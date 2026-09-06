@@ -1,0 +1,203 @@
+# foldyard — stack-colocated, secretless-by-default, laptop-local isolated dev env.
+# README.md is the pitch, DEVELOPMENT.md the contributor guide, docs/adrs/ the "why".
+# Distributed as a uv tool (`uv tool install foldyard`, or `--editable` from a checkout);
+# releases are cut by tag from the release workflow (see CHANGELOG.md for the process).
+[project]
+name = "foldyard"
+version = "0.0.1"
+description = "Stack-colocated, secretless-by-default, laptop-local isolated dev environment"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Tangible.finance" }]
+requires-python = ">=3.11"
+keywords = ["dev-environment", "sandbox", "podman", "lima", "coding-agent", "secretless", "egress-proxy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+]
+# Installed via `uv tool install` into a per-machine venv (off the shared mount), so
+# these are always available to the `foldyard` entry point. typer drives the CLI
+# (typed options, help, completion); Textual powers the TUI (core — it's the demo).
+# devmode/supervisor themselves stay stdlib-only, and `cli` imports Textual lazily,
+# so the per-recipe `foldyard env` hot path never pays the ~290ms Textual import.
+# Min versions pinned to the current releases — pre-1.0 / no external consumers yet,
+# so there's no backward-compat to preserve; bump deliberately.
+dependencies = [
+    "typer>=0.26.7",
+    "textual>=8.2.7",
+    # Podman's compose subcommand is only a provider wrapper. Bundle the native Podman provider
+    # in foldyard's tool venv and select it explicitly so hosts do not silently prefer a globally
+    # installed docker-compose. stack.compose_provider_path() resolves the dependency's script
+    # beside foldyard's interpreter (uv does not expose dependency scripts on the user's PATH).
+    "podman-compose>=1.6.0",
+]
+
+[project.optional-dependencies]
+# mitmproxy is a HOST-ONLY dependency — the `[host]` extra, pulled by `just foldyard install`
+# on the Mac (which runs `uv tool install …[host]`). The mitmdump egress proxy runs ONLY on the
+# host (the supervisor / `fy host`); the box merely ROUTES its egress through it and never runs
+# it, so a box's foldyard install (box.py's bootstrap chain) deliberately installs foldyard BARE
+# — no `[host]` — keeping the box light and its bootstrap egress small (no cryptography build to
+# fetch through the proxy). foldyard never IMPORTS mitmproxy — it only execs `mitmdump` — so the
+# recipe hot path pays nothing either way; it's purely about the binary being present host-side.
+# NB `uv tool install` does NOT link a dependency's console scripts onto PATH, so the daemon +
+# doctor resolve `mitmdump` from foldyard's OWN venv beside the interpreter — see
+# `proxy.mitmdump_path()`.
+host = [
+    "mitmproxy",
+    # PyJWT signs the GitHub App JWT in `plugins/github_app_token.py` (the `github-app` minter
+    # kind). HOST-only for the same reason as mitmproxy: minting happens in the supervisor's
+    # process tree on the Mac, never in the box, so the box's bare install skips it (and skips
+    # cryptography's build). The `[crypto]` extra makes that dependency EXPLICIT rather than
+    # inherited from mitmproxy. It replaces a consumer script launched via `uv run --script`,
+    # whose PEP 723 block resolved deps from the network at mint time — see
+    # ADR-0023 (docs/adrs/0023-no-host-executed-code-from-the-repo-mount.md). Imported lazily inside the minter, so the recipe
+    # hot path and the registry never pay for it.
+    "pyjwt[crypto]>=2.10",
+]
+
+[project.scripts]
+foldyard = "foldyard.cli:main"
+fy       = "foldyard.cli:main"   # short alias
+
+[project.urls]
+Homepage = "https://github.com/twistco/foldyard"
+Repository = "https://github.com/twistco/foldyard"
+Documentation = "https://github.com/twistco/foldyard/tree/main/docs"
+Changelog = "https://github.com/twistco/foldyard/blob/main/CHANGELOG.md"
+Issues = "https://github.com/twistco/foldyard/issues"
+
+# Third-party plugins register on this group: `value = "<module>:<PluginClass>"` where the
+# class subclasses `foldyard.plugins.Plugin`. The built-in gcp/github plugins are loaded
+# DIRECTLY (foldyard.plugins.load_plugins), not via this group — so they're always present
+# (no dist metadata needed, works run-from-source) and never double-load. See ADR-0015.
+[project.entry-points."foldyard.plugins"]
+# example-aws-imds = "foldyard_aws.plugin:AwsImdsPlugin"
+
+[dependency-groups]
+# `uv run`/`uv sync` install these by default — used by `just foldyard test|lint|typecheck`.
+dev = [
+    "pytest>=9.1",
+    "pytest-asyncio>=1.4",
+    "pytest-xdist>=3.6",   # parallel test runner (`-n auto`)
+    "hypothesis>=6.100",   # property-based tests (tests/test_properties.py, test_reconcile_model.py)
+    # Exact pins, in lockstep with data/pyproject.toml (see the comment there) — bump together.
+    "ruff==0.15.17",       # linter + formatter
+    "pyright==1.1.411",    # type checker (Microsoft)
+    "ty==0.0.61",          # type checker (Astral; fast, pre-release)
+    # Also a `[host]` extra dep (the `github-app` minter signs the App JWT with it). Repeated here
+    # so the DEFAULT test/typecheck env covers it: both type-checkers must resolve the minter's
+    # lazy `import jwt`, and the signing path is security-relevant enough to exercise in CI's
+    # `check` job rather than only under the opt-in e2e group.
+    "pyjwt[crypto]>=2.10",
+]
+# OPT-IN, NOT default: the real egress-proxy e2e (test_proxy_e2e.py) runs an actual mitmdump +
+# the egress_proxy addon + a fake minter + a CA-trusting client. Heavy + needs a network to install,
+# so it's its own group — `just foldyard test-proxy-e2e` pulls it; plain `test`/`check` skip it.
+e2e = [
+    "mitmproxy",           # the real proxy under test (brings cryptography for the test's certs)
+    "requests",            # the "box" client: https-throuegress-proxy + a custom CA bundle
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+# ── ruff (lint + format) ───────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+# example/ is a consumer fixture (its own app + deps, not in foldyard's dev env) — foldyard's
+# lint rules don't apply to it. assets/{box,skills} are packaged DATA copied into a guest (a
+# Dockerfile, bundled skill markdown) — not library code; assets/machine-wall is shell only. But
+# assets/proxy/ is the egress-proxy mitmdump addon: real foldyard Python that the proxy plugin
+# runs, so it IS linted (it's just not TYPE-checked — it executes under mitmproxy's addon context
+# with the injected `ctx` global / stubless APIs; see the pyright/ty assets excludes below).
+extend-exclude = [
+    "example",
+    "src/foldyard/assets/box",
+    "src/foldyard/assets/skills",
+]
+# Honour the excludes even when a path is passed EXPLICITLY (the lefthook pre-commit hook runs
+# `ruff … {staged_files}`) — so a staged in-guest script isn't linted as library code just for
+# being staged, while the proxy addon (not excluded) is.
+force-exclude = true
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]
+ignore = [
+    "B904",    # defensive `raise` without `from` (hot path / discovery must not leak frames)
+    "RUF001",  # ambiguous unicode in strings — the ✓/✗/▶/● UI glyphs are deliberate
+    "RUF002",  # …in docstrings
+    "RUF003",  # …in comments
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# typer's `Argument(...)`/`Option(...)` defaults are the framework idiom, not a B008 bug.
+extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into private helpers (`_pam_left`, `_run`, …) and rebind names freely.
+"tests/*" = ["E501"]
+# Textual widgets declare mutable class-level BINDINGS/CSS lists by design (RUF012).
+"src/foldyard/tui.py" = ["RUF012"]
+# box.py embeds transcribed shell (the claude/pulumi install + warm-up); those one-liners
+# (curl | bash, etc.) are inherently long and must not be wrapped.
+"src/foldyard/box.py" = ["E501"]
+# init.py is a foldyard.toml TEMPLATE writer — its comment/example lines (a pulumi install
+# one-liner, aligned inline hints) are literal output that must not be wrapped.
+"src/foldyard/init.py" = ["E501"]
+
+# ── pyright (type checker) ─────────────────────────────────────────────────────────────
+# REMINDER: the monorepo root's pyrightconfig.json mirrors this project (include +
+# executionEnvironments) for IDE/LSP root-workspace sessions — keep it in sync when
+# changing include/exclude here. CLI runs pin `--project pyproject.toml` and never see it.
+[tool.pyright]
+include = ["src", "tests"]
+exclude = ["src/foldyard/assets"]  # packaged DATA (in-guest scripts), not type-checked library code
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+
+# ── ty (Astral type checker) ───────────────────────────────────────────────────────────
+[tool.ty.src]
+include = ["src", "tests"]
+exclude = ["src/foldyard/assets"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/foldyard"]
+
+# Ship the CONSUMER docs inside the wheel (`fy docs <topic>`), mapped from their repo location so
+# the tree stays human-browsable. Version-matched by construction: an installed foldyard serves the
+# docs for the code it is actually running — the failure mode that made config pinning necessary in
+# the first place (docs/adrs/0022) applies just as much to documentation. It also means `fy docs`
+# works with no egress, which a box under `default_deny` needs.
+#
+# Consumer-facing only. Contributor material (DEVELOPMENT.md, the design notes and the wall proof
+# kit under docs/) belongs in the repo, not in every consumer's install.
+[tool.hatch.build.targets.wheel.force-include]
+"docs/quickstart.md" = "foldyard/assets/docs/quickstart.md"
+"docs/configuration.md" = "foldyard/assets/docs/configuration.md"
+"docs/modes.md" = "foldyard/assets/docs/modes.md"
+"docs/networking.md" = "foldyard/assets/docs/networking.md"
+"docs/security.md" = "foldyard/assets/docs/security.md"
+"docs/compose-overlays.md" = "foldyard/assets/docs/compose-overlays.md"
+"docs/testing-modes.md" = "foldyard/assets/docs/testing-modes.md"
+"docs/nested-virt.md" = "foldyard/assets/docs/nested-virt.md"
+"docs/lima-backend-scope.md" = "foldyard/assets/docs/lima-backend-scope.md"
+"docs/adrs" = "foldyard/assets/docs/adrs"

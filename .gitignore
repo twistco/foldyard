@@ -1,0 +1,21 @@
+# VM-visible scratch the box+proxy e2e mounts into a sibling box (cleaned up per run)
+.e2e-tmp/
+
+# hypothesis example database (property-based tests)
+.hypothesis/
+
+# uv-managed virtualenv + lockfile churn / build artefacts
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+# Covered by the monorepo root .gitignore today; listed here so the standalone repo has them too.
+.DS_Store
+.ruff_cache/
+# Per-developer overrides (deep-merged over foldyard.toml — documented by foldyard.local.toml.example)
+foldyard.local.toml
+.claude/settings.local.*

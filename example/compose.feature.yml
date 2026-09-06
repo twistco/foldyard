@@ -1,0 +1,8 @@
+# Posture overlay — layered by foldyard when fakedep=on ([[overlay]] in foldyard.toml).
+# Flips the api's feature flag, so the posture is observable: `/` reports {"feature": "on"}.
+# The living example of "most of what a posture DOES is layer a compose file"
+# (../docs/compose-overlays.md).
+services:
+  api:
+    environment:
+      EXAMPLE_FEATURE: "on"

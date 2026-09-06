@@ -1,0 +1,51 @@
+# Native Lima VM for the network-forcing proof — runs DIRECTLY on the Mac (vz / full HVF
+# acceleration), NOT nested inside the podman machine. No churn, no L1-wedge risk.
+#
+#   limactl start --name=wall ./wall.yaml      # (run.sh does this + the install + tests)
+#
+# It boots a minimal Debian 12 (bookworm) cloud image, installs the bits the wall needs, and stops
+# there; install.sh (copied in by run.sh) lays down the proxy + nftables wall + the unprivileged
+# `agent` user.
+#
+# Why Debian genericcloud (was Ubuntu 24.04): it keeps systemd + glibc — so the rootless-podman
+# units and the nftables wall work unchanged — while shipping FAR fewer default-enabled listening
+# services than Ubuntu's server cloud image. Ubuntu shipped `podman.socket` ENABLED (the rootful-
+# socket VM-root hole that check h caught); a minimal Debian base doesn't, and provisioning MASKS it
+# anyway (below) so we never trust the image's defaults. genericcloud (not nocloud) so Lima's cloud-
+# init can inject its user + SSH key; Lima converts the qcow2 for vz automatically.
+
+vmType: vz
+os: Linux
+
+images:
+- location: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2"
+  arch: aarch64
+- location: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+  arch: x86_64
+
+cpus: 2
+memory: "2GiB"
+disk: "12GiB"
+
+# Sandbox demo — mount nothing from the host (keeps the isolation property; the repo is
+# irrelevant to this test). containerd off; we use podman for the optional container check.
+mounts: []
+containerd:
+  system: false
+  user: false
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends nftables python3 podman uidmap passt slirp4netns curl ca-certificates
+    # Mask anything that LISTENS or GRANTS, in provisioning — don't trust image defaults. The
+    # rootful podman API socket runs as VM-root, so reaching it is a TOTAL wall bypass (Ubuntu even
+    # shipped it ENABLED — check h). A minimal Debian base usually doesn't, but MASK it (stronger
+    # than disable: nothing can re-activate it) so a base-image change can't silently reopen the
+    # hole. NEVER mask ssh — Lima drives the VM over it. The agent's OWN rootless socket is untouched
+    # (it's uid-tagged → caught by the wall, not a bypass). install.sh disables it too (belt + braces).
+    systemctl mask --now podman.socket 2>/dev/null || true

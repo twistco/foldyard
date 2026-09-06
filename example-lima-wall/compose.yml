@@ -1,0 +1,47 @@
+# The locked-down example stack: an api + a worker that calls it by service name.
+#
+# Two services on purpose — to demonstrate the wall's one caveat. With [machine].wall = true,
+# foldyard's wall provisioning sets proxy env (HTTP(S)_PROXY) on the VM's rootless podman
+# service, and podman propagates that into the containers it runs. So WITHOUT the `no_proxy`
+# below, `worker` would resolve `http://api:8090` and try to reach it THROUGH the Mac proxy —
+# which can't see the podman network → the intra-stack call fails. The fix is per-service
+# `no_proxy` listing the in-stack names. (The dev BOX already gets this via foldyard's
+# box_args NO_PROXY; stack services set it themselves, as shown here.)
+
+services:
+  api:
+    image: docker.io/library/python:3.12-slim
+    # A trivial always-200 HTTP endpoint — no build, nothing external to fetch at runtime.
+    command: ["python", "-m", "http.server", "8090"]
+    ports:
+      - "${API_PORT:-8090}:8090"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8090/')\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  worker:
+    image: docker.io/library/python:3.12-slim
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # THE CAVEAT FIX. `api` (+ localhost) must bypass the inherited proxy — it's an in-stack
+      # name the Mac proxy can't resolve. Drop this line to SEE the caveat: the worker's
+      # api calls start failing (proxy 502/refused) while its external calls still work.
+      no_proxy: "api,localhost,127.0.0.1"
+      NO_PROXY: "api,localhost,127.0.0.1"
+    # Loop: hit the in-stack api (must bypass the proxy) — that's the line the caveat is about.
+    command:
+      - python
+      - -c
+      - |
+        import time, urllib.request
+        while True:
+            try:
+                urllib.request.urlopen("http://api:8090/", timeout=5)
+                print("worker: reached api (intra-stack, bypassed the proxy)", flush=True)
+            except Exception as e:
+                print(f"worker: api call FAILED ({e}) — is no_proxy set for 'api'?", flush=True)
+            time.sleep(5)

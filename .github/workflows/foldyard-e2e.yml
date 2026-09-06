@@ -1,0 +1,209 @@
+name: foldyard · live e2e
+
+# foldyard's live container e2es. Two advisory tiers run here:
+#   - Docker-in-container topology for proxy/box e2es that need a sibling box to reach the test
+#     process by container IP.
+#   - Native Linux host topology with `[machine].backend = "native"` so CI exercises the real
+#     host-side `foldyard up` / worktree stack lifecycle without nested virtualization.
+#
+# The VM-backed `podman machine` lifecycle still needs a real VM provider (/dev/kvm or macOS
+# virtualization) and stays in DEVELOPMENT.md, deliberately out of shared-runner CI.
+#
+# Split out from foldyard.yml so the fast lint/types/unit suite runs on every push (uniform with the
+# other areas), while this heavy 25-min job is OPT-IN — mirroring platform-e2e. The workflow triggers
+# on every push, but the job only runs on `main` (post-merge net), on a manual `workflow_dispatch`,
+# or when a commit message carries `[run-e2e]` (the pre-merge opt-in you add when a branch is ready
+# for the full check). On an ordinary feature-branch push the job is simply skipped — near-zero cost.
+# Deliberately excluded from the CI gate (ci-gate.yml) as too heavy, so it's advisory and never
+# blocks the required check.
+on:
+  push: # all branches; the job-level `if` decides whether to run
+  workflow_dispatch: # allow manual runs
+
+concurrency:
+  group: foldyard-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-e2e:
+    name: live e2e (example stack + proxy + box, on Docker)
+    # Opt-in (mirrors platform-e2e): main, a manual dispatch, or a `[run-e2e]` commit message.
+    if: >-
+      github.ref == 'refs/heads/main'
+      || contains(github.event.head_commit.message, '[run-e2e]')
+      || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      # Repo-only read: don't leave the GitHub token in .git/config. This job bind-mounts the
+      # workspace into a sibling container, so a persisted token would ride into it — and nothing
+      # here pushes. persist-credentials: false keeps the checkout but drops the credential.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # Warm the host Docker cache, in PARALLEL, so neither the `docker run` below (the uv image)
+      # nor the in-test pulls (the api base, the box image, postgres, alpine) wait on a serial pull.
+      # python:3.12-slim is the example api's FROM: without it warm, `foldyard up`'s buildkit does a
+      # live `load metadata for python:3.12-slim` against Docker Hub, which intermittently 502s and
+      # fails the build hard (no buildkit retry). Pre-pulling it (with retry) lets the in-test
+      # `docker compose build` resolve the base from the local cache instead of the registry.
+      - name: Pre-pull e2e images (parallel)
+        run: |
+          pull() { for i in 1 2 3 4 5; do docker pull "$1" && return 0; sleep $((i * 5)); done; return 1; }
+          for img in \
+            ghcr.io/astral-sh/uv:python3.12-bookworm \
+            quay.io/podman/stable:latest \
+            docker.io/library/python:3.12-slim \
+            docker.io/library/postgres:16-alpine \
+            docker.io/library/alpine:latest; do
+            pull "$img" &
+          done
+          wait
+
+      # The proxy/box live e2es need the test process to run INSIDE a container so a sibling box can
+      # reach the in-process proxy/emulator by container IP. Use docker CLI only (no podman), mount
+      # the host socket, and keep the repo at the same path so daemon-side bind mounts resolve.
+      # IN_DEVBOX=1 is the box signature `config.in_box()` keys on — a preset DOCKER_HOST alone is
+      # NOT one (Linux/WSL2 hosts export a socket too). It is what stands the launch gates down
+      # here exactly as in the dev box: preflight's fail-closed default-backend block, the
+      # config-adopt gate and `machine.ensure` all skip in-box, because there is no VM to manage
+      # and nothing host-side to adopt.
+      - name: live e2e inside a docker-CLI container
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -w "$GITHUB_WORKSPACE" \
+            -e FOLDYARD_E2E=1 \
+            -e IN_DEVBOX=1 \
+            -e DOCKER_HOST=unix:///var/run/docker.sock \
+            ghcr.io/astral-sh/uv:python3.12-bookworm \
+            bash -lc '
+              set -euo pipefail
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends docker.io curl ca-certificates >/dev/null
+              # docker compose v2 plugin (the example-stack e2e shells `docker compose`); the static
+              # release binary, dropped into both plugin dirs the docker.io CLI searches.
+              for d in /usr/local/lib/docker/cli-plugins /usr/libexec/docker/cli-plugins; do
+                mkdir -p "$d"
+                curl -fsSL https://github.com/docker/compose/releases/download/v2.30.3/docker-compose-linux-x86_64 \
+                  -o "$d/docker-compose"
+                chmod +x "$d/docker-compose"
+              done
+              docker compose version
+              uv run --group e2e pytest tests -k e2e -v
+            '
+
+  native-host-e2e:
+    name: native host e2e (example + worktree, on Podman)
+    # Same opt-in policy as the heavier Docker topology.
+    if: >-
+      github.ref == 'refs/heads/main'
+      || contains(github.event.head_commit.message, '[run-e2e]')
+      || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      FOLDYARD_E2E: "1"
+      FOLDYARD_ENGINE: podman
+      MACHINE_BACKEND: native
+      FOLDYARD_STATE_DIR: /tmp/foldyard-state
+      # NB: XDG_RUNTIME_DIR is set by the "Enable systemd --user session" step below to
+      # /run/user/$UID (NOT a /tmp path), so rootless podman can find the user systemd manager
+      # that schedules healthcheck timers. The native socket path derives from it
+      # (machine_backend.NativeBackend._socket_path → $XDG_RUNTIME_DIR/podman/podman.sock).
+    steps:
+      # Repo-only read (no push) — keep the token out of .git/config.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v8.2.0
+
+      # Rootless podman schedules a container's healthcheck INTERVALS via `systemd --user`
+      # transient timers. On a GH runner the `runner` user has no login session — so no user
+      # systemd manager and no /run/user/$UID — and the old custom XDG_RUNTIME_DIR=/tmp/... made
+      # it strictly worse (podman then can't find ANY user systemd). With no timer the example db's
+      # healthcheck never re-runs, its health stays `starting`, and compose's `depends_on:
+      # service_healthy` (the api → db) blocks `foldyard up` FOREVER — the job hung to its 25-min
+      # timeout. enable-linger starts user@$UID.service + creates /run/user/$UID; we point
+      # XDG_RUNTIME_DIR + the D-Bus session there so podman's `systemd-run --user` reaches it.
+      - name: Enable systemd --user session (rootless podman healthcheck timers)
+        run: |
+          set -euo pipefail
+          sudo loginctl enable-linger "$(id -un)"
+          uid="$(id -u)"
+          for _ in $(seq 1 30); do
+            test -S "/run/user/$uid/bus" && break
+            sleep 1
+          done
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$uid"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus"
+          } >> "$GITHUB_ENV"
+          # Sanity: the user manager is reachable (degraded is fine — we only need the timer path).
+          XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+            systemctl --user is-system-running || true
+
+      - name: Install native Podman backend
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            podman podman-compose uidmap slirp4netns fuse-overlayfs
+          mkdir -p "$XDG_RUNTIME_DIR/podman"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          podman system service --time=0 "unix://$XDG_RUNTIME_DIR/podman/podman.sock" \
+            >"$RUNNER_TEMP/podman-service.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/podman-service.pid"
+          for _ in $(seq 1 20); do
+            if test -S "$XDG_RUNTIME_DIR/podman/podman.sock" && podman info >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          podman info
+          podman compose version || podman-compose --version
+
+      - name: Pre-pull native e2e images
+        run: |
+          set -euo pipefail
+          for img in \
+            docker.io/library/python:3.12-slim \
+            docker.io/library/postgres:16-alpine \
+            docker.io/library/alpine:latest; do
+            podman pull "$img" &
+          done
+          wait
+
+      # Prove the systemd --user timer path works BEFORE the e2e, so a broken healthcheck fails
+      # here in ~20s with a clear message instead of hanging `foldyard up`'s depends_on to the
+      # 25-min job timeout. A container with a trivial healthcheck must flip to `healthy`.
+      - name: Verify rootless healthchecks fire (fail fast, not a 25-min hang)
+        run: |
+          set -euo pipefail
+          cid=$(podman run -d --health-cmd 'true' --health-interval 2s --health-retries 3 \
+                  docker.io/library/alpine:latest sleep 300)
+          state=""
+          for _ in $(seq 1 15); do
+            state=$(podman inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "")
+            [ "$state" = "healthy" ] && break
+            sleep 2
+          done
+          podman rm -f "$cid" >/dev/null 2>&1 || true
+          if [ "$state" != "healthy" ]; then
+            echo "✗ rootless podman healthchecks are NOT firing (last state: '${state:-none}')."
+            echo "  The example db's health would never flip → foldyard up hangs on depends_on."
+            echo "  Fix the systemd --user wiring (enable-linger / XDG_RUNTIME_DIR / DBUS above)."
+            exit 1
+          fi
+          echo "✓ rootless healthchecks fire — the example db will reach healthy."
+
+      - name: Native host e2e
+        run: uv run pytest tests/test_e2e.py -v
+
+      - name: Native backend diagnostics
+        if: always()
+        run: |
+          podman ps -a || true
+          cat "$RUNNER_TEMP/podman-service.log" || true

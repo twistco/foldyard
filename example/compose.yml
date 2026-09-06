@@ -1,0 +1,30 @@
+# Example stack: Postgres + a FastAPI api that reads from it. Deliberately tiny — enough
+# to prove foldyard brings a real multi-service stack up, wires a DB, and that `verify`
+# passes inside the boundary. Host ports come from foldyard ([ports] in foldyard.toml);
+# in-container ports are fixed, so per-worktree stacks never collide.
+
+services:
+  db:
+    image: docker.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: example
+      POSTGRES_DB: example
+    ports:
+      - "${PG_PORT:-5544}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d example"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build:
+      context: ./api
+    environment:
+      # In-network service name `db`; the password matches the db service above.
+      DATABASE_URL: postgresql://postgres:example@db:5432/example
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8080}:8080"

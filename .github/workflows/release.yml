@@ -1,0 +1,53 @@
+name: release
+
+# Tag → build → publish to PyPI. Lives under foldyard/.github/ in the origin monorepo so that repo
+# never runs it; in the standalone repo it is the .github/workflows/release.yml at the root.
+#
+# Trusted publishing: PyPI is told to trust THIS workflow in THIS repo (project settings →
+# Publishing → add a GitHub publisher: owner twistco, repo foldyard, workflow release.yml,
+# environment pypi). No API token is stored anywhere; `uv publish` exchanges the job's OIDC
+# token for a short-lived upload token. Build and publish are separate jobs so the publish job
+# holds the id-token permission and nothing else, and never runs project code.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v8.2.0
+      - name: Tag must match pyproject version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(uv version --short)"
+          if [ "$tag" != "$version" ]; then
+            echo "✗ tag v$tag does not match [project].version = $version — bump pyproject first"
+            exit 1
+          fi
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - run: uv publish
