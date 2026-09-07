@@ -1,0 +1,26 @@
+name: foldyard
+
+# foldyard's fast lint/types/unit suite (no container engine, no KVM). Runs on every push that
+# touches foldyard, on ALL branches — uniform with the other areas' lint/test workflows
+# (platform-test, infra-lint, contracts) so the CI gate (ci-gate.yml, PR-only) reliably finds this
+# check across the PR's commits. The heavy live Docker e2es are split out into foldyard-e2e.yml,
+# which stays PR + post-merge scoped.
+on:
+  push:
+
+concurrency:
+  group: foldyard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint + types + unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v4
+      - uses: astral-sh/setup-uv@v8.2.0
+      # ruff (lint + format-check) + pyright + ty + the unit/golden/TUI suite. No engine. typecheck
+      # installs the `e2e` group so the opt-in proxy/box e2e tests resolve cryptography/requests.
+      - run: just check

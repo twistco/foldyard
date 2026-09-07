@@ -1,0 +1,76 @@
+# foldyard — example consumer config.
+#
+# A minimal, self-contained stack (Postgres + a FastAPI api) that exercises foldyard
+# end-to-end WITHOUT any of Tangible's machinery — the "bring your own compose stack"
+# payload from PLAN §4.3, and the fixture we dogfood `foldyard up|verify|box` against
+# (incl. headless inside a nested-KVM sibling container; see README.md).
+#
+# Resolution everywhere is: explicit env var wins → foldyard.local.toml (gitignored,
+# per-developer overrides) → this file → built-in default.
+# Run foldyard with this dir as the repo root: `cd foldyard/example && foldyard up`
+# (foldyard walks up from CWD to the nearest foldyard.toml).
+#
+# NOT the most locked-down config foldyard can write — read it for the STACK tier, not the
+# posture tier. There's no [proxy] and no [machine].wall here, so box egress is direct:
+# unrouted, unobserved, unfiltered. That's deliberate and structural, not simplification —
+# the proxy runs on the HOST, and declaring [proxy] makes `fy box up` require a CA only the
+# host-side `fy host` can generate, which would stop this fixture running in CI containers,
+# in-box, and the nested-KVM rig (the environments it exists to be dogfooded in).
+# `foldyard init` writes the locked-down posture for a real project; ../example-lima-wall is
+# the worked example of it (wall + enforced allowlist + keyless agent). See README.md.
+
+[project]
+name = "foldyard-example"
+# Container/volume/network prefix (a worktree appends `-<name>`).
+prefix = "fyex"
+# The app service — target of `foldyard shell` + the browsable-URL hint.
+app = "api"
+# Compose files in -f order, relative to this dir.
+compose = ["compose.yml"]
+# The (transitional) dev-VM asset dir — where the gitignored mode mirror (.dev-mode.json)
+# lands. "." (the repo root) is also the package default now; shown here for clarity.
+dev_vm_dir = "."
+
+# Host-published ports, keyed by the env var the compose file reads. In-container ports
+# never move; a worktree adds a deterministic per-name offset for a second stack.
+[ports]
+API_PORT = 8080
+PG_PORT = 5544
+
+# Rootless VM — modest sizing for a throwaway example. The default backend is `lima`
+# (concurrent per-project VMs; needs `limactl` alongside podman). `backend = "podman"` is the
+# nothing-extra-to-install alternative: one shared machine, no concurrent projects, no wall.
+# On Linux/WSL2, `backend = "native"` explicitly opts into host-rootless Podman for convenience/CI,
+# with weaker isolation than the VM boundary.
+[machine]
+name = "foldyard-example"
+cpus = 2
+memory_mib = 2048
+disk_gib = 20
+
+# The dev box (`foldyard box`). The image is the consumer's; foldyard injects its bits
+# (socket, CONTAINER_HOST, the foldyard CLI) at box-up. This image satisfies the minimal
+# box contract (PLAN §7.4): an engine client that speaks the socket + git + python/uv.
+[box]
+image = { dockerfile = "box.Dockerfile", tag = "foldyard-example-box:latest" }
+
+# ── Posture: modes, overlays, requirements — the walkthrough in README.md ───────────────
+# The fakecred plugin is foldyard's zero-secret stand-in for a real credential mechanism
+# (../docs/testing-modes.md): `fakecred` is a credential-granting axis (off | on | user —
+# real daemon, TTLs, a capability probe), `fakedep` a dependent behaviour axis that CONSUMES
+# it — the same shape as a real consumer's gcp + llm pair, with nothing secret anywhere.
+# Declaring the table (even empty) is what loads it.
+[plugins.fakecred]
+
+# Posture overlay, pure config: layer compose.feature.yml onto the `-f` chain whenever
+# fakedep=on — the api then reports {"feature": "on"} at `/`. See ../docs/compose-overlays.md.
+[[overlay]]
+file = "compose.feature.yml"
+when = { fakedep = "on" }
+
+# Cross-axis requirement: `fy mode fakedep=on` alone is REFUSED with the atomic fix
+# (`fy mode fakecred=on fakedep=on`). That row ships INSIDE the fakecred plugin
+# (Axis.requires — intrinsic: fakedep exists to consume fakecred), so nothing is declared
+# here. When YOUR wiring creates such a coupling — an overlay above routes traffic through
+# a credential a different axis grants — declare it beside that overlay as a `[[require]]`
+# table instead; schema + the intrinsic-vs-wiring rule: ../docs/configuration.md.

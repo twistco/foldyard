@@ -1,0 +1,37 @@
+# foldyard's OWN foldyard config — the dev box for hacking on foldyard itself (PLAN §8.1).
+#
+# DUAL-HOME: because config.repo_root() walks up to the nearest foldyard.toml, this file is
+# foldyard's consumer config whether foldyard lives as a monorepo subdir (here, under
+# Tangible) OR as its own standalone repo after extraction. The invariant that makes it
+# travel verbatim: it references NOTHING outside this directory (no `../`). tests/test_dual_
+# home.py asserts that. It doesn't hijack the Tangible root recipes — those run from the
+# Tangible root and resolve to that foldyard.toml; this one only activates when foldyard is
+# driven from inside foldyard/ (e.g. `cd foldyard && foldyard box up`).
+#
+# Resolution everywhere is: explicit env var wins → this file → built-in default.
+
+[project]
+name = "foldyard-dev"
+# Container/volume/network name prefix (a worktree appends `-<name>`). Distinct from any
+# consumer's prefix so a foldyard-dev box never collides with the stack it's developing.
+prefix = "foldyard-dev"
+
+# No compose stack: foldyard is a pure-Python uv project with no services to colocate. The
+# dev box (below) is all that's needed to run `just foldyard check`. For tier-3 e2e against a
+# real stack, use the example consumer (cd example && foldyard up) — see example/README.md.
+
+[machine]
+# A dedicated rootless machine, separate from any consumer's, so developing foldyard never
+# touches the VM of the project you're testing it against. First-init sizing only; resize an
+# existing machine with `foldyard machine recreate`.
+name = "foldyard-dev"
+cpus = 4
+memory_mib = 8192
+disk_gib = 40
+# VM backend: "podman" (default — one VM at a time on macOS) or "lima" (concurrent
+# per-project VMs; needs `brew install lima`). MACHINE_BACKEND env overrides this.
+# backend = "podman"
+
+# No [box].image → foldyard builds its own packaged GENERIC dev box (engine client + git +
+# uv) — exactly what a uv project needs to install foldyard and run the suite. Dogfooding the
+# very default foldyard ships to other projects.

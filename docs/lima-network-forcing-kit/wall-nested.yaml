@@ -1,0 +1,68 @@
+# NESTED variant — run the wall VM INSIDE the dev box (a sibling --device /dev/kvm container),
+# via Lima's QEMU driver + KVM acceleration. The native wall.yaml uses vmType: vz (Apple
+# Virtualization.framework), which is macOS-ONLY and can't run inside a Linux container; qemu+kvm
+# can. The wall itself (install.sh + proxy.py + test.sh) is IDENTICAL — only how the VM is made
+# differs ("the in-VM wall is identical regardless of how the VM is made", root CLAUDE.md).
+#
+# ⚠ DRAFT — unvalidated here (no /dev/kvm on the dev box). Run + verify on a host that exposes
+# nested KVM (Apple Silicon M3+/macOS 15 libkrun machine, or a Linux KVM host). See the spike doc.
+#
+# Context + why the conservative knobs: the spike (docs/lima-network-forcing-spike.md / root
+# CLAUDE.md "Confirmed 2026-06-24") DID boot an L2 Ubuntu guest this way, but it was operationally
+# FRAGILE — a 2-vCPU guest churned ~4 host cores and starved L1's control plane (limactl/docker
+# exec hung; recovery needed a Mac-side `podman machine stop/start`). Mitigations baked in here:
+#   • the lighter Debian `cloud` kernel (virtio-only, stripped) instead of Ubuntu server,
+#   • 1 vCPU + 1 GiB RAM (do NOT raise the vCPU count — that's what starved L1),
+#   • qcow2 used directly by qemu (no raw conversion step vz needs).
+#
+# ⚠ TEAR DOWN GRACEFULLY (this bites): poweroff the guest from INSIDE first, then stop the
+# container; NEVER SIGKILL the inner qemu/VMM or `docker rm -f` the container running it — that
+# wedges L1 (the documented KVM "host freeze on ungraceful guest teardown" class). If L1 goes
+# sluggish, recreate the L1 machine FROM THE MAC, never an in-box force-kill.
+#
+# Prereqs in the dev box: a sibling launched `--device /dev/kvm`, with `limactl` + `qemu-system-*`
+# installed. Then:
+#   limactl start --name=wall-nested ./wall-nested.yaml
+#   limactl copy ./proxy.py   wall-nested:/tmp/proxy.py
+#   limactl copy ./install.sh wall-nested:/tmp/install.sh
+#   limactl shell wall-nested sudo bash /tmp/install.sh
+#   bash ./test.sh wall-nested
+#   # graceful teardown:
+#   limactl shell wall-nested sudo poweroff || true ; limactl stop wall-nested ; limactl delete wall-nested
+
+vmType: qemu
+os: Linux
+
+# qcow2 is qemu's native format (no raw conversion). genericcloud (cloud-init) so Lima injects its
+# user + SSH key; the `cloud` kernel keeps the nested guest light.
+images:
+- location: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2"
+  arch: aarch64
+- location: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+  arch: x86_64
+
+# Conservative on purpose — nested ARM KVM is fragile under load; 1 vCPU keeps the guest from
+# starving the L1 machine's control plane (the 2-vCPU spike did exactly that).
+cpus: 1
+memory: "1GiB"
+disk: "12GiB"
+
+mounts: []
+containerd:
+  system: false
+  user: false
+
+# Lima's qemu driver auto-uses /dev/kvm when present (and falls back to slow TCG emulation if not —
+# if the guest is glacial, that's the tell that KVM acceleration didn't engage; check the device is
+# passed into the container and readable).
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends nftables python3 podman uidmap passt slirp4netns curl ca-certificates
+    # Same as wall.yaml: mask the rootful podman socket (VM-root bypass) in provisioning — don't
+    # trust image defaults. Never mask ssh (Lima drives the VM over it).
+    systemctl mask --now podman.socket 2>/dev/null || true

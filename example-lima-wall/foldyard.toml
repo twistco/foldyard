@@ -1,0 +1,85 @@
+# foldyard — the LOCKED-DOWN example (lima + in-VM egress wall + keyless Claude).
+#
+# The sibling of ../example (the minimal, backend-agnostic dogfood fixture). This one shows
+# the most-isolated posture foldyard offers and the ONE caveat it introduces:
+#
+#   • backend = "lima"      concurrent per-project VM (not the single podman machine)
+#   • [machine].wall = true nftables default-deny INSIDE the VM — the Mac proxy is the ONLY
+#                           way out (fail-closed: egress that ignores the proxy is REJECTED)
+#   • [proxy] default_deny  an ENFORCED allowlist on top (blocked hosts show in `fy tui`)
+#   • [claude] keyless      the real token is injected at the Mac proxy, never in the box
+#
+# The stack is deliberately two services (api + worker) so the wall's ONE caveat is visible:
+# under the wall, podman propagates the VM's proxy env into stack containers too, so a
+# container calling ANOTHER by its compose name would wrongly try to egress via the Mac proxy
+# (which can't resolve an in-stack name) unless it bypasses with `no_proxy` — see compose.yml.
+#
+# Run it on a Mac with Lima: `cd foldyard/example-lima-wall && fy up`, then
+# `bash test_network.sh` (the host-run test + diagnostics harness).
+
+[project]
+name = "fy-wall-example"
+prefix = "fywall"
+app = "api"
+compose = ["compose.yml"]
+dev_vm_dir = "."
+
+[ports]
+API_PORT = 8090
+
+[machine]
+backend = "lima"
+wall = true           # ← the in-VM egress wall (lima-only). Comment out for cooperative-only.
+name = "fy-wall-example"
+cpus = 2
+# NB memory is MiB and is passed to Lima VERBATIM — any whole number is fine (a rounded-GiB
+# string like "3.91GiB" is what macOS Virtualization.framework rejects; foldyard avoids it).
+memory_mib = 2048
+disk_gib = 20
+
+[box]
+image = { dockerfile = "box.Dockerfile", tag = "fy-wall-example-box:latest" }
+
+# Enforced egress allowlist. `default_deny = true` means a host not granted (live via `fy tui` /
+# `fy allow add`, or by answering the offers below) is REFUSED at the proxy — belt to the wall's
+# braces. There is no `allow` key here on purpose: GRANTS live in the host-side allow-store,
+# outside the mount, because a list in this file is one the box could widen by editing it.
+#
+# What the repo CAN do is `recommend` — offered to the operator per host at `fy up`/`fy box up`
+# (or `fy allow sync`, `--yes` to take them all unattended), granted only on a yes. These cover
+# this example's box image + bootstrap and the stack's images, so a first run answers once and
+# comes up walled and working. Two sets are deliberately ABSENT:
+#   • api.anthropic.com — the keyless injector host, allowed implicitly (foldyard must reach it
+#     to mint), so listing it would be noise;
+#   • Claude Code's installer (claude.ai, downloads.claude.ai) — contributed by the [claude]
+#     plugin itself and offered alongside these. foldyard knows where its own installer fetches
+#     from; a copy here would only go stale.
+[proxy]
+default_deny = true
+recommend = [
+  { host = "registry-1.docker.io", why = "box + stack images — Docker Hub manifest/blobs" },
+  { host = "auth.docker.io", why = "Docker Hub auth token" },
+  { host = "production.cloudfront.docker.com", why = "Docker Hub blob CDN" },
+  { host = "ghcr.io", why = "box image build — the uv binary layer" },
+  { host = "pkg-containers.githubusercontent.com", why = "ghcr.io blob storage" },
+  { host = "deb.debian.org", why = "apt — the box image's git/podman/curl" },
+  { host = "pypi.org", why = "uv — installing foldyard into the box at box-up" },
+  { host = "files.pythonhosted.org", why = "uv package downloads" },
+  { host = "github.com", why = "git fetch/clone + release-asset redirects" },
+  { host = "objects.githubusercontent.com", why = "GitHub release assets — uv-managed Python" },
+  { host = "release-assets.githubusercontent.com", why = "GitHub release assets (newer host)" },
+]
+
+# Keyless Claude: `fy box up` prompts once (hidden) for a `claude setup-token` OAuth token,
+# stored ONLY on the Mac (~/.foldyard/fy-wall-example/host.env). The box holds a dummy; the
+# proxy swaps in the real Bearer in flight. `fy mode claude=on` turns injection on.
+[claude]
+keyless = "oauth"
+system_prompt = """
+You are root in this project's LOCKED-DOWN foldyard dev box: a rootless Lima VM with an
+in-VM egress wall, so your only way out is the Mac's allowlisting proxy. Prove the cage with
+`fy verify` (it checks direct egress is refused). You can read + commit locally but CANNOT
+push, and you hold no real credential — the proxy injects auth in flight.
+"""
+
+[vscode]
