@@ -1,10 +1,8 @@
 name: foldyard
 
-# foldyard's fast lint/types/unit suite (no container engine, no KVM). Runs on every push that
-# touches foldyard, on ALL branches — uniform with the other areas' lint/test workflows
-# (platform-test, infra-lint, contracts) so the CI gate (ci-gate.yml, PR-only) reliably finds this
-# check across the PR's commits. The heavy live Docker e2es are split out into foldyard-e2e.yml,
-# which stays PR + post-merge scoped.
+# foldyard's fast lint/types/unit suite (no container engine, no KVM). Runs on every push, on ALL
+# branches — this is the check to make required in branch protection. The heavy live Docker e2es
+# are split out into foldyard-e2e.yml, which only runs on main / on demand.
 on:
   push:
 

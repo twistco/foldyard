@@ -2,12 +2,11 @@
 
 Thanks for looking. Two things to know before you start.
 
-**Where development happens.** Until `0.1.0` this repository is a *snapshot*: foldyard is still
-developed inside the monorepo it is being extracted from, and `main` here is re-created from it
-(one squash commit, force-pushed) as that work lands. Issues are welcome and read; a pull
-request will be ported by hand rather than merged, and its history will not survive. After
-`0.1.0` this becomes the home and that caveat goes away — `CHANGELOG.md` says which side of the
-line we are on.
+**Where development happens.** Here. Up to `0.0.1` this repository was a snapshot force-pushed
+from the monorepo foldyard was extracted from, and pull requests had to be ported by hand; that
+ended at `0.1.0`. Issues and pull requests are both welcome, and a merged PR keeps its history.
+The single commit at the root of `main` is the squash-start ([ADR-0013](./docs/adrs/0013-in-repo-carve-out-until-extraction.md));
+the pre-extraction run-logs stay in the origin monorepo.
 
 **How to work on it.** [`DEVELOPMENT.md`](./DEVELOPMENT.md) is the guide: the module map, the
 test tiers (what runs anywhere, what needs an engine, what only runs on a real host), the

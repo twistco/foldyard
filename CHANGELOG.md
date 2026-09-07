@@ -6,15 +6,20 @@ break config or CLI shape, and say so here.
 
 ## Unreleased
 
-This repository is a force-pushed snapshot of the foldyard tree in its origin monorepo until
-`0.1.0` (see `CONTRIBUTING.md`).
+## 0.1.0 — 2026-09-07
 
-## 0.1.0 — unreleased
+The first release intended for general use, and the end of the extraction: this repository is now
+foldyard's home. Up to `0.0.1` it was a squash-start snapshot force-pushed from the monorepo it was
+carved out of; from here history is real and pull requests are merged rather than ported.
 
-- The first release intended for general use.
+### Added
+
 - **`fy --version`** — foldyard can now name itself. `__version__` resolves lazily from the
   install metadata (PEP 562) instead of being a hand-maintained literal, so it can no longer drift
   from `[project].version`, which is what the box already pins itself to.
+- **`[machine].vmtype`** — pin the Lima VM type (`vz`, `qemu`, `krunkit`) rather than taking Lima's
+  default. See `docs/isolation-layers.md` for which layer each backend actually gives you, and
+  `docs/firecracker-and-microvm-backends.md` for why Firecracker is not one of them.
 
 ### Fixed
 
@@ -30,12 +35,6 @@ This repository is a force-pushed snapshot of the foldyard tree in its origin mo
   was macOS-only (`/Users|/private|/var/folders|/Volumes`), so the host-filesystem leak check passed
   vacuously on Linux and WSL2; it is now derived from the real host home plus the fixed points other
   platforms expose a host filesystem at.
-
-### Added
-
-- **`[machine].vmtype`** — pin the Lima VM type (`vz`, `qemu`, `krunkit`) rather than taking Lima's
-  default. See `docs/isolation-layers.md` for which layer each backend actually gives you, and
-  `docs/firecracker-and-microvm-backends.md` for why Firecracker is not one of them.
 
 ## 0.0.1 — 2026-09-06
 

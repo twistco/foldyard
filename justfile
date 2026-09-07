@@ -119,16 +119,3 @@ publish: build
     set -euo pipefail
     : "${UV_PUBLISH_TOKEN:?set UV_PUBLISH_TOKEN (a PyPI API token) — or tag a release instead}"
     uv publish "{{_dir}}"/dist/*
-
-# ------------------------------------------------------------------------------
-# Git hooks — thin forwarder to the root hook-runner (config in the root lefthook.yml)
-# ------------------------------------------------------------------------------
-
-# lefthook (with `root: foldyard/`) runs us from foldyard/ with the real check as ARGS. Forward
-# to the single root `hook-run`, passing our own dir so it cd's there and dispatches the check
-# into the dev box (Python 3.12 = CI) — or runs it directly in-box / skips politely when the box
-# is down. _dir (= source_directory()) is THIS project's dir even when this file is loaded as a
-# module (where justfile_directory() would resolve to the repo root instead).
-[group('git hooks')]
-hook-run +ARGS:
-    @just -f "{{ parent_directory(_dir) / 'justfile' }}" hook-run "{{ _dir }}" {{ quote(ARGS) }}

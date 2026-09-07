@@ -9,13 +9,13 @@ name: foldyard · live e2e
 # The VM-backed `podman machine` lifecycle still needs a real VM provider (/dev/kvm or macOS
 # virtualization) and stays in DEVELOPMENT.md, deliberately out of shared-runner CI.
 #
-# Split out from foldyard.yml so the fast lint/types/unit suite runs on every push (uniform with the
-# other areas), while this heavy 25-min job is OPT-IN — mirroring platform-e2e. The workflow triggers
-# on every push, but the job only runs on `main` (post-merge net), on a manual `workflow_dispatch`,
-# or when a commit message carries `[run-e2e]` (the pre-merge opt-in you add when a branch is ready
-# for the full check). On an ordinary feature-branch push the job is simply skipped — near-zero cost.
-# Deliberately excluded from the CI gate (ci-gate.yml) as too heavy, so it's advisory and never
-# blocks the required check.
+# Split out from foldyard.yml so the fast lint/types/unit suite can run on every push while this
+# heavier job stays OPT-IN. The workflow triggers on every push, but the job only runs on `main`
+# (the post-merge net), on a manual `workflow_dispatch`, or when a commit message carries
+# `[run-e2e]` (the pre-merge opt-in you add when a branch is ready for the full check). On an
+# ordinary feature-branch push the job is simply skipped — near-zero cost. Keep it ADVISORY (out of
+# branch protection): it drives real containers, so it is the tier most likely to fail for reasons
+# that are not the change under review.
 on:
   push: # all branches; the job-level `if` decides whether to run
   workflow_dispatch: # allow manual runs
