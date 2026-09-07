@@ -1,6 +1,6 @@
 # Security model — the boundary, the threat model, and `fy verify`
 
-The [README's third thesis](../README.md#three-theses) is *isolation without hiding*: safety
+The [README's third idea](../README.md#why) is *isolation without hiding*: safety
 comes from a real boundary, not from concealment, and you can test the boundary yourself. This
 page is the depth behind that claim — what the boundary is, what it defends against, what it
 honestly doesn't, and exactly what `fy verify` proves. The "why" behind each design call lives
