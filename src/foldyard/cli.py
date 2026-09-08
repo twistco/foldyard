@@ -42,6 +42,7 @@ def _version(show: bool) -> None:
 
 @app.callback()
 def _resolve_worktree(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False,
         "--version",
@@ -62,35 +63,34 @@ def _resolve_worktree(
     Best-effort: a non-git dir (e.g. ``init`` scaffolding) just leaves it unset."""
     import os
 
-    from . import config
+    from . import compat, config
 
-    if config.in_box() or os.environ.get("WORKTREE"):
-        return
     try:
-        from . import stack
+        if not (config.in_box() or os.environ.get("WORKTREE")):
+            try:
+                from . import stack
 
-        os.environ["WORKTREE"] = stack._active_worktree(stack.worktrees_root(stack.main_repo()))
-    except (Exception, SystemExit):
-        # not a git repo / no worktrees root → leave WORKTREE unset (resolves to main). SystemExit
-        # too: stack.main_repo() raises it (not an Exception) from a non-git dir, and this best-
-        # effort pin must never abort the command it's fronting (e.g. `fy init` scaffolding).
-        pass
+                os.environ["WORKTREE"] = stack._active_worktree(
+                    stack.worktrees_root(stack.main_repo())
+                )
+            except (Exception, SystemExit):
+                # not a git repo / no worktrees root → leave WORKTREE unset (resolves to main).
+                # SystemExit too: stack.main_repo() raises it (not an Exception) from a non-git
+                # dir, and this best-effort pin must never abort the command it's fronting (e.g.
+                # `fy init` scaffolding).
+                pass
     finally:
-        # AFTER the worktree pin: the version window is declared per-checkout, so it must be
-        # read against the checkout this command actually targets. `--version` is eager and has
-        # already exited by now, deliberately — asking a binary to name itself has to keep
-        # working when the answer is what you are being told to change.
-        import click
-
-        from . import compat
-
-        # The verb comes from the RUNNING context rather than a `ctx: typer.Context` parameter:
-        # typer vendors its own click, so a declared Context param cannot be constructed by a
-        # caller outside the CLI (the callback's own unit tests invoke it directly). silent=True
-        # yields None off the CLI path, which reads correctly as "no verb" — nudge quiet, floor
-        # still applied.
-        ctx = click.get_current_context(silent=True)
-        compat.gate_or_abort(ctx.invoked_subcommand if ctx is not None else None)
+        # AFTER the worktree pin, and reached on EVERY path through this callback — the
+        # in-box and WORKTREE-already-set cases short-circuit the pin, and those are exactly
+        # where a mismatched foldyard does the most damage. `--version` is eager and has already
+        # exited by now, deliberately: asking a binary to name itself has to keep working when
+        # the answer is what you are being told to change.
+        #
+        # The verb comes from the declared `ctx` and NOT click.get_current_context(): typer
+        # vendors its own click, so the top-level click package reads a different context stack
+        # and always answers None — which silently disabled the nudge until a wiring test caught
+        # it. Anything reaching into click here must come from typer's copy.
+        compat.gate_or_abort(ctx.invoked_subcommand)
 
 
 @app.command()

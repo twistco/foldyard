@@ -269,3 +269,45 @@ def test_the_floor_ignores_the_verb_entirely(repo_declaring, capsys, verb):
     with pytest.raises(SystemExit):
         compat.gate_or_abort(verb)
     assert "99.0.0" in capsys.readouterr().err
+
+
+# ── the seam: the nudge has to survive the trip through typer ────────────────────────
+
+
+def _invoke(argv):
+    """Run the real app through its runner, capturing stderr separately."""
+    from typer.testing import CliRunner
+
+    from foldyard import cli
+
+    return CliRunner().invoke(cli.app, argv)
+
+
+def test_nudge_reaches_the_cli_not_just_the_unit(repo_declaring):
+    # Regression: the verb was first read via click.get_current_context(), but typer vendors
+    # its own click — the top-level package reads a DIFFERENT context stack and always answered
+    # None, so the nudge could never fire in a real invocation while every unit test passed.
+    # Assert through the seam, with a verb, or this class of bug is invisible again.
+    repo_declaring(recommended_foldyard_version="99.0.0")
+    result = _invoke(["up", "--help"])
+    assert "99.0.0" in result.output
+
+
+def test_no_nudge_through_the_cli_on_a_hot_verb(repo_declaring):
+    repo_declaring(recommended_foldyard_version="99.0.0")
+    assert "99.0.0" not in _invoke(["ps", "--help"]).output
+
+
+def test_floor_blocks_through_the_cli(repo_declaring):
+    repo_declaring(min_foldyard_version="99.0.0")
+    result = _invoke(["ps", "--help"])
+    assert result.exit_code == 1
+    assert "99.0.0" in result.output
+
+
+def test_gate_still_runs_when_the_worktree_pin_short_circuits(repo_declaring, monkeypatch):
+    # in_box / an explicit WORKTREE skip the pin. The gate must not be skipped with it — the
+    # box is where a foldyard mismatched to the repo does the most damage.
+    repo_declaring(min_foldyard_version="99.0.0")
+    monkeypatch.setenv("WORKTREE", "some-worktree")
+    assert _invoke(["ps", "--help"]).exit_code == 1

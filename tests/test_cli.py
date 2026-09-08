@@ -121,6 +121,19 @@ def test_exit_code_propagates(monkeypatch):
 # ── worktree resolution at CLI startup (config + stack must agree on which checkout) ─────
 
 
+def _callback_ctx():
+    """A context for calling the app callback directly.
+
+    Built from typer's own `get_command`, not `click.Command`: typer vendors its own click, so
+    a plain click Command is a different type to the one `typer.Context` expects. Its
+    `invoked_subcommand` is None — "no verb" — which is what these tests want: they exercise
+    the worktree pin, not the version window."""
+    import typer
+    from typer.main import get_command
+
+    return typer.Context(get_command(cli.app))
+
+
 def test_callback_pins_worktree_from_cwd_inference(monkeypatch):
     # On the host, posture (config) reads WORKTREE while the stack infers it from CWD. The callback
     # resolves it ONCE via the stack's git+CWD logic and exports it, so both agree (else a host
@@ -132,7 +145,7 @@ def test_callback_pins_worktree_from_cwd_inference(monkeypatch):
     monkeypatch.setattr(stack, "main_repo", lambda: __import__("pathlib").Path("/repo"))
     monkeypatch.setattr(stack, "worktrees_root", lambda m: __import__("pathlib").Path("/repo-wt"))
     monkeypatch.setattr(stack, "_active_worktree", lambda wt_root: "feat")
-    cli._resolve_worktree()
+    cli._resolve_worktree(_callback_ctx())
     assert __import__("os").environ["WORKTREE"] == "feat"
 
 
@@ -144,13 +157,15 @@ def test_callback_treats_empty_worktree_as_unset(monkeypatch):
     monkeypatch.setattr(stack, "main_repo", lambda: __import__("pathlib").Path("/repo"))
     monkeypatch.setattr(stack, "worktrees_root", lambda m: __import__("pathlib").Path("/repo-wt"))
     monkeypatch.setattr(stack, "_active_worktree", lambda wt_root: "feat")
-    cli._resolve_worktree()
+    cli._resolve_worktree(_callback_ctx())
     assert __import__("os").environ["WORKTREE"] == "feat"
 
 
 def test_callback_leaves_explicit_worktree_untouched(monkeypatch):
     monkeypatch.setenv("WORKTREE", "other")
-    cli._resolve_worktree()  # already set (box exports it / explicit) → never overridden
+    cli._resolve_worktree(
+        _callback_ctx()
+    )  # already set (box exports it / explicit) → never overridden
     assert __import__("os").environ["WORKTREE"] == "other"
 
 
@@ -159,7 +174,7 @@ def test_callback_is_a_noop_in_the_box(monkeypatch):
 
     monkeypatch.delenv("WORKTREE", raising=False)
     monkeypatch.setattr(config, "in_box", lambda: True)  # the box must not infer/escalate
-    cli._resolve_worktree()
+    cli._resolve_worktree(_callback_ctx())
     assert __import__("os").environ.get("WORKTREE") is None
 
 
@@ -175,7 +190,7 @@ def test_callback_swallows_non_git_fallback(monkeypatch):
         raise SystemExit(1)
 
     monkeypatch.setattr(stack, "main_repo", boom)
-    cli._resolve_worktree()  # must not raise
+    cli._resolve_worktree(_callback_ctx())  # must not raise
     assert __import__("os").environ.get("WORKTREE") is None
 
 
