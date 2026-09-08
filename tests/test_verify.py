@@ -92,6 +92,22 @@ def _enter_box(monkeypatch, tmp_path):
     monkeypatch.setattr(verify, "which", lambda c: None)
     # No proxy CA mounted ⇒ the github plugin's verify hook reports github=off.
     monkeypatch.setattr(proxy, "BOX_CA", tmp_path / "no-ca.pem")
+    # The wall section is a different subject with its own tests below, and it needs a live proxy
+    # + network. Left unpinned it resolves the REPO's OWN foldyard.toml — so this repo declaring
+    # `[machine] wall = true` silently bolted a failing check onto every test here: green locally,
+    # where a dev box exports HTTPS_PROXY ambiently, red in CI where nothing does. The `== 1` tests
+    # kept passing throughout, on the wall's failure rather than their own subject's.
+    monkeypatch.setattr(verify.config, "machine_wall", lambda: False)
+    # The wall section is a different subject with its own tests below, and it needs a live proxy
+    # + network. Left unpinned it resolves the REPO's OWN foldyard.toml — so this repo declaring
+    # `[machine] wall = true` silently bolted a failing check onto every test here: green locally,
+    # where a dev box exports HTTPS_PROXY ambiently, red in CI where nothing does. The `== 1` tests
+    # kept passing throughout, on the wall's failure rather than their own subject's.
+    # The wall section is a different subject with its own tests below, and it needs a live proxy
+    # + network. Left unpinned it resolves the REPO's OWN foldyard.toml — so this repo declaring
+    # `[machine] wall = true` silently bolted a failing check onto every test here: green locally,
+    # where a dev box exports HTTPS_PROXY ambiently, red in CI where nothing does. The `== 1` tests
+    # kept passing throughout, on the wall's failure rather than their own subject's.
     return home
 
 
@@ -205,16 +221,20 @@ def test_box_posture_clean_passes(secure_engine, monkeypatch, tmp_path, capsys):
     assert verify.verify() == 0
     out = capsys.readouterr().out
     assert "no SSH agent" in out and "no ~/.netrc" in out and "git push refused" in out
+    # Name the offender rather than reporting a bare 1 != 0: this test went red in CI once
+    # because ambient config added a whole section nobody here asked for.
+    assert "FAIL" not in out, out
 
 
-def test_git_remote_reachable_is_fail(secure_engine, monkeypatch, tmp_path):
+def test_git_remote_reachable_is_fail(secure_engine, monkeypatch, tmp_path, capsys):
     _, results = secure_engine
     results["git_rc"] = 0  # origin reachable → the box could push
     _enter_box(monkeypatch, tmp_path)
     assert verify.verify() == 1
+    assert "git remote REACHABLE" in capsys.readouterr().out  # ...and for THAT reason
 
 
-def test_ssh_private_key_is_fail(secure_engine, monkeypatch, tmp_path):
+def test_ssh_private_key_is_fail(secure_engine, monkeypatch, tmp_path, capsys):
     home = _enter_box(monkeypatch, tmp_path)
     ssh = home / ".ssh"
     ssh.mkdir()
@@ -222,6 +242,7 @@ def test_ssh_private_key_is_fail(secure_engine, monkeypatch, tmp_path):
     (ssh / "config").write_text("")  # harmless
     (ssh / "id_ed25519").write_text("KEY")  # a push path
     assert verify.verify() == 1
+    assert "~/.ssh key material" in capsys.readouterr().out  # ...and for THAT reason
 
 
 def test_ssh_only_known_hosts_passes(secure_engine, monkeypatch, tmp_path, capsys):

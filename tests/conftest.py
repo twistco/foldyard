@@ -179,8 +179,27 @@ def scrubbed_box_session_env(monkeypatch):
     ``config.worktree_suffix()``/``active_worktree()`` read it — so the daemon names become
     ``egress-proxy@<wt>`` etc. and every test asserting the bare main-checkout name fails ONLY when
     the suite runs inside a worktree. Clearing it pins the suite to the main checkout; the worktree
-    tests setenv it themselves (autouse runs first, so their setenv wins)."""
-    for var in ("IN_DEVBOX", "FY_PROXY_PORT", "GCP_MINTER_PORT", "FY_PROXY", "WORKTREE"):
+    tests setenv it themselves (autouse runs first, so their setenv wins).
+
+    ``*_PROXY``/``*_proxy`` for the same reason, learned the hard way: a box session exports
+    HTTPS_PROXY, and ``verify``'s wall section reads it as the wall's permitted path. Two verify
+    tests therefore passed in-box on the ambient value and failed in CI, where nothing exports one
+    — the divergence this fixture exists to prevent. Scrubbing them makes local runs agree with
+    CI; the wall tests set the var themselves. NOT the CA vars beside them (SSL_CERT_FILE,
+    REQUESTS_CA_BUNDLE…): the opt-in proxy e2es need a real trust store."""
+    for var in (
+        "IN_DEVBOX",
+        "FY_PROXY_PORT",
+        "GCP_MINTER_PORT",
+        "FY_PROXY",
+        "WORKTREE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    ):
         monkeypatch.delenv(var, raising=False)
 
 
