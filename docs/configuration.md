@@ -96,8 +96,40 @@ min_foldyard_version = "0.2.0"
 - **`min_foldyard_version`** — a **floor**, not a pin: `fy` refuses to run in this checkout
   below it. Raise it in the same commit that adds a setting an older `fy` cannot honour.
   Default: none.
-- **`recommended_foldyard_version`** — a one-line nudge on each invocation, never a block.
-  Default: none. Silence with `FOLDYARD_NO_VERSION_NUDGE=1`.
+- **`recommended_foldyard_version`** — a one-line nudge, never a block. Printed only on
+  `fy up`, `fy box up` and `fy host`. Default: none. Silence with `FOLDYARD_NO_VERSION_NUDGE=1`.
+
+### What the recommendation is for (and when not to set one)
+
+It is **not** a news feed. foldyard does not tell you a release exists; the consumer repo tells
+you which release *it* has adopted. Those are different claims, and only the second is
+actionable — a version this repo has never tested is not one you should be upgrading to on its
+account.
+
+Its real job is to be **stage one of an escalation that ends in a floor**:
+
+1. You adopt a version — pin CI to it, run the suite, merge.
+2. Set `recommended_foldyard_version` to it. Colleagues see one line the next time they start a
+   session and upgrade when it suits them.
+3. Later, when something actually *needs* that version, raise `min_foldyard_version` to match.
+
+By step 3 almost everyone has already upgraded, so the floor lands as a formality instead of
+blocking someone mid-task. That staging is the whole value. Skip step 2 and every floor arrives
+as an ambush.
+
+So: **time-box it.** A recommendation that has sat unchanged for months is warning fatigue with
+extra steps — either promote it to a floor or delete it. If you find yourself wanting one set
+permanently, what you actually want is a floor.
+
+**Why it only speaks on `up` / `box up` / `host`.** A warning printed on every invocation is
+filtered out by the reader within a day, and takes the rest of foldyard's stderr with it — and
+the people it annoys most would set `FOLDYARD_NO_VERSION_NUDGE` and then never see a nudge
+again, including one that mattered. Spending it on the few verbs that start a working session
+keeps it worth reading. `fy doctor` reports the window unconditionally for anyone who wants to
+ask, including when that variable is set.
+
+This is the bound to leave unset if you are unsure. An absent recommendation costs nothing; a
+stale one costs attention every session, and attention does not come back.
 
 ### Why the floor is a refusal rather than a warning
 

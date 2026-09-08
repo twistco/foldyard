@@ -40,6 +40,16 @@ import sys
 
 _NUM = re.compile(r"\d+")
 
+#: Verbs the NUDGE is allowed to speak on — the ones that start a working session, run a
+#: handful of times a day. The floor ignores this set entirely.
+#:
+#: A warning printed on every invocation is filtered out by the reader within a day, and takes
+#: the rest of foldyard's stderr with it; the people it annoys most would then set
+#: FOLDYARD_NO_VERSION_NUDGE and never see one again, including the nudge that mattered. So it
+#: is spent where it will be read. `fy doctor` reports the window unconditionally for anyone
+#: who wants to ask.
+NUDGE_VERBS = frozenset({"up", "box", "host"})
+
 
 def _parse(raw: str | None) -> tuple[int, ...] | None:
     """A version as a comparable tuple, or ``None`` when it cannot be ordered.
@@ -126,8 +136,12 @@ def _floor_message(installed: str, minimum: str | None, *, in_box: bool, certain
     )
 
 
-def gate_or_abort() -> None:
+def gate_or_abort(verb: str | None = None) -> None:
     """Apply the declared window to this process; print and ``SystemExit(1)`` on a violation.
+
+    ``verb`` is the top-level command being run; the nudge speaks only for :data:`NUDGE_VERBS`,
+    the floor for all of them (a stale ``fy`` misreads the config that drives every verb, so
+    the refusal cannot be scoped to a few).
 
     Best-effort by construction — a missing/unreadable ``foldyard.toml`` yields no declaration
     and therefore no opinion, which is what ``fy init`` in an empty directory needs.
@@ -145,7 +159,9 @@ def gate_or_abort() -> None:
             __version__,
             minimum,
             recommended,
-            quiet_nudge=bool(os.environ.get("FOLDYARD_NO_VERSION_NUDGE")),
+            quiet_nudge=(
+                verb not in NUDGE_VERBS or bool(os.environ.get("FOLDYARD_NO_VERSION_NUDGE"))
+            ),
             in_box=config.in_box(),
         )
     except Exception:  # pragma: no cover — a version check must never be the thing that breaks fy

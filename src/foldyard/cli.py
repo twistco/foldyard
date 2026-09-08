@@ -80,9 +80,17 @@ def _resolve_worktree(
         # read against the checkout this command actually targets. `--version` is eager and has
         # already exited by now, deliberately — asking a binary to name itself has to keep
         # working when the answer is what you are being told to change.
+        import click
+
         from . import compat
 
-        compat.gate_or_abort()
+        # The verb comes from the RUNNING context rather than a `ctx: typer.Context` parameter:
+        # typer vendors its own click, so a declared Context param cannot be constructed by a
+        # caller outside the CLI (the callback's own unit tests invoke it directly). silent=True
+        # yields None off the CLI path, which reads correctly as "no verb" — nudge quiet, floor
+        # still applied.
+        ctx = click.get_current_context(silent=True)
+        compat.gate_or_abort(ctx.invoked_subcommand if ctx is not None else None)
 
 
 @app.command()

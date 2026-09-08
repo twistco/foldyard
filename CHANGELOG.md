@@ -16,6 +16,12 @@ break config or CLI shape, and say so here.
   continues (`FOLDYARD_NO_VERSION_NUDGE=1` silences it). `fy doctor` shows the window as its own
   row, and reports the nudge even when that variable is set.
 
+  The nudge speaks only on `fy up`, `fy box up` and `fy host`. A warning on every invocation is
+  filtered out by the reader within a day and takes the rest of foldyard's stderr with it, so it
+  is spent on the verbs that start a session. `docs/configuration.md` covers what a
+  recommendation is for — briefly, staging a floor so it lands as a formality rather than an
+  ambush — and when to leave it unset.
+
   The floor refuses rather than warns because `foldyard.toml` is read with `.get()` and no schema:
   unknown keys are tolerated by construction, so an old `fy` against a new config doesn't fail —
   it silently ignores the new keys and does the old thing. A warning is not enough for a failure

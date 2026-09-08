@@ -179,7 +179,7 @@ def test_gate_is_silent_when_nothing_is_declared(repo_declaring, capsys):
 
 def test_gate_nudges_without_aborting(repo_declaring, capsys):
     repo_declaring(recommended_foldyard_version="99.0.0")
-    compat.gate_or_abort()  # must not raise
+    compat.gate_or_abort("up")  # must not raise
     assert "99.0.0" in capsys.readouterr().err
 
 
@@ -240,3 +240,32 @@ def test_doctor_reports_the_nudge_even_when_silenced(repo_declaring, monkeypatch
     monkeypatch.setenv("FOLDYARD_NO_VERSION_NUDGE", "1")
     (status, _, _) = _row(repo_declaring, recommended_foldyard_version="99.0.0")[0]
     assert status == "warn"
+
+
+# ── the nudge is scoped to session-starting verbs ────────────────────────────────────
+
+
+@pytest.mark.parametrize("verb", sorted(compat.NUDGE_VERBS))
+def test_nudge_fires_on_session_starting_verbs(repo_declaring, capsys, verb):
+    repo_declaring(recommended_foldyard_version="99.0.0")
+    compat.gate_or_abort(verb)
+    assert "99.0.0" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("verb", ["ps", "mode", "logs", "shell", "open", "state"])
+def test_nudge_stays_quiet_on_verbs_you_run_all_day(repo_declaring, capsys, verb):
+    # A warning on every invocation is filtered out by the reader within a day, and takes
+    # foldyard's other stderr with it. The nudge is worth having only if it stays rare.
+    repo_declaring(recommended_foldyard_version="99.0.0")
+    compat.gate_or_abort(verb)
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("verb", ["ps", "mode", None])
+def test_the_floor_ignores_the_verb_entirely(repo_declaring, capsys, verb):
+    # Scoping is a noise concession for the nudge alone. A stale fy misreads the config that
+    # drives every verb, so the refusal cannot be one of them.
+    repo_declaring(min_foldyard_version="99.0.0")
+    with pytest.raises(SystemExit):
+        compat.gate_or_abort(verb)
+    assert "99.0.0" in capsys.readouterr().err
