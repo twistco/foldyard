@@ -48,8 +48,8 @@ from pathlib import Path
 
 import pytest
 
+from foldyard import allowlist, config
 from foldyard import box as boxmod
-from foldyard import config
 from foldyard.plugins import Registry
 from foldyard.plugins import proxy as proxy_mod
 from foldyard.plugins.github import GithubPlugin
@@ -228,6 +228,21 @@ class _Box:
         )  # fmt: skip
 
 
+def _wall_enforcing_with(host: str) -> None:
+    """State this test's egress-wall posture: ENFORCING, with ``host`` granted.
+
+    The daemon spec carries the wall (``DEFAULT_DENY`` + ``ALLOW_FILE``), so left unstated the fake
+    upstream is judged by whatever is ambient — the repo's own ``[proxy] default_deny`` seed and
+    whatever the machine's allow-store happens to hold. That passed on a developer box with grants
+    and 403'd every CONNECT in CI, where the seed is `true` and nothing has ever been granted.
+
+    Stating it also earns the test something: the capture path is now proven THROUGH an enforcing
+    wall rather than around one. Writes land in the per-test store ``conftest.isolated_allow_store``
+    pins, never the real one."""
+    allowlist.grant(host, "permanent")
+    allowlist.set_wall(True)  # rewrites the effective allowlist the addon re-reads per request
+
+
 def _has_trust_tool(box: _Box) -> bool:
     return any(
         box.exec("sh", "-c", f"command -v {t}").returncode == 0
@@ -265,8 +280,10 @@ def capture_box(tmp_path, monkeypatch):
     # github-consumer property now (undeclared consumers get no GH_TOKEN at all).
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
     monkeypatch.setattr(config, "github_declared", lambda: True)
+    _wall_enforcing_with(ip)  # before the spec is built — it reads DEFAULT_DENY + ALLOW_FILE
     reg = Registry([GithubPlugin(), ProxyPlugin()])
     spec = reg.desired_daemons({"github": "off", "capture": "on"})["egress-proxy"]
+    assert spec["env"]["DEFAULT_DENY"] == "1"  # the wall is up; the upstream is granted through it
     # The wiring under test: capture-only ⇒ EMPTY inject config (egress_proxy logs, rewrites nothing),
     # and the log path is the project log dir we redirected above.
     assert spec["env"]["INJECT_HOST"] == "" and spec["env"]["INJECT_COMMAND"] == ""
@@ -418,12 +435,15 @@ def av_box(tmp_path, monkeypatch):
     # Opt the consumer into the proxy ([proxy] declared) so the always-on daemon exists with no
     # injector — Phase A′ always-route is an opted-in-consumer property.
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
+    _wall_enforcing_with(ip)  # before the specs are built — they read DEFAULT_DENY + ALLOW_FILE
     reg = Registry([GithubPlugin(), ProxyPlugin()])
     spec_pass = reg.desired_daemons({"github": "off", "capture": "off"})["egress-proxy"]
     spec_full = reg.desired_daemons({"github": "off", "capture": "on"})["egress-proxy"]
     assert spec_pass["env"]["CAPTURE_MODE"] == "passthrough"
     assert spec_full["env"]["CAPTURE_MODE"] == "full"
     assert spec_pass["env"]["PROXY_LOG_FILE"] == str(log)
+    # Both modes carry the wall: passthrough tunnels blind, but it still refuses an ungranted host.
+    assert spec_pass["env"]["DEFAULT_DENY"] == spec_full["env"]["DEFAULT_DENY"] == "1"
 
     proc = _launch_mitm(spec_pass, confdir, pport, mitm_log)
     ca = confdir / "mitmproxy-ca-cert.pem"

@@ -123,6 +123,21 @@ def isolated_port_registry(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_allow_store(tmp_path, monkeypatch):
+    """Point the egress allow-store + the effective file the proxy reads at per-test paths, so no
+    test reads or writes the real ~/.foldyard/<project>/allow-store.json — and every test starts
+    from "nothing granted, nothing declined".
+
+    The same local/CI divergence the fixtures above exist for: a developer's store carries their
+    real grants and their `fy allow wall` answer, CI's carries nothing, so a test that reads the
+    ambient store asserts a different wall in each place. (An empty store still falls back to
+    ``[proxy] default_deny`` — the repo seed — so a test whose SUBJECT is the wall must state its
+    posture itself: `allowlist.grant(...)` / `allowlist.set_wall(...)` into this isolated store.)"""
+    monkeypatch.setenv("FOLDYARD_ALLOW_STORE", str(tmp_path / "allow-store.json"))
+    monkeypatch.setenv("FOLDYARD_ALLOW_FILE", str(tmp_path / "allow-effective.json"))
+
+
+@pytest.fixture(autouse=True)
 def isolated_capability_state(tmp_path, monkeypatch):
     """Point the supervisor's capability-probe results file at a per-test path and pin the test
     clock to real time, so no test reads or writes the real ~/.foldyard capabilities.json — or
