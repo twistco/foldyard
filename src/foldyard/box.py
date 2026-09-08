@@ -736,6 +736,54 @@ def _capture_keyless() -> None:
         )
 
 
+def _warn_keyless_axis_at_rest() -> None:
+    """Host-side, before box-up: a keyless agent whose posture axis is still at rest.
+
+    This is the last step of the scaffold's step 2 ("uncomment ONE agent, then `fy box up`") and the
+    easiest to skip, because nothing else looks wrong: declaring ``keyless`` is what CREATES the
+    axis (``ClaudePlugin.axes`` returns nothing without it) but it does not ARM it, so the box comes
+    up with its install, its volumes and its DUMMY credential — and then the agent 401s against an
+    otherwise perfect box. The same failure the comment above ``_capture_keyless`` describes,
+    reached from the other side: there the host had no token, here the posture won't let the proxy
+    inject the one it has.
+
+    Said HERE and not from ``fy mode``, deliberately. An axis at its default rung is the PRODUCT —
+    secretless-by-default, armed for a session and TTL'd back down — so warning on every posture
+    read would be nagging at a resting posture, and would be tuned out by the time it mattered. A
+    session-starting verb is where "you are about to use this agent" is actually true.
+    """
+    from . import devmode
+
+    declared = [
+        (axis, table, kind)
+        for axis, table, kind in (
+            ("claude", "[claude]", config.claude_keyless()),
+            ("codex", "[codex]", config.codex_keyless()),
+        )
+        if kind
+    ]
+    if not declared:  # no keyless ⇒ no axis to be off (a bare [claude] logs in inside the box)
+        return
+    try:
+        mode = devmode.read(apply_expiry=True)["mode"]
+    except Exception as e:  # pragma: no cover — a corrupt/absent mode file must not block box-up
+        _err(f"⚠ couldn't read the posture to check the agent axes ({e}) — skipping.")
+        return
+    rungs, defaults = devmode.axes(), devmode.axis_defaults()
+    for axis, table, kind in declared:
+        rest = defaults.get(axis)
+        if rest is None or mode.get(axis, rest) != rest:
+            continue
+        # The rung to suggest comes from the registry, not a literal "on": the axis belongs to the
+        # plugin, and this message must not be the thing that goes stale if its rungs change.
+        arm = next((r for r in rungs.get(axis, ()) if r != rest), "on")
+        _err(
+            f"⚠ {table}.keyless = {kind!r} is declared but the posture has {axis}={rest} — the box "
+            f"gets only a dummy credential, so the agent cannot reach its API.\n"
+            f"  Arm it: `fy mode {axis}={arm}`  (or `fy tui`, where one keypress flips it)."
+        )
+
+
 def _capture_secrets() -> None:
     """Mac-side, before box-up: for every secret the CURRENT posture declares it needs (plugin
     ``secrets`` hooks + the consumer's ``[[secret]]`` rows), make sure it's in host.env — prompting
@@ -791,6 +839,9 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # injected nothing and the box 401'd for days.
     _capture_secrets()
     _capture_keyless()
+    # Above the early return for the same reason: arming an axis is host-side and needs no recreate,
+    # so an already-up box is exactly where this is most likely to be the one thing still missing.
+    _warn_keyless_axis_at_rest()
 
     expected_fingerprint = _box_image_fingerprint(main)
 
