@@ -65,6 +65,67 @@ def _registered_worktree(main: Path, wt_dir: Path) -> bool:
     return str(wt_dir) in trees or str(wt_dir.resolve()) in trees
 
 
+def _snapshot_uncommitted(wt_dir: Path, name: str) -> str | None:
+    """Park a worktree's uncommitted work on a ref in MAIN before the checkout is deleted.
+
+    ``worktree remove --force`` (and the orphan path's ``rmtree``, which ALWAYS needs --force)
+    discard tracked edits and untracked files with no trace: nothing was ever written to the
+    object database, so there is not even a dangling blob to recover. Transcripts are archived
+    one step above precisely because destruction is coming; the code they describe was not.
+
+    Written as a commit whose tree is built through a THROWAWAY index, so neither the worktree's
+    index nor its HEAD is touched on the way out — this must not be able to change what is being
+    removed. ``git add -A`` honours .gitignore, which is what keeps it cheap (no node_modules)
+    and is also its one blind spot: a gitignored-but-precious file is not in here.
+
+    The ref lands in the SHARED store (linked worktrees share objects and refs with main), so it
+    outlives ``worktree remove``, ``worktree prune`` and a ``gc --prune=now`` — the ref keeps the
+    objects reachable. Returns the ref name, or None when there was nothing to save or git could
+    not be driven (a pruned orphan's ``.git`` file dangles, and that is exactly the case that
+    cannot be rescued — say so rather than pretend).
+    """
+    import tempfile
+    from datetime import datetime
+
+    def _git(*args: str, **kw) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(wt_dir), *args], capture_output=True, text=True, **kw
+        )
+
+    head = _git("rev-parse", "HEAD")
+    if head.returncode != 0:
+        return None
+    idx = Path(tempfile.mkdtemp(prefix="fy-wt-snap-")) / "index"
+    try:
+        env = {**os.environ, "GIT_INDEX_FILE": str(idx)}
+        if _git("read-tree", "HEAD", env=env).returncode != 0:
+            return None
+        if _git("add", "-A", env=env).returncode != 0:
+            return None
+        tree = _git("write-tree", env=env)
+        if tree.returncode != 0:
+            return None
+        # An unchanged tree means there was nothing uncommitted to lose — no ref, no noise.
+        if tree.stdout.strip() == _git("rev-parse", "HEAD^{tree}").stdout.strip():
+            return None
+        made = _git(
+            "commit-tree",
+            tree.stdout.strip(),
+            "-p",
+            head.stdout.strip(),
+            "-m",
+            f"fy: uncommitted work in worktree '{name}' at removal",
+        )
+        if made.returncode != 0:
+            return None
+        ref = f"refs/fy/removed/{name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        if _git("update-ref", ref, made.stdout.strip()).returncode != 0:
+            return None
+        return ref
+    finally:
+        shutil.rmtree(idx.parent, ignore_errors=True)
+
+
 def _git_has_ref(repo: Path, ref: str) -> bool:
     return (
         subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet", ref]).returncode
@@ -467,6 +528,16 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
         _err("  Resolve the issue, or re-run with --force to remove anyway (loses them).")
         return rc
 
+    # 3b. Park any uncommitted work on a ref in main BEFORE the checkout is deleted. Best-effort
+    #     and never blocking, unlike the transcript archive above: both paths that reach step 4
+    #     with work still in the tree are explicit --force (git itself refuses the non-force
+    #     removal of a dirty worktree), so the operator has already accepted the loss — this is a
+    #     net under them, not a promise they were given.
+    saved = _snapshot_uncommitted(wt_dir, name)
+    if saved:
+        print(f"▶ uncommitted work in '{name}' saved to {saved}")
+        print(f"     inspect:  git -C {main} show --stat {saved}")
+        print(f"     restore:  git -C {main} checkout {saved} -- .")
     # 4. git worktree remove — or, for an orphan git no longer tracks, delete the dir + prune
     #    the stale metadata so a re-add of the same name starts clean.
     if orphaned:
@@ -497,6 +568,8 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
         f"✓ worktree '{name}' removed "
         "(box + stack torn down, transcripts archived, local state deleted)."
     )
+    if saved:
+        print(f"  Its uncommitted work is on {saved} — see above to restore.")
     return 0
 
 

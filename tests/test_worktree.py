@@ -525,3 +525,126 @@ def test_init_refuses_a_script_outside_the_repo(fake_main, monkeypatch, capsys):
     assert worktree.init_config("feat") == 1
     assert "must point inside the repo" in capsys.readouterr().err
     assert not any(c[:2] == ["podman", "run"] for c in fake_main["calls"])
+
+
+# ── the uncommitted-work snapshot taken before a worktree is destroyed ────────────────
+#
+# These drive REAL git (no mock): the whole point is the plumbing — a throwaway index, and a
+# ref in the SHARED store that outlives the checkout. A mocked git would assert nothing.
+
+
+@pytest.fixture
+def real_worktree(tmp_path):
+    """A real main repo with a real linked worktree, and a helper to run git in either."""
+    import subprocess
+
+    main, wt = tmp_path / "main", tmp_path / "wt"
+
+    def git(repo, *args, **kw):
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, **kw)
+
+    subprocess.run(["git", "init", "-q", str(main)], check=True)
+    git(main, "config", "user.email", "t@example.com")
+    git(main, "config", "user.name", "t")
+    (main / "f.txt").write_text("base\n")
+    git(main, "add", "-A")
+    git(main, "commit", "-qm", "base")
+    git(main, "worktree", "add", "-q", str(wt), "-b", "feat")
+    return {"main": main, "wt": wt, "git": git}
+
+
+def test_snapshot_saves_tracked_and_untracked_work(real_worktree):
+    wt, main, git = real_worktree["wt"], real_worktree["main"], real_worktree["git"]
+    (wt / "f.txt").write_text("EDITED\n")
+    (wt / "new.txt").write_text("BRAND NEW\n")
+
+    ref = worktree._snapshot_uncommitted(wt, "feat")
+    assert ref and ref.startswith("refs/fy/removed/feat-")
+    assert git(main, "show", f"{ref}:f.txt").stdout == "EDITED\n"
+    # The untracked file is the one `git stash create` would silently drop — and the one that
+    # is unrecoverable, since nothing ever wrote it to the object database.
+    assert git(main, "show", f"{ref}:new.txt").stdout == "BRAND NEW\n"
+
+
+def test_snapshot_outlives_the_worktree_it_describes(real_worktree):
+    wt, main, git = real_worktree["wt"], real_worktree["main"], real_worktree["git"]
+    (wt / "new.txt").write_text("BRAND NEW\n")
+    ref = worktree._snapshot_uncommitted(wt, "feat")
+
+    # The destruction it exists for, plus the two sweeps that would collect an unreferenced
+    # object. Linked worktrees share objects AND refs with main, so the ref keeps it reachable.
+    git(main, "worktree", "remove", "--force", str(wt))
+    git(main, "worktree", "prune")
+    git(main, "gc", "-q", "--prune=now")
+    assert not wt.exists()
+    assert git(main, "show", f"{ref}:new.txt").stdout == "BRAND NEW\n"
+
+
+def test_snapshot_does_not_disturb_what_it_is_snapshotting(real_worktree):
+    # It runs on the way OUT of a checkout, so it must not be able to change what is removed:
+    # the tree is built through a throwaway index, never the worktree's own.
+    wt, git = real_worktree["wt"], real_worktree["git"]
+    (wt / "f.txt").write_text("EDITED\n")
+    (wt / "new.txt").write_text("BRAND NEW\n")
+    before = (git(wt, "status", "--porcelain").stdout, git(wt, "rev-parse", "HEAD").stdout)
+
+    worktree._snapshot_uncommitted(wt, "feat")
+
+    assert (git(wt, "status", "--porcelain").stdout, git(wt, "rev-parse", "HEAD").stdout) == before
+    assert (wt / "f.txt").read_text() == "EDITED\n"  # and the files themselves are untouched
+
+
+def test_snapshot_is_silent_when_there_is_nothing_to_save(real_worktree):
+    # A clean tree has nothing to lose — no ref, no noise on the way out.
+    assert worktree._snapshot_uncommitted(real_worktree["wt"], "feat") is None
+
+
+def test_snapshot_ignores_what_gitignore_ignores(real_worktree):
+    # What keeps it cheap (no node_modules) is also its blind spot — pin the behaviour so the
+    # tradeoff is a decision rather than a surprise.
+    wt, main, git = real_worktree["wt"], real_worktree["main"], real_worktree["git"]
+    (wt / ".gitignore").write_text("junk/\n")
+    (wt / "junk").mkdir()
+    (wt / "junk" / "big.bin").write_text("x" * 1000)
+    ref = worktree._snapshot_uncommitted(wt, "feat")
+    assert ref
+    assert "junk/big.bin" not in git(main, "ls-tree", "-r", "--name-only", ref).stdout
+
+
+def test_snapshot_returns_none_when_git_cannot_be_driven(tmp_path):
+    # A pruned orphan's `.git` file dangles. That case genuinely cannot be rescued, so it must
+    # report nothing rather than raise on the way out of a removal already under way.
+    orphan = tmp_path / "not-a-repo"
+    orphan.mkdir()
+    assert worktree._snapshot_uncommitted(orphan, "feat") is None
+
+
+def test_remove_snapshots_before_git_takes_the_checkout(fake_main, monkeypatch, capsys):
+    # Ordering is the whole point: after `git worktree remove` there is nothing left to read.
+    order: list[str] = []
+    monkeypatch.setattr(
+        worktree,
+        "_snapshot_uncommitted",
+        lambda wt_dir, name: order.append("snapshot") or "refs/fy/removed/feat-x",
+    )
+    real_run = worktree.subprocess.run
+
+    def spy(cmd, **kw):
+        if cmd[:1] == ["git"] and "worktree" in cmd and "remove" in cmd:
+            order.append("git-remove")
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(worktree.subprocess, "run", spy)
+    _make_wt(fake_main)
+    assert worktree.remove("feat", assume_yes=True) == 0
+    assert order == ["snapshot", "git-remove"]
+    assert "refs/fy/removed/feat-x" in capsys.readouterr().out  # and it says where it went
+
+
+def test_remove_is_not_blocked_by_a_failed_snapshot(fake_main, monkeypatch):
+    # Unlike the transcript archive above it, this must never refuse: both paths that still
+    # carry work at this point are explicit --force, so the loss was already accepted. A net
+    # under the operator, not a promise made to them.
+    monkeypatch.setattr(worktree, "_snapshot_uncommitted", lambda wt_dir, name: None)
+    _make_wt(fake_main)
+    assert worktree.remove("feat", assume_yes=True) == 0
