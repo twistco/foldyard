@@ -109,7 +109,14 @@ foldyard's surface splits by *where it can be validated*:
    mutations). **Commit everything BEFORE mutation-testing**: the natural revert is
    `git checkout -- <file>`, which wipes any uncommitted work in that file along with the
    mutation — a mutation round on a file carrying uncommitted changes has destroyed them once
-   already. Profiles live in `conftest.py`: CI (`CI` env) is derandomized so `check` never
+   already. Git cannot help here: it cannot tell the mutation from your work (both are just
+   unstaged changes to that file), so `stash` is no safer than `checkout` — stashing first
+   mutation-tests code without the change you are validating, stashing after bundles the two
+   back together. Revert with the exact INVERSE edit instead, leaving git out of it;
+   committing first is then the fallback, not the mechanism. (Nor does `&&`-chaining the
+   revert save you — it only guards the round where the mutation step itself failed.) There
+   is no bare `python`/`python3` in a dev box — `uv run python`. Profiles live in
+   `conftest.py`: CI (`CI` env) is derandomized so `check` never
    flakes; local runs stay randomized. Keep strategies as plain data (hypothesis shrinks data,
    not closures).
 2. **Engine verbs (golden tests)** — mock the engine; assert the exact `docker`/`podman`

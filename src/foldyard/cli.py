@@ -42,6 +42,7 @@ def _version(show: bool) -> None:
 
 @app.callback()
 def _resolve_worktree(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False,
         "--version",
@@ -62,19 +63,34 @@ def _resolve_worktree(
     Best-effort: a non-git dir (e.g. ``init`` scaffolding) just leaves it unset."""
     import os
 
-    from . import config
+    from . import compat, config
 
-    if config.in_box() or os.environ.get("WORKTREE"):
-        return
     try:
-        from . import stack
+        if not (config.in_box() or os.environ.get("WORKTREE")):
+            try:
+                from . import stack
 
-        os.environ["WORKTREE"] = stack._active_worktree(stack.worktrees_root(stack.main_repo()))
-    except (Exception, SystemExit):
-        # not a git repo / no worktrees root → leave WORKTREE unset (resolves to main). SystemExit
-        # too: stack.main_repo() raises it (not an Exception) from a non-git dir, and this best-
-        # effort pin must never abort the command it's fronting (e.g. `fy init` scaffolding).
-        pass
+                os.environ["WORKTREE"] = stack._active_worktree(
+                    stack.worktrees_root(stack.main_repo())
+                )
+            except (Exception, SystemExit):
+                # not a git repo / no worktrees root → leave WORKTREE unset (resolves to main).
+                # SystemExit too: stack.main_repo() raises it (not an Exception) from a non-git
+                # dir, and this best-effort pin must never abort the command it's fronting (e.g.
+                # `fy init` scaffolding).
+                pass
+    finally:
+        # AFTER the worktree pin, and reached on EVERY path through this callback — the
+        # in-box and WORKTREE-already-set cases short-circuit the pin, and those are exactly
+        # where a mismatched foldyard does the most damage. `--version` is eager and has already
+        # exited by now, deliberately: asking a binary to name itself has to keep working when
+        # the answer is what you are being told to change.
+        #
+        # The verb comes from the declared `ctx` and NOT click.get_current_context(): typer
+        # vendors its own click, so the top-level click package reads a different context stack
+        # and always answers None — which silently disabled the nudge until a wiring test caught
+        # it. Anything reaching into click here must come from typer's copy.
+        compat.gate_or_abort(ctx.invoked_subcommand)
 
 
 @app.command()
@@ -412,6 +428,17 @@ box_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(box_app)
+
+
+@box_app.callback()
+def _box_version_nudge(ctx: typer.Context) -> None:
+    """The root callback runs before this sub-app resolves its verb, so every `fy box …` looks
+    like a bare "box" up there — and scoping the nudge to that group put it on `fy box exec`,
+    which git hooks dispatch through once per commit. The floor already ran at the root (and
+    exited if unmet); this adds back only the recommendation, for the resolved path."""
+    from . import compat
+
+    compat.nudge(f"box {ctx.invoked_subcommand}" if ctx.invoked_subcommand else None)
 
 
 @box_app.command("build")

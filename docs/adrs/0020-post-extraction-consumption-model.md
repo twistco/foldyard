@@ -5,6 +5,9 @@
   mechanism that keeps it fresh. Everything else here stands as decided — the editable developer
   flow, the box-side staging chain, the co-dev toggle (unbuilt) and no vendoring. The
   git-installed-host staging gap is demoted from blocking to optional by the same amendment.
+- **Amended again (2026-09-08)** when the version window was actually built: the floor
+  **refuses**, it is checked on **every** invocation rather than only `fy up`, and it gained a
+  soft sibling. See "The version window, as built" below.
 - **Sources:** spinout-plan D1, amended by D-A
 
 ## Context
@@ -54,6 +57,33 @@ What makes that affordable is **cheap releases**: tag → `uv build` → `uv pub
 release per merge to `main` through the churn period, so "you need to pull" never has to mean a git
 install. The consumer repo pins a **floor**, not a version — `[project].min_foldyard_version` in
 `foldyard.toml`, surfaced as a doctor row plus a one-line warning on `fy up`.
+
+### The version window, as built (amendment, 2026-09-08)
+
+Implemented in `compat.py` as two keys, and three details of the sketch above changed on contact:
+
+**The floor refuses; it does not warn.** `config.py` reads the TOML with `.get()` and no schema,
+so unknown keys are tolerated by construction — an old `fy` against a new `foldyard.toml` doesn't
+fail, it silently ignores the new keys and does the old thing. A warning is not enough for a
+failure mode that leaves no trace, which is the whole reason the floor exists.
+
+**It is checked on every invocation, not just `fy up`.** The config a stale `fy` misreads governs
+`mode`, `host`, `box`, everything — gating only the one verb would leave the rest silently wrong.
+It sits in the Typer callback, after the worktree pin (the window is declared per checkout) and
+after the eager `--version` (asking a binary to name itself must keep working when the answer is
+what you are being told to change).
+
+**A soft sibling, `recommended_foldyard_version`.** Nudges, never blocks; `FOLDYARD_NO_VERSION_NUDGE=1`
+silences it. Both bounds are **declarative — foldyard never asks PyPI what the latest release is.**
+`fy` runs inside the box too, where egress is default-deny, so a lookup would mean an allowlist
+hole in the zero-egress posture for a cosmetic message; and a consumer pins its CI deliberately
+so it does not float with someone else's release, making the repo's opinion of "current" the more
+useful one.
+
+**Stated limit.** A floor only protects from the release that *implements* it onward — any older
+`fy` ignores the key and always will. It cannot rescue a migration in flight (the monorepo flip
+that motivated it needed a `foldyard/` shim instead); it earns its keep on the next one. That is
+an argument for landing it early, while the unprotected population is still small.
 
 **One sharp edge this ordering creates, worth stating because it is silent.** Claiming the PyPI
 name with a *placeholder* published at foldyard's current version would make every git-installed

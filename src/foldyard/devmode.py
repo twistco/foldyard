@@ -930,6 +930,7 @@ def doctor(deep: bool = False):
     # Shadowing hygiene for the ACTIVE checkout — the box half is a pure filesystem scan, the
     # stack half asks the running containers. Same answer and same fix on either side of the
     # mount, so both are yielded before the split rather than duplicated into each branch.
+    yield from _version_window_check()
     yield from _shadow_volume_check()
     yield from _stack_shadow_check()
     yield from _disk_headroom_check()
@@ -1133,6 +1134,38 @@ def _stack_mounts(project: str) -> list[tuple[str, list[tuple[str, str]], set[st
                 masked.add(dest)  # a named/anonymous volume shadows whatever is under it
         result.append((name, binds, masked))
     return result
+
+
+def _version_window_check():
+    """The consumer's declared foldyard version window (:mod:`foldyard.compat`).
+
+    Yields nothing when the repo declares neither bound — "this consumer has no opinion" is
+    not a finding. Reuses the same policy the CLI gate applies, so the row and the refusal can
+    never disagree; the three outcomes map onto ok/warn/fail. Asks for the nudge
+    unconditionally, ignoring ``FOLDYARD_NO_VERSION_NUDGE``: that variable silences a
+    per-invocation nag, and someone running `fy doctor` is asking to be told everything.
+    """
+    minimum = config.min_foldyard_version()
+    recommended = config.recommended_foldyard_version()
+    if minimum is None and recommended is None:
+        return
+
+    from . import __version__
+    from .compat import version_gate
+
+    # No ledger passed on purpose: a doctor row is one line in a table, and the reasons are a
+    # list. The row says WHERE you are; `fy up` says what you would gain by moving.
+    message, blocked = version_gate(__version__, minimum, recommended, in_box=in_box())
+    fix = "`fy box up` from the Mac" if in_box() else "`uv tool install --upgrade foldyard`"
+    if blocked:
+        yield ("fail", "foldyard version", f"{__version__} — repo needs >= {minimum}; run {fix}")
+    elif message:
+        # Either behind the recommendation, or a version we could not order at all (a local
+        # dev build, a bare source import). Both are "worth knowing, not worth blocking".
+        want = recommended or minimum
+        yield ("warn", "foldyard version", f"{__version__} — repo expects {want}; run {fix}")
+    else:
+        yield ("ok", "foldyard version", f"{__version__} satisfies this repo's declared window")
 
 
 def _disk_headroom_check():

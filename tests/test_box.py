@@ -986,3 +986,77 @@ def test_up_no_codex_nag_when_the_box_was_created_with_it(fake, capsys, monkeypa
     fake["state"]["baked_env"]["CODEX_HOME"] = "/home/vscode/.codex"
     assert box.main("up") == 0
     assert "[codex]" not in capsys.readouterr().out
+
+
+# ── a keyless agent whose axis is still at rest ──────────────────────────────────────
+
+
+@pytest.fixture
+def keyless_posture(monkeypatch):
+    """Declare keyless for either agent and pin the stored posture, over the REAL plugins.
+
+    The axis exists only because `keyless` is set (`ClaudePlugin.axes` returns nothing without
+    it), so the registry is built from the real plugins rather than stand-ins — a synthetic axis
+    would not pin the coupling this warning is about."""
+    from foldyard import devmode
+    from foldyard.plugins import Registry, claude, codex
+
+    def _wire(mode, *, claude_keyless="", codex_keyless=""):
+        from conftest import GENERIC_TOML, make_config
+
+        monkeypatch.setattr(config, "claude_keyless", lambda: claude_keyless)
+        monkeypatch.setattr(config, "codex_keyless", lambda: codex_keyless)
+        reg = Registry(
+            [claude.ClaudePlugin(), codex.CodexPlugin()], config=make_config(GENERIC_TOML)
+        )
+        monkeypatch.setattr(devmode, "registry", lambda: reg)
+        monkeypatch.setattr(devmode, "read", lambda apply_expiry=True: {"mode": mode})
+
+    return _wire
+
+
+def test_up_warns_when_a_keyless_agent_axis_is_still_off(fake, capsys, keyless_posture):
+    # The step-2 papercut: [claude].keyless declared, box built fine, but nobody ran `fy mode
+    # claude=on` — so the proxy injects nothing, the box keeps its dummy, and Claude 401s against
+    # a box where everything else is right.
+    keyless_posture({"claude": "off"}, claude_keyless="oauth")
+    assert box.main("up") == 0
+    err = capsys.readouterr().err
+    assert "[claude].keyless" in err and "claude=off" in err
+    assert "fy mode claude=on" in err and "fy tui" in err
+
+
+def test_up_is_quiet_once_the_axis_is_armed(fake, capsys, keyless_posture):
+    keyless_posture({"claude": "on"}, claude_keyless="oauth")
+    assert box.main("up") == 0
+    assert "[claude].keyless" not in capsys.readouterr().err
+
+
+def test_up_does_not_warn_for_a_bare_agent_table(fake, capsys, keyless_posture):
+    # No keyless ⇒ ClaudePlugin.axes() returns NOTHING, so there is no rung to arm: that box logs
+    # in inside the container. Telling this user to run `fy mode claude=on` would name an axis
+    # that does not exist.
+    keyless_posture({}, claude_keyless="")
+    assert box.main("up") == 0
+    assert "keyless" not in capsys.readouterr().err
+
+
+def test_up_warns_per_agent_not_once_for_both(fake, capsys, keyless_posture):
+    keyless_posture(
+        {"claude": "off", "codex": "on"}, claude_keyless="oauth", codex_keyless="chatgpt"
+    )
+    assert box.main("up") == 0
+    err = capsys.readouterr().err
+    assert "[claude].keyless" in err
+    assert "[codex].keyless" not in err  # codex is armed; only the one at rest speaks
+
+
+def test_up_warns_about_a_resting_axis_even_when_the_box_is_already_up(
+    fake, capsys, keyless_posture
+):
+    # Arming is host-side and needs no recreate, so an already-up box is exactly where this is
+    # most likely to be the one thing still missing — it must not sit below the early return.
+    keyless_posture({"claude": "off"}, claude_keyless="oauth")
+    fake["state"]["running"] = True
+    assert box.main("up") == 0
+    assert "fy mode claude=on" in capsys.readouterr().err

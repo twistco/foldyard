@@ -64,6 +64,7 @@ prefix = "acme"
 app = "app"
 app_port = "WEB_PORT"
 compose = ["compose.yml"]
+min_foldyard_version = "0.2.0"
 ```
 
 - **`name`** — the project key: it names the host state dir `~/.foldyard/<name>/`. Default:
@@ -92,6 +93,95 @@ compose = ["compose.yml"]
 - **`dev_vm_dir`** — *transitional*: where foldyard's generated assets and the gitignored
   `.dev-mode.json` posture mirror land, relative to the repo root. Default: `"."`. Env:
   `FOLDYARD_DEV_VM_DIR`. Leave it alone unless you want those files tucked into a subdir.
+- **`min_foldyard_version`** — a **floor**, not a pin: `fy` refuses to run in this checkout
+  below it. Raise it in the same commit that adds a setting an older `fy` cannot honour.
+  Default: none.
+- **`recommended_foldyard_version`** — a nudge, never a block. Printed only on `fy up`,
+  `fy box up` and `fy host`. Default: none. Silence with `FOLDYARD_NO_VERSION_NUDGE=1`.
+- **`[project.foldyard_version_reasons]`** — an optional ledger of *why this repo wanted* each
+  foldyard it adopted, keyed by version. Both messages list the entries between the version you
+  have and the bound you are being pointed at. Default: empty.
+
+```toml
+[project.foldyard_version_reasons]
+"0.2.0" = "the verify false-pass fix; CI runs this"
+"0.3.0" = "the Lima backend, for the M-series boxes"
+```
+
+```text
+▸ foldyard 0.1.0 is behind the 0.3.0 this repo expects. Since yours:
+    0.2.0  the verify false-pass fix; CI runs this
+    0.3.0  the Lima backend, for the M-series boxes
+  Run `uv tool install --upgrade foldyard`.
+```
+
+Entries are **appended, never rewritten** — which is the point. A single "why" field next to
+the version has to be re-edited on every bump, and the bump where someone forgets is the one
+that starts lying. A ledger entry describes a version that is already frozen, so it cannot
+drift. It also lets the message say what you would gain across *several* hops rather than only
+the newest, which is a much stronger reason to act.
+
+It does not grow without bound, because **the floor is its garbage collector**: once
+`min_foldyard_version` is `0.5.0`, every entry below `0.5.0` is unreachable and should be
+deleted. What stays live is the versions between your floor and your recommendation — one or
+two, if you follow the escalation below.
+
+A version with no entry simply doesn't appear; a malformed key or a non-string reason drops
+that line alone rather than blanking the rest.
+
+
+### What the recommendation is for (and when not to set one)
+
+It is **not** a news feed. foldyard does not tell you a release exists; the consumer repo tells
+you which release *it* has adopted. Those are different claims, and only the second is
+actionable — a version this repo has never tested is not one you should be upgrading to on its
+account.
+
+Its real job is to be **stage one of an escalation that ends in a floor**:
+
+1. You adopt a version — pin CI to it, run the suite, merge.
+2. Set `recommended_foldyard_version` to it. Colleagues see one line the next time they start a
+   session and upgrade when it suits them.
+3. Later, when something actually *needs* that version, raise `min_foldyard_version` to match.
+
+By step 3 almost everyone has already upgraded, so the floor lands as a formality instead of
+blocking someone mid-task. That staging is the whole value. Skip step 2 and every floor arrives
+as an ambush.
+
+So: **time-box it.** A recommendation that has sat unchanged for months is warning fatigue with
+extra steps — either promote it to a floor or delete it. If you find yourself wanting one set
+permanently, what you actually want is a floor.
+
+**Why it only speaks on `up` / `box up` / `host`.** A warning printed on every invocation is
+filtered out by the reader within a day, and takes the rest of foldyard's stderr with it — and
+the people it annoys most would set `FOLDYARD_NO_VERSION_NUDGE` and then never see a nudge
+again, including one that mattered. Spending it on the few verbs that start a working session
+keeps it worth reading. `fy doctor` reports the window unconditionally for anyone who wants to
+ask, including when that variable is set.
+
+This is the bound to leave unset if you are unsure. An absent recommendation costs nothing; a
+stale one costs attention every session, and attention does not come back.
+
+### Why the floor is a refusal rather than a warning
+
+foldyard reads `foldyard.toml` with `.get()` and no schema, so unknown keys are tolerated by
+construction. An old `fy` against a new config therefore doesn't fail — it silently ignores
+the new keys and does the old thing. A warning isn't enough for a failure mode that leaves no
+trace, so the floor stops the command.
+
+Both bounds are **declarative, and foldyard never asks PyPI what the latest release is**.
+`fy` runs on the host *and* inside the box, where egress is default-deny through the proxy —
+a version check would mean punching an allowlist hole in the zero-egress posture to power a
+cosmetic message. The consumer's own opinion of "current" is the more useful one anyway: a
+repo pins its CI deliberately so it doesn't float with someone else's release.
+
+`fy doctor` shows the window as its own row, and reports the nudge even when
+`FOLDYARD_NO_VERSION_NUDGE` is set — that variable silences a per-invocation nag, not an
+explicit request to be told everything.
+
+**Inherent limit.** A floor only protects from the release that *implements* it onward; any
+older `fy` ignores the key and always will. It can't rescue a migration already in flight —
+it earns its keep on the next one.
 
 ## `[machine]`
 
@@ -710,6 +800,7 @@ The per-key overrides are listed with their keys above. The globals:
 | `GCP_MINTER_PORT` | The gcp-minter base port, likewise. |
 | `FY_HOST_ALIAS` | The address containers use to reach the host-side daemons — the escape hatch for a customised Lima network whose host gateway differs. |
 | `FOLDYARD_COMPOSE_EXTRA` | Extra compose overlay files (path-separator-joined), appended after everything else so an explicit override wins on conflicting keys. |
+| `FOLDYARD_NO_VERSION_NUDGE` | Silences the `recommended_foldyard_version` nudge. Never affects the floor, or `fy doctor`'s row. |
 | `IN_DEVBOX` | `1` inside the dev box; the signature foldyard's "am I on the host?" guards use. Set by foldyard — don't set it yourself. |
 
 ## Internal / advanced
