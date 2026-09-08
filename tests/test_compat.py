@@ -311,3 +311,91 @@ def test_gate_still_runs_when_the_worktree_pin_short_circuits(repo_declaring, mo
     repo_declaring(min_foldyard_version="99.0.0")
     monkeypatch.setenv("WORKTREE", "some-worktree")
     assert _invoke(["ps", "--help"]).exit_code == 1
+
+
+# ── the reason ledger ────────────────────────────────────────────────────────────────
+
+LEDGER = {
+    "0.2.0": "the verify false-pass fix",
+    "0.3.0": "the Lima backend",
+    "0.4.0": "packaged minters",
+}
+
+
+def test_reasons_are_the_half_open_range_you_would_gain():
+    # (installed, bound] — what you do NOT have, up to and including what you are asked for.
+    assert compat.reasons_between(LEDGER, "0.2.0", "0.4.0") == [
+        ("0.3.0", "the Lima backend"),
+        ("0.4.0", "packaged minters"),
+    ]
+
+
+def test_reasons_are_ordered_by_version_not_by_toml_order():
+    jumbled = {"0.10.0": "ten", "0.9.0": "nine", "0.2.0": "two"}
+    assert [v for v, _ in compat.reasons_between(jumbled, "0.1.0", "0.10.0")] == [
+        "0.2.0",
+        "0.9.0",
+        "0.10.0",
+    ]
+
+
+def test_reasons_excludes_what_you_already_have_and_what_you_were_not_asked_for():
+    assert compat.reasons_between(LEDGER, "0.3.0", "0.3.0") == []
+    assert [v for v, _ in compat.reasons_between(LEDGER, "0.1.0", "0.2.0")] == ["0.2.0"]
+
+
+def test_reasons_skips_entries_it_cannot_use():
+    # A typo'd version key or a non-string reason must drop that ENTRY, not the whole ledger:
+    # a mistake in one line should not silently blank the explanation for the others.
+    messy = {"0.2.0": "kept", "not-a-version": "dropped", "0.3.0": 42}
+    assert compat.reasons_between(messy, "0.1.0", "0.9.0") == [("0.2.0", "kept")]
+
+
+def test_reasons_are_empty_when_your_own_version_cannot_be_ordered():
+    # "Since yours" is meaningless without a "yours".
+    assert compat.reasons_between(LEDGER, "0+unknown", "0.4.0") == []
+
+
+def test_reasons_are_empty_without_a_ledger():
+    assert compat.reasons_between({}, "0.1.0", "0.4.0") == []
+    assert compat.reasons_between(None, "0.1.0", "0.4.0") == []
+
+
+# ── the ledger reaches both messages ─────────────────────────────────────────────────
+
+
+def test_nudge_lists_what_you_would_gain():
+    msg, abort = compat.version_gate("0.1.0", None, "0.3.0", reasons=LEDGER)
+    assert abort is False
+    assert msg is not None
+    assert "the verify false-pass fix" in msg
+    assert "the Lima backend" in msg
+    assert "packaged minters" not in msg  # 0.4.0 is past what this repo asked for
+
+
+def test_nudge_stays_one_line_without_a_ledger():
+    msg, _ = compat.version_gate("0.1.0", None, "0.3.0")
+    assert msg is not None
+    assert "\n" not in msg
+
+
+def test_floor_lists_what_you_are_missing():
+    msg, abort = compat.version_gate("0.1.0", "0.3.0", None, reasons=LEDGER)
+    assert abort is True
+    assert msg is not None
+    assert "the verify false-pass fix" in msg and "the Lima backend" in msg
+
+
+def test_ledger_accessor_reads_the_nested_table(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text(
+        '[project]\nname = "p"\n\n[project.foldyard_version_reasons]\n'
+        '"0.2.0" = "the verify false-pass fix"\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.foldyard_version_reasons() == {"0.2.0": "the verify false-pass fix"}
+
+
+def test_ledger_accessor_is_empty_when_undeclared(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text('[project]\nname = "p"\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.foldyard_version_reasons() == {}

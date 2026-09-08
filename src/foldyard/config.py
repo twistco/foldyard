@@ -442,6 +442,17 @@ def recommended_foldyard_version() -> str | None:
     return _version_declaration("recommended_foldyard_version")
 
 
+def foldyard_version_reasons() -> dict[str, object]:
+    """``[project.foldyard_version_reasons]`` — why this repo wanted each foldyard it adopted.
+
+    A ledger, not a field: entries are appended and never rewritten, so no reason can drift out
+    of date with the version it describes. Values are typed ``object`` because they are whatever
+    the consumer's TOML held — :func:`foldyard.compat.reasons_between` does the narrowing, and
+    annotating ``str`` here would only hide that it has to. See :mod:`foldyard.compat`."""
+    table = _project_table().get("foldyard_version_reasons")
+    return table if isinstance(table, dict) else {}
+
+
 def dev_vm_rel() -> str:
     """The dev-VM asset dir as configured — the raw (usually relative) value.
     ``dev_vm_dir`` resolves it against ``repo_root``; ``foldyard.stack`` joins it onto

@@ -37,6 +37,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from collections.abc import Mapping
 
 _NUM = re.compile(r"\d+")
 
@@ -74,11 +75,41 @@ def _parse(raw: str | None) -> tuple[int, ...] | None:
     return tuple(parts) or None
 
 
+def reasons_between(
+    reasons: Mapping[str, object] | None, installed: str, bound: str | None
+) -> list[tuple[str, str]]:
+    """The ledger entries in ``(installed, bound]``, oldest first — what you would gain.
+
+    Half-open on the left because you already have your own version's reason, closed on the
+    right because the bound is what you are being asked for. An entry whose key will not parse
+    or whose reason is not a string is dropped ALONE: one typo'd line should not blank the
+    explanation for the rest. Empty when your own version cannot be ordered — "since yours" has
+    no meaning without a "yours".
+    """
+    have, want = _parse(installed), _parse(bound)
+    if not reasons or have is None or want is None:
+        return []
+    picked = []
+    for raw, reason in reasons.items():
+        at = _parse(raw)
+        if at is None or not isinstance(reason, str) or not reason:
+            continue
+        if have < at <= want:
+            picked.append((at, raw, reason))
+    return [(raw, reason) for _, raw, reason in sorted(picked)]
+
+
+def _bullets(entries: list[tuple[str, str]], indent: str = "    ") -> str:
+    width = max((len(v) for v, _ in entries), default=0)
+    return "\n".join(f"{indent}{v:<{width}}  {reason}" for v, reason in entries)
+
+
 def version_gate(
     installed: str,
     minimum: str | None,
     recommended: str | None,
     *,
+    reasons: Mapping[str, object] | None = None,
     quiet_nudge: bool = False,
     in_box: bool = False,
 ) -> tuple[str | None, bool]:
@@ -94,11 +125,23 @@ def version_gate(
         # An unknown installed version cannot be *proven* to violate the floor, and refusing
         # to run a source checkout is worse than the drift the floor guards against — so say
         # so loudly and let it through.
-        return _floor_message(installed, minimum, in_box=in_box, certain=have is not None), (
-            have is not None
-        )
+        return _floor_message(
+            installed,
+            minimum,
+            in_box=in_box,
+            certain=have is not None,
+            gains=reasons_between(reasons, installed, minimum),
+        ), (have is not None)
 
     if want is not None and have is not None and have < want and not quiet_nudge:
+        gains = reasons_between(reasons, installed, recommended)
+        if gains:
+            return (
+                f"▸ foldyard {installed} is behind the {recommended} this repo expects. "
+                f"Since yours:\n{_bullets(gains)}\n  {_fix(in_box)}"
+                "  (silence: FOLDYARD_NO_VERSION_NUDGE=1)",
+                False,
+            )
         return (
             f"▸ foldyard {installed} is older than the {recommended} this repo expects. "
             f"{_fix(in_box)}"
@@ -121,17 +164,26 @@ def _fix(in_box: bool) -> str:
     return "Run `uv tool install --upgrade foldyard`."
 
 
-def _floor_message(installed: str, minimum: str | None, *, in_box: bool, certain: bool) -> str:
+def _floor_message(
+    installed: str,
+    minimum: str | None,
+    *,
+    in_box: bool,
+    certain: bool,
+    gains: list[tuple[str, str]],
+) -> str:
     if not certain:
         return (
             f"▸ Could not determine the installed foldyard version ({installed!r}), and this "
             f"repo declares a floor of {minimum}. Proceeding, but behaviour is unverified. "
             f"{_fix(in_box)}"
         )
+    missing = f"  What you are missing:\n{_bullets(gains)}\n\n" if gains else ""
     return (
         f"✗ This repo needs foldyard >= {minimum}; you have {installed}.\n\n"
         f"  Its foldyard.toml declares settings an older fy ignores SILENTLY rather than\n"
         f"  failing on, so this stops here instead of running with half of them applied.\n\n"
+        f"{missing}"
         f"  {_fix(in_box)}"
     )
 
@@ -159,6 +211,7 @@ def gate_or_abort(verb: str | None = None) -> None:
             __version__,
             minimum,
             recommended,
+            reasons=config.foldyard_version_reasons(),
             quiet_nudge=(
                 verb not in NUDGE_VERBS or bool(os.environ.get("FOLDYARD_NO_VERSION_NUDGE"))
             ),

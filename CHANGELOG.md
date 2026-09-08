@@ -22,6 +22,13 @@ break config or CLI shape, and say so here.
   recommendation is for — briefly, staging a floor so it lands as a formality rather than an
   ambush — and when to leave it unset.
 
+- **`[project.foldyard_version_reasons]`** — an optional ledger, keyed by version, of why the
+  consumer wanted each foldyard it adopted. Both the nudge and the refusal list the entries
+  between the version you have and the bound you are pointed at, so the message says what you
+  would *gain* rather than only which number to type. Entries are appended and never rewritten,
+  so a reason cannot drift out of date with the version it describes, and the floor prunes them
+  (anything below it is unreachable).
+
   The floor refuses rather than warns because `foldyard.toml` is read with `.get()` and no schema:
   unknown keys are tolerated by construction, so an old `fy` against a new config doesn't fail —
   it silently ignores the new keys and does the old thing. A warning is not enough for a failure

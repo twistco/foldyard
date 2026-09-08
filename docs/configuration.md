@@ -96,8 +96,39 @@ min_foldyard_version = "0.2.0"
 - **`min_foldyard_version`** — a **floor**, not a pin: `fy` refuses to run in this checkout
   below it. Raise it in the same commit that adds a setting an older `fy` cannot honour.
   Default: none.
-- **`recommended_foldyard_version`** — a one-line nudge, never a block. Printed only on
-  `fy up`, `fy box up` and `fy host`. Default: none. Silence with `FOLDYARD_NO_VERSION_NUDGE=1`.
+- **`recommended_foldyard_version`** — a nudge, never a block. Printed only on `fy up`,
+  `fy box up` and `fy host`. Default: none. Silence with `FOLDYARD_NO_VERSION_NUDGE=1`.
+- **`[project.foldyard_version_reasons]`** — an optional ledger of *why this repo wanted* each
+  foldyard it adopted, keyed by version. Both messages list the entries between the version you
+  have and the bound you are being pointed at. Default: empty.
+
+```toml
+[project.foldyard_version_reasons]
+"0.2.0" = "the verify false-pass fix; CI runs this"
+"0.3.0" = "the Lima backend, for the M-series boxes"
+```
+
+```text
+▸ foldyard 0.1.0 is behind the 0.3.0 this repo expects. Since yours:
+    0.2.0  the verify false-pass fix; CI runs this
+    0.3.0  the Lima backend, for the M-series boxes
+  Run `uv tool install --upgrade foldyard`.
+```
+
+Entries are **appended, never rewritten** — which is the point. A single "why" field next to
+the version has to be re-edited on every bump, and the bump where someone forgets is the one
+that starts lying. A ledger entry describes a version that is already frozen, so it cannot
+drift. It also lets the message say what you would gain across *several* hops rather than only
+the newest, which is a much stronger reason to act.
+
+It does not grow without bound, because **the floor is its garbage collector**: once
+`min_foldyard_version` is `0.5.0`, every entry below `0.5.0` is unreachable and should be
+deleted. What stays live is the versions between your floor and your recommendation — one or
+two, if you follow the escalation below.
+
+A version with no entry simply doesn't appear; a malformed key or a non-string reason drops
+that line alone rather than blanking the rest.
+
 
 ### What the recommendation is for (and when not to set one)
 
