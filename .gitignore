@@ -19,3 +19,13 @@ build/
 # Per-developer overrides (deep-merged over foldyard.toml — documented by foldyard.local.toml.example)
 foldyard.local.toml
 .claude/settings.local.*
+
+# >>> foldyard (managed) — do not edit inside this block >>>
+# Box/host-generated files foldyard writes beside foldyard.toml; never commit.
+.devbox-ca/
+.devbox-claude/
+.devbox-codex/
+.devbox-foldyard/
+.dev-mode.json
+**/foldyard.local.toml
+# <<< foldyard (managed) <<<
