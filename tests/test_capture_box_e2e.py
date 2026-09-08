@@ -48,6 +48,7 @@ from pathlib import Path
 
 import pytest
 
+from e2e_box import BOX_IMAGE
 from foldyard import allowlist, config
 from foldyard import box as boxmod
 from foldyard.plugins import Registry
@@ -56,9 +57,6 @@ from foldyard.plugins.github import GithubPlugin
 from foldyard.plugins.proxy import BOX_CA, ProxyPlugin
 
 ADDON = Path(__file__).resolve().parents[1] / "src/foldyard/assets/proxy/egress_proxy.py"
-# A throwaway box image with an https client + a CA trust tool (Fedora's update-ca-trust); already
-# local in the dev box. box.py's CA-trust snippet handles both Debian + Fedora bases.
-BOX_IMAGE = "quay.io/podman/stable:latest"
 # VM-visible scratch for the CA the box mounts (bind sources resolve on the podman MACHINE, so the
 # CA must live under the repo, which IS bind-mounted into the VM). See test_proxy_box_e2e.py.
 _VM_TMP = Path(__file__).resolve().parents[1] / ".e2e-tmp"
@@ -243,11 +241,19 @@ def _wall_enforcing_with(host: str) -> None:
     allowlist.set_wall(True)  # rewrites the effective allowlist the addon re-reads per request
 
 
-def _has_trust_tool(box: _Box) -> bool:
-    return any(
-        box.exec("sh", "-c", f"command -v {t}").returncode == 0
-        for t in ("update-ca-trust", "update-ca-certificates")
+def _seed_system_trust(box: _Box) -> None:
+    """Install the mounted MITM CA into the box's SYSTEM trust store with box.py's own snippet —
+    the thing under test in every naive-``curl`` assertion below.
+
+    Asserted, not skipped-around. While the rig ran a second base OS this was guarded by a
+    "does the image have a trust tool?" skip in each test, which is a silent off switch for the
+    load-bearing assertion of this file. The image is ours and pinned (``e2e_box.BOX_IMAGE``), so
+    a missing tool is a broken rig and should say so."""
+    assert box.exec("sh", "-c", "command -v update-ca-certificates").returncode == 0, (
+        f"box image {BOX_IMAGE} has no update-ca-certificates — box.py's CA-trust snippet, and so "
+        "every naive-curl assertion here, cannot work on it"
     )
+    box.exec("bash", "-lc", boxmod._CA_TRUST_SNIPPET)
 
 
 @pytest.fixture
@@ -336,8 +342,7 @@ def capture_box(tmp_path, monkeypatch):
         created = subprocess.run(run, env=eng_env, capture_output=True, text=True, timeout=120)
         assert created.returncode == 0, f"box create failed:\n{created.stderr}"
         box = _Box(engine, eng_env, name)
-        # Seed the system trust store from the mounted CA — the REAL box.py snippet (Debian+Fedora).
-        box.exec("bash", "-lc", boxmod._CA_TRUST_SNIPPET)
+        _seed_system_trust(box)  # the mounted CA into the SYSTEM store, via box.py's own snippet
         yield box, uport, ip, log
     finally:
         if box is not None:
@@ -363,8 +368,6 @@ def test_capture_logs_naive_box_egress_without_injecting(capture_box):
     # proxy up from $https_proxy (box_args set it). The freshly-generated mitm CA is in no base
     # image's store, so success can only come from our install → this is also the load-bearing test.
     got = box.exec("curl", "-sS", "-H", "Authorization: Bearer DUMMY", url)
-    if got.returncode != 0 and not _has_trust_tool(box):
-        pytest.skip(f"box image {BOX_IMAGE} has no update-ca-trust/update-ca-certificates")
     assert got.returncode == 0, f"naive curl through the capture proxy failed:\n{got.stderr}"
     # Capture LOGS but does not rewrite — the upstream echoes the box's ORIGINAL header.
     assert got.stdout == "Bearer DUMMY", f"capture must not inject; upstream saw {got.stdout!r}"
@@ -483,7 +486,7 @@ def av_box(tmp_path, monkeypatch):
         created = subprocess.run(run, env=eng_env, capture_output=True, text=True, timeout=120)
         assert created.returncode == 0, f"box create failed:\n{created.stderr}"
         box = _Box(engine, eng_env, name)
-        box.exec("bash", "-lc", boxmod._CA_TRUST_SNIPPET)  # seed system trust + combined bundle
+        _seed_system_trust(box)  # system trust + the combined bundle, via box.py's own snippet
 
         controller = {"proc": proc}
 
@@ -528,8 +531,6 @@ def av_box(tmp_path, monkeypatch):
 def test_passthrough_routes_egress_without_decrypting(av_box):
     box, ip, uport, up_ca = av_box["box"], av_box["ip"], av_box["uport"], av_box["up_ca"]
     url = f"https://{ip}:{uport}/echo"
-    if not _has_trust_tool(box):
-        pytest.skip(f"box image {BOX_IMAGE} has no update-ca-trust/update-ca-certificates")
 
     # Passthrough (capture=off) blind-tunnels HTTPS: the box does end-to-end TLS against the REAL
     # upstream cert. Trusting THAT cert → curl succeeds AND the upstream echoes the ORIGINAL header
@@ -547,8 +548,6 @@ def test_passthrough_routes_egress_without_decrypting(av_box):
 def test_capture_toggles_on_a_running_box_without_recreate(av_box):
     box, ip, uport, log = av_box["box"], av_box["ip"], av_box["uport"], av_box["log"]
     url = f"https://{ip}:{uport}/echo"
-    if not _has_trust_tool(box):
-        pytest.skip(f"box image {BOX_IMAGE} has no update-ca-trust/update-ca-certificates")
 
     # Flip capture on host-side — the daemon reconciles to full MITM; the box is NOT recreated.
     av_box["restart"](capture_on=True)
@@ -573,8 +572,6 @@ def test_capture_toggles_on_a_running_box_without_recreate(av_box):
 def test_capture_on_passes_through_a_trusted_host(av_box):
     box, ip, uport, up_ca = av_box["box"], av_box["ip"], av_box["uport"], av_box["up_ca"]
     url = f"https://{ip}:{uport}/echo"
-    if not _has_trust_tool(box):
-        pytest.skip(f"box image {BOX_IMAGE} has no update-ca-trust/update-ca-certificates")
 
     # capture=on, but the upstream is TRUSTED (in PASSTHROUGH_HOSTS) → it must be tunnelled, NOT
     # decrypted: the fast/quiet path for the toolchain even while we scrutinise the unknowns.

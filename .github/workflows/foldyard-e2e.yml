@@ -58,12 +58,14 @@ jobs:
       # live `load metadata for python:3.12-slim` against Docker Hub, which intermittently 502s and
       # fails the build hard (no buildkit retry). Pre-pulling it (with retry) lets the in-test
       # `docker compose build` resolve the base from the local cache instead of the registry.
+      # The box e2es' throwaway base is pinned in tests/e2e_box.py — keep it and the line below
+      # in step (a miss costs a serial pull mid-test, not a failure).
       - name: Pre-pull e2e images (parallel)
         run: |
           pull() { for i in 1 2 3 4 5; do docker pull "$1" && return 0; sleep $((i * 5)); done; return 1; }
           for img in \
             ghcr.io/astral-sh/uv:python3.12-bookworm \
-            quay.io/podman/stable:latest \
+            docker.io/library/buildpack-deps:trixie-curl \
             docker.io/library/python:3.12-slim \
             docker.io/library/postgres:16-alpine \
             docker.io/library/alpine:latest; do
