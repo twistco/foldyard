@@ -430,6 +430,17 @@ box_app = typer.Typer(
 app.add_typer(box_app)
 
 
+@box_app.callback()
+def _box_version_nudge(ctx: typer.Context) -> None:
+    """The root callback runs before this sub-app resolves its verb, so every `fy box …` looks
+    like a bare "box" up there — and scoping the nudge to that group put it on `fy box exec`,
+    which git hooks dispatch through once per commit. The floor already ran at the root (and
+    exited if unmet); this adds back only the recommendation, for the resolved path."""
+    from . import compat
+
+    compat.nudge(f"box {ctx.invoked_subcommand}" if ctx.invoked_subcommand else None)
+
+
 @box_app.command("build")
 def box_build() -> None:
     """Build the dev-box base image (from `[box].image`)."""

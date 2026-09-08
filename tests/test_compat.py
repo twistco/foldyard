@@ -17,14 +17,33 @@ from foldyard import compat, config
     ("raw", "want"),
     [
         ("0.1.0", (0, 1, 0)),
-        ("1.2", (1, 2)),
+        ("1.2", (1, 2, 0)),  # padded to major.minor.patch, so "1.2" == "1.2.0"
+        ("1", (1, 0, 0)),
         ("10.0.3", (10, 0, 3)),
         ("0.2.0rc1", (0, 2, 0)),  # pre-releases satisfy their own floor; simpler than PEP 440
         ("v0.3.1", (0, 3, 1)),
+        ("1.2.3.4", (1, 2, 3, 4)),  # padding never truncates
     ],
 )
 def test_parse_accepts_ordinary_versions(raw, want):
     assert compat._parse(raw) == want
+
+
+def test_equivalent_spellings_compare_equal():
+    # Unpadded, (1, 2) < (1, 2, 0): an installed 1.2 would be REFUSED by a 1.2.0 floor and
+    # nagged at by a 1.2.0 recommendation it already satisfies.
+    assert compat._parse("1.2") == compat._parse("1.2.0") == compat._parse("v1.2.0")
+    assert compat.version_gate("1.2", minimum="1.2.0", recommended="1.2.0") == (None, False)
+
+
+@pytest.mark.parametrize(
+    ("lower", "higher"),
+    [("1.2", "1.2.1"), ("1.2.1", "1.3"), ("1.2.3", "1.2.3.4"), ("0.9.9", "1")],
+)
+def test_padding_preserves_ordering(lower, higher):
+    low, high = compat._parse(lower), compat._parse(higher)
+    assert low is not None and high is not None
+    assert low < high
 
 
 @pytest.mark.parametrize("raw", ["0+unknown", "", "nightly", None])
@@ -252,7 +271,7 @@ def test_nudge_fires_on_session_starting_verbs(repo_declaring, capsys, verb):
     assert "99.0.0" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("verb", ["ps", "mode", "logs", "shell", "open", "state"])
+@pytest.mark.parametrize("verb", ["ps", "mode", "logs", "shell", "open", "state", "box"])
 def test_nudge_stays_quiet_on_verbs_you_run_all_day(repo_declaring, capsys, verb):
     # A warning on every invocation is filtered out by the reader within a day, and takes
     # foldyard's other stderr with it. The nudge is worth having only if it stays rare.
@@ -303,6 +322,41 @@ def test_floor_blocks_through_the_cli(repo_declaring):
     result = _invoke(["ps", "--help"])
     assert result.exit_code == 1
     assert "99.0.0" in result.output
+
+
+def test_nudge_fires_on_box_up_through_the_cli(repo_declaring):
+    # `box up` starts a session, so it earns the nudge — but the root callback cannot see it
+    # (there, every `fy box …` is a bare "box"), so this only works via box_app's own callback.
+    repo_declaring(recommended_foldyard_version="99.0.0")
+    assert "99.0.0" in _invoke(["box", "up", "--help"]).output
+
+
+@pytest.mark.parametrize("sub", ["down", "ps", "exec", "shell"])
+def test_no_nudge_on_a_non_session_box_subcommand(repo_declaring, sub):
+    # `fy box exec` is what git hooks dispatch through — once per commit. Scoping the nudge to
+    # the whole `box` group put the nag there, which is the every-invocation noise NUDGE_VERBS
+    # exists to prevent.
+    repo_declaring(recommended_foldyard_version="99.0.0")
+    assert "99.0.0" not in _invoke(["box", sub, "--help"]).output
+
+
+def test_floor_still_blocks_every_box_subcommand(repo_declaring):
+    # Scoping is a noise concession for the nudge alone; the floor stays whole-group.
+    repo_declaring(min_foldyard_version="99.0.0")
+    result = _invoke(["box", "exec", "--help"])
+    assert result.exit_code == 1
+    assert "99.0.0" in result.output
+
+
+def test_the_box_nudge_is_not_doubled(repo_declaring):
+    # Root callback + box callback both run; only one of them may speak.
+    repo_declaring(recommended_foldyard_version="99.0.0")
+    assert _invoke(["box", "up", "--help"]).output.count("99.0.0") == 1
+
+
+def test_box_group_help_survives_its_new_callback(repo_declaring):
+    repo_declaring()
+    assert "the long-lived, per-worktree dev box" in _invoke(["box", "--help"]).output
 
 
 def test_gate_still_runs_when_the_worktree_pin_short_circuits(repo_declaring, monkeypatch):

@@ -41,6 +41,10 @@ from collections.abc import Mapping
 
 _NUM = re.compile(r"\d+")
 
+#: major.minor.patch — the shape versions are declared in, and the width a parsed tuple is
+#: padded out to (see :func:`_parse`).
+_WIDTH = 3
+
 #: Verbs the NUDGE is allowed to speak on — the ones that start a working session, run a
 #: handful of times a day. The floor ignores this set entirely.
 #:
@@ -49,7 +53,12 @@ _NUM = re.compile(r"\d+")
 #: FOLDYARD_NO_VERSION_NUDGE and never see one again, including the nudge that mattered. So it
 #: is spent where it will be read. `fy doctor` reports the window unconditionally for anyone
 #: who wants to ask.
-NUDGE_VERBS = frozenset({"up", "box", "host"})
+#:
+#: Entries are the full command PATH, so a sub-app's verbs can be scoped one at a time: `box up`
+#: starts a session, while `box exec` is what every git hook dispatches through and `box ps`
+#: answers a question. Whole-group scoping (a bare ``"box"``) put the nudge on a commit hook,
+#: which is precisely the every-invocation nag this set exists to avoid — see :func:`nudge`.
+NUDGE_VERBS = frozenset({"up", "box up", "host"})
 
 
 def _parse(raw: str | None) -> tuple[int, ...] | None:
@@ -62,6 +71,11 @@ def _parse(raw: str | None) -> tuple[int, ...] | None:
     source-tree import *so that a floor does not trust it*, and equally a local dev build whose
     number says nothing about what it contains. Unparseable must mean "cannot tell", never
     "very old".
+
+    Short versions are zero-padded to :data:`_WIDTH` so equivalent spellings compare EQUAL:
+    unpadded, ``(1, 2) < (1, 2, 0)``, and an installed ``1.2`` would be refused by a ``1.2.0``
+    floor and nagged at by a ``1.2.0`` recommendation it already satisfies. Components past the
+    width are kept, never truncated — ``1.2.3.4`` must not collapse onto ``1.2.3``.
     """
     if not isinstance(raw, str) or not raw or "+" in raw:
         return None
@@ -72,7 +86,9 @@ def _parse(raw: str | None) -> tuple[int, ...] | None:
         if m is None:
             break
         parts.append(int(m.group()))
-    return tuple(parts) or None
+    if not parts:
+        return None
+    return tuple(parts) + (0,) * (_WIDTH - len(parts))
 
 
 def reasons_between(
@@ -191,17 +207,36 @@ def _floor_message(
 def gate_or_abort(verb: str | None = None) -> None:
     """Apply the declared window to this process; print and ``SystemExit(1)`` on a violation.
 
-    ``verb`` is the top-level command being run; the nudge speaks only for :data:`NUDGE_VERBS`,
-    the floor for all of them (a stale ``fy`` misreads the config that drives every verb, so
-    the refusal cannot be scoped to a few).
+    ``verb`` is the command path being run; the nudge speaks only for :data:`NUDGE_VERBS`, the
+    floor for all of them (a stale ``fy`` misreads the config that drives every verb, so the
+    refusal cannot be scoped to a few).
 
     Best-effort by construction — a missing/unreadable ``foldyard.toml`` yields no declaration
     and therefore no opinion, which is what ``fy init`` in an empty directory needs.
     """
+    _apply(verb, floor=True)
+
+
+def nudge(verb: str | None) -> None:
+    """The soft half alone, for a verb the root callback could not see yet.
+
+    A sub-app's subcommand is not resolved when the root callback runs — every ``fy box …``
+    invocation looks like a bare ``"box"`` there, so scoping the nudge at that level can only be
+    all-or-nothing for the group. It was ``all``, which put the nag on ``fy box exec``: the
+    primitive every git hook dispatches through, i.e. once per commit.
+
+    So the group's own callback re-asks with the resolved path (``"box up"``). The floor is NOT
+    repeated here — the root callback already ran it and exited on a violation; ``minimum=None``
+    keeps this to the recommendation.
+    """
+    _apply(verb, floor=False)
+
+
+def _apply(verb: str | None, *, floor: bool) -> None:
     from . import config
 
     try:
-        minimum = config.min_foldyard_version()
+        minimum = config.min_foldyard_version() if floor else None
         recommended = config.recommended_foldyard_version()
         if minimum is None and recommended is None:
             return
