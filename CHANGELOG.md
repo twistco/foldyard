@@ -6,6 +6,32 @@ break config or CLI shape, and say so here.
 
 ## Unreleased
 
+## 0.2.0 — 2026-09-08
+
+### Added
+
+- **A declared version window: `[project].min_foldyard_version` and
+  `[project].recommended_foldyard_version`.** A consumer repo can now say which foldyard its
+  checkout needs. The floor **refuses to run** below it; the recommendation prints one line and
+  continues (`FOLDYARD_NO_VERSION_NUDGE=1` silences it). `fy doctor` shows the window as its own
+  row, and reports the nudge even when that variable is set.
+
+  The floor refuses rather than warns because `foldyard.toml` is read with `.get()` and no schema:
+  unknown keys are tolerated by construction, so an old `fy` against a new config doesn't fail —
+  it silently ignores the new keys and does the old thing. A warning is not enough for a failure
+  mode that leaves no trace. Raise the floor in the same commit that adds the setting it needs.
+
+  Both bounds are declarative; **foldyard never asks PyPI what the latest release is.** `fy` runs
+  inside the box too, where egress is default-deny, so a lookup would mean punching an allowlist
+  hole in the zero-egress posture to power a cosmetic message — and a consumer pins its CI
+  deliberately so it doesn't float with someone else's release, which makes the repo's own opinion
+  of "current" the more useful one.
+
+  Inert until a consumer declares a bound, so existing repos see no change. Note the inherent
+  limit: a floor only protects from *this* release onward — any older `fy` ignores the key and
+  always will. It can't rescue a migration already in flight; it earns its keep on the next one.
+  See `docs/configuration.md` and the 2026-09-08 amendment to ADR-0020.
+
 ## 0.1.0 — 2026-09-07
 
 The first release intended for general use, and the end of the extraction: this repository is now

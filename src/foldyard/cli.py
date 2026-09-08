@@ -75,6 +75,14 @@ def _resolve_worktree(
         # too: stack.main_repo() raises it (not an Exception) from a non-git dir, and this best-
         # effort pin must never abort the command it's fronting (e.g. `fy init` scaffolding).
         pass
+    finally:
+        # AFTER the worktree pin: the version window is declared per-checkout, so it must be
+        # read against the checkout this command actually targets. `--version` is eager and has
+        # already exited by now, deliberately — asking a binary to name itself has to keep
+        # working when the answer is what you are being told to change.
+        from . import compat
+
+        compat.gate_or_abort()
 
 
 @app.command()

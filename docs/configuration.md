@@ -64,6 +64,7 @@ prefix = "acme"
 app = "app"
 app_port = "WEB_PORT"
 compose = ["compose.yml"]
+min_foldyard_version = "0.2.0"
 ```
 
 - **`name`** — the project key: it names the host state dir `~/.foldyard/<name>/`. Default:
@@ -92,6 +93,32 @@ compose = ["compose.yml"]
 - **`dev_vm_dir`** — *transitional*: where foldyard's generated assets and the gitignored
   `.dev-mode.json` posture mirror land, relative to the repo root. Default: `"."`. Env:
   `FOLDYARD_DEV_VM_DIR`. Leave it alone unless you want those files tucked into a subdir.
+- **`min_foldyard_version`** — a **floor**, not a pin: `fy` refuses to run in this checkout
+  below it. Raise it in the same commit that adds a setting an older `fy` cannot honour.
+  Default: none.
+- **`recommended_foldyard_version`** — a one-line nudge on each invocation, never a block.
+  Default: none. Silence with `FOLDYARD_NO_VERSION_NUDGE=1`.
+
+### Why the floor is a refusal rather than a warning
+
+foldyard reads `foldyard.toml` with `.get()` and no schema, so unknown keys are tolerated by
+construction. An old `fy` against a new config therefore doesn't fail — it silently ignores
+the new keys and does the old thing. A warning isn't enough for a failure mode that leaves no
+trace, so the floor stops the command.
+
+Both bounds are **declarative, and foldyard never asks PyPI what the latest release is**.
+`fy` runs on the host *and* inside the box, where egress is default-deny through the proxy —
+a version check would mean punching an allowlist hole in the zero-egress posture to power a
+cosmetic message. The consumer's own opinion of "current" is the more useful one anyway: a
+repo pins its CI deliberately so it doesn't float with someone else's release.
+
+`fy doctor` shows the window as its own row, and reports the nudge even when
+`FOLDYARD_NO_VERSION_NUDGE` is set — that variable silences a per-invocation nag, not an
+explicit request to be told everything.
+
+**Inherent limit.** A floor only protects from the release that *implements* it onward; any
+older `fy` ignores the key and always will. It can't rescue a migration already in flight —
+it earns its keep on the next one.
 
 ## `[machine]`
 
@@ -710,6 +737,7 @@ The per-key overrides are listed with their keys above. The globals:
 | `GCP_MINTER_PORT` | The gcp-minter base port, likewise. |
 | `FY_HOST_ALIAS` | The address containers use to reach the host-side daemons — the escape hatch for a customised Lima network whose host gateway differs. |
 | `FOLDYARD_COMPOSE_EXTRA` | Extra compose overlay files (path-separator-joined), appended after everything else so an explicit override wins on conflicting keys. |
+| `FOLDYARD_NO_VERSION_NUDGE` | Silences the `recommended_foldyard_version` nudge. Never affects the floor, or `fy doctor`'s row. |
 | `IN_DEVBOX` | `1` inside the dev box; the signature foldyard's "am I on the host?" guards use. Set by foldyard — don't set it yourself. |
 
 ## Internal / advanced

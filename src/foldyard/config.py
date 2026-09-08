@@ -422,6 +422,26 @@ def project() -> str:
     )
 
 
+def _version_declaration(key: str) -> str | None:
+    """One of the ``[project]`` version-window keys, or ``None``.
+
+    Non-strings are ignored rather than coerced: TOML parses ``min_foldyard_version = 0.4``
+    as a float, and a float has no third component — silently reading it as "0.4" would make
+    the floor mean something the author did not write. See :mod:`foldyard.compat`."""
+    value = _project_table().get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def min_foldyard_version() -> str | None:
+    """``[project].min_foldyard_version`` — the floor below which fy refuses to run here."""
+    return _version_declaration("min_foldyard_version")
+
+
+def recommended_foldyard_version() -> str | None:
+    """``[project].recommended_foldyard_version`` — nudge-only; never blocks."""
+    return _version_declaration("recommended_foldyard_version")
+
+
 def dev_vm_rel() -> str:
     """The dev-VM asset dir as configured — the raw (usually relative) value.
     ``dev_vm_dir`` resolves it against ``repo_root``; ``foldyard.stack`` joins it onto
