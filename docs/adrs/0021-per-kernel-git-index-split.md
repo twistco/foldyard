@@ -5,6 +5,9 @@
   empirically in scratch repos (git 2.47).
 - **Sources:** the corruption lore formerly in the Tangible root `CLAUDE.md`; the options
   discussion this distils (mount-vs-sync, 2026-07-11).
+- **Amended 2026-09-08:** a periodic worktree snapshot recorded under *Rejected alternatives* —
+  considered for the destructive-git residuals below, not taken; its event-triggered slice ships
+  in `worktree remove`.
 
 ## Context
 
@@ -103,3 +106,26 @@ Shim mechanics (each point traces to a verified failure mode):
   asynchronously; exclude it and each side needs its own git, i.e. the VM-native model with a
   weaker conflict engine, plus a daemon on the ADR-0006/0016 supervisor surface and conflict
   states living outside git.
+- **A periodic worktree snapshot** (host-side, on the supervisor tick — modelled on
+  `transcripts.sweep`: tick-counted interval, edge-triggered logging, never raises) — a time
+  machine for the checkout backed by git's own object store: build a tree through a throwaway
+  index, `commit-tree` it, point a ref at it, write no ref when the tree is unchanged. Verified
+  2026-09-08 (git 2.47): the real index and worktree are untouched, `.gitignore` is honoured (so
+  `node_modules` costs nothing), and it runs in 13 ms warm / 60 ms cold on a 194-file repo
+  measured *over the mount* — the supervisor is host-side, so in practice it reads the checkout
+  natively and never pays the virtiofs metadata tax a box-side equivalent would. Note `git stash
+  create` is **not** the primitive to reach for: it silently omits untracked files, which is
+  exactly the never-staged content that is unrecoverable (a staged blob survives as dangling and
+  can be fished out with `fsck`; an unstaged one leaves no trace at all).
+  It would blunt two residuals above — the stale-side `commit` that silently reverts the other
+  side's work, and the shared-refs weakness — and, by keeping uncommitted work host-side, it
+  retires the durability objection that gates the VM-native alternative.
+  Not taken now, on three counts: it nets a *different* failure (deliberate destruction —
+  `checkout --`, `reset --hard`, `clean -fdx`, `rm -rf`) than the corruption this ADR closes; it
+  needs a retention policy, since refs are reachable and `gc` will therefore never prune them; and
+  it needs a deliberate answer on where the store lives — inside `.git` is sufficient for
+  accidents (none of those verbs touch refs) while only an outside-the-mount store under
+  `state_dir()` holds against a box that is actively hostile, which is a security claim rather
+  than a usability one. The narrow, event-triggered slice of this idea **was** taken: `worktree
+  remove` parks a doomed checkout's uncommitted work on `refs/fy/removed/<name>-<ts>` in main
+  (2026-09-08), where the destruction is certain and the moment is known.
