@@ -6,6 +6,21 @@ break config or CLI shape, and say so here.
 
 ## Unreleased
 
+### Added
+
+- **`fy init` now stamps the version floor it scaffolds for.** A fresh `foldyard.toml` carries
+  `[project].min_foldyard_version` set to the `fy` that wrote it — the only version that file is
+  known to be right for — with the recommendation and the reasons ledger parked as commented
+  lines beside it, and the floor reported on the way out (`✓ wrote … (floor: foldyard >= X)`).
+
+  The window landed in 0.2.0 as something a consumer had to know to write, which meant a repo
+  that never heard of it kept the default: no floor at all. Since an older `fy` doesn't fail on
+  config it doesn't understand — it ignores those keys and does the old thing, silently — a repo
+  with no floor is the case the mechanism exists for, and the scaffold is the one place foldyard
+  can put a floor there without asking anyone. A `fy` that can't name its own version
+  (`0+unknown` from a source tree, or a local build) leaves the key commented rather than
+  stamping a number that means nothing.
+
 ## 0.2.0 — 2026-09-08
 
 ### Added

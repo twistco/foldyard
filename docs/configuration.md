@@ -95,7 +95,8 @@ min_foldyard_version = "0.2.0"
   `FOLDYARD_DEV_VM_DIR`. Leave it alone unless you want those files tucked into a subdir.
 - **`min_foldyard_version`** — a **floor**, not a pin: `fy` refuses to run in this checkout
   below it. Raise it in the same commit that adds a setting an older `fy` cannot honour.
-  Default: none.
+  Default: none — but `fy init` stamps one, set to the `fy` that scaffolded the file (the only
+  version that file is known to be right for).
 - **`recommended_foldyard_version`** — a nudge, never a block. Printed only on `fy up`,
   `fy box up` and `fy host`. Default: none. Silence with `FOLDYARD_NO_VERSION_NUDGE=1`.
 - **`[project.foldyard_version_reasons]`** — an optional ledger of *why this repo wanted* each
