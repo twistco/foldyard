@@ -48,6 +48,8 @@ Why foldyard is built the way it is.
 - [prior-art.md](./prior-art.md) — the landscape of similar tools and where foldyard fits.
 - [prior-art/](./prior-art/) — deep-dives on the closest tools (gondolin, vhrn), read against
   foldyard, and a side-by-side comparison.
+- [e2b-self-host-research.md](./e2b-self-host-research.md) — research note: what self-hosting
+  E2B actually costs, its two-tier static env trace, and whether the stack could run in foldyard.
 - [archive/](./archive/) — finished studies and incident records, kept for reference:
   - [verify-false-pass.md](./archive/verify-false-pass.md) — how `fy verify` once printed ALL
     PASS while checking nothing, and the control that fixed it.
