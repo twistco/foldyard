@@ -35,6 +35,8 @@ Start with the [package README](../README.md) (what foldyard is and why). Then, 
   runs one VM at a time
 - [firecracker-and-microvm-backends.md](./firecracker-and-microvm-backends.md) — research note:
   where Firecracker could (and can't) fit, and the libkrun/krunkit alternative
+- [e2b-self-host-research.md](./e2b-self-host-research.md) — research note: what self-hosting
+  E2B actually costs, its two-tier static env trace, and whether the stack could run in foldyard
 - [isolation-layers.md](./isolation-layers.md) — which layer carries the boundary on each host
   (macOS · Linux · WSL2), with the hypervisor stacks drawn out
 - [verify-false-pass.md](./verify-false-pass.md) — how `fy verify` could print ALL PASS while
