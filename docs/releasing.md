@@ -23,9 +23,12 @@ GitHub is down. Reach for the tag first.
 
 ## Cutting a release
 
-`just release <version>` does steps 1–4 and stops. It deliberately does **not** tag: the tag is
-the irreversible act — once a version is on PyPI it can never be reused, even after a delete —
-so it stays a deliberate human command.
+`just release <version>` does steps 1, 2 and 4 — the bump, the changelog roll, then `check` +
+`build`. Step 3 stays **by hand** (it needs a sentence only you can write), and it deliberately
+does **not** tag: the tag is the irreversible act — once a version is on PyPI it can never be
+reused, even after a delete — so it stays a deliberate human command. Re-running it for the same
+version is safe: if all three files already carry it consistently, it skips the edits and just
+re-validates and rebuilds.
 
 1. **Bump the version in both places.** `[project].version` in `pyproject.toml`, *and* the
    `foldyard` entry in `uv.lock`. The lock records the workspace package's own version; bump
@@ -35,7 +38,8 @@ so it stays a deliberate human command.
    consumer reads to decide whether to bump, and what they lift into their own
    `[project.foldyard_version_reasons]` ledger. Write the entry so a line of it can be pasted
    there verbatim.
-3. **Add a reasons entry to our own `foldyard.toml`.** We dogfood the version window, so
+3. **Add a reasons entry to our own `foldyard.toml`** — *manual; `just release` only reminds you*.
+   We dogfood the version window, so
    `[project.foldyard_version_reasons]` gets a one-line summary of the release, and
    `recommended_foldyard_version` moves to it. Raise `min_foldyard_version` only when the
    checkout genuinely stops working below it — a floor is a refusal, not a preference.
