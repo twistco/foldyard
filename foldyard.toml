@@ -20,12 +20,29 @@
 name = "foldyard"
 # Container/volume/network name prefix (a worktree appends `-<name>`).
 prefix = "foldyard"
+# The version window for foldyard's OWN checkout — we eat the dogfood. The floor is 0.2.0
+# because that is the first `fy` that READS these keys at all: below it the declaration is
+# ignored and the old behaviour runs silently, so a lower number would look like protection
+# and be none. The recommendation is where contributors should actually be; raise the floor
+# to meet it once everyone has moved.
+min_foldyard_version = "0.2.0"
+recommended_foldyard_version = "0.2.1"
 # A compose stack to drive alongside the box — uncomment when you have one (step 3), add
 # its host ports under [ports] below, and extend [claude].system_prompt with the stack
 # paragraph parked beside it (an agent that knows the box but not the stack is half-lost).
 #   app = "app"                # the app service (fy shell target)
 #   app_port = "WEB_PORT"      # [ports] key shown in the TUI + opened by `fy open`
 #   compose = ["compose.yml"]  # compose files in -f order, relative to this dir
+
+# Why this repo wanted each foldyard it adopted — appended, never rewritten, so a reason can
+# never drift out of date with the version it describes. Both the floor's refusal and the
+# recommendation's nudge list the entries between the `fy` you have and the bound you are
+# pointed at, so the message says what you'd GAIN. Keep entries below the floor pruned: they
+# are unreachable. Cutting a release? Write the CHANGELOG entry first, then lift its point
+# into one line here — this ledger is what a consumer reads to decide whether to bump.
+[project.foldyard_version_reasons]
+"0.2.0" = "the version window itself — the first fy that reads these keys instead of ignoring them"
+"0.2.1" = "`fy init` stamps a version floor; `fy tui` lists every workspace from inside a worktree"
 
 [machine]
 # A rootless VM that mounts ONLY this repo. Default here is the Lima backend + an in-VM
@@ -162,12 +179,26 @@ tui = { raw_output_mode = false }
 # would rewrite the host tree as root. `caches` is optional — a warm cache that survives
 # box recreation; pnpm ALSO needs its store pinned there (npm_config_store_dir), or it
 # relocates the store inside the node_modules volume and re-downloads every time.
-# [box]
-# image = { dockerfile = "box.Dockerfile", tag = "foldyard-box:latest" }
-# shadow_volumes = [".venv"]   # or ["web/node_modules", "rust/target"] — checkout-relative
-# warmup = [{ dir = ".", run = "uv sync --frozen" }]
-# env = { UV_LINK_MODE = "copy" }   # pnpm: npm_config_package_import_method = "copy"
-# caches = [{ volume = "foldyard-uv-cache", path = ".cache/uv" }]   # path is under HOME
+# foldyard is a uv project, so `.venv` is the dir this applies to. `just` recipes already
+# redirect UV_PROJECT_ENVIRONMENT off the mount, but a BARE `uv run` (what an agent in here
+# reaches for) still builds `<checkout>/.venv` — the host's own venv, under a second kernel
+# and a second uid. Shadowed, the box gets its own at that path and the host keeps its own
+# underneath. `warmup` fills the fresh (empty) volume; `env` is not optional with it — the
+# volume is a different filesystem from the uv cache, so uv's default hardlink import fails
+# cross-device. `--frozen` matters twice: it keeps the warmup from resolving (the lockfile is
+# on the shared mount, and a resolving install would rewrite the host's tree as root), and it
+# is the same guard `uv run` needs — see UV_FROZEN below.
+# image: omitted on purpose — foldyard's own box is the PACKAGED generic one (engine client +
+# git + uv), so this repo dogfoods the no-Dockerfile path every consumer starts on.
+[box]
+shadow_volumes = [".venv"]
+warmup = [{ dir = ".", run = "uv sync --frozen" }]
+# UV_FROZEN: a bare `uv run` in here re-resolves and REWRITES uv.lock against this box's
+# interpreter — 90-odd lines of marker churn that then lands in whatever commit follows. The
+# box can't push, so it has no business re-locking; when a dep really changes, re-lock
+# deliberately (`uv lock`) instead of picking it up as a side effect of running a test.
+env = { UV_LINK_MODE = "copy", UV_FROZEN = "1" }
+caches = [{ volume = "foldyard-uv-cache", path = ".cache/uv" }]   # path is under HOME
 #
 # Consumer tools installed once per fresh box, as MONITORED steps (reported ✓/✗):
 # [[box.tools]]
@@ -187,6 +218,24 @@ tui = { raw_output_mode = false }
 name = "nodejs-for-pyright"
 check = "command -v node"
 install = "apt-get install -y --no-install-recommends nodejs"
+
+# `just` is how DEVELOPMENT.md tells you to run everything (`just check`, `just test`,
+# `just build`), and the packaged generic box has no task runner — so every one of those
+# instructions was a dead end from inside the box, and an agent in here had to reverse the
+# recipes into raw uv commands. Debian trixie ships it (1.40), so this costs one apt package
+# and no new egress grant.
+[[box.tools]]
+name = "just"
+check = "command -v just"
+install = "apt-get install -y --no-install-recommends just"
+
+# `unzip` for inspecting a built wheel — `just build`'s own comment tells you to run
+# `unzip -l dist/*.whl` to see which docs got force-included, and that is the one check that
+# catches a `fy docs <topic>` shipping 404 to consumers while resolving fine from source.
+[[box.tools]]
+name = "unzip"
+check = "command -v unzip"
+install = "apt-get install -y --no-install-recommends unzip"
 
 #
 # VS Code attach (`fy code`) — persist the vscode-server volume across box recreations.
