@@ -1,10 +1,10 @@
 # foldyard — stack-colocated, secretless-by-default, laptop-local isolated dev env.
 # README.md is the pitch, DEVELOPMENT.md the contributor guide, docs/adrs/ the "why".
 # Distributed as a uv tool (`uv tool install foldyard`, or `--editable` from a checkout);
-# releases are cut by tag from the release workflow (see CHANGELOG.md for the process).
+# releases are cut by tag from the release workflow (docs/releasing.md is the process).
 [project]
 name = "foldyard"
-version = "0.2.0"
+version = "0.2.1"
 description = "Stack-colocated, secretless-by-default, laptop-local isolated dev environment"
 readme = "README.md"
 license = "Apache-2.0"

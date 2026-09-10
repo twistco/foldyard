@@ -111,6 +111,78 @@ build:
     rm -rf "{{_dir}}/dist"
     uv build --project "{{_dir}}" --out-dir "{{_dir}}/dist"
 
+# Prepare a release: bump, roll the changelog, check, build — then STOP. See docs/releasing.md.
+#
+# Deliberately does not tag. The tag is the irreversible half (PyPI never lets a version number
+# be reused, even after a delete), so it stays a human command, run on the host — a dev box has
+# no credential that reaches origin.
+#
+# The edits are made with python, not `uv version` or sed: `uv` would re-resolve and rewrite
+# uv.lock wholesale (inside a box that is ~90 lines of interpreter-marker churn riding along in
+# the release commit), and `sed -i` differs between BSD and GNU. `--no-project` keeps this off
+# the project env entirely, so preparing a release can never itself touch the lock.
+release version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v uv >/dev/null 2>&1 || { echo "✗ uv not found — brew install uv" >&2; exit 1; }
+    cd "{{_dir}}"
+    # Each identifier is 0 or starts 1-9: `01.2.3` is not a semantic version, and PyPI would
+    # normalise it to 1.2.3 — a number that then no longer matches the tag or pyproject.
+    [[ "{{version}}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+        || { echo "✗ '{{version}}' is not X.Y.Z" >&2; exit 1; }
+    uv run --no-project python - "{{version}}" "$(date +%F)" <<'PY'
+    import re, sys
+    version, today = sys.argv[1], sys.argv[2]
+
+    # Read and validate EVERYTHING before writing anything: a half-bumped tree (pyproject moved,
+    # uv.lock refused) is worse than a refusal, and is exactly what `check` would then fail on.
+    pyproject = open("pyproject.toml").read()
+    current = re.search(r'^version = "(.*)"$', pyproject, re.M).group(1)
+    lock = open("uv.lock").read()
+    changelog = open("CHANGELOG.md").read()
+
+    # Only the `foldyard` package's own stanza; every dependency has a version line too.
+    def stanza(v):
+        return f'name = "foldyard"\nversion = "{v}"'
+
+    rolled = re.search(rf'^## {re.escape(version)} — ', changelog, re.M) is not None
+
+    if current == version:
+        # A rerun. Resume (revalidate + rebuild) only if all three files consistently carry the
+        # version already; a tree that is half-prepared has to be sorted out by hand.
+        if lock.count(stanza(version)) != 1:
+            sys.exit(f"✗ pyproject is at {version} but uv.lock has "
+                     f"{lock.count(stanza(version))} foldyard {version} stanzas — fix by hand")
+        if not rolled:
+            sys.exit(f"✗ pyproject is at {version} but CHANGELOG.md has no '## {version}' "
+                     "section — fix by hand")
+        print(f"✓ already prepared at {version} — revalidating and rebuilding")
+    else:
+        if lock.count(stanza(current)) != 1:
+            sys.exit(f"✗ expected one foldyard {current} stanza in uv.lock, "
+                     f"found {lock.count(stanza(current))}")
+        if "## Unreleased" not in changelog:
+            sys.exit("✗ CHANGELOG.md has no '## Unreleased' section to roll")
+        if rolled:
+            sys.exit(f"✗ CHANGELOG.md already has a '## {version}' section, "
+                     f"but pyproject is at {current} — fix by hand")
+
+        open("pyproject.toml", "w").write(
+            pyproject.replace(f'version = "{current}"', f'version = "{version}"', 1))
+        open("uv.lock", "w").write(lock.replace(stanza(current), stanza(version)))
+        open("CHANGELOG.md", "w").write(
+            changelog.replace("## Unreleased", f"## Unreleased\n\n## {version} — {today}", 1))
+        print(f"✓ {current} → {version} in pyproject.toml, uv.lock, CHANGELOG.md")
+    PY
+    just check
+    just build
+    echo
+    echo "✓ prepared {{version}}. Now, by hand:"
+    echo "  · add a [project.foldyard_version_reasons] line + move recommended_foldyard_version"
+    echo "  · unzip -l dist/*.whl | grep assets/docs   # what consumers will actually get"
+    echo "  · commit, then ON THE HOST:"
+    echo "      git tag -a v{{version}} -m 'foldyard {{version}}' && git push origin v{{version}}"
+
 # The NORMAL path is the tag-driven release workflow (.github/workflows/release.yml — trusted
 # publishing, no token anywhere); this needs UV_PUBLISH_TOKEN in the environment.
 # Publish dist/ to PyPI from a laptop — the manual escape hatch.

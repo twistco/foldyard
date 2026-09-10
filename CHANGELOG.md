@@ -2,9 +2,12 @@
 
 Notable changes, per release. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/) once past `1.0`. Before that, minor versions may
-break config or CLI shape, and say so here.
+break config or CLI shape, and say so here. How a release is cut:
+[docs/releasing.md](./docs/releasing.md).
 
 ## Unreleased
+
+## 0.2.1 — 2026-09-10
 
 ### Fixed
 
@@ -36,6 +39,23 @@ break config or CLI shape, and say so here.
   can put a floor there without asking anyone. A `fy` that can't name its own version
   (`0+unknown` from a source tree, or a local build) leaves the key commented rather than
   stamping a number that means nothing.
+
+- **An architecture diagram, above the README's "Why".**
+  `docs/assets/foldyard-architecture.svg` draws the host/yard split in one picture: what runs
+  outside the fence (the CLI, the supervisor, the credential minters, the egress proxy, the
+  adopted config, the access modes), what runs inside it (the compose stack, the dev box, the
+  coding agent, per-worktree boxes), and what `fy verify` checks across the seam.
+
+  The previous drawing had drifted from the code. It credited `verify` with a
+  gitleaks/TruffleHog secret scan it has never run — that stays the operator's clean-repo
+  PREREQUISITE (`docs/security.md`), and the diagram now says so; it claimed `verify` re-runs
+  on every mount when it is on-demand only; it called the yard a podman machine after Lima
+  became the default backend; and it led with "no daemon running ⇒ no credential flow", true
+  when written but misleading now that `fy up` / `fy box up` start the supervisor themselves so
+  the always-on proxy is up. The guarantees that carry that weight today are drawn instead: the
+  mode file is host-side and the yard only ever gets a read-only copy, and repo config is inert
+  until adopted (ADR-0022). Redrawn as hand-editable SVG (14 KB, one `<style>` block) rather
+  than a 350 KB design-tool export, so the next correction is a text edit.
 
 ## 0.2.0 — 2026-09-08
 

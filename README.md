@@ -38,6 +38,16 @@ surfaces into a posture. Foldyard can mount a clean repo; it can't clean a dirty
 The walkthrough is [docs/quickstart.md](./docs/quickstart.md) — and the whole manual ships
 with the install, offline and version-matched: `fy docs`.
 
+## Architecture
+
+Everything that holds a credential stays on your machine; the yard gets the repo and nothing
+else. One picture of the whole split:
+
+![Foldyard architecture: the host runs the CLI, supervisor, credential minters and egress
+proxy; the yard is a throwaway Linux VM holding the compose stack, dev box, coding agent and
+per-worktree boxes, with `fy verify` auditing the boundary from
+inside.](./docs/assets/foldyard-architecture.svg)
+
 ## Why
 
 A *fold-yard* is the enclosed farmyard where animals are folded (penned) for the night. Same
