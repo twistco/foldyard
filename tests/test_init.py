@@ -176,6 +176,11 @@ def test_render_leaves_the_floor_commented_when_fy_cant_name_its_own_version():
     )
     assert "could not tell its own version" in body
     assert '# min_foldyard_version = "0.1.0"' in body
+    # Every EXAMPLE line is meant to be uncommented verbatim, so none of them may carry the
+    # unorderable string itself — compat has no opinion on `0+unknown`, which makes the key
+    # silently inert exactly where this file is trying to prevent silence.
+    assert "0+unknown" not in body.replace("it reported '0+unknown'", "")
+    assert '# "0.1.0" = "the version this project started on"' in body
 
 
 def test_init_stamps_the_running_fy_and_says_so(tmp_path, capsys):

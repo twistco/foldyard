@@ -77,6 +77,19 @@ class InitOptions:
     version: str = field(default_factory=_running_version)
 
 
+#: Stand-in for an unorderable running version in the file's EXAMPLE lines (the commented
+#: recommendation, the reasons-ledger key). A real number rather than a `"…"` placeholder or the
+#: unorderable string itself: these lines are meant to be uncommented VERBATIM, and a version
+#: :func:`foldyard.compat._parse` refuses is silently inert once they are — which is the exact
+#: failure this file's floor exists to prevent.
+_EXAMPLE_VERSION = "0.1.0"
+
+
+def _orderable(version: str) -> str:
+    """``version`` if compat can order it, else :data:`_EXAMPLE_VERSION`."""
+    return version if compat._parse(version) is not None else _EXAMPLE_VERSION
+
+
 def _version_lines(version: str) -> list[str]:
     """The declared version window for a freshly scaffolded repo (:mod:`foldyard.compat`).
 
@@ -108,13 +121,11 @@ def _version_lines(version: str) -> list[str]:
     else:
         lines += [
             f"# (fy could not tell its own version here — it reported {version!r} — so this is",
-            "#  left commented rather than stamped with a number that means nothing.)",
-            '# min_foldyard_version = "0.1.0"',
+            "#  left commented rather than stamped with a number that means nothing. Replace the",
+            "#  example below with the oldest fy this repo should accept.)",
+            f'# min_foldyard_version = "{_EXAMPLE_VERSION}"',
         ]
-    # A real number rather than a `"…"` placeholder: uncommented verbatim, an unparseable version
-    # is silently inert (compat has no opinion on it), and silently inert config is the thing this
-    # file's floor exists to prevent.
-    shown = version if known else "0.1.0"
+    shown = _orderable(version)
     lines += [
         f'# recommended_foldyard_version = "{shown}"   # a NUDGE, never a block: printed on',
         "#                     # `fy up` / `fy box up` / `fy host` when you're behind it. Raise it",
@@ -178,7 +189,7 @@ def render(opts: InitOptions) -> str:
         "# between the fy you have and the one you're being pointed at, so an upgrade prompt says",
         "# what you'd GAIN. A sub-table, so it must stay last in [project]:",
         "# [project.foldyard_version_reasons]",
-        f'# "{opts.version}" = "the version this project started on"',
+        f'# "{_orderable(opts.version)}" = "the version this project started on"',
         "",
         "[machine]",
         "# A rootless VM that mounts ONLY this repo. Default here is the Lima backend + an in-VM",
