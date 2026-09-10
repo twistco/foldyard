@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from . import compat
 
 # config defaults mirrored here so `init` writes the SAME numbers foldyard would otherwise
 # fall back to (config.machine_resources defaults: cpus=4, memory=8192 MiB, disk=60 GiB).
@@ -57,12 +59,79 @@ GITIGNORE_ENTRIES = (
 LOCAL_EXAMPLE = "foldyard.local.toml.example"
 
 
+def _running_version() -> str:
+    """The foldyard doing the scaffolding — what the file it writes is written FOR."""
+    from . import __version__
+
+    return __version__
+
+
 @dataclass
 class InitOptions:
     name: str
     cpus: int = DEFAULT_CPUS
     memory_mib: int = DEFAULT_MEMORY_MIB
     disk_gib: int = DEFAULT_DISK_GIB
+    #: The version stamped as the scaffold's floor. Defaults to the ``fy`` running `init`;
+    #: a field rather than a lookup inside :func:`render` so the writer stays pure + testable.
+    version: str = field(default_factory=_running_version)
+
+
+#: Stand-in for an unorderable running version in the file's EXAMPLE lines (the commented
+#: recommendation, the reasons-ledger key). A real number rather than a `"…"` placeholder or the
+#: unorderable string itself: these lines are meant to be uncommented VERBATIM, and a version
+#: :func:`foldyard.compat._parse` refuses is silently inert once they are — which is the exact
+#: failure this file's floor exists to prevent.
+_EXAMPLE_VERSION = "0.1.0"
+
+
+def _orderable(version: str) -> str:
+    """``version`` if compat can order it, else :data:`_EXAMPLE_VERSION`."""
+    return version if compat._parse(version) is not None else _EXAMPLE_VERSION
+
+
+def _version_lines(version: str) -> list[str]:
+    """The declared version window for a freshly scaffolded repo (:mod:`foldyard.compat`).
+
+    The floor is stamped with the ``fy`` that WROTE the file, which is the only version the
+    scaffold is known to be right for — and the honest starting point for a key whose whole job is
+    to be raised, in the same commit, by whatever later adds a setting an older ``fy`` can't
+    honour. It matters more than it looks: ``config`` reads the TOML with ``.get()`` and no schema,
+    so an old ``fy`` against a newer ``foldyard.toml`` doesn't fail — it ignores the keys it
+    doesn't know and does the old thing, silently. A floor is the only thing that turns that into
+    an error, and a floor nobody wrote is a floor of zero.
+
+    The recommendation + the reasons ledger ship COMMENTED, like the rest of the file: they are
+    about a project's history with the tool, which a repo on day one has none of.
+
+    When the running version can't be ordered (``0+unknown`` from a bare source-tree import, or a
+    local build — :func:`foldyard.compat._parse` returns None for both), the key is written
+    COMMENTED. A floor foldyard itself would ignore reads as protection and is none, and guessing
+    a number from a build that won't say what it contains is worse than leaving the line to a
+    human."""
+    known = compat._parse(version) is not None
+    lines = [
+        "# The foldyard this file was written for, as a FLOOR — `fy` REFUSES to run in this",
+        "# checkout below it. Not fussiness: an older fy doesn't fail on config it doesn't",
+        "# understand, it ignores those keys silently and does the old thing. Raise this in the",
+        "# same commit as any setting that needs a newer fy, and the two can never come apart.",
+    ]
+    if known:
+        lines.append(f'min_foldyard_version = "{version}"')
+    else:
+        lines += [
+            f"# (fy could not tell its own version here — it reported {version!r} — so this is",
+            "#  left commented rather than stamped with a number that means nothing. Replace the",
+            "#  example below with the oldest fy this repo should accept.)",
+            f'# min_foldyard_version = "{_EXAMPLE_VERSION}"',
+        ]
+    shown = _orderable(version)
+    lines += [
+        f'# recommended_foldyard_version = "{shown}"   # a NUDGE, never a block: printed on',
+        "#                     # `fy up` / `fy box up` / `fy host` when you're behind it. Raise it",
+        "#                     # for a version worth having; leave the floor for one you must have.",
+    ]
+    return lines
 
 
 def _slug(name: str) -> str:
@@ -109,12 +178,18 @@ def render(opts: InitOptions) -> str:
         f"name = {json.dumps(opts.name)}",
         "# Container/volume/network name prefix (a worktree appends `-<name>`).",
         f'prefix = "{prefix}"',
+        *_version_lines(opts.version),
         "# A compose stack to drive alongside the box — uncomment when you have one (step 3), add",
         "# its host ports under [ports] below, and extend [claude].system_prompt with the stack",
         "# paragraph parked beside it (an agent that knows the box but not the stack is half-lost).",
         '#   app = "app"                # the app service (fy shell target)',
         '#   app_port = "WEB_PORT"      # [ports] key shown in the TUI + opened by `fy open`',
         '#   compose = ["compose.yml"]  # compose files in -f order, relative to this dir',
+        "# Why this repo wanted each foldyard it adopted. Both version messages list the entries",
+        "# between the fy you have and the one you're being pointed at, so an upgrade prompt says",
+        "# what you'd GAIN. A sub-table, so it must stay last in [project]:",
+        "# [project.foldyard_version_reasons]",
+        f'# "{_orderable(opts.version)}" = "the version this project started on"',
         "",
         "[machine]",
         "# A rootless VM that mounts ONLY this repo. Default here is the Lima backend + an in-VM",
@@ -474,7 +549,8 @@ def init(
     except OSError as e:
         print(f"✗ could not write {dest}: {e}")
         return 1
-    print(f"✓ wrote {dest}")
+    floor = f" (floor: foldyard >= {opts.version})" if compat._parse(opts.version) else ""
+    print(f"✓ wrote {dest}{floor}")
     if local_status == "written":
         print(f"✓ wrote {target / LOCAL_EXAMPLE} (per-developer overrides — commit this template)")
     if gitignore_status != "unchanged":

@@ -134,6 +134,73 @@ def test_render_memory_is_a_plain_int_not_a_rounded_gib():
     assert doc["machine"]["memory_mib"] == 4000
 
 
+def test_render_stamps_the_scaffolding_fy_as_the_floor():
+    # The scaffold declares a version window from the start: the fy that wrote the file is the
+    # only version it is known to be right for, and a floor nobody wrote is a floor of zero.
+    doc = _parse(init.InitOptions(name="x", version="1.4.2"))
+    assert doc["project"]["min_foldyard_version"] == "1.4.2"
+    # The soft half + the ledger ship COMMENTED — a repo on day one has no history with the tool.
+    assert "recommended_foldyard_version" not in doc["project"]
+    assert "foldyard_version_reasons" not in doc["project"]
+    body = init.render(init.InitOptions(name="x", version="1.4.2"))
+    assert '# recommended_foldyard_version = "1.4.2"' in body
+    assert "# [project.foldyard_version_reasons]" in body
+
+
+def test_render_commented_version_window_uncomments_into_valid_toml():
+    # Uncommenting is how this file is meant to GROW, so what it parks must parse — and must not
+    # be inert once uncommented (an unparseable version is a key foldyard silently has no opinion
+    # on, which is the exact failure the floor above exists to prevent).
+    body = init.render(init.InitOptions(name="x", version="1.4.2"))
+    lines = []
+    for raw in body.splitlines():
+        stripped = raw.lstrip("# ")
+        if stripped.startswith(("recommended_foldyard_version", "[project.foldyard_version")) or (
+            lines and re.match(r'"[\d.]+" = ', stripped)
+        ):
+            lines.append(stripped)
+    doc = tomllib.loads("[project]\n" + "\n".join(lines))
+    assert doc["project"]["recommended_foldyard_version"] == "1.4.2"
+    assert doc["project"]["foldyard_version_reasons"] == {
+        "1.4.2": "the version this project started on"
+    }
+
+
+def test_render_leaves_the_floor_commented_when_fy_cant_name_its_own_version():
+    # `0+unknown` (a bare source-tree import) and any local build are versions compat REFUSES to
+    # order. Stamping one reads as protection and is none, so the key is parked instead.
+    body = init.render(init.InitOptions(name="x", version="0+unknown"))
+    assert (
+        "min_foldyard_version"
+        not in _parse(init.InitOptions(name="x", version="0+unknown"))["project"]
+    )
+    assert "could not tell its own version" in body
+    assert '# min_foldyard_version = "0.1.0"' in body
+    # Every EXAMPLE line is meant to be uncommented verbatim, so none of them may carry the
+    # unorderable string itself — compat has no opinion on `0+unknown`, which makes the key
+    # silently inert exactly where this file is trying to prevent silence.
+    assert "0+unknown" not in body.replace("it reported '0+unknown'", "")
+    assert '# "0.1.0" = "the version this project started on"' in body
+
+
+def test_init_stamps_the_running_fy_and_says_so(tmp_path, capsys):
+    # End to end: the default InitOptions.version is the fy actually running, and the write is
+    # REPORTED — a floor that appears in the file without being mentioned is a surprise the first
+    # time it refuses someone. Branching rather than skipping on an unorderable version, so this
+    # keeps asserting something in a bare source tree (where __version__ is "0+unknown").
+    from foldyard import __version__, compat
+
+    assert init.init(path=str(tmp_path), name="fresh") == 0
+    project = tomllib.loads((tmp_path / "foldyard.toml").read_text())["project"]
+    out = capsys.readouterr().out
+    if compat._parse(__version__) is not None:
+        assert project["min_foldyard_version"] == __version__
+        assert f"floor: foldyard >= {__version__}" in out
+    else:
+        assert "min_foldyard_version" not in project
+        assert "floor:" not in out
+
+
 def test_init_writes_file_and_defaults_name_to_dir(tmp_path):
     proj = tmp_path / "my-repo"
     rc = init.init(path=str(proj))
