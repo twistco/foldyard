@@ -48,13 +48,11 @@ from pathlib import Path
 
 import pytest
 
+from e2e_box import BOX_IMAGE
 from foldyard.plugins import InjectRule, Plugin, Registry
 from foldyard.plugins.proxy import BOX_CA, ProxyPlugin
 
 ADDON = Path(__file__).resolve().parents[1] / "src/foldyard/assets/proxy/egress_proxy.py"
-# A throwaway box image that satisfies the contract we exercise (an https client + a CA store).
-# Already local in the dev box; a Fedora base with curl, which is all the box side needs here.
-BOX_IMAGE = "quay.io/podman/stable:latest"
 # VM-visible scratch: bind-mount SOURCES resolve on the podman MACHINE, not in this container, so
 # the CA the box mounts must live under the repo (which IS bind-mounted into the VM). tmp_path
 # (container-local) is fine for everything only this process reads (cert/key/minter/log/confdir).

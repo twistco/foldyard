@@ -37,10 +37,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from e2e_box import BOX_IMAGE
 from foldyard.plugins import gcp
 
 SERVER_PY = gcp.METADATA_DIR / "server.py"
-BOX_IMAGE = "quay.io/podman/stable:latest"
 
 _LOG_SA = "devbox-log-reader@acme-staging.iam.gserviceaccount.com"
 _APP_SA = "app-runtime@acme-staging.iam.gserviceaccount.com"
@@ -192,10 +192,18 @@ class _Box:
 
     def token(self, emulator: str) -> str | None:
         """The access_token the box gets from the emulator's GCE metadata endpoint, or None on a
-        non-200 (e.g. the minter-down 404). Uses curl with the anti-SSRF header the libs send."""
+        non-200 (e.g. the minter-down 404). Uses curl with the anti-SSRF header the libs send.
+
+        ``--noproxy '*'`` because the emulator is a neighbour on this container network, which is
+        what NO_PROXY covers for a real box (a metadata endpoint is never egress). Without it the
+        request follows whatever ``http_proxy`` the ENGINE injects into every container — a walled
+        dev box's containers.conf does exactly that — and the wall then 403s the emulator's
+        ephemeral IP, which reads here as "no token" and has nothing to do with the identity
+        wiring under test."""
         url = f"http://{emulator}/computeMetadata/v1/instance/service-accounts/default/token"
         got = subprocess.run(
-            [self.engine, "exec", self.name, "curl", "-s", "-H", "Metadata-Flavor: Google", url],
+            [self.engine, "exec", self.name, "curl", "-s", "--noproxy", "*",
+             "-H", "Metadata-Flavor: Google", url],
             env=self.env, capture_output=True, text=True, timeout=60,
         )  # fmt: skip
         try:

@@ -115,3 +115,13 @@ podman *inside* the container, which is the job that image is actually for. Cons
 own `[box].image` are unaffected, as ever; generic-box consumers pick the new base up on their
 next image rebuild and swap their dnf tool steps for apt (or for `playwright install-deps`,
 which now works).
+
+**Follow-on (2026-09-08).** The live box e2es kept the old Fedora image as the throwaway base for
+the sibling box they stand up, so the rig proved the box wiring on a distro the product no longer
+ships. They now run Debian too, pinned once in `tests/e2e_box.py`
+(`buildpack-deps:trixie-curl` — the trixie official image that already carries curl +
+ca-certificates, so no box-side install and therefore no egress is needed to reach the contract).
+`box.py`'s CA-trust snippet still handles both `update-ca-certificates` and `update-ca-trust`:
+that branch is for consumers who bring a Fedora/RHEL `[box].image`, not for the rig — it just no
+longer has a test exercising it. The nested-virt docs keep `quay.io/podman/stable` for the reason
+above.
