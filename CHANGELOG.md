@@ -6,6 +6,22 @@ break config or CLI shape, and say so here.
 
 ## Unreleased
 
+### Fixed
+
+- **`fy tui` shows every workspace from inside a worktree, and opens on the one you're standing
+  in.** The workspace list anchored on `config.repo_root()`, which stops at the *current*
+  checkout's `foldyard.toml` — so run from a worktree it looked for siblings under a
+  `<worktree>-worktrees` directory that has never existed. The list collapsed to a single card
+  labelled "main" whose path was actually the worktree, and no worktree could be seen, switched to
+  or acted on from any worktree; the workaround was to go back to the main checkout.
+
+  The set of workspaces is a property of the repo, so it now anchors on the primary checkout
+  (`stack.main_repo()`, git's common dir — the same anchor `worktree_keys()` already used) and is
+  identical wherever `fy` runs. Where you stand picks the initial SELECTION instead: the TUI opens
+  with your own checkout's card highlighted, so the Mode tab, the plugin panels and the workspace
+  actions target the checkout a bare `fy up` here would act on. It sets the opening row only —
+  later refreshes never yank the highlight back from wherever you moved it.
+
 ### Added
 
 - **`fy init` now stamps the version floor it scaffolds for.** A fresh `foldyard.toml` carries

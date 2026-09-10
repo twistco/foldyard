@@ -421,6 +421,79 @@ def test_no_up_boxes_still_serves_main_daemons_but_reports_none_up(monkeypatch):
     assert devmode.active_worktrees() == [""]
 
 
+def _worktree_layout(tmp_path):
+    """A primary checkout + one sibling worktree on disk, as `git worktree add` leaves them."""
+    main = tmp_path / "repo"
+    main.mkdir()
+    (main / "foldyard.toml").write_text('[project]\nname = "p"\n')
+    feat = tmp_path / "repo-worktrees" / "feat"
+    feat.mkdir(parents=True)
+    (feat / "foldyard.toml").write_text('[project]\nname = "p"\n')
+    (feat / ".git").write_text("gitdir: ../../repo/.git/worktrees/feat\n")
+    return main, feat
+
+
+def test_workspaces_lists_every_checkout_from_inside_a_worktree(monkeypatch, tmp_path):
+    # Run from a worktree, `config.repo_root()` stops at THAT checkout's foldyard.toml — so
+    # anchoring the workspace list on it resolved worktrees_root to a `<worktree>-worktrees` dir
+    # that doesn't exist, and the TUI showed a single card labelled "main" whose path was the
+    # worktree: no sibling worktree could be seen or acted on from any worktree. The set of
+    # workspaces is a property of the REPO, so it anchors on main_repo() and is identical wherever
+    # fy runs.
+    from pathlib import Path
+
+    from foldyard import config
+
+    main, feat = _worktree_layout(tmp_path)
+    monkeypatch.setattr(config, "repo_root", lambda: feat)  # standing in the worktree
+    monkeypatch.setattr(devmode, "main_repo", lambda: main)
+    # The real default, kept a function of its base so the test still pins WHICH base is passed.
+    monkeypatch.setattr(config, "worktrees_root", lambda base: Path(f"{base}-worktrees"))
+    monkeypatch.setattr(config, "project_prefix", lambda: "proj")
+
+    class _R:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(devmode.subprocess, "run", lambda *a, **k: _R())
+    spaces = devmode.workspaces()
+    assert [(w["name"], w["path"]) for w in spaces] == [
+        ("main", str(main)),
+        ("feat", str(feat)),
+    ]
+    assert [w["project"] for w in spaces] == ["proj", "proj-feat"]
+
+
+def test_current_workspace_follows_the_checkout_you_are_standing_in(monkeypatch, tmp_path):
+    # What the TUI opens on: the whole list is visible from anywhere now, so the useful default
+    # selection is the checkout you invoked fy from — the one a bare `fy up` here would act on.
+    from pathlib import Path
+
+    from foldyard import config
+
+    main, feat = _worktree_layout(tmp_path)
+    monkeypatch.setattr(devmode, "main_repo", lambda: main)
+    monkeypatch.setattr(config, "worktrees_root", lambda base: Path(f"{base}-worktrees"))
+
+    monkeypatch.setenv("WORKTREE", "feat")  # explicit target wins (the box always exports it)
+    assert devmode.current_workspace() == "feat"
+    monkeypatch.delenv("WORKTREE")
+    monkeypatch.chdir(feat)  # …else inferred from CWD, exactly as the stack verbs infer it
+    assert devmode.current_workspace() == "feat"
+    monkeypatch.chdir(main)
+    assert devmode.current_workspace() == "main"
+
+
+def test_current_workspace_falls_back_to_main_when_it_cannot_resolve(monkeypatch, tmp_path):
+    # Nothing about picking a default row may be able to take the TUI down: a non-git dir makes
+    # main_repo() raise SystemExit (not an Exception), which an `except Exception` would let past.
+    def boom():
+        raise SystemExit(1)
+
+    monkeypatch.setattr(devmode, "main_repo", boom)
+    assert devmode.current_workspace() == "main"
+
+
 def test_worktree_config_keys_on_the_checkout(monkeypatch, tmp_path):
     from foldyard import config
 

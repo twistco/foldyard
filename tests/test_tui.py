@@ -597,6 +597,48 @@ async def test_mode_grid_rebuilds_for_selected_worktree_axes(monkeypatch):
         assert app.query_one("#gcp-logs", tui.Button)
 
 
+async def test_opens_on_the_checkout_it_was_launched_from(monkeypatch):
+    # The list shows every workspace wherever fy runs, so the default SELECTION is what carries
+    # "where you are standing": launched from the 'feat' worktree, its card is highlighted, and the
+    # Mode tab, the panels and every workspace action target that worktree — not main.
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces)
+    monkeypatch.setattr(devmode, "current_workspace", lambda: "feat")
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        assert app.query_one("#workspaces", tui.WorkspaceList).index == 1
+        assert app.selected_workspace is not None
+        assert app.selected_workspace["name"] == "feat"
+        assert app._active_worktree() == "feat"
+
+
+async def test_launch_selection_is_not_reapplied_on_later_refreshes(monkeypatch):
+    # It picks the OPENING row, nothing more: a human who moved to another workspace must not have
+    # the highlight yanked back under them by the 5s workspace refresh.
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces)
+    monkeypatch.setattr(devmode, "current_workspace", lambda: "feat")
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.index = 0  # the human moves to main
+        await pilot.pause()
+        app.refresh_workspaces()
+        await pilot.pause()
+        assert lv.index == 0
+
+
+async def test_unknown_launch_workspace_leaves_the_first_row_selected(monkeypatch):
+    # CWD outside every checkout, or a worktree dir git no longer tracks — there's no card to
+    # select, so the list opens where it always did rather than on an empty selection.
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces)
+    monkeypatch.setattr(devmode, "current_workspace", lambda: "gone")
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        assert app.query_one("#workspaces", tui.WorkspaceList).index == 0
+
+
 async def test_remove_worktree_confirm_calls_removal(monkeypatch):
     monkeypatch.setattr(devmode, "workspaces", _two_workspaces)
     called: list[str] = []
