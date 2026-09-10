@@ -37,7 +37,10 @@ def test_own_config_references_nothing_outside_its_dir():
 
 
 def test_own_config_declares_no_compose_or_box_image():
-    # foldyard has no services to colocate and dogfoods the packaged generic box.
+    # foldyard has no services to colocate and dogfoods the packaged generic box image.
+    # `[[box.tools]]` is fine — it layers installs ON that image; a `[box].image` would
+    # replace it, and a Dockerfile path is exactly the kind of outside-the-dir reference
+    # this file must not carry.
     doc = tomllib.loads(OWN_TOML.read_text())
     assert "compose" not in doc.get("project", {})
-    assert "box" not in doc
+    assert "image" not in doc.get("box", {})

@@ -660,6 +660,7 @@ class DevModeTui(App):
         # rebuilds when its data changed (otherwise the user's expand/collapse state is left alone).
         self._tree_sigs: dict[str, tuple] = {}
         self.refresh_workspaces()
+        self._select_launch_workspace()
         self.refresh_mode()
         self.refresh_panels()
         self._run_doctor(deep=True)  # deep (live IAM probes) on startup; renders as rows land
@@ -699,6 +700,23 @@ class DevModeTui(App):
             for card, ws in zip(cards, spaces, strict=False):
                 card.refresh_ws(ws)
         self.refresh_ws_hint()
+
+    def _select_launch_workspace(self) -> None:
+        """Open on the checkout `fy tui` was launched from. The list shows EVERY workspace
+        wherever it runs (devmode.workspaces anchors on the primary checkout), so from a worktree
+        the useful row is that worktree's own — highlighting it makes the Mode tab, the panels and
+        every workspace action land on the checkout you were standing in, which is what the
+        `WORKTREE=<name>` prefix would have selected on the command line. Runs ONCE at mount:
+        later refreshes must never yank the highlight back from wherever the human moved it.
+        Unknown name (CWD outside every checkout, or a dir git no longer tracks) ⇒ leave row 0."""
+        lv = self._workspace_list()
+        if lv is None:
+            return
+        name = devmode.current_workspace()
+        for i, card in enumerate(lv.query(WorkspaceCard)):
+            if card.ws["name"] == name:
+                lv.index = i
+                return
 
     @property
     def selected_workspace(self) -> dict | None:

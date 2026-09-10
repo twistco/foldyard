@@ -485,8 +485,16 @@ def workspaces() -> list[dict]:
 
     Each entry: {name, path, project, branch, app_port, containers (compose count, None
     if the engine is unreachable), devbox (bool)}.
+
+    Anchored on the PRIMARY checkout (:func:`main_repo`), never ``config.repo_root()`` — the same
+    anchor :func:`worktree_keys` uses, and for the same reason. Run from inside a worktree,
+    ``repo_root()`` stops at THAT checkout's ``foldyard.toml``, so ``worktrees_root()`` resolved to
+    a ``<worktree>-worktrees`` dir that doesn't exist: the list collapsed to one card labelled
+    "main" whose path was the worktree, and no worktree could be seen or acted on from any worktree.
+    The workspace SET is a property of the repo, not of where you happen to stand in it; where you
+    stand picks the initial selection instead (:func:`current_workspace`).
     """
-    repo = config.repo_root()
+    repo = main_repo()
     wt_root = config.worktrees_root(repo)
     prefix = config.project_prefix()
     items: list[dict[str, Any]] = [{"name": "main", "path": str(repo), "project": prefix}]
@@ -570,6 +578,29 @@ def worktree_keys() -> list[str]:
             if d.is_dir() and (d / ".git").exists():
                 keys.append(d.name)
     return keys
+
+
+def current_workspace() -> str:
+    """The workspace NAME (``"main"``, else a worktree's name) of the checkout ``fy`` was invoked
+    from — the row the TUI opens on, so standing in a worktree selects that worktree's card instead
+    of making you hunt for it in a list that now shows all of them.
+
+    ``WORKTREE`` wins, else it's inferred from CWD via the SAME rule every stack/box verb uses
+    (:func:`~foldyard.stack._active_worktree`) — so the TUI opens on the checkout a bare ``fy up``
+    here would act on. Falls back to ``"main"`` when CWD is outside every checkout; a name with no
+    card (a worktree dir git no longer tracks) is the caller's to resolve against the list it
+    actually rendered.
+
+    ``SystemExit`` is caught beside ``Exception`` (as ``cli``'s worktree pin does): that is what
+    ``stack.main_repo`` raises from a non-git dir, and it is not an ``Exception`` — picking a
+    default row must never be the thing that takes the TUI down.
+    """
+    from . import stack
+
+    try:
+        return stack._active_worktree(config.worktrees_root(main_repo())) or "main"
+    except (Exception, SystemExit):
+        return "main"
 
 
 def up_worktrees() -> list[str]:
