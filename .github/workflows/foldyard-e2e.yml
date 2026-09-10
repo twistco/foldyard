@@ -63,6 +63,7 @@ jobs:
       - name: Pre-pull e2e images (parallel)
         run: |
           pull() { for i in 1 2 3 4 5; do docker pull "$1" && return 0; sleep $((i * 5)); done; return 1; }
+          pids=()
           for img in \
             ghcr.io/astral-sh/uv:python3.12-bookworm \
             docker.io/library/buildpack-deps:trixie-curl \
@@ -70,8 +71,16 @@ jobs:
             docker.io/library/postgres:16-alpine \
             docker.io/library/alpine:latest; do
             pull "$img" &
+            pids+=("$!")
           done
-          wait
+          # Wait on each PID, not a bare `wait`: bare `wait` returns 0 once every child has exited,
+          # whatever they exited WITH — so five exhausted retries would warm nothing and still pass
+          # the step, leaving the failure to surface as a confusing mid-test build error instead.
+          rc=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || rc=1
+          done
+          exit "$rc"
 
       # The proxy/box live e2es need the test process to run INSIDE a container so a sibling box can
       # reach the in-process proxy/emulator by container IP. Use docker CLI only (no podman), mount
@@ -180,13 +189,23 @@ jobs:
       - name: Pre-pull native e2e images
         run: |
           set -euo pipefail
+          pids=()
           for img in \
             docker.io/library/python:3.12-slim \
             docker.io/library/postgres:16-alpine \
             docker.io/library/alpine:latest; do
             podman pull "$img" &
+            pids+=("$!")
           done
-          wait
+          # Per-PID, not a bare `wait` — same reason as the Docker job's pre-pull above: bare `wait`
+          # returns 0 once the children have exited, whatever they exited WITH, so a registry blip
+          # would warm nothing and still pass. Failing here names the image; failing later shows up
+          # as a compose build error or a healthcheck that never fires.
+          rc=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || rc=1
+          done
+          exit "$rc"
 
       # Prove the systemd --user timer path works BEFORE the e2e, so a broken healthcheck fails
       # here in ~20s with a clear message instead of hanging `foldyard up`'s depends_on to the

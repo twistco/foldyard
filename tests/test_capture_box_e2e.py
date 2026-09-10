@@ -253,7 +253,14 @@ def _seed_system_trust(box: _Box) -> None:
         f"box image {BOX_IMAGE} has no update-ca-certificates — box.py's CA-trust snippet, and so "
         "every naive-curl assertion here, cannot work on it"
     )
-    box.exec("bash", "-lc", boxmod._CA_TRUST_SNIPPET)
+    # Assert the install itself, both ways it can fail: a non-zero exit, and the snippet's own
+    # `|| echo "(… failed)"` swallow, which keeps the exit status 0. Unchecked, either one leaves
+    # every assertion below reporting a curl/certificate error for a step that never ran.
+    installed = box.exec("bash", "-lc", boxmod._CA_TRUST_SNIPPET)
+    assert installed.returncode == 0 and "failed" not in installed.stdout, (
+        "box.py's CA-trust snippet did not install the MITM CA into the box's system store "
+        f"(rc={installed.returncode}):\n{installed.stdout}\n{installed.stderr}"
+    )
 
 
 @pytest.fixture
