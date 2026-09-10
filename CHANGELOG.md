@@ -2,7 +2,8 @@
 
 Notable changes, per release. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/) once past `1.0`. Before that, minor versions may
-break config or CLI shape, and say so here.
+break config or CLI shape, and say so here. How a release is cut:
+[docs/releasing.md](./docs/releasing.md).
 
 ## Unreleased
 

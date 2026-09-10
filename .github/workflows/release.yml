@@ -21,13 +21,27 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v8.2.0
-      - name: Tag must match pyproject version
+      # Three cheap assertions, all about the SAME number written in four places. Each has
+      # been got wrong: pyproject bumped without uv.lock (the lock records the workspace
+      # package's own version, and nothing else notices), and a tag cut while the changelog
+      # still said Unreleased. Failing here costs a re-tag; failing after publish costs a
+      # version number forever, since PyPI never lets one be reused. See docs/releasing.md.
+      - name: Tag, pyproject, uv.lock and CHANGELOG must agree
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
           version="$(uv version --short)"
           if [ "$tag" != "$version" ]; then
             echo "✗ tag v$tag does not match [project].version = $version — bump pyproject first"
+            exit 1
+          fi
+          locked="$(awk '/^name = "foldyard"$/{getline; print}' uv.lock | sed -n 's/^version = "\(.*\)"$/\1/p')"
+          if [ "$locked" != "$version" ]; then
+            echo "✗ uv.lock records foldyard $locked, pyproject says $version — run \`uv lock\`"
+            exit 1
+          fi
+          if ! grep -qE "^## $tag( |$)" CHANGELOG.md; then
+            echo "✗ CHANGELOG.md has no '## $tag' section — roll Unreleased before tagging"
             exit 1
           fi
       - run: uv build
