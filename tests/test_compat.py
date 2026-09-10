@@ -129,12 +129,17 @@ def test_fix_command_on_the_mac_is_a_uv_reinstall():
     assert "fy box up" not in msg
 
 
-def test_fix_command_in_the_box_is_a_box_rebuild():
+def test_fix_command_in_the_box_is_a_box_recreate():
     # The box's foldyard is installed by the bootstrap to match the host, so `uv tool install`
-    # inside the box would be undone by the next `fy box up` — and the box has no egress for it.
+    # inside the box would be undone by the next recreate — and the box has no egress for it.
+    #
+    # It must say RECREATE, not `fy box up`: box.up early-returns on a running box before any
+    # bootstrap step, so a bare `fy box up` prints "already up" and reinstalls nothing. Advice
+    # that reads as success while changing nothing sends the reader looking elsewhere, and the
+    # reader here is by definition someone whose in-box fy is already too old to trust.
     msg, _ = compat.version_gate("0.1.0", minimum="0.4.0", recommended=None, in_box=True)
     assert msg is not None
-    assert "fy box up" in msg
+    assert "fy box down && fy box up" in msg
     assert "uv tool install" not in msg
 
 

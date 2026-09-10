@@ -110,6 +110,13 @@ break config or CLI shape, and say so here. How a release is cut:
   already running outside its scope — started before the option was on — is refused until
   `fy machine stop && fy up`; asking for it on a host that can't enforce it (macOS) is a
   preflight error, never a silent downgrade. Default off. Env: `MACHINE_HOST_WALL`.
+- **`fy box up` warns when a running box's foldyard isn't the one the Mac runs.** The box's
+  foldyard is installed by the bootstrap, which only runs on a freshly *created* box — so a host
+  upgrade leaves the two sides on different versions indefinitely, with every `fy box up` in
+  between reporting "already up". `up` now stamps `FY_VERSION` into the container at create time
+  and compares it on the reuse path, so the mismatch is announced with the recreate that fixes
+  it rather than being discovered later as a refusal. A box created before the stamp existed has
+  no `FY_VERSION` and is treated as drift, which is correct: it is the most stale case there is.
 
 ### Changed
 
@@ -200,6 +207,14 @@ break config or CLI shape, and say so here. How a release is cut:
   carries `subvol=/root` in its *options* — a false FAIL on a table that exposes nothing. The
   audit now matches the mountpoint field only; the same path *as* a mountpoint, and the
   repo-mount exemption, are unchanged. Found by the first in-box `verify` on a Linux host.
+- **A version-window refusal inside the box pointed at a command that does nothing.** `_fix`
+  told an in-box reader to run `fy box up` from the Mac, and its docstring claimed the bootstrap
+  reinstalls foldyard "at every `fy box up`". It doesn't: `box.up` early-returns on a running box
+  before any bootstrap step and prints `✓ dev box … already up`. So the one reader this message
+  exists for — someone whose in-box `fy` is too old to honour the repo's config — followed the
+  advice, saw a tick, and was no better off. It now says `fy box down && fy box up`, matching the
+  three drift warnings that already sit in that same early-return branch.
+
 
 ## 0.2.1 — 2026-09-10
 

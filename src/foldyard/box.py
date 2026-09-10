@@ -167,6 +167,31 @@ def _warn_stale_proxy_port(engine: str, box: str, env: dict) -> None:
         )
 
 
+def _warn_stale_foldyard(engine: str, box: str, env: dict) -> None:
+    """Nag when a running box's foldyard is not the one the Mac now runs.
+
+    The bootstrap installs foldyard only on a freshly CREATED box, so a host upgrade leaves the
+    two sides on different versions indefinitely while every `fy box up` in between says "already
+    up". It stays silent until something in the box misreads config an older fy ignores — at which
+    point the symptom is a version-window refusal (compat.py) whose own fix is this recreate.
+
+    Inequality rather than "older": a downgrade is drift too, and the box tracks the host either
+    way. Absent = a box created before this stamp existed (or an inspect that failed on a box we
+    just probed as running) — treated as drift, like the CLAUDE_CONFIG_DIR/CODEX_HOME rows.
+    """
+    from . import __version__
+
+    baked = _baked_env(engine, box, env, "FY_VERSION")
+    if baked == __version__:
+        return
+    was = f"foldyard {baked}" if baked else "a foldyard from before this stamp"
+    print(
+        f"⚠ dev box {box} has {was} installed, but the Mac now runs foldyard {__version__}. The "
+        "bootstrap that installs it runs only on a freshly created box, so `fy box up` alone "
+        "won't move it: `fy box down && fy box up`."
+    )
+
+
 def _box_image_fingerprint(main: Path) -> str:
     """Fingerprint the inputs Foldyard owns for a dev-box image.
 
@@ -901,6 +926,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
                 "⚠ [codex] is declared but this box was created without it (no Codex install, "
                 "~/.codex volume or keyless seed). Recreate to add them: `fy box down && fy box up`."
             )
+        _warn_stale_foldyard(engine, box, env)
         print(f"✓ dev box {box} already up. Attach: {_attach_hint(worktree)}")
         return 0
     if _exists(engine, box, env):
@@ -1035,7 +1061,13 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         # A create-time property (like the port band): baked so the already-up nag and the
         # in-box `fy verify` row can compare the wish with the box they actually have.
         env_args += ["-e", f"{sandbox.BAKED_ENV}=gvisor"]
+    from . import __version__
+
     env_args += [
+        # The foldyard that created this box — i.e. the version its bootstrap installed inside.
+        # Read back by _warn_stale_foldyard on the reuse path.
+        "-e",
+        f"FY_VERSION={__version__}",
         "-e",
         "IN_DEVBOX=1",
         "-e",

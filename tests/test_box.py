@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+import foldyard
 from foldyard import box, config, stack, supervisor
 
 
@@ -435,6 +436,54 @@ def test_up_no_nag_when_running_box_port_matches(fake, capsys):
     fake["state"]["baked_proxy_port"] = "41000"  # matches the allocated band base
     assert box.main("up") == 0
     assert "recreate" not in capsys.readouterr().out
+
+
+# The [claude]/[codex] drift rows above fire on the same "recreate" advice, so the foldyard
+# rows below bake their keys to keep those quiet and leave only the row under test speaking.
+_QUIET = {"CLAUDE_CONFIG_DIR": "/home/vscode/.claude", "CODEX_HOME": "/home/vscode/.codex"}
+
+
+def test_up_nags_when_running_box_has_a_different_foldyard(fake, capsys, monkeypatch):
+    # The box's foldyard is installed by the bootstrap, which runs ONLY on a freshly created
+    # box — so after a host upgrade the two sides sit on different versions until a recreate,
+    # and every `fy box up` in between prints "already up" while changing nothing. Without this
+    # row the mismatch is silent: it surfaces only as an in-box version-window refusal, whose
+    # own advice is the recreate this row is asking for.
+    fake["state"]["running"] = True
+    fake["state"]["baked_env"] = _QUIET | {"FY_VERSION": "0.2.1"}
+    monkeypatch.setattr(foldyard, "__version__", "0.3.0", raising=False)
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "0.2.1" in out and "0.3.0" in out
+    assert "fy box down && fy box up" in out
+
+
+def test_up_nags_when_running_box_predates_the_foldyard_stamp(fake, capsys, monkeypatch):
+    # No FY_VERSION at all = a box created before this stamp existed, which is exactly the
+    # long-lived box whose foldyard is furthest behind. Absence is the drift signal, same as
+    # CLAUDE_CONFIG_DIR/CODEX_HOME above.
+    fake["state"]["running"] = True
+    fake["state"]["baked_env"] = dict(_QUIET)
+    monkeypatch.setattr(foldyard, "__version__", "0.3.0", raising=False)
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "foldyard" in out and "fy box down && fy box up" in out
+
+
+def test_up_no_nag_when_running_box_foldyard_matches(fake, capsys, monkeypatch):
+    fake["state"]["running"] = True
+    fake["state"]["baked_env"] = _QUIET | {"FY_VERSION": "0.3.0"}
+    monkeypatch.setattr(foldyard, "__version__", "0.3.0", raising=False)
+    assert box.main("up") == 0
+    assert "fy box down && fy box up" not in capsys.readouterr().out
+
+
+def test_up_stamps_the_creating_foldyard_version_into_the_box(fake, monkeypatch):
+    # The row above can only compare what `up` bakes in at create time.
+    monkeypatch.setattr(foldyard, "__version__", "0.3.0", raising=False)
+    assert box.main("up") == 0
+    create = _find(fake["calls"], has=["run", "-d"])[0]
+    assert "FY_VERSION=0.3.0" in create
 
 
 def test_up_ensures_host_supervisor(fake):

@@ -172,11 +172,15 @@ def _fix(in_box: bool) -> str:
     """The upgrade instruction for where you are.
 
     Inside the box, ``uv tool install`` is the wrong advice twice over: the box has no egress
-    for PyPI under default-deny, and the bootstrap reinstalls foldyard to match the host at
-    every ``fy box up`` — so a hand-install would be silently undone.
+    for PyPI under default-deny, and the bootstrap reinstalls foldyard to match the host — so a
+    hand-install would be silently undone by the next recreate.
+
+    It has to be the RECREATE, not a bare ``fy box up``: ``box.up`` early-returns on a running
+    box before any bootstrap step, so ``fy box up`` alone prints "already up" and reinstalls
+    nothing. Advice that reads as success while changing nothing is worse than none.
     """
     if in_box:
-        return "Run `fy box up` from the Mac."
+        return "Run `fy box down && fy box up` from the Mac."
     return "Run `uv tool install --upgrade foldyard`."
 
 
