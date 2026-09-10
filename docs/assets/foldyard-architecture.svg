@@ -1,0 +1,268 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1362" height="984" viewBox="99 99 1362 984" fill="none">
+  <style>
+    text { font-family: "Hanken Grotesk", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+           fill: #6e7263; }
+    .title    { font-family: "Newsreader", Georgia, "Times New Roman", serif;
+                font-size: 30px; font-weight: 600; fill: #1a1c16; }
+    .tagline  { font-size: 15px; }
+    .band     { font-size: 12px; font-weight: 700; fill: #1a1c16; letter-spacing: .06em; }
+    .band-yard{ font-size: 12px; font-weight: 700; fill: #265629; letter-spacing: .06em; }
+    .band-sub { font-size: 12px; }
+    .card-h   { font-size: 14.5px; font-weight: 700; fill: #1a1c16; }
+    .body     { font-size: 12px; }
+    .note     { font-size: 12px; font-weight: 700; fill: #265629; text-anchor: middle; }
+    .arrow    { font-size: 15px; fill: #9a9d8c; }
+    .down     { font-size: 16px; fill: #265629; text-anchor: middle; }
+    .cap      { font-size: 12px; }
+    .cap-b    { font-size: 12px; font-weight: 700; fill: #1a1c16; }
+    .col-lbl  { font-size: 11px; font-weight: 700; fill: #b8923a; letter-spacing: .08em; }
+    .col-h    { font-size: 15px; font-weight: 700; fill: #b8923a; }
+    .idea-h   { font-size: 12.5px; font-weight: 700; fill: #1a1c16; }
+    .idea     { font-size: 11.5px; }
+    .frame    { fill: #f6f4ec; stroke: #e1e0d4; }
+    .card     { fill: #fff; stroke: #dcdacb; stroke-width: 1.5; }
+    .fence    { fill: #edf1f3; stroke: #3f6e84; stroke-width: 1.5; }
+    .yardfence{ fill: #ebf1e7; stroke: #265629; stroke-width: 2.5; stroke-dasharray: 12.5 12.5; }
+    .up-card  { fill: #fff; stroke: #b8923a; stroke-width: 1.5; }
+    .panel    { fill: #f8f0d8; stroke: #e9d59c; stroke-width: 1.5; }
+    .rule     { stroke: #e0cf9a; stroke-width: 1; }
+  </style>
+  <rect class="frame" x="100" y="100" width="1360" height="982" rx="18"/>
+
+  <!-- header -->
+  <text class="title" x="160" y="160">Foldyard Architecture</text>
+  <text class="tagline" x="160" y="191">Bring your whole dev stack into the fold — secretless by default.</text>
+
+  <!-- YOUR MACHINE — everything that holds a credential stays out here -->
+  <rect class="fence" x="140" y="228" width="1040" height="340" rx="16"/>
+  <text class="band" x="160" y="259">YOUR MACHINE</text>
+  <text class="band-sub" x="290" y="259">host · outside the fence — your keys, browser and other repos stay here</text>
+
+  <rect class="card" x="160" y="278" width="235" height="127" rx="12"/>
+  <text class="card-h" x="178" y="305">foldyard CLI</text>
+  <text class="body" x="178" y="327">
+    <tspan x="178">One Python CLI. Drives the VM,</tspan>
+    <tspan x="178" dy="16">the compose stack, the dev box</tspan>
+    <tspan x="178" dy="16">and the access modes — it runs</tspan>
+    <tspan x="178" dy="16">under your task runner, not instead</tspan>
+    <tspan x="178" dy="16">of it.</tspan>
+  </text>
+  <rect class="card" x="415" y="278" width="235" height="127" rx="12"/>
+  <text class="card-h" x="433" y="305">Host-side supervisor</text>
+  <text class="body" x="433" y="327">
+    <tspan x="433">The one process that holds</tspan>
+    <tspan x="433" dy="16">credentials, and it runs outside the</tspan>
+    <tspan x="433" dy="16">fence. Starts with the box, keeps</tspan>
+    <tspan x="433" dy="16">the proxy up, reconciles to the</tspan>
+    <tspan x="433" dy="16">mode you set.</tspan>
+  </text>
+  <rect class="card" x="670" y="278" width="235" height="127" rx="12"/>
+  <text class="card-h" x="688" y="305">Credential minters</text>
+  <text class="body" x="688" y="327">
+    <tspan x="688">GCP metadata emulator · GitHub</tspan>
+    <tspan x="688" dy="16">App · header or query-param auth</tspan>
+    <tspan x="688" dy="16">— or your own, as a plugin.</tspan>
+    <tspan x="688" dy="16">Short-lived, scoped tokens minted</tspan>
+    <tspan x="688" dy="16">on demand, never a long-lived key.</tspan>
+  </text>
+  <rect class="card" x="925" y="278" width="235" height="127" rx="12"/>
+  <text class="card-h" x="943" y="305">Egress proxy</text>
+  <text class="body" x="943" y="327">
+    <tspan x="943">The yard's only way out. Injects</tspan>
+    <tspan x="943" dy="16">the minted token at the edge, so it</tspan>
+    <tspan x="943" dy="16">reaches the API but never the</tspan>
+    <tspan x="943" dy="16">yard. Every destination logged.</tspan>
+  </text>
+
+  <rect class="card" x="160" y="421" width="235" height="127" rx="12"/>
+  <text class="card-h" x="178" y="448">Keyless coding agents</text>
+  <text class="body" x="178" y="470">
+    <tspan x="178">Claude Code and Codex run in the</tspan>
+    <tspan x="178" dy="16">yard with no API key in it — the</tspan>
+    <tspan x="178" dy="16">proxy adds the token on the way</tspan>
+    <tspan x="178" dy="16">out. The agent can use it, never</tspan>
+    <tspan x="178" dy="16">read it.</tspan>
+  </text>
+  <rect class="card" x="415" y="421" width="235" height="127" rx="12"/>
+  <text class="card-h" x="433" y="448">Config you approve</text>
+  <text class="body" x="433" y="470">
+    <tspan x="433">foldyard.toml is committed, so your</tspan>
+    <tspan x="433" dy="16">team shares it — but the host runs</tspan>
+    <tspan x="433" dy="16">only the copy you adopted. An edit</tspan>
+    <tspan x="433" dy="16">made inside the yard does nothing</tspan>
+    <tspan x="433" dy="16">until you accept it.</tspan>
+  </text>
+  <rect class="card" x="670" y="421" width="235" height="127" rx="12"/>
+  <text class="card-h" x="688" y="448">Egress wall + allowlist</text>
+  <text class="body" x="688" y="470">
+    <tspan x="688">Default-deny, held on the host: you</tspan>
+    <tspan x="688" dy="16">grant a hostname live. A firewall</tspan>
+    <tspan x="688" dy="16">provisioned inside the VM refuses</tspan>
+    <tspan x="688" dy="16">traffic that tries to skip the proxy.</tspan>
+  </text>
+  <rect class="card" x="925" y="421" width="235" height="127" rx="12"/>
+  <text class="card-h" x="943" y="448">Access modes live here</text>
+  <text class="body" x="943" y="470">
+    <tspan x="943">You set the mode on your</tspan>
+    <tspan x="943" dy="16">machine; the yard gets a read-only</tspan>
+    <tspan x="943" dy="16">copy and can never raise it.</tspan>
+    <tspan x="943" dy="16">Emergency levels carry a timer</tspan>
+    <tspan x="943" dy="16">and revert on their own.</tspan>
+  </text>
+
+  <!-- THE YARD — throwaway VM, zero credentials at rest -->
+  <rect class="yardfence" x="140" y="642" width="1040" height="400" rx="16"/>
+  <text class="band-yard" x="160" y="673">THE YARD</text>
+  <text class="band-sub" x="240" y="673">a throwaway Linux VM running rootless Podman · inside the fence — mounts only the repo, starts with zero credentials</text>
+
+  <rect class="card" x="160" y="692" width="235" height="143" rx="12"/>
+  <text class="card-h" x="178" y="719">Compose stack</text>
+  <text class="body" x="178" y="741">
+    <tspan x="178">Databases · emulators · app</tspan>
+    <tspan x="178" dy="16">servers — your real stack,</tspan>
+    <tspan x="178" dy="16">reachable by container name. The</tspan>
+    <tspan x="178" dy="16">same stack your e2e suite drives,</tspan>
+    <tspan x="178" dy="16">brought up and torn down with one</tspan>
+    <tspan x="178" dy="16">verb.</tspan>
+  </text>
+  <rect class="card" x="415" y="692" width="235" height="143" rx="12"/>
+  <text class="card-h" x="433" y="719">Long-lived dev box</text>
+  <text class="body" x="433" y="741">
+    <tspan x="433">Multi-session, VS Code attaches.</tspan>
+    <tspan x="433" dy="16">Installs land in volumes the host</tspan>
+    <tspan x="433" dy="16">never sees, so a compromised</tspan>
+    <tspan x="433" dy="16">package wakes with nothing to lift.</tspan>
+    <tspan x="433" dy="16">Ships as a Debian box; bring your</tspan>
+    <tspan x="433" dy="16">own Dockerfile to grow it.</tspan>
+  </text>
+  <rect class="card" x="670" y="692" width="235" height="143" rx="12"/>
+  <text class="card-h" x="688" y="719">Coding agent</text>
+  <text class="body" x="688" y="741">
+    <tspan x="688">Claude Code (or any agent),</tspan>
+    <tspan x="688" dy="16">handed the VM's own engine</tspan>
+    <tspan x="688" dy="16">socket: full autonomy over the</tspan>
+    <tspan x="688" dy="16">stack, bounded to the repo and the</tspan>
+    <tspan x="688" dy="16">containers inside the VM — never</tspan>
+    <tspan x="688" dy="16">your machine.</tspan>
+  </text>
+  <rect class="card" x="925" y="692" width="235" height="143" rx="12"/>
+  <text class="card-h" x="943" y="719">Worktrees, side by side</text>
+  <text class="body" x="943" y="741">
+    <tspan x="943">Every git worktree gets its own dev</tspan>
+    <tspan x="943" dy="16">box, ports and containers inside</tspan>
+    <tspan x="943" dy="16">the one VM — parallel branches</tspan>
+    <tspan x="943" dy="16">that never collide, with build</tspan>
+    <tspan x="943" dy="16">caches shared between them.</tspan>
+  </text>
+
+  <!-- fy verify — the credibility check, and the prerequisite it cannot check -->
+  <text class="cap-b" x="160" y="861">fy verify<tspan class="cap" dx="4" style="font-weight:400">· the isolation checks, run from inside the yard, on demand.</tspan></text>
+  <text class="cap" x="160" y="879">The one prerequisite it can't check for you: scan your history (gitleaks, TruffleHog) first — foldyard can mount a clean repo, it can't clean a dirty one.</text>
+
+  <rect class="card" x="160" y="895" width="235" height="127" rx="12"/>
+  <text class="card-h" x="178" y="922">Mount audit</text>
+  <text class="body" x="178" y="944">
+    <tspan x="178">Reads the VM's own mount table</tspan>
+    <tspan x="178" dy="16">and fails on any host path — the</tspan>
+    <tspan x="178" dy="16">stray $HOME bind-mount that</tspan>
+    <tspan x="178" dy="16">would quietly undo everything.</tspan>
+  </text>
+  <rect class="card" x="415" y="895" width="235" height="127" rx="12"/>
+  <text class="card-h" x="433" y="922">Escape battery</text>
+  <text class="body" x="433" y="944">
+    <tspan x="433">The engine must be rootless, and</tspan>
+    <tspan x="433" dy="16">a --privileged --pid=host container</tspan>
+    <tspan x="433" dy="16">must not reach the host's PID 1. It</tspan>
+    <tspan x="433" dy="16">runs the escapes we know about:</tspan>
+    <tspan x="433" dy="16">assurance, not proof.</tspan>
+  </text>
+  <rect class="card" x="670" y="895" width="235" height="127" rx="12"/>
+  <text class="card-h" x="688" y="922">Credential-less posture</text>
+  <text class="body" x="688" y="944">
+    <tspan x="688">No SSH agent, no keys, no .netrc</tspan>
+    <tspan x="688" dy="16">— and a push to origin must be</tspan>
+    <tspan x="688" dy="16">refused for credential reasons, not</tspan>
+    <tspan x="688" dy="16">because the network happened to</tspan>
+    <tspan x="688" dy="16">be down.</tspan>
+  </text>
+  <rect class="card" x="925" y="895" width="235" height="127" rx="12"/>
+  <text class="card-h" x="943" y="922">Wall enforcing</text>
+  <text class="body" x="943" y="944">
+    <tspan x="943">Egress that skips the proxy must</tspan>
+    <tspan x="943" dy="16">be rejected — and the permitted</tspan>
+    <tspan x="943" dy="16">path is checked too, so an outage</tspan>
+    <tspan x="943" dy="16">can never pass for enforcement.</tspan>
+  </text>
+
+  <text class="arrow" x="909" y="346">▶</text>
+  <text class="arrow" x="1178" y="346">▶</text>
+
+  <!-- the seam: what crosses the fence, and what does not -->
+  <text class="note" x="660" y="600">the yard mounts ONLY the repo — no $HOME, no keys, no other repos</text>
+  <text class="down" x="660" y="628">▼</text>
+
+  <!-- upstream + the three ideas -->
+  <text class="col-lbl" x="1212" y="264">INTERNET</text>
+  <rect class="up-card" x="1210" y="278" width="210" height="127" rx="12"/>
+  <text class="card-h" x="1228" y="305">Upstream APIs</text>
+  <text class="body" x="1228" y="327">
+    <tspan x="1228">GCP · GitHub · Anthropic ·</tspan>
+    <tspan x="1228" dy="16">your own services. They</tspan>
+    <tspan x="1228" dy="16">receive the injected token —</tspan>
+    <tspan x="1228" dy="16">which never entered the yard.</tspan>
+  </text>
+
+  <rect class="panel" x="1210" y="421" width="210" height="621" rx="12"/>
+  <text class="col-h" x="1228" y="451">Why it's built this way</text>
+
+  <text class="idea-h" x="1228" y="483">
+    <tspan x="1228">1 · Isolate the project, not</tspan>
+    <tspan x="1228" dy="17">just the agent</tspan>
+  </text>
+  <text class="idea" x="1228" y="522">
+    <tspan x="1228">Agent sandboxes are</tspan>
+    <tspan x="1228" dy="15">everywhere. What's missing is</tspan>
+    <tspan x="1228" dy="15">one boundary that holds the</tspan>
+    <tspan x="1228" dy="15">real compose stack, the real</tspan>
+    <tspan x="1228" dy="15">e2e loop and services by name</tspan>
+    <tspan x="1228" dy="15">— with zero credentials inside</tspan>
+    <tspan x="1228" dy="15">it.</tspan>
+  </text>
+
+  <text class="idea-h" x="1228" y="638">
+    <tspan x="1228">2 · Secretless by default,</tspan>
+    <tspan x="1228" dy="17">access on demand</tspan>
+  </text>
+  <text class="idea" x="1228" y="677">
+    <tspan x="1228">The yard starts with nothing to</tspan>
+    <tspan x="1228" dy="15">lift and no way to push. Declare</tspan>
+    <tspan x="1228" dy="15">a mode and host-side daemons</tspan>
+    <tspan x="1228" dy="15">mint short-lived, scoped tokens</tspan>
+    <tspan x="1228" dy="15">the proxy injects. Emergency</tspan>
+    <tspan x="1228" dy="15">levels expire and revert on their</tspan>
+    <tspan x="1228" dy="15">own.</tspan>
+  </text>
+
+  <text class="idea-h" x="1228" y="793">
+    <tspan x="1228">3 · Isolation without hiding</tspan>
+  </text>
+  <text class="idea" x="1228" y="815">
+    <tspan x="1228">An escape lands in the</tspan>
+    <tspan x="1228" dy="15">throwaway VM, not on your</tspan>
+    <tspan x="1228" dy="15">machine — no host filesystem</tspan>
+    <tspan x="1228" dy="15">is there to reach. Nothing is</tspan>
+    <tspan x="1228" dy="15">concealed either: Podman</tspan>
+    <tspan x="1228" dy="15">Desktop shows every</tspan>
+    <tspan x="1228" dy="15">container, and fy verify audits</tspan>
+    <tspan x="1228" dy="15">the boundary.</tspan>
+  </text>
+
+  <line class="rule" x1="1228" y1="934" x2="1402" y2="934"/>
+  <text class="idea" x="1228" y="960">
+    <tspan x="1228">fy docs ships the whole manual</tspan>
+    <tspan x="1228" dy="15">with the install, offline. fy state</tspan>
+    <tspan x="1228" dy="15">and fy doctor show what this</tspan>
+    <tspan x="1228" dy="15">machine can grant, and where</tspan>
+    <tspan x="1228" dy="15">reality has drifted.</tspan>
+  </text>
+</svg>
