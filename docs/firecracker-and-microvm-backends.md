@@ -126,7 +126,7 @@ Firecracker, and it shouldn't be.
 
 ## The thing that does fit: libkrun / krunkit
 
-[libkrun](https://github.com/containers/libkrun) is a VMM shipped as a *library*: any process
+[libkrun](https://github.com/libkrun/libkrun) is a VMM shipped as a *library*: any process
 links it and gets a hardware-isolated VM from a C call. Three facts make it the interesting answer
 to this question rather than a tangent:
 
@@ -324,28 +324,33 @@ Two Linux-specific settings worth pinning alongside it, neither of which macOS s
   is routine. So the defence-in-depth option this note has been circling is cheapest exactly
   where the VMM is weakest. That inverts what you'd guess.
 
-### WSL2: the distro *is* the boundary — the honest framing, not a workaround
+### WSL2: ~~the distro *is* the boundary~~ — corrected 2026-09-11
 
-Two things that look like WSL2 support are not:
+The original draft of this section is kept struck through because both of its load-bearing
+claims turned out to be wrong, in opposite directions. The current framing lives in
+[isolation-layers.md](./isolation-layers.md#wsl2--a-linux-host-whose-hyper-v-boundary-protects-the-wrong-asset).
 
-- **Lima inside a WSL2 distro** needs nested KVM in WSL2, which needs a **custom-built WSL2
-  kernel** (`CONFIG_MODULES=y`, lockdown/LoadPin off). Not a supportable default.
+- ~~**Lima inside a WSL2 distro** needs nested KVM in WSL2, which needs a **custom-built WSL2
+  kernel** (`CONFIG_MODULES=y`, lockdown/LoadPin off). Not a supportable default.~~
+  **Correction — stale since the 6.x WSL2 kernels.** The stock kernel builds KVM as modules,
+  `nestedVirtualization` defaults on for Windows 11 on x86, and `/dev/kvm` appears after a
+  `wsl --shutdown`. The custom-kernel recipe was the 2021 answer. Limits: Windows 10 silently
+  overrides the setting; Windows-on-ARM boots the distro at EL1, so KVM is structurally absent.
+  Consequence: WSL2's menu is the Linux menu, and this note's own "Platform reality" section
+  (which said WSL2 *does* expose KVM) was the right one of the two.
 - **Lima's `wsl2` driver** runs on *Windows* (`limactl.exe`), is documented experimental,
   "doesn't support many of Lima's options", and wants a tar rootfs rather than a VM image. Not
-  a foundation.
+  a foundation. *(Still true.)*
+- ~~**A WSL2 distro already is a Hyper-V VM**, so `native` inside it is not the same weak profile
+  as `native` on bare Linux — there is a hypervisor between the containers and the Windows
+  host.~~ **Correction — the hypervisor is between the containers and *Windows*.** The
+  supervisor, minters and allow-store run *inside* the distro, in the same home as the engine,
+  under the same uid. Hyper-V puts nothing between the agent and the credentials. For foldyard's
+  threat model WSL2 + `native` **is** bare-Linux `native`; the earlier "weaker than the Mac's,
+  stronger than bare-Linux" ranking does not hold.
 
-But WSL2 doesn't need either, because **a WSL2 distro already is a Hyper-V VM**. `native` inside
-it is therefore not the same weak profile as `native` on bare Linux — there is a hypervisor
-between the containers and the Windows host. Two caveats have to be said in the same breath:
-
-1. It is **one boundary shared by every project**, not per-project. No concurrent isolation, and
-   `[machine].wall` has no VM of its own to be provisioned into.
-2. **WSL2 automounts the Windows drives at `/mnt/c` by default** — which straightforwardly
-   breaks the repo-only mount property (ADR-0001). `/etc/wsl.conf` with `[automount] enabled =
-   false` should be a documented prerequisite, not an optimisation.
-
-That is a coherent, honest profile — weaker than the Mac's, stronger than bare-Linux `native`
-— and it is deliverable without waiting for anything upstream.
+Still true and still prerequisites: **`/mnt/c` is automounted by default**, which breaks the
+repo-only mount (ADR-0001), so `/etc/wsl.conf` with `[automount] enabled = false` comes first.
 
 ### The blocker: `verify` does not currently check any of this off a Mac
 
@@ -516,6 +521,12 @@ is a separate question this note does not answer.
    note argues before.
 7. Should `mountType` get the same pinning treatment as `vmtype` (9p is the QEMU default and is
    the wrong answer)?
+8. *(added 2026-09-11)* The Linux direction is now chosen — stack Lima/QEMU with a crun-jailed
+   libkrun microVM for the box ([isolation-layers.md](./isolation-layers.md#c-stack-them--the-direction-chosen-2026-09-11)).
+   The first blocker is the box's `AF_UNIX` engine socket, which virtio-fs will not carry into a
+   microVM: re-plumb it (TCP inside the Lima guest, or vsock) and narrow it in the same move.
+   Note that the M3 rig cannot run three levels (arm64 nested KVM is experimental); an x86 Linux
+   VM with nested virt is the rig for this one.
 
 ## Sources
 
@@ -528,11 +539,13 @@ is a separate question this note does not answer.
 - Lima: `pkg/driver/` (qemu · vz · wsl2 · krunkit · hcs · external), `pkg/limatype/lima_yaml.go`
   `DefaultDriver()`, `website/content/en/docs/config/vmtype/krunkit.md` · external drivers
   <https://lima-vm.io/docs/dev/drivers/> · v2.0 <https://www.cncf.io/blog/2025/12/11/lima-v2-0-new-features-for-secure-ai-workflows/>
-- libkrun <https://github.com/containers/libkrun> · krun handler
+- libkrun <https://github.com/libkrun/libkrun> · krun handler
   <https://github.com/containers/crun/blob/main/krun.1.md>
 - Kata + Firecracker, block-device requirement <https://blog.cloudkernels.net/posts/kata-fc-k3s-k8s/>
 - podman machine providers (applehv default, libkrun opt-in) — see also [nested-virt.md](./nested-virt.md) ·
-  WSL2 nested KVM needs a custom kernel <https://github.com/microsoft/WSL/issues/4193>
+  WSL2 nested KVM: the custom-kernel era <https://github.com/microsoft/WSL/issues/4193> (historical);
+  stock-kernel KVM in 2026 <https://www.boxofcables.dev/build-a-custom-wsl-2-kernel-in-2026/>,
+  Windows 10 override <https://github.com/microsoft/WSL/issues/40735>
 - QEMU escape history: CVE-2015-5165 · CVE-2015-7504 (Phrack, "VM escape — QEMU case study") ·
   CVE-2020-14364 · 2026 KVM escapes: CVE-2026-46316 (ITScape, arm64) · CVE-2026-53359 (Januscape,
   x86) · CVE-2026-64561 (Zapscape)
