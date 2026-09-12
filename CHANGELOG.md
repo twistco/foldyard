@@ -7,6 +7,22 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ## Unreleased
 
+### Changed
+
+- **Root in the Lima machine VM is now boot-time only — the VM user's passwordless sudo is
+  dropped.** The dev box runs as that user's uid, so a container-runtime escape used to be one
+  `sudo nft flush ruleset` from open egress. foldyard now records a root boot script in the
+  instance config that narrows the sudo grant to `shutdown` and (re)installs the egress wall on
+  every boot; the host no longer runs `sudo` in the guest, and reads the guest's own report of
+  what it applied. **Migration:** every existing Lima VM keeps the old grant until it is
+  restarted once — `fy up` refuses a running VM whose recording is stale and tells you to
+  `fy machine stop && fy up`. Only `[machine].backend = "lima"` is affected.
+
+- **`fy verify`'s mount audit reads the VM's real mount table** (PID 1's, via `--pid=host`)
+  instead of a `--privileged` container's own namespace, which never showed VM-level mounts — a
+  Lima VM mounting the operator's whole home previously passed. The repo and worktrees-root
+  mounts are exempt by exact path; a home mount, a sibling, or a nested bind still fail.
+
 ## 0.2.1 — 2026-09-10
 
 ### Fixed
