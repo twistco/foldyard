@@ -132,14 +132,81 @@ def test_install_declines_on_an_empty_scope(bands, monkeypatch):
     assert hostwall.install("acme", "", ssh_port=22) is False
 
 
-def test_remove_deletes_this_vms_table(monkeypatch):
+# ── wiring into the machine lifecycle: the per-VM scope, the resolver, idempotent removal ──
+
+
+def test_scope_unit_is_per_vm_and_systemd_safe():
+    assert hostwall.scope_unit("acme") == "fy-machine-acme.scope"
+    assert hostwall.scope_unit("acme two!") == "fy-machine-acme_two_.scope"
+
+
+def test_scoped_argv_prefix_runs_the_start_in_its_own_transient_scope():
+    """`systemd-run --user --scope` puts limactl AND everything it forks (the hostagent, QEMU)
+    in ONE per-VM cgroup, so the wall's match is predictable — never the login session's scope,
+    which would wall the operator's whole shell."""
+    assert hostwall.scoped_argv_prefix("acme") == [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        "--unit",
+        "fy-machine-acme.scope",
+    ]
+
+
+def test_in_own_scope_requires_the_vm_scope_as_the_leaf():
+    assert hostwall.in_own_scope("acme", _SCOPE) is True
+    # the login session's scope: walling it would wall the operator's whole session
+    assert hostwall.in_own_scope("acme", "user.slice/user-1000.slice/session-2.scope") is False
+    # a sibling VM's scope is not ours either
+    assert hostwall.in_own_scope("acme", _SCOPE.replace("acme", "other")) is False
+    assert hostwall.in_own_scope("acme", "") is False
+
+
+def test_resolvers_come_from_resolv_conf(tmp_path, monkeypatch):
+    conf = tmp_path / "resolv.conf"
+    conf.write_text(
+        "# Generated\nnameserver 10.0.0.2\nsearch example.internal\nnameserver fd00::1\n"
+        "options edns0\nnameserver 8.8.8.8\n"
+    )
+    monkeypatch.setattr(hostwall, "RESOLV_CONF", conf)
+    assert hostwall.resolvers() == ("10.0.0.2", "fd00::1", "8.8.8.8")
+
+
+def test_resolvers_fall_back_to_the_stub_when_unreadable(tmp_path, monkeypatch):
+    monkeypatch.setattr(hostwall, "RESOLV_CONF", tmp_path / "missing")
+    assert hostwall.resolvers() == hostwall.DEFAULT_RESOLVERS
+    empty = tmp_path / "empty"
+    empty.write_text("# nothing\n")
+    monkeypatch.setattr(hostwall, "RESOLV_CONF", empty)
+    assert hostwall.resolvers() == hostwall.DEFAULT_RESOLVERS
+
+
+def test_render_splits_resolvers_by_address_family(bands):
+    rs = hostwall.render("acme", _SCOPE, ssh_port=22, resolvers=("10.0.0.2", "fd00::1"))
+    assert "ip daddr { 10.0.0.2 } udp dport 53 accept" in rs
+    assert "ip6 daddr { fd00::1 } udp dport 53 accept" in rs
+    assert "ip6 daddr { fd00::1 } tcp dport 53 accept" in rs
+    # no empty set is ever rendered (nft rejects `{ }`)
+    v4_only = hostwall.render("acme", _SCOPE, ssh_port=22, resolvers=("10.0.0.2",))
+    assert "ip6 daddr" not in v4_only
+
+
+def test_remove_is_idempotent_by_construction(monkeypatch):
+    """`nft delete table` errors on a missing table, so removal streams the same declare-then-
+    delete pair `render` uses — a table that is already gone is a clean no-op."""
     seen = {}
 
     def fake_run(cmd, **kw):
-        seen["cmd"] = cmd
+        seen["cmd"], seen["input"] = cmd, kw.get("input")
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(hostwall.shutil, "which", lambda c: "/usr/sbin/nft")
     monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
     assert hostwall.remove("acme") is True
-    assert seen["cmd"] == ["sudo", "nft", "delete", "table", "inet", "fy_host_wall_acme"]
+    assert seen["cmd"] == ["sudo", "nft", "-f", "-"]
+    assert seen["input"].splitlines() == [
+        "table inet fy_host_wall_acme",
+        "delete table inet fy_host_wall_acme",
+    ]

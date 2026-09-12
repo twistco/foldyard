@@ -47,6 +47,7 @@ import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from pathlib import Path
 from shutil import which
 
@@ -173,7 +174,21 @@ class Backend(ABC):
     def stop_argv(self, name: str) -> list[str]: ...
 
     @abstractmethod
-    def start(self, name: str) -> bool: ...
+    def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
+        """Start the VM. ``prefix`` is prepended to :meth:`start_argv` — the caller's way to
+        launch the VM's host processes inside a cgroup of its choosing (the host-side wall's
+        ``systemd-run --scope``, :mod:`foldyard.hostwall`) without the backend knowing why."""
+
+    def vm_pid(self, name: str) -> int:
+        """The host pid of the VM's own process (the VMM, or a sibling sharing its cgroup) —
+        what the host-side wall reads the cgroup scope from. ``0`` where there is none to name
+        (stopped; a backend whose VM foldyard can't place, podman-machine's; native's no-VM)."""
+        return 0
+
+    def ssh_port(self, name: str) -> int:
+        """The host-loopback port the backend forwards to the guest's SSH — the one loopback
+        port besides the daemon band the host-side wall must leave open. ``0`` when unknown."""
+        return 0
 
     def stop(self, name: str) -> bool:
         return _run(self.stop_argv(name)).returncode == 0
@@ -270,8 +285,8 @@ class PodmanBackend(Backend):
     def stop_argv(self, name: str) -> list[str]:
         return ["podman", "machine", "stop", name]
 
-    def start(self, name: str) -> bool:
-        return subprocess.run(self.start_argv(name)).returncode == 0
+    def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
+        return subprocess.run([*prefix, *self.start_argv(name)]).returncode == 0
 
     # ── orphan reaping (the half-torn-down machine) ────────────────────────────────────
     #
@@ -445,7 +460,7 @@ class NativeBackend(Backend):
     def stop_argv(self, name: str) -> list[str]:
         return ["true"]
 
-    def start(self, name: str) -> bool:
+    def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
         return True
 
     def stop(self, name: str) -> bool:
@@ -672,10 +687,28 @@ class LimaBackend(Backend):
     def stop_argv(self, name: str) -> list[str]:
         return ["limactl", "stop", name]
 
-    def start(self, name: str) -> bool:
-        if subprocess.run(self.start_argv(name)).returncode != 0:
+    def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
+        if subprocess.run([*prefix, *self.start_argv(name)]).returncode != 0:
             return False
         return self._wait_for_socket(name)
+
+    def ssh_port(self, name: str) -> int:
+        inst = self._instance(name)
+        try:
+            return int((inst or {}).get("sshLocalPort") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def vm_pid(self, name: str) -> int:
+        """Lima's QEMU driver writes ``qemu.pid`` in the instance dir and the hostagent writes
+        ``ha.pid``; both live in the scope the VM was started in, the VMM is preferred."""
+        inst = Path.home() / ".lima" / name
+        for pidfile in ("qemu.pid", "ha.pid"):
+            try:
+                return int((inst / pidfile).read_text().strip())
+            except (OSError, ValueError):
+                continue
+        return 0
 
     def _wait_for_socket(self, name: str, tries: int = 30, delay: float = 1.0) -> bool:
         """SPIKE: the forwarded podman socket appears a moment after `start` returns — poll

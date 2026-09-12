@@ -31,10 +31,16 @@ On macOS Lima's user-mode network also runs as the operator, but pf cannot singl
 out without a dedicated uid or a different network mode, so the host wall is a Linux capability,
 reported absent elsewhere rather than branched away.
 
-**Not auto-wired into ``fy up`` (yet).** Placing QEMU in a stable, per-VM cgroup scope (via
-``systemd-run --user --scope``) and the host-root policy for loading nftables are launch-path and
-operator-consent decisions this module deliberately leaves to its caller; :func:`vm_cgroup_scope`
-discovers wherever the VM actually landed so the wall can match it either way. Stdlib only.
+**How :mod:`foldyard.machine` wires it (``[machine].host_wall = true``).** The VM is STARTED
+inside its own transient scope (:func:`scoped_argv_prefix` — ``systemd-run --user --scope``), so
+limactl, the hostagent and QEMU all land in ``…/app.slice/fy-machine-<vm>.scope`` and nothing
+else does; after every start, and again on each steady-state ``fy up``, the wall is rendered for
+the scope the VM ACTUALLY sits in (:func:`vm_cgroup_scope`) and loaded as root (idempotent
+replace). A VM found outside its own scope — started by hand, or before the option was turned
+on — is refused, because matching the login session's scope instead would wall the operator's
+whole shell (:func:`in_own_scope` is that guard). The forwarded SSH port is re-read each time:
+Lima allocates it per boot. Root is ``sudo nft``; a passwordless sudoers rule for ``nft`` is the
+operator's call and makes it silent. Stdlib only.
 """
 
 from __future__ import annotations
@@ -45,8 +51,10 @@ from pathlib import Path
 
 from . import config
 
-# The systemd-resolved stub every mainstream Linux distro puts in /etc/resolv.conf; QEMU's slirp
-# forwards the guest's DNS here on the host, so the wall must let the VM process reach it.
+# QEMU's slirp forwards the guest's DNS to the host's configured resolvers, so the wall must let
+# the VM process reach them: read from resolv.conf (:func:`resolvers`), with the systemd-resolved
+# stub every mainstream distro uses as the fallback when the file is unreadable or names none.
+RESOLV_CONF = Path("/etc/resolv.conf")
 DEFAULT_RESOLVERS = ("127.0.0.53",)
 
 _SPAN = 89  # the worktree-offset span each daemon band covers (main is +0; ports.py)
@@ -58,6 +66,47 @@ def table_name(vm: str) -> str:
     so the VM name's other characters collapse to ``_``."""
     safe = "".join(c if c.isalnum() or c in "_./" else "_" for c in vm)
     return f"fy_host_wall_{safe}"
+
+
+def scope_unit(vm: str) -> str:
+    """The transient systemd scope the VM is started in — per-VM, so two projects' VMs never
+    share a cgroup (the wall would otherwise match both). systemd unit names allow
+    ``[A-Za-z0-9:_.\\-]``; anything else in the VM name collapses to ``_``."""
+    safe = "".join(c if c.isalnum() or c in "_.-:" else "_" for c in vm)
+    return f"fy-machine-{safe}.scope"
+
+
+def scoped_argv_prefix(vm: str) -> list[str]:
+    """Prefix for the backend's start argv that runs it — and everything it forks: Lima's
+    hostagent, QEMU, the SSH mux — inside :func:`scope_unit`. ``--scope`` keeps the command in
+    the foreground (limactl's own output and exit code are unchanged); the scope outlives the
+    command while any child lives, which is exactly the VM's lifetime. ``--collect`` garbage-
+    collects a failed scope so a retry never trips over "unit already exists"."""
+    return ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--unit", scope_unit(vm)]
+
+
+def in_own_scope(vm: str, scope: str) -> bool:
+    """Is ``scope`` (a cgroup path as :func:`vm_cgroup_scope` reports it) THIS VM's own scope?
+    The wall matches every socket in the scope, so a VM that landed anywhere else — the login
+    session's scope, a sibling VM's — must be refused, not walled: matching the session would
+    reject the operator's own egress."""
+    parts = [p for p in scope.strip("/").split("/") if p]
+    return bool(parts) and parts[-1] == scope_unit(vm)
+
+
+def resolvers() -> tuple[str, ...]:
+    """The host's DNS resolvers from :data:`RESOLV_CONF` (``nameserver`` lines, in order), or
+    :data:`DEFAULT_RESOLVERS` when the file is unreadable or names none."""
+    try:
+        lines = RESOLV_CONF.read_text().splitlines()
+    except OSError:
+        return DEFAULT_RESOLVERS
+    found = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == "nameserver":
+            found.append(fields[1])
+    return tuple(found) or DEFAULT_RESOLVERS
 
 
 def available() -> bool:
@@ -114,18 +163,25 @@ def render(
 ) -> str:
     """The nftables ruleset that walls the VM whose QEMU process sits in cgroup ``scope``.
 
-    ``ssh_port`` is Lima's forwarded guest-SSH port on the host loopback (``limactl shell`` and
-    the socket forward must keep working); the daemon bands come from config. The ``delete table``
+    ``ssh_port`` is Lima's forwarded guest-SSH port on the host loopback (``limactl shell``, the
+    hostagent's own session and the socket forward must keep working — Lima allocates it per
+    boot, so render after each start); the daemon bands come from config. The ``delete table``
     before the ``table`` block makes the whole file idempotent — a re-apply replaces the table
     atomically rather than erroring on the existing one or stacking a second copy."""
     level = cgroup_level(scope)
     ports = ", ".join([str(ssh_port), *_allowed_ports()])
-    daddr = ", ".join(resolvers)
     name = table_name(vm)
+    dns = []
+    for family, addrs in (
+        ("ip", [r for r in resolvers if ":" not in r]),
+        ("ip6", [r for r in resolvers if ":" in r]),
+    ):
+        if addrs:  # nft rejects an empty set, so a family with no resolver renders nothing
+            dns.append(f"    {family} daddr {{ {', '.join(addrs)} }} udp dport 53 accept")
+            dns.append(f"    {family} daddr {{ {', '.join(addrs)} }} tcp dport 53 accept")
+    dns_rules = "\n".join(dns)
     return f"""\
-table inet {name}
-delete table inet {name}
-table inet {name} {{
+{_declare_then_delete(name)}table inet {name} {{
   chain output {{
     type filter hook output priority filter; policy accept;
     socket cgroupv2 level {level} "{scope}" jump vm
@@ -133,8 +189,7 @@ table inet {name} {{
   chain vm {{
     ct state established,related accept
     oif "lo" tcp dport {{ {ports} }} accept
-    ip daddr {{ {daddr} }} udp dport 53 accept
-    ip daddr {{ {daddr} }} tcp dport 53 accept
+{dns_rules}
     meta l4proto tcp counter reject with tcp reset
     counter reject with icmpx type admin-prohibited
   }}
@@ -142,16 +197,17 @@ table inet {name} {{
 """
 
 
+def _declare_then_delete(name: str) -> str:
+    """The nft idiom for a no-op-safe delete: declaring the table first means the delete can't
+    miss, whether or not the table exists."""
+    return f"table inet {name}\ndelete table inet {name}\n"
+
+
 def install_argv() -> list[str]:
     """The command that loads a ruleset from stdin as root. Streamed over stdin (never a temp
     file) for the same reason the guest wall is: no path a lesser-privileged process could swap
     between write and root-load."""
     return ["sudo", "nft", "-f", "-"]
-
-
-def remove_argv(vm: str) -> list[str]:
-    """The command that tears this VM's wall down — root, and a no-op-safe delete."""
-    return ["sudo", "nft", "delete", "table", "inet", table_name(vm)]
 
 
 def install(
@@ -166,8 +222,10 @@ def install(
 
 
 def remove(vm: str) -> bool:
-    """Tear down the VM's host wall (idempotent-ish: a missing table is the caller's to tolerate).
-    False when the host has no nft at all."""
+    """Tear down the VM's host wall — idempotent (a table that is already gone is a clean no-op:
+    ``nft delete table`` alone would error, so this streams the declare-then-delete pair).
+    False when the host has no nft at all or the load fails."""
     if shutil.which("nft") is None:
         return False
-    return subprocess.run(remove_argv(vm)).returncode == 0
+    ruleset = _declare_then_delete(table_name(vm))
+    return subprocess.run(install_argv(), input=ruleset, text=True).returncode == 0

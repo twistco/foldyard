@@ -796,3 +796,22 @@ def test_github_app_identity_env_wins_over_toml(fresh_config, tmp_path):
 def test_github_app_identity_absent_is_empty(fresh_config, tmp_path):
     fresh_config(FOLDYARD_REPO=tmp_path, GH_APP_ID=None, GH_INSTALLATION_ID=None, GH_REPO=None)
     assert config.github_app_id() == config.github_installation_id() == config.github_repo() == ""
+
+
+# ── machine_host_wall ([machine].host_wall — the host-side cgroup wall, Linux) ─────────
+
+
+def test_machine_host_wall_defaults_off(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text('[machine]\nbackend = "lima"\nwall = true\n')
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_HOST_WALL=None)
+    assert config.machine_host_wall() is False
+
+
+def test_machine_host_wall_toml_opt_in_and_env_override(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text("[machine]\nwall = true\nhost_wall = true\n")
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_HOST_WALL=None)
+    assert config.machine_host_wall() is True
+    fresh_config(MACHINE_HOST_WALL="0")
+    assert config.machine_host_wall() is False
+    fresh_config(MACHINE_HOST_WALL="yes")
+    assert config.machine_host_wall() is True

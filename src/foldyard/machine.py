@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config
+from . import config, hostwall
 from .machine_backend import default_unavailable_block, get_backend
 
 MACHINE = config.machine_name()
@@ -98,7 +98,10 @@ def _start() -> bool:
             _err('      backend = "lima"  under [machine] in foldyard.toml (needs limactl).')
             return False
     _err(f"▶ starting {BACKEND.name} machine '{MACHINE}'…")
-    if not BACKEND.start(MACHINE):
+    # Under the host wall the VM's host processes are launched inside their own transient
+    # cgroup scope, so the wall has one predictable thing to match (see _apply_host_wall).
+    prefix = hostwall.scoped_argv_prefix(MACHINE) if _host_wall_wanted() else []
+    if not BACKEND.start(MACHINE, prefix=prefix):
         _err(f"✗ '{BACKEND.cli}' failed to start '{MACHINE}'.")
         return False
     return True
@@ -145,6 +148,59 @@ def _revive() -> bool:
     _err(f"  boot — check the console log, then `{BACKEND.cli} machine rm {MACHINE}`")
     _err("  and `fy up` to rebuild it (containers and named volumes are lost).")
     return False
+
+
+# ── the host-side wall (lima, `[machine].host_wall`): nftables on the HOST, matched by cgroup ──
+#
+# The tier above the guest wall. That one is enforcement the guest applies to itself, so a
+# guest-KERNEL exploit reaching VM-root can flush it; this one matches the VM process's own
+# traffic on the host — where the guest has no reach — and allows only this project's daemon
+# band (hostwall.py has the ruleset and the why). Two things make it wire-able: the VM is
+# STARTED inside its own transient systemd scope (`_start`), and after every start — and on
+# every steady-state `fy up`, since the table can't be read back without root — the ruleset is
+# rendered for the scope the VM ACTUALLY sits in and loaded as root (an idempotent replace).
+# Lima allocates the forwarded SSH port per boot, which is why it is re-read every time. A VM
+# found outside its own scope (started by hand, or before `host_wall` was turned on) is REFUSED:
+# matching the login session's scope instead would wall the operator's entire shell.
+
+
+def _host_wall_wanted() -> bool:
+    return BACKEND.name == "lima" and config.machine_host_wall()
+
+
+def _apply_host_wall() -> None:
+    """Load (or re-load) the host-side wall for the running VM; a hard stop when it was asked
+    for and can't be delivered — never a silent downgrade to the guest wall alone."""
+    if not _host_wall_wanted():
+        return
+    if not hostwall.available():
+        _err("✗ [machine].host_wall = true but this host has no `nft` / cgroup v2 to enforce it.")
+        _err("  Install nftables, or drop `host_wall` (the in-VM wall still applies).")
+        raise SystemExit(1)
+    scope = hostwall.vm_cgroup_scope(BACKEND.vm_pid(MACHINE))
+    if not hostwall.in_own_scope(MACHINE, scope):
+        _err(f"✗ '{MACHINE}' is running OUTSIDE its own scope ({scope or 'no VM pid found'}), so")
+        _err("  the host wall has nothing safe to match — walling the scope it is in would wall")
+        _err("  the shell that started it. Restart it under foldyard:   fy machine stop && fy up")
+        raise SystemExit(1)
+    ssh_port = BACKEND.ssh_port(MACHINE)
+    if not ssh_port:
+        _err(f"✗ can't read '{MACHINE}'s forwarded SSH port — the host wall would cut limactl off.")
+        raise SystemExit(1)
+    _err(f"▶ loading the host-side wall for '{MACHINE}' (root: sudo nft)…")
+    if not hostwall.install(MACHINE, scope, ssh_port, hostwall.resolvers()):
+        _err(f"✗ loading the host-side wall for '{MACHINE}' failed (`sudo nft -f -`).")
+        raise SystemExit(1)
+
+
+def _remove_host_wall() -> None:
+    """Best-effort teardown after the VM is gone: a table matching a scope that no longer
+    exists is inert, so a failure here is a warning, not an error."""
+    if not _host_wall_wanted() or not hostwall.available():
+        return
+    if not hostwall.remove(MACHINE):
+        _err(f"⚠ removing the host-side wall table for '{MACHINE}' failed (inert without the VM;")
+        _err(f"  `sudo nft delete table inet {hostwall.table_name(MACHINE)}` clears it).")
 
 
 # ── guest boot provisioning: the sudo grant + the in-VM egress wall (lima only) ────────────
@@ -338,8 +394,10 @@ def ensure(main: Path, wt_root: Path) -> None:
         # socket nothing serves (see _revive).
         if not _revive():
             raise SystemExit(1)
-    # Every path ends by reading the guest's own report of what it applied (never the host's
-    # memory of it): a fresh boot, a revive, and the steady state alike.
+    # Every path ends by (re)loading the host-side wall for wherever the VM actually sits, then
+    # reading the guest's own report of what it applied (never the host's memory of it): a
+    # fresh boot, a revive, and the steady state alike.
+    _apply_host_wall()
     _check_guest_provisioning()
 
 
@@ -445,8 +503,9 @@ def delete(assume_yes: bool = False) -> int:
     if not BACKEND.remove(MACHINE):
         print(f"✗ '{BACKEND.cli}' failed to remove '{MACHINE}'.")
         return 1
-    # No host-side wall state to clear: the boot provisioning lives in the instance config,
-    # which the backend removes with the VM.
+    # The boot provisioning lives in the instance config, which the backend removes with the VM;
+    # the host-side wall's table is the one host-side thing to clear.
+    _remove_host_wall()
     if not _stop_host_supervisor():
         return 1
     print(f"✓ machine '{MACHINE}' deleted. `fy up` / `fy machine ensure` re-creates it.")
@@ -488,6 +547,7 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
     _record_provisioning()  # the fresh VM is stopped: record before its first boot
     if not _start():  # one-VM-at-a-time aware on non-concurrent backends
         return 1
+    _apply_host_wall()
     _check_guest_provisioning()
     print(f"✓ machine '{MACHINE}' recreated with the worktrees mount.")
     return 0

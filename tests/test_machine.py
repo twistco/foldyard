@@ -70,8 +70,8 @@ class FakeBackend:
         self.calls.append(f"reap:{name}")
         return list(self._orphans)
 
-    def start(self, name):
-        self.calls.append(f"start:{name}")
+    def start(self, name, prefix=()):
+        self.calls.append(f"start:{name}" + (f" under {' '.join(prefix)}" if prefix else ""))
         self._running.append(name)
         self._state = "running"
         self._responsive = self._revives
@@ -99,6 +99,16 @@ class FakeBackend:
         self._provision = script.splitlines()[1].split()[-1]
         self.calls.append(f"provision:{self._provision}")
         return True
+
+    # the host-side wall's inputs: where the VM's process sits, and the forwarded SSH port
+    _pid = 0
+    _ssh_port = 0
+
+    def vm_pid(self, name):
+        return self._pid
+
+    def ssh_port(self, name):
+        return self._ssh_port
 
 
 @pytest.fixture
@@ -765,3 +775,140 @@ def test_delete_refused_in_box(fake, monkeypatch):
     monkeypatch.setattr(machine.config, "in_box", lambda: True)
     assert machine.delete(assume_yes=True) == 1
     assert be.calls == []
+
+
+# ── the host-side wall (lima, [machine].host_wall): loaded after every start, and on every
+# steady-state `fy up`, for the scope the VM ACTUALLY sits in; refused outside its own scope ──
+
+
+_OWN_SCOPE = "user.slice/user-1000.slice/user@1000.service/app.slice/fy-machine-homelab.scope"
+
+
+@pytest.fixture
+def host_wall_env(lima_env, monkeypatch):
+    """`lima_env` with the host wall wanted and every host input a seam: returns
+    ``(backend, guest, installs, set_scope)`` — `installs` records (vm, scope, ssh_port) per
+    `hostwall.install`, `set_scope` is what the VM's pid resolves to in /proc."""
+    be, guest, set_wall, guest_ok = lima_env
+    set_wall(True)
+    guest_ok()
+    be._provision = machine.provision_id()
+    be._pid, be._ssh_port = 4242, 45285
+    monkeypatch.setattr(machine.config, "machine_host_wall", lambda: True)
+    monkeypatch.setattr(machine.hostwall, "available", lambda: True)
+    monkeypatch.setattr(machine.hostwall, "resolvers", lambda: ("127.0.0.53",))
+    installs: list[tuple[str, str, int]] = []
+    scope = {"path": ""}
+    monkeypatch.setattr(machine.hostwall, "vm_cgroup_scope", lambda pid: scope["path"])
+
+    def install(vm, sc, port, resolvers):
+        installs.append((vm, sc, port))
+        return True
+
+    monkeypatch.setattr(machine.hostwall, "install", install)
+
+    def set_scope(path):
+        scope["path"] = path
+
+    set_scope(_OWN_SCOPE)
+    return be, guest, installs, set_scope
+
+
+def test_host_wall_start_runs_the_vm_in_its_own_scope(host_wall_env, tmp_path):
+    be, _guest, installs, _ = host_wall_env
+    be._state = "stopped"
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    prefix = " ".join(machine.hostwall.scoped_argv_prefix("homelab"))
+    assert be.calls == [f"start:homelab under {prefix}"]
+    # …and the wall is rendered for where the VM landed, with THIS boot's SSH port
+    assert installs == [("homelab", _OWN_SCOPE, 45285)]
+
+
+def test_host_wall_is_reloaded_on_every_steady_state_up(host_wall_env, tmp_path):
+    # The table can't be read back without root, and re-loading is an idempotent replace — so
+    # a steady-state `fy up` re-applies it, the way the guest re-applies its wall at each boot.
+    be, guest, installs, _ = host_wall_env
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == []
+    assert len(installs) == 1 and guest.reads == 1
+
+
+def test_host_wall_refuses_a_vm_outside_its_own_scope(host_wall_env, tmp_path, capsys):
+    # Started by hand, or before host_wall was turned on: QEMU sits in the login session's
+    # scope. Walling THAT would wall the operator's whole shell — refuse and say how to fix.
+    _be, _guest, installs, set_scope = host_wall_env
+    set_scope("user.slice/user-1000.slice/session-2.scope")
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert installs == []
+    assert "fy machine stop && fy up" in capsys.readouterr().err
+
+
+def test_host_wall_refuses_when_the_vm_pid_is_unknown(host_wall_env, tmp_path):
+    _be, _guest, installs, set_scope = host_wall_env
+    set_scope("")  # no pid file → no cgroup line: nothing to place, so nothing safe to match
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert installs == []
+
+
+def test_host_wall_refuses_when_the_ssh_port_is_unknown(host_wall_env, tmp_path, capsys):
+    be, _guest, installs, _ = host_wall_env
+    be._ssh_port = 0
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert installs == [] and "SSH port" in capsys.readouterr().err
+
+
+def test_host_wall_asked_for_on_a_host_that_cannot_enforce_it_is_a_hard_stop(
+    host_wall_env, monkeypatch, tmp_path, capsys
+):
+    _be, _guest, installs, _ = host_wall_env
+    monkeypatch.setattr(machine.hostwall, "available", lambda: False)
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert installs == [] and "nft" in capsys.readouterr().err
+
+
+def test_host_wall_load_failure_is_a_hard_stop(host_wall_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(machine.hostwall, "install", lambda *a: False)
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+
+
+def test_host_wall_off_starts_unscoped_and_loads_nothing(lima_env, monkeypatch, tmp_path):
+    be, _guest, set_wall, guest_ok = lima_env
+    set_wall(True)
+    guest_ok()
+    be._provision = machine.provision_id()
+    be._state = "stopped"
+    monkeypatch.setattr(machine.config, "machine_host_wall", lambda: False)
+    monkeypatch.setattr(machine.hostwall, "install", lambda *a: pytest.fail("must not load"))
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == ["start:homelab"]
+
+
+def test_host_wall_is_reapplied_after_a_revive(host_wall_env, tmp_path):
+    be, _guest, installs, _ = host_wall_env
+    be._responsive = False
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert any(c.startswith("start:homelab under") for c in be.calls)
+    assert len(installs) == 1
+
+
+def test_delete_removes_the_host_wall_table(host_wall_env, monkeypatch, tmp_path):
+    be, _guest, _installs, _ = host_wall_env
+    removed = []
+    monkeypatch.setattr(machine.hostwall, "remove", lambda vm: removed.append(vm) or True)
+    monkeypatch.setattr(machine, "_stop_host_supervisor", lambda: True)
+    assert machine.delete(assume_yes=True) == 0
+    assert removed == ["homelab"]
+    assert be.calls == ["stop:homelab", "remove:homelab"]
+
+
+def test_stop_leaves_the_host_wall_table_in_place(host_wall_env, monkeypatch):
+    # A table matching a scope with no processes is inert, and the next `fy up` re-renders it
+    # (the SSH port changes per boot anyway) — so `stop` needs no second root prompt.
+    monkeypatch.setattr(machine.hostwall, "remove", lambda vm: pytest.fail("must not touch nft"))
+    monkeypatch.setattr(machine, "_stop_host_supervisor", lambda: True)
+    assert machine.stop() == 0

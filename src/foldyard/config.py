@@ -819,6 +819,20 @@ def machine_wall() -> bool:
     return bool(_table("machine").get("wall", False))
 
 
+def machine_host_wall() -> bool:
+    """``[machine].host_wall`` — ALSO enforce the wall on the HOST, matching the VM process's own
+    traffic by its cgroup scope with host nftables (:mod:`foldyard.hostwall`), so a guest-kernel
+    exploit that flushes the in-VM wall still leaves through a host that rejects everything but
+    this project's daemon band. The tier above ``wall``: needs it (preflight enforces), and a host
+    that HAS nftables + cgroup v2 — Linux; asked for on a host that can't deliver it is a hard
+    stop, never a silent downgrade. Loading the table needs root (``sudo nft``) on every ``fy
+    up``. ``MACHINE_HOST_WALL`` env wins (1/true/on/yes ⇒ on)."""
+    env = os.environ.get("MACHINE_HOST_WALL")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "on", "yes")
+    return bool(_table("machine").get("host_wall", False))
+
+
 # Lima's documented guest→host address: the user-mode network's host gateway, which the usernet
 # forwards to the Mac (the same trick gvproxy plays with host.containers.internal, different
 # constant). Lima also writes it into the guest's /etc/hosts as `host.lima.internal`, but that

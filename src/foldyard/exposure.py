@@ -113,6 +113,7 @@ class Exposure:
     # (key, values, fix, origin)
     ignored: list[tuple[str, list[str], str, str]] = field(default_factory=list)
     wall: bool = False
+    host_wall: bool = False  # the same wall enforced on the HOST too (hostwall.py)
     backend: str = ""
     enforcing: bool = False  # the egress wall's allowlist (host-owned)
 
@@ -354,6 +355,7 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
         recommend_origin=_origin(shared, local, "proxy", "recommend"),
         ignored=_ignored(cfg, shared, local),
         wall=config.machine_wall(),
+        host_wall=config.machine_host_wall(),
         backend=config.machine_backend(),
         enforcing=default_deny(),
     )
@@ -452,7 +454,7 @@ def render(exp: Exposure) -> list[str]:
 
     out.append(f"  Not counted — runs in the yard, not on the host: {' · '.join(BOX_SCOPED)}")
     wall = (
-        f"wall ON ({exp.backend})"
+        f"wall ON ({exp.backend}{', host-enforced too' if exp.host_wall else ''})"
         if exp.wall
         else f"wall OFF ({exp.backend}) — proxy routing is cooperative"
     )

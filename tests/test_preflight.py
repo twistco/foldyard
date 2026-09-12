@@ -264,3 +264,31 @@ def test_inherited_lima_without_limactl_aborts_both_launch_verbs(monkeypatch, ca
         preflight.check_or_abort(verb)
     err = capsys.readouterr().err
     assert verb in err and "limactl" in err and 'backend = "native"' in err
+
+
+# ── [machine].host_wall — the host-side cgroup wall (Linux; nft + cgroup v2) ──────────────
+
+
+def test_host_wall_without_the_guest_wall_blocks(monkeypatch):
+    # The host wall is the tier ABOVE the guest wall (it opens the same band the guest wall
+    # expects and nothing else); alone it is a wall with no in-VM counterpart to back-stop.
+    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=False)
+    monkeypatch.setattr(preflight.config, "machine_host_wall", lambda: True)
+    monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
+    assert any("[machine].host_wall" in p and "wall = true" in p for p in preflight.issues())
+
+
+def test_host_wall_on_a_host_that_cannot_enforce_it_blocks(monkeypatch):
+    # Asked for and undeliverable is a hard stop, never a silent downgrade (macOS, or a Linux
+    # host without nftables / cgroup v2).
+    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True)
+    monkeypatch.setattr(preflight.config, "machine_host_wall", lambda: True)
+    monkeypatch.setattr(preflight.hostwall, "available", lambda: False)
+    assert any("[machine].host_wall" in p and "nft" in p for p in preflight.issues())
+
+
+def test_host_wall_with_wall_lima_proxy_and_nft_is_clean(monkeypatch):
+    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True)
+    monkeypatch.setattr(preflight.config, "machine_host_wall", lambda: True)
+    monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
+    assert not any("host_wall" in p for p in preflight.issues())

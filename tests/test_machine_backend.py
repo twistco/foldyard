@@ -528,3 +528,47 @@ def test_backends_without_a_provisionable_guest_record_nothing():
     for be in (mb.get_backend("podman"), mb.get_backend("native")):
         assert be.provision_id("x") == ""
         assert be.set_provision("x", "#!/bin/bash\n# fy-provision y\n") is False
+
+
+# ── the host-side wall's inputs (lima): the VM's host pid + its forwarded SSH port ─────────
+
+
+def test_lima_ssh_port_comes_from_list_json(monkeypatch):
+    rows = _json_lines({"name": "acme", "status": "Running", "sshLocalPort": 45285})
+    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(0, rows))
+    assert mb.LimaBackend().ssh_port("acme") == 45285
+    assert mb.LimaBackend().ssh_port("absent") == 0
+
+
+def test_lima_vm_pid_reads_the_drivers_pid_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(mb.Path, "home", lambda: tmp_path)
+    inst = tmp_path / ".lima" / "acme"
+    inst.mkdir(parents=True)
+    assert mb.LimaBackend().vm_pid("acme") == 0  # stopped: no pid file at all
+    (inst / "ha.pid").write_text("4242\n")
+    assert mb.LimaBackend().vm_pid("acme") == 4242  # the hostagent shares QEMU's cgroup
+    (inst / "qemu.pid").write_text("4343\n")
+    assert mb.LimaBackend().vm_pid("acme") == 4343  # …but the VMM itself is preferred
+    (inst / "qemu.pid").write_text("garbage\n")
+    assert mb.LimaBackend().vm_pid("acme") == 4242
+
+
+def test_backends_without_a_host_wall_input_report_nothing():
+    for be in (mb.PodmanBackend(), mb.NativeBackend()):
+        assert be.vm_pid("x") == 0
+        assert be.ssh_port("x") == 0
+
+
+def test_lima_start_runs_under_the_given_prefix(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return _Proc(0, "")
+
+    monkeypatch.setattr(mb.subprocess, "run", fake_run)
+    monkeypatch.setattr(mb.LimaBackend, "_wait_for_socket", lambda self, name: True)
+    assert mb.LimaBackend().start("acme", prefix=["systemd-run", "--scope"]) is True
+    assert seen["cmd"] == ["systemd-run", "--scope", "limactl", "start", "acme"]
+    assert mb.LimaBackend().start("acme") is True
+    assert seen["cmd"] == ["limactl", "start", "acme"]
