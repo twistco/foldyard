@@ -231,7 +231,7 @@ disk_gib = 60
   and is where essentially every published guest→host escape lives, while a Mac on `vz` runs
   neither QEMU nor KVM. Left unpinned, which one you got depended on an unexamined `runtime.GOOS`
   branch inside Lima. See
-  [firecracker-and-microvm-backends.md](./firecracker-and-microvm-backends.md).
+  [isolation-layers.md](./isolation-layers.md#macos-arm64--the-machine-layer-does-the-work).
 
   `krunkit` (libkrun — a microVM with a Firecracker-derived device model) is never selected
   automatically: it is upstream-experimental, macOS/arm64 only, and needs `brew install krunkit`.

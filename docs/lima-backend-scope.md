@@ -55,7 +55,8 @@ Two things the same pass found that are *not* on the checklist:
   `[machine].vmtype` (config.machine_vmtype → `LimaBackend.resolve_vmtype`), which resolves from
   `limactl info` rather than the OS. `mountType` is still unpinned and inherits Lima's per-driver
   default: virtiofs under vz, **9p under qemu** — which matters the moment a Linux host uses this
-  backend. See [firecracker-and-microvm-backends.md](./firecracker-and-microvm-backends.md).
+  backend. See [isolation-layers.md](./isolation-layers.md#linux--the-machine-layer-is-optional-and-qemu-is-the-price)
+  (and note `virtiofs` cannot be pinned on Linux yet — measured 2026-09-11).
 - **`template://podman` is deprecated** since Lima v2.0 (`template:podman` is the spelling now).
   `LimaBackend.create()` still uses the old form and emits a warning on every creation.
 
