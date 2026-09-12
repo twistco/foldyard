@@ -66,10 +66,11 @@ there are upper bounds; correctness results transfer as they are.
 - **Lima mounts on Linux**: 9p is slow on metadata (4.9 s vs 0.05 s for 3,000 small files); a
   fix is upstream (`virtiofsd` root/file-handle support), or a newer Lima. Re-test when either
   moves.
-- **`③` on Linux**: gVisor is the candidate; what remains is a decision on `host-uds` (the
-  podman socket exposure) and `--ignore-cgroups` for the box, plus a sustained build rather than
-  micro-loops — then an ADR. Not a Linux-support blocker: the product claim without `③` is the
-  same as the Mac's.
+- **`③` on Linux**: gVisor is the candidate and its cost is measured (~3× on git walks, both
+  hosts). `--ignore-cgroups` and `host-uds` are settled (see the ③ row above); what remains is
+  gVisor as the real box runtime (`fy box up` under runsc), a sustained build, and socket
+  narrowing as its precondition — then an ADR. Not a Linux-support blocker: the product claim
+  without `③` is the same as the Mac's.
 - **A CI job on a Linux *host* path** is not possible on GitHub-hosted runners (podman-machine /
   Lima VMs are flaky there — [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml)),
   so the rig stays the validation host for tier 4. Its recipe and its cost are in
