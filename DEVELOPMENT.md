@@ -322,6 +322,16 @@ so that path stays the Mac / nested-KVM-host recipe in
 - **Box creation (`fy box up`/`build`) can't run in-box** — it would recreate the running box.
   `box.py` is golden-tested for command shape; exercise real `up`/`build` on a host or the
   nested rig.
+- **Root in the Lima guest is boot-time only — never `limactl shell … sudo` from the host.** The
+  VM user is the uid the box runs as, and Lima's cloud-init grants it `NOPASSWD:ALL` on EVERY
+  boot (the instance id changes each boot). foldyard's one `provision: mode: system` script
+  (`assets/machine-wall/guest-boot.sh`, recorded in lima.yaml by `machine._record_provisioning`)
+  narrows that grant to `shutdown` and installs the wall as root at each boot; the host then
+  reads the guest's report (`/run/fy-wall/state`, no root needed) and fails closed on a
+  mismatch. Anything new that needs root in the guest goes INTO that script (a new rendered
+  id ⇒ `fy machine stop && fy up`), not into a new sudo call — a sudo path would hand a
+  container escape VM-root again. Lima renders the script as a Go template (`{{.User}}`,
+  `{{.UID}}`), so no other `{{` may appear in it, and `bash -n` gates it in the tests.
 
 ## The example consumer
 

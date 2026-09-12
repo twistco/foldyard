@@ -280,7 +280,7 @@ def _wall_posture(rep: _Report) -> None:
     the refusals are evidence of an outage, not of enforcement. (The wall REJECTs with tcp-reset,
     so a fast refusal remains the expected signature and a long timeout is still suspicious. The
     fuller red-team battery — rootful socket masked, nft-flush denied, host-network egress caught
-    — is the host-side `_wall_vm_state` probe on every `fy up` + example-lima-wall/
+    — is the host-side `_guest_state` probe on every `fy up` + example-lima-wall/
     test_network.sh; the box can't inspect VM-root state from an unprivileged container.)"""
     print("▶ egress wall ([machine].wall — direct egress from the box must be refused)")
 

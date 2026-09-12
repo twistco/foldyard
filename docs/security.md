@@ -124,9 +124,12 @@ will not call that filtering, because it isn't
 
 **Enforcement is `[machine].wall = true`** (Lima backend): a fail-closed firewall provisioned
 into the VM itself, so traffic that ignores the proxy env is *rejected*, not silently missed —
-the proxy becomes the only way out. One residual to know about: QUIC/UDP-443 can bypass a
-CONNECT proxy in cooperative-only setups (the wall closes this); depth on capture modes and
-the wall's rules is in [networking.md](./networking.md).
+the proxy becomes the only way out. It is provisioned at boot, as root, from the host's recorded
+config, and the same boot script removes the VM user's passwordless sudo: root in the guest
+exists only at boot, so a container escape that lands as the VM user cannot flush the wall —
+only a guest-kernel exploit can, and even that reaches no credential. One residual to know
+about: QUIC/UDP-443 can bypass a CONNECT proxy in cooperative-only setups (the wall closes
+this); depth on capture modes and the wall's rules is in [networking.md](./networking.md).
 
 ## `fy verify`: prove it, don't trust it
 

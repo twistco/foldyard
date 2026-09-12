@@ -6,6 +6,9 @@ Backend internals (podman/Lima command shapes) live in test_machine_backend.py."
 
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -35,6 +38,8 @@ class FakeBackend:
         self._responsive_delay = 0
         self._orphans: list[int] = []
         self._stops = True
+        # The boot-provisioning id the backend's stored config carries ("" = none recorded).
+        self._provision = ""
         self.calls: list[str] = []
 
     def supports_concurrent(self):
@@ -84,6 +89,15 @@ class FakeBackend:
 
     def remove(self, name):
         self.calls.append(f"remove:{name}")
+        return True
+
+    def provision_id(self, name):
+        return self._provision
+
+    def set_provision(self, name, script):
+        # the id rides in the script's marker line, as it does in the real lima.yaml
+        self._provision = script.splitlines()[1].split()[-1]
+        self.calls.append(f"provision:{self._provision}")
         return True
 
 
@@ -284,15 +298,22 @@ def test_ensure_fails_loudly_when_the_restart_does_not_revive_the_socket(
     assert "still dead" in err and "machine rm homelab" in err
 
 
-def test_ensure_reasserts_the_wall_after_a_revive(half_started, monkeypatch, tmp_path):
-    # A revived VM is a booted-from-cold VM: it lost any in-VM provisioning, so the wall must be
-    # re-installed exactly as on a normal start (`force`), not skipped because the marker matches.
+def test_ensure_checks_the_guest_provisioning_after_a_revive(half_started, monkeypatch, tmp_path):
+    # A revived VM is a booted-from-cold VM: the boot provisioning (sudo grant dropped, wall)
+    # re-ran as root at that boot, and ensure must read the guest's report of it as on any start.
     be = half_started(name="lima", cli="limactl", concurrent=True)
-    forced: list[bool] = []
-    monkeypatch.setattr(machine, "wall_sync", lambda force=False: forced.append(force) or True)
+    monkeypatch.setattr(machine.config, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(machine.config, "machine_wall", lambda: True)
+    be._provision = machine.provision_id()
+    reads: list[int] = []
+    monkeypatch.setattr(
+        machine,
+        "_guest_state",
+        lambda: (reads.append(1), (machine._provision_want(), True, True))[1],
+    )
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == ["stop:homelab", "reap:homelab", "start:homelab"]
-    assert forced == [True]
+    assert reads == [1]
 
 
 def test_not_running_reason_reports_a_dead_socket_on_a_running_machine(fake):
@@ -359,7 +380,6 @@ def test_delete_stops_the_supervisor_after_removing_the_vm(fake, monkeypatch, tm
     be._state = "stopped"
     stopped: list[bool] = []
     monkeypatch.setattr(machine, "_stop_host_supervisor", lambda: stopped.append(True) or True)
-    monkeypatch.setattr(machine, "_wall_marker", lambda: tmp_path / "machine-wall-homelab")
 
     assert machine.delete(assume_yes=True) == 0
     assert be.calls == ["remove:homelab"]
@@ -382,16 +402,22 @@ def test_recreate_native_backend_refuses_with_native_message(fake, monkeypatch, 
     assert be.calls == []  # refused before any stop/remove/create
 
 
-# ── the in-VM egress wall ([machine].wall — lima only; golden limactl sequences) ───────
+# ── guest boot provisioning: the sudo grant + the egress wall (lima only) ──────────────
+#
+# Root in the guest is BOOT-TIME ONLY: a `provision: mode: system` script recorded in the
+# instance's lima.yaml runs as root on every boot (Lima re-creates cloud-init's NOPASSWD:ALL
+# grant on every boot too — the instance id changes — so the script narrows it each time). The
+# host never runs `sudo` in the guest; it records the script while the VM is stopped and reads
+# the guest's own report of what it applied after boot. So a change needs a restart, and a
+# running VM with stale provisioning is refused — never run unwalled / with the old grant.
 
 
 @pytest.fixture
-def wall_env(fake, monkeypatch, tmp_path):
-    """A running lima machine + tmp state dir + the `_sh` seam captured (rc 0). Returns
-    ``(backend, calls, set_wall, set_vm)`` — ``set_wall(True/False)`` flips the DESIRED wall
-    state; ``set_vm(present, masked)`` sets what the in-VM probe (`_wall_vm_state`) reports.
-    The VM defaults to NOT enforcing (False, False); a test that wants the steady-state fast
-    path to no-op must declare the VM enforcing via ``set_vm(True, True)``."""
+def lima_env(fake, monkeypatch, tmp_path):
+    """A running lima machine whose guest-state probe is a seam. Returns ``(backend, guest,
+    set_wall, guest_ok)``: ``guest`` is what `_guest_state` answers (state text, wall active,
+    rootful socket masked) and counts reads; ``guest_ok()`` makes it report the CURRENT desired
+    provisioning as applied."""
     be = fake(concurrent=True, name="lima", cli="limactl")
     be._exists = True
     be._state = "running"
@@ -399,154 +425,199 @@ def wall_env(fake, monkeypatch, tmp_path):
     monkeypatch.setattr(machine.config, "state_dir", lambda: tmp_path / "state")
     monkeypatch.delenv("FY_PROXY_PORT", raising=False)
     monkeypatch.delenv("GCP_MINTER_PORT", raising=False)
-    calls: list[list[str]] = []
-    monkeypatch.setattr(machine, "_sh", lambda cmd, stdin=None: (calls.append(cmd), 0)[1])
-    vm = {"present": False, "masked": False}
-    monkeypatch.setattr(machine, "_wall_vm_state", lambda: (vm["present"], vm["masked"]))
+
+    class Guest:
+        state = ""
+        active = False
+        masked = False
+        reads = 0
+
+    guest = Guest()
+
+    def _guest_state():
+        guest.reads += 1
+        return (guest.state, guest.active, guest.masked)
+
+    monkeypatch.setattr(machine, "_guest_state", _guest_state)
 
     def set_wall(on: bool) -> None:
         monkeypatch.setattr(machine.config, "machine_wall", lambda: on)
 
-    def set_vm(present: bool, masked: bool) -> None:
-        vm["present"], vm["masked"] = present, masked
+    def guest_ok() -> None:
+        guest.state = machine._provision_want()
+        guest.active = machine.config.machine_wall()
+        guest.masked = True
 
-    return be, calls, set_wall, set_vm
+    return be, guest, set_wall, guest_ok
 
 
-def test_wall_sync_installs_with_gateway_ports_and_proxy_url(wall_env, tmp_path):
-    _, calls, set_wall, _set_vm = wall_env
+def test_provision_script_drops_the_sudo_grant_and_installs_the_wall(lima_env):
+    _, _, set_wall, _ = lima_env
     set_wall(True)
-    assert machine.wall_sync() is True
-    (install,) = calls
-    # The script is STREAMED over stdin (`sudo bash -s --`), never staged in the guest's /tmp
-    # (a swappable staging path would be a root-execution TOCTOU).
-    assert install[:6] == ["limactl", "shell", "homelab", "sudo", "bash", "-s"]
-    assert "/tmp/fy-machine-wall.sh" not in install
-    assert "install" in install
-    assert "192.168.5.2" in install  # the Lima host gateway the wall opens toward
-    # the project's allocated band bases + the full worktree-offset span (disjoint 90-spans)
-    assert "41000-41089, 41100-41189" in install
-    assert "http://192.168.5.2:41000" in install  # VM-level proxy env (pulls/builds) — main port
-    # the marker records the port set too, so a band change re-provisions (not just on/off)
-    assert (
-        tmp_path / "state" / "machine-wall-homelab"
-    ).read_text() == "on 41000-41089, 41100-41189"
+    script = machine.guest_provision_script()
+    assert script.splitlines()[1] == f"# fy-provision {machine.provision_id()}"
+    # 1. cloud-init's NOPASSWD:ALL becomes Lima's own non-passwordless form (a graceful
+    #    `limactl stop` still runs shutdown) — the VM user, i.e. the box's uid, gets no root.
+    assert "/etc/sudoers.d/90-cloud-init-users" in script
+    assert "NOPASSWD:/sbin/shutdown -h now" in script
+    # 2. the wall asset is embedded, so the guest installs it root-owned — never from the mount
+    assert "table inet fy_wall" in script
+    # 3. installed with the gateway, THIS project's band, and the main proxy URL; the walled uid
+    #    is the guest's own record of the Lima user, not a host guess
+    assert "install 192.168.5.2 '41000-41089, 41100-41189' http://192.168.5.2:41000" in script
+    assert "uid='{{.UID}}'" in script and 'FY_WALL_UID="$uid"' in script
+    # 4. the guest records what it applied where the host can read it WITHOUT root
+    assert "/run/fy-wall/state" in script
+    assert "wall on 41000-41089, 41100-41189" in script
 
 
-def test_wall_sync_skips_when_marker_matches_and_vm_enforces_then_force_reruns(wall_env):
-    _, calls, set_wall, set_vm = wall_env
+@pytest.mark.parametrize("wall", [True, False])
+def test_provision_script_is_valid_bash(lima_env, wall):
+    # `bash -n` — the first live run died on an apostrophe inside a `${x:?message}` (a quoting
+    # error bash reports only at the END of the file), so the guest never wrote its report and
+    # ensure failed closed. Cheap to catch here, on any host with bash.
+    if shutil.which("bash") is None:
+        pytest.skip("no bash on this host")
+    _, _, set_wall, _ = lima_env
+    set_wall(wall)
+    script = machine.guest_provision_script()
+    res = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+    assert res.returncode == 0, res.stderr
+
+
+def test_provision_script_uses_only_limas_template_fields(lima_env):
+    # Lima renders the script as a Go template at every start (`{{.User}}`, `{{.UID}}` are how a
+    # provision script learns the guest user — its LIMA_CIDATA_* env is internal, and referencing
+    # it draws a warning on every limactl call). So `{{` anywhere else — e.g. in the embedded wall
+    # asset — would break the render, and the guest would boot without provisioning.
+    _, _, set_wall, _ = lima_env
     set_wall(True)
-    assert machine.wall_sync() is True
-    set_vm(True, True)  # VM now actually enforcing with the rootful socket masked
-    calls.clear()
-    assert machine.wall_sync() is True
-    assert calls == []  # marker matches AND the VM confirms — no limactl on the fast path
-    assert machine.wall_sync(force=True) is True
-    assert [c for c in calls if "install" in c]  # force re-provisions (self-heal)
+    script = machine.guest_provision_script()
+    assert set(re.findall(r"\{\{.*?\}\}", script)) == {"{{.User}}", "{{.UID}}"}
+    assert "LIMA_CIDATA" not in script
 
 
-def test_wall_sync_reprovisions_when_marker_says_on_but_vm_is_not_enforcing(wall_env):
-    # The #3 fix: an out-of-band `limactl delete`/factory-reset drops the nft rules while the
-    # host marker still reads "on <ports>". Trusting the marker would leave the VM UNWALLED;
-    # the in-VM probe catches it and re-provisions.
-    _, calls, set_wall, set_vm = wall_env
-    set_wall(True)
-    machine.wall_sync()
-    set_vm(False, False)  # VM lost the wall behind foldyard's back; marker still "on"
-    calls.clear()
-    assert machine.wall_sync() is True
-    assert [c for c in calls if "install" in c]  # re-provisioned despite the matching marker
-
-
-def test_wall_sync_reprovisions_and_warns_when_rootful_socket_unmasked(wall_env, capsys):
-    # The #4 regression: the wall is loaded but the rootful podman.socket got re-enabled — the
-    # container-root→VM-root bypass. The probe flags it and re-provisions (which re-masks).
-    _, calls, set_wall, set_vm = wall_env
-    set_wall(True)
-    machine.wall_sync()
-    set_vm(True, False)  # table present, but the rootful socket is NOT masked
-    calls.clear()
-    assert machine.wall_sync() is True
-    assert [c for c in calls if "install" in c]
-    assert "rootful podman.socket is NOT masked" in capsys.readouterr().err
-
-
-def test_wall_sync_off_uninstalls_when_vm_still_enforces_despite_absent_marker(wall_env):
-    # The #8 fix: a wiped state_dir loses the marker while the VM's persistent fy-wall.service
-    # keeps enforcing. Desired=off + absent marker must PROBE and uninstall, not assume clean.
-    _, calls, set_wall, set_vm = wall_env
+def test_provision_script_wall_off_still_drops_the_sudo_grant(lima_env):
+    _, _, set_wall, _ = lima_env
     set_wall(False)
-    set_vm(True, True)  # marker absent (fresh tmp state), but the VM still has the wall
-    assert machine.wall_sync() is True
-    assert any("uninstall" in c for c in calls)
+    script = machine.guest_provision_script()
+    assert "NOPASSWD:/sbin/shutdown -h now" in script
+    assert "fy-machine-wall uninstall" in script
+    assert "wall off" in script
 
 
-def test_wall_sync_reprovisions_when_the_port_band_changes(wall_env, monkeypatch):
-    # The marker records the PORT SET, not just on/off — a moved band (registry edit, env
-    # override) must re-provision, or the VM keeps nft ranges nothing listens on.
-    _, calls, set_wall, _set_vm = wall_env
+def test_provision_id_changes_with_the_port_band(lima_env, monkeypatch):
+    # A moved band (registry edit, env override) is a different script — the VM keeps nft
+    # ranges nothing listens on otherwise.
+    _, _, set_wall, _ = lima_env
     set_wall(True)
-    assert machine.wall_sync() is True
-    calls.clear()
+    before = machine.provision_id()
     monkeypatch.setenv("FY_PROXY_PORT", "42000")
     monkeypatch.setenv("GCP_MINTER_PORT", "42100")
-    assert machine.wall_sync() is True
-    install = [c for c in calls if "install" in c]
-    assert install and "42000-42089, 42100-42189" in install[0]
-    assert "http://192.168.5.2:42000" in install[0]
+    assert machine.provision_id() != before
+    assert "42000-42089, 42100-42189" in machine.guest_provision_script()
 
 
-def test_wall_sync_uninstalls_when_flipped_off(wall_env, tmp_path):
-    _, calls, set_wall, _set_vm = wall_env
-    set_wall(True)
-    machine.wall_sync()
-    calls.clear()
-    set_wall(False)
-    assert machine.wall_sync() is True
-    assert any("uninstall" in c for c in calls)
-    assert (tmp_path / "state" / "machine-wall-homelab").read_text() == "off"
-
-
-def test_wall_sync_off_never_installed_touches_nothing_in_vm(wall_env, tmp_path):
-    _, calls, set_wall, _set_vm = wall_env
-    set_wall(False)
-    assert machine.wall_sync() is True
-    assert calls == []  # nothing was ever installed — no limactl at all
-    assert (tmp_path / "state" / "machine-wall-homelab").read_text() == "off"
-
-
-def test_wall_sync_warns_and_noops_on_non_lima(fake, monkeypatch, capsys):
-    fake(concurrent=False, name="podman", cli="podman")
-    monkeypatch.setattr(machine.config, "machine_wall", lambda: True)
-    calls: list[list[str]] = []
-    monkeypatch.setattr(machine, "_sh", lambda cmd, stdin=None: (calls.append(cmd), 0)[1])
-    assert machine.wall_sync() is True  # never blocks `up` here — preflight owns that error
-    assert calls == []
-    assert "lima-only" in capsys.readouterr().err
-
-
-def test_ensure_on_fresh_lima_machine_provisions_the_wall(wall_env, tmp_path):
-    # The wiring: a just-created machine gets the wall before anything else touches it.
-    be, calls, set_wall, _set_vm = wall_env
+def test_ensure_records_provisioning_before_the_first_boot(lima_env, tmp_path):
+    be, guest, set_wall, guest_ok = lima_env
     be._exists = False
     be._state = "stopped"
     set_wall(True)
+    guest_ok()
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    assert be.calls == ["create:homelab", "start:homelab"]
-    assert any("install" in c for c in calls)
+    assert be.calls == ["create:homelab", f"provision:{machine.provision_id()}", "start:homelab"]
+    assert guest.reads == 1  # …and the guest's report was checked after the boot
 
 
-def test_ensure_reasserts_the_wall_on_every_machine_start(wall_env, tmp_path):
-    # Self-healing: a start transition re-runs the idempotent install even when the marker
-    # already says "on" (a VM tampered with / drifted while stopped gets re-walled on boot).
-    be, calls, set_wall, _set_vm = wall_env
-    set_wall(True)
-    machine.wall_sync()  # marker now "on"
-    calls.clear()
+def test_ensure_updates_stale_provisioning_on_a_stopped_machine(lima_env, tmp_path):
+    be, _guest, set_wall, guest_ok = lima_env
     be._state = "stopped"
+    be._provision = "stale"
+    set_wall(True)
+    guest_ok()
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    assert be.calls == ["start:homelab"]
-    assert any("install" in c for c in calls)
+    assert be.calls == [f"provision:{machine.provision_id()}", "start:homelab"]
+
+
+def test_ensure_refuses_a_running_machine_whose_provisioning_is_stale(lima_env, tmp_path, capsys):
+    # Provisioning applies at BOOT (it is what runs as root), so a change — the wall flipped, a
+    # moved band, or a VM created before the sudo grant was dropped — needs a restart. Fail
+    # closed rather than run unwalled / with the old grant, and say exactly what to do.
+    be, guest, set_wall, _guest_ok = lima_env
+    be._provision = "stale"
+    set_wall(True)
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == []
+    assert guest.reads == 0
+    assert "fy machine stop" in capsys.readouterr().err
+
+
+def test_ensure_steady_state_only_reads_the_guest(lima_env, tmp_path):
+    be, guest, set_wall, guest_ok = lima_env
+    set_wall(True)
+    be._provision = machine.provision_id()
+    guest_ok()
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == []
+    assert guest.reads == 1  # one `limactl shell` per steady-state `fy up`: correctness over speed
+
+
+@pytest.mark.parametrize(
+    "state, active, masked, why",
+    [
+        ("wall off", True, True, "an older/failed boot script left a different state"),
+        ("", False, False, "no report at all — the script never ran"),
+        (None, False, True, "the wall unit is not active (tampered / failed)"),
+        (None, True, False, "the rootful podman.socket is unmasked (container-root → VM-root)"),
+    ],
+)
+def test_ensure_fails_when_the_guest_did_not_apply_the_provisioning(
+    lima_env, tmp_path, capsys, state, active, masked, why
+):
+    be, guest, set_wall, _guest_ok = lima_env
+    set_wall(True)
+    be._provision = machine.provision_id()
+    guest.state = machine._provision_want() if state is None else state
+    guest.active, guest.masked = active, masked
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert "provision" in capsys.readouterr().err, why
+
+
+def test_ensure_wall_off_does_not_require_the_rootful_socket_masked(lima_env, tmp_path):
+    be, guest, set_wall, _guest_ok = lima_env
+    set_wall(False)
+    be._provision = machine.provision_id()
+    guest.state, guest.active, guest.masked = machine._provision_want(), False, False
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == []
+
+
+def test_non_lima_backends_are_not_provisioned(fake, monkeypatch, tmp_path):
+    # podman-machine's appliance can't be provisioned and native has no VM: nothing to record,
+    # nothing to read — and never an error here (preflight owns the "wall needs lima" error).
+    be = fake(concurrent=False, name="podman", cli="podman")
+    be._exists = True
+    be._state = "running"
+    monkeypatch.setattr(machine.config, "in_box", lambda: False)
+    monkeypatch.setattr(machine.config, "machine_wall", lambda: True)
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == []
+
+
+def test_recreate_provisions_the_fresh_machine_before_its_first_boot(lima_env, tmp_path):
+    be, _guest, set_wall, guest_ok = lima_env
+    set_wall(True)
+    guest_ok()
+    assert machine.recreate(tmp_path / "repo", tmp_path / "repo-wt", assume_yes=True) == 0
+    assert be.calls == [
+        "stop:homelab",
+        "remove:homelab",
+        "create:homelab",
+        f"provision:{machine.provision_id()}",
+        "start:homelab",
+    ]
 
 
 def test_wall_asset_script_shape():
@@ -658,17 +729,15 @@ def test_delete_noop_when_machine_absent(fake, monkeypatch, capsys):
     assert "does not exist" in capsys.readouterr().out
 
 
-def test_delete_stops_removes_and_clears_the_wall_marker(fake, monkeypatch, tmp_path, capsys):
+def test_delete_stops_then_removes_a_lima_machine(fake, monkeypatch, tmp_path, capsys):
+    # The boot provisioning (wall + sudo grant) is recorded IN the instance config, so removing
+    # the VM removes it — there is no host-side wall state left to clear.
     be = fake(concurrent=True, available=True, name="lima", cli="limactl")
     be._exists = True
     be._state = "running"
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
-    monkeypatch.setattr(machine.config, "state_dir", lambda: tmp_path)
-    marker = tmp_path / "machine-wall-homelab"
-    marker.write_text("on 41000-41089")  # host-side wall state must not outlive the VM
     assert machine.delete(assume_yes=True) == 0
     assert be.calls == ["stop:homelab", "remove:homelab"]
-    assert not marker.exists()
     assert "deleted" in capsys.readouterr().out
 
 

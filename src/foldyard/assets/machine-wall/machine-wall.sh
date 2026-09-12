@@ -1,10 +1,11 @@
 #!/bin/bash
 # fy machine wall — the nftables egress wall for the REAL lima machine VM.
 #
-# Runs INSIDE the guest as root (machine.py streams it over stdin via
-# `limactl shell <name> sudo bash -s -- …` — never staged in the guest's /tmp, so a
-# non-root guest process can't swap the file between copy and root execution). NOT the
-# standalone proof rig — that lives at
+# Runs INSIDE the guest as root, at BOOT: foldyard's boot provisioning (`guest-boot.sh`,
+# recorded in the instance's lima.yaml; Lima runs it as root on every boot) installs this file
+# root-owned at /usr/local/libexec/fy-machine-wall from its own embedded copy — never from the
+# repo mount, never via sudo from the VM user, who has no sudo (the same boot script narrows
+# Lima's grant to `shutdown` only). NOT the standalone proof rig — that lives at
 # docs/lima-network-forcing-kit/ (its own throwaway VM + red-team battery; the packaged
 # `fy wall` verb was retired). This script enforces the SAME model on
 # the project's real machine, with one architectural difference: there is NO in-VM proxy. The
@@ -18,12 +19,14 @@
 # as the user's own uid, so the uid rule catches it; but a `--network=host` container process
 # running as a non-root CONTAINER user egresses with a host-visible SUBUID (no pasta NAT hop), so
 # the wall must default-deny the subuid range too — else `podman run --network=host --user 1000 …`
-# tunnels straight past it. The moat: the user has no path to VM-root beyond sudo… which Lima
-# grants — so the wall is enforcement against the BOX (whose container has no sudo/rootful socket),
-# and defense-in-depth for the VM user. The security argument is ADR-0009: no in-VM wall holds
-# against VM-root; the backstop is the Mac-side chokepoint.
+# tunnels straight past it. The moat: the user has NO path to VM-root — Lima's passwordless
+# sudo grant is narrowed to `shutdown` at every boot — so the wall is enforcement against the
+# box AND against a container escape that lands as the VM user; only a guest-KERNEL exploit
+# reaches VM-root. The security argument is ADR-0009: no in-VM wall holds against VM-root; the
+# backstop is the host-side chokepoint, which holds no less for it.
 #
-# Usage (all as root in the guest):
+# Usage (as root in the guest; the walled uid comes from FY_WALL_UID, which the boot script
+# sets from Lima's own record of the user — SUDO_UID is the fallback for a manual run):
 #   machine-wall.sh install <host_gateway_ip> "<tcp_port_ranges>" <proxy_url>
 #       e.g. install 192.168.5.2 "41000-41089, 41100-41189" http://192.168.5.2:41000
 #       (the ranges/URL are the project's allocated daemon port band — foldyard's ports.py)

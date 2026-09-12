@@ -116,40 +116,55 @@ ignores `HTTPS_PROXY` egresses direct. The wall makes lima **fail-closed**:
     `$GW` from there. VM-level operations use the MAIN proxy port; each box gets its per-worktree
     `FY_PROXY`.
   - systemd `fy-wall.service` (oneshot nft load) → survives VM restarts.
-- `machine.wall_sync()` reconciles on `ensure`/`recreate`: every machine create/START re-runs the
-  idempotent install (self-healing — a drifted/tampered wall is re-asserted on the next boot). The
-  **VM is the source of truth**, not the host marker: `_wall_vm_state()` probes the running VM
-  (is `fy_wall` loaded? is the rootful `podman.socket` masked?) on each sync, so an out-of-band
-  `limactl delete`/factory-reset that drops the rules — or a re-enabled rootful socket — is caught
-  and re-provisioned instead of trusting a stale `on` marker (a 2026-07 review finding; the marker
-  now only fast-paths the ports/config-flip check, it never certifies live state). The desired-off
-  path likewise probes-then-uninstalls when a wiped `state_dir` left the marker absent while
-  `fy-wall.service` kept enforcing. There is deliberately NO separate CLI verb — toggling the wall
-  IS editing `foldyard.toml` + `fy up`; in-VM status/diagnosis lives in
-  `example-lima-wall/test_network.sh` (host-run, `limactl shell` is right there).
+- **Provisioned at BOOT, as root, from the host's config — the host never runs `sudo` in the
+  guest (2026-09-11).** `machine.ensure`/`recreate` record ONE `provision: mode: system` script
+  (`assets/machine-wall/guest-boot.sh`, with `machine-wall.sh` embedded) in the instance's
+  lima.yaml via `limactl edit --set`, which refuses a running instance; Lima runs it as root on
+  every boot, after cloud-init. The script narrows Lima's passwordless sudo grant to `shutdown`
+  only (cloud-init re-creates `NOPASSWD:ALL` on every boot — the instance id changes each boot —
+  so this too runs every boot), installs the wall root-owned from its own embedded copy (never
+  from the repo mount), applies `install …`/`uninstall`, and writes what it applied to
+  `/run/fy-wall/state`, world-readable. The **guest's own report is the source of truth**: after
+  every start, and once per steady-state `fy up`, `_guest_state()` reads that file plus
+  `systemctl is-active fy-wall.service` and `is-enabled podman.socket` — none needs root — and a
+  mismatch (a reset VM, a failed boot script, a re-enabled rootful socket) fails `ensure` closed
+  with `limactl shell <name> cat /run/fy-wall/boot.log` as the recourse. There is no host-side
+  marker any more. A change — the wall flipped, a moved band, a VM created before the grant was
+  dropped — is a different script id, and a RUNNING VM whose recording is stale is refused:
+  `fy machine stop && fy up`. That restart is the price of "root only at boot"; bands are sticky,
+  so it is rare. There is deliberately NO separate CLI verb — toggling the wall IS editing
+  `foldyard.toml` + that restart; in-VM diagnosis is the boot log above and
+  `example-lima-wall/test_network.sh`.
 - `fy verify` (in-box, when lima+wall): raw proxy-ignoring connects to `1.1.1.1:443` **and
   `1.1.1.1:53`** must both be REFUSED — the fail-closed probe plus the port-53-tunnel probe. (The
   box is an unprivileged container, so it can't inspect VM-root invariants — those live in the
-  host-side `_wall_vm_state` probe + `test_network.sh`'s C battery.)
+  host-side `_guest_state` check + `test_network.sh`'s C battery.)
 
 **Security posture (matches the spike's conclusion, HANDOVER: "the backstop is a chokepoint
 outside the VM"):** real credentials stay on the Mac, period. A VM-root escalation can flush the
 wall (defense-in-depth, not the moat) but steals no creds; the box container itself has no sudo
-/ rootful socket, so for the *agent* the wall is enforcement. **Known residual (documented, not
-yet closed):** the fuller red-team battery (walled user can't `nft flush`, no path to VM-root
-beyond Lima's sudo grant) runs only in `test_network.sh` / the standalone kit — `fy verify` and
-`_wall_vm_state` cover the highest-value invariants (direct + `:53` egress refused, rules loaded,
-rootful socket masked) but not the whole battery, because an unprivileged box can't and a per-`fy
-up` host probe shouldn't run the destructive checks.
+/ rootful socket, so for the *agent* the wall is enforcement. **The VM user has no path to
+VM-root either (closed 2026-09-11):** Lima's passwordless sudo grant — which made a
+container-runtime escape landing as the VM user one `sudo nft flush ruleset` from open egress —
+is narrowed to `shutdown` at every boot by the same script that installs the wall. Only a
+guest-KERNEL exploit reaches VM-root now, and even that steals no credentials. Validated live on
+macOS (Lima/vz): `sudo -n true` → "a password is required", `sudo -l` lists shutdown only, the
+wall active, direct egress rejected. **Known residual:** the fuller red-team battery (walled user
+can't `nft flush`, the subuid bypass) runs only in `test_network.sh` / the standalone kit —
+`fy verify` and `_guest_state` cover the highest-value invariants (direct + `:53` egress refused,
+the guest's applied state, rootful socket masked) but not the whole battery, because an
+unprivileged box can't and a per-`fy up` host check shouldn't run the destructive checks.
 
 ## Validated where?
 
 Unit/golden coverage: `test_config` (host_alias/machine_wall), `test_plugins` (lima derive_env),
 `test_preflight` (block matrix + the nested-project trap + inject-only proxy routing + the
-worktree-offset ≤89 guard), `test_machine` (wall_sync limactl sequences + self-heal-on-start +
-band-change re-provision + the VM-truth probes: reprovision when the marker lies, warn+reprovision
-on an unmasked rootful socket, uninstall a still-enforcing VM despite an absent marker + asset
-shape), `test_machine_backend` (memory-MiB sizing), `test_proxy_inject` (keyless always decrypts,
+worktree-offset ≤89 guard), `test_machine` (boot provisioning: the rendered script drops the
+sudo grant + installs/uninstalls the wall, `bash -n` clean, only Lima's template fields; recorded
+before the first boot, updated on a stopped VM, a running stale VM refused, the guest's report
+checked after every start and on the steady state, fails closed on a missing/mismatched report,
+an inactive unit or an unmasked rootful socket + asset shape), `test_machine_backend`
+(memory-MiB sizing, the `limactl edit --set` recording + marker read), `test_proxy_inject` (keyless always decrypts,
 even vs an explicit passthrough listing), `test_verify` (wall posture: 443 + the `:53` exfil
 probe), `test_ports` (band allocation + config derivations), `test_supervisor` (the project-scoped
 orphan-reaper, incl. the prefix-collision guard), `test_box` (the stale-proxy-port recreate nag),

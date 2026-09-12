@@ -135,6 +135,17 @@ class Backend(ABC):
     def mounts(self, name: str) -> list[str]:
         """The VM's mount targets — for the worktrees-mount drift warning."""
 
+    def provision_id(self, name: str) -> str:
+        """The id of foldyard's boot-provisioning script as RECORDED in the VM's stored config
+        (``""`` = none). Only a backend whose guest foldyard provisions at boot (Lima) has one;
+        the id is what :mod:`foldyard.machine` compares against the script it wants."""
+        return ""
+
+    def set_provision(self, name: str, script: str) -> bool:
+        """Record ``script`` as the VM's root boot script — the VM must be stopped. False where
+        the guest cannot be provisioned at all (podman-machine's appliance; native's no-VM)."""
+        return False
+
     @abstractmethod
     def socket(self, name: str) -> str:
         """The VM's libpod socket as a ``unix://`` URI (assumes the VM exists)."""
@@ -507,6 +518,38 @@ class LimaBackend(Backend):
                     if val:
                         targets.append(val)
         return targets
+
+    # First line after the shebang of foldyard's boot script; lima.yaml carries it verbatim
+    # inside the `script: |` block, so a line scan (no YAML parser) finds it.
+    _PROVISION_MARKER = "# fy-provision "
+
+    def provision_id(self, name: str) -> str:
+        cfg = Path.home() / ".lima" / name / "lima.yaml"
+        try:
+            text = cfg.read_text()
+        except OSError:
+            return ""
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith(self._PROVISION_MARKER):
+                return s[len(self._PROVISION_MARKER) :].strip()
+        return ""
+
+    def set_provision(self, name: str, script: str) -> bool:
+        """``limactl edit --set``: drop any earlier foldyard entry (matched by its marker line)
+        and append this one as ``mode: system`` — Lima runs those as ROOT on every boot, after
+        cloud-init and the template's own provisioning. ``edit`` refuses a running instance,
+        which is the contract: a provisioning change needs a restart to apply."""
+        keep = (
+            '(.provision // [])[] | select((.script // "") | '
+            f"test({json.dumps(self._PROVISION_MARKER)}) | not)"
+        )
+        # UTF-8 intact: a `\uXXXX` escape lands in lima.yaml verbatim (yq keeps it), and the
+        # guest would then echo the escape instead of the wall script's glyphs.
+        entry = f'{{"mode": "system", "script": {json.dumps(script, ensure_ascii=False)}}}'
+        expr = f".provision = ([{keep}] + [{entry}])"
+        cmd = ["limactl", "edit", "--tty=false", name, "--set", expr]
+        return subprocess.run(cmd).returncode == 0
 
     def socket(self, name: str) -> str:
         """SPIKE: Lima's podman template forwards the guest libpod socket to

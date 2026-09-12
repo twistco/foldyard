@@ -478,3 +478,53 @@ def test_unlink_dead_sockets_spares_live_ones_the_log_and_a_sibling_machine(
 def test_unlink_dead_sockets_noop_when_the_api_path_is_unknown(monkeypatch, tmp_path):
     monkeypatch.setattr(mb, "_run", _with_config(tmp_path, sock=""))
     mb.PodmanBackend()._unlink_dead_sockets("tng")  # must not raise
+
+
+# ── boot provisioning (lima): recorded in the stored config, applied by Lima at every boot ──
+
+
+def test_lima_set_provision_edits_the_stopped_instance_with_yq(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, *a, **k):
+        seen["cmd"] = cmd
+        return _Proc(0)
+
+    monkeypatch.setattr(mb.subprocess, "run", fake_run)
+    script = "#!/bin/bash\n# fy-provision abc123\necho ✓ hi\n"  # the wall asset has such glyphs
+    assert mb.LimaBackend().set_provision("acme", script) is True
+    cmd = seen["cmd"]
+    assert cmd[:4] == ["limactl", "edit", "--tty=false", "acme"]  # edit refuses a RUNNING VM
+    expr = cmd[cmd.index("--set") + 1]
+    # replaces any previous foldyard entry (never stacks them) and appends this one as a root
+    # boot script — Lima's `mode: system` runs on every boot
+    assert '"mode": "system"' in expr
+    assert "fy-provision" in expr and "select(" in expr
+    # the script travels as a JSON string literal, UTF-8 intact — a `\uXXXX` escape lands in
+    # lima.yaml VERBATIM (yq keeps it), so the guest would echo the escape, not the glyph
+    assert json.dumps(script, ensure_ascii=False) in expr
+    assert "\\u2713" not in expr
+
+
+def test_lima_set_provision_reports_failure(monkeypatch):
+    monkeypatch.setattr(mb.subprocess, "run", lambda *a, **k: _Proc(1))
+    assert mb.LimaBackend().set_provision("acme", "#!/bin/bash\n# fy-provision x\n") is False
+
+
+def test_lima_provision_id_reads_the_marker_from_the_stored_config(monkeypatch, tmp_path):
+    home = tmp_path
+    inst = home / ".lima" / "acme"
+    inst.mkdir(parents=True)
+    (inst / "lima.yaml").write_text(
+        "provision:\n- mode: system\n  script: |\n    #!/bin/bash\n"
+        "    # fy-provision abc123\n    echo hi\n"
+    )
+    monkeypatch.setattr(mb.Path, "home", staticmethod(lambda: home))
+    assert mb.LimaBackend().provision_id("acme") == "abc123"
+    assert mb.LimaBackend().provision_id("nope") == ""  # no config → nothing recorded
+
+
+def test_backends_without_a_provisionable_guest_record_nothing():
+    for be in (mb.get_backend("podman"), mb.get_backend("native")):
+        assert be.provision_id("x") == ""
+        assert be.set_provision("x", "#!/bin/bash\n# fy-provision y\n") is False
