@@ -116,8 +116,10 @@ provisioned with the fail-closed wall. Other backends, and when to pick them, ar
 ## Status
 
 The engine runs daily on Macs with a production project, but has only been lightly tested on
-other repos, treat it as alpha quality for now. Other platforms (Linux and WSL2) are planned,
-but currently not supported. Brave testers and issues very welcome!
+other repos, treat it as alpha quality for now. A Linux host is partly validated — the machine
+VM, `verify`, both walls — but not the daily `fy up` loop, and WSL2 is unmeasured; what has and
+has not been run there is tracked in [docs/linux-support.md](./docs/linux-support.md). Brave
+testers and issues very welcome!
 
 ## More info
 
