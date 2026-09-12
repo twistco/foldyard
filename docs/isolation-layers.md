@@ -545,6 +545,50 @@ whether `--ignore-cgroups` (which the box needs, and which drops podman's per-co
 limits) is acceptable, the `host-uds=all` socket exposure, and a sustained build rather than
 micro-loops. But on cost alone gVisor clears the bar libkrun could not.
 
+**Confirmed on the Mac — arm64 / vz (2026-09-12).** The whole reason gVisor was picked up is that
+the Mac has fewer options than Linux (no `③` microVM without nested KVM on M1/M2), so the question
+was whether it runs, and at what cost, on a real M3 inside a Lima/vz VM — not just on the x86 rig.
+It does. `runsc` release-20260817.0 runs rootless under podman 5.8.1 with the same wrapper
+(`--ignore-cgroups`, `--allow-flag-override`) and `--security-opt label=disable`, guest kernel
+`4.19.0-gvisor`. Measured in a throwaway Fedora-44 arm64 VM against a real foldyard checkout on a
+read-only bind mount:
+
+| workload | crun | runsc systrap (directfs on) | runsc directfs **off** |
+| --- | --- | --- | --- |
+| `git status` ×200 | 1.72 s | **4.59 s (2.7×)** | 15.1 s (8.8×) |
+| `git grep` ×100 | 0.46 s | **1.46 s (3.2×)** | — |
+| fork/exec ×2000 (sys) | 0.38 s | 1.83 s (~5×) | — |
+| toolchain install + C-ext compile | 4.96 s | 6.95 s (1.4×) | — |
+| container startup (`run … true`) | 76 ms | 126 ms | — |
+
+So the arm64/vz git-walk is **~3×**, the same order as the x86 rig — *provided directfs is on*,
+which it is by default; forcing it off is 8.8×, so keeping it on is load-bearing (it is the row
+that decides, not a tuning knob). Builds and CPU work are ~1.4× or better. Two of the three
+"still unsettled" items above are now answered, both on the Mac:
+
+- **`--ignore-cgroups` costs nothing real here.** It drops podman's *per-container* resource
+  limits, and the box sets none (`box.py` passes no `--memory`/`--cpus`/`--pids-limit`); the VM's
+  own sizing is the ceiling. The flag is needed only because rootless podman otherwise has runsc
+  try to make a systemd scope over the system bus and refuses.
+- **`host-uds=all` is the unfiltered socket — the door, demonstrated.** With the flag the
+  bind-mounted podman socket connects (the default refuses); without it the box can't drive the
+  engine at all, so the box needs it. But from inside a gVisor container holding that socket, a
+  `podman --remote run --privileged -v /:/host` sibling started, ran under the **VM** kernel (not
+  gVisor), and listed the VM's home. So `③` via gVisor does **not** remove the socket hole:
+  `host-uds=all` hands over the full API, and an unconfined privileged sibling is one call away.
+  **Socket narrowing is a precondition for `③`, not an alternative to it** — the two close
+  different holes (kernel-exploit vs. by-design API), and gVisor's netstack (host loopback
+  unreachable) does not substitute for the API filter.
+- **inotify does not cross the gVisor boundary inward** (same shape as krun): a watcher inside a
+  runsc container saw its own writes but neither VM-side nor host-side writes to the shared mount,
+  while `ls`/stat (revalidation) saw every file immediately. So file-watching dev servers in the
+  box need polling (`CHOKIDAR_USEPOLLING`, `vite --watch` poll, `nodemon -L`, `watchexec --poll`),
+  exactly as the shared-mount model already implies — but it is a caveat to carry into any `③`
+  decision, and a two-way sync (Mutagen-style) would be the alternative if native inotify ever
+  became a hard requirement. Still owed before an ADR: gVisor as the **real box runtime**
+  (`fy box up` under runsc, not a hand-run container) and a long build, on both the rig and the
+  Mac.
+
 ### Bind mounts under krun
 
 uid mapping is the same as crun (guest root = host uid 1000 files); `rw` works. **inotify does
@@ -598,9 +642,13 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
 - **Socket narrowing**: the pod-loopback filter shape is proven; the filter itself is not built.
 - **`③` reassessment**: periodic, on the same fork/exec, package-install and `git status` loops.
   libkrun needs its 2.0 line driven by a newer crun AND x2APIC in libkrunfw before it is worth
-  re-measuring; gVisor's cost is now measured (~3× on git walks) and it is the front-runner —
-  what remains is a decision on `host-uds` (the socket) and `--ignore-cgroups` for the box, plus
-  a sustained build rather than micro-loops.
+  re-measuring; gVisor's cost is now measured (~3× on git walks, on the x86 rig AND on Mac
+  arm64/vz — directfs on) and it is the front-runner. `--ignore-cgroups` is settled (the box sets
+  no per-container limits, so it costs nothing); `host-uds=all` is settled the other way (it is
+  the unfiltered socket — socket narrowing is a precondition, not an alternative). What remains
+  before an ADR: gVisor as the real box runtime (`fy box up` under runsc) and a sustained build,
+  on both hosts; and the inotify-inward caveat (polling, or a two-way sync) carried into the
+  decision.
 - **Linux mounts**: `virtiofs` under Lima on Linux fails every file create (above); 9p until
   upstream moves.
 - **WSL2**: still unmeasured — `/dev/kvm` in the distro, and Lima+QEMU inside it.
