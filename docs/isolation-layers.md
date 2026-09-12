@@ -179,9 +179,10 @@ agent's own working set too, so "agent only in the microVM" does not rescue it.
 
 **The decision (Dain, 2026-09-11).** Containment is the goal; per-session snapshots are not
 wanted. `③` is deferred, not rejected: reassess periodically as libkrun, or another library,
-improves — the outs were measured the same day ([below](#the-outs-measured-2026-09-11-second-rig-session)):
+improves — the outs were measured the same day ([below](#the-outs-measured)):
 none rescues libkrun 1.x, and **gVisor is the live candidate** (package install at 1.1×, rootless
-under podman, no KVM needed so it would reach M1/M2 too; its `git`-walk cost is unmeasured). The
+under podman, no KVM needed so it would reach M1/M2 too; its `git`-walk cost, the deciding number,
+came in at ~3× against libkrun's ~25× — measured 2026-09-12, [below](#the-outs-measured)). The
 product claim on every platform stays what the wall doc already states: **real credentials never
 enter the VM** (the moat), plus **the wall as enforcement against everything short of a
 guest-kernel exploit**. What `③` would have bought — a wall that survives VM-root — is bounded
@@ -195,10 +196,24 @@ come before any microVM, both at zero runtime cost:
    the wall on every boot, and the host never runs `sudo` in the guest
    ([lima-wall-machine-integration.md](./lima-wall-machine-integration.md#2-enforcement--machinewall--true)).
    Validated live on a Lima/vz VM.
-2. **Host-side wall enforcement on Linux**, as an option: match the VM process's traffic by cgroup
-   or uid with host nftables and allow only the proxy band, so flushing the guest wall gains
-   nothing. Clean on Linux; on macOS Lima's user-mode network runs as the operator, so pf cannot
-   single it out without a dedicated uid or a different network mode.
+2. **Host-side wall enforcement on Linux — mechanism proven 2026-09-12, module landed.** Match
+   the VM's own traffic *on the host*, where the guest has no reach, with nftables, and allow only
+   the proxy band; flushing the guest wall then gains nothing, since the packets still have to
+   leave through the host. The match is the QEMU process's **cgroup v2 scope**, not its uid:
+   Lima's QEMU driver runs the guest's user-mode network inside `qemu-system`, so every guest
+   packet leaves the host as that process, and the operator's other work shares their uid but
+   only the VM lives in the VM's scope. Proven on the rig against the running `foldyard-example`
+   VM: with the table loaded, a direct `https://` from inside the guest was rejected (curl rc 7),
+   DNS to the host resolver still resolved, the allowed band port returned 200, an out-of-band
+   port and the host's sshd were refused, `limactl shell` and the podman socket kept working, and
+   the operator's own egress was untouched. `foldyard.hostwall` renders that ruleset (its
+   `render`/`available`/`vm_cgroup_scope` are unit-tested); it is **not auto-wired into `fy up`**
+   — placing QEMU in a stable per-VM scope (`systemd-run --user --scope`) and the host-root policy
+   for loading nftables are launch-path and operator-consent calls left to the caller, and the
+   module discovers wherever the VM actually landed rather than dictating it. Clean on Linux; on
+   macOS Lima's user-mode network runs as the operator, so pf cannot single it out without a
+   dedicated uid or a different network mode — the module reports itself unavailable there rather
+   than branching on the OS.
 
 Socket narrowing (below) stays the fix for the *design* hole, with or without `③`.
 
@@ -267,8 +282,9 @@ the difference between a checked property and a slogan.
 VM's — a Lima VM that mounted the operator's whole home passed it (measured on the Linux rig with
 a deliberately leaky VM). The audit now reads PID 1's table via `--pid=host`, which does see the
 leak, and exempts only the repo and worktrees-root mounts by exact path. Run live on a Mac it
-passes on exactly those two; still owed is `verify` itself against a leaky VM on a real host,
-since the rig reproduction was by hand. See
+passes on exactly those two, and on the rig (2026-09-12) `verify` itself — not the probe by hand —
+FAILED against a Lima VM deliberately mounting the whole home (`VM exposes host paths: … /home/dain
+9p ro`) and PASSED once the leak was removed. See
 [verify-false-pass.md](./verify-false-pass.md#a-second-gap-2026-09-11-the-probe-reads-the-wrong-mount-namespace).
 
 ## What can be measured where
@@ -432,7 +448,10 @@ What it is and is not:
 
 The outs are measured in the next subsection: none of them moves libkrun 1.x.
 
-### The outs, measured (2026-09-11, second rig session)
+### The outs, measured
+
+*Second rig session, 2026-09-11, except the agent-loop, host-wall and leaky-VM rows, 2026-09-12
+(third session).*
 
 Same rig and versions, plus libkrun 1.19.4 built from source, gVisor `runsc`
 release-20260817.0, and a direct-libkrun harness (`examples/chroot_vm.c` from v1.19.0 with
@@ -490,12 +509,32 @@ and uses no KVM at all, so it is nesting-agnostic; the kvm platform also runs ro
 Also probed: the bind-mounted podman `AF_UNIX` socket **connects** from inside, but only with the
 per-container opt-in `dev.gvisor.flag.host-uds=all` (the default refuses) — so unlike krun the
 socket needs no re-plumbing, and it is exactly the unfiltered socket; the host's loopback is
-unreachable (netstack has its own); egress works. Not measured: `git status`-style metadata walks
-(gVisor's gofer/directfs path is the analogous cost centre — the number that decides it), sustained
-builds, and whether `--ignore-cgroups` is acceptable for the box (it drops podman's resource limits
-for that container). gVisor is a different boundary — a userspace kernel in Go behind a small
-seccomp filter, not a hardware VM — so the Trail of Bits framing becomes "the sentry's syscall
-surface" rather than "the VMM's device model".
+unreachable (netstack has its own); egress works. gVisor is a different boundary — a userspace
+kernel in Go behind a small seccomp filter, not a hardware VM — so the Trail of Bits framing
+becomes "the sentry's syscall surface" rather than "the VMM's device model".
+
+**The deciding number — the agent's own working set (2026-09-12, third rig session).** gVisor's
+gofer/directfs metadata path was the cost centre left to measure; it is the walk a coding agent
+does all day, and it is where libkrun collapsed. On the same rig, an agent-shaped image (git +
+node + python over a 200-commit checkout), each runtime twice warm:
+
+| workload | crun | runsc systrap (default) | runsc kvm | libkrun, for scale |
+| --- | --- | --- | --- | --- |
+| `git status` ×50 (rootfs) | 0.48 s | **1.52 s (3.2×)** | 2.04 s | 12.0 s (25×) |
+| `git grep` ×20 | 0.37 s | **1.14 s (3.1×)** | 2.24 s | 7.40 s (20×) |
+| `git log -20` ×50 | 0.27 s | 0.61 s (2.3×) | 1.08 s | 2.90 s (11×) |
+| python read 2000 files | 0.22 s | 0.37 s (1.7×) | 0.54 s | 1.68 s (7.6×) |
+| `node -e` start ×50 | 4.85 s | 6.74 s (1.4×) | 15.3 s | 13.5 s (2.8×) |
+| in-guest HTTP loop ×300 | 1.45 s | 1.79 s (1.2×) | 2.06 s | 4.08 s (2.8×) |
+| python regex (CPU) | 0.77 s | 0.95 s (1.2×) | 0.77 s | 2.39 s (3.1×) |
+
+So gVisor's git-walk cost is **~3×, not libkrun's ~25×** — the number that was missing, and it
+lands where it matters most. The default systrap platform (directfs on) is the row that counts:
+the kvm platform is 1.3–2× worse on metadata here and buys nothing rootless, and directfs off
+roughly doubles the bind-mount walk. Still unsettled before gVisor could be the `③` posture:
+whether `--ignore-cgroups` (which the box needs, and which drops podman's per-container resource
+limits) is acceptable, the `host-uds=all` socket exposure, and a sustained build rather than
+micro-loops. But on cost alone gVisor clears the bar libkrun could not.
 
 ### Bind mounts under krun
 
@@ -533,25 +572,28 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
 
 - Windows Server + WSL2 on GCP: `/dev/kvm` in the distro, and "WSL2 has no KVM" versus
   "three-deep nesting through Hyper-V failed" — the two need distinguishing.
-- gVisor on the agent-shaped loop (`git status`, `git grep`, file walks) — the number that
-  decides whether it is the `③` candidate — and a libkrunfw rebuild with `CONFIG_X86_X2APIC`.
-- `fy up` on Linux (only `machine ensure` and `verify` ran); the box e2e on the rig.
+- A libkrunfw rebuild with `CONFIG_X86_X2APIC` (the one libkrun out worth a compile; ≤ a quarter
+  of the exits, so it does not close the gap on its own). gVisor's agent-loop cost is now measured
+  (above).
+- `fy up` on Linux (only `machine ensure`, `verify` and the host-wall probe ran); the box e2e on
+  the rig.
 
 ## Still open
 
 - **krunkit as a posture**, not a probe: a sustained workload on Lima + krunkit, and a decision
   on carrying an experimental driver at a moving Cellar path. Until then it stays opt-in.
-- **Host-side wall enforcement on Linux** (the second hardening step above `③`; the sudo grant
-  is dropped).
+- **Host-side wall enforcement on Linux**: the ruleset and cgroup match are proven and
+  `foldyard.hostwall` renders them, but it is not wired into `fy up` — that needs a per-VM
+  systemd scope for QEMU and a host-root policy for loading nftables (above).
 - **Socket narrowing**: the pod-loopback filter shape is proven; the filter itself is not built.
 - **`③` reassessment**: periodic, on the same fork/exec, package-install and `git status` loops.
   libkrun needs its 2.0 line driven by a newer crun AND x2APIC in libkrunfw before it is worth
-  re-measuring; gVisor needs the `git`-walk number first, then a decision on `host-uds` (the
-  socket) and `--ignore-cgroups` for the box.
+  re-measuring; gVisor's cost is now measured (~3× on git walks) and it is the front-runner —
+  what remains is a decision on `host-uds` (the socket) and `--ignore-cgroups` for the box, plus
+  a sustained build rather than micro-loops.
 - **Linux mounts**: `virtiofs` under Lima on Linux fails every file create (above); 9p until
   upstream moves.
 - **WSL2**: still unmeasured — `/dev/kvm` in the distro, and Lima+QEMU inside it.
-- **`fy verify` against a deliberately leaky VM** on a real host, through `verify` itself.
 - **Closed, not open:** per-session pristine state via snapshots (not wanted, 2026-09-11); box-only
   krun on M3 (`③` is Linux-only by the M1/M2 decision, and deferred there).
 
@@ -566,6 +608,11 @@ podman 5.8.4 / crun 1.28 + `crun-krun` / libkrun 1.19.0 (and 1.19.4 from source)
 5.5.0 / Lima 2.2.0 / `virtiofsd` 1.14 / gVisor `runsc` release-20260817.0 — the
 [Measured on GCP](#measured-on-gcp-2026-09-11) section. crun's krun handler, for the vsock finding:
 <https://github.com/containers/crun/blob/main/src/libcrun/handlers/krun.c>.
+
+Measured 2026-09-12 on the same rig (third session): gVisor's agent-loop cost (git/node/python
+walks), the host-side cgroup wall against the running `foldyard-example` VM, and `fy verify`
+itself against a deliberately leaky VM — folded into [The outs, measured](#the-outs-measured) and
+[verify-false-pass.md](./verify-false-pass.md).
 
 Read 2026-09-11: libkrun README (security model, 2.0 status)
 <https://github.com/libkrun/libkrun> (moved out of the `containers` org; old URLs redirect) ·

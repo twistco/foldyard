@@ -128,5 +128,13 @@ sibling under it, or a bind at a sub-path of the repo all still fail (`test_the_
 The positive control above still gates it, the test fixture answers a bare `mount` with a clean
 table so a regression to the container view goes red, and the leaky-VM case is pinned by
 `test_vm_level_mount_hidden_from_the_container_namespace_is_still_a_fail`. Run live on a Mac
-(Lima/vz): the table shows exactly the two mounts and passes. Still owed: running `verify`
-itself, rather than the probe by hand, against a deliberately leaky VM on a real host.
+(Lima/vz): the table shows exactly the two mounts and passes.
+
+**Closed on the rig (2026-09-12):** `verify` itself — not the probe by hand — was run against a
+Lima/QEMU VM deliberately mounting the whole home (`mounts += /home/dain`, read-only 9p). It
+FAILED with `VM exposes host paths: … /home/dain 9p ro`, and PASSED (`VM mount table (PID 1's
+namespace) free of host home/paths beyond the repo mounts`) once the leak was removed — the two
+directions the fix promised, end to end. One thing the run also confirmed: the probe image must
+live in the *VM's* podman store, not the host's — a host-built image the VM can't run trips the
+positive control (`probe image … could not run … the boundary battery DID NOT EXECUTE`) rather
+than passing vacuously, which is the control doing its job.
