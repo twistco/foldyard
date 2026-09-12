@@ -90,3 +90,43 @@ The unifying rule, and the one to apply to any check added later: **a negative c
 positive control.** `_stack_health` already worked this way and says so in its own docstring — "a
 probe that FAILED is not a probe that found nothing" — so this was foldyard's own principle,
 applied in one section and missing from the other three.
+
+## A second gap (2026-09-11): the probe reads the wrong mount namespace
+
+Found on the Linux rig by the deliberate leak the isolation work called for: a probe Lima VM
+that mounts **all of `/home/dain`** (read-only, 9p) passes `fy verify` — "VM mount table free of
+host home/paths" ✓ — even though `_host_paths()` now matches `/home/dain` correctly.
+
+Cause: the mount-table probe runs `mount` inside a `--privileged` container, which prints the
+*container's* mount namespace. VM-level mounts are not in it. The `ls /Users` probe has the same
+shape and passes for the same reason on every platform. Measured on the leaky VM:
+
+| probe | shows the 9p mount at `/home/dain`? |
+| --- | --- |
+| `--privileged … mount` (as written) | no |
+| `--privileged --pid=host … cat /proc/1/mounts` | **yes** |
+| `--privileged -v /:/host … cat /host/proc/1/mounts` | **yes** |
+| `--privileged -v /:/host … ls /host/home/dain` | yes (lists the host home) |
+
+So the two "repo-only mount" ✅s in
+[isolation-layers.md](./isolation-layers.md#what-fy-verify-proves-per-platform) are, today,
+proven by the mount configuration `machine ensure` writes and not by `verify`. This is the same
+class as the two above — green while asserting nothing — reached by a third road: the probe ran,
+produced non-empty output, and looked in the wrong place.
+
+**Fixed the same day** (`fix(verify): read the VM's mount table from PID 1, not the probe
+container's`). The mount audit now reads `/proc/1/mounts` from `--pid=host` — the escape probe
+already uses that flag, and `/proc/1/mounts` is world-readable where `/proc/1/ns/*` is not, so
+the two coexist. The container-side `ls /Users` probe was folded into it: it read the same wrong
+namespace, and `/Users` is a member of the foreign-mounts list the audit greps for.
+
+Reading the real table has a consequence the old probe never met: it *sees the mounts foldyard
+itself makes* — the repo and the worktrees root, at their host paths — and on a Mac those sit
+under `/Users/<you>`, so the first live run failed on its own repo mount. The audit therefore
+exempts `machine.guest_mounts()` by **exact mountpoint** and nothing else: the home itself, a
+sibling under it, or a bind at a sub-path of the repo all still fail (`test_the_isolation_mount_set_is_not_a_leak`).
+The positive control above still gates it, the test fixture answers a bare `mount` with a clean
+table so a regression to the container view goes red, and the leaky-VM case is pinned by
+`test_vm_level_mount_hidden_from_the_container_namespace_is_still_a_fail`. Run live on a Mac
+(Lima/vz): the table shows exactly the two mounts and passes. Still owed: running `verify`
+itself, rather than the probe by hand, against a deliberately leaky VM on a real host.

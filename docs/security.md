@@ -137,9 +137,10 @@ asserts, grouped:
 
 - **VM boundary** (over the engine socket): the engine reports **rootless**; a
   `--privileged --pid=host` container **cannot read the host's PID-1 namespace** — the
-  known breakout, actively attempted and refused; no `/Users` visible inside a
-  `--privileged` container; and a **mount audit** — the VM's mount table is free of any
-  host home path.
+  known breakout, actively attempted and refused; and a **mount audit** — the VM's own mount
+  table (PID 1's, read through `--pid=host`; a container's `mount` only shows its own
+  namespace) carries no host home path beyond the repo and worktrees-root mounts themselves,
+  matched exactly.
 - **Credential-agnostic backstops** (inside the box): no SSH agent forwarded, no `~/.ssh`
   private-key material, no `~/.netrc`, and `git ls-remote origin` **fails** — the box can't
   even reach the remote to push, by construction. These live in foldyard's core so no absent

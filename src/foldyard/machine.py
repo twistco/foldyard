@@ -46,6 +46,12 @@ def _volumes(main: Path, wt_root: Path) -> list[tuple[str, str]]:
     return [(str(main), str(main)), (str(wt_root), str(wt_root))]
 
 
+def guest_mounts(main: Path, wt_root: Path) -> list[str]:
+    """The GUEST paths of the isolation mount set — the only host paths `verify`'s mount audit
+    exempts (by exact mountpoint) when it reads the VM's real mount table."""
+    return [guest for _, guest in _volumes(main, wt_root)]
+
+
 def running_machines() -> list[str]:
     """Names of currently-running VMs of the active backend."""
     return BACKEND.list_running()

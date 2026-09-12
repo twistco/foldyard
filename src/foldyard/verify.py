@@ -1,11 +1,11 @@
 """Isolation battery — the product's credibility check (`foldyard verify`).
 
-Faithful port of the `verify` recipe. Proves the VM boundary
-over the engine socket (rootless, the `--privileged --pid=host` escape refused, no host
-home/paths) and — INSIDE the box only — the credential-less dev-box posture (no SSH key
-material, mode-aware GitHub posture, git push refused). Each check prints PASS/FAIL; returns
-non-zero on any FAIL (CI-usable). One ADVISORY section rides along at the end — unhealthy
-containers in the stack — printed as WARN so it can never move the isolation verdict.
+Faithful port of the `verify` recipe. Proves the VM boundary over the engine socket
+(rootless, the `--privileged --pid=host` escape refused, the VM's own mount table — PID 1's —
+free of host home/paths) and — INSIDE the box only — the credential-less dev-box posture (no
+SSH key material, mode-aware GitHub posture, git push refused). Each check prints PASS/FAIL;
+returns non-zero on any FAIL (CI-usable). One ADVISORY section rides along at the end —
+unhealthy containers in the stack — printed as WARN so it can never move the isolation verdict.
 
 Behaviour-preserving: same checks, same messages, same exit semantics as the recipe. The
 engine probes run with the resolved stack env (so `CONTAINER_HOST`/`DOCKER_HOST` reach the
@@ -24,7 +24,7 @@ import subprocess
 from pathlib import Path
 from shutil import which
 
-from . import config, stack
+from . import config, machine, stack
 from .plugins import VerifyContext, registry
 
 _PASS = "\033[32m✓ PASS\033[0m"
@@ -46,6 +46,20 @@ _FOREIGN_MOUNTS = (
     "/run/host",  # systemd/flatpak-style host passthrough
     "/media",  # Linux removable media
 )
+
+
+# The VM's own mount table: PID 1's, in PID 1's mount namespace. Read with `--pid=host` so the
+# probe container's /proc is the VM's — the container's `mount` shows only its own namespace.
+_PID1_MOUNTS = "cat /proc/1/mounts"
+_MOUNT_ESCAPE = re.compile(r"\\([0-7]{3})")  # /proc/mounts octal-escapes space, tab, newline, \
+
+
+def _mountpoint(line: str) -> str:
+    """Field 2 of a `/proc/<pid>/mounts` line, unescaped."""
+    fields = line.split()
+    if len(fields) < 2:
+        return ""
+    return _MOUNT_ESCAPE.sub(lambda m: chr(int(m.group(1), 8)), fields[1])
 
 
 def _host_paths() -> re.Pattern[str]:
@@ -121,7 +135,9 @@ def _rootless(engine: str, env: dict) -> bool:
     return rl.returncode == 0 and "true" in rl.stdout.lower()
 
 
-def _vm_boundary(rep: _Report, engine: str, env: dict, probe: str) -> None:
+def _vm_boundary(
+    rep: _Report, engine: str, env: dict, probe: str, allowed: list[str] | None = None
+) -> None:
     socket = env.get("CONTAINER_HOST") or env.get("DOCKER_HOST", "")
     print(f"▶ VM boundary (engine: {engine}, over the socket: {socket})")
 
@@ -147,22 +163,32 @@ def _vm_boundary(rep: _Report, engine: str, env: dict, probe: str) -> None:
     else:
         rep.ok("escape refused (--privileged --pid=host can't read host PID1 ns)")
 
-    if _engine_run_succeeds(engine, env, ["--privileged", probe, "sh", "-c", "ls /Users"]):
-        rep.bad("/Users visible inside a --privileged container — VM mounts host home")
-    else:
-        rep.ok("no /Users inside a --privileged container")
-
-    # An EMPTY mount table is not a clean one: `mount` printing nothing means the probe did not
-    # run, and grepping no lines for host paths finds none of them.
+    # The VM's mount table is PID 1's, read through the host PID namespace: `mount` (or
+    # `ls /Users`) inside a --privileged container shows the CONTAINER's mount namespace, in
+    # which a VM-level mount of the operator's whole home never appears — a Lima VM mounting all
+    # of `$HOME` passed the old probe (2026-09-11, docs/verify-false-pass.md). `/proc/1/mounts`
+    # is world-readable, so this coexists with the escape probe above, which relies on
+    # `/proc/1/ns/*` being unreadable. An EMPTY table is not a clean one: nothing printed means
+    # the probe did not run, and grepping no lines for host paths finds none of them.
     mp = _run(
-        [engine, "run", "--rm", "--privileged", probe, "sh", "-c", "mount"], env, capture=True
+        [engine, "run", "--rm", "--privileged", "--pid=host", probe, "sh", "-c", _PID1_MOUNTS],
+        env,
+        capture=True,
     )
     if mp.returncode != 0 or not mp.stdout.strip():
         rep.bad("could not read the VM mount table (probe produced nothing) — leak check UNPROVEN")
         return
-    host = [ln for ln in mp.stdout.splitlines() if _host_paths().search(ln)]
+    # The real table carries the mounts foldyard itself makes — the repo and the worktrees root,
+    # at their host paths (`machine.guest_mounts`). Exempt by EXACT mountpoint only: the home
+    # itself, a sibling under it, or a nested bind at a sub-path are all still leaks.
+    exempt = set(allowed or ())
+    host = [
+        ln
+        for ln in mp.stdout.splitlines()
+        if _host_paths().search(ln) and _mountpoint(ln) not in exempt
+    ]
     if not host:
-        rep.ok("VM mount table free of host home/paths")
+        rep.ok("VM mount table (PID 1's namespace) free of host home/paths beyond the repo mounts")
     else:
         rep.bad(f"VM exposes host paths: {host[0]}")
 
@@ -347,7 +373,8 @@ def verify() -> int:
     probe = os.environ.get("VERIFY_IMG", "alpine")
     rep = _Report()
 
-    _vm_boundary(rep, engine, ctx.env, probe)
+    allowed = machine.guest_mounts(ctx.main, stack.worktrees_root(ctx.main))
+    _vm_boundary(rep, engine, ctx.env, probe, allowed)
 
     if config.in_box():
         _box_posture(rep, ctx.env)

@@ -28,8 +28,9 @@ def secure_engine(monkeypatch, tmp_path):
     results = {
         "rootless": True,
         "escape_rc": 1,  # --privileged --pid=host refused
-        "ls_users_rc": 1,  # /Users not visible
-        "mount": "proc /proc proc rw 0 0\ntmpfs /tmp tmpfs rw 0 0\n",
+        # The VM's mount table = PID 1's, read via --pid=host (the container's own `mount`
+        # never shows VM-level mounts — see the namespace test below).
+        "pid1_mounts": "proc /proc proc rw 0 0\ntmpfs /tmp tmpfs rw 0 0\n",
         "mount_rc": 0,
         "probe_rc": 0,  # the positive control: the probe image CAN run
         "git_rc": 1,  # origin unreachable…
@@ -58,10 +59,10 @@ def secure_engine(monkeypatch, tmp_path):
             tail = cmd[-1]
             if "cat /proc/1/ns/ipc" in tail:
                 return _Proc(results["escape_rc"])
-            if "ls /Users" in tail:
-                return _Proc(results["ls_users_rc"])
-            if tail == "mount":
-                return _Proc(results["mount_rc"], results["mount"])
+            if tail == "mount":  # the CONTAINER's namespace: always clean, never the evidence
+                return _Proc(0, "proc /proc proc rw 0 0\n")
+            if tail == "cat /proc/1/mounts" and "--pid=host" in cmd:
+                return _Proc(results["mount_rc"], results["pid1_mounts"])
             if tail == "true":  # the positive control
                 return _Proc(results["probe_rc"])
         return _Proc(0, "")
@@ -118,7 +119,9 @@ def test_all_pass_returns_0(secure_engine, capsys):
     assert verify.verify() == 0
     out = capsys.readouterr().out
     assert "ALL PASS" in out
-    assert out.count("✓ PASS") == 4  # the 4 VM-boundary checks; posture skipped
+    # The 3 VM-boundary checks; posture skipped. (Was 4: `ls /Users` inside the container read
+    # the container's namespace and never saw a VM mount — folded into the PID-1 mount audit.)
+    assert out.count("✓ PASS") == 3
     assert "skipped (not inside the box" in out
 
 
@@ -138,7 +141,7 @@ def test_not_rootless_is_fail(secure_engine):
 
 def test_host_mount_leak_is_fail(secure_engine, capsys):
     _, results = secure_engine
-    results["mount"] = "macfuse /Users/dain osxfuse rw 0 0\n"
+    results["pid1_mounts"] = "macfuse /Users/dain osxfuse rw 0 0\n"
     assert verify.verify() == 1
     assert "host paths" in capsys.readouterr().out
 
@@ -147,6 +150,49 @@ def test_escape_probe_command_shape(secure_engine):
     calls, _ = secure_engine
     verify.verify()
     assert any(c[1] == "run" and "--privileged" in c and "--pid=host" in c for c in calls)
+
+
+def test_vm_level_mount_hidden_from_the_container_namespace_is_still_a_fail(secure_engine, capsys):
+    # Found 2026-09-11 on the Linux rig: a Lima VM mounting ALL of the operator's home passed
+    # "VM mount table free of host home/paths", because `mount` inside a --privileged container
+    # prints the CONTAINER's mount namespace — VM-level mounts are not in it. PID 1's table is.
+    # The fixture answers a bare `mount` with a clean table regardless, so reading the wrong
+    # namespace again would turn this green.
+    calls, results = secure_engine
+    results["pid1_mounts"] = f"mount0 {pathlib.Path.home()} 9p rw,relatime 0 0\n"
+    assert verify.verify() == 1
+    assert "host paths" in capsys.readouterr().out
+    assert not any(c[1] == "run" and c[-1] == "mount" for c in calls)
+
+
+def test_the_isolation_mount_set_is_not_a_leak(secure_engine, monkeypatch, capsys):
+    # Reading the REAL table means seeing the mounts foldyard itself makes: the repo and the
+    # worktrees root, at their host paths (`machine._volumes`: host==guest). Those two are the
+    # whole point, not a leak — exempt by exact mountpoint, so `$HOME` itself, or anything
+    # else under it, still fails.
+    _, results = secure_engine
+    main = pathlib.Path.home() / "ws" / "repo"
+    wt_root = pathlib.Path.home() / "ws" / "repo-worktrees"
+    monkeypatch.setenv("FOLDYARD_WORKTREES_ROOT", str(wt_root))
+    ctx = stack.Context(
+        main=main,
+        env={"CONTAINER_HOST": "unix:///s"},
+        compose=[],
+        app="app",
+        project="p",
+        worktree="",
+    )
+    monkeypatch.setattr(verify.stack, "resolve", lambda *a, **k: ctx)
+    results["pid1_mounts"] = (
+        "/dev/vda2 / btrfs rw 0 0\n"
+        f"lima-1 {main} virtiofs rw,relatime 0 0\n"
+        f"lima-2 {wt_root} virtiofs rw,relatime 0 0\n"
+    )
+    assert verify.verify() == 0
+    assert "free of host home/paths" in capsys.readouterr().out
+    # …but a sibling under the home, or the home itself, is not covered by the exemption.
+    results["pid1_mounts"] += f"lima-3 {pathlib.Path.home() / 'ws' / 'other'} virtiofs rw 0 0\n"
+    assert verify.verify() == 1
 
 
 # ── false passes: a negative check needs a positive control ──────────────────────────────
@@ -167,7 +213,7 @@ def test_unrunnable_probe_image_cannot_report_a_sound_boundary(secure_engine, ca
 
 def test_empty_mount_output_is_not_a_clean_mount_table(secure_engine, capsys):
     _, results = secure_engine
-    results["mount"] = ""  # command produced nothing — silence is not an all-clear
+    results["pid1_mounts"] = ""  # command produced nothing — silence is not an all-clear
     results["mount_rc"] = 1
     assert verify.verify() != 0
     assert "free of host home/paths" not in capsys.readouterr().out
