@@ -206,14 +206,23 @@ come before any microVM, both at zero runtime cost:
    VM: with the table loaded, a direct `https://` from inside the guest was rejected (curl rc 7),
    DNS to the host resolver still resolved, the allowed band port returned 200, an out-of-band
    port and the host's sshd were refused, `limactl shell` and the podman socket kept working, and
-   the operator's own egress was untouched. `foldyard.hostwall` renders that ruleset (its
-   `render`/`available`/`vm_cgroup_scope` are unit-tested); it is **not auto-wired into `fy up`**
-   — placing QEMU in a stable per-VM scope (`systemd-run --user --scope`) and the host-root policy
-   for loading nftables are launch-path and operator-consent calls left to the caller, and the
-   module discovers wherever the VM actually landed rather than dictating it. Clean on Linux; on
-   macOS Lima's user-mode network runs as the operator, so pf cannot single it out without a
-   dedicated uid or a different network mode — the module reports itself unavailable there rather
-   than branching on the OS.
+   the operator's own egress was untouched. `foldyard.hostwall` renders that ruleset, and as of
+   2026-09-12 it is **wired into `fy up`** behind `[machine].host_wall = true`: the VM is started
+   inside its own transient scope (`systemd-run --user --scope --unit fy-machine-<vm>.scope`) so
+   the match is predictable, the table is re-rendered on every `fy up` for the scope the VM
+   actually sits in (Lima allocates the SSH port per boot) and loaded with `sudo nft`, and a VM
+   found outside its own scope is refused rather than walled — matching the login session's scope
+   would wall the operator's shell. Preflight pairs it with `wall` and with a host that can
+   enforce it. Run end to end on the rig the same day (`fy machine ensure` under
+   `MACHINE_HOST_WALL=1`, the example VM created from scratch): every probe above held, plus
+   `fy verify` ALL PASS under the wall, the hand-started VM refused, and `rm` leaving no table.
+   One finding the by-hand probe had missed: the guest's DNS is Lima's *host resolver* — the
+   hostagent serves it on a random loopback udp+tcp port and QEMU forwards each query there —
+   so a ruleset allowing only `resolv.conf`'s stub cuts DNS; the wall now discovers and opens
+   the loopback listeners the VM's own processes hold. Clean on Linux; on macOS Lima's
+   user-mode network runs as the operator, so pf cannot single it out without a dedicated uid or
+   a different network mode — the module reports itself unavailable there rather than branching
+   on the OS.
 
 Socket narrowing (below) stays the fix for the *design* hole, with or without `③`.
 
@@ -575,16 +584,17 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
 - A libkrunfw rebuild with `CONFIG_X86_X2APIC` (the one libkrun out worth a compile; ≤ a quarter
   of the exits, so it does not close the gap on its own). gVisor's agent-loop cost is now measured
   (above).
-- `fy up` on Linux (only `machine ensure`, `verify` and the host-wall probe ran); the box e2e on
-  the rig.
+- `fy up` on Linux beyond the host-wall run (only `machine ensure`, `verify` and the host-wall
+  probe ran before it); the box e2e on the rig.
 
 ## Still open
 
 - **krunkit as a posture**, not a probe: a sustained workload on Lima + krunkit, and a decision
   on carrying an experimental driver at a moving Cellar path. Until then it stays opt-in.
-- **Host-side wall enforcement on Linux**: the ruleset and cgroup match are proven and
-  `foldyard.hostwall` renders them, but it is not wired into `fy up` — that needs a per-VM
-  systemd scope for QEMU and a host-root policy for loading nftables (above).
+- **Host-side wall enforcement on Linux**: wired and run end to end on the rig 2026-09-12
+  (`[machine].host_wall`, above). Still open: the sudoers policy is the operator's (a root prompt
+  per `fy up` otherwise), `fy up` proper with the proxy running (the rig run was `machine ensure`
+  + `verify`), and WSL2 is unmeasured.
 - **Socket narrowing**: the pod-loopback filter shape is proven; the filter itself is not built.
 - **`③` reassessment**: periodic, on the same fork/exec, package-install and `git status` loops.
   libkrun needs its 2.0 line driven by a newer crun AND x2APIC in libkrunfw before it is worth

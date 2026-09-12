@@ -197,6 +197,7 @@ later with `foldyard machine recreate`.
 backend = "lima"
 vmtype = "vz"
 wall = true
+host_wall = true
 name = "acme"
 cpus = 4
 memory_mib = 8192
@@ -219,6 +220,19 @@ disk_gib = 60
   allowed. Lima-only (preflight enforces the pairing); requires `[proxy]` to be declared, or
   the box has no way out at all. Default: `false` (`init` writes `true`). Env: `MACHINE_WALL`
   (`1`/`true`/`on`/`yes`).
+- **`host_wall`** — ALSO enforce the wall on the **host**: nftables matching the VM process's
+  own traffic by its cgroup v2 scope (foldyard starts the VM inside
+  `systemd-run --user --scope --unit fy-machine-<vm>.scope`), allowing only this project's
+  daemon band, the VM's own loopback plumbing (the forwarded SSH port and the hostagent's DNS
+  resolver, discovered from its processes) and the host's resolvers. So a guest-kernel exploit
+  that flushes the in-VM wall still leaves through a host that rejects it. Needs `wall = true`
+  and a host with `nft` + cgroup v2 — a Linux host; macOS reports it unavailable, and preflight
+  refuses rather than silently downgrading. Loading the table is `sudo nft -f -` on every
+  `fy up` (re-rendered each time — Lima allocates the SSH port per boot); a passwordless sudoers
+  rule for `nft` makes it silent. A VM already running outside its own scope (started before
+  the option was on) is refused with `fy machine stop && fy up`. `fy machine rm` removes the
+  table; `fy machine stop` leaves it (inert without the scope). Default: `false`. Env:
+  `MACHINE_HOST_WALL`.
 - **`vmtype`** — the Lima **driver**, i.e. the hypervisor the VM actually runs on: `"vz"`
   (Apple Virtualization.framework) | `"qemu"` | `"krunkit"` | any external Lima driver plugin.
   Lima-only. **Create-only** — like mounts and sizing, changing it means `fy machine recreate`.
@@ -799,7 +813,7 @@ The per-key overrides are listed with their keys above. The globals:
 | `WORKTREE` | The active worktree name; empty = the main checkout. Usually inferred (set inside the box; inferred from CWD on the host). |
 | `WT_OFFSET` | Explicit worktree port offset, bypassing pins and the hash. |
 | `PODMAN_MACHINE` | The VM name. |
-| `MACHINE_BACKEND` / `MACHINE_VMTYPE` / `MACHINE_WALL` / `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK` | `[machine]` overrides. |
+| `MACHINE_BACKEND` / `MACHINE_VMTYPE` / `MACHINE_WALL` / `MACHINE_HOST_WALL` / `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK` | `[machine]` overrides. |
 | `FY_PROXY_PORT` | The egress-proxy base port, bypassing the port-band registry. |
 | `GCP_MINTER_PORT` | The gcp-minter base port, likewise. |
 | `FY_HOST_ALIAS` | The address containers use to reach the host-side daemons — the escape hatch for a customised Lima network whose host gateway differs. |

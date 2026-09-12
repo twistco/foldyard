@@ -51,6 +51,11 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   the registry's `verify_checks`.
 - `machine.py` / `machine_backend.py` — rootless dev-VM lifecycle behind the pluggable
   backend contract (podman | lima | native; see `docs/lima-backend-scope.md`).
+- `hostwall.py` — the host-side egress wall for the machine VM on Linux: nftables matched by the
+  VM's cgroup v2 scope (the VM is started in a per-VM systemd scope so the match is predictable),
+  wired via `[machine].host_wall`; fail-closed — a VM outside its own scope is refused, not
+  walled. The VM's loopback plumbing (Lima's host resolver, the SSH forward) is discovered from
+  its processes' sockets, never guessed.
 - `box.py` — the dev-box lifecycle (`fy box build|up|shell|down|ps`) + the monitored bootstrap.
 - `supervisor.py` — `fy host`: the ONE Mac-side process running the credential daemons
   (singleton lock, per-worktree listeners, replace-on-launch staleness handling, the

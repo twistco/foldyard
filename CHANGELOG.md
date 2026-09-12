@@ -7,6 +7,19 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ## Unreleased
 
+### Added
+
+- **`[machine].host_wall` — enforce the egress wall on the host too (Linux).** With
+  `wall = true` and a host that has `nft` + cgroup v2, foldyard starts the Lima VM inside its
+  own systemd scope and loads a host nftables table matching that scope: only this project's
+  daemon band, the VM's own loopback plumbing (SSH forward, Lima's host resolver) and the
+  host's resolvers get out, so even a guest-kernel
+  exploit that flushes the in-VM wall leaves through a host that rejects it. Loading the table
+  is `sudo nft` on every `fy up` (a passwordless sudoers rule for `nft` makes it silent). A VM
+  already running outside its scope — started before the option was on — is refused until
+  `fy machine stop && fy up`; asking for it on a host that can't enforce it (macOS) is a
+  preflight error, never a silent downgrade. Default off. Env: `MACHINE_HOST_WALL`.
+
 ### Changed
 
 - **Root in the Lima machine VM is now boot-time only — the VM user's passwordless sudo is

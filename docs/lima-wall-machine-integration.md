@@ -155,6 +155,48 @@ can't `nft flush`, the subuid bypass) runs only in `test_network.sh` / the stand
 the guest's applied state, rootful socket masked) but not the whole battery, because an
 unprivileged box can't and a per-`fy up` host check shouldn't run the destructive checks.
 
+## 3. Host-side enforcement — `[machine].host_wall = true` (Linux)
+
+Section 2 is enforcement the guest applies to itself, so the one thing that beats it is a
+guest-KERNEL exploit reaching VM-root (`nft flush`). `host_wall` closes that on a Linux host by
+matching the VM's OWN traffic *on the host*, where the guest has no reach: Lima's QEMU driver runs
+the guest's user-mode network inside `qemu-system`, so every guest packet leaves the host as that
+process, and host nftables can single it out. Flushing the guest wall then gains nothing.
+
+- **The match is a cgroup v2 scope, not a uid** — the operator's other work shares their uid;
+  only the VM lives in the VM's scope. To make that scope predictable, `machine._start` launches
+  the backend's start under `systemd-run --user --scope --unit fy-machine-<vm>.scope`, so
+  limactl, the hostagent and QEMU all land in one transient cgroup and nothing else does.
+- **Rendered for where the VM actually sits, on every `fy up`.** `foldyard.hostwall.render`
+  emits a per-VM table (`fy_host_wall_<vm>`): established/related, loopback to this project's
+  daemon bands (the same `base..base+89` spans section 2 opens) + the VM's own loopback
+  plumbing, the host's resolvers (from `resolv.conf`) on `:53`, else REJECT. The plumbing is
+  the loopback listeners the VM's host processes hold — `hostwall.listener_ports`, socket
+  inodes from `/proc/<pid>/fd` against `/proc/net/*` — because the guest's DNS is Lima's host
+  resolver: the hostagent serves it on a random loopback udp+tcp port and QEMU forwards each
+  query there (the first rig run walled DNS by allowing only `resolv.conf`'s stub). QEMU's SSH
+  `hostfwd` is the other one. The scope is read from the VM pid's `/proc/<pid>/cgroup`, the SSH
+  port from `limactl list` (Lima allocates all of these per boot), and the
+  table is loaded with `sudo nft -f -` as a declare-then-delete-then-declare idempotent replace —
+  after every start, a revive, and each steady-state `fy up`, since it can't be read back
+  without root. That root prompt is the price; a passwordless sudoers rule for `nft` is the
+  operator's call and makes it silent.
+- **Fail-closed, never a silent downgrade to the guest wall alone.** Preflight refuses
+  `host_wall` without `wall`, and on a host without `nft` + cgroup v2 (macOS reports itself
+  unavailable rather than branching on the OS). `ensure` refuses a VM found OUTSIDE its own scope
+  — started by hand, or before the option was turned on — because walling the login session's
+  scope it landed in would wall the operator's whole shell: `fy machine stop && fy up`. An
+  unreadable SSH port or a failed load also stop `fy up`. `fy machine rm` removes the table;
+  `stop` leaves it (inert once the scope is empty, re-rendered on the next up).
+
+Run end to end on the Linux rig (2026-09-12, `fy machine ensure` with `MACHINE_HOST_WALL=1`
+against the example): the VM created and started inside its scope, direct guest egress refused by
+name and by IP (curl rc 7), DNS resolved, the band port answered 200 while an out-of-band port and
+the host's sshd were refused, the operator's egress and `limactl shell` + the podman socket
+untouched, `fy verify` ALL PASS under the wall, a hand-started VM refused, `fy machine rm` left no
+table. Details in [isolation-layers.md](./isolation-layers.md) under "Host-side wall enforcement
+on Linux".
+
 ## Validated where?
 
 Unit/golden coverage: `test_config` (host_alias/machine_wall), `test_plugins` (lima derive_env),
