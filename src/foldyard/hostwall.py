@@ -45,6 +45,7 @@ operator's call and makes it silent. Stdlib only.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -56,6 +57,7 @@ from . import config
 # stub every mainstream distro uses as the fallback when the file is unreadable or names none.
 RESOLV_CONF = Path("/etc/resolv.conf")
 DEFAULT_RESOLVERS = ("127.0.0.53",)
+PROC = Path("/proc")
 
 _SPAN = 89  # the worktree-offset span each daemon band covers (main is +0; ports.py)
 
@@ -145,7 +147,7 @@ def vm_cgroup_scope(pid: int) -> str:
     prescription: the wall matches wherever Lima/systemd actually put QEMU, whether that is a
     dedicated ``fy-machine-<vm>.scope`` or the login session's own scope."""
     try:
-        text = Path(f"/proc/{pid}/cgroup").read_text()
+        text = (PROC / str(pid) / "cgroup").read_text()
     except OSError:
         return ""
     for line in text.splitlines():
@@ -155,21 +157,72 @@ def vm_cgroup_scope(pid: int) -> str:
     return ""
 
 
+# /proc/net/{tcp,udp} socket states: a TCP listener is 0A (LISTEN); a bound, unconnected UDP
+# socket — which is what a UDP "listener" is — shows as 07 (TCP_CLOSE).
+_LISTENING = {"tcp": "0A", "udp": "07"}
+# Loopback in /proc/net's hex little-endian notation: 127.0.0.1 and ::1.
+_LOOPBACK = {"0100007F", "00000000000000000000000001000000"}
+
+
+def listener_ports(*pids: int) -> tuple[tuple[str, int], ...]:
+    """The LOOPBACK listeners the VM's own host processes hold, as ``(proto, port)`` — the
+    plumbing the wall must leave open on ``lo`` for the VM to work at all: Lima's host resolver
+    (the hostagent serves the guest's DNS on a random loopback udp+tcp port and QEMU forwards
+    each query there — measured on the rig, it is where a wall without this rule cut DNS) and
+    QEMU's SSH ``hostfwd``. Matched by socket inode: ``/proc/<pid>/fd`` → ``/proc/net/*``. Only
+    loopback-bound sockets count — QEMU's outbound UDP sockets are bound to ``0.0.0.0`` and are
+    not listeners. A gone pid or an unreadable table contributes nothing."""
+    inodes: set[str] = set()
+    for pid in pids:
+        try:
+            fds = list((PROC / str(pid) / "fd").iterdir())
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target.endswith("]"):
+                inodes.add(target[8:-1])
+    found: set[tuple[str, int]] = set()
+    for proto in ("tcp", "udp"):
+        for table in (proto, f"{proto}6"):
+            try:
+                rows = (PROC / "net" / table).read_text().splitlines()[1:]
+            except OSError:
+                continue
+            for row in rows:
+                f = row.split()
+                if len(f) < 10 or f[9] not in inodes or f[3] != _LISTENING[proto]:
+                    continue
+                addr, _, port = f[1].partition(":")
+                if addr in _LOOPBACK:
+                    found.add((proto, int(port, 16)))
+    return tuple(sorted(found))
+
+
 def render(
     vm: str,
     scope: str,
     ssh_port: int,
     resolvers: tuple[str, ...] = DEFAULT_RESOLVERS,
+    plumbing: tuple[tuple[str, int], ...] = (),
 ) -> str:
     """The nftables ruleset that walls the VM whose QEMU process sits in cgroup ``scope``.
 
     ``ssh_port`` is Lima's forwarded guest-SSH port on the host loopback (``limactl shell``, the
     hostagent's own session and the socket forward must keep working — Lima allocates it per
-    boot, so render after each start); the daemon bands come from config. The ``delete table``
+    boot, so render after each start); ``plumbing`` is :func:`listener_ports` — the VM's other
+    loopback listeners, the hostagent's DNS above all; the daemon bands come from config. Nothing
+    off-loopback is opened but the resolvers' ``:53``. The ``delete table``
     before the ``table`` block makes the whole file idempotent — a re-apply replaces the table
     atomically rather than erroring on the existing one or stacking a second copy."""
     level = cgroup_level(scope)
-    ports = ", ".join([str(ssh_port), *_allowed_ports()])
+    tcp_extra = [str(p) for proto, p in plumbing if proto == "tcp" and p != ssh_port]
+    ports = ", ".join([str(ssh_port), *_allowed_ports(), *tcp_extra])
+    udp_ports = ", ".join(str(p) for proto, p in plumbing if proto == "udp")
+    udp_rule = f'    oif "lo" udp dport {{ {udp_ports} }} accept\n' if udp_ports else ""
     name = table_name(vm)
     dns = []
     for family, addrs in (
@@ -189,7 +242,7 @@ def render(
   chain vm {{
     ct state established,related accept
     oif "lo" tcp dport {{ {ports} }} accept
-{dns_rules}
+{udp_rule}{dns_rules}
     meta l4proto tcp counter reject with tcp reset
     counter reject with icmpx type admin-prohibited
   }}
@@ -211,13 +264,17 @@ def install_argv() -> list[str]:
 
 
 def install(
-    vm: str, scope: str, ssh_port: int, resolvers: tuple[str, ...] = DEFAULT_RESOLVERS
+    vm: str,
+    scope: str,
+    ssh_port: int,
+    resolvers: tuple[str, ...] = DEFAULT_RESOLVERS,
+    plumbing: tuple[tuple[str, int], ...] = (),
 ) -> bool:
     """Load the VM's host wall. False if the host can't enforce one or ``nft`` rejects the
     ruleset. Caller decides WHEN (VM start) and whether the operator consented to host nftables."""
     if not available() or not scope:
         return False
-    ruleset = render(vm, scope, ssh_port, resolvers)
+    ruleset = render(vm, scope, ssh_port, resolvers, plumbing)
     return subprocess.run(install_argv(), input=ruleset, text=True).returncode == 0
 
 

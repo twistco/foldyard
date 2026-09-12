@@ -179,11 +179,17 @@ class Backend(ABC):
         launch the VM's host processes inside a cgroup of its choosing (the host-side wall's
         ``systemd-run --scope``, :mod:`foldyard.hostwall`) without the backend knowing why."""
 
+    def host_pids(self, name: str) -> list[int]:
+        """The host pids of the VM's own processes — the VMM first, then its siblings sharing
+        its cgroup (Lima's hostagent). The host-side wall reads the cgroup scope from the first
+        and the loopback plumbing to keep open from all of them. ``[]`` where there is none to
+        name (stopped; a backend whose VM foldyard can't place, podman-machine's; native's
+        no-VM)."""
+        return []
+
     def vm_pid(self, name: str) -> int:
-        """The host pid of the VM's own process (the VMM, or a sibling sharing its cgroup) —
-        what the host-side wall reads the cgroup scope from. ``0`` where there is none to name
-        (stopped; a backend whose VM foldyard can't place, podman-machine's; native's no-VM)."""
-        return 0
+        """:meth:`host_pids`' first entry, or ``0``."""
+        return next(iter(self.host_pids(name)), 0)
 
     def ssh_port(self, name: str) -> int:
         """The host-loopback port the backend forwards to the guest's SSH — the one loopback
@@ -699,16 +705,17 @@ class LimaBackend(Backend):
         except (TypeError, ValueError):
             return 0
 
-    def vm_pid(self, name: str) -> int:
+    def host_pids(self, name: str) -> list[int]:
         """Lima's QEMU driver writes ``qemu.pid`` in the instance dir and the hostagent writes
-        ``ha.pid``; both live in the scope the VM was started in, the VMM is preferred."""
+        ``ha.pid``; both live in the scope the VM was started in, the VMM first."""
         inst = Path.home() / ".lima" / name
+        pids = []
         for pidfile in ("qemu.pid", "ha.pid"):
             try:
-                return int((inst / pidfile).read_text().strip())
+                pids.append(int((inst / pidfile).read_text().strip()))
             except (OSError, ValueError):
                 continue
-        return 0
+        return pids
 
     def _wait_for_socket(self, name: str, tries: int = 30, delay: float = 1.0) -> bool:
         """SPIKE: the forwarded podman socket appears a moment after `start` returns — poll

@@ -100,12 +100,12 @@ class FakeBackend:
         self.calls.append(f"provision:{self._provision}")
         return True
 
-    # the host-side wall's inputs: where the VM's process sits, and the forwarded SSH port
-    _pid = 0
+    # the host-side wall's inputs: the VM's host processes, and the forwarded SSH port
+    _pids: tuple[int, ...] = ()
     _ssh_port = 0
 
-    def vm_pid(self, name):
-        return self._pid
+    def host_pids(self, name):
+        return list(self._pids)
 
     def ssh_port(self, name):
         return self._ssh_port
@@ -793,15 +793,20 @@ def host_wall_env(lima_env, monkeypatch):
     set_wall(True)
     guest_ok()
     be._provision = machine.provision_id()
-    be._pid, be._ssh_port = 4242, 45285
+    be._pids, be._ssh_port = (4343, 4242), 45285
     monkeypatch.setattr(machine.config, "machine_host_wall", lambda: True)
     monkeypatch.setattr(machine.hostwall, "available", lambda: True)
     monkeypatch.setattr(machine.hostwall, "resolvers", lambda: ("127.0.0.53",))
     installs: list[tuple[str, str, int]] = []
     scope = {"path": ""}
     monkeypatch.setattr(machine.hostwall, "vm_cgroup_scope", lambda pid: scope["path"])
+    # the loopback plumbing is discovered from ALL the VM's host pids (hostagent DNS + ssh fwd)
+    monkeypatch.setattr(
+        machine.hostwall, "listener_ports", lambda *pids: (("udp", 38020),) if pids else ()
+    )
 
-    def install(vm, sc, port, resolvers):
+    def install(vm, sc, port, resolvers, plumbing):
+        assert plumbing == (("udp", 38020),), "the hostagent's DNS listener must be opened"
         installs.append((vm, sc, port))
         return True
 

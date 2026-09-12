@@ -38,7 +38,7 @@ def test_vm_cgroup_scope_reads_the_unified_v2_line(tmp_path, monkeypatch):
     proc.mkdir(parents=True)
     # a v1 controller line first (must be ignored), then the unified v2 line
     (proc / "cgroup").write_text(f"1:name=systemd:/legacy\n0::/{_SCOPE}\n")
-    monkeypatch.setattr(hostwall, "Path", lambda p: tmp_path / p.lstrip("/"))
+    monkeypatch.setattr(hostwall, "PROC", tmp_path / "proc")
     assert hostwall.vm_cgroup_scope(999) == _SCOPE
 
 
@@ -210,3 +210,60 @@ def test_remove_is_idempotent_by_construction(monkeypatch):
         "table inet fy_host_wall_acme",
         "delete table inet fy_host_wall_acme",
     ]
+
+
+# ── the VM's own host-side plumbing: loopback listeners its processes hold (Lima's host
+# resolver in the hostagent, QEMU's SSH hostfwd) — discovered from /proc, allowed on lo ──
+
+
+def _proc(tmp_path, pids: dict[int, list[int]], tcp: str, udp: str, tcp6: str = "", udp6: str = ""):
+    """A fake /proc: per-pid fd/ symlinks to socket inodes, plus the net tables."""
+    root = tmp_path / "proc"
+    for pid, inodes in pids.items():
+        fd = root / str(pid) / "fd"
+        fd.mkdir(parents=True)
+        for i, ino in enumerate(inodes):
+            (fd / str(i)).symlink_to(f"socket:[{ino}]")
+        (fd / "99").symlink_to("/dev/null")  # a non-socket fd, must be ignored
+    net = root / "net"
+    net.mkdir()
+    hdr = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+    for name, body in (("tcp", tcp), ("udp", udp), ("tcp6", tcp6), ("udp6", udp6)):
+        (net / name).write_text(hdr + body)
+    return root
+
+
+def _row(local: str, st: str, inode: int) -> str:
+    return f"   0: {local} 00000000:0000 {st} 00000000:00000000 00:00000000 00000000  1000        0 {inode} 1 0 100 0 0 0 0\n"
+
+
+def test_listener_ports_finds_the_vm_processes_loopback_listeners(tmp_path, monkeypatch):
+    root = _proc(
+        tmp_path,
+        {1093: [500, 501, 502], 1114: [600, 601]},
+        # 1093 (hostagent): DNS on 127.0.0.1:38020 tcp LISTEN + udp; 1114 (QEMU): ssh hostfwd
+        # 127.0.0.1:40209 LISTEN, an outbound udp socket bound to 0.0.0.0 (slirp), and an
+        # ESTABLISHED tcp flow — only the loopback LISTENERS count
+        tcp=_row("0100007F:9484", "0A", 500)
+        + _row("0100007F:9D11", "0A", 600)
+        + _row("0100007F:8409", "01", 601),
+        udp=_row("0100007F:9484", "07", 501) + _row("00000000:A3D2", "07", 502),
+        tcp6=_row("00000000000000000000000001000000:9484", "0A", 700),  # not one of ours
+    )
+    monkeypatch.setattr(hostwall, "PROC", root)
+    assert hostwall.listener_ports(1093, 1114) == (("tcp", 38020), ("tcp", 40209), ("udp", 38020))
+
+
+def test_listener_ports_ignores_a_gone_pid_and_unreadable_tables(tmp_path, monkeypatch):
+    monkeypatch.setattr(hostwall, "PROC", tmp_path / "nope")
+    assert hostwall.listener_ports(1, 2) == ()
+
+
+def test_render_opens_the_plumbing_on_loopback_only(bands):
+    rs = hostwall.render(
+        "acme", _SCOPE, ssh_port=45285, plumbing=(("tcp", 38020), ("udp", 38020), ("tcp", 40209))
+    )
+    assert 'oif "lo" tcp dport { 45285, 41000-41089, 41100-41189, 38020, 40209 } accept' in rs
+    assert 'oif "lo" udp dport { 38020 } accept' in rs
+    # nothing without plumbing: no empty udp set
+    assert "udp dport {" not in hostwall.render("acme", _SCOPE, ssh_port=45285)

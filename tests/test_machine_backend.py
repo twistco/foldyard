@@ -544,18 +544,20 @@ def test_lima_vm_pid_reads_the_drivers_pid_file(monkeypatch, tmp_path):
     monkeypatch.setattr(mb.Path, "home", lambda: tmp_path)
     inst = tmp_path / ".lima" / "acme"
     inst.mkdir(parents=True)
-    assert mb.LimaBackend().vm_pid("acme") == 0  # stopped: no pid file at all
+    assert mb.LimaBackend().host_pids("acme") == []  # stopped: no pid file at all
+    assert mb.LimaBackend().vm_pid("acme") == 0
     (inst / "ha.pid").write_text("4242\n")
     assert mb.LimaBackend().vm_pid("acme") == 4242  # the hostagent shares QEMU's cgroup
     (inst / "qemu.pid").write_text("4343\n")
-    assert mb.LimaBackend().vm_pid("acme") == 4343  # …but the VMM itself is preferred
+    assert mb.LimaBackend().host_pids("acme") == [4343, 4242]  # …but the VMM comes first
+    assert mb.LimaBackend().vm_pid("acme") == 4343
     (inst / "qemu.pid").write_text("garbage\n")
-    assert mb.LimaBackend().vm_pid("acme") == 4242
+    assert mb.LimaBackend().host_pids("acme") == [4242]
 
 
 def test_backends_without_a_host_wall_input_report_nothing():
     for be in (mb.PodmanBackend(), mb.NativeBackend()):
-        assert be.vm_pid("x") == 0
+        assert be.host_pids("x") == [] and be.vm_pid("x") == 0
         assert be.ssh_port("x") == 0
 
 

@@ -200,6 +200,7 @@ def render(opts: InitOptions) -> str:
         '#   backend = "native"  # host podman directly (no VM) — weakest isolation, shared kernel',
         "#   wall = false        # lima but COOPERATIVE-only: the box uses the proxy, but nothing",
         "#                       # stops a process that ignores it (the wall makes it fail-closed)",
+        "#   host_wall = true    # Linux hosts: enforce the same wall on the HOST too (nft, sudo on fy up)",
         'backend = "lima"',
         "wall = true",
         f'name = "{prefix}"',

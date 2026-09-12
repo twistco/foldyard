@@ -177,7 +177,8 @@ def _apply_host_wall() -> None:
         _err("✗ [machine].host_wall = true but this host has no `nft` / cgroup v2 to enforce it.")
         _err("  Install nftables, or drop `host_wall` (the in-VM wall still applies).")
         raise SystemExit(1)
-    scope = hostwall.vm_cgroup_scope(BACKEND.vm_pid(MACHINE))
+    pids = BACKEND.host_pids(MACHINE)
+    scope = hostwall.vm_cgroup_scope(pids[0] if pids else 0)
     if not hostwall.in_own_scope(MACHINE, scope):
         _err(f"✗ '{MACHINE}' is running OUTSIDE its own scope ({scope or 'no VM pid found'}), so")
         _err("  the host wall has nothing safe to match — walling the scope it is in would wall")
@@ -188,7 +189,10 @@ def _apply_host_wall() -> None:
         _err(f"✗ can't read '{MACHINE}'s forwarded SSH port — the host wall would cut limactl off.")
         raise SystemExit(1)
     _err(f"▶ loading the host-side wall for '{MACHINE}' (root: sudo nft)…")
-    if not hostwall.install(MACHINE, scope, ssh_port, hostwall.resolvers()):
+    # The VM's own loopback plumbing (the hostagent's DNS resolver, QEMU's SSH forward) is
+    # discovered from its processes, never guessed: Lima allocates those ports per boot too.
+    plumbing = hostwall.listener_ports(*pids)
+    if not hostwall.install(MACHINE, scope, ssh_port, hostwall.resolvers(), plumbing):
         _err(f"✗ loading the host-side wall for '{MACHINE}' failed (`sudo nft -f -`).")
         raise SystemExit(1)
 
