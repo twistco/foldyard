@@ -195,6 +195,22 @@ def test_the_isolation_mount_set_is_not_a_leak(secure_engine, monkeypatch, capsy
     assert verify.verify() == 1
 
 
+def test_a_host_path_string_in_the_mount_options_is_not_a_leak(secure_engine, monkeypatch, capsys):
+    # Linux rig, 2026-09-13: run INSIDE the box, `Path.home()` is /root, and a Fedora guest's btrfs
+    # root line carries `subvol=/root` in its OPTIONS field — the mountpoint is `/`, nothing of
+    # the host is exposed, yet a whole-line search flagged it. Only the mountpoint decides.
+    _, results = secure_engine
+    monkeypatch.setattr(verify.Path, "home", staticmethod(lambda: pathlib.Path("/root")))
+    results["pid1_mounts"] = (
+        "/dev/vda3 / btrfs rw,seclabel,relatime,compress=zstd:1,subvolid=256,subvol=/root 0 0\n"
+    )
+    assert verify.verify() == 0
+    assert "free of host home/paths" in capsys.readouterr().out
+    # …while the same path AS the mountpoint is still the leak it always was.
+    results["pid1_mounts"] = "lima-1 /root 9p rw,relatime 0 0\n"
+    assert verify.verify() == 1
+
+
 # ── false passes: a negative check needs a positive control ──────────────────────────────
 # Every check below asserts an ABSENCE, so it reports PASS when its probe command FAILS. A probe
 # that could not run at all therefore reads as a clean bill of health. This bit in the wild:

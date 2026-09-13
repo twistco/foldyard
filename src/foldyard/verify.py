@@ -180,12 +180,15 @@ def _vm_boundary(
         return
     # The real table carries the mounts foldyard itself makes — the repo and the worktrees root,
     # at their host paths (`machine.guest_mounts`). Exempt by EXACT mountpoint only: the home
-    # itself, a sibling under it, or a nested bind at a sub-path are all still leaks.
+    # itself, a sibling under it, or a nested bind at a sub-path are all still leaks. Judge the
+    # MOUNTPOINT field, not the whole line: the options field can carry a path-shaped string
+    # that exposes nothing — a Fedora guest's btrfs root is `/ … subvol=/root`, and in the box
+    # (uid 0) `/root` IS the home this pattern looks for (Linux rig, 2026-09-13).
     exempt = set(allowed or ())
     host = [
         ln
         for ln in mp.stdout.splitlines()
-        if _host_paths().search(ln) and _mountpoint(ln) not in exempt
+        if (mnt := _mountpoint(ln)) not in exempt and _host_paths().search(mnt)
     ]
     if not host:
         rep.ok("VM mount table (PID 1's namespace) free of host home/paths beyond the repo mounts")
