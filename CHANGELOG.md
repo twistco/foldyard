@@ -36,6 +36,14 @@ break config or CLI shape, and say so here. How a release is cut:
   Lima VM mounting the operator's whole home previously passed. The repo and worktrees-root
   mounts are exempt by exact path; a home mount, a sibling, or a nested bind still fail.
 
+### Fixed
+
+- **`fy verify`'s mount audit judged the whole `/proc/1/mounts` line, not the mountpoint.** Run
+  inside the box (uid 0) the home it looks for is `/root`, and a Fedora guest's btrfs root line
+  carries `subvol=/root` in its *options* — a false FAIL on a table that exposes nothing. The
+  audit now matches the mountpoint field only; the same path *as* a mountpoint, and the
+  repo-mount exemption, are unchanged. Found by the first in-box `verify` on a Linux host.
+
 ## 0.2.1 — 2026-09-10
 
 ### Fixed

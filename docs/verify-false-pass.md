@@ -138,3 +138,27 @@ directions the fix promised, end to end. One thing the run also confirmed: the p
 live in the *VM's* podman store, not the host's — a host-built image the VM can't run trips the
 positive control (`probe image … could not run … the boundary battery DID NOT EXECUTE`) rather
 than passing vacuously, which is the control doing its job.
+
+## A false FAIL (2026-09-13): the options field
+
+The opposite failure, from the first in-box `fy verify` on a Linux host (Lima/QEMU, a Fedora
+guest). The audit reported `VM exposes host paths: /dev/vda3 / btrfs rw,…,subvol=/root 0 0`
+— the VM's *root filesystem*. Inside the box the process runs as uid 0, so the home the leak
+pattern looks for is `/root`; the btrfs root line carries `subvol=/root` in its **options**
+field; and the pattern was searched across the whole line. The mountpoint is `/`. Nothing of the
+host is in that line.
+
+A false FAIL is not a security hole, but it is the same credibility problem from the other side:
+a battery that cries wolf on a sound boundary teaches people to read past its red. Fixed the same
+day (`fix(verify): judge the mount audit by the mountpoint field, not the whole line`): the
+pattern is applied to field 2 only — the only field a leak can live in, since a 9p/virtiofs
+source is a tag and a bind's source is a device — and the repo-mount exemption is unchanged.
+Pinned by `test_a_host_path_string_in_the_mount_options_is_not_a_leak`, which also keeps the
+same path *as* a mountpoint a FAIL. A Mac's Ubuntu guest (ext4) never showed it; any btrfs guest
+would have.
+
+One more thing the same run taught about the `git push refused` check: it proves the refusal
+only against a **private** origin. A public one answers `git ls-remote` without credentials, so
+the box reads as "REACHABLE — the box can push"; a repo with no origin at all reads as UNPROVEN.
+Neither is a bug in the check — both are the positive control refusing to certify what it could
+not test — but a fixture or a fresh `git init` needs a private-looking origin to get a PASS.

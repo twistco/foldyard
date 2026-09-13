@@ -29,13 +29,18 @@ there are upper bounds; correctness results transfer as they are.
 | `[machine].host_wall` — the host-side cgroup-matched wall, end to end (`machine ensure` under `MACHINE_HOST_WALL=1`) | ✅ VM created + started in its scope; guest egress refused by name and IP; DNS resolves; band port 200; out-of-band port + sshd refused; operator, `limactl shell`, podman socket untouched; `fy verify` ALL PASS under it; hand-started VM refused; `rm` leaves no table | 2026-09-12 | [lima-wall-machine-integration.md §3](./lima-wall-machine-integration.md#3-host-side-enforcement--machinehost_wall--true-linux) |
 | `fy machine ensure` / `stop` / `rm` lifecycle | ✅ exercised repeatedly by the host-wall run (create → start → stop → hand start → stop → rm) | 2026-09-12 | as above |
 | the `③` question — a per-box userspace kernel (gVisor) under the machine VM | measured, **deferred**: libkrun 25× on `git status`; gVisor ~3× (x86 rig AND Mac arm64/vz, directfs on), rootless, no KVM — the front-runner. `--ignore-cgroups` costs nothing (box sets no limits); `host-uds=all` is the unfiltered socket so narrowing is a precondition; inotify-inward needs polling | 2026-09-11 / 12 | [isolation-layers](./isolation-layers.md#the-outs-measured) |
+| **`fy up` end to end** — preflight, the config-adopt gate, `machine ensure`, the supervisor in the background (fake minter, egress proxy), the `fakedep` overlay, the compose build + up | ✅ against the example copied out as its own repo, `fakecred=on fakedep=on`: 58 s incl. the Postgres pull; the api serves `feature: on` and a DB-backed `/db`; `fy state` all ✓ (daemons up, capability probed ok). preflight's nested-project refusal fires on `example/` *inside* the clone — copy it out first | 2026-09-13 | this page; the run notes are in the session handover |
+| `[proxy]` on the host — mitmdump + its CA, box routing, the egress log | ✅ first `fy host` generated the CA; the box gets `HTTPS_PROXY=192.168.5.2:41200` + the combined bundle, `curl https://example.com` from the box → 200 through the proxy, logged in `egress.jsonl`; `fy doctor` all ✓ | 2026-09-13 | as above |
+| `[machine].wall` + `host_wall` **via `fy up`** (not `machine ensure`) | ✅ needs `[proxy]` declared — preflight refuses the wall on a consumer with nothing routing the box; then: table loaded, VM in its scope, direct guest egress refused by name and IP, DNS resolves, the api still served. Probe with `curl --noproxy '*'`: Lima's `environment.d` gives the VM user the proxy env, so a bare `curl` from `limactl shell` goes through the proxy and answers 200 | 2026-09-13 | [lima-wall-machine-integration.md §3](./lima-wall-machine-integration.md#3-host-side-enforcement--machinehost_wall--true-linux) |
+| `fy box up` / `exec` / `down` + **in-box `fy verify`** | ✅ box image built + bootstrapped in 45 s; in-box `fy ps` reaches the engine, `fy mode` reads the mirror; in-box `verify` ALL PASS under walls + proxy — after fixing a false FAIL (a Fedora guest's btrfs `subvol=/root` option matched the in-box home; the audit now judges the mountpoint field) and giving the fixture a *private* origin (a public one answers `ls-remote` without credentials and reads as pushable) | 2026-09-13 | [verify-false-pass.md](./verify-false-pass.md#a-false-fail-2026-09-13-the-options-field) |
+| the config-adopt gate ([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)): first adoption, drift, revert | ✅ a never-adopted checkout with no terminal: `fy up` refuses; `fy config adopt` non-interactive adopts. A drifted tree (`cpus = 2 → 3`): `fy up` prints the diff and keeps running the adopted copy, the supervisor logs the one-per-change line, the doctor row flags it, `fy config revert` restores the file | 2026-09-13 | as above |
+| `fy machine recreate`, `fy machine stop` (also stops the supervisor), `fy doctor`, the stale-provisioning refusal (`fy box exec` without the wall env after a walled `up`) | ✅ | 2026-09-13 | as above |
 | CI tiers 1–3 (unit/golden/TUI, the example stack up → serve → down, the proxy and box e2es) | ✅ every push, on `ubuntu-latest` — inside a docker-CLI container mirroring the dev box, so `in_box()` is true and the machine + host gates are bypassed | continuous | [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml) |
 
 ## Not yet validated on Linux
 
-- **`fy up` proper** — the supervisor (`fy host`) with the proxy and minters, a box behind the
-  wall, the config-adopt gate, worktrees. Only `machine ensure` + `verify` have run on a Linux
-  *host*; CI's `fy up` runs in-box. This is the single biggest gap: it is the daily loop.
+- **Worktrees on a Linux host** — `fy worktree add` + a second stack in the same VM; `fy up`
+  itself is validated above, worktrees are not.
 - **The box e2e on the rig** (`tests/test_proxy_box_e2e.py` against the rig's engine — the
   recipe is in [nested-virt.md](./nested-virt.md)); CI covers it on a runner, the rig would cover
   it on a real Lima VM.
@@ -47,7 +52,6 @@ there are upper bounds; correctness results transfer as they are.
   structurally absent there. See
   [isolation-layers.md](./isolation-layers.md#wsl2--a-linux-host-whose-hyper-v-boundary-protects-the-wrong-asset).
 - **`fy tui`, `fy code` (the VS Code attach), `fy open` (browser)** on Linux — untouched.
-- **`fy doctor` rows** on Linux (engine disk headroom, the backend checks) — untouched.
 - **The host wall's operator side**: the `sudo nft` prompt on every `fy up` (a passwordless
   sudoers rule for `nft` is the documented answer, not yet written up as a recipe), and the
   requirement for a `systemd --user` manager (an SSH login has one; a bare `su` may not) — the

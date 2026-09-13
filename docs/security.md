@@ -146,7 +146,8 @@ asserts, grouped:
   matched exactly.
 - **Credential-agnostic backstops** (inside the box): no SSH agent forwarded, no `~/.ssh`
   private-key material, no `~/.netrc`, and `git ls-remote origin` **fails** — the box can't
-  even reach the remote to push, by construction. These live in foldyard's core so no absent
+  even reach the remote to push, by construction (proven against a *private* origin — a public
+  one answers `ls-remote` without credentials and reads as reachable). These live in foldyard's core so no absent
   or broken plugin can weaken them.
 - **Mode-aware posture checks** (from the credential plugins): each mechanism asserts its
   own posture — e.g. for `github`, the token in the box is never more than the ambient
