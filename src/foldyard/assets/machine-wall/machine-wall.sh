@@ -157,7 +157,15 @@ EOF
     # and can't reach $GW (Lima's internal usernet address) from there. The wall already scopes
     # $GW to the daemon ports, so direct egress to it is safe. Using $GW as the PROXY is unaffected
     # (NO_PROXY filters request destinations, not the proxy connection itself).
-    install -d "$WALL_HOME/.config/environment.d"
+    # Every directory created here is created OWNED BY THE USER: this runs as root at boot, and
+    # a root-owned ~/.config (what a bare `install -d` leaves behind on a fresh image where nothing
+    # made it yet) makes every later user-level step fail — Lima's `systemctl --user enable
+    # podman.socket` (the API socket never comes up, `limactl start` times out) and the sandbox
+    # posture's own drop-ins. Fedora 44 images happened to pre-create the dir; Fedora 45 doesn't.
+    WALL_GID="$(id -g "$WALL_UID")"
+    for d in "$WALL_HOME/.config" "$WALL_HOME/.config/environment.d"; do
+        [ -d "$d" ] || install -d -o "$WALL_UID" -g "$WALL_GID" "$d"
+    done
     cat >"$WALL_HOME/.config/environment.d/90-fy-wall-proxy.conf" <<EOF
 HTTP_PROXY=$PROXY_URL
 HTTPS_PROXY=$PROXY_URL

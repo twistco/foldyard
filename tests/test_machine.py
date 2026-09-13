@@ -260,6 +260,10 @@ def test_ensure_provisions_the_gvisor_posture_after_the_guest_checks(
 ):
     from foldyard import sandbox
 
+    # The fake MUST be installed: without it `ensure` runs against the real backend — and the
+    # developer's live VM (it passed for months only while that VM's recorded boot
+    # provisioning happened to match the current asset).
+    half_started()
     order = []
     monkeypatch.setattr(machine, "_check_guest_provisioning", lambda: order.append("guest"))
     monkeypatch.setattr(sandbox, "ensure", lambda backend, name: order.append(f"sandbox:{name}"))
@@ -271,6 +275,8 @@ def test_ensure_provisions_the_gvisor_posture_after_the_guest_checks(
 def test_ensure_skips_the_sandbox_without_the_posture(half_started, tmp_path, monkeypatch):
     from foldyard import sandbox
 
+    half_started()  # see above — never the real backend
+    monkeypatch.setattr(machine, "_check_guest_provisioning", lambda: None)
     monkeypatch.setattr(sandbox, "ensure", lambda backend, name: pytest.fail("not wanted"))
     monkeypatch.setattr(machine.config, "machine_runtime", lambda: "")
     machine.ensure(tmp_path, tmp_path / "wt")
@@ -667,6 +673,32 @@ def test_wall_asset_script_shape():
     ):
         assert needle in text, f"machine-wall.sh missing {needle!r}"
     assert "transproxy" not in text  # no in-VM proxy — the Mac proxy stays the only chokepoint
+
+
+def _dir_creations_outside_system_paths(text: str) -> list[str]:
+    """Every `install -d` / `mkdir` DIRECTIVE in the wall script (comments skipped) whose target
+    is not a fixed system path — i.e. anything that can land under the VM user's home."""
+    out = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("#") or not re.search(r"\b(install -d|mkdir)\b", line):
+            continue
+        target = line.split()[-1].strip('"')
+        if not target.startswith(("/etc/", "/usr/", "/run/", "/var/", "/tmp/")):
+            out.append(line)
+    return out
+
+
+def test_wall_script_creates_user_home_dirs_owned_by_the_user():
+    # The wall runs as ROOT at boot and writes environment.d under the VM user's ~/.config. On a
+    # fresh image where nothing made ~/.config yet, a bare `install -d` leaves it ROOT-owned —
+    # then every later user-level step fails: Lima's `systemctl --user enable podman.socket` (so
+    # the API socket never comes up and `limactl start` times out) and the sandbox posture's own
+    # drop-ins. Fedora 44 happened to pre-create the dir; the Fedora 45 guest didn't (2026-09-13).
+    creations = _dir_creations_outside_system_paths(machine._wall_asset().read_text())
+    assert creations, "expected the wall script to create ~/.config/environment.d"
+    for line in creations:
+        assert '-o "$WALL_UID"' in line, f"creates a dir under the user's home as root: {line}"
 
 
 # ── stop / rm: the rest of the lifecycle (`fy machine stop|rm`) ─────────────────────────
