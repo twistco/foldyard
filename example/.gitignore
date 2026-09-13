@@ -1,2 +1,4 @@
 # foldyard's gitignored, read-only posture mirror (written host-side; informational only).
 .dev-mode.json
+# A host-side `uv sync` in api/ (the box's own api/.venv is a named volume, never in the tree).
+.venv/

@@ -553,7 +553,11 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   `/var/run/docker.sock`. Default: the active backend's guest socket. Env:
   `PODMAN_SOCK_IN_VM`. You rarely need this.
 - **`shadow_volumes`** — in-tree build-artifact dirs (checkout-relative) shadowed with
-  per-box named volumes — the workaround for bind-mount uid squashing. Default: `[]`.
+  per-box named volumes — the workaround for bind-mount uid squashing, and the isolation line
+  for dependencies: what the box installs there stays in the volume, off the host tree, so a
+  package pulled inside the box (compromised or merely different) is never something the host's
+  own toolchain or editor loads. On a VM disk, too, rather than the shared mount — installs and
+  imports run at native speed (see [isolation-layers.md](./isolation-layers.md)). Default: `[]`.
 - **`caches`** — shared caches mounted into the box: a list of `{ volume, path }`, where
   `path` is relative to the box's `HOME`. Default: `[]`.
 - **`warmup`** — background dependency warm-up steps run after box-up: a list of

@@ -22,6 +22,14 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Changed
 
+- **The example consumer's api is a uv project, and the example's box shadows its venv.**
+  `example/api` gains `pyproject.toml` + `uv.lock` (the same three pins, now locked) and an image
+  built from that lockfile with uv; `example/foldyard.toml`'s `[box]` wires the in-tree-artefact
+  pattern every real consumer needs — `shadow_volumes = ["api/.venv"]`, a frozen `uv sync`
+  warmup, `UV_LINK_MODE=copy` + `UV_FROZEN` — so the box's dependencies live in a per-box volume
+  on the VM disk (never on the host tree, and never on the shared mount: the fifth rig session
+  measured that placement as a 100× layer for installs under crun alone). `tests/test_example.py`
+  pins the shape.
 - **Root in the Lima machine VM is now boot-time only — the VM user's passwordless sudo is
   dropped.** The dev box runs as that user's uid, so a container-runtime escape used to be one
   `sudo nft flush ruleset` from open egress. foldyard now records a root boot script in the

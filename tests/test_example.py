@@ -25,7 +25,16 @@ def example_repo(fresh_config):
 
 
 def test_example_files_present():
-    for rel in ("foldyard.toml", "compose.yml", "box.Dockerfile", "api/Dockerfile", "api/main.py"):
+    for rel in (
+        "foldyard.toml",
+        "compose.yml",
+        "box.Dockerfile",
+        "api/Dockerfile",
+        "api/main.py",
+        "api/pyproject.toml",
+        "api/uv.lock",
+        "api/.dockerignore",
+    ):
         assert (EXAMPLE / rel).is_file(), rel
 
 
@@ -70,6 +79,26 @@ def test_example_omits_the_proxy_tier_and_says_why(example_repo):
     for rel in ("foldyard.toml", "README.md"):
         text = (EXAMPLE / rel).read_text()
         assert "example-lima-wall" in text, f"{rel} must point at the locked-down example"
+
+
+def test_example_shadows_the_api_venv_and_warms_it_frozen(example_repo):
+    """The example teaches the in-tree-artefact pattern every real consumer needs: the box's
+    `api/.venv` is a per-box named volume (so the box's dependencies never land on the host tree
+    and the host's never leak into the box), filled by a FROZEN warmup (the lockfile lives on the
+    shared mount, so a resolving install would rewrite it as root), with uv's link mode pinned to
+    copy (the volume is a different filesystem from the package cache) and re-locking refused.
+    The api image installs from the SAME lockfile, so the three environments agree."""
+    assert config.box_shadow_volumes() == ["api/.venv"]
+    (step,) = config.box_warmup()
+    assert step["dir"] == "api"
+    assert step["run"].startswith("uv sync --frozen")
+    env = config.box_env()
+    assert env["UV_LINK_MODE"] == "copy"
+    assert env["UV_FROZEN"] == "1"
+    dockerfile = (EXAMPLE / "api/Dockerfile").read_text()
+    assert "uv sync --frozen" in dockerfile, "the image must install from uv.lock"
+    assert ".venv" in (EXAMPLE / "api/.dockerignore").read_text().split()
+    assert "shadow_volumes" in (EXAMPLE / "README.md").read_text()
 
 
 def test_example_registry_refuses_a_strandable_fakedep(example_repo):

@@ -53,6 +53,20 @@ disk_gib = 20
 # box contract (PLAN §7.4): an engine client that speaks the socket + git + python/uv.
 [box]
 image = { dockerfile = "box.Dockerfile", tag = "foldyard-example-box:latest" }
+# THE IN-TREE ARTEFACT PATTERN (every real consumer needs it — ../docs/configuration.md `[box]`).
+# The box mounts this checkout, so `api/.venv` would be the SAME directory the host's toolchain
+# builds into: two kernels, two uids, one dir. `shadow_volumes` masks it with a per-box named
+# volume on the VM disk — the box's dependencies never land on the host tree (a package the box
+# pulled, compromised or merely different, is never something the host's own python or editor
+# can load), the host's never leak into the box, and installs run at VM-disk speed instead of
+# the shared mount's. A fresh volume starts EMPTY, so `warmup` fills it at box-up — FROZEN,
+# because uv.lock lives on the shared mount and a resolving install would rewrite it as root.
+# `env` is not optional with it: the volume is a different filesystem from uv's package cache
+# (the default hardlink import fails cross-device), and UV_FROZEN keeps a bare `uv run` from
+# re-locking as a side effect of running a test. api/Dockerfile installs from the same lockfile.
+shadow_volumes = ["api/.venv"]
+warmup = [{ dir = "api", run = "uv sync --frozen" }]
+env = { UV_LINK_MODE = "copy", UV_FROZEN = "1" }
 
 # ── Posture: modes, overlays, requirements — the walkthrough in README.md ───────────────
 # The fakecred plugin is foldyard's zero-secret stand-in for a real credential mechanism
