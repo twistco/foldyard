@@ -205,6 +205,14 @@ caches = [{ volume = "foldyard-uv-cache", path = ".cache/uv" }]   # path is unde
 # name = "pulumi"
 # install = "curl -fsSL https://get.pulumi.com | sh -s -- --install-root /opt/fy-tools --no-edit-path"
 
+# The packaged box image drops its apt lists (`rm -rf /var/lib/apt/lists/*` after its own
+# installs, the usual image hygiene), so the apt steps below need them fetched ONCE first —
+# without this, each of them failed with `Unable to locate package` on every fresh box.
+[[box.tools]]
+name = "apt-lists"
+check = "ls /var/lib/apt/lists/*Packages >/dev/null 2>&1"
+install = "apt-get update -qq"
+
 # `uv run pyright` (the `just typecheck` recipe) needs a Node runtime: the pyright PyPI
 # package is a thin wrapper that BUNDLES the pyright JS inside its wheel and prefers a
 # global `node` from PATH (PYRIGHT_PYTHON_GLOBAL_NODE defaults on). Without one it falls

@@ -157,6 +157,23 @@ Pinned by `test_a_host_path_string_in_the_mount_options_is_not_a_leak`, which al
 same path *as* a mountpoint a FAIL. A Mac's Ubuntu guest (ext4) never showed it; any btrfs guest
 would have.
 
+## Under gVisor (2026-09-13): the mount audit cannot run from inside the box, by design
+
+`[machine].runtime = "gvisor"` (docs/configuration.md) runs the box under gVisor's userspace
+kernel. The VM mount audit reads the VM's PID-1 mount table through a `--privileged --pid=host`
+sibling — but that reach into the VM kernel is exactly what gVisor blocks, and it is the SAME
+property the `escape refused` check proves is blocked. So under the posture the sibling reaches
+only the sandbox, `/proc/1/mounts` yields nothing, and the audit cannot execute.
+
+That is not a leak and not a failed probe, so it is reported as an **advisory** (`⚠`, no effect
+on the exit code) naming the reason and where the boundary IS checked — host-side, or on a crun
+box — never as a silent PASS. The `escape refused`, credential-absence and direct-egress checks
+still run and still assert. Pinned by `test_mount_audit_under_gvisor_warns_instead_of_failing`
+(and `test_mount_audit_empty_is_still_a_fail_under_crun`, so the crun path keeps its FAIL on an
+empty table). The VM's mount set is fixed by `machine ensure` (repo + worktrees only); the audit
+re-checks it, and under gVisor that re-check moves outside the sandbox. When the socket-narrowing
+filter lands it will want a host-side mount assertion so the boundary is proven, not only set.
+
 One more thing the same run taught about the `git push refused` check: it proves the refusal
 only against a **private** origin. A public one answers `git ls-remote` without credentials, so
 the box reads as "REACHABLE — the box can push"; a repo with no origin at all reads as UNPROVEN.

@@ -540,6 +540,44 @@ def test_lima_ssh_port_comes_from_list_json(monkeypatch):
     assert mb.LimaBackend().ssh_port("absent") == 0
 
 
+def test_lima_ssh_target_comes_from_the_instances_ssh_config(monkeypatch, tmp_path):
+    monkeypatch.setattr(mb.Path, "home", lambda: tmp_path)
+    inst = tmp_path / ".lima" / "acme"
+    inst.mkdir(parents=True)
+    (inst / "ssh.config").write_text(
+        'Host lima-acme\n  IdentityFile "/h/.lima/_config/user"\n  IdentityFile "/h/.ssh/id_ed25519"\n'
+        "  User dain\n  Hostname 127.0.0.1\n  Port 60022\n"
+    )
+    t = mb.LimaBackend().ssh_target("acme")
+    assert t is not None
+    assert (t.user, t.port, t.identity) == ("dain", 60022, "/h/.lima/_config/user")
+    assert mb.LimaBackend().ssh_target("absent") is None
+
+
+def test_podman_ssh_target_comes_from_a_machine_inspect_TEMPLATE(monkeypatch):
+    # NOT `--format json` — `podman machine inspect` renders `json` as a literal string. The
+    # template must be tab-separated user/port/identity.
+    seen = {}
+
+    def fake_run(cmd):
+        seen["fmt"] = cmd[cmd.index("--format") + 1]
+        return _Proc(0, "core\t50501\t/h/machine\n")
+
+    monkeypatch.setattr(mb, "_run", fake_run)
+    t = mb.PodmanBackend().ssh_target("tangible")
+    assert t is not None
+    assert (t.user, t.port, t.identity) == ("core", 50501, "/h/machine")
+    assert "{{.SSHConfig.RemoteUsername}}" in seen["fmt"] and "json" not in seen["fmt"]
+    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(125, ""))
+    assert mb.PodmanBackend().ssh_target("tangible") is None
+    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(0, "core\t\t/h/machine\n"))  # a blank field
+    assert mb.PodmanBackend().ssh_target("tangible") is None
+
+
+def test_native_backend_has_no_ssh_target():
+    assert mb.NativeBackend().ssh_target("x") is None
+
+
 def test_lima_vm_pid_reads_the_drivers_pid_file(monkeypatch, tmp_path):
     monkeypatch.setattr(mb.Path, "home", lambda: tmp_path)
     inst = tmp_path / ".lima" / "acme"

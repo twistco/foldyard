@@ -288,6 +288,79 @@ def test_box_posture_clean_passes(secure_engine, monkeypatch, tmp_path, capsys):
     assert "FAIL" not in out, out
 
 
+def test_git_refused_by_a_missing_ssh_client_proves_the_push_refusal(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # An SSH origin in a box that ships no ssh client: git cannot even start the transport. With
+    # the rows above already asserting no keys and no agent, that absence IS the refusal — no
+    # credential can reach origin over a transport that does not exist — and must not read as
+    # "unreachable for network reasons" (which left every SSH-origin consumer short of ALL PASS).
+    _, results = secure_engine
+    results["git_rc"], results["git_stderr"] = (
+        128,
+        ("error: cannot run ssh: No such file or directory\nfatal: unable to fork\n"),
+    )
+    _enter_box(monkeypatch, tmp_path)
+    assert verify.verify() == 0
+    assert "git push refused" in capsys.readouterr().out
+
+
+def test_git_timeout_is_still_not_a_refusal(secure_engine, monkeypatch, tmp_path, capsys):
+    _, results = secure_engine
+    results["git_rc"], results["git_stderr"] = (
+        128,
+        "ssh: connect to host github.com port 22: Connection timed out\n",
+    )
+    _enter_box(monkeypatch, tmp_path)
+    assert verify.verify() == 1
+    assert "UNPROVEN" in capsys.readouterr().out
+
+
+def test_mount_audit_under_gvisor_warns_instead_of_failing(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # `--pid=host` into the VM is exactly what gVisor blocks (the "escape refused" property), so
+    # the in-box mount audit cannot run under the posture — that is not a leak, and must not FAIL.
+    _, results = secure_engine
+    results["pid1_mounts"] = ""  # the probe reaches only the sandbox: nothing to read
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.setenv("FY_MACHINE_RUNTIME", "gvisor")
+    monkeypatch.setattr(verify, "_kernel_release", lambda: "4.19.0-gvisor")
+    assert verify.verify() == 0  # advisory, not a fail
+    out = capsys.readouterr().out
+    assert "not runnable inside a gVisor box" in out and "escape refused" in out
+
+
+def test_mount_audit_empty_is_still_a_fail_under_crun(secure_engine, monkeypatch, tmp_path, capsys):
+    _, results = secure_engine
+    results["pid1_mounts"] = ""
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.delenv("FY_MACHINE_RUNTIME", raising=False)
+    assert verify.verify() == 1
+    assert "UNPROVEN" in capsys.readouterr().out
+
+
+def test_gvisor_posture_row_checks_the_kernel_the_box_actually_runs_on(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.setenv("FY_MACHINE_RUNTIME", "gvisor")
+    monkeypatch.setattr(verify, "_kernel_release", lambda: "4.19.0-gvisor")
+    assert verify.verify() == 0
+    assert "gVisor" in capsys.readouterr().out
+    monkeypatch.setattr(verify, "_kernel_release", lambda: "6.19.10-300.fc44.aarch64")
+    assert verify.verify() == 1
+    assert "NOT under gVisor" in capsys.readouterr().out
+
+
+def test_no_gvisor_row_without_the_posture(secure_engine, monkeypatch, tmp_path, capsys):
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.delenv("FY_MACHINE_RUNTIME", raising=False)
+    monkeypatch.setattr(verify, "_kernel_release", lambda: "6.19.10")
+    assert verify.verify() == 0
+    assert "gVisor" not in capsys.readouterr().out
+
+
 def test_git_remote_reachable_is_fail(secure_engine, monkeypatch, tmp_path, capsys):
     _, results = secure_engine
     results["git_rc"] = 0  # origin reachable → the box could push

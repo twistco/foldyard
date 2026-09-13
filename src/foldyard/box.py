@@ -37,7 +37,7 @@ import sys
 from importlib import metadata
 from pathlib import Path
 
-from . import config, keyless, stack
+from . import config, keyless, machine, sandbox, stack
 from .plugins import registry
 
 _BOX_FINGERPRINT_LABEL = "io.foldyard.box-fingerprint"
@@ -115,6 +115,35 @@ def _baked_env(engine: str, box: str, env: dict, key: str) -> str | None:
         if sep and name == key:
             return val
     return None
+
+
+def _oci_runtime(engine: str, box: str, env: dict) -> str:
+    """The runtime the engine recorded for ``box`` at create (``runsc-fy`` under the gVisor
+    posture, ``crun`` otherwise) — the fact, not the config's wish."""
+    out = subprocess.run(
+        [engine, "inspect", box, "--format", "{{.OCIRuntime}}"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def _warn_stale_runtime(engine: str, box: str, env: dict) -> None:
+    """The runtime a box runs under is fixed at create. A box created before ``[machine].runtime``
+    was adopted keeps running under the VM's runtime (and vice versa), so an "already up" that
+    said nothing would be reporting a hardened box that isn't. Best-effort, like the port-band
+    nag: silent when the baked value can't be read."""
+    baked = (_baked_env(engine, box, env, sandbox.BAKED_ENV) or "").strip()
+    wanted = "gvisor" if sandbox.wanted() else ""
+    if baked == wanted:
+        return
+    have = baked or "the VM engine's own runtime"
+    want = wanted or "the VM engine's own runtime"
+    print(
+        f"⚠ dev box {box} runs under {have}, but [machine].runtime now asks for {want}. "
+        "The runtime is fixed at create: `fy box down && fy box up`."
+    )
 
 
 def _warn_stale_proxy_port(engine: str, box: str, env: dict) -> None:
@@ -847,6 +876,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
 
     if _running(engine, box, env):
         _warn_stale_proxy_port(engine, box, env)  # a pre-band box strands on a dead proxy port
+        _warn_stale_runtime(engine, box, env)  # [machine].runtime is create-time too
         if _fingerprint(engine, "container", box, env) != expected_fingerprint:
             print(
                 f"⚠ dev box {box} was built from an older image definition. Recreate it to pick "
@@ -940,9 +970,14 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # Core box volumes: the engine socket, the shared on-PATH tools prefix (foldyard + consumer
     # [[box.tools]]), and the configured caches. The agent/editor volumes (Claude config/native +
     # transcripts, vscode-server) come from the gated claude/vscode plugins' box_args above.
+    # Under the gVisor posture the box's OWN engine socket is the runsc-default one: everything
+    # the box creates (siblings, the stack from an in-box `fy up`) runs under gVisor too, so the
+    # box cannot opt itself or a sibling out by choosing a socket.
+    gvisor = sandbox.wanted()
+    sock_in_vm = sandbox.guest_socket() if gvisor else config.box_sock_in_vm()
     agent_vols = [
         "-v",
-        f"{config.box_sock_in_vm()}:/var/run/docker.sock",
+        f"{sock_in_vm}:/var/run/docker.sock",
         "-v",
         "devbox_tools:/opt/fy-tools",
         # Agent-neutral persisted shell state (bash history — see the _BASE_SCRIPT HISTFILE
@@ -989,6 +1024,10 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     ]
     for key in config.port_bases():  # passthrough -e KEY (value flows from env below)
         env_args += ["-e", key]
+    if gvisor:
+        # A create-time property (like the port band): baked so the already-up nag and the
+        # in-box `fy verify` row can compare the wish with the box they actually have.
+        env_args += ["-e", f"{sandbox.BAKED_ENV}=gvisor"]
     env_args += [
         "-e",
         "IN_DEVBOX=1",
@@ -1039,8 +1078,21 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         "infinity",
     ]
     _echo(run)
-    if subprocess.run(run, env=env, stdout=subprocess.DEVNULL).returncode != 0:
+    # ONLY the create goes through the runsc socket (the runtime is decided by the SOCKET a
+    # container is created through, never by a flag the box could omit); probes, exec and the
+    # build stay on the stack env — both services share the VM's one libpod store.
+    create_env = sandbox.engine_env(env, machine.BACKEND, machine.MACHINE) if gvisor else env
+    if subprocess.run(run, env=create_env, stdout=subprocess.DEVNULL).returncode != 0:
         _err("✗ dev box create failed")
+        return 1
+    if gvisor and sandbox.RUNTIME not in (got := _oci_runtime(engine, box, env)):
+        # Fail closed: never bootstrap (and hand credentials to) a box outside the posture.
+        _err(
+            f"✗ dev box {box} came up under runtime {got or 'unknown'!r}, not gVisor "
+            f"({sandbox.RUNTIME}) — the machine posture was not applied; removing it. "
+            "`fy up` re-provisions the gVisor socket (machine ensure); then retry."
+        )
+        subprocess.run([engine, "rm", "-f", box], env=env, stdout=subprocess.DEVNULL)
         return 1
 
     # One-time MONITORED install steps (core foldyard + Claude, plugins, consumer [[box.tools]]),

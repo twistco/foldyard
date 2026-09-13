@@ -912,9 +912,13 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
   VM restart, reachable over Lima's ssh with no forward. Decided 2026-09-13: it is a MACHINE
   posture (the box must not be able to opt itself or a sibling out — so the box's socket is the
   narrowed runsc one, and the filter strips `oci_runtime` / `dev.gvisor.*`), on the Mac too, and
-  wired together with socket narrowing as one opt-in safety option. What remains before the ADR:
-  the narrowing filter itself, and the inotify-inward caveat (polling, or a two-way sync) carried
-  into the decision.
+  wired together with socket narrowing as one opt-in safety option. **Wired (2026-09-13):
+  `[machine].runtime = "gvisor"`** — `machine ensure` provisions the second socket in the guest
+  (both backends, over their own ssh), `fy box up` creates through it and hands the box that
+  socket as its own, fail-closed both ways, `fy verify` checks the kernel (docs/configuration.md).
+  What remains before the ADR: the narrowing filter (it must strip `oci_runtime` and
+  `dev.gvisor.*` — on podman ≥ 6 the socket default alone is a convenience, not enforcement),
+  and the inotify-inward caveat (polling, or a two-way sync) carried into the decision.
 - **Linux mounts**: `virtiofs` under Lima on Linux fails every file create (above); 9p until
   upstream moves.
 - **WSL2**: still unmeasured — `/dev/kvm` in the distro, and Lima+QEMU inside it.

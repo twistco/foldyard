@@ -75,9 +75,10 @@ there are upper bounds; correctness results transfer as they are.
   product's `shadow_volumes`/`caches` default (not a gVisor accommodation), and what is left is
   the syscall path. `--ignore-cgroups` and `host-uds` are settled.
   The route is settled and proven (a second runsc-default socket, isolation-layers.md, sixth
-  session) and the Mac's long build is measured (1.2× on the suite). What remains: wiring it as
-  a machine posture together with socket narrowing (the filter is the enforcement: it must strip
-  `oci_runtime` and `dev.gvisor.*` from the box's socket) —
+  session), the Mac's long build is measured (1.2× on the suite), and it is wired as
+  `[machine].runtime = "gvisor"` (both VM backends). What remains: socket narrowing (the filter
+  is the enforcement on podman ≥ 6: it must strip `oci_runtime` and `dev.gvisor.*` from the
+  box's socket) —
   then an ADR. Not a Linux-support blocker: the product claim without `③` is the same as the
   Mac's.
 - **A CI job on a Linux *host* path** is not possible on GitHub-hosted runners (podman-machine /

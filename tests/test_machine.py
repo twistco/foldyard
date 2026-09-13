@@ -255,6 +255,27 @@ def test_ensure_restarts_a_running_but_unresponsive_machine(half_started, tmp_pa
     assert "reports running" in err and "Restarting" in err
 
 
+def test_ensure_provisions_the_gvisor_posture_after_the_guest_checks(
+    half_started, tmp_path, monkeypatch
+):
+    from foldyard import sandbox
+
+    order = []
+    monkeypatch.setattr(machine, "_check_guest_provisioning", lambda: order.append("guest"))
+    monkeypatch.setattr(sandbox, "ensure", lambda backend, name: order.append(f"sandbox:{name}"))
+    monkeypatch.setattr(machine.config, "machine_runtime", lambda: "gvisor")
+    machine.ensure(tmp_path, tmp_path / "wt")
+    assert order == ["guest", f"sandbox:{machine.MACHINE}"]
+
+
+def test_ensure_skips_the_sandbox_without_the_posture(half_started, tmp_path, monkeypatch):
+    from foldyard import sandbox
+
+    monkeypatch.setattr(sandbox, "ensure", lambda backend, name: pytest.fail("not wanted"))
+    monkeypatch.setattr(machine.config, "machine_runtime", lambda: "")
+    machine.ensure(tmp_path, tmp_path / "wt")
+
+
 def test_ensure_leaves_a_healthy_machine_alone(half_started, tmp_path):
     # The guard must cost a probe and nothing else on the steady-state path — no stop/start
     # churn on every `fy up` just because we now look closer than the flag.

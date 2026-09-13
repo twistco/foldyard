@@ -9,6 +9,18 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Added
 
+- **`[machine].runtime = "gvisor"` — the dev box under gVisor's userspace kernel, as a machine
+  posture.** `machine ensure` provisions a second podman API service in the VM whose default
+  runtime is `runsc` (a pinned, sha512-verified release installed user-level over the backend's
+  ssh, a wrapper with the flags fixed and no per-container override, a drop-in registering the
+  runtime name engine-wide, an enabled user unit); `fy box up` creates the box through that
+  socket (`CONTAINER_HOST=ssh://…`, so no VM config change and no restart) and hands the box that
+  socket as its own, so a sibling or an in-box `fy up` cannot come up unsandboxed. Fail-closed on
+  a socket that does not answer with the gVisor runtime and on a box that came up under another
+  runtime (removed before bootstrap); an already-up box from before the posture nags to recreate.
+  In-box `fy verify` gains a row checking the kernel the box actually runs on. Both VM backends
+  (`lima`, `podman`). Measured 2026-09-13 on the Mac and the Linux rig: the route, the cost
+  (suite 1.2× on the Mac) and the flag boundary are in docs/isolation-layers.md.
 - **`[machine].host_wall` — enforce the egress wall on the host too (Linux).** With
   `wall = true` and a host that has `nft` + cgroup v2, foldyard starts the Lima VM inside its
   own systemd scope and loads a host nftables table matching that scope: only this project's
@@ -46,6 +58,20 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Fixed
 
+- **`fy verify` in a box with an SSH origin and no ssh client reported the push refusal
+  UNPROVEN.** `git ls-remote` fails there with `cannot run ssh`, which the check read as a
+  network failure — so every consumer with a `git@…` origin (this repo included) was short of
+  ALL PASS by construction. With no keys and no agent (asserted beside it), a transport that
+  does not exist IS the refusal: the row now passes and says why. A real network failure
+  still reads as unproven.
+- **`fy verify` under `[machine].runtime = "gvisor"`**: the VM mount audit needs a
+  `--pid=host` reach into the VM that gVisor blocks (the same property `escape refused` proves),
+  so from inside a gVisor box it cannot run — now an advisory naming the reason and where to
+  audit the boundary instead, not a FAIL (docs/verify-false-pass.md). The crun path keeps its
+  FAIL on an empty mount table.
+- **foldyard's own `[[box.tools]]` apt steps failed on every fresh box** (`Unable to locate
+  package nodejs/just/unzip`): the packaged image ships no apt lists. An `apt-lists` step
+  fetches them once, first; docs/configuration.md documents the shape for consumers.
 - **`fy doctor` no longer fails forever on a consumer the proxy never serves.** The proxy
   plugin's `mitmproxy` / `mitm CA` / `egress proxy` rows were unconditional, while its daemon
   and the box's routing are gated on a declared `[proxy]` or an active injector — so a consumer

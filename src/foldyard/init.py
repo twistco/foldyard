@@ -201,6 +201,8 @@ def render(opts: InitOptions) -> str:
         "#   wall = false        # lima but COOPERATIVE-only: the box uses the proxy, but nothing",
         "#                       # stops a process that ignores it (the wall makes it fail-closed)",
         "#   host_wall = true    # Linux hosts: enforce the same wall on the HOST too (nft, sudo on fy up)",
+        '#   runtime = "gvisor"  # the box (and what it creates) under gVisor\'s userspace kernel',
+        "#                       # (a kernel-exploit layer; ~1.2x on a test suite — docs/configuration.md)",
         'backend = "lima"',
         "wall = true",
         f'name = "{prefix}"',

@@ -833,6 +833,30 @@ def machine_host_wall() -> bool:
     return bool(_table("machine").get("host_wall", False))
 
 
+_MACHINE_RUNTIMES = ("", "gvisor")
+
+
+def machine_runtime() -> str:
+    """``[machine].runtime`` — the sandbox the dev box (and everything the box creates) runs
+    under: ``""`` (the VM engine's own runtime, crun) or ``"gvisor"`` (layer ③: runsc, a
+    userspace kernel between the box and the VM kernel — :mod:`foldyard.sandbox`). A MACHINE
+    posture: ``machine ensure`` provisions it in the VM, and the box's own engine socket defaults
+    to it, so the box cannot opt itself or a sibling out. Only the postures foldyard knows how to
+    provision are accepted — never a runtime path or command from config (ADR-0023). Changing it
+    means recreating the box (``fy box down && fy box up``), not the VM. ``MACHINE_RUNTIME`` env
+    wins."""
+    raw = os.environ.get("MACHINE_RUNTIME")
+    if raw is None:
+        raw = _table("machine").get("runtime", "")
+    name = str(raw or "").strip().lower()
+    if name not in _MACHINE_RUNTIMES:
+        raise SystemExit(
+            f'✗ [machine].runtime must be "gvisor" or unset (the engine\'s own runtime), '
+            f"not {name!r} — it names a posture foldyard provisions, never a runtime binary."
+        )
+    return name
+
+
 # Lima's documented guest→host address: the user-mode network's host gateway, which the usernet
 # forwards to the Mac (the same trick gvproxy plays with host.containers.internal, different
 # constant). Lima also writes it into the guest's /etc/hosts as `host.lima.internal`, but that

@@ -397,6 +397,38 @@ def test_machine_wall_env_overrides_toml_both_ways(fresh_config, tmp_path):
     assert config.machine_wall() is True
 
 
+# ── [machine].runtime — the gVisor posture ───────────────────────────────────────────
+
+
+def test_machine_runtime_defaults_to_the_engines_own(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text('[machine]\nbackend = "lima"\n')
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_RUNTIME=None)
+    assert config.machine_runtime() == ""
+
+
+def test_machine_runtime_gvisor_from_toml_and_env_wins(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text('[machine]\nruntime = "gvisor"\n')
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_RUNTIME=None)
+    assert config.machine_runtime() == "gvisor"
+    fresh_config(MACHINE_RUNTIME="")
+    assert config.machine_runtime() == ""
+    (tmp_path / "foldyard.toml").write_text("[machine]\n")
+    fresh_config(MACHINE_RUNTIME="gvisor")
+    assert config.machine_runtime() == "gvisor"
+
+
+def test_machine_runtime_rejects_anything_but_the_known_postures(fresh_config, tmp_path):
+    # A NAME the engine resolves, never a path or a command (ADR-0023) — and only the postures
+    # foldyard knows how to provision: the runtime binary is installed by `machine ensure`.
+    (tmp_path / "foldyard.toml").write_text('[machine]\nruntime = "/usr/bin/runsc --debug"\n')
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_RUNTIME=None)
+    with pytest.raises(SystemExit):
+        config.machine_runtime()
+    fresh_config(MACHINE_RUNTIME="kata")
+    with pytest.raises(SystemExit):
+        config.machine_runtime()
+
+
 # ── box_image (consumer dockerfile vs the packaged generic box; ADR-0014) ────────────
 
 

@@ -250,6 +250,24 @@ disk_gib = 60
   `krunkit` (libkrun — a microVM with a Firecracker-derived device model) is never selected
   automatically: it is upstream-experimental, macOS/arm64 only, and needs `brew install krunkit`.
   Name it explicitly to try it.
+- **`runtime`** — `"gvisor"` to run the dev box, and everything the box creates, under
+  gVisor's userspace kernel (`runsc`) instead of directly on the VM kernel — layer ③ of
+  [isolation-layers.md](./isolation-layers.md): a kernel exploit from inside the box has to get
+  through gVisor's Sentry before it reaches the kernel that holds the engine socket, the stack
+  and the mounted checkout. A **machine** posture, not a per-box knob: `fy up`/`fy box up`
+  (`machine ensure`) provisions a second podman API service in the VM whose default runtime is
+  runsc — a pinned, sha512-verified `runsc` release installed user-level (no root, nothing in
+  the boot script), a wrapper with the flags fixed and no per-container override, and an enabled
+  user unit — then creates the box through that socket (podman-remote over the backend's own
+  ssh port, so no VM config change and no restart) and **hands the box that socket as its
+  own**, so a sibling or an in-box `fy up` cannot come up unsandboxed. Fail-closed: a socket that
+  does not answer with the gVisor runtime aborts the verb, and a box that came up under another
+  runtime is removed before its bootstrap. Both VM backends (`lima`, `podman`); `native` has no
+  VM to provision. The runtime is fixed when a container is created, so changing this means
+  `fy box down && fy box up` (the box, not the VM); an already-up box nags. Cost: ~1.2× on a
+  Python test suite, 2–4× on sub-second git/lint calls, no inotify across the mount (poll). In
+  the box, `fy verify` adds a row that checks the kernel it actually runs on. Default: unset
+  (the engine's own runtime). Env: `MACHINE_RUNTIME`.
 - **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`.
 - **`cpus`** / **`memory_mib`** / **`disk_gib`** — sizing at first creation. Defaults:
   `4` / `8192` / `60`. Env: `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK`.
@@ -573,6 +591,18 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   [[box.tools]]
   name = "pulumi"
   install = "curl -fsSL https://get.pulumi.com | sh -s -- --install-root /opt/fy-tools --no-edit-path"
+  ```
+
+  The packaged box image (and any image that follows its `apt-get … && rm -rf /var/lib/apt/lists/*`
+  shape) ships **no apt package lists**, so a bare `apt-get install` step fails with
+  `Unable to locate package`. Make the lists their own step, first — `check` keeps it a no-op
+  once they exist, and every apt step after it stays a one-liner:
+
+  ```toml
+  [[box.tools]]
+  name = "apt-lists"
+  check = "ls /var/lib/apt/lists/*Packages >/dev/null 2>&1"
+  install = "apt-get update -qq"
   ```
 
 - **`bootstrap`** — free-form shell run once per fresh box, after the structured steps — the

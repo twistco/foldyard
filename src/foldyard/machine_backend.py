@@ -48,6 +48,7 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
 
@@ -88,6 +89,15 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(cmd, capture_output=True, text=True)
     except OSError:
         return subprocess.CompletedProcess(cmd, 127, "", "")
+
+
+@dataclass(frozen=True)
+class SshTarget:
+    """A backend's ssh route into its guest: ``user@127.0.0.1:port`` with ``identity``."""
+
+    user: str
+    port: int
+    identity: str
 
 
 class Backend(ABC):
@@ -156,6 +166,13 @@ class Backend(ABC):
         """The podman socket path as seen INSIDE the VM (the dev box bind-mounts this to its
         ``/var/run/docker.sock``). Differs by backend: podman machine exposes a docker-compat
         path; Lima's podman template forwards a rootless ``/run/user/<uid>/…`` socket."""
+
+    def ssh_target(self, name: str) -> SshTarget | None:
+        """How to ssh into the guest as the VM user — the backend's own loopback port and
+        identity, i.e. the trust its ``shell`` verb already has. What the gVisor posture rides
+        (:mod:`foldyard.sandbox`: guest-side provisioning + ``CONTAINER_HOST=ssh://…``). ``None``
+        when the backend has no VM or the machine is unknown."""
+        return None
 
     @abstractmethod
     def list_running(self, name: str = "") -> list[str]:
@@ -259,6 +276,30 @@ class PodmanBackend(Backend):
 
     def guest_socket(self) -> str:
         return "/run/docker.sock"  # podman machine exposes the docker-compat socket here
+
+    def ssh_target(self, name: str) -> SshTarget | None:
+        # A Go template, NOT `--format json`: `podman machine inspect` treats `json` as a template
+        # STRING and prints the literal "json" (unlike `podman inspect`). One line, tab-separated,
+        # so an empty/renamed field is visible rather than silently JSON-absent.
+        out = _run(
+            [
+                "podman",
+                "machine",
+                "inspect",
+                name,
+                "--format",
+                "{{.SSHConfig.RemoteUsername}}\t{{.SSHConfig.Port}}\t{{.SSHConfig.IdentityPath}}",
+            ]
+        )
+        if out.returncode != 0:
+            return None
+        parts = out.stdout.strip().split("\t")
+        if len(parts) != 3 or not all(parts):
+            return None
+        try:
+            return SshTarget(user=parts[0], port=int(parts[1]), identity=parts[2])
+        except ValueError:
+            return None
 
     def list_running(self, name: str = "") -> list[str]:
         out = _run(["podman", "machine", "list", "--format", "{{.Name}}|{{.Running}}"])
@@ -697,6 +738,26 @@ class LimaBackend(Backend):
         if subprocess.run([*prefix, *self.start_argv(name)]).returncode != 0:
             return False
         return self._wait_for_socket(name)
+
+    def ssh_target(self, name: str) -> SshTarget | None:
+        """Lima writes ``~/.lima/<name>/ssh.config`` for the instance (the port changes per
+        boot; the identity is Lima's own ``_config/user`` key, listed first)."""
+        cfg = Path.home() / ".lima" / name / "ssh.config"
+        try:
+            text = cfg.read_text()
+        except OSError:
+            return None
+        fields: dict[str, str] = {}
+        for line in text.splitlines():
+            key, _, value = line.strip().partition(" ")
+            if key in ("Port", "User", "IdentityFile") and key not in fields:
+                fields[key] = value.strip().strip('"')
+        try:
+            return SshTarget(
+                user=fields["User"], port=int(fields["Port"]), identity=fields["IdentityFile"]
+            )
+        except (KeyError, ValueError):
+            return None
 
     def ssh_port(self, name: str) -> int:
         inst = self._instance(name)

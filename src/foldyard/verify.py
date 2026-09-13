@@ -119,6 +119,10 @@ def _probe_runs(engine: str, env: dict, probe: str) -> bool:
 # `git ls-remote` failing proves "no credential reaches origin" ONLY if it failed for credential
 # reasons. A box with no egress fails it too, which would certify the product's headline claim
 # ("git push is impossible from inside") from a network outage.
+# git could not even START the SSH transport: no client in the box. With no keys and no agent
+# (asserted beside it) that absence is the refusal — no credential can travel a transport that
+# does not exist — not an "unreachable for network reasons" that leaves the claim unproven.
+_GIT_NO_SSH = re.compile(r"cannot run ssh|ssh: (command )?not found", re.I)
 _GIT_AUTH_DENIED = re.compile(
     r"permission denied|authentication failed|could not read username|could not read password|"
     r"terminal prompts disabled|invalid username or password|access denied|403|401",
@@ -176,7 +180,21 @@ def _vm_boundary(
         capture=True,
     )
     if mp.returncode != 0 or not mp.stdout.strip():
-        rep.bad("could not read the VM mount table (probe produced nothing) — leak check UNPROVEN")
+        # Under the gVisor posture the box CANNOT read the VM's PID-1 mounts: `--pid=host` reaches
+        # only the sandbox, not the VM kernel — the SAME reach "escape refused" above proves is
+        # blocked. So this is not a failed probe, it is a check that is inapplicable from inside a
+        # gVisor box; the VM mount boundary is set by `machine ensure` (repo + worktrees only) and
+        # re-audited host-side or from a crun box. Advisory, not a FAIL — and never a silent pass.
+        if os.environ.get("FY_MACHINE_RUNTIME") == "gvisor":
+            rep.warn(
+                "VM mount audit not runnable inside a gVisor box (the sandbox blocks --pid=host "
+                "into the VM — see 'escape refused'); audit the VM boundary host-side or on a "
+                "crun box"
+            )
+        else:
+            rep.bad(
+                "could not read the VM mount table (probe produced nothing) — leak check UNPROVEN"
+            )
         return
     # The real table carries the mounts foldyard itself makes — the repo and the worktrees root,
     # at their host paths (`machine.guest_mounts`). Exempt by EXACT mountpoint only: the home
@@ -211,9 +229,22 @@ def _plugin_posture(rep: _Report, env: dict) -> None:
             print(f"  {msg}")
 
 
+def _kernel_release() -> str:
+    return os.uname().release
+
+
 def _box_posture(rep: _Report, env: dict) -> None:
     print("▶ dev-box posture (credential-less: read+commit, never push)")
     home = Path(os.environ.get("HOME") or str(Path.home()))
+
+    # [machine].runtime = "gvisor" bakes FY_MACHINE_RUNTIME into the box at create; the claim is
+    # checked against the kernel the box ACTUALLY runs on (gVisor's Sentry reports its own).
+    if os.environ.get("FY_MACHINE_RUNTIME") == "gvisor":
+        kernel = _kernel_release()
+        if "gvisor" in kernel.lower():
+            rep.ok(f"box runs under gVisor (kernel {kernel})")
+        else:
+            rep.bad(f"box is NOT under gVisor — kernel {kernel} is the VM's (posture not applied)")
 
     if not os.environ.get("SSH_AUTH_SOCK"):
         rep.ok("no SSH agent forwarded (SSH_AUTH_SOCK unset)")
@@ -260,6 +291,8 @@ def _box_posture(rep: _Report, env: dict) -> None:
         rep.bad("git remote REACHABLE — the box can push (credential leaked?)")
     elif _GIT_AUTH_DENIED.search(why):
         rep.ok("git push refused (no credential reaches origin)")
+    elif _GIT_NO_SSH.search(why):
+        rep.ok("git push refused (SSH origin, and the box has no ssh client — no transport)")
     else:
         # It failed, but not because a credential was refused — origin was never reached. That
         # is a network fact, not a posture one, and must not certify the credential-less claim.

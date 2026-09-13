@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, hostwall
+from . import config, hostwall, sandbox
 from .machine_backend import default_unavailable_block, get_backend
 
 MACHINE = config.machine_name()
@@ -403,6 +403,10 @@ def ensure(main: Path, wt_root: Path) -> None:
     # fresh boot, a revive, and the steady state alike.
     _apply_host_wall()
     _check_guest_provisioning()
+    # The gVisor posture is user-level in the guest (no root, so not the boot script): provisioned
+    # over the backend's ssh once the VM is up and its root-side provisioning is verified.
+    if sandbox.wanted():
+        sandbox.ensure(BACKEND, MACHINE)
 
 
 def not_running_reason() -> str | None:
