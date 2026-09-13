@@ -46,6 +46,15 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Fixed
 
+- **`fy doctor` no longer fails forever on a consumer the proxy never serves.** The proxy
+  plugin's `mitmproxy` / `mitm CA` / `egress proxy` rows were unconditional, while its daemon
+  and the box's routing are gated on a declared `[proxy]` or an active injector — so a consumer
+  with neither saw a red "NOT running … the box always routes through it" on every run, which
+  was false for it. The rows now follow the daemon's gate: none for such a consumer; the two
+  prerequisites (not the listener row) for a declared-but-off injector, so a missing
+  mitmproxy/CA shows BEFORE `fy mode github=app` needs it; all three once opted in or armed.
+  `DoctorContext` gains the current `mode` for this. Found by the first `fy doctor` on the
+  Linux rig's no-`[proxy]` example.
 - **`fy verify`'s mount audit judged the whole `/proc/1/mounts` line, not the mountpoint.** Run
   inside the box (uid 0) the home it looks for is `/root`, and a Fedora guest's btrfs root line
   carries `subvol=/root` in its *options* — a false FAIL on a table that exposes nothing. The

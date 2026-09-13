@@ -674,6 +674,35 @@ def test_gcp_minter_user_allows_user_token():
     assert spec["env"]["GCP_ALLOW_USER_TOKEN"] == "1"
 
 
+# ── the host-side doctor hands plugins the CURRENT mode ────────────────────────────────
+
+
+def test_doctor_passes_the_current_mode_to_plugin_checks(monkeypatch):
+    # A plugin's host-side rows may depend on what the supervisor is asked to run right now (the
+    # proxy's listener row is only a finding when the daemon is desired), so ctx carries the mode
+    # the state file resolves to — the same `read()` the supervisor reconciles from.
+    from conftest import GENERIC_TOML, make_config
+    from foldyard.plugins import Plugin, Registry
+
+    seen = []
+
+    class Recorder(Plugin):
+        name = "recorder"
+
+        def doctor_checks(self, ctx):
+            seen.append(ctx.mode)
+            return ()
+
+    reg = Registry([Recorder()], config=make_config(GENERIC_TOML))
+    monkeypatch.setattr(devmode, "registry", lambda: reg)
+    monkeypatch.setattr(devmode, "in_box", lambda: False)
+    monkeypatch.setattr(
+        devmode, "read", lambda apply_expiry=True: {"mode": {"github": "app"}, "written": None}
+    )
+    list(devmode.doctor(deep=False))
+    assert seen == [{"github": "app"}]
+
+
 # ── the shadow-volume doctor check (in-tree dep dirs the box + host would share) ───────
 
 

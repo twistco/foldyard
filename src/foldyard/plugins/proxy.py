@@ -557,8 +557,32 @@ class ProxyPlugin(Plugin):
             f"SSL_CERT_FILE={BOX_CA_BUNDLE}",
         ]
 
+    def _ever_rules(self, mode: dict) -> bool:
+        """Could ANY rung of this registry's axes put an injection rule on the proxy? The current
+        mode's rules, or those another rung would activate (asked of the registry, as
+        `exposure._targets` does — so an odd-shaped mechanism reports as it behaves)."""
+        if not self._registry:
+            return False
+        if self._registry.proxy_rules(mode):
+            return True
+        for axis, rungs in self._registry.axis_rungs().items():
+            for rung in rungs:
+                if rung != mode.get(axis, rungs[0]) and self._registry.proxy_rules(
+                    {**mode, axis: rung}
+                ):
+                    return True
+        return False
+
     def doctor_checks(self, ctx: DoctorContext) -> Iterable[tuple[str, str, str]]:
-        # Proxy-FRAMEWORK setup, host-side (the proxy daemon + CA live on the Mac): is mitmdump
+        # Whole-hook gate, matching daemons()/derive_env(): a consumer with no [proxy] and no
+        # injector that could ever ride the proxy gets NO proxy rows. They used to be
+        # unconditional, which left such a consumer's `fy doctor` failing forever with "the box
+        # always routes through it" — false for it (found on the Linux rig, 2026-09-13). A
+        # DECLARED-but-off injector keeps the prerequisites below (the operator should see a
+        # missing mitmproxy/CA BEFORE arming it); the listener row stays behind the live gate.
+        if not config.proxy_enabled() and not self._ever_rules(ctx.mode):
+            return
+        # Proxy-FRAMEWORK setup, host-side (the proxy daemon + CA live on the host): is mitmdump
         # installed, and has its CA been generated? These were the github plugin's, but they're
         # proxy concerns — github is just one injector that rides the proxy. Resolve mitmdump the
         # same way the daemon does (foldyard's own venv OR PATH), not via ctx.which (PATH-only),
@@ -578,7 +602,11 @@ class ProxyPlugin(Plugin):
         )
         # RUNTIME: is the always-on egress proxy actually listening? Phase A′ ALWAYS-routes the box
         # through it, so a down proxy means EVERY box request connection-refuses — this is the check
-        # that tells you why "requests in the box aren't working". Probe handles box→host vs Mac.
+        # that tells you why "requests in the box aren't working". Only a finding when the
+        # supervisor is asked to run it (the same gate as daemons(): opted in, or a rule active
+        # NOW) — a declared-but-off injector has no listener to be down. Probe handles box→host.
+        if not config.proxy_enabled() and not self._rules(ctx.mode):
+            return
         log = config.supervisor_log_file()
         port = config.proxy_port()  # this worktree's listener port (project band base + offset)
         yield ctx.result(

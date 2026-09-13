@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from importlib.metadata import entry_points
 from typing import TYPE_CHECKING
 
@@ -146,6 +146,10 @@ class DoctorContext:
     which: Callable[[str], bool]  # devmode._which
     result: Callable[..., tuple[str, str, str]]  # devmode._result(ok, name, good, bad)
     probe: Callable[[int], bool]  # devmode.probe(port) — TCP liveness (box→host.containers vs Mac)
+    # The posture the state file resolves to right now (devmode.read()["mode"]) — the same mode
+    # the supervisor reconciles daemons from, so a plugin's host-side rows can be gated the way
+    # its daemons are (the proxy's listener row is only a finding when the listener is desired).
+    mode: dict = field(default_factory=dict)
 
 
 @dataclass
