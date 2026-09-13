@@ -31,7 +31,8 @@ break config or CLI shape, and say so here. How a release is cut:
   narrowed view of that socket, not the runsc socket directly: a small in-VM stdlib filter (a
   further user unit) forwards to it but strips the runtime opt-out (`oci_runtime`, `dev.gvisor.*`,
   the compat `Runtime`) from every container-create and refuses an unparseable create, so the box
-  cannot escape gVisor even on a podman ≥ 6 that honours a client-chosen runtime.
+  cannot escape gVisor even on a podman ≥ 6 that honours a client-chosen runtime (shown live on
+  podman 6.1.1: the same create came up crun through the raw socket, runsc through the filter).
 - **`[machine].host_wall` — enforce the egress wall on the host too (Linux).** With
   `wall = true` and a host that has `nft` + cgroup v2, foldyard starts the Lima VM inside its
   own systemd scope and loads a host nftables table matching that scope: only this project's
@@ -69,6 +70,21 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Fixed
 
+- **The gVisor posture's socket probe could report podman's own client version block as "the
+  runtime".** podman-remote prints its client info to stdout (exit 125) when it cannot reach the
+  server, and the probe trusted stdout — so the first `fy box up` after a fresh provisioning,
+  racing a service that was 'active' but not yet listening, failed with `answers with runtime
+  'OS: linux/amd64…'`. The exit code now decides (a failure reports podman's stderr), and a
+  refused connection is retried for a few seconds before the fail-closed abort.
+- **The in-VM wall left the VM user's `~/.config` ROOT-owned on a fresh guest image.** The
+  boot-time wall script (root) wrote its proxy `environment.d` drop-in with a bare `install -d`,
+  which creates a missing `~/.config` as root and only chowned the leaf. Fedora 44 images
+  happened to pre-create the directory; on a Fedora 45 guest every later user-level step then
+  failed — Lima's `systemctl --user enable podman.socket` (so the API socket never came up and
+  `limactl start` timed out) and the gVisor posture's own drop-ins. Every directory the wall
+  creates under the user's home is now created owned by the user (pinned by a test over the
+  script). A new rendered provisioning id, so an existing VM re-provisions on
+  `fy machine stop && fy up`.
 - **`fy verify` in a box with an SSH origin and no ssh client reported the push refusal
   UNPROVEN.** `git ls-remote` fails there with `cannot run ssh`, which the check read as a
   network failure — so every consumer with a `git@…` origin (this repo included) was short of

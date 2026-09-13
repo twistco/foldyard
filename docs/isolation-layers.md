@@ -824,8 +824,13 @@ Then, on the host, `DOCKER_HOST=CONTAINER_HOST=<the runsc socket> FOLDYARD_ENGIN
   streams (attach/exec) raw, and fails closed (an unparseable create body is refused, never
   forwarded). Proven live on the Mac `foldyard` VM (podman 5.8.4): real creates round-trip under
   `runsc-fy` through the filter, a raw create carrying `oci_runtime: crun` is created gVisor and
-  a malformed body gets a 400; the strip itself (podman-6 behaviour, where the field is honoured)
-  is pinned by `tests/test_socket_filter.py` against a recording upstream.
+  a malformed body gets a 400. **The strip itself was then shown live on podman 6.1.1**
+  (2026-09-13, the Linux rig, a Fedora 45 nightly guest under Lima/QEMU — the first guest that
+  honours the field): the same libpod create carrying `oci_runtime: crun` came up **crun** through
+  the raw runsc socket (so on 6 the opt-out is real) and **`runsc-fy`** through the filtered socket
+  (the strip fired — not the engine ignoring it), a malformed body still 400. Day to day
+  `tests/test_socket_filter.py` pins it against a recording upstream, since the shipped guests are
+  podman 5.8.
 - **No Lima config change, no VM restart.** The service is a transient user unit started over
   `limactl shell`; the host reaches it either through an `ssh -L` unix-socket forward (what
   Lima's `portForwards` does — adding one there needs a stop/start) **or with no forward at
@@ -949,10 +954,10 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
   stdlib filter that strips the runtime opt-out (`oci_runtime` / `dev.gvisor.*` / compat
   `HostConfig.Runtime`) from every create and fails closed — so a sibling cannot escape gVisor
   even on a podman ≥ 6 that honours a client-chosen runtime (above; `tests/test_socket_filter.py`;
-  live on the Mac VM). **The ③ ADR is written: [ADR-0025](./adrs/0025-gvisor-machine-posture-and-socket-narrowing.md)** —
-  the posture and the runtime filter Accepted; the broader mount/endpoint allowlist and a live
-  podman-6 strip demonstration recorded as deferred, with the inotify posture (polling; no
-  two-way sync) decided in it.
+  live on the Mac VM, and the strip itself shown live on a podman 6.1.1 guest on the rig).
+  **The ③ ADR is written: [ADR-0025](./adrs/0025-gvisor-machine-posture-and-socket-narrowing.md)** —
+  the posture and the runtime filter Accepted; the broader mount/endpoint allowlist recorded as
+  deferred, with the inotify posture (polling; no two-way sync) decided in it.
 - **Linux mounts**: `virtiofs` under Lima on Linux fails every file create (above); 9p until
   upstream moves.
 - **WSL2**: still unmeasured — `/dev/kvm` in the distro, and Lima+QEMU inside it.

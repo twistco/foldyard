@@ -352,7 +352,9 @@ so that path stays the Mac / nested-KVM-host recipe in
   have `/usr/bin/python3`). It is foldyard's own packaged code run in the GUEST, not host code
   from the repo mount, so ADR-0023 is not in tension. `tests/test_socket_filter.py` pins the
   rewrite, the fail-closed refusal, keep-alive and the hijack splice; the podman-6 strip effect
-  is only observable there (both guests are podman 5.8, which ignores the field anyway).
+  (a client-chosen runtime honoured, then stripped) is only observable there day to day — the
+  shipped guests are podman 5.8, which ignores the field; it was shown live once on a podman
+  6.1.1 guest (2026-09-13, docs/isolation-layers.md).
 
 ## The example consumer
 

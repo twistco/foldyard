@@ -1,8 +1,9 @@
 # ADR-0025 — gVisor as a machine posture (`[machine].runtime = "gvisor"`), with socket narrowing as its enforcement tier
 
 - **Status:** Accepted (2026-09-13). The posture and the **runtime-narrowing** filter are built and
-  live-validated on both VM backends; the **broader mount/endpoint allowlist** and a **live
-  podman-6 strip demonstration** are deferred (see Decision §5 and Consequences). Layer ③ of
+  live-validated on both VM backends, and the strip was **shown live on podman 6.1.1** the same
+  day (Consequences); the **broader mount/endpoint allowlist** is deferred (see Decision §5 and
+  Consequences). Layer ③ of
   [../isolation-layers.md](../isolation-layers.md) — the living measurement page — is the evidence
   behind every number here.
 - **Sources:** the GCP nested-virt rig run-logs and `handover.md` (pre-merge working notes,
@@ -122,14 +123,22 @@ editing becomes a real workflow.
   created, so `[machine].runtime` changes take effect on `fy box down && fy box up` (~20 s), the
   VM untouched (the filter reaches the socket over ssh; no VM restart). An already-up box from
   before the posture nags to recreate.
-- **The strip's observable effect is only unit-testable until a podman-6 guest exists.** Both
-  machine VMs run podman 5.8, which ignores `oci_runtime` regardless — so a live run cannot
-  distinguish "the filter stripped it" from "the engine ignored it". `tests/test_socket_filter.py`
-  pins the strip against a recording upstream; the live runs prove the risky part (the HTTP proxy
-  is correct against real podman, preserves keep-alive, and fails closed). **podman 6 is not needed
-  for safety** — on 5.8 the socket default enforces and the filter is belt-and-braces — only to
-  demonstrate the strip firing. Moving the guest to podman 6 is a guest-*image* choice (Fedora 45
-  ships it; Debian 13 ships 5.4), independent of this design.
+- **The strip's observable effect was shown live on podman 6.1.1 (2026-09-13).** Both shipped
+  machine VMs run podman 5.8, which ignores `oci_runtime` regardless — so a live run there cannot
+  distinguish "the filter stripped it" from "the engine ignored it", and day to day
+  `tests/test_socket_filter.py` pins the strip against a recording upstream. The distinction was
+  then demonstrated once on the Linux rig with a Fedora 45 nightly guest (Lima/QEMU, podman
+  6.1.1): the same libpod create carrying `oci_runtime: crun` came up **crun** through the raw
+  runsc socket (6 honours the field — the opt-out is real) and **`runsc-fy`** through the filtered
+  socket (the strip fired); a malformed body got the 400. **podman 6 is still not needed for
+  safety** — on 5.8 the socket default enforces and the filter is belt-and-braces. Moving the
+  shipped guest to podman 6 stays a guest-*image* choice independent of this design, and not one
+  to make yet: Fedora 45 is pre-release (nightly images only), and under Lima 2.2.0 that nightly
+  refuses sshd the guest-agent socket (SELinux, `Enforcing`) — so Lima reports the VM DEGRADED,
+  `limactl start` fails and its port forwards are dead, even though the guest and both podman
+  sockets work over plain ssh. Debian 13 ships 5.4. Revisit at Fedora 45 GA. (The run also found
+  and fixed a real foldyard bug the fresh image exposed: the boot-time wall left the VM user's
+  `~/.config` root-owned — CHANGELOG.)
 - **The filter is foldyard's own packaged code run in the GUEST, not host code from the repo
   mount** — so [ADR-0023](./0023-no-host-executed-code-from-the-repo-mount.md) is not in tension.
   It is stdlib-only and runs under the guest's `python3` (present on both backends' guests).
