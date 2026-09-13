@@ -935,9 +935,10 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
   stdlib filter that strips the runtime opt-out (`oci_runtime` / `dev.gvisor.*` / compat
   `HostConfig.Runtime`) from every create and fails closed — so a sibling cannot escape gVisor
   even on a podman ≥ 6 that honours a client-chosen runtime (above; `tests/test_socket_filter.py`;
-  live on the Mac VM). What remains before the ADR: the inotify-inward caveat (polling, or a
-  two-way sync) carried into the decision, and — if wanted — the broader mount/endpoint allowlist
-  (a separate guarantee, above).
+  live on the Mac VM). **The ③ ADR is written: [ADR-0025](./adrs/0025-gvisor-machine-posture-and-socket-narrowing.md)** —
+  the posture and the runtime filter Accepted; the broader mount/endpoint allowlist and a live
+  podman-6 strip demonstration recorded as deferred, with the inotify posture (polling; no
+  two-way sync) decided in it.
 - **Linux mounts**: `virtiofs` under Lima on Linux fails every file create (above); 9p until
   upstream moves.
 - **WSL2**: still unmeasured — `/dev/kvm` in the distro, and Lima+QEMU inside it.

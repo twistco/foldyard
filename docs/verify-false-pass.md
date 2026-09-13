@@ -165,17 +165,26 @@ sibling — but that reach into the VM kernel is exactly what gVisor blocks, and
 property the `escape refused` check proves is blocked. So under the posture the sibling reaches
 only the sandbox, `/proc/1/mounts` yields nothing, and the audit cannot execute.
 
-That is not a leak and not a failed probe, so it is reported as an **advisory** (`⚠`, no effect
-on the exit code) naming the reason and where the boundary IS checked — host-side, or on a crun
-box — never as a silent PASS. The `escape refused`, credential-absence and direct-egress checks
-still run and still assert. Pinned by `test_mount_audit_under_gvisor_warns_instead_of_failing`
-(and `test_mount_audit_empty_is_still_a_fail_under_crun`, so the crun path keeps its FAIL on an
-empty table). The VM's mount set is fixed by `machine ensure` (repo + worktrees only); the audit
-re-checks it, and under gVisor that re-check moves outside the sandbox. The socket-narrowing
-filter that landed 2026-09-13 narrows only the RUNTIME opt-out (`oci_runtime` / `dev.gvisor.*`
-off every create) — it does not restrict what a box-created sibling may mount, so the host-side
-mount assertion this note calls for is still owed, now as part of the broader mount/endpoint
-allowlist (isolation-layers.md "Socket narrowing"), not the runtime filter.
+That is not a leak and not a failed probe. It is reported as **not applicable** (`⊘ N/A`, no
+effect on the exit code) rather than an advisory (`⚠`), because there is nothing to act on in-box
+AND the audit genuinely runs at another layer — not a gap softened into a warning. Host-side
+`fy verify` runs its probe over the DEFAULT (crun) socket, whose `--privileged --pid=host`
+container CAN read the VM's PID-1 mounts (the box's socket is the runsc/filtered one; the host's
+is not); a crun box audits it the same way. So the check runs, just not from inside the sandbox.
+The `escape refused`, credential-absence and direct-egress checks still run and still assert.
+Pinned by `test_mount_audit_under_gvisor_is_not_applicable_not_a_failure` (and
+`test_mount_audit_empty_is_still_a_fail_under_crun`, so the crun path keeps its FAIL on an empty
+table). The VM's mount set is fixed by `machine ensure` (repo + worktrees only); the audit
+re-checks it, and under gVisor that re-check moves outside the sandbox.
+
+A further, in-VM hardening the runtime filter deliberately leaves out: it narrows only the
+RUNTIME opt-out (`oci_runtime` / `dev.gvisor.*` off every create), NOT what a box-created sibling
+may bind-mount. On foldyard's one-VM-per-project topology the residual risk is small — a sibling
+mounting the VM's `/` reads this project's own VM (repo, worktrees, this project's stack), and
+credentials never enter the VM (they stay host-side behind the proxy) — so it is defence in depth
+against a shared-VM shape foldyard does not use. It is the broader mount/endpoint allowlist
+(isolation-layers.md "Socket narrowing"), left for the ADR, that would add a host-side mount
+assertion; the runtime filter is complete as scoped.
 
 One more thing the same run taught about the `git push refused` check: it proves the refusal
 only against a **private** origin. A public one answers `git ls-remote` without credentials, so

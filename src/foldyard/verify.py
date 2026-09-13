@@ -30,6 +30,7 @@ from .plugins import VerifyContext, registry
 _PASS = "\033[32m✓ PASS\033[0m"
 _FAIL = "\033[31m✗ FAIL\033[0m"
 _WARN = "\033[33m⚠ WARN\033[0m"
+_NA = "\033[36m⊘ N/A \033[0m"
 # Paths that must NEVER appear in a privileged container's mount table, built from the ACTUAL
 # host rather than a hardcoded macOS list. The old regex was `/Users|/private|/var/folders|
 # /Volumes` — every member macOS-only, so on a Linux or WSL2 host the leak check passed
@@ -88,6 +89,13 @@ class _Report:
         a consumer's service being sick is worth saying out loud but isn't a breach."""
         print(f"  {_WARN}  {msg}")
         self.warns += 1
+
+    def na(self, msg: str) -> None:
+        """Not applicable HERE — the check is fulfilled at another layer and there is nothing to
+        act on in this context. Neutral: no exit effect and not a warning (unlike `warn`, which
+        flags something worth a human's attention). Use only where another layer genuinely
+        performs the check, never to soften a gap nothing covers."""
+        print(f"  {_NA}  {msg}")
 
 
 def _run(cmd: list[str], env: dict, *, capture: bool = False) -> subprocess.CompletedProcess:
@@ -182,14 +190,16 @@ def _vm_boundary(
     if mp.returncode != 0 or not mp.stdout.strip():
         # Under the gVisor posture the box CANNOT read the VM's PID-1 mounts: `--pid=host` reaches
         # only the sandbox, not the VM kernel — the SAME reach "escape refused" above proves is
-        # blocked. So this is not a failed probe, it is a check that is inapplicable from inside a
-        # gVisor box; the VM mount boundary is set by `machine ensure` (repo + worktrees only) and
-        # re-audited host-side or from a crun box. Advisory, not a FAIL — and never a silent pass.
+        # blocked. This is NOT APPLICABLE here rather than advisory: there is nothing to act on
+        # in-box, and the audit is genuinely fulfilled at another layer — host-side `fy verify`
+        # runs its probe over the DEFAULT (crun) socket, whose --pid=host container CAN read the
+        # VM's PID-1 mounts, as can a crun box. So it is neither a FAIL nor a silent pass: the
+        # check runs, just not from inside the sandbox.
         if os.environ.get("FY_MACHINE_RUNTIME") == "gvisor":
-            rep.warn(
-                "VM mount audit not runnable inside a gVisor box (the sandbox blocks --pid=host "
-                "into the VM — see 'escape refused'); audit the VM boundary host-side or on a "
-                "crun box"
+            rep.na(
+                "VM mount audit runs at another layer, not inside a gVisor box (the sandbox "
+                "blocks --pid=host into the VM — see 'escape refused'); run `fy verify` on the "
+                "host, or from a crun box, to audit the VM mount boundary"
             )
         else:
             rep.bad(

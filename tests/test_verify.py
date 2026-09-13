@@ -316,19 +316,21 @@ def test_git_timeout_is_still_not_a_refusal(secure_engine, monkeypatch, tmp_path
     assert "UNPROVEN" in capsys.readouterr().out
 
 
-def test_mount_audit_under_gvisor_warns_instead_of_failing(
+def test_mount_audit_under_gvisor_is_not_applicable_not_a_failure(
     secure_engine, monkeypatch, tmp_path, capsys
 ):
     # `--pid=host` into the VM is exactly what gVisor blocks (the "escape refused" property), so
-    # the in-box mount audit cannot run under the posture — that is not a leak, and must not FAIL.
+    # the in-box mount audit cannot run under the posture — that is not a leak and must not FAIL.
+    # It is N/A here (fulfilled host-side / on a crun box), not an advisory: nothing to act on.
     _, results = secure_engine
     results["pid1_mounts"] = ""  # the probe reaches only the sandbox: nothing to read
     _enter_box(monkeypatch, tmp_path)
     monkeypatch.setenv("FY_MACHINE_RUNTIME", "gvisor")
     monkeypatch.setattr(verify, "_kernel_release", lambda: "4.19.0-gvisor")
-    assert verify.verify() == 0  # advisory, not a fail
+    assert verify.verify() == 0  # N/A, not a fail
     out = capsys.readouterr().out
-    assert "not runnable inside a gVisor box" in out and "escape refused" in out
+    assert "N/A" in out and "runs at another layer" in out and "escape refused" in out
+    assert "WARN" not in out  # not softened to an advisory — it genuinely runs elsewhere
 
 
 def test_mount_audit_empty_is_still_a_fail_under_crun(secure_engine, monkeypatch, tmp_path, capsys):
