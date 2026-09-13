@@ -9,6 +9,13 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Added
 
+- **An isolation-layers diagram, in the README and at the top of docs/isolation-layers.md.**
+  `docs/assets/foldyard-isolation-layers.svg` draws the hardening ladder as four cumulative
+  postures — a rootless Podman VM, Lima with the in-VM wall, gVisor under the dev box behind the
+  narrowed engine socket, the host-side wall on Linux — each labelled with the `[machine]` line
+  that turns it on, plus the egress dial (open → observe → enforce → fail-closed) and what never
+  moves across postures. The page's "three layers" sketch now names ③ as gVisor
+  (`[machine].runtime`), not the libkrun microVM it was first measured for.
 - **`[machine].runtime = "gvisor"` — the dev box under gVisor's userspace kernel, as a machine
   posture.** `machine ensure` provisions a second podman API service in the VM whose default
   runtime is `runsc` (a pinned, sha512-verified release installed user-level over the backend's

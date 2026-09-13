@@ -24,13 +24,27 @@ so its VM exists *only* to be a boundary, and has to justify its cost on that al
   └───────────────────────────┬─────────────────────────────────────┘
                               │  ② CONTAINER layer  (the engine)
   ┌───────────────────────────┴─────────────────────────────────────┐
-  │ dev box + the compose stack     ③ optional: microVM per container│
-  │ agents run here                    (podman run --runtime krun)   │
+  │ dev box + the compose stack     ③ optional: gVisor under the box │
+  │ agents run here                    ([machine].runtime = "gvisor")│
   └─────────────────────────────────────────────────────────────────┘
 ```
 
-① is `[machine].backend` + `[machine].vmtype`. ② is ordinary containers. ③ is a second VM
-boundary *underneath* the containers — available only where nested KVM is.
+① is `[machine].backend` + `[machine].vmtype`. ② is ordinary containers. ③ is a second kernel
+boundary *underneath* the containers: the box runs on gVisor's userspace kernel, so a container
+→ kernel exploit has to beat the Sentry before it reaches the VM kernel that holds the socket,
+the stack and the mount. No KVM needed, so it reaches M1/M2 and Linux alike
+([ADR-0025](./adrs/0025-gvisor-machine-posture-and-socket-narrowing.md)). The libkrun microVM
+this slot was first measured for is the deferred alternative — the measurements below record
+why.
+
+The same layers as a hardening ladder — one ring per step, each a line in `foldyard.toml`, with
+the egress dial alongside:
+
+![Foldyard isolation layers: four cumulative postures — a rootless Podman VM, Lima with the
+in-VM wall, gVisor under the dev box behind a narrowed engine socket, and the host-side wall on
+Linux — then the egress dial from open through observe and enforce to fail-closed, and what
+never moves: the credentials stay on the host, the socket is the design hole, fy verify proves
+the ring you are in.](./assets/foldyard-isolation-layers.svg)
 
 ## macOS (arm64) — the machine layer does the work
 
