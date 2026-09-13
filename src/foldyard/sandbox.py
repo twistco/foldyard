@@ -33,6 +33,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 from typing import Protocol
@@ -304,17 +305,30 @@ def _download(arch: str) -> Path:
     return dest
 
 
-def _probe_runtime(env: dict) -> str:
+def _probe_runtime(env: dict, *, attempts: int = 10, delay: float = 1.0) -> str:
     """What the runsc socket's service reports as its default runtime — asked THROUGH the same
-    ssh:// endpoint ``box up`` will use, so the probe covers the whole path."""
-    out = subprocess.run(
-        ["podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=90,
-    )
-    return out.stdout.strip() or f"(podman info failed: {out.stderr.strip()[-300:]})"
+    ssh:// endpoint ``box up`` will use, so the probe covers the whole path.
+
+    The exit code decides, never stdout: podman-remote prints its OWN client version block to
+    stdout when it cannot reach the server, which read as "answers with runtime 'OS: linux…'"
+    until this checked. And a service started moments ago by ``systemctl --user enable --now`` is
+    'active' before podman listens, so a failed connection is retried briefly — the first probe
+    after a fresh provisioning raced it live."""
+    out = None
+    for i in range(attempts):
+        out = subprocess.run(
+            ["podman", "info", "--format", "{{.Host.OCIRuntime.Name}}"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip() or "(podman info printed nothing)"
+        if i + 1 < attempts:
+            time.sleep(delay)
+    assert out is not None
+    return f"(podman info failed: {out.stderr.strip()[-300:]})"
 
 
 def ensure(backend: SshBackend, name: str) -> None:

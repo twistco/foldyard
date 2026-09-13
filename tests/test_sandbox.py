@@ -233,3 +233,39 @@ def test_probe_runtime_asks_podman_info_through_the_given_env(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert sandbox._probe_runtime({"CONTAINER_HOST": "ssh://x"}) == "runsc-fy"
     assert seen["cmd"][:2] == ["podman", "info"] and seen["env"]["CONTAINER_HOST"] == "ssh://x"
+
+
+def test_probe_runtime_reports_the_failure_not_the_client_version_block(monkeypatch):
+    # podman-remote prints the CLIENT's own version block to STDOUT (rc 125) when it cannot reach
+    # the server — seen live 2026-09-13 as `✗ … answers with runtime 'OS: linux/amd64\nbuildOrigin:
+    # …version: 5.8.4'`. The exit code decides; stdout is never trusted on a failed probe.
+    monkeypatch.setattr(sandbox.time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: _Proc(
+            125, "OS: linux/amd64\nversion: 5.8.4\n", "Cannot connect to Podman"
+        ),
+    )
+    got = sandbox._probe_runtime({}, attempts=2)
+    assert "podman info failed" in got and "Cannot connect to Podman" in got
+    assert "5.8.4" not in got
+
+
+def test_probe_runtime_retries_while_a_fresh_service_is_not_listening_yet(monkeypatch):
+    # `systemctl --user enable --now` returns the moment podman is spawned, before it listens —
+    # the first probe after a fresh provisioning raced it live (2026-09-13). Retried, not failed.
+    calls = []
+    monkeypatch.setattr(sandbox.time, "sleep", lambda s: calls.append(("sleep", s)))
+
+    def fake_run(cmd, **kw):
+        calls.append("run")
+        return (
+            _Proc(125, "", "dial unix: no such file")
+            if calls.count("run") < 3
+            else _Proc(0, "runsc-fy\n")
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert sandbox._probe_runtime({}, attempts=5, delay=0.5) == "runsc-fy"
+    assert calls.count("run") == 3 and calls.count(("sleep", 0.5)) == 2
