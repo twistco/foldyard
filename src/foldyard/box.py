@@ -970,11 +970,12 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # Core box volumes: the engine socket, the shared on-PATH tools prefix (foldyard + consumer
     # [[box.tools]]), and the configured caches. The agent/editor volumes (Claude config/native +
     # transcripts, vscode-server) come from the gated claude/vscode plugins' box_args above.
-    # Under the gVisor posture the box's OWN engine socket is the runsc-default one: everything
-    # the box creates (siblings, the stack from an in-box `fy up`) runs under gVisor too, so the
-    # box cannot opt itself or a sibling out by choosing a socket.
+    # Under the gVisor posture the box's OWN engine socket is the NARROWED runsc socket (the
+    # filter): everything the box creates (siblings, the stack from an in-box `fy up`) runs under
+    # gVisor too, and the filter strips the runtime opt-out from every create, so the box cannot
+    # opt itself or a sibling out by choosing a socket OR by asking for another runtime.
     gvisor = sandbox.wanted()
-    sock_in_vm = sandbox.guest_socket() if gvisor else config.box_sock_in_vm()
+    sock_in_vm = sandbox.box_socket() if gvisor else config.box_sock_in_vm()
     agent_vols = [
         "-v",
         f"{sock_in_vm}:/var/run/docker.sock",

@@ -171,8 +171,11 @@ box — never as a silent PASS. The `escape refused`, credential-absence and dir
 still run and still assert. Pinned by `test_mount_audit_under_gvisor_warns_instead_of_failing`
 (and `test_mount_audit_empty_is_still_a_fail_under_crun`, so the crun path keeps its FAIL on an
 empty table). The VM's mount set is fixed by `machine ensure` (repo + worktrees only); the audit
-re-checks it, and under gVisor that re-check moves outside the sandbox. When the socket-narrowing
-filter lands it will want a host-side mount assertion so the boundary is proven, not only set.
+re-checks it, and under gVisor that re-check moves outside the sandbox. The socket-narrowing
+filter that landed 2026-09-13 narrows only the RUNTIME opt-out (`oci_runtime` / `dev.gvisor.*`
+off every create) — it does not restrict what a box-created sibling may mount, so the host-side
+mount assertion this note calls for is still owed, now as part of the broader mount/endpoint
+allowlist (isolation-layers.md "Socket narrowing"), not the runtime filter.
 
 One more thing the same run taught about the `git push refused` check: it proves the refusal
 only against a **private** origin. A public one answers `git ls-remote` without credentials, so

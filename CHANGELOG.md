@@ -20,7 +20,11 @@ break config or CLI shape, and say so here. How a release is cut:
   runtime (removed before bootstrap); an already-up box from before the posture nags to recreate.
   In-box `fy verify` gains a row checking the kernel the box actually runs on. Both VM backends
   (`lima`, `podman`). Measured 2026-09-13 on the Mac and the Linux rig: the route, the cost
-  (suite 1.2× on the Mac) and the flag boundary are in docs/isolation-layers.md.
+  (suite 1.2× on the Mac) and the flag boundary are in docs/isolation-layers.md. The box mounts a
+  narrowed view of that socket, not the runsc socket directly: a small in-VM stdlib filter (a
+  further user unit) forwards to it but strips the runtime opt-out (`oci_runtime`, `dev.gvisor.*`,
+  the compat `Runtime`) from every container-create and refuses an unparseable create, so the box
+  cannot escape gVisor even on a podman ≥ 6 that honours a client-chosen runtime.
 - **`[machine].host_wall` — enforce the egress wall on the host too (Linux).** With
   `wall = true` and a host that has `nft` + cgroup v2, foldyard starts the Lima VM inside its
   own systemd scope and loads a host nftables table matching that scope: only this project's

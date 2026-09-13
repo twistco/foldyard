@@ -75,6 +75,12 @@ def test_guest_socket_is_the_vm_users_runtime_dir(monkeypatch):
     assert sandbox.guest_socket() == "/run/user/501/podman/podman-runsc.sock"
 
 
+def test_box_socket_is_the_filtered_socket_the_box_mounts(monkeypatch):
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 501)
+    assert sandbox.box_socket() == "/run/user/501/podman/podman-runsc-filtered.sock"
+    assert sandbox.box_socket() != sandbox.guest_socket()  # the box never holds the raw socket
+
+
 def test_engine_env_points_podman_remote_at_the_runsc_socket_over_the_backends_ssh(monkeypatch):
     monkeypatch.setattr(sandbox.os, "getuid", lambda: 501)
     env = sandbox.engine_env(
@@ -84,6 +90,12 @@ def test_engine_env_points_podman_remote_at_the_runsc_socket_over_the_backends_s
     assert env["CONTAINER_HOST"] == uri and env["DOCKER_HOST"] == uri
     assert env["CONTAINER_SSHKEY"] == "/h/.lima/_config/user"
     assert env["X"] == "1"  # the rest of the stack env rides along
+
+
+def test_engine_env_filtered_targets_the_box_facing_socket(monkeypatch):
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 501)
+    env = sandbox.engine_env({}, FakeBackend(), "acme", filtered=True)
+    assert env["CONTAINER_HOST"].endswith("/run/user/501/podman/podman-runsc-filtered.sock")
 
 
 def test_engine_env_refuses_a_backend_without_ssh(monkeypatch):
@@ -117,6 +129,28 @@ def test_ensure_installs_runsc_when_absent_then_provisions_and_probes(guest, mon
     assert "label = false" in prov  # in-box `podman run` through the socket: no SELinux label
     assert "podman-runsc.service" in prov and "CONTAINERS_CONF_OVERRIDE" in prov
     assert "systemctl --user" in prov and "enable --now podman-runsc.service" in prov
+    # the narrowing filter: its source is embedded, its unit serves the box-facing socket and
+    # forwards to the runsc one, and it is enabled alongside the runsc service
+    assert "fy-socket-filter" in prov and "def strip_create" in prov  # the source, embedded
+    assert "@@FILTER_SOURCE@@" not in prov  # the placeholder was substituted, not shipped
+    assert "podman-runsc-filter.service" in prov
+    assert "podman-runsc.sock %t/podman/podman-runsc-filtered.sock" in prov  # upstream → listen
+    assert "enable --now podman-runsc-filter.service" in prov
+
+
+def test_ensure_probes_through_the_box_facing_filtered_socket(guest, monkeypatch):
+    """Fail-closed covers the box's ACTUAL path: the probe rides the filtered socket, which
+    forwards to the runsc one, so a bad default or a dead filter both surface."""
+    guest["have"] = f"runsc version release-{sandbox.GVISOR_RELEASE}"
+    seen = {}
+
+    def probe(env):
+        seen["uri"] = env["CONTAINER_HOST"]
+        return sandbox.RUNTIME
+
+    monkeypatch.setattr(sandbox, "_probe_runtime", probe)
+    sandbox.ensure(FakeBackend(), "acme")
+    assert seen["uri"].endswith("/podman/podman-runsc-filtered.sock")
 
 
 def test_ensure_skips_the_download_when_the_pinned_release_is_there(guest):

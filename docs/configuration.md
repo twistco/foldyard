@@ -259,10 +259,15 @@ disk_gib = 60
   runsc — a pinned, sha512-verified `runsc` release installed user-level (no root, nothing in
   the boot script), a wrapper with the flags fixed and no per-container override, and an enabled
   user unit — then creates the box through that socket (podman-remote over the backend's own
-  ssh port, so no VM config change and no restart) and **hands the box that socket as its
-  own**, so a sibling or an in-box `fy up` cannot come up unsandboxed. Fail-closed: a socket that
-  does not answer with the gVisor runtime aborts the verb, and a box that came up under another
-  runtime is removed before its bootstrap. Both VM backends (`lima`, `podman`); `native` has no
+  ssh port, so no VM config change and no restart) and **hands the box a narrowed view of it as
+  its own** engine socket, so a sibling or an in-box `fy up` cannot come up unsandboxed. The
+  narrowing is a small in-VM filter (a further user unit) the box's socket points at: it forwards
+  to the runsc socket but strips the runtime-selecting fields (`oci_runtime`, `dev.gvisor.*`, the
+  compat `Runtime`) from every container-create, so the box cannot opt a container back out even
+  on a podman that would honour a client-chosen runtime — and refuses a create it cannot parse.
+  Fail-closed: a socket that does not answer with the gVisor runtime aborts the verb, and a box
+  that came up under another runtime is removed before its bootstrap. Both VM backends
+  (`lima`, `podman`); `native` has no
   VM to provision. The runtime is fixed when a container is created, so changing this means
   `fy box down && fy box up` (the box, not the VM); an already-up box nags. Cost: ~1.2× on a
   Python test suite, 2–4× on sub-second git/lint calls, no inotify across the mount (poll). In

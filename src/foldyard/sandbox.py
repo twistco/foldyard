@@ -52,7 +52,9 @@ class SshBackend(Protocol):
 
 GVISOR_RELEASE = "20260817.0"
 RUNTIME = "runsc-fy"  # the runtime NAME the VM's engine resolves (the wrapper below)
-SOCKET = "podman-runsc.sock"
+SOCKET = "podman-runsc.sock"  # the runsc-DEFAULT service — the HOST creates the box through it
+FILTER_SOCKET = "podman-runsc-filtered.sock"  # the narrowing filter — what the BOX mounts
+FILTER_UNIT = "podman-runsc-filter.service"
 BAKED_ENV = (
     "FY_MACHINE_RUNTIME"  # baked into the box at create: the already-up nag + verify read it
 )
@@ -67,18 +69,33 @@ def wanted() -> bool:
     return config.machine_runtime() == "gvisor"
 
 
+def _runtime_dir() -> str:
+    """The VM user's ``XDG_RUNTIME_DIR``. The VM user is the host user's uid on both backends
+    (Lima maps it; podman machine creates ``core`` with it), so it is ``/run/user/<host uid>``
+    there — the same convention the Lima backend's guest socket uses."""
+    return f"/run/user/{os.getuid()}"
+
+
 def guest_socket() -> str:
-    """The runsc-default API socket INSIDE the VM. The VM user is the host user's uid on both
-    backends (Lima maps it; podman machine creates ``core`` with it), so ``XDG_RUNTIME_DIR`` is
-    ``/run/user/<host uid>`` there — the same convention the Lima backend's guest socket uses."""
-    return f"/run/user/{os.getuid()}/podman/{SOCKET}"
+    """The runsc-DEFAULT API socket inside the VM. The HOST creates the box through this (a
+    trusted create with no runtime field); the box itself never touches it — it holds the
+    filtered socket below, so it cannot opt a sibling out."""
+    return f"{_runtime_dir()}/podman/{SOCKET}"
 
 
-def container_host(target: SshTarget) -> str:
-    """The ``CONTAINER_HOST`` podman-remote uses to reach the runsc socket: ssh to the backend's
+def box_socket() -> str:
+    """The NARROWED API socket the box mounts as its own engine socket. The socket filter
+    (``assets/sandbox/socket_filter.py``) forwards it to :func:`guest_socket` after stripping the
+    runtime-selecting fields from container-create, so a sibling or an in-box ``fy up`` created
+    through it cannot escape gVisor even on a podman that would honour a client-chosen runtime."""
+    return f"{_runtime_dir()}/podman/{FILTER_SOCKET}"
+
+
+def container_host(target: SshTarget, socket_path: str | None = None) -> str:
+    """The ``CONTAINER_HOST`` podman-remote uses to reach a guest socket: ssh to the backend's
     loopback port, then the socket path in the guest. No forward to configure, nothing for the
-    VM to restart."""
-    return f"ssh://{target.user}@127.0.0.1:{target.port}{guest_socket()}"
+    VM to restart. Defaults to the runsc socket (the host's create path)."""
+    return f"ssh://{target.user}@127.0.0.1:{target.port}{socket_path or guest_socket()}"
 
 
 def _target(backend: SshBackend, name: str) -> SshTarget:
@@ -91,13 +108,14 @@ def _target(backend: SshBackend, name: str) -> SshTarget:
     return target
 
 
-def engine_env(env: dict, backend: SshBackend, name: str) -> dict:
-    """The stack env with the engine endpoint swapped for the runsc socket — what ``box up``
-    hands the ONE ``podman run`` that creates the box. Everything else (probes, exec, build)
-    stays on the default socket: both services share the VM's one libpod store, and the runtime
-    is fixed at create."""
+def engine_env(env: dict, backend: SshBackend, name: str, *, filtered: bool = False) -> dict:
+    """The stack env with the engine endpoint swapped for a guest socket — what ``box up`` hands
+    the ONE ``podman run`` that creates the box. Everything else (probes, exec, build) stays on
+    the default socket: both services share the VM's one libpod store, and the runtime is fixed
+    at create. ``filtered`` selects the narrowed socket (the box's own, and what ``ensure``
+    probes); the host's create uses the runsc socket directly."""
     target = _target(backend, name)
-    uri = container_host(target)
+    uri = container_host(target, box_socket() if filtered else guest_socket())
     return {**env, "CONTAINER_HOST": uri, "DOCKER_HOST": uri, "CONTAINER_SSHKEY": target.identity}
 
 
@@ -144,15 +162,27 @@ def _ssh(target: SshTarget, script: str, stdin: bytes | None = None) -> subproce
     )
 
 
+def _filter_source() -> str:
+    """The in-guest socket filter, embedded into the provisioning script (written by the guest's
+    own ``write`` helper so it restarts the filter unit only when the source changed)."""
+    path = Path(__file__).resolve().parent / "assets" / "sandbox" / "socket_filter.py"
+    return path.read_text()
+
+
 def guest_script() -> str:
     """The idempotent provisioning the VM user runs: the wrapper (flags fixed, override OFF), the
     runtime NAME registered engine-wide as a drop-in (so the DEFAULT service can exec/stop/rm a
     gVisor box — without it that service says the runtime is missing — and so an existing
-    containers.conf is never clobbered), the override the second service defaults on, and that
-    service as an enabled user unit. Services are restarted only when their inputs changed."""
-    return r"""
+    containers.conf is never clobbered), the override the second service defaults on, that
+    service as an enabled user unit, and the narrowing filter (its source + a third unit serving
+    the socket the box mounts). Services are restarted only when their inputs changed."""
+    return _GUEST_SCRIPT.replace("@@FILTER_SOURCE@@", _filter_source())
+
+
+_GUEST_SCRIPT = r"""
 set -euo pipefail
 PODMAN=$(command -v podman)
+PY=$(command -v python3)
 mkdir -p ~/.local/bin ~/.config/containers/containers.conf.d ~/.config/systemd/user
 cat > ~/.local/bin/runsc-fy <<EOF
 #!/bin/sh
@@ -205,10 +235,34 @@ Restart=on-failure
 WantedBy=default.target
 EOF
 )
+filter=$(write ~/.local/bin/fy-socket-filter <<'PYEOF'
+@@FILTER_SOURCE@@
+PYEOF
+)
+chmod 0755 ~/.local/bin/fy-socket-filter
+filterunit=$(write ~/.config/systemd/user/podman-runsc-filter.service <<EOF
+[Unit]
+# foldyard: the narrowing filter in front of the runsc socket. The box mounts THIS socket, so a
+# container the box creates cannot pick a non-gVisor runtime — the filter strips oci_runtime and
+# dev.gvisor.* from container-create (docs/isolation-layers.md, ADR ③).
+Description=foldyard: gVisor socket filter (box-facing, strips the runtime opt-out from creates)
+After=podman-runsc.service
+Requires=podman-runsc.service
+
+[Service]
+ExecStart=$PY %h/.local/bin/fy-socket-filter %t/podman/podman-runsc.sock %t/podman/podman-runsc-filtered.sock
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+)
 systemctl --user daemon-reload
 if [ -n "$runtimes" ]; then systemctl --user try-restart podman.service; fi
 if [ -n "$unit$override" ]; then systemctl --user try-restart podman-runsc.service; fi
 systemctl --user enable --now podman-runsc.service
+if [ -n "$filter$filterunit" ]; then systemctl --user try-restart podman-runsc-filter.service; fi
+systemctl --user enable --now podman-runsc-filter.service
 """
 
 
@@ -292,10 +346,13 @@ def ensure(backend: SshBackend, name: str) -> None:
         raise SystemExit(
             f"✗ provisioning the gVisor socket in '{name}' failed:\n{prov.stderr.strip()}"
         )
-    got = _probe_runtime(engine_env(dict(os.environ), backend, name))
+    # Probe through the FILTERED socket — the box's own path. It forwards to the runsc socket, so
+    # a wrong runtime default upstream (or a filter that isn't up) both surface here. Fail-closed:
+    # the box is never created against a socket that doesn't answer as gVisor.
+    got = _probe_runtime(engine_env(dict(os.environ), backend, name, filtered=True))
     if got != RUNTIME:
         raise SystemExit(
             f"✗ the gVisor socket in '{name}' answers with runtime {got!r}, not {RUNTIME!r} — "
             "refusing to create boxes outside the posture [machine].runtime asks for."
         )
-    _err(f"✓ gVisor posture: {RUNTIME} is the default on {guest_socket()}")
+    _err(f"✓ gVisor posture: {RUNTIME} via the box-facing filter on {box_socket()}")

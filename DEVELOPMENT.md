@@ -337,6 +337,22 @@ so that path stays the Mac / nested-KVM-host recipe in
   id ⇒ `fy machine stop && fy up`), not into a new sudo call — a sudo path would hand a
   container escape VM-root again. Lima renders the script as a Go template (`{{.User}}`,
   `{{.UID}}`), so no other `{{` may appear in it, and `bash -n` gates it in the tests.
+- **Under the gVisor posture the box mounts the NARROWED socket, never the runsc socket
+  directly.** `box.py` mounts `sandbox.box_socket()` (`podman-runsc-filtered.sock`), not
+  `guest_socket()` — the filter (`assets/sandbox/socket_filter.py`, a guest user unit provisioned
+  by `sandbox.ensure`) strips the runtime opt-out (`oci_runtime` / `dev.gvisor.*` / compat
+  `HostConfig.Runtime`) from every container-create so the box can't escape gVisor on podman ≥ 6.
+  Reverting the box to `guest_socket()` re-opens that door. The filter is the enforcement tier;
+  the runsc-default socket is only a convenience for the HOST's own trusted `fy box up` create
+  (which still uses the raw socket). Three invariants if you touch the filter: it stays
+  **fail-closed** (an unparseable create body is refused, never forwarded — else a runtime slips
+  past the strip), **keep-alive-correct** (it frames every response so a create is filtered even
+  as the *second* request on a reused connection — the bypass a "peek at the first request then
+  splice" proxy leaves), and **stdlib-only** (it runs under the guest's `python3`; both backends
+  have `/usr/bin/python3`). It is foldyard's own packaged code run in the GUEST, not host code
+  from the repo mount, so ADR-0023 is not in tension. `tests/test_socket_filter.py` pins the
+  rewrite, the fail-closed refusal, keep-alive and the hijack splice; the podman-6 strip effect
+  is only observable there (both guests are podman 5.8, which ignores the field anyway).
 
 ## The example consumer
 

@@ -159,6 +159,9 @@ extend-immutable-calls = ["typer.Argument", "typer.Option"]
 # init.py is a foldyard.toml TEMPLATE writer — its comment/example lines (a pulumi install
 # one-liner, aligned inline hints) are literal output that must not be wrapped.
 "src/foldyard/init.py" = ["E501"]
+# sandbox.py embeds the guest provisioning script — a systemd ExecStart line (the socket-filter
+# unit's upstream→listen socket paths) is one shell token and must not be wrapped.
+"src/foldyard/sandbox.py" = ["E501"]
 
 # ── pyright (type checker) ─────────────────────────────────────────────────────────────
 # REMINDER: the monorepo root's pyrightconfig.json mirrors this project (include +

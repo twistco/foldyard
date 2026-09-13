@@ -247,7 +247,7 @@ def _gvisor(fake, monkeypatch):
         },
     )
     monkeypatch.setattr(
-        box.sandbox, "guest_socket", lambda: "/run/user/501/podman/podman-runsc.sock"
+        box.sandbox, "box_socket", lambda: "/run/user/501/podman/podman-runsc-filtered.sock"
     )
     fake["state"]["oci_runtime"] = "runsc-fy"
     return uri
@@ -266,8 +266,9 @@ def test_up_under_gvisor_creates_through_the_runsc_endpoint_and_mounts_that_sock
     assert env["CONTAINER_HOST"] == uri and env["CONTAINER_SSHKEY"] == "/k"
     others = [e for j, e in enumerate(envs) if j != i and e is not None]
     assert others and all(e.get("CONTAINER_HOST") != uri for e in others)
-    # the box's OWN socket is the runsc one: whatever it creates runs under gVisor too
-    assert "/run/user/501/podman/podman-runsc.sock:/var/run/docker.sock" in run
+    # the box's OWN socket is the NARROWED (filtered) runsc socket: whatever it creates runs
+    # under gVisor too, and the filter strips any runtime opt-out from the create
+    assert "/run/user/501/podman/podman-runsc-filtered.sock:/var/run/docker.sock" in run
     assert "/run/docker.sock:/var/run/docker.sock" not in run
     assert "FY_MACHINE_RUNTIME=gvisor" in run  # baked for the already-up nag + in-box verify
     assert "--runtime" not in run and "--annotation" not in run  # the SOCKET decides, not the box

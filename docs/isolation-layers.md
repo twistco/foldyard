@@ -798,9 +798,20 @@ Then, on the host, `DOCKER_HOST=CONTAINER_HOST=<the runsc socket> FOLDYARD_ENGIN
   whoever holds the socket — the box — so the product shape is flags-in-wrapper, override off.
 - **A client of the runsc socket cannot opt out on 5.8**: the libpod create endpoint's
   `oci_runtime: "crun"` is ignored (the container came up `runsc-fy`). On podman 6 it would be
-  honoured (fourth session) — so the socket the BOX holds must be narrowed to strip
-  `oci_runtime` (and `dev.gvisor.*` annotations) whatever the version; the runtime default is a
-  convenience for the host's own `fy box up`, the filter is the enforcement.
+  honoured (fourth session) — so the socket the BOX holds is narrowed to strip `oci_runtime`
+  (and `dev.gvisor.*` annotations) whatever the version; the runtime default is a convenience for
+  the host's own `fy box up`, the filter is the enforcement. **Built (2026-09-13):** the box no
+  longer mounts the runsc socket directly — it mounts a third, box-facing socket
+  (`podman-runsc-filtered.sock`) served by a stdlib-Python filter
+  (`assets/sandbox/socket_filter.py`, a fourth user unit) that forwards to the runsc socket and
+  rewrites container-create bodies to drop `oci_runtime` + `dev.gvisor.*` (libpod) /
+  `HostConfig.Runtime` (compat). It preserves keep-alive (so a create is filtered even as the
+  second request on a reused connection — the bypass a naive proxy leaves), splices hijacked
+  streams (attach/exec) raw, and fails closed (an unparseable create body is refused, never
+  forwarded). Proven live on the Mac `foldyard` VM (podman 5.8.4): real creates round-trip under
+  `runsc-fy` through the filter, a raw create carrying `oci_runtime: crun` is created gVisor and
+  a malformed body gets a 400; the strip itself (podman-6 behaviour, where the field is honoured)
+  is pinned by `tests/test_socket_filter.py` against a recording upstream.
 - **No Lima config change, no VM restart.** The service is a transient user unit started over
   `limactl shell`; the host reaches it either through an `ssh -L` unix-socket forward (what
   Lima's `portForwards` does — adding one there needs a stop/start) **or with no forward at
@@ -896,7 +907,11 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
   (`[machine].host_wall`, above). Still open: the sudoers policy is the operator's (a root prompt
   per `fy up` otherwise), `fy up` proper with the proxy running (the rig run was `machine ensure`
   + `verify`), and WSL2 is unmeasured.
-- **Socket narrowing**: the pod-loopback filter shape is proven; the filter itself is not built.
+- **Socket narrowing**: BUILT for the runtime opt-out (2026-09-13) — the box-facing filter that
+  strips `oci_runtime` / `dev.gvisor.*` from creates (above, and the `③` bullet below). The
+  broader "narrowing shape" from Finding 1 (a mount allowlist so a box-created sibling can't
+  bind-mount the VM's `/`, and an endpoint allowlist) is a larger, separate guarantee left for
+  the ADR's scope, not this pass.
 - **`③` reassessment**: periodic, on the same fork/exec, package-install and `git status` loops.
   libkrun needs its 2.0 line driven by a newer crun AND x2APIC in libkrunfw before it is worth
   re-measuring; gVisor's cost is now measured (~3× on git walks, on the x86 rig AND on Mac
@@ -916,9 +931,13 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
   `[machine].runtime = "gvisor"`** — `machine ensure` provisions the second socket in the guest
   (both backends, over their own ssh), `fy box up` creates through it and hands the box that
   socket as its own, fail-closed both ways, `fy verify` checks the kernel (docs/configuration.md).
-  What remains before the ADR: the narrowing filter (it must strip `oci_runtime` and
-  `dev.gvisor.*` — on podman ≥ 6 the socket default alone is a convenience, not enforcement),
-  and the inotify-inward caveat (polling, or a two-way sync) carried into the decision.
+  **Narrowing filter wired (2026-09-13):** the box mounts a third, box-facing socket served by a
+  stdlib filter that strips the runtime opt-out (`oci_runtime` / `dev.gvisor.*` / compat
+  `HostConfig.Runtime`) from every create and fails closed — so a sibling cannot escape gVisor
+  even on a podman ≥ 6 that honours a client-chosen runtime (above; `tests/test_socket_filter.py`;
+  live on the Mac VM). What remains before the ADR: the inotify-inward caveat (polling, or a
+  two-way sync) carried into the decision, and — if wanted — the broader mount/endpoint allowlist
+  (a separate guarantee, above).
 - **Linux mounts**: `virtiofs` under Lima on Linux fails every file create (above); 9p until
   upstream moves.
 - **WSL2**: still unmeasured — `/dev/kvm` in the distro, and Lima+QEMU inside it.
