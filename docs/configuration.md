@@ -270,9 +270,13 @@ disk_gib = 60
   (`lima`, `podman`); `native` has no
   VM to provision. The runtime is fixed when a container is created, so changing this means
   `fy box down && fy box up` (the box, not the VM); an already-up box nags. Cost: ~1.2× on a
-  Python test suite, 2–4× on sub-second git/lint calls, no inotify across the mount (poll). In
-  the box, `fy verify` adds a row that checks the kernel it actually runs on. Default: unset
-  (the engine's own runtime). Env: `MACHINE_RUNTIME`.
+  Python test suite, 2–4× on sub-second git/lint calls. **File watching:** edits made *inside*
+  the box (the agent, the attached editor) fire in-box `inotify` normally, but edits made on the
+  *host* do not cross into the box — so a dev server that hot-reloads on host-side edits must poll
+  (`CHOKIDAR_USEPOLLING=1`, Vite `server.watch.usePolling`, webpack `watchOptions.poll`). In the
+  box, `fy verify` adds a row that checks the kernel it actually runs on (and the VM mount audit
+  reports `N/A` there — it can only run host-side under the sandbox, so run `fy verify` on the
+  host to audit it). Default: unset (the engine's own runtime). Env: `MACHINE_RUNTIME`.
 - **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`.
 - **`cpus`** / **`memory_mib`** / **`disk_gib`** — sizing at first creation. Defaults:
   `4` / `8192` / `60`. Env: `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK`.
