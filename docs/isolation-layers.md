@@ -585,9 +585,78 @@ that decides, not a tuning knob). Builds and CPU work are ~1.4× or better. Two 
   box need polling (`CHOKIDAR_USEPOLLING`, `vite --watch` poll, `nodemon -L`, `watchexec --poll`),
   exactly as the shared-mount model already implies — but it is a caveat to carry into any `③`
   decision, and a two-way sync (Mutagen-style) would be the alternative if native inotify ever
-  became a hard requirement. Still owed before an ADR: gVisor as the **real box runtime**
-  (`fy box up` under runsc, not a hand-run container) and a long build, on both the rig and the
-  Mac.
+  became a hard requirement. ~~Still owed before an ADR: gVisor as the **real box runtime**
+  (`fy box up` under runsc, not a hand-run container) and a long build~~ — both done on the rig
+  2026-09-13, next section; the Mac's long build is still owed.
+
+### gVisor as the real box runtime, and a sustained build (2026-09-13, fourth rig session)
+
+**The box.** foldyard's own dev box — every argument `fy box up` emits (the echoed `podman run`
+line: `--user 0`, `label=disable`, the repo + worktrees mounts, the engine socket, the tool and
+shell volumes, the wall-registered network, the proxy env and CA bundle), created under
+`runsc` with `--annotation dev.gvisor.flag.host-uds=all` — comes up on the rig's Lima/QEMU VM
+(Fedora 44 guest, podman 5.8.4, runsc release-20260817.0 installed **rootless** in the guest
+user's `~/.local/bin` with the `--ignore-cgroups` wrapper and a `[engine.runtimes]` entry in the
+user's `containers.conf`; no root needed, which matters because root in the guest is boot-time
+only). Kernel `4.19.0-gvisor`. From the host `fy box ps`/`exec` see it as the project's box; in
+it the foldyard CLI installs from the staged wheel in 7.6 s, `fy ps` reaches the engine over the
+socket, and **`fy verify` is ALL PASS** under both walls + the proxy (the probes are siblings the
+engine runs under crun, so the boundary battery is unchanged by the box's runtime).
+
+**The sustained workload** — this repository copied onto the worktrees mount (9p), run twice in
+each box; the second, warm-cache run is the row (the first differs only in `git status`, which
+is cold-cache on both, and in downloads). Same VM, same image, same mounts; only the runtime:
+
+| workload (in-box, on the 9p mount unless noted) | crun | runsc systrap, directfs on | ratio |
+| --- | --- | --- | --- |
+| `git status` (warm) | 0.37 s | 0.46 s | 1.2× |
+| `git grep` · `git log --stat` | 0.28 · 0.23 s | 0.28 · 0.23 s | 1× |
+| `uv sync` into a fresh `.venv` (warm uv cache) | 41 s | 104 s | **2.5×** |
+| this repo's full suite (1479 tests, serial, `CI=1`) | 142 s | 226 s | **1.6×** |
+| `ruff check` | 0.62 s | 0.78 s | 1.3× |
+| 10k small files on the mount | 15.8 s | 39.2 s | 2.5× |
+| 10k small files on `/tmp` | 0.72 s | 0.70 s | 1× (gVisor's own tmpfs) |
+| 2000 × fork/exec (`/bin/true`) | 2.8 s | 30.1 s | **11×** |
+
+So the long-run cost lands where the micro-loops said it would: git walks near parity, the test
+suite 1.6×, a dependency install 2.5×, and process spawning ~11× — the one figure that would
+hurt a fork-heavy tool (a shell-script-per-file build, `make -j` over many tiny compiles). For
+an agent loop that is mostly editing, git, a test run and the odd install, gVisor's cost on this
+VM is **under 2× wall-clock** on the realistic items. (All of this is one hypervisor level
+deeper than a laptop; the ratios transfer, the absolute seconds do not.)
+
+**The product route is the surprise, and it is a podman fact, not a gVisor one.** foldyard
+reaches the VM's engine over its socket everywhere (the host's `podman` goes remote via
+`CONTAINER_HOST`; the box's is `podman-remote`), and **podman's API has no per-container runtime
+selection at 5.8**: `--runtime` is a *local* podman global option that `podman-remote` does not
+have at all (`unknown flag`), the libpod create endpoint's `oci_runtime` field is accepted and
+ignored (`pkg/specgen/generate/container_create.go` in 5.8.4 picks a runtime only from the
+*image platform*, `platform_to_oci_runtime` — the wasm hook), and the Docker-compat
+`HostConfig.Runtime` is never read (unmapped in `compat/containers_create.go`, still on `main`).
+All three were tried against the rig's socket and came back under crun. **podman ≥ 6.0 honours
+`oci_runtime` on the libpod create endpoint** (`WithCtrOCIRuntime(s.OCIRuntime)` from v6.0.0),
+but the CLI still does not set it (`specgenutil` never touches `OCIRuntime`), so on 6.x the
+route is the REST API, not a `podman run` flag. Hence the runtime knob prototyped this session
+(`[box].runtime` → `podman run --runtime`; kept as a patch, not on the branch) cannot work in
+any foldyard topology, and the box above was created by hand *inside the guest* with the local
+CLI. The shapes that would work, for the design call:
+
+1. **Create the box over the libpod REST API** with `oci_runtime`, on podman ≥ 6.0 in the VM
+   (stdlib `http.client` over the unix socket; the rest of the box lifecycle stays CLI). Needs
+   the VM image to carry podman 6 — the rig's Fedora 44 guest has 5.8.4.
+2. **A second API socket in the VM whose default runtime is runsc** (`podman system service`
+   under a user unit with a `containers.conf` override, forwarded by Lima beside the main one);
+   `fy box up` creates the box through that socket and everything else through the default.
+   Works on podman 5.8 today; costs a user unit in the guest and a second forward in the
+   instance config.
+3. **The VM engine's default runtime = runsc for everything**, stack included — a different
+   product (Postgres under gVisor), and `verify`'s probes would need re-reading.
+
+Either way the runtime binary and wrapper have to be *in the VM*, rootless, which is the guest
+user's `~/.local/bin` + `containers.conf` — installable from the host without root, so it can be
+part of `machine ensure` rather than the boot script. And none of it changes the socket door:
+`host-uds=all` is still the unfiltered engine API from inside the box, so narrowing stays the
+precondition for any boundary claim.
 
 ### Bind mounts under krun
 
@@ -645,10 +714,12 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
   re-measuring; gVisor's cost is now measured (~3× on git walks, on the x86 rig AND on Mac
   arm64/vz — directfs on) and it is the front-runner. `--ignore-cgroups` is settled (the box sets
   no per-container limits, so it costs nothing); `host-uds=all` is settled the other way (it is
-  the unfiltered socket — socket narrowing is a precondition, not an alternative). What remains
-  before an ADR: gVisor as the real box runtime (`fy box up` under runsc) and a sustained build,
-  on both hosts; and the inotify-inward caveat (polling, or a two-way sync) carried into the
-  decision.
+  the unfiltered socket — socket narrowing is a precondition, not an alternative). gVisor as the
+  real box runtime and a sustained build are measured on the rig (2026-09-13, above: suite 1.6×,
+  install 2.5×, fork/exec 11×, git walks ~1×). What remains before an ADR: the same long build on
+  the Mac; the **runtime-selection route** (podman's API has none at 5.8 — the three shapes
+  above are the design call); and the inotify-inward caveat (polling, or a two-way sync) carried
+  into the decision.
 - **Linux mounts**: `virtiofs` under Lima on Linux fails every file create (above); 9p until
   upstream moves.
 - **WSL2**: still unmeasured — `/dev/kvm` in the distro, and Lima+QEMU inside it.
