@@ -618,8 +618,11 @@ is cold-cache on both, and in downloads). Same VM, same image, same mounts; only
 | 10k small files on `/tmp` | 0.72 s | 0.70 s | 1× (gVisor's own tmpfs) |
 | 2000 × fork/exec (`/bin/true`) | 2.8 s | 30.1 s | **11×** |
 
-So the long-run cost lands where the micro-loops said it would: git walks near parity, the test
-suite 1.6×, a dependency install 2.5×, and process spawning ~11× — the one figure that would
+(Read those two bold rows with the next section: the venv was ON the 9p mount there, a shape
+foldyard's own box never runs — `shadow_volumes` puts it in a named volume — and the fifth session
+re-measured both in the shapes that matter.) So the long-run cost lands where the micro-loops said
+it would: git walks near parity, the test suite 1.6×, a dependency install 2.5×, and process
+spawning ~11× — the one figure that would
 hurt a fork-heavy tool (a shell-script-per-file build, `make -j` over many tiny compiles). For
 an agent loop that is mostly editing, git, a test run and the odd install, gVisor's cost on this
 VM is **under 2× wall-clock** on the realistic items. (All of this is one hypervisor level
@@ -657,6 +660,101 @@ user's `~/.local/bin` + `containers.conf` — installable from the host without 
 part of `machine ensure` rather than the boot script. And none of it changes the socket door:
 `host-uds=all` is still the unfiltered engine API from inside the box, so narrowing stays the
 precondition for any boundary claim.
+
+### Where the files live, and what the suite's 1.6× is made of (2026-09-13, fifth rig session)
+
+Two questions from the fourth session's numbers, both answered by measurement on the same rig,
+VM and box image (Lima/QEMU Fedora 44 guest, 2 vCPU / 2 GiB, podman 5.8.4, crun vs rootless
+runsc release-20260817.0 systrap + directfs, this repository as the workload, `CI=1 uv run
+pytest -q -p no:cacheprovider` — the CI hypothesis profile already sets `database=None`, so no
+example database is in any row). The crun box is the one `fy box up` creates; the runsc box is
+that exact echoed `podman run` line with `--runtime runsc-fy --annotation
+dev.gvisor.flag.host-uds=all` inserted (created inside the guest, with the combined CA bundle
+foldyard's bootstrap would have written — a hand-created box has none, and uv then fails every
+download through the proxy with `UnknownIssuer`). Every row is a warm run; pairs agreed within
+2 %.
+
+**1. The placement decides more than the runtime does.** The same `.venv` + uv cache, `uv sync`
+into a fresh venv, four placements:
+
+| warm `uv sync` (venv + cache together) | crun | runsc | ratio |
+| --- | --- | --- | --- |
+| the 9p mount (worktrees dir) | 29.0 s | 51.2 s | 1.8× |
+| a named volume (`[box].caches`, VM btrfs) | 0.28 s | 1.57 s | 5.6× |
+| the container rootfs (overlay) | 0.35 s | 0.57 s | 1.6× |
+| `/tmp` (gVisor's own tmpfs / crun's overlay) | 0.35 s | 0.23 s | 0.7× |
+| venv on the mount, cache in the rootfs — the fourth session's row | 42.8 s | 105.8 s | 2.5× |
+
+The mount is a **100× layer under crun** before gVisor enters (29 s vs 0.28 s), and the fourth
+session's 2.5× was half the cross-filesystem copy INTO 9p through the gofer (51 s with the cache
+beside the venv on the mount, 106 s with it in the rootfs). Off the mount the predicted order
+holds under runsc — tmpfs < rootfs < volume < 9p — and the gofer tax on a native volume is real
+for a create-heavy install (5.6× relative) but 1.3 s absolute for a 126 MB venv; gVisor's
+internal tmpfs beats crun's overlay. Cold installs through the proxy: 2–6 s off the mount, 63 s
+(crun) / 94 s (runsc) on it. Copying repo + venv (150 MB) OFF the mount costs 90–110 s under
+either runtime — the same 9p read cost seen from the other side; runsc is not slower at reading
+through 9p.
+
+**The shape foldyard's own box runs** (`foldyard.toml` `[box]`: `shadow_volumes = [".venv"]`,
+`warmup = uv sync --frozen`, `UV_LINK_MODE = "copy"` — source on the mount, ONLY the venv in a
+per-box volume, cache in the rootfs; emulated with `UV_PROJECT_ENVIRONMENT`, same filesystems as
+the shadow mount):
+
+| the shadow shape | crun | runsc | ratio |
+| --- | --- | --- | --- |
+| `uv sync --frozen`, warm (a copy across filesystems; hardlink mode falls back to the same) | 1.1 s | 6.1 s | 5.5× |
+| the suite, serial | 122 s | 194 s | 1.6× |
+| the suite, `-n 2` | 76 s | 165 s | 2.2× |
+| `ruff check` · `git status` (warm) | 0.14 · 0.32 s | 0.39 · 0.63 s | 2–3× |
+
+So under gVisor an install into the shadowed venv is 6 s where the mount-shaped row was 106 s,
+and the suite's ratio in the realistic shape is the same 1.6× — which brings the second question.
+
+**2. The suite's 1.6× is the syscall path, not the mount.** The candidates were (a) systrap's
+per-syscall interception, (b) pytest-side writes landing on 9p through the gofer, (c) source and
+site-packages reads through 9p+gofer on import. The suite moved off the mount entirely, and each
+pytest-side lever on the mount, one at a time:
+
+| the suite (1479 tests, serial unless noted) | crun | runsc | ratio |
+| --- | --- | --- | --- |
+| on the 9p mount (baseline, first and last run) | 144 s | 229 s | 1.6× |
+| mount + `PYTHONPYCACHEPREFIX=/tmp/pyc` (2nd run) · `PYTHONDONTWRITEBYTECODE=1` | 143 · 143 s | 226 · 229 s | — (no change) |
+| mount + `--import-mode=importlib` | 6 collection errors | same | not a candidate |
+| mount + `-n 2` (xdist, 2 vCPU) | 94 s | 197 s | 2.1× |
+| the whole repo + venv on `/tmp` (gVisor's own tmpfs: NO gofer) | 101 s | 174 s | **1.7×** |
+| … in the named volume · in the rootfs | 102 · 101 s | 173 · 172 s | 1.7× |
+| off the mount + `-n 2` | 59 s | 145 s | 2.5× |
+
+Off the mount, with no gofer in the path at all, the ratio is 1.7× — *higher* than on the
+mount, because 9p costs both runtimes the same ~40 s of import reads and dilutes the ratio. So
+(b) is nothing (a warm run's pycs are reads; the hypothesis database was already off), (c) is
+the mount's cost under either runtime, not gVisor's, and what remains is **(a): the sentry's
+syscall path, which is CPU**. Two corroborations: the three off-mount placements agree to 1 %
+(the gofer adds nothing to a read-mostly workload), and xdist scaling — two workers on two vCPUs
+take crun from 101 s to 59 s (1.7×) but runsc only from 174 s to 145 s (1.2×), because the
+sentry's own CPU work competes with the second worker. No test configuration touches that; the
+levers are the platform (kvm rather than systrap — measured next) and the workload's syscall
+count. `df` inside a runsc box, for the record, reports every gofer-backed mount as `9p`, the
+volume included — the sentry sees them all through one file protocol; the backing store is
+whatever the VM has.
+
+**What this means for the advice.** "Caches in a volume" is not a gVisor accommodation, it is
+the product's default (`shadow_volumes` + `caches`, which also keep a box-installed package off
+the host tree — [configuration.md](./configuration.md)), and it removes the dominant cost for BOTH
+runtimes: the example consumer now ships that shape ([example/](../example/)). With it in place,
+gVisor's remaining cost on this VM is ~1.6× on a test suite, ~5× on installs (seconds), 2–3× on
+sub-second git/lint calls, and the weaker parallel scaling — all of it the syscall path.
+
+**The platform lever, on this rig: no.** The same box with `--annotation
+dev.gvisor.flag.platform=kvm` starts rootless (the guest's `/dev/kvm` is world-rw; the sandbox
+runs `--platform=kvm`), and the shadow-shape warm-up run took **993 s against 201 s under
+systrap** — 5× worse, not better. This is the nested-virt story again, not a gVisor one: on the
+rig the sentry is a KVM guest inside a KVM guest inside Google's KVM, so every trap is an L2
+exit with L0 round-trips, exactly libkrun's failure above. The number does not transfer to a
+Linux laptop (one level less), where the kvm platform is what gVisor recommends for
+performance; it is only measurable there. On macOS it does not apply at all (no nested virt on
+M1/M2, and `③` is Linux-only). The remaining kvm rows were not run — the warm-up settles the
+rig's answer.
 
 ### Bind mounts under krun
 
@@ -716,8 +814,10 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
   no per-container limits, so it costs nothing); `host-uds=all` is settled the other way (it is
   the unfiltered socket — socket narrowing is a precondition, not an alternative). gVisor as the
   real box runtime and a sustained build are measured on the rig (2026-09-13, above: suite 1.6×,
-  install 2.5×, fork/exec 11×, git walks ~1×). What remains before an ADR: the same long build on
-  the Mac; the **runtime-selection route** (podman's API has none at 5.8 — the three shapes
+  fork/exec 11×, git walks ~1×; the install's 2.5× was the venv on the 9p mount — in the shadow
+  volume foldyard actually uses it is 6 s vs 1 s, and the suite's 1.6× is the syscall path, not
+  the mount: 1.7× on gVisor's own tmpfs — the fifth session, above). What remains before an ADR:
+  the same long build on the Mac; the **runtime-selection route** (podman's API has none at 5.8 — the three shapes
   above are the design call); and the inotify-inward caveat (polling, or a two-way sync) carried
   into the decision.
 - **Linux mounts**: `virtiofs` under Lima on Linux fails every file create (above); 9p until
