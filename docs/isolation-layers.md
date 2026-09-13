@@ -756,6 +756,96 @@ performance; it is only measurable there. On macOS it does not apply at all (no 
 M1/M2, and `③` is Linux-only). The remaining kvm rows were not run — the warm-up settles the
 rig's answer.
 
+### The route: a second, runsc-default API socket — proven on both hosts (2026-09-13, sixth session)
+
+The design call from the fourth session is settled by measurement, not argument. Of the three
+shapes, the second — **a second podman API service in the VM whose default runtime is runsc** —
+was set up in BOTH machine VMs (the Mac's `foldyard` VM, arm64/vz, Fedora 44, podman 5.8.4; the
+rig's `foldyard-example`, x86/QEMU, same guest) and driven by foldyard's real verbs from the host:
+
+```sh
+# in the guest, as the VM user — no root, nothing in the boot script
+~/.local/bin/runsc                       # the release binary (release-20260817.0)
+~/.local/bin/runsc-fy:                   #!/bin/sh
+                                         exec ~/.local/bin/runsc --ignore-cgroups --host-uds=all "$@"
+~/.config/containers/containers.conf:    [engine.runtimes]  runsc-fy = ["…/runsc-fy"]   # engine-wide NAME
+~/.config/containers/runsc.conf:         [engine]  runtime = "runsc-fy"                   # this service's DEFAULT
+systemd-run --user --unit podman-runsc --setenv=CONTAINERS_CONF_OVERRIDE=~/.config/containers/runsc.conf \
+  podman system service --time=0 unix:///run/user/$UID/podman/podman-runsc.sock
+```
+
+Then, on the host, `DOCKER_HOST=CONTAINER_HOST=<the runsc socket> FOLDYARD_ENGINE=podman fy box up`
+— the unmodified verb, the unmodified `podman run` line. What that proved, on both hosts:
+
+- **The box is a gVisor box** (`uname -r` = `4.19.0-gvisor`, `OCIRuntime = runsc-fy` in inspect),
+  created in 16 s (Mac) / 24 s (rig, walls on), bootstrap and all — every step reports the same
+  ✓/⏭/✗ as under crun. **Both sockets share one libpod store**: `fy ps`, `fy box ps`, `exec`,
+  `stop`, `rm` through the DEFAULT socket see and drive the runsc box like any container (the
+  runtime is recorded on the container; the only requirement is that the runtime NAME is
+  registered engine-wide, i.e. in `containers.conf`, not only in the override — with it only in
+  the override the default service says `runtime runsc-fy is missing` on exec/rm).
+- **In-box `fy verify`: ALL PASS on the rig** (walls + proxy). On the Mac one row fails — `git
+  remote UNREACHABLE for non-credential reasons` — because this checkout's origin is an SSH URL
+  and the box image has no `ssh` client; the same box under crun reports the same (a property of
+  the remote + image, not the runtime; the row is honest: unproven, not passed).
+- **The wrapper is the flag boundary.** With `--host-uds=all` in the wrapper and NO
+  `--allow-flag-override`, a client of the socket cannot reach runsc's flags: an annotation
+  `dev.gvisor.flag.debug-log=/home/<vm-user>/x` (a write primitive on the VM disk) is refused —
+  `flag override disabled, use --allow-flag-override`. runsc still honoured
+  `dev.gvisor.flag.host-uds=none` from a client (a NARROWING; the socket in that container was
+  refused), which is the safe direction. The earlier sessions' annotation route
+  (`--allow-flag-override` + `--annotation host-uds=all`) would have handed every flag to
+  whoever holds the socket — the box — so the product shape is flags-in-wrapper, override off.
+- **A client of the runsc socket cannot opt out on 5.8**: the libpod create endpoint's
+  `oci_runtime: "crun"` is ignored (the container came up `runsc-fy`). On podman 6 it would be
+  honoured (fourth session) — so the socket the BOX holds must be narrowed to strip
+  `oci_runtime` (and `dev.gvisor.*` annotations) whatever the version; the runtime default is a
+  convenience for the host's own `fy box up`, the filter is the enforcement.
+- **No Lima config change, no VM restart.** The service is a transient user unit started over
+  `limactl shell`; the host reaches it either through an `ssh -L` unix-socket forward (what
+  Lima's `portForwards` does — adding one there needs a stop/start) **or with no forward at
+  all**: podman-remote accepts `CONTAINER_HOST=ssh://<vm-user>@127.0.0.1:<lima ssh port>/run/user/<uid>/podman/podman-runsc.sock`
+  with `CONTAINER_SSHKEY=~/.lima/_config/user`, and `podman run` through it came up
+  `4.19.0-gvisor`. Switching a box between runtimes is therefore `fy box down && fy box up`
+  against the other socket — ~20 s, the VM untouched. (The name in that URI is Lima's ssh
+  `User`, which is the host user name, not the guest home's `<user>.guest`.)
+
+**The Mac's sustained workload, finally** (M3, Lima/vz, 4 vCPU / 8 GiB, virtiofs, this
+repository, the shadow `.venv` volume, box created by `fy box up` each time, warm rows):
+
+| workload (Mac, arm64/vz) | crun | runsc systrap | ratio |
+| --- | --- | --- | --- |
+| warm `uv sync --frozen` (venv in the shadow volume) | 6 ms | 14 ms | — |
+| the suite, serial (1478 tests) | 55.5 s | 65.6 s | **1.18×** |
+| the suite, `-n 4` | 19.4 s | 28.5 s | 1.47× |
+| `ruff check .` | 0.021 s | 0.051 s | 2.4× |
+| `git status` ×50 | 1.21 s | 2.62 s | 2.2× |
+| `git grep` ×20 | 0.32 s | 0.76 s | 2.4× |
+| fork/exec ×2000 (`/bin/true`) | 0.46 s | 1.92 s | 4.2× |
+| 5000 small files on `/tmp` | 0.13 s | 0.16 s | 1.3× |
+| 5000 small files on the virtiofs mount | 1.86 s | 3.56 s | 1.9× |
+
+**The rig, same session** (x86 nested, 2 vCPU, 9p, the fifth session's shadow shape, the box
+created by the real `fy box up` through the runsc socket; crun rows are the fifth session's from
+the same VM and image):
+
+| workload (rig, x86/QEMU) | crun (5th) | runsc (6th) | ratio | runsc (5th, hand-made box) |
+| --- | --- | --- | --- | --- |
+| warm `uv sync --frozen` (venv in volume) | 1.1 s | 1.4–1.6 s | 1.4× | 6.1 s |
+| the suite, serial | 122 s | 242 s | 2.0× | 194 s |
+| the suite, `-n 2` | 76 s | 208 s | 2.7× | 165 s |
+| `ruff check .` | 0.14 s | 0.33 s | 2.4× | 0.39 s |
+| `git status` ×50 | ~16 s | 31.7 s | 2.0× | (0.63 s each) |
+| fork/exec ×2000 | 2.8 s (4th) | 31.3 s | 11× | 30 s (4th) |
+
+Read the two together: the ratios that are about the sentry's syscall path (git walks, ruff,
+fork/exec) agree across hosts; the suite's ratio is **1.2× on the Mac against 2.0× on the rig**
+(1.6× in the fifth session — the rig's runsc rows moved by a quarter between two sessions on the
+same image, which is the noise floor of a nested cloud VM, so the Mac number is the clean one).
+On the Mac, gVisor's cost for an agent loop is a fifth on the suite and 2–4× on sub-second git
+and lint calls — well inside the "under 2× on the realistic items" verdict, and the Mac was the
+host the ③ decision had written off (systrap needs no KVM, so M1/M2 are reachable too).
+
 ### Bind mounts under krun
 
 uid mapping is the same as crun (guest root = host uid 1000 files); `rw` works. **inotify does
@@ -816,9 +906,14 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
   real box runtime and a sustained build are measured on the rig (2026-09-13, above: suite 1.6×,
   fork/exec 11×, git walks ~1×; the install's 2.5× was the venv on the 9p mount — in the shadow
   volume foldyard actually uses it is 6 s vs 1 s, and the suite's 1.6× is the syscall path, not
-  the mount: 1.7× on gVisor's own tmpfs — the fifth session, above). What remains before an ADR:
-  the same long build on the Mac; the **runtime-selection route** (podman's API has none at 5.8 — the three shapes
-  above are the design call); and the inotify-inward caveat (polling, or a two-way sync) carried
+  the mount: 1.7× on gVisor's own tmpfs — the fifth session, above). The Mac's long build is
+  measured (1.2× on the suite, sixth session) and the **runtime-selection route is settled: the
+  second, runsc-default API socket**, proven with the unmodified `fy box up` on both hosts, no
+  VM restart, reachable over Lima's ssh with no forward. Decided 2026-09-13: it is a MACHINE
+  posture (the box must not be able to opt itself or a sibling out — so the box's socket is the
+  narrowed runsc one, and the filter strips `oci_runtime` / `dev.gvisor.*`), on the Mac too, and
+  wired together with socket narrowing as one opt-in safety option. What remains before the ADR:
+  the narrowing filter itself, and the inotify-inward caveat (polling, or a two-way sync) carried
   into the decision.
 - **Linux mounts**: `virtiofs` under Lima on Linux fails every file create (above); 9p until
   upstream moves.
