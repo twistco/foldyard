@@ -11,8 +11,8 @@ with `/dev/kvm` plays the "host" role and runs `podman machine` itself.
 > exposes KVM to the guest*, nothing else. In particular, **libkrun appears here because it is
 > the route to `/dev/kvm`, not because it is a microVM** — do not read the rig's provider as a
 > statement about what a consumer's machine should run. (That inference has been made once
-> already; see [firecracker-and-microvm-backends.md](./firecracker-and-microvm-backends.md),
-> which discusses libkrun on its security merits *separately* and reaches its own conclusions.)
+> already; see [isolation-layers.md](./isolation-layers.md), which weighs libkrun on its security
+> merits *separately* — measured on both platforms — and reaches its own conclusions.)
 > The product's VMM is `[machine].vmtype`, and nothing on this page bears on it.
 
 ## Architecture

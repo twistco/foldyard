@@ -20,12 +20,14 @@ ensure/start/stop are no-ops over the host's rootless podman socket.
 
 from __future__ import annotations
 
+import hashlib
+import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from . import config
+from . import config, hostwall, sandbox
 from .machine_backend import default_unavailable_block, get_backend
 
 MACHINE = config.machine_name()
@@ -44,6 +46,12 @@ def _volumes(main: Path, wt_root: Path) -> list[tuple[str, str]]:
     """The isolation mount set as ``(host, guest)`` pairs (host==guest path) — the ONLY
     things the VM may see. REPLACES the backend's default mounts."""
     return [(str(main), str(main)), (str(wt_root), str(wt_root))]
+
+
+def guest_mounts(main: Path, wt_root: Path) -> list[str]:
+    """The GUEST paths of the isolation mount set — the only host paths `verify`'s mount audit
+    exempts (by exact mountpoint) when it reads the VM's real mount table."""
+    return [guest for _, guest in _volumes(main, wt_root)]
 
 
 def running_machines() -> list[str]:
@@ -90,7 +98,10 @@ def _start() -> bool:
             _err('      backend = "lima"  under [machine] in foldyard.toml (needs limactl).')
             return False
     _err(f"▶ starting {BACKEND.name} machine '{MACHINE}'…")
-    if not BACKEND.start(MACHINE):
+    # Under the host wall the VM's host processes are launched inside their own transient
+    # cgroup scope, so the wall has one predictable thing to match (see _apply_host_wall).
+    prefix = hostwall.scoped_argv_prefix(MACHINE) if _host_wall_wanted() else []
+    if not BACKEND.start(MACHINE, prefix=prefix):
         _err(f"✗ '{BACKEND.cli}' failed to start '{MACHINE}'.")
         return False
     return True
@@ -139,48 +150,145 @@ def _revive() -> bool:
     return False
 
 
-# ── the in-VM egress wall ([machine].wall — lima only) ─────────────────────────────────
+# ── the host-side wall (lima, `[machine].host_wall`): nftables on the HOST, matched by cgroup ──
 #
-# The Mac-side proxy stays the chokepoint (allowlist, keyless injection, network log, creds all on
-# the Mac); the wall makes the LIMA VM fail-closed: an nftables default-deny on the VM user's uid
-# (which ALL rootless-container egress NATs out as) whose only opening is the Mac's foldyard
-# daemons at the Lima host gateway. Provisioned by `assets/machine-wall/machine-wall.sh` on
-# ensure/recreate: every machine create/START re-runs the idempotent install (self-healing — a
-# tampered/drifted wall is re-asserted on the next boot), and a host-side marker catches
-# `[machine].wall` flips between runs without shelling `limactl` on the already-running path.
-# There is deliberately NO separate CLI verb: toggling IS editing foldyard.toml + `fy up`, and
-# in-VM status/diagnosis lives in example/test_network.sh (limactl shell is right there).
+# The tier above the guest wall. That one is enforcement the guest applies to itself, so a
+# guest-KERNEL exploit reaching VM-root can flush it; this one matches the VM process's own
+# traffic on the host — where the guest has no reach — and allows only this project's daemon
+# band (hostwall.py has the ruleset and the why). Two things make it wire-able: the VM is
+# STARTED inside its own transient systemd scope (`_start`), and after every start — and on
+# every steady-state `fy up`, since the table can't be read back without root — the ruleset is
+# rendered for the scope the VM ACTUALLY sits in and loaded as root (an idempotent replace).
+# Lima allocates the forwarded SSH port per boot, which is why it is re-read every time. A VM
+# found outside its own scope (started by hand, or before `host_wall` was turned on) is REFUSED:
+# matching the login session's scope instead would wall the operator's entire shell.
+
+
+def _host_wall_wanted() -> bool:
+    return BACKEND.name == "lima" and config.machine_host_wall()
+
+
+def _apply_host_wall() -> None:
+    """Load (or re-load) the host-side wall for the running VM; a hard stop when it was asked
+    for and can't be delivered — never a silent downgrade to the guest wall alone."""
+    if not _host_wall_wanted():
+        return
+    if not hostwall.available():
+        _err("✗ [machine].host_wall = true but this host has no `nft` / cgroup v2 to enforce it.")
+        _err("  Install nftables, or drop `host_wall` (the in-VM wall still applies).")
+        raise SystemExit(1)
+    pids = BACKEND.host_pids(MACHINE)
+    scope = hostwall.vm_cgroup_scope(pids[0] if pids else 0)
+    if not hostwall.in_own_scope(MACHINE, scope):
+        _err(f"✗ '{MACHINE}' is running OUTSIDE its own scope ({scope or 'no VM pid found'}), so")
+        _err("  the host wall has nothing safe to match — walling the scope it is in would wall")
+        _err("  the shell that started it. Restart it under foldyard:   fy machine stop && fy up")
+        raise SystemExit(1)
+    ssh_port = BACKEND.ssh_port(MACHINE)
+    if not ssh_port:
+        _err(f"✗ can't read '{MACHINE}'s forwarded SSH port — the host wall would cut limactl off.")
+        raise SystemExit(1)
+    _err(f"▶ loading the host-side wall for '{MACHINE}' (root: sudo nft)…")
+    # The VM's own loopback plumbing (the hostagent's DNS resolver, QEMU's SSH forward) is
+    # discovered from its processes, never guessed: Lima allocates those ports per boot too.
+    plumbing = hostwall.listener_ports(*pids)
+    if not hostwall.install(MACHINE, scope, ssh_port, hostwall.resolvers(), plumbing):
+        _err(f"✗ loading the host-side wall for '{MACHINE}' failed (`sudo nft -f -`).")
+        raise SystemExit(1)
+
+
+def _remove_host_wall() -> None:
+    """Best-effort teardown after the VM is gone: a table matching a scope that no longer
+    exists is inert, so a failure here is a warning, not an error."""
+    if not _host_wall_wanted() or not hostwall.available():
+        return
+    if not hostwall.remove(MACHINE):
+        _err(f"⚠ removing the host-side wall table for '{MACHINE}' failed (inert without the VM;")
+        _err(f"  `sudo nft delete table inet {hostwall.table_name(MACHINE)}` clears it).")
+
+
+# ── guest boot provisioning: the sudo grant + the in-VM egress wall (lima only) ────────────
+#
+# Root in the guest is BOOT-TIME ONLY. foldyard records ONE `provision: mode: system` script in
+# the instance's lima.yaml (`assets/machine-wall/guest-boot.sh`, rendered); Lima runs it as root
+# on every boot, after cloud-init. It (1) narrows the sudo grant Lima's cloud-init re-creates on
+# every boot — the instance id changes each boot — to Lima's own non-passwordless form, shutdown
+# only, which a graceful `limactl stop` still needs: the VM user, the uid the box runs as, gets
+# no path to VM-root; (2) installs or removes the nftables wall (`machine-wall.sh`, embedded and
+# root-owned in the guest — never read from the repo mount); (3) writes what it applied to
+# /run/fy-wall/state, world-readable, so the host can check without root.
+#
+# The host therefore never runs `sudo` in the guest: it records the script while the VM is
+# STOPPED (`limactl edit` refuses a running one) and reads the guest's report after boot. A
+# change — the wall flipped, a moved port band, a VM created before the grant was dropped — needs
+# a restart, and a running VM with stale provisioning is REFUSED: fail closed rather than run
+# unwalled or with the old grant. The host-side proxy stays the chokepoint (allowlist, keyless
+# injection, network log, creds all host-side); the wall makes the VM fail-closed on the VM
+# user's uid, whose only opening is the host's foldyard daemons at the Lima host gateway. There
+# is deliberately NO separate CLI verb: toggling IS editing foldyard.toml + `fy machine stop` +
+# `fy up`; in-VM diagnosis is `limactl shell <name> cat /run/fy-wall/boot.log`.
+
+_WALL_SCRIPT_PATH = "/usr/local/libexec/fy-machine-wall"
 
 
 def _wall_asset() -> Path:
     return Path(__file__).resolve().parent / "assets" / "machine-wall" / "machine-wall.sh"
 
 
-def _wall_marker() -> Path:
-    """Host-side record of the last wall state synced into MACHINE ("on"/"off"), so flipping
-    ``[machine].wall`` takes effect on the next `fy up` without shelling `limactl` every run."""
-    return config.state_dir() / f"machine-wall-{MACHINE}"
+def _boot_asset() -> Path:
+    return Path(__file__).resolve().parent / "assets" / "machine-wall" / "guest-boot.sh"
 
 
-def _sh(cmd: list[str], stdin: Path | None = None) -> int:
-    """Run a wall-provisioning command, streaming output; ``stdin`` (a file to feed the command)
-    carries the wall script itself. The seam golden tests patch to capture the exact ``limactl``
-    argv without a real Lima."""
-    if stdin is None:
-        return subprocess.run(cmd).returncode
-    with stdin.open("rb") as f:
-        return subprocess.run(cmd, stdin=f).returncode
+def _wall_ports() -> str:
+    """The nft port elements the wall opens toward the host: each daemon base port + the full
+    worktree-offset span (``config.worktree_offset`` is 1..89, main is 0), as ``base-base+89``
+    ranges. Bases are THIS PROJECT's (allocated band or env override — ``config.proxy_port_base``/
+    ``gcp_minter_port_base``), so a walled VM can reach only its own project's daemons, not a
+    sibling project's."""
+    bases = {config.proxy_port_base(), config.gcp_minter_port_base()}
+    return ", ".join(f"{b}-{b + 89}" for b in sorted(bases))
 
 
-def _wall_vm_state() -> tuple[bool, bool]:
-    """Query the VM for the wall's ACTUAL state — the host marker can NEVER certify it. An
-    out-of-band ``limactl delete``/factory-reset or an in-VM tamper drops the nft rules while the
-    marker still reads ``on``; a wiped ``state_dir`` loses the marker while ``fy-wall.service``
-    keeps enforcing. Returns ``(fy_wall_table_present, rootful_socket_masked)``. Best-effort:
-    ``(False, False)`` if the VM is unreachable — which makes :func:`wall_sync` (re)provision or
-    clean up rather than trust stale host-side state. A patchable seam (golden tests set it)."""
-    if BACKEND.name != "lima":
-        return (False, False)
+def _provision_want() -> str:
+    """What the guest must report after boot: the wall state, port set included."""
+    return f"wall on {_wall_ports()}" if config.machine_wall() else "wall off"
+
+
+def _render_provisioning() -> tuple[str, str]:
+    """The boot script for the CURRENT config and its id (a hash of the rendered content, so a
+    flipped wall, a moved band or a changed asset all read as a different recording)."""
+    if config.machine_wall():
+        gw = config.LIMA_HOST_GATEWAY
+        args = ["install", gw, _wall_ports(), f"http://{gw}:{config.proxy_port_base()}"]
+    else:
+        args = ["uninstall"]
+    body = (
+        _boot_asset()
+        .read_text()
+        .replace("@@WALL_ASSET@@", _wall_asset().read_text().rstrip("\n"))
+        .replace("@@WALL_PATH@@", _WALL_SCRIPT_PATH)
+        .replace("@@WALL_ARGS@@", " ".join(shlex.quote(a) for a in args))
+        .replace("@@WANT@@", _provision_want())
+    )
+    ident = hashlib.sha256(body.encode()).hexdigest()[:16]
+    return body.replace("@@ID@@", ident, 1), ident
+
+
+def guest_provision_script() -> str:
+    """The root boot script to record in the instance config (see the section comment)."""
+    return _render_provisioning()[0]
+
+
+def provision_id() -> str:
+    """The id of the boot script the current config wants recorded."""
+    return _render_provisioning()[1]
+
+
+def _guest_state() -> tuple[str, bool, bool]:
+    """What the guest applied at its last boot, read WITHOUT root: ``(the /run/fy-wall/state
+    line, fy-wall.service active, rootful podman.socket masked)``. ``("", False, False)`` when
+    the VM is unreachable — which reads as "not applied" and fails :func:`ensure` closed. A
+    patchable seam (golden tests set it)."""
 
     def _vm(args: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -191,85 +299,59 @@ def _wall_vm_state() -> tuple[bool, bool]:
         )
 
     try:
-        present = _vm(["sudo", "nft", "list", "table", "inet", "fy_wall"]).returncode == 0
+        state = _vm(["cat", "/run/fy-wall/state"]).stdout.strip()
+        active = _vm(["systemctl", "is-active", "fy-wall.service"]).stdout.strip() == "active"
         # `is-enabled` prints "masked" (rc 1) when masked, "enabled"/"disabled" otherwise — the
         # install masks it, so anything but "masked" means the container-root→VM-root hole is open.
         masked = _vm(["systemctl", "is-enabled", "podman.socket"]).stdout.strip() == "masked"
     except (OSError, subprocess.SubprocessError):
-        return (False, False)
-    return (present, masked)
+        return ("", False, False)
+    return (state, active, masked)
 
 
-def _wall_ports() -> str:
-    """The nft port elements the wall opens toward the Mac: each daemon base port + the full
-    worktree-offset span (``config.worktree_offset`` is 1..89, main is 0), as ``base-base+89``
-    ranges. Bases are THIS PROJECT's (allocated band or env override — ``config.proxy_port_base``/
-    ``gcp_minter_port_base``), so a walled VM can reach only its own project's daemons, not a
-    sibling project's."""
-    bases = {config.proxy_port_base(), config.gcp_minter_port_base()}
-    return ", ".join(f"{b}-{b + 89}" for b in sorted(bases))
-
-
-def wall_sync(force: bool = False) -> bool:
-    """Reconcile the in-VM wall with ``config.machine_wall()`` (assumes MACHINE is running).
-    Skips when the marker already matches (unless ``force``). True on success/no-op."""
-    desired = config.machine_wall()
+def _record_provisioning() -> None:
+    """Record the boot script in the (STOPPED) instance config when it differs from what is
+    recorded; refuse a RUNNING VM whose recording is stale (see the section comment)."""
     if BACKEND.name != "lima":
-        if desired:
-            _err(
-                "⚠ [machine].wall is lima-only — ignored on the "
-                f"'{BACKEND.name}' backend (preflight blocks `fy up`; fix foldyard.toml)."
-            )
-        return True
-    # The marker records the wall's PORT SET too, not just on/off — the allocated band (or an
-    # env override) can change between runs, and stale nft ranges would strand the VM's egress
-    # on ports nothing listens on. A port change re-provisions exactly like an off→on flip.
-    want = f"on {_wall_ports()}" if desired else "off"
-    marker = _wall_marker()
-    current = marker.read_text().strip() if marker.exists() else ""
-    if desired:
-        # The VM — not the marker — decides whether we can skip. Re-provision unless the marker
-        # matches the wanted ports AND the VM actually has the rules loaded AND the rootful
-        # podman.socket is still masked. Trusting the marker alone let a recreated/reset VM run
-        # UNWALLED while foldyard reported locked-down, and missed a re-enabled rootful socket
-        # (the container-root→VM-root bypass). This costs one `limactl shell` per steady-state
-        # `fy up`; correctness over the marker's speed.
-        present, masked = (False, False) if force else _wall_vm_state()
-        if not force and current == want and present and masked:
-            return True
-        if present and not masked:
-            _err("⚠ wall enforcing but the rootful podman.socket is NOT masked — re-provisioning")
-    else:
-        # Off: only skip if we can be SURE the VM carries no wall. An explicit 'off' marker we
-        # wrote is trustworthy; an ABSENT marker is ambiguous (a wiped state_dir loses it while
-        # fy-wall.service keeps enforcing), so probe the VM once and uninstall if it's still there.
-        if not force and current == "off":
-            return True
-        present = False if force else _wall_vm_state()[0]
-        if not force and not present and not current.startswith("on"):
-            _record_wall(marker, want)  # confirmed clean — nothing to remove in the VM
-            return True
-    if desired:
-        _err(f"▶ provisioning the egress wall into '{MACHINE}' (default-deny; Mac proxy only)…")
-        gateway = config.LIMA_HOST_GATEWAY
-        proxy_url = f"http://{gateway}:{config.proxy_port_base()}"
-        args = ["install", gateway, _wall_ports(), proxy_url]
-    else:
-        _err(f"▶ removing the egress wall from '{MACHINE}'…")
-        args = ["uninstall"]
-    # Stream the script over stdin (`sudo bash -s --`) rather than staging it in the guest's
-    # /tmp: a world-writable staging path could be swapped by a non-root guest process between
-    # copy and root execution.
-    cmd = ["limactl", "shell", MACHINE, "sudo", "bash", "-s", "--", *args]
-    if _sh(cmd, stdin=_wall_asset()) != 0:
-        return False
-    _record_wall(marker, want)
-    return True
+        return
+    script, ident = _render_provisioning()
+    if BACKEND.provision_id(MACHINE) == ident:
+        return
+    if state() == "running":
+        _err(f"✗ '{MACHINE}' is running with STALE boot provisioning — the sudo grant, the egress")
+        _err("  wall or its port band changed (or the VM predates boot provisioning). It applies")
+        _err("  at boot, as root, from the recorded config, so restart:   fy machine stop && fy up")
+        raise SystemExit(1)
+    _err(f"▶ recording boot provisioning for '{MACHINE}' ({_provision_want()}; VM user gets no")
+    _err("  sudo)…")
+    if not BACKEND.set_provision(MACHINE, script):
+        _err(f"✗ recording the boot provisioning into '{MACHINE}' failed (`limactl edit`).")
+        raise SystemExit(1)
 
 
-def _record_wall(marker: Path, state: str) -> None:
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(state)
+def _check_guest_provisioning() -> None:
+    """After a boot, and on the steady-state path: the guest's own report must match what the
+    config wants. One `limactl shell` per `fy up` — correctness over speed: a VM reset behind
+    foldyard's back, a failed boot script or a re-enabled rootful socket all surface here."""
+    if BACKEND.name != "lima":
+        return
+    want = _provision_want()
+    got, active, masked = _guest_state()
+    problems = []
+    if got != want:
+        problems.append(f"guest reports {got or 'nothing'!r}, wanted {want!r}")
+    if config.machine_wall():
+        if not active:
+            problems.append("fy-wall.service is not active")
+        if not masked:
+            problems.append("the rootful podman.socket is NOT masked (container-root → VM-root)")
+    if not problems:
+        return
+    _err(f"✗ '{MACHINE}' did not apply its boot provisioning: {'; '.join(problems)}.")
+    _err("  The script runs as root at boot from the recorded config; its log is readable")
+    _err(f"  without root:   limactl shell {MACHINE} cat /run/fy-wall/boot.log")
+    _err("  then restart:   fy machine stop && fy up")
+    raise SystemExit(1)
 
 
 def ensure(main: Path, wt_root: Path) -> None:
@@ -291,7 +373,6 @@ def ensure(main: Path, wt_root: Path) -> None:
         _err(f"  Install it ({BACKEND.install_hint}) or name a different [machine].backend.")
         raise SystemExit(1)
     wt_root.mkdir(parents=True, exist_ok=True)
-    created = False
     if not exists():
         _err(f"▶ {BACKEND.name} machine '{MACHINE}' not found — initialising (rootless; mounts")
         _err(f"  ONLY {main} and {wt_root})…")
@@ -302,28 +383,30 @@ def ensure(main: Path, wt_root: Path) -> None:
                 "blocked — e.g. under nono? Then create it in a plain terminal)."
             )
             raise SystemExit(1)
-        created = True
     elif str(wt_root) not in mounts():
         _err(f"⚠ machine '{MACHINE}' has no '{wt_root}' mount (created before worktree")
         _err("  support). The main stack still works; worktree stacks need it. To enable")
         _err("  worktrees, recreate once:  fy machine recreate")
-    started = False
+    # Boot provisioning (the sudo grant + the wall) is recorded BEFORE the VM boots — it is
+    # what runs as root at boot — and a running VM whose recording is stale is refused here.
+    _record_provisioning()
     if state() != "running":
         if not _start():
             raise SystemExit(1)
-        started = True
     elif not responsive():
         # Running per the backend, dead in fact — restart it rather than hand the caller a
         # socket nothing serves (see _revive).
         if not _revive():
             raise SystemExit(1)
-        started = True
-    # Re-assert the wall on every machine create/START (idempotent install → self-healing across
-    # boots and against in-VM drift); on the already-running path, sync only when [machine].wall
-    # flipped since the last run (the marker).
-    if not wall_sync(force=created or started):
-        _err(f"✗ syncing the egress wall into '{MACHINE}' failed — fix the above and re-run.")
-        raise SystemExit(1)
+    # Every path ends by (re)loading the host-side wall for wherever the VM actually sits, then
+    # reading the guest's own report of what it applied (never the host's memory of it): a
+    # fresh boot, a revive, and the steady state alike.
+    _apply_host_wall()
+    _check_guest_provisioning()
+    # The gVisor posture is user-level in the guest (no root, so not the boot script): provisioned
+    # over the backend's ssh once the VM is up and its root-side provisioning is verified.
+    if sandbox.wanted():
+        sandbox.ensure(BACKEND, MACHINE)
 
 
 def not_running_reason() -> str | None:
@@ -428,8 +511,9 @@ def delete(assume_yes: bool = False) -> int:
     if not BACKEND.remove(MACHINE):
         print(f"✗ '{BACKEND.cli}' failed to remove '{MACHINE}'.")
         return 1
-    # Host-side wall state must not outlive the VM it describes (a later create re-probes anyway).
-    _wall_marker().unlink(missing_ok=True)
+    # The boot provisioning lives in the instance config, which the backend removes with the VM;
+    # the host-side wall's table is the one host-side thing to clear.
+    _remove_host_wall()
     if not _stop_host_supervisor():
         return 1
     print(f"✓ machine '{MACHINE}' deleted. `fy up` / `fy machine ensure` re-creates it.")
@@ -468,13 +552,10 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
     if not BACKEND.create(MACHINE, _resources(), _volumes(main, wt_root)):
         print(f"✗ creating {BACKEND.name} machine '{MACHINE}' failed.")
         return 1
+    _record_provisioning()  # the fresh VM is stopped: record before its first boot
     if not _start():  # one-VM-at-a-time aware on non-concurrent backends
         return 1
-    if not wall_sync(force=True):  # the fresh VM lost any previous provisioning
-        print(
-            f"✗ machine '{MACHINE}' recreated but the egress wall sync failed — re-run `fy up` "
-            "(the wall re-asserts on every start), or check `limactl shell` connectivity."
-        )
-        return 1
+    _apply_host_wall()
+    _check_guest_provisioning()
     print(f"✓ machine '{MACHINE}' recreated with the worktrees mount.")
     return 0

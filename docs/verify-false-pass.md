@@ -90,3 +90,104 @@ The unifying rule, and the one to apply to any check added later: **a negative c
 positive control.** `_stack_health` already worked this way and says so in its own docstring — "a
 probe that FAILED is not a probe that found nothing" — so this was foldyard's own principle,
 applied in one section and missing from the other three.
+
+## A second gap (2026-09-11): the probe reads the wrong mount namespace
+
+Found on the Linux rig by the deliberate leak the isolation work called for: a probe Lima VM
+that mounts **all of `/home/dain`** (read-only, 9p) passes `fy verify` — "VM mount table free of
+host home/paths" ✓ — even though `_host_paths()` now matches `/home/dain` correctly.
+
+Cause: the mount-table probe runs `mount` inside a `--privileged` container, which prints the
+*container's* mount namespace. VM-level mounts are not in it. The `ls /Users` probe has the same
+shape and passes for the same reason on every platform. Measured on the leaky VM:
+
+| probe | shows the 9p mount at `/home/dain`? |
+| --- | --- |
+| `--privileged … mount` (as written) | no |
+| `--privileged --pid=host … cat /proc/1/mounts` | **yes** |
+| `--privileged -v /:/host … cat /host/proc/1/mounts` | **yes** |
+| `--privileged -v /:/host … ls /host/home/dain` | yes (lists the host home) |
+
+So the two "repo-only mount" ✅s in
+[isolation-layers.md](./isolation-layers.md#what-fy-verify-proves-per-platform) are, today,
+proven by the mount configuration `machine ensure` writes and not by `verify`. This is the same
+class as the two above — green while asserting nothing — reached by a third road: the probe ran,
+produced non-empty output, and looked in the wrong place.
+
+**Fixed the same day** (`fix(verify): read the VM's mount table from PID 1, not the probe
+container's`). The mount audit now reads `/proc/1/mounts` from `--pid=host` — the escape probe
+already uses that flag, and `/proc/1/mounts` is world-readable where `/proc/1/ns/*` is not, so
+the two coexist. The container-side `ls /Users` probe was folded into it: it read the same wrong
+namespace, and `/Users` is a member of the foreign-mounts list the audit greps for.
+
+Reading the real table has a consequence the old probe never met: it *sees the mounts foldyard
+itself makes* — the repo and the worktrees root, at their host paths — and on a Mac those sit
+under `/Users/<you>`, so the first live run failed on its own repo mount. The audit therefore
+exempts `machine.guest_mounts()` by **exact mountpoint** and nothing else: the home itself, a
+sibling under it, or a bind at a sub-path of the repo all still fail (`test_the_isolation_mount_set_is_not_a_leak`).
+The positive control above still gates it, the test fixture answers a bare `mount` with a clean
+table so a regression to the container view goes red, and the leaky-VM case is pinned by
+`test_vm_level_mount_hidden_from_the_container_namespace_is_still_a_fail`. Run live on a Mac
+(Lima/vz): the table shows exactly the two mounts and passes.
+
+**Closed on the rig (2026-09-12):** `verify` itself — not the probe by hand — was run against a
+Lima/QEMU VM deliberately mounting the whole home (`mounts += /home/dain`, read-only 9p). It
+FAILED with `VM exposes host paths: … /home/dain 9p ro`, and PASSED (`VM mount table (PID 1's
+namespace) free of host home/paths beyond the repo mounts`) once the leak was removed — the two
+directions the fix promised, end to end. One thing the run also confirmed: the probe image must
+live in the *VM's* podman store, not the host's — a host-built image the VM can't run trips the
+positive control (`probe image … could not run … the boundary battery DID NOT EXECUTE`) rather
+than passing vacuously, which is the control doing its job.
+
+## A false FAIL (2026-09-13): the options field
+
+The opposite failure, from the first in-box `fy verify` on a Linux host (Lima/QEMU, a Fedora
+guest). The audit reported `VM exposes host paths: /dev/vda3 / btrfs rw,…,subvol=/root 0 0`
+— the VM's *root filesystem*. Inside the box the process runs as uid 0, so the home the leak
+pattern looks for is `/root`; the btrfs root line carries `subvol=/root` in its **options**
+field; and the pattern was searched across the whole line. The mountpoint is `/`. Nothing of the
+host is in that line.
+
+A false FAIL is not a security hole, but it is the same credibility problem from the other side:
+a battery that cries wolf on a sound boundary teaches people to read past its red. Fixed the same
+day (`fix(verify): judge the mount audit by the mountpoint field, not the whole line`): the
+pattern is applied to field 2 only — the only field a leak can live in, since a 9p/virtiofs
+source is a tag and a bind's source is a device — and the repo-mount exemption is unchanged.
+Pinned by `test_a_host_path_string_in_the_mount_options_is_not_a_leak`, which also keeps the
+same path *as* a mountpoint a FAIL. A Mac's Ubuntu guest (ext4) never showed it; any btrfs guest
+would have.
+
+## Under gVisor (2026-09-13): the mount audit cannot run from inside the box, by design
+
+`[machine].runtime = "gvisor"` (docs/configuration.md) runs the box under gVisor's userspace
+kernel. The VM mount audit reads the VM's PID-1 mount table through a `--privileged --pid=host`
+sibling — but that reach into the VM kernel is exactly what gVisor blocks, and it is the SAME
+property the `escape refused` check proves is blocked. So under the posture the sibling reaches
+only the sandbox, `/proc/1/mounts` yields nothing, and the audit cannot execute.
+
+That is not a leak and not a failed probe. It is reported as **not applicable** (`⊘ N/A`, no
+effect on the exit code) rather than an advisory (`⚠`), because there is nothing to act on in-box
+AND the audit genuinely runs at another layer — not a gap softened into a warning. Host-side
+`fy verify` runs its probe over the DEFAULT (crun) socket, whose `--privileged --pid=host`
+container CAN read the VM's PID-1 mounts (the box's socket is the runsc/filtered one; the host's
+is not); a crun box audits it the same way. So the check runs, just not from inside the sandbox.
+The `escape refused`, credential-absence and direct-egress checks still run and still assert.
+Pinned by `test_mount_audit_under_gvisor_is_not_applicable_not_a_failure` (and
+`test_mount_audit_empty_is_still_a_fail_under_crun`, so the crun path keeps its FAIL on an empty
+table). The VM's mount set is fixed by `machine ensure` (repo + worktrees only); the audit
+re-checks it, and under gVisor that re-check moves outside the sandbox.
+
+A further, in-VM hardening the runtime filter deliberately leaves out: it narrows only the
+RUNTIME opt-out (`oci_runtime` / `dev.gvisor.*` off every create), NOT what a box-created sibling
+may bind-mount. On foldyard's one-VM-per-project topology the residual risk is small — a sibling
+mounting the VM's `/` reads this project's own VM (repo, worktrees, this project's stack), and
+credentials never enter the VM (they stay host-side behind the proxy) — so it is defence in depth
+against a shared-VM shape foldyard does not use. It is the broader mount/endpoint allowlist
+(isolation-layers.md "Socket narrowing"), left for the ADR, that would add a host-side mount
+assertion; the runtime filter is complete as scoped.
+
+One more thing the same run taught about the `git push refused` check: it proves the refusal
+only against a **private** origin. A public one answers `git ls-remote` without credentials, so
+the box reads as "REACHABLE — the box can push"; a repo with no origin at all reads as UNPROVEN.
+Neither is a bug in the check — both are the positive control refusing to certify what it could
+not test — but a fixture or a fresh `git init` needs a private-looking origin to get a PASS.

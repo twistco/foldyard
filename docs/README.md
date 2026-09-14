@@ -13,6 +13,8 @@ Start with the [package README](../README.md) (what foldyard is and why). Then, 
 - [security.md](./security.md) — the threat model and what `fy verify` proves
 - [compose-overlays.md](./compose-overlays.md) — the `[[overlay]]` posture-overlay config,
   in depth
+- [linux-support.md](./linux-support.md) — what has been validated on a Linux host, what has
+  not (the daily `fy up` loop, WSL2), and the outstanding list before "supported"
 - plugins.md — writing your own plugin (coming with the consumer-repo plugin work)
 
 **Why it's built this way:**
@@ -33,8 +35,8 @@ Start with the [package README](../README.md) (what foldyard is and why). Then, 
 - [lima-network-forcing-kit/](./lima-network-forcing-kit/) — the runnable wall proof kit
 - [podman-multi-vm-issue-26281.md](./podman-multi-vm-issue-26281.md) — why the podman backend
   runs one VM at a time
-- [firecracker-and-microvm-backends.md](./firecracker-and-microvm-backends.md) — research note:
-  where Firecracker could (and can't) fit, and the libkrun/krunkit alternative
+- [firecracker-and-microvm-backends.md](./firecracker-and-microvm-backends.md) — why Firecracker
+  does not fit (no filesystem sharing, by design); the libkrun measurements live in isolation-layers
 - [isolation-layers.md](./isolation-layers.md) — which layer carries the boundary on each host
   (macOS · Linux · WSL2), with the hypervisor stacks drawn out
 - [verify-false-pass.md](./verify-false-pass.md) — how `fy verify` could print ALL PASS while

@@ -51,6 +51,11 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   the registry's `verify_checks`.
 - `machine.py` / `machine_backend.py` — rootless dev-VM lifecycle behind the pluggable
   backend contract (podman | lima | native; see `docs/lima-backend-scope.md`).
+- `hostwall.py` — the host-side egress wall for the machine VM on Linux: nftables matched by the
+  VM's cgroup v2 scope (the VM is started in a per-VM systemd scope so the match is predictable),
+  wired via `[machine].host_wall`; fail-closed — a VM outside its own scope is refused, not
+  walled. The VM's loopback plumbing (Lima's host resolver, the SSH forward) is discovered from
+  its processes' sockets, never guessed.
 - `box.py` — the dev-box lifecycle (`fy box build|up|shell|down|ps`) + the monitored bootstrap.
 - `supervisor.py` — `fy host`: the ONE Mac-side process running the credential daemons
   (singleton lock, per-worktree listeners, replace-on-launch staleness handling, the
@@ -322,6 +327,34 @@ so that path stays the Mac / nested-KVM-host recipe in
 - **Box creation (`fy box up`/`build`) can't run in-box** — it would recreate the running box.
   `box.py` is golden-tested for command shape; exercise real `up`/`build` on a host or the
   nested rig.
+- **Root in the Lima guest is boot-time only — never `limactl shell … sudo` from the host.** The
+  VM user is the uid the box runs as, and Lima's cloud-init grants it `NOPASSWD:ALL` on EVERY
+  boot (the instance id changes each boot). foldyard's one `provision: mode: system` script
+  (`assets/machine-wall/guest-boot.sh`, recorded in lima.yaml by `machine._record_provisioning`)
+  narrows that grant to `shutdown` and installs the wall as root at each boot; the host then
+  reads the guest's report (`/run/fy-wall/state`, no root needed) and fails closed on a
+  mismatch. Anything new that needs root in the guest goes INTO that script (a new rendered
+  id ⇒ `fy machine stop && fy up`), not into a new sudo call — a sudo path would hand a
+  container escape VM-root again. Lima renders the script as a Go template (`{{.User}}`,
+  `{{.UID}}`), so no other `{{` may appear in it, and `bash -n` gates it in the tests.
+- **Under the gVisor posture the box mounts the NARROWED socket, never the runsc socket
+  directly.** `box.py` mounts `sandbox.box_socket()` (`podman-runsc-filtered.sock`), not
+  `guest_socket()` — the filter (`assets/sandbox/socket_filter.py`, a guest user unit provisioned
+  by `sandbox.ensure`) strips the runtime opt-out (`oci_runtime` / `dev.gvisor.*` / compat
+  `HostConfig.Runtime`) from every container-create so the box can't escape gVisor on podman ≥ 6.
+  Reverting the box to `guest_socket()` re-opens that door. The filter is the enforcement tier;
+  the runsc-default socket is only a convenience for the HOST's own trusted `fy box up` create
+  (which still uses the raw socket). Three invariants if you touch the filter: it stays
+  **fail-closed** (an unparseable create body is refused, never forwarded — else a runtime slips
+  past the strip), **keep-alive-correct** (it frames every response so a create is filtered even
+  as the *second* request on a reused connection — the bypass a "peek at the first request then
+  splice" proxy leaves), and **stdlib-only** (it runs under the guest's `python3`; both backends
+  have `/usr/bin/python3`). It is foldyard's own packaged code run in the GUEST, not host code
+  from the repo mount, so ADR-0023 is not in tension. `tests/test_socket_filter.py` pins the
+  rewrite, the fail-closed refusal, keep-alive and the hijack splice; the podman-6 strip effect
+  (a client-chosen runtime honoured, then stripped) is only observable there day to day — the
+  shipped guests are podman 5.8, which ignores the field; it was shown live once on a podman
+  6.1.1 guest (2026-09-13, docs/isolation-layers.md).
 
 ## The example consumer
 

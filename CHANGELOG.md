@@ -7,6 +7,113 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ## Unreleased
 
+### Added
+
+- **An isolation-layers diagram, in the README and at the top of docs/isolation-layers.md.**
+  `docs/assets/foldyard-isolation-layers.svg` draws the hardening ladder as four cumulative
+  postures — a rootless Podman VM, Lima with the in-VM wall, gVisor under the dev box behind the
+  narrowed engine socket, the host-side wall on Linux — each labelled with the `[machine]` line
+  that turns it on, plus the egress dial (open → observe → enforce → fail-closed) and what never
+  moves across postures. The page's "three layers" sketch now names ③ as gVisor
+  (`[machine].runtime`), not the libkrun microVM it was first measured for.
+- **`[machine].runtime = "gvisor"` — the dev box under gVisor's userspace kernel, as a machine
+  posture.** `machine ensure` provisions a second podman API service in the VM whose default
+  runtime is `runsc` (a pinned, sha512-verified release installed user-level over the backend's
+  ssh, a wrapper with the flags fixed and no per-container override, a drop-in registering the
+  runtime name engine-wide, an enabled user unit); `fy box up` creates the box through that
+  socket (`CONTAINER_HOST=ssh://…`, so no VM config change and no restart) and hands the box that
+  socket as its own, so a sibling or an in-box `fy up` cannot come up unsandboxed. Fail-closed on
+  a socket that does not answer with the gVisor runtime and on a box that came up under another
+  runtime (removed before bootstrap); an already-up box from before the posture nags to recreate.
+  In-box `fy verify` gains a row checking the kernel the box actually runs on. Both VM backends
+  (`lima`, `podman`). Measured 2026-09-13 on the Mac and the Linux rig: the route, the cost
+  (suite 1.2× on the Mac) and the flag boundary are in docs/isolation-layers.md. The box mounts a
+  narrowed view of that socket, not the runsc socket directly: a small in-VM stdlib filter (a
+  further user unit) forwards to it but strips the runtime opt-out (`oci_runtime`, `dev.gvisor.*`,
+  the compat `Runtime`) from every container-create and refuses an unparseable create, so the box
+  cannot escape gVisor even on a podman ≥ 6 that honours a client-chosen runtime (shown live on
+  podman 6.1.1: the same create came up crun through the raw socket, runsc through the filter).
+- **`[machine].host_wall` — enforce the egress wall on the host too (Linux).** With
+  `wall = true` and a host that has `nft` + cgroup v2, foldyard starts the Lima VM inside its
+  own systemd scope and loads a host nftables table matching that scope: only this project's
+  daemon band, the VM's own loopback plumbing (SSH forward, Lima's host resolver) and the
+  host's resolvers get out, so even a guest-kernel
+  exploit that flushes the in-VM wall leaves through a host that rejects it. Loading the table
+  is `sudo nft` on every `fy up` (a passwordless sudoers rule for `nft` makes it silent). A VM
+  already running outside its scope — started before the option was on — is refused until
+  `fy machine stop && fy up`; asking for it on a host that can't enforce it (macOS) is a
+  preflight error, never a silent downgrade. Default off. Env: `MACHINE_HOST_WALL`.
+
+### Changed
+
+- **The example consumer's api is a uv project, and the example's box shadows its venv.**
+  `example/api` gains `pyproject.toml` + `uv.lock` (the same three pins, now locked) and an image
+  built from that lockfile with uv; `example/foldyard.toml`'s `[box]` wires the in-tree-artefact
+  pattern every real consumer needs — `shadow_volumes = ["api/.venv"]`, a frozen `uv sync`
+  warmup, `UV_LINK_MODE=copy` + `UV_FROZEN` — so the box's dependencies live in a per-box volume
+  on the VM disk (never on the host tree, and never on the shared mount: the fifth rig session
+  measured that placement as a 100× layer for installs under crun alone). `tests/test_example.py`
+  pins the shape.
+- **Root in the Lima machine VM is now boot-time only — the VM user's passwordless sudo is
+  dropped.** The dev box runs as that user's uid, so a container-runtime escape used to be one
+  `sudo nft flush ruleset` from open egress. foldyard now records a root boot script in the
+  instance config that narrows the sudo grant to `shutdown` and (re)installs the egress wall on
+  every boot; the host no longer runs `sudo` in the guest, and reads the guest's own report of
+  what it applied. **Migration:** every existing Lima VM keeps the old grant until it is
+  restarted once — `fy up` refuses a running VM whose recording is stale and tells you to
+  `fy machine stop && fy up`. Only `[machine].backend = "lima"` is affected.
+
+- **`fy verify`'s mount audit reads the VM's real mount table** (PID 1's, via `--pid=host`)
+  instead of a `--privileged` container's own namespace, which never showed VM-level mounts — a
+  Lima VM mounting the operator's whole home previously passed. The repo and worktrees-root
+  mounts are exempt by exact path; a home mount, a sibling, or a nested bind still fail.
+
+### Fixed
+
+- **The gVisor posture's socket probe could report podman's own client version block as "the
+  runtime".** podman-remote prints its client info to stdout (exit 125) when it cannot reach the
+  server, and the probe trusted stdout — so the first `fy box up` after a fresh provisioning,
+  racing a service that was 'active' but not yet listening, failed with `answers with runtime
+  'OS: linux/amd64…'`. The exit code now decides (a failure reports podman's stderr), and a
+  refused connection is retried for a few seconds before the fail-closed abort.
+- **The in-VM wall left the VM user's `~/.config` ROOT-owned on a fresh guest image.** The
+  boot-time wall script (root) wrote its proxy `environment.d` drop-in with a bare `install -d`,
+  which creates a missing `~/.config` as root and only chowned the leaf. Fedora 44 images
+  happened to pre-create the directory; on a Fedora 45 guest every later user-level step then
+  failed — Lima's `systemctl --user enable podman.socket` (so the API socket never came up and
+  `limactl start` timed out) and the gVisor posture's own drop-ins. Every directory the wall
+  creates under the user's home is now created owned by the user (pinned by a test over the
+  script). A new rendered provisioning id, so an existing VM re-provisions on
+  `fy machine stop && fy up`.
+- **`fy verify` in a box with an SSH origin and no ssh client reported the push refusal
+  UNPROVEN.** `git ls-remote` fails there with `cannot run ssh`, which the check read as a
+  network failure — so every consumer with a `git@…` origin (this repo included) was short of
+  ALL PASS by construction. With no keys and no agent (asserted beside it), a transport that
+  does not exist IS the refusal: the row now passes and says why. A real network failure
+  still reads as unproven.
+- **`fy verify` under `[machine].runtime = "gvisor"`**: the VM mount audit needs a
+  `--pid=host` reach into the VM that gVisor blocks (the same property `escape refused` proves),
+  so from inside a gVisor box it cannot run — now an advisory naming the reason and where to
+  audit the boundary instead, not a FAIL (docs/verify-false-pass.md). The crun path keeps its
+  FAIL on an empty mount table.
+- **foldyard's own `[[box.tools]]` apt steps failed on every fresh box** (`Unable to locate
+  package nodejs/just/unzip`): the packaged image ships no apt lists. An `apt-lists` step
+  fetches them once, first; docs/configuration.md documents the shape for consumers.
+- **`fy doctor` no longer fails forever on a consumer the proxy never serves.** The proxy
+  plugin's `mitmproxy` / `mitm CA` / `egress proxy` rows were unconditional, while its daemon
+  and the box's routing are gated on a declared `[proxy]` or an active injector — so a consumer
+  with neither saw a red "NOT running … the box always routes through it" on every run, which
+  was false for it. The rows now follow the daemon's gate: none for such a consumer; the two
+  prerequisites (not the listener row) for a declared-but-off injector, so a missing
+  mitmproxy/CA shows BEFORE `fy mode github=app` needs it; all three once opted in or armed.
+  `DoctorContext` gains the current `mode` for this. Found by the first `fy doctor` on the
+  Linux rig's no-`[proxy]` example.
+- **`fy verify`'s mount audit judged the whole `/proc/1/mounts` line, not the mountpoint.** Run
+  inside the box (uid 0) the home it looks for is `/root`, and a Fedora guest's btrfs root line
+  carries `subvol=/root` in its *options* — a false FAIL on a table that exposes nothing. The
+  audit now matches the mountpoint field only; the same path *as* a mountpoint, and the
+  repo-mount exemption, are unchanged. Found by the first in-box `verify` on a Linux host.
+
 ## 0.2.1 — 2026-09-10
 
 ### Fixed

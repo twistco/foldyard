@@ -48,6 +48,19 @@ proxy; the yard is a throwaway Linux VM holding the compose stack, dev box, codi
 per-worktree boxes, with `fy verify` auditing the boundary from
 inside.](./docs/assets/foldyard-architecture.svg)
 
+The isolation is a ladder, not a switch — the same yard hardened one ring at a time, from a
+rootless Podman VM through Lima with the wall to gVisor under the dev box, with the egress dial
+alongside. Each step is one line in `foldyard.toml`, and the credentials never move:
+
+![Foldyard isolation layers: four cumulative postures — a rootless Podman VM, Lima with the
+in-VM wall, gVisor under the dev box behind a narrowed engine socket, and the host-side wall on
+Linux — then the egress dial from open through observe and enforce to fail-closed, and what
+never moves: the credentials stay on the host, the socket is the design hole, fy verify proves
+the ring you are in.](./docs/assets/foldyard-isolation-layers.svg)
+
+Where each layer carries the weight differs by host —
+[isolation-layers.md](./docs/isolation-layers.md).
+
 ## Why
 
 A *fold-yard* is the enclosed farmyard where animals are folded (penned) for the night. Same
@@ -116,8 +129,10 @@ provisioned with the fail-closed wall. Other backends, and when to pick them, ar
 ## Status
 
 The engine runs daily on Macs with a production project, but has only been lightly tested on
-other repos, treat it as alpha quality for now. Other platforms (Linux and WSL2) are planned,
-but currently not supported. Brave testers and issues very welcome!
+other repos, treat it as alpha quality for now. A Linux host is partly validated — the machine
+VM, `verify`, both walls — but not the daily `fy up` loop, and WSL2 is unmeasured; what has and
+has not been run there is tracked in [docs/linux-support.md](./docs/linux-support.md). Brave
+testers and issues very welcome!
 
 ## More info
 

@@ -37,6 +37,7 @@ def _wire(
     tables=None,
     in_box=False,
     wall=False,
+    host_wall=False,
     explicit=True,
 ):
     """Set every input preflight reads to a known value. `tables` maps a table name to its dict
@@ -48,6 +49,9 @@ def _wire(
         preflight.config, "machine_backend_explicit", lambda: backend if explicit else ""
     )
     monkeypatch.setattr(preflight.config, "machine_wall", lambda: wall)
+    # Pinned, not inherited: `MACHINE_HOST_WALL` in the ambient env (or the repo's own toml)
+    # would otherwise bolt the host-wall checks onto every test here.
+    monkeypatch.setattr(preflight.config, "machine_host_wall", lambda: host_wall)
     cli = {"podman": "podman", "lima": "limactl", "native": "podman"}.get(backend, backend)
     monkeypatch.setattr(
         preflight.machine_backend,
@@ -264,3 +268,28 @@ def test_inherited_lima_without_limactl_aborts_both_launch_verbs(monkeypatch, ca
         preflight.check_or_abort(verb)
     err = capsys.readouterr().err
     assert verb in err and "limactl" in err and 'backend = "native"' in err
+
+
+# ── [machine].host_wall — the host-side cgroup wall (Linux; nft + cgroup v2) ──────────────
+
+
+def test_host_wall_without_the_guest_wall_blocks(monkeypatch):
+    # The host wall is the tier ABOVE the guest wall (it opens the same band the guest wall
+    # expects and nothing else); alone it is a wall with no in-VM counterpart to back-stop.
+    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=False, host_wall=True)
+    monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
+    assert any("[machine].host_wall" in p and "wall = true" in p for p in preflight.issues())
+
+
+def test_host_wall_on_a_host_that_cannot_enforce_it_blocks(monkeypatch):
+    # Asked for and undeliverable is a hard stop, never a silent downgrade (macOS, or a Linux
+    # host without nftables / cgroup v2).
+    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True, host_wall=True)
+    monkeypatch.setattr(preflight.hostwall, "available", lambda: False)
+    assert any("[machine].host_wall" in p and "nft" in p for p in preflight.issues())
+
+
+def test_host_wall_with_wall_lima_proxy_and_nft_is_clean(monkeypatch):
+    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True, host_wall=True)
+    monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
+    assert not any("host_wall" in p for p in preflight.issues())

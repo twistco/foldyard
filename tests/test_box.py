@@ -106,10 +106,16 @@ def fake(tmp_path, monkeypatch):
         "net_exists": True,
         "baked_proxy_port": None,  # set to a string to simulate a box's baked FY_PROXY_PORT
         "baked_env": {},  # extra frozen Config.Env entries for the running box (_baked_env)
+        "oci_runtime": "crun",  # what `inspect {{.OCIRuntime}}` reports after create
     }
+
+    envs: list[dict | None] = []
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
+        envs.append(kw.get("env"))
+        if cmd[1] == "inspect" and "{{.OCIRuntime}}" in cmd:
+            return _Proc(0, state["oci_runtime"] + "\n")
         if cmd[1] == "ps" and ("-q" in cmd or "-aq" in cmd):
             # -q + status=running → the running probe; -aq → the exists probe.
             present = state["running"] if "status=running" in cmd else state["exists"]
@@ -142,6 +148,7 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "mirror_file", lambda: mirror)
     return {
         "calls": calls,
+        "envs": envs,
         "state": state,
         "main": main,
         "ctx": ctx,
@@ -219,10 +226,101 @@ def test_up_assembles_run(fake):
     # the project's Mac daemon port bases are PINNED into the box (in-box derivations can't
     # read the Mac's ports.json registry; the env vars win over allocation on both sides)
     assert "FY_PROXY_PORT=41000" in run and "GCP_MINTER_PORT=41100" in run
+    # The operator's home, for the in-box mount audit (verify._host_home).
+    assert f"FY_HOST_HOME={Path.home()}" in run
     # plugin box_args (gcp SA label, always)
     assert "--label" in run and "gcp.serviceAccount=box@p.iam.gserviceaccount.com" in run
     # clean DOCKER_CONFIG (default on) — sidesteps the editor-attach credsStore helper
     assert "DOCKER_CONFIG=/home/vscode/.docker-fy" in run
+
+
+def _gvisor(fake, monkeypatch):
+    """The gVisor machine posture: the runsc endpoint is a ssh:// URI the sandbox module derives."""
+    monkeypatch.setattr(config, "machine_runtime", lambda: "gvisor")
+    uri = "ssh://dain@127.0.0.1:60022/run/user/501/podman/podman-runsc.sock"
+    monkeypatch.setattr(
+        box.sandbox,
+        "engine_env",
+        lambda env, *a: {
+            **env,
+            "CONTAINER_HOST": uri,
+            "DOCKER_HOST": uri,
+            "CONTAINER_SSHKEY": "/k",
+        },
+    )
+    monkeypatch.setattr(
+        box.sandbox, "box_socket", lambda: "/run/user/501/podman/podman-runsc-filtered.sock"
+    )
+    fake["state"]["oci_runtime"] = "runsc-fy"
+    return uri
+
+
+def test_up_under_gvisor_creates_through_the_runsc_endpoint_and_mounts_that_socket(
+    fake, monkeypatch
+):
+    uri = _gvisor(fake, monkeypatch)
+    assert box.main("up") == 0
+    calls, envs = fake["calls"], fake["envs"]
+    i = next(i for i, c in enumerate(calls) if c[1:3] == ["run", "-d"])
+    run, env = calls[i], envs[i]
+    # ONLY the create goes through the runsc socket — the bootstrap exec, the probes and the
+    # image build stay on the stack env (same store, and the runtime is fixed at create)
+    assert env["CONTAINER_HOST"] == uri and env["CONTAINER_SSHKEY"] == "/k"
+    others = [e for j, e in enumerate(envs) if j != i and e is not None]
+    assert others and all(e.get("CONTAINER_HOST") != uri for e in others)
+    # the box's OWN socket is the NARROWED (filtered) runsc socket: whatever it creates runs
+    # under gVisor too, and the filter strips any runtime opt-out from the create
+    assert "/run/user/501/podman/podman-runsc-filtered.sock:/var/run/docker.sock" in run
+    assert "/run/docker.sock:/var/run/docker.sock" not in run
+    assert "FY_MACHINE_RUNTIME=gvisor" in run  # baked for the already-up nag + in-box verify
+    assert "--runtime" not in run and "--annotation" not in run  # the SOCKET decides, not the box
+    # and the create is CHECKED: inspect confirms the runtime before the bootstrap runs
+    insp = next(j for j, c in enumerate(calls) if c[1] == "inspect" and "{{.OCIRuntime}}" in c)
+    first_exec = next(j for j, c in enumerate(calls) if c[1] == "exec")
+    assert i < insp < first_exec
+
+
+def test_up_under_gvisor_fails_closed_when_the_box_came_up_under_another_runtime(
+    fake, monkeypatch, capsys
+):
+    _gvisor(fake, monkeypatch)
+    fake["state"]["oci_runtime"] = "crun"
+    assert box.main("up") == 1
+    calls = fake["calls"]
+    assert not [c for c in calls if c[1] == "exec"]  # no bootstrap into an unsandboxed box
+    assert [c for c in calls if c[1:3] == ["rm", "-f"]]  # and it is torn down, not left running
+    captured = capsys.readouterr()
+    assert "crun" in captured.out + captured.err
+
+
+def test_up_without_the_posture_keeps_the_default_socket(fake, monkeypatch):
+    monkeypatch.setattr(config, "machine_runtime", lambda: "")
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d", "sleep"])[0]
+    assert "/run/docker.sock:/var/run/docker.sock" in run
+    assert not [t for t in run if t.startswith("FY_MACHINE_RUNTIME")]
+    assert not [c for c in fake["calls"] if c[1] == "inspect" and "{{.OCIRuntime}}" in c]
+
+
+def test_up_nags_when_the_running_box_predates_the_posture(fake, monkeypatch, capsys):
+    _gvisor(fake, monkeypatch)
+    fake["state"]["running"] = True
+    fake["state"]["exists"] = True
+    fake["state"]["img"] = True
+    fake["state"]["image_fingerprint"] = "expected-fingerprint"
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "[machine].runtime" in out and "gvisor" in out and "fy box down && fy box up" in out
+
+
+def test_up_no_runtime_nag_when_the_running_box_matches(fake, monkeypatch, capsys):
+    _gvisor(fake, monkeypatch)
+    fake["state"].update(
+        running=True, exists=True, img=True, image_fingerprint="expected-fingerprint"
+    )
+    fake["state"]["baked_env"] = {"FY_MACHINE_RUNTIME": "gvisor"}
+    assert box.main("up") == 0
+    assert "[machine].runtime" not in capsys.readouterr().out  # other nags are not this one
 
 
 def test_up_clean_docker_config_opt_out(fake, monkeypatch):

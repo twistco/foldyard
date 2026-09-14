@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 from shutil import which
 
-from . import config, devmode, machine_backend
+from . import config, devmode, hostwall, machine_backend
 
 
 def _proxy_required(mode: dict) -> bool:
@@ -147,6 +147,23 @@ def issues() -> list[str]:
                 "    the wall default-denies direct egress, so the box would have NO way out.\n"
                 "    Declare a `[proxy]` table (or keyless/an injector) so egress goes Mac-side,\n"
                 "    or drop `wall`."
+            )
+
+    # 8. The host-side wall is the tier ABOVE the guest wall (same band, enforced where the guest
+    #    has no reach), so it needs `wall` — and a host that can enforce it: nftables + cgroup v2
+    #    (Linux). Asked for and undeliverable is a hard stop, never a silent downgrade.
+    if config.machine_host_wall():
+        if not config.machine_wall():
+            out.append(
+                "✗ [machine].host_wall = true needs the in-VM wall too — set [machine].wall =\n"
+                "    true (the host wall opens the same daemon band the guest wall does, from\n"
+                "    outside), or drop `host_wall`."
+            )
+        if not hostwall.available():
+            out.append(
+                "✗ [machine].host_wall = true but this host can't enforce it: the host wall needs\n"
+                "    `nft` (nftables) and a cgroup v2 hierarchy — a Linux host. Install nftables,\n"
+                "    or drop `host_wall` (the in-VM wall still applies)."
             )
     return out
 

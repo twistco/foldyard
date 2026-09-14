@@ -28,8 +28,9 @@ def secure_engine(monkeypatch, tmp_path):
     results = {
         "rootless": True,
         "escape_rc": 1,  # --privileged --pid=host refused
-        "ls_users_rc": 1,  # /Users not visible
-        "mount": "proc /proc proc rw 0 0\ntmpfs /tmp tmpfs rw 0 0\n",
+        # The VM's mount table = PID 1's, read via --pid=host (the container's own `mount`
+        # never shows VM-level mounts — see the namespace test below).
+        "pid1_mounts": "proc /proc proc rw 0 0\ntmpfs /tmp tmpfs rw 0 0\n",
         "mount_rc": 0,
         "probe_rc": 0,  # the positive control: the probe image CAN run
         "git_rc": 1,  # origin unreachable…
@@ -58,10 +59,10 @@ def secure_engine(monkeypatch, tmp_path):
             tail = cmd[-1]
             if "cat /proc/1/ns/ipc" in tail:
                 return _Proc(results["escape_rc"])
-            if "ls /Users" in tail:
-                return _Proc(results["ls_users_rc"])
-            if tail == "mount":
-                return _Proc(results["mount_rc"], results["mount"])
+            if tail == "mount":  # the CONTAINER's namespace: always clean, never the evidence
+                return _Proc(0, "proc /proc proc rw 0 0\n")
+            if tail == "cat /proc/1/mounts" and "--pid=host" in cmd:
+                return _Proc(results["mount_rc"], results["pid1_mounts"])
             if tail == "true":  # the positive control
                 return _Proc(results["probe_rc"])
         return _Proc(0, "")
@@ -77,6 +78,8 @@ def secure_engine(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(verify.stack, "resolve", lambda *a, **k: ctx)
     monkeypatch.setattr(verify.config, "in_box", lambda: False)  # VM-boundary only by default
+    # A real dev box bakes the operator's home; the tests build their tables from Path.home().
+    monkeypatch.delenv("FY_HOST_HOME", raising=False)
     return calls, results
 
 
@@ -98,16 +101,6 @@ def _enter_box(monkeypatch, tmp_path):
     # where a dev box exports HTTPS_PROXY ambiently, red in CI where nothing does. The `== 1` tests
     # kept passing throughout, on the wall's failure rather than their own subject's.
     monkeypatch.setattr(verify.config, "machine_wall", lambda: False)
-    # The wall section is a different subject with its own tests below, and it needs a live proxy
-    # + network. Left unpinned it resolves the REPO's OWN foldyard.toml — so this repo declaring
-    # `[machine] wall = true` silently bolted a failing check onto every test here: green locally,
-    # where a dev box exports HTTPS_PROXY ambiently, red in CI where nothing does. The `== 1` tests
-    # kept passing throughout, on the wall's failure rather than their own subject's.
-    # The wall section is a different subject with its own tests below, and it needs a live proxy
-    # + network. Left unpinned it resolves the REPO's OWN foldyard.toml — so this repo declaring
-    # `[machine] wall = true` silently bolted a failing check onto every test here: green locally,
-    # where a dev box exports HTTPS_PROXY ambiently, red in CI where nothing does. The `== 1` tests
-    # kept passing throughout, on the wall's failure rather than their own subject's.
     return home
 
 
@@ -118,7 +111,9 @@ def test_all_pass_returns_0(secure_engine, capsys):
     assert verify.verify() == 0
     out = capsys.readouterr().out
     assert "ALL PASS" in out
-    assert out.count("✓ PASS") == 4  # the 4 VM-boundary checks; posture skipped
+    # The 3 VM-boundary checks; posture skipped. (Was 4: `ls /Users` inside the container read
+    # the container's namespace and never saw a VM mount — folded into the PID-1 mount audit.)
+    assert out.count("✓ PASS") == 3
     assert "skipped (not inside the box" in out
 
 
@@ -138,7 +133,7 @@ def test_not_rootless_is_fail(secure_engine):
 
 def test_host_mount_leak_is_fail(secure_engine, capsys):
     _, results = secure_engine
-    results["mount"] = "macfuse /Users/dain osxfuse rw 0 0\n"
+    results["pid1_mounts"] = "macfuse /Users/dain osxfuse rw 0 0\n"
     assert verify.verify() == 1
     assert "host paths" in capsys.readouterr().out
 
@@ -147,6 +142,87 @@ def test_escape_probe_command_shape(secure_engine):
     calls, _ = secure_engine
     verify.verify()
     assert any(c[1] == "run" and "--privileged" in c and "--pid=host" in c for c in calls)
+
+
+def test_vm_level_mount_hidden_from_the_container_namespace_is_still_a_fail(secure_engine, capsys):
+    # Found 2026-09-11 on the Linux rig: a Lima VM mounting ALL of the operator's home passed
+    # "VM mount table free of host home/paths", because `mount` inside a --privileged container
+    # prints the CONTAINER's mount namespace — VM-level mounts are not in it. PID 1's table is.
+    # The fixture answers a bare `mount` with a clean table regardless, so reading the wrong
+    # namespace again would turn this green.
+    calls, results = secure_engine
+    results["pid1_mounts"] = f"mount0 {pathlib.Path.home()} 9p rw,relatime 0 0\n"
+    assert verify.verify() == 1
+    assert "host paths" in capsys.readouterr().out
+    assert not any(c[1] == "run" and c[-1] == "mount" for c in calls)
+
+
+def test_the_isolation_mount_set_is_not_a_leak(secure_engine, monkeypatch, capsys):
+    # Reading the REAL table means seeing the mounts foldyard itself makes: the repo and the
+    # worktrees root, at their host paths (`machine._volumes`: host==guest). Those two are the
+    # whole point, not a leak — exempt by exact mountpoint, so `$HOME` itself, or anything
+    # else under it, still fails.
+    _, results = secure_engine
+    main = pathlib.Path.home() / "ws" / "repo"
+    wt_root = pathlib.Path.home() / "ws" / "repo-worktrees"
+    monkeypatch.setenv("FOLDYARD_WORKTREES_ROOT", str(wt_root))
+    ctx = stack.Context(
+        main=main,
+        env={"CONTAINER_HOST": "unix:///s"},
+        compose=[],
+        app="app",
+        project="p",
+        worktree="",
+    )
+    monkeypatch.setattr(verify.stack, "resolve", lambda *a, **k: ctx)
+    results["pid1_mounts"] = (
+        "/dev/vda2 / btrfs rw 0 0\n"
+        f"lima-1 {main} virtiofs rw,relatime 0 0\n"
+        f"lima-2 {wt_root} virtiofs rw,relatime 0 0\n"
+    )
+    assert verify.verify() == 0
+    assert "free of host home/paths" in capsys.readouterr().out
+    # …but a sibling under the home, or the home itself, is not covered by the exemption.
+    results["pid1_mounts"] += f"lima-3 {pathlib.Path.home() / 'ws' / 'other'} virtiofs rw 0 0\n"
+    assert verify.verify() == 1
+
+
+def test_a_host_path_string_in_the_mount_options_is_not_a_leak(secure_engine, monkeypatch, capsys):
+    # Linux rig, 2026-09-13: run INSIDE the box, `Path.home()` is /root, and a Fedora guest's btrfs
+    # root line carries `subvol=/root` in its OPTIONS field — the mountpoint is `/`, nothing of
+    # the host is exposed, yet a whole-line search flagged it. Only the mountpoint decides.
+    _, results = secure_engine
+    monkeypatch.setattr(verify.Path, "home", staticmethod(lambda: pathlib.Path("/root")))
+    results["pid1_mounts"] = (
+        "/dev/vda3 / btrfs rw,seclabel,relatime,compress=zstd:1,subvolid=256,subvol=/root 0 0\n"
+    )
+    assert verify.verify() == 0
+    assert "free of host home/paths" in capsys.readouterr().out
+    # …while the same path AS the mountpoint is still the leak it always was.
+    results["pid1_mounts"] = "lima-1 /root 9p rw,relatime 0 0\n"
+    assert verify.verify() == 1
+
+
+def test_in_box_the_audit_judges_by_the_operators_home_not_the_box_users(
+    secure_engine, monkeypatch, capsys
+):
+    # In-box on a LINUX host, `Path.home()` is the box user's (/root) — so a Lima VM mounting the
+    # operator's /home/<user> passed, there being no `/Users` to catch it and the pattern
+    # looking for the wrong home. `fy box up` bakes the host's home as FY_HOST_HOME; the audit
+    # judges by that when present.
+    _, results = secure_engine
+    monkeypatch.setattr(verify.Path, "home", staticmethod(lambda: pathlib.Path("/root")))
+    monkeypatch.setenv("FY_HOST_HOME", "/home/operator")
+    results["pid1_mounts"] = "lima-1 /home/operator 9p rw,relatime 0 0\n"
+    assert verify.verify() == 1
+    assert "host paths" in capsys.readouterr().out
+    # The guest's own user shares the prefix and is still not a leak…
+    results["pid1_mounts"] = "lima-1 /home/operator.linux 9p rw,relatime 0 0\n"
+    assert verify.verify() == 0
+    # …and a box from before the bake falls back to the process's own home, as before.
+    monkeypatch.delenv("FY_HOST_HOME")
+    results["pid1_mounts"] = "lima-1 /root 9p rw,relatime 0 0\n"
+    assert verify.verify() == 1
 
 
 # ── false passes: a negative check needs a positive control ──────────────────────────────
@@ -167,7 +243,7 @@ def test_unrunnable_probe_image_cannot_report_a_sound_boundary(secure_engine, ca
 
 def test_empty_mount_output_is_not_a_clean_mount_table(secure_engine, capsys):
     _, results = secure_engine
-    results["mount"] = ""  # command produced nothing — silence is not an all-clear
+    results["pid1_mounts"] = ""  # command produced nothing — silence is not an all-clear
     results["mount_rc"] = 1
     assert verify.verify() != 0
     assert "free of host home/paths" not in capsys.readouterr().out
@@ -224,6 +300,81 @@ def test_box_posture_clean_passes(secure_engine, monkeypatch, tmp_path, capsys):
     # Name the offender rather than reporting a bare 1 != 0: this test went red in CI once
     # because ambient config added a whole section nobody here asked for.
     assert "FAIL" not in out, out
+
+
+def test_git_refused_by_a_missing_ssh_client_proves_the_push_refusal(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # An SSH origin in a box that ships no ssh client: git cannot even start the transport. With
+    # the rows above already asserting no keys and no agent, that absence IS the refusal — no
+    # credential can reach origin over a transport that does not exist — and must not read as
+    # "unreachable for network reasons" (which left every SSH-origin consumer short of ALL PASS).
+    _, results = secure_engine
+    results["git_rc"], results["git_stderr"] = (
+        128,
+        ("error: cannot run ssh: No such file or directory\nfatal: unable to fork\n"),
+    )
+    _enter_box(monkeypatch, tmp_path)
+    assert verify.verify() == 0
+    assert "git push refused" in capsys.readouterr().out
+
+
+def test_git_timeout_is_still_not_a_refusal(secure_engine, monkeypatch, tmp_path, capsys):
+    _, results = secure_engine
+    results["git_rc"], results["git_stderr"] = (
+        128,
+        "ssh: connect to host github.com port 22: Connection timed out\n",
+    )
+    _enter_box(monkeypatch, tmp_path)
+    assert verify.verify() == 1
+    assert "UNPROVEN" in capsys.readouterr().out
+
+
+def test_mount_audit_under_gvisor_is_not_applicable_not_a_failure(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # `--pid=host` into the VM is exactly what gVisor blocks (the "escape refused" property), so
+    # the in-box mount audit cannot run under the posture — that is not a leak and must not FAIL.
+    # It is N/A here (fulfilled host-side / on a crun box), not an advisory: nothing to act on.
+    _, results = secure_engine
+    results["pid1_mounts"] = ""  # the probe reaches only the sandbox: nothing to read
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.setenv("FY_MACHINE_RUNTIME", "gvisor")
+    monkeypatch.setattr(verify, "_kernel_release", lambda: "4.19.0-gvisor")
+    assert verify.verify() == 0  # N/A, not a fail
+    out = capsys.readouterr().out
+    assert "N/A" in out and "runs at another layer" in out and "escape refused" in out
+    assert "WARN" not in out  # not softened to an advisory — it genuinely runs elsewhere
+
+
+def test_mount_audit_empty_is_still_a_fail_under_crun(secure_engine, monkeypatch, tmp_path, capsys):
+    _, results = secure_engine
+    results["pid1_mounts"] = ""
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.delenv("FY_MACHINE_RUNTIME", raising=False)
+    assert verify.verify() == 1
+    assert "UNPROVEN" in capsys.readouterr().out
+
+
+def test_gvisor_posture_row_checks_the_kernel_the_box_actually_runs_on(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.setenv("FY_MACHINE_RUNTIME", "gvisor")
+    monkeypatch.setattr(verify, "_kernel_release", lambda: "4.19.0-gvisor")
+    assert verify.verify() == 0
+    assert "gVisor" in capsys.readouterr().out
+    monkeypatch.setattr(verify, "_kernel_release", lambda: "6.19.10-300.fc44.aarch64")
+    assert verify.verify() == 1
+    assert "NOT under gVisor" in capsys.readouterr().out
+
+
+def test_no_gvisor_row_without_the_posture(secure_engine, monkeypatch, tmp_path, capsys):
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.delenv("FY_MACHINE_RUNTIME", raising=False)
+    monkeypatch.setattr(verify, "_kernel_release", lambda: "6.19.10")
+    assert verify.verify() == 0
+    assert "gVisor" not in capsys.readouterr().out
 
 
 def test_git_remote_reachable_is_fail(secure_engine, monkeypatch, tmp_path, capsys):

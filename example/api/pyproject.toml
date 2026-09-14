@@ -1,0 +1,14 @@
+# The example api as a uv project: the SAME three pins the old plain-pip Dockerfile carried, now
+# locked (uv.lock) so the image build, the dev box's shadowed `api/.venv` and a developer's own
+# venv all install the identical set. No [build-system] on purpose — a single-module app is a
+# "virtual" project (uv installs its dependencies, never the app itself).
+[project]
+name = "foldyard-example-api"
+version = "0.1.0"
+description = "foldyard's example consumer: a FastAPI api backed by Postgres"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.115.*",
+    "uvicorn[standard]==0.34.*",
+    "psycopg[binary]==3.2.*",
+]

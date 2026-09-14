@@ -1,0 +1,4 @@
+# Never ship a venv into the build context: the host's own, or the box's (a named volume the
+# host cannot see anyway — see foldyard.toml [box].shadow_volumes).
+.venv
+__pycache__

@@ -809,6 +809,7 @@ def test_declared_secret_var_must_be_an_env_name(fresh_config, tmp_path, row):
 
 def test_proxy_owns_mitmproxy_and_ca_doctor_checks_not_github(monkeypatch):
     monkeypatch.setattr(config, "github_declared", lambda: True)  # a github consumer
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)  # …that opted into the proxy
     ctx = _ctx()
     proxy_checks = [name for _, name, _ in proxy.ProxyPlugin().doctor_checks(ctx)]
     github_checks = [name for _, name, _ in github.GithubPlugin().doctor_checks(ctx)]
@@ -816,6 +817,60 @@ def test_proxy_owns_mitmproxy_and_ca_doctor_checks_not_github(monkeypatch):
     assert "mitmproxy" in proxy_checks and "mitm CA" in proxy_checks
     assert "mitmproxy" not in github_checks and "mitm CA" not in github_checks
     assert "gh CLI" in github_checks  # github keeps its own credential-mechanism checks
+
+
+def _proxy_doctor_names(monkeypatch, *, proxy_declared: bool, github_declared: bool, mode: dict):
+    monkeypatch.setattr(config, "proxy_enabled", lambda: proxy_declared)
+    monkeypatch.setattr(config, "github_declared", lambda: github_declared)
+    reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
+    ctx = DoctorContext(
+        deep=False,
+        run=devmode._run,
+        which=devmode._which,
+        result=devmode._result,
+        probe=lambda _port: False,
+        mode=mode,
+    )
+    (plugin,) = [p for p in reg.plugins if isinstance(p, proxy.ProxyPlugin)]
+    return [name for _, name, _ in plugin.doctor_checks(ctx)]
+
+
+def test_proxy_doctor_silent_for_a_consumer_the_proxy_never_serves(monkeypatch):
+    # The rows are gated the SAME as daemons()/derive_env(): a consumer with no [proxy] and no
+    # injector that could ever ride the proxy gets NO proxy rows. They used to be unconditional,
+    # so such a consumer's `fy doctor` was rc 1 forever, saying "the box always routes through
+    # it" — false for it (found on the Linux rig, 2026-09-13).
+    names = _proxy_doctor_names(
+        monkeypatch, proxy_declared=False, github_declared=False, mode={"github": "off"}
+    )
+    assert names == []
+
+
+def test_proxy_doctor_prerequisites_for_a_latent_injector_but_no_listener_row(monkeypatch):
+    # No [proxy], but github is declared: `github=app` WOULD need the proxy, so the operator should
+    # see the mitmproxy/CA prerequisites before arming it — while the listener row stays out,
+    # because with github off the supervisor runs no proxy daemon (desired_daemons is empty).
+    names = _proxy_doctor_names(
+        monkeypatch, proxy_declared=False, github_declared=True, mode={"github": "off"}
+    )
+    assert "mitmproxy" in names and "mitm CA" in names
+    assert "egress proxy" not in names
+
+
+def test_proxy_doctor_listener_row_once_an_injector_is_active(monkeypatch):
+    names = _proxy_doctor_names(
+        monkeypatch, proxy_declared=False, github_declared=True, mode={"github": "app"}
+    )
+    assert "egress proxy" in names
+
+
+def test_proxy_doctor_all_rows_for_an_opted_in_consumer(monkeypatch):
+    # [proxy] declared ⇒ Phase A′ always-on: the listener is desired in EVERY mode, so all three
+    # rows show even fully off (no injector at all).
+    names = _proxy_doctor_names(
+        monkeypatch, proxy_declared=True, github_declared=False, mode={"github": "off"}
+    )
+    assert names == ["mitmproxy", "mitm CA", "egress proxy"]
 
 
 def _injection_rows(monkeypatch, *, mode: str = "app", headers: str = "", rc: int = 0):

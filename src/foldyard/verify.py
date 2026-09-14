@@ -1,11 +1,11 @@
 """Isolation battery — the product's credibility check (`foldyard verify`).
 
-Faithful port of the `verify` recipe. Proves the VM boundary
-over the engine socket (rootless, the `--privileged --pid=host` escape refused, no host
-home/paths) and — INSIDE the box only — the credential-less dev-box posture (no SSH key
-material, mode-aware GitHub posture, git push refused). Each check prints PASS/FAIL; returns
-non-zero on any FAIL (CI-usable). One ADVISORY section rides along at the end — unhealthy
-containers in the stack — printed as WARN so it can never move the isolation verdict.
+Faithful port of the `verify` recipe. Proves the VM boundary over the engine socket
+(rootless, the `--privileged --pid=host` escape refused, the VM's own mount table — PID 1's —
+free of host home/paths) and — INSIDE the box only — the credential-less dev-box posture (no
+SSH key material, mode-aware GitHub posture, git push refused). Each check prints PASS/FAIL;
+returns non-zero on any FAIL (CI-usable). One ADVISORY section rides along at the end —
+unhealthy containers in the stack — printed as WARN so it can never move the isolation verdict.
 
 Behaviour-preserving: same checks, same messages, same exit semantics as the recipe. The
 engine probes run with the resolved stack env (so `CONTAINER_HOST`/`DOCKER_HOST` reach the
@@ -24,12 +24,13 @@ import subprocess
 from pathlib import Path
 from shutil import which
 
-from . import config, stack
+from . import config, machine, stack
 from .plugins import VerifyContext, registry
 
 _PASS = "\033[32m✓ PASS\033[0m"
 _FAIL = "\033[31m✗ FAIL\033[0m"
 _WARN = "\033[33m⚠ WARN\033[0m"
+_NA = "\033[36m⊘ N/A \033[0m"
 # Paths that must NEVER appear in a privileged container's mount table, built from the ACTUAL
 # host rather than a hardcoded macOS list. The old regex was `/Users|/private|/var/folders|
 # /Volumes` — every member macOS-only, so on a Linux or WSL2 host the leak check passed
@@ -48,12 +49,35 @@ _FOREIGN_MOUNTS = (
 )
 
 
+# The VM's own mount table: PID 1's, in PID 1's mount namespace. Read with `--pid=host` so the
+# probe container's /proc is the VM's — the container's `mount` shows only its own namespace.
+_PID1_MOUNTS = "cat /proc/1/mounts"
+_MOUNT_ESCAPE = re.compile(r"\\([0-7]{3})")  # /proc/mounts octal-escapes space, tab, newline, \
+
+
+def _mountpoint(line: str) -> str:
+    """Field 2 of a `/proc/<pid>/mounts` line, unescaped."""
+    fields = line.split()
+    if len(fields) < 2:
+        return ""
+    return _MOUNT_ESCAPE.sub(lambda m: chr(int(m.group(1), 8)), fields[1])
+
+
+def _host_home() -> str:
+    """The OPERATOR's home — the identity the leak pattern looks for. In-box ``Path.home()`` is
+    the box user's (``/root``, ``/home/vscode``), which on a Linux host is not the home a leaked
+    mount would carry (``/home/<user>``; a Mac's is caught by ``/Users`` regardless), so
+    ``fy box up`` bakes the host's as ``FY_HOST_HOME`` and an in-box audit judges by that. A box
+    from before the bake falls back to the process's own."""
+    return os.environ.get("FY_HOST_HOME") or str(Path.home())
+
+
 def _host_paths() -> re.Pattern[str]:
     """The leak pattern for THIS host. The host's own home is matched exactly — followed by a
     separator, whitespace or end — so a guest home that merely shares its prefix does not trip
     it: Lima names the guest user ``<user>.linux``, so ``/home/dain`` must not match
     ``/home/dain.linux``."""
-    home = re.escape(str(Path.home()))
+    home = re.escape(_host_home())
     return re.compile("|".join((rf"{home}(?=/|\s|$)", *(re.escape(m) for m in _FOREIGN_MOUNTS))))
 
 
@@ -74,6 +98,13 @@ class _Report:
         a consumer's service being sick is worth saying out loud but isn't a breach."""
         print(f"  {_WARN}  {msg}")
         self.warns += 1
+
+    def na(self, msg: str) -> None:
+        """Not applicable HERE — the check is fulfilled at another layer and there is nothing to
+        act on in this context. Neutral: no exit effect and not a warning (unlike `warn`, which
+        flags something worth a human's attention). Use only where another layer genuinely
+        performs the check, never to soften a gap nothing covers."""
+        print(f"  {_NA}  {msg}")
 
 
 def _run(cmd: list[str], env: dict, *, capture: bool = False) -> subprocess.CompletedProcess:
@@ -105,6 +136,10 @@ def _probe_runs(engine: str, env: dict, probe: str) -> bool:
 # `git ls-remote` failing proves "no credential reaches origin" ONLY if it failed for credential
 # reasons. A box with no egress fails it too, which would certify the product's headline claim
 # ("git push is impossible from inside") from a network outage.
+# git could not even START the SSH transport: no client in the box. With no keys and no agent
+# (asserted beside it) that absence is the refusal — no credential can travel a transport that
+# does not exist — not an "unreachable for network reasons" that leaves the claim unproven.
+_GIT_NO_SSH = re.compile(r"cannot run ssh|ssh: (command )?not found", re.I)
 _GIT_AUTH_DENIED = re.compile(
     r"permission denied|authentication failed|could not read username|could not read password|"
     r"terminal prompts disabled|invalid username or password|access denied|403|401",
@@ -121,7 +156,9 @@ def _rootless(engine: str, env: dict) -> bool:
     return rl.returncode == 0 and "true" in rl.stdout.lower()
 
 
-def _vm_boundary(rep: _Report, engine: str, env: dict, probe: str) -> None:
+def _vm_boundary(
+    rep: _Report, engine: str, env: dict, probe: str, allowed: list[str] | None = None
+) -> None:
     socket = env.get("CONTAINER_HOST") or env.get("DOCKER_HOST", "")
     print(f"▶ VM boundary (engine: {engine}, over the socket: {socket})")
 
@@ -147,22 +184,51 @@ def _vm_boundary(rep: _Report, engine: str, env: dict, probe: str) -> None:
     else:
         rep.ok("escape refused (--privileged --pid=host can't read host PID1 ns)")
 
-    if _engine_run_succeeds(engine, env, ["--privileged", probe, "sh", "-c", "ls /Users"]):
-        rep.bad("/Users visible inside a --privileged container — VM mounts host home")
-    else:
-        rep.ok("no /Users inside a --privileged container")
-
-    # An EMPTY mount table is not a clean one: `mount` printing nothing means the probe did not
-    # run, and grepping no lines for host paths finds none of them.
+    # The VM's mount table is PID 1's, read through the host PID namespace: `mount` (or
+    # `ls /Users`) inside a --privileged container shows the CONTAINER's mount namespace, in
+    # which a VM-level mount of the operator's whole home never appears — a Lima VM mounting all
+    # of `$HOME` passed the old probe (2026-09-11, docs/verify-false-pass.md). `/proc/1/mounts`
+    # is world-readable, so this coexists with the escape probe above, which relies on
+    # `/proc/1/ns/*` being unreadable. An EMPTY table is not a clean one: nothing printed means
+    # the probe did not run, and grepping no lines for host paths finds none of them.
     mp = _run(
-        [engine, "run", "--rm", "--privileged", probe, "sh", "-c", "mount"], env, capture=True
+        [engine, "run", "--rm", "--privileged", "--pid=host", probe, "sh", "-c", _PID1_MOUNTS],
+        env,
+        capture=True,
     )
     if mp.returncode != 0 or not mp.stdout.strip():
-        rep.bad("could not read the VM mount table (probe produced nothing) — leak check UNPROVEN")
+        # Under the gVisor posture the box CANNOT read the VM's PID-1 mounts: `--pid=host` reaches
+        # only the sandbox, not the VM kernel — the SAME reach "escape refused" above proves is
+        # blocked. This is NOT APPLICABLE here rather than advisory: there is nothing to act on
+        # in-box, and the audit is genuinely fulfilled at another layer — host-side `fy verify`
+        # runs its probe over the DEFAULT (crun) socket, whose --pid=host container CAN read the
+        # VM's PID-1 mounts, as can a crun box. So it is neither a FAIL nor a silent pass: the
+        # check runs, just not from inside the sandbox.
+        if os.environ.get("FY_MACHINE_RUNTIME") == "gvisor":
+            rep.na(
+                "VM mount audit runs at another layer, not inside a gVisor box (the sandbox "
+                "blocks --pid=host into the VM — see 'escape refused'); run `fy verify` on the "
+                "host, or from a crun box, to audit the VM mount boundary"
+            )
+        else:
+            rep.bad(
+                "could not read the VM mount table (probe produced nothing) — leak check UNPROVEN"
+            )
         return
-    host = [ln for ln in mp.stdout.splitlines() if _host_paths().search(ln)]
+    # The real table carries the mounts foldyard itself makes — the repo and the worktrees root,
+    # at their host paths (`machine.guest_mounts`). Exempt by EXACT mountpoint only: the home
+    # itself, a sibling under it, or a nested bind at a sub-path are all still leaks. Judge the
+    # MOUNTPOINT field, not the whole line: the options field can carry a path-shaped string
+    # that exposes nothing — a Fedora guest's btrfs root is `/ … subvol=/root`, and in the box
+    # (uid 0) `/root` IS the home this pattern looks for (Linux rig, 2026-09-13).
+    exempt = set(allowed or ())
+    host = [
+        ln
+        for ln in mp.stdout.splitlines()
+        if (mnt := _mountpoint(ln)) not in exempt and _host_paths().search(mnt)
+    ]
     if not host:
-        rep.ok("VM mount table free of host home/paths")
+        rep.ok("VM mount table (PID 1's namespace) free of host home/paths beyond the repo mounts")
     else:
         rep.bad(f"VM exposes host paths: {host[0]}")
 
@@ -182,9 +248,22 @@ def _plugin_posture(rep: _Report, env: dict) -> None:
             print(f"  {msg}")
 
 
+def _kernel_release() -> str:
+    return os.uname().release
+
+
 def _box_posture(rep: _Report, env: dict) -> None:
     print("▶ dev-box posture (credential-less: read+commit, never push)")
     home = Path(os.environ.get("HOME") or str(Path.home()))
+
+    # [machine].runtime = "gvisor" bakes FY_MACHINE_RUNTIME into the box at create; the claim is
+    # checked against the kernel the box ACTUALLY runs on (gVisor's Sentry reports its own).
+    if os.environ.get("FY_MACHINE_RUNTIME") == "gvisor":
+        kernel = _kernel_release()
+        if "gvisor" in kernel.lower():
+            rep.ok(f"box runs under gVisor (kernel {kernel})")
+        else:
+            rep.bad(f"box is NOT under gVisor — kernel {kernel} is the VM's (posture not applied)")
 
     if not os.environ.get("SSH_AUTH_SOCK"):
         rep.ok("no SSH agent forwarded (SSH_AUTH_SOCK unset)")
@@ -231,6 +310,8 @@ def _box_posture(rep: _Report, env: dict) -> None:
         rep.bad("git remote REACHABLE — the box can push (credential leaked?)")
     elif _GIT_AUTH_DENIED.search(why):
         rep.ok("git push refused (no credential reaches origin)")
+    elif _GIT_NO_SSH.search(why):
+        rep.ok("git push refused (SSH origin, and the box has no ssh client — no transport)")
     else:
         # It failed, but not because a credential was refused — origin was never reached. That
         # is a network fact, not a posture one, and must not certify the credential-less claim.
@@ -254,7 +335,7 @@ def _wall_posture(rep: _Report) -> None:
     the refusals are evidence of an outage, not of enforcement. (The wall REJECTs with tcp-reset,
     so a fast refusal remains the expected signature and a long timeout is still suspicious. The
     fuller red-team battery — rootful socket masked, nft-flush denied, host-network egress caught
-    — is the host-side `_wall_vm_state` probe on every `fy up` + example-lima-wall/
+    — is the host-side `_guest_state` probe on every `fy up` + example-lima-wall/
     test_network.sh; the box can't inspect VM-root state from an unprivileged container.)"""
     print("▶ egress wall ([machine].wall — direct egress from the box must be refused)")
 
@@ -347,7 +428,8 @@ def verify() -> int:
     probe = os.environ.get("VERIFY_IMG", "alpine")
     rep = _Report()
 
-    _vm_boundary(rep, engine, ctx.env, probe)
+    allowed = machine.guest_mounts(ctx.main, stack.worktrees_root(ctx.main))
+    _vm_boundary(rep, engine, ctx.env, probe, allowed)
 
     if config.in_box():
         _box_posture(rep, ctx.env)

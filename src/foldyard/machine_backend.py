@@ -47,6 +47,8 @@ import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
 
@@ -87,6 +89,15 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(cmd, capture_output=True, text=True)
     except OSError:
         return subprocess.CompletedProcess(cmd, 127, "", "")
+
+
+@dataclass(frozen=True)
+class SshTarget:
+    """A backend's ssh route into its guest: ``user@127.0.0.1:port`` with ``identity``."""
+
+    user: str
+    port: int
+    identity: str
 
 
 class Backend(ABC):
@@ -135,6 +146,17 @@ class Backend(ABC):
     def mounts(self, name: str) -> list[str]:
         """The VM's mount targets — for the worktrees-mount drift warning."""
 
+    def provision_id(self, name: str) -> str:
+        """The id of foldyard's boot-provisioning script as RECORDED in the VM's stored config
+        (``""`` = none). Only a backend whose guest foldyard provisions at boot (Lima) has one;
+        the id is what :mod:`foldyard.machine` compares against the script it wants."""
+        return ""
+
+    def set_provision(self, name: str, script: str) -> bool:
+        """Record ``script`` as the VM's root boot script — the VM must be stopped. False where
+        the guest cannot be provisioned at all (podman-machine's appliance; native's no-VM)."""
+        return False
+
     @abstractmethod
     def socket(self, name: str) -> str:
         """The VM's libpod socket as a ``unix://`` URI (assumes the VM exists)."""
@@ -144,6 +166,13 @@ class Backend(ABC):
         """The podman socket path as seen INSIDE the VM (the dev box bind-mounts this to its
         ``/var/run/docker.sock``). Differs by backend: podman machine exposes a docker-compat
         path; Lima's podman template forwards a rootless ``/run/user/<uid>/…`` socket."""
+
+    def ssh_target(self, name: str) -> SshTarget | None:
+        """How to ssh into the guest as the VM user — the backend's own loopback port and
+        identity, i.e. the trust its ``shell`` verb already has. What the gVisor posture rides
+        (:mod:`foldyard.sandbox`: guest-side provisioning + ``CONTAINER_HOST=ssh://…``). ``None``
+        when the backend has no VM or the machine is unknown."""
+        return None
 
     @abstractmethod
     def list_running(self, name: str = "") -> list[str]:
@@ -162,7 +191,27 @@ class Backend(ABC):
     def stop_argv(self, name: str) -> list[str]: ...
 
     @abstractmethod
-    def start(self, name: str) -> bool: ...
+    def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
+        """Start the VM. ``prefix`` is prepended to :meth:`start_argv` — the caller's way to
+        launch the VM's host processes inside a cgroup of its choosing (the host-side wall's
+        ``systemd-run --scope``, :mod:`foldyard.hostwall`) without the backend knowing why."""
+
+    def host_pids(self, name: str) -> list[int]:
+        """The host pids of the VM's own processes — the VMM first, then its siblings sharing
+        its cgroup (Lima's hostagent). The host-side wall reads the cgroup scope from the first
+        and the loopback plumbing to keep open from all of them. ``[]`` where there is none to
+        name (stopped; a backend whose VM foldyard can't place, podman-machine's; native's
+        no-VM)."""
+        return []
+
+    def vm_pid(self, name: str) -> int:
+        """:meth:`host_pids`' first entry, or ``0``."""
+        return next(iter(self.host_pids(name)), 0)
+
+    def ssh_port(self, name: str) -> int:
+        """The host-loopback port the backend forwards to the guest's SSH — the one loopback
+        port besides the daemon band the host-side wall must leave open. ``0`` when unknown."""
+        return 0
 
     def stop(self, name: str) -> bool:
         return _run(self.stop_argv(name)).returncode == 0
@@ -228,6 +277,30 @@ class PodmanBackend(Backend):
     def guest_socket(self) -> str:
         return "/run/docker.sock"  # podman machine exposes the docker-compat socket here
 
+    def ssh_target(self, name: str) -> SshTarget | None:
+        # A Go template, NOT `--format json`: `podman machine inspect` treats `json` as a template
+        # STRING and prints the literal "json" (unlike `podman inspect`). One line, tab-separated,
+        # so an empty/renamed field is visible rather than silently JSON-absent.
+        out = _run(
+            [
+                "podman",
+                "machine",
+                "inspect",
+                name,
+                "--format",
+                "{{.SSHConfig.RemoteUsername}}\t{{.SSHConfig.Port}}\t{{.SSHConfig.IdentityPath}}",
+            ]
+        )
+        if out.returncode != 0:
+            return None
+        parts = out.stdout.strip().split("\t")
+        if len(parts) != 3 or not all(parts):
+            return None
+        try:
+            return SshTarget(user=parts[0], port=int(parts[1]), identity=parts[2])
+        except ValueError:
+            return None
+
     def list_running(self, name: str = "") -> list[str]:
         out = _run(["podman", "machine", "list", "--format", "{{.Name}}|{{.Running}}"])
         if out.returncode != 0:
@@ -259,8 +332,8 @@ class PodmanBackend(Backend):
     def stop_argv(self, name: str) -> list[str]:
         return ["podman", "machine", "stop", name]
 
-    def start(self, name: str) -> bool:
-        return subprocess.run(self.start_argv(name)).returncode == 0
+    def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
+        return subprocess.run([*prefix, *self.start_argv(name)]).returncode == 0
 
     # ── orphan reaping (the half-torn-down machine) ────────────────────────────────────
     #
@@ -434,7 +507,7 @@ class NativeBackend(Backend):
     def stop_argv(self, name: str) -> list[str]:
         return ["true"]
 
-    def start(self, name: str) -> bool:
+    def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
         return True
 
     def stop(self, name: str) -> bool:
@@ -507,6 +580,38 @@ class LimaBackend(Backend):
                     if val:
                         targets.append(val)
         return targets
+
+    # First line after the shebang of foldyard's boot script; lima.yaml carries it verbatim
+    # inside the `script: |` block, so a line scan (no YAML parser) finds it.
+    _PROVISION_MARKER = "# fy-provision "
+
+    def provision_id(self, name: str) -> str:
+        cfg = Path.home() / ".lima" / name / "lima.yaml"
+        try:
+            text = cfg.read_text()
+        except OSError:
+            return ""
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith(self._PROVISION_MARKER):
+                return s[len(self._PROVISION_MARKER) :].strip()
+        return ""
+
+    def set_provision(self, name: str, script: str) -> bool:
+        """``limactl edit --set``: drop any earlier foldyard entry (matched by its marker line)
+        and append this one as ``mode: system`` — Lima runs those as ROOT on every boot, after
+        cloud-init and the template's own provisioning. ``edit`` refuses a running instance,
+        which is the contract: a provisioning change needs a restart to apply."""
+        keep = (
+            '(.provision // [])[] | select((.script // "") | '
+            f"test({json.dumps(self._PROVISION_MARKER)}) | not)"
+        )
+        # UTF-8 intact: a `\uXXXX` escape lands in lima.yaml verbatim (yq keeps it), and the
+        # guest would then echo the escape instead of the wall script's glyphs.
+        entry = f'{{"mode": "system", "script": {json.dumps(script, ensure_ascii=False)}}}'
+        expr = f".provision = ([{keep}] + [{entry}])"
+        cmd = ["limactl", "edit", "--tty=false", name, "--set", expr]
+        return subprocess.run(cmd).returncode == 0
 
     def socket(self, name: str) -> str:
         """SPIKE: Lima's podman template forwards the guest libpod socket to
@@ -629,10 +734,49 @@ class LimaBackend(Backend):
     def stop_argv(self, name: str) -> list[str]:
         return ["limactl", "stop", name]
 
-    def start(self, name: str) -> bool:
-        if subprocess.run(self.start_argv(name)).returncode != 0:
+    def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
+        if subprocess.run([*prefix, *self.start_argv(name)]).returncode != 0:
             return False
         return self._wait_for_socket(name)
+
+    def ssh_target(self, name: str) -> SshTarget | None:
+        """Lima writes ``~/.lima/<name>/ssh.config`` for the instance (the port changes per
+        boot; the identity is Lima's own ``_config/user`` key, listed first)."""
+        cfg = Path.home() / ".lima" / name / "ssh.config"
+        try:
+            text = cfg.read_text()
+        except OSError:
+            return None
+        fields: dict[str, str] = {}
+        for line in text.splitlines():
+            key, _, value = line.strip().partition(" ")
+            if key in ("Port", "User", "IdentityFile") and key not in fields:
+                fields[key] = value.strip().strip('"')
+        try:
+            return SshTarget(
+                user=fields["User"], port=int(fields["Port"]), identity=fields["IdentityFile"]
+            )
+        except (KeyError, ValueError):
+            return None
+
+    def ssh_port(self, name: str) -> int:
+        inst = self._instance(name)
+        try:
+            return int((inst or {}).get("sshLocalPort") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def host_pids(self, name: str) -> list[int]:
+        """Lima's QEMU driver writes ``qemu.pid`` in the instance dir and the hostagent writes
+        ``ha.pid``; both live in the scope the VM was started in, the VMM first."""
+        inst = Path.home() / ".lima" / name
+        pids = []
+        for pidfile in ("qemu.pid", "ha.pid"):
+            try:
+                pids.append(int((inst / pidfile).read_text().strip()))
+            except (OSError, ValueError):
+                continue
+        return pids
 
     def _wait_for_socket(self, name: str, tries: int = 30, delay: float = 1.0) -> bool:
         """SPIKE: the forwarded podman socket appears a moment after `start` returns — poll

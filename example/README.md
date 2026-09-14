@@ -10,9 +10,9 @@ example/
 ├── foldyard.toml        # the consumer config foldyard reads
 ├── compose.yml          # db (postgres) + api (built from ./api)
 ├── compose.feature.yml  # posture overlay — layered when fakedep=on (walkthrough below)
-├── api/                 # the FastAPI app + its Dockerfile
+├── api/                 # the FastAPI app — a uv project (pyproject + uv.lock) + its Dockerfile
 ├── box.Dockerfile       # a minimal dev-box image (satisfies the PLAN §7.4 contract)
-└── .gitignore           # ignores foldyard's .dev-mode.json mirror
+└── .gitignore           # ignores foldyard's .dev-mode.json mirror + a host-side .venv
 ```
 
 ## What it deliberately does NOT lock down
@@ -56,6 +56,15 @@ foldyard down               # stop the stack
 
 Ports come from `[ports]` in `foldyard.toml` (`API_PORT=8080`, `PG_PORT=5544`); in-container
 ports are fixed, so a second worktree stack gets offset host ports and never collides.
+
+**Dependencies in the box.** `api/` is a uv project, and `foldyard.toml`'s `[box]` table wires
+the in-tree-artefact pattern every real consumer needs for its `.venv` / `node_modules` /
+`target`: `shadow_volumes` masks `api/.venv` with a per-box named volume, `warmup` fills it with
+a frozen `uv sync` at box-up, and `env` pins uv's link mode and refuses re-locking. So inside the
+box `cd api && uv run uvicorn main:app` runs from the box's own venv on the VM disk, never from a
+`.venv` on the shared mount: the box's packages never land on the host tree, the host's never
+leak into the box, and `api/Dockerfile` installs from the same `uv.lock`. Details and the
+node/pnpm/cargo shapes: [docs/configuration.md](../docs/configuration.md).
 
 ## Posture walkthrough — modes, overlays, requirements (zero secrets)
 

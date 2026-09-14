@@ -124,9 +124,12 @@ will not call that filtering, because it isn't
 
 **Enforcement is `[machine].wall = true`** (Lima backend): a fail-closed firewall provisioned
 into the VM itself, so traffic that ignores the proxy env is *rejected*, not silently missed —
-the proxy becomes the only way out. One residual to know about: QUIC/UDP-443 can bypass a
-CONNECT proxy in cooperative-only setups (the wall closes this); depth on capture modes and
-the wall's rules is in [networking.md](./networking.md).
+the proxy becomes the only way out. It is provisioned at boot, as root, from the host's recorded
+config, and the same boot script removes the VM user's passwordless sudo: root in the guest
+exists only at boot, so a container escape that lands as the VM user cannot flush the wall —
+only a guest-kernel exploit can, and even that reaches no credential. One residual to know
+about: QUIC/UDP-443 can bypass a CONNECT proxy in cooperative-only setups (the wall closes
+this); depth on capture modes and the wall's rules is in [networking.md](./networking.md).
 
 ## `fy verify`: prove it, don't trust it
 
@@ -137,12 +140,14 @@ asserts, grouped:
 
 - **VM boundary** (over the engine socket): the engine reports **rootless**; a
   `--privileged --pid=host` container **cannot read the host's PID-1 namespace** — the
-  known breakout, actively attempted and refused; no `/Users` visible inside a
-  `--privileged` container; and a **mount audit** — the VM's mount table is free of any
-  host home path.
+  known breakout, actively attempted and refused; and a **mount audit** — the VM's own mount
+  table (PID 1's, read through `--pid=host`; a container's `mount` only shows its own
+  namespace) carries no host home path beyond the repo and worktrees-root mounts themselves,
+  matched exactly.
 - **Credential-agnostic backstops** (inside the box): no SSH agent forwarded, no `~/.ssh`
   private-key material, no `~/.netrc`, and `git ls-remote origin` **fails** — the box can't
-  even reach the remote to push, by construction. These live in foldyard's core so no absent
+  even reach the remote to push, by construction (proven against a *private* origin — a public
+  one answers `ls-remote` without credentials and reads as reachable). These live in foldyard's core so no absent
   or broken plugin can weaken them.
 - **Mode-aware posture checks** (from the credential plugins): each mechanism asserts its
   own posture — e.g. for `github`, the token in the box is never more than the ambient

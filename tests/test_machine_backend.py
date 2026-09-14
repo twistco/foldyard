@@ -478,3 +478,137 @@ def test_unlink_dead_sockets_spares_live_ones_the_log_and_a_sibling_machine(
 def test_unlink_dead_sockets_noop_when_the_api_path_is_unknown(monkeypatch, tmp_path):
     monkeypatch.setattr(mb, "_run", _with_config(tmp_path, sock=""))
     mb.PodmanBackend()._unlink_dead_sockets("tng")  # must not raise
+
+
+# ── boot provisioning (lima): recorded in the stored config, applied by Lima at every boot ──
+
+
+def test_lima_set_provision_edits_the_stopped_instance_with_yq(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, *a, **k):
+        seen["cmd"] = cmd
+        return _Proc(0)
+
+    monkeypatch.setattr(mb.subprocess, "run", fake_run)
+    script = "#!/bin/bash\n# fy-provision abc123\necho ✓ hi\n"  # the wall asset has such glyphs
+    assert mb.LimaBackend().set_provision("acme", script) is True
+    cmd = seen["cmd"]
+    assert cmd[:4] == ["limactl", "edit", "--tty=false", "acme"]  # edit refuses a RUNNING VM
+    expr = cmd[cmd.index("--set") + 1]
+    # replaces any previous foldyard entry (never stacks them) and appends this one as a root
+    # boot script — Lima's `mode: system` runs on every boot
+    assert '"mode": "system"' in expr
+    assert "fy-provision" in expr and "select(" in expr
+    # the script travels as a JSON string literal, UTF-8 intact — a `\uXXXX` escape lands in
+    # lima.yaml VERBATIM (yq keeps it), so the guest would echo the escape, not the glyph
+    assert json.dumps(script, ensure_ascii=False) in expr
+    assert "\\u2713" not in expr
+
+
+def test_lima_set_provision_reports_failure(monkeypatch):
+    monkeypatch.setattr(mb.subprocess, "run", lambda *a, **k: _Proc(1))
+    assert mb.LimaBackend().set_provision("acme", "#!/bin/bash\n# fy-provision x\n") is False
+
+
+def test_lima_provision_id_reads_the_marker_from_the_stored_config(monkeypatch, tmp_path):
+    home = tmp_path
+    inst = home / ".lima" / "acme"
+    inst.mkdir(parents=True)
+    (inst / "lima.yaml").write_text(
+        "provision:\n- mode: system\n  script: |\n    #!/bin/bash\n"
+        "    # fy-provision abc123\n    echo hi\n"
+    )
+    monkeypatch.setattr(mb.Path, "home", staticmethod(lambda: home))
+    assert mb.LimaBackend().provision_id("acme") == "abc123"
+    assert mb.LimaBackend().provision_id("nope") == ""  # no config → nothing recorded
+
+
+def test_backends_without_a_provisionable_guest_record_nothing():
+    for be in (mb.get_backend("podman"), mb.get_backend("native")):
+        assert be.provision_id("x") == ""
+        assert be.set_provision("x", "#!/bin/bash\n# fy-provision y\n") is False
+
+
+# ── the host-side wall's inputs (lima): the VM's host pid + its forwarded SSH port ─────────
+
+
+def test_lima_ssh_port_comes_from_list_json(monkeypatch):
+    rows = _json_lines({"name": "acme", "status": "Running", "sshLocalPort": 45285})
+    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(0, rows))
+    assert mb.LimaBackend().ssh_port("acme") == 45285
+    assert mb.LimaBackend().ssh_port("absent") == 0
+
+
+def test_lima_ssh_target_comes_from_the_instances_ssh_config(monkeypatch, tmp_path):
+    monkeypatch.setattr(mb.Path, "home", lambda: tmp_path)
+    inst = tmp_path / ".lima" / "acme"
+    inst.mkdir(parents=True)
+    (inst / "ssh.config").write_text(
+        'Host lima-acme\n  IdentityFile "/h/.lima/_config/user"\n  IdentityFile "/h/.ssh/id_ed25519"\n'
+        "  User dain\n  Hostname 127.0.0.1\n  Port 60022\n"
+    )
+    t = mb.LimaBackend().ssh_target("acme")
+    assert t is not None
+    assert (t.user, t.port, t.identity) == ("dain", 60022, "/h/.lima/_config/user")
+    assert mb.LimaBackend().ssh_target("absent") is None
+
+
+def test_podman_ssh_target_comes_from_a_machine_inspect_TEMPLATE(monkeypatch):
+    # NOT `--format json` — `podman machine inspect` renders `json` as a literal string. The
+    # template must be tab-separated user/port/identity.
+    seen = {}
+
+    def fake_run(cmd):
+        seen["fmt"] = cmd[cmd.index("--format") + 1]
+        return _Proc(0, "core\t50501\t/h/machine\n")
+
+    monkeypatch.setattr(mb, "_run", fake_run)
+    t = mb.PodmanBackend().ssh_target("tangible")
+    assert t is not None
+    assert (t.user, t.port, t.identity) == ("core", 50501, "/h/machine")
+    assert "{{.SSHConfig.RemoteUsername}}" in seen["fmt"] and "json" not in seen["fmt"]
+    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(125, ""))
+    assert mb.PodmanBackend().ssh_target("tangible") is None
+    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(0, "core\t\t/h/machine\n"))  # a blank field
+    assert mb.PodmanBackend().ssh_target("tangible") is None
+
+
+def test_native_backend_has_no_ssh_target():
+    assert mb.NativeBackend().ssh_target("x") is None
+
+
+def test_lima_vm_pid_reads_the_drivers_pid_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(mb.Path, "home", lambda: tmp_path)
+    inst = tmp_path / ".lima" / "acme"
+    inst.mkdir(parents=True)
+    assert mb.LimaBackend().host_pids("acme") == []  # stopped: no pid file at all
+    assert mb.LimaBackend().vm_pid("acme") == 0
+    (inst / "ha.pid").write_text("4242\n")
+    assert mb.LimaBackend().vm_pid("acme") == 4242  # the hostagent shares QEMU's cgroup
+    (inst / "qemu.pid").write_text("4343\n")
+    assert mb.LimaBackend().host_pids("acme") == [4343, 4242]  # …but the VMM comes first
+    assert mb.LimaBackend().vm_pid("acme") == 4343
+    (inst / "qemu.pid").write_text("garbage\n")
+    assert mb.LimaBackend().host_pids("acme") == [4242]
+
+
+def test_backends_without_a_host_wall_input_report_nothing():
+    for be in (mb.PodmanBackend(), mb.NativeBackend()):
+        assert be.host_pids("x") == [] and be.vm_pid("x") == 0
+        assert be.ssh_port("x") == 0
+
+
+def test_lima_start_runs_under_the_given_prefix(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return _Proc(0, "")
+
+    monkeypatch.setattr(mb.subprocess, "run", fake_run)
+    monkeypatch.setattr(mb.LimaBackend, "_wait_for_socket", lambda self, name: True)
+    assert mb.LimaBackend().start("acme", prefix=["systemd-run", "--scope"]) is True
+    assert seen["cmd"] == ["systemd-run", "--scope", "limactl", "start", "acme"]
+    assert mb.LimaBackend().start("acme") is True
+    assert seen["cmd"] == ["limactl", "start", "acme"]

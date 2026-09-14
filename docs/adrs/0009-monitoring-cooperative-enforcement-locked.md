@@ -45,8 +45,11 @@ layers, each labelled with what it actually guarantees:
    zero guarantee against a client that skips the proxy.
 3. **`[machine].wall = true` — the locked kind (BUILT, Mac-unvalidated).** For the Lima backend
    (ADR-0011), an nftables default-deny wall is provisioned into the real machine VM
-   (`src/foldyard/assets/machine-wall/machine-wall.sh`, reconciled by `machine.wall_sync()` on
-   every ensure/recreate/start): default-deny the VM user's uid **and its rootless subuid range**,
+   (`src/foldyard/assets/machine-wall/machine-wall.sh`; *amended 2026-09-11:* provisioned at
+   BOOT as root from a script recorded in the instance config — `guest-boot.sh`, which also
+   drops the VM user's passwordless sudo — where before it was reconciled by
+   `machine.wall_sync()` over `sudo` on every ensure/recreate/start): default-deny the VM user's
+   uid **and its rootless subuid range**,
    open only loopback, DNS to local resolvers, and the Mac gateway (`config.host_alias()` →
    Lima's `192.168.5.2`) on this project's allocated daemon port band (`src/foldyard/ports.py`).
    Egress that ignores the proxy env is REJECTED, not silently missed — fail-closed. `fy verify`

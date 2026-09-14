@@ -996,7 +996,9 @@ def doctor(deep: bool = False):
     # (gcloud/ADC/PAM/impersonations from gcp; gh/mitmproxy/CA/host.env/PEM from github).
     # ctx hands the plugins devmode's own _run/_which/_result so their subprocess calls
     # still hit the redacting command log and render identically.
-    ctx = DoctorContext(deep=deep, run=_run, which=_which, result=_result, probe=probe)
+    ctx = DoctorContext(
+        deep=deep, run=_run, which=_which, result=_result, probe=probe, mode=read()["mode"]
+    )
     yield _result(_which("uv"), "uv", "installed", "missing — brew install uv (TUI, data tooling)")
     yield _config_pin_check()
     yield _widenings_check()
