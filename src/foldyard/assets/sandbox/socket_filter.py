@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import socket
 import sys
 import threading
+from urllib.parse import unquote
 
 _CREATE_SUFFIX = "/containers/create"
 _GVISOR_ANNOTATION_PREFIX = "dev.gvisor."
@@ -92,8 +94,16 @@ def header_value(lines: list[bytes], name: str) -> bytes | None:
     return None
 
 
+def route_path(path: str) -> str:
+    """The request path as the engine's router sees it: query dropped, percent-decoded and
+    normalised (``//``, ``.`` and ``..`` collapsed). Matching the RAW target would let
+    ``/containers/%63reate`` or ``/containers/./create`` reach the engine as a create the filter
+    never inspected; the decoded form is what both create checks judge."""
+    return posixpath.normpath(unquote(path.split("?", 1)[0]))
+
+
 def is_create(method: str, path: str) -> bool:
-    return method == "POST" and path.split("?", 1)[0].endswith(_CREATE_SUFFIX)
+    return method == "POST" and route_path(path).endswith(_CREATE_SUFFIX)
 
 
 def strip_create(path: str, body: bytes) -> bytes:
@@ -103,7 +113,7 @@ def strip_create(path: str, body: bytes) -> bytes:
     data = json.loads(body or b"{}")
     if not isinstance(data, dict):
         raise ValueError("create body is not a JSON object")
-    if "/libpod/" in path.split("?", 1)[0]:
+    if "/libpod/" in route_path(path):
         data.pop("oci_runtime", None)
         annotations = data.get("annotations")
         if isinstance(annotations, dict):
@@ -116,16 +126,23 @@ def strip_create(path: str, body: bytes) -> bytes:
     return json.dumps(data).encode()
 
 
+def _head(start_line: bytes, headers: list[bytes]) -> bytes:
+    """A start line + header block, terminated — correct for an EMPTY header list too (a bare
+    ``100 Continue``), where joining on CRLF would emit a stray blank line."""
+    return start_line + b"\r\n" + b"".join(ln + b"\r\n" for ln in headers) + b"\r\n"
+
+
 def _rebuild_headers(request_line: bytes, headers: list[bytes], body_len: int) -> bytes:
     """The request line + headers for a rewritten create: force Content-Length to the new body
     and drop any chunked framing (the body is sent whole)."""
     kept = [
         ln
         for ln in headers
-        if ln.split(b":", 1)[0].strip().lower() not in (b"content-length", b"transfer-encoding")
+        if ln.split(b":", 1)[0].strip().lower()
+        not in (b"content-length", b"transfer-encoding", b"expect")
     ]
     kept.append(b"Content-Length: " + str(body_len).encode())
-    return request_line + b"\r\n" + b"\r\n".join(kept) + b"\r\n\r\n"
+    return _head(request_line, kept)
 
 
 def _forward_body(src: _Reader, dst: socket.socket, te: bytes | None, cl: bytes | None) -> str:
@@ -226,6 +243,12 @@ def handle_conn(client: socket.socket, upstream_path: str) -> None:
             upgrade = header_value(headers, "upgrade") is not None
 
             if is_create(method, path):
+                # The body is read whole before anything reaches upstream, so a client waiting
+                # on `Expect: 100-continue` would stall: answer the interim ourselves (the
+                # header is dropped from the rebuilt request — the body goes up in one piece).
+                expect = header_value(headers, "expect")
+                if expect and b"100-continue" in expect.lower():
+                    client.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
                 if te and b"chunked" in te.lower():
                     body = _read_chunked_whole(cr)
                 elif cl is not None:
@@ -239,17 +262,23 @@ def handle_conn(client: socket.socket, upstream_path: str) -> None:
                     return
                 upstream.sendall(_rebuild_headers(request_line, headers, len(new_body)) + new_body)
             else:
-                upstream.sendall(request_line + b"\r\n" + b"\r\n".join(headers) + b"\r\n\r\n")
+                upstream.sendall(_head(request_line, headers))
                 _forward_body(cr, upstream, te, cl)
 
-            # Response.
-            response_line = ur.read_line()
-            if response_line is None:
-                return
-            resp_headers = ur.read_headers()
-            client.sendall(response_line + b"\r\n" + b"\r\n".join(resp_headers) + b"\r\n\r\n")
+            # Response. Interim 1xx responses (a 100 Continue the engine emits for a forwarded
+            # Expect, 103 hints) carry no body and precede the final one: forward each and keep
+            # reading, or the final response's framing is never applied and the connection is
+            # spliced raw — after which a pipelined create would bypass the filter.
+            while True:
+                response_line = ur.read_line()
+                if response_line is None:
+                    return
+                resp_headers = ur.read_headers()
+                client.sendall(_head(response_line, resp_headers))
+                status = _status_code(response_line)
+                if not (100 <= status < 200) or status == 101:
+                    break
 
-            status = _status_code(response_line)
             if status == 101 or upgrade:
                 _splice(client, upstream, cr, ur)
                 return

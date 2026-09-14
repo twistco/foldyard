@@ -1022,6 +1022,10 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         f"FY_PROXY_PORT={config.proxy_port_base()}",
         "-e",
         f"GCP_MINTER_PORT={config.gcp_minter_port_base()}",
+        # The operator's home, for the in-box `fy verify` mount audit: the box's own HOME is
+        # /root or /home/vscode, not the path a leaked host mount would carry.
+        "-e",
+        f"FY_HOST_HOME={Path.home()}",
     ]
     for key in config.port_bases():  # passthrough -e KEY (value flows from env below)
         env_args += ["-e", key]

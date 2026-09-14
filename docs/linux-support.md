@@ -76,11 +76,12 @@ there are upper bounds; correctness results transfer as they are.
   the syscall path. `--ignore-cgroups` and `host-uds` are settled.
   The route is settled and proven (a second runsc-default socket, isolation-layers.md, sixth
   session), the Mac's long build is measured (1.2× on the suite), and it is wired as
-  `[machine].runtime = "gvisor"` (both VM backends). What remains: socket narrowing (the filter
-  is the enforcement on podman ≥ 6: it must strip `oci_runtime` and `dev.gvisor.*` from the
-  box's socket) —
-  then an ADR. Not a Linux-support blocker: the product claim without `③` is the same as the
-  Mac's.
+  `[machine].runtime = "gvisor"` (both VM backends) with the socket-narrowing filter as its
+  enforcement tier (it strips `oci_runtime` / `dev.gvisor.*` / `HostConfig.Runtime` from the
+  box's socket; the strip shown live on podman 6.1.1) — accepted as
+  [ADR-0025](./adrs/0025-gvisor-machine-posture-and-socket-narrowing.md). What remains deferred
+  is the broader mount/endpoint allowlist (ADR-0025 §Decision 4). Not a Linux-support blocker:
+  the product claim without `③` is the same as the Mac's.
 - **A CI job on a Linux *host* path** is not possible on GitHub-hosted runners (podman-machine /
   Lima VMs are flaky there — [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml)),
   so the rig stays the validation host for tier 4. Its recipe and its cost are in

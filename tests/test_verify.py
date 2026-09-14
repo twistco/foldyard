@@ -78,6 +78,8 @@ def secure_engine(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(verify.stack, "resolve", lambda *a, **k: ctx)
     monkeypatch.setattr(verify.config, "in_box", lambda: False)  # VM-boundary only by default
+    # A real dev box bakes the operator's home; the tests build their tables from Path.home().
+    monkeypatch.delenv("FY_HOST_HOME", raising=False)
     return calls, results
 
 
@@ -99,16 +101,6 @@ def _enter_box(monkeypatch, tmp_path):
     # where a dev box exports HTTPS_PROXY ambiently, red in CI where nothing does. The `== 1` tests
     # kept passing throughout, on the wall's failure rather than their own subject's.
     monkeypatch.setattr(verify.config, "machine_wall", lambda: False)
-    # The wall section is a different subject with its own tests below, and it needs a live proxy
-    # + network. Left unpinned it resolves the REPO's OWN foldyard.toml — so this repo declaring
-    # `[machine] wall = true` silently bolted a failing check onto every test here: green locally,
-    # where a dev box exports HTTPS_PROXY ambiently, red in CI where nothing does. The `== 1` tests
-    # kept passing throughout, on the wall's failure rather than their own subject's.
-    # The wall section is a different subject with its own tests below, and it needs a live proxy
-    # + network. Left unpinned it resolves the REPO's OWN foldyard.toml — so this repo declaring
-    # `[machine] wall = true` silently bolted a failing check onto every test here: green locally,
-    # where a dev box exports HTTPS_PROXY ambiently, red in CI where nothing does. The `== 1` tests
-    # kept passing throughout, on the wall's failure rather than their own subject's.
     return home
 
 
@@ -207,6 +199,28 @@ def test_a_host_path_string_in_the_mount_options_is_not_a_leak(secure_engine, mo
     assert verify.verify() == 0
     assert "free of host home/paths" in capsys.readouterr().out
     # …while the same path AS the mountpoint is still the leak it always was.
+    results["pid1_mounts"] = "lima-1 /root 9p rw,relatime 0 0\n"
+    assert verify.verify() == 1
+
+
+def test_in_box_the_audit_judges_by_the_operators_home_not_the_box_users(
+    secure_engine, monkeypatch, capsys
+):
+    # In-box on a LINUX host, `Path.home()` is the box user's (/root) — so a Lima VM mounting the
+    # operator's /home/<user> passed, there being no `/Users` to catch it and the pattern
+    # looking for the wrong home. `fy box up` bakes the host's home as FY_HOST_HOME; the audit
+    # judges by that when present.
+    _, results = secure_engine
+    monkeypatch.setattr(verify.Path, "home", staticmethod(lambda: pathlib.Path("/root")))
+    monkeypatch.setenv("FY_HOST_HOME", "/home/operator")
+    results["pid1_mounts"] = "lima-1 /home/operator 9p rw,relatime 0 0\n"
+    assert verify.verify() == 1
+    assert "host paths" in capsys.readouterr().out
+    # The guest's own user shares the prefix and is still not a leak…
+    results["pid1_mounts"] = "lima-1 /home/operator.linux 9p rw,relatime 0 0\n"
+    assert verify.verify() == 0
+    # …and a box from before the bake falls back to the process's own home, as before.
+    monkeypatch.delenv("FY_HOST_HOME")
     results["pid1_mounts"] = "lima-1 /root 9p rw,relatime 0 0\n"
     assert verify.verify() == 1
 

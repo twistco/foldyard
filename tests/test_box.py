@@ -226,6 +226,8 @@ def test_up_assembles_run(fake):
     # the project's Mac daemon port bases are PINNED into the box (in-box derivations can't
     # read the Mac's ports.json registry; the env vars win over allocation on both sides)
     assert "FY_PROXY_PORT=41000" in run and "GCP_MINTER_PORT=41100" in run
+    # The operator's home, for the in-box mount audit (verify._host_home).
+    assert f"FY_HOST_HOME={Path.home()}" in run
     # plugin box_args (gcp SA label, always)
     assert "--label" in run and "gcp.serviceAccount=box@p.iam.gserviceaccount.com" in run
     # clean DOCKER_CONFIG (default on) — sidesteps the editor-attach credsStore helper

@@ -95,16 +95,18 @@ open on the Mac, as of 2026-09-11:
   Sandbox / `sandbox-exec`, which is deprecated and which neither Lima nor krunkit applies. So the
   machine-layer VMM escape lands on the operator's credentials under either vmType. The Linux
   stack *(c)* below has an answer to this (crun); the Mac does not yet.
-- **The box cannot have the microVM layer on the Mac.** The `③` layer — `--runtime krun` for the
-  dev box — needs `/dev/kvm` inside the machine VM, which Apple silicon only offers with
+- **The box cannot have the *microVM* layer on the Mac.** The libkrun route for the dev box —
+  `--runtime krun` — needs `/dev/kvm` inside the machine VM, which Apple silicon only offers with
   `nestedVirtualization: true` on **M3+ / macOS 15+**. **M1/M2 consumers must be supported**
-  (decided 2026-09-11), so `③` is a Linux-only layer, and the maintainer's M3 nested-virt capability
-  is a *test rig*, never a product assumption. The Mac's structure is therefore one kernel layer
-  shorter than Linux *(c)*: host ← VMM ← guest kernel ← container, versus host ← QEMU ← guest
-  kernel ← crun jail ← libkrun ← box kernel ← box. On the Mac a box kernel escape lands in the
-  machine VM's guest, and the machine VM is the whole boundary. What the Mac *can* still take from
-  the Linux work is the socket narrowing, which is platform-independent and closes the design hole
-  on both.
+  (decided 2026-09-11), so krun is a Linux-only option (the deferred *(c)* stack below), and the
+  maintainer's M3 nested-virt capability is a *test rig*, never a product assumption. `③` itself
+  is gVisor, which needs no KVM (systrap) and so reaches M1/M2 too
+  ([ADR-0025](./adrs/0025-gvisor-machine-posture-and-socket-narrowing.md)). The Mac's structure
+  is therefore host ← VMM ← guest kernel ← Sentry ← box, against Linux *(c)*'s host ← QEMU ←
+  guest kernel ← crun jail ← libkrun ← box kernel ← box: one kernel layer shorter than the
+  microVM design, not `③`-less. On the Mac a Sentry escape lands in the machine VM's guest, and
+  the machine VM is the whole boundary. What the Mac takes from the Linux work unchanged is the
+  socket narrowing, which is platform-independent and closes the design hole on both.
 - **krunkit stays opt-in.** It swaps the device model for a smaller one but is upstream-experimental
   on a Cellar path that moves per upgrade; libkrun 2.0 is an API break for krunkit's maintainers,
   not for Lima, but it is churn under a security layer. The probe passed; a week of builds has not
@@ -784,7 +786,7 @@ rig's `foldyard-example`, x86/QEMU, same guest) and driven by foldyard's real ve
                                          exec ~/.local/bin/runsc --ignore-cgroups --host-uds=all "$@"
 ~/.config/containers/containers.conf:    [engine.runtimes]  runsc-fy = ["…/runsc-fy"]   # engine-wide NAME
 ~/.config/containers/runsc.conf:         [engine]  runtime = "runsc-fy"                   # this service's DEFAULT
-systemd-run --user --unit podman-runsc --setenv=CONTAINERS_CONF_OVERRIDE=~/.config/containers/runsc.conf \
+systemd-run --user --unit podman-runsc --setenv=CONTAINERS_CONF_OVERRIDE=$HOME/.config/containers/runsc.conf \
   podman system service --time=0 unix:///run/user/$UID/podman/podman-runsc.sock
 ```
 
@@ -962,7 +964,8 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
   upstream moves.
 - **WSL2**: still unmeasured — `/dev/kvm` in the distro, and Lima+QEMU inside it.
 - **Closed, not open:** per-session pristine state via snapshots (not wanted, 2026-09-11); box-only
-  krun on M3 (`③` is Linux-only by the M1/M2 decision, and deferred there).
+  krun on M3 (krun is Linux-only by the M1/M2 decision, and deferred there; `③` is gVisor, which
+  needs no KVM).
 
 ## Sources
 

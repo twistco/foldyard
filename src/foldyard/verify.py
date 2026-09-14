@@ -63,12 +63,21 @@ def _mountpoint(line: str) -> str:
     return _MOUNT_ESCAPE.sub(lambda m: chr(int(m.group(1), 8)), fields[1])
 
 
+def _host_home() -> str:
+    """The OPERATOR's home — the identity the leak pattern looks for. In-box ``Path.home()`` is
+    the box user's (``/root``, ``/home/vscode``), which on a Linux host is not the home a leaked
+    mount would carry (``/home/<user>``; a Mac's is caught by ``/Users`` regardless), so
+    ``fy box up`` bakes the host's as ``FY_HOST_HOME`` and an in-box audit judges by that. A box
+    from before the bake falls back to the process's own."""
+    return os.environ.get("FY_HOST_HOME") or str(Path.home())
+
+
 def _host_paths() -> re.Pattern[str]:
     """The leak pattern for THIS host. The host's own home is matched exactly — followed by a
     separator, whitespace or end — so a guest home that merely shares its prefix does not trip
     it: Lima names the guest user ``<user>.linux``, so ``/home/dain`` must not match
     ``/home/dain.linux``."""
-    home = re.escape(str(Path.home()))
+    home = re.escape(_host_home())
     return re.compile("|".join((rf"{home}(?=/|\s|$)", *(re.escape(m) for m in _FOREIGN_MOUNTS))))
 
 

@@ -73,10 +73,22 @@ def test_strip_create_refuses_unparseable_body():
         ("GET", "/v5.0.0/libpod/info", False),
         ("POST", "/libpod/containers/prune", False),
         ("POST", "/libpod/images/create", False),  # image pull, not container create
+        # The engine routes on the DECODED, normalised path — so must the filter, or an encoded
+        # or dotted spelling reaches the engine as a create the filter never inspected.
+        ("POST", "/v5.0.0/libpod/containers/%63reate", True),
+        ("POST", "/v1.41/containers/./create?name=x", True),
+        ("POST", "/libpod/containers/x/../create", True),
+        ("POST", "/libpod//containers//create", True),
     ],
 )
 def test_is_create(method, path, expected):
     assert sf.is_create(method, path) is expected
+
+
+def test_strip_create_judges_the_libpod_branch_on_the_decoded_path():
+    body = json.dumps({"image": "img", "oci_runtime": "crun"}).encode()
+    out = json.loads(sf.strip_create("/v5.0.0/%6Cibpod/containers/%63reate", body))
+    assert "oci_runtime" not in out
 
 
 # ── end to end over unix sockets ────────────────────────────────────────────────────────
@@ -236,6 +248,52 @@ def test_chunked_create_body_is_dechunked_and_stripped(wired):
         b"Transfer-Encoding: chunked\r\n\r\n" + chunked
     )
     _read_response(c)
+    assert len(up.requests) == 1
+    assert "oci_runtime" not in json.loads(up.requests[0]["body"])
+
+
+def test_interim_1xx_is_forwarded_and_the_final_response_still_framed(wired):
+    """An engine answering a forwarded `Expect` with 100 Continue before the real response: the
+    filter must forward the interim and keep reading, or it takes the bodiless 1xx as the final
+    response, finds no framing and splices the connection raw — after which a create pipelined on
+    the same connection reaches the engine unfiltered."""
+    up, connect = wired(
+        b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+    )
+    c = connect()
+    c.sendall(
+        b"POST /v5.0.0/libpod/containers/prune HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n"
+    )
+    r = sf._Reader(c)
+    assert r.read_line() == b"HTTP/1.1 100 Continue" and r.read_headers() == []
+    assert r.read_line() == b"HTTP/1.1 200 OK"
+    assert r.read_exact(int(sf.header_value(r.read_headers(), "content-length") or 0)) == b"ok"
+    body = json.dumps({"image": "img", "oci_runtime": "crun"}).encode()
+    c.sendall(
+        b"POST /v5.0.0/libpod/containers/create HTTP/1.1\r\nHost: d\r\n"
+        b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+    )
+    assert r.read_line() == b"HTTP/1.1 100 Continue" and r.read_headers() == []
+    assert r.read_line() == b"HTTP/1.1 200 OK"
+    assert len(up.requests) == 2
+    assert "oci_runtime" not in json.loads(up.requests[1]["body"])
+
+
+def test_create_with_expect_gets_the_interim_from_the_filter_and_is_stripped(wired):
+    """The filter reads a create whole before forwarding, so a client honouring `Expect:
+    100-continue` would otherwise wait on an interim nobody sends: the filter answers it, and
+    drops the header from the rebuilt request (the body goes up in one piece)."""
+    up, connect = wired()
+    body = json.dumps({"image": "img", "oci_runtime": "crun"}).encode()
+    c = connect()
+    c.sendall(
+        b"POST /v5.0.0/libpod/containers/create HTTP/1.1\r\nHost: d\r\nExpect: 100-continue\r\n"
+        b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+    )
+    r = sf._Reader(c)
+    assert r.read_line() == b"HTTP/1.1 100 Continue" and r.read_headers() == []
+    c.sendall(body)
+    assert r.read_line() == b"HTTP/1.1 200 OK"
     assert len(up.requests) == 1
     assert "oci_runtime" not in json.loads(up.requests[0]["body"])
 

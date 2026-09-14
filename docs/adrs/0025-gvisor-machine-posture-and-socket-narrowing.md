@@ -88,13 +88,21 @@ came up under any other runtime before its bootstrap runs, so credentials are ne
 unsandboxed box. The filter refuses an unparseable create rather than forward it.
 
 **4. Narrowing scope is the runtime opt-out only.** The filter strips runtime selection, nothing
-else. It does **not** restrict what a box-created sibling may bind-mount. This is deliberate:
-foldyard runs one VM per project, credentials never enter the VM, and the VM mounts only the repo
-and worktrees (verified — §5). So a sibling that mounts the VM's `/` reads this project's own VM
-(its repo, worktrees and stack) and finds no credentials; there is no *other* project in the VM to
-leak to. The mount/endpoint allowlist (the broader "narrowing shape" from isolation-layers
-Finding 1) is defence in depth against a shared-VM topology foldyard does not use, and is left as
-optional future hardening rather than a blocker for this ADR.
+else. It does **not** restrict what a box-created sibling may bind-mount, nor which engine
+endpoints it may call. This is deliberate, with one qualification. foldyard runs one VM per
+project, the *host-held* credentials (every minter's `host.env` secret, the operator's keychain,
+`~/.foldyard`) never enter the VM, and the VM mounts only the repo and worktrees (verified — §5).
+So a sibling that mounts the VM's `/` reads this project's own VM (its repo, worktrees and stack);
+there is no *other* project in the VM to leak to. What the VM **does** hold is whatever the box
+itself was handed: a non-keyless `[claude]`/`[codex]` box logs in for real, and that token lives
+in the `devbox_claude_home` / `devbox_codex_home` named volumes on the VM's disk — the box's own
+mounts. A root sibling that bind-mounts the volume store reads them, so "no credentials in the
+VM" is only true of the host-held ones; but the box already reads those volumes, so the sibling
+holds no principal the box did not, and the host boundary is unchanged. The mount/endpoint
+allowlist (the broader "narrowing shape" from isolation-layers Finding 1) would close that reach
+too; it is defence in depth against a shared-VM topology foldyard does not use, and is left as
+optional future hardening rather than a blocker for this ADR. (The keyless rungs keep even the
+agent token host-side — the proxy injects it in flight.)
 
 **5. `verify` gains a kernel row and reclassifies the mount audit under the posture.** In-box,
 `fy verify` checks the kernel the box actually runs on reports gVisor. The VM mount audit
