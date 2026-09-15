@@ -70,6 +70,14 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Fixed
 
+- **`fy code` now pins every `[ports]` base against VS Code auto-forwarding, as the range a
+  worktree offset can land on (`"4400-4489": onAutoForward: ignore`).** The mirror of the
+  minter/proxy pin: under podman machine a publish of `127.0.0.1:P` is a gvproxy bind on the
+  host's loopback, so once VS Code auto-forwards P — it read `127.0.0.1:4400->4400/tcp` off a
+  `ps` line while the stack was down after a reboot, then `remote.restoreForwardedPorts`
+  re-bound it on every reopen — the container can never start (`bind: address already in use`
+  on every `up`), and nothing in the box can see the holder. Seen live on a consumer's Auth0
+  simulator port; the same instance had a worktree's `APP_PORT+1` forwarded, hence the range.
 - **The gVisor posture's socket probe could report podman's own client version block as "the
   runtime".** podman-remote prints its client info to stdout (exit 125) when it cannot reach the
   server, and the probe trusted stdout — so the first `fy box up` after a fresh provisioning,

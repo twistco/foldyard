@@ -644,6 +644,38 @@ def test_daemon_port_pin_is_applied_when_the_document_has_no_settings(monkeypatc
     assert clean["settings"]["remote.portsAttributes"]["8188"]["onAutoForward"] == "ignore"
 
 
+def test_published_ports_are_never_auto_forwarded(monkeypatch):
+    """The mirror hazard: a port the host PUBLISHES into the stack. Under podman machine a publish
+    of `127.0.0.1:P` is a gvproxy bind on the host's loopback, so once VS Code has auto-forwarded
+    P (it read `127.0.0.1:4400->4400/tcp` out of a `ps` line while the stack was down after a
+    reboot) the container can never start: `listen tcp 127.0.0.1:4400: bind: address already in
+    use`, on every `up`, until someone finds the Ports view. Pinned as the RANGE a worktree
+    offset can land on — the main instance forwarded a worktree's `APP_PORT+1` the same way."""
+    monkeypatch.setattr(config, "gcp_minter_port", lambda: 8188)
+    monkeypatch.setattr(config, "proxy_port", lambda: 8088)
+    monkeypatch.setattr(config, "port_bases", lambda: {"APP_PORT": 3000, "SIM_PORT": 4400})
+
+    clean = vscode._sanitize_attached_config({"settings": {"editor.fontSize": 12}}, "/repo")
+
+    attrs = clean["settings"]["remote.portsAttributes"]
+    assert attrs["3000-3089"]["onAutoForward"] == "ignore"
+    assert attrs["4400-4489"]["onAutoForward"] == "ignore"
+    assert attrs["8188"]["onAutoForward"] == "ignore"
+    assert clean["settings"]["editor.fontSize"] == 12
+    assert "remote.autoForwardPorts" not in clean["settings"]
+
+
+def test_published_port_pin_is_absent_without_a_ports_table(monkeypatch):
+    """A consumer with no ``[ports]`` publishes nothing, so there is nothing to guard."""
+    monkeypatch.setattr(config, "gcp_minter_port", lambda: 8188)
+    monkeypatch.setattr(config, "proxy_port", lambda: 8088)
+    monkeypatch.setattr(config, "port_bases", lambda: {})
+
+    clean = vscode._sanitize_attached_config({"extensions": []}, "/repo")
+
+    assert set(clean["settings"]["remote.portsAttributes"]) == {"8188", "8088"}
+
+
 def test_instance_settings_pin_update_mode_and_daemon_ports(fake, monkeypatch):
     """The user-data-dir settings.json is written on every `fy code`, so it carries the pins that
     must not depend on the attached config still being foldyard-owned. `update.mode` is manual
