@@ -792,7 +792,20 @@ def test_up_on_compose_less_project_starts_supervisor_and_points_at_box(
 
 def test_nuke_main_removes_volumes(fake_repo, capture_run):
     assert stack.nuke() == 0  # no WORKTREE → main teardown
-    assert _composes(capture_run)[-1][-2:] == ["down", "-v"]
+    assert _composes(capture_run)[-1][-3:] == ["down", "-v", "--remove-orphans"]
+
+
+def test_nuke_worktree_reaps_orphans(fake_repo, capture_run, monkeypatch):
+    # Same reason as `down`: a profile-gated container from an earlier posture (the metadata
+    # emulator after gcp=sa→off) isn't in the rendered config, so a plain `down` strands it —
+    # on worktree REMOVAL it then outlives the checkout (observed 2026-09-15).
+    wt = Path(f"{fake_repo}-worktrees") / "feat"
+    wt.mkdir(parents=True)
+    monkeypatch.setenv("WORKTREE", "feat")
+    monkeypatch.setattr(stack, "_offset", lambda name: 7)
+    assert stack.nuke() == 0
+    down = next(c for c in _composes(capture_run) if "down" in c)
+    assert down[-2:] == ["down", "--remove-orphans"]
 
 
 def test_up_ensures_external_network_before_compose(fake_repo, capture_run, monkeypatch):
