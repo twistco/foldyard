@@ -32,48 +32,36 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
-from typing import IO
 
-from . import config, stack
+from . import config, configpin, devmode, stack
 
 # The Dev Containers extension id whose globalStorage holds attached-container configs.
 _REMOTE_CONTAINERS = "ms-vscode-remote.remote-containers"
-# The ONLY keys foldyard will write into an attached-container config, and the only nested
-# `customizations.vscode` keys — an ALLOWLIST, deliberately, because the document is produced from
-# repo content. VS Code's attached-config schema includes lifecycle hooks, and `initializeCommand`
-# runs ON THE HOST: honouring one would hand the repo the very host-execution path the packaged
-# minters closed (ADR-0023). A denylist would fail OPEN the day the
-# schema grows another hook, so unknown keys are dropped and named instead.
-_ALLOWED_CONFIG_KEYS = frozenset(
-    {"_generatedBy", "workspaceFolder", "remoteUser", "extensions", "settings", "customizations"}
-)
-_ALLOWED_CUSTOMIZATION_KEYS = frozenset({"extensions", "settings"})
+# The attached-container config is AUTHORED by foldyard, from the ADOPTED `[vscode]` table — never
+# from a document the repo produces, and never from mount data such as `.vscode/extensions.json`.
+# Two reasons: VS Code's attached-config schema includes lifecycle hooks, and `initializeCommand`
+# runs ON THE HOST, so the only key set that can reach that file is one foldyard names itself
+# (ADR-0023); and the `extensions` list decides what the host INSTALLS — a UI-kind extension lands
+# in the operator's shared ~/.vscode/extensions — so it has to come from where the adopt gate
+# reviews it, not from a file the box can write (ADR-0026).
 _GENERATED_MARKER_KEY = "_generatedBy"
-# Stamped by US, never copied from the document: the marker is how the NEXT run recognises a config
-# as foldyard's rather than one you took ownership of. A generator that omitted it would otherwise
-# lock us out of our own file forever.
+# Stamped so the NEXT run recognises a config as foldyard's rather than one you took ownership of
+# (remove the key to keep your own edits).
 _GENERATED_MARKER = "foldyard fy code"
-# A marketplace extension id: `<publisher>.<name>`. Anything else in the list is dropped rather
-# than handed to VS Code.
+# The attach must match how `fy shell`/`fy claude` exec into the box (`--user 0`): attaching as the
+# image's baked `vscode` user (uid 1000) is what once split file ownership between VS Code-created
+# files and agent/root ones, and made VS Code tooling hit permission errors on the root-owned
+# socket and volumes. A foldyard fact, so a pin — not a consumer key.
+_REMOTE_USER = "root"
+# A marketplace extension id: `<publisher>.<name>`. Anything else in a recommendations file is
+# dropped rather than handed to VS Code.
 _EXT_ID = re.compile(r"^[A-Za-z0-9][\w-]*\.[A-Za-z0-9][\w-]*$")
-# Bounds on the in-box generator (see `_generate_attached_config`): it reads a handful of
-# `.vscode/extensions.json` files and prints a few KB, so anything past these is a broken or
-# hostile generator, not a big project.
-_GENERATOR_TIMEOUT = 120
-_MAX_DOC_BYTES = 1 << 20
-
-# How the generator is INVOKED in the box. Not a bare `python3`: the box contract promises git + uv
-# + an engine client, never python (the packaged image is uv-first — debian:trixie-slim has no
-# python3), so on a generic box that spelling made every attached-config generation fail. uv's
-# managed interpreter is already there (the box bootstrap's foldyard install provisions one).
-# `exec` so the generator keeps THIS pid — the timeout + stream caps below must land on it, not on
-# a shell wrapping it; `--no-project` so the checkout's pyproject can't turn this into a sync.
-_PY_SHIM = (
-    'if command -v python3 >/dev/null 2>&1; then exec python3 "$@"; '
-    'else exec uv run --no-project --quiet python "$@"; fi'
-)
+# Dev Containers applies an attached config's `extensions` and `settings` ONCE per server install,
+# each gated by its own marker under the box's ~/.vscode-server/data/Machine; a change only lands
+# once the matching marker is gone.
+_INSTALL_EXTENSIONS_MARKER = ".installExtensionsMarker"
+_WRITE_MACHINE_SETTINGS_MARKER = ".writeMachineSettingsMarker"
 _LOCAL_TERMINAL_PROFILE = "Foldyard Local"
 _TERMINAL_PROFILES_OSX = "terminal.integrated.profiles.osx"
 _TERMINAL_DEFAULT_PROFILE_OSX = "terminal.integrated.defaultProfile.osx"
@@ -165,7 +153,7 @@ def _user_data_dir(worktree: str = "") -> Path:
 
 def _globalstorage(udd: Path) -> Path:
     """Where the Dev Containers extension reads attached-container configs: UNDER the
-    user-data-dir. So when we relocate the user-data-dir, the config generator must target
+    user-data-dir. So when we relocate the user-data-dir, the config write must target
     THIS path — not VS Code's default globalStorage — or the isolated instance never sees it."""
     return udd / "User" / "globalStorage" / _REMOTE_CONTAINERS
 
@@ -223,7 +211,7 @@ def _pin_ports(settings: dict) -> dict:
     pinned = [str(p) for p in _host_daemon_ports()] + _published_port_ranges()
     for key in pinned:
         current = merged.get(key)
-        # Override the one attribute that is the guard; a label or protocol the generator set for
+        # Override the one attribute that is the guard; a label or protocol the consumer set for
         # that port is its business and survives.
         kept = current if isinstance(current, dict) else {}
         merged[key] = {**kept, "onAutoForward": "ignore"}
@@ -349,8 +337,8 @@ def _running(engine: str, box: str, env: dict) -> bool:
 
 
 def _installed_exts(engine: str, box: str, env: dict) -> str:
-    """The extension dirs already present in the box's server (so the generator only flags
-    genuine newcomers). Empty string if the box/dir can't be read — same as the recipe."""
+    """The extension dirs already present in the box's server (so the marker reset only fires
+    for genuine newcomers). Empty string if the box/dir can't be read — same as the recipe."""
     out = subprocess.run(
         [engine, "exec", box, "sh", "-c", 'ls "$HOME/.vscode-server/extensions" 2>/dev/null'],
         env=env,
@@ -360,148 +348,55 @@ def _installed_exts(engine: str, box: str, env: dict) -> str:
     return out.stdout if out.returncode == 0 else ""
 
 
-def _capped_text(sink: IO[bytes]) -> str:
-    """The first :data:`_MAX_DOC_BYTES` of a captured stream, decoded with replacement. Never the
-    whole file: the cap is what keeps a runaway generator's output off the heap, and
-    ``errors="replace"`` is what keeps its invalid UTF-8 from becoming a traceback (we only ever
-    json-parse or print this)."""
-    sink.seek(0)
-    return sink.read(_MAX_DOC_BYTES).decode("utf-8", errors="replace")
+def _valid_extensions(ids: list[str]) -> list[str]:
+    """``ids`` as VS Code will get them: shape-validated (a marketplace id, nothing else),
+    de-duplicated in order, and without the Dev Containers extension — meaningless inside the
+    container it attached through."""
+    exts: list[str] = []
+    for e in ids:
+        if _EXT_ID.match(e) and e != _REMOTE_CONTAINERS and e not in exts:
+            exts.append(e)
+    return exts
 
 
-def _generate_attached_config(
-    engine: str, box: str, script: Path, checkout: str, env: dict
-) -> dict | None:
-    """Run the consumer's attached-config generator INSIDE THE BOX and parse the JSON document it
-    prints. ``None`` when it can't run or didn't produce a document.
+def _attached_config(checkout: str, exts: list[str], settings: dict) -> dict:
+    """The attached-container config for ``checkout``: the consumer's `[vscode.settings]` table
+    with the daemon-port pin merged in (the pin WINS — same rule as ``workspaceFolder``), and the
+    extensions in BOTH schemas so they are *installed* on attach, not merely recommended —
+    ``customizations.vscode.{extensions,settings}`` is the unified form newer Dev Containers
+    versions honour, top-level ``extensions``/``settings`` the legacy one older versions read."""
+    pinned = _pin_ports(settings)
+    return {
+        _GENERATED_MARKER_KEY: _GENERATED_MARKER,
+        "workspaceFolder": checkout,
+        "remoteUser": _REMOTE_USER,
+        "extensions": exts,
+        "settings": pinned,
+        "customizations": {"vscode": {"extensions": exts, "settings": pinned}},
+    }
 
-    The generator is a repo file. Running it host-side made `fy code` execute whatever the checkout
-    contained, as the operator — the same hole the minters had. It doesn't need the host: everything
-    it READS (the projects' `.vscode/extensions.json`) and everything it WRITES ITSELF (the repo's
-    gitignored `.vscode/settings.json`, the multi-root workspace file) is in the mount. Only the
-    final write — into the Mac's VS Code globalStorage — is host-side, and that's foldyard's to do,
-    from a validated document (:func:`_sanitize_attached_config`). `fy code` already requires a
-    running box, so exec'ing in it costs nothing extra.
 
-    Progress goes to the generator's stderr (relayed, so the human sees it); stdout is the
-    document. Everything about that output is treated as UNTRUSTED, because it is repo code:
-
-    * one that hangs (a stray `input()`, a wedged import) must not wedge `fy code` — hence the
-      timeout;
-    * one that prints a gigabyte must be REFUSED rather than parsed, and must not be held in MEMORY
-      while it does — hence the temp-file sinks (the bytes land on disk and we read back at most the
-      cap) and a COMBINED limit, which output split across the two streams can't slip past;
-    * one that prints invalid UTF-8 must be a skipped config, not a `UnicodeDecodeError` out of
-      `fy code` — hence decoding ourselves, with replacement, after the fact.
-    """
-    with tempfile.TemporaryFile() as sink, tempfile.TemporaryFile() as errsink:
-        try:
-            proc = subprocess.run(
-                # "_" fills sh's $0 slot, so the generator's own args start at $1.
-                [
-                    engine,
-                    "exec",
-                    "-w",
-                    checkout,
-                    box,
-                    "sh",
-                    "-c",
-                    _PY_SHIM,
-                    "_",
-                    str(script),
-                    box,
-                    checkout,
-                ],
-                env=env,
-                stdout=sink,
-                stderr=errsink,
-                timeout=_GENERATOR_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired:
-            _err(
-                f"⚠ the attached-config generator didn't finish in {_GENERATOR_TIMEOUT}s "
-                "— attaching anyway."
-            )
-            return None
-        total = sink.tell() + errsink.tell()
-        stderr, stdout = _capped_text(errsink), _capped_text(sink)
-    if stderr.strip():
-        print(stderr.rstrip())
-    if total > _MAX_DOC_BYTES:
-        _err(
-            f"⚠ the attached-config generator printed more than {_MAX_DOC_BYTES} bytes "
-            "— skipping (an attached config is a few KB)."
-        )
-        return None
-    if proc.returncode != 0:
-        _err(f"⚠ the attached-config generator failed (exit {proc.returncode}) — attaching anyway.")
+def _read_config(path: Path) -> dict | None:
+    """The attached config currently on disk, or ``None`` when there isn't a readable JSON object
+    there (missing, garbage, or a non-dict document — all "nothing to preserve")."""
+    if not path.exists():
         return None
     try:
-        doc = json.loads(stdout)
-    except ValueError as e:
-        _err(f"⚠ the attached-config generator didn't print a JSON document ({e}) — skipping.")
+        existing = json.loads(path.read_text())
+    except (OSError, ValueError):
         return None
-    return doc if isinstance(doc, dict) else None
+    return existing if isinstance(existing, dict) else None
 
 
-def _sanitize_attached_config(doc: dict, checkout: str) -> dict:
-    """Keep only the keys foldyard understands (see :data:`_ALLOWED_CONFIG_KEYS`), and pin the ones
-    whose value has host consequences. What's dropped is NAMED, so a consumer adding a key doesn't
-    silently lose it — they get told foldyard won't write it.
-
-    Pinned rather than trusted: ``workspaceFolder`` must be the checkout we asked about (a different
-    path would point the attach elsewhere), ``extensions`` must be plain marketplace ids, and
-    ``settings`` must be a JSON object. Settings can't execute; lifecycle hooks can, which is why
-    they aren't in the allowlist at all."""
-    clean: dict = {}
-    for key, value in doc.items():
-        if key not in _ALLOWED_CONFIG_KEYS:
-            _err(f"  (dropped unsupported attached-config key: {key})")
-            continue
-        if key == "customizations":
-            vs = (value or {}).get("vscode") if isinstance(value, dict) else None
-            if isinstance(vs, dict):
-                kept = {k: v for k, v in vs.items() if k in _ALLOWED_CUSTOMIZATION_KEYS}
-                for dropped in set(vs) - _ALLOWED_CUSTOMIZATION_KEYS:
-                    _err(f"  (dropped unsupported customizations.vscode key: {dropped})")
-                clean[key] = {"vscode": kept}
-            continue
-        clean[key] = value
-    clean["workspaceFolder"] = checkout
-    clean[_GENERATED_MARKER_KEY] = _GENERATED_MARKER
-    raw_exts = clean.get("extensions")
-    # A null/scalar `extensions` is a malformed document, not a crash: iterate only a real list.
-    exts = (
-        [e for e in raw_exts if isinstance(e, str) and _EXT_ID.match(e)]
-        if isinstance(raw_exts, list)
-        else []
-    )
-    clean["extensions"] = exts
-    raw_settings = clean.get("settings")
-    clean["settings"] = _pin_ports(raw_settings if isinstance(raw_settings, dict) else {})
-    vs = clean.get("customizations", {}).get("vscode") if "customizations" in clean else None
-    if isinstance(vs, dict):
-        vs["extensions"] = exts
-        if not isinstance(vs.get("settings"), dict):
-            vs.pop("settings", None)
-    return clean
-
-
-def _write_attached_config(path: Path, cfg: dict) -> bool:
-    """Write the sanitized config into the isolated instance's globalStorage. Returns False unless
-    the existing config is OURS — i.e. its ``_generatedBy`` is exactly our marker. Anything else is
-    somebody's file to keep: the user took ownership by removing the marker, or another tool wrote
-    its own. (The check lives here, host-side, because the file does.)"""
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text())
-        except (OSError, ValueError):
-            existing = None  # unreadable/garbage — safe to replace with ours
-        # A non-dict document (`null`, a list) is malformed, not owned — and `in`/`.get` on it
-        # would be a TypeError out of `fy code`, hence the isinstance check rather than a lookup.
-        if isinstance(existing, dict) and existing.get(_GENERATED_MARKER_KEY) != _GENERATED_MARKER:
-            print(f"  (kept your customised {path})")
-            return False
+def _write_attached_config(path: Path, cfg: dict, existing: dict | None) -> bool:
+    """Write the config into the isolated instance's globalStorage. Returns False unless
+    ``existing`` (what :func:`_read_config` found at ``path``) is OURS — i.e. its ``_generatedBy``
+    is exactly our marker. Anything else is somebody's file to keep: the user took ownership by
+    removing the marker, or another tool wrote its own. A malformed document (``null``, a list,
+    garbage) reads as ``None`` — not owned, safe to replace."""
+    if existing is not None and existing.get(_GENERATED_MARKER_KEY) != _GENERATED_MARKER:
+        print(f"  (kept your customised {path})")
+        return False
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, indent=2) + "\n")
     print(f"▶ extensions: {len(cfg.get('extensions', []))} → {path}")
@@ -515,18 +410,14 @@ def _missing_extensions(exts: list[str], installed: str) -> list[str]:
     return [e for e in exts if not any(d.startswith(e.lower() + "-") for d in have)]
 
 
-def _reset_install_marker(engine: str, box: str, env: dict) -> None:
-    """VS Code applies an attached-config's extensions only ONCE per server install (gated by
-    .installExtensionsMarker). Delete it so the NEXT attach installs the newcomers."""
+def _reset_markers(engine: str, box: str, env: dict, markers: list[str]) -> None:
+    """Delete the given once-per-install markers in the box so the NEXT attach re-applies the
+    matching part of the config (see :data:`_INSTALL_EXTENSIONS_MARKER`)."""
+    if not markers:
+        return
+    paths = " ".join(f'"$HOME/.vscode-server/data/Machine/{m}"' for m in markers)
     subprocess.run(
-        [
-            engine,
-            "exec",
-            box,
-            "sh",
-            "-c",
-            'rm -f "$HOME/.vscode-server/data/Machine/.installExtensionsMarker"',
-        ],
+        [engine, "exec", box, "sh", "-c", f"rm -f {paths}"],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -536,11 +427,17 @@ def _reset_install_marker(engine: str, box: str, env: dict) -> None:
 def code() -> int:
     """Resolve the (worktree's) box, ensure it's running, refresh its extensions config, then
     launch VS Code attached to it in the isolated user-data-dir. Mac only."""
-    if not config.vscode_enabled():
+    ctx = stack.resolve()
+    # `[vscode]` decides what the HOST installs and applies, so it is read from the checkout's
+    # ADOPTED config, never the working tree (ADR-0022: the channel, not the field) — and the
+    # adopt/revert/ignore gate runs first, so a drifted table meets the operator here, before
+    # the host acts on it.
+    configpin.gate("fy code")
+    cfg = devmode.worktree_config(config.active_worktree())
+    if not cfg.vscode_enabled():
         _err("✗ VS Code support is off — add a [vscode] table to foldyard.toml, then `fy box up`")
         _err("  (it mounts the persisted vscode-server volume the attach reuses).")
         return 1
-    ctx = stack.resolve()
     engine = config.engine()
     env = ctx.env
     box = f"{ctx.project}-devbox"
@@ -561,24 +458,26 @@ def code() -> int:
     if _write_local_terminal_cwd(udd, host_checkout, env.get("ZDOTDIR")):
         print(f"▶ local terminal cwd: {host_checkout}")
 
-    # Auto-install our extensions on attach (Attach to Running Container ignores
-    # devcontainer.json — the supported lever is an attached-container config, keyed by the
-    # box name, UNDER this user-data-dir's globalStorage).
-    script = ctx.main / config.dev_vm_rel() / "vscode-attached-config.py"
-    if script.is_file():
-        doc = _generate_attached_config(engine, box, script, checkout, env)
-        if doc is not None:
-            cfg = _sanitize_attached_config(doc, checkout)
-            cfg_path = _globalstorage(udd) / "nameConfigs" / f"{box}.json"
-            if _write_attached_config(cfg_path, cfg):
-                missing = _missing_extensions(
-                    cfg.get("extensions", []), _installed_exts(engine, box, env)
-                )
-                if missing:
-                    _reset_install_marker(engine, box, env)
-                    print(f"▶ will install on attach: {' '.join(missing)}")
-    else:
-        print(f"  (no {script.name} alongside the recipe — extensions auto-install skipped)")
+    # Auto-apply extensions + settings on attach (Attach to Running Container ignores
+    # devcontainer.json — the supported lever is an attached-container config, keyed by the box
+    # name, UNDER this user-data-dir's globalStorage). Built here from the adopted `[vscode]`
+    # table — nothing under the mount is read; the config file is the only host-side write.
+    exts = _valid_extensions(cfg.vscode_extensions())
+    attached = _attached_config(checkout, exts, cfg.vscode_settings())
+    cfg_path = _globalstorage(udd) / "nameConfigs" / f"{box}.json"
+    previous = _read_config(cfg_path)
+    if _write_attached_config(cfg_path, attached, previous):
+        markers = []
+        missing = _missing_extensions(exts, _installed_exts(engine, box, env))
+        if missing:
+            markers.append(_INSTALL_EXTENSIONS_MARKER)
+            print(f"▶ will install on attach: {' '.join(missing)}")
+        # Settings have no in-box listing to diff against, so the last config WE wrote is the
+        # record of what the box's Machine settings hold; any difference (a first write included)
+        # needs the marker gone or the change never lands on an already-attached box.
+        if previous is None or previous.get("settings") != attached["settings"]:
+            markers.append(_WRITE_MACHINE_SETTINGS_MARKER)
+        _reset_markers(engine, box, env, markers)
 
     code_cli = shutil.which("code")
     if not code_cli:
@@ -597,11 +496,9 @@ def code() -> int:
         return 1
 
     # Multi-root workspace attach: when the consumer declares `[vscode] workspace_file` and
-    # the file exists (the attached-config generator above may have just written it), open it
-    # via --file-uri instead of the folder. Checked AFTER the generator so a fresh checkout's
-    # first `fy code` already gets the workspace.
+    # the file exists, open it via --file-uri instead of the folder.
     open_flag = "--folder-uri"
-    ws_rel = config.vscode_workspace_file()
+    ws_rel = cfg.vscode_workspace_file()
     if ws_rel:
         if (host_checkout / ws_rel).is_file():
             open_flag, uri = "--file-uri", _uri(box, f"{checkout}/{ws_rel}")

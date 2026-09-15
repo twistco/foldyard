@@ -733,7 +733,43 @@ Both tables deep-merge like everything else, so `foldyard.local.toml` can overri
 privileged actor from repo config, so `fy config widenings` lists them under **agent steering** —
 by key, since that's where a `hooks` or `permissions` entry would show up.
 - **`[vscode]`** — mounts the vscode-server volume so `fy code` (VS Code attach) reuses its
-  server across box recreations. No keys.
+  server across box recreations. `fy code` also writes the attached-container config the attach
+  applies (extensions + settings, keyed by the box name, under its own isolated
+  `--user-data-dir`), built from these keys. Foldyard authors that document itself — no repo
+  script produces it, and nothing under the mount (no `.vscode/extensions.json`) is read for it.
+  **The whole table is read from the ADOPTED config**, and `fy code` runs the adopt/revert/ignore
+  gate first: the extensions list decides what the host installs (a UI-kind extension lands in
+  the operator's shared `~/.vscode/extensions`), so a box edit to it is inert until an operator
+  adopts it ([ADR-0026](./adrs/0026-vscode-attach-config-is-declarative.md)).
+  - **`workspace_file`** — repo-relative `.code-workspace` path. When set and present in the
+    checkout, `fy code` opens THAT (a multi-root workspace) instead of the folder — the lever
+    for per-folder editor settings in a monorepo. Absent ⇒ folder attach.
+  - **`extensions`** — marketplace ids (`publisher.name`) installed on attach. The Dev Containers
+    extension is dropped (meaningless inside the container); an invalid id is dropped rather than
+    handed to VS Code. Keep the sub-projects' `.vscode/extensions.json` for plain VS Code's
+    click-to-install recommendations — this list is what installs *without* a click, which is
+    why it is config. Default: `[]`.
+  - **`settings`** — a table of VS Code settings carried in the attached config, which Dev
+    Containers applies to the box's server (machine scope) — e.g.
+    `"remote.autoForwardPorts" = false`, `"github.gitAuthentication" = false`. Settings can't
+    execute; the schema's lifecycle hooks are not a key and never will be. foldyard merges its
+    own pin on top (the minter/proxy ports are never auto-forwarded — a forward would shadow the
+    daemon the box dials). Dev Containers writes these ONCE per server install; `fy code` clears
+    that marker whenever the table changed, so an edit lands on the next attach.
+
+  Per-operator tweaks go in `foldyard.local.toml` (deep-merged, and adopted alongside). Removing
+  the `_generatedBy` key from the written config file is the host-side hatch that stops
+  `fy code` writing it at all — the whole table then stops applying to that instance.
+
+  ```toml
+  [vscode]
+  workspace_file = "acme.code-workspace"
+  extensions = ["anthropic.claude-code", "charliermarsh.ruff", "biomejs.biome"]
+
+  [vscode.settings]
+  "remote.autoForwardPorts" = false
+  "github.gitAuthentication" = false
+  ```
 
 ## `[reclaim]`
 

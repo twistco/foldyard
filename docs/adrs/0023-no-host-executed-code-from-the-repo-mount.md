@@ -65,8 +65,12 @@ question per surface — *does this actually need host privileges?* — which ha
    worktrees root (`worktree._init_in_yard`). The engine becomes a prerequisite and `fy worktree
    add` SKIPS with a retry hint when there's no image yet — deliberately **not** a host fallback,
    because "the yard wasn't ready" must never silently become "so we ran it on the Mac".
-2. **Yes, but it needs no credentials → split it: read in the yard, write on the host.** The VS Code
-   generator runs in the box (which `fy code` already requires to be up) and PRINTS a JSON document
+2. **Yes, but it needs no credentials → split it: read in the yard, write on the host.**
+   *(Superseded for this surface by
+   [ADR-0026](./0026-vscode-attach-config-is-declarative.md): the generator turned out to be data
+   wearing a script, and is now `[vscode]` config foldyard evaluates itself. The triage answer
+   stands for any future surface that genuinely needs computed output.)* The VS Code
+   generator ran in the box (which `fy code` already requires to be up) and PRINTS a JSON document
    on stdout; foldyard parses it host-side and performs the one privileged write. The document is
    sanitized by an **allowlist** (`_ALLOWED_CONFIG_KEYS`), not a denylist: VS Code's attached-config
    schema includes lifecycle hooks and `initializeCommand` runs ON THE HOST, so a passthrough would

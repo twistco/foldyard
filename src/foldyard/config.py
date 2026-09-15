@@ -1156,6 +1156,27 @@ def vscode_workspace_file() -> str:
     return raw if isinstance(raw, str) else ""
 
 
+def vscode_extensions() -> list[str]:
+    """``[vscode] extensions`` — the marketplace ids ``fy code`` auto-installs on attach, carried
+    in the attached-container config. Config rather than the checkout's ``.vscode/extensions.json``
+    on purpose: a UI-kind extension installs on the HOST (into the operator's shared extensions
+    dir), and the recommendations file is mount data the box can write — so the list lives where
+    the adopt gate reviews it (ADR-0026). ``[]`` when absent or malformed, never a partial list."""
+    raw = _table("vscode").get("extensions")
+    if not isinstance(raw, list) or not all(isinstance(e, str) for e in raw):
+        return []
+    return [e for e in raw if isinstance(e, str)]
+
+
+def vscode_settings() -> dict:
+    """``[vscode.settings]`` — VS Code settings ``fy code`` carries in the attached-container
+    config, so Dev Containers applies them to the box's server (machine scope) on attach. Data,
+    not code: settings can't execute, which is why this is a table and lifecycle hooks are not
+    a key. Read from the ADOPTED copy like the extensions. ``{}`` when absent or not a table."""
+    raw = _table("vscode").get("settings")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
 def codex_enabled() -> bool:
     """True when the consumer declares a ``[codex]`` table — installs the OpenAI Codex CLI on
     box-up and mounts its persisted ``~/.codex`` (auth.json) volume. Absent ⇒ no Codex."""

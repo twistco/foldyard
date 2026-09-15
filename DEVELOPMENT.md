@@ -316,10 +316,16 @@ so that path stays the Mac / nested-KVM-host recipe in
   mechanism = a new kind, or an
   entry-point plugin. Consumer scripts run in a CONTAINER, never on the host —
   `[project].worktree_init` via `worktree._init_in_yard` (skips with a retry hint when the yard
-  isn't ready, never falls back), and the vscode attached-config generator via
-  `vscode._generate_attached_config`, which prints a JSON document that foldyard sanitizes with an
-  ALLOWLIST (`_ALLOWED_CONFIG_KEYS`) before doing the one host-side write. Keep it an allowlist:
-  VS Code's `initializeCommand` runs on the HOST, and a denylist fails open when the schema grows.
+  isn't ready, never falls back). The VS Code attached-container config is AUTHORED by foldyard
+  (`vscode._attached_config`) from the ADOPTED `[vscode]` table — `fy code` runs `configpin.gate`
+  and reads through `devmode.worktree_config()` like every other host-consequence verb — with
+  `remoteUser` and the daemon-port pin as foldyard facts
+  ([ADR-0026](./docs/adrs/0026-vscode-attach-config-is-declarative.md)). Don't reintroduce a
+  repo-produced document (VS Code's attached-config schema has lifecycle hooks and
+  `initializeCommand` runs on the HOST), and don't source the `extensions` list from mount data
+  such as `.vscode/extensions.json`: a UI-kind extension installs into the operator's shared
+  `~/.vscode/extensions`, so that list is host code execution by another name for anything that
+  can write the checkout.
 - **Two different env sets on an `InjectRule`.** `requires` gates the whole proxy daemon's spawn
   (so it must never carry one mechanism's credential — a proxy that won't launch
   connection-refuses every box request under always-route); `env` is what that rule's minter may

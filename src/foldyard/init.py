@@ -356,7 +356,13 @@ def render(opts: InitOptions) -> str:
         '# install = "curl -fsSL https://get.pulumi.com | sh -s -- --install-root /opt/fy-tools --no-edit-path"',
         "#",
         "# VS Code attach (`fy code`) — persist the vscode-server volume across box recreations.",
+        "# Extensions install on attach (config, not .vscode/extensions.json — the list decides",
+        "# what the HOST installs, so it is read from the adopted copy); settings are applied to",
+        "# the box's server.",
         "# [vscode]",
+        '# extensions = ["anthropic.claude-code"]',
+        "# [vscode.settings]",
+        '# "remote.autoForwardPorts" = false',
     ]
     return "\n".join(lines) + "\n"
 
