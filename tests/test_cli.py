@@ -59,6 +59,17 @@ def test_build_routes_services_and_profiles(monkeypatch):
     assert calls == [(["e2e-app"], ["e2e"])]
 
 
+def test_reclaim_routes_to_the_unconditional_sweep(monkeypatch):
+    from foldyard import stack
+
+    called: list[bool] = []
+    monkeypatch.setattr(stack, "reclaim_now", lambda: called.append(True) or 0)
+
+    result = runner.invoke(cli.app, ["reclaim"])
+    assert result.exit_code == 0
+    assert called == [True]
+
+
 def test_hidden_commands_absent_from_help():
     # env/workspaces are hidden=True: not advertised in --help, but callable. Assert on the
     # rendered text directly rather than filtering by the "│" box char — rich downgrades/omits

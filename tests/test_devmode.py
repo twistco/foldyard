@@ -947,7 +947,7 @@ def test_disk_row_warns_when_the_store_is_low(monkeypatch):
     assert len(rows) == 1
     status, name, detail = rows[0]
     assert (status, name) == ("warn", "engine disk")  # warn, never fail — it's still working
-    assert "no space left on device" in detail and "until=24h" in detail
+    assert "no space left on device" in detail and "fy reclaim" in detail
 
 
 def test_disk_row_is_ok_with_headroom(monkeypatch):

@@ -607,6 +607,14 @@ def test_app_port_key_is_optional(fresh_config, tmp_path):
     assert config.app_port_key() is None
 
 
+def test_reclaim_script_from_toml_else_none(fresh_config, tmp_path):
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.reclaim_script() is None
+    (tmp_path / "foldyard.toml").write_text('[reclaim]\nscript = "dev-stack/reclaim.sh"\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.reclaim_script() == "dev-stack/reclaim.sh"
+
+
 def test_port_bases_from_toml_else_empty(fresh_config, tmp_path):
     (tmp_path / "foldyard.toml").write_text("[ports]\nAPP_PORT = 3000\nPG_PORT = 5533\n")
     fresh_config(FOLDYARD_REPO=tmp_path)

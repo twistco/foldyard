@@ -621,6 +621,14 @@ def worktree_init() -> str | None:
     return os.environ.get("FOLDYARD_WORKTREE_INIT") or _project_table().get("worktree_init") or None
 
 
+def reclaim_script() -> str | None:
+    """Optional ``[reclaim] script`` — the project's own space sweep (pnpm/uv cache prunes, test
+    artefacts, …), run IN THE DEV BOX with cwd = the checkout after foldyard's engine-level
+    sweeps, both by ``up`` under low headroom and by ``fy reclaim``. Checkout-relative path."""
+    raw = _table("reclaim").get("script")
+    return str(raw) if raw else None
+
+
 def port_bases() -> dict[str, int]:
     """Host-published port bases, keyed by the env-var name the compose file reads
     (e.g. ``APP_PORT``). A worktree adds a per-name offset to each. Empty when there's

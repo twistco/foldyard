@@ -1222,8 +1222,7 @@ def _disk_headroom_check():
         "engine disk",
         f"{head.render()} on the image/volume store",
         f"{head.render()} — a build can die mid-layer on 'no space left on device'. "
-        f"`fy up` reclaims automatically at this level; to sweep now: "
-        f"{config.engine()} image prune -f --filter until={stack.RECLAIM_MIN_AGE}",
+        f"`fy up` reclaims automatically at this level; to sweep now: fy reclaim",
     )
 
 

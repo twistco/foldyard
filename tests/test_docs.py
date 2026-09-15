@@ -70,6 +70,7 @@ def test_configuration_md_headings_are_real_surfaces():
         "claude",
         "codex",
         "vscode",
+        "reclaim",
         "plugins.gcp-metadata",
         "plugins.github",
         "plugins.auth0-sim",

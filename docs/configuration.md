@@ -719,6 +719,27 @@ by key, since that's where a `hooks` or `permissions` entry would show up.
 - **`[vscode]`** — mounts the vscode-server volume so `fy code` (VS Code attach) reuses its
   server across box recreations. No keys.
 
+## `[reclaim]`
+
+The project's own space sweep. foldyard decides *when* (the engine store under 20% headroom —
+the same line `fy doctor` warns at — checked before every `fy up` build, or on demand with
+`fy reclaim`) and does the engine-level sweeps only it can reason about: dangling images older
+than a day, images of removed worktrees, and the images its own build just superseded. What
+*else* fills the store is the project's business, and it lives in volumes only the dev box
+mounts, with tools only the box has — so it's a script, run **in the box** with cwd = the
+checkout, after those sweeps.
+
+```toml
+[reclaim]
+script = "dev-stack/reclaim.sh"   # checkout-relative; e.g. pnpm store prune, uv cache prune,
+                                  # trimming test artefacts, a stale buildx state volume
+```
+
+Best-effort like the rest: output streams to the terminal, a non-zero exit is not a failure,
+and a stopped box is a note (the engine sweeps still ran — run `fy reclaim` inside the box
+to reach its volumes). Per-worktree caches are only reached from that worktree's box; shared
+ones from any.
+
 ## `[plugins.<name>]`
 
 Plugin opt-ins — declaring the table (even empty) loads that plugin; a repo that declares

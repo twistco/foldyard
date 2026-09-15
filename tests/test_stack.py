@@ -883,6 +883,166 @@ def test_reclaim_triggers_on_a_low_fraction_of_a_large_store(fake_repo, monkeypa
     assert [c for c in calls if "prune" in c]
 
 
+def test_reclaim_warns_instead_of_ticking_when_the_store_stays_low(fake_repo, monkeypatch, capsys):
+    # `✓ reclaimed 0.0 GiB` on a store that is still low is a tick on a failure (seen live: every
+    # dangling image was younger than the guard, the build died on ENOSPC anyway). Say it is
+    # still low and name the sweeps this deliberately leaves to a human.
+    _, fake_run = _headroom_run(free_gib=2.0)
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    monkeypatch.setattr(stack, "_live_projects", lambda ctx: None)
+    stack.reclaim(stack.resolve())
+    out = capsys.readouterr().out
+    assert "✓" not in out
+    assert "still low" in out
+    assert "podman system df" in out and "podman image prune -a" in out
+
+
+def test_reclaim_now_sweeps_regardless_of_headroom(fake_repo, monkeypatch):
+    # The manual verb exists for the emergency — a store that is full NOW, with a box you can't
+    # afford to bounce — so it must not be gated on the same threshold that already failed to
+    # help. Same sweeps as `up`'s, just unconditional.
+    calls, fake_run = _headroom_run(free_gib=40.0)
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    monkeypatch.setattr(stack, "_live_projects", lambda ctx: None)
+    assert stack.reclaim_now() == 0
+    assert [c for c in calls if c[:3] == ["podman", "image", "prune"]]
+
+
+# ── the project's own [reclaim] script ───────────────────────────────────────────────
+
+
+def _box_runs(monkeypatch, *, box_running: bool, free_gib: float = 2.0):
+    """`_headroom_run` plus an answer for the dev-box liveness probe (`ps -q -f name=…`)."""
+    calls, headroom = _headroom_run(free_gib=free_gib)
+
+    def fake_run(cmd, **kw):
+        proc = headroom(cmd, **kw)
+        if cmd[:2] == ["podman", "ps"] and any(a.startswith("name=") for a in cmd):
+            proc.stdout = "abc123\n" if box_running else ""
+        return proc
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    monkeypatch.setattr(stack, "_live_projects", lambda ctx: None)
+    return calls
+
+
+def test_reclaim_runs_the_project_script_in_the_box(fake_repo, monkeypatch):
+    # What ELSE eats the store is the consumer's business — pnpm/uv caches, e2e artefacts, a
+    # buildx state volume — and lives in volumes only the box mounts, with tools only the box has.
+    # foldyard owns WHEN (its threshold) and the engine-level sweeps; the script owns the rest.
+    monkeypatch.setattr(config, "reclaim_script", lambda: "dev-stack/reclaim.sh")
+    calls = _box_runs(monkeypatch, box_running=True)
+    stack.reclaim(stack.resolve())
+    hook = next(c for c in calls if c[:2] == ["podman", "exec"])
+    assert "tangible-podman-devbox" in hook
+    assert hook[hook.index("-w") + 1] == str(fake_repo)  # the checkout, not the caller's cwd
+    assert hook[-1].endswith("sh dev-stack/reclaim.sh")
+    # After the engine sweeps, not before: a script that fails must not cost them.
+    assert calls.index(hook) > calls.index(next(c for c in calls if "prune" in c))
+
+
+def test_reclaim_skips_the_project_script_when_the_box_is_down(fake_repo, monkeypatch, capsys):
+    monkeypatch.setattr(config, "reclaim_script", lambda: "dev-stack/reclaim.sh")
+    calls = _box_runs(monkeypatch, box_running=False)
+    stack.reclaim(stack.resolve())
+    assert not [c for c in calls if c[:2] == ["podman", "exec"]]
+    assert "reclaim.sh" in capsys.readouterr().out  # said, not silent
+
+
+def test_reclaim_runs_the_project_script_directly_inside_the_box(fake_repo, monkeypatch):
+    # In-box `fy reclaim` (the emergency path) is already where the volumes are mounted.
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setattr(config, "reclaim_script", lambda: "dev-stack/reclaim.sh")
+    calls = _box_runs(monkeypatch, box_running=True)
+    stack.reclaim(stack.resolve())
+    assert ["sh", "dev-stack/reclaim.sh"] in calls
+    assert not [c for c in calls if c[:2] == ["podman", "exec"]]
+
+
+def test_reclaim_without_a_script_runs_no_hook(fake_repo, monkeypatch):
+    monkeypatch.setattr(config, "reclaim_script", lambda: None)
+    calls = _box_runs(monkeypatch, box_running=True)
+    stack.reclaim(stack.resolve())
+    assert not [c for c in calls if c[:2] == ["podman", "exec"] or c[:1] == ["sh"]]
+
+
+# ── images a build superseded are removed once nothing runs them ─────────────────────
+
+
+def _build_then_up_runs(monkeypatch, config_yaml: str, ids: dict[str, list[str]]):
+    """Record commands; answer `compose config` with the given services and `image inspect
+    <name>` with the next id in ``ids[name]`` (the last repeats) — the image before and after
+    the build."""
+    import types
+
+    calls: list[list[str]] = []
+    remaining = {k: list(v) for k, v in ids.items()}
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if "config" in cmd:
+            return types.SimpleNamespace(returncode=0, stdout=config_yaml, stderr="")
+        if cmd[:3] == ["podman", "image", "inspect"]:
+            seq = remaining.get(cmd[-1], [])
+            out = (seq.pop(0) if len(seq) > 1 else (seq[0] if seq else "")) + "\n"
+            return types.SimpleNamespace(returncode=0 if out.strip() else 1, stdout=out, stderr="")
+        return _FakeProc()
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    return calls
+
+
+_ONE_BUILD_SERVICE = json.dumps({"services": {"app": {"build": {"context": "/repo/app"}}}})
+
+
+def test_up_removes_the_image_its_build_superseded(fake_repo, monkeypatch):
+    # A rebuild retags `<project>_app`; the image it replaced is untagged, childless and OURS —
+    # provably not another session's build in flight, which is what the age guard on the
+    # dangling sweep exists for. So it needs no guard: remove it once `up` has moved the
+    # containers off it. Without this, every `fy up` that rebuilds a 6 GB image leaves 6 GB
+    # behind, all younger than any age guard exactly when the next build needs the space.
+    calls = _build_then_up_runs(
+        monkeypatch,
+        _ONE_BUILD_SERVICE,
+        {"tangible-podman_app": ["sha256:old", "sha256:new"]},
+    )
+    assert stack.up() == 0
+    rmi = next(c for c in calls if c[:2] == ["podman", "rmi"])
+    assert rmi == ["podman", "rmi", "sha256:old"]  # no --force: still-referenced ⇒ left alone
+    up_idx = next(i for i, c in enumerate(calls) if "compose" in c and "up" in c)
+    assert calls.index(rmi) > up_idx  # after the containers were recreated onto the new image
+
+
+def test_up_keeps_an_image_the_build_left_unchanged(fake_repo, monkeypatch):
+    # A fully cached build yields the same id — nothing was superseded.
+    calls = _build_then_up_runs(
+        monkeypatch, _ONE_BUILD_SERVICE, {"tangible-podman_app": ["sha256:same"]}
+    )
+    assert stack.up() == 0
+    assert not [c for c in calls if c[:2] == ["podman", "rmi"]]
+
+
+def test_up_keeps_the_old_image_when_the_build_fails(fake_repo, monkeypatch):
+    import types
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if "config" in cmd:
+            return types.SimpleNamespace(returncode=0, stdout=_ONE_BUILD_SERVICE, stderr="")
+        if cmd[:3] == ["podman", "image", "inspect"]:
+            return types.SimpleNamespace(returncode=0, stdout="sha256:old\n", stderr="")
+        proc = _FakeProc()
+        if len(cmd) >= 2 and cmd[1] == "build":
+            proc = types.SimpleNamespace(returncode=1, stdout="", stderr="")
+        return proc
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    assert stack.up() != 0
+    assert not [c for c in calls if c[:2] == ["podman", "rmi"]]
+
+
 def test_reclaim_is_a_no_op_when_the_disk_figure_is_unknown(fake_repo, monkeypatch):
     # docker (no equivalent field), a stopped VM, a malformed payload — all must read as "no
     # finding, change nothing" rather than as pressure.
