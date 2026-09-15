@@ -51,6 +51,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   the registry's `verify_checks`.
 - `machine.py` / `machine_backend.py` — rootless dev-VM lifecycle behind the pluggable
   backend contract (podman | lima | native; see `docs/lima-backend-scope.md`).
+- `guestlog.py` — the VM's log budget (`machine ensure`, every VM backend): journald cap as root
+  (Lima: rendered into the boot script; podman machine: `sudo -n` over ssh) + the rootless API
+  service's log level as a user drop-in over ssh. Best-effort — a warning, never an abort.
 - `hostwall.py` — the host-side egress wall for the machine VM on Linux: nftables matched by the
   VM's cgroup v2 scope (the VM is started in a per-VM systemd scope so the match is predictable),
   wired via `[machine].host_wall`; fail-closed — a VM outside its own scope is refused, not
