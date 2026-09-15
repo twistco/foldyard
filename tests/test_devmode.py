@@ -1243,3 +1243,54 @@ def test_mode_set_with_the_secret_present_does_not_prompt(isolated_state, monkey
     monkeypatch.setattr(devmode.getpass, "getpass", lambda _p: pytest.fail("already present"))
     assert devmode.main(["set", "github=app"]) == 0
     assert devmode.read()["mode"]["github"] == "app"
+
+
+# ── the TUI's workspace actions ────────────────────────────────────────────────────────
+
+
+class _FyDone:
+    returncode = 1
+    stdout = "+ podman compose down\n"
+    stderr = "\x1b[31m✗ compose exited 1\x1b[0m\n"
+
+
+def _stub_fy(monkeypatch):
+    monkeypatch.setattr(devmode.subprocess, "run", lambda *a, **k: _FyDone())
+    monkeypatch.setattr(devmode, "main_repo", lambda: "/tmp")
+    monkeypatch.setattr(devmode, "_CMD_LOG", [])  # action entries survive reset, so isolate
+
+
+def test_fy_records_the_action_in_the_command_log(isolated_state, monkeypatch):
+    # A TUI workspace action's output used to be captured and then dropped after a one-line
+    # toast — the `worktree remove` that stranded a container left no trace anywhere.
+    _stub_fy(monkeypatch)
+    devmode._fy(["worktree", "remove", "feat", "--yes"], env_extra={"WORKTREE": "feat"})
+    entry = devmode.cmd_log()[-1]
+    assert entry["cmd"] == "WORKTREE=feat foldyard worktree remove feat --yes"
+    assert entry["rc"] == 1 and entry["kind"] == "action"
+    assert "+ podman compose down" in entry["out"] and "✗ compose exited 1" in entry["out"]
+    assert "\x1b" not in entry["out"]
+
+
+def test_fy_appends_to_the_durable_actions_log(isolated_state, monkeypatch):
+    # Project-shared (under state_dir, next to the supervisor log), NOT per-worktree: the action
+    # may be the one deleting that worktree's posture dir.
+    _stub_fy(monkeypatch)
+    devmode._fy(["box", "down"])
+    devmode._fy(["worktree", "remove", "feat", "--yes"], env_extra={"WORKTREE": "feat"})
+    text = (isolated_state["dir"] / "tui-actions.log").read_text()
+    assert text.count("$ ") == 2  # one header line per action, appended
+    assert "$ WORKTREE=feat foldyard worktree remove feat --yes  (rc=1)" in text
+    assert "    + podman compose down\n    ✗ compose exited 1\n" in text
+    assert "\x1b" not in text
+
+
+def test_doctor_reset_keeps_action_entries(isolated_state, monkeypatch):
+    # The doctor clears the ring buffer per run so its pane shows that run's probes only — an
+    # action's entry must survive that, or looking at the Doctor tab hides what you came for.
+    _stub_fy(monkeypatch)
+    devmode._fy(["box", "down"])
+    devmode._run(["true"])
+    devmode.cmd_log_reset()
+    kinds = [e["kind"] for e in devmode.cmd_log()]
+    assert kinds == ["action"]
