@@ -1146,16 +1146,6 @@ def vscode_enabled() -> bool:
     return _toml().get("vscode") is not None
 
 
-def vscode_workspace_file() -> str:
-    """Optional repo-relative ``.code-workspace`` path (``[vscode] workspace_file``). When set
-    and present in the checkout, ``fy code`` opens THAT (a multi-root workspace) instead of the
-    folder — the lever for per-folder editor settings in a monorepo (e.g. a different default
-    formatter per sub-project, which a single-root workspace cannot express). Empty ⇒ folder
-    attach."""
-    raw = _table("vscode").get("workspace_file", "")
-    return raw if isinstance(raw, str) else ""
-
-
 def vscode_extensions() -> list[str]:
     """``[vscode] extensions`` — the marketplace ids ``fy code`` auto-installs on attach, carried
     in the attached-container config. Config rather than the checkout's ``.vscode/extensions.json``

@@ -71,7 +71,7 @@ consumer code runs to produce it, and nothing under the mount is read for it.**
   uses ([ADR-0022](./0022-host-runs-the-adopted-config.md)). A box edit to `[vscode]` is inert
   until an operator adopts it, and the adoption diff is where "this branch wants `x.y` installed
   on your machine" is seen. `fy code` had read the tree ambiently before (for `[vscode]`'s presence
-  and `workspace_file`); it no longer does for anything.
+  and `workspace_file`); it no longer reads the tree — or anything else under the mount — at all.
 - `remoteUser` is pinned to `root` by foldyard, not declared.
 - foldyard keeps the last config it wrote as the record of what the box's Machine settings hold,
   and clears `.writeMachineSettingsMarker` whenever the settings differ (a first write included) —
@@ -86,8 +86,7 @@ foldyard naming every key itself, a consumer-supplied `initializeCommand` has no
 
 ## Considered and not done
 
-**Shadowing `.vscode/` (and the `.code-workspace`) with overlay volumes so the box can't edit
-them.** It would defend the residual channel — VS Code itself still reads the mount's `.vscode/`
+**Shadowing `.vscode/` with overlay volumes so the box can't edit it.** It would defend the residual channel — VS Code itself still reads the mount's `.vscode/`
 when attached — but the boundary this codebase draws is *host consequences come from adopted
 config*, not *mount files are immutable*, and the second is a losing game: `.vscode/`,
 `*.code-workspace`, `.editorconfig`, a `pyproject` naming a tool path — every file an editor reads
@@ -102,10 +101,18 @@ this one — name it, pin it, or move it to config — not a mount-wide overlay.
 ## Consequences
 
 - The consumer's script shrinks to nothing, or to its fourth job. Tangible's editor-policy merge
-  (per-folder formatters, the generated workspace file) now needs a home outside foldyard — commit
-  the files, or keep a repo-side task; the reason they were gitignored (Peacock writing per-user
-  state into the workspace file) is Tangible's to weigh. `[vscode] workspace_file` stays: a thin,
-  honest key ("open this instead of the folder"), never the part that needed code.
+  (per-folder formatters) now needs a home outside foldyard — commit the files, or keep a
+  repo-side task.
+- **`[vscode] workspace_file` is removed, not kept.** It looked like a thin, honest key ("open this
+  instead of the folder"), but it gave one worktree two attach shapes over its life: the first
+  `fy code` found no generated workspace file and attached the folder, every later one attached the
+  file — and VS Code reads window-scoped settings (`workbench.colorCustomizations`, the state
+  Peacock saves) from the folder's `.vscode/settings.json` in a single-root window but only from
+  the workspace file in a multi-root one, so what an operator set in the first session silently
+  stopped applying in the second. The key existed to carry the one consumer's multi-root formatter
+  workaround, which that consumer is retiring; `fy code` now has one attach shape, the checkout
+  folder, and per-worktree editor state lives in each worktree's own `.vscode/settings.json` by
+  construction.
 - `remote.autoForwardPorts = false` — the request that surfaced all this — is one line of config.
 - An agent adding an extension on a branch now needs an operator to adopt before it installs.
   That friction is the point: it is the exact moment the operator should see the id.

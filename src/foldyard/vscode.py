@@ -495,21 +495,10 @@ def code() -> int:
         _err(f"  'Dev Containers: Attach to Running Container…' → {box}.")
         return 1
 
-    # Multi-root workspace attach: when the consumer declares `[vscode] workspace_file` and
-    # the file exists, open it via --file-uri instead of the folder.
-    open_flag = "--folder-uri"
-    ws_rel = cfg.vscode_workspace_file()
-    if ws_rel:
-        if (host_checkout / ws_rel).is_file():
-            open_flag, uri = "--file-uri", _uri(box, f"{checkout}/{ws_rel}")
-            print(f"▶ workspace: {ws_rel}  (multi-root)")
-        else:
-            print(f"  ({ws_rel} not in the checkout — folder attach instead)")
-
     print(f"▶ launching VS Code (DOCKER_HOST={env.get('DOCKER_HOST', '')})…")
     # `env` (incl. DOCKER_HOST) reaches ONLY this launched, isolated instance — never the
     # user's shell or their default VS Code. `|| true` parity: a non-zero `code` is non-fatal.
-    subprocess.run([code_cli, "--user-data-dir", str(udd), open_flag, uri], env=env)
+    subprocess.run([code_cli, "--user-data-dir", str(udd), "--folder-uri", uri], env=env)
     print("✓ launched. If it didn't attach, check that VS Code's Docker context points at the")
     print("  same socket as DOCKER_HOST (`fy docs quickstart`).")
     return 0

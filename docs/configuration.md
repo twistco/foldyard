@@ -741,9 +741,6 @@ by key, since that's where a `hooks` or `permissions` entry would show up.
   gate first: the extensions list decides what the host installs (a UI-kind extension lands in
   the operator's shared `~/.vscode/extensions`), so a box edit to it is inert until an operator
   adopts it ([ADR-0026](./adrs/0026-vscode-attach-config-is-declarative.md)).
-  - **`workspace_file`** — repo-relative `.code-workspace` path. When set and present in the
-    checkout, `fy code` opens THAT (a multi-root workspace) instead of the folder — the lever
-    for per-folder editor settings in a monorepo. Absent ⇒ folder attach.
   - **`extensions`** — marketplace ids (`publisher.name`) installed on attach. The Dev Containers
     extension is dropped (meaningless inside the container); an invalid id is dropped rather than
     handed to VS Code. Keep the sub-projects' `.vscode/extensions.json` for plain VS Code's
@@ -763,7 +760,6 @@ by key, since that's where a `hooks` or `permissions` entry would show up.
 
   ```toml
   [vscode]
-  workspace_file = "acme.code-workspace"
   extensions = ["anthropic.claude-code", "charliermarsh.ruff", "biomejs.biome"]
 
   [vscode.settings]

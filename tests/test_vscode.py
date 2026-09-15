@@ -234,31 +234,12 @@ def test_launch_uses_isolated_user_data_dir(fake):
     argv = launch[0]["cmd"]
     # the WHOLE point: a dedicated --user-data-dir, NOT VS Code's default singleton dir.
     assert argv[argv.index("--user-data-dir") + 1] == str(fake["udd"])
+    # Always the checkout FOLDER: one attach shape for a worktree's lifetime, so window-scoped
+    # state VS Code saves in one session (Peacock colours, …) is read by the next.
+    assert "--file-uri" not in argv
     uri = argv[argv.index("--folder-uri") + 1]
     assert uri.startswith("vscode-remote://attached-container+")
     assert uri.endswith(str(fake["ctx"].main))
-
-
-def test_workspace_file_opens_file_uri_when_present(fake, monkeypatch):
-    fake["state"]["running"] = True
-    monkeypatch.setattr(config, "vscode_workspace_file", lambda: "tangible.code-workspace")
-    (fake["ctx"].main / "tangible.code-workspace").write_text("{}\n")
-    assert vscode.code() == 0
-    argv = _launch(fake["calls"])[0]["cmd"]
-    assert "--folder-uri" not in argv
-    uri = argv[argv.index("--file-uri") + 1]
-    assert uri.startswith("vscode-remote://attached-container+")
-    assert uri.endswith(str(fake["ctx"].main) + "/tangible.code-workspace")
-
-
-def test_workspace_file_missing_falls_back_to_folder_attach(fake, monkeypatch, capsys):
-    fake["state"]["running"] = True
-    monkeypatch.setattr(config, "vscode_workspace_file", lambda: "tangible.code-workspace")
-    assert vscode.code() == 0
-    argv = _launch(fake["calls"])[0]["cmd"]
-    assert "--file-uri" not in argv
-    assert argv[argv.index("--folder-uri") + 1].endswith(str(fake["ctx"].main))
-    assert "not in the checkout" in capsys.readouterr().out
 
 
 def test_launch_stamps_local_terminal_zdotdir_in_isolated_user_settings(fake):

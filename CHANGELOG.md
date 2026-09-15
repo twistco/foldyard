@@ -137,6 +137,19 @@ break config or CLI shape, and say so here. How a release is cut:
   (`Environment=LOGGING=--log-level=warn`) over ssh on both, restarting the service only when
   the file changed. Both are housekeeping, not a posture: a guest that refuses is a warning,
   never an abort. Measured after applying by hand: 4.1G → 983M.
+- **`fy code` authors the attached-container config itself from a declarative `[vscode]` table,
+  read from the ADOPTED copy; the in-box generator script and `[vscode] workspace_file` are
+  removed.** `extensions` (marketplace ids installed on attach) and `[vscode.settings]` (applied
+  to the box's server) are config, behind the same adopt gate as every host-consequence verb —
+  the extensions list decides what the host installs, so a box edit to it is inert until adopted.
+  `remoteUser` and the daemon-port pin are foldyard facts. Nothing under the mount is read any
+  more: not a consumer script's output, not `.vscode/extensions.json`, and not a
+  `.code-workspace` — the attach is always the checkout folder, one shape for a worktree's
+  lifetime, so window-scoped editor state saved in one session (Peacock colours, …) is read by the
+  next. **Migration:** drop `workspace_file` and any generator script from `[vscode]`; move the
+  extensions it collected into `[vscode] extensions` and its machine settings into
+  `[vscode.settings]`; commit per-folder `.vscode/settings.json` files if you relied on a
+  generated multi-root workspace ([ADR-0026](./docs/adrs/0026-vscode-attach-config-is-declarative.md)).
 - **The example consumer's api is a uv project, and the example's box shadows its venv.**
   `example/api` gains `pyproject.toml` + `uv.lock` (the same three pins, now locked) and an image
   built from that lockfile with uv; `example/foldyard.toml`'s `[box]` wires the in-tree-artefact
