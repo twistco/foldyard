@@ -754,6 +754,12 @@ by key, since that's where a `hooks` or `permissions` entry would show up.
     daemon the box dials). Dev Containers writes these ONCE per server install; `fy code` clears
     that marker whenever the table changed, so an edit lands on the next attach.
 
+  Where this lands: the box's **Remote [Machine]** layer — above the isolated instance's own user
+  settings, below the checkout's `.vscode/settings.json`. So the table is the team's policy, and
+  that gitignored workspace file stays each operator's own (window colours per worktree and the
+  like override the policy, never diff). It reaches the `fy code` window only; a native VS Code
+  window on the same checkout sees none of it.
+
   Per-operator tweaks go in `foldyard.local.toml` (deep-merged, and adopted alongside). Removing
   the `_generatedBy` key from the written config file is the host-side hatch that stops
   `fy code` writing it at all — the whole table then stops applying to that instance.
