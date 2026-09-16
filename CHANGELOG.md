@@ -20,6 +20,27 @@ break config or CLI shape, and say so here. How a release is cut:
   not with an empty credential file. The hidden `foldyard stubs` verb and the `ensure_stubs`
   shell shim `shellenv` emitted for it go with it (`dev_vm_banner` / `foldyard banner` stay).
 
+### Fixed
+
+- **A daemon's own launch no longer reads as a lapse.** The supervisor tick probes capabilities
+  before it spawns daemons, so the tick that activated a rung (and the first tick of every
+  restarted supervisor — each `fy up`) probed the minter's port before anything had bound it:
+  a failure cached for the probe's whole interval, rendered by `fy mode` as `⚠ DEGRADED —
+  minter port not answering` beside the same daemon's `● up`, plus a spurious DEGRADED →
+  recovered notification pair a minute apart on every launch. An axis whose daemon is not yet
+  answerable (about to be spawned, or launched under `DAEMON_WARMUP_SECONDS` ago) now makes no
+  claim, and a verdict cached from before the launch is dropped so the axis is probed fresh
+  once warm. Neither a child that already died (a crash-loop still reads as one) nor a daemon
+  a spawn gate holds back (missing host.env, a foreign listener on its port) is warming —
+  the latter keeps the port probe that names a forwarder shadowing the minter.
+- **The gcp metadata emulator logs a client hang-up as one line, not a traceback.** A token
+  client giving up mid-response (google-auth's own timeout against a slow mint, a container
+  stopping) hit socketserver's default `handle_error` — a full traceback per request, which
+  read as the emulator being broken when the caller had merely left. Only the hang-up class
+  (`BrokenPipeError` / `ConnectionResetError`) is quietened; anything else still traces. The
+  file is restaged on the next `fy up`; the running emulator container picks it up on its
+  next (re)create.
+
 ### Added
 
 - **`fy reclaim`, `[reclaim] script`, and `fy up` removes the images its own build superseded.**

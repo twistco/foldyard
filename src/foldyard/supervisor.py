@@ -34,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 from shutil import which
@@ -43,6 +44,11 @@ from . import allowlist, config, configpin, devmode, githeal, transcripts
 TICK_SECONDS = 2.0
 RESTART_BACKOFF = 10.0
 MISSING_ENV_NAG = 30.0
+# How long after a daemon's launch its axis makes NO capability claim. The tick probes before it
+# spawns, so a rung's first tick (and a restarted supervisor's) would otherwise probe a port
+# nothing has bound yet — a failure cached for the probe's whole interval, shown beside a `● up`
+# daemon row, and a spurious DEGRADED→recovered notification pair on every launch.
+DAEMON_WARMUP_SECONDS = 10.0
 # A live supervisor stamps its heartbeat every tick (~2s, plus per-tick daemon probes); a stamp
 # this old while the singleton lock is HELD means the reconcile loop is wedged.
 HEARTBEAT_STALE_SECONDS = 30.0
@@ -566,9 +572,42 @@ def expire_user_modes() -> dict:
 _probe_state: dict[tuple[str, str, str], dict] = {}
 
 
-def run_capability_probes(wt: str, mode: dict) -> dict[str, dict]:
+def _warming_axes(
+    axis_daemon: dict[str, str | None],
+    desired: Collection[str],
+    children: dict[str, Child],
+    nagged: Collection[str] = (),
+) -> set[str]:
+    """The axes whose DESIRED daemon cannot answer a probe yet: about to be spawned (no child,
+    and no spawn gate holding it — the probes run before the spawn), or launched under
+    ``DAEMON_WARMUP_SECONDS`` ago and still binding. Two things are deliberately NOT warming,
+    because waiting on them would silence a real problem: a child that already died (a
+    crash-loop is a degradation, probed as one), and a daemon a spawn gate holds back
+    (``nagged``: missing host.env, a foreign listener on its port, exec failure) — it is never
+    going to bind, and the gcp port probe exists precisely to name a foreign listener shadowing
+    the port, which with the listener there FIRST is the only surface that says why `● up`
+    lies."""
+    now = time.monotonic()
+    out: set[str] = set()
+    for axis, daemon in axis_daemon.items():
+        if daemon is None or daemon not in desired:
+            continue
+        child = children.get(daemon)
+        if child is None:
+            if daemon not in nagged:
+                out.add(axis)
+        elif child.alive() and now - child.started_at < DAEMON_WARMUP_SECONDS:
+            out.add(axis)
+    return out
+
+
+def run_capability_probes(wt: str, mode: dict, warming: Collection[str] = ()) -> dict[str, dict]:
     """Run worktree ``wt``'s DUE capability probes and return its merged capability map:
-    axis → {ok, detail, checked}. Probes come from the plugins (``capability_probes`` — "does
+    axis → {ok, detail, checked}. An axis in ``warming`` (its daemon not yet answerable — see
+    ``_warming_axes``) is not probed and makes no claim; a verdict cached from before the
+    daemon's launch is dropped, so the axis is probed FRESH once warm rather than served the
+    pre-launch failure for the rest of the interval.
+    Probes come from the plugins (``capability_probes`` — "does
     the credential chain this rung promises actually work right now?"); results are cached
     per-probe until ``interval`` elapses, so the per-tick cost is one dict lookup. A probe that
     raises reads as failing (a broken probe must surface, not crash the tick). When one axis has
@@ -580,6 +619,9 @@ def run_capability_probes(wt: str, mode: dict) -> dict[str, dict]:
     active_keys: set[tuple[str, str, str]] = set()
     for probe in devmode.capability_probes(mode):
         key = (wt, probe.name, mode.get(probe.axis, ""))
+        if probe.axis in warming:
+            _probe_state.pop(key, None)
+            continue
         active_keys.add(key)
         state = _probe_state.get(key)
         if state is None or time.monotonic() >= state["due"]:
@@ -1004,7 +1046,11 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
             # Probe the EXTERNAL capability each active rung promises (PAM grant, ADC, token
             # validity) — due probes only; results feed the state file + this worktree's mirror
             # so `fy mode` on either side renders a DEGRADED axis instead of silent 401s.
-            capabilities[wt] = run_capability_probes(wt, mode)
+            capabilities[wt] = run_capability_probes(
+                wt,
+                mode,
+                warming=_warming_axes(devmode.axis_daemon(), desired, children, nagged),
+            )
             if wt in up:
                 devmode.write_mirror(
                     mode, devmode.read()["expires"], devmode.daemon_status(mode), capabilities[wt]
@@ -1091,6 +1137,9 @@ def _spawn_child(
         return
     try:
         children[name] = Child(name, spec)
+        # Launched ⇒ no longer gated. `nagged` doubles as "currently held back by a gate" for
+        # the capability warm-up, so it must not outlive the gate.
+        nagged.pop(name, None)
     except OSError as e:
         if time.monotonic() - nagged.get(name, 0.0) > MISSING_ENV_NAG:
             log(f"✗ can't start {name}: {e} (mitmproxy installed?); retrying")

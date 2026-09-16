@@ -9,6 +9,7 @@ import fcntl
 import os
 import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -378,12 +379,13 @@ def test_reap_refuses_to_kill_a_foreign_listener(monkeypatch):
     assert killed == []
 
 
-def _fake_cfg(wt: str) -> types.SimpleNamespace:
-    """A ``config.Config``-shaped stand-in for the reconcile tests: ``config.using()`` only needs an
-    object, but the tick also asks :mod:`foldyard.configpin` whether that checkout's foldyard.toml
-    still matches the copy the host adopted — so it needs a ``repo_root`` too. A path that doesn't
-    exist reads as "no config either side", i.e. no drift, which is what these tests want."""
-    return types.SimpleNamespace(worktree=wt, repo_root=Path("/nonexistent-checkout"))
+def _fake_cfg(wt: str) -> supervisor.config.Config:
+    """A real but empty ``config.Config`` for the reconcile tests (the tick binds it and asks the
+    registry for the axis→daemon map, so a bare namespace no longer does). The tick also asks
+    :mod:`foldyard.configpin` whether that checkout's foldyard.toml still matches the copy the
+    host adopted — a ``repo_root`` that doesn't exist reads as "no config either side", i.e. no
+    drift, which is what these tests want."""
+    return supervisor.config.Config(worktree=wt, repo_root=Path("/nonexistent-checkout"), toml={})
 
 
 class _StopTick(Exception):
@@ -1269,3 +1271,92 @@ def test_notify_respects_the_config_opt_out_and_missing_osascript(monkeypatch):
     with config_mod.using(make_config(FULL_TOML)):
         supervisor._notify("t", "b")
     assert runs == []
+
+
+# ── warm-up: no verdict about a daemon that can't answer yet ─────────────────────────────
+# The tick probes BEFORE it spawns, so the tick that activates a rung (or the first tick of a
+# restarted supervisor) probed a port nothing had bound yet: a failure cached for the probe's
+# whole interval, published beside a `● up` daemon row, plus a spurious DEGRADED→recovered
+# notification pair on every launch.
+
+
+def test_a_warming_axis_is_not_probed_and_makes_no_claim(monkeypatch):
+    calls: list[int] = []
+
+    def check():
+        calls.append(1)
+        return False, "port not answering"
+
+    monkeypatch.setattr(supervisor.devmode, "capability_probes", lambda mode: [_probe(check)])
+    assert supervisor.run_capability_probes("", {"gcp": "sa"}, warming={"gcp"}) == {}
+    assert calls == []
+
+
+def test_warm_up_drops_a_verdict_from_before_the_launch(monkeypatch):
+    healthy = [False]
+    probe = _probe(lambda: (healthy[0], "detail"), interval=3600.0)
+    monkeypatch.setattr(supervisor.devmode, "capability_probes", lambda mode: [probe])
+    first = supervisor.run_capability_probes("", {"gcp": "sa"})
+    assert first["gcp"]["ok"] is False  # probed before the daemon existed
+    assert supervisor.run_capability_probes("", {"gcp": "sa"}, warming={"gcp"}) == {}
+    healthy[0] = True
+    # After the warm-up the axis is probed FRESH — the hour-long cache from before the launch
+    # must not serve the pre-launch failure.
+    assert supervisor.run_capability_probes("", {"gcp": "sa"})["gcp"]["ok"] is True
+
+
+def test_warming_axes_follow_the_daemon_lifecycle(monkeypatch):
+    class _Child:
+        def __init__(self, started_at, alive=True):
+            self.started_at = started_at
+            self._alive = alive
+
+        def alive(self):
+            return self._alive
+
+    now = 1000.0
+    monkeypatch.setattr(supervisor.time, "monotonic", lambda: now)
+    axis_daemon = {"gcp": "gcp-minter", "github": "proxy", "claude": "proxy", "auth0": None}
+    desired = {"gcp-minter", "proxy"}
+    children: dict[str, Any] = {
+        "gcp-minter": _Child(now - 1.0),  # just launched — still binding
+        "proxy": _Child(now - supervisor.DAEMON_WARMUP_SECONDS - 1.0),  # warm
+    }
+    assert supervisor._warming_axes(axis_daemon, desired, children) == {"gcp"}
+    children["proxy"] = _Child(now - 1.0, alive=False)  # died right after launch: probe it
+    assert supervisor._warming_axes(axis_daemon, desired, children) == {"gcp"}
+    del children["gcp-minter"]  # desired but not spawned yet — this tick spawns it
+    assert supervisor._warming_axes(axis_daemon, desired, children) == {"gcp"}
+    # Not desired under this mode ⇒ nothing to wait for; the axis is probed as usual.
+    assert supervisor._warming_axes(axis_daemon, set(), children) == set()
+
+
+def test_a_gated_daemon_is_probed_not_treated_as_warming(monkeypatch):
+    # "No child" is ambiguous: about to spawn this tick, OR held back by a spawn gate (missing
+    # host.env, a foreign listener on its port, exec failure). A gated daemon is never going to
+    # bind, so waiting for it would silence its axis forever — and the gcp port probe exists
+    # precisely to name a foreign listener shadowing the port (the VS Code forwarder incident):
+    # with the forwarder there FIRST, the gate blocks and only the probe can say why `● up` lies.
+    monkeypatch.setattr(supervisor.time, "monotonic", lambda: 1000.0)
+    axis_daemon: dict[str, str | None] = {"gcp": "gcp-minter"}
+    assert supervisor._warming_axes(axis_daemon, {"gcp-minter"}, {}) == {"gcp"}
+    nagged = {"gcp-minter": 990.0}  # the gate nagged: currently blocked
+    assert supervisor._warming_axes(axis_daemon, {"gcp-minter"}, {}, nagged) == set()
+
+
+def test_a_successful_spawn_clears_the_daemons_nag(monkeypatch):
+    # `nagged` must mean "currently gated", not "was gated once": a stale entry would make a
+    # daemon that has since launched read as gated on its next respawn tick (one false verdict).
+    spawned: list[str] = []
+
+    class _FakeChild:
+        def __init__(self, name, spec):
+            spawned.append(name)
+
+    monkeypatch.setattr(supervisor, "Child", _FakeChild)
+    monkeypatch.setattr(supervisor.devmode, "probe", lambda port, host=None: False)
+    children: dict = {}
+    nagged = {"gcp-minter": 1.0}  # gated on an earlier tick (env was missing)
+    spec = {"requires": [], "port": 8188, "cmd": ["x"], "env": {}, "label": "minter"}
+    supervisor._spawn_child("gcp-minter", spec, children, nagged)
+    assert spawned == ["gcp-minter"] and "gcp-minter" not in nagged
