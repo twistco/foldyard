@@ -478,8 +478,17 @@ Any number of injectors can be on at once, each with its own host and token.
 ## `[[secret]]`
 
 Host-side secrets a posture needs **present** before its minter can work. Foldyard's business is
-presence, not provenance: it checks `host.env`, surfaces a doctor row, and — on a host TTY —
-prompts once for a paste. Where the value comes from is yours to decide.
+presence, not provenance: it checks `host.env`, surfaces a doctor row, and prompts once for a
+paste. Where the value comes from is yours to decide.
+
+The prompt comes at the **posture change**, because that is what consumes the secret (the
+supervisor's proxy reloads `host.env` every tick — the box never holds it): `fy mode sanity=on`
+asks on a host TTY *before* it writes the posture, so a Ctrl-C leaves the posture unchanged and
+the proxy never warms up against an empty `host.env`; a mode button in `fy tui` raises the same
+prompt as a modal (an empty paste skips — arm now, paste later; esc leaves the posture unchanged).
+`fy box up` re-checks the current posture as the backstop, for a posture that arrived by another
+door (a seeded worktree, a set with no TTY). Without a TTY foldyard warns and carries on — a
+missing secret degrades that one host, never the rest.
 
 ```toml
 [[secret]]

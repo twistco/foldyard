@@ -26,7 +26,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 # ── the keyless credential taxonomy ────────────────────────────────────────────────────────────
@@ -295,7 +295,8 @@ def ensure_secret(
     if not interactive:
         echo(
             f"⚠ {secret.label} isn't in {host_env} (${secret.var}) — the posture that needs it "
-            f"can't mint until it's set. Run `fy box up` on the Mac to be prompted."
+            f"can't mint until it's set. Run `fy mode …` or `fy box up` on the host with a TTY "
+            "to be prompted."
         )
         return "skipped"
     echo(f"▶ {secret.label}: paste it (stored on the host at 0600, never in the box or the repo).")
@@ -305,7 +306,10 @@ def ensure_secret(
         echo("  (single-line base64 — pipe the value through `base64` if the hint didn't)")
     value = prompt("  value (hidden): ").strip()
     if not value:
-        echo("  (nothing entered — skipped; set it later with a TTY `fy box up`.)")
+        echo(
+            "  (nothing entered — skipped; set it later from a host TTY: `fy mode …` or "
+            "`fy box up`.)"
+        )
         return "empty"
     to_store = secret_ok(value, secret.pattern, secret.b64)
     if to_store is None:
@@ -318,6 +322,24 @@ def ensure_secret(
     append_host_env(host_env, secret.var, to_store)
     echo(f"✓ stored {secret.label} in {host_env} (0600). The host minter reads it at mint time.")
     return "stored"
+
+
+def capture_secrets(
+    host_env: Path,
+    secrets: Iterable,
+    *,
+    interactive: bool,
+    prompt: Callable[[str], str],
+    echo: Callable[[str], None],
+) -> list[str]:
+    """:func:`ensure_secret` over every secret a posture declares (``registry().secrets(mode)``),
+    returning the statuses in order. The one loop behind both host-side doors to a posture —
+    `fy mode …` (asked of the mode ABOUT to be set, before it is written) and `fy box up` (the
+    backstop, asked of the current one) — so the two can't drift on what a missing secret means."""
+    return [
+        ensure_secret(host_env, secret, interactive=interactive, prompt=prompt, echo=echo)
+        for secret in secrets
+    ]
 
 
 def ensure_cred(

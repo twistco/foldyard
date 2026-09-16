@@ -43,6 +43,7 @@ its main():
 
 from __future__ import annotations
 
+import getpass
 import json
 import math
 import os
@@ -220,6 +221,20 @@ def write_mirror(
     if capabilities is not None:
         payload["capabilities"] = capabilities
     config.mirror_file().write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def missing_secrets(updates: dict[str, str]) -> list:
+    """The host-side secrets the posture ``updates`` would produce needs and host.env lacks —
+    asked of the PROSPECTIVE mode, before anything is written. The secret is consumed by the
+    supervisor's proxy (which reloads host.env every tick), not the box, so the moment to ask
+    for it is the posture change, whichever door it comes through: `fy mode …` prompts on a TTY,
+    the TUI raises a modal, and `fy box up` re-checks the current posture as the backstop.
+    Presence only, never provenance — see :class:`foldyard.plugins.Secret`."""
+    from . import keyless
+
+    mode = {**read(apply_expiry=True)["mode"], **updates}
+    host_env = config.host_env_file()
+    return [s for s in registry().secrets(mode) if not keyless.host_env_has(host_env, s.var)]
 
 
 def set_mode(
@@ -1548,6 +1563,21 @@ def clock_cli(args: list[str]) -> int:
 # ── CLI ────────────────────────────────────────────────────────────────────────────
 
 
+def _capture_secrets_for(updates: dict[str, str]) -> None:
+    """Ask for what the prospective posture lacks BEFORE it is written: a Ctrl-C at the prompt
+    then leaves the posture unchanged, and the proxy's warm-up never runs against an empty
+    host.env. Without a TTY it warns and carries on — same non-blocking contract as box-up."""
+    from . import keyless
+
+    keyless.capture_secrets(
+        config.host_env_file(),
+        missing_secrets(updates),
+        interactive=sys.stdin.isatty(),
+        prompt=getpass.getpass,  # hides the paste — a real secret
+        echo=lambda m: print(m, file=sys.stderr),
+    )
+
+
 def main(argv: list[str]) -> int:
     cmd = argv[0] if argv else "show"
     if cmd == "show":
@@ -1565,6 +1595,8 @@ def main(argv: list[str]) -> int:
                 updates[key] = value
         if not updates:
             raise SystemExit("✗ nothing to set (e.g. `fy mode gcp=logs github=app ttl=1h`)")
+        if not in_box():  # set_mode refuses in-box anyway; don't prompt for a secret first
+            _capture_secrets_for(updates)
         set_mode(updates, ttl)
         return show()
     if cmd == "env":

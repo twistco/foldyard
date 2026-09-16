@@ -814,11 +814,14 @@ def _warn_keyless_axis_at_rest() -> None:
 
 
 def _capture_secrets() -> None:
-    """Mac-side, before box-up: for every secret the CURRENT posture declares it needs (plugin
+    """Host-side, before box-up: for every secret the CURRENT posture declares it needs (plugin
     ``secrets`` hooks + the consumer's ``[[secret]]`` rows), make sure it's in host.env — prompting
-    once on a TTY, warning (never blocking) without one. This is the declarative replacement for a
-    consumer script that fetched the secret from a vault: foldyard checks presence and echoes the
-    declared ``how`` hint for the human to run, and never executes it. See
+    once on a TTY, warning (never blocking) without one. This is the BACKSTOP: the posture change
+    itself asks first (`fy mode …` / the TUI, via :func:`devmode.missing_secrets`), since the
+    secret is consumed by the supervisor's proxy, not the box — box-up catches whatever arrived by
+    another door (a worktree seeded with a posture, a `--no-tty` set). This is the declarative
+    replacement for a consumer script that fetched the secret from a vault: foldyard checks
+    presence and echoes the declared ``how`` hint for the human to run, and never executes it. See
     :class:`foldyard.plugins.Secret`."""
     from . import devmode
 
@@ -827,15 +830,14 @@ def _capture_secrets() -> None:
     except Exception as e:  # pragma: no cover — a corrupt/absent mode file must not block box-up
         _err(f"⚠ couldn't read the posture to check declared secrets ({e}) — skipping.")
         return
-    for secret in registry().secrets(mode):
-        keyless.ensure_secret(
-            config.host_env_file(),
-            secret,
-            interactive=sys.stdin.isatty(),
-            # getpass hides the paste (no terminal echo / scrollback) — a real secret.
-            prompt=getpass.getpass,
-            echo=_err,
-        )
+    keyless.capture_secrets(
+        config.host_env_file(),
+        registry().secrets(mode),
+        interactive=sys.stdin.isatty(),
+        # getpass hides the paste (no terminal echo / scrollback) — a real secret.
+        prompt=getpass.getpass,
+        echo=_err,
+    )
 
 
 def _up(ctx, engine: str, box: str, net: str) -> int:

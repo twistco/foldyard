@@ -385,6 +385,9 @@ async def test_mode_button_targets_the_selected_workspace(monkeypatch):
         }
 
     monkeypatch.setattr(devmode, "set_mode", fake_set_mode)
+    # github=app would first ask for the App PEM (see the secret-capture tests below); the subject
+    # here is the worktree binding of the write, so pretend host.env already has it.
+    monkeypatch.setattr(devmode, "missing_secrets", lambda updates: [])
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
@@ -538,6 +541,7 @@ async def test_rapid_toggles_on_different_worktrees_both_reconcile(monkeypatch):
         return True
 
     monkeypatch.setattr(devmode, "set_mode", fake_set_mode)
+    monkeypatch.setattr(devmode, "missing_secrets", lambda updates: [])  # PEM present
     monkeypatch.setattr(devmode, "reconcile_stack", fake_reconcile)
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
@@ -1436,6 +1440,127 @@ async def test_worktree_picker_cancel_returns_none(monkeypatch):
         await pilot.press("escape")
         await pilot.pause()
         assert chosen[-1] is None
+
+
+# ── secret capture at the mode change (the modal twin of the CLI prompt) ─────────────
+
+
+def _unchanged_set_mode(record: list):
+    def fake_set_mode(updates, ttl=None, reconcile=True, reconcile_sink=None):
+        record.append(updates)
+        sig = {"env": {}, "overlays": []}
+        return {
+            "mode": {},
+            "expires": {},
+            "prev_posture": sig,
+            "new_posture": sig,
+            "prev_profiles": "",
+            "new_profiles": "",
+        }
+
+    return fake_set_mode
+
+
+def _needs_token(monkeypatch, tmp_path):
+    """github=app wants a `ghp_*` token that host.env lacks; every other flip wants nothing."""
+    from foldyard.plugins import Secret
+
+    host_env = tmp_path / "host.env"
+    monkeypatch.setattr(config, "host_env_file", lambda: host_env)
+    secret = Secret(var="GH_TOK", label="GitHub token", how="gh auth token", pattern="ghp_*")
+    monkeypatch.setattr(
+        devmode,
+        "missing_secrets",
+        lambda updates: [secret] if updates == {"github": "app"} else [],
+    )
+    return host_env
+
+
+async def test_mode_button_prompts_for_a_missing_secret_before_applying(monkeypatch, tmp_path):
+    # The TUI is the other host-side door to a posture change, and it cannot getpass — so the
+    # same "secret first, then the flip" order runs through a modal. The flip waits on the paste.
+    host_env = _needs_token(monkeypatch, tmp_path)
+    sets: list = []
+    monkeypatch.setattr(devmode, "set_mode", _unchanged_set_mode(sets))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        btn = app.query_one("#github-app", tui.Button)
+        app.on_button_pressed(tui.Button.Pressed(btn))
+        await pilot.pause()
+        assert isinstance(app.screen, tui.SecretScreen)
+        assert sets == []  # not applied yet
+        body = _text(app.screen.query_one("#sec-body", tui.Static))
+        assert "gh auth token" in body  # the `how` hint, printed — never run
+        for ch in "ghp_abc":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+    assert "GH_TOK=ghp_abc" in host_env.read_text()
+    assert sets == [{"github": "app"}]
+
+
+async def test_mode_button_secret_cancel_leaves_the_posture_unchanged(monkeypatch, tmp_path):
+    host_env = _needs_token(monkeypatch, tmp_path)
+    sets: list = []
+    monkeypatch.setattr(devmode, "set_mode", _unchanged_set_mode(sets))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-app", tui.Button)))
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, tui.SecretScreen)
+    assert sets == [] and not host_env.exists()
+
+
+async def test_mode_button_secret_wrong_shape_stays_on_the_modal(monkeypatch, tmp_path):
+    # Mirrors ensure_secret's "mismatch": nothing wrong-shaped reaches the minter, and the
+    # operator gets to try again rather than being dropped back with a silent skip.
+    host_env = _needs_token(monkeypatch, tmp_path)
+    sets: list = []
+    monkeypatch.setattr(devmode, "set_mode", _unchanged_set_mode(sets))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-app", tui.Button)))
+        await pilot.pause()
+        for ch in "nope":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, tui.SecretScreen)
+        assert "doesn't look like" in _text(app.screen.query_one("#sec-hint", tui.Static))
+        assert not host_env.exists() and sets == []
+
+
+async def test_mode_button_secret_empty_paste_skips_and_applies(monkeypatch, tmp_path):
+    # Mirrors ensure_secret's "empty": an operator who wants to arm now and paste later can.
+    host_env = _needs_token(monkeypatch, tmp_path)
+    sets: list = []
+    monkeypatch.setattr(devmode, "set_mode", _unchanged_set_mode(sets))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-app", tui.Button)))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+    assert not host_env.exists() and sets == [{"github": "app"}]
+
+
+async def test_mode_button_with_nothing_missing_applies_directly(monkeypatch, tmp_path):
+    _needs_token(monkeypatch, tmp_path)
+    sets: list = []
+    monkeypatch.setattr(devmode, "set_mode", _unchanged_set_mode(sets))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#gcp-logs", tui.Button)))
+        await pilot.pause()
+        assert not isinstance(app.screen, tui.SecretScreen)
+    assert sets == [{"gcp": "logs"}]
 
 
 if __name__ == "__main__":
