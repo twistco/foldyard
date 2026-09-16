@@ -1063,7 +1063,9 @@ class DevModeTui(App):
                 # problem. The healthy state is shown ONCE in the host-status footer; repeating
                 # "{daemon} :{port} ● up" under every axis that shares the one egress-proxy (github,
                 # penpot, capture, claude, codex all do) was just duplicated noise.
-                if daemon and current != defaults[row.axis] and not daemon["up"]:
+                if daemon and current != defaults[row.axis] and daemon.get("blocked"):
+                    status += f"\n{dn} :{daemon['port']} ○ BLOCKED — {daemon['blocked']}"
+                elif daemon and current != defaults[row.axis] and not daemon["up"]:
                     status += f"\n{dn} :{daemon['port']} ○ DOWN — run `fy up` (or `fy host`)"
             row.query_one(".axis-status", Static).update(status)
         # The banner stacks every posture-level alarm: the emergency rung (as before) and any
@@ -1366,7 +1368,12 @@ class DevModeTui(App):
         # List each daemon ONCE here (port + which injectors ride it), instead of repeating that
         # line under every axis that shares the daemon — the de-duplicated home for the detail.
         lines = [head] + [
-            f"  {d.get('label', name)} :{d.get('port')} " + ("● up" if d.get("up") else "○ DOWN")
+            f"  {d.get('label', name)} :{d.get('port')} "
+            + (
+                f"○ BLOCKED — {d['blocked']}"
+                if d.get("blocked")
+                else ("● up" if d.get("up") else "○ DOWN")
+            )
             for name, d in sorted(daemons.items())
         ]
         pane.first(Static).update("\n".join(lines))

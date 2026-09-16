@@ -1541,6 +1541,18 @@ def capabilities_file() -> Path:
     return Path(env).expanduser() if env else state_dir() / "capabilities.json"
 
 
+def blocked_daemons_file() -> Path:
+    """The supervisor's PROJECT-shared record of the daemons a spawn gate is holding back —
+    ``{name: {reason, since}}`` — the gate's own fix (missing host.env key, a foreign listener
+    on the port, exec failure), which used to live only in the supervisor log's nag while every
+    posture surface probed the port itself and said "run `fy host`". Rewritten each tick; read
+    by ``devmode.daemon_status`` on the host, and only while the supervisor's heartbeat is fresh
+    (a dead supervisor's claim is no claim). ``FOLDYARD_BLOCKED_DAEMONS_FILE`` wins, else
+    ``<state_dir>/blocked-daemons.json``."""
+    env = os.environ.get("FOLDYARD_BLOCKED_DAEMONS_FILE")
+    return Path(env).expanduser() if env else state_dir() / "blocked-daemons.json"
+
+
 def _host_table() -> dict:
     """The optional ``[host]`` table — Mac-side supervisor behaviour knobs."""
     raw = _toml().get("host")

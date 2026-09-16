@@ -429,11 +429,51 @@ def probe(port: int, host: str | None = None) -> bool:
         return False
 
 
+# A supervisor whose heartbeat is older than this is not ticking (wedged or dead): the launch
+# paths bounce it, and any claim it published — a blocked daemon — lapses with it.
+HEARTBEAT_STALE_SECONDS = 30.0
+
+
+def heartbeat_age() -> float | None:
+    """Seconds since the supervisor last stamped its PROJECT-shared heartbeat (once per tick) —
+    or None when unknowable (no stamp yet / unreadable)."""
+    try:
+        stamp = _parse(config.heartbeat_file().read_text().strip())
+    except OSError:
+        return None
+    if stamp is None:
+        return None
+    return (now() - stamp).total_seconds()
+
+
+def blocked_daemons() -> dict[str, dict]:
+    """The daemons the supervisor's spawn gates are holding back, ``{name: {reason, since}}``
+    (``config.blocked_daemons_file``) — host-side only, and only while a live supervisor stands
+    behind the claim: past ``HEARTBEAT_STALE_SECONDS`` the file is a dead supervisor's memory,
+    not a fact about the daemon, so it reads as no claim. Box sessions get the mirror's copy
+    via ``daemon_status`` instead. Missing/unreadable = {}."""
+    if in_box():
+        return {}
+    age = heartbeat_age()
+    if age is None or age > HEARTBEAT_STALE_SECONDS:
+        return {}
+    raw = _load(config.blocked_daemons_file())
+    return {name: entry for name, entry in raw.items() if isinstance(entry, dict)}
+
+
 def daemon_status(mode: dict) -> dict[str, dict]:
-    return {
-        name: {"label": spec["label"], "port": spec["port"], "up": probe(spec["port"])}
-        for name, spec in desired_daemons(mode).items()
-    }
+    """name → {label, port, up[, blocked]} for every daemon ``mode`` demands. ``up`` is a live
+    connect to the port from here; ``blocked`` is the supervisor's published gate reason, which
+    OUTRANKS ``up`` on every surface — the port answering is exactly the lie a foreign listener
+    tells (the VS Code forwarder incident), and the gate's own text carries the fix."""
+    blocked = blocked_daemons()
+    out: dict[str, dict] = {}
+    for name, spec in desired_daemons(mode).items():
+        row = {"label": spec["label"], "port": spec["port"], "up": probe(spec["port"])}
+        if name in blocked:
+            row["blocked"] = str(blocked[name].get("reason") or "held back by a spawn gate")
+        out[name] = row
+    return out
 
 
 # ── recipe env derivation ──────────────────────────────────────────────────────────
@@ -1428,7 +1468,10 @@ def show() -> int:
         if value != defaults[axis] and dn:
             if daemon:
                 up = daemon.get("up")
-                mark = "● up" if up else "○ DOWN — run `fy host` on the Mac"
+                if daemon.get("blocked"):  # the supervisor refused to launch it — and says why
+                    mark = f"○ BLOCKED — {daemon['blocked']}"
+                else:
+                    mark = "● up" if up else "○ DOWN — run `fy host` on the Mac"
                 if stale:
                     mark += " (status stale — supervisor heartbeat missing?)"
                 line += f"   [{daemon.get('label', '')}: :{daemon.get('port')} {mark}]"

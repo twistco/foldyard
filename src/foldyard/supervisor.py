@@ -51,7 +51,7 @@ MISSING_ENV_NAG = 30.0
 DAEMON_WARMUP_SECONDS = 10.0
 # A live supervisor stamps its heartbeat every tick (~2s, plus per-tick daemon probes); a stamp
 # this old while the singleton lock is HELD means the reconcile loop is wedged.
-HEARTBEAT_STALE_SECONDS = 30.0
+HEARTBEAT_STALE_SECONDS = devmode.HEARTBEAT_STALE_SECONDS
 # Graceful stop of a bounced supervisor: its shutdown stops each child with its own 5s
 # terminate→kill window, so give the whole process a generous SIGTERM budget before SIGKILL.
 BOUNCE_TERM_WAIT = 20.0
@@ -266,14 +266,9 @@ def _heartbeat_age() -> float | None:
     signal, :func:`_stamp_heartbeat`) — or None when unknowable (no stamp yet / unreadable). Read on
     the launch path to distinguish a healthy holder from a wedged one. NOT the per-worktree mirror:
     that only refreshes while a worktree's box is up, so a down worktree's stale mirror used to read
-    as 'the reconcile loop is wedged' and bounce a healthy supervisor."""
-    try:
-        stamp = devmode._parse(config.heartbeat_file().read_text().strip())
-    except OSError:
-        return None
-    if stamp is None:
-        return None
-    return (devmode.now() - stamp).total_seconds()
+    as 'the reconcile loop is wedged' and bounce a healthy supervisor. (The reader lives in
+    devmode — `daemon_status` gates a published blocked-daemon claim on the same freshness.)"""
+    return devmode.heartbeat_age()
 
 
 def _holder_stale_reason() -> str | None:
@@ -576,17 +571,17 @@ def _warming_axes(
     axis_daemon: dict[str, str | None],
     desired: Collection[str],
     children: dict[str, Child],
-    nagged: Collection[str] = (),
+    blocked: Collection[str] = (),
 ) -> set[str]:
     """The axes whose DESIRED daemon cannot answer a probe yet: about to be spawned (no child,
     and no spawn gate holding it — the probes run before the spawn), or launched under
     ``DAEMON_WARMUP_SECONDS`` ago and still binding. Two things are deliberately NOT warming,
     because waiting on them would silence a real problem: a child that already died (a
     crash-loop is a degradation, probed as one), and a daemon a spawn gate holds back
-    (``nagged``: missing host.env, a foreign listener on its port, exec failure) — it is never
-    going to bind, and the gcp port probe exists precisely to name a foreign listener shadowing
-    the port, which with the listener there FIRST is the only surface that says why `● up`
-    lies."""
+    (``blocked`` — last tick's gate verdicts: missing host.env, a foreign listener on its port,
+    exec failure) — it is never going to bind, and the gcp port probe exists precisely to name
+    a foreign listener shadowing the port, which with the listener there FIRST is the probe's
+    to say."""
     now = time.monotonic()
     out: set[str] = set()
     for axis, daemon in axis_daemon.items():
@@ -594,7 +589,7 @@ def _warming_axes(
             continue
         child = children.get(daemon)
         if child is None:
-            if daemon not in nagged:
+            if daemon not in blocked:
                 out.add(axis)
         elif child.alive() and now - child.started_at < DAEMON_WARMUP_SECONDS:
             out.add(axis)
@@ -1049,7 +1044,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
             capabilities[wt] = run_capability_probes(
                 wt,
                 mode,
-                warming=_warming_axes(devmode.axis_daemon(), desired, children, nagged),
+                warming=_warming_axes(devmode.axis_daemon(), desired, children, _blocked),
             )
             if wt in up:
                 devmode.write_mirror(
@@ -1068,6 +1063,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
     for name in [n for n in children if n not in desired]:
         children.pop(name).stop()
 
+    blocked_now: dict[str, str] = {}
     for name, spec in desired.items():
         step = _child_step(children.get(name), spec)
         if step in (ChildStep.KEEP, ChildStep.BACKOFF):
@@ -1078,7 +1074,10 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
         elif step is ChildStep.RESPAWN:
             exited = children.pop(name)
             log(f"{name} exited (rc {exited.proc.returncode}) — restarting")
-        _spawn_child(name, spec, children, nagged)
+        reason = _spawn_child(name, spec, children, nagged)
+        if reason:
+            blocked_now[name] = reason
+    _publish_blocked(blocked_now, {name: spec["label"] for name, spec in desired.items()})
 
 
 class ChildStep(enum.Enum):
@@ -1108,42 +1107,78 @@ def _child_step(child: Child | None, spec: dict) -> ChildStep:
 
 def _spawn_child(
     name: str, spec: dict, children: dict[str, Child], nagged: dict[str, float]
-) -> None:
+) -> str | None:
     """The spawn gates + launch for one desired daemon. Three ways NOT to spawn, each nagged at
     most every MISSING_ENV_NAG seconds: required env still missing (host.env not filled in yet),
     the port held by a FOREIGN process (our own orphan from a dead supervisor is reaped first —
-    we hold the singleton lock, so nothing we manage is on it), or the exec itself failing."""
+    we hold the singleton lock, so nothing we manage is on it), or the exec itself failing.
+    Returns the gate's reason (the same sentence the nag carries, minus "retrying") so the tick
+    can publish it for the posture surfaces — or None once the daemon is launched."""
     missing = [k for k in spec["requires"] if not os.environ.get(k)]
     if missing:
+        reason = f"needs {', '.join(missing)} — set in {config.host_env_file()}"
         if time.monotonic() - nagged.get(name, 0.0) > MISSING_ENV_NAG:
-            log(f"✗ {name} needs {', '.join(missing)} — set in {config.host_env_file()}; retrying")
+            log(f"✗ {name} {reason}; retrying")
             nagged[name] = time.monotonic()
-        return
+        return reason
     # The port we're about to bind is already taken, yet we hold the singleton lock — so it's an
     # orphaned daemon from a dead supervisor. Reap it (idempotent restart); if we can't (a
     # foreign service holds it), nag with the fix instead of starting a doomed child that would
     # crash-loop on EADDRINUSE every backoff.
     port = spec.get("port")
     if port and devmode.probe(port) and not reap_orphan_listener(name, port, spec):
+        reason = (
+            f"can't bind :{port} — another process is listening (this project's leftover "
+            f"daemon would have been reaped, so it's foreign — `lsof -nP -iTCP:{port} "
+            "-sTCP:LISTEN` to see whose). Free the port, or move this project's band: edit "
+            "~/.foldyard/ports.json or set FY_PROXY_PORT"
+        )
         if time.monotonic() - nagged.get(name, 0.0) > MISSING_ENV_NAG:
-            log(
-                f"✗ {name} can't bind :{port} — another process is listening (this "
-                f"project's leftover daemon would have been reaped, so it's foreign — "
-                f"`lsof -nP -iTCP:{port} -sTCP:LISTEN` to see whose). Free the port, or "
-                "move this project's band: edit ~/.foldyard/ports.json or set "
-                "FY_PROXY_PORT. Retrying"
-            )
+            log(f"✗ {name} {reason}. Retrying")
             nagged[name] = time.monotonic()
-        return
+        return reason
     try:
         children[name] = Child(name, spec)
-        # Launched ⇒ no longer gated. `nagged` doubles as "currently held back by a gate" for
-        # the capability warm-up, so it must not outlive the gate.
+        # Launched ⇒ the next gate (if any) nags at once rather than waiting out an old stamp.
         nagged.pop(name, None)
     except OSError as e:
+        reason = f"can't start: {e} (mitmproxy installed?)"
         if time.monotonic() - nagged.get(name, 0.0) > MISSING_ENV_NAG:
-            log(f"✗ can't start {name}: {e} (mitmproxy installed?); retrying")
+            log(f"✗ {name} {reason}; retrying")
             nagged[name] = time.monotonic()
+        return reason
+    return None
+
+
+# The daemons a spawn gate is currently holding back, name → {reason, since}: the supervisor's
+# own memory between ticks (`since` is the first blocked tick), published each tick to
+# `config.blocked_daemons_file` for the posture surfaces (devmode.daemon_status reads it, only
+# while the heartbeat is fresh). A newly-blocked daemon also pushes one notification — the
+# gate's reason is the fix, and the log's 30s nag was the only place it used to reach.
+_blocked: dict[str, dict] = {}
+
+
+def _publish_blocked(blocked_now: dict[str, str], labels: dict[str, str]) -> None:
+    global _blocked
+    stamp = devmode._iso(devmode.now())
+    merged = {
+        name: {"reason": reason, "since": _blocked.get(name, {}).get("since") or stamp}
+        for name, reason in blocked_now.items()
+    }
+    for name in blocked_now.keys() - _blocked.keys():
+        _notify(f"foldyard: {labels.get(name, name)} not started", blocked_now[name])
+    _blocked = merged
+    path = config.blocked_daemons_file()
+    if not merged and not path.exists():
+        return  # nothing to say and never was — don't create the file
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(merged, indent=2) + "\n")
+        os.replace(tmp, path)
+    except OSError as e:
+        log(f"blocked daemons: write failed: {e}")
+        tmp.unlink(missing_ok=True)
 
 
 def main(restart: bool = False) -> int:
@@ -1241,6 +1276,7 @@ def main(restart: bool = False) -> int:
     log("shutting down…")
     for child in children.values():
         child.stop()
+    _publish_blocked({}, {})  # nothing is gated by a supervisor that isn't running
     # Refresh every UP worktree's mirror so each box sees its daemons are now down (a down
     # box has no reader — don't recreate its mirror on the way out).
     for wt in devmode.up_worktrees():

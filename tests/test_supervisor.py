@@ -6,6 +6,7 @@ guards are exercised with no real `foldyard host` process or podman."""
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import types
 from pathlib import Path
@@ -1340,8 +1341,8 @@ def test_a_gated_daemon_is_probed_not_treated_as_warming(monkeypatch):
     monkeypatch.setattr(supervisor.time, "monotonic", lambda: 1000.0)
     axis_daemon: dict[str, str | None] = {"gcp": "gcp-minter"}
     assert supervisor._warming_axes(axis_daemon, {"gcp-minter"}, {}) == {"gcp"}
-    nagged = {"gcp-minter": 990.0}  # the gate nagged: currently blocked
-    assert supervisor._warming_axes(axis_daemon, {"gcp-minter"}, {}, nagged) == set()
+    blocked = {"gcp-minter"}  # the gate refused it last tick
+    assert supervisor._warming_axes(axis_daemon, {"gcp-minter"}, {}, blocked) == set()
 
 
 def test_a_successful_spawn_clears_the_daemons_nag(monkeypatch):
@@ -1360,3 +1361,109 @@ def test_a_successful_spawn_clears_the_daemons_nag(monkeypatch):
     spec = {"requires": [], "port": 8188, "cmd": ["x"], "env": {}, "label": "minter"}
     supervisor._spawn_child("gcp-minter", spec, children, nagged)
     assert spawned == ["gcp-minter"] and "gcp-minter" not in nagged
+
+
+# ── blocked daemons: the spawn gate's reason reaches the surfaces ────────────────────────
+# A gate's reason used to live only in the supervisor log's 30s nag; every surface computed
+# daemon status by probing the port itself, so `fy mode` said "○ DOWN — run fy host" while
+# `fy host` was running fine, and a foreign listener on the port read as "● up".
+
+
+def _gate_world(monkeypatch, tmp_path):
+    monkeypatch.setattr(supervisor.config, "state_dir", lambda: tmp_path)
+    monkeypatch.delenv("FOLDYARD_BLOCKED_DAEMONS_FILE", raising=False)
+    monkeypatch.setattr(supervisor, "log", lambda _m: None)
+    monkeypatch.setattr(supervisor.devmode, "probe", lambda port, host=None: False)
+    spawned: list[str] = []
+
+    class _FakeChild:
+        def __init__(self, name, spec):
+            self.name, self.spec = name, spec
+            self.started_at = 0.0
+            spawned.append(name)
+
+        def alive(self):
+            return True
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(supervisor, "Child", _FakeChild)
+    return spawned
+
+
+def _spec(**over):
+    spec = {"requires": [], "port": 8188, "cmd": ["x"], "env": {}, "label": "GCP SA-token minter"}
+    spec.update(over)
+    return spec
+
+
+def test_spawn_child_returns_each_gates_reason(monkeypatch, tmp_path):
+    _gate_world(monkeypatch, tmp_path)
+    monkeypatch.delenv("GCP_KEY", raising=False)
+    nagged: dict[str, float] = {}
+    why = supervisor._spawn_child("m", _spec(requires=["GCP_KEY"]), {}, nagged)
+    assert why and "GCP_KEY" in why and "host.env" in why
+    monkeypatch.setattr(supervisor.devmode, "probe", lambda port, host=None: True)
+    monkeypatch.setattr(supervisor, "reap_orphan_listener", lambda name, port, spec: False)
+    why = supervisor._spawn_child("m", _spec(), {}, nagged)
+    assert why and "another process is listening" in why and "8188" in why
+    monkeypatch.setattr(supervisor.devmode, "probe", lambda port, host=None: False)
+
+    def boom(name, spec):
+        raise OSError("no such file: mitmdump")
+
+    monkeypatch.setattr(supervisor, "Child", boom)
+    why = supervisor._spawn_child("m", _spec(), {}, nagged)
+    assert why and "mitmdump" in why
+    monkeypatch.setattr(supervisor, "Child", lambda name, spec: types.SimpleNamespace(name=name))
+    assert supervisor._spawn_child("m", _spec(), {}, nagged) is None
+
+
+def _tick_with(monkeypatch, tmp_path, desired: dict, children: dict, nagged: dict):
+    monkeypatch.setattr(supervisor, "_stamp_heartbeat", lambda: None)
+    monkeypatch.setattr(supervisor.allowlist, "sweep", lambda: None)
+    monkeypatch.setattr(supervisor.githeal, "sweep", lambda log: None)
+    monkeypatch.setattr(supervisor.devmode, "up_worktrees", lambda: [])
+    monkeypatch.setattr(supervisor.devmode, "worktree_config", _fake_cfg)
+    monkeypatch.setattr(supervisor, "expire_user_modes", lambda: {"gcp": "sa"})
+    monkeypatch.setattr(supervisor.devmode, "desired_daemons", lambda mode: desired)
+    monkeypatch.setattr(supervisor.devmode, "env_defaults", lambda mode: {})
+    monkeypatch.setattr(supervisor.devmode, "capability_probes", lambda mode: [])
+    monkeypatch.setattr(supervisor.transcripts, "sweep", lambda *a, **k: None)
+    supervisor.reconcile_once(children, nagged)
+
+
+def test_tick_publishes_blocked_daemons_with_the_reason_and_clears_on_launch(monkeypatch, tmp_path):
+    spawned = _gate_world(monkeypatch, tmp_path)
+    monkeypatch.setattr(supervisor, "_blocked", {})
+    notified: list[tuple[str, str]] = []
+    monkeypatch.setattr(supervisor, "_notify", lambda t, b: notified.append((t, b)))
+    monkeypatch.delenv("GCP_KEY", raising=False)
+    desired = {"gcp-minter": _spec(requires=["GCP_KEY"])}
+    children: dict = {}
+    nagged: dict = {}
+
+    _tick_with(monkeypatch, tmp_path, desired, children, nagged)
+    published = json.loads((tmp_path / "blocked-daemons.json").read_text())
+    assert "GCP_KEY" in published["gcp-minter"]["reason"] and published["gcp-minter"]["since"]
+    assert spawned == []
+    assert len(notified) == 1  # one push, titled by the daemon's label, the gate's fix as body
+    assert "GCP SA-token minter" in notified[0][0] and "GCP_KEY" in notified[0][1]
+
+    _tick_with(monkeypatch, tmp_path, desired, children, nagged)  # still blocked: quiet
+    assert len(notified) == 1
+    since = json.loads((tmp_path / "blocked-daemons.json").read_text())["gcp-minter"]["since"]
+    assert since == published["gcp-minter"]["since"]  # `since` is the first blocked tick
+
+    monkeypatch.setenv("GCP_KEY", "x")  # host.env filled in → launches → no longer blocked
+    _tick_with(monkeypatch, tmp_path, desired, children, nagged)
+    assert spawned == ["gcp-minter"]
+    assert json.loads((tmp_path / "blocked-daemons.json").read_text()) == {}
+
+
+def test_blocked_file_is_not_created_while_nothing_is_blocked(monkeypatch, tmp_path):
+    _gate_world(monkeypatch, tmp_path)
+    monkeypatch.setattr(supervisor, "_blocked", {})
+    _tick_with(monkeypatch, tmp_path, {"gcp-minter": _spec()}, {}, {})
+    assert not (tmp_path / "blocked-daemons.json").exists()

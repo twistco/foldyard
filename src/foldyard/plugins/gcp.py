@@ -92,12 +92,19 @@ def _minter_port_answering() -> tuple[bool, str]:
     opener = urlrequest.build_opener(urlrequest.ProxyHandler({}))
     try:
         with opener.open(f"http://127.0.0.1:{port}/", timeout=5) as r:
-            body = json.loads(r.read() or b"{}")
+            raw = r.read()
     except Exception as e:  # unreachable, refused, or accepted-then-silent (the forwarder case)
         return False, (
             f"minter port {port} not answering ({type(e).__name__}) — the box gets no tokens; "
             "is `fy host` up?"
         )
+    # Something answered. Whether it's US is the parse's question, kept OUT of the try above: a
+    # squatter that speaks HTTP but not the minter's JSON (a dev server's HTML, a forwarder's
+    # relay) is the "held by another process" case, not "not answering".
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        body = None
     if not isinstance(body, dict) or body.get("foldyard") != _MINTER_MARKER:
         return False, (
             f"port {port} is held by another process, not the minter — a port forwarder "

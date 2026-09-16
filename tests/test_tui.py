@@ -1133,6 +1133,33 @@ async def test_shared_daemon_status_shown_only_when_active_and_down(monkeypatch)
         assert "DOWN" in line() and "8088" in line()  # on + down → actionable warning
 
 
+async def test_blocked_daemon_shows_the_gates_reason_even_when_the_port_answers(monkeypatch):
+    # The supervisor's published gate reason beats the port probe: a foreign listener answers,
+    # so plain "up" would hide the problem; the axis line names the gate's own fix instead.
+    def mode_with(**over):
+        m = dict(devmode.axis_defaults())
+        m.update(over)
+        return {"mode": m, "expires": {}}
+
+    blocked = {
+        "egress-proxy": {
+            "up": True,
+            "label": "x",
+            "port": 8088,
+            "blocked": "can't bind :8088 — another process is listening",
+        }
+    }
+    async with tui.DevModeTui().run_test() as pilot:
+        app = cast(tui.DevModeTui, pilot.app)
+        cap = next(r for r in app.query(tui.AxisRow) if r.axis == "capture")
+        monkeypatch.setattr(devmode, "read", lambda: mode_with(capture="on"))
+        monkeypatch.setattr(devmode, "daemon_status", lambda mode: blocked)
+        app.refresh_mode()
+        line = _text(cap.query_one(".axis-status", tui.Static))
+        assert "BLOCKED" in line and "another process is listening" in line
+        assert "DOWN" not in line
+
+
 async def test_banner_raises_degraded_capability_alongside_emergency(monkeypatch):
     # A probed-and-failing capability raises a banner line — same published claim `fy mode`
     # renders as ⚠ DEGRADED — and STACKS with the emergency-rung banner rather than replacing it.

@@ -58,6 +58,20 @@ break config or CLI shape, and say so here. How a release is cut:
   full store can be dealt with without bouncing the box or the machine; the doctor's low-disk
   row now points at it. A store still low afterwards is said so, with the sweeps deliberately
   left to a human (`system df`, `image prune -a`, `container prune`), instead of ticked.
+- **A daemon the supervisor refused to start says why, everywhere.** The three spawn gates
+  (a `requires` key missing from `host.env`; a foreign process on the daemon's port; the exec
+  failing) used to put their reason in the supervisor log's 30-second nag and nowhere else —
+  every posture surface computed daemon status by probing the port itself, so `fy mode` said
+  `○ DOWN — run fy host` while `fy host` was running, and a forwarder squatting on the minter's
+  port read as `● up`. The supervisor now publishes the gate's own sentence each tick
+  (`blocked-daemons.json`, honoured only while its heartbeat is fresh), `devmode.daemon_status`
+  carries it as `blocked`, and `fy mode` / `fy state` / the TUI render `○ BLOCKED — <fix>` —
+  outranking `● up`, which is the lie a foreign listener tells. One notification per
+  newly-blocked daemon. The capability warm-up reads the same verdicts, so a gated daemon's
+  axis is still probed (a forwarder there first is the probe's to name) while a launching one
+  is not. The gcp port probe's JSON parse moves out of its connect `try`, so a squatter that
+  speaks HTTP but not the minter's JSON reads as "held by another process" rather than "not
+  answering — is `fy host` up?", contradicting the BLOCKED row beside it.
 - **`fy verify` points at its own manual.** A failing row names *what* failed and stops there;
   the battery now prints the exact `fy docs security` call up front and again beside a FAIL
   verdict, and that page gains a "When a check fails" section — per row, what it usually
