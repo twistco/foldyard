@@ -605,7 +605,7 @@ def external_network() -> bool:
 
 def ensure_dirs() -> list[str]:
     """Bind-mount source dirs (relative to the checkout) the compose file expects to
-    pre-exist — created empty on ``up``/``stubs``. From ``[project].ensure_dirs`` ([]
+    pre-exist — created empty on ``up``. From ``[project].ensure_dirs`` ([]
     if absent)."""
     raw = _project_table().get("ensure_dirs")
     return [str(x) for x in raw] if isinstance(raw, list) else []

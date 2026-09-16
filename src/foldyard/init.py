@@ -38,8 +38,9 @@ DEFAULT_DISK_GIB = 60
 # the `.dev-mode.json` posture mirror the host drops in `dev_vm_dir()` (default: the repo root).
 # None are ever committed. `init` fences them into the consumer's .gitignore under these
 # sentinels so a re-run refreshes the block in place instead of appending a duplicate.
-# (Plugin/stack-specific artifacts — .stubs/, auth0-sim .certs-local/ — are NOT here: a bare
-# scaffolded box never generates them and their dirs are configurable.)
+# (Consumer-declared artifacts — `[project].ensure_dirs`, auth0-sim .certs-local/ — are NOT
+# here: a bare scaffolded box never generates them and their paths are the consumer's to
+# choose, so the consumer's own .gitignore covers them.)
 GITIGNORE_BEGIN = "# >>> foldyard (managed) — do not edit inside this block >>>"
 GITIGNORE_END = "# <<< foldyard (managed) <<<"
 GITIGNORE_ENTRIES = (

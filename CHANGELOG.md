@@ -7,6 +7,19 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ## Unreleased
 
+### Removed
+
+- **The hardcoded `<dev_vm_dir>/.stubs/{adc.json,access-token}` every `fy up` wrote.** A leftover
+  of the origin monorepo's compose file (which mounted the empty `adc.json` as a stand-in for a
+  host ADC file the VM can't reach), undocumented and ungated, so every consumer — GCP or not —
+  grew an unexplained `.stubs/` in its repo root (the `dev_vm_dir` default) that the managed
+  .gitignore block deliberately did not cover. `fy up` now writes only what `[project].ensure_dirs`
+  declares. A compose file that still mounts the old path gets a directory, not an empty file —
+  drop the mount: an app that wants "no GCP identity" says so with
+  `METADATA_SERVER_DETECTION=none` (Node google-auth) / an empty `GCE_METADATA_HOST` (Python),
+  not with an empty credential file. The hidden `foldyard stubs` verb and the `ensure_stubs`
+  shell shim `shellenv` emitted for it go with it (`dev_vm_banner` / `foldyard banner` stay).
+
 ### Added
 
 - **`fy reclaim`, `[reclaim] script`, and `fy up` removes the images its own build superseded.**
@@ -24,6 +37,10 @@ break config or CLI shape, and say so here. How a release is cut:
   full store can be dealt with without bouncing the box or the machine; the doctor's low-disk
   row now points at it. A store still low afterwards is said so, with the sweeps deliberately
   left to a human (`system df`, `image prune -a`, `container prune`), instead of ticked.
+- **`fy verify` points at its own manual.** A failing row names *what* failed and stops there;
+  the battery now prints the exact `fy docs security` call up front and again beside a FAIL
+  verdict, and that page gains a "When a check fails" section — per row, what it usually
+  means and which verb to reach for next.
 - **An isolation-layers diagram, in the README and at the top of docs/isolation-layers.md.**
   `docs/assets/foldyard-isolation-layers.svg` draws the hardening ladder as four cumulative
   postures — a rootless Podman VM, Lima with the in-VM wall, gVisor under the dev box behind the

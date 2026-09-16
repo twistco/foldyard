@@ -1,13 +1,12 @@
 """Stack-setup env for the `just` dev-VM recipes — the former `_common.sh`, in Python.
 
 `eval "$(foldyard shellenv)"` is a drop-in for the old `source _common.sh`: it emits the
-same shell vars (matching their export-ness), the `COMPOSE` bash array, and
-`ensure_stubs`/`dev_vm_banner` shims — so recipe bodies are unchanged. Side effects (git
-core.fileMode, the rootless-machine ensure) run here in Python; ALL human/progress
-output goes to STDERR so the stdout an `eval` consumes is pure shell. On a fatal setup
-error it prints `exit 1` to stdout (which the recipe's `eval` then runs) + the reason to
-stderr. `foldyard stubs` / `foldyard banner` back the emitted shims; the machine
-lifecycle lives in foldyard.machine.
+same shell vars (matching their export-ness), the `COMPOSE` bash array, and the
+`dev_vm_banner` shim — so recipe bodies are unchanged. Side effects (git core.fileMode,
+the rootless-machine ensure) run here in Python; ALL human/progress output goes to STDERR
+so the stdout an `eval` consumes is pure shell. On a fatal setup error it prints `exit 1`
+to stdout (which the recipe's `eval` then runs) + the reason to stderr. `foldyard banner`
+backs the emitted shim; the machine lifecycle lives in foldyard.machine.
 
 Faithful to `_common.sh` incl. worktree namespacing + deterministic host-port offsets
 (via the system `cksum`, for parity with the old recipes). Every project-specific value
@@ -310,24 +309,16 @@ def shellenv(no_machine: bool = False) -> int:
     lines += [f"export {k}={shlex.quote(v)}" for k, v in ports.items()]
     lines += [f'export {k}="${{{k}:-{v}}}"' for k, v in derived.items()]
     lines.append("COMPOSE=(" + " ".join(shlex.quote(x) for x in compose) + ")")
-    lines.append("ensure_stubs() { command foldyard stubs; }")
     lines.append("dev_vm_banner() { command foldyard banner; }")
     print("\n".join(lines))
     return 0
 
 
-def _stubs(checkout: Path, dev_vm_rel: str) -> None:
-    """Empty GCP credential stubs + the bind-mount source dirs the compose file expects,
-    inside the (worktree's) checkout — the compose file bind-mounts them, so they must
-    live in the SAME tree the stack runs from. Empty creds ⇒ the app stays offline. The
-    extra dirs are project config (`[project].ensure_dirs`), not hardcoded here."""
-    sd = checkout / dev_vm_rel / ".stubs"
-    sd.mkdir(parents=True, exist_ok=True)
-    try:
-        (sd / "adc.json").write_text("")  # `: >` — truncate to an empty stub
-    except OSError:
-        (sd / "adc.json").touch()
-    (sd / "access-token").touch()  # never truncate
+def _ensure_dirs(checkout: Path) -> None:
+    """The bind-mount source dirs the compose file expects to pre-exist, inside the
+    (worktree's) checkout — they must live in the SAME tree the stack runs from. All of it is
+    project config (`[project].ensure_dirs`), nothing is hardcoded here: a consumer that
+    declares nothing gets nothing written."""
     for rel in config.ensure_dirs():
         (checkout / rel).mkdir(parents=True, exist_ok=True)
 
@@ -339,15 +330,6 @@ def _print_banner(env: dict) -> None:
     )
     print(f"DOCKER_HOST={env.get('DOCKER_HOST', '')}")
     print(f"FOLDYARD_ENV_OVERRIDE={env.get('FOLDYARD_ENV_OVERRIDE', '')}")
-
-
-def stubs() -> int:
-    """`foldyard stubs` — backs the ensure_stubs shim (reads the eval'd recipe env)."""
-    _stubs(
-        Path(os.environ.get("FOLDYARD_CHECKOUT") or str(main_repo())),
-        os.environ.get("HERE") or config.dev_vm_rel(),
-    )
-    return 0
 
 
 def banner() -> int:
@@ -666,7 +648,7 @@ def up() -> int:
         print("      foldyard box up")
         print("  To add a stack instead, set [project].compose in foldyard.toml.")
         return 0
-    _stubs(Path(ctx.env["FOLDYARD_CHECKOUT"]), ctx.env.get("HERE") or config.dev_vm_rel())
+    _ensure_dirs(Path(ctx.env["FOLDYARD_CHECKOUT"]))
     # Stage any VM-visible stack assets a plugin's posture needs (e.g. the gcp metadata emulator's
     # server.py — shipped in the package, off the repo mount) into the checkout BEFORE compose up.
     from .plugins import registry
