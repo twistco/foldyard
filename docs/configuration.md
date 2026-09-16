@@ -430,6 +430,13 @@ default_deny = true
   keeps a box-writable key from becoming a hole in the wall. To reach an external host, grant it
   on the Mac: `fy allow add <host>`.
 
+  The one dotted shape allowed is a name under `.localhost` (`supabase.localhost`). RFC 6761 has
+  resolvers answer those with loopback and never send them upstream, so from the box such a name
+  can only reach the box itself or a compose network alias — never a public host. It is the
+  pattern for a single `NEXT_PUBLIC_*`-style URL that must work from the browser on the host
+  (where `*.localhost` is loopback) *and* from a container (give the gateway service the alias,
+  and publish it on the same port number it listens on).
+
 ## `[[inject]]`
 
 A generic, config-only egress injector: each entry becomes one on/off mode axis
