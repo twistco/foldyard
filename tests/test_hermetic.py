@@ -20,7 +20,16 @@ HOST_TOOL = "/bin/ls"
 
 
 def test_scrub_hides_host_tools_but_keeps_the_allowlist():
-    for tool in ("podman", "limactl", "gcloud", "gh", "terminal-notifier", "osascript", "ls"):
+    for tool in (
+        "podman",
+        "limactl",
+        "gcloud",
+        "gh",
+        "terminal-notifier",
+        "osascript",
+        "ls",
+        "env",
+    ):
         assert shutil.which(tool) is None, tool
     for tool in (*SPAWNABLE, "python", "python3"):
         assert shutil.which(tool), tool
@@ -80,3 +89,42 @@ def test_shell_true_is_refused_outright():
     # way, so the form itself is refused rather than parsed.
     with pytest.raises(HostToolSpawned, match="shell=True"):
         subprocess.run(f"true; {HOST_TOOL} /", shell=True, capture_output=True)
+
+
+def test_a_shell_wrapper_cannot_smuggle_a_program_in(tmp_path):
+    # `bash -c …` / `sh script` / bare stdin carry a whole program past argv[0] — the shell=True
+    # gap by another door. The shell itself is allowlisted (for `-n`), so the refusal names the
+    # program form, not the binary.
+    with pytest.raises(HostToolSpawned, match="would run a program under"):
+        subprocess.run(["bash", "-c", f"{HOST_TOOL} /"], capture_output=True)
+    with pytest.raises(HostToolSpawned, match="would run a program under"):
+        subprocess.run(["bash", "-lc", f"{HOST_TOOL} /"], capture_output=True)
+    script = tmp_path / "run.sh"
+    script.write_text(f"{HOST_TOOL} /\n")
+    with pytest.raises(HostToolSpawned, match="would run a program under"):
+        subprocess.run(["sh", str(script)], capture_output=True)
+    with pytest.raises(HostToolSpawned, match="would run a program under"):
+        subprocess.run(["sh"], input=f"{HOST_TOOL} /", text=True, capture_output=True)
+    # `executable=` is what runs; naming git as argv[0] doesn't change what the shell is handed.
+    with pytest.raises(HostToolSpawned, match="would run a program under"):
+        subprocess.run(["git", "-c", f"{HOST_TOOL} /"], executable="bash", capture_output=True)
+
+
+def test_a_syntax_check_executes_nothing_and_is_fine():
+    # The guestlog/machine tests `bash -n` their rendered scripts — parsing, not running: the
+    # script names a host tool and nothing is spawned.
+    res = subprocess.run(["bash", "-n"], input=f"{HOST_TOOL} /\n", text=True, capture_output=True)
+    assert res.returncode == 0, res.stderr
+    res = subprocess.run(["bash", "-o", "noexec", "-c", f"{HOST_TOOL} /"], capture_output=True)
+    assert res.returncode == 0, res.stderr
+    assert subprocess.run(["bash", "--version"], capture_output=True).returncode == 0
+
+
+@pytest.mark.spawns("bash")
+def test_the_marker_permits_a_program_under_a_named_shell():
+    # The box PATH tests run the REAL prepend snippet under bash; naming the shell says so.
+    res = subprocess.run(["bash", "-c", "echo ok"], capture_output=True, text=True)
+    assert res.stdout == "ok\n"
+    # …and it names THAT shell, not shells in general.
+    with pytest.raises(HostToolSpawned, match="would run a program under"):
+        subprocess.run(["sh", "-c", "echo ok"], capture_output=True)

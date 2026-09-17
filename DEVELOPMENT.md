@@ -189,8 +189,10 @@ scrubbed to `git`/`cksum`/the shell/the interpreter — a host tool named bare i
 a CI runner, so the code under test takes its "not installed" branch rather than the live
 machine's — and `subprocess.run`/`Popen` refuse to execute anything else reached by absolute path
 or a caller's own `env["PATH"]`, failing the test by name with an exception no `except Exception`
-can swallow. A test that means to run a host binary marks it (`@pytest.mark.spawns("/abs/path")`);
-one that needs a real tool is an e2e test (`tests/*_e2e.py`, exempt). Before this, `set_mode`
+can swallow. The shell is allowlisted for `bash -n`, not for a program (`bash -c …`/`sh script`
+carry one past argv[0] — refused like `shell=True`). A test that means to run a host binary
+marks it (`@pytest.mark.spawns("/abs/path")`, or `spawns("bash")` to run a program under that
+shell); one that needs a real tool is an e2e test (`tests/*_e2e.py`, exempt). Before this, `set_mode`
 round trips were running `limactl list` + `podman ps` against the live machine, and the
 supervisor's blocked-daemon push reached a real Notification Center — green in CI only because
 those binaries are absent there.

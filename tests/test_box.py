@@ -1071,6 +1071,7 @@ def _run_path_snippet(*applications: tuple[str, ...], start: str) -> str:
 _FY_DIRS = ("/opt/fy-tools/bin", "/home/vscode/.local/bin")
 
 
+@pytest.mark.spawns("bash")  # runs the REAL snippet under bash (builtins only)
 def test_path_prepend_is_idempotent_across_nested_shells():
     # The bug: four sites prepend the same two dirs and every one runs AGAIN in a nested shell
     # (`box shell` execs `bash -l`, which re-reads the rc files over the wrapper's export). None
@@ -1083,6 +1084,7 @@ def test_path_prepend_is_idempotent_across_nested_shells():
     assert six == once, "PATH grew across nested applications"
 
 
+@pytest.mark.spawns("bash")  # runs the REAL snippet under bash (builtins only)
 def test_path_prepend_restores_order_rather_than_skipping():
     # Why it's remove-then-prepend and NOT skip-if-present: ~/.local/bin must beat
     # /opt/fy-tools/bin (the native Claude installer hardcodes ~/.local/bin/claude; an npm install
@@ -1092,6 +1094,7 @@ def test_path_prepend_restores_order_rather_than_skipping():
     assert out == "/home/vscode/.local/bin:/opt/fy-tools/bin:/usr/bin"
 
 
+@pytest.mark.spawns("bash")  # runs the REAL snippet under bash (builtins only)
 def test_path_prepend_collapses_adjacent_duplicates():
     # The one-pass version of this looked right and wasn't: bash substitutes non-overlapping
     # matches, so `:a:a:` → `:a:` and a duplicate survived every run. Hence the loop to fixpoint.

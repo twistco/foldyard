@@ -245,9 +245,15 @@ def scrubbed_box_session_env(monkeypatch):
 #      handled error is how both incidents passed green). A command that resolves to nothing is
 #      let through: that is the "not installed" path, not a leak. A test that means to run
 #      something else says so: `@pytest.mark.spawns("/abs/path/tool")` (registered in pyproject).
+#      The shells are allowlisted for what they ARE (`bash -n` parses a script), not for what
+#      they run: `bash -c …` / `sh script` carry a whole program past argv[0] — shell=True by
+#      another door — so those forms are refused unless the test names the shell
+#      (`@pytest.mark.spawns("bash")`). `env` is deliberately absent: it is a wrapper too, and
+#      nothing under test spawns it.
 # Neither is an env var to opt out of: a test that needs a real host tool is an e2e test.
 
-SPAWNABLE = ("git", "cksum", "bash", "sh", "env", "true", "false", "echo")
+SPAWNABLE = ("git", "cksum", "bash", "sh", "true", "false", "echo")
+SHELLS = ("bash", "sh")
 
 
 def _is_e2e(request: pytest.FixtureRequest) -> bool:
@@ -299,6 +305,25 @@ def _resolved(cmd, env, executable=None) -> list[str]:
     return [found for exe in names if (found := shutil.which(exe, path=path))]
 
 
+def _shell_executes(args: list[str]) -> bool:
+    """Whether a shell handed ``args`` (its argv[1:]) would RUN anything. ``-n`` / ``-o noexec``
+    among the leading options means it only parses; ``--version`` / ``--help`` only print. Any
+    other form — ``-c program``, a script path, bare stdin — is a program the guard can't see
+    into, so it counts as executing."""
+    it = iter(args)
+    for arg in it:
+        if arg in ("--", "-") or not arg.startswith("-"):
+            break
+        if arg in ("--version", "--help"):
+            return False
+        if arg == "-o":
+            if next(it, None) == "noexec":
+                return False
+        elif not arg.startswith("--") and "n" in arg[1:]:
+            return False
+    return True
+
+
 @pytest.fixture(autouse=True)
 def no_host_tool_spawn(request, monkeypatch):
     if _is_e2e(request):
@@ -307,8 +332,10 @@ def no_host_tool_spawn(request, monkeypatch):
     # hand bash a `PATH=/usr/bin:/bin` of their own), plus the interpreter and the marker's paths.
     names = set(SPAWNABLE) | {"python", "python3"}
     permitted = {os.path.realpath(sys.executable)}
+    shells: set[str] = set()  # a bare name in the marker: programs may run under that shell
     for mark in request.node.iter_markers("spawns"):
-        permitted.update(os.path.realpath(p) for p in mark.args)
+        shells.update(p for p in mark.args if os.sep not in p)
+        permitted.update(os.path.realpath(p) for p in mark.args if os.sep in p)
 
     def guard(real):
         def wrapped(cmd, *args, **kwargs):
@@ -323,7 +350,8 @@ def no_host_tool_spawn(request, monkeypatch):
                 )
             # `executable` is Popen's third positional (after bufsize) or a kwarg.
             executable = args[1] if len(args) > 1 else kwargs.get("executable")
-            for found in _resolved(cmd, kwargs.get("env"), executable):
+            resolved = _resolved(cmd, kwargs.get("env"), executable)
+            for found in resolved:
                 if not (os.path.basename(found) in names or os.path.realpath(found) in permitted):
                     raise HostToolSpawned(
                         f"{request.node.nodeid} would execute {found!r} — stub the call at "
@@ -331,6 +359,27 @@ def no_host_tool_spawn(request, monkeypatch):
                         f"`@pytest.mark.spawns({found!r})` if it means to, or it is an e2e "
                         f"test (tests/*_e2e.py)"
                     )
+            # What actually runs is `executable` when given (appended last), else argv[0]. A
+            # shell is allowlisted by name for `-n`; a program under it is the shell=True gap.
+            runs = resolved[-1] if resolved else ""
+            shell = os.path.basename(runs)
+            tail = (
+                []
+                if isinstance(cmd, (str, bytes, os.PathLike))
+                else [os.fsdecode(a) for a in cmd[1:]]
+            )
+            if (
+                shell in SHELLS
+                and shell not in shells
+                and os.path.realpath(runs) not in permitted
+                and _shell_executes(tail)
+            ):
+                raise HostToolSpawned(
+                    f"{request.node.nodeid} would run a program under {runs!r} (`{shell} -c …` / "
+                    f"`{shell} script` carries a whole program past argv[0]) — spawn the tool "
+                    f"directly, mark the test `@pytest.mark.spawns({shell!r})` if it means to, "
+                    f"or it is an e2e test (tests/*_e2e.py)"
+                )
             return real(cmd, *args, **kwargs)
 
         return wrapped
