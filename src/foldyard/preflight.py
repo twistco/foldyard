@@ -165,6 +165,18 @@ def issues() -> list[str]:
                 "    `nft` (nftables) and a cgroup v2 hierarchy — a Linux host. Install nftables,\n"
                 "    or drop `host_wall` (the in-VM wall still applies)."
             )
+        # The kernel half, when the host publishes its config: the table matches the VM by
+        # `socket cgroupv2`, which a kernel built without CONFIG_NFT_SOCKET (the stock WSL2
+        # kernel) refuses at load time — AFTER `fy up` has re-provisioned the VM walled. Refuse
+        # here instead; an unreadable config (None) is not a reason to refuse, the load-time
+        # error explained (machine._apply_host_wall) covers that host.
+        elif hostwall.nft_socket_in_kernel() is False:
+            out.append(
+                "✗ [machine].host_wall = true but this kernel has no nftables `socket` expression\n"
+                "    (CONFIG_NFT_SOCKET is not set — the stock WSL2 kernel, for one): the host\n"
+                "    wall matches the VM by `socket cgroupv2` and cannot load here. Use a kernel\n"
+                "    built with nft_socket, or drop `host_wall` (the in-VM wall still applies)."
+            )
     return out
 
 

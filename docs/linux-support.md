@@ -55,8 +55,8 @@ there are upper bounds; correctness results transfer as they are.
 - **WSL2 on a real Windows 11 machine.** The tier above runs on Windows Server 2025 (the hosted
   runner) with `nestedVirtualization=true` said explicitly; Windows 11 x86 defaults it on and
   Windows 10 silently overrides it — the two-minute check on a real machine is still owed
-  (`wsl --shutdown; wsl; ls -l /dev/kvm`), as is `[automount] enabled = false` for the repo-only
-  mount (the runner keeps automount on: its shell wrapper reads step scripts through `/mnt`).
+  (`wsl --shutdown; wsl; ls -l /dev/kvm`). Automount is NOT a boundary concern (the runner keeps
+  it on, `verify` ALL PASS): keep the checkout on the distro's ext4, not under `/mnt/c`.
   Windows-on-ARM boots the distro at EL1, so KVM is structurally absent there. See
   [isolation-layers.md](./isolation-layers.md#wsl2--a-linux-host-whose-hyper-v-boundary-protects-the-wrong-asset).
 - **`fy tui`, `fy code` (the VS Code attach), `fy open` (browser)** on Linux — untouched.

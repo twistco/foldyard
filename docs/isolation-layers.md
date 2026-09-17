@@ -286,8 +286,12 @@ Lima's options" — and is not the route.
 
 Still true, and still prerequisites rather than tuning:
 
-- **`/mnt/c` is automounted by default**, which breaks the repo-only mount outright.
-  `/etc/wsl.conf` with `[automount] enabled = false` comes first.
+- **`/mnt/c` is automounted by default** — in the DISTRO, which is the host here; the VM's
+  mount set is whatever foldyard declares, so automount does not reach the boundary (measured:
+  the runner keeps it on and `fy verify` is ALL PASS, the repo on the distro's ext4). What it
+  does affect is where the checkout lives: a repo under `/mnt/c` would be 9p over drvfs, 0777
+  modes and CRLF — keep it on the distro's own filesystem. An earlier draft called
+  `[automount] enabled = false` a prerequisite; it is a tidiness choice.
 - Measured on a hosted Windows Server 2025 runner (2026-09-17): `/dev/kvm` is in the distro with
   `nestedVirtualization=true` said in `.wslconfig`, and foldyard's own `lima` backend boots the
   guest there and runs the host tier — the `wsl2-host-e2e` job,

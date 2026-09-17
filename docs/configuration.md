@@ -229,8 +229,11 @@ disk_gib = 60
   daemon band, the VM's own loopback plumbing (the forwarded SSH port and the hostagent's DNS
   resolver, discovered from its processes) and the host's resolvers. So a guest-kernel exploit
   that flushes the in-VM wall still leaves through a host that rejects it. Needs `wall = true`
-  and a host with `nft` + cgroup v2 — a Linux host; macOS reports it unavailable, and preflight
-  refuses rather than silently downgrading. Loading the table is `sudo nft -f -` on every
+  and a host with `nft` + cgroup v2 + a kernel built with nftables' `socket` expression
+  (`CONFIG_NFT_SOCKET`; the match is `socket cgroupv2`) — a Linux host; macOS reports it
+  unavailable, the stock WSL2 kernel lacks the expression, and preflight refuses either rather
+  than silently downgrading (on WSL2 the in-VM wall still applies; a custom kernel is the only
+  route to the host wall there). Loading the table is `sudo nft -f -` on every
   `fy up` (re-rendered each time — Lima allocates the SSH port per boot); a passwordless sudoers
   rule for `nft` makes it silent. A VM already running outside its own scope (started before
   the option was on) is refused with `fy machine stop && fy up`. `fy machine rm` removes the

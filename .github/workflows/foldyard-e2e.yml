@@ -1,6 +1,6 @@
 name: foldyard · live e2e
 
-# foldyard's live e2es. Two advisory tiers run here:
+# foldyard's live e2es. Three advisory tiers run here:
 #   - `live-e2e`: the docker-in-container topology for proxy/box e2es that need a sibling box to
 #     reach the test process by container IP (the IN-BOX topology, mirrored).
 #   - `lima-host-e2e`: a real Linux HOST — foldyard's default `lima` backend booting a QEMU/KVM
