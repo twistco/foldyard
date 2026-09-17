@@ -59,6 +59,12 @@ IGNORED_KEYS: dict[str, str] = {
         "the token var is DERIVED from the axis (FY_INJECT_<AXIS>) — a declared one is ignored, "
         "so a config rule can't point at another mechanism's secret"
     ),
+    "vscode.workspace_file": (
+        "`fy code` always attaches to the checkout folder (ADR-0026) — the generated multi-root "
+        "workspace, and the in-box generator that produced it, are no longer run; move the "
+        "extensions it collected into `[vscode] extensions` and its settings into "
+        "`[vscode.settings]`, then delete the file and the generator"
+    ),
 }
 
 # Config that runs code in the YARD, not on the host. Listed by name in the report's footer so its
@@ -292,6 +298,16 @@ def _ignored(
                 [str(h) for h in proxy["allow"]],
                 IGNORED_KEYS["proxy.allow"],
                 _origin(shared, local, "proxy", "allow"),
+            )
+        )
+    vscode = cfg.toml.get("vscode")
+    if isinstance(vscode, dict) and vscode.get("workspace_file") is not None:
+        found.append(
+            (
+                "[vscode] workspace_file",
+                [str(vscode["workspace_file"])],
+                IGNORED_KEYS["vscode.workspace_file"],
+                _origin(shared, local, "vscode", "workspace_file"),
             )
         )
     inject_origin = _origin(shared, local, "inject")

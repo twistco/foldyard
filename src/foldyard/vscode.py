@@ -59,9 +59,20 @@ _REMOTE_USER = "root"
 _EXT_ID = re.compile(r"^[A-Za-z0-9][\w-]*\.[A-Za-z0-9][\w-]*$")
 # Dev Containers applies an attached config's `extensions` and `settings` ONCE per server install,
 # each gated by its own marker under the box's ~/.vscode-server/data/Machine; a change only lands
-# once the matching marker is gone.
+# once the matching marker is gone AND the server goes through set-up again (a reconnect to a
+# running server skips it — `_reset_markers` restarts the server). The settings write has a
+# SECOND gate (extension source,
+# 0.469: `if (markerCreated && !exists(Machine/settings.json)) write`): it never rewrites an
+# existing Machine/settings.json, marker or no marker — so a settings change must remove that
+# file too, or it silently never applies to a box whose server has been attached once (found on
+# a consumer whose Machine settings were two months stale with the marker being reset on every
+# `fy code`). The file is the extension's rendering of OUR config plus its own additions
+# (Copilot instructions, port attributes), all of which it regenerates; an operator's hand edits
+# in the "Remote [Attached Container]" settings tab are the one thing lost, and those belong in
+# `[vscode.settings]` anyway.
 _INSTALL_EXTENSIONS_MARKER = ".installExtensionsMarker"
 _WRITE_MACHINE_SETTINGS_MARKER = ".writeMachineSettingsMarker"
+_MACHINE_SETTINGS_FILE = "settings.json"
 _LOCAL_TERMINAL_PROFILE = "Foldyard Local"
 _TERMINAL_PROFILES_OSX = "terminal.integrated.profiles.osx"
 _TERMINAL_DEFAULT_PROFILE_OSX = "terminal.integrated.defaultProfile.osx"
@@ -440,23 +451,27 @@ def _read_config(path: Path) -> dict | _Unreadable | None:
     return existing if isinstance(existing, dict) else None
 
 
-def _write_attached_config(path: Path, cfg: dict, existing: dict | _Unreadable | None) -> bool:
-    """Write the config into the isolated instance's globalStorage. Returns False unless
-    ``existing`` (what :func:`_read_config` found at ``path``) is OURS — i.e. its ``_generatedBy``
-    is exactly our marker. Anything else is somebody's file to keep: the user took ownership by
-    removing the marker, or another tool wrote its own. A malformed document (``null``, a list,
-    garbage) reads as ``None`` — not owned, safe to replace; one we could not read at all is kept,
-    since we cannot tell whose it is."""
+def _keeps_existing(path: Path, existing: dict | _Unreadable | None) -> bool:
+    """True when ``existing`` (what :func:`_read_config` found at ``path``) is NOT ours to
+    replace — its ``_generatedBy`` is not exactly our marker. That is somebody's file to keep: the
+    user took ownership by removing the marker, or another tool wrote its own. A malformed
+    document (``null``, a list, garbage) reads as ``None`` — not owned, safe to replace; one we
+    could not read at all is kept, since we cannot tell whose it is."""
     if isinstance(existing, _Unreadable):
         print(f"  (kept {path}: could not read it to check whether it is foldyard's)")
-        return False
+        return True
     if existing is not None and existing.get(_GENERATED_MARKER_KEY) != _GENERATED_MARKER:
         print(f"  (kept your customised {path})")
-        return False
+        return True
+    return False
+
+
+def _write_attached_config(path: Path, cfg: dict) -> None:
+    """Write the config into the isolated instance's globalStorage (ownership already settled by
+    :func:`_keeps_existing`)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, indent=2) + "\n")
     print(f"▶ extensions: {len(cfg.get('extensions', []))} → {path}")
-    return True
 
 
 def _missing_extensions(exts: list[str], installed: str) -> list[str]:
@@ -466,17 +481,40 @@ def _missing_extensions(exts: list[str], installed: str) -> list[str]:
     return [e for e in exts if not any(d.startswith(e.lower() + "-") for d in have)]
 
 
-def _reset_markers(engine: str, box: str, env: dict, markers: list[str]) -> None:
-    """Delete the given once-per-install markers in the box so the NEXT attach re-applies the
-    matching part of the config (see :data:`_INSTALL_EXTENSIONS_MARKER`)."""
+def _reset_markers(engine: str, box: str, env: dict, markers: list[str]) -> bool:
+    """Delete the given once-per-install markers (and, for settings, the rendered file — see
+    :data:`_MACHINE_SETTINGS_FILE`) in the box so the NEXT attach re-applies the matching part of
+    the config (see :data:`_INSTALL_EXTENSIONS_MARKER`). Returns whether the box did it."""
     if not markers:
-        return
+        return True
     paths = " ".join(f'"$HOME/.vscode-server/data/Machine/{m}"' for m in markers)
-    subprocess.run(
-        [engine, "exec", box, "sh", "-c", f"rm -f {paths}"],
+    # A reset marker is only READ during server set-up, and an attach that finds the box's server
+    # still running from the last session reconnects to it — set-up never runs, the marker sits
+    # there reset, and nothing installs or applies (seen live: seven extensions "will install on
+    # attach", three attaches, zero installed — until the server was restarted, then 7/7). So the
+    # server goes with the markers; the next attach starts a fresh one and runs set-up. A window
+    # still attached to this box reconnects to the new server (VS Code reloads it).
+    proc = subprocess.run(
+        [engine, "exec", box, "sh", "-c", _reset_script(paths)],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+    )
+    return proc.returncode == 0
+
+
+def _reset_script(paths: str) -> str:
+    """The in-box shell for :func:`_reset_markers`: remove ``paths``, then stop the running VS Code
+    server. Its exit status is the caller's whole signal — a failed `rm` must fail the script
+    (an unconditional trailing `true` once masked it, and with it the retry the caller does),
+    while `pgrep` finding no server (status 1) is the normal case and a success. A server that
+    exits between `pgrep` and `kill` is not a failure either: only a process that is STILL there
+    after a failed `kill` is."""
+    return (
+        f"rm -f {paths} || exit 1; "
+        "pids=$(pgrep -f '[.]vscode-server/bin'); s=$?; "
+        '[ "$s" -eq 0 ] || [ "$s" -eq 1 ] || exit "$s"; '
+        'for p in $pids; do kill "$p" 2>/dev/null || ! kill -0 "$p" 2>/dev/null || exit 1; done'
     )
 
 
@@ -535,7 +573,7 @@ def code() -> int:
     attached = _attached_config(checkout, exts, cfg.vscode_settings())
     cfg_path = _globalstorage(udd) / "nameConfigs" / f"{box}.json"
     previous = _read_config(cfg_path)
-    if _write_attached_config(cfg_path, attached, previous):
+    if not _keeps_existing(cfg_path, previous):
         markers = []
         missing = _missing_extensions(exts, _installed_exts(engine, box, env))
         if missing:
@@ -543,10 +581,17 @@ def code() -> int:
             print(f"▶ will install on attach: {' '.join(missing)}")
         # Settings have no in-box listing to diff against, so the last config WE wrote is the
         # record of what the box's Machine settings hold; any difference (a first write included)
-        # needs the marker gone or the change never lands on an already-attached box.
+        # needs the marker gone or the change never lands on an already-attached box. Which is
+        # why the markers go BEFORE the write: written first, a failed reset would leave a config
+        # that says "applied" and nothing left to retry from — the next `fy code` would diff
+        # against it, see no change, and the settings would never land.
         if not isinstance(previous, dict) or previous.get("settings") != attached["settings"]:
-            markers.append(_WRITE_MACHINE_SETTINGS_MARKER)
-        _reset_markers(engine, box, env, markers)
+            markers += [_WRITE_MACHINE_SETTINGS_MARKER, _MACHINE_SETTINGS_FILE]
+        if _reset_markers(engine, box, env, markers):
+            _write_attached_config(cfg_path, attached)
+        else:
+            _err(f"⚠ couldn't reset the box's once-per-install markers ({' '.join(markers)});")
+            _err(f"  {cfg_path} left as it was, so the next `fy code` retries the change.")
 
     code_cli = shutil.which("code")
     if not code_cli:
