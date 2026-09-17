@@ -628,6 +628,15 @@ def test_up_threads_staged_wheel_into_install(fake, monkeypatch):
     assert "run_step" in script  # delivered as a monitored step
 
 
+def test_foldyard_run_forces_every_install_branch():
+    # `_foldyard_check` fails the guard on a RETAINED stale foldyard, so every branch must
+    # `--force` — a bare install of a spec matching the retained receipt is a no-op.
+    script = box._foldyard_run("/w/acme", {"fy_wheel": "", "fy_version": "9.9.9"})
+    assert 'uv tool install --force "foldyard==9.9.9"' in script
+    assert "uv tool install --force --editable /w/acme/foldyard" in script
+    assert "uv tool install " not in script.replace("uv tool install --force", "")
+
+
 def test_stage_foldyard_builds_wheel(tmp_path, monkeypatch):
     # uv build succeeds (mocked to drop a .whl) → returns the staged wheel; failure → None.
     src = tmp_path / "src"

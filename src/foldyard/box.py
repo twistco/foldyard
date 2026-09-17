@@ -689,11 +689,14 @@ def _foldyard_run(checkout: str, subst: dict[str, str]) -> str:
         why = (
             "no wheel, pinned version, or vendored source — cannot pick a tested version to install"
         )
+    # `--force` on EVERY branch: the step only runs when `_foldyard_check` found a stale foldyard
+    # (or none), and a bare `uv tool install` of a spec matching the retained receipt reports
+    # "already installed" and leaves the stale executable in place.
     return (
         f"if [ -n {shlex.quote(wheel)} ] && [ -f {shlex.quote(wheel)} ]; then "
         f"uv tool install --force {shlex.quote(wheel)}; "
-        f'elif [ -n {shlex.quote(version)} ]; then uv tool install "foldyard=={version}"; '
-        f"elif [ -d {repo} ]; then uv tool install --editable {repo}; "
+        f'elif [ -n {shlex.quote(version)} ]; then uv tool install --force "foldyard=={version}"; '
+        f"elif [ -d {repo} ]; then uv tool install --force --editable {repo}; "
         f"else echo {shlex.quote(f'✗ foldyard: {why}')} >&2; exit 1; fi"
     )
 
