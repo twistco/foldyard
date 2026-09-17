@@ -49,6 +49,7 @@ from pathlib import Path
 import pytest
 
 from e2e_box import BOX_IMAGE
+from foldyard import allowlist
 from foldyard.plugins import InjectRule, Plugin, Registry
 from foldyard.plugins.proxy import BOX_CA, ProxyPlugin
 
@@ -278,6 +279,12 @@ def box_proxy(tmp_path, monkeypatch):
     mitm_log = tmp_path / "mitmdump.log"
 
     # ── the proxy daemon, built from the REAL ProxyPlugin off a real InjectRule ──────────────
+    # The wall fences the CONNECT port: a bare grant — and the injector host's exemption — means
+    # ``:443`` (a bare ``github.com`` used to reach ``github.com:22``), and our upstream sits on a
+    # random port, so it is granted as ``host:port`` into the per-test store
+    # (conftest.isolated_allow_store), BEFORE the spec is built — it reads DEFAULT_DENY + ALLOW_FILE.
+    allowlist.grant(f"{ip}:{uport}", "permanent")
+    allowlist.set_wall(True)
     reg = Registry([ProxyPlugin(), _TestInjector(ip, f"{sys.executable} {minter}")])
     spec = reg.desired_daemons({})["egress-proxy"]
     # The wiring under test: the daemon env is DERIVED FROM THE RULE (host/header/retry/minter),
