@@ -115,7 +115,7 @@ open on the Mac, as of 2026-09-11:
 So the Mac's honest state is: better VMM than the post's subject, unjailed like everything else,
 and one layer short of the Linux design.
 
-## Linux — the machine layer is optional, and QEMU is the price
+## Linux — the machine layer is QEMU, and QEMU is the price
 
 ```
    (a) BOUNDARY-PRESERVING            (b) MICROVM-PER-CONTAINER

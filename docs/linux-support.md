@@ -12,7 +12,7 @@ Where a Linux host stands in the design: the boundary can be **stronger** than t
 and it is never weaker: there is no VM-less backend (`native` was retired 2026-09-17,
 [ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md); WSL2's Hyper-V boundary protects
 Windows, not the credentials, so the VM is required inside the distro too). Both are explained in
-[isolation-layers.md](./isolation-layers.md#linux--the-machine-layer-is-optional-and-qemu-is-the-price).
+[isolation-layers.md](./isolation-layers.md#linux--the-machine-layer-is-qemu-and-qemu-is-the-price).
 
 **Validation host:** the GCP nested-KVM rig (Fedora 44, Lima 2.2.0, podman 5.8.4, crun 1.28 —
 [nested-virt.md](./nested-virt.md)). It is one hypervisor level deeper than a laptop, so timings
