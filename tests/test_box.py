@@ -1117,6 +1117,77 @@ def test_path_prepend_is_wired_into_every_prepend_site(fake, monkeypatch):
     assert 'PATH="$HOME/.local/bin:/opt/fy-tools/bin:$PATH"' not in attach[-1]
 
 
+# ── the editor attach's host bridges, neutralised in-box ─────────────────────────────────
+
+
+def _run_harden(home, env_in: dict[str, str]) -> dict[str, str]:
+    """Run the REAL `_HARDEN_SNIPPET` under bash with ``home`` as $HOME, then source the file it
+    wrote in a shell that starts with ``env_in`` and print the bridge vars as they end up. The
+    reaper is kept from spawning by seeding its pidfile with the running shell's own pid (its
+    liveness probe is `kill -0`), so nothing is left behind and no real /tmp is touched."""
+    import subprocess
+
+    cfg = home / ".config" / "foldyard"
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "bridge-reaper.pid").write_text("$$")  # rewritten with the real pid below
+    script = "\n".join(
+        [
+            'echo $$ > "$HOME/.config/foldyard/bridge-reaper.pid"',
+            box._HARDEN_SNIPPET,
+            "for v in SSH_AUTH_SOCK GIT_ASKPASS VSCODE_GIT_IPC_HANDLE VSCODE_IPC_HOOK_CLI BROWSER; do",
+            '  printf "%s=%s\\n" "$v" "${!v-<unset>}"',
+            "done",
+        ]
+    )
+    out = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin", **env_in},
+    )
+    assert out.returncode == 0, out.stderr
+    return dict(line.split("=", 1) for line in out.stdout.splitlines())
+
+
+@pytest.mark.spawns("bash")  # runs the REAL snippet under bash
+def test_harden_unsets_the_attach_bridges_and_hooks_bashrc_once(tmp_path):
+    # Seen live 2026-09-17: a `fy code` attach put a LIVE agent socket (1 key) and the git
+    # credential bridge into a box whose posture read "never push". The hygiene half: every var
+    # the attach sets is gone after the file is sourced, and the file is sourced from ~/.bashrc
+    # line 1 — before the interactive guard — exactly once however many times the snippet runs.
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bashrc").write_text("# existing rc\n")
+    attached = {
+        "SSH_AUTH_SOCK": "/tmp/vscode-ssh-auth-x.sock",
+        "GIT_ASKPASS": "/root/.vscode-server/bin/x/extensions/git/dist/askpass.sh",
+        "VSCODE_GIT_IPC_HANDLE": "/tmp/vscode-git-x.sock",
+        "VSCODE_IPC_HOOK_CLI": "/tmp/vscode-ipc-x.sock",
+        "BROWSER": "/root/.vscode-server/bin/x/bin/helpers/browser.sh",
+    }
+    seen = _run_harden(home, attached)
+    assert seen["SSH_AUTH_SOCK"] == "" and seen["BROWSER"] == ""  # empty, so no default kicks in
+    assert seen["GIT_ASKPASS"] == "<unset>" and seen["VSCODE_GIT_IPC_HANDLE"] == "<unset>"
+    assert seen["VSCODE_IPC_HOOK_CLI"] == "<unset>"
+    _run_harden(home, attached)  # idempotent
+    rc = (home / ".bashrc").read_text().splitlines()
+    assert rc[0].startswith('source "$HOME/.config/foldyard/harden.sh"')
+    assert rc.count(rc[0]) == 1 and rc[-1] == "# existing rc"
+    harden = (home / ".config" / "foldyard" / "harden.sh").read_text()
+    assert "rm -f /tmp/vscode-ssh-auth-*.sock /tmp/vscode-git-*.sock" in harden  # the reaper
+
+
+def test_harden_is_in_the_bootstrap_and_reapplied_to_an_already_up_box(fake, monkeypatch):
+    # Both entry points: every new box gets it from the base bootstrap (image-agnostic — the
+    # consumer image is not where a posture guard belongs), and a box created before it shipped
+    # gets it on its next `box up` without a recreate.
+    assert box._HARDEN_SNIPPET in box._BASE_SCRIPT
+    monkeypatch.setattr(box, "_running", lambda *a, **k: True)
+    assert box.main("up") == 0
+    reapplied = [c for c in fake["calls"] if "exec" in c and any("harden.sh" in t for t in c)]
+    assert reapplied and reapplied[0][-1] == box._HARDEN_SNIPPET
+
+
 def test_up_skips_the_worktrees_mount_when_there_is_none(fake, monkeypatch, tmp_path):
     # A project that has never made a worktree gets no phantom mount (podman would create the dir).
     monkeypatch.setattr(config, "worktrees_root", lambda m: tmp_path / "never-created")

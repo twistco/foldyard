@@ -26,8 +26,17 @@ pytestmark = pytest.mark.skipif(not ADDON.exists(), reason=f"proxy addon not fou
 
 
 class _Req:
-    def __init__(self, host: str, method: str = "GET", path: str = "/x") -> None:
+    def __init__(
+        self,
+        host: str,
+        method: str = "GET",
+        path: str = "/x",
+        port: int = 443,
+        scheme: str = "https",
+    ) -> None:
         self.pretty_host = host
+        self.port = port
+        self.scheme = scheme
         self.method = method
         self.path = path
         self.url = f"https://{host}{path}"  # the addon re-issues against this on a 401
@@ -54,8 +63,10 @@ class _Flow:
         method: str = "GET",
         path: str = "/x",
         content: bytes = b"",
+        port: int = 443,
+        scheme: str = "https",
     ) -> None:
-        self.request = _Req(host, method, path)
+        self.request = _Req(host, method, path, port, scheme)
         self.response: _Resp | None = _Resp(status, content)
         self.metadata: dict = {}
 
@@ -758,6 +769,136 @@ def test_default_deny_blocks_a_disallowed_https_connect_and_passes_allowed(walle
         f.response = None  # an allowed host must NOT be short-circuited
         inj.http_connect(f)
         assert f.response is None  # tunnel proceeds (exact + glob both allowed)
+
+
+def test_a_host_grant_covers_443_only_and_the_blocked_row_names_the_port(walled):
+    # CONNECT is a raw tunnel: mitmproxy relays whatever the client speaks through it, TLS or
+    # not — so a bare `github.com` grant used to let `github.com:22` out, and with an SSH agent
+    # forwarded into the box by an editor attach that is a push path. A host grant now means
+    # :443; any other port is refused, logged WITH the port so the TUI can offer that grant.
+    inj, allow, log = walled
+    _write_allow(allow, ["github.com"])
+
+    ssh = _Flow("github.com", port=22)
+    inj.http_connect(ssh)
+    assert ssh.response is not None and ssh.response.status_code == 403
+    entry = _last_log(log)
+    assert entry["host"] == "github.com:22" and entry["blocked"] is True
+
+    https = _Flow("github.com", port=443)
+    https.response = None
+    inj.http_connect(https)
+    assert https.response is None
+
+
+def test_a_host_port_grant_opens_exactly_that_port(walled):
+    # `fy allow add github.com:22` grants the tunnel on :22 and NOTHING else: not :443 for that
+    # host (a port grant is not a host grant), and not :22 for another host. Globs carry a port
+    # the same way (`*.internal.example:8443`).
+    inj, allow, _log = walled
+    _write_allow(allow, ["github.com:22", "*.internal.example:8443"])
+
+    for host, port in (("github.com", 22), ("db.internal.example", 8443)):
+        f = _Flow(host, port=port)
+        f.response = None
+        inj.http_connect(f)
+        assert f.response is None, (host, port)
+
+    for host, port in (("github.com", 443), ("gitlab.com", 22), ("internal.example", 8443)):
+        f = _Flow(host, port=port)
+        inj.http_connect(f)
+        assert f.response is not None and f.response.status_code == 403, (host, port)
+
+
+def test_the_injector_host_exemption_is_443_only(gh, monkeypatch, tmp_path):
+    # The injector host is exempt because the proxy must reach it to mint — over HTTPS. The
+    # exemption must not double as a tunnel to any port on that host.
+    allow = tmp_path / "allow-effective.json"
+    _write_allow(allow, [])
+    monkeypatch.setenv("INJECT_HOST", "api.github.com")
+    monkeypatch.setenv("INJECT_COMMAND", "true")
+    monkeypatch.setenv("DEFAULT_DENY", "1")
+    monkeypatch.setenv("ALLOW_FILE", str(allow))
+    monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
+    inj = gh.Injector()
+    f = _Flow("api.github.com", port=22)
+    inj.http_connect(f)
+    assert f.response is not None and f.response.status_code == 403
+
+
+def test_plain_http_enforces_the_port_policy_too(walled):
+    # `GET http://host:8080/` through the proxy is as much a tunnel past a host grant as a CONNECT
+    # to :22 — so the request hook applies the same policy: a bare grant covers :80 (apt,
+    # redirects) and :443 (a decrypted request), any other port needs `host:port`.
+    inj, allow, log = walled
+    _write_allow(allow, ["deb.debian.org", "internal.example:8080"])
+
+    for host, port, scheme in (
+        ("deb.debian.org", 80, "http"),
+        ("deb.debian.org", 443, "https"),
+        ("internal.example", 8080, "http"),
+    ):
+        f = _Flow(host, port=port, scheme=scheme)
+        f.response = None
+        inj.request(f)
+        assert f.response is None, (host, port)
+    clear443 = _Flow("deb.debian.org", port=443, scheme="http")  # cleartext on :443 is not :443
+    inj.request(clear443)
+    assert clear443.response is not None and clear443.response.status_code == 403
+    assert _last_log(log)["host"] == "deb.debian.org:443"
+
+    odd = _Flow("deb.debian.org", port=8080, scheme="http")
+    inj.request(odd)
+    assert odd.response is not None and odd.response.status_code == 403
+    assert _last_log(log)["host"] == "deb.debian.org:8080"
+    default = _Flow("internal.example", port=80, scheme="http")  # a port grant is not a host grant
+    inj.request(default)
+    assert default.response is not None and default.response.status_code == 403
+    assert _last_log(log)["host"] == "internal.example"
+
+
+def test_the_injector_exemption_never_covers_cleartext(gh, monkeypatch, tmp_path):
+    # The injector host is exempt so the proxy can reach it to MINT — over HTTPS. A cleartext
+    # request to it would carry the minted credential in the clear, so :80 is not exempt — and
+    # neither is `http://host:443/`: the exemption is by SCHEME, not port.
+    allow = tmp_path / "allow-effective.json"
+    _write_allow(allow, [])
+    monkeypatch.setenv("INJECT_HOST", "api.github.com")
+    monkeypatch.setenv("INJECT_COMMAND", "true")
+    monkeypatch.setenv("DEFAULT_DENY", "1")
+    monkeypatch.setenv("ALLOW_FILE", str(allow))
+    monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
+    inj = gh.Injector()
+    for port in (80, 443):
+        plain = _Flow("api.github.com", port=port, scheme="http")
+        inj.request(plain)
+        assert plain.response is not None and plain.response.status_code == 403, port
+    tls = _Flow("api.github.com", port=443)
+    tls.response = None
+    inj.request(tls)
+    assert tls.response is None
+
+
+def test_no_credential_is_injected_or_reissued_on_cleartext(gh, monkeypatch, tmp_path):
+    # With the host GRANTED for cleartext (so the wall lets it through) a cleartext request to
+    # the target host must still get no token — not on the way out, not on a 401 re-issue — even
+    # on :443 (which, in the clear, needs its own `host:443` grant to pass the wall at all).
+    allow = tmp_path / "allow-effective.json"
+    _write_allow(allow, ["api.github.com", "api.github.com:443"])
+    monkeypatch.setenv("INJECT_HOST", "api.github.com")
+    monkeypatch.setenv("INJECT_COMMAND", "printf tok")
+    monkeypatch.setenv("DEFAULT_DENY", "1")
+    monkeypatch.setenv("ALLOW_FILE", str(allow))
+    monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
+    inj = gh.Injector()
+    for port in (80, 443):
+        f = _Flow("api.github.com", port=port, scheme="http")
+        f.response = None
+        inj.request(f)
+        assert f.response is None, port  # granted → not blocked…
+        assert inj._rule_for(f) is None  # …but no rule applies: nothing injected
+    tls = _Flow("api.github.com")
+    assert inj._rule_for(tls) is not None
 
 
 def test_default_deny_off_never_blocks(gh, monkeypatch, tmp_path):

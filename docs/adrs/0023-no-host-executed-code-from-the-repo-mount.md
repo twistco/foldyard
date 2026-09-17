@@ -2,8 +2,11 @@
 
 - **Status:** Accepted (2026-08-08) — implemented across `plugins/github_app_token.py`,
   `plugins/gh_cli_token.py`, `plugins/__init__.py` (`Secret`/`Registry.secrets`),
-  `keyless.ensure_secret`, `worktree._init_in_yard`, `vscode._generate_attached_config` +
-  `_ALLOWED_CONFIG_KEYS`, `allowlist.py` (host-owned grants *and* wall switch), `config.engine_cli`.
+  `keyless.ensure_secret`, `worktree._init_in_yard`, `allowlist.py` (host-owned grants *and* wall
+  switch), `config.engine_cli`. The VS Code surface (`vscode._generate_attached_config` +
+  `_ALLOWED_CONFIG_KEYS`) is superseded by
+  [ADR-0026](./0026-vscode-attach-config-is-declarative.md) — the generator is gone and the
+  attached config is `[vscode]` data foldyard authors itself; branch 2 below keeps the history.
 - **Sources:** the review of the finalised `github=app` PR-bot minter — "does the consumer-side
   minter hand the box a code-execution path to the Mac?"; five review rounds against the
   implementation. Related: [0007](./0007-credential-injection-at-egress-proxy.md) (where minting
@@ -65,8 +68,12 @@ question per surface — *does this actually need host privileges?* — which ha
    worktrees root (`worktree._init_in_yard`). The engine becomes a prerequisite and `fy worktree
    add` SKIPS with a retry hint when there's no image yet — deliberately **not** a host fallback,
    because "the yard wasn't ready" must never silently become "so we ran it on the Mac".
-2. **Yes, but it needs no credentials → split it: read in the yard, write on the host.** The VS Code
-   generator runs in the box (which `fy code` already requires to be up) and PRINTS a JSON document
+2. **Yes, but it needs no credentials → split it: read in the yard, write on the host.**
+   *(Superseded for this surface by
+   [ADR-0026](./0026-vscode-attach-config-is-declarative.md): the generator turned out to be data
+   wearing a script, and is now `[vscode]` config foldyard evaluates itself. The triage answer
+   stands for any future surface that genuinely needs computed output.)* The VS Code
+   generator ran in the box (which `fy code` already requires to be up) and PRINTS a JSON document
    on stdout; foldyard parses it host-side and performs the one privileged write. The document is
    sanitized by an **allowlist** (`_ALLOWED_CONFIG_KEYS`), not a denylist: VS Code's attached-config
    schema includes lifecycle hooks and `initializeCommand` runs ON THE HOST, so a passthrough would

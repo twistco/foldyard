@@ -8,7 +8,9 @@ test is refused — `foldyard verify`). Long-lived so MULTIPLE sessions attach a
 
 DELIBERATELY no ~/.ssh mount, no SSH-agent forwarding, no gh/GITHUB_TOKEN: the box gets the
 full local git toolkit (via the mounted .git) but NO credential to reach the origin — prompt
-injection / malicious deps can't push or exfiltrate via push.
+injection / malicious deps can't push or exfiltrate via push. The one thing that DOES forward
+credentials in is an editor attach (VS Code's Dev Containers: the host's SSH agent and git
+credential store, unswitchable host-side) — neutralised in-box by ``_HARDEN_SNIPPET``.
 
 Faithful port of the `devbox` recipe. Project-specific values come from `[box]`
 in foldyard.toml (image · shadow_volumes · caches · warmup · env · sock_in_vm · tools ·
@@ -378,6 +380,47 @@ fy_path_prepend() {   # drop existing occurrences, then prepend — idempotent, 
 fy_path_prepend "/opt/fy-tools/bin" "$HOME/.local/bin"
 """
 
+# The host bridges an editor attach injects, neutralised in-box. VS Code's Dev Containers attach
+# (`fy code`, or a manual "Attach to Running Container") runs its server IN the box and, with no
+# setting to stop it, forwards the host's SSH agent (`/tmp/vscode-ssh-auth-*.sock`) and its
+# git-credential store (`GIT_ASKPASS` over `/tmp/vscode-git-*.sock`) into every terminal it opens
+# — two push paths in a box whose posture is "never push" — plus a host command channel
+# (`VSCODE_IPC_HOOK_CLI`, `BROWSER`/--openExternal). `fy code` defuses both at the SOURCE, race-free:
+# it launches VS Code with foldyard's own EMPTY ssh-agent (the attach forwards whatever the process
+# holds, verbatim — only an unset var makes it find the host's real one; `vscode._empty_agent`),
+# and pins `git.terminalAuthentication` off so the git bridge is never installed. This snippet is
+# the second layer, for what the source can't reach — a manual "Attach to Running Container" from
+# an operator's own VS Code, an instance launched before this shipped — image-agnostic, in two
+# parts. ENV hygiene: `harden.sh` unsets the vars, sourced at ~/.bashrc line 1 — BEFORE the
+# interactive guard — so every bash (the attach's terminals, `fy claude`, `box shell`, a
+# `bash -c`) inherits their absence. SOCKET removal: the sockets are usable by PATH regardless of
+# the env, so a reaper unlinks them as they appear; (re)started from harden.sh — every shell —
+# and from `fy code` before the attach. The window between a socket appearing and the reaper's
+# next pass is real, which is why it is the second layer and not the first; the egress wall's
+# :443 fence makes it moot for SSH regardless (`github.com:22` needs its own grant). `fy verify`
+# reports both the vars and the sockets. Generalised from the harden script a consumer image
+# carried — a load-bearing part of the posture that only one consumer had.
+_HARDEN_SNIPPET = r"""
+mkdir -p "$HOME/.config/foldyard" && touch ~/.bashrc
+cat > "$HOME/.config/foldyard/harden.sh" <<'FYHARDEN'
+# foldyard: neutralise the host bridges an editor attach injects (fy docs security, § fy verify).
+# Sourced at ~/.bashrc line 1, before the interactive guard, so every bash gets it.
+unset VSCODE_IPC_HOOK_CLI
+unset VSCODE_GIT_IPC_HANDLE GIT_ASKPASS VSCODE_GIT_ASKPASS_MAIN VSCODE_GIT_ASKPASS_NODE VSCODE_GIT_ASKPASS_EXTRA_ARGS
+unset REMOTE_CONTAINERS_IPC REMOTE_CONTAINERS_SOCKETS REMOTE_CONTAINERS_DISPLAY_SOCK WAYLAND_DISPLAY
+export BROWSER= SSH_AUTH_SOCK= GPG_AGENT_INFO=
+fy_bridge_reaper() {  # unlink the attach's agent + git-IPC sockets as they appear; one per box
+  local pid="$HOME/.config/foldyard/bridge-reaper.pid"
+  [ -r "$pid" ] && kill -0 "$(cat "$pid" 2>/dev/null)" 2>/dev/null && return 0
+  nohup sh -c 'while :; do rm -f /tmp/vscode-ssh-auth-*.sock /tmp/vscode-git-*.sock; sleep 1; done' >/dev/null 2>&1 </dev/null &
+  echo $! > "$pid"
+}
+fy_bridge_reaper
+FYHARDEN
+grep -q "foldyard/harden.sh" ~/.bashrc || { printf '%s\n' 'source "$HOME/.config/foldyard/harden.sh" 2>/dev/null || true' | cat - ~/.bashrc > ~/.bashrc.fy && mv ~/.bashrc.fy ~/.bashrc; }
+. "$HOME/.config/foldyard/harden.sh"
+"""
+
 # Base scaffolding the bootstrap runs FIRST (idempotent shell config, not an install): CA
 # system-trust, the PATH + persisted-history ~/.bashrc edits, and the `run_step` helper that the
 # MONITORED install steps (foldyard + plugins + consumer [[box.tools]]) call — so a failed step is
@@ -412,6 +455,9 @@ case "$PROMPT_COMMAND" in
   *) PROMPT_COMMAND="history -a${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
 esac
 BASHHIST
+"""
+    + _HARDEN_SNIPPET
+    + r"""
 # A Python for box-side scripting on ANY image. The box contract (ADR-0014) promises git + uv + an
 # engine client — NEVER python: the packaged image is uv-first by design (debian:trixie-slim has no
 # python3 at all), so a bare `python3` in a bootstrap step is the same defect class as a bare `npm`.
@@ -431,6 +477,20 @@ run_step() {  # label · check · run
 }
 """
 )
+
+
+def ensure_harden(engine: str, box: str, env: dict) -> bool:
+    """(Re)apply :data:`_HARDEN_SNIPPET` in a running box: the file, the ~/.bashrc hook and the
+    reaper — idempotent, so it runs on every `box up` of an existing box and before every `fy
+    code` attach (the moment the bridges appear). Returns whether it applied; the caller decides
+    what that means (`box up` warns, `fy code` refuses to attach)."""
+    proc = subprocess.run(
+        [engine, "exec", box, "bash", "-lc", _HARDEN_SNIPPET],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return proc.returncode == 0
 
 
 def _warmup_script(checkout: str) -> str:
@@ -753,7 +813,7 @@ def _bootstrap_script(checkout: str, here: str, env: dict) -> str:
             (tool["name"], tool.get("check") or f"command -v {tool['name']}", tool["install"])
         )
 
-    lines = [_BASE_SCRIPT]
+    lines: list[str] = [_BASE_SCRIPT]
     if config.box_clean_docker_config():
         # Seed the clean DOCKER_CONFIG dir the run env points at (see _up's env_args) — kept
         # out of ~/.docker so an editor attach can't re-inject its root-broken credsStore.
@@ -965,6 +1025,11 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
                 "~/.codex volume or keyless seed). Recreate to add them: `fy box down && fy box up`."
             )
         _warn_stale_foldyard(engine, box, env)
+        if not ensure_harden(engine, box, env):  # a box from before the hygiene gets it here
+            print(
+                "⚠ couldn't (re)apply the in-box editor-attach hygiene (bash in the box failed) — "
+                "`fy verify` in the box says what is exposed; `fy box down && fy box up` rebuilds it."
+            )
         print(f"✓ dev box {box} already up. Attach: {_attach_hint(worktree)}")
         return 0
     if _exists(engine, box, env):
