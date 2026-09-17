@@ -35,7 +35,9 @@ there are upper bounds; correctness results transfer as they are.
 | `fy box up` / `exec` / `down` + **in-box `fy verify`** | ✅ box image built + bootstrapped in 45 s; in-box `fy ps` reaches the engine, `fy mode` reads the mirror; in-box `verify` ALL PASS under walls + proxy — after fixing a false FAIL (a Fedora guest's btrfs `subvol=/root` option matched the in-box home; the audit now judges the mountpoint field) and giving the fixture a *private* origin (a public one answers `ls-remote` without credentials and reads as pushable) | 2026-09-13 | [verify-false-pass.md](./verify-false-pass.md#a-false-fail-2026-09-13-the-options-field) |
 | the config-adopt gate ([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)): first adoption, drift, revert | ✅ a never-adopted checkout with no terminal: `fy up` refuses; `fy config adopt` non-interactive adopts. A drifted tree (`cpus = 2 → 3`): `fy up` prints the diff and keeps running the adopted copy, the supervisor logs the one-per-change line, the doctor row flags it, `fy config revert` restores the file | 2026-09-13 | as above |
 | `fy machine recreate`, `fy machine stop` (also stops the supervisor), `fy doctor`, the stale-provisioning refusal (`fy box exec` without the wall env after a walled `up`) | ✅ | 2026-09-13 | as above |
-| CI tiers 1–3 (unit/golden/TUI, the example stack up → serve → down, the proxy and box e2es) | ✅ every push, on `ubuntu-latest` — inside a docker-CLI container mirroring the dev box, so `in_box()` is true and the machine + host gates are bypassed | continuous | [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml) |
+| CI tiers 1–3 (unit/golden/TUI, the example stack up → serve → down, the proxy and box e2es) | ✅ every push, on `ubuntu-latest` — inside a docker-CLI container mirroring the dev box, so `in_box()` is true and the machine + host gates are bypassed | continuous | [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml--foldyard-e2eyml) |
+| **The `lima` backend on a GitHub-hosted runner** (`ubuntu-24.04`, x86, `/dev/kvm` via `modprobe kvm; chown $USER /dev/kvm`, Lima 2.2.0 tarball, QEMU 8.2, host podman 4.9.3 CLI → podman in a Fedora 44 guest) — the phase-0 spike: `machine ensure → up → verify → state → down → machine stop → rm` against the example copied out, as 5 independent attempts × {walls off, walls on} on fresh runners, **no retry wrapper** | ✅ **10/10 green** (+2/2 in the shake-out run). QEMU start → Lima READY 29–41 s; `machine ensure` 39–79 s incl. the 13 s image download; `fy up` 24–30 s (api build + Postgres pull, warm registry); `verify` 2–3 s ALL PASS (rootless, escape refused, PID-1 mount table clean); `fy state` all ✓ — except the stack tier reads "engine unreachable" host-side while `fy ps` reaches it (unexplained; a live-probe test is the place to pin it); walls on: `[machine].wall` + `host_wall` via `fy up` with `[proxy]` declared — host table loaded on the VM's own cgroup scope, direct guest egress refused (`curl --noproxy '*'` connect-refused in 19 ms), DNS resolves, `https://example.com` via the proxy 200; `machine stop` stops the supervisor; `rm` clean. Whole attempt 1 m 35 s – 2 m 22 s | 2026-09-17 | [run 35222981855](https://github.com/twistco/foldyard/actions/runs/35222981855) (spike workflow, since deleted — the job it became is `lima-host-e2e` in [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml--foldyard-e2eyml)) |
+| `ubuntu-24.04-arm` runners | ❌ **no KVM**: no `/dev/kvm` before or after `sudo modprobe kvm` (the module loads, no device — no EL2 for the guest). VM-backed CI is x86-only | 2026-09-17 | same run |
 
 ## Not yet validated on Linux
 
@@ -44,8 +46,12 @@ there are upper bounds; correctness results transfer as they are.
 - **The box e2e on the rig** (`tests/test_proxy_box_e2e.py` against the rig's engine — the
   recipe is in [nested-virt.md](./nested-virt.md)); CI covers it on a runner, the rig would cover
   it on a real Lima VM.
-- **`backend = "native"`** on a real Linux host (the host's own rootless podman, no VM) — only
-  the CI container mirror has exercised it.
+- **`backend = "native"`** on a real Linux host (the host's own rootless podman, no VM) — the
+  `native-host-e2e` runner job exercised it (an `ubuntu-latest` runner's rootless podman +
+  `systemd --user` healthcheck timers) until 2026-09-17, when the `lima` job replaced it; nothing
+  live covers it now. Whether `native` stays a product option at all (it was largely a CI
+  stopgap; WSL2 is its remaining rationale) is an open product decision — see the outstanding
+  work below.
 - **WSL2 — nothing measured.** `/dev/kvm` in a stock Windows 11 x86 distro (two minutes on any
   such machine: `wsl --shutdown; wsl; ls -l /dev/kvm`), Lima + QEMU inside it, `[automount]
   enabled = false` for the repo-only mount. Windows-on-ARM boots the distro at EL1, so KVM is
@@ -82,10 +88,18 @@ there are upper bounds; correctness results transfer as they are.
   [ADR-0025](./adrs/0025-gvisor-machine-posture-and-socket-narrowing.md). What remains deferred
   is the broader mount/endpoint allowlist (ADR-0025 §Decision 4). Not a Linux-support blocker:
   the product claim without `③` is the same as the Mac's.
-- **A CI job on a Linux *host* path** is not possible on GitHub-hosted runners (podman-machine /
-  Lima VMs are flaky there — [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml)),
-  so the rig stays the validation host for tier 4. Its recipe and its cost are in
-  [nested-virt.md](./nested-virt.md).
+- **A CI job on a Linux *host* path** — done: `lima-host-e2e` boots the real lima/QEMU VM on an
+  `ubuntu-24.04` runner (the row above; [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml--foldyard-e2eyml)).
+  The old sentence here ("podman-machine / Lima VMs are flaky on GitHub-hosted runners") was
+  never evidenced for Lima: its one citation was a libvirt permission failure. What the runner
+  tier CANNOT reach: the `podman` backend (podman-machine on a runner — untried, no evidence
+  either way), arm64 (no KVM), and anything needing nested virtualisation inside the guest — for
+  those the nested-KVM-host recipe in [nested-virt.md](./nested-virt.md) remains.
+- **Retire `backend = "native"`?** With a VM job in CI the backend's CI rationale is gone; what
+  remains is the Linux/WSL2 "weaker boundary" product option. Retiring it means "foldyard always
+  has a VM" — an ADR (it changes [isolation-layers.md](./isolation-layers.md) and
+  `docs/configuration.md`) and the removal of `machine_backend.NativeBackend`. Decide before
+  deleting anything.
 
 ## Recording a new validation
 

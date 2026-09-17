@@ -183,16 +183,17 @@ com.docker.compose.config-hash=fy-canary <any-image> …`. For podman-compose: `
 io.podman.compose.project=<project> <any-image> …`. Run the suite once in each provider direction,
 confirm the matching canary survives each run, then remove it.
 
-## CI (`.github/workflows/foldyard.yml`)
+## CI (`.github/workflows/foldyard.yml` + `foldyard-e2e.yml`)
 
-Tiers 1–3 run on GitHub-hosted `ubuntu-latest` runners — **all of it on containers, none on
-KVM**, which is the key point: the egress-proxy box e2e needs a container engine and a test
-running *inside* a container, not a VM, and Docker is preinstalled on Linux runners. Two jobs:
+Tiers 1–3 and the host tier all run on GitHub-hosted Linux runners. `foldyard.yml` is the fast
+gate on every push; `foldyard-e2e.yml` holds the advisory live tiers, opt-in (`main`, a
+`[run-e2e]` commit message, or a dispatch). Three jobs:
 
 | job | what | engine |
 | --- | --- | --- |
 | `check` | `just foldyard check` — ruff + pyright + ty + the unit/golden/TUI suite. typecheck installs the `e2e` group so the opt-in proxy/box e2e files (which import `cryptography`/`requests`) resolve | none |
-| `live-e2e` | all the live e2es (`-k e2e`: the example stack up→serve→down, the in-process proxy e2e, AND the box e2e) — run **inside a docker-CLI container** that mirrors the dev box (see below) | runner Docker |
+| `live-e2e` | the in-box topology: all the live e2es (`-k e2e`: the example stack up→serve→down, the in-process proxy e2e, AND the box e2e) — run **inside a docker-CLI container** that mirrors the dev box (see below) | runner Docker |
+| `lima-host-e2e` | the HOST topology: `ubuntu-24.04` as a real Linux host running foldyard's default `lima` backend — `machine ensure` boots a QEMU/KVM VM on the runner, then `tests/test_e2e.py` drives the real `foldyard up` / worktree lifecycle through the config-adopt gate, the supervisor and compose, exactly as on an operator's machine | Lima VM (podman in the guest, over the forwarded socket) |
 
 **Why `live-e2e` runs inside a container.** The box e2e (`test_proxy_box_e2e.py`) spawns a
 *sibling* box and must discover its own network — so the test process itself has to be in a
@@ -205,13 +206,25 @@ the **repo mounted at its same host path** (so the box's `-v <CA>` mount, which 
 on the host, points at a path that exists there — the test copies the CA under the repo for this).
 A `docker compose` v2 plugin binary is dropped in for the example stack.
 
-**Why no KVM job.** The only foldyard surface that needs `/dev/kvm` is the `foldyard machine`
-(podman-machine VM) lifecycle — tier 4. Raw `/dev/kvm` *is* present on GitHub's Linux runners
-(the android-emulator action relies on it, via a `udev` rule), but full podman-machine / libvirt
-VMs are flaky there (nested-virt limits — see
-[josecelano/github-actions-virtualization-support](https://github.com/josecelano/github-actions-virtualization-support)),
-so that path stays the Mac / nested-KVM-host recipe in
-[docs/nested-virt.md](./docs/nested-virt.md) rather than a CI job.
+**Why a VM job works on a shared runner (2026-09-17).** Until then this page said podman-machine
+/ Lima VMs were "flaky" on GitHub-hosted runners; the only citation was a *libvirt* permission
+failure, and foldyard's lima backend does not use libvirt. `/dev/kvm` is present on the x86 Linux
+runners (under-documented, but Lima's own CI boots QEMU VMs on `ubuntu-24.04` on every PR with the
+recipe `modprobe kvm; chown $USER /dev/kvm` — group membership does not take effect there). A
+10-attempt spike of the real `lima` backend on `ubuntu-24.04` went 10/10 with no retry wrapper,
+with and without the walls, QEMU start → READY in 29–41 s and the whole attempt under 2.5 min;
+the record is in [docs/linux-support.md](./docs/linux-support.md#validated-on-a-linux-host). The
+job creates the VM once from a throwaway example copy before pytest (the example stack has no bind
+mounts, so every test copy can drive the one VM) and exports its socket as `DOCKER_HOST`; the
+tests' `foldyard up` then finds the machine running and goes on through the real host path.
+Things a Linux runner needs that a Mac does not: `qemu-img` (from `qemu-utils`, not implied by
+`qemu-system-x86-core`), a `systemd --user` manager for anything scoped (`loginctl
+enable-linger`), and Lima from the release tarball into `/usr/local`. **arm64 runners have no
+KVM** (`ubuntu-24.04-arm`: no `/dev/kvm` before or after `modprobe kvm`, probed 2026-09-17), so
+the job is x86-only. The `podman` backend (podman-machine) has not been tried on a runner; the
+`lima` backend is the product path and the one tested. The Mac / nested-KVM-host recipe in
+[docs/nested-virt.md](./docs/nested-virt.md) remains for what a VM job cannot reach (the gVisor
+posture under nested virtualisation).
 
 ## Conventions & gotchas
 
