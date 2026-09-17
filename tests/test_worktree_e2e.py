@@ -77,6 +77,16 @@ def rig(tmp_path_factory):
         fh.write(".devbox-claude/\n")
     _git(main, "add", ".gitignore")
     _git(main, "-c", "user.email=e2e@foldyard", "-c", "user.name=e2e", "commit", "-qm", "ignore")
+    # A NAMED volume for the db (the example ships none: postgres's data dir is an anonymous
+    # volume there), so `remove`'s volume sweep — `{project}_*` — has something real to drop.
+    compose = main / "compose.yml"
+    text = compose.read_text()
+    marker = "    image: docker.io/library/postgres:16-alpine\n"
+    assert marker in text
+    text = text.replace(marker, marker + "    volumes:\n      - pgdata:/var/lib/postgresql/data\n")
+    compose.write_text(text + "\nvolumes:\n  pgdata: {}\n")
+    _git(main, "add", "compose.yml")
+    _git(main, "-c", "user.email=e2e@foldyard", "-c", "user.name=e2e", "commit", "-qm", "volume")
     wt_root = base / "example-worktrees"
     archive = base / "transcripts-archive"
     env = {"FOLDYARD_WORKTREES_ROOT": str(wt_root), "FOLDYARD_TRANSCRIPTS_ARCHIVE": str(archive)}
@@ -120,7 +130,7 @@ def test_remove_tears_down_archives_and_drops_the_checkout_but_not_main_or_the_b
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("x")
     volumes_before = engine("volume", "ls", "-q", "--filter", f"name={WT_PROJECT}_").stdout.split()
-    assert volumes_before, "the worktree stack should own at least the db volume"
+    assert volumes_before, "the worktree stack should own the named db volume (fixture)"
 
     removed = fy_ok(["worktree", "remove", NAME, "--yes"], rig.main, timeout=600, env_extra=rig.env)
     assert f"worktree '{NAME}' removed" in removed.out, removed.out

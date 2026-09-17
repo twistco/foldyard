@@ -29,7 +29,16 @@ from pathlib import Path
 
 import pytest
 
-from e2e_host import _adopt_on_host, ensure_vm, example_copy, fy, fy_ok, host_tier, lima_edit
+from e2e_host import (
+    _adopt_on_host,
+    ensure_vm,
+    example_copy,
+    export_vm_socket,
+    fy,
+    fy_ok,
+    host_tier,
+    lima_edit,
+)
 
 pytestmark = host_tier
 
@@ -41,6 +50,12 @@ LEAK_AT = "/mnt/c"  # a verify._FOREIGN_MOUNTS marker: "WSL2 Windows drive"
 def repo(tmp_path_factory):
     r = example_copy(tmp_path_factory.mktemp("verify"))
     _adopt_on_host(r)
+    # The boundary under audit is the one foldyard builds for THIS checkout, so build it: the
+    # mount table then holds this repo + its worktrees root and nothing a previous module left
+    # (test_machine_e2e leaves the VM mounting ITS copy under the host home — a host path beyond
+    # this checkout's mounts, which the positive test would rightly FAIL on).
+    fy_ok(["machine", "recreate", "--yes"], r, timeout=900)
+    export_vm_socket()
     ensure_vm(r)
     yield r
     fy(["down"], r, timeout=180)
