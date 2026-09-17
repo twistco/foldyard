@@ -151,6 +151,15 @@ def nuke() -> None:
 
 
 @app.command()
+def reclaim() -> None:
+    """Free engine-store space now — the sweeps `up` runs under low headroom, plus the
+    project's [reclaim] script — without bouncing the box or the machine."""
+    from . import stack
+
+    raise typer.Exit(stack.reclaim_now())
+
+
+@app.command()
 def ps() -> None:
     """Show the stack's containers."""
     from . import stack

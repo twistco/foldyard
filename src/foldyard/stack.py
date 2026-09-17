@@ -425,6 +425,7 @@ def _podman_build(
     *,
     extra_profiles: list[str] | None = None,
     services: list[str] | None = None,
+    superseded: list[str] | None = None,
 ) -> int:
     """Build every service with a `build:` section using NATIVE `podman build` (buildah).
 
@@ -443,6 +444,10 @@ def _podman_build(
     resolves the bare name to its `localhost/…` store entry) and never re-enters the broken
     provider build. The docker engine (CI) never reaches here — compose's BuildKit default
     handles additional contexts there; see `up`.
+
+    ``superseded``, when given, collects the ids of images a successful build untagged — the
+    previous `<project>_<service>` images — for `up` to remove once containers have moved off
+    them (see ``_remove_superseded``).
     """
     cfg = _run(
         list(ctx.compose) + _profile_flags(ctx, extra_profiles) + ["config"],
@@ -543,6 +548,11 @@ def _podman_build(
                     return alias_name, rc
         return name, rc
 
+    # The ids behind every tag about to be (re)written: whatever a successful build replaces
+    # is ours to remove, once `up` has recreated the containers onto the new image.
+    images = {image_for(name, svc) for name, svc in to_build}
+    before = {image: _image_id(engine, image, ctx.env) for image in images}
+
     with log_path.open("w") as log:
         # Match podman-compose 1.6's build semantics: independent specs build concurrently. Services
         # with an identical normalized build mapping share one build and receive alias tags above.
@@ -563,7 +573,51 @@ def _podman_build(
                 _err("  " + line)
             _err(f"  full log: cat {log_path}")
             return failures[0][1]
+    if superseded is not None:
+        after = {image: _image_id(engine, image, ctx.env) for image in images}
+        superseded += sorted(
+            {old for image, old in before.items() if old and old != after.get(image)}
+        )
     return 0
+
+
+def _image_id(engine: str, image: str, env: dict[str, str]) -> str | None:
+    proc = _run([engine, "image", "inspect", "--format", "{{.Id}}", image], env=env)
+    return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+
+def _repo_tags(engine: str, image: str, env: dict[str, str]) -> list[str] | None:
+    """The tags still naming ``image`` — ``[]`` when untagged, None when unreadable (fail
+    closed: an id whose tags can't be read is treated as still referenced)."""
+    proc = _run([engine, "image", "inspect", "--format", "{{json .RepoTags}}", image], env=env)
+    if proc.returncode != 0:
+        return None
+    try:
+        tags = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    return tags if isinstance(tags, list) else None
+
+
+def _remove_superseded(ctx: Context, ids: list[str]) -> None:
+    """Remove the images `up`'s build untagged. Provably ours and not in flight, so no age
+    guard — the dangling sweep's guard exists for OTHER sessions' builds. Never `--force`: an
+    id a container still holds (a stopped one) is refused by the engine and left for the
+    dangling sweep. An id another tag still names is skipped BEFORE the rmi: `rmi <id>` on an
+    image with exactly one remaining tag removes it, and that tag is a service this build
+    didn't touch (a profile-gated alias of the same build spec, say) — its image, not a
+    leftover. Why it matters: a rebuilt 6 GB image otherwise sits there younger than any
+    guard, exactly when the next build needs the room."""
+    if not ids:
+        return
+    eng = config.engine()
+    removed = [
+        i
+        for i in ids
+        if _repo_tags(eng, i, ctx.env) == [] and _run([eng, "rmi", i], env=ctx.env).returncode == 0
+    ]
+    if removed:
+        print(f"✓ removed {len(removed)} image(s) this build superseded")
 
 
 def _build(
@@ -571,6 +625,7 @@ def _build(
     *,
     services: list[str] | None = None,
     extra_profiles: list[str] | None = None,
+    superseded: list[str] | None = None,
 ) -> int:
     """Build compose services with the configured engine.
 
@@ -579,7 +634,9 @@ def _build(
     regular BuildKit build.
     """
     if config.engine() == "podman":
-        return _podman_build(ctx, extra_profiles=extra_profiles, services=services)
+        return _podman_build(
+            ctx, extra_profiles=extra_profiles, services=services, superseded=superseded
+        )
     return _compose(ctx, ["build", *(services or [])], extra_profiles=extra_profiles)
 
 
@@ -636,7 +693,8 @@ def up() -> int:
     # layer that had already run). A no-op unless the store is genuinely low; see reclaim().
     reclaim(ctx, extra_profiles=extra)
     print(f"▶ building + starting the stack ({ctx.project})…")
-    rc = _build(ctx, extra_profiles=extra)
+    superseded: list[str] = []
+    rc = _build(ctx, extra_profiles=extra, superseded=superseded)
     if rc == 0:
         # AFTER the build (a failed build must leave the running stack untouched), BEFORE the
         # provider acts: sweep containers a different compose provider created, which this one
@@ -647,6 +705,8 @@ def up() -> int:
         rc = _compose(ctx, ["up", "-d", "--no-build"], extra_profiles=extra)
     if rc != 0:
         return rc
+    # Containers are on the new images now; the ones the build replaced can go.
+    _remove_superseded(ctx, superseded)
     # Dump-browse only: the Auth0 sim container rsyncs the read-only-mounted harness
     # (tests/auth0-simulator) into /opt/sim and re-seeds the login allow-list ONLY at startup,
     # and `compose up` leaves an already-healthy sim running — so a plain `fy up` after editing
@@ -1393,9 +1453,9 @@ def _orphan_project_images(ctx: Context, services: set[str], live: set[str]) -> 
     return orphans
 
 
-def reclaim(ctx: Context, extra_profiles: list[str] | None = None) -> None:
-    """Free engine-store space, but ONLY when the store is actually under pressure. Two narrow
-    sweeps:
+def reclaim(ctx: Context, extra_profiles: list[str] | None = None, *, force: bool = False) -> None:
+    """Free engine-store space, but ONLY when the store is actually under pressure (or on
+    ``force`` — the manual ``fy reclaim``). Three narrow sweeps:
 
     1. **dangling images older than** :data:`RECLAIM_MIN_AGE` — superseded builds. Podman's
        "dangling" means untagged AND not the parent of another image, so the layer CACHE is
@@ -1405,16 +1465,23 @@ def reclaim(ctx: Context, extra_profiles: list[str] | None = None) -> None:
        into a re-pull through the egress wall.
     2. **images of ``{prefix}-{worktree}`` projects whose checkout is gone** — tagged, so
        sweep 1 structurally cannot see them.
+    3. **the project's own ``[reclaim] script``**, in the dev box — what else fills the store
+       (package-manager caches, test artefacts) lives in volumes only the box mounts.
+
+    (``up`` separately removes the images its own build just superseded — no guard needed
+    there; see ``_remove_superseded``.)
 
     Called from ``up`` BEFORE the build, because the failure this exists to prevent is the
     build itself dying mid-layer on ``no space left on device``. Best-effort throughout: an
     unreadable disk figure, an unrenderable service list or an unreadable worktree list each
-    mean "reclaim nothing" and the build proceeds exactly as before."""
+    mean "reclaim nothing" and the build proceeds exactly as before. A store still low after
+    all three is said so — never ticked — with the sweeps left to a human."""
     before = disk_headroom(ctx.env)
-    if before is None or not before.low:
+    if not force and (before is None or not before.low):
         return
     eng = config.engine()
-    print(f"▶ engine store low on space ({before.render()}) — reclaiming before the build…")
+    state = before.render() if before is not None else "headroom unknown"
+    print(f"▶ reclaiming engine-store space ({state})…")
     cmd = [eng, "image", "prune", "-f", "--filter", f"until={RECLAIM_MIN_AGE}"]
     _err("+ " + " ".join(cmd))
     _run(cmd, env=ctx.env)
@@ -1425,9 +1492,61 @@ def reclaim(ctx: Context, extra_profiles: list[str] | None = None) -> None:
             print(f"  {len(orphans)} image(s) belong to removed worktrees — dropping those too")
             _err(f"+ {eng} rmi " + " ".join(orphans))
             _run([eng, "rmi", *orphans], env=ctx.env)
+    _project_reclaim(ctx)
+    # The two probes are independent: a forced reclaim runs with `before` unknown, and the
+    # store's state afterwards is still worth saying even when the freed figure isn't known.
     after = disk_headroom(ctx.env)
-    if after is not None:
-        print(f"✓ reclaimed {_gib(max(0, after.free - before.free))} — {after.render()}")
+    if after is None:
+        return
+    freed = (
+        f"reclaimed {_gib(max(0, after.free - before.free))}"
+        if before is not None
+        else "reclaimed (headroom before unknown)"
+    )
+    if after.low:
+        print(
+            f"⚠ {freed}, store still low — {after.render()}. `{eng} system df` shows "
+            f"what holds it; `{eng} image prune -a` also drops unused tagged images (base images "
+            f"re-pull on the next build), `{eng} container prune` stopped containers."
+        )
+    else:
+        print(f"✓ {freed} — {after.render()}")
+
+
+def _project_reclaim(ctx: Context) -> None:
+    """Run ``[reclaim] script`` where the volumes are: directly when already in the box, else
+    exec'd into it (a stopped box is a note, not a failure — the engine sweeps still ran).
+    Output streams to the terminal; the exit code is deliberately ignored."""
+    script = config.reclaim_script()
+    if not script:
+        return
+    checkout = ctx.env.get("FOLDYARD_CHECKOUT", str(ctx.main))
+    if config.in_box():
+        print(f"▶ running the project's reclaim script ({script})…")
+        subprocess.run(["sh", script], cwd=checkout)
+        return
+    from . import box
+
+    eng = config.engine()
+    name, _ = box._names(ctx)
+    if not box._running(eng, name, ctx.env):
+        print(f"  (dev box {name} not running — skipping its reclaim script {script})")
+        return
+    print(f"▶ running the project's reclaim script in {name} ({script})…")
+    # Login shell so PATH (pnpm/uv) matches an attached `fy box shell`.
+    subprocess.run(
+        [eng, "exec", "-w", checkout, name, "bash", "-lc", f"sh {shlex.quote(script)}"],
+        env=ctx.env,
+    )
+
+
+def reclaim_now() -> int:
+    """``fy reclaim``: the sweeps ``up`` runs under low headroom, unconditionally — for the
+    store that is full NOW, without bouncing the box or the machine."""
+    if not engine_reachable("reclaim"):
+        return 0
+    reclaim(resolve(), force=True)
+    return 0
 
 
 def nuke() -> int:

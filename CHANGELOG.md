@@ -9,6 +9,21 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Added
 
+- **`fy reclaim`, `[reclaim] script`, and `fy up` removes the images its own build superseded.**
+  Measured on a 90 GB store that died mid-build on `no space left on device`: the automatic
+  sweep freed `0.0 GiB` under a `✓`, because every dangling image was younger than its 24h
+  guard — one rebuild round leaves ~10 GB of freshly untagged images (a 6 GB app image, three
+  1.3 GB scraper builds in an hour), all younger than any age guard exactly when the next
+  build needs the room. Three changes. `up` now records the id behind every tag it is about to
+  rebuild and, once the containers have been recreated onto the new images, removes the old ids
+  — provably its own superseded builds, so no guard is needed (never `--force`: an id a
+  container still holds is refused and left to the dangling sweep). `[reclaim] script` runs the
+  project's own sweep in the dev box after foldyard's engine-level ones — the rest of the store
+  is package-manager caches and test artefacts in volumes only the box mounts (that store's
+  other 56 GB were volumes). And `fy reclaim` runs all of it on demand, unconditionally, so a
+  full store can be dealt with without bouncing the box or the machine; the doctor's low-disk
+  row now points at it. A store still low afterwards is said so, with the sweeps deliberately
+  left to a human (`system df`, `image prune -a`, `container prune`), instead of ticked.
 - **An isolation-layers diagram, in the README and at the top of docs/isolation-layers.md.**
   `docs/assets/foldyard-isolation-layers.svg` draws the hardening ladder as four cumulative
   postures — a rootless Podman VM, Lima with the in-VM wall, gVisor under the dev box behind the
