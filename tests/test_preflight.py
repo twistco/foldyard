@@ -39,10 +39,16 @@ def _wire(
     wall=False,
     host_wall=False,
     explicit=True,
+    engine_on_path=True,
 ):
     """Set every input preflight reads to a known value. `tables` maps a table name to its dict
-    (for the raw `keyless` typo check); defaults to empty tables."""
+    (for the raw `keyless` typo check); defaults to empty tables. `engine_on_path` is the
+    engine-CLI check's `which` — pinned, because the suite runs on a scrubbed PATH (conftest's
+    ``hermetic_path``) and these tests used to pass only where podman happened to be installed."""
     tables = tables or {}
+    monkeypatch.setattr(
+        preflight, "which", lambda name: f"/shim/{name}" if engine_on_path else None
+    )
     monkeypatch.setattr(preflight.config, "machine_backend", lambda: backend)
     # `explicit` distinguishes a backend the consumer NAMED from the inherited default.
     monkeypatch.setattr(

@@ -113,6 +113,9 @@ e2e = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "spawns(*paths): the test means to execute these host binaries (see conftest.no_host_tool_spawn)",
+]
 
 # ── ruff (lint + format) ───────────────────────────────────────────────────────────────
 [tool.ruff]

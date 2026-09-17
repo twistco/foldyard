@@ -4,6 +4,10 @@ mirror, hit GCP/git/network, or depend on where they're run (CI, box, Mac)."""
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 from hypothesis import HealthCheck, settings
@@ -232,6 +236,111 @@ def no_desktop_notifications(monkeypatch):
     from foldyard import supervisor
 
     monkeypatch.setattr(supervisor, "which", lambda _name: None)
+
+
+# ── hermetic subprocess ─────────────────────────────────────────────────────────────────
+# The suite must not execute a real host tool. Twice now a code path escaped its mocks at a layer
+# below the one the test stubbed: an engine probe that `podman rm -f`'d the box's live dev
+# stack (2026-08, hence the dead-socket rule in CLAUDE.md), and the supervisor's "newly blocked
+# daemon" push that posted "egress proxy (claude keyless) not started" to a developer's
+# Notification Center (2026-09-17). Before this guard a census found 210 tests spawning a real
+# process — `limactl` 114, `podman` 111, `gcloud`/`gh` 3 each; `set_mode` round trips were
+# running `limactl list` + `podman ps` against the live machine on the way — all passing in CI
+# only because those binaries are absent there: local and CI were passing for different reasons.
+# Two layers close it, both exempting the opt-in e2e modules (`*_e2e.py`, live by definition):
+#   1. `hermetic_path` — PATH is reduced to a shim dir holding only the tools tests legitimately
+#      spawn (git for tmp repos, `cksum` for stack._offset parity, the shell + interpreter), so a
+#      host tool resolves to "not found" here exactly as on a CI runner, and the code under test
+#      takes its "engine unreachable" branch — the hermetic outcome, not a stub of it.
+#   2. `no_host_tool_spawn` — the scrub can't see an ABSOLUTE path (`/usr/bin/osascript`,
+#      `compose_provider_path()`, anything under /opt/homebrew) or a caller's own `env["PATH"]`,
+#      so `subprocess.run`/`Popen`/… resolve what they are about to execute and refuse anything
+#      that isn't an allowlisted tool (by name, wherever it lives) or the interpreter, failing
+#      the test BY NAME with a BaseException the
+#      code's `except OSError`/`except Exception` can't swallow (a swallowed leak reading as a
+#      handled error is how both incidents passed green). A command that resolves to nothing is
+#      let through: that is the "not installed" path, not a leak. A test that means to run
+#      something else says so: `@pytest.mark.spawns("/abs/path/tool")` (registered in pyproject).
+# Neither is an env var to opt out of: a test that needs a real host tool is an e2e test.
+
+SPAWNABLE = ("git", "cksum", "bash", "sh", "env", "true", "false", "echo")
+
+
+def _is_e2e(request: pytest.FixtureRequest) -> bool:
+    return request.node.fspath.basename.endswith("_e2e.py")
+
+
+@pytest.fixture(scope="session")
+def _shim_bin(tmp_path_factory) -> Path:
+    """One dir of symlinks to the allowlisted tools, resolved from the REAL PATH once per
+    session (workers each build their own; it is a handful of symlinks)."""
+    shim = tmp_path_factory.mktemp("shim-bin")
+    for tool in SPAWNABLE:
+        real = shutil.which(tool)
+        if real:
+            (shim / tool).symlink_to(real)
+    for name in ("python", "python3"):
+        (shim / name).symlink_to(sys.executable)
+    return shim
+
+
+@pytest.fixture(autouse=True)
+def hermetic_path(request, monkeypatch, _shim_bin):
+    if _is_e2e(request):
+        return
+    monkeypatch.setenv("PATH", str(_shim_bin))
+
+
+class HostToolSpawned(BaseException):
+    """A test was about to execute a real host tool. A BaseException on purpose: the code under
+    test catches OSError, and some of it catches Exception (``run_stream`` turns any launch
+    failure into rc 127) — a swallowed leak is the failure mode this exists to end, and one that
+    reads as a handled error passes the test for the wrong reason. pytest reports it as a
+    failure like any other."""
+
+
+def _resolved(cmd, env) -> str | None:
+    """Where this call would execute from: the first argv element resolved the way exec does —
+    an absolute/relative path as is, a bare name through the CALLER's PATH (``env`` wins over
+    the ambient one, as it does for the child). None ⇒ not found."""
+    if isinstance(cmd, (str, bytes, os.PathLike)):
+        exe = os.fsdecode(cmd).split()[0]
+    elif cmd:
+        exe = os.fsdecode(cmd[0])
+    else:
+        return None
+    path = (env or os.environ).get("PATH", os.environ.get("PATH", ""))
+    return shutil.which(exe, path=path)
+
+
+@pytest.fixture(autouse=True)
+def no_host_tool_spawn(request, monkeypatch):
+    if _is_e2e(request):
+        return
+    # By NAME wherever it lives (git_shim runs the real git by absolute path; the box PATH tests
+    # hand bash a `PATH=/usr/bin:/bin` of their own), plus the interpreter and the marker's paths.
+    names = set(SPAWNABLE) | {"python", "python3"}
+    permitted = {os.path.realpath(sys.executable)}
+    for mark in request.node.iter_markers("spawns"):
+        permitted.update(os.path.realpath(p) for p in mark.args)
+
+    def guard(real):
+        def wrapped(cmd, *args, **kwargs):
+            found = _resolved(cmd, kwargs.get("env"))
+            if found is not None:
+                if not (os.path.basename(found) in names or os.path.realpath(found) in permitted):
+                    raise HostToolSpawned(
+                        f"{request.node.nodeid} would execute {found!r} — stub the call at "
+                        f"its own layer (e.g. `<module>.subprocess.run`), mark the test "
+                        f"`@pytest.mark.spawns({found!r})` if it means to, or it is an e2e "
+                        f"test (tests/*_e2e.py)"
+                    )
+            return real(cmd, *args, **kwargs)
+
+        return wrapped
+
+    for name in ("run", "Popen", "check_output", "check_call", "call"):
+        monkeypatch.setattr(subprocess, name, guard(getattr(subprocess, name)))
 
 
 @pytest.fixture(autouse=True)
