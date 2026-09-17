@@ -200,6 +200,15 @@ def guest_diagnostics() -> str:
         "stat -c '%u %g %n' /home/runner* ~/.local/share/containers/storage 2>/dev/null; ls -lan /home",
         "podman system migrate 2>&1; podman run --rm docker.io/library/alpine true && echo MIGRATE-FIXED",
         "podman run --rm --userns=keep-id docker.io/library/alpine true && echo KEEP-ID-OK",
+        # Ownership census of the store: rootless layers hold files owned by the user (image root)
+        # and by subuids (image non-root); anything owned by real root or an unmapped id is
+        # unusable from the user namespace and reads as EPERM/ENOENT at container create.
+        "s=~/.local/share/containers/storage; echo uid1001=$(find $s -xdev -uid 1001 | wc -l) "
+        "subuid=$(find $s -xdev -uid +524287 | wc -l) root=$(find $s -xdev -uid 0 | wc -l) "
+        "other=$(find $s -xdev ! -uid 1001 ! -uid 0 ! -uid +524287 | wc -l); "
+        "find $s -xdev -uid 0 | head -5; find $s -xdev -path '*postgresql*' -maxdepth 6 | head -3 | xargs -r stat -c '%u %g %n'",
+        "journalctl -b -o cat --no-pager 2>/dev/null | grep -iE 'rootless-base|chown|guest-home|lima-init|cloud-init.*(user|home)' | head -20",
+        "ls -la /var/log/cloud-init-output.log; tail -30 /var/log/cloud-init-output.log 2>&1 | grep -iE 'chown|home|user|rootless' | head -12",
     )
     out = []
     for cmd in probes:

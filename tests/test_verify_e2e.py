@@ -60,7 +60,15 @@ def home_mounted_vm(repo):
     finally:
         fy(["machine", "stop"], repo, timeout=300)
         lima_edit(f"del(.mounts[] | select(.location == {json.dumps(HOME)}))")
-        ensure_vm(repo)
+        try:
+            ensure_vm(repo)
+        except AssertionError as exc:
+            # A restart that leaves the guest's podman unable to run containers (seen on the
+            # ubuntu-24.04 runner after this very mount, 2026-09-17, mechanism still open) must
+            # not take every later module down with it: rebuild the VM and re-raise the finding.
+            print(f"restarted VM unusable — recreating it for the next module:\n{exc}")
+            fy_ok(["machine", "recreate", "--yes"], repo, timeout=900)
+            raise
 
 
 def test_verify_fails_when_the_vm_mounts_the_operators_home(repo, home_mounted_vm):
