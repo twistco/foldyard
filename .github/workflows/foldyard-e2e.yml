@@ -125,7 +125,7 @@ jobs:
       || contains(github.event.head_commit.message, '[run-e2e]')
       || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     env:
       FOLDYARD_E2E: "1"
       FOLDYARD_ENGINE: podman
@@ -208,26 +208,22 @@ jobs:
           echo "DOCKER_HOST=unix://$sock" >> "$GITHUB_ENV"
           CONTAINER_HOST="unix://$sock" podman info --format '{{.Host.Arch}} podman {{.Version.Version}} on {{.Host.Distribution.Distribution}} {{.Host.Distribution.Version}}'
 
-      - name: Pre-pull e2e images into the VM
-        run: |
-          set -euo pipefail
-          pids=()
-          for img in \
-            docker.io/library/python:3.12-slim \
-            docker.io/library/postgres:16-alpine \
-            docker.io/library/alpine:latest; do
-            CONTAINER_HOST="$DOCKER_HOST" podman pull -q "$img" &
-            pids+=("$!")
-          done
-          # Per-PID, not a bare `wait` — bare `wait` returns 0 whatever the children exited with.
-          rc=0
-          for pid in "${pids[@]}"; do
-            wait "$pid" || rc=1
-          done
-          exit "$rc"
-
+      # The host tier: test_e2e.py (the example + worktree stacks) plus the `*_e2e.py` modules that
+      # need a real VM (tests/e2e_host.py — verify's negative, the live probes, the machine
+      # lifecycle, the walls, the supervisor with the zero-secret rig, the box). Listed by name:
+      # `-k e2e` would also pick the proxy/box e2es that need the in-box topology (`live-e2e`).
+      # The `e2e` group brings mitmdump for the wall module's `[proxy]`. No pre-pull: the box
+      # module recreates the VM (its mount set is init-only), which would discard it anyway.
       - name: Host e2e on the VM
-        run: uv run pytest tests/test_e2e.py -v
+        run: >-
+          uv run --group e2e pytest -v
+          tests/test_e2e.py
+          tests/test_box_e2e.py
+          tests/test_host_daemons_e2e.py
+          tests/test_machine_e2e.py
+          tests/test_probes_e2e.py
+          tests/test_verify_e2e.py
+          tests/test_wall_e2e.py
 
       - name: Diagnostics
         if: always()
