@@ -17,7 +17,11 @@ name: foldyard · lima spike (phase 0)
 # (that is the point: no retry wrapper anywhere — a retry would hide exactly the flakiness this
 # spike exists to measure). `wall=on` adds `[proxy]` to the example copy (the wall refuses a
 # consumer with nothing routing the box) and sets MACHINE_WALL=1 + MACHINE_HOST_WALL=1.
+# GitHub only registers a workflow for `workflow_dispatch` once it has run from some trigger, so
+# a `[lima-spike]` commit message runs a one-attempt shake-out on push (both wall variants); the
+# full matrix is a dispatch with inputs.
 on:
+  push:
   workflow_dispatch:
     inputs:
       attempts:
@@ -39,6 +43,9 @@ jobs:
   # found (2026-09-17). Probe only — no packages, no VM.
   arm-kvm-probe:
     name: arm64 runner — /dev/kvm probe
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || contains(github.event.head_commit.message, '[lima-spike]')
     runs-on: ubuntu-24.04-arm
     continue-on-error: true
     timeout-minutes: 5
@@ -63,18 +70,21 @@ jobs:
 
   lima:
     name: lima on ubuntu-24.04 (wall=${{ matrix.wall }}, attempt ${{ matrix.attempt }})
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || contains(github.event.head_commit.message, '[lima-spike]')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        attempt: ${{ fromJSON(inputs.attempts) }}
-        wall: ${{ fromJSON(inputs.walls) }}
+        attempt: ${{ fromJSON(inputs.attempts || '[1]') }}
+        wall: ${{ fromJSON(inputs.walls || '["off","on"]') }}
     env:
       FOLDYARD_ENGINE: podman
       MACHINE_BACKEND: lima
       FOLDYARD_STATE_DIR: /tmp/foldyard-state
-      LIMA_VERSION: ${{ inputs.lima_version }}
+      LIMA_VERSION: ${{ inputs.lima_version || '2.2.0' }}
       # XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS are appended by the linger step below: the
       # host wall starts the VM inside a `systemd-run --user --scope`, which needs the user
       # manager the `runner` user does not otherwise have (no login session on a GH runner).
@@ -114,7 +124,7 @@ jobs:
           nft --version
 
       # The Linux install the docs prescribe: the release tarball into /usr/local, pinned.
-      - name: Lima ${{ inputs.lima_version }}
+      - name: Lima (release tarball into /usr/local)
         run: |
           set -euo pipefail
           url="https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz"
