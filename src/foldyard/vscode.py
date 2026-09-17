@@ -59,7 +59,9 @@ _REMOTE_USER = "root"
 _EXT_ID = re.compile(r"^[A-Za-z0-9][\w-]*\.[A-Za-z0-9][\w-]*$")
 # Dev Containers applies an attached config's `extensions` and `settings` ONCE per server install,
 # each gated by its own marker under the box's ~/.vscode-server/data/Machine; a change only lands
-# once the matching marker is gone. The settings write has a SECOND gate (extension source,
+# once the matching marker is gone AND the server goes through set-up again (a reconnect to a
+# running server skips it — `_reset_markers` restarts the server). The settings write has a
+# SECOND gate (extension source,
 # 0.469: `if (markerCreated && !exists(Machine/settings.json)) write`): it never rewrites an
 # existing Machine/settings.json, marker or no marker — so a settings change must remove that
 # file too, or it silently never applies to a box whose server has been attached once (found on
@@ -486,8 +488,21 @@ def _reset_markers(engine: str, box: str, env: dict, markers: list[str]) -> bool
     if not markers:
         return True
     paths = " ".join(f'"$HOME/.vscode-server/data/Machine/{m}"' for m in markers)
+    # A reset marker is only READ during server set-up, and an attach that finds the box's server
+    # still running from the last session reconnects to it — set-up never runs, the marker sits
+    # there reset, and nothing installs or applies (seen live: seven extensions "will install on
+    # attach", three attaches, zero installed — until the server was restarted, then 7/7). So the
+    # server goes with the markers; the next attach starts a fresh one and runs set-up. A window
+    # still attached to this box reconnects to the new server (VS Code reloads it).
     proc = subprocess.run(
-        [engine, "exec", box, "sh", "-c", f"rm -f {paths}"],
+        [
+            engine,
+            "exec",
+            box,
+            "sh",
+            "-c",
+            f"rm -f {paths} && for p in $(pgrep -f '[.]vscode-server/bin'); do kill $p; done; true",
+        ],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

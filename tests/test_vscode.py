@@ -468,10 +468,17 @@ def test_a_settings_change_resets_the_machine_settings_marker(fake):
     fake["state"]["installed"] = "anthropic.claude-code-1.2.3\nnefrob.vscode-just-syntax-0.5.0\n"
     assert vscode.code() == 0
     assert _execs(fake["calls"], "rm -f", ".writeMachineSettingsMarker", "Machine/settings.json")
+    # …and the box's server is restarted in the same breath: a reset marker is only read during
+    # set-up, and an attach that finds the old server running reconnects and skips set-up (seen
+    # live: three attaches, zero of seven extensions installed, until the server was restarted).
+    assert _execs(fake["calls"], "rm -f", "vscode-server/bin", "kill")
     fake["calls"].clear()
     assert vscode.code() == 0  # same settings → the box's copy is current
     assert not _execs(fake["calls"], ".writeMachineSettingsMarker")
     assert not _execs(fake["calls"], "Machine/settings.json")
+    # nothing to apply → the running server is left alone (harden.sh's reaper probe is `kill -0`,
+    # so match the marker exec, not any `kill`)
+    assert not _execs(fake["calls"], "vscode-server/bin')")
     fake["vscode"]["settings"]["remote.autoForwardPorts"] = False
     assert vscode.code() == 0
     assert _execs(fake["calls"], "rm -f", ".writeMachineSettingsMarker", "Machine/settings.json")

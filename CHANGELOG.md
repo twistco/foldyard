@@ -42,7 +42,11 @@ break config or CLI shape, and say so here. How a release is cut:
   only when that file does NOT exist — marker or no marker — so on a consumer the rendered file
   sat two months stale while the marker was dutifully reset on every `fy code`. The rendered
   file goes with the marker now; the extension regenerates it from the config (plus its own
-  Copilot/ports additions). Hand edits in the "Remote [Attached Container]" settings tab are the
+  Copilot/ports additions). And a reset marker is only READ when the box's server goes through
+  set-up — an attach that finds the server still running from the last session reconnects and
+  skips it (seven extensions "will install on attach", three attaches, zero installed) — so
+  `fy code` restarts the box's server whenever it resets a marker; a window still attached
+  reconnects to the new one. Hand edits in the "Remote [Attached Container]" settings tab are the
   one thing that resets — they belong in `[vscode.settings]`.
 - **A `[vscode]` table offers the marketplace hosts at the launch verbs.** The server IN the box
   installs `[vscode] extensions` itself, and under an enforcing wall the gallery query
