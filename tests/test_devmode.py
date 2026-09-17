@@ -1156,3 +1156,90 @@ def test_show_renders_blocked_over_up(isolated_state, monkeypatch, capsys):
     out = capsys.readouterr().out
     gcp = next(ln for ln in out.splitlines() if ln.strip().startswith("gcp "))
     assert "○ BLOCKED — can't bind :8188" in gcp and "● up" not in gcp
+
+
+# ── secret capture at the mode change ──────────────────────────────────────────────────
+
+
+_PEM = "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n"  # gitleaks:allow
+_PEM_B64 = __import__("base64").b64encode(_PEM.encode()).decode()
+
+
+def test_missing_secrets_names_what_the_prospective_posture_lacks(isolated_state):
+    # The secret is consumed by the POSTURE (the supervisor's proxy reloads host.env every tick),
+    # not the box — so the question is asked of the mode the operator is about to set, before it
+    # is written. github=app needs the App PEM; nothing else in the full config declares one.
+    assert [s.var for s in devmode.missing_secrets({"github": "app"})] == ["GH_PEM_B64"]
+    assert devmode.missing_secrets({"github": "off"}) == []
+    assert devmode.missing_secrets({"gcp": "logs"}) == []
+    isolated_state["host_env"].write_text(f"GH_PEM_B64={_PEM_B64}\n")
+    assert devmode.missing_secrets({"github": "app"}) == []
+
+
+def test_mode_set_prompts_for_the_secret_before_writing(isolated_state, monkeypatch, capsys):
+    # A host TTY: the prompt lands BEFORE the posture is written, so the proxy's warm-up never
+    # runs against an empty host.env (its mint would only WARN, but the host would be degraded
+    # until the next `fy box up` — the gap this closes).
+    seen: dict = {}
+
+    def fake_getpass(_prompt: str) -> str:
+        seen["mode_at_prompt"] = devmode.read()["mode"]["github"]
+        return _PEM_B64
+
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(devmode.getpass, "getpass", fake_getpass)
+    assert devmode.main(["set", "github=app"]) == 0
+    assert seen["mode_at_prompt"] == "off"
+    assert f"GH_PEM_B64={_PEM_B64}" in isolated_state["host_env"].read_text()
+    assert devmode.read()["mode"]["github"] == "app"
+    assert "stored GitHub App private key" in capsys.readouterr().err
+
+
+def test_mode_set_interrupted_at_the_prompt_leaves_the_posture_unchanged(
+    isolated_state, monkeypatch
+):
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
+
+    def ctrl_c(_prompt: str) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(devmode.getpass, "getpass", ctrl_c)
+    with pytest.raises(KeyboardInterrupt):
+        devmode.main(["set", "github=app"])
+    assert devmode.read()["mode"]["github"] == "off"
+    assert not isolated_state["host_env"].exists()
+
+
+def test_mode_set_without_a_tty_warns_and_still_applies(isolated_state, monkeypatch, capsys):
+    # Same non-blocking contract as box-up: no TTY ⇒ warn, apply, and let the minter degrade that
+    # one host. Arming from a script must not hang on a hidden prompt.
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(
+        devmode.getpass, "getpass", lambda _p: pytest.fail("must not prompt without a TTY")
+    )
+    assert devmode.main(["set", "github=app"]) == 0
+    assert devmode.read()["mode"]["github"] == "app"
+    assert "GitHub App private key (PEM) isn't in" in capsys.readouterr().err
+
+
+def test_mode_set_validates_the_updates_before_prompting(isolated_state, monkeypatch):
+    # An unknown axis or rung is refused by set_mode — but that check must land BEFORE the prompt,
+    # or a typo'd `fy mode github=app gihtub=off` stores the paste in host.env and then fails.
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(
+        devmode.getpass, "getpass", lambda _p: pytest.fail("must not prompt for a refused mode")
+    )
+    with pytest.raises(SystemExit, match="unknown axis 'gihtub'"):
+        devmode.main(["set", "github=app", "gihtub=off"])
+    with pytest.raises(SystemExit, match="github mode 'nope'"):
+        devmode.main(["set", "github=nope"])
+    assert not isolated_state["host_env"].exists()
+    assert devmode.read()["mode"]["github"] == "off"
+
+
+def test_mode_set_with_the_secret_present_does_not_prompt(isolated_state, monkeypatch):
+    isolated_state["host_env"].write_text(f"GH_PEM_B64={_PEM_B64}\n")
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(devmode.getpass, "getpass", lambda _p: pytest.fail("already present"))
+    assert devmode.main(["set", "github=app"]) == 0
+    assert devmode.read()["mode"]["github"] == "app"

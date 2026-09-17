@@ -43,6 +43,19 @@ def test_host_env_has_matches_supervisor_parsing(tmp_path):
     assert not keyless.host_env_has(tmp_path / "absent.env", "ANYTHING")
 
 
+def test_host_env_has_treats_an_empty_value_as_absent(tmp_path):
+    # `KEY=` (or `KEY=""`) is a placeholder, not a secret: the supervisor would export an empty
+    # string and the minter would fail on it, so missing_secrets() must still ask for the value.
+    f = tmp_path / "host.env"
+    f.write_text(
+        "GH_PEM_B64=\nANTHROPIC_API_KEY=''\nGH_APP_ID=7\nOPENAI_API_KEY=\nOPENAI_API_KEY=x\n"
+    )
+    assert not keyless.host_env_has(f, "GH_PEM_B64")
+    assert not keyless.host_env_has(f, "ANTHROPIC_API_KEY")
+    assert keyless.host_env_has(f, "GH_APP_ID")
+    assert keyless.host_env_has(f, "OPENAI_API_KEY")  # last definition wins, as in the supervisor
+
+
 def test_append_host_env_creates_0600_and_preserves(tmp_path):
     f = tmp_path / "sub" / "host.env"
     keyless.append_host_env(f, "ANTHROPIC_API_KEY", "sk-ant-real")
@@ -52,6 +65,46 @@ def test_append_host_env_creates_0600_and_preserves(tmp_path):
     f.write_text("FOO=bar")  # no trailing newline
     keyless.append_host_env(f, "OPENAI_API_KEY", "sk-proj-real")
     assert f.read_text() == "FOO=bar\nOPENAI_API_KEY=sk-proj-real\n"
+
+
+def test_append_host_env_never_leaves_the_secret_readable(tmp_path, monkeypatch):
+    # The file is created 0600 at open (not written world-readable and chmod'd after — that window
+    # is a real secret on disk), an existing looser file is tightened BEFORE the paste lands, and
+    # a tightening that fails propagates rather than storing the secret under the wrong mode.
+    f = tmp_path / "host.env"
+    f.write_text("FOO=bar\n")
+    f.chmod(0o644)
+    keyless.append_host_env(f, "ANTHROPIC_API_KEY", "sk-ant-real")
+    assert (f.stat().st_mode & 0o777) == 0o600
+    f.chmod(0o644)
+
+    def refuse(*_a, **_k):
+        raise PermissionError("chmod refused")
+
+    monkeypatch.setattr(keyless.os, "chmod", refuse)
+    with pytest.raises(PermissionError):
+        keyless.append_host_env(f, "OPENAI_API_KEY", "sk-proj-real")
+    assert "OPENAI_API_KEY" not in f.read_text()  # refused ⇒ nothing stored
+
+
+def test_append_host_env_serialises_concurrent_captures(tmp_path, monkeypatch):
+    # Two captures at once (the TUI modal and a `fy up` prompt) must not each read the same body
+    # and overwrite the other's line. Simulated interleaving: a rival append lands just before the
+    # first capture takes its lock — so everything the first capture reads must come AFTER it.
+    f = tmp_path / "host.env"
+    real_flock = keyless.fcntl.flock
+    raced = False
+
+    def racing_flock(fd, op):
+        nonlocal raced
+        if not raced:
+            raced = True
+            keyless.append_host_env(f, "OPENAI_API_KEY", "sk-proj-rival")
+        real_flock(fd, op)
+
+    monkeypatch.setattr(keyless.fcntl, "flock", racing_flock)
+    keyless.append_host_env(f, "ANTHROPIC_API_KEY", "sk-ant-real")
+    assert f.read_text() == "OPENAI_API_KEY=sk-proj-rival\nANTHROPIC_API_KEY=sk-ant-real\n"
 
 
 def _recorder():
@@ -339,9 +392,11 @@ def test_ensure_secret_empty_paste_stores_nothing(tmp_path):
 
 def test_host_env_value_matches_supervisor_parsing(tmp_path):
     f = tmp_path / "host.env"
-    f.write_text("# c\nGH_PEM_B64='quoted'\nOTHER = spaced \n")
+    f.write_text("# c\nGH_PEM_B64='quoted'\nOTHER = spaced \nOTHER=rotated\n")
     assert keyless.host_env_value(f, "GH_PEM_B64") == "quoted"  # quotes stripped, as the supervisor
-    assert keyless.host_env_value(f, "OTHER") == "spaced"
+    assert (
+        keyless.host_env_value(f, "OTHER") == "rotated"
+    )  # last definition wins, as in the supervisor
     assert keyless.host_env_value(f, "ABSENT") == ""
     assert keyless.host_env_value(tmp_path / "nope.env", "GH_PEM_B64") == ""
 

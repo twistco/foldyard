@@ -24,9 +24,10 @@ registry hot path:
 from __future__ import annotations
 
 import base64
+import fcntl
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 # ── the keyless credential taxonomy ────────────────────────────────────────────────────────────
@@ -200,33 +201,30 @@ def classify(secret: str) -> tuple[str, str] | None:
 
 
 def host_env_has(path: Path, var: str) -> bool:
-    """True when host.env defines ``var`` on a non-comment ``KEY=…`` line — the same parsing the
-    supervisor's ``load_host_env`` uses, so "present" here means "the minter will see it"."""
-    if not path.exists():
-        return False
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        if line.split("=", 1)[0].strip() == var:
-            return True
-    return False
+    """True when host.env defines ``var`` with a NON-EMPTY value on a non-comment ``KEY=…`` line —
+    the same parsing (and quote-stripping) the supervisor's ``load_host_env`` uses, so "present"
+    here means "the minter will see a value". A bare ``KEY=`` placeholder counts as absent, or
+    :func:`~foldyard.devmode.missing_secrets` would skip the prompt and the minter fail on
+    an empty string."""
+    return bool(host_env_value(path, var))
 
 
 def host_env_value(path: Path, var: str) -> str:
     """``var``'s value from host.env, or ``""`` — the same KEY=VALUE parsing (and quote-stripping)
     the supervisor's ``load_host_env`` applies, so what a caller reads here is exactly what a minter
-    will see in its environment. For CHECKING a secret's shape, never for logging it."""
+    will see in its environment: the LAST definition wins, as it does there. For CHECKING a secret's
+    shape, never for logging it."""
     if not path.exists():
         return ""
+    found = ""
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         if key.strip() == var:
-            return value.strip().strip("'\"")
-    return ""
+            found = value.strip().strip("'\"")
+    return found
 
 
 def append_host_env(path: Path, var: str, value: str) -> None:
@@ -234,14 +232,25 @@ def append_host_env(path: Path, var: str, value: str) -> None:
     file holds real secrets, so it lives OUTSIDE the repo mount (``config.host_env_file``) and is
     owner-only. We append rather than rewrite so a hand-edited host.env keeps its comments/order."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    body = path.read_text() if path.exists() else ""
-    if body and not body.endswith("\n"):
-        body += "\n"
-    path.write_text(f"{body}{var}={value}\n")
-    try:
-        path.chmod(0o600)
-    except OSError:  # pragma: no cover — best-effort tightening (e.g. exotic FS)
-        pass
+    # Owner-only from the first byte: an existing (possibly hand-made, looser) file is tightened
+    # BEFORE the secret lands, and a new one is created 0600 at open — never written and chmod'd
+    # after, which leaves the secret readable for a moment. A refused chmod propagates: better
+    # no paste stored than one under a mode we can't vouch for.
+    if path.exists():
+        os.chmod(path, 0o600)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+") as fh:
+        # One writer at a time: the read-modify-write is serialised on the file itself (an exclusive
+        # flock held until close, as ports.py does for its registry), so two captures landing at
+        # once — the TUI modal and a `fy up` prompt — can't each read the same body and have the
+        # second's rewrite drop the first's line.
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        body = fh.read()
+        if body and not body.endswith("\n"):
+            body += "\n"
+        fh.seek(0)
+        fh.truncate()
+        fh.write(f"{body}{var}={value}\n")
 
 
 def secret_ok(value: str, pattern: str, b64: bool) -> str | None:
@@ -295,7 +304,8 @@ def ensure_secret(
     if not interactive:
         echo(
             f"⚠ {secret.label} isn't in {host_env} (${secret.var}) — the posture that needs it "
-            f"can't mint until it's set. Run `fy box up` on the Mac to be prompted."
+            f"can't mint until it's set. Run `fy mode …` or `fy box up` on the host with a TTY "
+            "to be prompted."
         )
         return "skipped"
     echo(f"▶ {secret.label}: paste it (stored on the host at 0600, never in the box or the repo).")
@@ -305,7 +315,10 @@ def ensure_secret(
         echo("  (single-line base64 — pipe the value through `base64` if the hint didn't)")
     value = prompt("  value (hidden): ").strip()
     if not value:
-        echo("  (nothing entered — skipped; set it later with a TTY `fy box up`.)")
+        echo(
+            "  (nothing entered — skipped; set it later from a host TTY: `fy mode …` or "
+            "`fy box up`.)"
+        )
         return "empty"
     to_store = secret_ok(value, secret.pattern, secret.b64)
     if to_store is None:
@@ -318,6 +331,24 @@ def ensure_secret(
     append_host_env(host_env, secret.var, to_store)
     echo(f"✓ stored {secret.label} in {host_env} (0600). The host minter reads it at mint time.")
     return "stored"
+
+
+def capture_secrets(
+    host_env: Path,
+    secrets: Iterable,
+    *,
+    interactive: bool,
+    prompt: Callable[[str], str],
+    echo: Callable[[str], None],
+) -> list[str]:
+    """:func:`ensure_secret` over every secret a posture declares (``registry().secrets(mode)``),
+    returning the statuses in order. The one loop behind both host-side doors to a posture —
+    `fy mode …` (asked of the mode ABOUT to be set, before it is written) and `fy box up` (the
+    backstop, asked of the current one) — so the two can't drift on what a missing secret means."""
+    return [
+        ensure_secret(host_env, secret, interactive=interactive, prompt=prompt, echo=echo)
+        for secret in secrets
+    ]
 
 
 def ensure_cred(

@@ -42,6 +42,7 @@ Navigation is zoned (see DevModeTui / ModeGrid / WorkspaceList for the seams):
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from typing import cast
 
 from rich.markup import escape
@@ -530,6 +531,14 @@ class DevModeTui(App):
     #rm-buttons { height: auto; margin-top: 1; }
     #rm-buttons Button { margin-right: 2; min-width: 12; }
     #rm-hint { color: $text-muted; height: auto; margin-top: 1; }
+    /* The secret paste at a posture change — the modal twin of the CLI's getpass prompt. */
+    SecretScreen { align: center middle; }
+    #sec-dialog { width: 74; height: auto; max-height: 90%; border: thick $primary;
+                  background: $surface; padding: 1 2; }
+    #sec-title { text-style: bold; height: auto; }
+    #sec-body { height: auto; margin: 1 0; }
+    #sec-input { margin-bottom: 1; }
+    #sec-hint { color: $text-muted; height: auto; }
     /* The stop-devbox / stop-machine confirmation. $warning (not $error): stopping is
        disruptive (kills whatever runs inside) but recoverable with a plain start. */
     ConfirmScreen { align: center middle; }
@@ -1112,6 +1121,57 @@ class DevModeTui(App):
         # next tick and reconciles that worktree's daemons.
         ws_name = self._active_worktree() or "main"
         cfg = self._worktree_cfg()
+        # The secret a posture needs is asked for BEFORE the flip (the CLI's getpass, here a
+        # modal): it's consumed by the supervisor's proxy, which reloads host.env every tick, so
+        # capturing it at box-up alone leaves the host degraded from the flip until then.
+        with config.using(cfg):
+            missing = devmode.missing_secrets({axis: value})
+        if missing:
+            self._collect_secrets(
+                missing, cfg, ws_name, lambda: self._apply_mode(axis, value, cfg, ws_name)
+            )
+            return
+        self._apply_mode(axis, value, cfg, ws_name)
+
+    def _collect_secrets(self, missing: list, cfg, ws_name: str, then: Callable[[], None]) -> None:
+        """One SecretScreen per missing secret, in order, then ``then()``. Same outcomes as
+        :func:`keyless.ensure_secret`: a paste is stored (0600, host-side only), an EMPTY paste
+        skips that secret and carries on (arm now, paste later), esc leaves the posture
+        unchanged."""
+        from . import keyless
+
+        secret, rest = missing[0], missing[1:]
+
+        def _after(value: str | None) -> None:
+            if value is None:
+                self.notify(f"[{ws_name}] {secret.label} not entered — posture unchanged.")
+                return
+            if value:
+                try:
+                    with config.using(cfg):
+                        keyless.append_host_env(config.host_env_file(), secret.var, value)
+                except OSError as e:  # say so — never claim a 0600 store that didn't happen
+                    self.notify(
+                        f"[{ws_name}] couldn't store {secret.label} on the host: {e}",
+                        severity="error",
+                        timeout=10,
+                    )
+                    return
+                self.notify(f"[{ws_name}] stored {secret.label} on the host (0600).")
+            else:
+                self.notify(
+                    f"[{ws_name}] {secret.label} skipped — that host can't mint until it's set "
+                    f"(`fy mode …` or `fy box up` on a TTY prompts again).",
+                    severity="warning",
+                )
+            if rest:
+                self._collect_secrets(rest, cfg, ws_name, then)
+            else:
+                then()
+
+        self.push_screen(SecretScreen(secret), _after)
+
+    def _apply_mode(self, axis: str, value: str, cfg, ws_name: str) -> None:
         # Apply the mode file SYNCHRONOUSLY (fast) so the button highlights immediately, but DEFER
         # the stack reconcile (a slow `docker compose up` subprocess) to a worker thread. Running it
         # inline used to (a) freeze the whole TUI for seconds and (b) bleed raw compose output over
@@ -1890,6 +1950,64 @@ class RemoveWorktreeScreen(ModalScreen):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+class SecretScreen(ModalScreen):
+    """Paste one host-side secret a posture needs (:class:`foldyard.plugins.Secret`). The `how`
+    hint is SHOWN, never run. Enter validates the paste against the secret's pattern (a
+    wrong-shaped value keeps the dialog open with the reason, so nothing wrong-shaped reaches the
+    minter) and dismisses the value to STORE; an empty enter dismisses "" (skip); esc dismisses
+    None (leave the posture unchanged). The Input is masked — a real secret."""
+
+    BINDINGS = [Binding("escape", "cancel", "cancel")]
+
+    def __init__(self, secret) -> None:
+        super().__init__()
+        self._secret = secret
+
+    def compose(self) -> ComposeResult:
+        sec = self._secret
+        lines = [
+            f"[b]{escape(sec.label)}[/b] — stored on the host at 0600, never in the box or "
+            "the repo."
+        ]
+        if sec.how:
+            lines.append(f"get it with: [i]{escape(sec.how)}[/i]")
+        if sec.b64:
+            lines.append("single-line base64 — pipe the value through `base64` if the hint didn't")
+        with Vertical(id="sec-dialog"):
+            yield Static(
+                Text.from_markup(f"This posture needs {escape(sec.label)}"), id="sec-title"
+            )
+            yield Static(Text.from_markup("\n".join(lines)), id="sec-body")
+            yield Input(placeholder="paste the value (hidden)", password=True, id="sec-input")
+            yield Static(
+                "enter store · empty enter skip · esc leave the posture unchanged", id="sec-hint"
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#sec-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        from . import keyless
+
+        value = event.value.strip()
+        if not value:
+            self.dismiss("")
+            return
+        to_store = keyless.secret_ok(value, self._secret.pattern, self._secret.b64)
+        if to_store is None:
+            why = " (expected single-line base64)" if self._secret.b64 else ""
+            self.query_one("#sec-hint", Static).update(
+                f"✗ that doesn't look like {escape(self._secret.label)}{why} — nothing stored; "
+                "try again, or esc"
+            )
+            self.query_one("#sec-input", Input).value = ""
+            return
+        self.dismiss(to_store)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class ConfirmScreen(ModalScreen):
