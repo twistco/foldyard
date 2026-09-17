@@ -495,19 +495,27 @@ def _reset_markers(engine: str, box: str, env: dict, markers: list[str]) -> bool
     # server goes with the markers; the next attach starts a fresh one and runs set-up. A window
     # still attached to this box reconnects to the new server (VS Code reloads it).
     proc = subprocess.run(
-        [
-            engine,
-            "exec",
-            box,
-            "sh",
-            "-c",
-            f"rm -f {paths} && for p in $(pgrep -f '[.]vscode-server/bin'); do kill $p; done; true",
-        ],
+        [engine, "exec", box, "sh", "-c", _reset_script(paths)],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     return proc.returncode == 0
+
+
+def _reset_script(paths: str) -> str:
+    """The in-box shell for :func:`_reset_markers`: remove ``paths``, then stop the running VS Code
+    server. Its exit status is the caller's whole signal — a failed `rm` must fail the script
+    (an unconditional trailing `true` once masked it, and with it the retry the caller does),
+    while `pgrep` finding no server (status 1) is the normal case and a success. A server that
+    exits between `pgrep` and `kill` is not a failure either: only a process that is STILL there
+    after a failed `kill` is."""
+    return (
+        f"rm -f {paths} || exit 1; "
+        "pids=$(pgrep -f '[.]vscode-server/bin'); s=$?; "
+        '[ "$s" -eq 0 ] || [ "$s" -eq 1 ] || exit "$s"; '
+        'for p in $pids; do kill "$p" 2>/dev/null || ! kill -0 "$p" 2>/dev/null || exit 1; done'
+    )
 
 
 def code() -> int:

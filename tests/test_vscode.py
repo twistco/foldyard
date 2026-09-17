@@ -477,8 +477,8 @@ def test_a_settings_change_resets_the_machine_settings_marker(fake):
     assert not _execs(fake["calls"], ".writeMachineSettingsMarker")
     assert not _execs(fake["calls"], "Machine/settings.json")
     # nothing to apply → the running server is left alone (harden.sh's reaper probe is `kill -0`,
-    # so match the marker exec, not any `kill`)
-    assert not _execs(fake["calls"], "vscode-server/bin')")
+    # so match the reset script's own `pgrep`, not any `kill`)
+    assert not _execs(fake["calls"], "pgrep -f '[.]vscode-server/bin'")
     fake["vscode"]["settings"]["remote.autoForwardPorts"] = False
     assert vscode.code() == 0
     assert _execs(fake["calls"], "rm -f", ".writeMachineSettingsMarker", "Machine/settings.json")
@@ -510,6 +510,70 @@ def test_a_failed_marker_reset_leaves_the_config_unwritten_so_the_next_run_retri
     assert vscode.code() == 0  # the reset now succeeds → the config lands, markers were reset
     assert _cfg_path(fake).exists()
     assert _execs(calls, "rm -f", "Machine/settings.json")
+
+
+def _run_reset_script(tmp_path, pgrep_rc: int, pgrep_out: str = "", rm_target=None):
+    """Run the REAL reset script under `sh` with a fake `pgrep` on PATH (exit ``pgrep_rc``,
+    printing ``pgrep_out``) and return the exit status. ``rm_target`` is the path to remove."""
+    import subprocess
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    pg = fake_bin / "pgrep"
+    pg.write_text(f'#!/bin/sh\nprintf %s "{pgrep_out}"\nexit {pgrep_rc}\n')
+    pg.chmod(0o755)
+    target = str(rm_target or tmp_path / "marker")
+    return subprocess.run(
+        ["sh", "-c", vscode._reset_script(f'"{target}"')],
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    ).returncode
+
+
+@pytest.mark.spawns("sh")  # runs the REAL in-box reset script under sh, with a fake pgrep
+def test_reset_script_propagates_rm_failure_and_treats_no_server_as_success(tmp_path):
+    """The script's exit status is `_reset_markers`' whole signal. A trailing `true` once made
+    every outcome a success — including a failed `rm`, which then wrote a config saying
+    "applied" with nothing left to retry. So: `rm` failing fails the script; `pgrep` finding no
+    server (1) is the normal case and passes; any other `pgrep` status propagates."""
+    (tmp_path / "marker").write_text("")
+    assert _run_reset_script(tmp_path, pgrep_rc=1) == 0  # marker removed, no server: fine
+    assert not (tmp_path / "marker").exists()
+    assert _run_reset_script(tmp_path, pgrep_rc=1) == 0  # rm -f of a missing file is still fine
+    assert _run_reset_script(tmp_path, pgrep_rc=3) == 3  # pgrep itself broke → propagated
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "marker").write_text("")
+    locked.chmod(0o555)  # rm cannot unlink inside a read-only dir
+    try:
+        assert _run_reset_script(tmp_path, pgrep_rc=1, rm_target=locked / "marker") == 1
+    finally:
+        locked.chmod(0o755)
+
+
+@pytest.mark.spawns("sh", "/bin/sleep")  # the REAL reset script under sh; a sleep as the "server"
+def test_reset_script_kills_the_server_pgrep_reports(tmp_path):
+    """A live process pgrep names is killed; a pid that is already gone is not a failure (the
+    server can exit between `pgrep` and `kill`), and a pid that survives `kill` is."""
+    import os
+    import signal
+    import subprocess
+    import time
+
+    sleeper = subprocess.Popen(["/bin/sleep", "60"])
+    try:
+        assert _run_reset_script(tmp_path, pgrep_rc=0, pgrep_out=str(sleeper.pid)) == 0
+        for _ in range(50):
+            if sleeper.poll() is not None:
+                break
+            time.sleep(0.05)
+        assert sleeper.poll() is not None, "the server pid was not killed"
+    finally:
+        if sleeper.poll() is None:
+            os.kill(sleeper.pid, signal.SIGKILL)
+    gone = subprocess.Popen(["/bin/sleep", "60"])
+    gone.kill()
+    gone.wait()
+    assert _run_reset_script(tmp_path, pgrep_rc=0, pgrep_out=str(gone.pid)) == 0  # already gone
 
 
 def test_user_owned_config_is_never_clobbered(fake, capsys):
