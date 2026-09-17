@@ -50,7 +50,7 @@ Core (stdlib-only on the hot path; heavy imports lazy):
 - `verify.py` — the isolation battery, the product's credibility check; plugin-agnostic core +
   the registry's `verify_checks`.
 - `machine.py` / `machine_backend.py` — rootless dev-VM lifecycle behind the pluggable
-  backend contract (podman | lima | native; see `docs/lima-backend-scope.md`).
+  backend contract (podman | lima; see `docs/lima-backend-scope.md`).
 - `guestlog.py` — the VM's log budget (`machine ensure`, every VM backend): journald cap as root
   (Lima: rendered into the boot script; podman machine: `sudo -n` over ssh) + the rootless API
   service's log level as a user drop-in over ssh. Best-effort — a warning, never an abort.
@@ -139,11 +139,44 @@ foldyard's surface splits by *where it can be validated*:
      the socket — runs in an adapted topology so it works inside a dev box; see
      [docs/nested-virt.md](./docs/nested-virt.md). Both proxy e2es:
      `just foldyard test-proxy-e2e` (pulls the `e2e` group).
-4. **Host-only / "Mac-only" paths** — `machine ensure|recreate`, `box up|build`, `host`,
-   `mode set`. These deliberately **refuse to run inside a dev box** (`config.in_box()`
-   guards — the box must not manage its own VM or escalate its posture), and creating a
-   machine/box from inside the live box would collide with it. Validate them on a real host,
-   or headlessly via the nested-virt rig: [docs/nested-virt.md](./docs/nested-virt.md).
+4. **The host tier** — `machine ensure|stop|recreate`, `box up|build`, `host`, `mode set`,
+   `verify`'s real VM boundary, the walls. These deliberately **refuse to run inside a dev box**
+   (`config.in_box()` guards — the box must not manage its own VM or escalate its posture), and
+   creating a machine/box from inside the live box would collide with it. They have a REAL VM
+   in CI — the `lima-host-e2e` job (below) — and live as `tests/test_*_e2e.py` modules over the
+   shared substrate `tests/e2e_host.py` (gated: `FOLDYARD_E2E=1`, not in a box, `limactl` on
+   PATH; each module takes a throwaway example copy, leaves the VM running and un-walled):
+   - `test_verify_e2e.py` — ALL PASS on the boundary foldyard builds, **FAIL against a VM
+     mounting the operator's whole home**, PASS again once the mount is gone (the negative
+     [docs/verify-false-pass.md](./docs/verify-false-pass.md) owed). Never weaken this one.
+   - `test_probes_e2e.py` — the read-only engine probes in-process (`devmode.workspaces` /
+     `up_worktrees` / `_stack_mounts` / `_stack_shadow_check`, `stack.disk_headroom`,
+     `machine.state/socket/responsive` with the moved-socket invariant, `reconcile.scopes()`),
+     plus `fy state` and `fy doctor` — the output that drifts between podman versions, which the
+     hermetic unit suite cannot see.
+   - `test_machine_e2e.py` — ensure idempotent; stop stops the supervisor (heartbeat stale) and
+     keeps the VM; a SIGKILLed hypervisor recovered by ensure (the flag-is-not-liveness item
+     below); recreate. Its copy lives UNDER THE HOST HOME (`~/fy-e2e/machine/`, left in place)
+     and the VM is recreated from it first, so every restart runs with a repo mounted at
+     `/home/<user>/…` — the realistic Linux layout the open home-mount finding in
+     [docs/linux-support.md](./docs/linux-support.md) needed exercised.
+   - `test_reclaim_e2e.py` — `fy reclaim` on a real store: a removed worktree's tagged images
+     (both provider spellings) swept, the main image + base images kept, the next `up` still
+     `Using cache` (the three reclaim properties below, live).
+   - `test_worktree_e2e.py` — `fy worktree add` (registered, own branch, clean tree), its stack
+     up beside main's, `remove`: containers + volumes gone, the bound-out transcript ARCHIVED
+     before the tree is deleted, main untouched, the branch kept, local state dropped.
+   - `test_wall_e2e.py` — `[machine].wall` + `host_wall` via `fy up`: the host table on the VM's
+     own scope, direct guest egress refused, DNS resolving, the proxy the way out, the api still
+     served, and the stale-provisioning refusal.
+   - `test_host_daemons_e2e.py` — the supervisor with the zero-secret rig
+     ([docs/testing-modes.md](./docs/testing-modes.md)): mode on → fake minter up + the overlay
+     re-rendered, blocked-daemons empty; mode off.
+   - `test_box_e2e.py` — `fy box up` on the VM (recreated to mount the module's copy), in-box
+     `fy ps` over `CONTAINER_HOST`, in-box `fy verify` ALL PASS, `box down`.
+   On a Lima host these run against the example's own VM (creating, restarting, recreating it),
+   never a consumer's. What the runner cannot reach — nested virtualisation for the gVisor
+   posture — stays the recipe in [docs/nested-virt.md](./docs/nested-virt.md).
 
 **In-box validation you CAN do:** `fy verify`, `fy ps/down/up/logs`, the e2e tiers above.
 **CANNOT from inside the box:** `fy host` (real daemons), `fy mode <set>` (authoritative
@@ -197,16 +230,25 @@ round trips were running `limactl list` + `podman ps` against the live machine, 
 supervisor's blocked-daemon push reached a real Notification Center — green in CI only because
 those binaries are absent there.
 
-## CI (`.github/workflows/foldyard.yml`)
+**`just census` is the report over that gate, not a gate itself** (`tests/tools/census.py`, a
+`-p` plugin the recipe loads): every process the suite spawns, binary × test, aggregated across
+the xdist workers — what the allowlist still lets through (`git` from the git-shim tests, `cksum`
+from the port-offset parity test, the shells only from the guard's own tests) and, with
+`FOLDYARD_E2E=1 just census tests/test_*_e2e.py` on a Lima host, what the live tiers reach.
+Arguments pass to pytest (paths, not a quoted `-k` — `just` splits on whitespace);
+`CENSUS_TESTS=1` lists the tests under each binary.
 
-Tiers 1–3 run on GitHub-hosted `ubuntu-latest` runners — **all of it on containers, none on
-KVM**, which is the key point: the egress-proxy box e2e needs a container engine and a test
-running *inside* a container, not a VM, and Docker is preinstalled on Linux runners. Two jobs:
+## CI (`.github/workflows/foldyard.yml` + `foldyard-e2e.yml`)
+
+Tiers 1–3 and the host tier all run on GitHub-hosted Linux runners. `foldyard.yml` is the fast
+gate on every push; `foldyard-e2e.yml` holds the advisory live tiers, opt-in (`main`, a
+`[run-e2e]` commit message, or a dispatch). Three jobs:
 
 | job | what | engine |
 | --- | --- | --- |
 | `check` | `just foldyard check` — ruff + pyright + ty + the unit/golden/TUI suite. typecheck installs the `e2e` group so the opt-in proxy/box e2e files (which import `cryptography`/`requests`) resolve | none |
-| `live-e2e` | all the live e2es (`-k e2e`: the example stack up→serve→down, the in-process proxy e2e, AND the box e2e) — run **inside a docker-CLI container** that mirrors the dev box (see below) | runner Docker |
+| `live-e2e` | the in-box topology: all the live e2es (`-k e2e`: the example stack up→serve→down, the in-process proxy e2e, AND the box e2e) — run **inside a docker-CLI container** that mirrors the dev box (see below) | runner Docker |
+| `lima-host-e2e` | the HOST topology: `ubuntu-24.04` as a real Linux host running foldyard's default `lima` backend — `machine ensure` boots a QEMU/KVM VM on the runner, then `tests/test_e2e.py` drives the real `foldyard up` / worktree lifecycle through the config-adopt gate, the supervisor and compose, exactly as on an operator's machine | Lima VM (podman in the guest, over the forwarded socket) |
 
 **Why `live-e2e` runs inside a container.** The box e2e (`test_proxy_box_e2e.py`) spawns a
 *sibling* box and must discover its own network — so the test process itself has to be in a
@@ -219,13 +261,30 @@ the **repo mounted at its same host path** (so the box's `-v <CA>` mount, which 
 on the host, points at a path that exists there — the test copies the CA under the repo for this).
 A `docker compose` v2 plugin binary is dropped in for the example stack.
 
-**Why no KVM job.** The only foldyard surface that needs `/dev/kvm` is the `foldyard machine`
-(podman-machine VM) lifecycle — tier 4. Raw `/dev/kvm` *is* present on GitHub's Linux runners
-(the android-emulator action relies on it, via a `udev` rule), but full podman-machine / libvirt
-VMs are flaky there (nested-virt limits — see
-[josecelano/github-actions-virtualization-support](https://github.com/josecelano/github-actions-virtualization-support)),
-so that path stays the Mac / nested-KVM-host recipe in
-[docs/nested-virt.md](./docs/nested-virt.md) rather than a CI job.
+**Why a VM job works on a shared runner (2026-09-17).** Until then this page said podman-machine
+/ Lima VMs were "flaky" on GitHub-hosted runners; the only citation was a *libvirt* permission
+failure, and foldyard's lima backend does not use libvirt. `/dev/kvm` is present on the x86 Linux
+runners (under-documented, but Lima's own CI boots QEMU VMs on `ubuntu-24.04` on every PR with the
+recipe `modprobe kvm; chown $USER /dev/kvm` — group membership does not take effect there). A
+10-attempt spike of the real `lima` backend on `ubuntu-24.04` went 10/10 with no retry wrapper,
+with and without the walls, QEMU start → READY in 29–41 s and the whole attempt under 2.5 min;
+the record is in [docs/linux-support.md](./docs/linux-support.md#validated-on-a-linux-host). The
+job creates the VM once from a throwaway example copy before pytest (the example stack has no bind
+mounts, so every test copy can drive the one VM) and exports its socket as `CONTAINER_HOST` — for
+the tests' OWN engine calls; a preset `DOCKER_HOST` would make the CLI under test skip
+`machine.ensure` (`stack._docker_host`: dev-box semantics) and bypass the very lifecycle the tier
+drives. The tests' `foldyard up` then runs the real host path: machine ensure → adopt gate →
+supervisor → compose. First catch of the tier: podman 4.9.3's `ps --format` (Ubuntu 24.04's
+package) has no `{{.Label "k"}}`, so every probe built on it read "engine unreachable" on a
+Linux host — now `{{json .Labels}}` (`devmode.ps_labels`).
+Things a Linux runner needs that a Mac does not: `qemu-img` (from `qemu-utils`, not implied by
+`qemu-system-x86-core`), a `systemd --user` manager for anything scoped (`loginctl
+enable-linger`), and Lima from the release tarball into `/usr/local`. **arm64 runners have no
+KVM** (`ubuntu-24.04-arm`: no `/dev/kvm` before or after `modprobe kvm`, probed 2026-09-17), so
+the job is x86-only. The `podman` backend (podman-machine) has not been tried on a runner; the
+`lima` backend is the product path and the one tested. The Mac / nested-KVM-host recipe in
+[docs/nested-virt.md](./docs/nested-virt.md) remains for what a VM job cannot reach (the gVisor
+posture under nested virtualisation).
 
 ## Conventions & gotchas
 

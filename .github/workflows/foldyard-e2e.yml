@@ -1,13 +1,14 @@
 name: foldyard · live e2e
 
-# foldyard's live container e2es. Two advisory tiers run here:
-#   - Docker-in-container topology for proxy/box e2es that need a sibling box to reach the test
-#     process by container IP.
-#   - Native Linux host topology with `[machine].backend = "native"` so CI exercises the real
-#     host-side `foldyard up` / worktree stack lifecycle without nested virtualization.
-#
-# The VM-backed `podman machine` lifecycle still needs a real VM provider (/dev/kvm or macOS
-# virtualization) and stays in DEVELOPMENT.md, deliberately out of shared-runner CI.
+# foldyard's live e2es. Two advisory tiers run here:
+#   - `live-e2e`: the docker-in-container topology for proxy/box e2es that need a sibling box to
+#     reach the test process by container IP (the IN-BOX topology, mirrored).
+#   - `lima-host-e2e`: a real Linux HOST — foldyard's default `lima` backend booting a QEMU/KVM
+#     VM on the runner (`/dev/kvm` is present on GitHub's x86 Linux runners; Lima's own CI boots
+#     VMs the same way), so `machine ensure`, the config-adopt gate, the supervisor and the real
+#     `foldyard up` / worktree lifecycle run exactly as on an operator's machine. The phase-0
+#     spike that established this (10/10 attempts green, ~2 min per attempt, 2026-09-17) is
+#     recorded in docs/linux-support.md. It replaced a `native`-backend job, which exercised no VM.
 #
 # Split out from foldyard.yml so the fast lint/types/unit suite can run on every push while this
 # heavier job stays OPT-IN. The workflow triggers on every push, but the job only runs on `main`
@@ -30,9 +31,15 @@ on:
 permissions:
   contents: read
 
+# One live run per ref; a NEWER opt-in run pre-empts an older one. A push whose jobs are skipped
+# (no `[run-e2e]`, not main) must NOT cancel a run in flight — with a plain `true` here, a docs
+# commit landing mid-run cancelled a 15-minute VM job twice on 2026-09-17.
 concurrency:
   group: foldyard-e2e-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: >-
+    ${{ github.ref == 'refs/heads/main'
+      || contains(github.event.head_commit.message, '[run-e2e]')
+      || github.event_name == 'workflow_dispatch' }}
 
 jobs:
   live-e2e:
@@ -116,24 +123,24 @@ jobs:
               uv run --group e2e pytest tests -k e2e -v
             '
 
-  native-host-e2e:
-    name: native host e2e (example + worktree, on Podman)
-    # Same opt-in policy as the heavier Docker topology.
+  lima-host-e2e:
+    name: lima host e2e (example + worktree, on a QEMU/KVM VM)
+    # Same opt-in policy as the container topology.
     if: >-
       github.ref == 'refs/heads/main'
       || contains(github.event.head_commit.message, '[run-e2e]')
       || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       FOLDYARD_E2E: "1"
       FOLDYARD_ENGINE: podman
-      MACHINE_BACKEND: native
+      MACHINE_BACKEND: lima
       FOLDYARD_STATE_DIR: /tmp/foldyard-state
-      # NB: XDG_RUNTIME_DIR is set by the "Enable systemd --user session" step below to
-      # /run/user/$UID (NOT a /tmp path), so rootless podman can find the user systemd manager
-      # that schedules healthcheck timers. The native socket path derives from it
-      # (machine_backend.NativeBackend._socket_path → $XDG_RUNTIME_DIR/podman/podman.sock).
+      LIMA_VERSION: "2.2.0" # the release the rig and the spike validated; bump deliberately
+      # XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS are appended by the linger step: the `runner`
+      # user has no login session, and anything `systemd --user` (the host wall's per-VM scope)
+      # needs the user manager. Harmless without the wall; kept so a walled consumer can run here.
     steps:
       # Repo-only read (no push) — keep the token out of .git/config.
       - uses: actions/checkout@v6
@@ -141,15 +148,36 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v8.2.0
 
-      # Rootless podman schedules a container's healthcheck INTERVALS via `systemd --user`
-      # transient timers. On a GH runner the `runner` user has no login session — so no user
-      # systemd manager and no /run/user/$UID — and the old custom XDG_RUNTIME_DIR=/tmp/... made
-      # it strictly worse (podman then can't find ANY user systemd). With no timer the example db's
-      # healthcheck never re-runs, its health stays `starting`, and compose's `depends_on:
-      # service_healthy` (the api → db) blocks `foldyard up` FOREVER — the job hung to its 25-min
-      # timeout. enable-linger starts user@$UID.service + creates /run/user/$UID; we point
-      # XDG_RUNTIME_DIR + the D-Bus session there so podman's `systemd-run --user` reaches it.
-      - name: Enable systemd --user session (rootless podman healthcheck timers)
+      # Lima's own runner recipe (lima-vm/lima hack/install-qemu.sh): load the module, then chown
+      # the device — `usermod -aG kvm` does not take effect on GHA. Asserting `-w` fails the job in
+      # seconds with the reason, not ten minutes in with QEMU's "could not access KVM".
+      - name: KVM
+        run: |
+          set -euo pipefail
+          sudo modprobe kvm
+          sudo chown "$(id -un)" /dev/kvm
+          test -w /dev/kvm
+          echo "✓ /dev/kvm writable"
+
+      # ovmf + qemu-system-x86 + qemu-utils is Lima's set; qemu-utils carries qemu-img, which the
+      # lima backend needs and `qemu-system-x86-core` does not imply. podman is the host-side
+      # ENGINE CLI preflight requires whatever the backend (it drives the VM's forwarded socket);
+      # podman-compose is a foldyard dependency, resolved beside the interpreter. nftables is
+      # only for a walled consumer (the example declares no wall); cheap, so kept.
+      - name: Packages (QEMU, podman CLI, nftables) + Lima
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            ovmf qemu-system-x86 qemu-utils podman uidmap slirp4netns nftables jq
+          url="https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz"
+          curl -fsSL "$url" | sudo tar Cxz /usr/local
+          qemu-system-x86_64 --version | head -1
+          podman --version
+          limactl --version
+          limactl info | jq -c .vmTypes
+
+      - name: Enable systemd --user session
         run: |
           set -euo pipefail
           sudo loginctl enable-linger "$(id -un)"
@@ -162,79 +190,78 @@ jobs:
             echo "XDG_RUNTIME_DIR=/run/user/$uid"
             echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus"
           } >> "$GITHUB_ENV"
-          # Sanity: the user manager is reachable (degraded is fine — we only need the timer path).
-          XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
-            systemctl --user is-system-running || true
 
-      - name: Install native Podman backend
+      # The VM is created ONCE here, before pytest, from a throwaway copy of the example (preflight
+      # refuses the nested project; the launch gate refuses an unadopted checkout with no terminal
+      # — `fy config adopt` is the non-interactive path). Every example copy shares the VM name
+      # ([machine].name), and the example stack has no bind mounts (its build context ships over
+      # the socket), so the tests' own copies drive this VM through the real `foldyard up` —
+      # `machine.ensure` finds it running and goes on to the adopt gate + supervisor + compose.
+      # CONTAINER_HOST (NOT DOCKER_HOST) is exported so the tests' own engine helpers (`podman
+      # ps/run` for the in-network probe) reach the VM's forwarded socket while the CLI under test
+      # still resolves the socket ITSELF: a preset DOCKER_HOST makes `stack._docker_host` skip
+      # `machine.ensure` (dev-box semantics), which would bypass the start-after-stop, the
+      # provisioning record and the host wall — the very paths the host tier drives.
+      - name: Create the machine (fy machine ensure)
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            podman podman-compose uidmap slirp4netns fuse-overlayfs
-          mkdir -p "$XDG_RUNTIME_DIR/podman"
-          chmod 700 "$XDG_RUNTIME_DIR"
-          podman system service --time=0 "unix://$XDG_RUNTIME_DIR/podman/podman.sock" \
-            >"$RUNNER_TEMP/podman-service.log" 2>&1 &
-          echo "$!" > "$RUNNER_TEMP/podman-service.pid"
-          for _ in $(seq 1 20); do
-            if test -S "$XDG_RUNTIME_DIR/podman/podman.sock" && podman info >/dev/null 2>&1; then
-              break
-            fi
-            sleep 1
-          done
-          podman info
-          podman compose version || podman-compose --version
+          dst="$RUNNER_TEMP/fyex-machine"
+          cp -r example "$dst"
+          cd "$dst"
+          git init -q && git add -A
+          git -c user.email=e2e@foldyard -c user.name=e2e commit -qm init
+          uv run --project "$GITHUB_WORKSPACE" foldyard config adopt
+          uv run --project "$GITHUB_WORKSPACE" foldyard machine ensure
+          sock="$HOME/.lima/foldyard-example/sock/podman.sock"
+          test -S "$sock"
+          echo "CONTAINER_HOST=unix://$sock" >> "$GITHUB_ENV"
+          CONTAINER_HOST="unix://$sock" podman info --format '{{.Host.Arch}} podman {{.Version.Version}} on {{.Host.Distribution.Distribution}} {{.Host.Distribution.Version}}'
 
-      - name: Pre-pull native e2e images
-        run: |
-          set -euo pipefail
-          pids=()
-          for img in \
-            docker.io/library/python:3.12-slim \
-            docker.io/library/postgres:16-alpine \
-            docker.io/library/alpine:latest; do
-            podman pull "$img" &
-            pids+=("$!")
-          done
-          # Per-PID, not a bare `wait` — same reason as the Docker job's pre-pull above: bare `wait`
-          # returns 0 once the children have exited, whatever they exited WITH, so a registry blip
-          # would warm nothing and still pass. Failing here names the image; failing later shows up
-          # as a compose build error or a healthcheck that never fires.
-          rc=0
-          for pid in "${pids[@]}"; do
-            wait "$pid" || rc=1
-          done
-          exit "$rc"
+      # The host tier: test_e2e.py (the example + worktree stacks) plus the `*_e2e.py` modules that
+      # need a real VM (tests/e2e_host.py — verify's negative, the live probes, the machine
+      # lifecycle, the walls, the supervisor with the zero-secret rig, the box, `fy reclaim`, the
+      # worktree verbs). Listed by name:
+      # `-k e2e` would also pick the proxy/box e2es that need the in-box topology (`live-e2e`).
+      # The `e2e` group brings mitmdump for the wall module's `[proxy]`. No pre-pull: the box
+      # module recreates the VM (its mount set is init-only), which would discard it anyway.
+      - name: Host e2e on the VM
+        run: >-
+          uv run --group e2e pytest -v
+          tests/test_e2e.py
+          tests/test_box_e2e.py
+          tests/test_host_daemons_e2e.py
+          tests/test_machine_e2e.py
+          tests/test_probes_e2e.py
+          tests/test_reclaim_e2e.py
+          tests/test_verify_e2e.py
+          tests/test_wall_e2e.py
+          tests/test_worktree_e2e.py
 
-      # Prove the systemd --user timer path works BEFORE the e2e, so a broken healthcheck fails
-      # here in ~20s with a clear message instead of hanging `foldyard up`'s depends_on to the
-      # 25-min job timeout. A container with a trivial healthcheck must flip to `healthy`.
-      - name: Verify rootless healthchecks fire (fail fast, not a 25-min hang)
-        run: |
-          set -euo pipefail
-          cid=$(podman run -d --health-cmd 'true' --health-interval 2s --health-retries 3 \
-                  docker.io/library/alpine:latest sleep 300)
-          state=""
-          for _ in $(seq 1 15); do
-            state=$(podman inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "")
-            [ "$state" = "healthy" ] && break
-            sleep 2
-          done
-          podman rm -f "$cid" >/dev/null 2>&1 || true
-          if [ "$state" != "healthy" ]; then
-            echo "✗ rootless podman healthchecks are NOT firing (last state: '${state:-none}')."
-            echo "  The example db's health would never flip → foldyard up hangs on depends_on."
-            echo "  Fix the systemd --user wiring (enable-linger / XDG_RUNTIME_DIR / DBUS above)."
-            exit 1
-          fi
-          echo "✓ rootless healthchecks fire — the example db will reach healthy."
-
-      - name: Native host e2e
-        run: uv run pytest tests/test_e2e.py -v
-
-      - name: Native backend diagnostics
+      - name: Diagnostics
         if: always()
         run: |
-          podman ps -a || true
-          cat "$RUNNER_TEMP/podman-service.log" || true
+          echo "::group::limactl list"; limactl list || true; echo "::endgroup::"
+          echo "::group::podman ps -a"; podman ps -a || true; echo "::endgroup::"
+          echo "::group::supervisor log"; cat "$FOLDYARD_STATE_DIR"/host-supervisor.log 2>/dev/null || echo "(none)"; echo "::endgroup::"
+          echo "::group::lima ha.stderr.log"; tail -n 100 "$HOME"/.lima/*/ha.stderr.log 2>/dev/null || true; echo "::endgroup::"
+          echo "::group::inside the guest"
+          for cmd in \
+            "id; echo HOME=\$HOME; uptime; cat /etc/os-release | head -2" \
+            "podman info --format '{{.Store.GraphDriverName}} graph={{.Store.GraphRoot}} run={{.Store.RunRoot}} status={{json .Store.GraphStatus}}'" \
+            "podman images" \
+            "podman run --rm docker.io/library/alpine true && echo NATIVE-RUN-OK" \
+            "mount | grep -E ' / | /home|overlay|9p|virtiofs'" \
+            "journalctl --user -u podman --no-pager -n 25" \
+            "journalctl -b -p warning --no-pager -n 40" \
+            "cat /run/fy-wall/boot.log" \
+            "cat /etc/subuid /etc/subgid; podman unshare cat /proc/self/uid_map; podman info --format '{{json .Host.IDMappings}}'" \
+            "ls -lan /home; d=\$(ls -d ~/.local/share/containers/storage/overlay/*/diff | head -1); ls -lan \$d/etc | head -4"; do
+            echo "\$ $cmd"; limactl shell foldyard-example -- sh -c "$cmd" 2>&1 || true
+          done
+          echo "::endgroup::"
+          echo "::group::lima.yaml"; cat "$HOME"/.lima/foldyard-example/lima.yaml 2>/dev/null | grep -v "^ *#" | head -80; echo "::endgroup::"
+
+      # Never leave the VM to the runner teardown.
+      - name: Teardown
+        if: always()
+        run: limactl delete -f foldyard-example || true

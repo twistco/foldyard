@@ -13,7 +13,7 @@ commented blocks you uncomment when you're ready. This page walks the same arc.
 - **macOS with [uv](https://docs.astral.sh/uv/), [Lima](https://lima-vm.io/) and podman**
   (`brew install uv lima podman`). Lima creates the default machine and podman drives the
   socket it hands out — `fy` preflight refuses without both. See
-  [Backends](#backends-lima--podman--native) for the alternatives.
+  [Backends](#backends-lima--podman) for the alternatives.
 
 Install the CLI:
 
@@ -108,7 +108,7 @@ box image (`[box] image`), monitored tool installs (`[[box.tools]]`), VS Code at
 Parallel work happens in worktrees: `fy worktree add <name>` gives each branch its own
 namespaced stack with offset ports, sharing the one VM and its caches.
 
-## Backends: lima · podman · native
+## Backends: lima · podman
 
 `init` writes the default — `backend = "lima"` with `wall = true` — which gives each project
 its own VM, lets several projects run side by side, and makes egress fail-closed. The
@@ -117,8 +117,9 @@ alternatives, in `[machine]`:
 - `backend = "podman"` — one shared podman machine for everything. No concurrent
   per-project VMs (macOS runs one podman machine at a time) and no in-VM wall: egress
   control is the cooperative proxy only. Pick it if podman is already your daily driver.
-- `backend = "native"` — the host's rootless podman socket directly, no VM. Linux/CI
-  convenience; the weakest profile (shared kernel), so it's an explicit opt-in.
+
+Both are VMs: foldyard always has one, on Linux too
+([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)).
 
 Sizing (`cpus`/`memory_mib`/`disk_gib`) applies when the VM is first created; change it
 later with `foldyard machine recreate`.

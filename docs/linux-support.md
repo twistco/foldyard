@@ -9,9 +9,10 @@ where they were taken (linked per row); keep this page the summary, not a second
 
 Where a Linux host stands in the design: the boundary can be **stronger** than the Mac's
 (nftables can match the VM's own process on the host, which pf cannot — `[machine].host_wall`)
-and it can be **weaker** (`backend = "native"` drops the VM entirely; WSL2's Hyper-V boundary
-protects Windows, not the credentials). Both are explained in
-[isolation-layers.md](./isolation-layers.md#linux--the-machine-layer-is-optional-and-qemu-is-the-price).
+and it is never weaker: there is no VM-less backend (`native` was retired 2026-09-17,
+[ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md); WSL2's Hyper-V boundary protects
+Windows, not the credentials, so the VM is required inside the distro too). Both are explained in
+[isolation-layers.md](./isolation-layers.md#linux--the-machine-layer-is-qemu-and-qemu-is-the-price).
 
 **Validation host:** the GCP nested-KVM rig (Fedora 44, Lima 2.2.0, podman 5.8.4, crun 1.28 —
 [nested-virt.md](./nested-virt.md)). It is one hypervisor level deeper than a laptop, so timings
@@ -35,17 +36,20 @@ there are upper bounds; correctness results transfer as they are.
 | `fy box up` / `exec` / `down` + **in-box `fy verify`** | ✅ box image built + bootstrapped in 45 s; in-box `fy ps` reaches the engine, `fy mode` reads the mirror; in-box `verify` ALL PASS under walls + proxy — after fixing a false FAIL (a Fedora guest's btrfs `subvol=/root` option matched the in-box home; the audit now judges the mountpoint field) and giving the fixture a *private* origin (a public one answers `ls-remote` without credentials and reads as pushable) | 2026-09-13 | [verify-false-pass.md](./verify-false-pass.md#a-false-fail-2026-09-13-the-options-field) |
 | the config-adopt gate ([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)): first adoption, drift, revert | ✅ a never-adopted checkout with no terminal: `fy up` refuses; `fy config adopt` non-interactive adopts. A drifted tree (`cpus = 2 → 3`): `fy up` prints the diff and keeps running the adopted copy, the supervisor logs the one-per-change line, the doctor row flags it, `fy config revert` restores the file | 2026-09-13 | as above |
 | `fy machine recreate`, `fy machine stop` (also stops the supervisor), `fy doctor`, the stale-provisioning refusal (`fy box exec` without the wall env after a walled `up`) | ✅ | 2026-09-13 | as above |
-| CI tiers 1–3 (unit/golden/TUI, the example stack up → serve → down, the proxy and box e2es) | ✅ every push, on `ubuntu-latest` — inside a docker-CLI container mirroring the dev box, so `in_box()` is true and the machine + host gates are bypassed | continuous | [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml) |
+| CI tiers 1–3 (unit/golden/TUI, the example stack up → serve → down, the proxy and box e2es) | ✅ every push, on `ubuntu-latest` — inside a docker-CLI container mirroring the dev box, so `in_box()` is true and the machine + host gates are bypassed | continuous | [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml--foldyard-e2eyml) |
+| **The `lima` backend on a GitHub-hosted runner** (`ubuntu-24.04`, x86, `/dev/kvm` via `modprobe kvm; chown $USER /dev/kvm`, Lima 2.2.0 tarball, QEMU 8.2, host podman 4.9.3 CLI → podman in a Fedora 44 guest) — the phase-0 spike: `machine ensure → up → verify → state → down → machine stop → rm` against the example copied out, as 5 independent attempts × {walls off, walls on} on fresh runners, **no retry wrapper** | ✅ **10/10 green** (+2/2 in the shake-out run). QEMU start → Lima READY 29–41 s; `machine ensure` 39–79 s incl. the 13 s image download; `fy up` 24–30 s (api build + Postgres pull, warm registry); `verify` 2–3 s ALL PASS (rootless, escape refused, PID-1 mount table clean); `fy state` all ✓ — except the stack tier reads "engine unreachable" host-side while `fy ps` reaches it (unexplained; a live-probe test is the place to pin it); walls on: `[machine].wall` + `host_wall` via `fy up` with `[proxy]` declared — host table loaded on the VM's own cgroup scope, direct guest egress refused (`curl --noproxy '*'` connect-refused in 19 ms), DNS resolves, `https://example.com` via the proxy 200; `machine stop` stops the supervisor; `rm` clean. Whole attempt 1 m 35 s – 2 m 22 s | 2026-09-17 | [run 35222981855](https://github.com/twistco/foldyard/actions/runs/35222981855) (spike workflow, since deleted — the job it became is `lima-host-e2e` in [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml--foldyard-e2eyml)) |
+| **The host tier as CI tests** (`lima-host-e2e`: `tests/test_*_e2e.py` over `tests/e2e_host.py`, on the runner's Lima/QEMU VM — Fedora 44 guest, podman 5.8.4; host podman CLI 4.9.3) | ✅ `test_e2e.py` (the example + worktree stacks through the REAL host path: machine ensure → adopt gate → supervisor → compose); `test_box_e2e.py` (`fy box up` on the VM, in-box `fy ps` over `CONTAINER_HOST`, in-box `fy verify` ALL PASS, `box down`); `test_host_daemons_e2e.py` (`fy mode fakecred=on fakedep=on` → the fake minter up, the overlay re-rendered by the supervisor, the api reports `feature: on`, blocked-daemons empty → off); `test_machine_e2e.py` (ensure idempotent; `stop` stops the supervisor — heartbeat stale — and keeps the VM; a SIGKILLed QEMU recovered by `ensure`; `recreate`); `test_probes_e2e.py` (the read-only engine probes in-process — after the podman-4.9 `.Label` fix below; `fy state` clean; `fy doctor` no fail); `test_verify_e2e.py` (ALL PASS on the boundary; **FAIL** against the VM restarted with the whole host home mounted read-only at `/mnt/c` — `VM exposes host paths: … /mnt/c …` — and ALL PASS again once the mount is removed: the negative [verify-false-pass.md](./verify-false-pass.md) owed, now in CI); `test_wall_e2e.py` (`[machine].wall` + `host_wall` via `fy up`: host table on the VM's own scope, direct guest egress refused, DNS resolves, proxy 200, the stale-provisioning refusal of a verb run without the wall config; the api still served — probed with the proxy env cleared, the in-stack caveat the wall documents). **30/30**, the test step 9 min, the job 10 min; then `test_reclaim_e2e.py` + `test_worktree_e2e.py` (rows below) and the machine module moved to a home-path copy: **36/36**, the test step 12 min, the job 15 min | 2026-09-17 | [DEVELOPMENT.md](../DEVELOPMENT.md#test-tiers) (tier 4), [run 35237161600](https://github.com/twistco/foldyard/actions/runs/35237161600), [run 35244308703](https://github.com/twistco/foldyard/actions/runs/35244308703) |
+| **podman 4.9.3's `ps --format` has no `{{.Label "k"}}`** (Ubuntu 24.04's package, i.e. what a stock LTS host has) | ❌→✅ the accessor is a 5.x template function; on a 4.9 CLI it is a template error, a non-zero exit, and every probe built on it — the workspace cards, the reconciler's stack tier, `fy state` — read "engine unreachable" while `fy ps` reached the VM. Now `{{json .Labels}}` via `devmode.ps_labels` (a map from podman, a `k=v` string from docker) | 2026-09-17 | the host tier's first catch; unit-pinned in `tests/test_devmode.py` |
+| **A restarted Fedora/QEMU guest with the host's `/home/<user>` mounted at `/home/<user>`** | ❌ **open**: after `machine stop` → `limactl edit` (add the mount, read-only 9p) → `machine ensure`, the guest's rootless podman accepts connections but cannot create ANY container — crun fails inside the merged rootfs (`open …/merged/etc/resolv.conf: No such file`, `mkdir /run/secrets: EPERM`; `--userns=keep-id`'s copy: `lchown bin: EPERM`); native in the guest as well as remote; the store's ownership is intact (12,333 files at uid 1001, postgres dirs at subuid 524357, none root-owned); the subuid map is unchanged; `podman system migrate` does nothing; removing the mount and restarting does not heal it; `fy machine recreate` does. A plain stop→start, a walled re-provision, and a SIGKILL→ensure all restart fine, so it is this mount, not restarts. The rig (Fedora 44 host, same guest) ran this exact recipe healthy on 2026-09-11. The verify negative therefore exposes the home at `/mnt/c` (an audit marker) instead; the home-path branch of the pattern stays unit-tested. **Confined, same day:** a repo mounted UNDER the home at its own path (`/home/runner/fy-e2e/machine/example`, the realistic Linux layout — `test_machine_e2e.py` recreates the VM from a copy there first) survives stop→start and SIGKILL→ensure with the engine running containers afterwards, so it is a mount whose location IS the home, added after first boot, that breaks the guest — not restarts, not home paths | 2026-09-17 | [run 35231657712](https://github.com/twistco/foldyard/actions/runs/35231657712) (the guest diagnostics are in the job log) |
+| **`fy worktree add` / `remove` on a Linux host** (`test_worktree_e2e.py`) | ✅ `add` registers a sibling checkout on `wt/<name>` with a clean tree; `WORKTREE=<name> fy up` brings its stack up beside main's in the one VM (the example has no bind mounts, so the VM need not mount the worktrees root — `machine.ensure` warns and continues); `remove --yes` takes its containers AND its `{project}_` named volume, archives the bound-out transcript to `FOLDYARD_TRANSCRIPTS_ARCHIVE` (rsync) BEFORE git deletes the tree, drops the checkout + its local state, keeps main's stack and the branch | 2026-09-17 | [run 35244308703](https://github.com/twistco/foldyard/actions/runs/35244308703) |
+| **`fy reclaim` on a real store** (`test_reclaim_e2e.py`) | ✅ a removed worktree's TAGGED images (`fyex-gone_api` and `fyex-gone-api`, both provider spellings) swept; `fyex_api`, `python:3.12-slim`, `postgres:16-alpine` kept; the next `fy up` builds `Using cache` — the three reclaim properties in DEVELOPMENT.md, live (podman 5.8.4 guest, 4.9.3 host CLI) | 2026-09-17 | same run |
+| `ubuntu-24.04-arm` runners | ❌ **no KVM**: no `/dev/kvm` before or after `sudo modprobe kvm` (the module loads, no device — no EL2 for the guest). VM-backed CI is x86-only | 2026-09-17 | same run |
 
 ## Not yet validated on Linux
 
-- **Worktrees on a Linux host** — `fy worktree add` + a second stack in the same VM; `fy up`
-  itself is validated above, worktrees are not.
-- **The box e2e on the rig** (`tests/test_proxy_box_e2e.py` against the rig's engine — the
-  recipe is in [nested-virt.md](./nested-virt.md)); CI covers it on a runner, the rig would cover
-  it on a real Lima VM.
-- **`backend = "native"`** on a real Linux host (the host's own rootless podman, no VM) — only
-  the CI container mirror has exercised it.
+- **The proxy/box e2e on a real Lima VM** (`tests/test_proxy_box_e2e.py` needs the test process
+  INSIDE a container beside the box — the `live-e2e` container mirror covers it; the host tier's
+  `test_box_e2e.py` covers the box itself on the VM).
 - **WSL2 — nothing measured.** `/dev/kvm` in a stock Windows 11 x86 distro (two minutes on any
   such machine: `wsl --shutdown; wsl; ls -l /dev/kvm`), Lima + QEMU inside it, `[automount]
   enabled = false` for the repo-only mount. Windows-on-ARM boots the distro at EL1, so KVM is
@@ -82,10 +86,16 @@ there are upper bounds; correctness results transfer as they are.
   [ADR-0025](./adrs/0025-gvisor-machine-posture-and-socket-narrowing.md). What remains deferred
   is the broader mount/endpoint allowlist (ADR-0025 §Decision 4). Not a Linux-support blocker:
   the product claim without `③` is the same as the Mac's.
-- **A CI job on a Linux *host* path** is not possible on GitHub-hosted runners (podman-machine /
-  Lima VMs are flaky there — [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml)),
-  so the rig stays the validation host for tier 4. Its recipe and its cost are in
-  [nested-virt.md](./nested-virt.md).
+- **A CI job on a Linux *host* path** — done: `lima-host-e2e` boots the real lima/QEMU VM on an
+  `ubuntu-24.04` runner (the row above; [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml--foldyard-e2eyml)).
+  The old sentence here ("podman-machine / Lima VMs are flaky on GitHub-hosted runners") was
+  never evidenced for Lima: its one citation was a libvirt permission failure. What the runner
+  tier CANNOT reach: the `podman` backend (podman-machine on a runner — untried, no evidence
+  either way), arm64 (no KVM), and anything needing nested virtualisation inside the guest — for
+  those the nested-KVM-host recipe in [nested-virt.md](./nested-virt.md) remains.
+- ~~**Retire `backend = "native"`?**~~ **Decided 2026-09-17: retired**
+  ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)) — foldyard always has a VM;
+  `NativeBackend` and its branches are gone, a config naming it is warned and given `podman`.
 
 ## Recording a new validation
 

@@ -1,7 +1,10 @@
 # ADR-0017 — Nested-virt validation: one nesting level, host-role = container; CI uses containers, not KVM
 
 - **Status:** Accepted (2026-06-14; scope sharpened 2026-06-24) — implemented as the tier-4
-  validation rig; the full machine-wrapper nested e2e remains deferred
+  validation rig; the full machine-wrapper nested e2e remains deferred. **The "CI uses
+  containers, not KVM" clause is superseded** (2026-09-17, recorded in
+  [ADR-0027](./0027-always-a-vm-native-backend-retired.md)): the `lima-host-e2e` job boots a real
+  Lima/QEMU VM on x86 runners; the rig remains for what a runner VM cannot reach.
 - **Sources:** DEVELOPMENT.md (test tiers, nested-virt architecture, confirmations),
   docs/history/nested-podman-in-devbox.md, docs/history/lima-network-forcing-spike.md
 

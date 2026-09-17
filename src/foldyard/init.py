@@ -198,7 +198,6 @@ def render(opts: InitOptions) -> str:
         "# (below). Sizing applies at FIRST creation; to resize later: `foldyard machine recreate`.",
         '#   backend = "podman"  # the single shared podman machine — no concurrent per-project',
         "#                       # VMs, and no in-VM wall (egress is the host-side proxy + gvproxy)",
-        '#   backend = "native"  # host podman directly (no VM) — weakest isolation, shared kernel',
         "#   wall = false        # lima but COOPERATIVE-only: the box uses the proxy, but nothing",
         "#                       # stops a process that ignores it (the wall makes it fail-closed)",
         "#   host_wall = true    # Linux hosts: enforce the same wall on the HOST too (nft, sudo on fy up)",

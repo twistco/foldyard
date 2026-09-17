@@ -1,7 +1,7 @@
 """machine_backend.py — the backends behind machine.py. The host CLIs (`podman`,
 `limactl`) are mocked. PodmanBackend: assert `mounts()` reads the on-disk machine config
 (NOT the broken `inspect .Mounts` template, absent on podman 5.x libkrun/applehv) and that
-list/state parse correctly. NativeBackend: assert host socket resolution. LimaBackend: assert the
+list/state parse correctly. LimaBackend: assert the
 `--set` override (sizing + isolation mounts), JSON-lines parsing, state normalisation, and the
 forwarded-socket path. Liveness (`responsive`) and orphan reaping use REAL AF_UNIX sockets and
 files — the failure they exist to catch is a socket file that exists but serves nothing, which a
@@ -33,7 +33,17 @@ class _Proc:
 def test_get_backend_selects_by_name():
     assert isinstance(mb.get_backend("podman"), mb.PodmanBackend)
     assert isinstance(mb.get_backend("lima"), mb.LimaBackend)
-    assert isinstance(mb.get_backend("native"), mb.NativeBackend)
+
+
+def test_get_backend_native_is_retired_loudly_and_falls_back_to_a_vm(capsys):
+    # ADR-0027: the VM-less backend is gone. A config still naming it must not silently get a
+    # different profile, nor take `fy docs`/`fy config` down — a loud warning naming the ADR, then
+    # podman, a VM backend (the fall-back is in the safe direction).
+    be = mb.get_backend("native")
+    assert isinstance(be, mb.PodmanBackend)
+    err = capsys.readouterr().err
+    assert "RETIRED" in err and "ADR-0027" in err and '"lima"' in err and '"podman"' in err
+    assert not hasattr(mb, "NativeBackend")
 
 
 def test_get_backend_unknown_falls_back_to_podman(capsys):
@@ -45,7 +55,6 @@ def test_get_backend_unknown_falls_back_to_podman(capsys):
 def test_concurrency_capability():
     assert mb.PodmanBackend().supports_concurrent() is False  # macOS one-VM-at-a-time
     assert mb.LimaBackend().supports_concurrent() is True
-    assert mb.NativeBackend().supports_concurrent() is True
 
 
 def test_guest_socket_paths(monkeypatch):
@@ -54,17 +63,6 @@ def test_guest_socket_paths(monkeypatch):
     assert mb.PodmanBackend().guest_socket() == "/run/docker.sock"
     monkeypatch.setattr(mb.os, "getuid", lambda: 501)
     assert mb.LimaBackend().guest_socket() == "/run/user/501/podman/podman.sock"
-    monkeypatch.delenv("CONTAINER_HOST", raising=False)
-    monkeypatch.delenv("DOCKER_HOST", raising=False)
-    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/501")
-    assert mb.NativeBackend().socket("ignored") == "unix:///run/user/501/podman/podman.sock"
-    assert mb.NativeBackend().guest_socket() == "/run/user/501/podman/podman.sock"
-
-
-def test_native_backend_honours_preexported_socket(monkeypatch):
-    monkeypatch.setenv("CONTAINER_HOST", "unix:///tmp/podman.sock")
-    assert mb.NativeBackend().socket("ignored") == "unix:///tmp/podman.sock"
-    assert mb.NativeBackend().guest_socket() == "/tmp/podman.sock"
 
 
 # ── PodmanBackend ─────────────────────────────────────────────────────────────────────
@@ -335,13 +333,6 @@ def test_podman_responsive_probes_the_api_socket(monkeypatch, sockdir):
     assert be.responsive("acme") is False
 
 
-def test_native_backend_is_always_responsive(monkeypatch):
-    # No VM ⇒ no half-started VM to detect, and nothing `ensure` could restart. Must pair with
-    # NativeBackend.state()'s unconditional "running".
-    monkeypatch.setenv("CONTAINER_HOST", "unix:///nonexistent/podman.sock")
-    assert mb.NativeBackend().responsive("ignored") is True
-
-
 def test_reap_orphans_is_a_noop_by_default():
     assert mb.LimaBackend().reap_orphans("acme") == []
 
@@ -525,7 +516,7 @@ def test_lima_provision_id_reads_the_marker_from_the_stored_config(monkeypatch, 
 
 
 def test_backends_without_a_provisionable_guest_record_nothing():
-    for be in (mb.get_backend("podman"), mb.get_backend("native")):
+    for be in (mb.get_backend("podman"),):
         assert be.provision_id("x") == ""
         assert be.set_provision("x", "#!/bin/bash\n# fy-provision y\n") is False
 
@@ -574,10 +565,6 @@ def test_podman_ssh_target_comes_from_a_machine_inspect_TEMPLATE(monkeypatch):
     assert mb.PodmanBackend().ssh_target("tangible") is None
 
 
-def test_native_backend_has_no_ssh_target():
-    assert mb.NativeBackend().ssh_target("x") is None
-
-
 def test_lima_vm_pid_reads_the_drivers_pid_file(monkeypatch, tmp_path):
     monkeypatch.setattr(mb.Path, "home", lambda: tmp_path)
     inst = tmp_path / ".lima" / "acme"
@@ -594,7 +581,7 @@ def test_lima_vm_pid_reads_the_drivers_pid_file(monkeypatch, tmp_path):
 
 
 def test_backends_without_a_host_wall_input_report_nothing():
-    for be in (mb.PodmanBackend(), mb.NativeBackend()):
+    for be in (mb.PodmanBackend(),):
         assert be.host_pids("x") == [] and be.vm_pid("x") == 0
         assert be.ssh_port("x") == 0
 

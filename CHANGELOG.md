@@ -9,6 +9,15 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Removed
 
+- **`[machine].backend = "native"` — the VM-less backend.** foldyard always has a VM
+  ([ADR-0027](./docs/adrs/0027-always-a-vm-native-backend-retired.md)): its CI rationale is
+  gone (the host tier runs on a real Lima/QEMU VM on runners), WSL2 does not rescue it (Hyper-V
+  protects Windows, not the credentials), and "weaker profile" meant every product claim at once —
+  no repo-only socket, no wall, no gVisor posture, `verify` unable to assert the boundary. A config
+  still naming it gets a loud warning naming the ADR and the `podman` backend (a VM, so the
+  fall-back adds the boundary rather than dropping it); `machine ensure|stop|rm|recreate` and
+  preflight lose their VM-less branches, and the fail-closed "no `limactl`" message offers two ways
+  out, both VMs.
 - **The hardcoded `<dev_vm_dir>/.stubs/{adc.json,access-token}` every `fy up` wrote.** A leftover
   of the origin monorepo's compose file (which mounted the empty `adc.json` as a stand-in for a
   host ADC file the VM can't reach), undocumented and ungated, so every consumer — GCP or not —
@@ -22,6 +31,11 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Fixed
 
+- **Every engine probe read "engine unreachable" on a stock Ubuntu 24.04 host.** podman 4.9.3's
+  `ps --format` (the LTS package) has no `{{.Label "k"}}` — a 5.x template function — so the
+  workspace cards, the reconciler's stack tier and `fy state` all failed the template while
+  `fy ps` reached the VM. `devmode.ps_labels` now reads `{{json .Labels}}` (a map from podman, a
+  `k=v` string from docker). Caught by the first run of the VM-backed host tier in CI.
 - **A daemon's own launch no longer reads as a lapse.** The supervisor tick probes capabilities
   before it spawns daemons, so the tick that activated a rung (and the first tick of every
   restarted supervisor — each `fy up`) probed the minter's port before anything had bound it:
@@ -43,6 +57,17 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Added
 
+- **The host tier runs on a real Lima/QEMU VM in CI** (`lima-host-e2e` in `foldyard-e2e.yml`,
+  opt-in like the other live tiers): foldyard's default `lima` backend boots a VM on `ubuntu-24.04`
+  runners (x86 only — arm64 runners have no KVM), and eight `tests/test_*_e2e.py` modules over
+  `tests/e2e_host.py` drive the real product path — `machine ensure|stop|recreate` (including a
+  SIGKILLed hypervisor recovered by `ensure`, and restarts with the repo mounted under the host
+  home), the adopt gate, the supervisor with the zero-secret rig, both walls, the box (in-box
+  `fy verify` ALL PASS), `verify`'s negative against a VM exposing the host home, the read-only
+  engine probes, `fy reclaim` on a real store, and `fy worktree add|remove`. 36/36, ~15 minutes.
+- **`just census`** — the subprocess report over the hermetic guard (`tests/tools/census.py`):
+  every process the suite spawns, binary × test, aggregated across xdist workers; a report of what
+  the allowlist still lets through and what the live tiers reach, not a gate.
 - **The editor attach's host bridges are neutralised in-box, the egress wall fences CONNECT to
   `:443`, and `fy verify` reports both.** Seen live: a `fy code` attach put a LIVE SSH agent
   socket (one key) and VS Code's git-credential bridge (`GIT_ASKPASS` back to the host's store)

@@ -5,8 +5,11 @@ Unlike the golden/mocked tests, this runs the engine for real — `foldyard up` 
 image, pulls postgres, and the test queries the DB across the compose network. It is OPT-IN:
 skipped unless FOLDYARD_E2E=1 AND an engine is reachable (it pulls images + builds, ~minutes).
 Run it where foldyard has an engine — the dev box (the rootless machine socket), a nested
-podman host (see DEVELOPMENT.md), or Linux CI with `MACHINE_BACKEND=native`. It namespaces under
-the example's own 'fyex' project, so it never collides with a host project's stack.
+podman host (see DEVELOPMENT.md), or CI's `lima-host-e2e` job, where the VM is created once before
+pytest and its socket handed to THIS test's engine helpers as CONTAINER_HOST — never DOCKER_HOST,
+which the CLI would take as "socket pre-exported" and skip `machine.ensure` — so `foldyard up`
+here runs the REAL host path (machine ensure → adopt gate → supervisor → compose). It namespaces
+under the example's own 'fyex' project, so it never collides with a host project's stack.
 
     FOLDYARD_E2E=1 just foldyard test -k e2e
 """
@@ -136,15 +139,17 @@ def example_repo(tmp_path):
     _foldyard(["down"], dst, timeout=180)  # belt-and-suspenders if the body raised early
 
 
-def _probe_db(network: str = NETWORK, timeout: int = 120) -> str:
+def _probe_db(network: str = NETWORK, timeout: int = 120, env_args: list[str] | None = None) -> str:
     """Hit the api's /db across the compose network via a throwaway container — works whether
-    or not the test runner can reach the engine's published ports directly (the box can't)."""
+    or not the test runner can reach the engine's published ports directly (the box can't).
+    `env_args` are extra `--env` flags for the probe container (a walled VM propagates its proxy
+    env into containers; the host-tier wall test clears it so wget talks to `api` directly)."""
     eng, env = _engine(), _engine_env()
     deadline = time.time() + timeout
     last = ""
     while time.time() < deadline:
         out = subprocess.run(
-            [eng, "run", "--rm", "--network", network,
+            [eng, "run", "--rm", "--network", network, *(env_args or []),
              "docker.io/library/alpine", "wget", "-qO-", API_DB_URL],
             env=env, capture_output=True, text=True, timeout=40,
         )  # fmt: skip

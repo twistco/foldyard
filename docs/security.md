@@ -28,8 +28,9 @@ containers, never the host.
 **The VM is required even on Linux.** Native rootless podman has no repo-only blast radius:
 the engine sees your whole filesystem, so anything holding the socket could mount `~/.ssh`
 into a new container. The VM is what makes "socket = repo + containers only" true at all —
-which is why `backend = "native"` exists only as an explicit opt-in with a stated weaker
-profile, never the default.
+which is why there is no VM-less backend: the `native` backend that once offered one as an
+"explicit opt-in with a weaker profile" was retired
+([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)).
 
 ## Threat model
 
