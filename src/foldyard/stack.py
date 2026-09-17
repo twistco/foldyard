@@ -1544,10 +1544,13 @@ def nuke() -> int:
     # Sweep another provider's containers BEFORE the down: they'd otherwise survive it (the
     # active provider can't see them) and pin the project volumes the nuke is about to remove.
     _reconcile_foreign_containers(ctx)
+    # --remove-orphans for the same reason as `down`: a container from a now-inactive profile
+    # (the metadata emulator after leaving the gcp rungs) isn't in the rendered config, so a
+    # plain `down` strands it — and on worktree removal it then outlives the checkout.
     if ctx.worktree:
         # A worktree owns only its project-prefixed volumes; the pnpm/Playwright caches are
         # SHARED, so drop just this project's volumes and keep the shared caches.
-        rc = _compose(ctx, ["down"])
+        rc = _compose(ctx, ["down", "--remove-orphans"])
         eng = config.engine()
         vols = subprocess.run(
             [eng, "volume", "ls", "-q", "--filter", f"name={ctx.project}_"],
@@ -1561,6 +1564,6 @@ def nuke() -> int:
         _remove_external_network(ctx)
         print(f"✓ worktree {ctx.worktree} nuked (shared pnpm/playwright caches kept)")
         return rc
-    rc = _compose(ctx, ["down", "-v"])
+    rc = _compose(ctx, ["down", "-v", "--remove-orphans"])
     _remove_external_network(ctx)
     return rc

@@ -763,9 +763,20 @@ def branches() -> list[str]:
     return ordered
 
 
+def _decode(chunk: bytes | str | None) -> str:
+    """A subprocess stream as text — the bytes `TimeoutExpired` carries, or an already-decoded
+    stream, or None when nothing was captured."""
+    if chunk is None:
+        return ""
+    return chunk.decode(errors="replace") if isinstance(chunk, bytes) else chunk
+
+
 def _fy(args: list[str], timeout: float = 60, env_extra: dict | None = None) -> tuple[int, str]:
     """Run a `foldyard` (≡ `fy`) verb from the repo root (Mac only). Returns (rc, combined
-    out). `env_extra` overlays the process env (e.g. WORKTREE=<name> to target a worktree)."""
+    out). `env_extra` overlays the process env (e.g. WORKTREE=<name> to target a worktree).
+    The full output is kept — in the command log (Doctor pane) and the durable actions log —
+    because the TUI only toasts the last line, and a teardown that misbehaves is otherwise
+    untraceable after the fact."""
     try:
         env = {**os.environ, **(env_extra or {})}
         out = subprocess.run(
@@ -782,9 +793,18 @@ def _fy(args: list[str], timeout: float = 60, env_extra: dict | None = None) -> 
             timeout=timeout,
             env=env,
         )
-        return out.returncode, _strip_ansi((out.stdout + out.stderr).strip())
+        rc, output = out.returncode, _strip_ansi((out.stdout + out.stderr).strip())
+    except subprocess.TimeoutExpired as e:
+        # The partial output says WHERE the verb stuck — keep it. subprocess attaches it to the
+        # exception as raw bytes (or None), per stream, even under text=True.
+        partial = _strip_ansi((_decode(e.stdout) + _decode(e.stderr)).strip())
+        note = f"timed out after {timeout:g}s"
+        rc, output = 124, f"{partial}\n{note}" if partial else note
     except Exception as e:
-        return 127, str(e)
+        rc, output = 127, str(e)
+    shown = [f"{k}={v}" for k, v in (env_extra or {}).items() if v] + ["foldyard", *args]
+    _record_cmd(" ".join(shown), rc, output, kind="action")
+    return rc, output
 
 
 def create_worktree(name: str, branch: str) -> tuple[int, str]:
@@ -869,17 +889,42 @@ def _strip_ansi(text: str) -> str:
 
 
 # Ring buffer of subprocess calls (command + rc + captured output) so the TUI's Doctor
-# tab can show what ran in the background. Reset per doctor run via cmd_log_reset().
+# tab can show what ran in the background. Two kinds: "doctor" probes, reset per doctor run
+# via cmd_log_reset(), and "action" entries (the workspace verbs `_fy` runs), which survive
+# the reset so a just-run teardown stays visible when you open the tab to look for it.
 _CMD_LOG: list[dict] = []
 _CMD_LOG_MAX = 200
 
 
 def cmd_log_reset() -> None:
-    _CMD_LOG.clear()
+    _CMD_LOG[:] = [e for e in _CMD_LOG if e.get("kind") == "action"]
 
 
 def cmd_log() -> list[dict]:
     return list(_CMD_LOG)
+
+
+def actions_log_file() -> Path:
+    """Durable copy of every `_fy` action (command, rc, full output). Project-shared under
+    ``state_dir`` next to the supervisor log — NOT per-worktree, since the action may be the one
+    deleting that worktree's posture dir."""
+    return config.state_dir() / "tui-actions.log"
+
+
+def _record_cmd(cmd_str: str, rc: int, output: str, kind: str) -> None:
+    logged = _redact_for_log(cmd_str, rc, output)
+    _CMD_LOG.append({"cmd": cmd_str, "rc": rc, "out": logged, "kind": kind})
+    del _CMD_LOG[:-_CMD_LOG_MAX]
+    if kind != "action":
+        return
+    try:  # best-effort: the action already ran, a log write must never turn it into a failure
+        body = "".join(f"    {line}\n" for line in logged.splitlines())
+        path = actions_log_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
+            f.write(f"{_iso(now())} $ {cmd_str}  (rc={rc})\n{body}")
+    except OSError:
+        pass
 
 
 # Commands whose SUCCESSFUL output is a credential (token / PEM). We still log the
@@ -905,9 +950,7 @@ def _run(cmd: list[str], timeout: float = 8) -> tuple[int, str]:
         rc, output = out.returncode, _strip_ansi((out.stdout or out.stderr).strip())
     except Exception as e:
         rc, output = 127, str(e)
-    cmd_str = " ".join(cmd)
-    _CMD_LOG.append({"cmd": cmd_str, "rc": rc, "out": _redact_for_log(cmd_str, rc, output)})
-    del _CMD_LOG[:-_CMD_LOG_MAX]
+    _record_cmd(" ".join(cmd), rc, output, kind="doctor")
     return rc, output  # callers still get the real output; only the log is redacted
 
 
