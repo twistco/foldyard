@@ -120,6 +120,26 @@ finish looking healthy, and a steady lapse posts no fresh notification for it to
 TUI raises the same claim as a banner on the Mode tab, stacked with (not replacing) the
 emergency-rung banner.
 
+### A daemon the supervisor refused to start — BLOCKED
+
+One tier below the credential chain: the daemon itself may never have launched. The
+supervisor's spawn has three gates — a `requires` key missing from `host.env`, a **foreign**
+process already on the daemon's port (VS Code's auto-forward is the classic; the supervisor's
+own orphan from a dead run is reaped instead), and the exec failing (mitmproxy not
+installed). Each gate's reason is published every tick (`blocked-daemons.json` in the host
+state, honoured only while the supervisor's heartbeat is fresh — a dead supervisor's claim is
+no claim) and every posture surface renders it in place of the generic advice:
+
+```text
+gcp     sa    …   [GCP SA-token minter: :8188 ○ BLOCKED — needs GCP_KEY — set in ~/.foldyard/…/host.env]
+```
+
+BLOCKED outranks `● up`: with a forwarder on the port the probe *connects*, and "up" would be
+exactly the lie the reason corrects. A newly-blocked daemon posts one notification carrying
+the same fix. `fy mode`, `fy state` and the TUI all read it; in the box it rides the mirror.
+A daemon that *did* launch but died is not "blocked" — that's a crash-loop, and the
+supervisor log carries its exit code.
+
 ## `fy state` — every tier, desired vs observed
 
 Posture state lives on several tiers with different refresh lifetimes (the authoritative

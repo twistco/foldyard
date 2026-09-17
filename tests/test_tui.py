@@ -1133,6 +1133,57 @@ async def test_shared_daemon_status_shown_only_when_active_and_down(monkeypatch)
         assert "DOWN" in line() and "8088" in line()  # on + down → actionable warning
 
 
+async def test_blocked_daemon_shows_the_gates_reason_even_when_the_port_answers(monkeypatch):
+    # The supervisor's published gate reason beats the port probe: a foreign listener answers,
+    # so plain "up" would hide the problem; the axis line names the gate's own fix instead.
+    def mode_with(**over):
+        m = dict(devmode.axis_defaults())
+        m.update(over)
+        return {"mode": m, "expires": {}}
+
+    blocked = {
+        "egress-proxy": {
+            "up": True,
+            "label": "x",
+            "port": 8088,
+            "blocked": "can't bind :8088 — another process is listening",
+        }
+    }
+    async with tui.DevModeTui().run_test() as pilot:
+        app = cast(tui.DevModeTui, pilot.app)
+        cap = next(r for r in app.query(tui.AxisRow) if r.axis == "capture")
+        monkeypatch.setattr(devmode, "read", lambda: mode_with(capture="on"))
+        monkeypatch.setattr(devmode, "daemon_status", lambda mode: blocked)
+        app.refresh_mode()
+        line = _text(cap.query_one(".axis-status", tui.Static))
+        assert "BLOCKED" in line and "another process is listening" in line
+        assert "DOWN" not in line
+
+
+async def test_blocked_reason_is_rendered_verbatim_not_as_markup(monkeypatch):
+    # The gate's reason is free text — an OSError's str carries `[Errno N]`, and a bracketed
+    # fragment Rich would take for a tag must survive on both surfaces (the axis line and the
+    # host-status footer) rather than vanish or raise a MarkupError mid-tick.
+    def mode_with(**over):
+        m = dict(devmode.axis_defaults())
+        m.update(over)
+        return {"mode": m, "expires": {}}
+
+    reason = (
+        "can't start: [Errno 2] No such file or directory: 'mitmdump' [/dim] (mitmproxy installed?)"
+    )
+    blocked = {"egress-proxy": {"up": False, "label": "x", "port": 8088, "blocked": reason}}
+    async with tui.DevModeTui().run_test() as pilot:
+        app = cast(tui.DevModeTui, pilot.app)
+        cap = next(r for r in app.query(tui.AxisRow) if r.axis == "capture")
+        monkeypatch.setattr(devmode, "read", lambda: mode_with(capture="on"))
+        monkeypatch.setattr(devmode, "daemon_status", lambda mode: blocked)
+        app.refresh_mode()
+        assert reason in _text(cap.query_one(".axis-status", tui.Static))
+        app._render_host_status()
+        assert reason in _text(app.query_one("#host-status", tui.Static))
+
+
 async def test_banner_raises_degraded_capability_alongside_emergency(monkeypatch):
     # A probed-and-failing capability raises a banner line — same published claim `fy mode`
     # renders as ⚠ DEGRADED — and STACKS with the emergency-rung banner rather than replacing it.
@@ -1555,6 +1606,29 @@ async def test_host_status_reflects_daemon_liveness(monkeypatch):
         assert "● up" in status
         # the daemon detail (port + which injectors ride it) lives here ONCE, not under every axis
         assert "egress proxy :8088" in status and "● up" in status
+
+
+async def test_host_status_does_not_count_a_blocked_daemon_as_up(monkeypatch):
+    # A blocked daemon's port answering is the foreign listener, not the supervisor serving: the
+    # head must not say "● up" for a blocked-only workspace, while one healthy unblocked daemon
+    # beside a blocked one still is.
+    blocked = {"up": True, "label": "egress proxy", "port": 8088, "blocked": "port held"}
+    async with tui.DevModeTui().run_test() as pilot:
+        app = cast(tui.DevModeTui, pilot.app)
+        monkeypatch.setattr(devmode, "daemon_status", lambda mode: {"egress-proxy": blocked})
+        app._render_host_status()
+        status = _text(app.query_one("#host-status", tui.Static))
+        assert "none up" in status and "BLOCKED — port held" in status
+
+        healthy = {"up": True, "label": "gcp minter", "port": 8090}
+        monkeypatch.setattr(
+            devmode,
+            "daemon_status",
+            lambda mode: {"egress-proxy": blocked, "gcp-minter": healthy},
+        )
+        app._render_host_status()
+        status = _text(app.query_one("#host-status", tui.Static))
+        assert "host daemons for main: ● up" in status and "BLOCKED — port held" in status
 
 
 async def test_host_log_pane_tails_the_supervisor_logfile(monkeypatch, tmp_path):

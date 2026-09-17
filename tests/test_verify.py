@@ -572,3 +572,24 @@ def test_wall_posture_flags_port_53_exfil_hole(monkeypatch, capsys):
     assert rep.fails == 1
     out = capsys.readouterr().out
     assert "53" in out and "NOT enforcing" in out
+
+
+# ── the manual pointer ───────────────────────────────────────────────────────────────────
+# A row that fails names WHAT failed, not what to do about it; the "why might it fail, what do
+# I do" lives in the manual. The pointer is the exact `fy docs` call, printed up front (so the
+# reader knows before the first row where the explanations are) and again beside a FAIL verdict.
+
+
+def test_verify_points_at_the_manual_section(secure_engine, capsys):
+    verify.verify()
+    out = capsys.readouterr().out
+    assert "fy docs security" in out.splitlines()[0]
+
+
+def test_a_failed_verdict_repeats_the_manual_pointer(secure_engine, capsys):
+    _, results = secure_engine
+    results["escape_rc"] = 0  # any FAIL will do
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    verdict = [ln for ln in out.splitlines() if "check(s) FAILED" in ln]
+    assert verdict and "fy docs security" in out.split(verdict[0], 1)[1]

@@ -36,6 +36,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from .. import config
@@ -90,19 +91,31 @@ def _minter_port_answering() -> tuple[bool, str]:
     # No proxy, whatever the shell exports: HTTP_PROXY without a matching NO_PROXY would route even
     # loopback through it, and this probe exists to test the DIRECT path the VM gateway dials.
     opener = urlrequest.build_opener(urlrequest.ProxyHandler({}))
+    squatter = (
+        f"port {port} is held by another process, not the minter — a port forwarder "
+        "(VS Code auto-forward?) shadows it; free the port, then restart `fy host`"
+    )
     try:
         with opener.open(f"http://127.0.0.1:{port}/", timeout=5) as r:
-            body = json.loads(r.read() or b"{}")
+            raw = r.read()
+    except urlerror.HTTPError as e:
+        # An HTTP status is an ANSWER — a dev server's 404 on `/`, a relay's 502 — so this is the
+        # squatter case, not silence; urllib raises it, which the broad catch below would misread.
+        return False, f"{squatter} (it answered HTTP {e.code})"
     except Exception as e:  # unreachable, refused, or accepted-then-silent (the forwarder case)
         return False, (
             f"minter port {port} not answering ({type(e).__name__}) — the box gets no tokens; "
             "is `fy host` up?"
         )
+    # Something answered. Whether it's US is the parse's question, kept OUT of the try above: a
+    # squatter that speaks HTTP but not the minter's JSON (a dev server's HTML, a forwarder's
+    # relay) is the "held by another process" case, not "not answering".
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        body = None
     if not isinstance(body, dict) or body.get("foldyard") != _MINTER_MARKER:
-        return False, (
-            f"port {port} is held by another process, not the minter — a port forwarder "
-            "(VS Code auto-forward?) shadows it; free the port, then restart `fy host`"
-        )
+        return False, squatter
     return True, f"minter answering on :{port}"
 
 

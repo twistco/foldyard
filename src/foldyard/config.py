@@ -605,7 +605,7 @@ def external_network() -> bool:
 
 def ensure_dirs() -> list[str]:
     """Bind-mount source dirs (relative to the checkout) the compose file expects to
-    pre-exist — created empty on ``up``/``stubs``. From ``[project].ensure_dirs`` ([]
+    pre-exist — created empty on ``up``. From ``[project].ensure_dirs`` ([]
     if absent)."""
     raw = _project_table().get("ensure_dirs")
     return [str(x) for x in raw] if isinstance(raw, list) else []
@@ -1539,6 +1539,18 @@ def capabilities_file() -> Path:
     ``<state_dir>/capabilities.json``."""
     env = os.environ.get("FOLDYARD_CAPABILITIES_FILE")
     return Path(env).expanduser() if env else state_dir() / "capabilities.json"
+
+
+def blocked_daemons_file() -> Path:
+    """The supervisor's PROJECT-shared record of the daemons a spawn gate is holding back —
+    ``{name: {reason, since}}`` — the gate's own fix (missing host.env key, a foreign listener
+    on the port, exec failure), which used to live only in the supervisor log's nag while every
+    posture surface probed the port itself and said "run `fy host`". Rewritten each tick; read
+    by ``devmode.daemon_status`` on the host, and only while the supervisor's heartbeat is fresh
+    (a dead supervisor's claim is no claim). ``FOLDYARD_BLOCKED_DAEMONS_FILE`` wins, else
+    ``<state_dir>/blocked-daemons.json``."""
+    env = os.environ.get("FOLDYARD_BLOCKED_DAEMONS_FILE")
+    return Path(env).expanduser() if env else state_dir() / "blocked-daemons.json"
 
 
 def _host_table() -> dict:

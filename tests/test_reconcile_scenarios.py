@@ -149,10 +149,15 @@ def test_tick_converges_daemons_and_writes_mirror_and_capabilities_for_up_box(
     devmode.set_mode({"gcp": "sa"})
     tick_world["up"] = [""]
 
-    supervisor.reconcile_once({}, {})
-
+    children: dict = {}
+    supervisor.reconcile_once(children, {})
     # daemons: the posture's minter AND the always-on proxy converged
     assert {"gcp-minter", "egress-proxy"} <= set(tick_world["launched"])
+    # The tick probes before it spawns, so the launching tick makes no capability claim for the
+    # minter's axis (nothing had bound the port yet); the next tick — the fake child's
+    # started_at is long past the warm-up — probes it for real.
+    assert probe_calls == []
+    supervisor.reconcile_once(children, {})
     # mirror: written for the up box, carrying mode + daemon status + capabilities
     mirror = json.loads(tick_world["state"]["mirror"].read_text())
     assert mirror["gcp"] == "sa" and "daemons" in mirror

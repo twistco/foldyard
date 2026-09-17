@@ -353,18 +353,10 @@ def shellenv(
     no_machine: bool = typer.Option(False, "--no-machine", help="skip machine/DOCKER_HOST setup"),
 ) -> None:
     """Emit shell to `eval` at the top of a dev-VM recipe — drop-in for the old _common.sh
-    (vars + COMPOSE array + ensure_stubs/dev_vm_banner shims). Internal."""
+    (vars + COMPOSE array + the dev_vm_banner shim). Internal."""
     from . import stack
 
     raise typer.Exit(stack.shellenv(no_machine=no_machine))
-
-
-@app.command(hidden=True)
-def stubs() -> None:
-    """Create the empty GCP credential stubs the compose file bind-mounts (internal)."""
-    from . import stack
-
-    raise typer.Exit(stack.stubs())
 
 
 @app.command(hidden=True)

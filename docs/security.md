@@ -161,6 +161,52 @@ asserts, grouped:
   refused. One caveat verify states itself: an offline host also fails these probes, so a
   fast rejection is the healthy signature and a long timeout is the suspicious one.
 
+### When a check fails
+
+Every row names *what* failed and stops there. What it usually means, and where to go next:
+
+- **`probe image … could not run — the boundary battery DID NOT EXECUTE`** — the positive
+  control failed, so no boundary row below it was tested. The probe image (`alpine`, or
+  `VERIFY_IMG`) has to reach the VM: behind the wall that means the host proxy must be up
+  (`fy host`, or `fy up` which starts it in the background), or pre-pull the image / point
+  `VERIFY_IMG` at one already in the VM. Not an isolation failure — an unproven one.
+- **`engine is NOT reported rootless`** — the machine was created rootful, or the socket
+  verify reached isn't foldyard's. Check which socket the section header names, then
+  `fy doctor`; a rootful machine is rebuilt with `fy machine recreate`.
+- **`host PID1 namespace READABLE … (breakout!)`** — the known escape worked: container-root
+  reached the VM kernel. Treat the machine as compromised for isolation purposes and stop
+  using it (`fy machine stop`) until you know why — the usual cause is the socket being a
+  host engine rather than the VM's, not a kernel bug.
+- **`VM exposes host paths: …`** — the VM mounts more of the host than the repo and the
+  worktrees root (a backend default that shares your whole home, or a mount added by hand).
+  VM mount sets are init-only: fix the `[machine]` config, then `fy machine recreate`.
+  **`could not read the VM mount table … UNPROVEN`** is the probe failing, not a leak; under
+  gVisor the row reads `N/A` instead and the audit is `fy verify` on the host's job.
+- **`SSH_AUTH_SOCK set` / `~/.ssh key material` / `~/.netrc present`** — a credential is
+  physically in the box. Nothing in foldyard puts it there: look for a mount or a
+  `[box]`/bootstrap step that copies it in (`fy config widenings` lists what the adopted
+  config asks the host to allow), remove it, then `fy box down` + `fy box up`.
+- **`git remote REACHABLE — the box can push`** — the box authenticated to `origin`, or
+  `origin` is public (then `ls-remote` needs no credential and this row can't distinguish).
+  For a private origin: `fy state` shows what the posture is granting; `fy config widenings`
+  where a credential is being delivered. Note the row deliberately does *not* pass on a
+  network timeout — an unreachable remote proves nothing either way.
+- **Plugin rows** (e.g. the `github` token in the box is more than the dummy) — the box env
+  carries a real credential; the design puts it host-side only. `fy mode` shows the posture,
+  `fy state` the desired-vs-observed tiers; a box created under an older config is
+  recreated with `fy box down` + `fy box up`.
+- **`box is NOT under gVisor`** — the box was created before `[machine].runtime = "gvisor"`
+  was adopted, or through the wrong socket. `fy box down` + `fy box up` recreates it through
+  the runsc socket.
+- **Wall rows** — `no HTTPS_PROXY in the box` means the box predates the wall config
+  (`fy box down` + `fy box up`); `the permitted path … is unreachable too` means the box has
+  no egress at all, so the refusals prove nothing — start `fy host` (`fy doctor`'s
+  supervisor-heartbeat row says whether it is running); `direct egress … CONNECTED` means the
+  wall is not enforcing in the guest. The wall installs as root at VM boot, so
+  `fy machine stop` then `fy up` — and `fy up` itself reads the guest's own wall report,
+  refusing on a mismatch and printing where the boot log is.
+- **Health `WARN`s** are advisory (`fy logs <service>`) and never move the verdict.
+
 Alongside it, **`fy config widenings`** answers the question verify doesn't: not "is the posture
 what it claims?" but "what did we agree to, and where is it written?" — the hosts `passthrough`
 exempts from capture (with `@all` resolved to its real count), where each mechanism delivers its

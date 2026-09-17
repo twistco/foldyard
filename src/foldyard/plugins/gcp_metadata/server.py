@@ -239,6 +239,25 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, b"not found\n")
 
 
+class Server(ThreadingHTTPServer):
+    def handle_error(self, request, client_address) -> None:
+        # A client leaving mid-response — google-auth's own timeout giving up on a slow mint, a
+        # container stopping — is the caller's business, not a server fault. socketserver's
+        # default prints a full traceback per occurrence, which reads as the emulator being broken
+        # (one degraded minter produced pages of them). One line, and only for the hang-up class;
+        # anything else still traces.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+            print(
+                f"[metadata] client {client_address[0]} hung up mid-response "
+                f"({type(exc).__name__})",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        super().handle_error(request, client_address)
+
+
 def main() -> None:
     if not PROJECT:
         raise SystemExit(
@@ -247,7 +266,7 @@ def main() -> None:
             "  emulator service's environment). There is deliberately no default: the project id\n"
             "  is served as this instance's identity, and the SA emails are built from it."
         )
-    srv = ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), Handler)
+    srv = Server(("0.0.0.0", LISTEN_PORT), Handler)
     print(
         f"[metadata] serving on :{LISTEN_PORT} — project={PROJECT}, "
         f"minter={MINTER_URL}, label={SA_LABEL}",

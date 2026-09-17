@@ -1,4 +1,4 @@
-"""stack.py — `foldyard shellenv` (the _common.sh replacement) + stubs/banner. Golden-ish
+"""stack.py — `foldyard shellenv` (the _common.sh replacement) + ensure_dirs/banner. Golden-ish
 output checks on the emitted shell, with main_repo / machine / devmode mocked so nothing
 touches git, podman, or the real mode state."""
 
@@ -119,7 +119,8 @@ def test_shellenv_main_path(fake_repo, capsys):
     assert "ENGINE=podman" in out  # consumer recipes echo `"$ENGINE" …`
     assert "export PODMAN_COMPOSE_PROVIDER=/fy-venv/bin/podman-compose" in out
     assert "COMPOSE=(podman compose -f " in out and "compose.podman.yml" in out
-    assert "ensure_stubs() {" in out and "dev_vm_banner() {" in out
+    assert "dev_vm_banner() {" in out
+    assert "ensure_stubs" not in out  # the shim went with the hardcoded GCP stubs it created
     # Main path exports the [ports] bases at offset 0 (APP_PORT=3000, SIM_PORT=4500, …) so they're
     # SET in the compose env — matching the compose `${VAR:-default}` fallbacks, and silencing
     # compose-go's "variable is not set" warning (which fires even on defaulted refs).
@@ -225,20 +226,29 @@ def test_shellenv_emits_mode_env(fake_repo, capsys, monkeypatch):
     assert 'export COMPOSE_PROFILES="${COMPOSE_PROFILES:-metadata}"' in out
 
 
-def test_stubs_creates_empty_creds(tmp_path, monkeypatch):
+def test_ensure_dirs_creates_declared_dirs_only(tmp_path, monkeypatch):
+    """`fy up` pre-creates what the consumer DECLARES ([project].ensure_dirs) and nothing
+    else — no hardcoded `.stubs/` GCP credential files."""
     (tmp_path / "foldyard.toml").write_text(
         '[project]\nname = "p"\nensure_dirs = ["platform/.db-exports", "platform/.docker/gcs-emulator"]\n'
     )
     monkeypatch.setenv("FOLDYARD_REPO", str(tmp_path))
     config.clear_caches()
-    monkeypatch.setenv("FOLDYARD_CHECKOUT", str(tmp_path))
-    monkeypatch.setenv("HERE", "dev-stack")
-    assert stack.stubs() == 0
-    sd = tmp_path / "dev-stack/.stubs"
-    assert (sd / "adc.json").read_text() == ""  # empty ⇒ offline
-    assert (sd / "access-token").exists()
-    assert (tmp_path / "platform/.db-exports").is_dir()  # from [project].ensure_dirs
+    stack._ensure_dirs(tmp_path)
+    assert (tmp_path / "platform/.db-exports").is_dir()
     assert (tmp_path / "platform/.docker/gcs-emulator").is_dir()
+    assert not (tmp_path / ".stubs").exists()  # nothing undeclared
+    config.clear_caches()
+
+
+def test_ensure_dirs_writes_nothing_undeclared(tmp_path, monkeypatch):
+    """A consumer with no ensure_dirs gets no files at all — the old hardcoded
+    `<dev_vm_dir>/.stubs/` (a Tangible-specific leftover) is gone."""
+    (tmp_path / "foldyard.toml").write_text('[project]\nname = "p"\n')
+    monkeypatch.setenv("FOLDYARD_REPO", str(tmp_path))
+    config.clear_caches()
+    stack._ensure_dirs(tmp_path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["foldyard.toml"]
     config.clear_caches()
 
 

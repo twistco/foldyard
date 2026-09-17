@@ -6,9 +6,11 @@ guards are exercised with no real `foldyard host` process or podman."""
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -378,12 +380,13 @@ def test_reap_refuses_to_kill_a_foreign_listener(monkeypatch):
     assert killed == []
 
 
-def _fake_cfg(wt: str) -> types.SimpleNamespace:
-    """A ``config.Config``-shaped stand-in for the reconcile tests: ``config.using()`` only needs an
-    object, but the tick also asks :mod:`foldyard.configpin` whether that checkout's foldyard.toml
-    still matches the copy the host adopted — so it needs a ``repo_root`` too. A path that doesn't
-    exist reads as "no config either side", i.e. no drift, which is what these tests want."""
-    return types.SimpleNamespace(worktree=wt, repo_root=Path("/nonexistent-checkout"))
+def _fake_cfg(wt: str) -> supervisor.config.Config:
+    """A real but empty ``config.Config`` for the reconcile tests (the tick binds it and asks the
+    registry for the axis→daemon map, so a bare namespace no longer does). The tick also asks
+    :mod:`foldyard.configpin` whether that checkout's foldyard.toml still matches the copy the
+    host adopted — a ``repo_root`` that doesn't exist reads as "no config either side", i.e. no
+    drift, which is what these tests want."""
+    return supervisor.config.Config(worktree=wt, repo_root=Path("/nonexistent-checkout"), toml={})
 
 
 class _StopTick(Exception):
@@ -1269,3 +1272,198 @@ def test_notify_respects_the_config_opt_out_and_missing_osascript(monkeypatch):
     with config_mod.using(make_config(FULL_TOML)):
         supervisor._notify("t", "b")
     assert runs == []
+
+
+# ── warm-up: no verdict about a daemon that can't answer yet ─────────────────────────────
+# The tick probes BEFORE it spawns, so the tick that activates a rung (or the first tick of a
+# restarted supervisor) probed a port nothing had bound yet: a failure cached for the probe's
+# whole interval, published beside a `● up` daemon row, plus a spurious DEGRADED→recovered
+# notification pair on every launch.
+
+
+def test_a_warming_axis_is_not_probed_and_makes_no_claim(monkeypatch):
+    calls: list[int] = []
+
+    def check():
+        calls.append(1)
+        return False, "port not answering"
+
+    monkeypatch.setattr(supervisor.devmode, "capability_probes", lambda mode: [_probe(check)])
+    assert supervisor.run_capability_probes("", {"gcp": "sa"}, warming={"gcp"}) == {}
+    assert calls == []
+
+
+def test_warm_up_drops_a_verdict_from_before_the_launch(monkeypatch):
+    healthy = [False]
+    probe = _probe(lambda: (healthy[0], "detail"), interval=3600.0)
+    monkeypatch.setattr(supervisor.devmode, "capability_probes", lambda mode: [probe])
+    first = supervisor.run_capability_probes("", {"gcp": "sa"})
+    assert first["gcp"]["ok"] is False  # probed before the daemon existed
+    assert supervisor.run_capability_probes("", {"gcp": "sa"}, warming={"gcp"}) == {}
+    healthy[0] = True
+    # After the warm-up the axis is probed FRESH — the hour-long cache from before the launch
+    # must not serve the pre-launch failure.
+    assert supervisor.run_capability_probes("", {"gcp": "sa"})["gcp"]["ok"] is True
+
+
+def test_warming_axes_follow_the_daemon_lifecycle(monkeypatch):
+    class _Child:
+        def __init__(self, started_at, alive=True):
+            self.started_at = started_at
+            self._alive = alive
+
+        def alive(self):
+            return self._alive
+
+    now = 1000.0
+    monkeypatch.setattr(supervisor.time, "monotonic", lambda: now)
+    axis_daemon = {"gcp": "gcp-minter", "github": "proxy", "claude": "proxy", "auth0": None}
+    desired = {"gcp-minter", "proxy"}
+    children: dict[str, Any] = {
+        "gcp-minter": _Child(now - 1.0),  # just launched — still binding
+        "proxy": _Child(now - supervisor.DAEMON_WARMUP_SECONDS - 1.0),  # warm
+    }
+    assert supervisor._warming_axes(axis_daemon, desired, children) == {"gcp"}
+    children["proxy"] = _Child(now - 1.0, alive=False)  # died right after launch: probe it
+    assert supervisor._warming_axes(axis_daemon, desired, children) == {"gcp"}
+    del children["gcp-minter"]  # desired but not spawned yet — this tick spawns it
+    assert supervisor._warming_axes(axis_daemon, desired, children) == {"gcp"}
+    # Not desired under this mode ⇒ nothing to wait for; the axis is probed as usual.
+    assert supervisor._warming_axes(axis_daemon, set(), children) == set()
+
+
+def test_a_gated_daemon_is_probed_not_treated_as_warming(monkeypatch):
+    # "No child" is ambiguous: about to spawn this tick, OR held back by a spawn gate (missing
+    # host.env, a foreign listener on its port, exec failure). A gated daemon is never going to
+    # bind, so waiting for it would silence its axis forever — and the gcp port probe exists
+    # precisely to name a foreign listener shadowing the port (the VS Code forwarder incident):
+    # with the forwarder there FIRST, the gate blocks and only the probe can say why `● up` lies.
+    monkeypatch.setattr(supervisor.time, "monotonic", lambda: 1000.0)
+    axis_daemon: dict[str, str | None] = {"gcp": "gcp-minter"}
+    assert supervisor._warming_axes(axis_daemon, {"gcp-minter"}, {}) == {"gcp"}
+    blocked = {"gcp-minter"}  # the gate refused it last tick
+    assert supervisor._warming_axes(axis_daemon, {"gcp-minter"}, {}, blocked) == set()
+
+
+def test_a_successful_spawn_clears_the_daemons_nag(monkeypatch):
+    # `nagged` must mean "currently gated", not "was gated once": a stale entry would make a
+    # daemon that has since launched read as gated on its next respawn tick (one false verdict).
+    spawned: list[str] = []
+
+    class _FakeChild:
+        def __init__(self, name, spec):
+            spawned.append(name)
+
+    monkeypatch.setattr(supervisor, "Child", _FakeChild)
+    monkeypatch.setattr(supervisor.devmode, "probe", lambda port, host=None: False)
+    children: dict = {}
+    nagged = {"gcp-minter": 1.0}  # gated on an earlier tick (env was missing)
+    spec = {"requires": [], "port": 8188, "cmd": ["x"], "env": {}, "label": "minter"}
+    supervisor._spawn_child("gcp-minter", spec, children, nagged)
+    assert spawned == ["gcp-minter"] and "gcp-minter" not in nagged
+
+
+# ── blocked daemons: the spawn gate's reason reaches the surfaces ────────────────────────
+# A gate's reason used to live only in the supervisor log's 30s nag; every surface computed
+# daemon status by probing the port itself, so `fy mode` said "○ DOWN — run fy host" while
+# `fy host` was running fine, and a foreign listener on the port read as "● up".
+
+
+def _gate_world(monkeypatch, tmp_path):
+    monkeypatch.setattr(supervisor.config, "state_dir", lambda: tmp_path)
+    monkeypatch.delenv("FOLDYARD_BLOCKED_DAEMONS_FILE", raising=False)
+    monkeypatch.setattr(supervisor, "log", lambda _m: None)
+    monkeypatch.setattr(supervisor.devmode, "probe", lambda port, host=None: False)
+    spawned: list[str] = []
+
+    class _FakeChild:
+        def __init__(self, name, spec):
+            self.name, self.spec = name, spec
+            self.started_at = 0.0
+            spawned.append(name)
+
+        def alive(self):
+            return True
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(supervisor, "Child", _FakeChild)
+    return spawned
+
+
+def _spec(**over):
+    spec = {"requires": [], "port": 8188, "cmd": ["x"], "env": {}, "label": "GCP SA-token minter"}
+    spec.update(over)
+    return spec
+
+
+def test_spawn_child_returns_each_gates_reason(monkeypatch, tmp_path):
+    _gate_world(monkeypatch, tmp_path)
+    monkeypatch.delenv("GCP_KEY", raising=False)
+    nagged: dict[str, float] = {}
+    why = supervisor._spawn_child("m", _spec(requires=["GCP_KEY"]), {}, nagged)
+    assert why and "GCP_KEY" in why and "host.env" in why
+    monkeypatch.setattr(supervisor.devmode, "probe", lambda port, host=None: True)
+    monkeypatch.setattr(supervisor, "reap_orphan_listener", lambda name, port, spec: False)
+    why = supervisor._spawn_child("m", _spec(), {}, nagged)
+    assert why and "another process is listening" in why and "8188" in why
+    monkeypatch.setattr(supervisor.devmode, "probe", lambda port, host=None: False)
+
+    def boom(name, spec):
+        raise OSError("no such file: mitmdump")
+
+    monkeypatch.setattr(supervisor, "Child", boom)
+    why = supervisor._spawn_child("m", _spec(), {}, nagged)
+    assert why and "mitmdump" in why
+    monkeypatch.setattr(supervisor, "Child", lambda name, spec: types.SimpleNamespace(name=name))
+    assert supervisor._spawn_child("m", _spec(), {}, nagged) is None
+
+
+def _tick_with(monkeypatch, tmp_path, desired: dict, children: dict, nagged: dict):
+    monkeypatch.setattr(supervisor, "_stamp_heartbeat", lambda: None)
+    monkeypatch.setattr(supervisor.allowlist, "sweep", lambda: None)
+    monkeypatch.setattr(supervisor.githeal, "sweep", lambda log: None)
+    monkeypatch.setattr(supervisor.devmode, "up_worktrees", lambda: [])
+    monkeypatch.setattr(supervisor.devmode, "worktree_config", _fake_cfg)
+    monkeypatch.setattr(supervisor, "expire_user_modes", lambda: {"gcp": "sa"})
+    monkeypatch.setattr(supervisor.devmode, "desired_daemons", lambda mode: desired)
+    monkeypatch.setattr(supervisor.devmode, "env_defaults", lambda mode: {})
+    monkeypatch.setattr(supervisor.devmode, "capability_probes", lambda mode: [])
+    monkeypatch.setattr(supervisor.transcripts, "sweep", lambda *a, **k: None)
+    supervisor.reconcile_once(children, nagged)
+
+
+def test_tick_publishes_blocked_daemons_with_the_reason_and_clears_on_launch(monkeypatch, tmp_path):
+    spawned = _gate_world(monkeypatch, tmp_path)
+    monkeypatch.setattr(supervisor, "_blocked", {})
+    notified: list[tuple[str, str]] = []
+    monkeypatch.setattr(supervisor, "_notify", lambda t, b: notified.append((t, b)))
+    monkeypatch.delenv("GCP_KEY", raising=False)
+    desired = {"gcp-minter": _spec(requires=["GCP_KEY"])}
+    children: dict = {}
+    nagged: dict = {}
+
+    _tick_with(monkeypatch, tmp_path, desired, children, nagged)
+    published = json.loads((tmp_path / "blocked-daemons.json").read_text())
+    assert "GCP_KEY" in published["gcp-minter"]["reason"] and published["gcp-minter"]["since"]
+    assert spawned == []
+    assert len(notified) == 1  # one push, titled by the daemon's label, the gate's fix as body
+    assert "GCP SA-token minter" in notified[0][0] and "GCP_KEY" in notified[0][1]
+
+    _tick_with(monkeypatch, tmp_path, desired, children, nagged)  # still blocked: quiet
+    assert len(notified) == 1
+    since = json.loads((tmp_path / "blocked-daemons.json").read_text())["gcp-minter"]["since"]
+    assert since == published["gcp-minter"]["since"]  # `since` is the first blocked tick
+
+    monkeypatch.setenv("GCP_KEY", "x")  # host.env filled in → launches → no longer blocked
+    _tick_with(monkeypatch, tmp_path, desired, children, nagged)
+    assert spawned == ["gcp-minter"]
+    assert json.loads((tmp_path / "blocked-daemons.json").read_text()) == {}
+
+
+def test_blocked_file_is_not_created_while_nothing_is_blocked(monkeypatch, tmp_path):
+    _gate_world(monkeypatch, tmp_path)
+    monkeypatch.setattr(supervisor, "_blocked", {})
+    _tick_with(monkeypatch, tmp_path, {"gcp-minter": _spec()}, {}, {})
+    assert not (tmp_path / "blocked-daemons.json").exists()

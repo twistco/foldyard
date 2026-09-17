@@ -80,3 +80,19 @@ def test_state_flags_a_stale_extra_overlay_as_drift(isolated_state, monkeypatch,
     rc = state_view.show()
     out = capsys.readouterr().out
     assert rc == 1 and "stale overlay" in out and "compose.storage-staging.yml" in out
+
+
+def test_state_names_a_blocked_daemons_reason(isolated_state, offline_engine, monkeypatch, capsys):
+    # The spawn gate's reason, published by the supervisor, replaces the generic DOWN advice.
+    devmode.set_mode({"gcp": "sa"})
+    monkeypatch.setattr(
+        devmode,
+        "daemon_status",
+        lambda mode: {
+            "gcp-minter": {"up": True, "port": 41100, "blocked": "can't bind :41100 — foreign"}
+        },
+    )
+    rc = state_view.show()
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "BLOCKED — can't bind :41100 — foreign" in out and "DOWN" not in out

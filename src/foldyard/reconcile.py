@@ -119,7 +119,9 @@ class DaemonScope(Scope):
             seen = daemons.get(name) or {}
             up = seen.get("up")
             desired = f"{name} listening on :{spec['port']}"
-            if up:
+            if seen.get("blocked"):  # the supervisor's gate refused it — its reason IS the fix
+                rows.append(ScopeRow("drift", self.name, desired, f"BLOCKED — {seen['blocked']}"))
+            elif up:
                 rows.append(ScopeRow("ok", self.name, desired, "up"))
             elif up is None:
                 rows.append(

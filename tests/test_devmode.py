@@ -1109,3 +1109,50 @@ def test_fy_subprocesses_never_inherit_the_terminal(monkeypatch):
     monkeypatch.setattr(devmode, "main_repo", lambda: "/tmp")
     devmode._fy(["box", "up"])
     assert seen.get("stdin") is subprocess.DEVNULL
+
+
+# ── blocked daemons on the posture surfaces ───────────────────────────────────────────────
+
+
+def _publish_blocked(isolated_state, monkeypatch, reason="needs GCP_KEY — set in host.env"):
+    path = isolated_state["dir"] / "blocked-daemons.json"
+    monkeypatch.setenv("FOLDYARD_BLOCKED_DAEMONS_FILE", str(path))
+    path.write_text(json.dumps({"gcp-minter": {"reason": reason, "since": "t"}}))
+    hb = isolated_state["dir"] / "hb"
+    monkeypatch.setenv("FOLDYARD_HEARTBEAT_FILE", str(hb))
+    hb.write_text(devmode._iso(devmode.now()) + "\n")  # a live supervisor stands behind the claim
+    return hb
+
+
+def test_daemon_status_carries_the_supervisors_blocked_reason(isolated_state, monkeypatch):
+    _publish_blocked(isolated_state, monkeypatch)
+    monkeypatch.setattr(devmode, "probe", lambda port, host=None: True)  # a forwarder answers
+    status = devmode.daemon_status({**devmode.axis_defaults(), "gcp": "sa"})
+    assert status["gcp-minter"]["up"] is True  # the port answers…
+    assert status["gcp-minter"]["blocked"] == "needs GCP_KEY — set in host.env"  # …but not us
+    assert "blocked" not in status["egress-proxy"]
+
+
+def test_a_blocked_claim_lapses_with_the_supervisors_heartbeat(isolated_state, monkeypatch):
+    # The file outlives a supervisor that died; past the heartbeat's stale threshold it is no
+    # claim at all — never a "blocked" row about a supervisor that isn't there.
+    hb = _publish_blocked(isolated_state, monkeypatch)
+    monkeypatch.setattr(devmode, "probe", lambda port, host=None: False)
+    mode = {**devmode.axis_defaults(), "gcp": "sa"}
+    assert "blocked" in devmode.daemon_status(mode)["gcp-minter"]
+    hb.write_text(devmode._iso(devmode.now() - timedelta(seconds=120)) + "\n")
+    assert "blocked" not in devmode.daemon_status(mode)["gcp-minter"]
+    hb.unlink()
+    assert "blocked" not in devmode.daemon_status(mode)["gcp-minter"]
+
+
+def test_show_renders_blocked_over_up(isolated_state, monkeypatch, capsys):
+    # A foreign listener on the minter's port answers the probe, so "● up" would be the lie the
+    # published reason exists to correct: BLOCKED wins, with the gate's own fix.
+    _publish_blocked(isolated_state, monkeypatch, reason="can't bind :8188 — another process")
+    monkeypatch.setattr(devmode, "probe", lambda port, host=None: True)
+    devmode.set_mode({"gcp": "sa"})
+    devmode.show()
+    out = capsys.readouterr().out
+    gcp = next(ln for ln in out.splitlines() if ln.strip().startswith("gcp "))
+    assert "○ BLOCKED — can't bind :8188" in gcp and "● up" not in gcp

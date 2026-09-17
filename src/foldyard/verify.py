@@ -31,6 +31,12 @@ _PASS = "\033[32m✓ PASS\033[0m"
 _FAIL = "\033[31m✗ FAIL\033[0m"
 _WARN = "\033[33m⚠ WARN\033[0m"
 _NA = "\033[36m⊘ N/A \033[0m"
+# Where each check is explained — what it proves, why it fails, what to do. A row names WHAT
+# failed and stops there (the messages must stay terse enough to scan), so the manual pointer is
+# printed up front and again beside a FAIL verdict; the topic ships in the wheel (pyproject's
+# force-include), so it resolves in every install, offline.
+_MANUAL = "fy docs security"
+_MANUAL_SECTION = "§ fy verify"
 # Paths that must NEVER appear in a privileged container's mount table, built from the ACTUAL
 # host rather than a hardcoded macOS list. The old regex was `/Users|/private|/var/folders|
 # /Volumes` — every member macOS-only, so on a Linux or WSL2 host the leak check passed
@@ -427,6 +433,7 @@ def verify() -> int:
     engine = config.engine()
     probe = os.environ.get("VERIFY_IMG", "alpine")
     rep = _Report()
+    print(f"ℹ what each check proves, why it fails, what to do: `{_MANUAL}` ({_MANUAL_SECTION})")
 
     allowed = machine.guest_mounts(ctx.main, stack.worktrees_root(ctx.main))
     _vm_boundary(rep, engine, ctx.env, probe, allowed)
@@ -449,4 +456,5 @@ def verify() -> int:
         print(f"✓ verify: ALL PASS — isolation intact.{tail}")
         return 0
     print(f"✗ verify: {rep.fails} check(s) FAILED.{tail}")
+    print(f"  → `{_MANUAL}` ({_MANUAL_SECTION}: each check, why it fails, what to do)")
     return 1

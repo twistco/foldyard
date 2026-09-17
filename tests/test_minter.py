@@ -390,7 +390,55 @@ def test_probe_fails_when_another_process_holds_the_port(monkeypatch):
     finally:
         srv.shutdown()
     assert not ok
-    assert str(port) in detail
+    assert str(port) in detail and "not the minter" in detail
+
+
+def test_probe_names_a_squatter_that_does_not_speak_json(monkeypatch):
+    """A real squatter rarely answers `{}`: an HTTP dev server, a forwarder relaying HTML. The
+    parse used to sit inside the connect's `try`, so a wrong SPEAKER read as silence —
+    "not answering (JSONDecodeError) — is `fy host` up?" — contradicting the BLOCKED row beside it
+    that already named the foreign listener."""
+
+    class _Squatter(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b"<html>Directory listing</html>"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    port, srv = _serve(_Squatter)
+    try:
+        monkeypatch.setattr(gcp.config, "gcp_minter_port", lambda: port)
+        ok, detail = gcp._minter_port_answering()
+    finally:
+        srv.shutdown()
+    assert not ok
+    assert "not the minter" in detail and "not answering" not in detail
+
+
+def test_probe_names_a_squatter_that_answers_an_http_error(monkeypatch):
+    """A listener that 404s `/` (most dev servers, a relay's 502) is a RESPONDER: urllib raises
+    HTTPError for it, which the connect `try`'s broad catch used to report as "not answering"."""
+
+    class _NotFound(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_error(404)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    port, srv = _serve(_NotFound)
+    try:
+        monkeypatch.setattr(gcp.config, "gcp_minter_port", lambda: port)
+        ok, detail = gcp._minter_port_answering()
+    finally:
+        srv.shutdown()
+    assert not ok
+    assert "not the minter" in detail and "404" in detail and "not answering" not in detail
 
 
 def test_probe_fails_when_nothing_listens(monkeypatch):
