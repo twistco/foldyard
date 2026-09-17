@@ -103,7 +103,9 @@ def test_ensure_on_lima_leaves_the_journal_cap_to_the_boot_script(guest):
 
 
 def test_ensure_skips_a_backend_without_ssh(guest):
-    guestlog.ensure(FakeBackend("native", target=None), "x")
+    guestlog.ensure(
+        FakeBackend("podman", target=None), "x"
+    )  # a machine whose ssh target can't be read
     assert guest["scripts"] == []
 
 

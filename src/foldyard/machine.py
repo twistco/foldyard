@@ -1,21 +1,19 @@
 """Rootless dev-VM lifecycle — core foldyard (init/start/recreate).
 
-Backend-agnostic orchestration over :mod:`foldyard.machine_backend`: ``podman machine``
-by default, Lima (``[machine].backend = "lima"``) for concurrent per-project VMs, or native
-Linux/WSL2 podman (``[machine].backend = "native"``) as an explicit lower-isolation opt-in. The
+Backend-agnostic orchestration over :mod:`foldyard.machine_backend`: Lima
+(``[machine].backend = "lima"``, the default) for concurrent per-project VMs, or ``podman
+machine`` (``backend = "podman"``). There is no VM-less backend (ADR-0027). The
 backend is chosen once at import (``BACKEND``); this module only sequences create → start
 → socket and owns the cross-cutting policy (isolation mounts, the one-VM-at-a-time guard
 for non-concurrent backends).
 
 Host-only: the dev box runs INSIDE the engine boundary, so it can't manage its own host VM/engine
-— ``ensure`` no-ops there and ``recreate`` refuses. For VM-backed backends, the isolation property
-rests on the VM seeing ONLY the repo + the worktrees root (asserted by ``fy verify``).
+— ``ensure`` no-ops there and ``recreate`` refuses. The isolation property rests on the VM seeing
+ONLY the repo + the worktrees root (asserted by ``fy verify``).
 
 ``ensure`` progress → stderr (it runs inside ``foldyard shellenv``, whose stdout an ``eval``
 consumes). ``recreate`` is interactive, so it talks on stdout.
 
-When explicitly selected on Linux/WSL2, the native backend has no VM lifecycle, so
-ensure/start/stop are no-ops over the host's rootless podman socket.
 """
 
 from __future__ import annotations
@@ -357,14 +355,12 @@ def _check_guest_provisioning() -> None:
 
 def ensure(main: Path, wt_root: Path) -> None:
     """Provision the rootless machine (mounts ONLY repo + worktrees root) if absent, start it
-    if stopped. No-op inside the box (manages its host VM from outside) and under the explicit
-    ``native`` backend (no VM to manage). A missing backend CLI is a hard error either way — one
-    message when the consumer NAMED the backend, another when they inherited the default — because
-    a silent skip leaves the socket unset and hands the whole stack to the host's own podman
+    if stopped. No-op inside the box (manages its host VM from outside). A missing backend CLI
+    is a hard error either way — one message when the consumer NAMED the backend, another when
+    they inherited the default — because a silent skip leaves the socket unset and hands the
+    whole stack to the host's own podman
     (:func:`machine_backend.default_unavailable_block`). Progress → stderr."""
     if config.in_box():
-        return
-    if BACKEND.name == "native":
         return
     if not BACKEND.available():
         if not config.machine_backend_explicit():
@@ -415,11 +411,9 @@ def ensure(main: Path, wt_root: Path) -> None:
 
 def not_running_reason() -> str | None:
     """Why engine verbs can't reach the machine WITHOUT provisioning it — None when it's
-    running (or the backend has no VM to manage). Never creates or starts anything: this is
+    running. Never creates or starts anything: this is
     the read/teardown verbs' counterpart to :func:`ensure` (``fy down`` against a deleted
     machine must say "nothing to stop", not download a VM image)."""
-    if BACKEND.name == "native":
-        return None  # host podman directly — no VM lifecycle to be down
     if not BACKEND.available():
         return f"no '{BACKEND.cli}' CLI on this host"
     if not exists():
@@ -434,11 +428,8 @@ def not_running_reason() -> str | None:
 
 
 def _host_only_or_rc(verb: str) -> int | None:
-    """The shared guards for the stop/rm lifecycle verbs: no VM on the native backend, and
-    host-only (the box must not manage the VM it lives in). None when OK to proceed."""
-    if BACKEND.name == "native":
-        print(f"✗ the native backend has no VM to {verb} — its engine is the host's podman.")
-        return 1
+    """The shared guard for the stop/rm lifecycle verbs: host-only (the box must not manage the
+    VM it lives in). None when OK to proceed."""
     if config.in_box():
         print(f"✗ run on the host (Mac) — the box can't {verb} its own machine")
         return 1
@@ -528,12 +519,6 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
     """Stop + remove + re-create the machine so it mounts the worktrees root (VM mount sets
     are init-only — neither podman's ``--volume`` nor Lima's ``mounts:`` can be edited live).
     Interactive unless assume_yes."""
-    if BACKEND.name == "native":
-        print(
-            "✗ the native backend has no VM to recreate — its stack runs directly on the host's "
-            "rootless podman. The worktrees mount is a host dir, always visible; nothing to redo."
-        )
-        return 1
     if config.in_box() or not BACKEND.available():
         print("✗ run on the host (Mac) — the box can't recreate its own machine")
         return 1

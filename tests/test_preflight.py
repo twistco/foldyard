@@ -58,7 +58,7 @@ def _wire(
     # Pinned, not inherited: `MACHINE_HOST_WALL` in the ambient env (or the repo's own toml)
     # would otherwise bolt the host-wall checks onto every test here.
     monkeypatch.setattr(preflight.config, "machine_host_wall", lambda: host_wall)
-    cli = {"podman": "podman", "lima": "limactl", "native": "podman"}.get(backend, backend)
+    cli = {"podman": "podman", "lima": "limactl"}.get(backend, backend)
     monkeypatch.setattr(
         preflight.machine_backend,
         "get_backend",
@@ -103,7 +103,8 @@ def test_missing_cli_on_the_INHERITED_default_backend_blocks_too(monkeypatch):
     # the fix is "install it, or NAME the weaker backend" — but the same hard stop.
     _wire(monkeypatch, backend="lima", backend_available=False, explicit=False)
     problems = preflight.issues()
-    assert any("limactl" in p and "DEFAULT" in p and 'backend = "native"' in p for p in problems)
+    assert any("limactl" in p and "DEFAULT" in p and 'backend = "podman"' in p for p in problems)
+    assert not any("native" in p for p in problems)  # the VM-less way out is gone (ADR-0027)
 
 
 def test_proxy_required_but_mitmproxy_missing_blocks(monkeypatch):
@@ -273,7 +274,7 @@ def test_inherited_lima_without_limactl_aborts_both_launch_verbs(monkeypatch, ca
     with pytest.raises(SystemExit):
         preflight.check_or_abort(verb)
     err = capsys.readouterr().err
-    assert verb in err and "limactl" in err and 'backend = "native"' in err
+    assert verb in err and "limactl" in err and 'backend = "podman"' in err
 
 
 # ── [machine].host_wall — the host-side cgroup wall (Linux; nft + cgroup v2) ──────────────

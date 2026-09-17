@@ -1,8 +1,8 @@
 """Pluggable backend for foldyard's rootless engine (docs/lima-backend-scope.md).
 
-Backends expose ONE contract — a libpod socket for foldyard to target. VM-backed backends hand
-out a per-project VM socket; the explicit native backend hands out the host's rootless podman
-socket. Everything downstream (``stack.py``'s ``CONTAINER_HOST`` export, compose, box, worktrees)
+Backends expose ONE contract — a libpod socket for foldyard to target, from a per-project VM
+(foldyard always has one: the VM-less ``native`` backend was retired, ADR-0027). Everything
+downstream (``stack.py``'s ``CONTAINER_HOST`` export, compose, box, worktrees)
 is backend-blind: ``machine.socket()`` returns a podman URI either way.
 
 ``cli`` here is the VM-LIFECYCLE binary, and it is not the whole prerequisite. The engine CLI
@@ -26,10 +26,6 @@ resolves to, not limactl *instead of* one.
   is NOT concurrent — :func:`machine.ensure` refuses to start beside another running machine and
   tells you to stop it (or switch to Lima) — and its CoreOS appliance can't be provisioned with
   the wall.
-
-* :class:`NativeBackend` (explicit opt-in, ``[machine].backend = "native"``): no VM lifecycle;
-  foldyard talks to the host's rootless podman socket directly. Useful for Linux/WSL2 dev and CI,
-  but weaker isolation than a VM-backed backend because containers share the host kernel.
 
 The Lima paths marked ``SPIKE`` below follow Lima's documented podman-template behaviour
 but have not been exercised in CI (no ``limactl`` in the dev box). Verify on a Mac with
@@ -200,8 +196,7 @@ class Backend(ABC):
         """The host pids of the VM's own processes — the VMM first, then its siblings sharing
         its cgroup (Lima's hostagent). The host-side wall reads the cgroup scope from the first
         and the loopback plumbing to keep open from all of them. ``[]`` where there is none to
-        name (stopped; a backend whose VM foldyard can't place, podman-machine's; native's
-        no-VM)."""
+        name (stopped; a backend whose VM foldyard can't place, podman-machine's)."""
         return []
 
     def vm_pid(self, name: str) -> int:
@@ -455,66 +450,6 @@ class PodmanBackend(Backend):
 
     def remove(self, name: str) -> bool:
         return _run(["podman", "machine", "rm", "-f", name]).returncode == 0
-
-
-class NativeBackend(Backend):
-    """Native rootless podman on Linux/WSL2 — no VM exists, so lifecycle verbs are no-ops."""
-
-    name = "native"
-    cli = "podman"
-    install_hint = "your distro's podman package"
-
-    def supports_concurrent(self) -> bool:
-        return True
-
-    def exists(self, name: str) -> bool:
-        return True
-
-    def state(self, name: str) -> str:
-        return "running"
-
-    def responsive(self, name: str) -> bool:
-        """Pairs with the unconditional ``state()``: there is no VM here, so there is no
-        half-started VM to detect and nothing ``ensure`` could restart if we said otherwise."""
-        return True
-
-    def mounts(self, name: str) -> list[str]:
-        return []
-
-    def _socket_path(self) -> str:
-        for env in ("CONTAINER_HOST", "DOCKER_HOST"):
-            value = os.environ.get(env, "")
-            if value.startswith("unix://"):
-                return value.removeprefix("unix://")
-        runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-        return str(Path(runtime) / "podman" / "podman.sock")
-
-    def socket(self, name: str) -> str:
-        return "unix://" + self._socket_path()
-
-    def guest_socket(self) -> str:
-        return self._socket_path()
-
-    def list_running(self, name: str = "") -> list[str]:
-        return []
-
-    def create(self, name: str, resources: dict, volumes: list[tuple[str, str]]) -> bool:
-        return True
-
-    def start_argv(self, name: str) -> list[str]:
-        return ["true"]
-
-    def stop_argv(self, name: str) -> list[str]:
-        return ["true"]
-
-    def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
-        return True
-
-    def stop(self, name: str) -> bool:
-        return True
-
-    def remove(self, name: str) -> bool:
-        return True
 
 
 class LimaBackend(Backend):
@@ -799,15 +734,23 @@ class LimaBackend(Backend):
 def get_backend(name: str) -> Backend:
     """The backend for ``[machine].backend`` (see :func:`config.machine_backend`).
 
-    An unknown name falls back to **podman** — deliberately not to the default (lima), even
-    though lima is what an absent key resolves to. A typo shouldn't turn a warning into a hard
-    failure on a host that has no ``limactl``, and podman needs nothing the engine didn't already
-    need. It is still a VM backend, so the isolation boundary holds; what's lost is concurrency
+    An unknown name — and the retired ``native`` — falls back to **podman**, deliberately not to
+    the default (lima), even though lima is what an absent key resolves to. A typo shouldn't turn
+    a warning into a hard failure on a host that has no ``limactl``, and podman needs nothing the
+    engine didn't already need. It is still a VM backend, so the isolation boundary holds; what's
+    lost is concurrency
     and the wall, which is why the warning is loud rather than silent."""
     if name == "lima":
         return LimaBackend()
     if name == "native":
-        return NativeBackend()
+        _err(
+            '⚠ [machine].backend = "native" was RETIRED (ADR-0027): foldyard always has a VM;\n'
+            "    the host's own podman socket is no longer a backend. Using podman (one shared\n"
+            '    VM) for now — name "lima" (per-project VMs + the wall) or "podman" in [machine]\n'
+            "    and adopt the config. A backend switch is a new VM: box, volumes and caches\n"
+            "    start over."
+        )
+        return PodmanBackend()
     if name == "podman":
         return PodmanBackend()
     _err(
@@ -829,13 +772,13 @@ def default_unavailable_block(backend: Backend) -> str:
     lands on the host's own rootless podman socket — the native profile, containers sharing the
     host kernel, with nobody having chosen it and nothing saying so.
 
-    So: name the three ways out and let the operator pick. One block, shared by
+    So: name the two ways out (both VMs — there is no VM-less backend, ADR-0027) and let the
+    operator pick. One block, shared by
     :func:`machine.ensure` and :mod:`preflight`, so the two can't drift."""
     return (
         f"✗ `{backend.cli}` isn't installed, and '{backend.name}' is foldyard's DEFAULT\n"
         "    [machine].backend — so there is no VM to target. Refusing to fall back to this\n"
         "    host's own podman socket: that would drop the VM boundary silently. Pick one:\n"
         f"      • install it ({backend.install_hint}) — per-project VMs + the in-VM egress wall\n"
-        '      • [machine] backend = "podman"  — one shared VM, no extra CLI to install\n'
-        '      • [machine] backend = "native"  — NO VM: containers share this host\'s kernel'
+        '      • [machine] backend = "podman"  — one shared VM, no extra CLI to install'
     )

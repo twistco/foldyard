@@ -316,18 +316,6 @@ def test_machine_backend_defaults_to_lima(fresh_config, tmp_path):
     assert config.machine_backend_explicit() == ""  # nobody CHOSE it — it was inherited
 
 
-def test_machine_backend_native_is_explicit_toml_opt_in(fresh_config, tmp_path):
-    (tmp_path / "foldyard.toml").write_text('[machine]\nbackend = "native"\n')
-    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_BACKEND=None)
-    assert config.machine_backend() == "native"
-
-
-def test_machine_backend_env_can_select_native(fresh_config, tmp_path):
-    (tmp_path / "foldyard.toml").write_text('[project]\nname = "p"\n')
-    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_BACKEND="native")
-    assert config.machine_backend() == "native"
-
-
 def test_machine_backend_default_does_not_change_in_the_box(fresh_config, tmp_path, monkeypatch):
     # The box must resolve the SAME backend as the host: it reads the machine's socket, it doesn't
     # pick a backend of its own, and a divergence here would point the box at another VM's paths.

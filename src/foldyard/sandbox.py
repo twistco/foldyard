@@ -104,7 +104,7 @@ def _target(backend: SshBackend, name: str) -> SshTarget:
     if target is None:
         raise SystemExit(
             f'✗ [machine].runtime = "gvisor" needs ssh access to the VM, and the {backend.name} '
-            f"backend offers none for machine '{name}' (native has no VM; is it created?)."
+            f"backend offers none for machine '{name}' (is it created?)."
         )
     return target
 

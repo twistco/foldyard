@@ -131,8 +131,8 @@ def issues() -> list[str]:
                 "    [worktree-offsets] (or unset WT_OFFSET)."
             )
 
-    # 7. The wall only exists for lima (podman-machine's CoreOS appliance can't be provisioned;
-    #    native has no VM), and a walled VM with no proxy routing is an AIRGAPPED box — the wall
+    # 7. The wall only exists for lima (podman-machine's CoreOS appliance can't be provisioned),
+    #    and a walled VM with no proxy routing is an AIRGAPPED box — the wall
     #    default-denies direct egress, so without the proxy there is no way out at all.
     if config.machine_wall():
         if backend_name != "lima":

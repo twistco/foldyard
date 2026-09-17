@@ -169,23 +169,6 @@ def test_ensure_noop_in_box(fake, monkeypatch):
     assert be.calls == []  # the box manages its host VM from outside — nothing to do
 
 
-def test_ensure_noop_for_native_backend(fake, monkeypatch, tmp_path):
-    be = fake(concurrent=True, available=True, name="native", cli="podman")
-    monkeypatch.setattr(machine.config, "in_box", lambda: False)
-    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    assert be.calls == []
-
-
-def test_ensure_noop_under_the_explicit_native_backend(fake, monkeypatch, tmp_path):
-    # `backend = "native"` is the KNOWING opt-out of the VM: there is no machine to manage, and
-    # the host socket is what the consumer asked for. The only remaining silent no-op.
-    be = fake(concurrent=False, available=False, name="native", cli="podman")
-    monkeypatch.setattr(machine.config, "machine_backend_explicit", lambda: "native")
-    monkeypatch.setattr(machine.config, "in_box", lambda: False)
-    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    assert be.calls == []
-
-
 def test_ensure_errors_when_chosen_backend_cli_missing(fake, monkeypatch, tmp_path, capsys):
     # A backend the consumer NAMED whose CLI is absent → loud error, never a silent fallback to
     # another backend (which would swap the isolation profile without saying so).
@@ -212,7 +195,8 @@ def test_ensure_fails_closed_when_the_INHERITED_default_backend_has_no_cli(
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     err = capsys.readouterr().err
     assert "limactl" in err and "DEFAULT" in err
-    assert 'backend = "native"' in err  # names the explicit opt-out rather than taking it
+    assert 'backend = "podman"' in err  # names the other VM backend, never a VM-less one
+    assert "native" not in err
     assert be.calls == []  # and nothing was provisioned
 
 
@@ -444,19 +428,6 @@ def test_delete_stops_the_supervisor_after_removing_the_vm(fake, monkeypatch, tm
 
 
 # ── recreate: refuses where there's no VM to recreate ──────────────────────────────────
-
-
-def test_recreate_native_backend_refuses_with_native_message(fake, monkeypatch, capsys, tmp_path):
-    # The native backend has no VM — recreate must refuse, but with a native-appropriate reason,
-    # not the misleading "run on the host (Mac) — the box can't recreate its own machine".
-    be = fake(concurrent=True, available=True, name="native", cli="podman")
-    monkeypatch.setattr(machine.config, "in_box", lambda: False)
-    rc = machine.recreate(tmp_path / "repo", tmp_path / "repo-wt", assume_yes=True)
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "native backend" in out and "no VM" in out
-    assert "Mac" not in out  # the box/Mac message must NOT be used for native
-    assert be.calls == []  # refused before any stop/remove/create
 
 
 # ── guest boot provisioning: the sudo grant + the egress wall (lima only) ──────────────
@@ -747,11 +718,6 @@ def test_not_running_reason_over_the_lifecycle(fake, monkeypatch):
     assert machine.not_running_reason() is None
 
 
-def test_not_running_reason_native_backend_is_always_reachable(fake):
-    fake(concurrent=True, available=True, name="native", cli="podman")
-    assert machine.not_running_reason() is None  # no VM lifecycle to be down
-
-
 def test_not_running_reason_without_backend_cli(fake):
     fake(concurrent=False, available=False)
     assert "CLI" in (machine.not_running_reason() or "")
@@ -789,13 +755,6 @@ def test_stop_refused_in_box(fake, monkeypatch):
     monkeypatch.setattr(machine.config, "in_box", lambda: True)
     assert machine.stop() == 1
     assert be.calls == []
-
-
-def test_stop_refused_on_native_backend(fake, monkeypatch, capsys):
-    fake(concurrent=True, available=True, name="native", cli="podman")
-    monkeypatch.setattr(machine.config, "in_box", lambda: False)
-    assert machine.stop() == 1
-    assert "native backend" in capsys.readouterr().out
 
 
 def test_stop_refused_on_host_when_backend_cli_missing(fake, monkeypatch, capsys):

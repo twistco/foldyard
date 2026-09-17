@@ -831,8 +831,8 @@ def machine_backend() -> str:
     and is the zero-extra-dependency floor. ``foldyard init`` has scaffolded ``lima`` + ``wall``
     since it shipped; this default just stops a hand-written config from silently getting less.
 
-    Native Linux/WSL2 podman is available as an explicit opt-in (``backend = "native"``), but it is
-    intentionally never the default because it drops the VM boundary entirely."""
+    There is no VM-less backend: ``native`` was retired (ADR-0027) — foldyard always has a VM;
+    :func:`machine_backend.get_backend` warns a config still naming it and hands out podman."""
     return machine_backend_explicit() or "lima"
 
 
@@ -841,7 +841,7 @@ def machine_wall() -> bool:
     the VM user's (and thus every container's) only way out is the Mac-side egress proxy at
     :data:`LIMA_HOST_GATEWAY` (fail-closed: egress that ignores the proxy env is REJECTED, not
     silently allowed). Only meaningful for ``backend = "lima"`` (podman-machine's immutable CoreOS
-    appliance can't be provisioned like this; native has no VM) — preflight enforces the pairing.
+    appliance can't be provisioned like this) — preflight enforces the pairing.
     ``MACHINE_WALL`` env wins (1/true/on/yes ⇒ on)."""
     env = os.environ.get("MACHINE_WALL")
     if env is not None:
