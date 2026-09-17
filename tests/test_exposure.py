@@ -241,6 +241,20 @@ def test_a_declared_inject_token_env_is_named_as_ignored(checkout):
     assert exp.ignored[0][1] == ["penpot = PENPOT_USER_TOKEN"]
 
 
+def test_a_vscode_workspace_file_is_named_as_ignored(checkout):
+    """The generator-era key: `fy code` attaches to the folder since ADR-0026, so a consumer
+    still declaring this has a workspace nothing opens and a generator nothing runs — and, worse,
+    the extensions that generator collected silently no longer install. Found on a consumer
+    whose branch had migrated everything except this; foldyard said nothing."""
+    cfg = checkout(BASE + 'passthrough = []\n\n[vscode]\nworkspace_file = "x.code-workspace"\n')
+    exp = collect(cfg)
+
+    assert exp.ignored[0][0] == "[vscode] workspace_file"
+    assert exp.ignored[0][1] == ["x.code-workspace"]
+    assert "`[vscode] workspace_file` is IGNORED" in exp.concerns[0]
+    assert "[vscode] extensions" in rendered(cfg)
+
+
 # ── the doctor row ────────────────────────────────────────────────────────────────────
 
 

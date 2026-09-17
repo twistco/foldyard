@@ -36,6 +36,19 @@ break config or CLI shape, and say so here. How a release is cut:
   workspace cards, the reconciler's stack tier and `fy state` all failed the template while
   `fy ps` reached the VM. `devmode.ps_labels` now reads `{{json .Labels}}` (a map from podman, a
   `k=v` string from docker). Caught by the first run of the VM-backed host tier in CI.
+- **`[vscode.settings]` changes now reach a box whose server has already been attached to.**
+  `fy code` reset Dev Containers' `.writeMachineSettingsMarker` on every settings change, and it
+  wasn't enough: the extension (0.469, its own source) writes the box's Machine `settings.json`
+  only when that file does NOT exist — marker or no marker — so on a consumer the rendered file
+  sat two months stale while the marker was dutifully reset on every `fy code`. The rendered
+  file goes with the marker now; the extension regenerates it from the config (plus its own
+  Copilot/ports additions). Hand edits in the "Remote [Attached Container]" settings tab are the
+  one thing that resets — they belong in `[vscode.settings]`.
+- **A leftover `[vscode] workspace_file` is reported as IGNORED** (`fy config widenings`, the
+  doctor row, the adopt gate's footnote) with the migration spelled out — it was the one
+  generator-era key #18 removed without adding to `IGNORED_KEYS`, so a consumer that had
+  migrated everything else got silence while the extensions its generator used to collect
+  quietly stopped installing.
 - **A daemon's own launch no longer reads as a lapse.** The supervisor tick probes capabilities
   before it spawns daemons, so the tick that activated a rung (and the first tick of every
   restarted supervisor — each `fy up`) probed the minter's port before anything had bound it:

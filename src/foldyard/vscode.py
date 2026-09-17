@@ -59,9 +59,18 @@ _REMOTE_USER = "root"
 _EXT_ID = re.compile(r"^[A-Za-z0-9][\w-]*\.[A-Za-z0-9][\w-]*$")
 # Dev Containers applies an attached config's `extensions` and `settings` ONCE per server install,
 # each gated by its own marker under the box's ~/.vscode-server/data/Machine; a change only lands
-# once the matching marker is gone.
+# once the matching marker is gone. The settings write has a SECOND gate (extension source,
+# 0.469: `if (markerCreated && !exists(Machine/settings.json)) write`): it never rewrites an
+# existing Machine/settings.json, marker or no marker — so a settings change must remove that
+# file too, or it silently never applies to a box whose server has been attached once (found on
+# a consumer whose Machine settings were two months stale with the marker being reset on every
+# `fy code`). The file is the extension's rendering of OUR config plus its own additions
+# (Copilot instructions, port attributes), all of which it regenerates; an operator's hand edits
+# in the "Remote [Attached Container]" settings tab are the one thing lost, and those belong in
+# `[vscode.settings]` anyway.
 _INSTALL_EXTENSIONS_MARKER = ".installExtensionsMarker"
 _WRITE_MACHINE_SETTINGS_MARKER = ".writeMachineSettingsMarker"
+_MACHINE_SETTINGS_FILE = "settings.json"
 _LOCAL_TERMINAL_PROFILE = "Foldyard Local"
 _TERMINAL_PROFILES_OSX = "terminal.integrated.profiles.osx"
 _TERMINAL_DEFAULT_PROFILE_OSX = "terminal.integrated.defaultProfile.osx"
@@ -467,8 +476,9 @@ def _missing_extensions(exts: list[str], installed: str) -> list[str]:
 
 
 def _reset_markers(engine: str, box: str, env: dict, markers: list[str]) -> None:
-    """Delete the given once-per-install markers in the box so the NEXT attach re-applies the
-    matching part of the config (see :data:`_INSTALL_EXTENSIONS_MARKER`)."""
+    """Delete the given once-per-install markers (and, for settings, the rendered file — see
+    :data:`_MACHINE_SETTINGS_FILE`) in the box so the NEXT attach re-applies the matching part of
+    the config (see :data:`_INSTALL_EXTENSIONS_MARKER`)."""
     if not markers:
         return
     paths = " ".join(f'"$HOME/.vscode-server/data/Machine/{m}"' for m in markers)
@@ -545,7 +555,7 @@ def code() -> int:
         # record of what the box's Machine settings hold; any difference (a first write included)
         # needs the marker gone or the change never lands on an already-attached box.
         if not isinstance(previous, dict) or previous.get("settings") != attached["settings"]:
-            markers.append(_WRITE_MACHINE_SETTINGS_MARKER)
+            markers += [_WRITE_MACHINE_SETTINGS_MARKER, _MACHINE_SETTINGS_FILE]
         _reset_markers(engine, box, env, markers)
 
     code_cli = shutil.which("code")

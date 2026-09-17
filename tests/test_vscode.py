@@ -460,16 +460,21 @@ def test_a_settings_change_resets_the_machine_settings_marker(fake):
     # per server install (.writeMachineSettingsMarker — the settings twin of the extensions
     # marker), so a changed table would otherwise silently never apply to a box that has already
     # been attached to. First write, and every change since the last write, clear it.
+    # The marker alone is NOT enough: the extension also refuses to rewrite an existing
+    # Machine/settings.json (its source: `markerCreated && !exists(settings.json)`), so the
+    # rendered file goes with the marker — a consumer sat on two-month-stale Machine settings
+    # with the marker dutifully reset on every `fy code`.
     fake["state"]["running"] = True
     fake["state"]["installed"] = "anthropic.claude-code-1.2.3\nnefrob.vscode-just-syntax-0.5.0\n"
     assert vscode.code() == 0
-    assert _execs(fake["calls"], "rm -f", ".writeMachineSettingsMarker")
+    assert _execs(fake["calls"], "rm -f", ".writeMachineSettingsMarker", "Machine/settings.json")
     fake["calls"].clear()
     assert vscode.code() == 0  # same settings → the box's copy is current
     assert not _execs(fake["calls"], ".writeMachineSettingsMarker")
+    assert not _execs(fake["calls"], "Machine/settings.json")
     fake["vscode"]["settings"]["remote.autoForwardPorts"] = False
     assert vscode.code() == 0
-    assert _execs(fake["calls"], "rm -f", ".writeMachineSettingsMarker")
+    assert _execs(fake["calls"], "rm -f", ".writeMachineSettingsMarker", "Machine/settings.json")
 
 
 def test_user_owned_config_is_never_clobbered(fake, capsys):
