@@ -449,23 +449,27 @@ def _read_config(path: Path) -> dict | _Unreadable | None:
     return existing if isinstance(existing, dict) else None
 
 
-def _write_attached_config(path: Path, cfg: dict, existing: dict | _Unreadable | None) -> bool:
-    """Write the config into the isolated instance's globalStorage. Returns False unless
-    ``existing`` (what :func:`_read_config` found at ``path``) is OURS — i.e. its ``_generatedBy``
-    is exactly our marker. Anything else is somebody's file to keep: the user took ownership by
-    removing the marker, or another tool wrote its own. A malformed document (``null``, a list,
-    garbage) reads as ``None`` — not owned, safe to replace; one we could not read at all is kept,
-    since we cannot tell whose it is."""
+def _keeps_existing(path: Path, existing: dict | _Unreadable | None) -> bool:
+    """True when ``existing`` (what :func:`_read_config` found at ``path``) is NOT ours to
+    replace — its ``_generatedBy`` is not exactly our marker. That is somebody's file to keep: the
+    user took ownership by removing the marker, or another tool wrote its own. A malformed
+    document (``null``, a list, garbage) reads as ``None`` — not owned, safe to replace; one we
+    could not read at all is kept, since we cannot tell whose it is."""
     if isinstance(existing, _Unreadable):
         print(f"  (kept {path}: could not read it to check whether it is foldyard's)")
-        return False
+        return True
     if existing is not None and existing.get(_GENERATED_MARKER_KEY) != _GENERATED_MARKER:
         print(f"  (kept your customised {path})")
-        return False
+        return True
+    return False
+
+
+def _write_attached_config(path: Path, cfg: dict) -> None:
+    """Write the config into the isolated instance's globalStorage (ownership already settled by
+    :func:`_keeps_existing`)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, indent=2) + "\n")
     print(f"▶ extensions: {len(cfg.get('extensions', []))} → {path}")
-    return True
 
 
 def _missing_extensions(exts: list[str], installed: str) -> list[str]:
@@ -475,19 +479,20 @@ def _missing_extensions(exts: list[str], installed: str) -> list[str]:
     return [e for e in exts if not any(d.startswith(e.lower() + "-") for d in have)]
 
 
-def _reset_markers(engine: str, box: str, env: dict, markers: list[str]) -> None:
+def _reset_markers(engine: str, box: str, env: dict, markers: list[str]) -> bool:
     """Delete the given once-per-install markers (and, for settings, the rendered file — see
     :data:`_MACHINE_SETTINGS_FILE`) in the box so the NEXT attach re-applies the matching part of
-    the config (see :data:`_INSTALL_EXTENSIONS_MARKER`)."""
+    the config (see :data:`_INSTALL_EXTENSIONS_MARKER`). Returns whether the box did it."""
     if not markers:
-        return
+        return True
     paths = " ".join(f'"$HOME/.vscode-server/data/Machine/{m}"' for m in markers)
-    subprocess.run(
+    proc = subprocess.run(
         [engine, "exec", box, "sh", "-c", f"rm -f {paths}"],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    return proc.returncode == 0
 
 
 def code() -> int:
@@ -545,7 +550,7 @@ def code() -> int:
     attached = _attached_config(checkout, exts, cfg.vscode_settings())
     cfg_path = _globalstorage(udd) / "nameConfigs" / f"{box}.json"
     previous = _read_config(cfg_path)
-    if _write_attached_config(cfg_path, attached, previous):
+    if not _keeps_existing(cfg_path, previous):
         markers = []
         missing = _missing_extensions(exts, _installed_exts(engine, box, env))
         if missing:
@@ -553,10 +558,17 @@ def code() -> int:
             print(f"▶ will install on attach: {' '.join(missing)}")
         # Settings have no in-box listing to diff against, so the last config WE wrote is the
         # record of what the box's Machine settings hold; any difference (a first write included)
-        # needs the marker gone or the change never lands on an already-attached box.
+        # needs the marker gone or the change never lands on an already-attached box. Which is
+        # why the markers go BEFORE the write: written first, a failed reset would leave a config
+        # that says "applied" and nothing left to retry from — the next `fy code` would diff
+        # against it, see no change, and the settings would never land.
         if not isinstance(previous, dict) or previous.get("settings") != attached["settings"]:
             markers += [_WRITE_MACHINE_SETTINGS_MARKER, _MACHINE_SETTINGS_FILE]
-        _reset_markers(engine, box, env, markers)
+        if _reset_markers(engine, box, env, markers):
+            _write_attached_config(cfg_path, attached)
+        else:
+            _err(f"⚠ couldn't reset the box's once-per-install markers ({' '.join(markers)});")
+            _err(f"  {cfg_path} left as it was, so the next `fy code` retries the change.")
 
     code_cli = shutil.which("code")
     if not code_cli:

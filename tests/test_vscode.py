@@ -477,6 +477,33 @@ def test_a_settings_change_resets_the_machine_settings_marker(fake):
     assert _execs(fake["calls"], "rm -f", ".writeMachineSettingsMarker", "Machine/settings.json")
 
 
+def test_a_failed_marker_reset_leaves_the_config_unwritten_so_the_next_run_retries(
+    fake, capsys, monkeypatch
+):
+    # The written config is the record of what the box holds, so it must be written AFTER the
+    # markers are gone: written first, a failed `rm -f` leaves a config that says "applied" and
+    # the next `fy code` diffs against it, sees no change, and the settings never land.
+    fake["state"]["running"] = True
+    calls = fake["calls"]
+    real = vscode.subprocess.run
+
+    def flaky(cmd, **kw):
+        if cmd[1] == "exec" and cmd[3:5] == ["sh", "-c"] and cmd[-1].startswith("rm -f"):
+            calls.append({"cmd": cmd, "env": kw.get("env")})
+            return _Proc(1)
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(vscode.subprocess, "run", flaky)
+    assert vscode.code() == 0  # the attach itself still proceeds
+    monkeypatch.setattr(vscode.subprocess, "run", real)
+    assert not _cfg_path(fake).exists()
+    assert "next `fy code` retries" in capsys.readouterr().err
+    calls.clear()
+    assert vscode.code() == 0  # the reset now succeeds → the config lands, markers were reset
+    assert _cfg_path(fake).exists()
+    assert _execs(calls, "rm -f", "Machine/settings.json")
+
+
 def test_user_owned_config_is_never_clobbered(fake, capsys):
     # Removing the `_generatedBy` marker is how you take ownership of the file; we then leave it
     # (and skip the marker resets, since we didn't change what's configured).
