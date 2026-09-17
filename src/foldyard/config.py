@@ -1158,13 +1158,41 @@ def vscode_extensions() -> list[str]:
     return [e for e in raw if isinstance(e, str)]
 
 
+def _non_json_leaf(value: object, path: str) -> str | None:
+    """The dotted path of the first value under ``value`` that JSON cannot carry, or ``None``.
+    TOML has types JSON does not — dates, times, datetimes — and ``json.dumps`` meets them as a
+    traceback, so they are refused at the read instead."""
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return None
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if (bad := _non_json_leaf(v, f"{path}.{k}" if path else str(k))) is not None:
+                return bad
+        return None
+    if isinstance(value, list):
+        for i, v in enumerate(value):
+            if (bad := _non_json_leaf(v, f"{path}[{i}]")) is not None:
+                return bad
+        return None
+    return path
+
+
 def vscode_settings() -> dict:
     """``[vscode.settings]`` — VS Code settings ``fy code`` carries in the attached-container
     config, so Dev Containers applies them to the box's server (machine scope) on attach. Data,
     not code: settings can't execute, which is why this is a table and lifecycle hooks are not
-    a key. Read from the ADOPTED copy like the extensions. ``{}`` when absent or not a table."""
+    a key. Read from the ADOPTED copy like the extensions. ``{}`` when absent or not a table; a
+    value JSON can't carry (a TOML date/time) is a config error, named by key."""
     raw = _table("vscode").get("settings")
-    return dict(raw) if isinstance(raw, dict) else {}
+    if not isinstance(raw, dict):
+        return {}
+    if (bad := _non_json_leaf(raw, "")) is not None:
+        raise SystemExit(
+            f"✗ [vscode.settings] {bad}: not a JSON value (a TOML date/time?) — the settings go "
+            "into VS Code's JSON attached-container config, so only strings, numbers, booleans, "
+            "arrays and tables can be carried."
+        )
+    return dict(raw)
 
 
 def codex_enabled() -> bool:

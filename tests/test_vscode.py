@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,7 +41,9 @@ def fake(tmp_path, monkeypatch):
         project="tangible-podman",
         worktree="",
     )
-    monkeypatch.setattr(vscode.stack, "resolve", lambda *a, **k: ctx)
+    # `gated` records the gate and the stack resolve in CALL order: the gate must come first.
+    gated: list[str] = []
+    monkeypatch.setattr(vscode.stack, "resolve", lambda *a, **k: gated.append("resolve") or ctx)
     # The ADOPTED config for the checkout — what `fy code` reads `[vscode]` from. Tests mutate
     # `fake["vscode"]` (the table) directly; the tree's own foldyard.toml is never consulted.
     adopted = config.Config(
@@ -55,8 +58,11 @@ def fake(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setattr(vscode.devmode, "worktree_config", lambda wt: adopted)
-    gated: list[str] = []
-    monkeypatch.setattr(vscode.configpin, "gate", lambda verb: gated.append(verb) or "clean")
+    pin = {"status": "clean", "exists": True}  # what the gate answers / whether a pin exists
+    monkeypatch.setattr(vscode.configpin, "gate", lambda verb: gated.append(verb) or pin["status"])
+    monkeypatch.setattr(
+        vscode.configpin, "inspect", lambda cfg: SimpleNamespace(pinned_exists=pin["exists"])
+    )
     state = tmp_path / "state"
     monkeypatch.setattr(config, "state_dir", lambda: state)
     monkeypatch.setattr(
@@ -81,6 +87,7 @@ def fake(tmp_path, monkeypatch):
         "adopted": adopted,
         "vscode": adopted.toml["vscode"],
         "gated": gated,
+        "pin": pin,
         "ctx": ctx,
         "udd": state / "vscode" / "main",
         "sock": sock,
@@ -363,7 +370,44 @@ def test_the_tree_is_never_the_source_and_drift_is_gated_first(fake):
     fake["state"]["running"] = True
     assert vscode.code() == 0
     assert "evil.helper" not in _cfg_path(fake).read_text()
-    assert fake["gated"] == ["fy code"]
+    assert fake["gated"] == ["fy code", "resolve"]
+
+
+@pytest.mark.parametrize("status", ["ignored", "unresolved", "adopted", "reverted", "pinned"])
+def test_gate_outcomes_with_a_pin_in_place_proceed_on_the_adopted_copy(fake, status):
+    # `ignored`/`unresolved` are the operator deferring: the ADOPTED copy stays in force (that is
+    # what `worktree_config` returns), exactly as `fy up` proceeds on them. Refusing here would
+    # override a deliberate "ignore for now" with nothing gained — the tree is not read either way.
+    fake["pin"]["status"] = status
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    assert _written(fake)["_generatedBy"] == vscode._GENERATED_MARKER
+
+
+def test_a_failed_gate_refuses_to_launch(fake, capsys):
+    # "error" is the gate not knowing whether the tree drifted — and `effective()` degrades to the
+    # working tree on an unreadable state dir, so proceeding could hand the host a tree-chosen
+    # extension list. `fy up` keeps going on this (the supervisor reconciles from the pin anyway);
+    # `fy code` has no such backstop, so it stops.
+    fake["pin"]["status"] = "error"
+    fake["state"]["running"] = True
+    assert vscode.code() == 1
+    assert "couldn't check foldyard.toml" in capsys.readouterr().err
+    assert not _cfg_path(fake).exists()
+    assert not _launch(fake["calls"])
+
+
+def test_nothing_adopted_refuses_to_launch(fake, capsys):
+    # The gate answers "ignored" when an operator declines the FIRST adoption too — and with no
+    # pin, `effective()` falls back to the working tree: the one case where `[vscode]` would be
+    # read from the mount. Checked as "does a pin exist", not by status string.
+    fake["pin"]["status"] = "ignored"
+    fake["pin"]["exists"] = False
+    fake["state"]["running"] = True
+    assert vscode.code() == 1
+    assert "nothing adopted" in capsys.readouterr().err
+    assert not _cfg_path(fake).exists()
+    assert not _launch(fake["calls"])
 
 
 def test_extension_ids_are_validated_and_the_attach_extension_dropped(fake):

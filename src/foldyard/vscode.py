@@ -444,13 +444,26 @@ def _reset_markers(engine: str, box: str, env: dict, markers: list[str]) -> None
 def code() -> int:
     """Resolve the (worktree's) box, ensure it's running, refresh its extensions config, then
     launch VS Code attached to it in the isolated user-data-dir. Mac only."""
-    ctx = stack.resolve()
     # `[vscode]` decides what the HOST installs and applies, so it is read from the checkout's
     # ADOPTED config, never the working tree (ADR-0022: the channel, not the field) — and the
-    # adopt/revert/ignore gate runs first, so a drifted table meets the operator here, before
-    # the host acts on it.
-    configpin.gate("fy code")
+    # adopt/revert/ignore gate runs first, before `stack.resolve()` can so much as provision the
+    # machine, so a drifted table meets the operator here, before the host acts on anything.
+    # With a pin in place every outcome is safe to proceed on (`ignored`/`unresolved` keep the
+    # ADOPTED copy in force — `fy up` proceeds on them for the same reason). Two are not: the
+    # gate itself failing (state unknown; `effective()` degrades to the tree on an unreadable
+    # state dir), and NO pin at all after an operator declined to adopt — there `effective()`
+    # falls back to the working tree, which for this verb means the tree chose what the host
+    # installs. So `fy code` refuses both rather than inheriting `fy up`'s keep-going default.
+    status = configpin.gate("fy code")
+    if status == "error":
+        _err("✗ fy code: couldn't check foldyard.toml against the adopted copy — not launching.")
+        return 1
     cfg = devmode.worktree_config(config.active_worktree())
+    if not config.in_box() and not configpin.inspect(cfg).pinned_exists:
+        _err("✗ fy code: nothing adopted for this checkout, and [vscode] is read ONLY from the")
+        _err("  adopted copy. Run `fy config adopt` (`fy config diff` first), then retry.")
+        return 1
+    ctx = stack.resolve()
     if not cfg.vscode_enabled():
         _err("✗ VS Code support is off — add a [vscode] table to foldyard.toml, then `fy box up`")
         _err("  (it mounts the persisted vscode-server volume the attach reuses).")
