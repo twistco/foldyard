@@ -312,6 +312,15 @@ def no_host_tool_spawn(request, monkeypatch):
 
     def guard(real):
         def wrapped(cmd, *args, **kwargs):
+            # A shell string is a whole program; resolving its first word would miss every
+            # later one (`true; /opt/homebrew/bin/podman …`). Nothing under test spawns a shell
+            # this way, so the form is refused rather than parsed.
+            if kwargs.get("shell"):
+                raise HostToolSpawned(
+                    f"{request.node.nodeid} would run a shell=True command — spawn an explicit "
+                    f"argv instead (the guard resolves argv[0]), or it is an e2e test "
+                    f"(tests/*_e2e.py)"
+                )
             # `executable` is Popen's third positional (after bufsize) or a kwarg.
             executable = args[1] if len(args) > 1 else kwargs.get("executable")
             for found in _resolved(cmd, kwargs.get("env"), executable):

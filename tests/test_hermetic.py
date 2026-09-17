@@ -67,10 +67,16 @@ def test_the_marker_permits_a_named_binary():
 
 def test_an_executable_override_cannot_smuggle_one_in():
     # `executable=` is what actually runs; argv[0] is then only the name the child sees. Both
-    # spellings, and the shell=True form where it replaces the shell itself.
+    # spellings.
     with pytest.raises(HostToolSpawned, match=f"would execute {HOST_TOOL!r}"):
         subprocess.run(["git", "/"], executable=HOST_TOOL, capture_output=True)
     with pytest.raises(HostToolSpawned, match=f"would execute {HOST_TOOL!r}"):
         subprocess.Popen(["git", "/"], 0, HOST_TOOL, stdout=subprocess.DEVNULL)
-    with pytest.raises(HostToolSpawned, match=f"would execute {HOST_TOOL!r}"):
-        subprocess.run("true", shell=True, executable=HOST_TOOL, capture_output=True)
+
+
+def test_shell_true_is_refused_outright():
+    # The guard resolves argv[0]; a shell string is a whole program, and only its first word
+    # would be seen — `true; /bin/ls` reads as `true`. Nothing under test spawns a shell this
+    # way, so the form itself is refused rather than parsed.
+    with pytest.raises(HostToolSpawned, match="shell=True"):
+        subprocess.run(f"true; {HOST_TOOL} /", shell=True, capture_output=True)
