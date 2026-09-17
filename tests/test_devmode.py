@@ -1295,3 +1295,91 @@ def test_ps_labels_uses_the_labels_map_not_the_per_key_accessor(monkeypatch):
 
     monkeypatch.setattr(devmode.subprocess, "run", lambda *a, **k: _Bad())
     assert devmode.ps_labels() is None
+
+
+# ── the TUI's workspace actions ────────────────────────────────────────────────────────
+
+
+class _FyDone:
+    returncode = 1
+    stdout = "+ podman compose down\n"
+    stderr = "\x1b[31m✗ compose exited 1\x1b[0m\n"
+
+
+def _stub_fy(monkeypatch):
+    monkeypatch.setattr(devmode.subprocess, "run", lambda *a, **k: _FyDone())
+    monkeypatch.setattr(devmode, "main_repo", lambda: "/tmp")
+    monkeypatch.setattr(devmode, "_CMD_LOG", [])  # action entries survive reset, so isolate
+
+
+def test_fy_records_the_action_in_the_command_log(isolated_state, monkeypatch):
+    # A TUI workspace action's output used to be captured and then dropped after a one-line
+    # toast — the `worktree remove` that stranded a container left no trace anywhere.
+    _stub_fy(monkeypatch)
+    devmode._fy(["worktree", "remove", "feat", "--yes"], env_extra={"WORKTREE": "feat"})
+    entry = devmode.cmd_log()[-1]
+    assert entry["cmd"] == "WORKTREE=feat foldyard worktree remove feat --yes"
+    assert entry["rc"] == 1 and entry["kind"] == "action"
+    assert "+ podman compose down" in entry["out"] and "✗ compose exited 1" in entry["out"]
+    assert "\x1b" not in entry["out"]
+
+
+def test_fy_appends_to_the_durable_actions_log(isolated_state, monkeypatch):
+    # Project-shared (under state_dir, next to the supervisor log), NOT per-worktree: the action
+    # may be the one deleting that worktree's posture dir.
+    _stub_fy(monkeypatch)
+    devmode._fy(["box", "down"])
+    devmode._fy(["worktree", "remove", "feat", "--yes"], env_extra={"WORKTREE": "feat"})
+    text = (isolated_state["dir"] / "tui-actions.log").read_text()
+    assert text.count("$ ") == 2  # one header line per action, appended
+    assert "$ WORKTREE=feat foldyard worktree remove feat --yes  (rc=1)" in text
+    assert "    + podman compose down\n    ✗ compose exited 1\n" in text
+    assert "\x1b" not in text
+
+
+def test_fy_timeout_keeps_the_output_captured_so_far(isolated_state, monkeypatch):
+    # A verb that overruns its budget (a `worktree remove` stuck in compose down) used to be
+    # logged as just "Command '[...]' timed out after 300 seconds" — the partial output that
+    # says WHERE it stuck was captured and then dropped. subprocess hands it over on the
+    # exception as raw bytes (even under text=True), per stream.
+    def _hang(args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            args,
+            300,
+            output=b"+ podman compose down\nStopping fy-feat-db ...\n",
+            stderr=b"\x1b[33m! waiting on fy-feat-db\x1b[0m\n",
+        )
+
+    monkeypatch.setattr(devmode.subprocess, "run", _hang)
+    monkeypatch.setattr(devmode, "main_repo", lambda: "/tmp")
+    monkeypatch.setattr(devmode, "_CMD_LOG", [])
+    rc, output = devmode._fy(["worktree", "remove", "feat", "--yes"], timeout=300)
+    assert rc == 124 and output.endswith("timed out after 300s")
+    assert "Stopping fy-feat-db" in output and "! waiting on fy-feat-db" in output
+    assert "\x1b" not in output and "b'" not in output
+    entry = devmode.cmd_log()[-1]
+    assert entry["rc"] == 124 and entry["out"] == output
+    assert "Stopping fy-feat-db" in (isolated_state["dir"] / "tui-actions.log").read_text()
+
+
+def test_fy_timeout_with_nothing_captured_still_says_it_timed_out(monkeypatch):
+    # Both streams are None when the verb produced nothing before the deadline.
+    def _hang(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, 60)
+
+    monkeypatch.setattr(devmode.subprocess, "run", _hang)
+    monkeypatch.setattr(devmode, "main_repo", lambda: "/tmp")
+    monkeypatch.setattr(devmode, "_CMD_LOG", [])
+    rc, output = devmode._fy(["code"], timeout=60)
+    assert (rc, output) == (124, "timed out after 60s")
+
+
+def test_doctor_reset_keeps_action_entries(isolated_state, monkeypatch):
+    # The doctor clears the ring buffer per run so its pane shows that run's probes only — an
+    # action's entry must survive that, or looking at the Doctor tab hides what you came for.
+    _stub_fy(monkeypatch)
+    devmode._fy(["box", "down"])
+    devmode._run(["true"])
+    devmode.cmd_log_reset()
+    kinds = [e["kind"] for e in devmode.cmd_log()]
+    assert kinds == ["action"]
