@@ -38,6 +38,8 @@ install -m 0440 "$sudoers.fy" "$sudoers"
 rm -f "$sudoers.fy"
 echo "sudo: '$user' may only 'shutdown -h now' without a password"
 
+# 1b. The journal cap (guestlog.py) — root-owned /etc, so only this script can place it here.
+@@JOURNAL@@
 # 2. The wall script, root-owned in the guest — from this recording, never from the repo mount.
 install -d -m 0755 /usr/local/libexec
 cat >@@WALL_PATH@@.tmp <<'__FY_WALL_ASSET__'

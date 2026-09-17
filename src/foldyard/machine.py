@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, hostwall, sandbox
+from . import config, guestlog, hostwall, sandbox
 from .machine_backend import default_unavailable_block, get_backend
 
 MACHINE = config.machine_name()
@@ -269,6 +269,7 @@ def _render_provisioning() -> tuple[str, str]:
         .replace("@@WALL_PATH@@", _WALL_SCRIPT_PATH)
         .replace("@@WALL_ARGS@@", " ".join(shlex.quote(a) for a in args))
         .replace("@@WANT@@", _provision_want())
+        .replace("@@JOURNAL@@", guestlog.journal_snippet(sudo="").strip("\n"))
     )
     ident = hashlib.sha256(body.encode()).hexdigest()[:16]
     return body.replace("@@ID@@", ident, 1), ident
@@ -403,6 +404,9 @@ def ensure(main: Path, wt_root: Path) -> None:
     # fresh boot, a revive, and the steady state alike.
     _apply_host_wall()
     _check_guest_provisioning()
+    # Housekeeping every VM wants (journal cap, API log level): over ssh, best-effort, before the
+    # sandbox so its service restarts already see the drop-in.
+    guestlog.ensure(BACKEND, MACHINE)
     # The gVisor posture is user-level in the guest (no root, so not the boot script): provisioned
     # over the backend's ssh once the VM is up and its root-side provisioning is verified.
     if sandbox.wanted():

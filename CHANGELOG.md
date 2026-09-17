@@ -46,6 +46,18 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Changed
 
+- **`machine ensure` caps the VM's journal at 1G and quietens the API service's access log.**
+  Containers log to journald, so the guest journal IS the container logs — and Fedora's default
+  cap is min(10% of the fs, 4G): a 90G VM disk sat at 4.1G of journal, the largest producer
+  being the rootless `podman.service` at its stock `LOGGING=--log-level=info` (the TUI/doctor
+  polling `_ping`/list-containers, ~48k lines per 2h), then conmon relaying container stdout.
+  The cap is a root-owned `/etc` drop-in: on Lima it is rendered into the root boot script (so
+  the provisioning id changes and an existing VM re-provisions on `fy machine stop && fy up`);
+  on podman machine — no boot script, but the appliance user keeps passwordless sudo — it goes
+  over ssh with `sudo -n`. The log level is a user-level `podman.service` drop-in
+  (`Environment=LOGGING=--log-level=warn`) over ssh on both, restarting the service only when
+  the file changed. Both are housekeeping, not a posture: a guest that refuses is a warning,
+  never an abort. Measured after applying by hand: 4.1G → 983M.
 - **The example consumer's api is a uv project, and the example's box shadows its venv.**
   `example/api` gains `pyproject.toml` + `uv.lock` (the same three pins, now locked) and an image
   built from that lockfile with uv; `example/foldyard.toml`'s `[box]` wires the in-tree-artefact

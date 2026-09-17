@@ -91,6 +91,9 @@ class FakeBackend:
         self.calls.append(f"remove:{name}")
         return True
 
+    def ssh_target(self, name):
+        return None  # no VM to ssh into: guestlog skips, sandbox is patched where wanted
+
     def provision_id(self, name):
         return self._provision
 
@@ -270,6 +273,23 @@ def test_ensure_provisions_the_gvisor_posture_after_the_guest_checks(
     monkeypatch.setattr(machine.config, "machine_runtime", lambda: "gvisor")
     machine.ensure(tmp_path, tmp_path / "wt")
     assert order == ["guest", f"sandbox:{machine.MACHINE}"]
+
+
+def test_ensure_provisions_the_log_budget_after_the_guest_checks_on_every_backend(
+    half_started, tmp_path, monkeypatch
+):
+    from foldyard import guestlog
+
+    # Not gated on a posture: the journal cap / API log level are housekeeping every VM wants.
+    # After the guest checks (a VM that failed its root-side provisioning is refused first) and
+    # before the sandbox, whose service restarts should see the drop-in already there.
+    half_started()
+    order = []
+    monkeypatch.setattr(machine, "_check_guest_provisioning", lambda: order.append("guest"))
+    monkeypatch.setattr(guestlog, "ensure", lambda backend, name: order.append(f"log:{name}"))
+    monkeypatch.setattr(machine.config, "machine_runtime", lambda: "")
+    machine.ensure(tmp_path, tmp_path / "wt")
+    assert order == ["guest", f"log:{machine.MACHINE}"]
 
 
 def test_ensure_skips_the_sandbox_without_the_posture(half_started, tmp_path, monkeypatch):
@@ -532,6 +552,20 @@ def test_provision_script_uses_only_limas_template_fields(lima_env):
     script = machine.guest_provision_script()
     assert set(re.findall(r"\{\{.*?\}\}", script)) == {"{{.User}}", "{{.UID}}"}
     assert "LIMA_CIDATA" not in script
+
+
+def test_provision_script_caps_the_journal_as_root_at_boot(lima_env):
+    from foldyard import guestlog
+
+    # The Lima user has no sudo, so the journald cap (a root-owned /etc drop-in) can only land
+    # from the boot script — and riding the recording means an existing VM re-provisions on the
+    # next `fy machine stop && fy up`, the same way a wall change does.
+    _, _, set_wall, _ = lima_env
+    set_wall(False)
+    script = machine.guest_provision_script()
+    assert f"SystemMaxUse={guestlog.JOURNAL_MAX_USE}" in script
+    assert "/etc/systemd/journald.conf.d/50-foldyard-cap.conf" in script
+    assert "sudo" not in script.split("# 2. The wall script")[0].split("# 1b.")[-1]
 
 
 def test_provision_script_wall_off_still_drops_the_sudo_grant(lima_env):
