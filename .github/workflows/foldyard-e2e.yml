@@ -201,8 +201,8 @@ jobs:
           cd "$dst"
           git init -q && git add -A
           git -c user.email=e2e@foldyard -c user.name=e2e commit -qm init
-          uv run foldyard config adopt
-          uv run foldyard machine ensure
+          uv run --project "$GITHUB_WORKSPACE" foldyard config adopt
+          uv run --project "$GITHUB_WORKSPACE" foldyard machine ensure
           sock="$HOME/.lima/foldyard-example/sock/podman.sock"
           test -S "$sock"
           echo "DOCKER_HOST=unix://$sock" >> "$GITHUB_ENV"
