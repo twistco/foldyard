@@ -208,7 +208,7 @@ disk_gib = 60
   writes) — per-project VMs that run concurrently, and the only backend that supports the wall.
   `podman` is one shared podman machine for everything: no concurrent per-project VMs and no
   in-VM wall, but nothing extra to install. Both are VM backends: there is no VM-less option (the
-  `native` backend was retired, [ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md);
+  `native` backend was retired, [ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md);
   a config still naming it gets a warning and the podman backend). Env: `MACHINE_BACKEND`.
 
   The backend CLI is **not** the whole prerequisite: it creates the VM, and the container engine
@@ -363,7 +363,11 @@ default_deny = true
   <host> [--level once|session|permanent]`, `fy allow list`, or the TUI's `a` key on a blocked row. That placement is the whole guarantee: config travels with the branch and
   the box can write it, so a `[proxy] allow` list would let the yard widen its own wall by editing a
   file it already owns. A grant is a property of an operator on a host, like the posture itself.
-  Any keyless/injector host is allowed implicitly — never list those.
+  Any keyless/injector host is allowed implicitly — never list those. **A host grant means
+  `host:443`.** CONNECT is a raw tunnel — whatever the client speaks through it is relayed — so a
+  bare grant used to reach `github.com:22`, and with an SSH agent forwarded in by an editor attach
+  that is a push path. Another port is its own grant, `fy allow add github.com:22`; the blocked
+  row carries the port when the port was the reason, so the TUI's `a` key offers exactly that.
 - **`recommend`** — the committed half of the allowlist: hosts this repo ASKS operators to grant,
   each `{ host = "…", why = "…" }` (or a bare host string). Advisory by construction — the proxy
   never reads it. The host OFFERS each entry, per host, at `fy up`/`fy box up`/`fy host`, via
@@ -733,7 +737,51 @@ Both tables deep-merge like everything else, so `foldyard.local.toml` can overri
 privileged actor from repo config, so `fy config widenings` lists them under **agent steering** —
 by key, since that's where a `hooks` or `permissions` entry would show up.
 - **`[vscode]`** — mounts the vscode-server volume so `fy code` (VS Code attach) reuses its
-  server across box recreations. No keys.
+  server across box recreations. `fy code` also writes the attached-container config the attach
+  applies (extensions + settings, keyed by the box name, under its own isolated
+  `--user-data-dir`), built from these keys. Foldyard authors that document itself — no repo
+  script produces it, and nothing under the mount (no `.vscode/extensions.json`) is read for it.
+  **The whole table is read from the ADOPTED config**, and `fy code` runs the adopt/revert/ignore
+  gate first: the extensions list decides what the host installs (a UI-kind extension lands in
+  the operator's shared `~/.vscode/extensions`), so a box edit to it is inert until an operator
+  adopts it ([ADR-0026](./adrs/0026-vscode-attach-config-is-declarative.md)). Know what the
+  attach itself does: Dev Containers forwards the SSH agent the VS Code process holds and its
+  git-credential store into the box — so `fy code` launches VS Code with foldyard's own EMPTY
+  agent and switches the git bridge off (`git.terminalAuthentication`), the box unsets and reaps
+  whatever a manual attach still brings, and the wall fences CONNECT to `:443`; `fy config
+  widenings` lists it and `fy verify` reports what is left
+  ([security](./security.md#fy-verify-prove-it-dont-trust-it)).
+  - **`extensions`** — marketplace ids (`publisher.name`) installed on attach. The Dev Containers
+    extension is dropped (meaningless inside the container); an invalid id is dropped rather than
+    handed to VS Code. Keep the sub-projects' `.vscode/extensions.json` for plain VS Code's
+    click-to-install recommendations — this list is what installs *without* a click, which is
+    why it is config. Default: `[]`.
+  - **`settings`** — a table of VS Code settings carried in the attached config, which Dev
+    Containers applies to the box's server (machine scope) — e.g.
+    `"remote.autoForwardPorts" = false`, `"github.gitAuthentication" = false`. Settings can't
+    execute; the schema's lifecycle hooks are not a key and never will be. foldyard merges its
+    own pin on top (the minter/proxy ports are never auto-forwarded — a forward would shadow the
+    daemon the box dials). Dev Containers writes these ONCE per server install; `fy code` clears
+    that marker whenever the table changed, so an edit lands on the next attach.
+
+  Where this lands: the box's **Remote [Machine]** layer — above the isolated instance's own user
+  settings, below the checkout's `.vscode/settings.json`. So the table is the team's policy, and
+  that gitignored workspace file stays each operator's own (window colours per worktree and the
+  like override the policy, never diff). It reaches the `fy code` window only; a native VS Code
+  window on the same checkout sees none of it.
+
+  Per-operator tweaks go in `foldyard.local.toml` (deep-merged, and adopted alongside). Removing
+  the `_generatedBy` key from the written config file is the host-side hatch that stops
+  `fy code` writing it at all — the whole table then stops applying to that instance.
+
+  ```toml
+  [vscode]
+  extensions = ["anthropic.claude-code", "charliermarsh.ruff", "biomejs.biome"]
+
+  [vscode.settings]
+  "remote.autoForwardPorts" = false
+  "github.gitAuthentication" = false
+  ```
 
 ## `[reclaim]`
 

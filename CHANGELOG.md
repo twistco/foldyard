@@ -43,6 +43,33 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Added
 
+- **The editor attach's host bridges are neutralised in-box, the egress wall fences CONNECT to
+  `:443`, and `fy verify` reports both.** Seen live: a `fy code` attach put a LIVE SSH agent
+  socket (one key) and VS Code's git-credential bridge (`GIT_ASKPASS` back to the host's store)
+  into a box whose posture read "never push" — Dev Containers forwards them into every terminal
+  it opens, no setting stops it, and launching VS Code with `SSH_AUTH_SOCK` stripped still
+  forwards — but what the process HOLDS it forwards verbatim; only an unset var makes it hunt for
+  the host's agent. So `fy code` now launches VS Code with foldyard's own EMPTY ssh-agent (per
+  instance, reused while it answers, refused if it ever holds a key): the SSH side carries no
+  credential by construction, since no setting chooses what is forwarded. The git side gets
+  `git.terminalAuthentication` / `git.useIntegratedAskPass` pinned off at user and machine scope
+  — a default only, because workspace settings win and `.vscode/settings.json` is mount data the
+  box can write; `fy verify` FAILS a checkout that flips either back on. So for the git bridge,
+  and for a manual attach from the operator's own VS Code, the enforcement is in-box. The one
+  defeat that existed was an rc-file unset in a single consumer's box image, which no other
+  consumer had, and which leaves the socket reachable by path anyway; now foldyard's bootstrap
+  installs `~/.config/foldyard/harden.sh` in every box (image-agnostic),
+  sourced at `~/.bashrc` line 1 so every bash inherits the vars' absence, plus a reaper that
+  unlinks `/tmp/vscode-ssh-auth-*.sock` and `/tmp/vscode-git-*.sock` as they appear — restarted
+  from every shell and by `fy code` before the attach (which refuses to attach if it can't);
+  `fy box up` re-applies it to a running box, so no recreate. Independently, a host grant now
+  means `host:443` (and `:80` for cleartext): CONNECT is a raw tunnel and a bare `github.com`
+  grant reached `github.com:22`, so an agent had somewhere to go; another port is its own grant
+  (`fy allow add github.com:22`, offered by the TUI from the blocked row, which carries the
+  port), and an injector host's exemption never covers cleartext. `fy verify` gains rows for the
+  git-credential bridge vars and for the sockets on disk (a socket is the boundary; an unset var
+  is hygiene), and its `SSH_AUTH_SOCK` row names the attach. `fy config widenings` lists
+  `[vscode]` as the attach.
 - **`fy reclaim`, `[reclaim] script`, and `fy up` removes the images its own build superseded.**
   Measured on a 90 GB store that died mid-build on `no space left on device`: the automatic
   sweep freed `0.0 GiB` under a `✓`, because every dangling image was younger than its 24h
@@ -137,6 +164,19 @@ break config or CLI shape, and say so here. How a release is cut:
   (`Environment=LOGGING=--log-level=warn`) over ssh on both, restarting the service only when
   the file changed. Both are housekeeping, not a posture: a guest that refuses is a warning,
   never an abort. Measured after applying by hand: 4.1G → 983M.
+- **`fy code` authors the attached-container config itself from a declarative `[vscode]` table,
+  read from the ADOPTED copy; the in-box generator script and `[vscode] workspace_file` are
+  removed.** `extensions` (marketplace ids installed on attach) and `[vscode.settings]` (applied
+  to the box's server) are config, behind the same adopt gate as every host-consequence verb —
+  the extensions list decides what the host installs, so a box edit to it is inert until adopted.
+  `remoteUser` and the daemon-port pin are foldyard facts. Nothing under the mount is read any
+  more: not a consumer script's output, not `.vscode/extensions.json`, and not a
+  `.code-workspace` — the attach is always the checkout folder, one shape for a worktree's
+  lifetime, so window-scoped editor state saved in one session (Peacock colours, …) is read by the
+  next. **Migration:** drop `workspace_file` and any generator script from `[vscode]`; move the
+  extensions it collected into `[vscode] extensions` and its machine settings into
+  `[vscode.settings]`; commit per-folder `.vscode/settings.json` files if you relied on a
+  generated multi-root workspace ([ADR-0026](./docs/adrs/0026-vscode-attach-config-is-declarative.md)).
 - **The example consumer's api is a uv project, and the example's box shadows its venv.**
   `example/api` gains `pyproject.toml` + `uv.lock` (the same three pins, now locked) and an image
   built from that lockfile with uv; `example/foldyard.toml`'s `[box]` wires the in-tree-artefact

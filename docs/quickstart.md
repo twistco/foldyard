@@ -119,7 +119,7 @@ alternatives, in `[machine]`:
   control is the cooperative proxy only. Pick it if podman is already your daily driver.
 
 Both are VMs: foldyard always has one, on Linux too
-([ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md)).
+([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)).
 
 Sizing (`cpus`/`memory_mib`/`disk_gib`) applies when the VM is first created; change it
 later with `foldyard machine recreate`.

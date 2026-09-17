@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import math
 import os
 import subprocess
 import sys
@@ -1146,14 +1147,57 @@ def vscode_enabled() -> bool:
     return _toml().get("vscode") is not None
 
 
-def vscode_workspace_file() -> str:
-    """Optional repo-relative ``.code-workspace`` path (``[vscode] workspace_file``). When set
-    and present in the checkout, ``fy code`` opens THAT (a multi-root workspace) instead of the
-    folder — the lever for per-folder editor settings in a monorepo (e.g. a different default
-    formatter per sub-project, which a single-root workspace cannot express). Empty ⇒ folder
-    attach."""
-    raw = _table("vscode").get("workspace_file", "")
-    return raw if isinstance(raw, str) else ""
+def vscode_extensions() -> list[str]:
+    """``[vscode] extensions`` — the marketplace ids ``fy code`` auto-installs on attach, carried
+    in the attached-container config. Config rather than the checkout's ``.vscode/extensions.json``
+    on purpose: a UI-kind extension installs on the HOST (into the operator's shared extensions
+    dir), and the recommendations file is mount data the box can write — so the list lives where
+    the adopt gate reviews it (ADR-0026). ``[]`` when absent or malformed, never a partial list."""
+    raw = _table("vscode").get("extensions")
+    if not isinstance(raw, list) or not all(isinstance(e, str) for e in raw):
+        return []
+    return [e for e in raw if isinstance(e, str)]
+
+
+def _non_json_leaf(value: object, path: str) -> str | None:
+    """The dotted path of the first value under ``value`` that JSON cannot carry, or ``None``.
+    TOML has types JSON does not — dates, times, datetimes — and ``json.dumps`` meets them as a
+    traceback, so they are refused at the read instead."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return None
+    if isinstance(
+        value, float
+    ):  # TOML has nan/inf; json.dumps emits NaN/Infinity, which is not JSON
+        return None if math.isfinite(value) else path
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if (bad := _non_json_leaf(v, f"{path}.{k}" if path else str(k))) is not None:
+                return bad
+        return None
+    if isinstance(value, list):
+        for i, v in enumerate(value):
+            if (bad := _non_json_leaf(v, f"{path}[{i}]")) is not None:
+                return bad
+        return None
+    return path
+
+
+def vscode_settings() -> dict:
+    """``[vscode.settings]`` — VS Code settings ``fy code`` carries in the attached-container
+    config, so Dev Containers applies them to the box's server (machine scope) on attach. Data,
+    not code: settings can't execute, which is why this is a table and lifecycle hooks are not
+    a key. Read from the ADOPTED copy like the extensions. ``{}`` when absent or not a table; a
+    value JSON can't carry (a TOML date/time) is a config error, named by key."""
+    raw = _table("vscode").get("settings")
+    if not isinstance(raw, dict):
+        return {}
+    if (bad := _non_json_leaf(raw, "")) is not None:
+        raise SystemExit(
+            f"✗ [vscode.settings] {bad}: not a JSON value (a TOML date/time?) — the settings go "
+            "into VS Code's JSON attached-container config, so only strings, numbers, booleans, "
+            "arrays and tables can be carried."
+        )
+    return dict(raw)
 
 
 def codex_enabled() -> bool:

@@ -10,7 +10,7 @@ where they were taken (linked per row); keep this page the summary, not a second
 Where a Linux host stands in the design: the boundary can be **stronger** than the Mac's
 (nftables can match the VM's own process on the host, which pf cannot — `[machine].host_wall`)
 and it is never weaker: there is no VM-less backend (`native` was retired 2026-09-17,
-[ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md); WSL2's Hyper-V boundary protects
+[ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md); WSL2's Hyper-V boundary protects
 Windows, not the credentials, so the VM is required inside the distro too). Both are explained in
 [isolation-layers.md](./isolation-layers.md#linux--the-machine-layer-is-optional-and-qemu-is-the-price).
 
@@ -94,7 +94,7 @@ there are upper bounds; correctness results transfer as they are.
   either way), arm64 (no KVM), and anything needing nested virtualisation inside the guest — for
   those the nested-KVM-host recipe in [nested-virt.md](./nested-virt.md) remains.
 - ~~**Retire `backend = "native"`?**~~ **Decided 2026-09-17: retired**
-  ([ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md)) — foldyard always has a VM;
+  ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)) — foldyard always has a VM;
   `NativeBackend` and its branches are gone, a config naming it is warned and given `podman`.
 
 ## Recording a new validation

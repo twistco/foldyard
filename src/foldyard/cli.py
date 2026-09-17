@@ -505,7 +505,9 @@ app.add_typer(allow_app)
 
 @allow_app.command("add")
 def allow_add(
-    host: str = typer.Argument(..., help="exact host or *.suffix glob"),
+    host: str = typer.Argument(
+        ..., help="exact host or *.suffix glob (:443); host:port for one other tunnel port"
+    ),
     level: str = typer.Option(
         "session",
         "--level",

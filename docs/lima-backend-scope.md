@@ -15,7 +15,7 @@ concurrently**, so per-project machines coexist — no stop/swap dance, and an o
 ## The contract (backend-blind downstream)
 
 Backends expose ONE thing: a **libpod socket**, from a per-project VM (foldyard always has one —
-the VM-less `native` backend was retired, [ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md)).
+the VM-less `native` backend was retired, [ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)).
 Everything downstream (`stack.py`'s `CONTAINER_HOST` export, compose, box, worktrees) is
 backend-blind — `machine.socket()` returns a podman URI either way, no `--connection` juggling.
 Selection: `MACHINE_BACKEND` env → `[machine].backend` toml → `"lima"` default (ADR-0011's

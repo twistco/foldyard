@@ -130,6 +130,21 @@ def test_targets_name_the_file_that_declares_them(checkout):
     assert "yours only" in rendered(cfg)
 
 
+def test_a_vscode_table_is_reported_as_the_attach_that_forwards_host_credentials(checkout):
+    # The editor attach is the one declared surface that carries a push path INTO the box (the
+    # host's SSH agent + git credentials, forwarded by Dev Containers with no setting to stop it).
+    # It belongs in the inventory as a known, neutralised widening — not as a surprise `fy verify`
+    # row the first time someone opens a terminal in the attach.
+    cfg = checkout(BASE + "passthrough = []\n\n[vscode]\n")
+    assert collect(cfg).vscode_origin == exposure.SHARED
+    out = rendered(cfg)
+    assert "editor attach   [vscode]" in out and "EMPTY agent" in out and "fences CONNECT" in out
+
+    cfg = checkout(BASE + "passthrough = []\n")
+    assert collect(cfg).vscode_origin is None
+    assert "editor attach" not in rendered(cfg)
+
+
 def test_a_shared_agent_prompt_says_it_steers_everyone(checkout):
     cfg = checkout(BASE + 'passthrough = []\n\n[claude]\nsystem_prompt = "one\\ntwo\\n"\n')
     assert collect(cfg).prompts == [("[claude].system_prompt", 2, exposure.SHARED)]

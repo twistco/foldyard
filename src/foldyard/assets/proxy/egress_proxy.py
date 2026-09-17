@@ -173,6 +173,10 @@ logging.getLogger("mitmproxy.proxy.server").addFilter(_DropConnectChatter())
 logging.getLogger("mitmproxy.proxy.server").addFilter(_DropWebsocketPingPong())
 
 
+_HTTPS_PORT = 443  # the one port a bare host grant covers at CONNECT
+_HTTP_PORT = 80  # …and, for a request seen in the clear, this one
+
+
 def _host_matches(host: str | None, patterns: list[str]) -> bool:
     """Exact host match, or ``*.suffix`` wildcard (matches SUBDOMAINS, not the bare domain) —
     Claude Code Web's allow-list semantics, so its published list drops in unchanged. Used to
@@ -471,11 +475,15 @@ class Injector:
         )
         return [legacy] if legacy.active else []
 
-    def _rule_for(self, host: str | None, path: str) -> _Rule | None:
+    def _rule_for(self, flow: http.HTTPFlow) -> _Rule | None:
         """The rule that should inject on this request, or None (capture-only / non-target). First
-        match wins — distinct injectors use distinct hosts, so at most one matches in practice."""
+        match wins — distinct injectors use distinct hosts, so at most one matches in practice.
+        HTTPS only, by scheme: a cleartext request to a target host — even on :443 — gets no
+        credential, on the way out (`request`) or on a 401 re-issue (`response`)."""
+        if flow.request.scheme != "https":
+            return None
         for rule in self.rules:
-            if rule.matches(host, path):
+            if rule.matches(flow.request.pretty_host, flow.request.path):
                 return rule
         return None
 
@@ -617,14 +625,49 @@ class Injector:
         CONNECT to this proxy, and this hook fires on that CONNECT BEFORE any tunnel/TLS — so
         answering it with a 403 refuses the host outright (no upstream dialled, no TLS handshake,
         ``tls_clienthello`` never runs for it). Only the default-deny wall lives here; the
-        decrypt-vs-passthrough choice is still ``tls_clienthello``'s job for hosts we DO allow."""
+        decrypt-vs-passthrough choice is still ``tls_clienthello``'s job for hosts we DO allow.
+
+        The PORT is fenced too: a host grant means ``host:443``. CONNECT is a raw TCP tunnel — a
+        client that speaks something other than TLS through it is relayed as-is — so a bare host
+        grant used to let ``github.com:22`` out, and with an SSH agent forwarded into the box by an
+        editor attach that is a push path (seen live, 2026-09-17). Another port needs its own
+        grant, ``host:port`` (``fy allow add github.com:22``), so the blocked row carries the port
+        and the TUI's allow action offers exactly that."""
         if not self.default_deny:
             return
         host = flow.request.pretty_host
-        if self._allowed(host):
+        port = flow.request.port
+        if self._allowed_connect(host, port):
             return
         flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
-        self._log_blocked(host)
+        self._log_blocked(host if port == _HTTPS_PORT else f"{host}:{port}")
+
+    def _allowed_connect(self, host: str | None, port: int) -> bool:
+        """The CONNECT policy: the host granted (:meth:`_allowed`) on :443, else ``host:port``
+        granted explicitly."""
+        return self._allowed(host) if port == _HTTPS_PORT else self._granted_port(host, port)
+
+    def _allowed_plain(self, host: str | None, port: int, scheme: str) -> bool:
+        """The policy for a request the proxy sees in the clear — cleartext HTTP, or HTTPS it
+        decrypted — by SCHEME: a bare grant covers HTTPS on :443 (as CONNECT does, injector
+        exempt) and cleartext on :80 (apt, redirects; no exemption — a minted credential never
+        leaves in the clear); anything else, ``http://host:443/`` included, needs ``host:port``."""
+        if scheme == "https" and port == _HTTPS_PORT:
+            return self._allowed(host)
+        if scheme != "https" and port == _HTTP_PORT:
+            return self._granted(host)
+        return self._granted_port(host, port)
+
+    def _granted(self, host: str | None) -> bool:
+        """The host matches a grant (no injector exemption)."""
+        self._refresh_allow()
+        return _host_matches(host, self._allow_patterns)
+
+    def _granted_port(self, host: str | None, port: int) -> bool:
+        if not host:
+            return False
+        self._refresh_allow()
+        return _host_matches(f"{host}:{port}", self._allow_patterns)
 
     def tls_clienthello(self, data: tls.ClientHelloData) -> None:
         """Decide, before the TLS handshake, whether to MITM-decrypt this connection or blind-
@@ -660,13 +703,16 @@ class Injector:
 
     def request(self, flow: http.HTTPFlow) -> None:
         # The egress wall for plain HTTP (cleartext never CONNECTs, so http_connect can't catch it):
-        # refuse a disallowed host here, before it leaves the box. HTTPS is walled at http_connect.
-        if self.default_deny and not self._allowed(flow.request.pretty_host):
+        # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host
+        # grant as CONNECT :22 — here, before it leaves the box. HTTPS is walled at http_connect.
+        host, port = flow.request.pretty_host, flow.request.port
+        if self.default_deny and not self._allowed_plain(host, port, flow.request.scheme):
             flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
             flow.metadata["egress_proxy_blocked"] = True  # so `response` doesn't re-log it as a 403
-            self._log_blocked(flow.request.pretty_host)
+            default = _HTTPS_PORT if flow.request.scheme == "https" else _HTTP_PORT
+            self._log_blocked(host if port == default else f"{host}:{port}")
             return
-        rule = self._rule_for(flow.request.pretty_host, flow.request.path)
+        rule = self._rule_for(flow)
         if rule is None:
             return  # capture-only, or not a target host/path → log on the way back, rewrite nothing
         value = rule.token()
@@ -678,7 +724,7 @@ class Injector:
         # final (retried) response. The response hook fires before the client is written to, so
         # overwriting flow.response here hands the retry straight back to the waiting caller. The
         # MATCHING rule decides (its own retry_401 + minter), so distinct injectors don't interfere.
-        rule = self._rule_for(flow.request.pretty_host, flow.request.path)
+        rule = self._rule_for(flow)
         if (
             rule is not None
             and rule.retry_401

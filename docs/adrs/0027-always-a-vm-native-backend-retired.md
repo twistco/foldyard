@@ -1,4 +1,4 @@
-# ADR-0026 — foldyard always has a VM: the `native` backend is retired
+# ADR-0027 — foldyard always has a VM: the `native` backend is retired
 
 - **Status:** Accepted (2026-09-17) — **amends [ADR-0011](./0011-machine-backends-one-socket-contract.md)**
   (its third implementation is removed; the socket contract and the two VM backends stand) and

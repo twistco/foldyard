@@ -2,7 +2,7 @@
 
 - **Status:** Accepted (2026-06; native backend + lima spike on main via #25) — implemented;
   lima mock-validated + first real multi-project Mac run 2026-07-05. **Amended by
-  [ADR-0026](./0026-always-a-vm-native-backend-retired.md) (2026-09-17): the `native` backend
+  [ADR-0027](./0027-always-a-vm-native-backend-retired.md) (2026-09-17): the `native` backend
   is retired** — the socket contract and the two VM backends stand.
 - **Sources:** docs/lima-backend-scope.md, docs/podman-multi-vm-issue-26281.md,
   src/foldyard/machine_backend.py

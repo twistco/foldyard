@@ -4,6 +4,7 @@ nothing reads the real repo or ~/.foldyard."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -864,3 +865,61 @@ def test_machine_host_wall_toml_opt_in_and_env_override(fresh_config, tmp_path):
     assert config.machine_host_wall() is False
     fresh_config(MACHINE_HOST_WALL="yes")
     assert config.machine_host_wall() is True
+
+
+def test_vscode_extensions_read_toml_as_a_list_of_ids(fresh_config, tmp_path):
+    # `[vscode] extensions` is the auto-install list `fy code` carries in the attached config. A
+    # list of strings, or nothing: a malformed value (a string, a list with a non-string) yields []
+    # rather than crashing `fy code` — and never a partial list, which would hide the typo.
+    cases = {
+        "": [],
+        'extensions = ["anthropic.claude-code", "biomejs.biome"]': [
+            "anthropic.claude-code",
+            "biomejs.biome",
+        ],
+        'extensions = "anthropic.claude-code"': [],
+        'extensions = ["anthropic.claude-code", 7]': [],
+    }
+    for line, expected in cases.items():
+        (tmp_path / "foldyard.toml").write_text(f'[project]\nname = "x"\n[vscode]\n{line}\n')
+        fresh_config(FOLDYARD_REPO=tmp_path)
+        assert config.vscode_extensions() == expected, line
+
+
+def test_vscode_settings_read_toml_as_a_table(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text(
+        '[project]\nname = "x"\n[vscode]\n'
+        '[vscode.settings]\n"remote.autoForwardPorts" = false\n"github.gitAuthentication" = false\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.vscode_settings() == {
+        "remote.autoForwardPorts": False,
+        "github.gitAuthentication": False,
+    }
+    # Absent, or not a table → {}.
+    for line in ("", 'settings = "nope"'):
+        (tmp_path / "foldyard.toml").write_text(f'[project]\nname = "x"\n[vscode]\n{line}\n')
+        fresh_config(FOLDYARD_REPO=tmp_path)
+        assert config.vscode_settings() == {}, line
+
+
+@pytest.mark.parametrize(
+    ("body", "where"),
+    [
+        ('"a.b" = 1979-05-27T07:32:00Z', "a.b"),
+        ("d = 1979-05-27", "d"),
+        ("t = 07:32:00", "t"),
+        ("[vscode.settings.nested]\nwhen = 1979-05-27", "nested.when"),
+        ("xs = [1, 2, 1979-05-27]", "xs[2]"),
+        ("n = nan", "n"),  # TOML floats JSON has no spelling for
+        ("i = -inf", "i"),
+    ],
+)
+def test_vscode_settings_refuse_what_json_cannot_carry(fresh_config, tmp_path, body, where):
+    # TOML has dates and times, JSON does not — and the settings land in a JSON document, so a
+    # datetime used to reach `json.dumps` as a traceback out of `fy code`. Refused at the read,
+    # naming the key, before anything is serialised.
+    (tmp_path / "foldyard.toml").write_text(f'[project]\nname = "x"\n[vscode.settings]\n{body}\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    with pytest.raises(SystemExit, match=rf"\[vscode\.settings\] {re.escape(where)}:"):
+        config.vscode_settings()

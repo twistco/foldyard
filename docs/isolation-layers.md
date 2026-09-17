@@ -133,7 +133,7 @@ and one layer short of the Linux design.
 ```
 
 **`(b)` is no longer a foldyard option.** It needed the `native` (no-VM) backend, retired on
-2026-09-17 ([ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md)): foldyard always has a
+2026-09-17 ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)): foldyard always has a
 VM, so on Linux the shape is `(a)`, with `(c)` the deferred hardening on top. The column stays as
 the record of what `(b)` traded and why `(c)` was measured.
 
@@ -272,7 +272,7 @@ An earlier draft of this page called the distro "already the boundary". That is 
 wrong asset. The supervisor runs inside the distro — it is Linux Python — so the credentials and the
 engine share one kernel and one uid there, exactly as on bare Linux. **For foldyard's threat model,
 WSL2 with a VM-less engine is bare Linux with a VM-less engine** — which is why the `native`
-backend that offered that shape is retired ([ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md)).
+backend that offered that shape is retired ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)).
 The Hyper-V VM is real, but it protects Windows.
 
 The good news is that the earlier draft was also wrong about the remedy. It said Lima inside a WSL2
@@ -307,7 +307,7 @@ absence-check is gated on a positive control — see
 | VMM jailed | ❌ unconfined operator process | ✅ crun, for `③` only |
 
 A VM-less engine could never have advertised these claims — which is why the `native` backend
-is gone ([ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md)) rather than documented as
+is gone ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)) rather than documented as
 weaker. That is not a documentation nicety: it is the difference between a checked property and
 a slogan.
 

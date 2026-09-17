@@ -112,6 +112,11 @@ class Exposure:
     recommend_origin: str = DEFAULT
     # (key, values, fix, origin)
     ignored: list[tuple[str, list[str], str, str]] = field(default_factory=list)
+    # `[vscode]` declared, and where: the editor attach `fy code` sets up forwards the host's SSH
+    # agent + git credentials into the box (Dev Containers does; no setting stops it) — the one
+    # declared surface that carries a push path IN. Reported so the neutralisation is a known
+    # decision, not a surprise `fy verify` row.
+    vscode_origin: str | None = None
     wall: bool = False
     host_wall: bool = False  # the same wall enforced on the HOST too (hostwall.py)
     backend: str = ""
@@ -354,6 +359,7 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
         recommended=recommended,
         recommend_origin=_origin(shared, local, "proxy", "recommend"),
         ignored=_ignored(cfg, shared, local),
+        vscode_origin=_origin(shared, local, "vscode") if config.vscode_enabled() else None,
         wall=config.machine_wall(),
         host_wall=config.machine_host_wall(),
         backend=config.machine_backend(),
@@ -440,6 +446,23 @@ def render(exp: Exposure) -> list[str]:
             out.append(
                 f"    {path} — removed from the resolved config, {who}.{_shared_note(origin)}"
             )
+        out.append("")
+
+    if exp.vscode_origin is not None:
+        out.append(f"  editor attach   [vscode] — `fy code`{_shared_note(exp.vscode_origin)}")
+        out.append(
+            "    The attach forwards the SSH agent VS Code holds and its git-credential store "
+            "into the box:"
+        )
+        out.append(
+            "    `fy code` hands it an EMPTY agent (by construction) and defaults the git bridge "
+            "off (workspace"
+        )
+        out.append(
+            "    settings can re-arm it); the box unsets + reaps either way; the wall fences "
+            "CONNECT to :443."
+        )
+        out.append("    `fy verify` in the box reports what is left, incl. a re-armed workspace.")
         out.append("")
 
     if exp.ignored:
