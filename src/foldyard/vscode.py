@@ -183,11 +183,19 @@ def _user_settings(udd: Path) -> Path:
 # by reading `[minter] :8188` out of `fy host`'s own startup line, and every mint from the box
 # then hung — the credential path dead with every posture surface still green.
 #
+# The same key guards the mirror case: a port the host PUBLISHES into the stack (`[ports]`). Under
+# podman machine a publish of `127.0.0.1:P` is a gvproxy bind on the host's loopback, so if VS Code
+# holds P first — it auto-forwarded 4400 off a `ps` line while the stack was down after a reboot,
+# and `remote.restoreForwardedPorts` re-bound it on every reopen — the container can never start
+# (`bind: address already in use` on every `up`, nothing in the box to see it with).
+#
 # `update.mode` — this instance is per-worktree scaffolding, not the operator's daily editor, so an
 # update prompt on each attach is pure interruption (and updating a running attached instance is
 # worse than deferring it). The operator's own VS Code is a separate install and is unaffected.
 _PORTS_ATTRIBUTES = "remote.portsAttributes"
 _UPDATE_MODE = "update.mode"
+# Widest default worktree offset (`stack._offset`: cksum % 89 + 1).
+_MAX_WORKTREE_OFFSET = 89
 
 
 def _host_daemon_ports() -> list[int]:
@@ -197,6 +205,14 @@ def _host_daemon_ports() -> list[int]:
     return [config.gcp_minter_port(), config.proxy_port()]
 
 
+def _published_port_ranges() -> list[str]:
+    """Every host port a `[ports]` base can publish on, as VS Code port-range keys
+    (``"3000-3089"``). A range rather than this instance's own offset because any instance can
+    forward any worktree's port — the main one picked up a worktree's ``APP_PORT+1`` from
+    ``worktree add`` output. A pinned offset above the default span is not covered."""
+    return [f"{base}-{base + _MAX_WORKTREE_OFFSET}" for base in config.port_bases().values()]
+
+
 def _pin_ports(settings: dict) -> dict:
     """Merge the no-auto-forward pin into ``settings``, preserving every other key and every other
     port's attributes. The pin WINS over an existing value: it guards against a failure that
@@ -204,12 +220,13 @@ def _pin_ports(settings: dict) -> dict:
     reason to honour it — same rule as ``workspaceFolder``."""
     attrs = settings.get(_PORTS_ATTRIBUTES)
     merged = {str(k): v for k, v in attrs.items()} if isinstance(attrs, dict) else {}
-    for port in _host_daemon_ports():
-        current = merged.get(str(port))
+    pinned = [str(p) for p in _host_daemon_ports()] + _published_port_ranges()
+    for key in pinned:
+        current = merged.get(key)
         # Override the one attribute that is the guard; a label or protocol the generator set for
         # that port is its business and survives.
         kept = current if isinstance(current, dict) else {}
-        merged[str(port)] = {**kept, "onAutoForward": "ignore"}
+        merged[key] = {**kept, "onAutoForward": "ignore"}
     return {**settings, _PORTS_ATTRIBUTES: merged}
 
 
