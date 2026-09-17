@@ -183,6 +183,20 @@ com.docker.compose.config-hash=fy-canary <any-image> …`. For podman-compose: `
 io.podman.compose.project=<project> <any-image> …`. Run the suite once in each provider direction,
 confirm the matching canary survives each run, then remove it.
 
+**The suite is hermetic by construction, not by convention** (`tests/conftest.py`, the "hermetic
+subprocess" section; pinned by `tests/test_hermetic.py`). Every non-e2e test runs on a PATH
+scrubbed to `git`/`cksum`/the shell/the interpreter — a host tool named bare is *not found*, as on
+a CI runner, so the code under test takes its "not installed" branch rather than the live
+machine's — and `subprocess.run`/`Popen` refuse to execute anything else reached by absolute path
+or a caller's own `env["PATH"]`, failing the test by name with an exception no `except Exception`
+can swallow. The shell is allowlisted for `bash -n`, not for a program (`bash -c …`/`sh script`
+carry one past argv[0] — refused like `shell=True`). A test that means to run a host binary
+marks it (`@pytest.mark.spawns("/abs/path")`, or `spawns("bash")` to run a program under that
+shell); one that needs a real tool is an e2e test (`tests/*_e2e.py`, exempt). Before this, `set_mode`
+round trips were running `limactl list` + `podman ps` against the live machine, and the
+supervisor's blocked-daemon push reached a real Notification Center — green in CI only because
+those binaries are absent there.
+
 ## CI (`.github/workflows/foldyard.yml`)
 
 Tiers 1–3 run on GitHub-hosted `ubuntu-latest` runners — **all of it on containers, none on
