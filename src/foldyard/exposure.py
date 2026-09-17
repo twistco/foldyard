@@ -451,15 +451,15 @@ def render(exp: Exposure) -> list[str]:
     if exp.vscode_origin is not None:
         out.append(f"  editor attach   [vscode] — `fy code`{_shared_note(exp.vscode_origin)}")
         out.append(
-            "    While attached, VS Code forwards the HOST's SSH agent and git-credential store "
-            "into the box"
+            "    The attach forwards the SSH agent VS Code holds and its git-credential store "
+            "into the box:"
         )
         out.append(
-            "    (no setting stops it). foldyard unsets them in every box shell and reaps the "
-            "sockets; the wall"
+            "    `fy code` hands it an EMPTY agent and switches the git bridge off; the box "
+            "unsets + reaps what a"
         )
         out.append(
-            "    fences CONNECT to :443 so an agent has nowhere to go. `fy verify` in the box "
+            "    manual attach brings; the wall fences CONNECT to :443. `fy verify` in the box "
             "reports what is left."
         )
         out.append("")

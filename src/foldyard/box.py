@@ -385,17 +385,21 @@ fy_path_prepend "/opt/fy-tools/bin" "$HOME/.local/bin"
 # setting to stop it, forwards the host's SSH agent (`/tmp/vscode-ssh-auth-*.sock`) and its
 # git-credential store (`GIT_ASKPASS` over `/tmp/vscode-git-*.sock`) into every terminal it opens
 # — two push paths in a box whose posture is "never push" — plus a host command channel
-# (`VSCODE_IPC_HOOK_CLI`, `BROWSER`/--openExternal). Nothing host-side switches it off (launching
-# VS Code with the var stripped still forwards: macOS shell-env resolution), so the defeat lives
-# here, image-agnostic, in two layers. ENV hygiene: `harden.sh` unsets the vars, sourced at
-# ~/.bashrc line 1 — BEFORE the interactive guard — so every bash (the attach's terminals, `fy
-# claude`, `box shell`, a `bash -c`) inherits their absence. SOCKET removal: the sockets are
-# usable by PATH regardless of the env, so a reaper unlinks them as they appear; it is (re)started
-# from harden.sh — every shell — and from `fy code` before the attach. The window between the
-# attach creating a socket and the reaper's next pass is the residual; the egress wall's :443
-# fence is what makes it moot for SSH (`github.com:22` needs its own grant). `fy verify` reports
-# both the vars and the sockets. Generalised from the harden script a consumer image carried —
-# a load-bearing part of the posture that only one consumer had.
+# (`VSCODE_IPC_HOOK_CLI`, `BROWSER`/--openExternal). `fy code` defuses both at the SOURCE, race-free:
+# it launches VS Code with foldyard's own EMPTY ssh-agent (the attach forwards whatever the process
+# holds, verbatim — only an unset var makes it find the host's real one; `vscode._empty_agent`),
+# and pins `git.terminalAuthentication` off so the git bridge is never installed. This snippet is
+# the second layer, for what the source can't reach — a manual "Attach to Running Container" from
+# an operator's own VS Code, an instance launched before this shipped — image-agnostic, in two
+# parts. ENV hygiene: `harden.sh` unsets the vars, sourced at ~/.bashrc line 1 — BEFORE the
+# interactive guard — so every bash (the attach's terminals, `fy claude`, `box shell`, a
+# `bash -c`) inherits their absence. SOCKET removal: the sockets are usable by PATH regardless of
+# the env, so a reaper unlinks them as they appear; (re)started from harden.sh — every shell —
+# and from `fy code` before the attach. The window between a socket appearing and the reaper's
+# next pass is real, which is why it is the second layer and not the first; the egress wall's
+# :443 fence makes it moot for SSH regardless (`github.com:22` needs its own grant). `fy verify`
+# reports both the vars and the sockets. Generalised from the harden script a consumer image
+# carried — a load-bearing part of the posture that only one consumer had.
 _HARDEN_SNIPPET = r"""
 mkdir -p "$HOME/.config/foldyard" && touch ~/.bashrc
 cat > "$HOME/.config/foldyard/harden.sh" <<'FYHARDEN'
@@ -475,17 +479,18 @@ run_step() {  # label · check · run
 )
 
 
-def ensure_harden(engine: str, box: str, env: dict) -> None:
+def ensure_harden(engine: str, box: str, env: dict) -> bool:
     """(Re)apply :data:`_HARDEN_SNIPPET` in a running box: the file, the ~/.bashrc hook and the
     reaper — idempotent, so it runs on every `box up` of an existing box and before every `fy
-    code` attach (the moment the bridges appear). Best-effort: a box that can't be exec'd into is
-    reported by the verb that needs it, not here."""
-    subprocess.run(
+    code` attach (the moment the bridges appear). Returns whether it applied; the caller decides
+    what that means (`box up` warns, `fy code` refuses to attach)."""
+    proc = subprocess.run(
         [engine, "exec", box, "bash", "-lc", _HARDEN_SNIPPET],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    return proc.returncode == 0
 
 
 def _warmup_script(checkout: str) -> str:
@@ -1020,7 +1025,11 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
                 "~/.codex volume or keyless seed). Recreate to add them: `fy box down && fy box up`."
             )
         _warn_stale_foldyard(engine, box, env)
-        ensure_harden(engine, box, env)  # a box created before the hygiene shipped gets it here
+        if not ensure_harden(engine, box, env):  # a box from before the hygiene gets it here
+            print(
+                "⚠ couldn't (re)apply the in-box editor-attach hygiene (bash in the box failed) — "
+                "`fy verify` in the box says what is exposed; `fy box down && fy box up` rebuilds it."
+            )
         print(f"✓ dev box {box} already up. Attach: {_attach_hint(worktree)}")
         return 0
     if _exists(engine, box, env):

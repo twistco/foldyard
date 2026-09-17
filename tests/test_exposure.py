@@ -138,7 +138,7 @@ def test_a_vscode_table_is_reported_as_the_attach_that_forwards_host_credentials
     cfg = checkout(BASE + "passthrough = []\n\n[vscode]\n")
     assert collect(cfg).vscode_origin == exposure.SHARED
     out = rendered(cfg)
-    assert "editor attach   [vscode]" in out and "SSH agent" in out and "fences CONNECT" in out
+    assert "editor attach   [vscode]" in out and "EMPTY agent" in out and "fences CONNECT" in out
 
     cfg = checkout(BASE + "passthrough = []\n")
     assert collect(cfg).vscode_origin is None

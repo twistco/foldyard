@@ -65,15 +65,25 @@ def fake(tmp_path, monkeypatch):
     )
     state = tmp_path / "state"
     monkeypatch.setattr(config, "state_dir", lambda: state)
-    monkeypatch.setattr(
-        vscode.shutil, "which", lambda name: "/usr/local/bin/code" if name == "code" else None
-    )
+    tools = {
+        "code": "/usr/local/bin/code",
+        "ssh-agent": "/usr/bin/ssh-agent",
+        "ssh-add": "/usr/bin/ssh-add",
+    }
+    monkeypatch.setattr(vscode.shutil, "which", lambda name: tools.get(name))
 
     calls: list[dict] = []
     box_state = {"running": False, "installed": ""}
 
+    agent_state = {"rc": 2}  # `ssh-add -l` against the fy agent: 2 = not answering, 1 = empty
+
     def fake_run(cmd, **kw):
         calls.append({"cmd": cmd, "env": kw.get("env")})
+        if cmd[0] == "/usr/bin/ssh-add":
+            return _Proc(agent_state["rc"])
+        if cmd[0] == "/usr/bin/ssh-agent":
+            agent_state["rc"] = 1  # started ⇒ alive and empty from now on
+            return _Proc(0)
         if cmd[1] == "ps":  # running probe
             return _Proc(0, "deadbeef\n" if box_state["running"] else "")
         if cmd[1] == "exec":  # ls installed exts / marker reset
@@ -88,6 +98,7 @@ def fake(tmp_path, monkeypatch):
         "vscode": adopted.toml["vscode"],
         "gated": gated,
         "pin": pin,
+        "agent": agent_state,
         "ctx": ctx,
         "udd": state / "vscode" / "main",
         "sock": sock,
@@ -531,6 +542,62 @@ def test_the_in_box_harden_is_ensured_before_the_attach(fake):
     harden = [i for i, c in enumerate(cmds) if "exec" in c and "harden.sh" in c[-1]]
     launch = [i for i, c in enumerate(cmds) if c[0] == "/usr/local/bin/code"]
     assert harden and launch and harden[0] < launch[0]
+
+
+def test_vscode_is_launched_with_foldyards_empty_agent_not_the_operators(fake, monkeypatch):
+    # The attach forwards whatever SSH_AUTH_SOCK the VS Code process holds, verbatim (shown live:
+    # the process keeps the launch env's value; only an UNSET var makes the extension find the
+    # host's real agent). So the launch hands it foldyard's own agent, holding nothing — what
+    # reaches the box is empty by construction, no race to win.
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/private/tmp/com.apple.launchd.x/Listeners")
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    launch = _launch(fake["calls"])[0]
+    sock = str(fake["udd"] / "fy-empty-agent.sock")
+    assert launch["env"]["SSH_AUTH_SOCK"] == sock
+    started = [c["cmd"] for c in fake["calls"] if c["cmd"][0] == "/usr/bin/ssh-agent"]
+    assert started == [["/usr/bin/ssh-agent", "-a", sock]]
+
+
+def test_a_live_empty_agent_is_reused_not_restarted(fake):
+    fake["agent"]["rc"] = 1  # already answering, no identities
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    assert not [c for c in fake["calls"] if c["cmd"][0] == "/usr/bin/ssh-agent"]
+    assert _launch(fake["calls"])[0]["env"]["SSH_AUTH_SOCK"].endswith("fy-empty-agent.sock")
+
+
+def test_an_agent_that_holds_identities_refuses_the_launch(fake, capsys):
+    # Someone `ssh-add`ed a key into the fy agent. Forwarding THAT is the leak this exists to
+    # prevent, so the launch stops and says how to empty it.
+    fake["agent"]["rc"] = 0  # identities listed
+    fake["state"]["running"] = True
+    assert vscode.code() == 1
+    assert "holds identities" in capsys.readouterr().err
+    assert not _launch(fake["calls"])
+
+
+def test_the_git_credential_bridge_is_switched_off_at_both_scopes(fake):
+    # `git.terminalAuthentication` off means the git extension never sets GIT_ASKPASS in a box
+    # terminal — the bridge is not installed, rather than removed after the fact. Pinned in the
+    # instance's own settings (always written) and in the attached config (machine scope).
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    for doc in (json.loads(_settings(fake).read_text()), _written(fake)["settings"]):
+        assert doc["git.terminalAuthentication"] is False
+        assert doc["git.useIntegratedAskPass"] is False
+
+
+def test_a_failed_harden_refuses_the_attach(fake, monkeypatch, capsys):
+    # If the in-box hygiene can't be applied, attaching would forward host credentials into an
+    # unguarded box — so it doesn't.
+    from foldyard import box as box_mod
+
+    monkeypatch.setattr(box_mod, "ensure_harden", lambda *a: False)
+    fake["state"]["running"] = True
+    assert vscode.code() == 1
+    assert "not attaching" in capsys.readouterr().err
+    assert not _launch(fake["calls"])
 
 
 def test_resets_install_marker_when_extensions_missing(fake):

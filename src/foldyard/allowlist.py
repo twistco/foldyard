@@ -72,7 +72,7 @@ def valid_host(host: str) -> bool:
         return False
     if ":" in host:
         host, _, port = host.rpartition(":")
-        if not port.isdigit() or not 1 <= int(port) <= 65535:
+        if ":" in host or not port.isdigit() or not 1 <= int(port) <= 65535:
             return False
     bare = host[2:] if host.startswith("*.") else host
     return "." in bare and all(part for part in bare.split("."))

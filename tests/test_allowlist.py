@@ -122,6 +122,8 @@ def test_grant_rejects_bad_level_and_host(env):
         ("github.com:ssh", False),
         ("github.com:", False),
         (":22", False),
+        ("a:github.com:22", False),  # one separator: the host part keeps no colon
+        ("[::1]:22", False),
     ],
 )
 def test_valid_host(host, ok):

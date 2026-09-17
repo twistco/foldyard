@@ -817,6 +817,49 @@ def test_the_injector_host_exemption_is_443_only(gh, monkeypatch, tmp_path):
     assert f.response is not None and f.response.status_code == 403
 
 
+def test_plain_http_enforces_the_port_policy_too(walled):
+    # `GET http://host:8080/` through the proxy is as much a tunnel past a host grant as a CONNECT
+    # to :22 — so the request hook applies the same policy: a bare grant covers :80 (apt,
+    # redirects) and :443 (a decrypted request), any other port needs `host:port`.
+    inj, allow, log = walled
+    _write_allow(allow, ["deb.debian.org", "internal.example:8080"])
+
+    for host, port in (("deb.debian.org", 80), ("deb.debian.org", 443), ("internal.example", 8080)):
+        f = _Flow(host, port=port)
+        f.response = None
+        inj.request(f)
+        assert f.response is None, (host, port)
+
+    odd = _Flow("deb.debian.org", port=8080)
+    inj.request(odd)
+    assert odd.response is not None and odd.response.status_code == 403
+    assert _last_log(log)["host"] == "deb.debian.org:8080"
+    default = _Flow("internal.example", port=80)  # the port grant is not a host grant
+    inj.request(default)
+    assert default.response is not None and default.response.status_code == 403
+    assert _last_log(log)["host"] == "internal.example"
+
+
+def test_the_injector_exemption_never_covers_cleartext(gh, monkeypatch, tmp_path):
+    # The injector host is exempt so the proxy can reach it to MINT — over HTTPS. A cleartext
+    # request to it would carry the minted credential in the clear, so :80 is not exempt.
+    allow = tmp_path / "allow-effective.json"
+    _write_allow(allow, [])
+    monkeypatch.setenv("INJECT_HOST", "api.github.com")
+    monkeypatch.setenv("INJECT_COMMAND", "true")
+    monkeypatch.setenv("DEFAULT_DENY", "1")
+    monkeypatch.setenv("ALLOW_FILE", str(allow))
+    monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
+    inj = gh.Injector()
+    plain = _Flow("api.github.com", port=80)
+    inj.request(plain)
+    assert plain.response is not None and plain.response.status_code == 403
+    tls = _Flow("api.github.com", port=443)
+    tls.response = None
+    inj.request(tls)
+    assert tls.response is None
+
+
 def test_default_deny_off_never_blocks(gh, monkeypatch, tmp_path):
     # No DEFAULT_DENY: http_connect is a no-op — back-compat for the pre-allowlist behaviour.
     monkeypatch.setenv("INJECT_HOST", "")

@@ -174,6 +174,7 @@ logging.getLogger("mitmproxy.proxy.server").addFilter(_DropWebsocketPingPong())
 
 
 _HTTPS_PORT = 443  # the one port a bare host grant covers at CONNECT
+_HTTP_PORT = 80  # …and, for a request seen in the clear, this one
 
 
 def _host_matches(host: str | None, patterns: list[str]) -> bool:
@@ -638,9 +639,23 @@ class Injector:
         self._log_blocked(host if port == _HTTPS_PORT else f"{host}:{port}")
 
     def _allowed_connect(self, host: str | None, port: int) -> bool:
-        """``host:port`` granted explicitly, or the host granted (:meth:`_allowed`) on :443."""
+        """The CONNECT policy: the host granted (:meth:`_allowed`) on :443, else ``host:port``
+        granted explicitly."""
+        return self._allowed(host) if port == _HTTPS_PORT else self._granted_port(host, port)
+
+    def _allowed_plain(self, host: str | None, port: int) -> bool:
+        """The policy for a request the proxy sees in the clear — cleartext HTTP, or HTTPS it
+        decrypted: :443 as CONNECT; a bare grant covers :80 too (apt, redirects), but NOT the
+        injector exemption — a minted credential never leaves in cleartext; any other port needs
+        ``host:port``."""
         if port == _HTTPS_PORT:
             return self._allowed(host)
+        if port == _HTTP_PORT:
+            self._refresh_allow()
+            return _host_matches(host, self._allow_patterns)
+        return self._granted_port(host, port)
+
+    def _granted_port(self, host: str | None, port: int) -> bool:
         if not host:
             return False
         self._refresh_allow()
@@ -680,11 +695,13 @@ class Injector:
 
     def request(self, flow: http.HTTPFlow) -> None:
         # The egress wall for plain HTTP (cleartext never CONNECTs, so http_connect can't catch it):
-        # refuse a disallowed host here, before it leaves the box. HTTPS is walled at http_connect.
-        if self.default_deny and not self._allowed(flow.request.pretty_host):
+        # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host
+        # grant as CONNECT :22 — here, before it leaves the box. HTTPS is walled at http_connect.
+        host, port = flow.request.pretty_host, flow.request.port
+        if self.default_deny and not self._allowed_plain(host, port):
             flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
             flow.metadata["egress_proxy_blocked"] = True  # so `response` doesn't re-log it as a 403
-            self._log_blocked(flow.request.pretty_host)
+            self._log_blocked(host if port in (_HTTP_PORT, _HTTPS_PORT) else f"{host}:{port}")
             return
         rule = self._rule_for(flow.request.pretty_host, flow.request.path)
         if rule is None:

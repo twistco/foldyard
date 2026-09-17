@@ -911,6 +911,8 @@ def test_vscode_settings_read_toml_as_a_table(fresh_config, tmp_path):
         ("t = 07:32:00", "t"),
         ("[vscode.settings.nested]\nwhen = 1979-05-27", "nested.when"),
         ("xs = [1, 2, 1979-05-27]", "xs[2]"),
+        ("n = nan", "n"),  # TOML floats JSON has no spelling for
+        ("i = -inf", "i"),
     ],
 )
 def test_vscode_settings_refuse_what_json_cannot_carry(fresh_config, tmp_path, body, where):

@@ -745,9 +745,11 @@ by key, since that's where a `hooks` or `permissions` entry would show up.
   gate first: the extensions list decides what the host installs (a UI-kind extension lands in
   the operator's shared `~/.vscode/extensions`), so a box edit to it is inert until an operator
   adopts it ([ADR-0026](./adrs/0026-vscode-attach-config-is-declarative.md)). Know what the
-  attach itself does: Dev Containers forwards the host's SSH agent and git-credential store into
-  the box, and no setting stops it — foldyard neutralises both in-box and the wall fences CONNECT
-  to `:443`; `fy config widenings` lists it and `fy verify` reports what is left
+  attach itself does: Dev Containers forwards the SSH agent the VS Code process holds and its
+  git-credential store into the box — so `fy code` launches VS Code with foldyard's own EMPTY
+  agent and switches the git bridge off (`git.terminalAuthentication`), the box unsets and reaps
+  whatever a manual attach still brings, and the wall fences CONNECT to `:443`; `fy config
+  widenings` lists it and `fy verify` reports what is left
   ([security](./security.md#fy-verify-prove-it-dont-trust-it)).
   - **`extensions`** — marketplace ids (`publisher.name`) installed on attach. The Dev Containers
     extension is dropped (meaningless inside the container); an invalid id is dropped rather than

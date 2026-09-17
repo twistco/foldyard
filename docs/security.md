@@ -188,17 +188,22 @@ Every row names *what* failed and stops there. What it usually means, and where 
   (`fy code`, or a manual "Attach to Running Container") runs its server in the box and, with no
   setting to stop it, forwards the host's SSH agent (`/tmp/vscode-ssh-auth-*.sock`) and its
   git-credential store (`GIT_ASKPASS` over `/tmp/vscode-git-*.sock`) into every terminal it opens
-  — seen live: a box whose posture read "never push" held a live agent with one key. foldyard
-  neutralises both in-box, image-agnostic: the bootstrap installs `~/.config/foldyard/harden.sh`,
-  sourced at `~/.bashrc` line 1 (before the interactive guard, so every bash — the attach's
-  terminals, `fy claude`, `box shell` — inherits the vars' absence), and a reaper that unlinks the
-  sockets as they appear (restarted from every shell and by `fy code` before the attach). The
-  egress wall fences CONNECT to `:443` (below) so an agent has nowhere to go regardless. A hit
-  here means the hygiene isn't running: a box created before it shipped (`fy box up` re-applies
-  it to a running box), a shell that isn't bash, or a socket that appeared in the reaper's
-  one-second window — `fy box shell` restarts the reaper. Not from an attach at all? Then look for
-  a mount or a `[box]`/bootstrap step that copies a credential in (`fy config widenings` lists
-  what the adopted config asks the host to allow), remove it, then `fy box down` + `fy box up`.
+  — seen live: a box whose posture read "never push" held a live agent with one key. `fy code`
+  defuses both at the source, race-free: it launches VS Code with foldyard's own **empty**
+  ssh-agent (the attach forwards whatever agent the VS Code process holds, verbatim — only an
+  *unset* var makes it go and find the host's real one), and pins `git.terminalAuthentication`
+  off so the git bridge is never installed. A second, in-box layer covers what the source can't
+  reach — a manual "Attach to Running Container" from the operator's own VS Code: the bootstrap
+  installs `~/.config/foldyard/harden.sh`, sourced at `~/.bashrc` line 1 (before the interactive
+  guard, so every bash — the attach's terminals, `fy claude`, `box shell` — inherits the vars'
+  absence), and a reaper that unlinks the sockets as they appear (restarted from every shell and
+  by `fy code` before the attach). The egress wall fences CONNECT to `:443` (below) so an agent
+  has nowhere to go regardless. A hit here means an attach that isn't `fy code`'s, or the in-box
+  layer isn't running: a box created before it shipped (`fy box up` re-applies it to a running
+  box), a shell that isn't bash, or a socket that appeared inside the reaper's one-second window
+  — `fy box shell` restarts the reaper. Not from an attach at all? Then look for a mount or a
+  `[box]`/bootstrap step that copies a credential in (`fy config widenings` lists what the
+  adopted config asks the host to allow), remove it, then `fy box down` + `fy box up`.
 - **`~/.ssh key material` / `~/.netrc present`** — a credential is physically in the box. Nothing
   in foldyard puts it there: look for a mount or a `[box]`/bootstrap step that copies it in,
   remove it, then `fy box down` + `fy box up`.

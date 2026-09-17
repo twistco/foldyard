@@ -180,8 +180,17 @@ def _user_settings(udd: Path) -> Path:
 # `update.mode` — this instance is per-worktree scaffolding, not the operator's daily editor, so an
 # update prompt on each attach is pure interruption (and updating a running attached instance is
 # worse than deferring it). The operator's own VS Code is a separate install and is unaffected.
+#
+# `git.terminalAuthentication` / `git.useIntegratedAskPass` — off. On, the git extension running IN
+# the box sets `GIT_ASKPASS` (+ its IPC socket) in every terminal it opens, so a `git push` there
+# asks the HOST — the VS Code GitHub session, the keychain — for a credential: an HTTPS push path
+# into a box whose posture is "never push", seen live 2026-09-17. Off, the bridge is never
+# installed — race-free, unlike anything that removes it afterwards. Both are user-scope (the
+# instance's own settings.json, always written) AND machine-scope (the attached config): pinned
+# in both, like the port guard.
 _PORTS_ATTRIBUTES = "remote.portsAttributes"
 _UPDATE_MODE = "update.mode"
+_GIT_BRIDGE_PINS = {"git.terminalAuthentication": False, "git.useIntegratedAskPass": False}
 # Widest default worktree offset (`stack._offset`: cksum % 89 + 1).
 _MAX_WORKTREE_OFFSET = 89
 
@@ -223,7 +232,7 @@ def _pinned_settings(settings: dict) -> dict:
     user-data-dir's own settings.json, which foldyard always writes — the attached config carries
     the port guard too, but that file is skipped once an operator takes ownership of it, and a
     protection that disappears when someone customises an unrelated key is not a protection."""
-    return {**_pin_ports(settings), _UPDATE_MODE: "manual"}
+    return {**_pin_ports(settings), **_GIT_BRIDGE_PINS, _UPDATE_MODE: "manual"}
 
 
 def _local_terminal_zdotdir(udd: Path) -> Path:
@@ -365,7 +374,7 @@ def _attached_config(checkout: str, exts: list[str], settings: dict) -> dict:
     extensions in BOTH schemas so they are *installed* on attach, not merely recommended —
     ``customizations.vscode.{extensions,settings}`` is the unified form newer Dev Containers
     versions honour, top-level ``extensions``/``settings`` the legacy one older versions read."""
-    pinned = _pin_ports(settings)
+    pinned = {**_pin_ports(settings), **_GIT_BRIDGE_PINS}
     return {
         _GENERATED_MARKER_KEY: _GENERATED_MARKER,
         "workspaceFolder": checkout,
@@ -374,6 +383,33 @@ def _attached_config(checkout: str, exts: list[str], settings: dict) -> dict:
         "settings": pinned,
         "customizations": {"vscode": {"extensions": exts, "settings": pinned}},
     }
+
+
+def _empty_agent(udd: Path) -> str | None:
+    """The SSH agent the launched VS Code gets: foldyard's OWN, holding no identities — so what the
+    Dev Containers attach forwards into the box is empty by construction. The attach forwards
+    whatever ``SSH_AUTH_SOCK`` the VS Code process holds (shown 2026-09-17: the process keeps the
+    LAUNCH env's value verbatim; only an UNSET var makes the extension go and find the host's own
+    agent — the one with the operator's keys). Per user-data-dir, so per worktree instance; started
+    once and reused while it answers. Refuses (``None``) if it ever holds a key: someone ran
+    `ssh-add` against it, and an agent that is not empty has no business being forwarded."""
+    sock = udd / "fy-empty-agent.sock"
+    agent, add = shutil.which("ssh-agent"), shutil.which("ssh-add")
+    if not agent or not add:
+        # No OpenSSH on the host: a SET-but-dead path still beats unset (unset is the fallback
+        # that finds the real agent), and `fy verify` in the box reports whatever got forwarded.
+        return str(udd / "no-agent.sock")
+    env = {**os.environ, "SSH_AUTH_SOCK": str(sock)}
+    listed = subprocess.run([add, "-l"], env=env, capture_output=True, text=True)
+    if listed.returncode == 0:  # identities present — never forward those
+        _err(f"✗ the isolated VS Code's SSH agent at {sock} holds identities; it must stay empty.")
+        _err(f"  Remove them: SSH_AUTH_SOCK={sock} ssh-add -D  (or delete the socket), then retry.")
+        return None
+    if listed.returncode != 1:  # 1 = alive and empty; anything else = not answering → (re)start
+        udd.mkdir(parents=True, exist_ok=True)
+        sock.unlink(missing_ok=True)
+        subprocess.run([agent, "-a", str(sock)], stdout=subprocess.DEVNULL, check=False)
+    return str(sock)
 
 
 class _Unreadable:
@@ -530,11 +566,22 @@ def code() -> int:
     # place and its socket reaper running BEFORE the server lands — see box._HARDEN_SNIPPET.
     from . import box as box_mod  # lazy: box.py pulls keyless/machine/sandbox, not needed above
 
-    box_mod.ensure_harden(engine, box, env)
+    if not box_mod.ensure_harden(engine, box, env):
+        _err(f"✗ couldn't apply the in-box editor-attach hygiene to {box} (bash in the box failed)")
+        _err("  — not attaching: the attach would forward host credentials into an unguarded box.")
+        _err("  `fy box shell` to look; `fy box down && fy box up` rebuilds it.")
+        return 1
+    agent = _empty_agent(udd)
+    if agent is None:
+        return 1
     print(f"▶ launching VS Code (DOCKER_HOST={env.get('DOCKER_HOST', '')})…")
     # `env` (incl. DOCKER_HOST) reaches ONLY this launched, isolated instance — never the
     # user's shell or their default VS Code. `|| true` parity: a non-zero `code` is non-fatal.
-    subprocess.run([code_cli, "--user-data-dir", str(udd), "--folder-uri", uri], env=env)
+    # SSH_AUTH_SOCK is foldyard's empty agent (`_empty_agent`), never the operator's.
+    subprocess.run(
+        [code_cli, "--user-data-dir", str(udd), "--folder-uri", uri],
+        env={**env, "SSH_AUTH_SOCK": agent},
+    )
     print("✓ launched. If it didn't attach, check that VS Code's Docker context points at the")
     print("  same socket as DOCKER_HOST (`fy docs quickstart`).")
     return 0

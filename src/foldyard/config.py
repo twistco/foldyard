@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import math
 import os
 import subprocess
 import sys
@@ -1162,8 +1163,12 @@ def _non_json_leaf(value: object, path: str) -> str | None:
     """The dotted path of the first value under ``value`` that JSON cannot carry, or ``None``.
     TOML has types JSON does not — dates, times, datetimes — and ``json.dumps`` meets them as a
     traceback, so they are refused at the read instead."""
-    if value is None or isinstance(value, (str, bool, int, float)):
+    if value is None or isinstance(value, (str, bool, int)):
         return None
+    if isinstance(
+        value, float
+    ):  # TOML has nan/inf; json.dumps emits NaN/Infinity, which is not JSON
+        return None if math.isfinite(value) else path
     if isinstance(value, dict):
         for k, v in value.items():
             if (bad := _non_json_leaf(v, f"{path}.{k}" if path else str(k))) is not None:
