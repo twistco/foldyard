@@ -16,8 +16,11 @@ name: foldyard · live e2e
 #     `nestedVirtualization`, and a Lima 2.2.0 guest boots there (Lullabot/sandbar#149 measured it
 #     on 2026-08-27; the READY line comes ~2 min after QEMU starts, vs 30–40 s on ubuntu-24.04).
 #     WSL2 without the VM would be bare Linux without the VM (ADR-0027), so the distro is only the
-#     host; every product path still runs in the Lima guest. GitHub calls nested virtualisation
-#     experimental, so this tier is the most likely to regress for reasons outside the change.
+#     host; every product path still runs in the Lima guest. One module skips itself here:
+#     test_wall_e2e — the host-side wall matches the VM by `socket cgroupv2`, and the stock WSL2
+#     kernel has no CONFIG_NFT_SOCKET (the in-VM wall is unaffected; it runs in the Fedora
+#     guest). GitHub calls nested virtualisation experimental, so this tier is the most likely
+#     to regress for reasons outside the change.
 #
 # Split out from foldyard.yml so the fast lint/types/unit suite can run on every push while this
 # heavier job stays OPT-IN. The workflow triggers on every push, but the job only runs on `main`
@@ -447,7 +450,8 @@ jobs:
           echo "export CONTAINER_HOST=unix://$sock" >> "$HOME/.fy-ci.env"
           CONTAINER_HOST="unix://$sock" podman info --format '{{.Host.Arch}} podman {{.Version.Version}} on {{.Host.Distribution.Distribution}} {{.Host.Distribution.Version}}'
 
-      # The same module list as lima-host-e2e — what differs is the host under it.
+      # The same module list as lima-host-e2e — what differs is the host under it. The wall module
+      # gates itself on the kernel's nft `socket` expression and SKIPS here (see the header).
       - name: Host e2e on the VM
         shell: wsl-bash {0}
         run: |
