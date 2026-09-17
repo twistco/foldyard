@@ -2315,10 +2315,10 @@ def test_vscode_plugin_gated(monkeypatch):
 
 
 def test_vscode_plugin_offers_the_marketplace_behind_the_wall(monkeypatch):
-    # The server IN the box installs `[vscode] extensions` itself; under an enforcing wall the
-    # gallery query is refused and the install fails silently (an empty extensions dir, seen on
-    # a consumer). So the hosts are offered like the agents' installer hosts — and only under a
-    # `[vscode]` table. Telemetry/experiment hosts stay out.
+    """The server IN the box installs `[vscode] extensions` itself; under an enforcing wall the
+    gallery query is refused and the install fails silently (an empty extensions dir, seen on
+    a consumer). So the hosts are offered like the agents' installer hosts — and only under a
+    `[vscode]` table. Telemetry/experiment hosts stay out."""
     p = vscode.VscodePlugin()
     monkeypatch.setattr(config, "vscode_enabled", lambda: False)
     assert p.egress_recommend() == []

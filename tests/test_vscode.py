@@ -456,14 +456,14 @@ def test_settings_come_from_config_and_keep_the_daemon_port_pin(fake, monkeypatc
 
 
 def test_a_settings_change_resets_the_machine_settings_marker(fake):
-    # Dev Containers writes the attached config's settings into the box's Machine settings ONCE
-    # per server install (.writeMachineSettingsMarker — the settings twin of the extensions
-    # marker), so a changed table would otherwise silently never apply to a box that has already
-    # been attached to. First write, and every change since the last write, clear it.
-    # The marker alone is NOT enough: the extension also refuses to rewrite an existing
-    # Machine/settings.json (its source: `markerCreated && !exists(settings.json)`), so the
-    # rendered file goes with the marker — a consumer sat on two-month-stale Machine settings
-    # with the marker dutifully reset on every `fy code`.
+    """Dev Containers writes the attached config's settings into the box's Machine settings ONCE
+    per server install (.writeMachineSettingsMarker — the settings twin of the extensions
+    marker), so a changed table would otherwise silently never apply to a box that has already
+    been attached to. First write, and every change since the last write, clear it.
+    The marker alone is NOT enough: the extension also refuses to rewrite an existing
+    Machine/settings.json (its source: `markerCreated && !exists(settings.json)`), so the
+    rendered file goes with the marker — a consumer sat on two-month-stale Machine settings
+    with the marker dutifully reset on every `fy code`."""
     fake["state"]["running"] = True
     fake["state"]["installed"] = "anthropic.claude-code-1.2.3\nnefrob.vscode-just-syntax-0.5.0\n"
     assert vscode.code() == 0
@@ -487,14 +487,15 @@ def test_a_settings_change_resets_the_machine_settings_marker(fake):
 def test_a_failed_marker_reset_leaves_the_config_unwritten_so_the_next_run_retries(
     fake, capsys, monkeypatch
 ):
-    # The written config is the record of what the box holds, so it must be written AFTER the
-    # markers are gone: written first, a failed `rm -f` leaves a config that says "applied" and
-    # the next `fy code` diffs against it, sees no change, and the settings never land.
+    """The written config is the record of what the box holds, so it must be written AFTER the
+    markers are gone: written first, a failed `rm -f` leaves a config that says "applied" and
+    the next `fy code` diffs against it, sees no change, and the settings never land."""
     fake["state"]["running"] = True
     calls = fake["calls"]
     real = vscode.subprocess.run
 
     def flaky(cmd, **kw):
+        """The fixture's engine, except the marker-reset exec fails."""
         if cmd[1] == "exec" and cmd[3:5] == ["sh", "-c"] and cmd[-1].startswith("rm -f"):
             calls.append({"cmd": cmd, "env": kw.get("env")})
             return _Proc(1)
