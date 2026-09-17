@@ -227,7 +227,9 @@ class _Box:
 
 
 def _wall_enforcing_with(host: str) -> None:
-    """State this test's egress-wall posture: ENFORCING, with ``host`` granted.
+    """State this test's egress-wall posture: ENFORCING, with ``host`` granted — as ``host:port``
+    here, because the fake upstream sits on a random port and the wall fences the CONNECT port (a
+    bare grant means ``:443``; a bare ``github.com`` used to reach ``github.com:22``).
 
     The daemon spec carries the wall (``DEFAULT_DENY`` + ``ALLOW_FILE``), so left unstated the fake
     upstream is judged by whatever is ambient — the repo's own ``[proxy] default_deny`` seed and
@@ -293,7 +295,9 @@ def capture_box(tmp_path, monkeypatch):
     # github-consumer property now (undeclared consumers get no GH_TOKEN at all).
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
     monkeypatch.setattr(config, "github_declared", lambda: True)
-    _wall_enforcing_with(ip)  # before the spec is built — it reads DEFAULT_DENY + ALLOW_FILE
+    _wall_enforcing_with(
+        f"{ip}:{uport}"
+    )  # before the spec is built — it reads DEFAULT_DENY + ALLOW_FILE
     reg = Registry([GithubPlugin(), ProxyPlugin()])
     spec = reg.desired_daemons({"github": "off", "capture": "on"})["egress-proxy"]
     assert spec["env"]["DEFAULT_DENY"] == "1"  # the wall is up; the upstream is granted through it
@@ -445,7 +449,9 @@ def av_box(tmp_path, monkeypatch):
     # Opt the consumer into the proxy ([proxy] declared) so the always-on daemon exists with no
     # injector — Phase A′ always-route is an opted-in-consumer property.
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
-    _wall_enforcing_with(ip)  # before the specs are built — they read DEFAULT_DENY + ALLOW_FILE
+    _wall_enforcing_with(
+        f"{ip}:{uport}"
+    )  # before the specs are built — they read DEFAULT_DENY + ALLOW_FILE
     reg = Registry([GithubPlugin(), ProxyPlugin()])
     spec_pass = reg.desired_daemons({"github": "off", "capture": "off"})["egress-proxy"]
     spec_full = reg.desired_daemons({"github": "off", "capture": "on"})["egress-proxy"]
