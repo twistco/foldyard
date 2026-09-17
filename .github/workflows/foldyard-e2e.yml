@@ -31,9 +31,15 @@ on:
 permissions:
   contents: read
 
+# One live run per ref; a NEWER opt-in run pre-empts an older one. A push whose jobs are skipped
+# (no `[run-e2e]`, not main) must NOT cancel a run in flight — with a plain `true` here, a docs
+# commit landing mid-run cancelled a 15-minute VM job twice on 2026-09-17.
 concurrency:
   group: foldyard-e2e-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: >-
+    ${{ github.ref == 'refs/heads/main'
+      || contains(github.event.head_commit.message, '[run-e2e]')
+      || github.event_name == 'workflow_dispatch' }}
 
 jobs:
   live-e2e:
