@@ -189,11 +189,16 @@ Every row names *what* failed and stops there. What it usually means, and where 
   setting to stop it, forwards the host's SSH agent (`/tmp/vscode-ssh-auth-*.sock`) and its
   git-credential store (`GIT_ASKPASS` over `/tmp/vscode-git-*.sock`) into every terminal it opens
   — seen live: a box whose posture read "never push" held a live agent with one key. `fy code`
-  defuses both at the source, race-free: it launches VS Code with foldyard's own **empty**
-  ssh-agent (the attach forwards whatever agent the VS Code process holds, verbatim — only an
-  *unset* var makes it go and find the host's real one), and pins `git.terminalAuthentication`
-  off so the git bridge is never installed. A second, in-box layer covers what the source can't
-  reach — a manual "Attach to Running Container" from the operator's own VS Code: the bootstrap
+  defuses the SSH side at the source, by construction: it launches VS Code with foldyard's own
+  **empty** ssh-agent (the attach forwards whatever agent the VS Code process holds, verbatim —
+  only an *unset* var makes it go and find the host's real one), and no setting chooses what is
+  forwarded. The git side is only a *default*: `git.terminalAuthentication` and
+  `git.useIntegratedAskPass` are pinned off at user and machine scope, but workspace settings win
+  and `.vscode/settings.json` is mount data the box can write — so for the git bridge the in-box
+  layer is the enforcement, and `fy verify` **fails** a checkout that flips either back on
+  (`workspace settings re-enable the git-credential bridge`). That in-box layer also covers what
+  the source can't reach — a manual "Attach to Running Container" from the operator's own VS
+  Code: the bootstrap
   installs `~/.config/foldyard/harden.sh`, sourced at `~/.bashrc` line 1 (before the interactive
   guard, so every bash — the attach's terminals, `fy claude`, `box shell` — inherits the vars'
   absence), and a reaper that unlinks the sockets as they appear (restarted from every shell and

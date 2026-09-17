@@ -433,6 +433,27 @@ def test_a_bridge_socket_on_disk_is_fail_even_with_the_vars_unset(
     assert "bridge sockets" in out and "vscode-ssh-auth-deadbeef.sock" in out
 
 
+def test_workspace_settings_re_enabling_the_git_bridge_is_fail(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # `fy code` pins the bridge off at user + machine scope, but WORKSPACE settings win and
+    # `.vscode/settings.json` is mount data the box can write — so a checkout flipping it back on
+    # is the mount asking for a host credential, and verify says so. JSONC, matched textually.
+    _enter_box(monkeypatch, tmp_path)
+    checkout = tmp_path  # the fixture's Context carries FOLDYARD_CHECKOUT=tmp_path
+    (checkout / ".vscode").mkdir(parents=True)
+    (checkout / ".vscode" / "settings.json").write_text(
+        '{\n  // re-arm\n  "git.terminalAuthentication": true,\n  "editor.fontSize": 12,\n}\n'
+    )
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "re-enable the git-credential bridge: git.terminalAuthentication" in out
+
+    (checkout / ".vscode" / "settings.json").write_text('{"git.terminalAuthentication": false}')
+    assert verify.verify() == 0
+    assert "leave the git-credential bridge off" in capsys.readouterr().out
+
+
 def test_ssh_only_known_hosts_passes(secure_engine, monkeypatch, tmp_path, capsys):
     home = _enter_box(monkeypatch, tmp_path)
     ssh = home / ".ssh"

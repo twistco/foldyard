@@ -156,11 +156,14 @@ mount-wide overlay.
   read "never push"; the defeat one consumer's image carried (an rc-file unset) was never
   foldyard's, and the socket is usable by path regardless of the env. What the process holds it
   forwards verbatim, though — only an *unset* var makes it hunt for the host's agent — so `fy
-  code` now launches VS Code with foldyard's own empty ssh-agent and pins
-  `git.terminalAuthentication` off: neither bridge carries a credential, by construction. The
-  bootstrap's in-box hygiene (`box._HARDEN_SNIPPET`: unset + a socket reaper, re-ensured by `fy
-  code` before the attach) is the second layer for a manual attach; the egress wall fences CONNECT
-  to `:443`; `fy verify` reports the vars AND the sockets. The gate is still what stops the box;
-  this is what stops the attach.
+  code` now launches VS Code with foldyard's own empty ssh-agent: the SSH side carries no
+  credential by construction, since no setting chooses what is forwarded. The git side is weaker:
+  `git.terminalAuthentication` is pinned off at user and machine scope, but workspace settings
+  win and `.vscode/settings.json` is mount data, so that pin is a default; the enforcement is
+  the bootstrap's in-box hygiene (`box._HARDEN_SNIPPET`: the vars unset in every shell, the IPC
+  socket reaped — re-ensured by `fy code` before the attach, which refuses if it can't), which
+  also covers a manual attach, plus `fy verify` failing a checkout that re-arms the setting. The
+  egress wall fences CONNECT to `:443`. The gate is still what stops the box; this is what stops
+  the attach.
 - A future surface that genuinely needs *computed* output from the yard should reach for ADR-0023
   §2's split again — this ADR removes one instance of it, not the pattern.

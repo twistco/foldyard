@@ -185,9 +185,12 @@ def _user_settings(udd: Path) -> Path:
 # the box sets `GIT_ASKPASS` (+ its IPC socket) in every terminal it opens, so a `git push` there
 # asks the HOST — the VS Code GitHub session, the keychain — for a credential: an HTTPS push path
 # into a box whose posture is "never push", seen live 2026-09-17. Off, the bridge is never
-# installed — race-free, unlike anything that removes it afterwards. Both are user-scope (the
-# instance's own settings.json, always written) AND machine-scope (the attached config): pinned
-# in both, like the port guard.
+# installed. Pinned at user scope (the instance's own settings.json, always written) AND machine
+# scope (the attached config), like the port guard — but this is a DEFAULT, not enforcement:
+# WORKSPACE settings win, and `.vscode/settings.json` is mount data the box can write. The
+# enforcement for the git bridge is in-box (box._HARDEN_SNIPPET: the vars unset in every shell,
+# the IPC socket reaped) and `fy verify`, which fails a checkout that flips these back on. Only
+# the SSH side is by construction (`_empty_agent`): no setting chooses what agent is forwarded.
 _PORTS_ATTRIBUTES = "remote.portsAttributes"
 _UPDATE_MODE = "update.mode"
 _GIT_BRIDGE_PINS = {"git.terminalAuthentication": False, "git.useIntegratedAskPass": False}

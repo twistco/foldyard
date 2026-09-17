@@ -455,13 +455,14 @@ def render(exp: Exposure) -> list[str]:
             "into the box:"
         )
         out.append(
-            "    `fy code` hands it an EMPTY agent and switches the git bridge off; the box "
-            "unsets + reaps what a"
+            "    `fy code` hands it an EMPTY agent (by construction) and defaults the git bridge "
+            "off (workspace"
         )
         out.append(
-            "    manual attach brings; the wall fences CONNECT to :443. `fy verify` in the box "
-            "reports what is left."
+            "    settings can re-arm it); the box unsets + reaps either way; the wall fences "
+            "CONNECT to :443."
         )
+        out.append("    `fy verify` in the box reports what is left, incl. a re-armed workspace.")
         out.append("")
 
     if exp.ignored:

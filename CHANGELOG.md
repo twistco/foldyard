@@ -50,12 +50,15 @@ break config or CLI shape, and say so here. How a release is cut:
   it opens, no setting stops it, and launching VS Code with `SSH_AUTH_SOCK` stripped still
   forwards — but what the process HOLDS it forwards verbatim; only an unset var makes it hunt for
   the host's agent. So `fy code` now launches VS Code with foldyard's own EMPTY ssh-agent (per
-  instance, reused while it answers, refused if it ever holds a key) and pins
-  `git.terminalAuthentication` / `git.useIntegratedAskPass` off, so neither bridge carries a
-  credential, by construction. For a manual attach from the operator's own VS Code — which
-  `fy code` can't reach — the one defeat that existed was an rc-file unset in a single consumer's
-  box image, which no other consumer had, and which leaves the socket reachable by path anyway;
-  now foldyard's bootstrap installs `~/.config/foldyard/harden.sh` in every box (image-agnostic),
+  instance, reused while it answers, refused if it ever holds a key): the SSH side carries no
+  credential by construction, since no setting chooses what is forwarded. The git side gets
+  `git.terminalAuthentication` / `git.useIntegratedAskPass` pinned off at user and machine scope
+  — a default only, because workspace settings win and `.vscode/settings.json` is mount data the
+  box can write; `fy verify` FAILS a checkout that flips either back on. So for the git bridge,
+  and for a manual attach from the operator's own VS Code, the enforcement is in-box. The one
+  defeat that existed was an rc-file unset in a single consumer's box image, which no other
+  consumer had, and which leaves the socket reachable by path anyway; now foldyard's bootstrap
+  installs `~/.config/foldyard/harden.sh` in every box (image-agnostic),
   sourced at `~/.bashrc` line 1 so every bash inherits the vars' absence, plus a reaper that
   unlinks `/tmp/vscode-ssh-auth-*.sock` and `/tmp/vscode-git-*.sock` as they appear — restarted
   from every shell and by `fy code` before the attach (which refuses to attach if it can't);

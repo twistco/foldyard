@@ -149,6 +149,20 @@ def _probe_runs(engine: str, env: dict, probe: str) -> bool:
 # HTTPS the same way a forwarded agent is over SSH. And the sockets it drops in /tmp, which are
 # reachable by path regardless of the env: the agent proxy and the git-IPC the askpass goes over.
 _GIT_BRIDGE_VARS = ("GIT_ASKPASS", "VSCODE_GIT_IPC_HANDLE", "VSCODE_GIT_ASKPASS_MAIN")
+_GIT_BRIDGE_SETTINGS = ("git.terminalAuthentication", "git.useIntegratedAskPass")
+
+
+def _workspace_rearms_git_bridge(settings: Path) -> list[str]:
+    """The git-bridge settings a workspace ``settings.json`` sets to ``true``. A textual match, not
+    a parse: the file is JSONC (comments, trailing commas) and an unparseable one must not read
+    as "off"."""
+    try:
+        text = settings.read_text()
+    except OSError:
+        return []
+    return [k for k in _GIT_BRIDGE_SETTINGS if re.search(rf'"{re.escape(k)}"\s*:\s*true\b', text)]
+
+
 _BRIDGE_SOCKET_DIR = Path("/tmp")
 _BRIDGE_SOCKET_GLOBS = ("vscode-ssh-auth-*.sock", "vscode-git-*.sock")
 _GIT_NO_SSH = re.compile(r"cannot run ssh|ssh: (command )?not found", re.I)
@@ -301,6 +315,23 @@ def _box_posture(rep: _Report, env: dict) -> None:
             f"editor-attach bridge sockets in {_BRIDGE_SOCKET_DIR}: {' '.join(socks)} — usable "
             "by path even with the vars unset (foldyard's reaper removes these; a box shell "
             "restarts it)"
+        )
+
+    # `fy code` pins the git bridge OFF (git.terminalAuthentication / useIntegratedAskPass) at
+    # user + machine scope — but WORKSPACE settings win, and `.vscode/settings.json` is mount
+    # data the box can write. A checkout flipping either back on is asking VS Code to hand its
+    # git a host credential: the in-box unset + reaper still neutralise it (with their window),
+    # so this is the row that says the mount is trying.
+    checkout_dir = Path(env.get("FOLDYARD_CHECKOUT") or str(stack.main_repo()))
+    rearmed = _workspace_rearms_git_bridge(checkout_dir / ".vscode" / "settings.json")
+    if not rearmed:
+        rep.ok("workspace settings leave the git-credential bridge off")
+    else:
+        rep.bad(
+            f"workspace settings re-enable the git-credential bridge: {' '.join(rearmed)} = true "
+            f"in {checkout_dir / '.vscode' / 'settings.json'} — mount data overriding `fy code`'s "
+            "pin; remove it (the in-box unset + reaper are all that stand between git and a host "
+            "credential)"
         )
 
     # Only PRIVATE KEY material is a push path — known_hosts*/config are harmless.
