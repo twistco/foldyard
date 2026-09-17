@@ -244,7 +244,9 @@ jobs:
             "mount | grep -E ' / | /home|overlay|9p|virtiofs'" \
             "journalctl --user -u podman --no-pager -n 25" \
             "journalctl -b -p warning --no-pager -n 40" \
-            "cat /run/fy-wall/boot.log"; do
+            "cat /run/fy-wall/boot.log" \
+            "cat /etc/subuid /etc/subgid; podman unshare cat /proc/self/uid_map; podman info --format '{{json .Host.IDMappings}}'" \
+            "ls -lan /home; d=\$(ls -d ~/.local/share/containers/storage/overlay/*/diff | head -1); ls -lan \$d/etc | head -4"; do
             echo "\$ $cmd"; limactl shell foldyard-example -- sh -c "$cmd" 2>&1 || true
           done
           echo "::endgroup::"

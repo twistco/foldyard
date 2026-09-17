@@ -78,15 +78,9 @@ def test_workspaces_sees_main_with_its_live_stack(bound):
     )  # the example stack
     assert main["devbox"] is False
     assert main["branch"]
-    if main["app_port"] != 8080:
-        # workspaces() swallows the config error behind a None; re-do its lookup unguarded so
-        # the CI log names the exception (the adopted-config read, the port table…).
-        from foldyard import config
-
-        with config.using(devmode.worktree_config("")):
-            key = config.app_port_key()
-            bases = config.port_bases()
-        raise AssertionError(f"app_port {main['app_port']!r}: key={key!r} bases={bases!r}")
+    # The example declares no [project].app_port, so no browsable URL: None is the contract
+    # (a consumer-defined key, never a guessed APP_PORT — config.app_port_key).
+    assert main["app_port"] is None
 
 
 def test_up_worktrees_counts_dev_boxes_not_stack_containers(bound):

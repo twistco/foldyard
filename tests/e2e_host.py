@@ -188,9 +188,18 @@ def guest_diagnostics() -> str:
         "podman run --rm docker.io/library/alpine true && echo NATIVE-RUN-OK",
         "mount | grep -E ' / | /home|overlay|9p|virtiofs' | head -20",
         "ls -la ~/.local/share/containers/storage/overlay/ | head -12",
-        "journalctl --user -u podman --no-pager -n 25",
-        "journalctl -b -p warning --no-pager -n 30",
+        "journalctl --user -u podman --no-pager -n 12",
+        "journalctl -b -p warning --no-pager -n 12",
         "cat /run/fy-wall/boot.log 2>/dev/null | tail -20",
+        # The rootless ID mapping: a store populated under one subuid range and a user namespace
+        # built from another reads as EPERM/ENOENT on files the image plainly has.
+        "cat /etc/subuid /etc/subgid; ls -la /usr/bin/newuidmap; cat /proc/sys/user/max_user_namespaces",
+        "podman unshare cat /proc/self/uid_map /proc/self/gid_map",
+        "podman info --format '{{json .Host.IDMappings}}'",
+        "d=$(ls -d ~/.local/share/containers/storage/overlay/*/diff | head -1); ls -lan $d | head -6; ls -lan $d/etc | head -4",
+        "stat -c '%u %g %n' /home/runner* ~/.local/share/containers/storage 2>/dev/null; ls -lan /home",
+        "podman system migrate 2>&1; podman run --rm docker.io/library/alpine true && echo MIGRATE-FIXED",
+        "podman run --rm --userns=keep-id docker.io/library/alpine true && echo KEEP-ID-OK",
     )
     out = []
     for cmd in probes:
