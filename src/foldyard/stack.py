@@ -586,16 +586,36 @@ def _image_id(engine: str, image: str, env: dict[str, str]) -> str | None:
     return proc.stdout.strip() or None if proc.returncode == 0 else None
 
 
+def _repo_tags(engine: str, image: str, env: dict[str, str]) -> list[str] | None:
+    """The tags still naming ``image`` — ``[]`` when untagged, None when unreadable (fail
+    closed: an id whose tags can't be read is treated as still referenced)."""
+    proc = _run([engine, "image", "inspect", "--format", "{{json .RepoTags}}", image], env=env)
+    if proc.returncode != 0:
+        return None
+    try:
+        tags = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    return tags if isinstance(tags, list) else None
+
+
 def _remove_superseded(ctx: Context, ids: list[str]) -> None:
     """Remove the images `up`'s build untagged. Provably ours and not in flight, so no age
     guard — the dangling sweep's guard exists for OTHER sessions' builds. Never `--force`: an
-    id a container still holds (a stopped one, another service's tag) is refused by the engine
-    and left for the dangling sweep. Why it matters: a rebuilt 6 GB image otherwise sits there
-    younger than any guard, exactly when the next build needs the room."""
+    id a container still holds (a stopped one) is refused by the engine and left for the
+    dangling sweep. An id another tag still names is skipped BEFORE the rmi: `rmi <id>` on an
+    image with exactly one remaining tag removes it, and that tag is a service this build
+    didn't touch (a profile-gated alias of the same build spec, say) — its image, not a
+    leftover. Why it matters: a rebuilt 6 GB image otherwise sits there younger than any
+    guard, exactly when the next build needs the room."""
     if not ids:
         return
     eng = config.engine()
-    removed = [i for i in ids if _run([eng, "rmi", i], env=ctx.env).returncode == 0]
+    removed = [
+        i
+        for i in ids
+        if _repo_tags(eng, i, ctx.env) == [] and _run([eng, "rmi", i], env=ctx.env).returncode == 0
+    ]
     if removed:
         print(f"✓ removed {len(removed)} image(s) this build superseded")
 
@@ -1473,18 +1493,24 @@ def reclaim(ctx: Context, extra_profiles: list[str] | None = None, *, force: boo
             _err(f"+ {eng} rmi " + " ".join(orphans))
             _run([eng, "rmi", *orphans], env=ctx.env)
     _project_reclaim(ctx)
+    # The two probes are independent: a forced reclaim runs with `before` unknown, and the
+    # store's state afterwards is still worth saying even when the freed figure isn't known.
     after = disk_headroom(ctx.env)
-    if after is None or before is None:
+    if after is None:
         return
-    freed = _gib(max(0, after.free - before.free))
+    freed = (
+        f"reclaimed {_gib(max(0, after.free - before.free))}"
+        if before is not None
+        else "reclaimed (headroom before unknown)"
+    )
     if after.low:
         print(
-            f"⚠ reclaimed {freed}, store still low — {after.render()}. `{eng} system df` shows "
+            f"⚠ {freed}, store still low — {after.render()}. `{eng} system df` shows "
             f"what holds it; `{eng} image prune -a` also drops unused tagged images (base images "
             f"re-pull on the next build), `{eng} container prune` stopped containers."
         )
     else:
-        print(f"✓ reclaimed {freed} — {after.render()}")
+        print(f"✓ {freed} — {after.render()}")
 
 
 def _project_reclaim(ctx: Context) -> None:

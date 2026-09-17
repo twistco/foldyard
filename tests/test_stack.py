@@ -908,6 +908,32 @@ def test_reclaim_now_sweeps_regardless_of_headroom(fake_repo, monkeypatch):
     assert [c for c in calls if c[:3] == ["podman", "image", "prune"]]
 
 
+def test_forced_reclaim_reports_headroom_even_when_the_before_probe_failed(
+    fake_repo, monkeypatch, capsys
+):
+    # The two probes are independent: `fy reclaim` runs regardless of the first, so a store the
+    # first probe couldn't read but the second can must still get its state said.
+    _, headroom = _headroom_run(free_gib=40.0)
+    probes = 0
+
+    def fake_run(cmd, **kw):
+        nonlocal probes
+        proc = headroom(cmd, **kw)
+        if cmd[:2] == ["podman", "info"]:
+            probes += 1
+            if probes == 1:
+                proc = _FakeProc()
+                proc.returncode = 1
+        return proc
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    monkeypatch.setattr(stack, "_live_projects", lambda ctx: None)
+    stack.reclaim(stack.resolve(), force=True)
+    out = capsys.readouterr().out
+    assert "headroom unknown" in out  # the banner, before the sweeps
+    assert "✓" in out and "40.0 GiB" in out  # the after-state, from the second probe
+
+
 # ── the project's own [reclaim] script ───────────────────────────────────────────────
 
 
@@ -969,10 +995,15 @@ def test_reclaim_without_a_script_runs_no_hook(fake_repo, monkeypatch):
 # ── images a build superseded are removed once nothing runs them ─────────────────────
 
 
-def _build_then_up_runs(monkeypatch, config_yaml: str, ids: dict[str, list[str]]):
+def _build_then_up_runs(
+    monkeypatch,
+    config_yaml: str,
+    ids: dict[str, list[str]],
+    tags: dict[str, list[str]] | None = None,
+):
     """Record commands; answer `compose config` with the given services and `image inspect
     <name>` with the next id in ``ids[name]`` (the last repeats) — the image before and after
-    the build."""
+    the build. The RepoTags inspect of an id answers ``tags[id]`` (untagged by default)."""
     import types
 
     calls: list[list[str]] = []
@@ -982,6 +1013,9 @@ def _build_then_up_runs(monkeypatch, config_yaml: str, ids: dict[str, list[str]]
         calls.append(cmd)
         if "config" in cmd:
             return types.SimpleNamespace(returncode=0, stdout=config_yaml, stderr="")
+        if cmd[:3] == ["podman", "image", "inspect"] and "{{json .RepoTags}}" in cmd:
+            out = json.dumps((tags or {}).get(cmd[-1], []))
+            return types.SimpleNamespace(returncode=0, stdout=out + "\n", stderr="")
         if cmd[:3] == ["podman", "image", "inspect"]:
             seq = remaining.get(cmd[-1], [])
             out = (seq.pop(0) if len(seq) > 1 else (seq[0] if seq else "")) + "\n"
@@ -1018,6 +1052,66 @@ def test_up_keeps_an_image_the_build_left_unchanged(fake_repo, monkeypatch):
     calls = _build_then_up_runs(
         monkeypatch, _ONE_BUILD_SERVICE, {"tangible-podman_app": ["sha256:same"]}
     )
+    assert stack.up() == 0
+    assert not [c for c in calls if c[:2] == ["podman", "rmi"]]
+
+
+_TWO_SERVICES_ONE_SPEC = json.dumps(
+    {
+        "services": {
+            "app": {"build": {"context": "/repo/app"}},
+            "worker": {"build": {"context": "/repo/app"}, "profiles": ["jobs"]},
+        }
+    }
+)
+
+
+def test_up_keeps_a_superseded_id_another_tag_still_names(fake_repo, monkeypatch):
+    # `app` and `worker` share one build spec, so one id carries both tags. An `up` without the
+    # `jobs` profile rebuilds only `app`: the old id is superseded FOR THAT TAG but is still
+    # `<project>_worker`'s image — and with no worker container holding it, a bare `rmi <id>`
+    # would take it (the engine only refuses ids in use, not ids merely tagged). Skip it.
+    inactive = json.dumps({"services": {"app": {"build": {"context": "/repo/app"}}}})
+    calls = _build_then_up_runs(
+        monkeypatch,
+        inactive,
+        {"tangible-podman_app": ["sha256:shared", "sha256:new"]},
+        tags={"sha256:shared": ["localhost/tangible-podman_worker:latest"]},
+    )
+    assert stack.up() == 0
+    assert not [c for c in calls if c[:2] == ["podman", "rmi"]]
+    # …whereas once both tags have moved off it, it goes.
+    calls = _build_then_up_runs(
+        monkeypatch,
+        _TWO_SERVICES_ONE_SPEC,
+        {
+            "tangible-podman_app": ["sha256:shared", "sha256:new"],
+            "tangible-podman_worker": ["sha256:shared", "sha256:new"],
+        },
+    )
+    assert stack.up() == 0
+    assert [c for c in calls if c[:2] == ["podman", "rmi"]] == [["podman", "rmi", "sha256:shared"]]
+
+
+def test_up_keeps_a_superseded_id_whose_tags_are_unreadable(fake_repo, monkeypatch):
+    # Fail closed: tags that can't be read count as "still referenced".
+    import types
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if "config" in cmd:
+            return types.SimpleNamespace(returncode=0, stdout=_ONE_BUILD_SERVICE, stderr="")
+        if cmd[:3] == ["podman", "image", "inspect"] and "{{json .RepoTags}}" in cmd:
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+        if cmd[:3] == ["podman", "image", "inspect"]:
+            seen = [c for c in calls if c == cmd]
+            out = "sha256:old\n" if len(seen) == 1 else "sha256:new\n"
+            return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+        return _FakeProc()
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
     assert stack.up() == 0
     assert not [c for c in calls if c[:2] == ["podman", "rmi"]]
 

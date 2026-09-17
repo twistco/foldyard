@@ -615,6 +615,15 @@ def test_reclaim_script_from_toml_else_none(fresh_config, tmp_path):
     assert config.reclaim_script() == "dev-stack/reclaim.sh"
 
 
+@pytest.mark.parametrize("value", ["true", '["a.sh", "b.sh"]', "{ path = 'x.sh' }"])
+def test_reclaim_script_rejects_a_non_string(fresh_config, tmp_path, value):
+    # The value becomes `sh <script>` in the box: a bool/list/table is misconfiguration and
+    # must read as "no script", never be str()'d into a shell argument.
+    (tmp_path / "foldyard.toml").write_text(f"[reclaim]\nscript = {value}\n")
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.reclaim_script() is None
+
+
 def test_port_bases_from_toml_else_empty(fresh_config, tmp_path):
     (tmp_path / "foldyard.toml").write_text("[ports]\nAPP_PORT = 3000\nPG_PORT = 5533\n")
     fresh_config(FOLDYARD_REPO=tmp_path)

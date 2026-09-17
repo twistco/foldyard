@@ -626,7 +626,9 @@ def reclaim_script() -> str | None:
     artefacts, …), run IN THE DEV BOX with cwd = the checkout after foldyard's engine-level
     sweeps, both by ``up`` under low headroom and by ``fy reclaim``. Checkout-relative path."""
     raw = _table("reclaim").get("script")
-    return str(raw) if raw else None
+    # A non-string (a bool, a list, a table) is misconfiguration, not a path: never str() it
+    # into a `sh <…>` argument.
+    return raw if isinstance(raw, str) and raw else None
 
 
 def port_bases() -> dict[str, int]:
