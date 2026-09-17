@@ -1259,6 +1259,18 @@ def test_parse_labels_reads_podmans_json_object_and_dockers_kv_string():
         "com.docker.compose.project": "acme",
         "x": "1=2",
     }
+    # docker flattens the map, and the reconciler's `config_files` value IS a comma list: the
+    # split must keep it whole (a naive split kept only the first file ⇒ false "missing overlay"
+    # drift in `fy state` on docker).
+    assert devmode._parse_labels(
+        '"com.docker.compose.project=acme,'
+        "com.docker.compose.project.config_files=/r/compose.yml,/r/compose.feature.yml,"
+        'com.docker.compose.service=api"'
+    ) == {
+        "com.docker.compose.project": "acme",
+        "com.docker.compose.project.config_files": "/r/compose.yml,/r/compose.feature.yml",
+        "com.docker.compose.service": "api",
+    }
     assert devmode._parse_labels("null") == {}
     assert devmode._parse_labels("") == {}
 

@@ -29,6 +29,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, cast
@@ -84,6 +85,9 @@ class Census:
     def __init__(self, out_dir: Path) -> None:
         self.out_dir = out_dir
         self.spawns: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        # `stack`'s image build runs independent specs in a ThreadPoolExecutor, each spawning
+        # through this same wrapper: the nested increment is read-modify-write, so it is locked.
+        self._lock = threading.Lock()
         self._real_popen = None
 
     def pytest_sessionstart(self, session) -> None:
@@ -92,7 +96,8 @@ class Census:
 
         class CountingPopen(real):  # type: ignore[misc,valid-type]
             def __init__(self, cmd, *args, **kwargs):
-                census.spawns[_binary(cmd, args, kwargs)][_current_test()] += 1
+                with census._lock:
+                    census.spawns[_binary(cmd, args, kwargs)][_current_test()] += 1
                 super().__init__(cmd, *args, **kwargs)
 
         CountingPopen.__name__ = CountingPopen.__qualname__ = "Popen"

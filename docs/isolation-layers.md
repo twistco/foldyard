@@ -149,10 +149,10 @@ escape-prone of the two. **But `virtiofs` cannot be pinned on Linux yet** (measu
 `virtiofsd` 1.14 every inode create returns `EINVAL`, on Fedora and Ubuntu guests alike. So on
 Linux the mount stays 9p for now, and the pin is a known gap rather than a setting.
 
-`(b)` is the shape that actually carries libkrun on Linux, and nested KVM is routine on x86, so it
-is *cheaper* there than on a Mac. It trades away the two properties foldyard is most opinionated
-about. **Neither option dominates**; they trade different things, which is why this is a documented
-choice and not a default.
+`(b)` was the shape that carried libkrun on Linux (nested KVM is routine on x86, so it was
+*cheaper* there than on a Mac), and it traded away the two properties foldyard is most opinionated
+about. While the `native` backend existed the two were a documented choice with no dominant option;
+since ADR-0027 the analysis stays as the record of that trade, not as a menu.
 
 **On Linux the VMM *is* jailed.** crun's krun handler builds the container first — namespaces,
 cgroups, seccomp, the rootfs — and only then boots libkrun inside it. So the "guest and VMM share a

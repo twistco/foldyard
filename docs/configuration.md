@@ -213,9 +213,11 @@ disk_gib = 60
 
   The backend CLI is **not** the whole prerequisite: it creates the VM, and the container engine
   (`podman`) drives the socket it hands out. So lima needs `limactl` *and* podman; the podman
-  backend needs only what you already have. A missing CLI is a hard error when you NAMED the
-  backend, and a quiet skip when you didn't — on a host with no VM tooling (Linux, CI) there is
-  simply nothing to manage, and foldyard won't abort a verb over a choice you never made.
+  backend needs only what you already have. A missing CLI is a hard error either way — one
+  message when you NAMED the backend, another when you inherited the default: a quiet skip there
+  would leave the socket unset and drop every engine verb onto the host's own podman, the VM-less
+  profile nobody chose (ADR-0011's amendment; the message names the two ways out, install
+  `limactl` or name `podman`).
 - **`wall`** — provision the in-VM nftables egress wall, so the box's only way out is the
   Mac-side proxy — fail-closed: traffic that ignores the proxy env is rejected, not silently
   allowed. Lima-only (preflight enforces the pairing); requires `[proxy]` to be declared, or

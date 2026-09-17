@@ -146,7 +146,8 @@ def export_vm_socket() -> None:
     to drive. `test_e2e._engine_env` mirrors DOCKER_HOST→CONTAINER_HOST, not the reverse, so
     the subprocess CLI sees no DOCKER_HOST and resolves the socket itself, and podman (which
     reads CONTAINER_HOST) reaches the VM for the tests' probes. Idempotent; a preset wins."""
-    os.environ.setdefault("CONTAINER_HOST", f"unix://{LIMA_SOCK}")
+    os.environ["CONTAINER_HOST"] = f"unix://{LIMA_SOCK}"  # never a preset endpoint: the
+    # engine helpers tag/rmi/inspect, and must do so in the VM's store, not another podman's
 
 
 def ensure_vm(repo: Path, env_extra: dict[str, str] | None = None, warm: float = 90) -> None:

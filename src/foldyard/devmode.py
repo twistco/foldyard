@@ -543,7 +543,13 @@ def _engine_env() -> dict[str, str]:
 
 def _parse_labels(raw: str) -> dict[str, str]:
     """The ``{{json .Labels}}`` field of one ``ps`` row: a JSON object from podman, a
-    ``k=v,k=v`` string from docker, ``null`` for a container with no labels."""
+    ``k=v,k=v`` string from docker, ``null`` for a container with no labels.
+
+    Docker's string is not reversible in general, and one value the reconciler depends on holds
+    commas: ``com.docker.compose.project.config_files`` is the ``-f`` list joined by ``,``. So the
+    split is on a comma FOLLOWED BY a key (``key=``, where a label key never contains ``,`` or
+    ``=``), which keeps ``a.yml,b.yml`` whole; a value carrying ``,word=`` would still split, and
+    nothing foldyard reads has that shape."""
     try:
         value = json.loads(raw)
     except ValueError:
@@ -551,7 +557,8 @@ def _parse_labels(raw: str) -> dict[str, str]:
     if isinstance(value, dict):
         return {str(k): str(v) for k, v in value.items()}
     if isinstance(value, str):
-        return dict(part.split("=", 1) for part in value.split(",") if "=" in part)
+        parts = re.split(r",(?=[^,=]+=)", value)
+        return dict(part.split("=", 1) for part in parts if "=" in part)
     return {}
 
 

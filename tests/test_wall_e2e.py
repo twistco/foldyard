@@ -64,10 +64,20 @@ def repo(tmp_path_factory):
     fy_ok(["machine", "stop"], r, timeout=300)
     fy_ok(["up"], r, env_extra=WALL)
     yield r
-    fy(["down"], r, timeout=180, env_extra=WALL)
-    fy(["machine", "stop"], r, timeout=300, env_extra=WALL)
-    ensure_vm(r)  # re-provisions WITHOUT the walls for the next module
-    subprocess.run(["sudo", "-n", "nft", "delete", "table", "inet", TABLE], capture_output=True)
+    try:
+        fy(["down"], r, timeout=180, env_extra=WALL)
+        fy(["machine", "stop"], r, timeout=300, env_extra=WALL)
+        ensure_vm(r)  # re-provisions WITHOUT the walls for the next module
+    finally:
+        # The host table must not outlive the module whatever the recovery did — it would fence
+        # the next module's VM (a new scope, so nothing would match, but a stale table is still
+        # a stale table) and any local run after this one. Reported, never silent: a delete that
+        # fails here is a sudo/nft problem the operator needs to hear about.
+        gone = subprocess.run(
+            ["sudo", "-n", "nft", "delete", "table", "inet", TABLE], capture_output=True, text=True
+        )
+        if gone.returncode != 0 and "No such file or directory" not in gone.stderr:
+            print(f"⚠ could not remove host wall table {TABLE}: {gone.stderr.strip()}")
 
 
 def test_host_wall_table_is_loaded_for_the_vms_own_scope(repo):

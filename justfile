@@ -69,9 +69,9 @@ census *args:
     export UV_PROJECT_ENVIRONMENT="${XDG_CACHE_HOME:-$HOME/.cache}/foldyard/dev-venv-$(echo "{{_dir}}" | cksum | cut -d\  -f1)"
     cd "{{_dir}}"
     out="$(mktemp -d "${TMPDIR:-/tmp}/fy-census.XXXXXX")"
+    trap 'rm -rf -- "$out"' EXIT
     PYTHONPATH=tests uv run --project . pytest -q -n auto -p tools.census --census="$out" {{args}} || true
     uv run --project . python tests/tools/census.py "$out" ${CENSUS_TESTS:+--tests}
-    rm -rf "$out"
 
 # Run the foldyard CLI from source (without installing) — handy while iterating.
 # e.g. `just foldyard run mode` / `just foldyard run doctor`.
