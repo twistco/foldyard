@@ -1147,8 +1147,16 @@ class DevModeTui(App):
                 self.notify(f"[{ws_name}] {secret.label} not entered — posture unchanged.")
                 return
             if value:
-                with config.using(cfg):
-                    keyless.append_host_env(config.host_env_file(), secret.var, value)
+                try:
+                    with config.using(cfg):
+                        keyless.append_host_env(config.host_env_file(), secret.var, value)
+                except OSError as e:  # say so — never claim a 0600 store that didn't happen
+                    self.notify(
+                        f"[{ws_name}] couldn't store {secret.label} on the host: {e}",
+                        severity="error",
+                        timeout=10,
+                    )
+                    return
                 self.notify(f"[{ws_name}] stored {secret.label} on the host (0600).")
             else:
                 self.notify(

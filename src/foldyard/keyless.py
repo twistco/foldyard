@@ -237,11 +237,15 @@ def append_host_env(path: Path, var: str, value: str) -> None:
     body = path.read_text() if path.exists() else ""
     if body and not body.endswith("\n"):
         body += "\n"
-    path.write_text(f"{body}{var}={value}\n")
-    try:
-        path.chmod(0o600)
-    except OSError:  # pragma: no cover — best-effort tightening (e.g. exotic FS)
-        pass
+    # Owner-only from the first byte: an existing (possibly hand-made, looser) file is tightened
+    # BEFORE the secret lands, and a new one is created 0600 at open — never written and chmod'd
+    # after, which leaves the secret readable for a moment. A refused chmod propagates: better
+    # no paste stored than one under a mode we can't vouch for.
+    if path.exists():
+        os.chmod(path, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(f"{body}{var}={value}\n")
 
 
 def secret_ok(value: str, pattern: str, b64: bool) -> str | None:

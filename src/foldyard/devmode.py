@@ -237,6 +237,17 @@ def missing_secrets(updates: dict[str, str]) -> list:
     return [s for s in registry().secrets(mode) if not keyless.host_env_has(host_env, s.var)]
 
 
+def validate_updates(updates: dict[str, str]) -> None:
+    """Refuse an unknown axis or rung. Shared by :func:`set_mode` and the doors that do work
+    BEFORE it (the CLI's secret prompt), so a typo never stores a paste and then fails."""
+    rungs = axes()
+    for axis, value in updates.items():
+        if axis not in rungs:
+            raise SystemExit(f"✗ unknown axis {axis!r} (have: {', '.join(rungs)})")
+        if value not in rungs[axis]:
+            raise SystemExit(f"✗ {axis} mode {value!r} (have: {', '.join(rungs[axis])})")
+
+
 def set_mode(
     updates: dict[str, str],
     ttl: int | None = None,
@@ -257,13 +268,8 @@ def set_mode(
             "✗ mode changes are Mac-only: the box must not escalate its own posture "
             "(the authoritative file lives in the Mac home, outside the shared mount)."
         )
-    rungs = axes()
+    validate_updates(updates)
     emergency_rungs = emergency()
-    for axis, value in updates.items():
-        if axis not in rungs:
-            raise SystemExit(f"✗ unknown axis {axis!r} (have: {', '.join(rungs)})")
-        if value not in rungs[axis]:
-            raise SystemExit(f"✗ {axis} mode {value!r} (have: {', '.join(rungs[axis])})")
 
     state = read(apply_expiry=True)
     mode, expires = state["mode"], state["expires"]
@@ -1596,6 +1602,7 @@ def main(argv: list[str]) -> int:
         if not updates:
             raise SystemExit("✗ nothing to set (e.g. `fy mode gcp=logs github=app ttl=1h`)")
         if not in_box():  # set_mode refuses in-box anyway; don't prompt for a secret first
+            validate_updates(updates)  # …nor for a mode set_mode would refuse
             _capture_secrets_for(updates)
         set_mode(updates, ttl)
         return show()

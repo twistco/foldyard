@@ -1500,6 +1500,35 @@ async def test_mode_button_prompts_for_a_missing_secret_before_applying(monkeypa
     assert sets == [{"github": "app"}]
 
 
+async def test_mode_button_secret_store_failure_is_reported_not_claimed(monkeypatch, tmp_path):
+    # append_host_env propagates a permission failure; the modal must surface it and leave the
+    # posture unchanged — never toast "stored … (0600)" over a paste that never landed.
+    from foldyard import keyless
+
+    host_env = _needs_token(monkeypatch, tmp_path)
+    sets: list = []
+    monkeypatch.setattr(devmode, "set_mode", _unchanged_set_mode(sets))
+
+    def refuse(*_a, **_k):
+        raise PermissionError("chmod refused")
+
+    monkeypatch.setattr(keyless, "append_host_env", refuse)
+    toasts: list[str] = []
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        monkeypatch.setattr(app, "notify", lambda msg, **_k: toasts.append(str(msg)))
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-app", tui.Button)))
+        await pilot.pause()
+        for ch in "ghp_abc":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+    assert any("couldn't store GitHub token" in t and "chmod refused" in t for t in toasts)
+    assert not any("stored" in t and "0600" in t for t in toasts)
+    assert sets == [] and not host_env.exists()
+
+
 async def test_mode_button_secret_cancel_leaves_the_posture_unchanged(monkeypatch, tmp_path):
     host_env = _needs_token(monkeypatch, tmp_path)
     sets: list = []

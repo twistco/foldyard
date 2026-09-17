@@ -54,6 +54,26 @@ def test_append_host_env_creates_0600_and_preserves(tmp_path):
     assert f.read_text() == "FOO=bar\nOPENAI_API_KEY=sk-proj-real\n"
 
 
+def test_append_host_env_never_leaves_the_secret_readable(tmp_path, monkeypatch):
+    # The file is created 0600 at open (not written world-readable and chmod'd after — that window
+    # is a real secret on disk), an existing looser file is tightened BEFORE the paste lands, and
+    # a tightening that fails propagates rather than storing the secret under the wrong mode.
+    f = tmp_path / "host.env"
+    f.write_text("FOO=bar\n")
+    f.chmod(0o644)
+    keyless.append_host_env(f, "ANTHROPIC_API_KEY", "sk-ant-real")
+    assert (f.stat().st_mode & 0o777) == 0o600
+    f.chmod(0o644)
+
+    def refuse(*_a, **_k):
+        raise PermissionError("chmod refused")
+
+    monkeypatch.setattr(keyless.os, "chmod", refuse)
+    with pytest.raises(PermissionError):
+        keyless.append_host_env(f, "OPENAI_API_KEY", "sk-proj-real")
+    assert "OPENAI_API_KEY" not in f.read_text()  # refused ⇒ nothing stored
+
+
 def _recorder():
     out: list[str] = []
     return out, out.append

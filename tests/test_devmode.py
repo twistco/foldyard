@@ -1222,6 +1222,21 @@ def test_mode_set_without_a_tty_warns_and_still_applies(isolated_state, monkeypa
     assert "GitHub App private key (PEM) isn't in" in capsys.readouterr().err
 
 
+def test_mode_set_validates_the_updates_before_prompting(isolated_state, monkeypatch):
+    # An unknown axis or rung is refused by set_mode — but that check must land BEFORE the prompt,
+    # or a typo'd `fy mode github=app gihtub=off` stores the paste in host.env and then fails.
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(
+        devmode.getpass, "getpass", lambda _p: pytest.fail("must not prompt for a refused mode")
+    )
+    with pytest.raises(SystemExit, match="unknown axis 'gihtub'"):
+        devmode.main(["set", "github=app", "gihtub=off"])
+    with pytest.raises(SystemExit, match="github mode 'nope'"):
+        devmode.main(["set", "github=nope"])
+    assert not isolated_state["host_env"].exists()
+    assert devmode.read()["mode"]["github"] == "off"
+
+
 def test_mode_set_with_the_secret_present_does_not_prompt(isolated_state, monkeypatch):
     isolated_state["host_env"].write_text(f"GH_PEM_B64={_PEM_B64}\n")
     monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
