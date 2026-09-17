@@ -113,10 +113,15 @@ break config or CLI shape, and say so here. How a release is cut:
 - **`fy box up` warns when a running box's foldyard isn't the one the Mac runs.** The box's
   foldyard is installed by the bootstrap, which only runs on a freshly *created* box — so a host
   upgrade leaves the two sides on different versions indefinitely, with every `fy box up` in
-  between reporting "already up". `up` now stamps `FY_VERSION` into the container at create time
-  and compares it on the reuse path, so the mismatch is announced with the recreate that fixes
-  it rather than being discovered later as a refusal. A box created before the stamp existed has
-  no `FY_VERSION` and is treated as drift, which is correct: it is the most stale case there is.
+  between reporting "already up". `up` now asks the running box what `foldyard --version`
+  answers (over the same login-shell route as `fy box exec`) and compares it with the host's, so
+  the mismatch is announced with the recreate that fixes it rather than being discovered later
+  as a refusal. A box where nothing answers — no install, a broken one, or one too old to know
+  the flag — is treated as drift, which is correct: it is the most stale case there is. And the
+  recreate now actually moves it: the bootstrap's foldyard step used to skip whenever *a*
+  foldyard was on PATH, so one baked into the image or kept on a retained uv tool dir
+  (`[box].caches`, a `UV_TOOL_DIR` pin in `[box].env`) outlived every recreate; the guard is now
+  "present *and* the host's version".
 
 ### Changed
 

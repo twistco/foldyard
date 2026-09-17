@@ -107,6 +107,9 @@ def fake(tmp_path, monkeypatch):
         "net_exists": True,
         "baked_proxy_port": None,  # set to a string to simulate a box's baked FY_PROXY_PORT
         "baked_env": {},  # extra frozen Config.Env entries for the running box (_baked_env)
+        # What `foldyard --version` answers inside the running box (_installed_foldyard):
+        # None → whatever the host runs (no drift); "" → nothing answers.
+        "box_foldyard": None,
         "oci_runtime": "crun",  # what `inspect {{.OCIRuntime}}` reports after create
     }
 
@@ -137,6 +140,10 @@ def fake(tmp_path, monkeypatch):
             return _Proc(0 if state["net_exists"] else 1)
         if cmd[1:3] == ["run", "--rm"]:
             return _Proc(0, "/home/vscode /home/vscode/.claude")
+        if cmd[1] == "exec" and cmd[-1] == "foldyard --version":
+            v = state["box_foldyard"]
+            v = foldyard.__version__ if v is None else v
+            return _Proc(0 if v else 127, f"{v}\n" if v else "")
         return _Proc(0)
 
     monkeypatch.setattr(box.subprocess, "run", fake_run)
@@ -450,7 +457,8 @@ def test_up_nags_when_running_box_has_a_different_foldyard(fake, capsys, monkeyp
     # row the mismatch is silent: it surfaces only as an in-box version-window refusal, whose
     # own advice is the recreate this row is asking for.
     fake["state"]["running"] = True
-    fake["state"]["baked_env"] = _QUIET | {"FY_VERSION": "0.2.1"}
+    fake["state"]["baked_env"] = dict(_QUIET)
+    fake["state"]["box_foldyard"] = "0.2.1"
     monkeypatch.setattr(foldyard, "__version__", "0.3.0", raising=False)
     assert box.main("up") == 0
     out = capsys.readouterr().out
@@ -458,32 +466,58 @@ def test_up_nags_when_running_box_has_a_different_foldyard(fake, capsys, monkeyp
     assert "fy box down && fy box up" in out
 
 
-def test_up_nags_when_running_box_predates_the_foldyard_stamp(fake, capsys, monkeypatch):
-    # No FY_VERSION at all = a box created before this stamp existed, which is exactly the
-    # long-lived box whose foldyard is furthest behind. Absence is the drift signal, same as
-    # CLAUDE_CONFIG_DIR/CODEX_HOME above.
+def test_up_asks_the_box_which_foldyard_it_runs(fake, monkeypatch):
+    # The truth is what the box's PATH resolves, asked over the same login-shell route as
+    # `fy box exec` — NOT a create-time stamp: the bootstrap skips its install step when a
+    # foldyard is already present (image-baked, or a tool dir retained across recreates), so a
+    # stamp of the host's version would silence this row in exactly the retained case.
     fake["state"]["running"] = True
     fake["state"]["baked_env"] = dict(_QUIET)
     monkeypatch.setattr(foldyard, "__version__", "0.3.0", raising=False)
     assert box.main("up") == 0
+    probe = _find(fake["calls"], has=["exec", "foldyard --version"])
+    assert probe and probe[0][-3:-1] == ["bash", "-lc"]
+    create = _find(fake["calls"], has=["run", "-d"])
+    assert not create and not any("FY_VERSION" in tok for c in fake["calls"] for tok in c)
+
+
+def test_up_nags_when_running_box_has_no_working_foldyard(fake, capsys, monkeypatch):
+    # Nothing answers `--version` — no install, a broken one, or one too old to know the
+    # flag: the long-lived box whose foldyard is furthest behind. Drift, same as an absent
+    # CLAUDE_CONFIG_DIR/CODEX_HOME above; the recreate reinstalls it.
+    fake["state"]["running"] = True
+    fake["state"]["baked_env"] = dict(_QUIET)
+    fake["state"]["box_foldyard"] = ""
+    monkeypatch.setattr(foldyard, "__version__", "0.3.0", raising=False)
+    assert box.main("up") == 0
     out = capsys.readouterr().out
-    assert "foldyard" in out and "fy box down && fy box up" in out
+    assert "no working foldyard" in out and "fy box down && fy box up" in out
 
 
 def test_up_no_nag_when_running_box_foldyard_matches(fake, capsys, monkeypatch):
     fake["state"]["running"] = True
-    fake["state"]["baked_env"] = _QUIET | {"FY_VERSION": "0.3.0"}
+    fake["state"]["baked_env"] = dict(_QUIET)
+    fake["state"]["box_foldyard"] = "0.3.0"
     monkeypatch.setattr(foldyard, "__version__", "0.3.0", raising=False)
     assert box.main("up") == 0
     assert "fy box down && fy box up" not in capsys.readouterr().out
 
 
-def test_up_stamps_the_creating_foldyard_version_into_the_box(fake, monkeypatch):
-    # The row above can only compare what `up` bakes in at create time.
+def test_bootstrap_reinstalls_a_retained_foldyard_that_is_not_the_hosts(monkeypatch):
+    # The step's skip guard is "present AND the host's version", not "present": a foldyard
+    # baked into the image or kept on a retained uv tool dir would otherwise survive the very
+    # recreate the stale-foldyard row prescribes. A guard `command -v` would pass is the bug.
     monkeypatch.setattr(foldyard, "__version__", "0.3.0", raising=False)
-    assert box.main("up") == 0
-    create = _find(fake["calls"], has=["run", "-d"])[0]
-    assert "FY_VERSION=0.3.0" in create
+    monkeypatch.setattr(
+        box, "_foldyard_install_subst", lambda c, h: {"fy_wheel": "", "fy_version": ""}
+    )
+    monkeypatch.setattr(box.config, "box_tools", lambda: [])
+    monkeypatch.setattr(box.config, "box_bootstrap", lambda: "")
+    monkeypatch.setattr(box, "registry", lambda: _StubRegistry([]))
+    script = box._bootstrap_script("/repo", "dev-stack", {})
+    step = next(line for line in script.splitlines() if "'foldyard CLI'" in line)
+    assert "foldyard --version" in step and "0.3.0" in step
+    assert "command -v foldyard" not in step
 
 
 def test_up_ensures_host_supervisor(fake):
@@ -678,7 +712,7 @@ def test_bootstrap_includes_core_and_consumer_tools(monkeypatch):
     monkeypatch.setattr(box, "registry", lambda: _StubRegistry([]))
     script = box._bootstrap_script("/repo", "dev-stack", {})
     assert "run_step" in script and "_FY_BOOTSTRAP_FAILS" in script  # monitored
-    assert "command -v foldyard" in script  # core step
+    assert "foldyard --version" in script  # core step (guard: present AND the host's version)
     assert "pulumi" in script and "command -v pulumi" in script  # consumer tool + default check
     assert "curl x | sh" in script
 

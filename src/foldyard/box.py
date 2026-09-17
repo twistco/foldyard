@@ -167,6 +167,26 @@ def _warn_stale_proxy_port(engine: str, box: str, env: dict) -> None:
         )
 
 
+def _installed_foldyard(engine: str, box: str, env: dict) -> str | None:
+    """The version of the foldyard a running box ACTUALLY has on its PATH, or None when nothing
+    answers (no install, a broken one, or one too old to know ``--version``).
+
+    Asked of the box rather than read from a create-time stamp: a stamp records what the host
+    MEANT to install, and the bootstrap's foldyard step is skipped when a matching foldyard is
+    already present — so on an image that bakes one, or a tool dir retained across recreates via
+    ``[box].caches`` / a ``UV_TOOL_DIR`` pin in ``[box].env``, a stamp would report the host's
+    version over whatever the box kept. The same ``bash -lc`` login-shell route as ``fy box exec``,
+    so PATH resolves the install the way an attached shell would."""
+    out = subprocess.run(
+        [engine, "exec", box, "bash", "-lc", "foldyard --version"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    got = out.stdout.strip().splitlines()
+    return got[-1].strip() if out.returncode == 0 and got else None
+
+
 def _warn_stale_foldyard(engine: str, box: str, env: dict) -> None:
     """Nag when a running box's foldyard is not the one the Mac now runs.
 
@@ -176,15 +196,16 @@ def _warn_stale_foldyard(engine: str, box: str, env: dict) -> None:
     point the symptom is a version-window refusal (compat.py) whose own fix is this recreate.
 
     Inequality rather than "older": a downgrade is drift too, and the box tracks the host either
-    way. Absent = a box created before this stamp existed (or an inspect that failed on a box we
-    just probed as running) — treated as drift, like the CLAUDE_CONFIG_DIR/CODEX_HOME rows.
+    way. No answer at all (nothing installed, a broken install, a foldyard too old to know
+    ``--version``) is drift as well — the recreate reinstalls it — like the absent
+    CLAUDE_CONFIG_DIR/CODEX_HOME rows.
     """
     from . import __version__
 
-    baked = _baked_env(engine, box, env, "FY_VERSION")
-    if baked == __version__:
+    installed = _installed_foldyard(engine, box, env)
+    if installed == __version__:
         return
-    was = f"foldyard {baked}" if baked else "a foldyard from before this stamp"
+    was = f"foldyard {installed}" if installed else "no working foldyard"
     print(
         f"⚠ dev box {box} has {was} installed, but the Mac now runs foldyard {__version__}. The "
         "bootstrap that installs it runs only on a freshly created box, so `fy box up` alone "
@@ -677,6 +698,20 @@ def _foldyard_run(checkout: str, subst: dict[str, str]) -> str:
     )
 
 
+def _foldyard_check() -> str:
+    """The foldyard step's skip guard: present AND already the host's version.
+
+    ``command -v foldyard`` alone skipped the install whenever a foldyard was on PATH in the fresh
+    container — one baked into the consumer's image, or a uv tool dir retained across recreates
+    (``[box].caches`` over ``~/.local``, a ``UV_TOOL_DIR`` pin in ``[box].env``) — so the very
+    recreate `_warn_stale_foldyard` prescribes left the stale one in place. ``--version`` is eager
+    in the CLI (answers before the version-window gate), so an old foldyard can still name itself;
+    one too old to know the flag fails the guard and is reinstalled, which is the right outcome."""
+    from . import __version__
+
+    return f'[ "$(foldyard --version 2>/dev/null)" = {shlex.quote(__version__)} ]'
+
+
 def _git_shim_step() -> tuple[str, str, str] | None:
     """The git index-split shim as a monitored bootstrap step (``[box].git_index_split``,
     default on): install the packaged ``assets/box/git-index-shim.sh`` to ``/usr/local/bin/git``
@@ -707,7 +742,7 @@ def _bootstrap_script(checkout: str, here: str, env: dict) -> str:
         steps.append(shim)
     steps += [
         # Core: foldyard self-install. Claude/editor installs come from their gated plugins below.
-        ("foldyard CLI", "command -v foldyard", _foldyard_run(checkout, subst)),
+        ("foldyard CLI", _foldyard_check(), _foldyard_run(checkout, subst)),
     ]
     steps += [(s["label"], s.get("check", ""), s["run"]) for s in registry().box_bootstrap(env)]
     for tool in config.box_tools():  # consumer toolchain (e.g. pulumi) — out of the package
@@ -1061,13 +1096,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         # A create-time property (like the port band): baked so the already-up nag and the
         # in-box `fy verify` row can compare the wish with the box they actually have.
         env_args += ["-e", f"{sandbox.BAKED_ENV}=gvisor"]
-    from . import __version__
-
     env_args += [
-        # The foldyard that created this box — i.e. the version its bootstrap installed inside.
-        # Read back by _warn_stale_foldyard on the reuse path.
-        "-e",
-        f"FY_VERSION={__version__}",
         "-e",
         "IN_DEVBOX=1",
         "-e",
