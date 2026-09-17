@@ -88,6 +88,15 @@ break config or CLI shape, and say so here. How a release is cut:
   home), the adopt gate, the supervisor with the zero-secret rig, both walls, the box (in-box
   `fy verify` ALL PASS), `verify`'s negative against a VM exposing the host home, the read-only
   engine probes, `fy reclaim` on a real store, and `fy worktree add|remove`. 36/36, ~15 minutes.
+- **The same host tier inside WSL2 on a Windows runner** (`wsl2-host-e2e`: `windows-2025` +
+  Vampire/setup-wsl, Ubuntu 24.04 under WSL2, foldyard's `lima` backend booting the QEMU/KVM
+  VM INSIDE the distro — nested twice, which the hosted runners allow once `.wslconfig` asks for
+  `nestedVirtualization`). The product needed no change; the job's plumbing (WSLENV, a root→user
+  wrapper switch, the checkout cloned onto ext4) is documented in DEVELOPMENT.md. One finding:
+  the stock WSL2 kernel has no `CONFIG_NFT_SOCKET`, so `[machine].host_wall` cannot load there
+  (fails closed; the in-VM wall is unaffected) — `test_wall_e2e.py` now probes the kernel for
+  nft's `socket` expression in its gate and skips, instead of erroring after re-provisioning the
+  VM walled and taking the next module down with it.
 - **`just census`** — the subprocess report over the hermetic guard (`tests/tools/census.py`):
   every process the suite spawns, binary × test, aggregated across xdist workers; a report of what
   the allowlist still lets through and what the live tiers reach, not a gate.

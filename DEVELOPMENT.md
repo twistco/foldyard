@@ -143,7 +143,8 @@ foldyard's surface splits by *where it can be validated*:
    `verify`'s real VM boundary, the walls. These deliberately **refuse to run inside a dev box**
    (`config.in_box()` guards — the box must not manage its own VM or escalate its posture), and
    creating a machine/box from inside the live box would collide with it. They have a REAL VM
-   in CI — the `lima-host-e2e` job (below) — and live as `tests/test_*_e2e.py` modules over the
+   in CI — the `lima-host-e2e` job (below), and the same VM inside WSL2 on a Windows runner
+   (`wsl2-host-e2e`) — and live as `tests/test_*_e2e.py` modules over the
    shared substrate `tests/e2e_host.py` (gated: `FOLDYARD_E2E=1`, not in a box, `limactl` on
    PATH; each module takes a throwaway example copy, leaves the VM running and un-walled):
    - `test_verify_e2e.py` — ALL PASS on the boundary foldyard builds, **FAIL against a VM
@@ -240,15 +241,17 @@ Arguments pass to pytest (paths, not a quoted `-k` — `just` splits on whitespa
 
 ## CI (`.github/workflows/foldyard.yml` + `foldyard-e2e.yml`)
 
-Tiers 1–3 and the host tier all run on GitHub-hosted Linux runners. `foldyard.yml` is the fast
-gate on every push; `foldyard-e2e.yml` holds the advisory live tiers, opt-in (`main`, a
-`[run-e2e]` commit message, or a dispatch). Three jobs:
+Tiers 1–3 and the host tier all run on GitHub-hosted runners — Linux, and the host tier once more
+inside WSL2 on a Windows runner. `foldyard.yml` is the fast gate on every push; `foldyard-e2e.yml`
+holds the advisory live tiers, opt-in (`main`, a `[run-e2e]` commit message, or a dispatch). All
+four jobs use standard runners, which GitHub bills nothing for on a public repository. Four jobs:
 
 | job | what | engine |
 | --- | --- | --- |
 | `check` | `just foldyard check` — ruff + pyright + ty + the unit/golden/TUI suite. typecheck installs the `e2e` group so the opt-in proxy/box e2e files (which import `cryptography`/`requests`) resolve | none |
 | `live-e2e` | the in-box topology: all the live e2es (`-k e2e`: the example stack up→serve→down, the in-process proxy e2e, AND the box e2e) — run **inside a docker-CLI container** that mirrors the dev box (see below) | runner Docker |
 | `lima-host-e2e` | the HOST topology: `ubuntu-24.04` as a real Linux host running foldyard's default `lima` backend — `machine ensure` boots a QEMU/KVM VM on the runner, then `tests/test_e2e.py` drives the real `foldyard up` / worktree lifecycle through the config-adopt gate, the supervisor and compose, exactly as on an operator's machine | Lima VM (podman in the guest, over the forwarded socket) |
+| `wsl2-host-e2e` | the same host tier on `windows-2025`: an Ubuntu 24.04 distro under WSL2 ([Vampire/setup-wsl](https://github.com/Vampire/setup-wsl)) is the host, and the `lima` backend boots the QEMU/KVM VM INSIDE it — a second level of nesting the hosted Windows runners expose. Same module list; `test_wall_e2e.py` skips itself there (below) | Lima VM inside the WSL2 distro |
 
 **Why `live-e2e` runs inside a container.** The box e2e (`test_proxy_box_e2e.py`) spawns a
 *sibling* box and must discover its own network — so the test process itself has to be in a
@@ -286,6 +289,40 @@ the job is x86-only. The `podman` backend (podman-machine) has not been tried on
 [docs/nested-virt.md](./docs/nested-virt.md) remains for what a VM job cannot reach (the gVisor
 posture under nested virtualisation).
 
+**Why the same tier runs inside WSL2 on a Windows runner (2026-09-17).** WSL2's distro is a
+Hyper-V guest, so a Lima/QEMU VM inside it is nested twice (Azure → runner VM → WSL2 utility VM →
+QEMU). The hosted `windows-2025` runners allow it: with `[wsl2] nestedVirtualization=true` in
+`%USERPROFILE%\.wslconfig` (written BEFORE the distro first starts — the file is read at
+utility-VM boot; Windows 11 defaults it on, Windows Server 2025 needs it said) the distro has
+`/dev/kvm` (`root:kvm 0660`, WSL2 kernel 6.18), and foldyard's unmodified `machine ensure`
+boots the Fedora 44 guest to READY in 68 s (47 s on a restart) — Lullabot/sandbar#149 measured
+the same on 2026-08-27. WSL2 is only ever the HOST here: a VM-less engine in the distro would be
+bare Linux without the VM ([ADR-0027](./docs/adrs/0027-always-a-vm-native-backend-retired.md)).
+The job differs from the Linux one in plumbing, not product: job `env:` is Windows process env,
+so the variables the in-distro steps read are forwarded by `WSLENV` (`GITHUB_WORKSPACE/up`
+arrives path-translated) and state between steps goes through an in-distro env file, never
+`GITHUB_ENV`; the action's default distro user is root, so the root work (packages, Lima, uv,
+the `runner` user with `NOPASSWD` sudo + the `kvm` group + linger) runs first and the wsl-bash
+wrapper is then regenerated for `runner` (a second `setup-wsl` step with `wsl-shell-user`);
+the checkout is CLONED from the Windows drive onto the distro's ext4 (objects carry the
+committed modes and LF endings — the 9p automount shows 0777 and the runner's git has
+`core.autocrlf`; a local clone needs a global `safe.directory`, the automount is root-owned and
+`upload-pack` runs as a child). Automount stays on because the wrapper reads each step's script
+through `/mnt/<drive>`. The action caches the distro installer (372 MB): the first run's 5.5 min
+install is 40 s after. **What WSL2 cannot do: the host-side wall.** `[machine].host_wall`
+matches the VM by `socket cgroupv2`, and the stock WSL2 kernel has `# CONFIG_NFT_SOCKET is not
+set` (both the 6.6 and 6.18 branches), so `nft` refuses the rule with ENOENT — the wall fails
+closed, as designed. `test_wall_e2e.py` now probes the kernel for the expression in its gate
+(one rule into a throwaway table, `sudo -n`) and skips; before that its fixture had already
+re-provisioned the VM walled, and the error left the worktree module refusing the stale
+provisioning — 9 errors from one kernel option. The in-VM `[machine].wall` is unaffected (it
+runs in the guest). Everything else passed unchanged — 30 passed, 6 skipped; the tier is ~3.5×
+slower than on Linux (the test step 43 min vs 12; `test_box_e2e` 8 min, `test_machine_e2e` 9;
+the job 47 min against a 75-minute budget). Facts about the
+runner worth knowing: 16 GB / 4 vCPU, of which WSL2 takes half the memory; the distro's root
+is a sparse 1 TB vhdx on `C:` with ~30 GB actually free; the `ubuntu-24.04-arm` finding carries
+over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too.
+
 ## Conventions & gotchas
 
 - **Three surfaces TEACH, and none of them fails when it lies:** the bundled skills
@@ -302,7 +339,8 @@ posture under nested virtualisation).
 - **Write "host", not "Mac" — in new code, docstrings, messages and docs.** foldyard's split is
   host vs box, and the host being a Mac is a fact about today's users, not about the design (there
   is no platform branching in the package: no `sys.platform`, no `Darwin` test; the sweep of the
-  ~700 legacy mentions and Linux/WSL2 host validation are still pending). Say **macOS** only
+  ~700 legacy mentions is still pending — Linux and WSL2 hosts are now validated in CI, see the
+  two host-tier jobs). Say **macOS** only
   where the claim really is macOS-only — `brew`, the login keychain, `security add-trusted-cert`,
   Virtualization.framework/`vz`. One trap: **`host` already means an
   egress HOSTNAME** across the allowlist/proxy surface (`fy allow add <host>`, `[proxy] recommend`,

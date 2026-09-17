@@ -288,8 +288,13 @@ Still true, and still prerequisites rather than tuning:
 
 - **`/mnt/c` is automounted by default**, which breaks the repo-only mount outright.
   `/etc/wsl.conf` with `[automount] enabled = false` comes first.
-- Nothing above is measured. `/dev/kvm` on a stock Windows 11 x86 machine is a two-minute,
-  read-only check; Lima+QEMU inside the distro is not yet a probe anyone has run.
+- Measured on a hosted Windows Server 2025 runner (2026-09-17): `/dev/kvm` is in the distro with
+  `nestedVirtualization=true` said in `.wslconfig`, and foldyard's own `lima` backend boots the
+  guest there and runs the host tier — the `wsl2-host-e2e` job,
+  [linux-support.md](./linux-support.md#validated-on-a-linux-host). One limit is the WSL2
+  kernel's, not the design's: no `CONFIG_NFT_SOCKET`, so `[machine].host_wall` cannot load
+  (fails closed); the in-VM wall is unaffected. A real Windows 11 machine is still owed the
+  two-minute `/dev/kvm` check.
 
 ## What `fy verify` proves, per platform
 

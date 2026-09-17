@@ -44,16 +44,20 @@ there are upper bounds; correctness results transfer as they are.
 | **`fy worktree add` / `remove` on a Linux host** (`test_worktree_e2e.py`) | ✅ `add` registers a sibling checkout on `wt/<name>` with a clean tree; `WORKTREE=<name> fy up` brings its stack up beside main's in the one VM (the example has no bind mounts, so the VM need not mount the worktrees root — `machine.ensure` warns and continues); `remove --yes` takes its containers AND its `{project}_` named volume, archives the bound-out transcript to `FOLDYARD_TRANSCRIPTS_ARCHIVE` (rsync) BEFORE git deletes the tree, drops the checkout + its local state, keeps main's stack and the branch | 2026-09-17 | [run 35244308703](https://github.com/twistco/foldyard/actions/runs/35244308703) |
 | **`fy reclaim` on a real store** (`test_reclaim_e2e.py`) | ✅ a removed worktree's TAGGED images (`fyex-gone_api` and `fyex-gone-api`, both provider spellings) swept; `fyex_api`, `python:3.12-slim`, `postgres:16-alpine` kept; the next `fy up` builds `Using cache` — the three reclaim properties in DEVELOPMENT.md, live (podman 5.8.4 guest, 4.9.3 host CLI) | 2026-09-17 | same run |
 | `ubuntu-24.04-arm` runners | ❌ **no KVM**: no `/dev/kvm` before or after `sudo modprobe kvm` (the module loads, no device — no EL2 for the guest). VM-backed CI is x86-only | 2026-09-17 | same run |
+| **WSL2 as the host** (`wsl2-host-e2e`: `windows-2025`, Ubuntu 24.04.4 under WSL2 via Vampire/setup-wsl, WSL2 kernel 6.18.33.2, cgroup v2, systemd; the `lima` backend booting the Fedora 44 / podman 5.8.4 guest INSIDE the distro — nested twice) | ✅ `/dev/kvm` in the distro (`root:kvm 0660`) once `.wslconfig` says `nestedVirtualization=true`; `limactl info` registers `qemu`; unmodified `machine ensure` → READY in 68 s (47 s on a restart); then the host tier as-is: `test_e2e` (example + worktree stacks through the real host path), `test_box_e2e` (in-box `fy verify` ALL PASS), `test_host_daemons_e2e`, `test_machine_e2e` (SIGKILLed QEMU recovered, recreate, the home-path mount), `test_probes_e2e`, `test_reclaim_e2e`, `test_verify_e2e` (ALL PASS, **FAIL** with the home exposed at `/mnt/c`, PASS again), `test_worktree_e2e` — **30 passed, 6 skipped** (the wall module, next row); ~3.5× the Linux job's time (test step 43 min, the job 47). What the operator's WSL2 needs beyond Linux: nothing in the product — the job's plumbing (WSLENV, the root→user wrapper switch, the clone onto ext4) is the runner's, see [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml--foldyard-e2eyml) | 2026-09-17 | [run 35261179135](https://github.com/twistco/foldyard/actions/runs/35261179135) (all three live tiers green on it) |
+| **`[machine].host_wall` on WSL2** | ❌ **kernel**: the host table matches the VM by `socket cgroupv2`, and the stock WSL2 kernel has `# CONFIG_NFT_SOCKET is not set` (microsoft/WSL2-Linux-Kernel, both `linux-msft-wsl-6.6.y` and `-6.18.y`) — `nft -f` answers `Could not process rule: No such file or directory` and the wall fails closed. The in-VM `[machine].wall` runs in the guest and is unaffected. `test_wall_e2e.py` probes the expression in its gate and skips there; a custom WSL2 kernel (`.wslconfig` `kernel=`) is the only route to the host wall on WSL2 | 2026-09-17 | [run 35256429594](https://github.com/twistco/foldyard/actions/runs/35256429594) (the 9 errors: 6 wall + 3 worktree knock-on, before the gate) |
 
 ## Not yet validated on Linux
 
 - **The proxy/box e2e on a real Lima VM** (`tests/test_proxy_box_e2e.py` needs the test process
   INSIDE a container beside the box — the `live-e2e` container mirror covers it; the host tier's
   `test_box_e2e.py` covers the box itself on the VM).
-- **WSL2 — nothing measured.** `/dev/kvm` in a stock Windows 11 x86 distro (two minutes on any
-  such machine: `wsl --shutdown; wsl; ls -l /dev/kvm`), Lima + QEMU inside it, `[automount]
-  enabled = false` for the repo-only mount. Windows-on-ARM boots the distro at EL1, so KVM is
-  structurally absent there. See
+- **WSL2 on a real Windows 11 machine.** The tier above runs on Windows Server 2025 (the hosted
+  runner) with `nestedVirtualization=true` said explicitly; Windows 11 x86 defaults it on and
+  Windows 10 silently overrides it — the two-minute check on a real machine is still owed
+  (`wsl --shutdown; wsl; ls -l /dev/kvm`), as is `[automount] enabled = false` for the repo-only
+  mount (the runner keeps automount on: its shell wrapper reads step scripts through `/mnt`).
+  Windows-on-ARM boots the distro at EL1, so KVM is structurally absent there. See
   [isolation-layers.md](./isolation-layers.md#wsl2--a-linux-host-whose-hyper-v-boundary-protects-the-wrong-asset).
 - **`fy tui`, `fy code` (the VS Code attach), `fy open` (browser)** on Linux — untouched.
 - **The host wall's operator side**: the `sudo nft` prompt on every `fy up` (a passwordless
