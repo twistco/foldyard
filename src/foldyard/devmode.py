@@ -763,6 +763,14 @@ def branches() -> list[str]:
     return ordered
 
 
+def _decode(chunk: bytes | str | None) -> str:
+    """A subprocess stream as text — the bytes `TimeoutExpired` carries, or an already-decoded
+    stream, or None when nothing was captured."""
+    if chunk is None:
+        return ""
+    return chunk.decode(errors="replace") if isinstance(chunk, bytes) else chunk
+
+
 def _fy(args: list[str], timeout: float = 60, env_extra: dict | None = None) -> tuple[int, str]:
     """Run a `foldyard` (≡ `fy`) verb from the repo root (Mac only). Returns (rc, combined
     out). `env_extra` overlays the process env (e.g. WORKTREE=<name> to target a worktree).
@@ -786,6 +794,12 @@ def _fy(args: list[str], timeout: float = 60, env_extra: dict | None = None) -> 
             env=env,
         )
         rc, output = out.returncode, _strip_ansi((out.stdout + out.stderr).strip())
+    except subprocess.TimeoutExpired as e:
+        # The partial output says WHERE the verb stuck — keep it. subprocess attaches it to the
+        # exception as raw bytes (or None), per stream, even under text=True.
+        partial = _strip_ansi((_decode(e.stdout) + _decode(e.stderr)).strip())
+        note = f"timed out after {timeout:g}s"
+        rc, output = 124, f"{partial}\n{note}" if partial else note
     except Exception as e:
         rc, output = 127, str(e)
     shown = [f"{k}={v}" for k, v in (env_extra or {}).items() if v] + ["foldyard", *args]

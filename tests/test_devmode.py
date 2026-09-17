@@ -1285,6 +1285,43 @@ def test_fy_appends_to_the_durable_actions_log(isolated_state, monkeypatch):
     assert "\x1b" not in text
 
 
+def test_fy_timeout_keeps_the_output_captured_so_far(isolated_state, monkeypatch):
+    # A verb that overruns its budget (a `worktree remove` stuck in compose down) used to be
+    # logged as just "Command '[...]' timed out after 300 seconds" — the partial output that
+    # says WHERE it stuck was captured and then dropped. subprocess hands it over on the
+    # exception as raw bytes (even under text=True), per stream.
+    def _hang(args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            args,
+            300,
+            output=b"+ podman compose down\nStopping fy-feat-db ...\n",
+            stderr=b"\x1b[33m! waiting on fy-feat-db\x1b[0m\n",
+        )
+
+    monkeypatch.setattr(devmode.subprocess, "run", _hang)
+    monkeypatch.setattr(devmode, "main_repo", lambda: "/tmp")
+    monkeypatch.setattr(devmode, "_CMD_LOG", [])
+    rc, output = devmode._fy(["worktree", "remove", "feat", "--yes"], timeout=300)
+    assert rc == 124 and output.endswith("timed out after 300s")
+    assert "Stopping fy-feat-db" in output and "! waiting on fy-feat-db" in output
+    assert "\x1b" not in output and "b'" not in output
+    entry = devmode.cmd_log()[-1]
+    assert entry["rc"] == 124 and entry["out"] == output
+    assert "Stopping fy-feat-db" in (isolated_state["dir"] / "tui-actions.log").read_text()
+
+
+def test_fy_timeout_with_nothing_captured_still_says_it_timed_out(monkeypatch):
+    # Both streams are None when the verb produced nothing before the deadline.
+    def _hang(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, 60)
+
+    monkeypatch.setattr(devmode.subprocess, "run", _hang)
+    monkeypatch.setattr(devmode, "main_repo", lambda: "/tmp")
+    monkeypatch.setattr(devmode, "_CMD_LOG", [])
+    rc, output = devmode._fy(["code"], timeout=60)
+    assert (rc, output) == (124, "timed out after 60s")
+
+
 def test_doctor_reset_keeps_action_entries(isolated_state, monkeypatch):
     # The doctor clears the ring buffer per run so its pane shows that run's probes only — an
     # action's entry must survive that, or looking at the Doctor tab hides what you came for.
