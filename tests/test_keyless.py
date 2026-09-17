@@ -43,6 +43,19 @@ def test_host_env_has_matches_supervisor_parsing(tmp_path):
     assert not keyless.host_env_has(tmp_path / "absent.env", "ANYTHING")
 
 
+def test_host_env_has_treats_an_empty_value_as_absent(tmp_path):
+    # `KEY=` (or `KEY=""`) is a placeholder, not a secret: the supervisor would export an empty
+    # string and the minter would fail on it, so missing_secrets() must still ask for the value.
+    f = tmp_path / "host.env"
+    f.write_text(
+        "GH_PEM_B64=\nANTHROPIC_API_KEY=''\nGH_APP_ID=7\nOPENAI_API_KEY=\nOPENAI_API_KEY=x\n"
+    )
+    assert not keyless.host_env_has(f, "GH_PEM_B64")
+    assert not keyless.host_env_has(f, "ANTHROPIC_API_KEY")
+    assert keyless.host_env_has(f, "GH_APP_ID")
+    assert keyless.host_env_has(f, "OPENAI_API_KEY")  # last definition wins, as in the supervisor
+
+
 def test_append_host_env_creates_0600_and_preserves(tmp_path):
     f = tmp_path / "sub" / "host.env"
     keyless.append_host_env(f, "ANTHROPIC_API_KEY", "sk-ant-real")

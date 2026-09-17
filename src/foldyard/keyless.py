@@ -200,17 +200,22 @@ def classify(secret: str) -> tuple[str, str] | None:
 
 
 def host_env_has(path: Path, var: str) -> bool:
-    """True when host.env defines ``var`` on a non-comment ``KEY=…`` line — the same parsing the
-    supervisor's ``load_host_env`` uses, so "present" here means "the minter will see it"."""
+    """True when host.env defines ``var`` with a NON-EMPTY value on a non-comment ``KEY=…`` line —
+    the same parsing (and quote-stripping) the supervisor's ``load_host_env`` uses, so "present"
+    here means "the minter will see a value". A bare ``KEY=`` placeholder counts as absent, or
+    :func:`~foldyard.devmode.missing_secrets` would skip the prompt and the minter fail on
+    an empty string."""
     if not path.exists():
         return False
+    present = False  # last definition wins, as in load_host_env
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        if line.split("=", 1)[0].strip() == var:
-            return True
-    return False
+        key, value = line.split("=", 1)
+        if key.strip() == var:
+            present = bool(value.strip().strip("'\""))
+    return present
 
 
 def host_env_value(path: Path, var: str) -> str:
