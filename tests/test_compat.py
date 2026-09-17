@@ -259,6 +259,22 @@ def test_doctor_is_ok_inside_the_window(repo_declaring):
     assert status == "ok"
 
 
+def test_doctor_row_in_the_box_says_recreate(repo_declaring, monkeypatch):
+    # Same reasoning as test_fix_command_in_the_box_is_a_box_recreate: a bare `fy box up` is a
+    # no-op on a running box. The row and the gate must name the same fix.
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    (_, _, detail) = _row(repo_declaring, min_foldyard_version="99.0.0")[0]
+    assert "fy box down && fy box up" in detail
+    assert "uv tool install" not in detail
+
+
+def test_doctor_row_on_the_host_says_upgrade(repo_declaring, monkeypatch):
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    (_, _, detail) = _row(repo_declaring, min_foldyard_version="99.0.0")[0]
+    assert "uv tool install --upgrade foldyard" in detail
+    assert "fy box" not in detail
+
+
 def test_doctor_reports_the_nudge_even_when_silenced(repo_declaring, monkeypatch):
     # FOLDYARD_NO_VERSION_NUDGE silences the per-invocation nag, not an explicit `fy doctor`.
     monkeypatch.setenv("FOLDYARD_NO_VERSION_NUDGE", "1")
