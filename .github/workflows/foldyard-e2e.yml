@@ -219,7 +219,8 @@ jobs:
 
       # The host tier: test_e2e.py (the example + worktree stacks) plus the `*_e2e.py` modules that
       # need a real VM (tests/e2e_host.py — verify's negative, the live probes, the machine
-      # lifecycle, the walls, the supervisor with the zero-secret rig, the box). Listed by name:
+      # lifecycle, the walls, the supervisor with the zero-secret rig, the box, `fy reclaim`, the
+      # worktree verbs). Listed by name:
       # `-k e2e` would also pick the proxy/box e2es that need the in-box topology (`live-e2e`).
       # The `e2e` group brings mitmdump for the wall module's `[proxy]`. No pre-pull: the box
       # module recreates the VM (its mount set is init-only), which would discard it anyway.
@@ -231,8 +232,10 @@ jobs:
           tests/test_host_daemons_e2e.py
           tests/test_machine_e2e.py
           tests/test_probes_e2e.py
+          tests/test_reclaim_e2e.py
           tests/test_verify_e2e.py
           tests/test_wall_e2e.py
+          tests/test_worktree_e2e.py
 
       - name: Diagnostics
         if: always()

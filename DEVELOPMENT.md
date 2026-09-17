@@ -156,7 +156,16 @@ foldyard's surface splits by *where it can be validated*:
      hermetic unit suite cannot see.
    - `test_machine_e2e.py` — ensure idempotent; stop stops the supervisor (heartbeat stale) and
      keeps the VM; a SIGKILLed hypervisor recovered by ensure (the flag-is-not-liveness item
-     below); recreate.
+     below); recreate. Its copy lives UNDER THE HOST HOME (`~/fy-e2e/machine/`, left in place)
+     and the VM is recreated from it first, so every restart runs with a repo mounted at
+     `/home/<user>/…` — the realistic Linux layout the open home-mount finding in
+     [docs/linux-support.md](./docs/linux-support.md) needed exercised.
+   - `test_reclaim_e2e.py` — `fy reclaim` on a real store: a removed worktree's tagged images
+     (both provider spellings) swept, the main image + base images kept, the next `up` still
+     `Using cache` (the three reclaim properties below, live).
+   - `test_worktree_e2e.py` — `fy worktree add` (registered, own branch, clean tree), its stack
+     up beside main's, `remove`: containers + volumes gone, the bound-out transcript ARCHIVED
+     before the tree is deleted, main untouched, the branch kept, local state dropped.
    - `test_wall_e2e.py` — `[machine].wall` + `host_wall` via `fy up`: the host table on the VM's
      own scope, direct guest egress refused, DNS resolving, the proxy the way out, the api still
      served, and the stale-provisioning refusal.

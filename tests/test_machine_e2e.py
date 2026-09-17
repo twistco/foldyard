@@ -7,13 +7,24 @@ socket nothing serves); `recreate` boots a fresh VM.
 Host tier (tests/e2e_host.py). Lima 2.2.0's QEMU driver on Linux: the hypervisor is
 `qemu-system-x86_64`, its pid in `~/.lima/<name>/qemu.pid`; killing it is the "host crash /
 battery death" the revive path exists for. The module ends with the VM running and un-walled.
+
+The checkout the VM mounts lives UNDER THE HOST HOME (`~/fy-e2e/machine/example`), not under
+`tmp_path`, and the module recreates the VM from it FIRST so every restart below — stop→start,
+kill→ensure — runs with a repo mounted at `/home/<user>/…` inside the guest. That is the
+realistic Linux layout, and the one the open finding in docs/linux-support.md (a restarted
+guest with the host home itself mounted at its own path cannot create containers) had never
+been exercised with: every earlier restart test mounted `/tmp/pytest-…`. The copy is left in
+place at teardown (a fixed path, overwritten by the next run): the VM keeps mounting it, and a
+later module's restart with the location gone is not a case worth adding here.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import time
+from pathlib import Path
 
 import pytest
 
@@ -23,11 +34,13 @@ from e2e_host import (
     engine,
     ensure_vm,
     example_copy,
+    export_vm_socket,
     fy,
     fy_ok,
     heartbeat_age,
     heartbeat_file,
     host_tier,
+    lima_shell,
     lima_status,
     socket_alive,
     wait_for,
@@ -35,15 +48,28 @@ from e2e_host import (
 
 pytestmark = host_tier
 
+HOME_COPY = Path.home() / "fy-e2e" / "machine"
+
 
 @pytest.fixture(scope="module")
-def repo(tmp_path_factory):
-    r = example_copy(tmp_path_factory.mktemp("machine"))
+def repo():
+    shutil.rmtree(HOME_COPY, ignore_errors=True)
+    HOME_COPY.mkdir(parents=True)
+    r = example_copy(HOME_COPY)
     _adopt_on_host(r)
-    ensure_vm(r)
+    fy_ok(["machine", "recreate", "--yes"], r, timeout=900)  # so the VM mounts THIS copy
+    export_vm_socket()
+    ensure_vm(r)  # warm: the engine can run a container
     yield r
     ensure_vm(r)  # whatever a failing test left: the next module expects a running VM
     fy(["down"], r, timeout=180)
+
+
+def test_the_vm_mounts_the_checkout_under_the_host_home(repo):
+    # The premise of the module: the guest sees the repo at its host path, under /home/<user>.
+    assert str(repo).startswith(str(Path.home())), repo
+    seen = lima_shell("ls", str(repo / "foldyard.toml"))
+    assert seen.returncode == 0, f"{seen.stdout}{seen.stderr}"
 
 
 def test_ensure_is_idempotent_on_a_running_vm(repo):
@@ -70,7 +96,7 @@ def test_stop_stops_the_supervisor_too_and_keeps_the_vm(repo):
     before = heartbeat_file().stat().st_mtime
     time.sleep(6)
     assert heartbeat_file().stat().st_mtime == before, "heartbeat still ticking after machine stop"
-    ensure_vm(repo)
+    ensure_vm(repo)  # a restart with the home-path mount: the engine must run a container again
     assert lima_status() == "Running"
     assert engine("info").returncode == 0
     fy_ok(["down"], repo, timeout=180)
@@ -90,6 +116,7 @@ def test_ensure_recovers_a_vm_whose_hypervisor_died(repo):
     assert socket_alive(), recovered.out
     info = engine("info")
     assert info.returncode == 0, f"engine dead after ensure:\n{info.stderr}\n{recovered.out}"
+    ensure_vm(repo)  # and, past the socket accepting: a container actually runs
 
 
 def test_recreate_boots_a_fresh_vm(repo):
