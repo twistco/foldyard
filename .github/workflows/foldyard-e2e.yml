@@ -9,6 +9,15 @@ name: foldyard · live e2e
 #     `foldyard up` / worktree lifecycle run exactly as on an operator's machine. The phase-0
 #     spike that established this (10/10 attempts green, ~2 min per attempt, 2026-09-17) is
 #     recorded in docs/linux-support.md. It replaced a `native`-backend job, which exercised no VM.
+#   - `wsl2-host-e2e`: the same HOST topology on a Windows runner — an Ubuntu distro under WSL2
+#     (`windows-2025`, Vampire/setup-wsl), with foldyard's `lima` backend booting the QEMU/KVM VM
+#     INSIDE the distro. That is a second level of nesting (Azure → runner VM → WSL2 utility VM →
+#     QEMU), and it holds: `/dev/kvm` is present in the distro once `.wslconfig` asks for
+#     `nestedVirtualization`, and a Lima 2.2.0 guest boots there (Lullabot/sandbar#149 measured it
+#     on 2026-08-27; the READY line comes ~2 min after QEMU starts, vs 30–40 s on ubuntu-24.04).
+#     WSL2 without the VM would be bare Linux without the VM (ADR-0027), so the distro is only the
+#     host; every product path still runs in the Lima guest. GitHub calls nested virtualisation
+#     experimental, so this tier is the most likely to regress for reasons outside the change.
 #
 # Split out from foldyard.yml so the fast lint/types/unit suite can run on every push while this
 # heavier job stays OPT-IN. The workflow triggers on every push, but the job only runs on `main`
@@ -264,4 +273,220 @@ jobs:
       # Never leave the VM to the runner teardown.
       - name: Teardown
         if: always()
+        run: limactl delete -f foldyard-example || true
+
+  wsl2-host-e2e:
+    name: wsl2 host e2e (example + host tier, on a QEMU/KVM VM inside WSL2)
+    # Same opt-in policy as the other two tiers.
+    if: >-
+      github.ref == 'refs/heads/main'
+      || contains(github.event.head_commit.message, '[run-e2e]')
+      || github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
+    # The Linux job takes ~15 min; QEMU under a second level of nesting boots ~4× slower, and
+    # the distro install + apt run on top. Generous on purpose — a hung VM is what the
+    # per-test timeouts are for, not this.
+    timeout-minutes: 75
+    env:
+      LIMA_VERSION: "2.2.0" # keep in step with lima-host-e2e
+      FOLDYARD_E2E: "1"
+      FOLDYARD_ENGINE: podman
+      MACHINE_BACKEND: lima
+      FOLDYARD_STATE_DIR: /tmp/foldyard-state
+      # Job `env:` is WINDOWS process environment. wsl.exe hands a Linux process only PATH plus
+      # whatever WSLENV names, so every variable the in-distro steps read is listed here (`/u`:
+      # forward Windows → WSL; `/p`: translate the path, so GITHUB_WORKSPACE arrives as
+      # /mnt/<drive>/a/foldyard/foldyard). GITHUB_ENV is deliberately NOT used across steps —
+      # it is a Windows-side file and its exports would not cross into the distro either; the
+      # in-distro steps hand state forward through ~/.fy-ci.env instead.
+      WSLENV: FOLDYARD_E2E/u:FOLDYARD_ENGINE/u:MACHINE_BACKEND/u:FOLDYARD_STATE_DIR/u:LIMA_VERSION/u:GITHUB_WORKSPACE/up
+    steps:
+      # Repo-only read (no push) — keep the token out of .git/config. The checkout lands on the
+      # Windows drive; the distro clones it onto its own ext4 (below) rather than working over
+      # the 9p automount.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # Read at utility-VM boot, so it must exist BEFORE the distro first starts. Windows 11
+      # defaults nestedVirtualization on; the runner is Windows Server 2025, so say it.
+      - name: Request nested virtualisation from WSL
+        shell: pwsh
+        run: |
+          Set-Content -Path "$env:USERPROFILE\.wslconfig" -Value "[wsl2]`nnestedVirtualization=true`n"
+          Get-Content "$env:USERPROFILE\.wslconfig"
+          wsl --version
+
+      # Ubuntu 24.04 for parity with the Linux job (same podman 4.9.3 CLI, QEMU 8.2, ovmf), so a
+      # failure here isolates WSL2 rather than a package delta. `wsl-conf` OVERWRITES the distro's
+      # default file: systemd is required (the `runner` user's manager below — the host wall's
+      # per-VM scope and `loginctl` need it); automount stays ON, because the wsl-bash wrapper
+      # reads each step's script through /mnt/<drive>. The distro's default user is root at this
+      # point — the wrapper runs the next three steps as root, and is regenerated for `runner`
+      # after them.
+      - name: Install WSL2 + Ubuntu 24.04
+        uses: Vampire/setup-wsl@v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          set-as-default: "true"
+          wsl-conf: |
+            [boot]
+            systemd=true
+
+      # Fail in seconds with the reason, not twenty minutes in with QEMU's "could not access
+      # KVM": the device, systemd as PID 1, and the WSLENV forwarding this job leans on.
+      - name: Distro, KVM, systemd, env
+        shell: wsl-bash {0}
+        run: |
+          uname -a
+          head -2 /etc/os-release
+          id
+          grep -o -m1 -E 'vmx|svm' /proc/cpuinfo || { echo "no virtualisation extensions in the distro" >&2; exit 1; }
+          test -e /dev/kvm || { echo "no /dev/kvm in the distro — .wslconfig nestedVirtualization not honoured" >&2; exit 1; }
+          ls -l /dev/kvm
+          test -d /run/systemd/system || { echo "systemd is not PID 1 in the distro — [boot] systemd=true did not take" >&2; exit 1; }
+          systemctl is-system-running --wait || true
+          test "${FOLDYARD_E2E:-}" = "1" || { echo "WSLENV forwarding broken: FOLDYARD_E2E not set in the distro" >&2; exit 1; }
+          test -d "$GITHUB_WORKSPACE" || { echo "GITHUB_WORKSPACE did not translate: '$GITHUB_WORKSPACE'" >&2; exit 1; }
+          echo "✓ /dev/kvm present, systemd up, env forwarded (workspace at $GITHUB_WORKSPACE)"
+
+      # The Linux job's set, plus what the runner image has and a bare rootfs does not: git,
+      # ssh (Lima), rsync (`worktree remove` archives transcripts), lsof + iproute2 (the port
+      # probes), sudo (the host wall's `nft`). Lima from the release tarball; uv into
+      # /usr/local/bin (an unmanaged install, so it is on every user's PATH — the wrapper's
+      # shell is `--noprofile --norc`, so ~/.local/bin would not be).
+      - name: Packages (QEMU, podman CLI, nftables) + Lima + uv
+        shell: wsl-bash {0}
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            ovmf qemu-system-x86 qemu-utils podman uidmap slirp4netns nftables jq \
+            git openssh-client curl ca-certificates rsync lsof iproute2 sudo
+          url="https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz"
+          curl -fsSL "$url" | tar Cxz /usr/local
+          curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
+          qemu-system-x86_64 --version | head -1
+          podman --version
+          uv --version
+          test -x /usr/local/bin/limactl # limactl refuses to run as root; the version prints as `runner`
+
+      # The operator: an ordinary user, as on the Linux runner. kvm group + a chown (belt and
+      # braces: udev may not have applied the group rule under WSL), passwordless sudo for the
+      # host wall's `nft`, subuids for the podman CLI, and linger so `systemd --user` has a
+      # manager for the wall's per-VM scope.
+      - name: The runner user
+        shell: wsl-bash {0}
+        run: |
+          useradd -m -s /bin/bash runner
+          usermod -aG kvm runner
+          chown runner /dev/kvm
+          grep -q '^runner:' /etc/subuid || usermod --add-subuids 200000-265535 --add-subgids 200000-265535 runner
+          echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
+          chmod 440 /etc/sudoers.d/runner
+          loginctl enable-linger runner
+          id runner
+
+      # Regenerate the wsl-bash wrapper for `runner`: setup-wsl only rewrites an existing wrapper
+      # when `wsl-shell-command` is given explicitly. Every step from here runs as `runner`.
+      - name: Switch the wsl-bash wrapper to the runner user
+        uses: Vampire/setup-wsl@v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-shell-user: runner
+          wsl-shell-command: bash --noprofile --norc -euo pipefail
+
+      # Clone from the Windows-side checkout into the distro's ext4: objects carry the committed
+      # modes and LF endings, so neither the drive's 0777 view nor core.autocrlf reaches the tree
+      # (a CRLF guest-boot.sh would fail its `bash -n` gate; a symlinked .venv on 9p is a bad
+      # time). `safe.directory`: the automount presents the checkout as root-owned.
+      - name: Clone into the distro + user session
+        shell: wsl-bash {0}
+        run: |
+          id
+          test -w /dev/kvm || { echo "/dev/kvm not writable as runner" >&2; exit 1; }
+          limactl --version
+          limactl info | jq -c .vmTypes
+          sha="$(git -c safe.directory='*' -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+          git -c safe.directory='*' clone -q "$GITHUB_WORKSPACE" "$HOME/foldyard"
+          git -C "$HOME/foldyard" checkout -q "$sha"
+          git -C "$HOME/foldyard" log -1 --oneline
+          uid="$(id -u)"
+          for _ in $(seq 1 30); do
+            test -S "/run/user/$uid/bus" && break
+            sleep 1
+          done
+          test -S "/run/user/$uid/bus" || { echo "no systemd --user bus for runner (linger)" >&2; exit 1; }
+          {
+            echo "export XDG_RUNTIME_DIR=/run/user/$uid"
+            echo "export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus"
+          } > "$HOME/.fy-ci.env"
+          echo "✓ $(git -C "$HOME/foldyard" rev-parse --short HEAD) cloned; user bus up"
+
+      # As in lima-host-e2e: the VM is created ONCE, from a throwaway example copy — under the
+      # distro's home, not RUNNER_TEMP (a Windows path). CONTAINER_HOST (not DOCKER_HOST) for the
+      # tests' own engine calls, handed forward through the env file.
+      - name: Create the machine (fy machine ensure)
+        shell: wsl-bash {0}
+        run: |
+          . "$HOME/.fy-ci.env"
+          dst="$HOME/fyex-machine"
+          cp -r "$HOME/foldyard/example" "$dst"
+          cd "$dst"
+          git init -q && git add -A
+          git -c user.email=e2e@foldyard -c user.name=e2e commit -qm init
+          uv run --project "$HOME/foldyard" foldyard config adopt
+          uv run --project "$HOME/foldyard" foldyard machine ensure
+          sock="$HOME/.lima/foldyard-example/sock/podman.sock"
+          test -S "$sock"
+          echo "export CONTAINER_HOST=unix://$sock" >> "$HOME/.fy-ci.env"
+          CONTAINER_HOST="unix://$sock" podman info --format '{{.Host.Arch}} podman {{.Version.Version}} on {{.Host.Distribution.Distribution}} {{.Host.Distribution.Version}}'
+
+      # The same module list as lima-host-e2e — what differs is the host under it.
+      - name: Host e2e on the VM
+        shell: wsl-bash {0}
+        run: |
+          . "$HOME/.fy-ci.env"
+          cd "$HOME/foldyard"
+          uv run --group e2e pytest -v \
+            tests/test_e2e.py \
+            tests/test_box_e2e.py \
+            tests/test_host_daemons_e2e.py \
+            tests/test_machine_e2e.py \
+            tests/test_probes_e2e.py \
+            tests/test_reclaim_e2e.py \
+            tests/test_verify_e2e.py \
+            tests/test_wall_e2e.py \
+            tests/test_worktree_e2e.py
+
+      - name: Diagnostics
+        if: always()
+        shell: wsl-bash {0}
+        run: |
+          set +e
+          . "$HOME/.fy-ci.env" 2>/dev/null
+          echo "::group::distro"; uname -a; cat /proc/meminfo | head -3; df -h / /mnt/c 2>/dev/null; mount | grep -E ' / |cgroup'; echo "::endgroup::"
+          echo "::group::limactl list"; limactl list; echo "::endgroup::"
+          echo "::group::podman ps -a"; podman ps -a; echo "::endgroup::"
+          echo "::group::supervisor log"; cat "$FOLDYARD_STATE_DIR"/host-supervisor.log 2>/dev/null || echo "(none)"; echo "::endgroup::"
+          echo "::group::lima ha.stderr.log"; tail -n 100 "$HOME"/.lima/*/ha.stderr.log 2>/dev/null; echo "::endgroup::"
+          echo "::group::inside the guest"
+          for cmd in \
+            "id; echo HOME=\$HOME; uptime; cat /etc/os-release | head -2" \
+            "podman info --format '{{.Store.GraphDriverName}} graph={{.Store.GraphRoot}} run={{.Store.RunRoot}}'" \
+            "podman images" \
+            "mount | grep -E ' / | /home|overlay|9p|virtiofs'" \
+            "journalctl --user -u podman --no-pager -n 25" \
+            "journalctl -b -p warning --no-pager -n 40" \
+            "cat /run/fy-wall/boot.log"; do
+            echo "\$ $cmd"; limactl shell foldyard-example -- sh -c "$cmd" 2>&1
+          done
+          echo "::endgroup::"
+          echo "::group::lima.yaml"; grep -v "^ *#" "$HOME"/.lima/foldyard-example/lima.yaml 2>/dev/null | head -80; echo "::endgroup::"
+          true
+
+      - name: Teardown
+        if: always()
+        shell: wsl-bash {0}
         run: limactl delete -f foldyard-example || true
