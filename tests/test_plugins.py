@@ -1172,6 +1172,43 @@ def test_no_proxy_refuses_a_dotted_entry(fresh_config, tmp_path):
         config.proxy_no_proxy()
 
 
+def test_no_proxy_admits_a_localhost_alias(fresh_config, tmp_path):
+    # The one dotted shape that is NOT a public host: a name under `.localhost`. RFC 6761 makes
+    # resolvers answer those with loopback and never send them upstream, so in the box such a
+    # name can only ever reach the box itself or an in-stack network alias — a consumer gives a
+    # gateway service one (`supabase.localhost`) so a single NEXT_PUBLIC_* URL works from the
+    # browser on the host AND from a container. The invariant survives: no dotted entry can
+    # name a public host.
+    (tmp_path / "foldyard.toml").write_text(
+        '[proxy]\nno_proxy = ["supabase.localhost", "Kong.LocalHost", "a.b.localhost", "redis"]\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.proxy_no_proxy() == [
+        "supabase.localhost",
+        "Kong.LocalHost",
+        "a.b.localhost",
+        "redis",
+    ]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "*.localhost",  # a glob bypasses wholesale — refused whatever the suffix
+        ".localhost",  # a bare suffix (curl's "every name under") — an empty label, refused
+        "supabase..localhost",  # empty label
+        "supabase.localhost.",  # a trailing dot: the FQDN spelling, not the alias
+        "localhost.evil.com",  # `.localhost` in the middle is not the RFC 6761 TLD
+        "supabase.localhos",  # the near-miss
+    ],
+)
+def test_no_proxy_localhost_exemption_is_exact(fresh_config, tmp_path, entry):
+    (tmp_path / "foldyard.toml").write_text(f'[proxy]\nno_proxy = ["{entry}"]\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    with pytest.raises(SystemExit, match="may not contain dotted names"):
+        config.proxy_no_proxy()
+
+
 def test_proxy_box_args_ambient_ca_without_routing(monkeypatch, tmp_path):
     # AMBIENT CA: the CA exists but no proxy mode set FY_PROXY → mount + additively trust it, but
     # DON'T route and DON'T set the bundle-replacing vars (they'd break every non-proxied HTTPS).

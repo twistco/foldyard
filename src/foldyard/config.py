@@ -677,19 +677,38 @@ def proxy_no_proxy() -> list[str]:
     labels, so refusing dots admits every legitimate use and structurally excludes every public
     host — and refusing ``*`` closes the same hole by the other door, since a lone ``NO_PROXY=*``
     (and every ``*``-bearing glob) bypasses the proxy wholesale without ever carrying a dot. Such
-    an entry is a typo or an attack, and both get the same loud refusal as ``[engine].cli``."""
+    an entry is a typo or an attack, and both get the same loud refusal as ``[engine].cli``.
+
+    The one dotted shape admitted is a name under ``.localhost`` (``supabase.localhost``): RFC 6761
+    has resolvers answer those with loopback and never send them upstream, so in the box such a
+    name reaches the box itself or an in-stack network alias — never a public host, which keeps
+    the invariant. A consumer wants this when ONE URL must work from the browser on the host
+    (where ``*.localhost`` is loopback) and from a container (where it is a compose alias on the
+    gateway). Every label must be non-empty, so a bare ``.localhost`` suffix and a glob are
+    still refused."""
     raw = _table("proxy").get("no_proxy")
     if not isinstance(raw, list):
         return []
     out = [str(x).strip() for x in raw if str(x).strip()]
-    if bad := [h for h in out if "." in h or "*" in h]:
+    if bad := [h for h in out if not _no_proxy_entry_ok(h)]:
         raise SystemExit(
             f"✗ [proxy] no_proxy may not contain dotted names or wildcards: {', '.join(bad)}\n"
             "  Only in-stack service/container names (single DNS labels) belong here — a dotted\n"
             "  or `*` entry would exempt PUBLIC hosts from capture and from the egress wall.\n"
+            "  (The exception is a name under `.localhost`, which can never be public.)\n"
             "  To reach an external host, grant it on the Mac instead: `fy allow add <host>`."
         )
     return out
+
+
+def _no_proxy_entry_ok(entry: str) -> bool:
+    """A single DNS label, or non-empty labels under the reserved ``.localhost`` TLD."""
+    if "*" in entry:
+        return False
+    labels = entry.split(".")
+    if len(labels) == 1:
+        return True
+    return labels[-1].lower() == "localhost" and all(labels)
 
 
 def proxy_recommend() -> list[dict]:
