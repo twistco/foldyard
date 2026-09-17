@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from foldyard import devmode, reconcile, state_view
+from foldyard import devmode, state_view
 
 pytestmark = pytest.mark.usefixtures("full_config_bound")
 
@@ -17,10 +17,7 @@ pytestmark = pytest.mark.usefixtures("full_config_bound")
 def offline_engine(monkeypatch):
     """Make the engine-backed scopes deterministic: stack/box report 'unknown/down'."""
 
-    def _no_engine(*a, **k):
-        raise OSError("no engine in tests")
-
-    monkeypatch.setattr(reconcile.subprocess, "run", _no_engine)
+    monkeypatch.setattr(devmode, "ps_labels", lambda *a, **k: None)  # engine unreachable
     monkeypatch.setattr(devmode, "_box_env_hint", lambda mode: None)
 
 
@@ -69,14 +66,19 @@ def test_state_flags_a_stale_extra_overlay_as_drift(isolated_state, monkeypatch,
         devmode, "daemon_status", lambda mode: {"gcp-minter": {"up": True, "port": 41100}}
     )
 
-    class _Out:
-        returncode = 0
-        stdout = (
-            "/repo/compose.yml,/repo/dev-stack/compose.identity.yml,"
-            "/repo/dev-stack/compose.identity-data.yml,/repo/dev-stack/compose.storage-staging.yml\n"
+    running = [
+        (
+            "acme_api_1",
+            {
+                "com.docker.compose.project.config_files": (
+                    "/repo/compose.yml,/repo/dev-stack/compose.identity.yml,"
+                    "/repo/dev-stack/compose.identity-data.yml,"
+                    "/repo/dev-stack/compose.storage-staging.yml"
+                )
+            },
         )
-
-    monkeypatch.setattr(reconcile.subprocess, "run", lambda *a, **k: _Out())
+    ]
+    monkeypatch.setattr(devmode, "ps_labels", lambda *a, **k: running)
     rc = state_view.show()
     out = capsys.readouterr().out
     assert rc == 1 and "stale overlay" in out and "compose.storage-staging.yml" in out

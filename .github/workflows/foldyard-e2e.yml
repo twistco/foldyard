@@ -191,8 +191,11 @@ jobs:
       # ([machine].name), and the example stack has no bind mounts (its build context ships over
       # the socket), so the tests' own copies drive this VM through the real `foldyard up` —
       # `machine.ensure` finds it running and goes on to the adopt gate + supervisor + compose.
-      # DOCKER_HOST is exported so the tests' engine helpers (`podman ps/run` for the in-network
-      # probe) reach the VM's forwarded socket: test_e2e.py mirrors it into CONTAINER_HOST.
+      # CONTAINER_HOST (NOT DOCKER_HOST) is exported so the tests' own engine helpers (`podman
+      # ps/run` for the in-network probe) reach the VM's forwarded socket while the CLI under test
+      # still resolves the socket ITSELF: a preset DOCKER_HOST makes `stack._docker_host` skip
+      # `machine.ensure` (dev-box semantics), which would bypass the start-after-stop, the
+      # provisioning record and the host wall — the very paths the host tier drives.
       - name: Create the machine (fy machine ensure)
         run: |
           set -euo pipefail
@@ -205,7 +208,7 @@ jobs:
           uv run --project "$GITHUB_WORKSPACE" foldyard machine ensure
           sock="$HOME/.lima/foldyard-example/sock/podman.sock"
           test -S "$sock"
-          echo "DOCKER_HOST=unix://$sock" >> "$GITHUB_ENV"
+          echo "CONTAINER_HOST=unix://$sock" >> "$GITHUB_ENV"
           CONTAINER_HOST="unix://$sock" podman info --format '{{.Host.Arch}} podman {{.Version.Version}} on {{.Host.Distribution.Distribution}} {{.Host.Distribution.Version}}'
 
       # The host tier: test_e2e.py (the example + worktree stacks) plus the `*_e2e.py` modules that
@@ -229,7 +232,7 @@ jobs:
         if: always()
         run: |
           echo "::group::limactl list"; limactl list || true; echo "::endgroup::"
-          echo "::group::podman ps -a"; CONTAINER_HOST="${DOCKER_HOST:-}" podman ps -a || true; echo "::endgroup::"
+          echo "::group::podman ps -a"; podman ps -a || true; echo "::endgroup::"
           echo "::group::supervisor log"; cat "$FOLDYARD_STATE_DIR"/host-supervisor.log 2>/dev/null || echo "(none)"; echo "::endgroup::"
           echo "::group::lima ha.stderr.log"; tail -n 100 "$HOME"/.lima/*/ha.stderr.log 2>/dev/null || true; echo "::endgroup::"
 

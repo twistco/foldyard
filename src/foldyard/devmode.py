@@ -541,6 +541,60 @@ def _engine_env() -> dict[str, str]:
     return env
 
 
+def _parse_labels(raw: str) -> dict[str, str]:
+    """The ``{{json .Labels}}`` field of one ``ps`` row: a JSON object from podman, a
+    ``k=v,k=v`` string from docker, ``null`` for a container with no labels."""
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        value = raw
+    if isinstance(value, dict):
+        return {str(k): str(v) for k, v in value.items()}
+    if isinstance(value, str):
+        return dict(part.split("=", 1) for part in value.split(",") if "=" in part)
+    return {}
+
+
+def ps_labels(
+    extra_args: list[str] | None = None, timeout: float = 5
+) -> list[tuple[str, dict[str, str]]] | None:
+    """``<engine> ps`` as ``(name, labels)`` per container — ``None`` when the engine is
+    unreachable (the callers render that, never guess). ONE read-only probe shared by the
+    workspace cards and the reconciler's stack tier.
+
+    ``{{json .Labels}}``, deliberately NOT ``{{.Label "key"}}``: the per-key accessor is a
+    template function podman's ps reporter only grew in 5.x — Ubuntu 24.04's podman 4.9.3 CLI
+    answers ``can't evaluate field Label in type containers.psReporter``, and since a template
+    error is a non-zero exit, every probe built on it read as "engine unreachable" on a Linux
+    host while ``fy ps`` reached the VM fine (lima-host-e2e, 2026-09-17). ``.Labels`` exists on
+    every podman and docker; :func:`_parse_labels` absorbs the two shapes."""
+    try:
+        out = subprocess.run(
+            [
+                config.engine(),
+                "ps",
+                *(extra_args or []),
+                "--format",
+                "{{.Names}}\t{{json .Labels}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=_engine_env(),
+        )
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    rows = []
+    for line in out.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        name, _, raw = line.partition("\t")
+        rows.append((name, _parse_labels(raw)))
+    return rows
+
+
 def workspaces() -> list[dict]:
     """main + each worktree, with stack/devbox status from one engine call.
 
@@ -563,24 +617,7 @@ def workspaces() -> list[dict]:
         for d in sorted(wt_root.iterdir()):
             if d.is_dir() and (d / ".git").exists():
                 items.append({"name": d.name, "path": str(d), "project": f"{prefix}-{d.name}"})
-    try:
-        out = subprocess.run(
-            [
-                config.engine(),
-                "ps",
-                "--format",
-                '{{.Names}}\t{{.Label "com.docker.compose.project"}}',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=_engine_env(),
-        )
-        rows = [line.split("\t") for line in out.stdout.splitlines() if "\t" in line]
-        if out.returncode != 0:
-            rows = None
-    except Exception:
-        rows = None
+    rows = ps_labels(timeout=5)
     for item in items:
         wt = "" if item["name"] == "main" else item["name"]
         try:
@@ -606,7 +643,9 @@ def workspaces() -> list[dict]:
             item["containers"] = None
             item["devbox"] = False
             continue
-        item["containers"] = sum(1 for _, proj in rows if proj == item["project"])
+        item["containers"] = sum(
+            1 for _, labels in rows if labels.get("com.docker.compose.project") == item["project"]
+        )
         item["devbox"] = any(name == f"{item['project']}-devbox" for name, _ in rows)
     return items
 

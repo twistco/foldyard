@@ -6,9 +6,10 @@ image, pulls postgres, and the test queries the DB across the compose network. I
 skipped unless FOLDYARD_E2E=1 AND an engine is reachable (it pulls images + builds, ~minutes).
 Run it where foldyard has an engine — the dev box (the rootless machine socket), a nested
 podman host (see DEVELOPMENT.md), or CI's `lima-host-e2e` job, where the VM is created once before
-pytest and its socket handed in as DOCKER_HOST so `foldyard up` here runs the REAL host path
-(machine found running → adopt gate → supervisor → compose). It namespaces under the example's
-own 'fyex' project, so it never collides with a host project's stack.
+pytest and its socket handed to THIS test's engine helpers as CONTAINER_HOST — never DOCKER_HOST,
+which the CLI would take as "socket pre-exported" and skip `machine.ensure` — so `foldyard up`
+here runs the REAL host path (machine ensure → adopt gate → supervisor → compose). It namespaces
+under the example's own 'fyex' project, so it never collides with a host project's stack.
 
     FOLDYARD_E2E=1 just foldyard test -k e2e
 """

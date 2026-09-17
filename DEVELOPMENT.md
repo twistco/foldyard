@@ -139,11 +139,35 @@ foldyard's surface splits by *where it can be validated*:
      the socket — runs in an adapted topology so it works inside a dev box; see
      [docs/nested-virt.md](./docs/nested-virt.md). Both proxy e2es:
      `just foldyard test-proxy-e2e` (pulls the `e2e` group).
-4. **Host-only / "Mac-only" paths** — `machine ensure|recreate`, `box up|build`, `host`,
-   `mode set`. These deliberately **refuse to run inside a dev box** (`config.in_box()`
-   guards — the box must not manage its own VM or escalate its posture), and creating a
-   machine/box from inside the live box would collide with it. Validate them on a real host,
-   or headlessly via the nested-virt rig: [docs/nested-virt.md](./docs/nested-virt.md).
+4. **The host tier** — `machine ensure|stop|recreate`, `box up|build`, `host`, `mode set`,
+   `verify`'s real VM boundary, the walls. These deliberately **refuse to run inside a dev box**
+   (`config.in_box()` guards — the box must not manage its own VM or escalate its posture), and
+   creating a machine/box from inside the live box would collide with it. They have a REAL VM
+   in CI — the `lima-host-e2e` job (below) — and live as `tests/test_*_e2e.py` modules over the
+   shared substrate `tests/e2e_host.py` (gated: `FOLDYARD_E2E=1`, not in a box, `limactl` on
+   PATH; each module takes a throwaway example copy, leaves the VM running and un-walled):
+   - `test_verify_e2e.py` — ALL PASS on the boundary foldyard builds, **FAIL against a VM
+     mounting the operator's whole home**, PASS again once the mount is gone (the negative
+     [docs/verify-false-pass.md](./docs/verify-false-pass.md) owed). Never weaken this one.
+   - `test_probes_e2e.py` — the read-only engine probes in-process (`devmode.workspaces` /
+     `up_worktrees` / `_stack_mounts` / `_stack_shadow_check`, `stack.disk_headroom`,
+     `machine.state/socket/responsive` with the moved-socket invariant, `reconcile.scopes()`),
+     plus `fy state` and `fy doctor` — the output that drifts between podman versions, which the
+     hermetic unit suite cannot see.
+   - `test_machine_e2e.py` — ensure idempotent; stop stops the supervisor (heartbeat stale) and
+     keeps the VM; a SIGKILLed hypervisor recovered by ensure (the flag-is-not-liveness item
+     below); recreate.
+   - `test_wall_e2e.py` — `[machine].wall` + `host_wall` via `fy up`: the host table on the VM's
+     own scope, direct guest egress refused, DNS resolving, the proxy the way out, the api still
+     served, and the stale-provisioning refusal.
+   - `test_host_daemons_e2e.py` — the supervisor with the zero-secret rig
+     ([docs/testing-modes.md](./docs/testing-modes.md)): mode on → fake minter up + the overlay
+     re-rendered, blocked-daemons empty; mode off.
+   - `test_box_e2e.py` — `fy box up` on the VM (recreated to mount the module's copy), in-box
+     `fy ps` over `CONTAINER_HOST`, in-box `fy verify` ALL PASS, `box down`.
+   On a Lima host these run against the example's own VM (creating, restarting, recreating it),
+   never a consumer's. What the runner cannot reach — nested virtualisation for the gVisor
+   posture — stays the recipe in [docs/nested-virt.md](./docs/nested-virt.md).
 
 **In-box validation you CAN do:** `fy verify`, `fy ps/down/up/logs`, the e2e tiers above.
 **CANNOT from inside the box:** `fy host` (real daemons), `fy mode <set>` (authoritative
@@ -215,8 +239,13 @@ recipe `modprobe kvm; chown $USER /dev/kvm` — group membership does not take e
 with and without the walls, QEMU start → READY in 29–41 s and the whole attempt under 2.5 min;
 the record is in [docs/linux-support.md](./docs/linux-support.md#validated-on-a-linux-host). The
 job creates the VM once from a throwaway example copy before pytest (the example stack has no bind
-mounts, so every test copy can drive the one VM) and exports its socket as `DOCKER_HOST`; the
-tests' `foldyard up` then finds the machine running and goes on through the real host path.
+mounts, so every test copy can drive the one VM) and exports its socket as `CONTAINER_HOST` — for
+the tests' OWN engine calls; a preset `DOCKER_HOST` would make the CLI under test skip
+`machine.ensure` (`stack._docker_host`: dev-box semantics) and bypass the very lifecycle the tier
+drives. The tests' `foldyard up` then runs the real host path: machine ensure → adopt gate →
+supervisor → compose. First catch of the tier: podman 4.9.3's `ps --format` (Ubuntu 24.04's
+package) has no `{{.Label "k"}}`, so every probe built on it read "engine unreachable" on a
+Linux host — now `{{json .Labels}}` (`devmode.ps_labels`).
 Things a Linux runner needs that a Mac does not: `qemu-img` (from `qemu-utils`, not implied by
 `qemu-system-x86-core`), a `systemd --user` manager for anything scoped (`loginctl
 enable-linger`), and Lima from the release tarball into `/usr/local`. **arm64 runners have no

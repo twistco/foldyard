@@ -30,7 +30,6 @@ Stdlib only (loads on the `fy state` path).
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 
 from . import config, devmode
@@ -197,26 +196,15 @@ class StackScope(Scope):
         profiles = signature["env"].get("COMPOSE_PROFILES", "")
         if profiles:
             desired += f" · profiles: {profiles}"
-        try:
-            out = subprocess.run(
-                [
-                    config.engine(),
-                    "ps",
-                    "--filter",
-                    f"label=com.docker.compose.project={config.project_prefix()}",
-                    "--format",
-                    '{{.Label "com.docker.compose.project.config_files"}}',
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=devmode._engine_env(),
-            )
-            if out.returncode != 0:
-                return [ScopeRow("unknown", self.name, desired, "engine unreachable")]
-        except Exception:
+        rows = devmode.ps_labels(
+            ["--filter", f"label=com.docker.compose.project={config.project_prefix()}"], timeout=5
+        )
+        if rows is None:
             return [ScopeRow("unknown", self.name, desired, "engine unreachable")]
-        lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
+        lines = [
+            labels.get("com.docker.compose.project.config_files", "").strip() for _, labels in rows
+        ]
+        lines = [ln for ln in lines if ln]
         if not lines:
             return [
                 ScopeRow("ok", self.name, desired, "stack down (posture applies on next `fy up`)")

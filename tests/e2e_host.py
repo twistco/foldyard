@@ -137,20 +137,43 @@ def fy_ok(
 
 
 def export_vm_socket() -> None:
-    """Point the engine helpers at the VM's forwarded socket for the rest of the process — the
-    lima backend registers no podman connection of its own (unlike `podman machine init`), so a
-    bare `podman` would talk to the host's own store. Idempotent; a preset DOCKER_HOST (CI's
-    `lima-host-e2e` exports one) wins."""
-    if not os.environ.get("DOCKER_HOST"):
-        os.environ["DOCKER_HOST"] = f"unix://{LIMA_SOCK}"
-    os.environ.setdefault("CONTAINER_HOST", os.environ["DOCKER_HOST"])
+    """Point the tests' OWN engine calls at the VM's forwarded socket for the rest of the
+    process — the lima backend registers no podman connection (unlike `podman machine init`), so
+    a bare `podman` would talk to the host's own store. CONTAINER_HOST only, never DOCKER_HOST:
+    the CLI under test treats a preset DOCKER_HOST as "the socket is someone else's business"
+    (`stack._docker_host`: dev box / pre-exported) and SKIPS `machine.ensure` — the start-after-
+    stop, the provisioning record, the host wall — which is exactly the path these tests exist
+    to drive. `test_e2e._engine_env` mirrors DOCKER_HOST→CONTAINER_HOST, not the reverse, so
+    the subprocess CLI sees no DOCKER_HOST and resolves the socket itself, and podman (which
+    reads CONTAINER_HOST) reaches the VM for the tests' probes. Idempotent; a preset wins."""
+    os.environ.setdefault("CONTAINER_HOST", f"unix://{LIMA_SOCK}")
 
 
-def ensure_vm(repo: Path, env_extra: dict[str, str] | None = None) -> None:
+def ensure_vm(repo: Path, env_extra: dict[str, str] | None = None, warm: float = 90) -> None:
     """`fy machine ensure` from `repo` (creates the VM on first use, starts it if stopped, no-op
-    when running) and export its socket."""
+    when running), export its socket, then wait until the engine can actually RUN a container.
+
+    `ensure` returns when the forwarded socket accepts, which after a (re)boot is earlier than
+    the guest's rootless podman can start a container (the verify battery's positive control —
+    `podman run --rm alpine true` — failed for a moment after every restart, 2026-09-17). A real
+    operator never notices: `fy up` builds for 30 s first. The tests do, so warm here, and say
+    how long it took when it was not immediate."""
     fy_ok(["machine", "ensure"], repo, timeout=900, env_extra=env_extra)
     export_vm_socket()
+    start = time.time()
+    last = None
+    while time.time() - start < warm:
+        last = engine("run", "--rm", "docker.io/library/alpine", "true", timeout=60)
+        if last.returncode == 0:
+            waited = time.time() - start
+            if waited > 3:
+                print(f"(engine could run a container {waited:.0f}s after ensure returned)")
+            return
+        time.sleep(2)
+    raise AssertionError(
+        f"engine accepted connections but could not run a container within {warm}s of ensure:\n"
+        f"{last.stderr if last else ''}"
+    )
 
 
 def lima_status() -> str:

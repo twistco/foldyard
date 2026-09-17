@@ -1243,3 +1243,55 @@ def test_mode_set_with_the_secret_present_does_not_prompt(isolated_state, monkey
     monkeypatch.setattr(devmode.getpass, "getpass", lambda _p: pytest.fail("already present"))
     assert devmode.main(["set", "github=app"]) == 0
     assert devmode.read()["mode"]["github"] == "app"
+
+
+# ── ps_labels: the version-proof `{{json .Labels}}` probe ────────────────────────────────
+
+
+def test_parse_labels_reads_podmans_json_object_and_dockers_kv_string():
+    # podman: a JSON object; docker: `.Labels` is a `k=v,k=v` string, json-encoded by the
+    # template; a container with no labels: `null`. All three must land as a dict.
+    assert devmode._parse_labels('{"com.docker.compose.project": "acme", "x": "1"}') == {
+        "com.docker.compose.project": "acme",
+        "x": "1",
+    }
+    assert devmode._parse_labels('"com.docker.compose.project=acme,x=1=2"') == {
+        "com.docker.compose.project": "acme",
+        "x": "1=2",
+    }
+    assert devmode._parse_labels("null") == {}
+    assert devmode._parse_labels("") == {}
+
+
+def test_ps_labels_uses_the_labels_map_not_the_per_key_accessor(monkeypatch):
+    """`{{.Label "k"}}` is missing from podman 4.9's ps reporter (Ubuntu 24.04's package) — a
+    template error is a non-zero exit, and the probes read "engine unreachable" on a Linux host
+    (lima-host-e2e, 2026-09-17). Pin the format and the row shape."""
+    seen = {}
+
+    class _Out:
+        returncode = 0
+        stdout = 'acme-devbox\t{"a": "1"}\nacme_db_1\tnull\nno-tab-line\n'
+
+    def _run(cmd, **kw):
+        seen["cmd"] = cmd
+        return _Out()
+
+    monkeypatch.setattr(devmode.subprocess, "run", _run)
+    monkeypatch.setattr(devmode, "_engine_env", lambda: {})
+    rows = devmode.ps_labels(["--filter", "label=x=y"])
+    assert seen["cmd"][1:] == [
+        "ps",
+        "--filter",
+        "label=x=y",
+        "--format",
+        "{{.Names}}\t{{json .Labels}}",
+    ]
+    assert ".Label " not in " ".join(seen["cmd"])
+    assert rows == [("acme-devbox", {"a": "1"}), ("acme_db_1", {})]
+
+    class _Bad(_Out):
+        returncode = 125
+
+    monkeypatch.setattr(devmode.subprocess, "run", lambda *a, **k: _Bad())
+    assert devmode.ps_labels() is None
