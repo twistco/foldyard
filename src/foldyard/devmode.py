@@ -1252,7 +1252,7 @@ def _version_window_check():
     message, blocked = version_gate(__version__, minimum, recommended, in_box=in_box())
     # The recreate, not a bare `fy box up` — see compat._fix for why the latter does nothing.
     fix = (
-        "`fy box down && fy box up` from the Mac"
+        "`fy box down && fy box up` from the host"
         if in_box()
         else "`uv tool install --upgrade foldyard`"
     )

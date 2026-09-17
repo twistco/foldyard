@@ -180,7 +180,7 @@ def _fix(in_box: bool) -> str:
     nothing. Advice that reads as success while changing nothing is worse than none.
     """
     if in_box:
-        return "Run `fy box down && fy box up` from the Mac."
+        return "Run `fy box down && fy box up` from the host."
     return "Run `uv tool install --upgrade foldyard`."
 
 

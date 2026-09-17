@@ -122,7 +122,7 @@ def test_unparseable_declaration_is_ignored():
 # ── the fix instruction differs by where you are ─────────────────────────────────────
 
 
-def test_fix_command_on_the_mac_is_a_uv_reinstall():
+def test_fix_command_on_the_host_is_a_uv_reinstall():
     msg, _ = compat.version_gate("0.1.0", minimum="0.4.0", recommended=None, in_box=False)
     assert msg is not None
     assert "uv tool install" in msg
