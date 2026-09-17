@@ -40,8 +40,7 @@ PG_PORT = 5544
 # Rootless VM — modest sizing for a throwaway example. The default backend is `lima`
 # (concurrent per-project VMs; needs `limactl` alongside podman). `backend = "podman"` is the
 # nothing-extra-to-install alternative: one shared machine, no concurrent projects, no wall.
-# On Linux/WSL2, `backend = "native"` explicitly opts into host-rootless Podman for convenience/CI,
-# with weaker isolation than the VM boundary.
+# Both are VMs — there is no VM-less backend (ADR-0026).
 [machine]
 name = "foldyard-example"
 cpus = 2

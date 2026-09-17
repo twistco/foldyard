@@ -132,6 +132,11 @@ and one layer short of the Linux design.
    ⚠  mountType defaults to 9p        n/a
 ```
 
+**`(b)` is no longer a foldyard option.** It needed the `native` (no-VM) backend, retired on
+2026-09-17 ([ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md)): foldyard always has a
+VM, so on Linux the shape is `(a)`, with `(c)` the deferred hardening on top. The column stays as
+the record of what `(b)` traded and why `(c)` was measured.
+
 **Lima on Linux does not get you libkrun** — Lima registers only `qemu` there; `krunkit` is a
 macOS/arm64 binary. So adopting Lima on Linux is a choice for *(a)*, i.e. for the boundary, mount
 and wall properties, with QEMU as the knowingly-accepted weak link. It is not a way to make the
@@ -266,13 +271,15 @@ with or without `③`: narrowing closes the design hole on its own.
 An earlier draft of this page called the distro "already the boundary". That is comfort for the
 wrong asset. The supervisor runs inside the distro — it is Linux Python — so the credentials and the
 engine share one kernel and one uid there, exactly as on bare Linux. **For foldyard's threat model,
-WSL2 + `native` is bare-Linux `native`.** The Hyper-V VM is real, but it protects Windows.
+WSL2 with a VM-less engine is bare Linux with a VM-less engine** — which is why the `native`
+backend that offered that shape is retired ([ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md)).
+The Hyper-V VM is real, but it protects Windows.
 
 The good news is that the earlier draft was also wrong about the remedy. It said Lima inside a WSL2
 distro needs a custom-built kernel for nested KVM. That was true in 2021 and is stale: the stock
 WSL2 kernel (6.x) builds KVM as modules, `nestedVirtualization` defaults on for Windows 11 on x86,
 and `/dev/kvm` is present after a `wsl --shutdown`. So **WSL2's menu is the Linux menu** — `(a)`,
-`(b)` and `(c)` above are all candidates inside the distro. Two hard limits: Windows 10 silently
+and `(c)` above it, are the candidates inside the distro. Two hard limits: Windows 10 silently
 overrides the setting, and Windows-on-ARM boots the distro at EL1, so KVM can never work there.
 Lima's *Windows-side* `wsl2` driver remains what it was — experimental, "doesn't support many of
 Lima's options" — and is not the route.
@@ -291,16 +298,18 @@ is derived from the real host (`verify._host_paths`) rather than a macOS-only re
 absence-check is gated on a positive control — see
 [verify-false-pass.md](./verify-false-pass.md). What still differs:
 
-| claim | macOS | Linux / WSL2 (lima) | Linux / WSL2 (native) |
-| --- | --- | --- | --- |
-| VM boundary exists | ✅ | ✅ | ❌ (WSL2's Hyper-V does not count: the credentials are inside it) |
-| repo-only mount | ✅ | ✅ | ❌ engine sees the host FS; WSL2 also needs automount off |
-| `wall` fail-closed egress | ✅ | ✅ | ❌ no VM to wall |
-| microVM device model | ⚠ krunkit only | ❌ (QEMU) — `(c)` would add one *under* it; deferred | ⚠ `(b)` only |
-| VMM jailed | ❌ unconfined operator process | ✅ crun, for `③` only | ✅ crun, for `(b)` |
+| claim | macOS | Linux / WSL2 (lima) |
+| --- | --- | --- |
+| VM boundary exists | ✅ | ✅ |
+| repo-only mount | ✅ | ✅ |
+| `wall` fail-closed egress | ✅ | ✅ |
+| microVM device model | ⚠ krunkit only | ❌ (QEMU) — `(c)` would add one *under* it; deferred |
+| VMM jailed | ❌ unconfined operator process | ✅ crun, for `③` only |
 
-`native` must never advertise the VM-boundary claims. That is not a documentation nicety: it is
-the difference between a checked property and a slogan.
+A VM-less engine could never have advertised these claims — which is why the `native` backend
+is gone ([ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md)) rather than documented as
+weaker. That is not a documentation nicety: it is the difference between a checked property and
+a slogan.
 
 **A gap found and closed 2026-09-11, on every platform:** until that day the mount audit ran
 `mount` inside a `--privileged` container, which shows the *container's* mount namespace, not the

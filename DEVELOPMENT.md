@@ -50,7 +50,7 @@ Core (stdlib-only on the hot path; heavy imports lazy):
 - `verify.py` — the isolation battery, the product's credibility check; plugin-agnostic core +
   the registry's `verify_checks`.
 - `machine.py` / `machine_backend.py` — rootless dev-VM lifecycle behind the pluggable
-  backend contract (podman | lima | native; see `docs/lima-backend-scope.md`).
+  backend contract (podman | lima; see `docs/lima-backend-scope.md`).
 - `guestlog.py` — the VM's log budget (`machine ensure`, every VM backend): journald cap as root
   (Lima: rendered into the boot script; podman machine: `sudo -n` over ssh) + the rootless API
   service's log level as a user drop-in over ssh. Best-effort — a warning, never an abort.

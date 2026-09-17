@@ -9,8 +9,9 @@ where they were taken (linked per row); keep this page the summary, not a second
 
 Where a Linux host stands in the design: the boundary can be **stronger** than the Mac's
 (nftables can match the VM's own process on the host, which pf cannot — `[machine].host_wall`)
-and it can be **weaker** (`backend = "native"` drops the VM entirely; WSL2's Hyper-V boundary
-protects Windows, not the credentials). Both are explained in
+and it is never weaker: there is no VM-less backend (`native` was retired 2026-09-17,
+[ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md); WSL2's Hyper-V boundary protects
+Windows, not the credentials, so the VM is required inside the distro too). Both are explained in
 [isolation-layers.md](./isolation-layers.md#linux--the-machine-layer-is-optional-and-qemu-is-the-price).
 
 **Validation host:** the GCP nested-KVM rig (Fedora 44, Lima 2.2.0, podman 5.8.4, crun 1.28 —
@@ -49,12 +50,6 @@ there are upper bounds; correctness results transfer as they are.
 - **The proxy/box e2e on a real Lima VM** (`tests/test_proxy_box_e2e.py` needs the test process
   INSIDE a container beside the box — the `live-e2e` container mirror covers it; the host tier's
   `test_box_e2e.py` covers the box itself on the VM).
-- **`backend = "native"`** on a real Linux host (the host's own rootless podman, no VM) — the
-  `native-host-e2e` runner job exercised it (an `ubuntu-latest` runner's rootless podman +
-  `systemd --user` healthcheck timers) until 2026-09-17, when the `lima` job replaced it; nothing
-  live covers it now. Whether `native` stays a product option at all (it was largely a CI
-  stopgap; WSL2 is its remaining rationale) is an open product decision — see the outstanding
-  work below.
 - **WSL2 — nothing measured.** `/dev/kvm` in a stock Windows 11 x86 distro (two minutes on any
   such machine: `wsl --shutdown; wsl; ls -l /dev/kvm`), Lima + QEMU inside it, `[automount]
   enabled = false` for the repo-only mount. Windows-on-ARM boots the distro at EL1, so KVM is
@@ -98,11 +93,9 @@ there are upper bounds; correctness results transfer as they are.
   tier CANNOT reach: the `podman` backend (podman-machine on a runner — untried, no evidence
   either way), arm64 (no KVM), and anything needing nested virtualisation inside the guest — for
   those the nested-KVM-host recipe in [nested-virt.md](./nested-virt.md) remains.
-- **Retire `backend = "native"`?** With a VM job in CI the backend's CI rationale is gone; what
-  remains is the Linux/WSL2 "weaker boundary" product option. Retiring it means "foldyard always
-  has a VM" — an ADR (it changes [isolation-layers.md](./isolation-layers.md) and
-  `docs/configuration.md`) and the removal of `machine_backend.NativeBackend`. Decide before
-  deleting anything.
+- ~~**Retire `backend = "native"`?**~~ **Decided 2026-09-17: retired**
+  ([ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md)) — foldyard always has a VM;
+  `NativeBackend` and its branches are gone, a config naming it is warned and given `podman`.
 
 ## Recording a new validation
 

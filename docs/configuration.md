@@ -204,11 +204,12 @@ memory_mib = 8192
 disk_gib = 60
 ```
 
-- **`backend`** — `"lima"` | `"podman"` | `"native"`. **Default: `lima`** (also what `init`
+- **`backend`** — `"lima"` | `"podman"`. **Default: `lima`** (also what `init`
   writes) — per-project VMs that run concurrently, and the only backend that supports the wall.
   `podman` is one shared podman machine for everything: no concurrent per-project VMs and no
-  in-VM wall, but nothing extra to install. `native` is the host's rootless podman socket
-  directly — no VM, weakest isolation, an explicit opt-in for Linux/CI. Env: `MACHINE_BACKEND`.
+  in-VM wall, but nothing extra to install. Both are VM backends: there is no VM-less option (the
+  `native` backend was retired, [ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md);
+  a config still naming it gets a warning and the podman backend). Env: `MACHINE_BACKEND`.
 
   The backend CLI is **not** the whole prerequisite: it creates the VM, and the container engine
   (`podman`) drives the socket it hands out. So lima needs `limactl` *and* podman; the podman
@@ -266,9 +267,8 @@ disk_gib = 60
   compat `Runtime`) from every container-create, so the box cannot opt a container back out even
   on a podman that would honour a client-chosen runtime — and refuses a create it cannot parse.
   Fail-closed: a socket that does not answer with the gVisor runtime aborts the verb, and a box
-  that came up under another runtime is removed before its bootstrap. Both VM backends
-  (`lima`, `podman`); `native` has no
-  VM to provision. The runtime is fixed when a container is created, so changing this means
+  that came up under another runtime is removed before its bootstrap. Both backends
+  (`lima`, `podman`). The runtime is fixed when a container is created, so changing this means
   `fy box down && fy box up` (the box, not the VM); an already-up box nags. Cost: ~1.2× on a
   Python test suite, 2–4× on sub-second git/lint calls. **File watching:** edits made *inside*
   the box (the agent, the attached editor) fire in-box `inotify` normally, but edits made on the

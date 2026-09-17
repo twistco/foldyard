@@ -14,14 +14,12 @@ concurrently**, so per-project machines coexist — no stop/swap dance, and an o
 
 ## The contract (backend-blind downstream)
 
-Backends expose ONE thing: a **libpod socket**. VM-backed backends provide that socket from a
-per-project VM; the explicit native backend uses the host's rootless podman socket directly.
+Backends expose ONE thing: a **libpod socket**, from a per-project VM (foldyard always has one —
+the VM-less `native` backend was retired, [ADR-0026](./adrs/0026-always-a-vm-native-backend-retired.md)).
 Everything downstream (`stack.py`'s `CONTAINER_HOST` export, compose, box, worktrees) is
 backend-blind — `machine.socket()` returns a podman URI either way, no `--connection` juggling.
 Selection: `MACHINE_BACKEND` env → `[machine].backend` toml → `"lima"` default (ADR-0011's
-2026-08-29 amendment; it was `"podman"` originally). Native is never
-auto-selected; Linux/WSL2 users opt in with `backend = "native"` when they want convenience/CI over
-the VM boundary.
+2026-08-29 amendment; it was `"podman"` originally).
 
 - **`PodmanBackend`** (no extra deps): wraps `podman machine`; `supports_concurrent()` →
   `False` (the one-VM guard in `machine._start()` is active). The portable floor.
@@ -30,9 +28,6 @@ the VM boundary.
   `<instanceDir>/sock/podman.sock`); `supports_concurrent()` → `True` (guard skipped). The VM is
   generated from the template with a `--set` expression that pins CPU/memory/disk and **replaces**
   the template mounts with only foldyard's isolation mounts (repo + worktrees root).
-- **`NativeBackend`** (opt-in, `[machine].backend = "native"`): no VM lifecycle; foldyard uses the
-  host's rootless podman socket. Useful for Linux/WSL2 and cheap CI coverage, but not equivalent to
-  the VM-backed sandbox because containers share the host kernel.
 
 ## Status update (2026-09-07): most of the SPIKE is now settled on real hardware
 
@@ -66,7 +61,7 @@ untested is `krunkit` as an alternative `vmType` — see the microVM note linked
 ## Historical: SPIKE — unit-tested, not yet exercised on a real `limactl`
 
 `test_machine_backend.py` covers the backends with **mocked** CLIs (selection, concurrency
-flags, guest sockets, native socket resolution, Lima JSON-line parsing, the `--set` override). The
+flags, guest sockets, Lima JSON-line parsing, the `--set` override). The
 Lima paths follow Lima's documented podman-template behaviour but have **not** run against a real
 `limactl` (none in CI / the dev box). Verify on a Mac with `brew install lima` before relying on
 them.
