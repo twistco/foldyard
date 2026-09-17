@@ -283,18 +283,20 @@ class HostToolSpawned(BaseException):
     failure like any other."""
 
 
-def _resolved(cmd, env) -> str | None:
+def _resolved(cmd, env, executable=None) -> list[str]:
     """Where this call would execute from: the first argv element resolved the way exec does —
     an absolute/relative path as is, a bare name through the CALLER's PATH (``env`` wins over
-    the ambient one, as it does for the child). None ⇒ not found."""
+    the ambient one, as it does for the child) — plus ``executable`` when given, since that is
+    what actually runs (argv[0] is then only the name the child sees). Not found ⇒ omitted."""
+    names = []
     if isinstance(cmd, (str, bytes, os.PathLike)):
-        exe = os.fsdecode(cmd).split()[0]
+        names.append(os.fsdecode(cmd).split()[0])
     elif cmd:
-        exe = os.fsdecode(cmd[0])
-    else:
-        return None
+        names.append(os.fsdecode(cmd[0]))
+    if executable is not None:
+        names.append(os.fsdecode(executable))
     path = (env or os.environ).get("PATH", os.environ.get("PATH", ""))
-    return shutil.which(exe, path=path)
+    return [found for exe in names if (found := shutil.which(exe, path=path))]
 
 
 @pytest.fixture(autouse=True)
@@ -310,8 +312,9 @@ def no_host_tool_spawn(request, monkeypatch):
 
     def guard(real):
         def wrapped(cmd, *args, **kwargs):
-            found = _resolved(cmd, kwargs.get("env"))
-            if found is not None:
+            # `executable` is Popen's third positional (after bufsize) or a kwarg.
+            executable = args[1] if len(args) > 1 else kwargs.get("executable")
+            for found in _resolved(cmd, kwargs.get("env"), executable):
                 if not (os.path.basename(found) in names or os.path.realpath(found) in permitted):
                     raise HostToolSpawned(
                         f"{request.node.nodeid} would execute {found!r} — stub the call at "

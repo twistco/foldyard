@@ -63,3 +63,14 @@ def test_an_allowlisted_tool_is_fine_wherever_it_lives():
 @pytest.mark.spawns(HOST_TOOL)
 def test_the_marker_permits_a_named_binary():
     assert subprocess.run([HOST_TOOL, "/"], capture_output=True).returncode == 0
+
+
+def test_an_executable_override_cannot_smuggle_one_in():
+    # `executable=` is what actually runs; argv[0] is then only the name the child sees. Both
+    # spellings, and the shell=True form where it replaces the shell itself.
+    with pytest.raises(HostToolSpawned, match=f"would execute {HOST_TOOL!r}"):
+        subprocess.run(["git", "/"], executable=HOST_TOOL, capture_output=True)
+    with pytest.raises(HostToolSpawned, match=f"would execute {HOST_TOOL!r}"):
+        subprocess.Popen(["git", "/"], 0, HOST_TOOL, stdout=subprocess.DEVNULL)
+    with pytest.raises(HostToolSpawned, match=f"would execute {HOST_TOOL!r}"):
+        subprocess.run("true", shell=True, executable=HOST_TOOL, capture_output=True)
