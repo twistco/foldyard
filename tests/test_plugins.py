@@ -2314,6 +2314,24 @@ def test_vscode_plugin_gated(monkeypatch):
     assert "devbox_vscode_server:/home/vscode/.vscode-server" in p.box_args(dict(_BOX_ENV))
 
 
+def test_vscode_plugin_offers_the_marketplace_behind_the_wall(monkeypatch):
+    # The server IN the box installs `[vscode] extensions` itself; under an enforcing wall the
+    # gallery query is refused and the install fails silently (an empty extensions dir, seen on
+    # a consumer). So the hosts are offered like the agents' installer hosts — and only under a
+    # `[vscode]` table. Telemetry/experiment hosts stay out.
+    p = vscode.VscodePlugin()
+    monkeypatch.setattr(config, "vscode_enabled", lambda: False)
+    assert p.egress_recommend() == []
+    monkeypatch.setattr(config, "vscode_enabled", lambda: True)
+    hosts = [h["host"] for h in p.egress_recommend()]
+    assert "marketplace.visualstudio.com" in hosts
+    assert (
+        "*.gallery.vsassets.io" in hosts and "*.gallerycdn.vsassets.io" in hosts
+    )  # seen live: gallery
+    assert not any("microsoft.com" in h or "exp-tas" in h for h in hosts)
+    assert all(h["why"] for h in p.egress_recommend())
+
+
 def test_codex_plugin_gated(tmp_path, monkeypatch):
     p = codex.CodexPlugin()
     monkeypatch.setattr(config, "codex_enabled", lambda: False)

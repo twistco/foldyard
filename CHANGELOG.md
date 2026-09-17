@@ -44,6 +44,12 @@ break config or CLI shape, and say so here. How a release is cut:
   file goes with the marker now; the extension regenerates it from the config (plus its own
   Copilot/ports additions). Hand edits in the "Remote [Attached Container]" settings tab are the
   one thing that resets — they belong in `[vscode.settings]`.
+- **A `[vscode]` table offers the marketplace hosts at the launch verbs.** The server IN the box
+  installs `[vscode] extensions` itself, and under an enforcing wall the gallery query
+  (`marketplace.visualstudio.com`) was refused — the install failed silently, every extension
+  "not found", the extensions dir empty. The `vscode` plugin now recommends the gallery, the
+  VSIX hosts (`*.gallery.vsassets.io`, `*.gallerycdn.vsassets.io`) and the server-build hosts, one consented yes each,
+  like the agents' installer hosts. Telemetry and experiment hosts are deliberately not offered.
 - **A leftover `[vscode] workspace_file` is reported as IGNORED** (`fy config widenings`, the
   doctor row, the adopt gate's footnote) with the migration spelled out — it was the one
   generator-era key #18 removed without adding to `IGNORED_KEYS`, so a consumer that had
