@@ -1,0 +1,259 @@
+name: foldyard · lima spike (phase 0)
+
+# PHASE 0 SPIKE — throwaway, dispatch-only. Deleted when the `lima-host-e2e` job lands in
+# foldyard-e2e.yml (phase 1). Its one job is to produce NUMBERS: can a GitHub-hosted
+# `ubuntu-24.04` runner boot foldyard's real `lima` backend (limactl + QEMU/KVM) and drive the
+# example consumer through `machine ensure → up → verify → state → down → machine stop → rm`,
+# and how often, and how long does each verb take. The decision rule and the record of the runs
+# live in docs/linux-support.md ("A CI job on a Linux host path").
+#
+# Why this is plausible at all: Lima's own CI boots QEMU VMs on GitHub-hosted ubuntu-24.04 on
+# every PR (lima-vm/lima .github/workflows/test.yml, jobs qemu-linux / bats), with the KVM
+# recipe in hack/install-qemu.sh (`modprobe kvm; chown $SUDO_USER /dev/kvm` — `usermod -aG kvm`
+# does not take effect on GHA). The "flaky" claim in DEVELOPMENT.md cites only a libvirt
+# permission failure; foldyard's lima backend does not use libvirt.
+#
+# Each matrix cell is ONE attempt on ONE fresh runner, so the attempts are independent samples
+# (that is the point: no retry wrapper anywhere — a retry would hide exactly the flakiness this
+# spike exists to measure). `wall=on` adds `[proxy]` to the example copy (the wall refuses a
+# consumer with nothing routing the box) and sets MACHINE_WALL=1 + MACHINE_HOST_WALL=1.
+on:
+  workflow_dispatch:
+    inputs:
+      attempts:
+        description: "JSON list of attempt ids — one fresh runner each (e.g. [1,2,3,4,5])"
+        default: "[1,2,3,4,5]"
+      walls:
+        description: 'JSON list of wall variants to run: ["off","on"], ["off"] or ["on"]'
+        default: '["off","on"]'
+      lima_version:
+        description: "Lima release to install into /usr/local (the rig validated 2.2.0)"
+        default: "2.2.0"
+
+permissions:
+  contents: read
+
+jobs:
+  # One data point ends the arm64 question: does /dev/kvm exist on GitHub's ARM runners at all?
+  # Lima's QEMU-Linux jobs run on x86 only, and no positive report of KVM on ubuntu-24.04-arm was
+  # found (2026-09-17). Probe only — no packages, no VM.
+  arm-kvm-probe:
+    name: arm64 runner — /dev/kvm probe
+    runs-on: ubuntu-24.04-arm
+    continue-on-error: true
+    timeout-minutes: 5
+    steps:
+      - name: Probe KVM
+        run: |
+          set -x
+          uname -m
+          ls -l /dev/kvm || echo "no /dev/kvm before modprobe"
+          sudo modprobe kvm || echo "modprobe kvm failed (rc=$?)"
+          lsmod | grep -i kvm || echo "no kvm module loaded"
+          ls -l /dev/kvm || echo "no /dev/kvm after modprobe"
+          if [ -e /dev/kvm ]; then
+            sudo chown "$(id -un)" /dev/kvm
+            test -w /dev/kvm && echo "RESULT: /dev/kvm present and writable on ubuntu-24.04-arm" \
+              || echo "RESULT: /dev/kvm present but not writable"
+          else
+            echo "RESULT: no /dev/kvm on ubuntu-24.04-arm"
+          fi
+          grep -m1 -E 'model name|CPU implementer' /proc/cpuinfo || true
+          nproc; free -g
+
+  lima:
+    name: lima on ubuntu-24.04 (wall=${{ matrix.wall }}, attempt ${{ matrix.attempt }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: ${{ fromJSON(inputs.attempts) }}
+        wall: ${{ fromJSON(inputs.walls) }}
+    env:
+      FOLDYARD_ENGINE: podman
+      MACHINE_BACKEND: lima
+      FOLDYARD_STATE_DIR: /tmp/foldyard-state
+      LIMA_VERSION: ${{ inputs.lima_version }}
+      # XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS are appended by the linger step below: the
+      # host wall starts the VM inside a `systemd-run --user --scope`, which needs the user
+      # manager the `runner` user does not otherwise have (no login session on a GH runner).
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v8.2.0
+
+      # Lima's recipe (hack/install-qemu.sh): the module, then chown — group membership does not
+      # take effect on GHA. Asserting `-w` here fails the attempt in seconds with a clear reason
+      # instead of a QEMU "could not access KVM kernel module" ten minutes in.
+      - name: KVM
+        run: |
+          set -euo pipefail
+          sudo modprobe kvm
+          ls -l /dev/kvm
+          sudo chown "$(id -un)" /dev/kvm
+          test -w /dev/kvm
+          echo "✓ /dev/kvm writable; vmx/svm flags: $(grep -c -E 'vmx|svm' /proc/cpuinfo) cpus"
+          nproc; free -g; df -h / "$HOME"
+
+      # ovmf + qemu-system-x86 + qemu-utils is Lima's own runner set; qemu-utils carries qemu-img,
+      # which foldyard's lima backend needs and `qemu-system-x86-core` does not imply
+      # (docs/linux-support.md). podman is the host-side ENGINE CLI preflight requires whatever the
+      # backend (it drives the VM's forwarded socket); nftables is for the host wall (`sudo nft`
+      # is passwordless here). podman-compose comes bundled in foldyard's tool venv.
+      - name: Packages (QEMU, podman CLI, nftables)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            ovmf qemu-system-x86 qemu-utils podman uidmap slirp4netns nftables jq
+          qemu-system-x86_64 --version | head -1
+          qemu-img --version
+          podman --version
+          nft --version
+
+      # The Linux install the docs prescribe: the release tarball into /usr/local, pinned.
+      - name: Lima ${{ inputs.lima_version }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz"
+          curl -fsSL "$url" | sudo tar Cxz /usr/local
+          limactl --version
+          limactl info | jq -c '{vmTypes, defaultTemplate: .defaultTemplate.vmType}'
+
+      # Same dance as native-host-e2e: the `runner` user has no login session, so no user systemd
+      # manager. The host wall's per-VM scope (`systemd-run --user --scope`) needs one.
+      - name: Enable systemd --user session
+        run: |
+          set -euo pipefail
+          sudo loginctl enable-linger "$(id -un)"
+          uid="$(id -u)"
+          for _ in $(seq 1 30); do
+            test -S "/run/user/$uid/bus" && break
+            sleep 1
+          done
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$uid"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus"
+          } >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+            systemctl --user is-system-running || true
+
+      # As a real host installs it (`just foldyard install`): the tool venv with the [host] extra,
+      # so `fy` is on PATH with mitmdump (the wall variant declares [proxy]) and podman-compose.
+      - name: Install foldyard (uv tool, [host] extra)
+        run: |
+          set -euo pipefail
+          uv tool install --force --editable ".[host]"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/fy" --help >/dev/null
+
+      # preflight refuses the nested project (example/ inside the foldyard checkout), so the
+      # example is copied out as its own git repo — the rig's recipe. The launch gate refuses an
+      # unadopted checkout with no terminal, so adopt first (non-interactive path, ADR-0022).
+      - name: Example copy + adopt
+        run: |
+          set -euo pipefail
+          dst="$RUNNER_TEMP/fyex"
+          cp -r example "$dst"
+          if [ "${{ matrix.wall }}" = "on" ]; then
+            printf '\n# spike: the wall needs something routing the box through the proxy\n[proxy]\n' \
+              >> "$dst/foldyard.toml"
+            echo "MACHINE_WALL=1" >> "$GITHUB_ENV"
+            echo "MACHINE_HOST_WALL=1" >> "$GITHUB_ENV"
+          fi
+          echo "FYEX=$dst" >> "$GITHUB_ENV"
+          cd "$dst"
+          git init -q
+          git add -A
+          git -c user.email=spike@foldyard -c user.name=spike commit -qm init
+          fy config adopt
+          fy doctor || true
+
+      - name: machine ensure → up → verify → state → down → stop → rm (timed)
+        working-directory: ${{ env.FYEX }}
+        run: |
+          set -euo pipefail
+          timings="$RUNNER_TEMP/timings.tsv"
+          : > "$timings"
+          t() {
+            local name="$1"; shift
+            local start rc=0
+            start=$(date +%s)
+            echo "::group::$name"
+            "$@" || rc=$?
+            echo "::endgroup::"
+            printf '%s\t%ss\trc=%s\n' "$name" "$(( $(date +%s) - start ))" "$rc" | tee -a "$timings"
+            return "$rc"
+          }
+          t "machine ensure" fy machine ensure
+          # Host wall: the table is loaded for the VM's own scope; nothing else on the host is in it.
+          if [ "${MACHINE_HOST_WALL:-}" = "1" ]; then
+            sudo nft list ruleset | grep -A20 'fy_host_wall' | head -40 || true
+          fi
+          t "up" fy up
+          t "ps" fy ps
+          t "verify" fy verify
+          t "state" fy state
+          if [ "${MACHINE_WALL:-}" = "1" ]; then
+            # The wall's claim: direct guest egress refused, DNS resolves, the proxy is the way out.
+            # Lima's environment.d gives the VM user the proxy env, so a bare curl goes through the
+            # proxy; `--noproxy '*'` is the direct path the wall must refuse (docs/linux-support.md).
+            vm="foldyard-example"
+            t "wall: direct egress refused" \
+              sh -c "! limactl shell $vm -- curl -sS --noproxy '*' -m 8 -o /dev/null https://example.com"
+            t "wall: DNS resolves" limactl shell "$vm" -- getent hosts example.com
+            t "wall: via proxy 200" \
+              sh -c "limactl shell $vm -- curl -sS -m 20 -o /dev/null -w '%{http_code}\n' https://example.com | grep -x 200"
+          fi
+          t "down" fy down
+          t "machine stop" fy machine stop
+          t "machine rm" fy machine rm --yes
+
+      - name: Record versions + timings in the job summary
+        if: always()
+        run: |
+          {
+            echo "## lima spike — wall=${{ matrix.wall }}, attempt ${{ matrix.attempt }}"
+            echo
+            echo '```'
+            echo "runner: $(uname -r) · $(nproc) cpu · $(free -g | awk '/Mem/ {print $2}') GiB"
+            echo "lima: $(limactl --version 2>/dev/null || echo n/a)"
+            echo "qemu: $(qemu-system-x86_64 --version 2>/dev/null | head -1 || echo n/a)"
+            echo "podman (host): $(podman --version 2>/dev/null || echo n/a)"
+            echo "vmTypes: $(limactl info 2>/dev/null | jq -c .vmTypes || echo n/a)"
+            echo
+            cat "$RUNNER_TEMP/timings.tsv" 2>/dev/null || echo "(no timings — failed before the run)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "::group::limactl list"; limactl list || true; echo "::endgroup::"
+          echo "::group::podman ps -a (via the VM socket, if any)"
+          sock=$(ls "$HOME"/.lima/*/sock/podman.sock 2>/dev/null | head -1 || true)
+          [ -n "$sock" ] && CONTAINER_HOST="unix://$sock" podman ps -a || echo "(no socket)"
+          echo "::endgroup::"
+          echo "::group::supervisor log"; cat "$FOLDYARD_STATE_DIR"/*/host-supervisor.log 2>/dev/null || cat "$FOLDYARD_STATE_DIR"/host-supervisor.log 2>/dev/null || echo "(none)"; echo "::endgroup::"
+          echo "::group::host wall"; sudo nft list ruleset 2>/dev/null || true; echo "::endgroup::"
+          echo "::group::lima ha.stderr.log"; tail -n 200 "$HOME"/.lima/*/ha.stderr.log 2>/dev/null || true; echo "::endgroup::"
+          mkdir -p "$RUNNER_TEMP/diag"
+          cp -r "$HOME/.lima" "$RUNNER_TEMP/diag/lima" 2>/dev/null || true
+          find "$RUNNER_TEMP/diag/lima" -type f \( -name '*.img' -o -name '*.qcow2' -o -name '*.raw' -o -name 'cidata.iso' \) -delete 2>/dev/null || true
+          find "$FOLDYARD_STATE_DIR" -name '*.log' -exec cp --parents {} "$RUNNER_TEMP/diag/" \; 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: lima-spike-wall-${{ matrix.wall }}-attempt-${{ matrix.attempt }}
+          path: ${{ runner.temp }}/diag
+          if-no-files-found: ignore
+
+      # Never leave a VM to the runner teardown: a failed attempt still stops + removes it.
+      - name: Teardown
+        if: always()
+        working-directory: ${{ env.FYEX }}
+        run: |
+          fy machine rm --yes || limactl delete -f foldyard-example || true
