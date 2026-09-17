@@ -12,6 +12,14 @@ Linux host, `vz` on macOS), the podman template's Fedora 44 guest (podman 5.8.4)
 4.9.3 (ubuntu-24.04). The mount is added with `limactl edit --set` on the STOPPED instance — mount
 sets are init-only in Lima — and removed the same way, in a fixture, so a failing assertion never
 leaves the VM leaking the home into the next module.
+
+The whole host home is mounted at the guest path `/mnt/c` — one of the audit's foreign-mount
+markers — rather than at its own path: on the ubuntu-24.04 runner, a Fedora/QEMU guest restarted
+with the host's `/home/<user>` mounted at `/home/<user>` came back with a rootless podman that
+could no longer create ANY container (crun EPERM/ENOENT inside the merged rootfs; store ownership
+intact; only a recreate healed it — 2026-09-17, docs/linux-support.md; mechanism open). The
+home-path branch of the leak pattern is pinned by the unit tests; what this proves live is the
+audit reading PID 1's real table and failing on a host filesystem the VM should not have.
 """
 
 from __future__ import annotations
@@ -26,6 +34,7 @@ from e2e_host import _adopt_on_host, ensure_vm, example_copy, fy, fy_ok, host_ti
 pytestmark = host_tier
 
 HOME = str(Path.home())
+LEAK_AT = "/mnt/c"  # a verify._FOREIGN_MOUNTS marker: "WSL2 Windows drive"
 
 
 @pytest.fixture(scope="module")
@@ -53,13 +62,16 @@ def home_mounted_vm(repo):
     """The VM restarted with the operator's whole home mounted (read-only is enough — the leak
     is the exposure, not the write); restored on the way out whatever the test did."""
     fy_ok(["machine", "stop"], repo, timeout=300)
-    lima_edit(f'.mounts += [{{"location": {json.dumps(HOME)}, "writable": false}}]')
+    lima_edit(
+        f'.mounts += [{{"location": {json.dumps(HOME)}, "mountPoint": {json.dumps(LEAK_AT)}, '
+        '"writable": false}]'
+    )
     try:
         ensure_vm(repo)
         yield
     finally:
         fy(["machine", "stop"], repo, timeout=300)
-        lima_edit(f"del(.mounts[] | select(.location == {json.dumps(HOME)}))")
+        lima_edit(f"del(.mounts[] | select(.mountPoint == {json.dumps(LEAK_AT)}))")
         try:
             ensure_vm(repo)
         except AssertionError as exc:
@@ -75,7 +87,7 @@ def test_verify_fails_when_the_vm_mounts_the_operators_home(repo, home_mounted_v
     run = fy(["verify"], repo, timeout=300)
     assert run.rc != 0, f"verify PASSED against a VM mounting {HOME}:\n{run.out}"
     assert "VM exposes host paths" in run.out, run.out
-    assert HOME in run.out, run.out
+    assert LEAK_AT in run.out, run.out
     assert "ALL PASS" not in run.out
 
 

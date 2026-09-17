@@ -139,15 +139,17 @@ def example_repo(tmp_path):
     _foldyard(["down"], dst, timeout=180)  # belt-and-suspenders if the body raised early
 
 
-def _probe_db(network: str = NETWORK, timeout: int = 120) -> str:
+def _probe_db(network: str = NETWORK, timeout: int = 120, env_args: list[str] | None = None) -> str:
     """Hit the api's /db across the compose network via a throwaway container — works whether
-    or not the test runner can reach the engine's published ports directly (the box can't)."""
+    or not the test runner can reach the engine's published ports directly (the box can't).
+    `env_args` are extra `--env` flags for the probe container (a walled VM propagates its proxy
+    env into containers; the host-tier wall test clears it so wget talks to `api` directly)."""
     eng, env = _engine(), _engine_env()
     deadline = time.time() + timeout
     last = ""
     while time.time() < deadline:
         out = subprocess.run(
-            [eng, "run", "--rm", "--network", network,
+            [eng, "run", "--rm", "--network", network, *(env_args or []),
              "docker.io/library/alpine", "wget", "-qO-", API_DB_URL],
             env=env, capture_output=True, text=True, timeout=40,
         )  # fmt: skip

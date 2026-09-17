@@ -33,6 +33,7 @@ from e2e_host import (
 )
 
 WALL = {"MACHINE_WALL": "1", "MACHINE_HOST_WALL": "1"}
+NO_PROXY_ENV = [f"--env={v}=" for v in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")]
 TABLE = f"fy_host_wall_{VM.replace('-', '_')}"  # hostwall.table_name — identifiers allow no '-'
 
 
@@ -98,7 +99,11 @@ def test_the_proxy_is_the_way_out(repo):
 
 
 def test_the_api_is_still_served_through_the_walled_stack(repo):
-    assert "reachable" in _probe_db()
+    # Under the wall podman propagates the VM's proxy env into every container, so the probe
+    # container's wget would ask the host proxy for `api` — a compose name the proxy cannot
+    # resolve (502). Clearing the proxy env is what a stack service calling a sibling must do
+    # too: the ONE caveat the wall introduces (example-lima-wall/compose.yml, `no_proxy`).
+    assert "reachable" in _probe_db(env_args=NO_PROXY_ENV)
 
 
 def test_a_verb_without_the_wall_config_is_refused_on_the_walled_vm(repo):
