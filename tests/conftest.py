@@ -253,6 +253,8 @@ def scrubbed_box_session_env(monkeypatch):
 # Neither is an env var to opt out of: a test that needs a real host tool is an e2e test.
 
 SPAWNABLE = ("git", "cksum", "bash", "sh", "true", "false", "echo")
+
+
 SHELLS = ("bash", "sh")
 
 

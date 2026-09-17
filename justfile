@@ -57,6 +57,22 @@ test-proxy-e2e *args:
     exec env FOLDYARD_E2E=1 uv run --project . --group e2e \
         pytest -k "proxy_e2e or proxy_box_e2e or capture_box_e2e or metadata_box_e2e" {{args}}
 
+# The subprocess census — a REPORT, not a gate: every process the suite spawns, binary × test,
+# aggregated across xdist workers (tests/tools/census.py). Says what the hermetic guard's allowlist
+# still lets through (git, cksum, the shell) and, with `FOLDYARD_E2E=1 just census tests/test_*_e2e.py`
+# on a Lima host, what the live tiers reach. Extra args pass to pytest; `--tests` is not one of
+# them — set CENSUS_TESTS=1 to list the tests under each binary.
+census *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v uv >/dev/null 2>&1 || { echo "✗ uv not found — brew install uv" >&2; exit 1; }
+    export UV_PROJECT_ENVIRONMENT="${XDG_CACHE_HOME:-$HOME/.cache}/foldyard/dev-venv-$(echo "{{_dir}}" | cksum | cut -d\  -f1)"
+    cd "{{_dir}}"
+    out="$(mktemp -d "${TMPDIR:-/tmp}/fy-census.XXXXXX")"
+    PYTHONPATH=tests uv run --project . pytest -q -n auto -p tools.census --census="$out" {{args}} || true
+    uv run --project . python tests/tools/census.py "$out" ${CENSUS_TESTS:+--tests}
+    rm -rf "$out"
+
 # Run the foldyard CLI from source (without installing) — handy while iterating.
 # e.g. `just foldyard run mode` / `just foldyard run doctor`.
 run *args:

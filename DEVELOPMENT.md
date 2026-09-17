@@ -230,6 +230,14 @@ round trips were running `limactl list` + `podman ps` against the live machine, 
 supervisor's blocked-daemon push reached a real Notification Center — green in CI only because
 those binaries are absent there.
 
+**`just census` is the report over that gate, not a gate itself** (`tests/tools/census.py`, a
+`-p` plugin the recipe loads): every process the suite spawns, binary × test, aggregated across
+the xdist workers — what the allowlist still lets through (`git` from the git-shim tests, `cksum`
+from the port-offset parity test, the shells only from the guard's own tests) and, with
+`FOLDYARD_E2E=1 just census tests/test_*_e2e.py` on a Lima host, what the live tiers reach.
+Arguments pass to pytest (paths, not a quoted `-k` — `just` splits on whitespace);
+`CENSUS_TESTS=1` lists the tests under each binary.
+
 ## CI (`.github/workflows/foldyard.yml` + `foldyard-e2e.yml`)
 
 Tiers 1–3 and the host tier all run on GitHub-hosted Linux runners. `foldyard.yml` is the fast
