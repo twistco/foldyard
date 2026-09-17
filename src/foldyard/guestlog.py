@@ -25,6 +25,7 @@ warning, never the abort a failed wall or gVisor provisioning is.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 
 from .sandbox import SshBackend, _ssh
@@ -83,7 +84,14 @@ def ensure(backend: SshBackend, name: str) -> None:
     script = user_script()
     if backend.name == "podman":
         script += journal_snippet(sudo="sudo -n")
-    res = _ssh(target, script)
+    try:
+        res = _ssh(target, script)
+    except subprocess.TimeoutExpired as e:
+        # `_ssh` bounds the call; a guest that answers and then stalls is the same best-effort
+        # failure as one that refuses, not an abort of `machine ensure`.
+        _err(f"⚠ the log budget for '{name}' didn't apply (journal cap / API log level):")
+        _err(f"  ssh timed out after {int(e.timeout)}s")
+        return
     if res.returncode != 0:
         _err(f"⚠ the log budget for '{name}' didn't apply (journal cap / API log level):")
         _err(f"  {res.stderr.strip() or res.stdout.strip()}")

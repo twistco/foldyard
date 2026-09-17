@@ -114,3 +114,15 @@ def test_ensure_warns_and_carries_on_when_the_guest_refuses(guest, capsys):
     guestlog.ensure(FakeBackend("podman"), "tangible")
     err = capsys.readouterr().err
     assert "⚠" in err and "log budget" in err and "ssh: boom" in err
+
+
+def test_ensure_warns_and_carries_on_when_ssh_stalls(guest, monkeypatch, capsys):
+    # `_ssh` has a timeout; a guest that accepts the connection and then hangs must surface as
+    # the same warning, not as a TimeoutExpired escaping `machine ensure`.
+    def stalled(target, script, stdin=None):
+        raise subprocess.TimeoutExpired(cmd="ssh", timeout=600)
+
+    monkeypatch.setattr(guestlog, "_ssh", stalled)
+    guestlog.ensure(FakeBackend("podman"), "tangible")
+    err = capsys.readouterr().err
+    assert "⚠" in err and "log budget" in err and "timed out" in err
