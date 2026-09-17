@@ -110,7 +110,7 @@ break config or CLI shape, and say so here. How a release is cut:
   already running outside its scope — started before the option was on — is refused until
   `fy machine stop && fy up`; asking for it on a host that can't enforce it (macOS) is a
   preflight error, never a silent downgrade. Default off. Env: `MACHINE_HOST_WALL`.
-- **`fy box up` warns when a running box's foldyard isn't the one the Mac runs.** The box's
+- **`fy box up` warns when a running box's foldyard isn't the one the host runs.** The box's
   foldyard is installed by the bootstrap, which only runs on a freshly *created* box — so a host
   upgrade leaves the two sides on different versions indefinitely, with every `fy box up` in
   between reporting "already up". `up` now asks the running box what `foldyard --version`
