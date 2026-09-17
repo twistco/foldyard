@@ -33,7 +33,7 @@ from e2e_host import (
 )
 
 WALL = {"MACHINE_WALL": "1", "MACHINE_HOST_WALL": "1"}
-NO_PROXY_ENV = [f"--env={v}=" for v in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")]
+NO_PROXY_ENV: list[str] = [f"--env={v}=" for v in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")]
 TABLE = f"fy_host_wall_{VM.replace('-', '_')}"  # hostwall.table_name — identifiers allow no '-'
 
 
