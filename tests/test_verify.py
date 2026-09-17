@@ -90,6 +90,10 @@ def _enter_box(monkeypatch, tmp_path):
     monkeypatch.setattr(verify.config, "in_box", lambda: True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    for v in verify._GIT_BRIDGE_VARS:
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setattr(verify, "_BRIDGE_SOCKET_DIR", tmp_path / "tmp")
+    (tmp_path / "tmp").mkdir(exist_ok=True)
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(verify, "which", lambda c: None)
@@ -394,6 +398,39 @@ def test_ssh_private_key_is_fail(secure_engine, monkeypatch, tmp_path, capsys):
     (ssh / "id_ed25519").write_text("KEY")  # a push path
     assert verify.verify() == 1
     assert "~/.ssh key material" in capsys.readouterr().out  # ...and for THAT reason
+
+
+def test_a_forwarded_agent_is_fail_and_names_the_attach(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # Seen live 2026-09-17: a VS Code attach forwarded the host's agent (1 key) into a box whose
+    # posture read "never push". The row must name where it comes from, not just the var.
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/vscode-ssh-auth-deadbeef.sock")
+    assert verify.verify() == 1
+    assert "SSH_AUTH_SOCK set" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("var", ["GIT_ASKPASS", "VSCODE_GIT_IPC_HANDLE"])
+def test_a_git_credential_bridge_is_fail(secure_engine, monkeypatch, tmp_path, capsys, var):
+    # The other half of the same attach: git in the box asks the HOST's credential store — an
+    # HTTPS push path with no key material anywhere in the box.
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.setenv(var, "/root/.vscode-server/bin/x/extensions/git/dist/askpass.sh")
+    assert verify.verify() == 1
+    assert f"git-credential bridge to the host: {var}" in capsys.readouterr().out
+
+
+def test_a_bridge_socket_on_disk_is_fail_even_with_the_vars_unset(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # The socket is reachable by PATH: unsetting SSH_AUTH_SOCK in a shell is hygiene, the file
+    # gone is the boundary. So `fy box shell` (vars scrubbed) must still fail while it exists.
+    _enter_box(monkeypatch, tmp_path)
+    (tmp_path / "tmp" / "vscode-ssh-auth-deadbeef.sock").write_text("")
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "bridge sockets" in out and "vscode-ssh-auth-deadbeef.sock" in out
 
 
 def test_ssh_only_known_hosts_passes(secure_engine, monkeypatch, tmp_path, capsys):

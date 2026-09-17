@@ -113,6 +113,15 @@ def test_grant_rejects_bad_level_and_host(env):
         ("http://x.com", False),
         ("a/b.com", False),
         ("", False),
+        # host:port — one CONNECT tunnel port; what the blocked row carries when the port was
+        # the reason, so `fy allow add github.com:22` and the TUI's allow action both take it.
+        ("github.com:22", True),
+        ("*.internal.example:8443", True),
+        ("github.com:0", False),
+        ("github.com:65536", False),
+        ("github.com:ssh", False),
+        ("github.com:", False),
+        (":22", False),
     ],
 )
 def test_valid_host(host, ok):

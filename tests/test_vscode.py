@@ -521,6 +521,18 @@ def test_a_malformed_existing_config_is_replaced_not_a_traceback(fake, junk):
     assert _written(fake)["_generatedBy"] == vscode._GENERATED_MARKER
 
 
+def test_the_in_box_harden_is_ensured_before_the_attach(fake):
+    # The attach forwards the host's SSH agent + git credentials into the box; the in-box hygiene
+    # (box._HARDEN_SNIPPET: unset vars, reap the sockets) must be in place and its reaper running
+    # BEFORE VS Code's server lands — so the exec comes before the `code` launch, every time.
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    cmds = [c["cmd"] for c in fake["calls"]]
+    harden = [i for i, c in enumerate(cmds) if "exec" in c and "harden.sh" in c[-1]]
+    launch = [i for i, c in enumerate(cmds) if c[0] == "/usr/local/bin/code"]
+    assert harden and launch and harden[0] < launch[0]
+
+
 def test_resets_install_marker_when_extensions_missing(fake):
     fake["state"]["running"] = True
     fake["state"]["installed"] = "anthropic.claude-code-1.2.3\n"  # just-syntax is NOT installed

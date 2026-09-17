@@ -363,7 +363,11 @@ default_deny = true
   <host> [--level once|session|permanent]`, `fy allow list`, or the TUI's `a` key on a blocked row. That placement is the whole guarantee: config travels with the branch and
   the box can write it, so a `[proxy] allow` list would let the yard widen its own wall by editing a
   file it already owns. A grant is a property of an operator on a host, like the posture itself.
-  Any keyless/injector host is allowed implicitly — never list those.
+  Any keyless/injector host is allowed implicitly — never list those. **A host grant means
+  `host:443`.** CONNECT is a raw tunnel — whatever the client speaks through it is relayed — so a
+  bare grant used to reach `github.com:22`, and with an SSH agent forwarded in by an editor attach
+  that is a push path. Another port is its own grant, `fy allow add github.com:22`; the blocked
+  row carries the port when the port was the reason, so the TUI's `a` key offers exactly that.
 - **`recommend`** — the committed half of the allowlist: hosts this repo ASKS operators to grant,
   each `{ host = "…", why = "…" }` (or a bare host string). Advisory by construction — the proxy
   never reads it. The host OFFERS each entry, per host, at `fy up`/`fy box up`/`fy host`, via
@@ -740,7 +744,11 @@ by key, since that's where a `hooks` or `permissions` entry would show up.
   **The whole table is read from the ADOPTED config**, and `fy code` runs the adopt/revert/ignore
   gate first: the extensions list decides what the host installs (a UI-kind extension lands in
   the operator's shared `~/.vscode/extensions`), so a box edit to it is inert until an operator
-  adopts it ([ADR-0026](./adrs/0026-vscode-attach-config-is-declarative.md)).
+  adopts it ([ADR-0026](./adrs/0026-vscode-attach-config-is-declarative.md)). Know what the
+  attach itself does: Dev Containers forwards the host's SSH agent and git-credential store into
+  the box, and no setting stops it — foldyard neutralises both in-box and the wall fences CONNECT
+  to `:443`; `fy config widenings` lists it and `fy verify` reports what is left
+  ([security](./security.md#fy-verify-prove-it-dont-trust-it)).
   - **`extensions`** — marketplace ids (`publisher.name`) installed on attach. The Dev Containers
     extension is dropped (meaningless inside the container); an invalid id is dropped rather than
     handed to VS Code. Keep the sub-projects' `.vscode/extensions.json` for plain VS Code's

@@ -61,11 +61,19 @@ def _parse(iso: str | None) -> datetime | None:
 
 
 def valid_host(host: str) -> bool:
-    """A plausible host / ``*.suffix`` glob — no scheme, path, whitespace, and at least one dot.
-    Keeps junk (and TOML-breaking text) out of the persisted allowlist."""
+    """A plausible host / ``*.suffix`` glob, optionally ``:port`` — no scheme, path, whitespace,
+    and at least one dot. Keeps junk (and TOML-breaking text) out of the persisted allowlist.
+
+    A bare host grants the HTTPS tunnel (``:443``) only; ``host:port`` grants a CONNECT tunnel to
+    that one port and nothing else — the shape the proxy's blocked row carries when the port was
+    the reason (``github.com:22``), so the TUI's allow action round-trips it unchanged."""
     host = host.strip()
     if not host or any(c.isspace() for c in host) or "/" in host or "://" in host:
         return False
+    if ":" in host:
+        host, _, port = host.rpartition(":")
+        if not port.isdigit() or not 1 <= int(port) <= 65535:
+            return False
     bare = host[2:] if host.startswith("*.") else host
     return "." in bare and all(part for part in bare.split("."))
 

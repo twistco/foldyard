@@ -173,6 +173,9 @@ logging.getLogger("mitmproxy.proxy.server").addFilter(_DropConnectChatter())
 logging.getLogger("mitmproxy.proxy.server").addFilter(_DropWebsocketPingPong())
 
 
+_HTTPS_PORT = 443  # the one port a bare host grant covers at CONNECT
+
+
 def _host_matches(host: str | None, patterns: list[str]) -> bool:
     """Exact host match, or ``*.suffix`` wildcard (matches SUBDOMAINS, not the bare domain) —
     Claude Code Web's allow-list semantics, so its published list drops in unchanged. Used to
@@ -617,14 +620,31 @@ class Injector:
         CONNECT to this proxy, and this hook fires on that CONNECT BEFORE any tunnel/TLS — so
         answering it with a 403 refuses the host outright (no upstream dialled, no TLS handshake,
         ``tls_clienthello`` never runs for it). Only the default-deny wall lives here; the
-        decrypt-vs-passthrough choice is still ``tls_clienthello``'s job for hosts we DO allow."""
+        decrypt-vs-passthrough choice is still ``tls_clienthello``'s job for hosts we DO allow.
+
+        The PORT is fenced too: a host grant means ``host:443``. CONNECT is a raw TCP tunnel — a
+        client that speaks something other than TLS through it is relayed as-is — so a bare host
+        grant used to let ``github.com:22`` out, and with an SSH agent forwarded into the box by an
+        editor attach that is a push path (seen live, 2026-09-17). Another port needs its own
+        grant, ``host:port`` (``fy allow add github.com:22``), so the blocked row carries the port
+        and the TUI's allow action offers exactly that."""
         if not self.default_deny:
             return
         host = flow.request.pretty_host
-        if self._allowed(host):
+        port = flow.request.port
+        if self._allowed_connect(host, port):
             return
         flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
-        self._log_blocked(host)
+        self._log_blocked(host if port == _HTTPS_PORT else f"{host}:{port}")
+
+    def _allowed_connect(self, host: str | None, port: int) -> bool:
+        """``host:port`` granted explicitly, or the host granted (:meth:`_allowed`) on :443."""
+        if port == _HTTPS_PORT:
+            return self._allowed(host)
+        if not host:
+            return False
+        self._refresh_allow()
+        return _host_matches(f"{host}:{port}", self._allow_patterns)
 
     def tls_clienthello(self, data: tls.ClientHelloData) -> None:
         """Decide, before the TLS handshake, whether to MITM-decrypt this connection or blind-

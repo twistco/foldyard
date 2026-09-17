@@ -144,7 +144,8 @@ asserts, grouped:
   table (PID 1's, read through `--pid=host`; a container's `mount` only shows its own
   namespace) carries no host home path beyond the repo and worktrees-root mounts themselves,
   matched exactly.
-- **Credential-agnostic backstops** (inside the box): no SSH agent forwarded, no `~/.ssh`
+- **Credential-agnostic backstops** (inside the box): no SSH agent forwarded, no git-credential
+  bridge to the host (`GIT_ASKPASS`), no editor-attach bridge sockets in `/tmp`, no `~/.ssh`
   private-key material, no `~/.netrc`, and `git ls-remote origin` **fails** — the box can't
   even reach the remote to push, by construction (proven against a *private* origin — a public
   one answers `ls-remote` without credentials and reads as reachable). These live in foldyard's core so no absent
@@ -182,10 +183,25 @@ Every row names *what* failed and stops there. What it usually means, and where 
   VM mount sets are init-only: fix the `[machine]` config, then `fy machine recreate`.
   **`could not read the VM mount table … UNPROVEN`** is the probe failing, not a leak; under
   gVisor the row reads `N/A` instead and the audit is `fy verify` on the host's job.
-- **`SSH_AUTH_SOCK set` / `~/.ssh key material` / `~/.netrc present`** — a credential is
-  physically in the box. Nothing in foldyard puts it there: look for a mount or a
-  `[box]`/bootstrap step that copies it in (`fy config widenings` lists what the adopted
-  config asks the host to allow), remove it, then `fy box down` + `fy box up`.
+- **`SSH_AUTH_SOCK set` / `git-credential bridge to the host` / `editor-attach bridge sockets`**
+  — an **editor attach** forwarded the host's credentials in. VS Code's Dev Containers attach
+  (`fy code`, or a manual "Attach to Running Container") runs its server in the box and, with no
+  setting to stop it, forwards the host's SSH agent (`/tmp/vscode-ssh-auth-*.sock`) and its
+  git-credential store (`GIT_ASKPASS` over `/tmp/vscode-git-*.sock`) into every terminal it opens
+  — seen live: a box whose posture read "never push" held a live agent with one key. foldyard
+  neutralises both in-box, image-agnostic: the bootstrap installs `~/.config/foldyard/harden.sh`,
+  sourced at `~/.bashrc` line 1 (before the interactive guard, so every bash — the attach's
+  terminals, `fy claude`, `box shell` — inherits the vars' absence), and a reaper that unlinks the
+  sockets as they appear (restarted from every shell and by `fy code` before the attach). The
+  egress wall fences CONNECT to `:443` (below) so an agent has nowhere to go regardless. A hit
+  here means the hygiene isn't running: a box created before it shipped (`fy box up` re-applies
+  it to a running box), a shell that isn't bash, or a socket that appeared in the reaper's
+  one-second window — `fy box shell` restarts the reaper. Not from an attach at all? Then look for
+  a mount or a `[box]`/bootstrap step that copies a credential in (`fy config widenings` lists
+  what the adopted config asks the host to allow), remove it, then `fy box down` + `fy box up`.
+- **`~/.ssh key material` / `~/.netrc present`** — a credential is physically in the box. Nothing
+  in foldyard puts it there: look for a mount or a `[box]`/bootstrap step that copies it in,
+  remove it, then `fy box down` + `fy box up`.
 - **`git remote REACHABLE — the box can push`** — the box authenticated to `origin`, or
   `origin` is public (then `ls-remote` needs no credential and this row can't distinguish).
   For a private origin: `fy state` shows what the posture is granting; `fy config widenings`

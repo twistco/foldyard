@@ -147,8 +147,16 @@ mount-wide overlay.
   personal layer there — that trade-off is the consumer's, and this ADR only makes it explicit.
 - An agent adding an extension on a branch now needs an operator to adopt before it installs.
   That friction is the point: it is the exact moment the operator should see the id.
-- `fy config widenings` does not yet list `[vscode] extensions`. It should — it is a repo-declared
-  ask of the host in the same sense as an injection target — and is a small follow-up, not a
-  boundary: the gate is what stops the box, the widenings row is what tells the operator.
+- `fy config widenings` lists `[vscode]` as the editor attach — not for the extensions (a
+  follow-up: they are a repo-declared ask of the host in the same sense as an injection target)
+  but for what the attach itself does. Found while this ADR was in review (2026-09-17): Dev
+  Containers forwards the host's SSH agent and git-credential store into every terminal it opens
+  in the box, and no setting stops it (launching VS Code with `SSH_AUTH_SOCK` stripped still
+  forwards — macOS shell-env resolution). A live agent with one key sat in a box whose posture
+  read "never push"; the defeat one consumer's image carried (an rc-file unset) was never
+  foldyard's, and the socket is usable by path regardless of the env. So foldyard's bootstrap now
+  installs the hygiene (`box._HARDEN_SNIPPET`: unset + a socket reaper), `fy code` re-ensures it
+  before the attach, the egress wall fences CONNECT to `:443`, and `fy verify` reports the vars
+  AND the sockets. The gate is still what stops the box; this is what stops the attach.
 - A future surface that genuinely needs *computed* output from the yard should reach for ADR-0023
   §2's split again — this ADR removes one instance of it, not the pattern.

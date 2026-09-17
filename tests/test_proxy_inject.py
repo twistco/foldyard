@@ -26,8 +26,9 @@ pytestmark = pytest.mark.skipif(not ADDON.exists(), reason=f"proxy addon not fou
 
 
 class _Req:
-    def __init__(self, host: str, method: str = "GET", path: str = "/x") -> None:
+    def __init__(self, host: str, method: str = "GET", path: str = "/x", port: int = 443) -> None:
         self.pretty_host = host
+        self.port = port
         self.method = method
         self.path = path
         self.url = f"https://{host}{path}"  # the addon re-issues against this on a 401
@@ -54,8 +55,9 @@ class _Flow:
         method: str = "GET",
         path: str = "/x",
         content: bytes = b"",
+        port: int = 443,
     ) -> None:
-        self.request = _Req(host, method, path)
+        self.request = _Req(host, method, path, port)
         self.response: _Resp | None = _Resp(status, content)
         self.metadata: dict = {}
 
@@ -758,6 +760,61 @@ def test_default_deny_blocks_a_disallowed_https_connect_and_passes_allowed(walle
         f.response = None  # an allowed host must NOT be short-circuited
         inj.http_connect(f)
         assert f.response is None  # tunnel proceeds (exact + glob both allowed)
+
+
+def test_a_host_grant_covers_443_only_and_the_blocked_row_names_the_port(walled):
+    # CONNECT is a raw tunnel: mitmproxy relays whatever the client speaks through it, TLS or
+    # not — so a bare `github.com` grant used to let `github.com:22` out, and with an SSH agent
+    # forwarded into the box by an editor attach that is a push path. A host grant now means
+    # :443; any other port is refused, logged WITH the port so the TUI can offer that grant.
+    inj, allow, log = walled
+    _write_allow(allow, ["github.com"])
+
+    ssh = _Flow("github.com", port=22)
+    inj.http_connect(ssh)
+    assert ssh.response is not None and ssh.response.status_code == 403
+    entry = _last_log(log)
+    assert entry["host"] == "github.com:22" and entry["blocked"] is True
+
+    https = _Flow("github.com", port=443)
+    https.response = None
+    inj.http_connect(https)
+    assert https.response is None
+
+
+def test_a_host_port_grant_opens_exactly_that_port(walled):
+    # `fy allow add github.com:22` grants the tunnel on :22 and NOTHING else: not :443 for that
+    # host (a port grant is not a host grant), and not :22 for another host. Globs carry a port
+    # the same way (`*.internal.example:8443`).
+    inj, allow, _log = walled
+    _write_allow(allow, ["github.com:22", "*.internal.example:8443"])
+
+    for host, port in (("github.com", 22), ("db.internal.example", 8443)):
+        f = _Flow(host, port=port)
+        f.response = None
+        inj.http_connect(f)
+        assert f.response is None, (host, port)
+
+    for host, port in (("github.com", 443), ("gitlab.com", 22), ("internal.example", 8443)):
+        f = _Flow(host, port=port)
+        inj.http_connect(f)
+        assert f.response is not None and f.response.status_code == 403, (host, port)
+
+
+def test_the_injector_host_exemption_is_443_only(gh, monkeypatch, tmp_path):
+    # The injector host is exempt because the proxy must reach it to mint — over HTTPS. The
+    # exemption must not double as a tunnel to any port on that host.
+    allow = tmp_path / "allow-effective.json"
+    _write_allow(allow, [])
+    monkeypatch.setenv("INJECT_HOST", "api.github.com")
+    monkeypatch.setenv("INJECT_COMMAND", "true")
+    monkeypatch.setenv("DEFAULT_DENY", "1")
+    monkeypatch.setenv("ALLOW_FILE", str(allow))
+    monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
+    inj = gh.Injector()
+    f = _Flow("api.github.com", port=22)
+    inj.http_connect(f)
+    assert f.response is not None and f.response.status_code == 403
 
 
 def test_default_deny_off_never_blocks(gh, monkeypatch, tmp_path):

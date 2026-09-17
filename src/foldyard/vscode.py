@@ -525,6 +525,12 @@ def code() -> int:
         _err(f"  'Dev Containers: Attach to Running Container…' → {box}.")
         return 1
 
+    # The attach is about to forward the host's SSH agent + git credentials into the box (Dev
+    # Containers does, unswitchably); make sure the in-box hygiene that neutralises them is in
+    # place and its socket reaper running BEFORE the server lands — see box._HARDEN_SNIPPET.
+    from . import box as box_mod  # lazy: box.py pulls keyless/machine/sandbox, not needed above
+
+    box_mod.ensure_harden(engine, box, env)
     print(f"▶ launching VS Code (DOCKER_HOST={env.get('DOCKER_HOST', '')})…")
     # `env` (incl. DOCKER_HOST) reaches ONLY this launched, isolated instance — never the
     # user's shell or their default VS Code. `|| true` parity: a non-zero `code` is non-fatal.

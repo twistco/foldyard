@@ -43,6 +43,23 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Added
 
+- **The editor attach's host bridges are neutralised in-box, the egress wall fences CONNECT to
+  `:443`, and `fy verify` reports both.** Seen live: a `fy code` attach put a LIVE SSH agent
+  socket (one key) and VS Code's git-credential bridge (`GIT_ASKPASS` back to the host's store)
+  into a box whose posture read "never push" — Dev Containers forwards them into every terminal
+  it opens, no setting stops it, and launching VS Code with `SSH_AUTH_SOCK` stripped still
+  forwards. The one defeat that existed was an rc-file unset in a single consumer's box image,
+  which no other consumer had, and which leaves the socket reachable by path anyway. Now
+  foldyard's bootstrap installs `~/.config/foldyard/harden.sh` in every box (image-agnostic),
+  sourced at `~/.bashrc` line 1 so every bash inherits the vars' absence, plus a reaper that
+  unlinks `/tmp/vscode-ssh-auth-*.sock` and `/tmp/vscode-git-*.sock` as they appear — restarted
+  from every shell and by `fy code` before the attach; `fy box up` re-applies it to a running
+  box, so no recreate. Independently, a host grant now means `host:443`: CONNECT is a raw
+  tunnel and a bare `github.com` grant reached `github.com:22`, so an agent had somewhere to go;
+  another port is its own grant (`fy allow add github.com:22`, offered by the TUI from the blocked
+  row, which carries the port). `fy verify` gains rows for the git-credential bridge vars and for
+  the sockets on disk (a socket is the boundary; an unset var is hygiene), and its
+  `SSH_AUTH_SOCK` row names the attach. `fy config widenings` lists `[vscode]` as the attach.
 - **`fy reclaim`, `[reclaim] script`, and `fy up` removes the images its own build superseded.**
   Measured on a 90 GB store that died mid-build on `no space left on device`: the automatic
   sweep freed `0.0 GiB` under a `✓`, because every dangling image was younger than its 24h
