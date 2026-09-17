@@ -87,6 +87,26 @@ def test_append_host_env_never_leaves_the_secret_readable(tmp_path, monkeypatch)
     assert "OPENAI_API_KEY" not in f.read_text()  # refused ⇒ nothing stored
 
 
+def test_append_host_env_serialises_concurrent_captures(tmp_path, monkeypatch):
+    # Two captures at once (the TUI modal and a `fy up` prompt) must not each read the same body
+    # and overwrite the other's line. Simulated interleaving: a rival append lands just before the
+    # first capture takes its lock — so everything the first capture reads must come AFTER it.
+    f = tmp_path / "host.env"
+    real_flock = keyless.fcntl.flock
+    raced = False
+
+    def racing_flock(fd, op):
+        nonlocal raced
+        if not raced:
+            raced = True
+            keyless.append_host_env(f, "OPENAI_API_KEY", "sk-proj-rival")
+        real_flock(fd, op)
+
+    monkeypatch.setattr(keyless.fcntl, "flock", racing_flock)
+    keyless.append_host_env(f, "ANTHROPIC_API_KEY", "sk-ant-real")
+    assert f.read_text() == "OPENAI_API_KEY=sk-proj-rival\nANTHROPIC_API_KEY=sk-ant-real\n"
+
+
 def _recorder():
     out: list[str] = []
     return out, out.append
@@ -372,9 +392,11 @@ def test_ensure_secret_empty_paste_stores_nothing(tmp_path):
 
 def test_host_env_value_matches_supervisor_parsing(tmp_path):
     f = tmp_path / "host.env"
-    f.write_text("# c\nGH_PEM_B64='quoted'\nOTHER = spaced \n")
+    f.write_text("# c\nGH_PEM_B64='quoted'\nOTHER = spaced \nOTHER=rotated\n")
     assert keyless.host_env_value(f, "GH_PEM_B64") == "quoted"  # quotes stripped, as the supervisor
-    assert keyless.host_env_value(f, "OTHER") == "spaced"
+    assert (
+        keyless.host_env_value(f, "OTHER") == "rotated"
+    )  # last definition wins, as in the supervisor
     assert keyless.host_env_value(f, "ABSENT") == ""
     assert keyless.host_env_value(tmp_path / "nope.env", "GH_PEM_B64") == ""
 

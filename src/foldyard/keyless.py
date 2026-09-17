@@ -24,6 +24,7 @@ registry hot path:
 from __future__ import annotations
 
 import base64
+import fcntl
 import json
 import os
 from collections.abc import Callable, Iterable
@@ -205,33 +206,25 @@ def host_env_has(path: Path, var: str) -> bool:
     here means "the minter will see a value". A bare ``KEY=`` placeholder counts as absent, or
     :func:`~foldyard.devmode.missing_secrets` would skip the prompt and the minter fail on
     an empty string."""
-    if not path.exists():
-        return False
-    present = False  # last definition wins, as in load_host_env
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        if key.strip() == var:
-            present = bool(value.strip().strip("'\""))
-    return present
+    return bool(host_env_value(path, var))
 
 
 def host_env_value(path: Path, var: str) -> str:
     """``var``'s value from host.env, or ``""`` — the same KEY=VALUE parsing (and quote-stripping)
     the supervisor's ``load_host_env`` applies, so what a caller reads here is exactly what a minter
-    will see in its environment. For CHECKING a secret's shape, never for logging it."""
+    will see in its environment: the LAST definition wins, as it does there. For CHECKING a secret's
+    shape, never for logging it."""
     if not path.exists():
         return ""
+    found = ""
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         if key.strip() == var:
-            return value.strip().strip("'\"")
-    return ""
+            found = value.strip().strip("'\"")
+    return found
 
 
 def append_host_env(path: Path, var: str, value: str) -> None:
@@ -239,17 +232,24 @@ def append_host_env(path: Path, var: str, value: str) -> None:
     file holds real secrets, so it lives OUTSIDE the repo mount (``config.host_env_file``) and is
     owner-only. We append rather than rewrite so a hand-edited host.env keeps its comments/order."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    body = path.read_text() if path.exists() else ""
-    if body and not body.endswith("\n"):
-        body += "\n"
     # Owner-only from the first byte: an existing (possibly hand-made, looser) file is tightened
     # BEFORE the secret lands, and a new one is created 0600 at open — never written and chmod'd
     # after, which leaves the secret readable for a moment. A refused chmod propagates: better
     # no paste stored than one under a mode we can't vouch for.
     if path.exists():
         os.chmod(path, 0o600)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+") as fh:
+        # One writer at a time: the read-modify-write is serialised on the file itself (an exclusive
+        # flock held until close, as ports.py does for its registry), so two captures landing at
+        # once — the TUI modal and a `fy up` prompt — can't each read the same body and have the
+        # second's rewrite drop the first's line.
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        body = fh.read()
+        if body and not body.endswith("\n"):
+            body += "\n"
+        fh.seek(0)
+        fh.truncate()
         fh.write(f"{body}{var}={value}\n")
 
 
