@@ -70,7 +70,7 @@ break config or CLI shape, and say so here. How a release is cut:
   newly-blocked daemon. The capability warm-up reads the same verdicts, so a gated daemon's
   axis is still probed (a forwarder there first is the probe's to name) while a launching one
   is not. The gcp port probe's JSON parse moves out of its connect `try`, so a squatter that
-  speaks HTTP but not the minter's JSON reads as "held by another process" rather than "not
+  speaks HTTP but not the minter's JSON (or answers a 404) reads as "held by another process" rather than "not
   answering — is `fy host` up?", contradicting the BLOCKED row beside it.
 - **`fy verify` points at its own manual.** A failing row names *what* failed and stops there;
   the battery now prints the exact `fy docs security` call up front and again beside a FAIL

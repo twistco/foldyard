@@ -420,6 +420,27 @@ def test_probe_names_a_squatter_that_does_not_speak_json(monkeypatch):
     assert "not the minter" in detail and "not answering" not in detail
 
 
+def test_probe_names_a_squatter_that_answers_an_http_error(monkeypatch):
+    """A listener that 404s `/` (most dev servers, a relay's 502) is a RESPONDER: urllib raises
+    HTTPError for it, which the connect `try`'s broad catch used to report as "not answering"."""
+
+    class _NotFound(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_error(404)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    port, srv = _serve(_NotFound)
+    try:
+        monkeypatch.setattr(gcp.config, "gcp_minter_port", lambda: port)
+        ok, detail = gcp._minter_port_answering()
+    finally:
+        srv.shutdown()
+    assert not ok
+    assert "not the minter" in detail and "404" in detail and "not answering" not in detail
+
+
 def test_probe_fails_when_nothing_listens(monkeypatch):
     monkeypatch.setattr(gcp.config, "gcp_minter_port", lambda: _free_port())
     ok, detail = gcp._minter_port_answering()

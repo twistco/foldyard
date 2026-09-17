@@ -1064,7 +1064,9 @@ class DevModeTui(App):
                 # "{daemon} :{port} ● up" under every axis that shares the one egress-proxy (github,
                 # penpot, capture, claude, codex all do) was just duplicated noise.
                 if daemon and current != defaults[row.axis] and daemon.get("blocked"):
-                    status += f"\n{dn} :{daemon['port']} ○ BLOCKED — {daemon['blocked']}"
+                    # The reason is the supervisor's free text (an OSError's str, say) — escaped,
+                    # or a bracketed fragment reads as markup and an unmatched `[/x]` raises.
+                    status += f"\n{dn} :{daemon['port']} ○ BLOCKED — {escape(daemon['blocked'])}"
                 elif daemon and current != defaults[row.axis] and not daemon["up"]:
                     status += f"\n{dn} :{daemon['port']} ○ DOWN — run `fy up` (or `fy host`)"
             row.query_one(".axis-status", Static).update(status)
@@ -1354,7 +1356,9 @@ class DevModeTui(App):
             return
         if daemons is None:
             daemons = devmode.daemon_status(devmode.read()["mode"])
-        up = any(d.get("up") for d in daemons.values())
+        # A BLOCKED daemon's port may still answer — that is a foreign listener, not the
+        # supervisor serving — so it must not count towards "● up".
+        up = any(d.get("up") and not d.get("blocked") for d in daemons.values())
         # Per-workspace: these are the SELECTED worktree's daemons (its own proxy/minter ports). The
         # one supervisor serves every worktree, but a worktree only has daemons up once its box
         # is up + its posture needs them — phrase it per-workspace to match the focused card.
@@ -1370,7 +1374,7 @@ class DevModeTui(App):
         lines = [head] + [
             f"  {d.get('label', name)} :{d.get('port')} "
             + (
-                f"○ BLOCKED — {d['blocked']}"
+                f"○ BLOCKED — {escape(d['blocked'])}"
                 if d.get("blocked")
                 else ("● up" if d.get("up") else "○ DOWN")
             )
