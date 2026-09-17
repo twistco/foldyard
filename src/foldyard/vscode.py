@@ -376,24 +376,41 @@ def _attached_config(checkout: str, exts: list[str], settings: dict) -> dict:
     }
 
 
-def _read_config(path: Path) -> dict | None:
-    """The attached config currently on disk, or ``None`` when there isn't a readable JSON object
-    there (missing, garbage, or a non-dict document — all "nothing to preserve")."""
+class _Unreadable:
+    """What :func:`_read_config` answers when the file is there but could not be READ (permissions,
+    a transient I/O error). Distinct from ``None`` — "nothing to preserve" — because a file whose
+    contents are unknown might be the operator's, and the safe answer to "may I overwrite it?" is
+    no."""
+
+
+_UNREADABLE = _Unreadable()
+
+
+def _read_config(path: Path) -> dict | _Unreadable | None:
+    """The attached config currently on disk: ``None`` when there isn't a JSON object there
+    (missing, garbage, or a non-dict document — all "nothing to preserve"), :data:`_UNREADABLE`
+    when there is a file but reading it failed."""
     if not path.exists():
         return None
     try:
         existing = json.loads(path.read_text())
-    except (OSError, ValueError):
+    except OSError:
+        return _UNREADABLE
+    except ValueError:
         return None
     return existing if isinstance(existing, dict) else None
 
 
-def _write_attached_config(path: Path, cfg: dict, existing: dict | None) -> bool:
+def _write_attached_config(path: Path, cfg: dict, existing: dict | _Unreadable | None) -> bool:
     """Write the config into the isolated instance's globalStorage. Returns False unless
     ``existing`` (what :func:`_read_config` found at ``path``) is OURS — i.e. its ``_generatedBy``
     is exactly our marker. Anything else is somebody's file to keep: the user took ownership by
     removing the marker, or another tool wrote its own. A malformed document (``null``, a list,
-    garbage) reads as ``None`` — not owned, safe to replace."""
+    garbage) reads as ``None`` — not owned, safe to replace; one we could not read at all is kept,
+    since we cannot tell whose it is."""
+    if isinstance(existing, _Unreadable):
+        print(f"  (kept {path}: could not read it to check whether it is foldyard's)")
+        return False
     if existing is not None and existing.get(_GENERATED_MARKER_KEY) != _GENERATED_MARKER:
         print(f"  (kept your customised {path})")
         return False
@@ -475,7 +492,7 @@ def code() -> int:
         # Settings have no in-box listing to diff against, so the last config WE wrote is the
         # record of what the box's Machine settings hold; any difference (a first write included)
         # needs the marker gone or the change never lands on an already-attached box.
-        if previous is None or previous.get("settings") != attached["settings"]:
+        if not isinstance(previous, dict) or previous.get("settings") != attached["settings"]:
             markers.append(_WRITE_MACHINE_SETTINGS_MARKER)
         _reset_markers(engine, box, env, markers)
 

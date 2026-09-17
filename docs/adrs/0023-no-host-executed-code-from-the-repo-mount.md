@@ -2,8 +2,11 @@
 
 - **Status:** Accepted (2026-08-08) — implemented across `plugins/github_app_token.py`,
   `plugins/gh_cli_token.py`, `plugins/__init__.py` (`Secret`/`Registry.secrets`),
-  `keyless.ensure_secret`, `worktree._init_in_yard`, `vscode._generate_attached_config` +
-  `_ALLOWED_CONFIG_KEYS`, `allowlist.py` (host-owned grants *and* wall switch), `config.engine_cli`.
+  `keyless.ensure_secret`, `worktree._init_in_yard`, `allowlist.py` (host-owned grants *and* wall
+  switch), `config.engine_cli`. The VS Code surface (`vscode._generate_attached_config` +
+  `_ALLOWED_CONFIG_KEYS`) is superseded by
+  [ADR-0026](./0026-vscode-attach-config-is-declarative.md) — the generator is gone and the
+  attached config is `[vscode]` data foldyard authors itself; branch 2 below keeps the history.
 - **Sources:** the review of the finalised `github=app` PR-bot minter — "does the consumer-side
   minter hand the box a code-execution path to the Mac?"; five review rounds against the
   implementation. Related: [0007](./0007-credential-injection-at-egress-proxy.md) (where minting

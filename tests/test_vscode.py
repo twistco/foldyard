@@ -442,6 +442,29 @@ def test_a_foreign_marker_is_someone_elses_file_too(fake, capsys):
     assert "kept your customised" in capsys.readouterr().out
 
 
+def test_an_unreadable_existing_config_is_kept_not_replaced(fake, capsys, monkeypatch):
+    # Malformed is "nothing to preserve"; UNREADABLE is "we don't know whose this is" — and the
+    # answer to "may I overwrite a file I can't inspect?" is no, or a permissions blip on the
+    # operator's own customised config would silently revert it to foldyard's.
+    fake["state"]["running"] = True
+    path = _cfg_path(fake)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"extensions": ["mine.only"]}')
+    real_read_text = Path.read_text
+
+    def refuse(self, *a, **kw):
+        if self == path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", refuse)
+    assert vscode.code() == 0
+    monkeypatch.undo()
+    assert json.loads(path.read_text()) == {"extensions": ["mine.only"]}
+    assert "could not read it" in capsys.readouterr().out
+    assert not _execs(fake["calls"], "Marker")
+
+
 @pytest.mark.parametrize("junk", ["null", "[1, 2]", "not json at all"])
 def test_a_malformed_existing_config_is_replaced_not_a_traceback(fake, junk):
     # `null` parses fine and then answers every lookup with a TypeError — the one shape that used
