@@ -122,19 +122,24 @@ def test_unparseable_declaration_is_ignored():
 # ── the fix instruction differs by where you are ─────────────────────────────────────
 
 
-def test_fix_command_on_the_mac_is_a_uv_reinstall():
+def test_fix_command_on_the_host_is_a_uv_reinstall():
     msg, _ = compat.version_gate("0.1.0", minimum="0.4.0", recommended=None, in_box=False)
     assert msg is not None
     assert "uv tool install" in msg
     assert "fy box up" not in msg
 
 
-def test_fix_command_in_the_box_is_a_box_rebuild():
+def test_fix_command_in_the_box_is_a_box_recreate():
     # The box's foldyard is installed by the bootstrap to match the host, so `uv tool install`
-    # inside the box would be undone by the next `fy box up` — and the box has no egress for it.
+    # inside the box would be undone by the next recreate — and the box has no egress for it.
+    #
+    # It must say RECREATE, not `fy box up`: box.up early-returns on a running box before any
+    # bootstrap step, so a bare `fy box up` prints "already up" and reinstalls nothing. Advice
+    # that reads as success while changing nothing sends the reader looking elsewhere, and the
+    # reader here is by definition someone whose in-box fy is already too old to trust.
     msg, _ = compat.version_gate("0.1.0", minimum="0.4.0", recommended=None, in_box=True)
     assert msg is not None
-    assert "fy box up" in msg
+    assert "fy box down && fy box up" in msg
     assert "uv tool install" not in msg
 
 
@@ -252,6 +257,22 @@ def test_doctor_warns_on_an_unmet_recommendation(repo_declaring):
 def test_doctor_is_ok_inside_the_window(repo_declaring):
     (status, _, _) = _row(repo_declaring, min_foldyard_version="0.0.1")[0]
     assert status == "ok"
+
+
+def test_doctor_row_in_the_box_says_recreate(repo_declaring, monkeypatch):
+    # Same reasoning as test_fix_command_in_the_box_is_a_box_recreate: a bare `fy box up` is a
+    # no-op on a running box. The row and the gate must name the same fix.
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    (_, _, detail) = _row(repo_declaring, min_foldyard_version="99.0.0")[0]
+    assert "fy box down && fy box up" in detail
+    assert "uv tool install" not in detail
+
+
+def test_doctor_row_on_the_host_says_upgrade(repo_declaring, monkeypatch):
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    (_, _, detail) = _row(repo_declaring, min_foldyard_version="99.0.0")[0]
+    assert "uv tool install --upgrade foldyard" in detail
+    assert "fy box" not in detail
 
 
 def test_doctor_reports_the_nudge_even_when_silenced(repo_declaring, monkeypatch):

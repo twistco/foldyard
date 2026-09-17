@@ -219,6 +219,22 @@ def scrubbed_box_session_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_desktop_notifications(monkeypatch):
+    """Keep the supervisor's push surface off the developer's screen. ``supervisor._notify``
+    shells to ``terminal-notifier``/``osascript`` when either is on PATH, and a test that drives a
+    tick with a daemon's required env missing (deliberately — that IS the scenario) reaches it
+    on the "newly blocked" edge: the suite once posted "egress proxy (claude keyless) not
+    started — set in …/pytest-of-…/host.env" to a real Notification Center. The same class of
+    leak as a golden test seeing a live engine socket, closed the same way: structurally, for
+    every test, not per call site. With ``which`` finding nothing, ``_notify`` returns before
+    any subprocess. The ``_notify`` unit tests set ``which`` themselves (autouse runs first, so
+    their patch wins) and stub ``subprocess.run`` beside it."""
+    from foldyard import supervisor
+
+    monkeypatch.setattr(supervisor, "which", lambda _name: None)
+
+
+@pytest.fixture(autouse=True)
 def deterministic_engine(monkeypatch):
     """Pin the container engine so golden command tests assert one engine regardless of
     whether the host (CI / box / Mac) has podman or docker on PATH. Engine-detection

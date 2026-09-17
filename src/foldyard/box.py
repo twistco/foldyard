@@ -167,6 +167,52 @@ def _warn_stale_proxy_port(engine: str, box: str, env: dict) -> None:
         )
 
 
+def _installed_foldyard(engine: str, box: str, env: dict) -> str | None:
+    """The version of the foldyard a running box ACTUALLY has on its PATH, or None when nothing
+    answers (no install, a broken one, or one too old to know ``--version``).
+
+    Asked of the box rather than read from a create-time stamp: a stamp records what the host
+    MEANT to install, and the bootstrap's foldyard step is skipped when a matching foldyard is
+    already present — so on an image that bakes one, or a tool dir retained across recreates via
+    ``[box].caches`` / a ``UV_TOOL_DIR`` pin in ``[box].env``, a stamp would report the host's
+    version over whatever the box kept. The same ``bash -lc`` login-shell route as ``fy box exec``,
+    so PATH resolves the install the way an attached shell would."""
+    out = subprocess.run(
+        [engine, "exec", box, "bash", "-lc", "foldyard --version"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    got = out.stdout.strip().splitlines()
+    return got[-1].strip() if out.returncode == 0 and got else None
+
+
+def _warn_stale_foldyard(engine: str, box: str, env: dict) -> None:
+    """Nag when a running box's foldyard is not the one the Mac now runs.
+
+    The bootstrap installs foldyard only on a freshly CREATED box, so a host upgrade leaves the
+    two sides on different versions indefinitely while every `fy box up` in between says "already
+    up". It stays silent until something in the box misreads config an older fy ignores — at which
+    point the symptom is a version-window refusal (compat.py) whose own fix is this recreate.
+
+    Inequality rather than "older": a downgrade is drift too, and the box tracks the host either
+    way. No answer at all (nothing installed, a broken install, a foldyard too old to know
+    ``--version``) is drift as well — the recreate reinstalls it — like the absent
+    CLAUDE_CONFIG_DIR/CODEX_HOME rows.
+    """
+    from . import __version__
+
+    installed = _installed_foldyard(engine, box, env)
+    if installed == __version__:
+        return
+    was = f"foldyard {installed}" if installed else "no working foldyard"
+    print(
+        f"⚠ dev box {box} has {was} installed, but the Mac now runs foldyard {__version__}. The "
+        "bootstrap that installs it runs only on a freshly created box, so `fy box up` alone "
+        "won't move it: `fy box down && fy box up`."
+    )
+
+
 def _box_image_fingerprint(main: Path) -> str:
     """Fingerprint the inputs Foldyard owns for a dev-box image.
 
@@ -643,13 +689,30 @@ def _foldyard_run(checkout: str, subst: dict[str, str]) -> str:
         why = (
             "no wheel, pinned version, or vendored source — cannot pick a tested version to install"
         )
+    # `--force` on EVERY branch: the step only runs when `_foldyard_check` found a stale foldyard
+    # (or none), and a bare `uv tool install` of a spec matching the retained receipt reports
+    # "already installed" and leaves the stale executable in place.
     return (
         f"if [ -n {shlex.quote(wheel)} ] && [ -f {shlex.quote(wheel)} ]; then "
         f"uv tool install --force {shlex.quote(wheel)}; "
-        f'elif [ -n {shlex.quote(version)} ]; then uv tool install "foldyard=={version}"; '
-        f"elif [ -d {repo} ]; then uv tool install --editable {repo}; "
+        f'elif [ -n {shlex.quote(version)} ]; then uv tool install --force "foldyard=={version}"; '
+        f"elif [ -d {repo} ]; then uv tool install --force --editable {repo}; "
         f"else echo {shlex.quote(f'✗ foldyard: {why}')} >&2; exit 1; fi"
     )
+
+
+def _foldyard_check() -> str:
+    """The foldyard step's skip guard: present AND already the host's version.
+
+    ``command -v foldyard`` alone skipped the install whenever a foldyard was on PATH in the fresh
+    container — one baked into the consumer's image, or a uv tool dir retained across recreates
+    (``[box].caches`` over ``~/.local``, a ``UV_TOOL_DIR`` pin in ``[box].env``) — so the very
+    recreate `_warn_stale_foldyard` prescribes left the stale one in place. ``--version`` is eager
+    in the CLI (answers before the version-window gate), so an old foldyard can still name itself;
+    one too old to know the flag fails the guard and is reinstalled, which is the right outcome."""
+    from . import __version__
+
+    return f'[ "$(foldyard --version 2>/dev/null)" = {shlex.quote(__version__)} ]'
 
 
 def _git_shim_step() -> tuple[str, str, str] | None:
@@ -682,7 +745,7 @@ def _bootstrap_script(checkout: str, here: str, env: dict) -> str:
         steps.append(shim)
     steps += [
         # Core: foldyard self-install. Claude/editor installs come from their gated plugins below.
-        ("foldyard CLI", "command -v foldyard", _foldyard_run(checkout, subst)),
+        ("foldyard CLI", _foldyard_check(), _foldyard_run(checkout, subst)),
     ]
     steps += [(s["label"], s.get("check", ""), s["run"]) for s in registry().box_bootstrap(env)]
     for tool in config.box_tools():  # consumer toolchain (e.g. pulumi) — out of the package
@@ -901,6 +964,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
                 "⚠ [codex] is declared but this box was created without it (no Codex install, "
                 "~/.codex volume or keyless seed). Recreate to add them: `fy box down && fy box up`."
             )
+        _warn_stale_foldyard(engine, box, env)
         print(f"✓ dev box {box} already up. Attach: {_attach_hint(worktree)}")
         return 0
     if _exists(engine, box, env):
