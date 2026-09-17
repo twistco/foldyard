@@ -77,8 +77,16 @@ def test_workspaces_sees_main_with_its_live_stack(bound):
         f"expected the db + api containers, got {main}"
     )  # the example stack
     assert main["devbox"] is False
-    assert main["app_port"] == 8080  # [ports] API_PORT, offset 0 for main
     assert main["branch"]
+    if main["app_port"] != 8080:
+        # workspaces() swallows the config error behind a None; re-do its lookup unguarded so
+        # the CI log names the exception (the adopted-config read, the port table…).
+        from foldyard import config
+
+        with config.using(devmode.worktree_config("")):
+            key = config.app_port_key()
+            bases = config.port_bases()
+        raise AssertionError(f"app_port {main['app_port']!r}: key={key!r} bases={bases!r}")
 
 
 def test_up_worktrees_counts_dev_boxes_not_stack_containers(bound):
@@ -92,14 +100,13 @@ def test_stack_mounts_reads_the_running_containers(bound):
     from foldyard import devmode
 
     containers = devmode._stack_mounts(PROJECT)
-    by_service = {service: (binds, masked) for service, binds, masked in containers}
-    assert set(by_service) == {"db", "api"}, containers
-    binds, _ = by_service["api"]
-    assert binds == [], f"the example api mounts nothing from the checkout: {binds}"
-    _, masked = by_service["db"]
-    assert "/var/lib/postgresql/data" in masked, (
-        f"postgres's declared VOLUME not in masked: {masked}"
-    )
+    # Rows are keyed by CONTAINER name (podman-compose: `<project>_<service>_1`).
+    by_name = {name.replace("-", "_"): (binds, masked) for name, binds, masked in containers}
+    assert set(by_name) == {f"{PROJECT}_db_1", f"{PROJECT}_api_1"}, containers
+    api_binds, _ = by_name[f"{PROJECT}_api_1"]
+    assert api_binds == [], f"the example api mounts nothing from the checkout: {api_binds}"
+    _, db_masked = by_name[f"{PROJECT}_db_1"]
+    assert "/var/lib/postgresql/data" in db_masked, f"postgres's VOLUME not in masked: {db_masked}"
 
 
 def test_stack_shadow_check_yields_placeholder_then_rows(bound):

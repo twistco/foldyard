@@ -235,6 +235,20 @@ jobs:
           echo "::group::podman ps -a"; podman ps -a || true; echo "::endgroup::"
           echo "::group::supervisor log"; cat "$FOLDYARD_STATE_DIR"/host-supervisor.log 2>/dev/null || echo "(none)"; echo "::endgroup::"
           echo "::group::lima ha.stderr.log"; tail -n 100 "$HOME"/.lima/*/ha.stderr.log 2>/dev/null || true; echo "::endgroup::"
+          echo "::group::inside the guest"
+          for cmd in \
+            "id; echo HOME=\$HOME; uptime; cat /etc/os-release | head -2" \
+            "podman info --format '{{.Store.GraphDriverName}} graph={{.Store.GraphRoot}} run={{.Store.RunRoot}} status={{json .Store.GraphStatus}}'" \
+            "podman images" \
+            "podman run --rm docker.io/library/alpine true && echo NATIVE-RUN-OK" \
+            "mount | grep -E ' / | /home|overlay|9p|virtiofs'" \
+            "journalctl --user -u podman --no-pager -n 25" \
+            "journalctl -b -p warning --no-pager -n 40" \
+            "cat /run/fy-wall/boot.log"; do
+            echo "\$ $cmd"; limactl shell foldyard-example -- sh -c "$cmd" 2>&1 || true
+          done
+          echo "::endgroup::"
+          echo "::group::lima.yaml"; cat "$HOME"/.lima/foldyard-example/lima.yaml 2>/dev/null | grep -v "^ *#" | head -80; echo "::endgroup::"
 
       # Never leave the VM to the runner teardown.
       - name: Teardown

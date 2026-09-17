@@ -172,8 +172,31 @@ def ensure_vm(repo: Path, env_extra: dict[str, str] | None = None, warm: float =
         time.sleep(2)
     raise AssertionError(
         f"engine accepted connections but could not run a container within {warm}s of ensure:\n"
-        f"{last.stderr if last else ''}"
+        f"{last.stderr if last else ''}\n--- inside the guest ---\n{guest_diagnostics()}"
     )
+
+
+def guest_diagnostics() -> str:
+    """What the guest itself says when the engine misbehaves — run natively over `limactl
+    shell`, not through the forwarded socket, so a remote-only symptom is told apart from a
+    broken engine."""
+    probes = (
+        "id; echo HOME=$HOME; uptime",
+        "podman info --format '{{.Store.GraphDriverName}} graph={{.Store.GraphRoot}} "
+        "run={{.Store.RunRoot}} status={{json .Store.GraphStatus}}'",
+        "podman images --format '{{.Repository}}:{{.Tag}} {{.Id}}'",
+        "podman run --rm docker.io/library/alpine true && echo NATIVE-RUN-OK",
+        "mount | grep -E ' / | /home|overlay|9p|virtiofs' | head -20",
+        "ls -la ~/.local/share/containers/storage/overlay/ | head -12",
+        "journalctl --user -u podman --no-pager -n 25",
+        "journalctl -b -p warning --no-pager -n 30",
+        "cat /run/fy-wall/boot.log 2>/dev/null | tail -20",
+    )
+    out = []
+    for cmd in probes:
+        r = lima_shell("sh", "-c", cmd, timeout=90)
+        out.append(f"$ {cmd}\n{r.stdout}{r.stderr}".rstrip())
+    return "\n".join(out)
 
 
 def lima_status() -> str:
