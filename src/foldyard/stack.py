@@ -144,6 +144,31 @@ def _docker_host(main: Path, wt_root: Path, no_machine: bool) -> str | None:
     raise SystemExit(1)
 
 
+def pin_filemode(main: Path) -> None:
+    """``core.fileMode=false`` in the MAIN checkout's ``.git/config`` — exec-bit churn on the
+    shared mount must not read as a modification — written READ-FIRST, so the file is touched
+    once per checkout rather than on every ``shellenv``/``resolve`` from both kernels.
+
+    The pin has to live in the file: a host GUI's bundled git (Fork ships its own) reads neither
+    shellenv's env nor the box's git shim, and it is the writer that would otherwise see phantom
+    mode changes. But ``.git/config`` sits on the virtiofs mount under the same non-atomic
+    lock→rename protocol as the index (ADR-0021), and ``git config`` rewrites the file even for an
+    unchanged value — so an unconditional write made foldyard the file's most frequent writer and
+    a lost update once left a consumer's config as the 25-byte ``[core] fileMode = false``
+    (issue #6). ``--local`` on the read: an operator's global ``fileMode=false`` must not skip
+    the write the box side (no such global) still needs."""
+    got = subprocess.run(
+        ["git", "-C", str(main), "config", "--local", "--get", "core.fileMode"],
+        capture_output=True,
+        text=True,
+    )
+    if got.returncode == 0 and got.stdout.strip().lower() == "false":
+        return
+    subprocess.run(
+        ["git", "-C", str(main), "config", "core.fileMode", "false"], capture_output=True
+    )
+
+
 def _context(
     no_machine: bool, worktree: str | None = None
 ) -> tuple[Path, dict[str, str], dict[str, str], dict[str, str]]:
@@ -153,10 +178,7 @@ def _context(
     wt_root = worktrees_root(main)
     dev_vm_rel = config.dev_vm_rel()
     prefix = config.project_prefix()
-    # Ignore exec-bit churn on the shared mount (writes the shared .git/config).
-    subprocess.run(
-        ["git", "-C", str(main), "config", "core.fileMode", "false"], capture_output=True
-    )
+    pin_filemode(main)
 
     plain = {
         "WORKTREES_ROOT": str(wt_root),

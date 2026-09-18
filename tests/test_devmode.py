@@ -963,6 +963,63 @@ def test_disk_row_is_absent_when_the_figure_is_unknown(monkeypatch):
     assert _disk_row(monkeypatch, None) == []
 
 
+# ── the shared-git-config doctor row (the lost-update signature, issue #6) ─────────────
+
+
+def _git(repo, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _config_row(monkeypatch, repo):
+    from foldyard import stack
+
+    monkeypatch.setattr(stack, "main_repo", lambda: repo)
+    return list(devmode._git_config_check())
+
+
+@pytest.fixture
+def scratch_repo(tmp_path):
+    repo = tmp_path / "scratch"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "remote", "add", "origin", "git@example.com:acme/app.git")
+    return repo
+
+
+def test_git_config_row_is_ok_for_an_intact_config(monkeypatch, scratch_repo):
+    rows = _config_row(monkeypatch, scratch_repo)
+    assert len(rows) == 1
+    status, name, detail = rows[0]
+    assert (status, name) == ("ok", "shared git config")
+    assert "1 remote" in detail
+
+
+def test_git_config_row_fails_on_the_lost_update_signature(monkeypatch, scratch_repo):
+    # What survived on the consumer repo: exactly the one key foldyard writes. git degrades
+    # rather than errors on this file, so the damage only ever showed as a misleading `verify`
+    # failure; doctor names it, with the recovery an operator would otherwise have to work out.
+    (scratch_repo / ".git" / "config").write_text("[core]\n\tfileMode = false\n")
+    status, name, detail = _config_row(monkeypatch, scratch_repo)[0]
+    assert (status, name) == ("fail", "shared git config")
+    assert "core.bare" in detail and "remote" in detail and "FETCH_HEAD" in detail
+
+
+def test_git_config_row_warns_when_the_only_loss_is_the_remote(monkeypatch, scratch_repo):
+    # git's own init keys intact but no remote: not the lost update, but `fy verify` cannot
+    # prove the push refusal without an origin — say so here instead of there.
+    _git(scratch_repo, "remote", "remove", "origin")
+    status, name, detail = _config_row(monkeypatch, scratch_repo)[0]
+    assert (status, name) == ("warn", "shared git config")
+    assert "no remote" in detail and "verify" in detail
+
+
+def test_git_config_row_is_absent_outside_a_git_repo(monkeypatch, tmp_path):
+    # A stack-less scratch dir is not a finding about anyone's .git/config.
+    assert _config_row(monkeypatch, tmp_path) == []
+
+
 # ── run_stream (the doctor-fix runner: streams output, returns rc) ─────────────────────
 
 
