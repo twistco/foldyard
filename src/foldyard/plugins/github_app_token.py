@@ -120,9 +120,11 @@ def app_jwt(key: str, app_id: str, now: int | None = None) -> str:
     try:
         import jwt
     except ImportError:  # pragma: no cover — depends on the install shape, not on logic
+        from .proxy import host_install_hint
+
         raise SystemExit(
-            "github_app_token: PyJWT is missing — reinstall the host extra "
-            "(`just foldyard install`, i.e. `uv tool install 'foldyard[host]'`)"
+            "github_app_token: PyJWT is missing — reinstall the [host] extra: "
+            + host_install_hint()
         )
     stamp = int(time.time()) if now is None else now
     return jwt.encode(

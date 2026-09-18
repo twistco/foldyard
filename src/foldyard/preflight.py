@@ -84,13 +84,14 @@ def issues() -> list[str]:
     # 4. When the box will route through the proxy, the proxy must be able to RUN and be REACHABLE.
     mode = devmode.read()["mode"]
     if _proxy_required(mode):
-        from .plugins.proxy import mitmdump_path
+        from .plugins.proxy import host_install_hint, mitmdump_path
 
         if mitmdump_path() is None:
             out.append(
-                "✗ this project routes box egress through the Mac's mitmdump proxy, but mitmproxy\n"
-                "    isn't installed on the host — the box's egress (even PyPI at bootstrap) will\n"
-                "    connection-refuse. Install it: `just foldyard install` (the [host] extra)."
+                "✗ this project routes box egress through the host-side mitmdump proxy, but\n"
+                "    mitmproxy isn't installed on the host — the box's egress (even PyPI at\n"
+                f"    bootstrap) will connection-refuse. Install it (the [host] extra):\n"
+                f"    {host_install_hint()}"
             )
 
     # 5. A foldyard.toml INSIDE a bigger git repo (e.g. running an example in-place from the

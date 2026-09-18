@@ -224,6 +224,20 @@ def test_proxy_required_includes_generic_inject_axes(monkeypatch):
     assert any("mitmproxy" in p and "[host] extra" in p for p in preflight.issues())
 
 
+def test_mitmproxy_missing_names_a_command_a_consumer_has(monkeypatch):
+    # `just foldyard install` is foldyard's own dev recipe in its origin monorepo's spelling —
+    # a consumer's justfile has no such recipe ("justfile does not contain recipe `foldyard`",
+    # 2026-09-18). The hint is the uv reinstall itself, shaped to this install
+    # (proxy.host_install_hint).
+    _wire(monkeypatch, proxy_enabled=True, mitmdump=None)
+    from foldyard.plugins import proxy
+
+    monkeypatch.setattr(proxy, "_foldyard_src", lambda: None)
+    (issue,) = [p for p in preflight.issues() if "mitmproxy" in p]
+    assert "uv tool install --force 'foldyard[host]'" in issue
+    assert "just" not in issue
+
+
 def test_inject_only_with_wall_is_not_wrongly_aborted(monkeypatch):
     # The mirror's other half: inject-only + wall must NOT trip 'nothing routes through the
     # proxy' (the old hand-rolled _proxy_required missed [[inject]] and aborted a valid config).

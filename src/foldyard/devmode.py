@@ -1336,17 +1336,13 @@ def _version_window_check():
         return
 
     from . import __version__
-    from .compat import version_gate
+    from .compat import upgrade_hint, version_gate
 
     # No ledger passed on purpose: a doctor row is one line in a table, and the reasons are a
     # list. The row says WHERE you are; `fy up` says what you would gain by moving.
     message, blocked = version_gate(__version__, minimum, recommended, in_box=in_box())
     # The recreate, not a bare `fy box up` — see compat._fix for why the latter does nothing.
-    fix = (
-        "`fy box down && fy box up` from the host"
-        if in_box()
-        else "`uv tool install --upgrade foldyard`"
-    )
+    fix = "`fy box down && fy box up` from the host" if in_box() else f"`{upgrade_hint()}`"
     if blocked:
         yield ("fail", "foldyard version", f"{__version__} — repo needs >= {minimum}; run {fix}")
     elif message:

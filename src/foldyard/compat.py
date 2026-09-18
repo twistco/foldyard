@@ -181,7 +181,21 @@ def _fix(in_box: bool) -> str:
     """
     if in_box:
         return "Run `fy box down && fy box up` from the host."
-    return "Run `uv tool install --upgrade foldyard`."
+    return f"Run `{upgrade_hint()}`."
+
+
+def upgrade_hint() -> str:
+    """The host-side upgrade command: ``uv tool upgrade``, NOT ``uv tool install --upgrade``.
+
+    The latter RE-SPECIFIES the requirement as the bare name ``foldyard``: the ``[host]`` extra is
+    dropped — mitmproxy uninstalled, so the next ``fy up`` fails preflight and every box request
+    would connection-refuse at the proxy — and an editable checkout is swapped for PyPI's. Seen
+    live (2026-09-18): the gate's old advice took a working host install to that in one command.
+    ``uv tool upgrade`` re-resolves the receipt as installed — extras and an editable path kept —
+    and rebuilds an editable install's baked metadata, which is the only way the version it
+    reports moves after the checkout is pulled (``__init__.__version__``).
+    """
+    return "uv tool upgrade foldyard"
 
 
 def _floor_message(

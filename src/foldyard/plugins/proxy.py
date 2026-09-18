@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import sys
 from collections.abc import Iterable
@@ -40,7 +41,7 @@ from ._passthrough_bundles import BUNDLES
 def mitmdump_path() -> str | None:
     """Resolve the ``mitmdump`` executable, or ``None`` if it isn't installed.
 
-    Prefer the copy BESIDE foldyard's own interpreter: the HOST install (`just foldyard install` →
+    Prefer the copy BESIDE foldyard's own interpreter: the HOST install (`just install` →
     ``uv tool install …[host]``) puts mitmproxy in foldyard's venv, but ``uv tool install`` does NOT
     link a *dependency's* console scripts onto PATH — so for a tool install the venv copy is the
     only one that exists. Fall back to PATH (a standalone ``uv tool install mitmproxy`` / system).
@@ -86,6 +87,26 @@ def _foldyard_src() -> Path | None:
     # …/foldyard/src/foldyard/plugins/proxy.py → parents[3] = the project root …/foldyard
     root = Path(__file__).resolve().parents[3]
     return root if (root / "pyproject.toml").exists() else None
+
+
+def host_install_cmd() -> list[str]:
+    """Reinstall foldyard WITH the ``[host]`` extra (mitmproxy → foldyard's own venv): the ONE
+    command every "mitmproxy is missing" surface names — the doctor row, preflight, the PyJWT
+    error — and the TUI's fix button runs, so the advice and the button can never disagree.
+    Editable from the source dir for a from-source install (a bare ``uv tool install
+    foldyard[host]`` on top of an editable would silently swap it for PyPI's); the bare name is
+    the fallback. Not ``uv tool upgrade``: that re-resolves the receipt as it stands, so it can
+    never ADD an extra. Host-side only — the box never runs the proxy."""
+    src = _foldyard_src()
+    cmd = ["uv", "tool", "install", "--force"]
+    return cmd + (["--editable", f"{src}[host]"] if src else ["foldyard[host]"])
+
+
+def host_install_hint() -> str:
+    """:func:`host_install_cmd` as a line a reader can paste — quoted, since zsh globs a bare
+    ``[host]``. (It was `just install` — foldyard's own dev recipe in its origin
+    monorepo's spelling, which no consumer's justfile has.)"""
+    return shlex.join(host_install_cmd())
 
 
 # Where the proxy CA is mounted inside the box; its presence is also how `verify` (in-box)
@@ -591,7 +612,7 @@ class ProxyPlugin(Plugin):
             mitmdump_path() is not None,
             "mitmproxy",
             "installed",
-            "missing — reinstall foldyard: just foldyard install",
+            f"missing — reinstall with the [host] extra: {host_install_hint()}",
         )
         ca = _mitm_ca()
         yield ctx.result(
@@ -619,12 +640,7 @@ class ProxyPlugin(Plugin):
 
     def doctor_fixes(self) -> Iterable[DoctorFix]:
         # One-click repairs for the two checks above. Both NON-INTERACTIVE (run in a TUI worker).
-        src = _foldyard_src()
-        # Reinstall foldyard WITH the `[host]` extra (mitmproxy → foldyard's own venv). This is a
-        # HOST-side fix (the box never runs the proxy, so it never needs this), hence the extra.
-        # Editable from the source dir when we can find it; the bare name is a best-effort fallback.
-        install = ["uv", "tool", "install", "--force"]
-        install += ["--editable", f"{src}[host]"] if src else ["foldyard[host]"]
+        # The reinstall is the same command the doctor row prints (host_install_cmd).
         # Generate the CA with no server/port via mitmproxy's own API (sys.executable is foldyard's
         # venv python — it carries mitmproxy). Confdir = the CA's dir.
         confdir = _mitm_ca().parent
@@ -634,7 +650,7 @@ class ProxyPlugin(Plugin):
             "CertStore.create_store(d, 'mitmproxy', 2048); print('mitm CA written to', d)"
         )
         return [
-            DoctorFix(check="mitmproxy", label="reinstall foldyard", cmd=install),
+            DoctorFix(check="mitmproxy", label="reinstall foldyard", cmd=host_install_cmd()),
             DoctorFix(check="mitm CA", label="generate CA", cmd=[sys.executable, "-c", gen_ca]),
         ]
 
