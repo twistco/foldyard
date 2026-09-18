@@ -55,10 +55,14 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   (Lima: rendered into the boot script; podman machine: `sudo -n` over ssh) + the rootless API
   service's log level as a user drop-in over ssh. Best-effort — a warning, never an abort.
 - `hostwall.py` — the host-side egress wall for the machine VM on Linux: nftables matched by the
-  VM's cgroup v2 scope (the VM is started in a per-VM systemd scope so the match is predictable),
-  wired via `[machine].host_wall`; fail-closed — a VM outside its own scope is refused, not
-  walled. The VM's loopback plumbing (Lima's host resolver, the SSH forward) is discovered from
-  its processes' sockets, never guessed.
+  VM's cgroup v2 SLICE (the VM is started in a per-VM scope under a persistent per-VM slice, so
+  the match is predictable and its cgroup id survives restarts), wired via `[machine].host_wall`;
+  fail-closed — a VM outside its own scope-under-slice is refused, not walled. Boot-stable: the
+  VM's loopback plumbing (Lima's host resolver, the SSH forward) is judged on the INPUT hook by
+  the listener's cgroup, never named. **foldyard never loads it** (ADR-0028): `fy machine
+  host-wall` renders the table + a system unit and prints the `sudo` lines, the operator runs
+  them once, and every `fy up` PROBES enforcement from inside the slice — the table can't be
+  read without root, and one that exists may hold a dead slice's id (fail-open otherwise).
 - `box.py` — the dev-box lifecycle (`fy box build|up|shell|down|ps`) + the monitored bootstrap.
 - `supervisor.py` — `fy host`: the ONE Mac-side process running the credential daemons
   (singleton lock, per-worktree listeners, replace-on-launch staleness handling, the
@@ -167,9 +171,11 @@ foldyard's surface splits by *where it can be validated*:
    - `test_worktree_e2e.py` — `fy worktree add` (registered, own branch, clean tree), its stack
      up beside main's, `remove`: containers + volumes gone, the bound-out transcript ARCHIVED
      before the tree is deleted, main untouched, the branch kept, local state dropped.
-   - `test_wall_e2e.py` — `[machine].wall` + `host_wall` via `fy up`: the host table on the VM's
-     own scope, direct guest egress refused, DNS resolving, the proxy the way out, the api still
-     served, and the stale-provisioning refusal.
+   - `test_wall_e2e.py` — `[machine].wall` + `host_wall` via `fy up`: the fixture IS the operator
+     — the first `fy up` refused (nothing installed), then the `sudo` lines `fy machine
+     host-wall` printed run verbatim, then `fy up` passes; the host table on the VM's own slice,
+     the unit active, direct guest egress refused, DNS resolving, the proxy the way out, the api
+     still served, and the stale-provisioning refusal.
    - `test_host_daemons_e2e.py` — the supervisor with the zero-secret rig
      ([docs/testing-modes.md](./docs/testing-modes.md)): mode on → fake minter up + the overlay
      re-rendered, blocked-daemons empty; mode off.
@@ -370,7 +376,12 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   the socket — `exists()` would pass on the stale socket file a killed process leaves). `ensure`
   recovers this itself (stop → `reap_orphans` → start); `reap_orphans` matches processes by
   podman's OWN recorded paths (disk image / EFI store / api socket), never by machine name —
-  name matching would let `acme`'s `fy up` kill `acme-two`'s VM.
+  name matching would let `acme`'s `fy up` kill `acme-two`'s VM. Lima's version is narrower
+  and runs inside `start` on both of `ensure`'s paths: a hostagent (Lima's own `ha.pid`) still
+  alive after its driver (`qemu.pid`) died is waited for — it exits by itself once it notices,
+  but not atomically with flipping the instance to Stopped, and `limactl start` in that window
+  refuses with "host agent is running but driver is not" (the WSL2 runner, 2026-09-18) — and
+  signalled only if it lingers. A VM whose driver is alive is never touched.
 - **Port offsets:** `stack._offset` shells to system `cksum` for exact parity with the
   original shell implementation.
 - **Module-level constants** (`devmode.AXES`/`MODE_BLURB`/`AXIS_DAEMON`/`EMERGENCY`,

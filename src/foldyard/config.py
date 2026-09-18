@@ -868,8 +868,9 @@ def machine_host_wall() -> bool:
     exploit that flushes the in-VM wall still leaves through a host that rejects everything but
     this project's daemon band. The tier above ``wall``: needs it (preflight enforces), and a host
     that HAS nftables + cgroup v2 — Linux; asked for on a host that can't deliver it is a hard
-    stop, never a silent downgrade. Loading the table needs root (``sudo nft``) on every ``fy
-    up``. ``MACHINE_HOST_WALL`` env wins (1/true/on/yes ⇒ on)."""
+    stop, never a silent downgrade. The table is the OPERATOR's install (``fy machine
+    host-wall`` prints it and the steps; ADR-0028) — foldyard probes it on every ``fy up``,
+    never loads it. ``MACHINE_HOST_WALL`` env wins (1/true/on/yes ⇒ on)."""
     env = os.environ.get("MACHINE_HOST_WALL")
     if env is not None:
         return env.strip().lower() in ("1", "true", "on", "yes")

@@ -13,16 +13,41 @@ everything but the daemon band.
 **Why the VM process, matched by cgroup.** Lima's QEMU driver runs the guest's user-mode network
 inside the ``qemu-system`` process, so every packet the guest emits leaves the host as that
 process's own traffic (guest→host forwards land on the host loopback; external egress leaves as
-QEMU). Matching that process by its **cgroup v2 scope** — not by uid — is what makes this precise:
-the operator's other work shares their uid, but only the VM lives in the VM's scope. The
-proven ruleset (rig, 2026-09-11):
+QEMU). Matching that process by its **cgroup v2 slice** — not by uid — is what makes this precise:
+the operator's other work shares their uid, but only the VM lives under the VM's slice. The
+ruleset (the match proven on the rig, 2026-09-11; the boot-stable loopback form on a GitHub
+ubuntu-24.04 runner, 2026-09-18):
 
     table inet fy_host_wall_<vm>
-      output hook: socket cgroupv2 level <n> "<scope>" jump vm
+      output hook: socket cgroupv2 level <n> "<slice>" jump vm
       vm: established/related accept
-          oif lo tcp dport { <ssh port>, <band ranges> } accept   # limactl + the proxy band
-          ip daddr <resolver> udp/tcp dport 53 accept              # QEMU's slirp DNS
+          udp/tcp dport 53 accept                 # the hostagent resolves for the guest
+          oif lo ct mark set <mark> accept        # loopback: allowed OUT, judged on INPUT
           reject (tcp reset for tcp, admin-prohibited otherwise)
+      input hook: iif lo ct mark <mark> jump lo
+      lo: established/related accept
+          socket cgroupv2 level <n> "<slice>" accept   # the receiver is the VM's own plumbing
+          tcp dport { <band ranges> } accept           # …or this project's daemons
+          reject
+
+**Why loopback is judged by the RECEIVER.** The VM's host-side plumbing — the hostagent's DNS
+resolver, QEMU's SSH forward — listens on loopback ports Lima picks per boot. Naming them would
+make the table a per-boot artefact; instead every loopback flow the VM opens is marked (a ct mark
+set on OUTPUT rides the connection to INPUT), and on INPUT the same ``socket cgroupv2`` match is
+asked of the LISTENING socket: in the VM's own slice (its plumbing) or on the project's daemon
+band, and nothing else — the operator's local services stay out of reach. The mark is the
+project's band base under foldyard's byte (:func:`ct_mark`), so two projects' tables never judge
+each other's flows. Nothing in the rendered table comes from a
+running VM or from the network: it is a function of the VM name, its slice and the project's
+bands, which is what lets it be applied ONCE and stay valid.
+
+**Why a SLICE, and what the rule actually holds.** ``socket cgroupv2`` compiles the path to a
+cgroup ID at load time — the cgroup must exist then, and a cgroup destroyed and recreated gets
+a new ID the loaded rule no longer matches (silently: fail-OPEN). A transient scope dies with
+its last process, so it is the wrong thing to bind to; a slice survives being emptied, so the
+VM runs in its scope UNDER a per-VM slice and the table matches the slice — the same ID across
+every VM restart. A host reboot is a new ID: whether the loaded table still bites is therefore
+a thing to PROBE, never assume.
 
 **Why LINUX only, and why this is not a ``sys.platform`` branch.** The mechanism is nftables
 plus cgroup-v2 socket matching; :func:`available` asks whether the host HAS those, the same
@@ -31,34 +56,46 @@ On macOS Lima's user-mode network also runs as the operator, but pf cannot singl
 out without a dedicated uid or a different network mode, so the host wall is a Linux capability,
 reported absent elsewhere rather than branched away.
 
+**Who loads it: the operator, once (ADR-0028).** foldyard never elevates on the host. The VM's
+slice is a PERSISTENT user unit under ``$XDG_DATA_HOME/systemd/user`` that only
+``fy machine host-wall`` writes and enables (:func:`ensure_slice` — the wall's one user-level
+change, said once; a launch verb checks :func:`slice_path` and refuses before booting); the
+verb also renders the table and a system unit that loads it with the operator's user manager
+into the project's state dir (:func:`stage`) and prints them with the exact ``sudo`` lines that
+install them — the operator runs those, with the content in front of them. Then every ``fy up``
+PROBES (:func:`probe`): a child under the slice must be refused an out-of-slice loopback
+listener and an off-host address, and must reach the band; anything else refuses ``fy up`` and
+points at the verb. An install, not a VM-lifecycle step: ``stop``/``rm`` leave it alone.
+
 **How :mod:`foldyard.machine` wires it (``[machine].host_wall = true``).** The VM is STARTED
-inside its own transient scope (:func:`scoped_argv_prefix` — ``systemd-run --user --scope``), so
-limactl, the hostagent and QEMU all land in ``…/app.slice/fy-machine-<vm>.scope`` and nothing
-else does; after every start, and again on each steady-state ``fy up``, the wall is rendered for
-the scope the VM ACTUALLY sits in (:func:`vm_cgroup_scope`) and loaded as root (idempotent
-replace). A VM found outside its own scope — started by hand, or before the option was turned
-on — is refused, because matching the login session's scope instead would wall the operator's
-whole shell (:func:`in_own_scope` is that guard). The forwarded SSH port is re-read each time:
-Lima allocates it per boot. Root is ``sudo nft``; a passwordless sudoers rule for ``nft`` is the
-operator's call and makes it silent. Stdlib only.
+inside its own transient scope under that slice (:func:`scoped_argv_prefix` —
+``systemd-run --user --scope --slice``), so limactl, the hostagent and QEMU all land in
+``…/fy.slice/fy-machine-<vm>.slice/fy-machine-<vm>.scope`` and nothing else does; after every
+start, and again on each steady-state ``fy up``, the wall is probed for the slice the VM
+ACTUALLY sits under (:func:`vm_cgroup_scope` → :func:`in_own_scope`). A VM found outside its own
+scope-under-slice — started by hand, or before the option was turned on — is refused, because
+matching the login session's scope instead would wall the operator's whole shell. Stdlib only.
 """
 
 from __future__ import annotations
 
+import errno
+import json
 import os
+import shlex
 import shutil
+import socket
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import config
 
-# QEMU's slirp forwards the guest's DNS to the host's configured resolvers, so the wall must let
-# the VM process reach them: read from resolv.conf (:func:`resolvers`), with the systemd-resolved
-# stub every mainstream distro uses as the fallback when the file is unreadable or names none.
-RESOLV_CONF = Path("/etc/resolv.conf")
-DEFAULT_RESOLVERS = ("127.0.0.53",)
 PROC = Path("/proc")
+# The top byte of every foldyard ct mark — a namespace, so the per-project value below can
+# never collide with a mark another tool on the host sets (firewalld, Docker, a VPN client).
+_MARK_BYTE = 0xF4
 
 _SPAN = 89  # the worktree-offset span each daemon band covers (main is +0; ports.py)
 
@@ -71,45 +108,72 @@ def table_name(vm: str) -> str:
     return f"fy_host_wall_{safe}"
 
 
+def _unit_safe(vm: str) -> str:
+    """systemd unit names allow ``[A-Za-z0-9:_.\\-]``; anything else in the VM name collapses
+    to ``_``."""
+    return "".join(c if c.isalnum() or c in "_.-:" else "_" for c in vm)
+
+
 def scope_unit(vm: str) -> str:
     """The transient systemd scope the VM is started in — per-VM, so two projects' VMs never
-    share a cgroup (the wall would otherwise match both). systemd unit names allow
-    ``[A-Za-z0-9:_.\\-]``; anything else in the VM name collapses to ``_``."""
-    safe = "".join(c if c.isalnum() or c in "_.-:" else "_" for c in vm)
-    return f"fy-machine-{safe}.scope"
+    share a cgroup (the wall would otherwise match both)."""
+    return f"fy-machine-{_unit_safe(vm)}.scope"
+
+
+def slice_unit(vm: str) -> str:
+    """The per-VM slice the scope runs under, and the cgroup the wall MATCHES. systemd nests
+    it by its dashes: ``…/user@<uid>.service/fy.slice/fy-machine-<vm>.slice``. A slice survives
+    being emptied (the VM stopped), so the cgroup ID a loaded table holds stays the same across
+    every restart — the transient scope, gone with its last process, would not."""
+    return f"fy-machine-{_unit_safe(vm)}.slice"
 
 
 def scoped_argv_prefix(vm: str) -> list[str]:
     """Prefix for the backend's start argv that runs it — and everything it forks: Lima's
-    hostagent, QEMU, the SSH mux — inside :func:`scope_unit`. ``--scope`` keeps the command in
-    the foreground (limactl's own output and exit code are unchanged); the scope outlives the
-    command while any child lives, which is exactly the VM's lifetime. ``--collect`` garbage-
-    collects a failed scope so a retry never trips over "unit already exists"."""
-    return ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--unit", scope_unit(vm)]
+    hostagent, QEMU, the SSH mux — inside :func:`scope_unit` under :func:`slice_unit`.
+    ``--scope`` keeps the command in the foreground (limactl's own output and exit code are
+    unchanged); the scope outlives the command while any child lives, which is exactly the VM's
+    lifetime. ``--collect`` garbage-collects a failed scope so a retry never trips over "unit
+    already exists". ``--slice`` creates the slice if it does not exist yet."""
+    return [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        "--slice",
+        slice_unit(vm),
+        "--unit",
+        scope_unit(vm),
+    ]
 
 
 def in_own_scope(vm: str, scope: str) -> bool:
-    """Is ``scope`` (a cgroup path as :func:`vm_cgroup_scope` reports it) THIS VM's own scope?
-    The wall matches every socket in the scope, so a VM that landed anywhere else — the login
-    session's scope, a sibling VM's — must be refused, not walled: matching the session would
-    reject the operator's own egress."""
+    """Is ``scope`` (a cgroup path as :func:`vm_cgroup_scope` reports it) THIS VM's own scope,
+    under its own slice? The wall matches every socket under the slice, so a VM that landed
+    anywhere else — the login session's scope, a sibling VM's, its own scope but unsliced (an
+    older foldyard started it) — must be refused, not walled: matching the session would reject
+    the operator's own egress, and a slice the VM is not under would match nothing."""
     parts = [p for p in scope.strip("/").split("/") if p]
-    return bool(parts) and parts[-1] == scope_unit(vm)
+    return len(parts) >= 2 and parts[-1] == scope_unit(vm) and parts[-2] == slice_unit(vm)
 
 
-def resolvers() -> tuple[str, ...]:
-    """The host's DNS resolvers from :data:`RESOLV_CONF` (``nameserver`` lines, in order), or
-    :data:`DEFAULT_RESOLVERS` when the file is unreadable or names none."""
-    try:
-        lines = RESOLV_CONF.read_text().splitlines()
-    except OSError:
-        return DEFAULT_RESOLVERS
-    found = []
-    for line in lines:
-        fields = line.split()
-        if len(fields) >= 2 and fields[0] == "nameserver":
-            found.append(fields[1])
-    return tuple(found) or DEFAULT_RESOLVERS
+def vm_slice(scope: str) -> str:
+    """The slice a VM scope path sits under — its parent cgroup — or empty when there is none."""
+    parts = [p for p in scope.strip("/").split("/") if p]
+    return "/".join(parts[:-1])
+
+
+def ct_mark() -> int:
+    """The conntrack mark that tags this project's VM loopback flows between the OUTPUT hook
+    (set by the sender's slice) and the INPUT hook (judged by the receiver). Per project — two
+    projects' tables both hook INPUT, each jumping on ITS mark; a shared one would let project
+    A's table judge B's flows (and reject them: B's slice is not A's, so B's VM would lose its
+    own plumbing with nothing naming the cause). The value is the project's proxy band base
+    under foldyard's byte: a port number, but chosen because :mod:`foldyard.ports` already
+    allocates it unique per project on this host — uniqueness by construction, where a hash of
+    the VM name would be a collision nothing could detect or explain."""
+    return (_MARK_BYTE << 24) | config.proxy_port_base()
 
 
 def available() -> bool:
@@ -160,22 +224,6 @@ def nft_socket_in_kernel() -> bool | None:
     return None
 
 
-def explain_load_failure(stderr: str) -> str:
-    """The operator-facing reason behind an ``nft -f -`` failure, when nft's own words identify
-    one foldyard knows: ENOENT at the ``socket cgroupv2`` rule is a kernel without
-    ``CONFIG_NFT_SOCKET`` (nf_tables reports a missing expression as "No such file or directory"
-    — nothing to do with a file). Empty for any other error: nft's stderr, printed beside this,
-    is then the whole story."""
-    if "No such file or directory" in stderr and "socket cgroupv2" in stderr:
-        return (
-            "  This kernel has no nftables `socket` expression (CONFIG_NFT_SOCKET is not set —\n"
-            "  the stock WSL2 kernel, for one), so the host wall's `socket cgroupv2` match can\n"
-            "  never load here. Use a kernel built with nft_socket, or drop `host_wall` (the\n"
-            "  in-VM wall still applies)."
-        )
-    return ""
-
-
 def _allowed_ports() -> list[str]:
     """The loopback dports the VM process may reach: THIS project's daemon bands (proxy + minter,
     each covering the full ``base..base+89`` worktree span), as nft range elements. Bases are the
@@ -208,92 +256,43 @@ def vm_cgroup_scope(pid: int) -> str:
     return ""
 
 
-# /proc/net/{tcp,udp} socket states: a TCP listener is 0A (LISTEN); a bound, unconnected UDP
-# socket — which is what a UDP "listener" is — shows as 07 (TCP_CLOSE).
-_LISTENING = {"tcp": "0A", "udp": "07"}
-# Loopback in /proc/net's hex little-endian notation: 127.0.0.1 and ::1.
-_LOOPBACK = {"0100007F", "00000000000000000000000001000000"}
+def render(vm: str, slice_path: str) -> str:
+    """The nftables ruleset that walls the VM whose processes run under cgroup ``slice_path``.
 
-
-def listener_ports(*pids: int) -> tuple[tuple[str, int], ...]:
-    """The LOOPBACK listeners the VM's own host processes hold, as ``(proto, port)`` — the
-    plumbing the wall must leave open on ``lo`` for the VM to work at all: Lima's host resolver
-    (the hostagent serves the guest's DNS on a random loopback udp+tcp port and QEMU forwards
-    each query there — measured on the rig, it is where a wall without this rule cut DNS) and
-    QEMU's SSH ``hostfwd``. Matched by socket inode: ``/proc/<pid>/fd`` → ``/proc/net/*``. Only
-    loopback-bound sockets count — QEMU's outbound UDP sockets are bound to ``0.0.0.0`` and are
-    not listeners. A gone pid or an unreadable table contributes nothing."""
-    inodes: set[str] = set()
-    for pid in pids:
-        try:
-            fds = list((PROC / str(pid) / "fd").iterdir())
-        except OSError:
-            continue
-        for fd in fds:
-            try:
-                target = os.readlink(fd)
-            except OSError:
-                continue
-            if target.startswith("socket:[") and target.endswith("]"):
-                inodes.add(target[8:-1])
-    found: set[tuple[str, int]] = set()
-    for proto in ("tcp", "udp"):
-        for table in (proto, f"{proto}6"):
-            try:
-                rows = (PROC / "net" / table).read_text().splitlines()[1:]
-            except OSError:
-                continue
-            for row in rows:
-                f = row.split()
-                if len(f) < 10 or f[9] not in inodes or f[3] != _LISTENING[proto]:
-                    continue
-                addr, _, port = f[1].partition(":")
-                if addr in _LOOPBACK:
-                    found.add((proto, int(port, 16)))
-    return tuple(sorted(found))
-
-
-def render(
-    vm: str,
-    scope: str,
-    ssh_port: int,
-    resolvers: tuple[str, ...] = DEFAULT_RESOLVERS,
-    plumbing: tuple[tuple[str, int], ...] = (),
-) -> str:
-    """The nftables ruleset that walls the VM whose QEMU process sits in cgroup ``scope``.
-
-    ``ssh_port`` is Lima's forwarded guest-SSH port on the host loopback (``limactl shell``, the
-    hostagent's own session and the socket forward must keep working — Lima allocates it per
-    boot, so render after each start); ``plumbing`` is :func:`listener_ports` — the VM's other
-    loopback listeners, the hostagent's DNS above all; the daemon bands come from config. Nothing
-    off-loopback is opened but the resolvers' ``:53``. The ``delete table``
-    before the ``table`` block makes the whole file idempotent — a re-apply replaces the table
-    atomically rather than erroring on the existing one or stacking a second copy."""
-    level = cgroup_level(scope)
-    tcp_extra = [str(p) for proto, p in plumbing if proto == "tcp" and p != ssh_port]
-    ports = ", ".join([str(ssh_port), *_allowed_ports(), *tcp_extra])
-    udp_ports = ", ".join(str(p) for proto, p in plumbing if proto == "udp")
-    udp_rule = f'    oif "lo" udp dport {{ {udp_ports} }} accept\n' if udp_ports else ""
+    A pure function of the VM name, its slice and the project's daemon bands (from config) —
+    nothing from a running VM (Lima's forwarded SSH port, the hostagent's listener ports) and
+    nothing from the network (resolvers), so the same text is valid across every boot of the VM.
+    Loopback is allowed out under the VM's :func:`ct_mark` and judged on INPUT by the receiving
+    socket (the module docstring has the why); DNS goes to any resolver, both transports. The
+    ``delete table`` before the ``table`` block makes the whole file idempotent — a re-apply
+    replaces the table atomically rather than erroring on the existing one or stacking a second
+    copy."""
+    level = cgroup_level(slice_path)
+    bands = ", ".join(_allowed_ports())
     name = table_name(vm)
-    dns = []
-    for family, addrs in (
-        ("ip", [r for r in resolvers if ":" not in r]),
-        ("ip6", [r for r in resolvers if ":" in r]),
-    ):
-        if addrs:  # nft rejects an empty set, so a family with no resolver renders nothing
-            dns.append(f"    {family} daddr {{ {', '.join(addrs)} }} udp dport 53 accept")
-            dns.append(f"    {family} daddr {{ {', '.join(addrs)} }} tcp dport 53 accept")
-    dns_rules = "\n".join(dns)
+    mark = f"{ct_mark():#010x}"
     return f"""\
 {_declare_then_delete(name)}table inet {name} {{
   chain output {{
     type filter hook output priority filter; policy accept;
-    socket cgroupv2 level {level} "{scope}" jump vm
+    socket cgroupv2 level {level} "{slice_path}" jump vm
   }}
   chain vm {{
     ct state established,related accept
-    oif "lo" tcp dport {{ {ports} }} accept
-{udp_rule}{dns_rules}
+    udp dport 53 accept
+    tcp dport 53 accept
+    oif "lo" ct mark set {mark} accept
+    meta l4proto tcp counter reject with tcp reset
+    counter reject with icmpx type admin-prohibited
+  }}
+  chain input {{
+    type filter hook input priority filter; policy accept;
+    iif "lo" ct mark {mark} jump lo
+  }}
+  chain lo {{
+    ct state established,related accept
+    socket cgroupv2 level {level} "{slice_path}" accept
+    tcp dport {{ {bands} }} accept
     meta l4proto tcp counter reject with tcp reset
     counter reject with icmpx type admin-prohibited
   }}
@@ -307,52 +306,324 @@ def _declare_then_delete(name: str) -> str:
     return f"table inet {name}\ndelete table inet {name}\n"
 
 
-def install_argv() -> list[str]:
-    """The command that loads a ruleset from stdin as root. Streamed over stdin (never a temp
-    file) for the same reason the guest wall is: no path a lesser-privileged process could swap
-    between write and root-load."""
-    return ["sudo", "nft", "-f", "-"]
+# ── the operator's install: a slice foldyard owns, root-side files the operator applies ──
+#
+# foldyard never elevates on the host (ADR-0028). It (1) keeps the VM's slice as a PERSISTENT
+# user unit, so the cgroup — and the ID a loaded table binds to — exists before the operator
+# applies anything and comes back with every user manager; (2) renders the root-side files
+# into a staging dir the operator can read and copies with two `install` lines; and (3) PROBES
+# the result (below) — it never reads the table back, which would need root too.
+
+ETC_DIR = Path("/etc/foldyard")
+SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
+
+
+def service_unit(vm: str) -> str:
+    """The system unit that loads this VM's table at every start of the operator's user manager
+    — one per VM, no template: the uid and the paths are baked in, so what root runs reads in
+    full from the file."""
+    return f"fy-host-wall-{_unit_safe(vm)}.service"
+
+
+def user_unit_dir() -> Path:
+    """Where a TOOL's units for the user go: ``$XDG_DATA_HOME/systemd/user`` — systemd.unit(5)'s
+    "units of packages that have been installed in the home directory" — not
+    ``~/.config/systemd/user``, which is for units the operator wrote or edited themselves."""
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(base) / "systemd" / "user"
+
+
+def slice_unit_text(vm: str) -> str:
+    """The persistent user slice. ``WantedBy=default.target`` so it is up as soon as the user
+    manager is — before the system unit (``After=user@<uid>.service``) loads the table that
+    binds to it. Empty of settings on purpose: it exists to BE a cgroup, not to limit one."""
+    return f"""\
+# Generated by foldyard (`fy machine host-wall`) — do not edit; the verb regenerates it.
+# Remove with: systemctl --user disable --now {slice_unit(vm)}
+[Unit]
+Description=foldyard machine VM '{vm}' (the cgroup the host-side wall matches)
+Documentation=https://github.com/twistco/foldyard/blob/main/docs/configuration.md
+
+[Slice]
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def service_unit_text(vm: str, uid: int, nft: str) -> str:
+    """The system unit the operator installs. Bound to the user manager's lifetime
+    (``BindsTo`` + ``After``): the slice lives under ``user@<uid>.service``, so the table is
+    loaded once that is up (its slice exists by then — the user manager reports ready only after
+    its default target, which wants the slice) and dropped when it stops (the slice, and the
+    cgroup ID the table held, are gone with it). ``WantedBy=user@<uid>.service`` makes every
+    later start of the user manager pull it in again. ``RemainAfterExit`` keeps the unit
+    "active" while the table is loaded, so ``systemctl status`` tells the truth."""
+    return f"""\
+[Unit]
+Description=foldyard host-side wall for machine VM '{vm}' (uid {uid})
+Documentation=https://github.com/twistco/foldyard/blob/main/docs/configuration.md
+After=user@{uid}.service
+BindsTo=user@{uid}.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={nft} -f {ETC_DIR / ruleset_file(vm)}
+ExecStop={nft} delete table inet {table_name(vm)}
+
+[Install]
+WantedBy=user@{uid}.service
+"""
+
+
+def ruleset_file(vm: str) -> str:
+    return f"host-wall-{_unit_safe(vm)}.nft"
+
+
+def _systemctl_user(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
+
+
+def slice_installed(vm: str) -> bool:
+    """Is the VM's slice unit on disk, as this foldyard renders it? The verb's "did I change
+    anything?" question — and NOT what ``fy up`` asks (that is :func:`slice_path`: active)."""
+    try:
+        return (user_unit_dir() / slice_unit(vm)).read_text() == slice_unit_text(vm)
+    except OSError:
+        return False
+
+
+def ensure_slice(vm: str) -> str:
+    """Make the VM's persistent slice exist and be active; return its cgroup path (no leading
+    ``/``), empty when the user manager can't deliver one (its stderr is lost here: the caller
+    says what a missing user manager means). Writes the unit only when its text changed
+    (``daemon-reload`` is not free), then ``enable --now`` — idempotent. The one user-level
+    change foldyard makes for the wall, and only ``fy machine host-wall`` makes it: ``fy up``
+    checks (:func:`slice_path`) and refuses, it never sets up."""
+    unit = user_unit_dir() / slice_unit(vm)
+    text = slice_unit_text(vm)
+    if not slice_installed(vm):
+        try:
+            unit.parent.mkdir(parents=True, exist_ok=True)
+            unit.write_text(text)
+        except OSError:
+            return ""
+        _systemctl_user("daemon-reload")
+    if _systemctl_user("enable", "--now", slice_unit(vm)).returncode != 0:
+        return ""
+    return slice_path(vm)
+
+
+def slice_path(vm: str) -> str:
+    """The cgroup path of the VM's slice as systemd placed it (``…/fy.slice/fy-machine-<vm>.slice``
+    — it nests by the dashes), read from the unit rather than derived, or empty when the slice
+    is not active. This is the path the table is rendered for."""
+    res = _systemctl_user("show", "-p", "ControlGroup", "--value", slice_unit(vm))
+    return res.stdout.strip().lstrip("/") if res.returncode == 0 else ""
 
 
 @dataclass(frozen=True)
-class LoadResult:
-    """What loading the ruleset came to: ``ok``, and nft's stderr when it did not — kept so the
-    caller can print nft's own words and :func:`explain_load_failure` can read them."""
+class Staged:
+    """The root-side files, rendered into the operator's staging dir, and the exact commands
+    that install (or remove) them — printed, never run, by foldyard."""
 
-    ok: bool
-    stderr: str = ""
+    ruleset: Path
+    service: Path
+    install: tuple[str, ...]
+    uninstall: tuple[str, ...]
 
 
-def install(
-    vm: str,
-    scope: str,
-    ssh_port: int,
-    resolvers: tuple[str, ...] = DEFAULT_RESOLVERS,
-    plumbing: tuple[tuple[str, int], ...] = (),
-) -> LoadResult:
-    """Load the VM's host wall. Not ``ok`` if the host can't enforce one or ``nft`` rejects the
-    ruleset (its stderr rides along). Caller decides WHEN (VM start) and whether the operator
-    consented to host nftables."""
-    if not available() or not scope:
-        return LoadResult(False)
-    ruleset = render(vm, scope, ssh_port, resolvers, plumbing)
+def stage(vm: str, slice_path: str, into: Path) -> Staged:
+    """Render the ruleset and the system unit into ``into`` and say how to install them. The
+    copies are root-owned once installed, so nothing running as the operator — a hostile
+    process, an agent, the box — can change what root loads afterwards."""
+    into.mkdir(parents=True, exist_ok=True)
+    ruleset = into / ruleset_file(vm)
+    service = into / service_unit(vm)
+    ruleset.write_text(render(vm, slice_path))
+    nft = shutil.which("nft") or "/usr/sbin/nft"
+    service.write_text(service_unit_text(vm, os.getuid(), nft))
+    unit = service_unit(vm)
+    q = shlex.quote  # the lines are pasted into a shell: a state dir with a space must survive
+    return Staged(
+        ruleset,
+        service,
+        (
+            f"sudo install -D -m 0644 {q(str(ruleset))} {q(str(ETC_DIR / ruleset.name))}",
+            f"sudo install -D -m 0644 {q(str(service))} {q(str(SYSTEMD_SYSTEM_DIR / unit))}",
+            "sudo systemctl daemon-reload",
+            f"sudo systemctl enable --now {unit}",
+        ),
+        (
+            f"sudo systemctl disable --now {unit}",
+            f"sudo rm {q(str(SYSTEMD_SYSTEM_DIR / unit))} {q(str(ETC_DIR / ruleset.name))}",
+            "sudo systemctl daemon-reload",
+            # the user-level half, last: `--now` stops the slice, and with it a running VM
+            f"systemctl --user disable --now {slice_unit(vm)}",
+            f"rm {q(str(user_unit_dir() / slice_unit(vm)))}",
+        ),
+    )
+
+
+# ── the probe: is the wall ENFORCING for this slice, right now? ────────────────────────────
+#
+# The only honest check, and the one that turns the cgroup-ID fail-open into fail-closed: a
+# table can't be read back without root, and a table that IS there may hold the ID of a slice
+# that no longer exists. So a child is run UNDER the slice and asked to connect: to a listener
+# foldyard opened OUTSIDE the slice on loopback (must be REFUSED — the input hook's judgement),
+# to TEST-NET-1 off-host (must be REFUSED by the output hook's reject; without the wall the SYN
+# leaves the host and times out), and to a listener on the project's band (must CONNECT — the
+# staleness half: a moved band shows up here). Refusals are tcp resets, so every verdict is
+# immediate; a timeout is never mistaken for enforcement.
+
+TEST_NET = ("192.0.2.1", 9)  # RFC 5737: never routable, so an unwalled SYN leaves and times out
+_PROBE_TIMEOUT = 3.0
+
+
+@dataclass(frozen=True)
+class Probe:
+    """``enforcing`` and, per check, what the child saw (``ok`` / ``refused`` / ``timeout`` /
+    ``unreachable`` / an error) — printed on refusal so the operator sees WHICH half failed."""
+
+    enforcing: bool
+    checks: dict[str, str]
+    error: str = ""
+
+    def detail(self) -> str:
+        """One line: each check, ticked when it saw what enforcement predicts."""
+        parts = []
+        for name, got in self.checks.items():
+            good = got in _EXPECTED.get(name, ())
+            parts.append(f"{name} {'✓' if good else '✗'} {got}")
+        return ", ".join(parts)
+
+
+# What each check must see for the wall to count as enforcing: `external` also accepts
+# "unreachable" — a host with no route never hands the SYN to the wall, so it proves nothing
+# either way, and refusing `fy up` on an offline laptop would be the wall walling the operator.
+_EXPECTED = {"loopback": ("refused",), "external": ("refused", "unreachable"), "band": ("ok",)}
+
+
+def _band_listener() -> socket.socket | None:
+    """A listener on the first free port of this project's proxy band — outside the slice, so
+    only the band rule lets the child reach it."""
+    base = config.proxy_port_base()
+    for port in range(base, base + _SPAN + 1):
+        sock = socket.socket()
+        try:
+            sock.bind(("127.0.0.1", port))
+            sock.listen(1)
+            return sock
+        except OSError:
+            sock.close()
+    return None
+
+
+def probe_argv(slice_name: str, targets: dict[str, tuple[str, int]]) -> list[str]:
+    """The child, run under the slice: this interpreter, this module, the targets."""
+    return [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        "--slice",
+        slice_name,
+        "--",
+        sys.executable,
+        "-m",
+        "foldyard.hostwall",
+        "--probe",
+        *(f"{name}={host}:{port}" for name, (host, port) in targets.items()),
+    ]
+
+
+def _out_of_band_listener(tries: int = 32) -> socket.socket | None:
+    """The listener the child must be REFUSED: an ephemeral loopback port that is NOT on either
+    of this project's bands. The kernel's ephemeral range (32768–60999) contains the bands, so a
+    plain port-0 bind would land on one every few hundred probes — and a listener the band rule
+    admits would read as "not enforcing" for no reason anyone could see."""
+    bands = [(b, b + _SPAN) for b in (config.proxy_port_base(), config.gcp_minter_port_base())]
+    for _ in range(tries):
+        sock = socket.socket()
+        try:
+            sock.bind(("127.0.0.1", 0))
+        except OSError:
+            sock.close()
+            return None
+        port = sock.getsockname()[1]
+        if any(lo <= port <= hi for lo, hi in bands):
+            sock.close()
+            continue
+        sock.listen(1)
+        return sock
+    return None
+
+
+def probe(vm: str) -> Probe:
+    """Run the probe for ``vm``'s slice (which must exist — :func:`ensure_slice`); see the
+    section comment for what enforcing means."""
+    loopback = _out_of_band_listener()
+    if loopback is None:
+        return Probe(False, {}, "no out-of-band loopback port for the probe's listener")
+    band = _band_listener()
     try:
-        res = subprocess.run(install_argv(), input=ruleset, text=True, capture_output=True)
+        targets = {"loopback": loopback.getsockname()[:2], "external": TEST_NET}
+        if band is not None:
+            targets["band"] = band.getsockname()[:2]
+        res = subprocess.run(
+            probe_argv(slice_unit(vm), targets), capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Probe(False, {}, str(exc))
+    finally:
+        loopback.close()
+        if band is not None:
+            band.close()
+    if res.returncode != 0:
+        return Probe(False, {}, res.stderr.strip() or f"probe exited {res.returncode}")
+    try:
+        checks = json.loads(res.stdout)
+    except ValueError:
+        return Probe(False, {}, f"unreadable probe output: {res.stdout!r}")
+    return Probe(_verdict(checks), checks)
+
+
+def _verdict(checks: dict[str, str]) -> bool:
+    return all(checks.get(name) in want for name, want in _EXPECTED.items())
+
+
+def _try_connect(host: str, port: int) -> str:
+    sock = socket.socket()
+    sock.settimeout(_PROBE_TIMEOUT)
+    try:
+        sock.connect((host, port))
+        return "ok"
+    except TimeoutError:
+        return "timeout"
     except OSError as exc:
-        # The loader itself could not launch (no `sudo` on PATH — available() vouches for nft
-        # only): declined with the OS's reason, the same fail-closed shape as a rejected ruleset.
-        return LoadResult(False, str(exc))
-    return LoadResult(res.returncode == 0, res.stderr or "")
+        if exc.errno == errno.ECONNREFUSED:
+            return "refused"
+        if exc.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH):
+            return "unreachable"  # no route at all — the wall never got to see the packet
+        return f"error({exc.errno})"
+    finally:
+        sock.close()
 
 
-def remove(vm: str) -> bool:
-    """Tear down the VM's host wall — idempotent (a table that is already gone is a clean no-op:
-    ``nft delete table`` alone would error, so this streams the declare-then-delete pair).
-    False when the host has no nft at all or the load fails."""
-    if shutil.which("nft") is None:
-        return False
-    ruleset = _declare_then_delete(table_name(vm))
-    try:
-        return subprocess.run(install_argv(), input=ruleset, text=True).returncode == 0
-    except OSError:
-        return False  # no `sudo` to launch — the caller's "warn, inert without the VM" case
+def _probe_main(args: list[str]) -> int:
+    """The child's side: ``name=host:port`` per argument, a JSON object of verdicts out."""
+    results = {}
+    for arg in args:
+        name, _, target = arg.partition("=")
+        host, _, port = target.rpartition(":")
+        results[name] = _try_connect(host, int(port))
+    print(json.dumps(results))
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--probe":
+        raise SystemExit(_probe_main(sys.argv[2:]))
+    raise SystemExit("usage: python -m foldyard.hostwall --probe name=host:port ...")

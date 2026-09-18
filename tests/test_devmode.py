@@ -1452,3 +1452,47 @@ def test_doctor_reset_keeps_action_entries(isolated_state, monkeypatch):
     devmode.cmd_log_reset()
     kinds = [e["kind"] for e in devmode.cmd_log()]
     assert kinds == ["action"]
+
+
+# ── doctor: the host-wall row — the operator's install, probed, independent of the VM ──────
+
+
+def test_host_wall_doctor_row_is_silent_unless_wanted(monkeypatch):
+    monkeypatch.setattr(devmode.config, "machine_host_wall", lambda: False)
+    assert list(devmode._host_wall_check()) == []
+
+
+@pytest.fixture
+def host_wall_row(monkeypatch):
+    from foldyard import hostwall
+
+    monkeypatch.setattr(devmode.config, "machine_host_wall", lambda: True)
+    monkeypatch.setattr(devmode._BACKEND.__class__, "name", "lima", raising=False)
+    monkeypatch.setattr(hostwall, "available", lambda: True)
+    monkeypatch.setattr(
+        hostwall, "slice_path", lambda vm: "user.slice/x/fy.slice/fy-machine-x.slice"
+    )
+    return hostwall
+
+
+def test_host_wall_doctor_row_enforcing(host_wall_row, monkeypatch):
+    checks = {"loopback": "refused", "external": "refused", "band": "ok"}
+    monkeypatch.setattr(host_wall_row, "probe", lambda vm: host_wall_row.Probe(True, checks))
+    assert list(devmode._host_wall_check()) == [
+        ("running", "host wall", ""),  # the spinner placeholder a live UI replaces by name
+        ("ok", "host wall", "enforcing (loopback ✓ refused, external ✓ refused, band ✓ ok)"),
+    ]
+
+
+def test_host_wall_doctor_row_not_enforcing_points_at_the_verb(host_wall_row, monkeypatch):
+    checks = {"loopback": "ok", "external": "timeout", "band": "ok"}
+    monkeypatch.setattr(host_wall_row, "probe", lambda vm: host_wall_row.Probe(False, checks))
+    status, _name, detail = list(devmode._host_wall_check())[-1]
+    assert status == "fail" and "NOT enforcing" in detail and "fy machine host-wall" in detail
+
+
+def test_host_wall_doctor_row_without_a_slice_is_a_warn(host_wall_row, monkeypatch):
+    monkeypatch.setattr(host_wall_row, "slice_path", lambda vm: "")
+    monkeypatch.setattr(host_wall_row, "probe", lambda vm: pytest.fail("nothing to probe yet"))
+    ((status, _name, detail),) = devmode._host_wall_check()
+    assert status == "warn" and "fy machine host-wall" in detail and "slice" in detail

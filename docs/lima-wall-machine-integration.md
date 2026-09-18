@@ -163,38 +163,67 @@ matching the VM's OWN traffic *on the host*, where the guest has no reach: Lima'
 the guest's user-mode network inside `qemu-system`, so every guest packet leaves the host as that
 process, and host nftables can single it out. Flushing the guest wall then gains nothing.
 
-- **The match is a cgroup v2 scope, not a uid** — the operator's other work shares their uid;
-  only the VM lives in the VM's scope. To make that scope predictable, `machine._start` launches
-  the backend's start under `systemd-run --user --scope --unit fy-machine-<vm>.scope`, so
-  limactl, the hostagent and QEMU all land in one transient cgroup and nothing else does.
-- **Rendered for where the VM actually sits, on every `fy up`.** `foldyard.hostwall.render`
-  emits a per-VM table (`fy_host_wall_<vm>`): established/related, loopback to this project's
-  daemon bands (the same `base..base+89` spans section 2 opens) + the VM's own loopback
-  plumbing, the host's resolvers (from `resolv.conf`) on `:53`, else REJECT. The plumbing is
-  the loopback listeners the VM's host processes hold — `hostwall.listener_ports`, socket
-  inodes from `/proc/<pid>/fd` against `/proc/net/*` — because the guest's DNS is Lima's host
-  resolver: the hostagent serves it on a random loopback udp+tcp port and QEMU forwards each
-  query there (the first rig run walled DNS by allowing only `resolv.conf`'s stub). QEMU's SSH
-  `hostfwd` is the other one. The scope is read from the VM pid's `/proc/<pid>/cgroup`, the SSH
-  port from `limactl list` (Lima allocates all of these per boot), and the
-  table is loaded with `sudo nft -f -` as a declare-then-delete-then-declare idempotent replace —
-  after every start, a revive, and each steady-state `fy up`, since it can't be read back
-  without root. That root prompt is the price; a passwordless sudoers rule for `nft` is the
-  operator's call and makes it silent.
+- **The match is a cgroup v2 slice, not a uid** — the operator's other work shares their uid;
+  only the VM lives under the VM's slice. To make that predictable, `machine._start` launches
+  the backend's start under `systemd-run --user --scope --slice fy-machine-<vm>.slice --unit
+  fy-machine-<vm>.scope`, so limactl, the hostagent and QEMU all land in one transient scope
+  under one per-VM slice and nothing else does. The SLICE is what the table matches:
+  `socket cgroupv2` compiles the path to a cgroup ID at load, a scope dies with its last
+  process (new ID next start), a slice survives being emptied — the same ID across every VM
+  restart (proven on a GitHub `ubuntu-24.04` runner, 2026-09-18; a slice stopped and
+  recreated DID get a new ID, and the loaded rule then matched nothing: fail-open, which is why
+  what the table still bites is a thing to probe, never assume).
+- **Boot-stable: nothing in the table comes from a running VM.** `foldyard.hostwall.render`
+  emits a per-VM table (`fy_host_wall_<vm>`): on OUTPUT, established/related, `:53` to any
+  resolver (both transports; the hostagent resolves for the guest, and resolvers change with
+  the network), loopback allowed out under a per-project ct mark (foldyard's byte over the
+  proxy band base — unique per project on the host by the allocator's construction, so two
+  projects' tables can never judge each other's flows), else REJECT; on INPUT, loopback
+  flows carrying that mark pass only when the LISTENING socket is in the VM's own slice (the
+  hostagent's resolver, QEMU's SSH `hostfwd` — the ports Lima picks per boot, never named) or
+  on this project's daemon bands (the same `base..base+89` spans section 2 opens), else REJECT.
+  The earlier form named those ports (read from `limactl list` and the VM pids' socket inodes)
+  and so had to be re-rendered every boot; the ct-mark form was proven on the runner
+  (2026-09-18): the mark set on OUTPUT is visible on INPUT for the same loopback packet, and
+  `socket cgroupv2` on INPUT resolves the listener for a SYN.
+- **Installed by the operator, once; probed by foldyard, always
+  ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)).** foldyard never
+  runs `sudo`. The slice is a persistent user unit (`fy-machine-<vm>.slice`,
+  `WantedBy=default.target`, under `$XDG_DATA_HOME/systemd/user/` with a generated-by header)
+  that ONLY `fy machine host-wall` writes and enables, saying so once — a launch verb checks
+  it is active and refuses before booting when not; the verb also renders the table and a
+  system unit
+  `fy-host-wall-<vm>.service` (`After=`/`BindsTo=`/`WantedBy=user@<uid>.service` — loaded once
+  the user manager is up, so the slice exists; dropped when it stops, so a stale cgroup id is
+  never held across a re-login; `ExecStart=nft -f /etc/foldyard/host-wall-<vm>.nft`) into
+  `~/.foldyard/<project>/host-wall/`, prints both in full and the four `sudo` lines that
+  install them (`install -D` ×2, `daemon-reload`, `enable --now`). Then every `fy up` PROBES:
+  a child under the slice (`systemd-run --slice`) must be REFUSED a loopback listener foldyard
+  opened outside the slice and a connect to TEST-NET-1 (`192.0.2.1:9` — never routable, so an
+  unwalled SYN leaves and times out; "unreachable" on a host with no route proves nothing and
+  refuses nothing), and must CONNECT to a listener on the project's band. Not enforcing ⇒
+  `fy up` refuses and names the half that failed. The same probe is the verb's status line and
+  doctor's `host wall` row. Why a probe and not a read: the table can't be read without root,
+  and (the runner, 2026-09-18) a table that IS there may hold the id of a slice that no longer
+  exists — it matched nothing after the slice was stopped and recreated, silently. The install
+  is not part of the VM's lifecycle: `stop` and `rm` leave it (`rm` says so and names
+  `--uninstall`).
 - **Fail-closed, never a silent downgrade to the guest wall alone.** Preflight refuses
   `host_wall` without `wall`, and on a host without `nft` + cgroup v2 (macOS reports itself
   unavailable rather than branching on the OS). `ensure` refuses a VM found OUTSIDE its own scope
   — started by hand, or before the option was turned on — because walling the login session's
-  scope it landed in would wall the operator's whole shell: `fy machine stop && fy up`. An
-  unreadable SSH port or a failed load also stop `fy up`. `fy machine rm` removes the table;
-  `stop` leaves it (inert once the scope is empty, re-rendered on the next up).
+  scope it landed in would wall the operator's whole shell — and a VM in its scope but not
+  under its slice (an older foldyard started it) would leave the table matching nothing:
+  `fy machine stop && fy up`. A probe that finds the wall not enforcing also stops `fy up`.
 
 Run end to end on the Linux rig (2026-09-12, `fy machine ensure` with `MACHINE_HOST_WALL=1`
 against the example): the VM created and started inside its scope, direct guest egress refused by
 name and by IP (curl rc 7), DNS resolved, the band port answered 200 while an out-of-band port and
 the host's sshd were refused, the operator's egress and `limactl shell` + the podman socket
 untouched, `fy verify` ALL PASS under the wall, a hand-started VM refused, `fy machine rm` left no
-table. Details in [isolation-layers.md](./isolation-layers.md) under "Host-side wall enforcement
+table (superseded 2026-09-18: the table is the operator's install and `rm` leaves it —
+`fy machine host-wall --uninstall` prints its removal; [ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)).
+Details in [isolation-layers.md](./isolation-layers.md) under "Host-side wall enforcement
 on Linux".
 
 ## Validated where?

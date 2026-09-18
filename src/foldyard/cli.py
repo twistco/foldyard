@@ -416,6 +416,20 @@ def machine_rm(
     raise typer.Exit(machine.delete(assume_yes=yes))
 
 
+@machine_app.command("host-wall")
+def machine_host_wall(
+    uninstall: bool = typer.Option(False, "--uninstall", help="print the removal steps instead"),
+) -> None:
+    """The host-side wall's install: print the nftables table and the system unit foldyard
+    rendered, the exact root commands that install them, and whether the wall is enforcing now.
+    foldyard never runs them — the operator does, with the files in front of them. Exit 1 when
+    not enforcing. Linux + `[machine].host_wall = true`; an install/uninstall thing, not part of
+    the VM's lifecycle."""
+    from . import machine
+
+    raise typer.Exit(machine.host_wall(uninstall=uninstall))
+
+
 @machine_app.command("delete", hidden=True)  # alias: limactl users reach for `delete`
 def machine_delete(
     yes: bool = typer.Option(False, "--yes", "-y", help="skip the confirmation prompt"),

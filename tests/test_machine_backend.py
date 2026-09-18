@@ -521,14 +521,7 @@ def test_backends_without_a_provisionable_guest_record_nothing():
         assert be.set_provision("x", "#!/bin/bash\n# fy-provision y\n") is False
 
 
-# ── the host-side wall's inputs (lima): the VM's host pid + its forwarded SSH port ─────────
-
-
-def test_lima_ssh_port_comes_from_list_json(monkeypatch):
-    rows = _json_lines({"name": "acme", "status": "Running", "sshLocalPort": 45285})
-    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(0, rows))
-    assert mb.LimaBackend().ssh_port("acme") == 45285
-    assert mb.LimaBackend().ssh_port("absent") == 0
+# ── the host-side wall's input (lima): the VM's host pids ──────────────────────────────────
 
 
 def test_lima_ssh_target_comes_from_the_instances_ssh_config(monkeypatch, tmp_path):
@@ -583,7 +576,6 @@ def test_lima_vm_pid_reads_the_drivers_pid_file(monkeypatch, tmp_path):
 def test_backends_without_a_host_wall_input_report_nothing():
     for be in (mb.PodmanBackend(),):
         assert be.host_pids("x") == [] and be.vm_pid("x") == 0
-        assert be.ssh_port("x") == 0
 
 
 def test_lima_start_runs_under_the_given_prefix(monkeypatch):
@@ -599,3 +591,88 @@ def test_lima_start_runs_under_the_given_prefix(monkeypatch):
     assert seen["cmd"] == ["systemd-run", "--scope", "limactl", "start", "acme"]
     assert mb.LimaBackend().start("acme") is True
     assert seen["cmd"] == ["limactl", "start", "acme"]
+
+
+# ── lima: a hostagent outliving its driver is waited for, then reaped, before `start` ──────
+#
+# Lima's hostagent notices a dead QEMU, flips the instance to Stopped and exits — but not
+# atomically: `limactl start` inside that window refuses with "host agent is running but driver
+# is not" (the WSL2 runner, 3.5× slower than Linux, hit it; 2026-09-18). The window is closed by
+# the backend's own start, so both `ensure` paths (a plain start on "stopped", the revive on a
+# dead socket) are covered.
+
+
+@pytest.fixture
+def lima_pids(tmp_path, monkeypatch):
+    """Lima's instance dir with ``ha.pid`` / ``qemu.pid``, liveness scripted per pid, kills
+    recorded, no sleeping."""
+    inst = tmp_path / ".lima" / "acme"
+    inst.mkdir(parents=True)
+    monkeypatch.setattr(mb.Path, "home", lambda: tmp_path)
+    alive: dict[int, list[bool]] = {}  # pid → the answers `_alive` gives, in order (last repeats)
+    kills: list[tuple[int, int]] = []
+
+    def fake_alive(pid):
+        answers = alive.get(pid, [False])
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    monkeypatch.setattr(mb, "_alive", fake_alive)
+    monkeypatch.setattr(mb.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    monkeypatch.setattr(mb.time, "sleep", lambda s: None)
+    monkeypatch.setattr(mb.LimaBackend, "_HOSTAGENT_EXIT_WAIT", 2.0)
+
+    def write(ha=None, qemu=None):
+        if ha:
+            (inst / "ha.pid").write_text(f"{ha}\n")
+        if qemu:
+            (inst / "qemu.pid").write_text(f"{qemu}\n")
+
+    return write, alive, kills
+
+
+def test_lima_reap_waits_for_a_hostagent_that_is_already_leaving(lima_pids):
+    write, alive, kills = lima_pids
+    write(ha=500, qemu=600)
+    alive[600] = [False]  # the driver is dead…
+    alive[500] = [True, True, False]  # …and the hostagent goes on its own two polls later
+    assert mb.LimaBackend().reap_orphans("acme") == []
+    assert kills == []  # never signalled: it left by itself
+
+
+def test_lima_reap_signals_a_hostagent_that_lingers(lima_pids, monkeypatch):
+    write, alive, kills = lima_pids
+    write(ha=500, qemu=600)
+    alive[600] = [False]
+    alive[500] = [True]  # never leaves on its own
+    ticks = iter(range(0, 100))
+    monkeypatch.setattr(mb.time, "monotonic", lambda: float(next(ticks)))
+    assert mb.LimaBackend().reap_orphans("acme") == [500]
+    assert kills == [(500, mb.signal.SIGTERM), (500, mb.signal.SIGKILL)]
+
+
+def test_lima_reap_never_touches_a_healthy_vm(lima_pids):
+    write, alive, kills = lima_pids
+    write(ha=500, qemu=600)
+    alive[600] = [True]  # driver alive: a running VM, whatever the hostagent is doing
+    alive[500] = [True]
+    assert mb.LimaBackend().reap_orphans("acme") == []
+    assert kills == []
+
+
+def test_lima_reap_is_a_no_op_without_pid_files(lima_pids):
+    _write, _alive, kills = lima_pids
+    assert mb.LimaBackend().reap_orphans("acme") == []
+    assert kills == []
+
+
+def test_lima_start_reaps_before_limactl(lima_pids, monkeypatch, capsys):
+    write, alive, _kills = lima_pids
+    write(ha=500, qemu=600)
+    alive[600] = [False]
+    alive[500] = [True, False]
+    seen = []
+    monkeypatch.setattr(mb.subprocess, "run", lambda cmd, **kw: seen.append(cmd) or _Proc(0, ""))
+    monkeypatch.setattr(mb.LimaBackend, "_wait_for_socket", lambda self, name: True)
+    assert mb.LimaBackend().start("acme") is True
+    assert seen == [["limactl", "start", "acme"]]
+    assert "hostagent" in capsys.readouterr().err  # waited: said so
