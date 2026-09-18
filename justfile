@@ -1,15 +1,15 @@
 # foldyard — its own dev recipes (install the tool, run the tests).
 #
-# Imported as a module by the repo-root justfile, so from anywhere in the monorepo:
-#   just foldyard install     # uv tool install (per-machine venv; editable)
-#   just foldyard test [args] # the test suite (unit + headless Textual pilots)
-# Or standalone: `cd foldyard && just <recipe>`.
+#   just install     # uv tool install (per-machine venv; editable, with the [host] extra)
+#   just test [args] # the test suite (unit + headless Textual pilots)
 #
-# The USER-facing dev-VM verbs (mode/host/doctor/mode-tui) live in the dev-VM justfile
-# (now inlined in the root justfile) — those drive the stack; these build/test foldyard.
+# These build/test foldyard. The USER-facing verbs (`fy up`/`mode`/`host`/`doctor`/`tui`) are
+# the CLI's, run from a consumer checkout — a consumer's justfile has none of these recipes.
+# (`just foldyard <recipe>` was the origin monorepo's spelling, where this file was imported
+# as a module; the extraction — ADR-0013 — made it the root justfile.)
 
-# source_directory() = this file's dir (foldyard/) even when imported as a module by the
-# root justfile, where justfile_directory() would resolve to the repo root instead.
+# source_directory() = this file's dir, and still the right call should a host justfile ever
+# import this one as a module (justfile_directory() would resolve to the importer's dir).
 _dir := source_directory()
 
 default:
@@ -32,8 +32,8 @@ install:
 # every `uv run` re-pointed the editable foldyard install at whichever checkout ran last, so
 # concurrent sessions on main + a worktree silently swapped each other's source mid-test-run
 # (import errors for symbols only one branch has, tests exercising the other checkout's code).
-# Extra args pass through to pytest — flags (`just foldyard test -k cli`)
-# AND paths, which resolve against foldyard/ from any CWD (`just foldyard test
+# Extra args pass through to pytest — flags (`just test -k cli`)
+# AND paths, which resolve against foldyard/ from any CWD (`just test
 # tests/test_cli.py`); no args ⇒ the whole suite (pyproject's testpaths).
 test *args:
     #!/usr/bin/env bash
@@ -74,7 +74,7 @@ census *args:
     uv run --project . python tests/tools/census.py "$out" ${CENSUS_TESTS:+--tests}
 
 # Run the foldyard CLI from source (without installing) — handy while iterating.
-# e.g. `just foldyard run mode` / `just foldyard run doctor`.
+# e.g. `just run mode` / `just run doctor`.
 run *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -82,7 +82,7 @@ run *args:
     export UV_PROJECT_ENVIRONMENT="${XDG_CACHE_HOME:-$HOME/.cache}/foldyard/dev-venv-$(echo "{{_dir}}" | cksum | cut -d\  -f1)"
     exec uv run --project "{{_dir}}" foldyard {{args}}
 
-# Lint + format-check (ruff). Auto-fix with `just foldyard format`.
+# Lint + format-check (ruff). Auto-fix with `just format`.
 lint:
     #!/usr/bin/env bash
     set -euo pipefail

@@ -14,19 +14,19 @@ foldyard is a uv project (`pyproject.toml`, `src/foldyard/`, `tests/`), distribu
 the TUI (imported lazily).
 
 ```bash
-just foldyard install     # uv tool install --force --editable (per-machine venv)
-just foldyard test [args] # the suite (add -n auto to parallelise)
-just foldyard run <verb>  # run the CLI from source without installing
-just foldyard lint        # ruff check + format --check   (auto-fix: just foldyard format)
-just foldyard typecheck   # pyright + ty (both, run together)
-just foldyard check       # lint + typecheck + suite — what CI gates on
+just install     # uv tool install --force --editable (per-machine venv)
+just test [args] # the suite (add -n auto to parallelise)
+just run <verb>  # run the CLI from source without installing
+just lint        # ruff check + format --check   (auto-fix: just format)
+just typecheck   # pyright + ty (both, run together)
+just check       # lint + typecheck + suite — what CI gates on
 ```
 
 **Tooling (dev deps, in `pyproject.toml`):** ruff (lint+format, line-length 100), pyright +
 ty (both type-checkers — keep green under each), pytest-xdist (`-n auto`). ruff config
 carries the deliberate ignores (✓/✗/▶ glyphs = RUF001-003; typer `Argument`/`Option`
 defaults = B008; Textual mutable class-attrs = RUF012 in tui; box.py embeds long shell =
-E501). Keep all three at zero before committing (`just foldyard check`).
+E501). Keep all three at zero before committing (`just check`).
 
 ## Module map — `src/foldyard/`
 
@@ -136,13 +136,13 @@ foldyard's surface splits by *where it can be validated*:
 3. **Live smoke (e2e)** — drive the REAL machinery on a real engine, opt-in (`FOLDYARD_E2E=1`):
    - `tests/test_e2e.py`: the real CLI (`foldyard up`/`ps`/`down`) against the
      [example consumer](./example/), asserting the api serves a DB-backed request
-     (`just foldyard test -k e2e`). Isolated by the example's own `fyex` project.
+     (`just test -k e2e`). Isolated by the example's own `fyex` project.
    - `tests/test_proxy_e2e.py`: a real `mitmdump` + the `egress_proxy` addon + a fake minter + a
      CA-trusting `requests` client — host-side header rewrite, network log, 401 re-issue.
    - `tests/test_proxy_box_e2e.py`: the **proxy plugin driving a REAL dev-box container** over
      the socket — runs in an adapted topology so it works inside a dev box; see
      [docs/nested-virt.md](./docs/nested-virt.md). Both proxy e2es:
-     `just foldyard test-proxy-e2e` (pulls the `e2e` group).
+     `just test-proxy-e2e` (pulls the `e2e` group).
 4. **The host tier** — `machine ensure|stop|recreate`, `box up|build`, `host`, `mode set`,
    `verify`'s real VM boundary, the walls. These deliberately **refuse to run inside a dev box**
    (`config.in_box()` guards — the box must not manage its own VM or escalate its posture), and
@@ -254,7 +254,7 @@ four jobs use standard runners, which GitHub bills nothing for on a public repos
 
 | job | what | engine |
 | --- | --- | --- |
-| `check` | `just foldyard check` — ruff + pyright + ty + the unit/golden/TUI suite. typecheck installs the `e2e` group so the opt-in proxy/box e2e files (which import `cryptography`/`requests`) resolve | none |
+| `check` | `just check` — ruff + pyright + ty + the unit/golden/TUI suite. typecheck installs the `e2e` group so the opt-in proxy/box e2e files (which import `cryptography`/`requests`) resolve | none |
 | `live-e2e` | the in-box topology: all the live e2es (`-k e2e`: the example stack up→serve→down, the in-process proxy e2e, AND the box e2e) — run **inside a docker-CLI container** that mirrors the dev box (see below) | runner Docker |
 | `lima-host-e2e` | the HOST topology: `ubuntu-24.04` as a real Linux host running foldyard's default `lima` backend — `machine ensure` boots a QEMU/KVM VM on the runner, then `tests/test_e2e.py` drives the real `foldyard up` / worktree lifecycle through the config-adopt gate, the supervisor and compose, exactly as on an operator's machine | Lima VM (podman in the guest, over the forwarded socket) |
 | `wsl2-host-e2e` | the same host tier on `windows-2025`: an Ubuntu 24.04 distro under WSL2 ([Vampire/setup-wsl](https://github.com/Vampire/setup-wsl)) is the host, and the `lima` backend boots the QEMU/KVM VM INSIDE it — a second level of nesting the hosted Windows runners expose. Same module list; `test_wall_e2e.py` skips itself there (below) | Lima VM inside the WSL2 distro |

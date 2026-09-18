@@ -1072,9 +1072,47 @@ def test_doctor_fixes_match_their_checks_and_are_runnable(monkeypatch):
     assert set(fixes) == {"gh CLI", "mitmproxy", "mitm CA"}
     assert fixes["mitmproxy"].cmd[:3] == ["uv", "tool", "install"]
     assert "--editable" in fixes["mitmproxy"].cmd  # reinstall foldyard (mitmproxy is a core dep)
+    # the button runs exactly what the doctor row / preflight TELL a reader to run
+    assert fixes["mitmproxy"].cmd == proxy.host_install_cmd()
     assert fixes["gh CLI"].cmd == ["brew", "install", "gh"]
     # the CA fix shells the venv python at mitmproxy's CertStore — no server, no port
     assert fixes["mitm CA"].cmd[1] == "-c" and "CertStore.create_store" in fixes["mitm CA"].cmd[2]
+
+
+def test_host_install_hint_is_editable_from_source_else_the_bare_extra(monkeypatch, tmp_path):
+    # ONE reinstall for every "mitmproxy is missing" surface (doctor row, preflight, the PyJWT
+    # error, the TUI button): a from-source install is reinstalled from its checkout — a bare
+    # `uv tool install foldyard[host]` on top of an editable would silently swap it for PyPI's —
+    # else the bare name. Never `uv tool upgrade`: that re-resolves the receipt as it stands and
+    # so can never ADD the extra. Quoted for the shell (zsh globs an unquoted `[host]`).
+    src = tmp_path / "fy src"
+    monkeypatch.setattr(proxy, "_foldyard_src", lambda: src)
+    assert proxy.host_install_cmd() == [
+        "uv",
+        "tool",
+        "install",
+        "--force",
+        "--editable",
+        f"{src}[host]",
+    ]
+    assert proxy.host_install_hint() == f"uv tool install --force --editable '{src}[host]'"
+    monkeypatch.setattr(proxy, "_foldyard_src", lambda: None)
+    assert proxy.host_install_hint() == "uv tool install --force 'foldyard[host]'"
+
+
+def test_mitmproxy_doctor_row_names_the_reinstall(monkeypatch):
+    # `just foldyard install` was the origin monorepo's spelling of foldyard's OWN dev recipe —
+    # no consumer has it, and the standalone checkout says `just install`. The row must carry
+    # the uv command a reader can run wherever they are.
+    monkeypatch.setattr(proxy, "mitmdump_path", lambda: None)
+    monkeypatch.setattr(proxy, "_foldyard_src", lambda: None)
+    rows = {
+        name: (status, detail) for status, name, detail in proxy.ProxyPlugin().doctor_checks(_ctx())
+    }
+    status, detail = rows["mitmproxy"]
+    assert status == "fail"
+    assert "uv tool install --force 'foldyard[host]'" in detail
+    assert "just" not in detail
 
 
 # ── box_args (the box env/mounts hooks, ADR-0015) ────────────────────────────────────

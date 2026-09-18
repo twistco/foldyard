@@ -733,7 +733,7 @@ def _foldyard_run(checkout: str, subst: dict[str, str]) -> str:
     Every branch installs foldyard BARE — never the ``[host]`` extra — because the box only ROUTES
     egress through the Mac's mitmdump proxy, it never runs mitmproxy itself. That keeps the box light
     and, crucially, shrinks its bootstrap egress: no cryptography/mitmproxy wheels to pull through the
-    proxy just to get `fy` on PATH (mitmproxy is the host's `just foldyard install` `[host]` extra)."""
+    proxy just to get `fy` on PATH (mitmproxy is the host's `just install` `[host]` extra)."""
     wheel, version = subst.get("fy_wheel", ""), subst.get("fy_version", "")
     repo = shlex.quote(f"{checkout}/foldyard")
     # Fail closed rather than `uv tool install foldyard` unpinned: an unpinned install would

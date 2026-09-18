@@ -122,11 +122,22 @@ def test_unparseable_declaration_is_ignored():
 # ── the fix instruction differs by where you are ─────────────────────────────────────
 
 
-def test_fix_command_on_the_host_is_a_uv_reinstall():
+def test_fix_command_on_the_host_is_a_uv_upgrade():
     msg, _ = compat.version_gate("0.1.0", minimum="0.4.0", recommended=None, in_box=False)
     assert msg is not None
-    assert "uv tool install" in msg
+    assert "`uv tool upgrade foldyard`" in msg
     assert "fy box up" not in msg
+
+
+def test_upgrade_hint_re_resolves_the_receipt_rather_than_respecifying_it():
+    # `uv tool install --upgrade foldyard` RE-SPECIFIES the requirement as the bare name: the
+    # `[host]` extra is dropped (mitmproxy uninstalled — every box request then connection-refuses
+    # at the proxy) and an editable checkout is swapped for PyPI's. `uv tool upgrade` re-resolves
+    # the receipt as installed, keeping both, and rebuilds an editable install's baked metadata
+    # (the only way its reported version moves). Seen live on 2026-09-18: the gate's old advice
+    # took a working host install to a mitmproxy-less one in a single command.
+    assert compat.upgrade_hint() == "uv tool upgrade foldyard"
+    assert "install" not in compat.upgrade_hint()
 
 
 def test_fix_command_in_the_box_is_a_box_recreate():
@@ -271,7 +282,8 @@ def test_doctor_row_in_the_box_says_recreate(repo_declaring, monkeypatch):
 def test_doctor_row_on_the_host_says_upgrade(repo_declaring, monkeypatch):
     monkeypatch.delenv("IN_DEVBOX", raising=False)
     (_, _, detail) = _row(repo_declaring, min_foldyard_version="99.0.0")[0]
-    assert "uv tool install --upgrade foldyard" in detail
+    assert "`uv tool upgrade foldyard`" in detail
+    assert "uv tool install" not in detail
     assert "fy box" not in detail
 
 

@@ -149,7 +149,7 @@ def _code_fingerprint() -> str:
     this package (keyed by relpath + size) plus the interpreter path. Hashing contents — not just
     (size, mtime) metadata — guarantees any code edit flips the fingerprint even when mtime is
     unreliable (a `git checkout` / `cp -p` can restore an old timestamp on same-size content).
-    Editable installs (the normal `just foldyard install`) point this at the source checkout, so
+    Editable installs (the normal `just install`) point this at the source checkout, so
     editing/updating foldyard changes it. The supervisor stamps it into the singleton lock at
     startup so launchers (`fy host`, `fy up` via ``ensure_background``) can tell a CURRENT
     supervisor from a STALE one — a long-lived supervisor computes daemon specs/allowlists from the

@@ -119,7 +119,7 @@ min_foldyard_version = "0.2.0"
 ▸ foldyard 0.1.0 is behind the 0.3.0 this repo expects. Since yours:
     0.2.0  the verify false-pass fix; CI runs this
     0.3.0  the Lima backend, for the M-series boxes
-  Run `uv tool install --upgrade foldyard`.
+  Run `uv tool upgrade foldyard`.
 ```
 
 Entries are **appended, never rewritten** — which is the point. A single "why" field next to
