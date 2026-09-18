@@ -221,7 +221,9 @@ against the example): the VM created and started inside its scope, direct guest 
 name and by IP (curl rc 7), DNS resolved, the band port answered 200 while an out-of-band port and
 the host's sshd were refused, the operator's egress and `limactl shell` + the podman socket
 untouched, `fy verify` ALL PASS under the wall, a hand-started VM refused, `fy machine rm` left no
-table. Details in [isolation-layers.md](./isolation-layers.md) under "Host-side wall enforcement
+table (superseded 2026-09-18: the table is the operator's install and `rm` leaves it —
+`fy machine host-wall --uninstall` prints its removal; [ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)).
+Details in [isolation-layers.md](./isolation-layers.md) under "Host-side wall enforcement
 on Linux".
 
 ## Validated where?

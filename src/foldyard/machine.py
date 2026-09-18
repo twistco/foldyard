@@ -226,19 +226,27 @@ def host_wall(uninstall: bool = False) -> int:
     if not hostwall.available():
         print("✗ this host can't enforce a host wall: it needs `nft` (nftables) and cgroup v2.")
         return 1
-    fresh = not hostwall.slice_installed(MACHINE)
-    slice_path = hostwall.ensure_slice(MACHINE)
-    if not slice_path:
-        print(f"✗ can't set up the user slice '{hostwall.slice_unit(MACHINE)}':")
-        print("  `systemctl --user` failed — no user manager for this login?")
-        print("  `loginctl enable-linger` gives one to a session without it.")
-        return 1
+    fresh = False
+    if uninstall:
+        # removal never sets anything up: no slice means nothing to probe, only lines to print
+        slice_path = hostwall.slice_path(MACHINE)
+    else:
+        fresh = not hostwall.slice_installed(MACHINE)
+        slice_path = hostwall.ensure_slice(MACHINE)
+        if not slice_path:
+            print(f"✗ can't set up the user slice '{hostwall.slice_unit(MACHINE)}':")
+            print("  `systemctl --user` failed — no user manager for this login?")
+            print("  `loginctl enable-linger` gives one to a session without it.")
+            return 1
     if fresh:  # the one user-level change the wall makes, said once, when it happens
         print(f"✓ user slice {hostwall.slice_unit(MACHINE)} written and enabled (no root):")
         print(f"    {hostwall.user_unit_dir() / hostwall.slice_unit(MACHINE)}")
     staged = hostwall.stage(MACHINE, slice_path, config.state_dir() / "host-wall")
-    result = hostwall.probe(MACHINE)
-    print(f"host-side wall for machine '{MACHINE}' — slice {slice_path}")
+    if slice_path:
+        result = hostwall.probe(MACHINE)
+    else:  # uninstall with no slice: probing would create a transient one — nothing to ask
+        result = hostwall.Probe(False, {}, "not set up (no slice)")
+    print(f"host-side wall for machine '{MACHINE}' — slice {slice_path or '(none)'}")
     if result.enforcing:
         print(f"  ✓ enforcing ({result.detail()})")
     else:

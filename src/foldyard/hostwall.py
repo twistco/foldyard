@@ -82,6 +82,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -444,22 +445,23 @@ def stage(vm: str, slice_path: str, into: Path) -> Staged:
     nft = shutil.which("nft") or "/usr/sbin/nft"
     service.write_text(service_unit_text(vm, os.getuid(), nft))
     unit = service_unit(vm)
+    q = shlex.quote  # the lines are pasted into a shell: a state dir with a space must survive
     return Staged(
         ruleset,
         service,
         (
-            f"sudo install -D -m 0644 {ruleset} {ETC_DIR / ruleset.name}",
-            f"sudo install -D -m 0644 {service} {SYSTEMD_SYSTEM_DIR / unit}",
+            f"sudo install -D -m 0644 {q(str(ruleset))} {q(str(ETC_DIR / ruleset.name))}",
+            f"sudo install -D -m 0644 {q(str(service))} {q(str(SYSTEMD_SYSTEM_DIR / unit))}",
             "sudo systemctl daemon-reload",
             f"sudo systemctl enable --now {unit}",
         ),
         (
             f"sudo systemctl disable --now {unit}",
-            f"sudo rm {SYSTEMD_SYSTEM_DIR / unit} {ETC_DIR / ruleset.name}",
+            f"sudo rm {q(str(SYSTEMD_SYSTEM_DIR / unit))} {q(str(ETC_DIR / ruleset.name))}",
             "sudo systemctl daemon-reload",
             # the user-level half, last: `--now` stops the slice, and with it a running VM
             f"systemctl --user disable --now {slice_unit(vm)}",
-            f"rm {user_unit_dir() / slice_unit(vm)}",
+            f"rm {q(str(user_unit_dir() / slice_unit(vm)))}",
         ),
     )
 
@@ -537,14 +539,36 @@ def probe_argv(slice_name: str, targets: dict[str, tuple[str, int]]) -> list[str
     ]
 
 
+def _out_of_band_listener(tries: int = 32) -> socket.socket | None:
+    """The listener the child must be REFUSED: an ephemeral loopback port that is NOT on either
+    of this project's bands. The kernel's ephemeral range (32768–60999) contains the bands, so a
+    plain port-0 bind would land on one every few hundred probes — and a listener the band rule
+    admits would read as "not enforcing" for no reason anyone could see."""
+    bands = [(b, b + _SPAN) for b in (config.proxy_port_base(), config.gcp_minter_port_base())]
+    for _ in range(tries):
+        sock = socket.socket()
+        try:
+            sock.bind(("127.0.0.1", 0))
+        except OSError:
+            sock.close()
+            return None
+        port = sock.getsockname()[1]
+        if any(lo <= port <= hi for lo, hi in bands):
+            sock.close()
+            continue
+        sock.listen(1)
+        return sock
+    return None
+
+
 def probe(vm: str) -> Probe:
     """Run the probe for ``vm``'s slice (which must exist — :func:`ensure_slice`); see the
     section comment for what enforcing means."""
-    loopback = socket.socket()
+    loopback = _out_of_band_listener()
+    if loopback is None:
+        return Probe(False, {}, "no out-of-band loopback port for the probe's listener")
     band = _band_listener()
     try:
-        loopback.bind(("127.0.0.1", 0))
-        loopback.listen(1)
         targets = {"loopback": loopback.getsockname()[:2], "external": TEST_NET}
         if band is not None:
             targets["band"] = band.getsockname()[:2]

@@ -1531,8 +1531,9 @@ def _host_wall_check():
         yield _result(False, "host wall", "", "wanted, but this host has no nft / cgroup v2")
         return
     if not hostwall.slice_path(PODMAN_MACHINE):
-        yield _result(None, "host wall", "", f"no slice yet — `fy up` creates it; then {fix}")
+        yield _result(None, "host wall", "", f"not set up — {fix} (and creates the slice)")
         return
+    yield ("running", "host wall", "")  # the probe below spawns a child — let a live UI spin
     res = hostwall.probe(PODMAN_MACHINE)
     yield _result(
         res.enforcing,

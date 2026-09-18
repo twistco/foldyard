@@ -1063,3 +1063,14 @@ def test_host_wall_verb_is_a_no_op_note_when_off(host_wall_verb, monkeypatch, ca
     monkeypatch.setattr(machine.config, "machine_host_wall", lambda: False)
     assert machine.host_wall() == 0
     assert "host_wall is off" in capsys.readouterr().out
+
+
+def test_host_wall_verb_uninstall_never_sets_the_slice_up(host_wall_verb, monkeypatch, capsys):
+    # Removal with nothing set up: no ensure (that would write + enable the unit), no probe
+    # (`systemd-run --slice` would create a transient slice) — just the lines.
+    monkeypatch.setattr(machine.hostwall, "slice_path", lambda vm: "")
+    monkeypatch.setattr(machine.hostwall, "ensure_slice", lambda vm: pytest.fail("set up"))
+    monkeypatch.setattr(machine.hostwall, "probe", lambda vm: pytest.fail("probed"))
+    machine.host_wall(uninstall=True)
+    out = capsys.readouterr().out
+    assert "not set up (no slice)" in out and "systemctl --user disable --now" in out

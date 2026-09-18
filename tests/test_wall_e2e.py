@@ -28,6 +28,7 @@ re-provisioned WITHOUT the walls.
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -144,7 +145,7 @@ def _steps(out: str) -> list[str]:
 def _run_step(line: str, must: bool = True) -> None:
     """Run one printed step: a `sudo` line with `sudo -n` (the runner's sudo is passwordless),
     anything else as the user. The fixture IS the operator, and runs what it was shown."""
-    words = line.split()
+    words = shlex.split(line)  # the verb quotes paths for a shell
     argv = ["sudo", "-n", *words[1:]] if words[0] == "sudo" else words
     res = subprocess.run(argv, capture_output=True, text=True)
     if must:

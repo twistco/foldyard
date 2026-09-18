@@ -437,3 +437,42 @@ def test_probe_child_reports_per_target(capsys):
         lis.close()
     assert rc == 0
     assert json.loads(capsys.readouterr().out) == {"a": "ok", "b": "refused"}
+
+
+def test_probe_listener_skips_a_port_on_either_band(bands, monkeypatch):
+    # The ephemeral range holds the bands; a port-0 bind that lands on one would be ADMITTED by
+    # the band rule and read as "not enforcing" — so the listener re-rolls off-band.
+    ports = iter([41005, 41150, 50000])  # proxy band, minter band, then clear
+
+    class Sock:
+        def __init__(self, *a):
+            self.port = None
+            self.listening = False
+
+        def bind(self, addr):
+            self.port = next(ports)
+
+        def getsockname(self):
+            return ("127.0.0.1", self.port)
+
+        def listen(self, n):
+            self.listening = True
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(hostwall.socket, "socket", Sock)
+    sock = hostwall._out_of_band_listener()
+    assert sock is not None
+    assert sock.getsockname() == ("127.0.0.1", 50000) and getattr(sock, "listening", False)
+
+
+def test_stage_quotes_paths_for_the_shell(bands, tmp_path, monkeypatch):
+    monkeypatch.setattr(hostwall.shutil, "which", lambda name: "/usr/sbin/nft")
+    monkeypatch.setattr(hostwall, "user_unit_dir", lambda: tmp_path / "my units")
+    staged = hostwall.stage("acme", _SLICE, tmp_path / "state dir" / "host-wall")
+    assert (
+        f"sudo install -D -m 0644 '{staged.ruleset}' /etc/foldyard/host-wall-acme.nft"
+        in staged.install
+    )
+    assert f"rm '{tmp_path / 'my units' / 'fy-machine-acme.slice'}'" in staged.uninstall
