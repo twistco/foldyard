@@ -364,3 +364,27 @@ def test_install_hands_back_nfts_own_words_on_failure(bands, monkeypatch):
     res = hostwall.install("acme", _SCOPE, ssh_port=22)
     assert res.ok is False
     assert res.stderr == _NFT_ENOENT
+
+
+def test_install_declines_when_the_loader_cannot_launch(bands, monkeypatch):
+    # No `sudo` on the host (available() only vouches for nft): the launch itself fails, and
+    # that is a declined load with the OS's reason, not a traceback out of machine start.
+    def fake_run(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "sudo")
+
+    monkeypatch.setattr(hostwall, "available", lambda: True)
+    monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
+    res = hostwall.install("acme", _SCOPE, ssh_port=22)
+    assert res.ok is False
+    assert "sudo" in res.stderr
+
+
+def test_remove_declines_when_the_loader_cannot_launch(monkeypatch):
+    # The same door on teardown: machine rm treats a False as "warn, the table is inert" — a
+    # raise here would turn that best-effort step into a traceback after the VM is already gone.
+    def fake_run(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "sudo")
+
+    monkeypatch.setattr(hostwall.shutil, "which", lambda name: "/usr/sbin/nft")
+    monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
+    assert hostwall.remove("acme") is False

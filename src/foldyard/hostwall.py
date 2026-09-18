@@ -336,7 +336,12 @@ def install(
     if not available() or not scope:
         return LoadResult(False)
     ruleset = render(vm, scope, ssh_port, resolvers, plumbing)
-    res = subprocess.run(install_argv(), input=ruleset, text=True, capture_output=True)
+    try:
+        res = subprocess.run(install_argv(), input=ruleset, text=True, capture_output=True)
+    except OSError as exc:
+        # The loader itself could not launch (no `sudo` on PATH — available() vouches for nft
+        # only): declined with the OS's reason, the same fail-closed shape as a rejected ruleset.
+        return LoadResult(False, str(exc))
     return LoadResult(res.returncode == 0, res.stderr or "")
 
 
@@ -347,4 +352,7 @@ def remove(vm: str) -> bool:
     if shutil.which("nft") is None:
         return False
     ruleset = _declare_then_delete(table_name(vm))
-    return subprocess.run(install_argv(), input=ruleset, text=True).returncode == 0
+    try:
+        return subprocess.run(install_argv(), input=ruleset, text=True).returncode == 0
+    except OSError:
+        return False  # no `sudo` to launch — the caller's "warn, inert without the VM" case

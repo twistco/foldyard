@@ -49,6 +49,8 @@ TABLE = f"fy_host_wall_{VM.replace('-', '_')}"  # hostwall.table_name — identi
 def _host_wall_possible() -> bool:
     if shutil.which("nft") is None or not Path("/sys/fs/cgroup/cgroup.controllers").exists():
         return False
+    if shutil.which("sudo") is None:
+        return False
     if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
         return False
     # The kernel half: load ONE `socket cgroupv2` rule into a throwaway table and drop it again.
