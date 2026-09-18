@@ -58,6 +58,16 @@ def _err(*a: object) -> None:
     print(*a, file=sys.stderr, flush=True)
 
 
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # EPERM — someone else's process, so very much alive
+    return True
+
+
 def socket_alive(uri: str, timeout: float = 2.0) -> bool:
     """Does something actually ACCEPT on this ``unix://`` socket? The liveness primitive
     behind :meth:`Backend.responsive` — a plain ``exists()`` would pass on a stale socket
@@ -387,16 +397,6 @@ class PodmanBackend(Backend):
                 pids.append(int(fields[0]))
         return pids
 
-    @staticmethod
-    def _alive(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except OSError:
-            return True  # EPERM — someone else's process, so very much alive
-        return True
-
     def reap_orphans(self, name: str) -> list[int]:
         """SIGTERM (then SIGKILL) the machine's surviving host processes and unlink its dead
         socket files. Returns the PIDs signalled."""
@@ -407,11 +407,11 @@ class PodmanBackend(Backend):
             except OSError:
                 pass
         for _ in range(20):
-            if not any(self._alive(p) for p in pids):
+            if not any(_alive(p) for p in pids):
                 break
             time.sleep(0.25)
         for pid in pids:
-            if self._alive(pid):
+            if _alive(pid):
                 try:
                     os.kill(pid, signal.SIGKILL)
                 except OSError:
@@ -664,10 +664,53 @@ class LimaBackend(Backend):
     def stop_argv(self, name: str) -> list[str]:
         return ["limactl", "stop", name]
 
+    _HOSTAGENT_EXIT_WAIT = 20.0  # seconds a leaving hostagent gets before it is signalled
+
     def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
+        if self.reap_orphans(name):
+            _err("  (the hostagent lingered — reaped it)")
         if subprocess.run([*prefix, *self.start_argv(name)]).returncode != 0:
             return False
         return self._wait_for_socket(name)
+
+    @staticmethod
+    def _pid(pidfile: Path) -> int:
+        try:
+            return int(pidfile.read_text().strip())
+        except (OSError, ValueError):
+            return 0
+
+    def reap_orphans(self, name: str) -> list[int]:
+        """A hostagent that outlived its driver. Lima's hostagent notices a dead QEMU, flips
+        the instance to Stopped and exits — but not atomically: ``limactl start`` inside that
+        window refuses with "host agent is running but driver is not" (the WSL2 runner, 3.5×
+        slower than Linux, hit it; 2026-09-18). So: driver dead + hostagent alive ⇒ wait for
+        the hostagent to go (it is going), and signal it only if it lingers — identified by
+        Lima's OWN ``ha.pid``, never by name. A VM whose driver is alive is never touched.
+        Called from :meth:`start`, so both of ``ensure``'s paths are covered: the plain start
+        on a "stopped" flag and the revive on a dead socket."""
+        inst = Path.home() / ".lima" / name
+        ha, qemu = self._pid(inst / "ha.pid"), self._pid(inst / "qemu.pid")
+        if not ha or not _alive(ha) or (qemu and _alive(qemu)):
+            return []
+        _err(f"⏳ '{name}': the lima hostagent (pid {ha}) outlived its driver — waiting for it")
+        _err("  to leave before starting (it exits on its own once it notices; up to 20s)…")
+        deadline = time.monotonic() + self._HOSTAGENT_EXIT_WAIT
+        while time.monotonic() < deadline:
+            if not _alive(ha):
+                return []  # left on its own: nothing was signalled
+            time.sleep(0.5)
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(ha, sig)
+            except OSError:
+                break
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and _alive(ha):
+                time.sleep(0.25)
+            if not _alive(ha):
+                break
+        return [ha]
 
     def ssh_target(self, name: str) -> SshTarget | None:
         """Lima writes ``~/.lima/<name>/ssh.config`` for the instance (the port changes per

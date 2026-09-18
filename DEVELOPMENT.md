@@ -376,7 +376,12 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   the socket — `exists()` would pass on the stale socket file a killed process leaves). `ensure`
   recovers this itself (stop → `reap_orphans` → start); `reap_orphans` matches processes by
   podman's OWN recorded paths (disk image / EFI store / api socket), never by machine name —
-  name matching would let `acme`'s `fy up` kill `acme-two`'s VM.
+  name matching would let `acme`'s `fy up` kill `acme-two`'s VM. Lima's version is narrower
+  and runs inside `start` on both of `ensure`'s paths: a hostagent (Lima's own `ha.pid`) still
+  alive after its driver (`qemu.pid`) died is waited for — it exits by itself once it notices,
+  but not atomically with flipping the instance to Stopped, and `limactl start` in that window
+  refuses with "host agent is running but driver is not" (the WSL2 runner, 2026-09-18) — and
+  signalled only if it lingers. A VM whose driver is alive is never touched.
 - **Port offsets:** `stack._offset` shells to system `cksum` for exact parity with the
   original shell implementation.
 - **Module-level constants** (`devmode.AXES`/`MODE_BLURB`/`AXIS_DAEMON`/`EMERGENCY`,
