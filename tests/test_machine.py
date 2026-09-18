@@ -854,7 +854,7 @@ def host_wall_env(lima_env, monkeypatch):
     def install(vm, sc, port, resolvers, plumbing):
         assert plumbing == (("udp", 38020),), "the hostagent's DNS listener must be opened"
         installs.append((vm, sc, port))
-        return True
+        return machine.hostwall.LoadResult(True)
 
     monkeypatch.setattr(machine.hostwall, "install", install)
 
@@ -921,10 +921,23 @@ def test_host_wall_asked_for_on_a_host_that_cannot_enforce_it_is_a_hard_stop(
     assert installs == [] and "nft" in capsys.readouterr().err
 
 
-def test_host_wall_load_failure_is_a_hard_stop(host_wall_env, monkeypatch, tmp_path):
-    monkeypatch.setattr(machine.hostwall, "install", lambda *a: False)
+def test_host_wall_load_failure_is_a_hard_stop(host_wall_env, monkeypatch, tmp_path, capsys):
+    # nft's own words are printed (they are captured, not streamed), and when they name a case
+    # foldyard knows — ENOENT at the `socket cgroupv2` rule: a kernel without CONFIG_NFT_SOCKET,
+    # the stock WSL2 kernel — the reason follows them. A hard stop either way.
+    enoent = (
+        "/dev/stdin:6:5-27: Error: Could not process rule: No such file or directory\n"
+        '    socket cgroupv2 level 5 "user.slice/x.scope" jump vm\n'
+    )
+    monkeypatch.setattr(
+        machine.hostwall, "install", lambda *a: machine.hostwall.LoadResult(False, enoent)
+    )
     with pytest.raises(SystemExit):
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    err = capsys.readouterr().err
+    assert "Could not process rule" in err
+    assert "loading the host-side wall for 'homelab' failed" in err
+    assert "CONFIG_NFT_SOCKET" in err and "in-VM wall" in err
 
 
 def test_host_wall_off_starts_unscoped_and_loads_nothing(lima_env, monkeypatch, tmp_path):

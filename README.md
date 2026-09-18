@@ -130,9 +130,9 @@ provisioned with the fail-closed wall. Other backends, and when to pick them, ar
 
 The engine runs daily on Macs with a production project, but has only been lightly tested on
 other repos, treat it as alpha quality for now. A Linux host is partly validated — the machine
-VM, `verify`, both walls — but not the daily `fy up` loop, and WSL2 is unmeasured; what has and
-has not been run there is tracked in [docs/linux-support.md](./docs/linux-support.md). Brave
-testers and issues very welcome!
+VM, `verify`, both walls — but not the daily `fy up` loop; WSL2 runs the same CI tier (the host
+wall excepted — a WSL2 kernel limit); what has and has not been run there is tracked in
+[docs/linux-support.md](./docs/linux-support.md). Brave testers and issues very welcome!
 
 ## More info
 

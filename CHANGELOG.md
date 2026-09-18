@@ -88,6 +88,22 @@ break config or CLI shape, and say so here. How a release is cut:
   home), the adopt gate, the supervisor with the zero-secret rig, both walls, the box (in-box
   `fy verify` ALL PASS), `verify`'s negative against a VM exposing the host home, the read-only
   engine probes, `fy reclaim` on a real store, and `fy worktree add|remove`. 36/36, ~15 minutes.
+- **The same host tier inside WSL2 on a Windows runner** (`wsl2-host-e2e`: `windows-2025` +
+  Vampire/setup-wsl, Ubuntu 24.04 under WSL2, foldyard's `lima` backend booting the QEMU/KVM
+  VM INSIDE the distro — nested twice, which the hosted runners allow once `.wslconfig` asks for
+  `nestedVirtualization`). The product needed no change; the job's plumbing (WSLENV, a root→user
+  wrapper switch, the checkout cloned onto ext4) is documented in DEVELOPMENT.md. One finding:
+  the stock WSL2 kernel has no `CONFIG_NFT_SOCKET`, so `[machine].host_wall` cannot load there
+  (fails closed; the in-VM wall is unaffected) — `test_wall_e2e.py` now probes the kernel for
+  nft's `socket` expression in its gate and skips, instead of erroring after re-provisioning the
+  VM walled and taking the next module down with it.
+- **`host_wall` on a kernel without `CONFIG_NFT_SOCKET` is refused up front, with the reason.**
+  preflight reads the kernel config (`/proc/config.gz`, then `/boot/config-<release>`;
+  `hostwall.nft_socket_in_kernel`) and refuses `fy up` before it re-provisions the VM walled;
+  where no config is readable, the load-time `nft` error is now captured and, when it is ENOENT
+  at the `socket cgroupv2` rule, explained (`hostwall.explain_load_failure`) instead of left as
+  a bare "No such file or directory". Either way the message says what still applies (the in-VM
+  wall) and what would change it (a kernel built with nft_socket).
 - **`just census`** — the subprocess report over the hermetic guard (`tests/tools/census.py`):
   every process the suite spawns, binary × test, aggregated across xdist workers; a report of what
   the allowlist still lets through and what the live tiers reach, not a gate.

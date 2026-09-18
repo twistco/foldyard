@@ -13,8 +13,9 @@ Start with the [package README](../README.md) (what foldyard is and why). Then, 
 - [security.md](./security.md) — the threat model and what `fy verify` proves
 - [compose-overlays.md](./compose-overlays.md) — the `[[overlay]]` posture-overlay config,
   in depth
-- [linux-support.md](./linux-support.md) — what has been validated on a Linux host, what has
-  not (the daily `fy up` loop, WSL2), and the outstanding list before "supported"
+- [linux-support.md](./linux-support.md) — what has been validated on a Linux host and inside
+  WSL2, what has not (the daily `fy up` loop, a real Windows 11 machine), and the outstanding
+  list before "supported"
 - plugins.md — writing your own plugin (coming with the consumer-repo plugin work)
 
 **Why it's built this way:**

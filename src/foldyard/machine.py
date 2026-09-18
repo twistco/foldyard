@@ -190,8 +190,15 @@ def _apply_host_wall() -> None:
     # The VM's own loopback plumbing (the hostagent's DNS resolver, QEMU's SSH forward) is
     # discovered from its processes, never guessed: Lima allocates those ports per boot too.
     plumbing = hostwall.listener_ports(*pids)
-    if not hostwall.install(MACHINE, scope, ssh_port, hostwall.resolvers(), plumbing):
+    loaded = hostwall.install(MACHINE, scope, ssh_port, hostwall.resolvers(), plumbing)
+    if not loaded.ok:
+        # nft's own words first (they were captured, not streamed), then what they mean when
+        # foldyard knows — a kernel without the `socket` expression is the case a WSL2 host hits.
+        if loaded.stderr.strip():
+            _err(loaded.stderr.rstrip())
         _err(f"✗ loading the host-side wall for '{MACHINE}' failed (`sudo nft -f -`).")
+        if why := hostwall.explain_load_failure(loaded.stderr):
+            _err(why)
         raise SystemExit(1)
 
 

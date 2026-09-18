@@ -48,6 +48,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import config
@@ -123,6 +124,56 @@ def available() -> bool:
         return (Path("/sys/fs/cgroup") / "cgroup.controllers").exists()
     except OSError:
         return False
+
+
+def _kernel_config_paths() -> tuple[Path, ...]:
+    """Where a Linux kernel publishes its build config, in preference order: ``/proc/config.gz``
+    (``CONFIG_IKCONFIG_PROC`` — the WSL2 kernel has it), then the distro's
+    ``/boot/config-<release>`` (Debian/Ubuntu/Fedora). Neither is guaranteed; the caller treats
+    absence as unknown."""
+    return (Path("/proc/config.gz"), Path(f"/boot/config-{os.uname().release}"))
+
+
+def nft_socket_in_kernel() -> bool | None:
+    """Whether the running kernel was built with nftables' ``socket`` expression
+    (``CONFIG_NFT_SOCKET``, ``=y`` or ``=m``) — the match :func:`render` needs for
+    ``socket cgroupv2``. A kernel without it refuses the rule with ENOENT at load time; the stock
+    WSL2 kernel is one (``# CONFIG_NFT_SOCKET is not set`` on its 6.6 and 6.18 branches). Read
+    from the first readable kernel config; ``None`` when no config is readable or none mentions
+    the symbol — unknown, never a guess, so preflight refuses only on a definite ``False`` and
+    the load-time error (:func:`explain_load_failure`) covers the rest."""
+    import gzip
+
+    for path in _kernel_config_paths():
+        try:
+            raw = path.read_bytes()
+            text = (gzip.decompress(raw) if path.suffix == ".gz" else raw).decode(
+                "utf-8", "replace"
+            )
+        except (OSError, EOFError, ValueError):
+            continue
+        for line in text.splitlines():
+            if line.startswith("CONFIG_NFT_SOCKET="):
+                return line.split("=", 1)[1] in ("y", "m")
+            if line.startswith("# CONFIG_NFT_SOCKET is not set"):
+                return False
+    return None
+
+
+def explain_load_failure(stderr: str) -> str:
+    """The operator-facing reason behind an ``nft -f -`` failure, when nft's own words identify
+    one foldyard knows: ENOENT at the ``socket cgroupv2`` rule is a kernel without
+    ``CONFIG_NFT_SOCKET`` (nf_tables reports a missing expression as "No such file or directory"
+    — nothing to do with a file). Empty for any other error: nft's stderr, printed beside this,
+    is then the whole story."""
+    if "No such file or directory" in stderr and "socket cgroupv2" in stderr:
+        return (
+            "  This kernel has no nftables `socket` expression (CONFIG_NFT_SOCKET is not set —\n"
+            "  the stock WSL2 kernel, for one), so the host wall's `socket cgroupv2` match can\n"
+            "  never load here. Use a kernel built with nft_socket, or drop `host_wall` (the\n"
+            "  in-VM wall still applies)."
+        )
+    return ""
 
 
 def _allowed_ports() -> list[str]:
@@ -263,19 +314,35 @@ def install_argv() -> list[str]:
     return ["sudo", "nft", "-f", "-"]
 
 
+@dataclass(frozen=True)
+class LoadResult:
+    """What loading the ruleset came to: ``ok``, and nft's stderr when it did not — kept so the
+    caller can print nft's own words and :func:`explain_load_failure` can read them."""
+
+    ok: bool
+    stderr: str = ""
+
+
 def install(
     vm: str,
     scope: str,
     ssh_port: int,
     resolvers: tuple[str, ...] = DEFAULT_RESOLVERS,
     plumbing: tuple[tuple[str, int], ...] = (),
-) -> bool:
-    """Load the VM's host wall. False if the host can't enforce one or ``nft`` rejects the
-    ruleset. Caller decides WHEN (VM start) and whether the operator consented to host nftables."""
+) -> LoadResult:
+    """Load the VM's host wall. Not ``ok`` if the host can't enforce one or ``nft`` rejects the
+    ruleset (its stderr rides along). Caller decides WHEN (VM start) and whether the operator
+    consented to host nftables."""
     if not available() or not scope:
-        return False
+        return LoadResult(False)
     ruleset = render(vm, scope, ssh_port, resolvers, plumbing)
-    return subprocess.run(install_argv(), input=ruleset, text=True).returncode == 0
+    try:
+        res = subprocess.run(install_argv(), input=ruleset, text=True, capture_output=True)
+    except OSError as exc:
+        # The loader itself could not launch (no `sudo` on PATH — available() vouches for nft
+        # only): declined with the OS's reason, the same fail-closed shape as a rejected ruleset.
+        return LoadResult(False, str(exc))
+    return LoadResult(res.returncode == 0, res.stderr or "")
 
 
 def remove(vm: str) -> bool:
@@ -285,4 +352,7 @@ def remove(vm: str) -> bool:
     if shutil.which("nft") is None:
         return False
     ruleset = _declare_then_delete(table_name(vm))
-    return subprocess.run(install_argv(), input=ruleset, text=True).returncode == 0
+    try:
+        return subprocess.run(install_argv(), input=ruleset, text=True).returncode == 0
+    except OSError:
+        return False  # no `sudo` to launch — the caller's "warn, inert without the VM" case

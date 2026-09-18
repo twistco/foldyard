@@ -8,8 +8,15 @@ VM. Ported from the rig's scripted run (docs/lima-wall-machine-integration.md §
 
 Host tier (tests/e2e_host.py) plus what the walls need: `mitmdump` (the `e2e` dependency group —
 the wall refuses a consumer with nothing routing the box, so the example copy declares `[proxy]`),
-and for the host wall `nft` + cgroup v2 + passwordless `sudo -n` (a Linux host; CI's runner).
-Lima 2.2.0, Fedora 44 guest. The module ends with the VM re-provisioned WITHOUT the walls.
+and for the host wall `nft` + cgroup v2 + passwordless `sudo -n` (a Linux host; CI's runner) —
+AND a kernel that has nftables' `socket` expression (`CONFIG_NFT_SOCKET`): the host table matches
+the VM by `socket cgroupv2`, and a kernel without the expression refuses the rule with ENOENT.
+Ubuntu's kernel has it; the stock WSL2 kernel does not (`# CONFIG_NFT_SOCKET is not set` on both
+the 6.6 and 6.18 branches of microsoft/WSL2-Linux-Kernel), so on a WSL2 host this module SKIPS —
+it must, because the fixture re-provisions the VM walled before it discovers the host side can't
+load, and an error there leaves the next module refusing the stale provisioning (2026-09-17,
+the first `wsl2-host-e2e` run). Lima 2.2.0, Fedora 44 guest. The module ends with the VM
+re-provisioned WITHOUT the walls.
 """
 
 from __future__ import annotations
@@ -42,14 +49,33 @@ TABLE = f"fy_host_wall_{VM.replace('-', '_')}"  # hostwall.table_name — identi
 def _host_wall_possible() -> bool:
     if shutil.which("nft") is None or not Path("/sys/fs/cgroup/cgroup.controllers").exists():
         return False
-    return subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
+    if shutil.which("sudo") is None:
+        return False
+    if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
+        return False
+    # The kernel half: load ONE `socket cgroupv2` rule into a throwaway table and drop it again.
+    # `nft --check` only parses, so this has to reach the kernel — it is the same expression
+    # hostwall emits, against a cgroup path every systemd host has.
+    probe = "fy_e2e_probe_nft_socket"
+    ruleset = (
+        f"table inet {probe} {{\n"
+        "  chain c { type filter hook output priority 0; policy accept;\n"
+        '    socket cgroupv2 level 1 "user.slice" accept\n'
+        "  }\n}\n"
+    )
+    loaded = subprocess.run(
+        ["sudo", "-n", "nft", "-f", "-"], input=ruleset, text=True, capture_output=True
+    )
+    subprocess.run(["sudo", "-n", "nft", "delete", "table", "inet", probe], capture_output=True)
+    return loaded.returncode == 0
 
 
 pytestmark = [
     host_tier,
     pytest.mark.skipif(shutil.which("mitmdump") is None, reason="walls need [proxy] ⇒ mitmdump"),
     pytest.mark.skipif(
-        not _host_wall_possible(), reason="host wall needs nft + cgroup v2 + sudo -n"
+        not _host_wall_possible(),
+        reason="host wall needs nft + cgroup v2 + sudo -n + a kernel with nft's socket expression",
     ),
 ]
 

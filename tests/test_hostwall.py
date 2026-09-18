@@ -108,7 +108,7 @@ def test_install_streams_over_stdin_as_root(bands, monkeypatch):
 
     monkeypatch.setattr(hostwall, "available", lambda: True)
     monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
-    assert hostwall.install("acme", _SCOPE, ssh_port=22) is True
+    assert hostwall.install("acme", _SCOPE, ssh_port=22).ok is True
     # loaded from stdin (`nft -f -`), never a temp file a lesser process could swap
     assert seen["cmd"] == ["sudo", "nft", "-f", "-"]
     assert seen["input"] is not None and "fy_host_wall_acme" in seen["input"]
@@ -119,7 +119,7 @@ def test_install_declines_when_the_host_cannot_enforce(bands, monkeypatch):
     monkeypatch.setattr(
         hostwall.subprocess, "run", lambda *a, **k: pytest.fail("must not shell nft")
     )
-    assert hostwall.install("acme", _SCOPE, ssh_port=22) is False
+    assert hostwall.install("acme", _SCOPE, ssh_port=22).ok is False
 
 
 def test_install_declines_on_an_empty_scope(bands, monkeypatch):
@@ -129,7 +129,7 @@ def test_install_declines_on_an_empty_scope(bands, monkeypatch):
     monkeypatch.setattr(
         hostwall.subprocess, "run", lambda *a, **k: pytest.fail("must not shell nft")
     )
-    assert hostwall.install("acme", "", ssh_port=22) is False
+    assert hostwall.install("acme", "", ssh_port=22).ok is False
 
 
 # ── wiring into the machine lifecycle: the per-VM scope, the resolver, idempotent removal ──
@@ -267,3 +267,124 @@ def test_render_opens_the_plumbing_on_loopback_only(bands):
     assert 'oif "lo" udp dport { 38020 } accept' in rs
     # nothing without plumbing: no empty udp set
     assert "udp dport {" not in hostwall.render("acme", _SCOPE, ssh_port=45285)
+
+
+# ── the kernel half of the capability: nftables' `socket` expression (CONFIG_NFT_SOCKET) ──
+#
+# The host table matches the VM by `socket cgroupv2`; a kernel built without nft_socket refuses
+# the rule with ENOENT at load time. The stock WSL2 kernel is one (`# CONFIG_NFT_SOCKET is not
+# set` on its 6.6 and 6.18 branches — the first wsl2-host-e2e run, 2026-09-17). Two tiers: the
+# kernel config, when the host exposes one, lets preflight refuse BEFORE the VM is re-provisioned
+# walled; nft's own error, explained, covers a host whose config is unreadable.
+
+_NFT_ENOENT = (
+    "/dev/stdin:6:5-27: Error: Could not process rule: No such file or directory\n"
+    '    socket cgroupv2 level 5 "user.slice/user-1000.slice/user@1000.service/app.slice/'
+    'fy-machine-foldyard-example.scope" jump vm\n'
+    "    ^^^^^^^^^^^^^^^^^^^^^^^\n"
+)
+
+
+def _kernel_configs(monkeypatch, tmp_path, *, proc: str | None, boot: str | None):
+    import gzip
+
+    paths = []
+    if proc is not None:
+        gz = tmp_path / "config.gz"
+        gz.write_bytes(gzip.compress(proc.encode()))
+        paths.append(gz)
+    else:
+        paths.append(tmp_path / "missing-config.gz")
+    if boot is not None:
+        plain = tmp_path / "config-6.8.0"
+        plain.write_text(boot)
+        paths.append(plain)
+    else:
+        paths.append(tmp_path / "missing-config-6.8.0")
+    monkeypatch.setattr(hostwall, "_kernel_config_paths", lambda: tuple(paths))
+
+
+def test_nft_socket_in_kernel_reads_proc_config_gz(tmp_path, monkeypatch):
+    _kernel_configs(
+        monkeypatch, tmp_path, proc="CONFIG_NF_TABLES=y\nCONFIG_NFT_SOCKET=m\n", boot=None
+    )
+    assert hostwall.nft_socket_in_kernel() is True
+    _kernel_configs(monkeypatch, tmp_path, proc="CONFIG_NFT_SOCKET=y\n", boot=None)
+    assert hostwall.nft_socket_in_kernel() is True
+    _kernel_configs(
+        monkeypatch,
+        tmp_path,
+        proc="CONFIG_NF_TABLES=y\n# CONFIG_NFT_SOCKET is not set\n",
+        boot=None,
+    )
+    assert hostwall.nft_socket_in_kernel() is False
+
+
+def test_nft_socket_in_kernel_falls_back_to_the_boot_config(tmp_path, monkeypatch):
+    _kernel_configs(monkeypatch, tmp_path, proc=None, boot="# CONFIG_NFT_SOCKET is not set\n")
+    assert hostwall.nft_socket_in_kernel() is False
+    _kernel_configs(monkeypatch, tmp_path, proc=None, boot="CONFIG_NFT_SOCKET=m\n")
+    assert hostwall.nft_socket_in_kernel() is True
+
+
+def test_nft_socket_in_kernel_is_unknown_without_a_readable_config(tmp_path, monkeypatch):
+    """No config, or one that never mentions the symbol: unknown (None), never a guess — the
+    load-time explanation covers that host."""
+    _kernel_configs(monkeypatch, tmp_path, proc=None, boot=None)
+    assert hostwall.nft_socket_in_kernel() is None
+    _kernel_configs(monkeypatch, tmp_path, proc="CONFIG_NF_TABLES=y\n", boot=None)
+    assert hostwall.nft_socket_in_kernel() is None
+    # unreadable garbage where the gzip should be: still unknown, never an exception
+    (tmp_path / "config.gz").write_bytes(b"not gzip")
+    monkeypatch.setattr(hostwall, "_kernel_config_paths", lambda: (tmp_path / "config.gz",))
+    assert hostwall.nft_socket_in_kernel() is None
+
+
+def test_explain_load_failure_names_the_kernel_option_for_a_socket_enoent():
+    why = hostwall.explain_load_failure(_NFT_ENOENT)
+    assert "CONFIG_NFT_SOCKET" in why and "socket" in why
+    assert "in-VM wall" in why  # what still applies
+
+
+def test_explain_load_failure_is_empty_for_any_other_error():
+    assert hostwall.explain_load_failure("") == ""
+    assert hostwall.explain_load_failure("Error: syntax error, unexpected junk\n") == ""
+    # ENOENT on some OTHER rule is not the socket expression
+    other = "Error: Could not process rule: No such file or directory\n    ct state established\n"
+    assert hostwall.explain_load_failure(other) == ""
+
+
+def test_install_hands_back_nfts_own_words_on_failure(bands, monkeypatch):
+    def fake_run(cmd, **kw):
+        assert kw.get("capture_output") is True, "stderr must be captured to be explained"
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=_NFT_ENOENT)
+
+    monkeypatch.setattr(hostwall, "available", lambda: True)
+    monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
+    res = hostwall.install("acme", _SCOPE, ssh_port=22)
+    assert res.ok is False
+    assert res.stderr == _NFT_ENOENT
+
+
+def test_install_declines_when_the_loader_cannot_launch(bands, monkeypatch):
+    # No `sudo` on the host (available() only vouches for nft): the launch itself fails, and
+    # that is a declined load with the OS's reason, not a traceback out of machine start.
+    def fake_run(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "sudo")
+
+    monkeypatch.setattr(hostwall, "available", lambda: True)
+    monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
+    res = hostwall.install("acme", _SCOPE, ssh_port=22)
+    assert res.ok is False
+    assert "sudo" in res.stderr
+
+
+def test_remove_declines_when_the_loader_cannot_launch(monkeypatch):
+    # The same door on teardown: machine rm treats a False as "warn, the table is inert" — a
+    # raise here would turn that best-effort step into a traceback after the VM is already gone.
+    def fake_run(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "sudo")
+
+    monkeypatch.setattr(hostwall.shutil, "which", lambda name: "/usr/sbin/nft")
+    monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
+    assert hostwall.remove("acme") is False

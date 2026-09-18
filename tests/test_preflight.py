@@ -296,7 +296,28 @@ def test_host_wall_on_a_host_that_cannot_enforce_it_blocks(monkeypatch):
     assert any("[machine].host_wall" in p and "nft" in p for p in preflight.issues())
 
 
+def test_host_wall_on_a_kernel_without_nft_socket_blocks(monkeypatch):
+    # nft + cgroup v2 present, but the kernel was built without nftables' `socket` expression
+    # (the stock WSL2 kernel): the `socket cgroupv2` match can never load, so refuse HERE —
+    # before `fy up` re-provisions the VM walled and the load fails closed on the far side.
+    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True, host_wall=True)
+    monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
+    monkeypatch.setattr(preflight.hostwall, "nft_socket_in_kernel", lambda: False)
+    hits = [p for p in preflight.issues() if "[machine].host_wall" in p]
+    assert hits and "CONFIG_NFT_SOCKET" in hits[0] and "in-VM wall" in hits[0]
+
+
+def test_host_wall_with_an_unknown_kernel_config_is_not_refused(monkeypatch):
+    # No readable kernel config (None): not a reason to refuse — the load-time error, explained,
+    # covers that host; refusing on ignorance would block every Linux host without /proc/config.gz.
+    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True, host_wall=True)
+    monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
+    monkeypatch.setattr(preflight.hostwall, "nft_socket_in_kernel", lambda: None)
+    assert not any("host_wall" in p for p in preflight.issues())
+
+
 def test_host_wall_with_wall_lima_proxy_and_nft_is_clean(monkeypatch):
     _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True, host_wall=True)
     monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
+    monkeypatch.setattr(preflight.hostwall, "nft_socket_in_kernel", lambda: True)
     assert not any("host_wall" in p for p in preflight.issues())
