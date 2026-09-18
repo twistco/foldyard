@@ -166,6 +166,7 @@ def _workspace_rearms_git_bridge(settings: Path) -> list[str]:
 _BRIDGE_SOCKET_DIR = Path("/tmp")
 _BRIDGE_SOCKET_GLOBS = ("vscode-ssh-auth-*.sock", "vscode-git-*.sock")
 _GIT_NO_SSH = re.compile(r"cannot run ssh|ssh: (command )?not found", re.I)
+_GIT_NO_ORIGIN = re.compile(r"'origin' does not appear to be a git repository", re.I)
 _GIT_AUTH_DENIED = re.compile(
     r"permission denied|authentication failed|could not read username|could not read password|"
     r"terminal prompts disabled|invalid username or password|access denied|403|401",
@@ -376,6 +377,13 @@ def _box_posture(rep: _Report, env: dict) -> None:
         rep.ok("git push refused (no credential reaches origin)")
     elif _GIT_NO_SSH.search(why):
         rep.ok("git push refused (SSH origin, and the box has no ssh client — no transport)")
+    elif _GIT_NO_ORIGIN.search(why):
+        # Not a network fact either: the checkout has no `origin` to refuse. The shared
+        # .git/config losing its remotes (issue #6) surfaced here first, read as an egress problem.
+        rep.bad(
+            "no `origin` remote in the checkout — push refusal UNPROVEN "
+            "(the shared .git/config lost its remotes? `fy doctor` → shared git config)"
+        )
     else:
         # It failed, but not because a credential was refused — origin was never reached. That
         # is a network fact, not a posture one, and must not certify the credential-less claim.

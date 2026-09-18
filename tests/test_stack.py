@@ -226,6 +226,71 @@ def test_shellenv_emits_mode_env(fake_repo, capsys, monkeypatch):
     assert 'export COMPOSE_PROFILES="${COMPOSE_PROFILES:-metadata}"' in out
 
 
+# ── the shared .git/config: written once per checkout, never per invocation (issue #6) ──
+#
+# `.git/config` is on the virtiofs mount and rewritten by git's lock→rename protocol, which is
+# not atomic across kernels (ADR-0021's index race). foldyard was the file's most frequent
+# writer — `core.fileMode=false` on EVERY shellenv/resolve, from BOTH kernels — and a lost
+# update once left a consumer's config as the 25-byte `[core] fileMode = false`. The pin must
+# stay in the FILE (a host GUI's bundled git — Fork's own 2.50 — reads neither shellenv nor the
+# box shim), so the fix is read-first: git rewrites the file even for an unchanged value.
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@pytest.fixture
+def real_repo(tmp_path):
+    repo = tmp_path / "real"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "remote", "add", "origin", "git@example.com:acme/app.git")
+    return repo
+
+
+def test_pin_filemode_writes_once_and_keeps_the_rest_of_the_config(real_repo):
+    stack.pin_filemode(real_repo)
+    assert _git(real_repo, "config", "--get", "core.fileMode") == "false"
+    assert _git(real_repo, "remote", "get-url", "origin") == "git@example.com:acme/app.git"
+
+
+def test_pin_filemode_does_not_rewrite_an_already_pinned_config(real_repo):
+    _git(real_repo, "config", "core.fileMode", "false")
+    cfg = real_repo / ".git" / "config"
+    before = cfg.stat()
+    stack.pin_filemode(real_repo)
+    after = cfg.stat()
+    # A `git config` write replaces the file (lock → rename), so the inode changes — the
+    # original still exists while the replacement is created. Same inode ⇒ no write happened.
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+def test_pin_filemode_still_writes_when_pinned_to_true(real_repo):
+    _git(real_repo, "config", "core.fileMode", "true")
+    stack.pin_filemode(real_repo)
+    assert _git(real_repo, "config", "--get", "core.fileMode") == "false"
+
+
+def test_pin_filemode_reads_the_repo_local_value_only(real_repo, monkeypatch, tmp_path):
+    # A global `core.fileMode=false` (a host operator's own dotfiles) must not skip the write:
+    # the box's git has no such global, so the SHARED file is the only place both sides agree.
+    gitconfig = tmp_path / "gitconfig"
+    gitconfig.write_text("[core]\n\tfileMode = false\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+    stack.pin_filemode(real_repo)
+    assert _git(real_repo, "config", "--local", "--get", "core.fileMode") == "false"
+
+
+def test_context_pins_filemode_through_the_helper(fake_repo, monkeypatch):
+    seen: list[Path] = []
+    monkeypatch.setattr(stack, "pin_filemode", lambda main: seen.append(main))
+    stack._context(no_machine=True)
+    assert seen == [stack.main_repo()]
+
+
 def test_ensure_dirs_creates_declared_dirs_only(tmp_path, monkeypatch):
     """`fy up` pre-creates what the consumer DECLARES ([project].ensure_dirs) and nothing
     else — no hardcoded `.stubs/` GCP credential files."""

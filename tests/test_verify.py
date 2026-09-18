@@ -282,6 +282,24 @@ def test_git_network_failure_does_not_prove_the_push_refusal(secure_engine, monk
     assert verify.verify() != 0
 
 
+def test_git_missing_origin_is_named_not_blamed_on_the_network(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # The shared .git/config lost its remotes (issue #6): git says 'origin' is not a repository.
+    # Still UNPROVEN — but the message must point at the config, not at egress/credentials,
+    # which is the box's own posture machinery and the wrong place to look.
+    _enter_box(monkeypatch, tmp_path)
+    _, results = secure_engine
+    results["git_rc"] = 128
+    results["git_stderr"] = (
+        "fatal: 'origin' does not appear to be a git repository\n"
+        "fatal: Could not read from remote repository.\n"
+    )
+    assert verify.verify() != 0
+    out = capsys.readouterr().out
+    assert "no `origin` remote" in out and "UNPROVEN" in out and "fy doctor" in out
+
+
 def test_git_auth_failure_does_prove_the_push_refusal(secure_engine, monkeypatch, tmp_path, capsys):
     _enter_box(monkeypatch, tmp_path)
     _, results = secure_engine

@@ -8,6 +8,8 @@
 - **Amended 2026-09-08:** a periodic worktree snapshot recorded under *Rejected alternatives* —
   considered for the destructive-git residuals below, not taken; its event-triggered slice ships
   in `worktree remove`.
+- **Amended 2026-09-18:** `.git/config` added to the shared-file residuals below — foldyard
+  itself was its most frequent writer (issue #6).
 
 ## Context
 
@@ -79,6 +81,18 @@ Shim mechanics (each point traces to a verified failure mode):
   weakness — much rarer (deliberate ops, not polling), failing as a stale `.lock` file rather
   than an emptied index. Host-side GUI auto-fetch off shrinks it; if it ever bites, consider
   `gc.auto=0` in the shared config with maintenance run host-side.
+- **`.git/config` is shared too**, and here foldyard WAS the racer: `shellenv`/`resolve` wrote
+  `core.fileMode=false` unconditionally — every recipe and engine verb, from both kernels — and
+  `git config` rewrites the file (lock → rename) even for an unchanged value. A lost update left
+  a consumer's config as the 25-byte `[core] fileMode = false`: remote, upstreams and git's own
+  init keys gone, and git degrading silently (refs still resolve) until `fy verify` blamed
+  egress for the missing origin (issue #6, 2026-09-11). Now read-first (`stack.pin_filemode`):
+  one write per checkout. The pin stays in the FILE rather than moving to the shim's env,
+  because the writer it protects is host-side git outside any shellenv — a GUI client's own
+  bundled binary (Fork ships its git) is exactly the process that would otherwise see phantom
+  mode changes; the env-injection objection below applies unchanged. `fy doctor`'s
+  `shared git config` row names the signature (`repositoryformatversion`/`bare` missing) with
+  the recovery, and `verify` distinguishes "no origin" from "origin unreachable".
 - Stray `index-box` files are derived state — safe to delete anytime (the shim re-seeds).
 - Follow-up: an `fy verify` assertion that in-box `git` resolves to the shim, so a regression
   fails loudly instead of silently re-arming the race.

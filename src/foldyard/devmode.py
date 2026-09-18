@@ -1112,6 +1112,7 @@ def doctor(deep: bool = False):
     # stack half asks the running containers. Same answer and same fix on either side of the
     # mount, so both are yielded before the split rather than duplicated into each branch.
     yield from _version_window_check()
+    yield from _git_config_check()
     yield from _shadow_volume_check()
     yield from _stack_shadow_check()
     yield from _disk_headroom_check()
@@ -1378,6 +1379,48 @@ def _disk_headroom_check():
         f"{head.render()} on the image/volume store",
         f"{head.render()} — a build can die mid-layer on 'no space left on device'. "
         f"`fy up` reclaims automatically at this level; to sweep now: fy reclaim",
+    )
+
+
+def _git_config_check():
+    """The MAIN checkout's ``.git/config`` — one file on the shared mount, read by both kernels
+    and rewritten under the lock→rename protocol ADR-0021 found non-atomic across them. A lost
+    update leaves git DEGRADING rather than erroring: no remote, no ``core.bare``, refs still
+    resolving — so it surfaced as ``fy verify``'s "remote UNREACHABLE … UNPROVEN", pointing at
+    egress when the cause was a 25-byte config (issue #6). This row names it.
+
+    fail = git's own init keys are gone (the signature: ``git init`` always writes
+    ``repositoryformatversion`` + ``bare``, foldyard's pin never removes them); warn = intact but
+    no remote (``verify`` can't prove the push refusal without an origin); absent outside a git
+    repo — a scratch dir is not a finding."""
+    from . import stack
+
+    try:
+        main = stack.main_repo()
+    except SystemExit:
+        return
+    rc, out = _run(["git", "-C", str(main), "config", "--local", "--list"])
+    if rc != 0:
+        return
+    keys = {ln.partition("=")[0] for ln in out.splitlines()}
+    lost = [k for k in ("core.repositoryformatversion", "core.bare") if k not in keys]
+    rc, out = _run(["git", "-C", str(main), "remote"])
+    remotes = [r for r in out.splitlines() if r.strip()] if rc == 0 else []
+    if lost:
+        yield _result(
+            False,
+            "shared git config",
+            "",
+            f"{main / '.git' / 'config'} lost {', '.join(lost)} — the shared-mount lost update "
+            "(issue #6). Restore `git config core.repositoryformatversion 0`, `core.bare false`, "
+            "then your remotes + branch upstreams (FETCH_HEAD holds the last fetched URL)",
+        )
+        return
+    yield _result(
+        True if remotes else None,
+        "shared git config",
+        f"intact ({len(remotes)} remote{'s' if len(remotes) != 1 else ''}: {', '.join(remotes)})",
+        "intact, but no remote — `fy verify` cannot prove the push refusal without an origin",
     )
 
 
