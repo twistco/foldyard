@@ -163,31 +163,41 @@ matching the VM's OWN traffic *on the host*, where the guest has no reach: Lima'
 the guest's user-mode network inside `qemu-system`, so every guest packet leaves the host as that
 process, and host nftables can single it out. Flushing the guest wall then gains nothing.
 
-- **The match is a cgroup v2 scope, not a uid** — the operator's other work shares their uid;
-  only the VM lives in the VM's scope. To make that scope predictable, `machine._start` launches
-  the backend's start under `systemd-run --user --scope --unit fy-machine-<vm>.scope`, so
-  limactl, the hostagent and QEMU all land in one transient cgroup and nothing else does.
-- **Rendered for where the VM actually sits, on every `fy up`.** `foldyard.hostwall.render`
-  emits a per-VM table (`fy_host_wall_<vm>`): established/related, loopback to this project's
-  daemon bands (the same `base..base+89` spans section 2 opens) + the VM's own loopback
-  plumbing, the host's resolvers (from `resolv.conf`) on `:53`, else REJECT. The plumbing is
-  the loopback listeners the VM's host processes hold — `hostwall.listener_ports`, socket
-  inodes from `/proc/<pid>/fd` against `/proc/net/*` — because the guest's DNS is Lima's host
-  resolver: the hostagent serves it on a random loopback udp+tcp port and QEMU forwards each
-  query there (the first rig run walled DNS by allowing only `resolv.conf`'s stub). QEMU's SSH
-  `hostfwd` is the other one. The scope is read from the VM pid's `/proc/<pid>/cgroup`, the SSH
-  port from `limactl list` (Lima allocates all of these per boot), and the
-  table is loaded with `sudo nft -f -` as a declare-then-delete-then-declare idempotent replace —
-  after every start, a revive, and each steady-state `fy up`, since it can't be read back
-  without root. That root prompt is the price; a passwordless sudoers rule for `nft` is the
-  operator's call and makes it silent.
+- **The match is a cgroup v2 slice, not a uid** — the operator's other work shares their uid;
+  only the VM lives under the VM's slice. To make that predictable, `machine._start` launches
+  the backend's start under `systemd-run --user --scope --slice fy-machine-<vm>.slice --unit
+  fy-machine-<vm>.scope`, so limactl, the hostagent and QEMU all land in one transient scope
+  under one per-VM slice and nothing else does. The SLICE is what the table matches:
+  `socket cgroupv2` compiles the path to a cgroup ID at load, a scope dies with its last
+  process (new ID next start), a slice survives being emptied — the same ID across every VM
+  restart (proven on a GitHub `ubuntu-24.04` runner, 2026-09-18; a slice stopped and
+  recreated DID get a new ID, and the loaded rule then matched nothing: fail-open, which is why
+  what the table still bites is a thing to probe, never assume).
+- **Boot-stable: nothing in the table comes from a running VM.** `foldyard.hostwall.render`
+  emits a per-VM table (`fy_host_wall_<vm>`): on OUTPUT, established/related, `:53` to any
+  resolver (both transports; the hostagent resolves for the guest, and resolvers change with
+  the network), loopback allowed out under a per-project ct mark (foldyard's byte over the
+  proxy band base — unique per project on the host by the allocator's construction, so two
+  projects' tables can never judge each other's flows), else REJECT; on INPUT, loopback
+  flows carrying that mark pass only when the LISTENING socket is in the VM's own slice (the
+  hostagent's resolver, QEMU's SSH `hostfwd` — the ports Lima picks per boot, never named) or
+  on this project's daemon bands (the same `base..base+89` spans section 2 opens), else REJECT.
+  The earlier form named those ports (read from `limactl list` and the VM pids' socket inodes)
+  and so had to be re-rendered every boot; the ct-mark form was proven on the runner
+  (2026-09-18): the mark set on OUTPUT is visible on INPUT for the same loopback packet, and
+  `socket cgroupv2` on INPUT resolves the listener for a SYN. The slice is read from the VM
+  pid's `/proc/<pid>/cgroup`, and the table is loaded with `sudo nft -f -` as a
+  declare-then-delete-then-declare idempotent replace — after every start, a revive, and each
+  steady-state `fy up`, since it can't be read back without root. That root prompt is the
+  price; a passwordless sudoers rule for `nft` is the operator's call and makes it silent.
 - **Fail-closed, never a silent downgrade to the guest wall alone.** Preflight refuses
   `host_wall` without `wall`, and on a host without `nft` + cgroup v2 (macOS reports itself
   unavailable rather than branching on the OS). `ensure` refuses a VM found OUTSIDE its own scope
   — started by hand, or before the option was turned on — because walling the login session's
-  scope it landed in would wall the operator's whole shell: `fy machine stop && fy up`. An
-  unreadable SSH port or a failed load also stop `fy up`. `fy machine rm` removes the table;
-  `stop` leaves it (inert once the scope is empty, re-rendered on the next up).
+  scope it landed in would wall the operator's whole shell — and a VM in its scope but not
+  under its slice (an older foldyard started it) would leave the table matching nothing:
+  `fy machine stop && fy up`. A failed load also stops `fy up`. `fy machine rm` removes the
+  table; `stop` leaves it (the slice survives idle, so it stays bound to the right cgroup).
 
 Run end to end on the Linux rig (2026-09-12, `fy machine ensure` with `MACHINE_HOST_WALL=1`
 against the example): the VM created and started inside its scope, direct guest egress refused by

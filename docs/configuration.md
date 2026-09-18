@@ -227,21 +227,24 @@ disk_gib = 60
   the box has no way out at all. Default: `false` (`init` writes `true`). Env: `MACHINE_WALL`
   (`1`/`true`/`on`/`yes`).
 - **`host_wall`** — ALSO enforce the wall on the **host**: nftables matching the VM process's
-  own traffic by its cgroup v2 scope (foldyard starts the VM inside
-  `systemd-run --user --scope --unit fy-machine-<vm>.scope`), allowing only this project's
-  daemon band, the VM's own loopback plumbing (the forwarded SSH port and the hostagent's DNS
-  resolver, discovered from its processes) and the host's resolvers. So a guest-kernel exploit
-  that flushes the in-VM wall still leaves through a host that rejects it. Needs `wall = true`
+  own traffic by its cgroup v2 slice (foldyard starts the VM inside
+  `systemd-run --user --scope --slice fy-machine-<vm>.slice --unit fy-machine-<vm>.scope`),
+  allowing only DNS, this project's daemon band, and loopback flows whose LISTENER is in the
+  VM's own slice (the forwarded SSH port, the hostagent's DNS resolver — whatever ports Lima
+  picked this boot; judged on the input hook, so the table names none of them). So a
+  guest-kernel exploit that flushes the in-VM wall still leaves through a host that rejects it.
+  The rendered table is a function of the VM name, its slice and the bands alone — the same
+  text on every boot. Needs `wall = true`
   and a host with `nft` + cgroup v2 + a kernel built with nftables' `socket` expression
   (`CONFIG_NFT_SOCKET`; the match is `socket cgroupv2`) — a Linux host; macOS reports it
   unavailable, the stock WSL2 kernel lacks the expression, and preflight refuses either rather
   than silently downgrading (on WSL2 the in-VM wall still applies; a custom kernel is the only
   route to the host wall there). Loading the table is `sudo nft -f -` on every
-  `fy up` (re-rendered each time — Lima allocates the SSH port per boot); a passwordless sudoers
-  rule for `nft` makes it silent. A VM already running outside its own scope (started before
-  the option was on) is refused with `fy machine stop && fy up`. `fy machine rm` removes the
-  table; `fy machine stop` leaves it (inert without the scope). Default: `false`. Env:
-  `MACHINE_HOST_WALL`.
+  `fy up` (an idempotent replace of the same text); a passwordless sudoers rule for `nft` makes
+  it silent. A VM already running outside its own scope-under-slice (started before the option
+  was on, or by an older foldyard) is refused with `fy machine stop && fy up`. `fy machine rm`
+  removes the table; `fy machine stop` leaves it (the slice survives idle, so the table stays
+  bound to the right cgroup). Default: `false`. Env: `MACHINE_HOST_WALL`.
 - **`vmtype`** — the Lima **driver**, i.e. the hypervisor the VM actually runs on: `"vz"`
   (Apple Virtualization.framework) | `"qemu"` | `"krunkit"` | any external Lima driver plugin.
   Lima-only. **Create-only** — like mounts and sizing, changing it means `fy machine recreate`.

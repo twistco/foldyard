@@ -203,11 +203,6 @@ class Backend(ABC):
         """:meth:`host_pids`' first entry, or ``0``."""
         return next(iter(self.host_pids(name)), 0)
 
-    def ssh_port(self, name: str) -> int:
-        """The host-loopback port the backend forwards to the guest's SSH — the one loopback
-        port besides the daemon band the host-side wall must leave open. ``0`` when unknown."""
-        return 0
-
     def stop(self, name: str) -> bool:
         return _run(self.stop_argv(name)).returncode == 0
 
@@ -693,13 +688,6 @@ class LimaBackend(Backend):
             )
         except (KeyError, ValueError):
             return None
-
-    def ssh_port(self, name: str) -> int:
-        inst = self._instance(name)
-        try:
-            return int((inst or {}).get("sshLocalPort") or 0)
-        except (TypeError, ValueError):
-            return 0
 
     def host_pids(self, name: str) -> list[int]:
         """Lima's QEMU driver writes ``qemu.pid`` in the instance dir and the hostagent writes

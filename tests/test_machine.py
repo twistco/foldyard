@@ -103,15 +103,11 @@ class FakeBackend:
         self.calls.append(f"provision:{self._provision}")
         return True
 
-    # the host-side wall's inputs: the VM's host processes, and the forwarded SSH port
+    # the host-side wall's input: the VM's host processes
     _pids: tuple[int, ...] = ()
-    _ssh_port = 0
 
     def host_pids(self, name):
         return list(self._pids)
-
-    def ssh_port(self, name):
-        return self._ssh_port
 
 
 @pytest.fixture
@@ -827,33 +823,28 @@ def test_delete_refused_in_box(fake, monkeypatch):
 # steady-state `fy up`, for the scope the VM ACTUALLY sits in; refused outside its own scope ──
 
 
-_OWN_SCOPE = "user.slice/user-1000.slice/user@1000.service/app.slice/fy-machine-homelab.scope"
+_OWN_SLICE = "user.slice/user-1000.slice/user@1000.service/fy.slice/fy-machine-homelab.slice"
+_OWN_SCOPE = f"{_OWN_SLICE}/fy-machine-homelab.scope"
 
 
 @pytest.fixture
 def host_wall_env(lima_env, monkeypatch):
     """`lima_env` with the host wall wanted and every host input a seam: returns
-    ``(backend, guest, installs, set_scope)`` — `installs` records (vm, scope, ssh_port) per
+    ``(backend, guest, installs, set_scope)`` — `installs` records (vm, slice) per
     `hostwall.install`, `set_scope` is what the VM's pid resolves to in /proc."""
     be, guest, set_wall, guest_ok = lima_env
     set_wall(True)
     guest_ok()
     be._provision = machine.provision_id()
-    be._pids, be._ssh_port = (4343, 4242), 45285
+    be._pids = (4343, 4242)
     monkeypatch.setattr(machine.config, "machine_host_wall", lambda: True)
     monkeypatch.setattr(machine.hostwall, "available", lambda: True)
-    monkeypatch.setattr(machine.hostwall, "resolvers", lambda: ("127.0.0.53",))
-    installs: list[tuple[str, str, int]] = []
+    installs: list[tuple[str, str]] = []
     scope = {"path": ""}
     monkeypatch.setattr(machine.hostwall, "vm_cgroup_scope", lambda pid: scope["path"])
-    # the loopback plumbing is discovered from ALL the VM's host pids (hostagent DNS + ssh fwd)
-    monkeypatch.setattr(
-        machine.hostwall, "listener_ports", lambda *pids: (("udp", 38020),) if pids else ()
-    )
 
-    def install(vm, sc, port, resolvers, plumbing):
-        assert plumbing == (("udp", 38020),), "the hostagent's DNS listener must be opened"
-        installs.append((vm, sc, port))
+    def install(vm, slice_path):
+        installs.append((vm, slice_path))
         return machine.hostwall.LoadResult(True)
 
     monkeypatch.setattr(machine.hostwall, "install", install)
@@ -871,8 +862,8 @@ def test_host_wall_start_runs_the_vm_in_its_own_scope(host_wall_env, tmp_path):
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     prefix = " ".join(machine.hostwall.scoped_argv_prefix("homelab"))
     assert be.calls == [f"start:homelab under {prefix}"]
-    # …and the wall is rendered for where the VM landed, with THIS boot's SSH port
-    assert installs == [("homelab", _OWN_SCOPE, 45285)]
+    # …and the wall is rendered for the SLICE the VM landed under — nothing from this boot
+    assert installs == [("homelab", _OWN_SLICE)]
 
 
 def test_host_wall_is_reloaded_on_every_steady_state_up(host_wall_env, tmp_path):
@@ -903,12 +894,15 @@ def test_host_wall_refuses_when_the_vm_pid_is_unknown(host_wall_env, tmp_path):
     assert installs == []
 
 
-def test_host_wall_refuses_when_the_ssh_port_is_unknown(host_wall_env, tmp_path, capsys):
-    be, _guest, installs, _ = host_wall_env
-    be._ssh_port = 0
+def test_host_wall_refuses_a_vm_scope_outside_its_slice(host_wall_env, tmp_path, capsys):
+    # The right scope name, but started before the slice existed (an older foldyard): the
+    # table would bind to a slice the VM is not under and match nothing — refuse, same cure.
+    _be, _guest, installs, set_scope = host_wall_env
+    set_scope("user.slice/user-1000.slice/user@1000.service/app.slice/fy-machine-homelab.scope")
     with pytest.raises(SystemExit):
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    assert installs == [] and "SSH port" in capsys.readouterr().err
+    assert installs == []
+    assert "fy machine stop && fy up" in capsys.readouterr().err
 
 
 def test_host_wall_asked_for_on_a_host_that_cannot_enforce_it_is_a_hard_stop(

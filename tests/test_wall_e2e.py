@@ -106,12 +106,12 @@ def repo(tmp_path_factory):
             print(f"⚠ could not remove host wall table {TABLE}: {gone.stderr.strip()}")
 
 
-def test_host_wall_table_is_loaded_for_the_vms_own_scope(repo):
+def test_host_wall_table_is_loaded_for_the_vms_own_slice(repo):
     table = subprocess.run(
         ["sudo", "-n", "nft", "list", "table", "inet", TABLE], capture_output=True, text=True
     )
     assert table.returncode == 0, table.stderr
-    assert f"fy-machine-{VM}.scope" in table.stdout, table.stdout
+    assert f"fy-machine-{VM}.slice" in table.stdout, table.stdout
     assert "reject" in table.stdout, table.stdout
 
 

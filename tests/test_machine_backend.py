@@ -521,14 +521,7 @@ def test_backends_without_a_provisionable_guest_record_nothing():
         assert be.set_provision("x", "#!/bin/bash\n# fy-provision y\n") is False
 
 
-# ── the host-side wall's inputs (lima): the VM's host pid + its forwarded SSH port ─────────
-
-
-def test_lima_ssh_port_comes_from_list_json(monkeypatch):
-    rows = _json_lines({"name": "acme", "status": "Running", "sshLocalPort": 45285})
-    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(0, rows))
-    assert mb.LimaBackend().ssh_port("acme") == 45285
-    assert mb.LimaBackend().ssh_port("absent") == 0
+# ── the host-side wall's input (lima): the VM's host pids ──────────────────────────────────
 
 
 def test_lima_ssh_target_comes_from_the_instances_ssh_config(monkeypatch, tmp_path):
@@ -583,7 +576,6 @@ def test_lima_vm_pid_reads_the_drivers_pid_file(monkeypatch, tmp_path):
 def test_backends_without_a_host_wall_input_report_nothing():
     for be in (mb.PodmanBackend(),):
         assert be.host_pids("x") == [] and be.vm_pid("x") == 0
-        assert be.ssh_port("x") == 0
 
 
 def test_lima_start_runs_under_the_given_prefix(monkeypatch):

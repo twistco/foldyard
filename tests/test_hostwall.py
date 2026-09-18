@@ -1,17 +1,21 @@
 """hostwall.py — the Linux host-side egress wall for the machine VM. Pure rendering + the
 capability gate + cgroup discovery are unit-tested here; the live nftables behaviour (guest
 egress refused, DNS + band allowed, operator untouched) was validated on the GCP rig
-(docs/isolation-layers.md). No root, no nft, no VM needed for these."""
+(docs/isolation-layers.md), and the boot-STABLE form — loopback decided on the INPUT hook by the
+listener's cgroup, a per-project ct mark carrying the origin across — on a GitHub ubuntu-24.04 runner
+(2026-09-18). No root, no nft, no VM needed for these."""
 
 from __future__ import annotations
 
+import re
 import subprocess
 
 import pytest
 
 from foldyard import config, hostwall
 
-_SCOPE = "user.slice/user-1000.slice/user@1000.service/app.slice/fy-machine-acme.scope"
+_SLICE = "user.slice/user-1000.slice/user@1000.service/fy.slice/fy-machine-acme.slice"
+_SCOPE = f"{_SLICE}/fy-machine-acme.scope"
 
 
 @pytest.fixture
@@ -28,7 +32,8 @@ def test_table_name_is_per_vm_and_nft_safe():
 
 
 def test_cgroup_level_counts_components():
-    assert hostwall.cgroup_level(_SCOPE) == 5
+    assert hostwall.cgroup_level(_SLICE) == 5
+    assert hostwall.cgroup_level(_SCOPE) == 6
     assert hostwall.cgroup_level("/user.slice/") == 1
     assert hostwall.cgroup_level("/") == 0
 
@@ -58,25 +63,52 @@ def test_available_needs_nft_and_cgroup2(monkeypatch):
 
 
 def test_render_matches_the_validated_ruleset(bands):
-    rs = hostwall.render("acme", _SCOPE, ssh_port=45285)
-    # the output hook matches the VM's cgroup at its own level, and jumps to the vm chain
-    assert f'socket cgroupv2 level 5 "{_SCOPE}" jump vm' in rs
+    rs = hostwall.render("acme", _SLICE)
+    # the output hook matches the VM's SLICE at its own level, and jumps to the vm chain
+    assert f'socket cgroupv2 level 5 "{_SLICE}" jump vm' in rs
     # established first, so replies to allowed flows are never re-evaluated
     assert "ct state established,related accept" in rs
-    # loopback: Lima's forwarded SSH port + THIS project's two daemon bands, nothing else
-    assert 'oif "lo" tcp dport { 45285, 41000-41089, 41100-41189 } accept' in rs
-    # QEMU's slirp DNS to the host resolver stays open (both transports)
-    assert "ip daddr { 127.0.0.53 } udp dport 53 accept" in rs
-    assert "ip daddr { 127.0.0.53 } tcp dport 53 accept" in rs
+    # DNS to any resolver (both transports): the hostagent resolves on the guest's behalf, and
+    # resolvers change with the network — nothing here may vary per boot or per network
+    assert "    udp dport 53 accept\n    tcp dport 53 accept" in rs
+    # loopback is ALLOWED OUT but MARKED, so the input hook can decide by who is listening
+    mark = hostwall.ct_mark()
+    assert f'oif "lo" ct mark set {mark:#010x} accept' in rs
+    assert f'iif "lo" ct mark {mark:#010x} jump lo' in rs
+    # …and on input only two receivers pass: a socket in the VM's own slice (the hostagent's
+    # resolver, QEMU's SSH forward — whatever ports Lima picked this boot) or THIS project's bands
+    assert f'socket cgroupv2 level 5 "{_SLICE}" accept' in rs
+    assert "tcp dport { 41000-41089, 41100-41189 } accept" in rs
     # everything else is REJECTED (fail-closed), tcp with a reset so the guest fails fast
-    assert "meta l4proto tcp counter reject with tcp reset" in rs
-    assert "reject with icmpx type admin-prohibited" in rs
+    assert rs.count("meta l4proto tcp counter reject with tcp reset") == 2
+    assert rs.count("reject with icmpx type admin-prohibited") == 2
+
+
+def test_render_names_no_per_boot_or_per_network_fact(bands):
+    """The whole point of the stable form: an operator can apply the table ONCE. Nothing in it may
+    come from a running VM (Lima's forwarded SSH port, the hostagent's listener ports) or from the
+    network (resolv.conf) — only the VM name, its slice and the project's bands."""
+    rs = hostwall.render("acme", _SLICE)
+    assert "127.0.0.53" not in rs and "daddr" not in rs
+    numbers = set(re.findall(r"\b\d{2,5}\b", rs.replace(_SLICE, ""))) - {"53"}
+    assert numbers == {"41000", "41089", "41100", "41189"}, numbers
+
+
+def test_ct_mark_is_the_projects_band_under_foldyards_byte(bands, monkeypatch):
+    """Two projects' tables both hook INPUT, each jumping on ITS mark — a shared value would let
+    project A's table judge project B's loopback flows (and reject them: B's slice is not A's,
+    so B's VM would lose its own plumbing with nothing naming the cause). The mark is therefore
+    the project's proxy band base — unique per project on this host by the allocator's
+    construction, never by chance — under foldyard's byte."""
+    assert hostwall.ct_mark() == (0xF4 << 24) | 41000
+    monkeypatch.setattr(config, "proxy_port_base", lambda: 42000)
+    assert hostwall.ct_mark() == (0xF4 << 24) | 42000
 
 
 def test_render_is_idempotent_by_construction(bands):
     """The delete-then-declare pair means a re-apply replaces the table atomically — never
     errors on an existing table, never stacks a second copy."""
-    rs = hostwall.render("acme", _SCOPE, ssh_port=22)
+    rs = hostwall.render("acme", _SLICE)
     lines = [ln.strip() for ln in rs.splitlines()]
     assert lines[0] == "table inet fy_host_wall_acme"  # declare (so the delete can't miss)
     assert lines[1] == "delete table inet fy_host_wall_acme"
@@ -88,14 +120,9 @@ def test_render_bands_are_this_projects_only(monkeypatch):
     daemons, never a sibling's (the same scoping the in-VM wall enforces)."""
     monkeypatch.setattr(config, "proxy_port_base", lambda: 42000)
     monkeypatch.setattr(config, "gcp_minter_port_base", lambda: 42100)
-    rs = hostwall.render("other", _SCOPE, ssh_port=22)
+    rs = hostwall.render("other", _SLICE)
     assert "42000-42089, 42100-42189" in rs
     assert "41000" not in rs
-
-
-def test_render_honours_custom_resolvers(bands):
-    rs = hostwall.render("acme", _SCOPE, ssh_port=22, resolvers=("10.0.0.1", "10.0.0.2"))
-    assert "ip daddr { 10.0.0.1, 10.0.0.2 } udp dport 53 accept" in rs
 
 
 def test_install_streams_over_stdin_as_root(bands, monkeypatch):
@@ -108,7 +135,7 @@ def test_install_streams_over_stdin_as_root(bands, monkeypatch):
 
     monkeypatch.setattr(hostwall, "available", lambda: True)
     monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
-    assert hostwall.install("acme", _SCOPE, ssh_port=22).ok is True
+    assert hostwall.install("acme", _SLICE).ok is True
     # loaded from stdin (`nft -f -`), never a temp file a lesser process could swap
     assert seen["cmd"] == ["sudo", "nft", "-f", "-"]
     assert seen["input"] is not None and "fy_host_wall_acme" in seen["input"]
@@ -119,78 +146,65 @@ def test_install_declines_when_the_host_cannot_enforce(bands, monkeypatch):
     monkeypatch.setattr(
         hostwall.subprocess, "run", lambda *a, **k: pytest.fail("must not shell nft")
     )
-    assert hostwall.install("acme", _SCOPE, ssh_port=22).ok is False
+    assert hostwall.install("acme", _SLICE).ok is False
 
 
-def test_install_declines_on_an_empty_scope(bands, monkeypatch):
-    """An empty scope (VM pid gone) must never wall the whole world — decline, don't render a
+def test_install_declines_on_an_empty_slice(bands, monkeypatch):
+    """An empty slice (VM pid gone) must never wall the whole world — decline, don't render a
     table whose match is `cgroupv2 level 0 ""`."""
     monkeypatch.setattr(hostwall, "available", lambda: True)
     monkeypatch.setattr(
         hostwall.subprocess, "run", lambda *a, **k: pytest.fail("must not shell nft")
     )
-    assert hostwall.install("acme", "", ssh_port=22).ok is False
+    assert hostwall.install("acme", "").ok is False
 
 
-# ── wiring into the machine lifecycle: the per-VM scope, the resolver, idempotent removal ──
+# ── wiring into the machine lifecycle: the per-VM slice + scope, idempotent removal ──
 
 
-def test_scope_unit_is_per_vm_and_systemd_safe():
+def test_scope_and_slice_units_are_per_vm_and_systemd_safe():
     assert hostwall.scope_unit("acme") == "fy-machine-acme.scope"
     assert hostwall.scope_unit("acme two!") == "fy-machine-acme_two_.scope"
+    assert hostwall.slice_unit("acme") == "fy-machine-acme.slice"
+    assert hostwall.slice_unit("acme two!") == "fy-machine-acme_two_.slice"
 
 
-def test_scoped_argv_prefix_runs_the_start_in_its_own_transient_scope():
+def test_scoped_argv_prefix_runs_the_start_in_its_own_scope_under_its_own_slice():
     """`systemd-run --user --scope` puts limactl AND everything it forks (the hostagent, QEMU)
     in ONE per-VM cgroup, so the wall's match is predictable — never the login session's scope,
-    which would wall the operator's whole shell."""
+    which would wall the operator's whole shell. The scope sits under a per-VM SLICE, and the
+    slice is what the wall matches: a scope dies with its last process, a slice survives idle —
+    the same cgroup id across every VM restart, which is what lets an applied table stay valid."""
     assert hostwall.scoped_argv_prefix("acme") == [
         "systemd-run",
         "--user",
         "--scope",
         "--quiet",
         "--collect",
+        "--slice",
+        "fy-machine-acme.slice",
         "--unit",
         "fy-machine-acme.scope",
     ]
 
 
-def test_in_own_scope_requires_the_vm_scope_as_the_leaf():
+def test_in_own_scope_requires_the_vm_scope_under_the_vm_slice():
     assert hostwall.in_own_scope("acme", _SCOPE) is True
     # the login session's scope: walling it would wall the operator's whole session
     assert hostwall.in_own_scope("acme", "user.slice/user-1000.slice/session-2.scope") is False
     # a sibling VM's scope is not ours either
     assert hostwall.in_own_scope("acme", _SCOPE.replace("acme", "other")) is False
+    # the right scope but not under its slice (started before the slice existed): the wall
+    # would match nothing — refuse, as for any other misplaced VM
+    unsliced = "user.slice/user-1000.slice/user@1000.service/app.slice/fy-machine-acme.scope"
+    assert hostwall.in_own_scope("acme", unsliced) is False
     assert hostwall.in_own_scope("acme", "") is False
 
 
-def test_resolvers_come_from_resolv_conf(tmp_path, monkeypatch):
-    conf = tmp_path / "resolv.conf"
-    conf.write_text(
-        "# Generated\nnameserver 10.0.0.2\nsearch example.internal\nnameserver fd00::1\n"
-        "options edns0\nnameserver 8.8.8.8\n"
-    )
-    monkeypatch.setattr(hostwall, "RESOLV_CONF", conf)
-    assert hostwall.resolvers() == ("10.0.0.2", "fd00::1", "8.8.8.8")
-
-
-def test_resolvers_fall_back_to_the_stub_when_unreadable(tmp_path, monkeypatch):
-    monkeypatch.setattr(hostwall, "RESOLV_CONF", tmp_path / "missing")
-    assert hostwall.resolvers() == hostwall.DEFAULT_RESOLVERS
-    empty = tmp_path / "empty"
-    empty.write_text("# nothing\n")
-    monkeypatch.setattr(hostwall, "RESOLV_CONF", empty)
-    assert hostwall.resolvers() == hostwall.DEFAULT_RESOLVERS
-
-
-def test_render_splits_resolvers_by_address_family(bands):
-    rs = hostwall.render("acme", _SCOPE, ssh_port=22, resolvers=("10.0.0.2", "fd00::1"))
-    assert "ip daddr { 10.0.0.2 } udp dport 53 accept" in rs
-    assert "ip6 daddr { fd00::1 } udp dport 53 accept" in rs
-    assert "ip6 daddr { fd00::1 } tcp dport 53 accept" in rs
-    # no empty set is ever rendered (nft rejects `{ }`)
-    v4_only = hostwall.render("acme", _SCOPE, ssh_port=22, resolvers=("10.0.0.2",))
-    assert "ip6 daddr" not in v4_only
+def test_vm_slice_is_the_scopes_parent():
+    assert hostwall.vm_slice(_SCOPE) == _SLICE
+    assert hostwall.vm_slice("fy-machine-acme.scope") == ""
+    assert hostwall.vm_slice("") == ""
 
 
 def test_remove_is_idempotent_by_construction(monkeypatch):
@@ -210,63 +224,6 @@ def test_remove_is_idempotent_by_construction(monkeypatch):
         "table inet fy_host_wall_acme",
         "delete table inet fy_host_wall_acme",
     ]
-
-
-# ── the VM's own host-side plumbing: loopback listeners its processes hold (Lima's host
-# resolver in the hostagent, QEMU's SSH hostfwd) — discovered from /proc, allowed on lo ──
-
-
-def _proc(tmp_path, pids: dict[int, list[int]], tcp: str, udp: str, tcp6: str = "", udp6: str = ""):
-    """A fake /proc: per-pid fd/ symlinks to socket inodes, plus the net tables."""
-    root = tmp_path / "proc"
-    for pid, inodes in pids.items():
-        fd = root / str(pid) / "fd"
-        fd.mkdir(parents=True)
-        for i, ino in enumerate(inodes):
-            (fd / str(i)).symlink_to(f"socket:[{ino}]")
-        (fd / "99").symlink_to("/dev/null")  # a non-socket fd, must be ignored
-    net = root / "net"
-    net.mkdir()
-    hdr = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
-    for name, body in (("tcp", tcp), ("udp", udp), ("tcp6", tcp6), ("udp6", udp6)):
-        (net / name).write_text(hdr + body)
-    return root
-
-
-def _row(local: str, st: str, inode: int) -> str:
-    return f"   0: {local} 00000000:0000 {st} 00000000:00000000 00:00000000 00000000  1000        0 {inode} 1 0 100 0 0 0 0\n"
-
-
-def test_listener_ports_finds_the_vm_processes_loopback_listeners(tmp_path, monkeypatch):
-    root = _proc(
-        tmp_path,
-        {1093: [500, 501, 502], 1114: [600, 601]},
-        # 1093 (hostagent): DNS on 127.0.0.1:38020 tcp LISTEN + udp; 1114 (QEMU): ssh hostfwd
-        # 127.0.0.1:40209 LISTEN, an outbound udp socket bound to 0.0.0.0 (slirp), and an
-        # ESTABLISHED tcp flow — only the loopback LISTENERS count
-        tcp=_row("0100007F:9484", "0A", 500)
-        + _row("0100007F:9D11", "0A", 600)
-        + _row("0100007F:8409", "01", 601),
-        udp=_row("0100007F:9484", "07", 501) + _row("00000000:A3D2", "07", 502),
-        tcp6=_row("00000000000000000000000001000000:9484", "0A", 700),  # not one of ours
-    )
-    monkeypatch.setattr(hostwall, "PROC", root)
-    assert hostwall.listener_ports(1093, 1114) == (("tcp", 38020), ("tcp", 40209), ("udp", 38020))
-
-
-def test_listener_ports_ignores_a_gone_pid_and_unreadable_tables(tmp_path, monkeypatch):
-    monkeypatch.setattr(hostwall, "PROC", tmp_path / "nope")
-    assert hostwall.listener_ports(1, 2) == ()
-
-
-def test_render_opens_the_plumbing_on_loopback_only(bands):
-    rs = hostwall.render(
-        "acme", _SCOPE, ssh_port=45285, plumbing=(("tcp", 38020), ("udp", 38020), ("tcp", 40209))
-    )
-    assert 'oif "lo" tcp dport { 45285, 41000-41089, 41100-41189, 38020, 40209 } accept' in rs
-    assert 'oif "lo" udp dport { 38020 } accept' in rs
-    # nothing without plumbing: no empty udp set
-    assert "udp dport {" not in hostwall.render("acme", _SCOPE, ssh_port=45285)
 
 
 # ── the kernel half of the capability: nftables' `socket` expression (CONFIG_NFT_SOCKET) ──
@@ -361,7 +318,7 @@ def test_install_hands_back_nfts_own_words_on_failure(bands, monkeypatch):
 
     monkeypatch.setattr(hostwall, "available", lambda: True)
     monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
-    res = hostwall.install("acme", _SCOPE, ssh_port=22)
+    res = hostwall.install("acme", _SLICE)
     assert res.ok is False
     assert res.stderr == _NFT_ENOENT
 
@@ -374,7 +331,7 @@ def test_install_declines_when_the_loader_cannot_launch(bands, monkeypatch):
 
     monkeypatch.setattr(hostwall, "available", lambda: True)
     monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
-    res = hostwall.install("acme", _SCOPE, ssh_port=22)
+    res = hostwall.install("acme", _SLICE)
     assert res.ok is False
     assert "sudo" in res.stderr
 

@@ -97,7 +97,8 @@ def _start() -> bool:
             return False
     _err(f"▶ starting {BACKEND.name} machine '{MACHINE}'…")
     # Under the host wall the VM's host processes are launched inside their own transient
-    # cgroup scope, so the wall has one predictable thing to match (see _apply_host_wall).
+    # cgroup scope under a per-VM slice, so the wall has one predictable, restart-stable thing
+    # to match (see _apply_host_wall).
     prefix = hostwall.scoped_argv_prefix(MACHINE) if _host_wall_wanted() else []
     if not BACKEND.start(MACHINE, prefix=prefix):
         _err(f"✗ '{BACKEND.cli}' failed to start '{MACHINE}'.")
@@ -154,12 +155,14 @@ def _revive() -> bool:
 # guest-KERNEL exploit reaching VM-root can flush it; this one matches the VM process's own
 # traffic on the host — where the guest has no reach — and allows only this project's daemon
 # band (hostwall.py has the ruleset and the why). Two things make it wire-able: the VM is
-# STARTED inside its own transient systemd scope (`_start`), and after every start — and on
-# every steady-state `fy up`, since the table can't be read back without root — the ruleset is
-# rendered for the scope the VM ACTUALLY sits in and loaded as root (an idempotent replace).
-# Lima allocates the forwarded SSH port per boot, which is why it is re-read every time. A VM
-# found outside its own scope (started by hand, or before `host_wall` was turned on) is REFUSED:
-# matching the login session's scope instead would wall the operator's entire shell.
+# STARTED inside its own transient systemd scope under its own slice (`_start`), and after
+# every start — and on every steady-state `fy up`, since the table can't be read back without
+# root — the ruleset is rendered for the slice the VM ACTUALLY sits under and loaded as root (an
+# idempotent replace). The ruleset names nothing from this boot (Lima's per-boot ports are
+# judged by the listener's cgroup instead), so the reload is a no-op replace of the same text.
+# A VM found outside its own scope-under-slice (started by hand, or before `host_wall` was
+# turned on) is REFUSED: matching the login session's scope instead would wall the operator's
+# entire shell, and a slice the VM is not under would match nothing.
 
 
 def _host_wall_wanted() -> bool:
@@ -182,15 +185,8 @@ def _apply_host_wall() -> None:
         _err("  the host wall has nothing safe to match — walling the scope it is in would wall")
         _err("  the shell that started it. Restart it under foldyard:   fy machine stop && fy up")
         raise SystemExit(1)
-    ssh_port = BACKEND.ssh_port(MACHINE)
-    if not ssh_port:
-        _err(f"✗ can't read '{MACHINE}'s forwarded SSH port — the host wall would cut limactl off.")
-        raise SystemExit(1)
     _err(f"▶ loading the host-side wall for '{MACHINE}' (root: sudo nft)…")
-    # The VM's own loopback plumbing (the hostagent's DNS resolver, QEMU's SSH forward) is
-    # discovered from its processes, never guessed: Lima allocates those ports per boot too.
-    plumbing = hostwall.listener_ports(*pids)
-    loaded = hostwall.install(MACHINE, scope, ssh_port, hostwall.resolvers(), plumbing)
+    loaded = hostwall.install(MACHINE, hostwall.vm_slice(scope))
     if not loaded.ok:
         # nft's own words first (they were captured, not streamed), then what they mean when
         # foldyard knows — a kernel without the `socket` expression is the case a WSL2 host hits.

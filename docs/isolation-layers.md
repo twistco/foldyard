@@ -220,19 +220,21 @@ come before any microVM, both at zero runtime cost:
 2. **Host-side wall enforcement on Linux — mechanism proven 2026-09-12, module landed.** Match
    the VM's own traffic *on the host*, where the guest has no reach, with nftables, and allow only
    the proxy band; flushing the guest wall then gains nothing, since the packets still have to
-   leave through the host. The match is the QEMU process's **cgroup v2 scope**, not its uid:
+   leave through the host. The match is the QEMU process's **cgroup v2 slice**, not its uid:
    Lima's QEMU driver runs the guest's user-mode network inside `qemu-system`, so every guest
    packet leaves the host as that process, and the operator's other work shares their uid but
-   only the VM lives in the VM's scope. Proven on the rig against the running `foldyard-example`
+   only the VM lives under the VM's slice. Proven on the rig against the running `foldyard-example`
    VM: with the table loaded, a direct `https://` from inside the guest was rejected (curl rc 7),
    DNS to the host resolver still resolved, the allowed band port returned 200, an out-of-band
    port and the host's sshd were refused, `limactl shell` and the podman socket kept working, and
    the operator's own egress was untouched. `foldyard.hostwall` renders that ruleset, and as of
    2026-09-12 it is **wired into `fy up`** behind `[machine].host_wall = true`: the VM is started
-   inside its own transient scope (`systemd-run --user --scope --unit fy-machine-<vm>.scope`) so
-   the match is predictable, the table is re-rendered on every `fy up` for the scope the VM
-   actually sits in (Lima allocates the SSH port per boot) and loaded with `sudo nft`, and a VM
-   found outside its own scope is refused rather than walled — matching the login session's scope
+   inside its own transient scope under its own slice (`systemd-run --user --scope --slice
+   fy-machine-<vm>.slice --unit fy-machine-<vm>.scope`) so the match is predictable, the table
+   is rendered for the slice the VM actually sits under and loaded with `sudo nft` on every
+   `fy up` (since 2026-09-18 the same text every boot: loopback is judged on the input hook by
+   the listener's cgroup, so Lima's per-boot ports are never named), and a VM found outside its
+   own scope-under-slice is refused rather than walled — matching the login session's scope
    would wall the operator's shell. Preflight pairs it with `wall` and with a host that can
    enforce it. Run end to end on the rig the same day (`fy machine ensure` under
    `MACHINE_HOST_WALL=1`, the example VM created from scratch): every probe above held, plus
