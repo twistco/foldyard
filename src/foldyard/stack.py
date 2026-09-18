@@ -269,19 +269,21 @@ def _compose_overlays(mode: dict, base: Path) -> list[str]:
 
 
 def shellenv(no_machine: bool = False) -> int:
+    # The declared compose files must exist in the checkout the stack is bound to — checked
+    # FIRST, before _context() can ensure (provision!) the machine for a stack that can't run,
+    # and before COMPOSE is emitted: a raw recipe would otherwise hand the provider a file
+    # foldyard already knows isn't there. Same gate, same message as the stack verbs.
+    if _missing_declared_compose():
+        print("exit 1")  # the recipe's `eval` runs this → it aborts (reason already on stderr)
+        return 1
     try:
         main, plain, exported, ports = _context(no_machine)
     except SystemExit as e:
-        print("exit 1")  # the recipe's `eval` runs this → it aborts (reason already on stderr)
-        return e.code if isinstance(e.code, int) else 1
-    # The checkout the stack is bound to (a worktree's tree, or main) — the one resolve() joins
-    # the `-f` paths onto, and the one the declared files must exist in. Validated before the
-    # engine is touched, and before COMPOSE is emitted: a raw recipe would otherwise hand the
-    # provider a file foldyard already knows isn't there.
-    checkout = Path(exported["FOLDYARD_CHECKOUT"])
-    if _report_missing_compose(checkout):
         print("exit 1")
-        return 1
+        return e.code if isinstance(e.code, int) else 1
+    # The checkout _context() bound (a worktree's tree, or main) — the one resolve() joins the
+    # `-f` paths onto, and the one the gate above validated against.
+    checkout = Path(exported["FOLDYARD_CHECKOUT"])
 
     # An external_network consumer's raw-compose recipes (`"${COMPOSE[@]}" up …`, e.g. a cold
     # `just e2e`) can't rely on a prior `up` having created the network compose now declares
@@ -1221,20 +1223,24 @@ def stack_declared(verb: str, box_verb: str | None) -> int | None:
             print(f"  The dev box: {box_verb}")
         print("  To bring a stack in: fy docs quickstart (step 3) · fy docs configuration")
         return 0
+    return 1 if _missing_declared_compose() else None
+
+
+def _missing_declared_compose() -> bool:
+    """Is a declared compose file absent from the checkout the stack is bound to? Reports it
+    when so — foldyard's own error naming the file and the checkout it looked in. Shared by the
+    stack verbs' gate and ``shellenv`` so the two never disagree on what a missing file looks
+    like, and side-effect-free beyond the memoised ``main_repo()`` git call — never the engine
+    or the machine — so it can run BEFORE ``_context()`` provisions anything. No declaration ⇒
+    nothing to check (the box-only case is the caller's to explain); a worktree that doesn't
+    exist is ``_context()``'s own error ("no worktree at …"), not a missing file under it."""
+    if not config.has_compose_stack():
+        return False
     main = main_repo()
     wt = _active_worktree(worktrees_root(main))
     checkout = worktrees_root(main) / wt if wt else main
-    # A worktree that doesn't exist is _context()'s own error ("no worktree at …"), not a
-    # missing compose file under it.
-    if checkout.is_dir() and _report_missing_compose(checkout):
-        return 1
-    return None
-
-
-def _report_missing_compose(checkout: Path) -> bool:
-    """Report the declared compose files ``checkout`` lacks — foldyard's own error naming the
-    file and the checkout it looked in — and say whether there were any. Shared by the stack
-    verbs' gate and ``shellenv`` so the two never disagree on what a missing file looks like."""
+    if not checkout.is_dir():
+        return False
     missing = config.missing_compose_files(checkout)
     if missing:
         _err(f"✗ [project].compose names {', '.join(missing)} — not found under {checkout}.")

@@ -167,17 +167,25 @@ def test_shellenv_without_a_declared_stack_still_emits_the_env(stackless_repo, c
     assert "export FOLDYARD_CHECKOUT=" in out and "COMPOSE=(podman compose)\n" in out
 
 
-def test_shellenv_worktree_missing_compose_file_aborts(fake_repo, capsys, monkeypatch):
+def test_shellenv_worktree_missing_compose_file_aborts(fake_repo, capture_run, capsys, monkeypatch):
     # Declared but not in the worktree (main's copy is): the eval'd `exit 1` + foldyard's own
     # error naming the file and the checkout, before any raw recipe hands the provider the path.
+    # And BEFORE _context(): on a host with no preset DOCKER_HOST that would ensure — provision —
+    # the machine for a stack that can't run, so neither the machine nor the engine (nor
+    # _context's git call) may be touched.
     wt = Path(f"{fake_repo}-worktrees") / "feat"
     wt.mkdir(parents=True)
     monkeypatch.setenv("WORKTREE", "feat")
     monkeypatch.setattr(stack, "_offset", lambda name: 7)
+    monkeypatch.delenv("DOCKER_HOST")  # the host path: _docker_host would ensure the machine
+    monkeypatch.setattr(stack, "which", lambda name: "/fake/bin/podman")
+    ensured: list[tuple] = []
+    monkeypatch.setattr(machine, "ensure", lambda *a, **k: ensured.append(a))
     assert stack.shellenv() == 1
     out, err = capsys.readouterr()
     assert "exit 1" in out and "COMPOSE=(" not in out
     assert "compose.podman.yml" in err and str(wt) in err
+    assert ensured == [] and capture_run == []
 
 
 def test_offset_precedence_env_then_pin_then_cksum(fake_repo, monkeypatch):
