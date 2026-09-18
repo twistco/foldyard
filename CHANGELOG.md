@@ -7,6 +7,8 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ## Unreleased
 
+## 0.3.0 — 2026-09-18
+
 ### Removed
 
 - **`[machine].backend = "native"` — the VM-less backend.** foldyard always has a VM
