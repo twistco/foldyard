@@ -20,6 +20,7 @@ _FAKE_TOML = """\
 name = "tangible"
 prefix = "tangible-podman"
 app = "platform-frontend"
+compose = ["compose.podman.yml"]
 ensure_dirs = ["platform/.db-exports", "platform/.docker/gcs-emulator"]
 
 [ports]
@@ -101,6 +102,15 @@ def test_main_repo_shells_out_once_per_process(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
+def _worktree(fake_repo: Path, name: str) -> Path:
+    """A sibling worktree checkout carrying the fixture's declared compose file — the stack is
+    the worktree's, so that is where the file must be."""
+    wt = Path(f"{fake_repo}-worktrees") / name
+    wt.mkdir(parents=True)
+    (wt / "compose.podman.yml").write_text("services: {}\n")
+    return wt
+
+
 def test_shellenv_main_path(fake_repo, capsys):
     rc = stack.shellenv()
     out = capsys.readouterr().out
@@ -134,8 +144,7 @@ def test_shellenv_preserves_explicit_compose_provider(fake_repo, capsys, monkeyp
 
 
 def test_shellenv_worktree_path(fake_repo, capsys, monkeypatch):
-    wt = Path(f"{fake_repo}-worktrees") / "feat"
-    wt.mkdir(parents=True)
+    wt = _worktree(fake_repo, "feat")
     monkeypatch.setenv("WORKTREE", "feat")
     monkeypatch.setattr(stack, "_offset", lambda name: 7)
     rc = stack.shellenv()
@@ -145,6 +154,38 @@ def test_shellenv_worktree_path(fake_repo, capsys, monkeypatch):
     assert "APP_PORT=3007" in out  # 3000 + offset (shlex.quote leaves digits unquoted)
     assert "SIM_PORT=4507" in out
     assert str(wt) in out  # FOLDYARD_CHECKOUT points at the worktree tree
+    # COMPOSE names the WORKTREE's file, absolute: the recipe `cd`s to MAIN_REPO, so a relative
+    # `-f` there pointed the worktree's stack at main's compose file.
+    assert f"-f {wt / 'compose.podman.yml'}" in out
+
+
+def test_shellenv_without_a_declared_stack_still_emits_the_env(stackless_repo, capsys):
+    # A box-only project has nothing to validate: the shim still emits the shared env (the raw
+    # recipes need MAIN_REPO/DOCKER_HOST/ports), with a COMPOSE that names no `-f` file.
+    assert stack.shellenv() == 0
+    out = capsys.readouterr().out
+    assert "export FOLDYARD_CHECKOUT=" in out and "COMPOSE=(podman compose)\n" in out
+
+
+def test_shellenv_worktree_missing_compose_file_aborts(fake_repo, capture_run, capsys, monkeypatch):
+    # Declared but not in the worktree (main's copy is): the eval'd `exit 1` + foldyard's own
+    # error naming the file and the checkout, before any raw recipe hands the provider the path.
+    # And BEFORE _context(): on a host with no preset DOCKER_HOST that would ensure — provision —
+    # the machine for a stack that can't run, so neither the machine nor the engine (nor
+    # _context's git call) may be touched.
+    wt = Path(f"{fake_repo}-worktrees") / "feat"
+    wt.mkdir(parents=True)
+    monkeypatch.setenv("WORKTREE", "feat")
+    monkeypatch.setattr(stack, "_offset", lambda name: 7)
+    monkeypatch.delenv("DOCKER_HOST")  # the host path: _docker_host would ensure the machine
+    monkeypatch.setattr(stack, "which", lambda name: "/fake/bin/podman")
+    ensured: list[tuple] = []
+    monkeypatch.setattr(machine, "ensure", lambda *a, **k: ensured.append(a))
+    assert stack.shellenv() == 1
+    out, err = capsys.readouterr()
+    assert "exit 1" in out and "COMPOSE=(" not in out
+    assert "compose.podman.yml" in err and str(wt) in err
+    assert ensured == [] and capture_run == []
 
 
 def test_offset_precedence_env_then_pin_then_cksum(fake_repo, monkeypatch):
@@ -163,8 +204,8 @@ def test_offset_precedence_env_then_pin_then_cksum(fake_repo, monkeypatch):
 def test_shellenv_worktree_inferred_from_cwd(fake_repo, capsys, monkeypatch):
     # No WORKTREE env, but cwd is inside a sibling worktree → infer its name (so `cd`-ing into a
     # worktree means its verbs Just Work without the WORKTREE= prefix).
-    wt = Path(f"{fake_repo}-worktrees") / "feat"
-    (wt / "platform").mkdir(parents=True)
+    wt = _worktree(fake_repo, "feat")
+    (wt / "platform").mkdir()
     monkeypatch.setattr(stack, "_offset", lambda name: 7)
     monkeypatch.chdir(wt / "platform")  # a nested dir under the worktree, not just its root
     rc = stack.shellenv()
@@ -177,9 +218,8 @@ def test_shellenv_worktree_inferred_from_cwd(fake_repo, capsys, monkeypatch):
 
 def test_shellenv_explicit_env_overrides_cwd(fake_repo, capsys, monkeypatch):
     # An explicit WORKTREE wins even when cwd sits in a different worktree.
-    (Path(f"{fake_repo}-worktrees") / "other").mkdir(parents=True)
-    elsewhere = Path(f"{fake_repo}-worktrees") / "feat"
-    elsewhere.mkdir(parents=True)
+    _worktree(fake_repo, "other")
+    elsewhere = _worktree(fake_repo, "feat")
     monkeypatch.chdir(elsewhere)
     monkeypatch.setenv("WORKTREE", "other")
     monkeypatch.setattr(stack, "_offset", lambda name: 7)
@@ -839,12 +879,23 @@ def test_up_stays_quiet_when_capabilities_are_healthy(fake_repo, capture_run, mo
     assert "DEGRADED" not in capsys.readouterr().out
 
 
+@pytest.fixture
+def stackless_repo(fake_repo):
+    """fake_repo with `[project].compose` UNSET — a box-only consumer. The compose.podman.yml
+    the fixture wrote stays on disk on purpose: the stack is what the toml declares, and a
+    stray file of the old default's name must not be read as one."""
+    toml = fake_repo / "foldyard.toml"
+    toml.write_text(toml.read_text().replace('compose = ["compose.podman.yml"]\n', ""))
+    config.clear_caches()
+    assert (fake_repo / "compose.podman.yml").exists()
+    return fake_repo
+
+
 def test_up_on_compose_less_project_starts_supervisor_and_points_at_box(
-    fake_repo, capture_run, capsys, monkeypatch
+    stackless_repo, capture_run, capsys, monkeypatch
 ):
-    # A box-only project (no compose file present) still ensures the machine, but has nothing
-    # to `compose up` — succeed and point at `foldyard box up` instead of failing on a path.
-    (fake_repo / "compose.podman.yml").unlink()
+    # A box-only project still ensures the machine, but has nothing to `compose up` — succeed
+    # and point at `foldyard box up` + where a stack gets set up, instead of failing on a path.
     started: list[bool] = []
     monkeypatch.setattr(supervisor, "ensure_background", lambda: started.append(True))
 
@@ -852,7 +903,82 @@ def test_up_on_compose_less_project_starts_supervisor_and_points_at_box(
     assert _composes(capture_run) == []  # never invoked compose
     assert started == [True]
     out = capsys.readouterr().out
-    assert "no compose stack" in out and "foldyard box up" in out
+    assert "[project].compose" in out and "fy box up" in out and "fy docs quickstart" in out
+
+
+# Every verb that acts on the compose stack, with the box counterpart its note points at.
+_STACK_VERBS = [
+    ("ps", lambda: stack.ps(), "fy box ps"),
+    ("logs", lambda: stack.logs([]), None),
+    ("shell", lambda: stack.shell(), "fy box shell"),
+    ("build", lambda: stack.build([]), "fy box build"),
+    ("down", lambda: stack.down(), "fy box down"),
+    ("nuke", lambda: stack.nuke(), "fy box down"),
+]
+
+
+@pytest.mark.parametrize(
+    ("verb", "run", "box_hint"), _STACK_VERBS, ids=[v[0] for v in _STACK_VERBS]
+)
+def test_stack_verbs_without_a_declared_stack_explain_and_exit_zero(
+    stackless_repo, capture_run, capsys, verb, run, box_hint
+):
+    # `fy ps` on a box-only project used to hand podman-compose an invented `-f
+    # compose.podman.yml` and exit 1 on its CRITICAL "missing files" — a scary non-failure an
+    # agent then debugs. Now: say what the verb acts on, that this project declares no stack,
+    # where the stack is set up — and touch NOTHING (no engine, no machine, no git).
+    assert run() == 0
+    assert capture_run == []
+    out = capsys.readouterr().out
+    assert f"`fy {verb}`" in out and "[project].compose" in out
+    assert "fy docs quickstart" in out and "fy docs configuration" in out
+    if box_hint:
+        assert box_hint in out
+    else:
+        assert "fy box" not in out
+
+
+@pytest.mark.parametrize(("verb", "run", "_"), _STACK_VERBS, ids=[v[0] for v in _STACK_VERBS])
+def test_stack_verbs_with_a_declared_file_missing_abort_naming_it(
+    fake_repo, capture_run, capsys, verb, run, _
+):
+    # Declared but gone (wrong branch, a rename): that IS an error — but foldyard's, naming the
+    # file and the checkout it looked in, not the compose provider's "missing files" dump.
+    (fake_repo / "compose.podman.yml").unlink()
+    assert run() == 1
+    assert _composes(capture_run) == []
+    err = capsys.readouterr().err
+    assert "compose.podman.yml" in err and str(fake_repo) in err and "[project].compose" in err
+
+
+def test_declared_file_is_checked_in_the_explicit_worktree(
+    fake_repo, capture_run, capsys, monkeypatch
+):
+    # WORKTREE=feat binds the stack to the sibling checkout, and that is where resolve() joins
+    # the `-f` paths — so the preflight must look there too. Checking config.repo_root() (cwd /
+    # FOLDYARD_REPO = main) passed on main's copy and handed the provider a path under the
+    # worktree that wasn't there.
+    wt = Path(f"{fake_repo}-worktrees") / "feat"
+    wt.mkdir(parents=True)  # no compose.podman.yml in it; main's is still on disk
+    monkeypatch.setenv("WORKTREE", "feat")
+    monkeypatch.setattr(stack, "_offset", lambda name: 7)
+    assert stack.ps() == 1
+    assert _composes(capture_run) == []
+    err = capsys.readouterr().err
+    assert "compose.podman.yml" in err and str(wt) in err and str(fake_repo) + "." not in err
+    # And the converse: the worktree carries the file, main doesn't — the worktree's is the one.
+    (wt / "compose.podman.yml").write_text("services: {}\n")
+    (fake_repo / "compose.podman.yml").unlink()
+    assert stack.ps() == 0
+    assert str(wt / "compose.podman.yml") in _composes(capture_run)[-1]
+
+
+def test_up_with_a_declared_file_missing_aborts_naming_it(fake_repo, capture_run, capsys):
+    (fake_repo / "compose.podman.yml").unlink()
+    assert stack.up() == 1
+    assert _composes(capture_run) == []
+    err = capsys.readouterr().err
+    assert "compose.podman.yml" in err and "[project].compose" in err
 
 
 def test_nuke_main_removes_volumes(fake_repo, capture_run):
@@ -864,8 +990,7 @@ def test_nuke_worktree_reaps_orphans(fake_repo, capture_run, monkeypatch):
     # Same reason as `down`: a profile-gated container from an earlier posture (the metadata
     # emulator after gcp=sa→off) isn't in the rendered config, so a plain `down` strands it —
     # on worktree REMOVAL it then outlives the checkout (observed 2026-09-15).
-    wt = Path(f"{fake_repo}-worktrees") / "feat"
-    wt.mkdir(parents=True)
+    _worktree(fake_repo, "feat")
     monkeypatch.setenv("WORKTREE", "feat")
     monkeypatch.setattr(stack, "_offset", lambda name: 7)
     assert stack.nuke() == 0
@@ -1464,10 +1589,9 @@ def test_reconcile_noop_when_stack_not_up(fake_repo, capture_stream, monkeypatch
     assert capture_stream == []  # guardrail: never START a stack on a posture change
 
 
-def test_reconcile_noop_when_stackless(fake_repo, capture_stream, monkeypatch):
-    # No compose file on disk ⇒ nothing to reconcile (and no engine probe at all).
+def test_reconcile_noop_when_stackless(stackless_repo, capture_stream, monkeypatch):
+    # No declared stack ⇒ nothing to reconcile (and no engine probe at all).
     monkeypatch.setattr(config, "in_box", lambda: False)
-    (fake_repo / "compose.podman.yml").unlink()
     assert stack.reconcile_posture(_sig(""), _sig("metadata")) is True
     assert capture_stream == []
 

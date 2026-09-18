@@ -291,11 +291,21 @@ def _compose_overlays(mode: dict, base: Path) -> list[str]:
 
 
 def shellenv(no_machine: bool = False) -> int:
+    # The declared compose files must exist in the checkout the stack is bound to — checked
+    # FIRST, before _context() can ensure (provision!) the machine for a stack that can't run,
+    # and before COMPOSE is emitted: a raw recipe would otherwise hand the provider a file
+    # foldyard already knows isn't there. Same gate, same message as the stack verbs.
+    if _missing_declared_compose():
+        print("exit 1")  # the recipe's `eval` runs this → it aborts (reason already on stderr)
+        return 1
     try:
         main, plain, exported, ports = _context(no_machine)
     except SystemExit as e:
-        print("exit 1")  # the recipe's `eval` runs this → it aborts (reason already on stderr)
+        print("exit 1")
         return e.code if isinstance(e.code, int) else 1
+    # The checkout _context() bound (a worktree's tree, or main) — the one resolve() joins the
+    # `-f` paths onto, and the one the gate above validated against.
+    checkout = Path(exported["FOLDYARD_CHECKOUT"])
 
     # An external_network consumer's raw-compose recipes (`"${COMPOSE[@]}" up …`, e.g. a cold
     # `just e2e`) can't rely on a prior `up` having created the network compose now declares
@@ -312,15 +322,18 @@ def shellenv(no_machine: bool = False) -> int:
     mode = devmode.read()["mode"]
     derived = devmode.derive_env(mode)
 
-    # COMPOSE: configured files relative to MAIN_REPO (we `cd` there) + posture overlays. Overlays
+    # COMPOSE: configured files + posture overlays, resolved against the CHECKOUT as absolute
+    # paths (the recipe `cd`s to MAIN_REPO, which is not a worktree's tree — a relative `-f` there
+    # pointed a worktree's stack at main's compose file; resolve() joins the same way). Overlays
     # STACK (a plugin can contribute several; several plugins can each contribute) — e.g. dump +
     # a data-callback overlay — instead of one clobbering the rest. Manual FOLDYARD_COMPOSE_EXTRA
     # entries (os.pathsep-joined) append LAST, so an explicit override wins on conflicting keys.
     # Engine: docker when DOCKER_HOST is preset (the box), else podman.
     compose = config.engine_compose()
     for f in config.compose_files():
-        compose += ["-f", f]
-    for overlay in _compose_overlays(mode, base=main):
+        p = Path(f)
+        compose += ["-f", str(p if p.is_absolute() else checkout / p)]
+    for overlay in _compose_overlays(mode, base=checkout):
         compose += ["-f", overlay]
 
     # Recipe bodies relied on _common.sh's `set -euo pipefail` (they don't set it
@@ -646,6 +659,8 @@ def _build(
 
 def build(services: list[str], *, extra_profiles: list[str] | None = None) -> int:
     """Build selected compose services; an empty list builds every configured service."""
+    if (rc := stack_declared("build", "fy box build")) is not None:
+        return rc
     return _build(resolve(), services=services or None, extra_profiles=extra_profiles)
 
 
@@ -664,12 +679,10 @@ def up() -> int:
     from . import supervisor
 
     supervisor.ensure_background()
-    if not config.has_compose_stack(ctx.main):
-        print(f"ℹ no compose stack for '{ctx.project}' — the machine is up, but there's no")
-        print("  compose file to start. This project is box-only; bring up its dev box with:")
-        print("      foldyard box up")
-        print("  To add a stack instead, set [project].compose in foldyard.toml.")
-        return 0
+    # Gated AFTER the machine + supervisor, unlike the other stack verbs: a box-only consumer's
+    # `fy up` is how both come up (the note below then points at `fy box up`).
+    if (rc := stack_declared("up", "fy box up")) is not None:
+        return rc
     _ensure_dirs(Path(ctx.env["FOLDYARD_CHECKOUT"]))
     # Stage any VM-visible stack assets a plugin's posture needs (e.g. the gcp metadata emulator's
     # server.py — shipped in the package, off the repo mount) into the checkout BEFORE compose up.
@@ -959,7 +972,7 @@ def reconcile_posture(
         ctx_mgr = config.using(cfg) if cfg is not None else nullcontext()
         with ctx_mgr:
             # Cheap, subprocess-free skip for stack-less consumers under the bound config.
-            if not config.has_compose_stack(config.repo_root()):
+            if not config.has_compose_stack():
                 return True
             ctx = resolve(no_machine=True, worktree=cfg.worktree if cfg is not None else None)
             from .plugins import registry
@@ -1208,6 +1221,55 @@ def _compose_captured(
     return devmode.run_stream(cmd, emit, env=ctx.env, cwd=str(ctx.main))
 
 
+def stack_declared(verb: str, box_verb: str | None) -> int | None:
+    """The gate every verb that acts on the compose stack runs FIRST — before any engine or
+    machine call. Returns an exit code to stop with, or None to carry on.
+
+    ``[project].compose`` unset ⇒ a box-only project: say what ``fy <verb>`` acts on, that this
+    project declares no stack, the box counterpart, and where a stack gets set up — exit 0,
+    pure config, nothing touched. Nothing is invented: the old default path handed the compose
+    provider a file nobody wrote, and its CRITICAL "missing files" read as a real failure to an
+    agent following the guide.
+    Declared but missing on disk ⇒ foldyard's own error naming the file and the checkout it
+    looked in (a branch from before the file, a rename), exit 1. The checkout is the one
+    ``resolve()`` joins the ``-f`` paths onto — an explicit ``WORKTREE`` (or a cwd inside one)
+    binds the stack to that sibling checkout, which ``config.repo_root()`` (cwd / FOLDYARD_REPO)
+    need not be — so the preflight can't pass on main's file and hand the provider the
+    worktree's. That costs the memoised ``main_repo()`` git call, never the engine."""
+    if not config.has_compose_stack():
+        print(
+            f"ℹ `fy {verb}` acts on the compose stack, and '{config.project_prefix()}' doesn't "
+            "drive one ([project].compose is unset in foldyard.toml)."
+        )
+        if box_verb:
+            print(f"  The dev box: {box_verb}")
+        print("  To bring a stack in: fy docs quickstart (step 3) · fy docs configuration")
+        return 0
+    return 1 if _missing_declared_compose() else None
+
+
+def _missing_declared_compose() -> bool:
+    """Is a declared compose file absent from the checkout the stack is bound to? Reports it
+    when so — foldyard's own error naming the file and the checkout it looked in. Shared by the
+    stack verbs' gate and ``shellenv`` so the two never disagree on what a missing file looks
+    like, and side-effect-free beyond the memoised ``main_repo()`` git call — never the engine
+    or the machine — so it can run BEFORE ``_context()`` provisions anything. No declaration ⇒
+    nothing to check (the box-only case is the caller's to explain); a worktree that doesn't
+    exist is ``_context()``'s own error ("no worktree at …"), not a missing file under it."""
+    if not config.has_compose_stack():
+        return False
+    main = main_repo()
+    wt = _active_worktree(worktrees_root(main))
+    checkout = worktrees_root(main) / wt if wt else main
+    if not checkout.is_dir():
+        return False
+    missing = config.missing_compose_files(checkout)
+    if missing:
+        _err(f"✗ [project].compose names {', '.join(missing)} — not found under {checkout}.")
+        _err("  Check the branch this checkout is on, or fix the path in foldyard.toml.")
+    return bool(missing)
+
+
 def engine_reachable(nothing_to: str) -> bool:
     """Gate for verbs that only READ or TEAR DOWN engine state (down/nuke/ps/logs): an
     inherited DOCKER_HOST (box, CI) passes, a running machine passes — but an absent or
@@ -1224,6 +1286,8 @@ def engine_reachable(nothing_to: str) -> bool:
 
 
 def down() -> int:
+    if (rc := stack_declared("down", "fy box down")) is not None:
+        return rc
     if not engine_reachable("stop"):
         return 0
     ctx = resolve()
@@ -1238,18 +1302,24 @@ def down() -> int:
 
 
 def ps() -> int:
+    if (rc := stack_declared("ps", "fy box ps")) is not None:
+        return rc
     if not engine_reachable("show"):
         return 0
     return _compose(resolve(), ["ps"])
 
 
 def logs(svc: list[str]) -> int:
+    if (rc := stack_declared("logs", None)) is not None:
+        return rc
     if not engine_reachable("follow"):
         return 0
     return _compose(resolve(), ["logs", "-f", "-n", "50", *svc])
 
 
 def shell() -> int:
+    if (rc := stack_declared("shell", "fy box shell")) is not None:
+        return rc
     ctx = resolve()
     return _compose(ctx, ["exec", ctx.app, "bash"])
 
@@ -1554,6 +1624,8 @@ def reclaim_now() -> int:
 
 
 def nuke() -> int:
+    if (rc := stack_declared("nuke", "fy box down")) is not None:
+        return rc
     if not engine_reachable("nuke"):
         return 0
     ctx = resolve()

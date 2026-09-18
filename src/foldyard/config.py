@@ -566,29 +566,42 @@ def app_port_key() -> str | None:
 
 
 def compose_files() -> list[str]:
-    """Compose files in ``-f`` order, each relative to the active checkout (or
-    absolute). ``[project].compose`` wins; defaults to ``<dev_vm_dir>/compose.podman.yml``."""
+    """Compose files in ``-f`` order, each relative to the active checkout (or absolute) —
+    exactly what ``[project].compose`` declares, and EMPTY when it declares nothing. There is
+    no default path: a consumer's stack is opted into in the toml (the scaffold, the quickstart
+    and every consumer do this), and the old ``<dev_vm_dir>/compose.podman.yml`` fallback only
+    ever sent a box-only project's ``fy ps`` into the compose provider's "missing files" error."""
     raw = _project_table().get("compose")
     if isinstance(raw, list) and raw:
         return [str(x) for x in raw]
     if isinstance(raw, str) and raw:
         return [raw]
-    return [f"{dev_vm_rel().rstrip('/')}/compose.podman.yml"]
+    return []
 
 
-def has_compose_stack(base: Path) -> bool:
-    """Does this project actually ship a compose stack — i.e. does a configured compose file
-    exist on disk (checkout-relative to ``base``, or absolute)? ``compose_files()`` always
-    returns a default path, so a stack-less project (no file authored) has none: ``up`` then
-    has nothing to start (point the user at ``box up``), and ``box up`` must create the
-    ``{project}_default`` network itself since no ``compose up`` will."""
+def has_compose_stack() -> bool:
+    """Does this project drive a compose stack — i.e. does ``[project].compose`` declare one?
+    The declaration is the gate, not a file on disk: a stack-less project's ``up`` has nothing
+    to start (point the user at ``box up``), ``box up`` must create the ``{project}_default``
+    network itself since no ``compose up`` will, and the other stack verbs say what they would
+    have shown. A declared file that is missing on disk is a different thing — an error, see
+    :func:`missing_compose_files`."""
+    return bool(compose_files())
+
+
+def missing_compose_files(checkout: Path) -> list[str]:
+    """The declared compose files that aren't files under ``checkout`` (relative entries resolve
+    against it; absolute ones stand). Non-empty means the config names a stack this checkout
+    doesn't carry — a branch from before the file, a rename — which the stack verbs report as
+    foldyard's own error rather than letting the compose provider dump its "missing files".
+    ``is_file``, not ``exists``: a directory of that name (or an empty entry, which resolves to
+    the checkout itself) is just as much not a compose file."""
+    missing = []
     for f in compose_files():
         p = Path(f)
-        if not p.is_absolute():
-            p = Path(base) / f
-        if p.exists():
-            return True
-    return False
+        if not (p if p.is_absolute() else Path(checkout) / p).is_file():
+            missing.append(f)
+    return missing
 
 
 def external_network() -> bool:

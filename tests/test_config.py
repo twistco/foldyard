@@ -624,9 +624,26 @@ def test_port_bases_empty_without_table(fresh_config, tmp_path):
     assert config.port_bases() == {}
 
 
-def test_compose_files_default_under_dev_vm_dir(fresh_config, tmp_path):
+def test_compose_files_empty_when_undeclared(fresh_config, tmp_path):
+    # No `[project].compose` ⇒ no stack — foldyard never invents a compose path (the old
+    # `<dev_vm_dir>/compose.podman.yml` default sent every stack verb of a box-only project into
+    # podman-compose's "missing files"). A stray file of that name on disk is not a declaration.
+    (tmp_path / "compose.podman.yml").write_text("services: {}\n")
     fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_DEV_VM_DIR=None)
-    assert config.compose_files() == ["./compose.podman.yml"]
+    assert config.compose_files() == []
+    assert config.has_compose_stack() is False
+
+
+def test_has_compose_stack_is_the_declaration(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text('[project]\ncompose = ["compose.yml"]\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.has_compose_stack() is True  # declared — whether or not the file is there yet
+    assert config.missing_compose_files(tmp_path) == ["compose.yml"]
+    (tmp_path / "compose.yml").mkdir()  # exists, but a directory is not a compose file
+    assert config.missing_compose_files(tmp_path) == ["compose.yml"]
+    (tmp_path / "compose.yml").rmdir()
+    (tmp_path / "compose.yml").write_text("services: {}\n")
+    assert config.missing_compose_files(tmp_path) == []
 
 
 def test_compose_files_from_toml(fresh_config, tmp_path):
