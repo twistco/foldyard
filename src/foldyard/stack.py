@@ -1187,15 +1187,20 @@ def _compose_captured(
 
 
 def stack_declared(verb: str, box_verb: str | None) -> int | None:
-    """The gate every verb that acts on the compose stack runs FIRST — pure config, before any
-    engine, machine or git call. Returns an exit code to stop with, or None to carry on.
+    """The gate every verb that acts on the compose stack runs FIRST — before any engine or
+    machine call. Returns an exit code to stop with, or None to carry on.
 
     ``[project].compose`` unset ⇒ a box-only project: say what ``fy <verb>`` acts on, that this
-    project declares no stack, the box counterpart, and where a stack gets set up — exit 0.
-    Nothing is invented: the old default path handed the compose provider a file nobody wrote,
-    and its CRITICAL "missing files" read as a real failure to an agent following the guide.
+    project declares no stack, the box counterpart, and where a stack gets set up — exit 0,
+    pure config, nothing touched. Nothing is invented: the old default path handed the compose
+    provider a file nobody wrote, and its CRITICAL "missing files" read as a real failure to an
+    agent following the guide.
     Declared but missing on disk ⇒ foldyard's own error naming the file and the checkout it
-    looked in (a branch from before the file, a rename), exit 1."""
+    looked in (a branch from before the file, a rename), exit 1. The checkout is the one
+    ``resolve()`` joins the ``-f`` paths onto — an explicit ``WORKTREE`` (or a cwd inside one)
+    binds the stack to that sibling checkout, which ``config.repo_root()`` (cwd / FOLDYARD_REPO)
+    need not be — so the preflight can't pass on main's file and hand the provider the
+    worktree's. That costs the memoised ``main_repo()`` git call, never the engine."""
     if not config.has_compose_stack():
         print(
             f"ℹ `fy {verb}` acts on the compose stack, and '{config.project_prefix()}' doesn't "
@@ -1205,8 +1210,12 @@ def stack_declared(verb: str, box_verb: str | None) -> int | None:
             print(f"  The dev box: {box_verb}")
         print("  To bring a stack in: fy docs quickstart (step 3) · fy docs configuration")
         return 0
-    checkout = config.repo_root()
-    missing = config.missing_compose_files(checkout)
+    main = main_repo()
+    wt = _active_worktree(worktrees_root(main))
+    checkout = worktrees_root(main) / wt if wt else main
+    # A worktree that doesn't exist is _context()'s own error ("no worktree at …"), not a
+    # missing compose file under it.
+    missing = config.missing_compose_files(checkout) if checkout.is_dir() else []
     if missing:
         _err(f"✗ [project].compose names {', '.join(missing)} — not found under {checkout}.")
         _err("  Check the branch this checkout is on, or fix the path in foldyard.toml.")

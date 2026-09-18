@@ -847,6 +847,28 @@ def test_stack_verbs_with_a_declared_file_missing_abort_naming_it(
     assert "compose.podman.yml" in err and str(fake_repo) in err and "[project].compose" in err
 
 
+def test_declared_file_is_checked_in_the_explicit_worktree(
+    fake_repo, capture_run, capsys, monkeypatch
+):
+    # WORKTREE=feat binds the stack to the sibling checkout, and that is where resolve() joins
+    # the `-f` paths — so the preflight must look there too. Checking config.repo_root() (cwd /
+    # FOLDYARD_REPO = main) passed on main's copy and handed the provider a path under the
+    # worktree that wasn't there.
+    wt = Path(f"{fake_repo}-worktrees") / "feat"
+    wt.mkdir(parents=True)  # no compose.podman.yml in it; main's is still on disk
+    monkeypatch.setenv("WORKTREE", "feat")
+    monkeypatch.setattr(stack, "_offset", lambda name: 7)
+    assert stack.ps() == 1
+    assert _composes(capture_run) == []
+    err = capsys.readouterr().err
+    assert "compose.podman.yml" in err and str(wt) in err and str(fake_repo) + "." not in err
+    # And the converse: the worktree carries the file, main doesn't — the worktree's is the one.
+    (wt / "compose.podman.yml").write_text("services: {}\n")
+    (fake_repo / "compose.podman.yml").unlink()
+    assert stack.ps() == 0
+    assert str(wt / "compose.podman.yml") in _composes(capture_run)[-1]
+
+
 def test_up_with_a_declared_file_missing_aborts_naming_it(fake_repo, capture_run, capsys):
     (fake_repo / "compose.podman.yml").unlink()
     assert stack.up() == 1
@@ -866,6 +888,7 @@ def test_nuke_worktree_reaps_orphans(fake_repo, capture_run, monkeypatch):
     # on worktree REMOVAL it then outlives the checkout (observed 2026-09-15).
     wt = Path(f"{fake_repo}-worktrees") / "feat"
     wt.mkdir(parents=True)
+    (wt / "compose.podman.yml").write_text("services: {}\n")  # the stack is the worktree's
     monkeypatch.setenv("WORKTREE", "feat")
     monkeypatch.setattr(stack, "_offset", lambda name: 7)
     assert stack.nuke() == 0

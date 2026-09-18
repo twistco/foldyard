@@ -78,9 +78,10 @@ min_foldyard_version = "0.2.0"
 - **`compose`** — your compose files, in `-f` order; a single string also works. Paths are
   relative to the active checkout (or absolute). No default: unset means the project drives
   no compose stack (box-only), and every stack verb (`fy up | ps | logs | shell | build | down
-  | nuke`) says so and points at its `fy box …` counterpart instead of guessing a file — `fy up`
-  still brings the machine and the host daemons up first. A declared file that is missing on
-  disk (a branch from before it, a rename) is an error naming the file and the checkout.
+  | nuke`) says so instead of guessing a file — pointing at its `fy box …` counterpart where one
+  exists (`fy logs` has none) — and `fy up` still brings the machine and the host daemons up
+  first. A declared file that is missing on disk (a branch from before it, a rename) is an
+  error naming the file and the checkout.
 - **`ensure_dirs`** — bind-mount source dirs (checkout-relative) your compose file expects to
   pre-exist; foldyard creates them empty on `up`. Default: `[]`.
 - **`external_network`** — set `true` to let foldyard own the `{prefix}_default` network's

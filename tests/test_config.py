@@ -639,6 +639,9 @@ def test_has_compose_stack_is_the_declaration(fresh_config, tmp_path):
     fresh_config(FOLDYARD_REPO=tmp_path)
     assert config.has_compose_stack() is True  # declared — whether or not the file is there yet
     assert config.missing_compose_files(tmp_path) == ["compose.yml"]
+    (tmp_path / "compose.yml").mkdir()  # exists, but a directory is not a compose file
+    assert config.missing_compose_files(tmp_path) == ["compose.yml"]
+    (tmp_path / "compose.yml").rmdir()
     (tmp_path / "compose.yml").write_text("services: {}\n")
     assert config.missing_compose_files(tmp_path) == []
 

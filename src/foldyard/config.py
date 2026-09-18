@@ -590,14 +590,16 @@ def has_compose_stack() -> bool:
 
 
 def missing_compose_files(checkout: Path) -> list[str]:
-    """The declared compose files that don't exist under ``checkout`` (relative entries resolve
+    """The declared compose files that aren't files under ``checkout`` (relative entries resolve
     against it; absolute ones stand). Non-empty means the config names a stack this checkout
     doesn't carry — a branch from before the file, a rename — which the stack verbs report as
-    foldyard's own error rather than letting the compose provider dump its "missing files"."""
+    foldyard's own error rather than letting the compose provider dump its "missing files".
+    ``is_file``, not ``exists``: a directory of that name (or an empty entry, which resolves to
+    the checkout itself) is just as much not a compose file."""
     missing = []
     for f in compose_files():
         p = Path(f)
-        if not (p if p.is_absolute() else Path(checkout) / p).exists():
+        if not (p if p.is_absolute() else Path(checkout) / p).is_file():
             missing.append(f)
     return missing
 
