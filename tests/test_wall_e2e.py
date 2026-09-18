@@ -7,10 +7,11 @@ run WITHOUT the wall config is refused rather than quietly talking to a differen
 VM. Ported from the rig's scripted run (docs/lima-wall-machine-integration.md §2–3).
 
 The host wall is the OPERATOR'S install (ADR-0028: foldyard never elevates on the host), so
-this module plays the operator: the first `fy up` must be REFUSED (probe: not enforcing), then
-the fixture runs the root commands `fy machine host-wall` printed — verbatim, that is the whole
-contract — and `fy up` passes. The table is bound to the persistent user slice the VM runs
-under; the module removes the install and the slice at the end.
+this module plays the operator: the first `fy up` must be REFUSED before it boots anything (the
+slice is not set up), then the fixture runs the commands `fy machine host-wall` printed — the
+root ones under `sudo -n`, the user-level ones as itself, verbatim: that is the whole contract —
+and `fy up` passes. The table is bound to the persistent user slice the VM runs under; the
+module removes the install and the slice at the end, again from the verb's printed lines.
 
 Host tier (tests/e2e_host.py) plus what the walls need: `mitmdump` (the `e2e` dependency group —
 the wall refuses a consumer with nothing routing the box, so the example copy declares `[proxy]`),
@@ -95,14 +96,15 @@ def repo(tmp_path_factory):
     # The boot provisioning (the sudo narrowing + the wall) is recorded on the STOPPED instance;
     # `fy up` then boots it walled, in its own scope, and loads the host table.
     fy_ok(["machine", "stop"], r, timeout=300)
-    # Nothing installed yet: the VM boots walled, in its slice — and `fy up` is REFUSED, because
-    # the host wall it was asked for is not enforcing. Kept for the test below.
+    # Nothing set up yet: `fy up` is REFUSED before it boots anything — the slice the wall would
+    # match is not there, and a launch verb never sets it up. Kept for the test below.
     refused = fy(["up"], r, env_extra=WALL)
-    # The operator's install, exactly as printed. `fy machine host-wall` exits 1 here (not
-    # enforcing yet) — its output is the contract, not its exit code.
+    # The operator's install: the verb sets up the user slice (its one user-level change, said
+    # out loud) and prints the root files + lines. It exits 1 here (not enforcing yet) — its
+    # output is the contract, not its exit code.
     shown = fy(["machine", "host-wall"], r, timeout=120, env_extra=WALL)
-    for line in _root_steps(shown.out):
-        _as_root(line)
+    for line in _steps(shown.out):
+        _run_step(line)
     fy_ok(["up"], r, env_extra=WALL)
     _OPERATOR.update(refused=refused, shown=shown)
     yield r
@@ -113,35 +115,37 @@ def repo(tmp_path_factory):
     finally:
         # The install must not outlive the module whatever the recovery did — it would fence
         # the next module's VM and any local run after this one. The uninstall steps are the
-        # verb's too; a leftover table is deleted by hand as the last resort. Reported, never
-        # silent: a failure here is a sudo/nft problem the operator needs to hear about.
-        for line in _root_steps(
-            fy(["machine", "host-wall", "--uninstall"], r, timeout=120, env_extra=WALL).out
-        ):
-            _as_root(line, must=False)
+        # verb's too (root, then the user slice — the VM is stopped by now, so `--now` on the
+        # slice stops nothing); a leftover table is deleted by hand as the last resort.
+        # Reported, never silent: a failure here is a sudo/nft problem the operator must hear.
+        shown = fy(["machine", "host-wall", "--uninstall"], r, timeout=120, env_extra=WALL)
+        for line in _steps(shown.out):
+            _run_step(line, must=False)
         gone = subprocess.run(
             ["sudo", "-n", "nft", "delete", "table", "inet", TABLE], capture_output=True, text=True
         )
         if gone.returncode != 0 and "No such file or directory" not in gone.stderr:
             print(f"⚠ could not remove host wall table {TABLE}: {gone.stderr.strip()}")
-        subprocess.run(
-            ["systemctl", "--user", "disable", "--now", f"fy-machine-{VM}.slice"],
-            capture_output=True,
-        )
 
 
 _OPERATOR: dict[str, Run] = {}  # what the fixture saw on the way in, for the first test
 
 
-def _root_steps(out: str) -> list[str]:
-    """The `sudo …` lines the verb printed — the operator's copy-paste block, nothing else."""
-    return [ln.strip() for ln in out.splitlines() if ln.strip().startswith("sudo ")]
+def _steps(out: str) -> list[str]:
+    """The command lines the verb printed — the operator's copy-paste block (indented by four,
+    `sudo …` or `systemctl --user …`/`rm …`), nothing else."""
+    return [
+        ln.strip()
+        for ln in out.splitlines()
+        if ln.startswith("    ") and ln.strip().split(" ")[0] in ("sudo", "systemctl", "rm")
+    ]
 
 
-def _as_root(line: str, must: bool = True) -> None:
-    """Run one printed step with `sudo -n` (the runner's sudo is passwordless): the fixture IS
-    the operator, and runs what it was shown."""
-    argv = ["sudo", "-n", *line.split()[1:]]
+def _run_step(line: str, must: bool = True) -> None:
+    """Run one printed step: a `sudo` line with `sudo -n` (the runner's sudo is passwordless),
+    anything else as the user. The fixture IS the operator, and runs what it was shown."""
+    words = line.split()
+    argv = ["sudo", "-n", *words[1:]] if words[0] == "sudo" else words
     res = subprocess.run(argv, capture_output=True, text=True)
     if must:
         assert res.returncode == 0, f"{line}\n{res.stderr}"
@@ -149,12 +153,15 @@ def _as_root(line: str, must: bool = True) -> None:
 
 def test_fy_up_is_refused_until_the_operator_installs_the_host_wall(repo):
     refused, shown = _OPERATOR["refused"], _OPERATOR["shown"]
-    assert refused.rc != 0, f"fy up ran without a host wall installed:\n{refused.out}"
-    assert "NOT enforcing" in refused.out and "fy machine host-wall" in refused.out, refused.out
-    # what the operator was shown: the table and the unit in full, then the root steps
+    assert refused.rc != 0, f"fy up ran without a host wall set up:\n{refused.out}"
+    assert "not set up" in refused.out and "fy machine host-wall" in refused.out, refused.out
+    assert "starting lima machine" not in refused.out, refused.out  # refused BEFORE booting
+    # what the operator was shown: the slice it set up (said once), the table and the unit in
+    # full, then exactly the four root steps
     assert shown.rc != 0 and "NOT enforcing" in shown.out, shown.out
+    assert "written and enabled (no root)" in shown.out, shown.out
     assert "socket cgroupv2" in shown.out and "ExecStart=" in shown.out, shown.out
-    assert [ln.split()[1] for ln in _root_steps(shown.out)] == [
+    assert [ln.split()[1] for ln in _steps(shown.out)] == [
         "install",
         "install",
         "systemctl",

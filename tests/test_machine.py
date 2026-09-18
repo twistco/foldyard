@@ -840,7 +840,7 @@ def host_wall_env(lima_env, monkeypatch):
     be._pids = (4343, 4242)
     monkeypatch.setattr(machine.config, "machine_host_wall", lambda: True)
     monkeypatch.setattr(machine.hostwall, "available", lambda: True)
-    monkeypatch.setattr(machine.hostwall, "ensure_slice", lambda vm: _OWN_SLICE)
+    monkeypatch.setattr(machine.hostwall, "slice_path", lambda vm: _OWN_SLICE)  # set up, active
     scope = {"path": ""}
     monkeypatch.setattr(machine.hostwall, "vm_cgroup_scope", lambda pid: scope["path"])
 
@@ -874,16 +874,21 @@ def test_host_wall_start_runs_the_vm_in_its_own_scope_under_its_slice(host_wall_
     assert probes == ["homelab"]
 
 
-def test_host_wall_start_needs_the_persistent_slice(host_wall_env, monkeypatch, tmp_path, capsys):
-    # `systemd-run --slice` would create a transient slice — a new cgroup ID the operator's
-    # table does not hold. No slice from the user manager: no start, and say what that means.
+def test_host_wall_start_refuses_before_booting_when_not_set_up(
+    host_wall_env, monkeypatch, tmp_path, capsys
+):
+    # No active slice: `systemd-run --slice` would create a transient one — a new cgroup ID the
+    # operator's table does not hold. A launch verb never sets the slice up (that is the verb's
+    # one user-level change, said out loud there): refuse BEFORE booting a VM it could not wall.
     be, _guest, probes, _ = host_wall_env
     be._state = "stopped"
-    monkeypatch.setattr(machine.hostwall, "ensure_slice", lambda vm: "")
+    monkeypatch.setattr(machine.hostwall, "slice_path", lambda vm: "")
+    monkeypatch.setattr(machine.hostwall, "ensure_slice", lambda vm: pytest.fail("fy up set up"))
     with pytest.raises(SystemExit):
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == [] and probes == []
-    assert "enable-linger" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "not set up" in err and "fy machine host-wall" in err
 
 
 def test_host_wall_is_probed_on_every_steady_state_up(host_wall_env, tmp_path, capsys):
@@ -1003,6 +1008,8 @@ def test_stop_leaves_the_host_wall_alone(host_wall_env, monkeypatch):
 @pytest.fixture
 def host_wall_verb(host_wall_env, monkeypatch, tmp_path):
     monkeypatch.setattr(machine.config, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(machine.hostwall, "user_unit_dir", lambda: tmp_path / "units")
+    monkeypatch.setattr(machine.hostwall, "ensure_slice", lambda vm: _OWN_SLICE)
     monkeypatch.setattr(machine.config, "proxy_port_base", lambda: 41000)
     monkeypatch.setattr(machine.config, "gcp_minter_port_base", lambda: 41100)
     monkeypatch.setattr(machine.hostwall.shutil, "which", lambda name: "/usr/sbin/nft")
@@ -1014,6 +1021,8 @@ def test_host_wall_verb_prints_the_files_and_the_install_steps(host_wall_verb, c
     assert machine.host_wall() == 0
     out = capsys.readouterr().out
     assert "✓ enforcing" in out
+    # the one user-level change, said when it is made (the unit is not on disk in this test)
+    assert "user slice fy-machine-homelab.slice written and enabled (no root)" in out
     # the table and the unit, in full, then the four root commands — and a probe, not a load
     assert (
         'socket cgroupv2 level 5 "user.slice/user-1000.slice/user@1000.service/fy.slice/fy-machine-homelab.slice"'
@@ -1040,7 +1049,14 @@ def test_host_wall_verb_uninstall_prints_the_removal_steps_only(host_wall_verb, 
     out = capsys.readouterr().out
     assert "sudo systemctl disable --now fy-host-wall-homelab.service" in out
     assert "sudo rm /etc/systemd/system/fy-host-wall-homelab.service" in out
+    assert "systemctl --user disable --now fy-machine-homelab.slice" in out  # the user half too
     assert "ExecStart" not in out and "sudo install" not in out
+
+
+def test_host_wall_verb_is_quiet_about_a_slice_already_set_up(host_wall_verb, monkeypatch, capsys):
+    monkeypatch.setattr(machine.hostwall, "slice_installed", lambda vm: True)
+    machine.host_wall()
+    assert "written and enabled" not in capsys.readouterr().out
 
 
 def test_host_wall_verb_is_a_no_op_note_when_off(host_wall_verb, monkeypatch, capsys):

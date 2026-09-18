@@ -95,20 +95,22 @@ def _start() -> bool:
             _err("    • or run projects concurrently with the Lima backend — set")
             _err('      backend = "lima"  under [machine] in foldyard.toml (needs limactl).')
             return False
-    _err(f"▶ starting {BACKEND.name} machine '{MACHINE}'…")
     # Under the host wall the VM's host processes are launched inside their own transient
     # cgroup scope under a per-VM PERSISTENT slice, so the wall has one predictable,
-    # restart-stable thing to match (see _check_host_wall). The slice is made to exist first:
-    # `systemd-run --slice` would create a transient one, and a transient slice is a new cgroup
-    # ID — one the operator's installed table does not hold.
+    # restart-stable thing to match (see _check_host_wall). The slice must already be active:
+    # `systemd-run --slice` would otherwise create a transient one — a new cgroup ID the
+    # operator's installed table does not hold. Setting it up is `fy machine host-wall`'s job
+    # (the one user-level change the wall makes, said out loud there); a launch verb only
+    # checks, and refuses BEFORE booting a VM it could not wall.
     prefix: list[str] = []
     if _host_wall_wanted():
-        if not hostwall.ensure_slice(MACHINE):
-            _err(f"✗ can't set up the user slice '{hostwall.slice_unit(MACHINE)}' for the host")
-            _err("  wall (`systemctl --user` failed — is there a systemd user manager for this")
-            _err("  login? `loginctl enable-linger` gives one to a session without it).")
+        if not hostwall.slice_path(MACHINE):
+            _err("✗ [machine].host_wall = true but the host wall is not set up on this host:")
+            _err(f"  the user slice '{hostwall.slice_unit(MACHINE)}' is not active. Set it up")
+            _err("  (and see the install steps) with:   fy machine host-wall")
             return False
         prefix = hostwall.scoped_argv_prefix(MACHINE)
+    _err(f"▶ starting {BACKEND.name} machine '{MACHINE}'…")
     if not BACKEND.start(MACHINE, prefix=prefix):
         _err(f"✗ '{BACKEND.cli}' failed to start '{MACHINE}'.")
         return False
@@ -224,12 +226,16 @@ def host_wall(uninstall: bool = False) -> int:
     if not hostwall.available():
         print("✗ this host can't enforce a host wall: it needs `nft` (nftables) and cgroup v2.")
         return 1
+    fresh = not hostwall.slice_installed(MACHINE)
     slice_path = hostwall.ensure_slice(MACHINE)
     if not slice_path:
         print(f"✗ can't set up the user slice '{hostwall.slice_unit(MACHINE)}':")
         print("  `systemctl --user` failed — no user manager for this login?")
         print("  `loginctl enable-linger` gives one to a session without it.")
         return 1
+    if fresh:  # the one user-level change the wall makes, said once, when it happens
+        print(f"✓ user slice {hostwall.slice_unit(MACHINE)} written and enabled (no root):")
+        print(f"    {hostwall.user_unit_dir() / hostwall.slice_unit(MACHINE)}")
     staged = hostwall.stage(MACHINE, slice_path, config.state_dir() / "host-wall")
     result = hostwall.probe(MACHINE)
     print(f"host-side wall for machine '{MACHINE}' — slice {slice_path}")
@@ -238,7 +244,8 @@ def host_wall(uninstall: bool = False) -> int:
     else:
         print(f"  ✗ NOT enforcing ({result.error or result.detail()})")
     if uninstall:
-        print("\nTo remove the install (as root — foldyard runs none of this):")
+        print("\nTo remove the install (the `sudo` lines as root, the last two as you — foldyard")
+        print("runs none of this; stop the VM first, the slice goes down with its last line):")
         for line in staged.uninstall:
             print(f"    {line}")
         return 0 if result.enforcing else 1

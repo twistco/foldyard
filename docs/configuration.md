@@ -241,9 +241,12 @@ disk_gib = 60
   than silently downgrading (on WSL2 the in-VM wall still applies; a custom kernel is the only
   route to the host wall there). **foldyard never loads the table itself** — it is the
   operator's install ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)):
-  `fy machine host-wall` prints the table and a system unit that loads it with your user
-  manager, plus the four root commands that install them (`--uninstall` prints the three that
-  remove them); you run those, once per host. Every `fy up` then PROBES that the wall is
+  `fy machine host-wall` sets up the user slice the VM runs under (its one user-level change —
+  `~/.local/share/systemd/user/fy-machine-<vm>.slice`, said once when written) and prints the
+  table and a system unit that loads it with your user manager, plus the four root commands
+  that install them (`--uninstall` prints the lines that remove all of it); you run those, once
+  per host. A launch verb before that setup refuses before booting anything. Every `fy up` then
+  PROBES that the wall is
   enforcing — from inside the VM's slice, never by reading the table — and refuses with the
   reason when it is not (not installed; installed before a host reboot, when the slice's cgroup
   id changed; the band changed). `fy doctor` has the same row. The install is not part of the

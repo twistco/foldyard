@@ -188,8 +188,11 @@ process, and host nftables can single it out. Flushing the guest wall then gains
   `socket cgroupv2` on INPUT resolves the listener for a SYN.
 - **Installed by the operator, once; probed by foldyard, always
   ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)).** foldyard never
-  runs `sudo`. The slice is a persistent user unit foldyard enables (`fy-machine-<vm>.slice`,
-  `WantedBy=default.target`); `fy machine host-wall` renders the table and a system unit
+  runs `sudo`. The slice is a persistent user unit (`fy-machine-<vm>.slice`,
+  `WantedBy=default.target`, under `$XDG_DATA_HOME/systemd/user/` with a generated-by header)
+  that ONLY `fy machine host-wall` writes and enables, saying so once — a launch verb checks
+  it is active and refuses before booting when not; the verb also renders the table and a
+  system unit
   `fy-host-wall-<vm>.service` (`After=`/`BindsTo=`/`WantedBy=user@<uid>.service` — loaded once
   the user manager is up, so the slice exists; dropped when it stops, so a stale cgroup id is
   never held across a re-login; `ExecStart=nft -f /etc/foldyard/host-wall-<vm>.nft`) into
