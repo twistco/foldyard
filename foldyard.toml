@@ -26,7 +26,7 @@ prefix = "foldyard"
 # and be none. The recommendation is where contributors should actually be; raise the floor
 # to meet it once everyone has moved.
 min_foldyard_version = "0.2.0"
-recommended_foldyard_version = "0.2.1"
+recommended_foldyard_version = "0.3.0"
 # A compose stack to drive alongside the box — uncomment when you have one (step 3), add
 # its host ports under [ports] below, and extend [claude].system_prompt with the stack
 # paragraph parked beside it (an agent that knows the box but not the stack is half-lost).
@@ -43,6 +43,7 @@ recommended_foldyard_version = "0.2.1"
 [project.foldyard_version_reasons]
 "0.2.0" = "the version window itself — the first fy that reads these keys instead of ignoring them"
 "0.2.1" = "`fy init` stamps a version floor; `fy tui` lists every workspace from inside a worktree"
+"0.3.0" = "the `native` backend is gone (always a VM); gVisor as a machine posture; the host-side wall on Linux; `fy reclaim`; engine probes work on podman 4.9 (Ubuntu 24.04)"
 
 [machine]
 # A rootless VM that mounts ONLY this repo. Default here is the Lima backend + an in-VM
