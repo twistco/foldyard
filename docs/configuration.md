@@ -76,9 +76,11 @@ min_foldyard_version = "0.2.0"
   the TUI shows it. Port keys are yours, so foldyard never guesses a name here. Absent means
   no browsable-app URL. Env: `FOLDYARD_APP_PORT_KEY`.
 - **`compose`** — your compose files, in `-f` order; a single string also works. Paths are
-  relative to the active checkout (or absolute). Default: `<dev_vm_dir>/compose.podman.yml`.
-  If no configured file exists on disk, the project is treated as stack-less: `fy up` has
-  nothing to start and points you at `fy box up`.
+  relative to the active checkout (or absolute). No default: unset means the project drives
+  no compose stack (box-only), and every stack verb (`fy up | ps | logs | shell | build | down
+  | nuke`) says so and points at its `fy box …` counterpart instead of guessing a file — `fy up`
+  still brings the machine and the host daemons up first. A declared file that is missing on
+  disk (a branch from before it, a rename) is an error naming the file and the checkout.
 - **`ensure_dirs`** — bind-mount source dirs (checkout-relative) your compose file expects to
   pre-exist; foldyard creates them empty on `up`. Default: `[]`.
 - **`external_network`** — set `true` to let foldyard own the `{prefix}_default` network's

@@ -263,11 +263,11 @@ def _attach_hint(worktree: str) -> str:
     return f"WORKTREE={worktree} fy box shell" if worktree else "fy box shell"
 
 
-def _has_compose(checkout: str) -> bool:
+def _has_compose() -> bool:
     """Does this project ship a compose stack? When it doesn't, `compose up` owns no
     `{project}_default` network, so `box up` must create it itself — see
     `stack.ensure_network`. Shared with `stack.up` via `config.has_compose_stack`."""
-    return config.has_compose_stack(Path(checkout))
+    return config.has_compose_stack()
 
 
 def _build_img(engine: str, main: Path, env: dict) -> int:
@@ -1181,7 +1181,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # exists). A compose-OWNED network is compose's to create — pre-creating it would lack
     # compose's labels and break the stack's first `up` — so a missing one means the stack
     # has never been up: say so instead of dying on podman's cryptic "network not found".
-    if not _has_compose(checkout) or config.external_network():
+    if not _has_compose() or config.external_network():
         stack.ensure_network(engine, net, env)
     elif not stack.network_exists(engine, net, env):
         _err(f"✗ network {net} doesn't exist yet — it's created by the stack's first up:")

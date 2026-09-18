@@ -624,6 +624,8 @@ def _build(
 
 def build(services: list[str], *, extra_profiles: list[str] | None = None) -> int:
     """Build selected compose services; an empty list builds every configured service."""
+    if (rc := stack_declared("build", "fy box build")) is not None:
+        return rc
     return _build(resolve(), services=services or None, extra_profiles=extra_profiles)
 
 
@@ -642,12 +644,10 @@ def up() -> int:
     from . import supervisor
 
     supervisor.ensure_background()
-    if not config.has_compose_stack(ctx.main):
-        print(f"ℹ no compose stack for '{ctx.project}' — the machine is up, but there's no")
-        print("  compose file to start. This project is box-only; bring up its dev box with:")
-        print("      foldyard box up")
-        print("  To add a stack instead, set [project].compose in foldyard.toml.")
-        return 0
+    # Gated AFTER the machine + supervisor, unlike the other stack verbs: a box-only consumer's
+    # `fy up` is how both come up (the note below then points at `fy box up`).
+    if (rc := stack_declared("up", "fy box up")) is not None:
+        return rc
     _ensure_dirs(Path(ctx.env["FOLDYARD_CHECKOUT"]))
     # Stage any VM-visible stack assets a plugin's posture needs (e.g. the gcp metadata emulator's
     # server.py — shipped in the package, off the repo mount) into the checkout BEFORE compose up.
@@ -937,7 +937,7 @@ def reconcile_posture(
         ctx_mgr = config.using(cfg) if cfg is not None else nullcontext()
         with ctx_mgr:
             # Cheap, subprocess-free skip for stack-less consumers under the bound config.
-            if not config.has_compose_stack(config.repo_root()):
+            if not config.has_compose_stack():
                 return True
             ctx = resolve(no_machine=True, worktree=cfg.worktree if cfg is not None else None)
             from .plugins import registry
@@ -1186,6 +1186,34 @@ def _compose_captured(
     return devmode.run_stream(cmd, emit, env=ctx.env, cwd=str(ctx.main))
 
 
+def stack_declared(verb: str, box_verb: str | None) -> int | None:
+    """The gate every verb that acts on the compose stack runs FIRST — pure config, before any
+    engine, machine or git call. Returns an exit code to stop with, or None to carry on.
+
+    ``[project].compose`` unset ⇒ a box-only project: say what ``fy <verb>`` acts on, that this
+    project declares no stack, the box counterpart, and where a stack gets set up — exit 0.
+    Nothing is invented: the old default path handed the compose provider a file nobody wrote,
+    and its CRITICAL "missing files" read as a real failure to an agent following the guide.
+    Declared but missing on disk ⇒ foldyard's own error naming the file and the checkout it
+    looked in (a branch from before the file, a rename), exit 1."""
+    if not config.has_compose_stack():
+        print(
+            f"ℹ `fy {verb}` acts on the compose stack, and '{config.project_prefix()}' doesn't "
+            "drive one ([project].compose is unset in foldyard.toml)."
+        )
+        if box_verb:
+            print(f"  The dev box: {box_verb}")
+        print("  To bring a stack in: fy docs quickstart (step 3) · fy docs configuration")
+        return 0
+    checkout = config.repo_root()
+    missing = config.missing_compose_files(checkout)
+    if missing:
+        _err(f"✗ [project].compose names {', '.join(missing)} — not found under {checkout}.")
+        _err("  Check the branch this checkout is on, or fix the path in foldyard.toml.")
+        return 1
+    return None
+
+
 def engine_reachable(nothing_to: str) -> bool:
     """Gate for verbs that only READ or TEAR DOWN engine state (down/nuke/ps/logs): an
     inherited DOCKER_HOST (box, CI) passes, a running machine passes — but an absent or
@@ -1202,6 +1230,8 @@ def engine_reachable(nothing_to: str) -> bool:
 
 
 def down() -> int:
+    if (rc := stack_declared("down", "fy box down")) is not None:
+        return rc
     if not engine_reachable("stop"):
         return 0
     ctx = resolve()
@@ -1216,18 +1246,24 @@ def down() -> int:
 
 
 def ps() -> int:
+    if (rc := stack_declared("ps", "fy box ps")) is not None:
+        return rc
     if not engine_reachable("show"):
         return 0
     return _compose(resolve(), ["ps"])
 
 
 def logs(svc: list[str]) -> int:
+    if (rc := stack_declared("logs", None)) is not None:
+        return rc
     if not engine_reachable("follow"):
         return 0
     return _compose(resolve(), ["logs", "-f", "-n", "50", *svc])
 
 
 def shell() -> int:
+    if (rc := stack_declared("shell", "fy box shell")) is not None:
+        return rc
     ctx = resolve()
     return _compose(ctx, ["exec", ctx.app, "bash"])
 
@@ -1532,6 +1568,8 @@ def reclaim_now() -> int:
 
 
 def nuke() -> int:
+    if (rc := stack_declared("nuke", "fy box down")) is not None:
+        return rc
     if not engine_reachable("nuke"):
         return 0
     ctx = resolve()

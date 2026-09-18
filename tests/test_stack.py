@@ -20,6 +20,7 @@ _FAKE_TOML = """\
 name = "tangible"
 prefix = "tangible-podman"
 app = "platform-frontend"
+compose = ["compose.podman.yml"]
 ensure_dirs = ["platform/.db-exports", "platform/.docker/gcs-emulator"]
 
 [ports]
@@ -774,12 +775,23 @@ def test_up_stays_quiet_when_capabilities_are_healthy(fake_repo, capture_run, mo
     assert "DEGRADED" not in capsys.readouterr().out
 
 
+@pytest.fixture
+def stackless_repo(fake_repo):
+    """fake_repo with `[project].compose` UNSET — a box-only consumer. The compose.podman.yml
+    the fixture wrote stays on disk on purpose: the stack is what the toml declares, and a
+    stray file of the old default's name must not be read as one."""
+    toml = fake_repo / "foldyard.toml"
+    toml.write_text(toml.read_text().replace('compose = ["compose.podman.yml"]\n', ""))
+    config.clear_caches()
+    assert (fake_repo / "compose.podman.yml").exists()
+    return fake_repo
+
+
 def test_up_on_compose_less_project_starts_supervisor_and_points_at_box(
-    fake_repo, capture_run, capsys, monkeypatch
+    stackless_repo, capture_run, capsys, monkeypatch
 ):
-    # A box-only project (no compose file present) still ensures the machine, but has nothing
-    # to `compose up` — succeed and point at `foldyard box up` instead of failing on a path.
-    (fake_repo / "compose.podman.yml").unlink()
+    # A box-only project still ensures the machine, but has nothing to `compose up` — succeed
+    # and point at `foldyard box up` + where a stack gets set up, instead of failing on a path.
     started: list[bool] = []
     monkeypatch.setattr(supervisor, "ensure_background", lambda: started.append(True))
 
@@ -787,7 +799,60 @@ def test_up_on_compose_less_project_starts_supervisor_and_points_at_box(
     assert _composes(capture_run) == []  # never invoked compose
     assert started == [True]
     out = capsys.readouterr().out
-    assert "no compose stack" in out and "foldyard box up" in out
+    assert "[project].compose" in out and "fy box up" in out and "fy docs quickstart" in out
+
+
+# Every verb that acts on the compose stack, with the box counterpart its note points at.
+_STACK_VERBS = [
+    ("ps", lambda: stack.ps(), "fy box ps"),
+    ("logs", lambda: stack.logs([]), None),
+    ("shell", lambda: stack.shell(), "fy box shell"),
+    ("build", lambda: stack.build([]), "fy box build"),
+    ("down", lambda: stack.down(), "fy box down"),
+    ("nuke", lambda: stack.nuke(), "fy box down"),
+]
+
+
+@pytest.mark.parametrize(
+    ("verb", "run", "box_hint"), _STACK_VERBS, ids=[v[0] for v in _STACK_VERBS]
+)
+def test_stack_verbs_without_a_declared_stack_explain_and_exit_zero(
+    stackless_repo, capture_run, capsys, verb, run, box_hint
+):
+    # `fy ps` on a box-only project used to hand podman-compose an invented `-f
+    # compose.podman.yml` and exit 1 on its CRITICAL "missing files" — a scary non-failure an
+    # agent then debugs. Now: say what the verb acts on, that this project declares no stack,
+    # where the stack is set up — and touch NOTHING (no engine, no machine, no git).
+    assert run() == 0
+    assert capture_run == []
+    out = capsys.readouterr().out
+    assert f"`fy {verb}`" in out and "[project].compose" in out
+    assert "fy docs quickstart" in out and "fy docs configuration" in out
+    if box_hint:
+        assert box_hint in out
+    else:
+        assert "fy box" not in out
+
+
+@pytest.mark.parametrize(("verb", "run", "_"), _STACK_VERBS, ids=[v[0] for v in _STACK_VERBS])
+def test_stack_verbs_with_a_declared_file_missing_abort_naming_it(
+    fake_repo, capture_run, capsys, verb, run, _
+):
+    # Declared but gone (wrong branch, a rename): that IS an error — but foldyard's, naming the
+    # file and the checkout it looked in, not the compose provider's "missing files" dump.
+    (fake_repo / "compose.podman.yml").unlink()
+    assert run() == 1
+    assert _composes(capture_run) == []
+    err = capsys.readouterr().err
+    assert "compose.podman.yml" in err and str(fake_repo) in err and "[project].compose" in err
+
+
+def test_up_with_a_declared_file_missing_aborts_naming_it(fake_repo, capture_run, capsys):
+    (fake_repo / "compose.podman.yml").unlink()
+    assert stack.up() == 1
+    assert _composes(capture_run) == []
+    err = capsys.readouterr().err
+    assert "compose.podman.yml" in err and "[project].compose" in err
 
 
 def test_nuke_main_removes_volumes(fake_repo, capture_run):
@@ -1399,10 +1464,9 @@ def test_reconcile_noop_when_stack_not_up(fake_repo, capture_stream, monkeypatch
     assert capture_stream == []  # guardrail: never START a stack on a posture change
 
 
-def test_reconcile_noop_when_stackless(fake_repo, capture_stream, monkeypatch):
-    # No compose file on disk ⇒ nothing to reconcile (and no engine probe at all).
+def test_reconcile_noop_when_stackless(stackless_repo, capture_stream, monkeypatch):
+    # No declared stack ⇒ nothing to reconcile (and no engine probe at all).
     monkeypatch.setattr(config, "in_box", lambda: False)
-    (fake_repo / "compose.podman.yml").unlink()
     assert stack.reconcile_posture(_sig(""), _sig("metadata")) is True
     assert capture_stream == []
 
