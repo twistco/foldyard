@@ -4,7 +4,7 @@
 # releases are cut by tag from the release workflow (docs/releasing.md is the process).
 [project]
 name = "foldyard"
-version = "0.3.0"
+version = "0.3.1"
 description = "Stack-colocated, secretless-by-default, laptop-local isolated dev environment"
 readme = "README.md"
 license = "Apache-2.0"

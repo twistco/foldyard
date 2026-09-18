@@ -181,7 +181,7 @@ def _fix(in_box: bool) -> str:
     """
     if in_box:
         return "Run `fy box down && fy box up` from the host."
-    return f"Run `{upgrade_hint()}`."
+    return f"Run `{upgrade_hint()}` (the full sequence: `fy docs quickstart`, Upgrading)."
 
 
 def upgrade_hint() -> str:

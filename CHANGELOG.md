@@ -7,6 +7,8 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ## Unreleased
 
+## 0.3.1 — 2026-09-18
+
 ### Changed
 
 - **`[machine].host_wall` is the operator's install — foldyard never runs `sudo` on the host
@@ -48,6 +50,17 @@ break config or CLI shape, and say so here. How a release is cut:
   lima backend now waits for a hostagent whose driver is dead to leave on its own (announced, up
   to 20 s) and signals it only if it lingers — identified by Lima's own `ha.pid`, never by name;
   a VM whose driver is alive is never touched. Both of `ensure`'s paths are covered.
+- **The upgrade the version floor asked for no longer breaks the install it runs on.** It said
+  `uv tool install --upgrade foldyard`, which re-specifies the requirement as bare `foldyard`:
+  the `[host]` extra is dropped — mitmproxy uninstalled, so the next `fy box up` fails preflight
+  and the box's egress would connection-refuse — and an editable checkout is swapped for PyPI's.
+  Seen on the first 0.3.0 upgrade. It now says `uv tool upgrade foldyard`, which re-resolves the
+  install as it was made (extras and editable path kept, an editable install's baked version
+  refreshed). And the mitmproxy-missing preflight / doctor row / PyJWT error named `just foldyard
+  install` — foldyard's own dev recipe, in a spelling that no longer exists even here; they now
+  print the `uv tool install --force … [host]` reinstall shaped to your install, the same
+  command the TUI's fix button runs. The safe sequence is written down:
+  [quickstart → Upgrading](./docs/quickstart.md#upgrading) (`fy docs quickstart`).
 
 ## 0.3.0 — 2026-09-18
 
