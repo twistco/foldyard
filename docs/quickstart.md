@@ -124,6 +124,46 @@ Both are VMs: foldyard always has one, on Linux too
 Sizing (`cpus`/`memory_mib`/`disk_gib`) applies when the VM is first created; change it
 later with `foldyard machine recreate`.
 
+## Upgrading
+
+A repo raises `min_foldyard_version` in the same commit as the setting an older `fy` would
+ignore, so after a `git pull` an old `fy` **refuses every verb** — `fy box down` included — until
+you upgrade. Do the upgrade first and nothing ever refuses:
+
+```bash
+uv tool upgrade foldyard      # 1. the host tool — BEFORE pulling
+fy --version
+git pull                      # 2. the repo (and its foldyard.toml)
+fy doctor                     # 3. ✓ foldyard version · ✓ mitmproxy · ○ adopted config (expected)
+fy config diff                # 4. read what the host would start honouring…
+fy config adopt               #    …and adopt it explicitly
+fy box down && fy box up      # 5. recreate the box on the new version
+```
+
+Why each line is the way it is:
+
+- **`uv tool upgrade`, never `uv tool install --upgrade`.** The latter re-specifies the
+  requirement as bare `foldyard`: the `[host]` extra is dropped (mitmproxy uninstalled — the next
+  `fy box up` fails preflight, and the box's egress would connection-refuse) and an editable
+  checkout is swapped for PyPI's. `upgrade` re-resolves the install exactly as it was made. If it
+  answers "Nothing to upgrade" (a pinned install), or `fy doctor` shows `mitmproxy` missing,
+  the row prints the reinstall shaped to *your* install: `uv tool install --force
+  'foldyard[host]'` for a PyPI install, the same with `--editable '<checkout>[host]'` for one
+  made from a foldyard checkout — run the line as printed, not the other one. (Editable from a
+  checkout? `upgrade` rebuilds from whatever that checkout holds, so pull *it* — not the repo
+  you are in — first.)
+- **Adopt explicitly, having read the diff.** `fy box up` would show the same diff and ask, but
+  its default answer is *ignore*: press Enter and the host keeps running the *previous*
+  config, asks again next time, and the launch looks like it worked. `fy config diff` shows what
+  the host would start honouring — credential injection and egress capture live in this file —
+  and `fy config adopt` is the one act that changes it ([configuration](./configuration.md)).
+- **`down` then `up`, not `up` alone.** `fy box up` on a running box says "already up" and
+  reinstalls nothing; the recreate is what installs the box's own `fy` to match the host's, and
+  what replaces a host supervisor still running the old code. Finish or park in-box agent
+  sessions first — `box down` archives their transcripts, but a mid-task agent is interrupted.
+- **`fy code` afterwards** if the release moved anything under `[vscode]`: the attach config is
+  authored from the adopted table, so it is stale until re-authored.
+
 ## When something's off
 
 `fy doctor` diagnoses; `fy tui` shows the same checks with one-click fixes where they're
