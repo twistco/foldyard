@@ -239,12 +239,17 @@ disk_gib = 60
   (`CONFIG_NFT_SOCKET`; the match is `socket cgroupv2`) — a Linux host; macOS reports it
   unavailable, the stock WSL2 kernel lacks the expression, and preflight refuses either rather
   than silently downgrading (on WSL2 the in-VM wall still applies; a custom kernel is the only
-  route to the host wall there). Loading the table is `sudo nft -f -` on every
-  `fy up` (an idempotent replace of the same text); a passwordless sudoers rule for `nft` makes
-  it silent. A VM already running outside its own scope-under-slice (started before the option
-  was on, or by an older foldyard) is refused with `fy machine stop && fy up`. `fy machine rm`
-  removes the table; `fy machine stop` leaves it (the slice survives idle, so the table stays
-  bound to the right cgroup). Default: `false`. Env: `MACHINE_HOST_WALL`.
+  route to the host wall there). **foldyard never loads the table itself** — it is the
+  operator's install ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)):
+  `fy machine host-wall` prints the table and a system unit that loads it with your user
+  manager, plus the four root commands that install them (`--uninstall` prints the three that
+  remove them); you run those, once per host. Every `fy up` then PROBES that the wall is
+  enforcing — from inside the VM's slice, never by reading the table — and refuses with the
+  reason when it is not (not installed; installed before a host reboot, when the slice's cgroup
+  id changed; the band changed). `fy doctor` has the same row. The install is not part of the
+  VM's lifecycle: `fy machine stop` and `rm` leave it alone. A VM already running outside its
+  own scope-under-slice (started before the option was on, or by an older foldyard) is refused
+  with `fy machine stop && fy up`. Default: `false`. Env: `MACHINE_HOST_WALL`.
 - **`vmtype`** — the Lima **driver**, i.e. the hypervisor the VM actually runs on: `"vz"`
   (Apple Virtualization.framework) | `"qemu"` | `"krunkit"` | any external Lima driver plugin.
   Lima-only. **Create-only** — like mounts and sizing, changing it means `fy machine recreate`.

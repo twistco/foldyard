@@ -229,13 +229,16 @@ come before any microVM, both at zero runtime cost:
    port and the host's sshd were refused, `limactl shell` and the podman socket kept working, and
    the operator's own egress was untouched. `foldyard.hostwall` renders that ruleset, and as of
    2026-09-12 it is **wired into `fy up`** behind `[machine].host_wall = true`: the VM is started
-   inside its own transient scope under its own slice (`systemd-run --user --scope --slice
-   fy-machine-<vm>.slice --unit fy-machine-<vm>.scope`) so the match is predictable, the table
-   is rendered for the slice the VM actually sits under and loaded with `sudo nft` on every
-   `fy up` (since 2026-09-18 the same text every boot: loopback is judged on the input hook by
-   the listener's cgroup, so Lima's per-boot ports are never named), and a VM found outside its
-   own scope-under-slice is refused rather than walled — matching the login session's scope
-   would wall the operator's shell. Preflight pairs it with `wall` and with a host that can
+   inside its own transient scope under its own persistent slice (`systemd-run --user --scope
+   --slice fy-machine-<vm>.slice --unit fy-machine-<vm>.scope`) so the match is predictable,
+   the table is rendered for that slice (since 2026-09-18 the same text every boot: loopback
+   is judged on the input hook by the listener's cgroup, so Lima's per-boot ports are never
+   named) and **installed by the operator, once**, from the files and `sudo` lines
+   `fy machine host-wall` prints — foldyard never elevates on the host
+   ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)); every `fy up` then
+   probes that it is enforcing, from inside the slice, and refuses when it is not. A VM found
+   outside its own scope-under-slice is refused rather than walled — matching the login
+   session's scope would wall the operator's shell. Preflight pairs it with `wall` and with a host that can
    enforce it. Run end to end on the rig the same day (`fy machine ensure` under
    `MACHINE_HOST_WALL=1`, the example VM created from scratch): every probe above held, plus
    `fy verify` ALL PASS under the wall, the hand-started VM refused, and `rm` leaving no table.

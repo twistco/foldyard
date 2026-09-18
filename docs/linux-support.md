@@ -60,10 +60,12 @@ there are upper bounds; correctness results transfer as they are.
   Windows-on-ARM boots the distro at EL1, so KVM is structurally absent there. See
   [isolation-layers.md](./isolation-layers.md#wsl2--a-linux-host-whose-hyper-v-boundary-protects-the-wrong-asset).
 - **`fy tui`, `fy code` (the VS Code attach), `fy open` (browser)** on Linux — untouched.
-- **The host wall's operator side**: the `sudo nft` prompt on every `fy up` (a passwordless
-  sudoers rule for `nft` is the documented answer, not yet written up as a recipe), and the
-  requirement for a `systemd --user` manager (an SSH login has one; a bare `su` may not) — the
-  scope wrapper would fail loudly, but the message is systemd's, not ours.
+- **The host wall's operator side** — resolved 2026-09-18
+  ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)): no `sudo` prompt from
+  foldyard at all; `fy machine host-wall` prints the install (a table + a system unit bound to
+  the user manager), done once per host, and `fy up` probes. What remains is the requirement
+  for a `systemd --user` manager (an SSH login has one; a bare `su` may not): the slice and the
+  probe both need it, and foldyard now says so (`loginctl enable-linger`).
 
 ## Outstanding work before "supported"
 

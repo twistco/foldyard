@@ -185,19 +185,33 @@ process, and host nftables can single it out. Flushing the guest wall then gains
   The earlier form named those ports (read from `limactl list` and the VM pids' socket inodes)
   and so had to be re-rendered every boot; the ct-mark form was proven on the runner
   (2026-09-18): the mark set on OUTPUT is visible on INPUT for the same loopback packet, and
-  `socket cgroupv2` on INPUT resolves the listener for a SYN. The slice is read from the VM
-  pid's `/proc/<pid>/cgroup`, and the table is loaded with `sudo nft -f -` as a
-  declare-then-delete-then-declare idempotent replace — after every start, a revive, and each
-  steady-state `fy up`, since it can't be read back without root. That root prompt is the
-  price; a passwordless sudoers rule for `nft` is the operator's call and makes it silent.
+  `socket cgroupv2` on INPUT resolves the listener for a SYN.
+- **Installed by the operator, once; probed by foldyard, always
+  ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)).** foldyard never
+  runs `sudo`. The slice is a persistent user unit foldyard enables (`fy-machine-<vm>.slice`,
+  `WantedBy=default.target`); `fy machine host-wall` renders the table and a system unit
+  `fy-host-wall-<vm>.service` (`After=`/`BindsTo=`/`WantedBy=user@<uid>.service` — loaded once
+  the user manager is up, so the slice exists; dropped when it stops, so a stale cgroup id is
+  never held across a re-login; `ExecStart=nft -f /etc/foldyard/host-wall-<vm>.nft`) into
+  `~/.foldyard/<project>/host-wall/`, prints both in full and the four `sudo` lines that
+  install them (`install -D` ×2, `daemon-reload`, `enable --now`). Then every `fy up` PROBES:
+  a child under the slice (`systemd-run --slice`) must be REFUSED a loopback listener foldyard
+  opened outside the slice and a connect to TEST-NET-1 (`192.0.2.1:9` — never routable, so an
+  unwalled SYN leaves and times out; "unreachable" on a host with no route proves nothing and
+  refuses nothing), and must CONNECT to a listener on the project's band. Not enforcing ⇒
+  `fy up` refuses and names the half that failed. The same probe is the verb's status line and
+  doctor's `host wall` row. Why a probe and not a read: the table can't be read without root,
+  and (the runner, 2026-09-18) a table that IS there may hold the id of a slice that no longer
+  exists — it matched nothing after the slice was stopped and recreated, silently. The install
+  is not part of the VM's lifecycle: `stop` and `rm` leave it (`rm` says so and names
+  `--uninstall`).
 - **Fail-closed, never a silent downgrade to the guest wall alone.** Preflight refuses
   `host_wall` without `wall`, and on a host without `nft` + cgroup v2 (macOS reports itself
   unavailable rather than branching on the OS). `ensure` refuses a VM found OUTSIDE its own scope
   — started by hand, or before the option was turned on — because walling the login session's
   scope it landed in would wall the operator's whole shell — and a VM in its scope but not
   under its slice (an older foldyard started it) would leave the table matching nothing:
-  `fy machine stop && fy up`. A failed load also stops `fy up`. `fy machine rm` removes the
-  table; `stop` leaves it (the slice survives idle, so it stays bound to the right cgroup).
+  `fy machine stop && fy up`. A probe that finds the wall not enforcing also stops `fy up`.
 
 Run end to end on the Linux rig (2026-09-12, `fy machine ensure` with `MACHINE_HOST_WALL=1`
 against the example): the VM created and started inside its scope, direct guest egress refused by

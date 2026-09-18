@@ -97,9 +97,18 @@ def _start() -> bool:
             return False
     _err(f"▶ starting {BACKEND.name} machine '{MACHINE}'…")
     # Under the host wall the VM's host processes are launched inside their own transient
-    # cgroup scope under a per-VM slice, so the wall has one predictable, restart-stable thing
-    # to match (see _apply_host_wall).
-    prefix = hostwall.scoped_argv_prefix(MACHINE) if _host_wall_wanted() else []
+    # cgroup scope under a per-VM PERSISTENT slice, so the wall has one predictable,
+    # restart-stable thing to match (see _check_host_wall). The slice is made to exist first:
+    # `systemd-run --slice` would create a transient one, and a transient slice is a new cgroup
+    # ID — one the operator's installed table does not hold.
+    prefix: list[str] = []
+    if _host_wall_wanted():
+        if not hostwall.ensure_slice(MACHINE):
+            _err(f"✗ can't set up the user slice '{hostwall.slice_unit(MACHINE)}' for the host")
+            _err("  wall (`systemctl --user` failed — is there a systemd user manager for this")
+            _err("  login? `loginctl enable-linger` gives one to a session without it).")
+            return False
+        prefix = hostwall.scoped_argv_prefix(MACHINE)
     if not BACKEND.start(MACHINE, prefix=prefix):
         _err(f"✗ '{BACKEND.cli}' failed to start '{MACHINE}'.")
         return False
@@ -154,24 +163,27 @@ def _revive() -> bool:
 # The tier above the guest wall. That one is enforcement the guest applies to itself, so a
 # guest-KERNEL exploit reaching VM-root can flush it; this one matches the VM process's own
 # traffic on the host — where the guest has no reach — and allows only this project's daemon
-# band (hostwall.py has the ruleset and the why). Two things make it wire-able: the VM is
-# STARTED inside its own transient systemd scope under its own slice (`_start`), and after
-# every start — and on every steady-state `fy up`, since the table can't be read back without
-# root — the ruleset is rendered for the slice the VM ACTUALLY sits under and loaded as root (an
-# idempotent replace). The ruleset names nothing from this boot (Lima's per-boot ports are
-# judged by the listener's cgroup instead), so the reload is a no-op replace of the same text.
-# A VM found outside its own scope-under-slice (started by hand, or before `host_wall` was
-# turned on) is REFUSED: matching the login session's scope instead would wall the operator's
-# entire shell, and a slice the VM is not under would match nothing.
+# band (hostwall.py has the ruleset and the why). foldyard never loads it: the OPERATOR installs
+# the table once, from files foldyard renders and prints (`fy machine host-wall`; ADR-0028 — no
+# elevation on the host, nothing to approve blind). What foldyard does is (1) start the VM
+# inside its own transient scope under its own PERSISTENT slice (`_start`), the cgroup the
+# operator's table binds to, and (2) after every start — and on every steady-state `fy up` —
+# PROBE that the wall is enforcing for that slice (`_check_host_wall`): a table can't be read
+# back without root, and one that is there may hold the ID of a slice that no longer exists
+# (a host reboot), which is fail-open unless something asks. A VM found outside its own
+# scope-under-slice (started by hand, or before `host_wall` was turned on) is REFUSED:
+# matching the login session's scope instead would wall the operator's entire shell, and a
+# slice the VM is not under would match nothing.
 
 
 def _host_wall_wanted() -> bool:
     return BACKEND.name == "lima" and config.machine_host_wall()
 
 
-def _apply_host_wall() -> None:
-    """Load (or re-load) the host-side wall for the running VM; a hard stop when it was asked
-    for and can't be delivered — never a silent downgrade to the guest wall alone."""
+def _check_host_wall() -> None:
+    """Refuse to go on unless the host-side wall is ENFORCING for the running VM's slice; a hard
+    stop when it was asked for and isn't there — never a silent downgrade to the guest wall
+    alone. Says which half failed and where the install steps are."""
     if not _host_wall_wanted():
         return
     if not hostwall.available():
@@ -185,27 +197,69 @@ def _apply_host_wall() -> None:
         _err("  the host wall has nothing safe to match — walling the scope it is in would wall")
         _err("  the shell that started it. Restart it under foldyard:   fy machine stop && fy up")
         raise SystemExit(1)
-    _err(f"▶ loading the host-side wall for '{MACHINE}' (root: sudo nft)…")
-    loaded = hostwall.install(MACHINE, hostwall.vm_slice(scope))
-    if not loaded.ok:
-        # nft's own words first (they were captured, not streamed), then what they mean when
-        # foldyard knows — a kernel without the `socket` expression is the case a WSL2 host hits.
-        if loaded.stderr.strip():
-            _err(loaded.stderr.rstrip())
-        _err(f"✗ loading the host-side wall for '{MACHINE}' failed (`sudo nft -f -`).")
-        if why := hostwall.explain_load_failure(loaded.stderr):
-            _err(why)
-        raise SystemExit(1)
-
-
-def _remove_host_wall() -> None:
-    """Best-effort teardown after the VM is gone: a table matching a scope that no longer
-    exists is inert, so a failure here is a warning, not an error."""
-    if not _host_wall_wanted() or not hostwall.available():
+    result = hostwall.probe(MACHINE)
+    if result.enforcing:
+        _err(f"✓ host-side wall enforcing for '{MACHINE}' ({result.detail()})")
         return
-    if not hostwall.remove(MACHINE):
-        _err(f"⚠ removing the host-side wall table for '{MACHINE}' failed (inert without the VM;")
-        _err(f"  `sudo nft delete table inet {hostwall.table_name(MACHINE)}` clears it).")
+    _err(f"✗ the host-side wall is NOT enforcing for '{MACHINE}'.")
+    if result.error:
+        _err(f"  probe: {result.error}")
+    else:
+        _err(f"  probe: {result.detail()}")
+    _err("  Not installed, or installed for a slice that no longer exists (a host reboot, a")
+    _err("  changed band). foldyard never loads it itself — see the files and the steps:")
+    _err("      fy machine host-wall")
+    raise SystemExit(1)
+
+
+def host_wall(uninstall: bool = False) -> int:
+    """`fy machine host-wall`: the operator's side of the host wall. Makes the VM's persistent
+    slice exist, renders the root-side files into the project's state dir, prints them and the
+    exact commands that install (or, with ``uninstall``, remove) them — and probes whether the
+    wall is enforcing right now. Exit 0 when it is, 1 when it is not (so a script can ask).
+    foldyard runs none of the printed commands: what root does is in front of the operator."""
+    if not _host_wall_wanted():
+        print("host_wall is off for this project ([machine].host_wall; lima backend only).")
+        return 0
+    if not hostwall.available():
+        print("✗ this host can't enforce a host wall: it needs `nft` (nftables) and cgroup v2.")
+        return 1
+    slice_path = hostwall.ensure_slice(MACHINE)
+    if not slice_path:
+        print(f"✗ can't set up the user slice '{hostwall.slice_unit(MACHINE)}':")
+        print("  `systemctl --user` failed — no user manager for this login?")
+        print("  `loginctl enable-linger` gives one to a session without it.")
+        return 1
+    staged = hostwall.stage(MACHINE, slice_path, config.state_dir() / "host-wall")
+    result = hostwall.probe(MACHINE)
+    print(f"host-side wall for machine '{MACHINE}' — slice {slice_path}")
+    if result.enforcing:
+        print(f"  ✓ enforcing ({result.detail()})")
+    else:
+        print(f"  ✗ NOT enforcing ({result.error or result.detail()})")
+    if uninstall:
+        print("\nTo remove the install (as root — foldyard runs none of this):")
+        for line in staged.uninstall:
+            print(f"    {line}")
+        return 0 if result.enforcing else 1
+    print(f"\n── {staged.ruleset} ── the table root loads:\n")
+    print(staged.ruleset.read_text())
+    print(f"── {staged.service} ── the unit that loads it with your user manager:\n")
+    print(staged.service.read_text())
+    print("To install (as root — foldyard runs none of this; the copies are root-owned):")
+    for line in staged.install:
+        print(f"    {line}")
+    print("\nThen `fy up` (or this verb again) probes it. Re-run the install after a change to")
+    print("the project's daemon band, and once per host if the files were removed.")
+    return 0 if result.enforcing else 1
+
+
+def _note_host_wall_install() -> None:
+    """`rm` deletes the VM, not the operator's wall install: the table is inert while the slice
+    is empty and right again for the next VM of this name. Say so, once."""
+    if _host_wall_wanted() and hostwall.available():
+        _err("ℹ the host-side wall install is untouched (`fy machine host-wall --uninstall` says")
+        _err("  how to remove it).")
 
 
 # ── guest boot provisioning: the sudo grant + the in-VM egress wall (lima only) ────────────
@@ -398,10 +452,10 @@ def ensure(main: Path, wt_root: Path) -> None:
         # socket nothing serves (see _revive).
         if not _revive():
             raise SystemExit(1)
-    # Every path ends by (re)loading the host-side wall for wherever the VM actually sits, then
+    # Every path ends by probing the host-side wall for wherever the VM actually sits, then
     # reading the guest's own report of what it applied (never the host's memory of it): a
     # fresh boot, a revive, and the steady state alike.
-    _apply_host_wall()
+    _check_host_wall()
     _check_guest_provisioning()
     # Housekeeping every VM wants (journal cap, API log level): over ssh, best-effort, before the
     # sandbox so its service restarts already see the drop-in.
@@ -510,8 +564,8 @@ def delete(assume_yes: bool = False) -> int:
         print(f"✗ '{BACKEND.cli}' failed to remove '{MACHINE}'.")
         return 1
     # The boot provisioning lives in the instance config, which the backend removes with the VM;
-    # the host-side wall's table is the one host-side thing to clear.
-    _remove_host_wall()
+    # the host-side wall is the operator's install, not the VM's.
+    _note_host_wall_install()
     if not _stop_host_supervisor():
         return 1
     print(f"✓ machine '{MACHINE}' deleted. `fy up` / `fy machine ensure` re-creates it.")
@@ -547,7 +601,7 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
     _record_provisioning()  # the fresh VM is stopped: record before its first boot
     if not _start():  # one-VM-at-a-time aware on non-concurrent backends
         return 1
-    _apply_host_wall()
+    _check_host_wall()
     _check_guest_provisioning()
     print(f"✓ machine '{MACHINE}' recreated with the worktrees mount.")
     return 0

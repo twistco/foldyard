@@ -167,9 +167,10 @@ def issues() -> list[str]:
             )
         # The kernel half, when the host publishes its config: the table matches the VM by
         # `socket cgroupv2`, which a kernel built without CONFIG_NFT_SOCKET (the stock WSL2
-        # kernel) refuses at load time — AFTER `fy up` has re-provisioned the VM walled. Refuse
-        # here instead; an unreadable config (None) is not a reason to refuse, the load-time
-        # error explained (machine._apply_host_wall) covers that host.
+        # kernel) refuses at load time — the operator's own `nft -f` would say so, but only
+        # AFTER `fy up` has re-provisioned the VM walled. Refuse here instead; an unreadable
+        # config (None) is not a reason to refuse — the probe (machine._check_host_wall) still
+        # refuses `fy up` on such a host until the table loads.
         elif hostwall.nft_socket_in_kernel() is False:
             out.append(
                 "✗ [machine].host_wall = true but this kernel has no nftables `socket` expression\n"

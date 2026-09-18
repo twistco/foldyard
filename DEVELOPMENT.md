@@ -55,10 +55,14 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   (Lima: rendered into the boot script; podman machine: `sudo -n` over ssh) + the rootless API
   service's log level as a user drop-in over ssh. Best-effort — a warning, never an abort.
 - `hostwall.py` — the host-side egress wall for the machine VM on Linux: nftables matched by the
-  VM's cgroup v2 scope (the VM is started in a per-VM systemd scope so the match is predictable),
-  wired via `[machine].host_wall`; fail-closed — a VM outside its own scope is refused, not
-  walled. The VM's loopback plumbing (Lima's host resolver, the SSH forward) is discovered from
-  its processes' sockets, never guessed.
+  VM's cgroup v2 SLICE (the VM is started in a per-VM scope under a persistent per-VM slice, so
+  the match is predictable and its cgroup id survives restarts), wired via `[machine].host_wall`;
+  fail-closed — a VM outside its own scope-under-slice is refused, not walled. Boot-stable: the
+  VM's loopback plumbing (Lima's host resolver, the SSH forward) is judged on the INPUT hook by
+  the listener's cgroup, never named. **foldyard never loads it** (ADR-0028): `fy machine
+  host-wall` renders the table + a system unit and prints the `sudo` lines, the operator runs
+  them once, and every `fy up` PROBES enforcement from inside the slice — the table can't be
+  read without root, and one that exists may hold a dead slice's id (fail-open otherwise).
 - `box.py` — the dev-box lifecycle (`fy box build|up|shell|down|ps`) + the monitored bootstrap.
 - `supervisor.py` — `fy host`: the ONE Mac-side process running the credential daemons
   (singleton lock, per-worktree listeners, replace-on-launch staleness handling, the
@@ -167,9 +171,11 @@ foldyard's surface splits by *where it can be validated*:
    - `test_worktree_e2e.py` — `fy worktree add` (registered, own branch, clean tree), its stack
      up beside main's, `remove`: containers + volumes gone, the bound-out transcript ARCHIVED
      before the tree is deleted, main untouched, the branch kept, local state dropped.
-   - `test_wall_e2e.py` — `[machine].wall` + `host_wall` via `fy up`: the host table on the VM's
-     own scope, direct guest egress refused, DNS resolving, the proxy the way out, the api still
-     served, and the stale-provisioning refusal.
+   - `test_wall_e2e.py` — `[machine].wall` + `host_wall` via `fy up`: the fixture IS the operator
+     — the first `fy up` refused (nothing installed), then the `sudo` lines `fy machine
+     host-wall` printed run verbatim, then `fy up` passes; the host table on the VM's own slice,
+     the unit active, direct guest egress refused, DNS resolving, the proxy the way out, the api
+     still served, and the stale-provisioning refusal.
    - `test_host_daemons_e2e.py` — the supervisor with the zero-secret rig
      ([docs/testing-modes.md](./docs/testing-modes.md)): mode on → fake minter up + the overlay
      re-rendered, blocked-daemons empty; mode off.

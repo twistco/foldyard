@@ -56,23 +56,34 @@ On macOS Lima's user-mode network also runs as the operator, but pf cannot singl
 out without a dedicated uid or a different network mode, so the host wall is a Linux capability,
 reported absent elsewhere rather than branched away.
 
+**Who loads it: the operator, once (ADR-0028).** foldyard never elevates on the host. The VM's
+slice is a PERSISTENT user unit foldyard owns (:func:`ensure_slice`); ``fy machine host-wall``
+renders the table and a system unit that loads it with the operator's user manager into the
+project's state dir (:func:`stage`) and prints them with the exact ``sudo`` lines that install
+them — the operator runs those, with the content in front of them. Then every ``fy up`` PROBES
+(:func:`probe`): a child under the slice must be refused an out-of-slice loopback listener and
+an off-host address, and must reach the band; anything else refuses ``fy up`` and points at the
+verb. An install, not a VM-lifecycle step: ``stop``/``rm`` leave it alone.
+
 **How :mod:`foldyard.machine` wires it (``[machine].host_wall = true``).** The VM is STARTED
-inside its own transient scope under its own slice (:func:`scoped_argv_prefix` —
+inside its own transient scope under that slice (:func:`scoped_argv_prefix` —
 ``systemd-run --user --scope --slice``), so limactl, the hostagent and QEMU all land in
 ``…/fy.slice/fy-machine-<vm>.slice/fy-machine-<vm>.scope`` and nothing else does; after every
-start, and again on each steady-state ``fy up``, the wall is rendered for the slice the VM
-ACTUALLY sits under (:func:`vm_cgroup_scope` → :func:`vm_slice`) and loaded as root (idempotent
-replace). A VM found outside its own scope-under-slice — started by hand, or before the option
-was turned on — is refused, because matching the login session's scope instead would wall the
-operator's whole shell (:func:`in_own_scope` is that guard). Root is ``sudo nft``; a passwordless
-sudoers rule for ``nft`` is the operator's call and makes it silent. Stdlib only.
+start, and again on each steady-state ``fy up``, the wall is probed for the slice the VM
+ACTUALLY sits under (:func:`vm_cgroup_scope` → :func:`in_own_scope`). A VM found outside its own
+scope-under-slice — started by hand, or before the option was turned on — is refused, because
+matching the login session's scope instead would wall the operator's whole shell. Stdlib only.
 """
 
 from __future__ import annotations
 
+import errno
+import json
 import os
 import shutil
+import socket
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -210,22 +221,6 @@ def nft_socket_in_kernel() -> bool | None:
     return None
 
 
-def explain_load_failure(stderr: str) -> str:
-    """The operator-facing reason behind an ``nft -f -`` failure, when nft's own words identify
-    one foldyard knows: ENOENT at the ``socket cgroupv2`` rule is a kernel without
-    ``CONFIG_NFT_SOCKET`` (nf_tables reports a missing expression as "No such file or directory"
-    — nothing to do with a file). Empty for any other error: nft's stderr, printed beside this,
-    is then the whole story."""
-    if "No such file or directory" in stderr and "socket cgroupv2" in stderr:
-        return (
-            "  This kernel has no nftables `socket` expression (CONFIG_NFT_SOCKET is not set —\n"
-            "  the stock WSL2 kernel, for one), so the host wall's `socket cgroupv2` match can\n"
-            "  never load here. Use a kernel built with nft_socket, or drop `host_wall` (the\n"
-            "  in-VM wall still applies)."
-        )
-    return ""
-
-
 def _allowed_ports() -> list[str]:
     """The loopback dports the VM process may reach: THIS project's daemon bands (proxy + minter,
     each covering the full ``base..base+89`` worktree span), as nft range elements. Bases are the
@@ -308,46 +303,287 @@ def _declare_then_delete(name: str) -> str:
     return f"table inet {name}\ndelete table inet {name}\n"
 
 
-def install_argv() -> list[str]:
-    """The command that loads a ruleset from stdin as root. Streamed over stdin (never a temp
-    file) for the same reason the guest wall is: no path a lesser-privileged process could swap
-    between write and root-load."""
-    return ["sudo", "nft", "-f", "-"]
+# ── the operator's install: a slice foldyard owns, root-side files the operator applies ──
+#
+# foldyard never elevates on the host (ADR-0028). It (1) keeps the VM's slice as a PERSISTENT
+# user unit, so the cgroup — and the ID a loaded table binds to — exists before the operator
+# applies anything and comes back with every user manager; (2) renders the root-side files
+# into a staging dir the operator can read and copies with two `install` lines; and (3) PROBES
+# the result (below) — it never reads the table back, which would need root too.
+
+ETC_DIR = Path("/etc/foldyard")
+SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
+
+
+def service_unit(vm: str) -> str:
+    """The system unit that loads this VM's table at every start of the operator's user manager
+    — one per VM, no template: the uid and the paths are baked in, so what root runs reads in
+    full from the file."""
+    return f"fy-host-wall-{_unit_safe(vm)}.service"
+
+
+def user_unit_dir() -> Path:
+    """Where `systemctl --user` reads the operator's own units from."""
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "systemd" / "user"
+
+
+def slice_unit_text(vm: str) -> str:
+    """The persistent user slice. ``WantedBy=default.target`` so it is up as soon as the user
+    manager is — before the system unit (``After=user@<uid>.service``) loads the table that
+    binds to it. Empty of settings on purpose: it exists to BE a cgroup, not to limit one."""
+    return f"""\
+[Unit]
+Description=foldyard machine VM '{vm}' (the cgroup the host-side wall matches)
+Documentation=https://github.com/twistco/foldyard/blob/main/docs/configuration.md
+
+[Slice]
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def service_unit_text(vm: str, uid: int, nft: str) -> str:
+    """The system unit the operator installs. Bound to the user manager's lifetime
+    (``BindsTo`` + ``After``): the slice lives under ``user@<uid>.service``, so the table is
+    loaded once that is up (its slice exists by then — the user manager reports ready only after
+    its default target, which wants the slice) and dropped when it stops (the slice, and the
+    cgroup ID the table held, are gone with it). ``WantedBy=user@<uid>.service`` makes every
+    later start of the user manager pull it in again. ``RemainAfterExit`` keeps the unit
+    "active" while the table is loaded, so ``systemctl status`` tells the truth."""
+    return f"""\
+[Unit]
+Description=foldyard host-side wall for machine VM '{vm}' (uid {uid})
+Documentation=https://github.com/twistco/foldyard/blob/main/docs/configuration.md
+After=user@{uid}.service
+BindsTo=user@{uid}.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={nft} -f {ETC_DIR / ruleset_file(vm)}
+ExecStop={nft} delete table inet {table_name(vm)}
+
+[Install]
+WantedBy=user@{uid}.service
+"""
+
+
+def ruleset_file(vm: str) -> str:
+    return f"host-wall-{_unit_safe(vm)}.nft"
+
+
+def _systemctl_user(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
+
+
+def ensure_slice(vm: str) -> str:
+    """Make the VM's persistent slice exist and be active; return its cgroup path (no leading
+    ``/``), empty when the user manager can't deliver one (its stderr is lost here: the caller
+    says what a missing user manager means). Writes the unit only when its text changed
+    (``daemon-reload`` is not free), then ``enable --now`` — idempotent."""
+    unit = user_unit_dir() / slice_unit(vm)
+    text = slice_unit_text(vm)
+    try:
+        current = unit.read_text()
+    except OSError:
+        current = ""
+    if current != text:
+        try:
+            unit.parent.mkdir(parents=True, exist_ok=True)
+            unit.write_text(text)
+        except OSError:
+            return ""
+        _systemctl_user("daemon-reload")
+    if _systemctl_user("enable", "--now", slice_unit(vm)).returncode != 0:
+        return ""
+    return slice_path(vm)
+
+
+def slice_path(vm: str) -> str:
+    """The cgroup path of the VM's slice as systemd placed it (``…/fy.slice/fy-machine-<vm>.slice``
+    — it nests by the dashes), read from the unit rather than derived, or empty when the slice
+    is not active. This is the path the table is rendered for."""
+    res = _systemctl_user("show", "-p", "ControlGroup", "--value", slice_unit(vm))
+    return res.stdout.strip().lstrip("/") if res.returncode == 0 else ""
 
 
 @dataclass(frozen=True)
-class LoadResult:
-    """What loading the ruleset came to: ``ok``, and nft's stderr when it did not — kept so the
-    caller can print nft's own words and :func:`explain_load_failure` can read them."""
+class Staged:
+    """The root-side files, rendered into the operator's staging dir, and the exact commands
+    that install (or remove) them — printed, never run, by foldyard."""
 
-    ok: bool
-    stderr: str = ""
+    ruleset: Path
+    service: Path
+    install: tuple[str, ...]
+    uninstall: tuple[str, ...]
 
 
-def install(vm: str, slice_path: str) -> LoadResult:
-    """Load the VM's host wall for the slice it runs under. Not ``ok`` if the host can't enforce
-    one or ``nft`` rejects the ruleset (its stderr rides along). Caller decides WHEN (VM start)
-    and whether the operator consented to host nftables."""
-    if not available() or not slice_path:
-        return LoadResult(False)
-    ruleset = render(vm, slice_path)
+def stage(vm: str, slice_path: str, into: Path) -> Staged:
+    """Render the ruleset and the system unit into ``into`` and say how to install them. The
+    copies are root-owned once installed, so nothing running as the operator — a hostile
+    process, an agent, the box — can change what root loads afterwards."""
+    into.mkdir(parents=True, exist_ok=True)
+    ruleset = into / ruleset_file(vm)
+    service = into / service_unit(vm)
+    ruleset.write_text(render(vm, slice_path))
+    nft = shutil.which("nft") or "/usr/sbin/nft"
+    service.write_text(service_unit_text(vm, os.getuid(), nft))
+    unit = service_unit(vm)
+    return Staged(
+        ruleset,
+        service,
+        (
+            f"sudo install -D -m 0644 {ruleset} {ETC_DIR / ruleset.name}",
+            f"sudo install -D -m 0644 {service} {SYSTEMD_SYSTEM_DIR / unit}",
+            "sudo systemctl daemon-reload",
+            f"sudo systemctl enable --now {unit}",
+        ),
+        (
+            f"sudo systemctl disable --now {unit}",
+            f"sudo rm {SYSTEMD_SYSTEM_DIR / unit} {ETC_DIR / ruleset.name}",
+            "sudo systemctl daemon-reload",
+        ),
+    )
+
+
+# ── the probe: is the wall ENFORCING for this slice, right now? ────────────────────────────
+#
+# The only honest check, and the one that turns the cgroup-ID fail-open into fail-closed: a
+# table can't be read back without root, and a table that IS there may hold the ID of a slice
+# that no longer exists. So a child is run UNDER the slice and asked to connect: to a listener
+# foldyard opened OUTSIDE the slice on loopback (must be REFUSED — the input hook's judgement),
+# to TEST-NET-1 off-host (must be REFUSED by the output hook's reject; without the wall the SYN
+# leaves the host and times out), and to a listener on the project's band (must CONNECT — the
+# staleness half: a moved band shows up here). Refusals are tcp resets, so every verdict is
+# immediate; a timeout is never mistaken for enforcement.
+
+TEST_NET = ("192.0.2.1", 9)  # RFC 5737: never routable, so an unwalled SYN leaves and times out
+_PROBE_TIMEOUT = 3.0
+
+
+@dataclass(frozen=True)
+class Probe:
+    """``enforcing`` and, per check, what the child saw (``ok`` / ``refused`` / ``timeout`` /
+    ``unreachable`` / an error) — printed on refusal so the operator sees WHICH half failed."""
+
+    enforcing: bool
+    checks: dict[str, str]
+    error: str = ""
+
+    def detail(self) -> str:
+        """One line: each check, ticked when it saw what enforcement predicts."""
+        parts = []
+        for name, got in self.checks.items():
+            good = got in _EXPECTED.get(name, ())
+            parts.append(f"{name} {'✓' if good else '✗'} {got}")
+        return ", ".join(parts)
+
+
+# What each check must see for the wall to count as enforcing: `external` also accepts
+# "unreachable" — a host with no route never hands the SYN to the wall, so it proves nothing
+# either way, and refusing `fy up` on an offline laptop would be the wall walling the operator.
+_EXPECTED = {"loopback": ("refused",), "external": ("refused", "unreachable"), "band": ("ok",)}
+
+
+def _band_listener() -> socket.socket | None:
+    """A listener on the first free port of this project's proxy band — outside the slice, so
+    only the band rule lets the child reach it."""
+    base = config.proxy_port_base()
+    for port in range(base, base + _SPAN + 1):
+        sock = socket.socket()
+        try:
+            sock.bind(("127.0.0.1", port))
+            sock.listen(1)
+            return sock
+        except OSError:
+            sock.close()
+    return None
+
+
+def probe_argv(slice_name: str, targets: dict[str, tuple[str, int]]) -> list[str]:
+    """The child, run under the slice: this interpreter, this module, the targets."""
+    return [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        "--slice",
+        slice_name,
+        "--",
+        sys.executable,
+        "-m",
+        "foldyard.hostwall",
+        "--probe",
+        *(f"{name}={host}:{port}" for name, (host, port) in targets.items()),
+    ]
+
+
+def probe(vm: str) -> Probe:
+    """Run the probe for ``vm``'s slice (which must exist — :func:`ensure_slice`); see the
+    section comment for what enforcing means."""
+    loopback = socket.socket()
+    band = _band_listener()
     try:
-        res = subprocess.run(install_argv(), input=ruleset, text=True, capture_output=True)
+        loopback.bind(("127.0.0.1", 0))
+        loopback.listen(1)
+        targets = {"loopback": loopback.getsockname()[:2], "external": TEST_NET}
+        if band is not None:
+            targets["band"] = band.getsockname()[:2]
+        res = subprocess.run(
+            probe_argv(slice_unit(vm), targets), capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Probe(False, {}, str(exc))
+    finally:
+        loopback.close()
+        if band is not None:
+            band.close()
+    if res.returncode != 0:
+        return Probe(False, {}, res.stderr.strip() or f"probe exited {res.returncode}")
+    try:
+        checks = json.loads(res.stdout)
+    except ValueError:
+        return Probe(False, {}, f"unreadable probe output: {res.stdout!r}")
+    return Probe(_verdict(checks), checks)
+
+
+def _verdict(checks: dict[str, str]) -> bool:
+    return all(checks.get(name) in want for name, want in _EXPECTED.items())
+
+
+def _try_connect(host: str, port: int) -> str:
+    sock = socket.socket()
+    sock.settimeout(_PROBE_TIMEOUT)
+    try:
+        sock.connect((host, port))
+        return "ok"
+    except TimeoutError:
+        return "timeout"
     except OSError as exc:
-        # The loader itself could not launch (no `sudo` on PATH — available() vouches for nft
-        # only): declined with the OS's reason, the same fail-closed shape as a rejected ruleset.
-        return LoadResult(False, str(exc))
-    return LoadResult(res.returncode == 0, res.stderr or "")
+        if exc.errno == errno.ECONNREFUSED:
+            return "refused"
+        if exc.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH):
+            return "unreachable"  # no route at all — the wall never got to see the packet
+        return f"error({exc.errno})"
+    finally:
+        sock.close()
 
 
-def remove(vm: str) -> bool:
-    """Tear down the VM's host wall — idempotent (a table that is already gone is a clean no-op:
-    ``nft delete table`` alone would error, so this streams the declare-then-delete pair).
-    False when the host has no nft at all or the load fails."""
-    if shutil.which("nft") is None:
-        return False
-    ruleset = _declare_then_delete(table_name(vm))
-    try:
-        return subprocess.run(install_argv(), input=ruleset, text=True).returncode == 0
-    except OSError:
-        return False  # no `sudo` to launch — the caller's "warn, inert without the VM" case
+def _probe_main(args: list[str]) -> int:
+    """The child's side: ``name=host:port`` per argument, a JSON object of verdicts out."""
+    results = {}
+    for arg in args:
+        name, _, target = arg.partition("=")
+        host, _, port = target.rpartition(":")
+        results[name] = _try_connect(host, int(port))
+    print(json.dumps(results))
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--probe":
+        raise SystemExit(_probe_main(sys.argv[2:]))
+    raise SystemExit("usage: python -m foldyard.hostwall --probe name=host:port ...")

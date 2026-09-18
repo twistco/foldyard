@@ -7,7 +7,9 @@ listener's cgroup, a per-project ct mark carrying the origin across — on a Git
 
 from __future__ import annotations
 
+import json
 import re
+import socket
 import subprocess
 
 import pytest
@@ -125,41 +127,7 @@ def test_render_bands_are_this_projects_only(monkeypatch):
     assert "41000" not in rs
 
 
-def test_install_streams_over_stdin_as_root(bands, monkeypatch):
-    seen = {}
-
-    def fake_run(cmd, **kw):
-        seen["cmd"] = cmd
-        seen["input"] = kw.get("input")
-        return subprocess.CompletedProcess(cmd, 0)
-
-    monkeypatch.setattr(hostwall, "available", lambda: True)
-    monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
-    assert hostwall.install("acme", _SLICE).ok is True
-    # loaded from stdin (`nft -f -`), never a temp file a lesser process could swap
-    assert seen["cmd"] == ["sudo", "nft", "-f", "-"]
-    assert seen["input"] is not None and "fy_host_wall_acme" in seen["input"]
-
-
-def test_install_declines_when_the_host_cannot_enforce(bands, monkeypatch):
-    monkeypatch.setattr(hostwall, "available", lambda: False)
-    monkeypatch.setattr(
-        hostwall.subprocess, "run", lambda *a, **k: pytest.fail("must not shell nft")
-    )
-    assert hostwall.install("acme", _SLICE).ok is False
-
-
-def test_install_declines_on_an_empty_slice(bands, monkeypatch):
-    """An empty slice (VM pid gone) must never wall the whole world — decline, don't render a
-    table whose match is `cgroupv2 level 0 ""`."""
-    monkeypatch.setattr(hostwall, "available", lambda: True)
-    monkeypatch.setattr(
-        hostwall.subprocess, "run", lambda *a, **k: pytest.fail("must not shell nft")
-    )
-    assert hostwall.install("acme", "").ok is False
-
-
-# ── wiring into the machine lifecycle: the per-VM slice + scope, idempotent removal ──
+# ── wiring into the machine lifecycle: the per-VM slice + scope ──
 
 
 def test_scope_and_slice_units_are_per_vm_and_systemd_safe():
@@ -207,39 +175,14 @@ def test_vm_slice_is_the_scopes_parent():
     assert hostwall.vm_slice("") == ""
 
 
-def test_remove_is_idempotent_by_construction(monkeypatch):
-    """`nft delete table` errors on a missing table, so removal streams the same declare-then-
-    delete pair `render` uses — a table that is already gone is a clean no-op."""
-    seen = {}
-
-    def fake_run(cmd, **kw):
-        seen["cmd"], seen["input"] = cmd, kw.get("input")
-        return subprocess.CompletedProcess(cmd, 0)
-
-    monkeypatch.setattr(hostwall.shutil, "which", lambda c: "/usr/sbin/nft")
-    monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
-    assert hostwall.remove("acme") is True
-    assert seen["cmd"] == ["sudo", "nft", "-f", "-"]
-    assert seen["input"].splitlines() == [
-        "table inet fy_host_wall_acme",
-        "delete table inet fy_host_wall_acme",
-    ]
-
-
 # ── the kernel half of the capability: nftables' `socket` expression (CONFIG_NFT_SOCKET) ──
 #
 # The host table matches the VM by `socket cgroupv2`; a kernel built without nft_socket refuses
 # the rule with ENOENT at load time. The stock WSL2 kernel is one (`# CONFIG_NFT_SOCKET is not
-# set` on its 6.6 and 6.18 branches — the first wsl2-host-e2e run, 2026-09-17). Two tiers: the
-# kernel config, when the host exposes one, lets preflight refuse BEFORE the VM is re-provisioned
-# walled; nft's own error, explained, covers a host whose config is unreadable.
-
-_NFT_ENOENT = (
-    "/dev/stdin:6:5-27: Error: Could not process rule: No such file or directory\n"
-    '    socket cgroupv2 level 5 "user.slice/user-1000.slice/user@1000.service/app.slice/'
-    'fy-machine-foldyard-example.scope" jump vm\n'
-    "    ^^^^^^^^^^^^^^^^^^^^^^^\n"
-)
+# set` on its 6.6 and 6.18 branches — the first wsl2-host-e2e run, 2026-09-17). The kernel
+# config, when the host exposes one, lets preflight refuse BEFORE the VM is re-provisioned
+# walled; on a host whose config is unreadable the operator's own `nft -f` says so (ENOENT at
+# the `socket cgroupv2` rule) — in their terminal, since they run it.
 
 
 def _kernel_configs(monkeypatch, tmp_path, *, proc: str | None, boot: str | None):
@@ -297,51 +240,184 @@ def test_nft_socket_in_kernel_is_unknown_without_a_readable_config(tmp_path, mon
     assert hostwall.nft_socket_in_kernel() is None
 
 
-def test_explain_load_failure_names_the_kernel_option_for_a_socket_enoent():
-    why = hostwall.explain_load_failure(_NFT_ENOENT)
-    assert "CONFIG_NFT_SOCKET" in why and "socket" in why
-    assert "in-VM wall" in why  # what still applies
+# ── the operator's install: the persistent slice, the staged root-side files ───────────────
 
 
-def test_explain_load_failure_is_empty_for_any_other_error():
-    assert hostwall.explain_load_failure("") == ""
-    assert hostwall.explain_load_failure("Error: syntax error, unexpected junk\n") == ""
-    # ENOENT on some OTHER rule is not the socket expression
-    other = "Error: Could not process rule: No such file or directory\n    ct state established\n"
-    assert hostwall.explain_load_failure(other) == ""
+def test_slice_unit_is_wanted_by_the_user_managers_default_target():
+    text = hostwall.slice_unit_text("acme")
+    assert "[Slice]" in text and "WantedBy=default.target" in text
+    assert "'acme'" in text
 
 
-def test_install_hands_back_nfts_own_words_on_failure(bands, monkeypatch):
+def test_service_unit_is_bound_to_the_users_manager_and_names_what_root_runs():
+    text = hostwall.service_unit_text("acme", 1000, "/usr/sbin/nft")
+    # up after — and only while — the user manager: the slice (and the cgroup ID the table
+    # binds to) lives under user@1000.service
+    assert "After=user@1000.service" in text and "BindsTo=user@1000.service" in text
+    assert "WantedBy=user@1000.service" in text
+    # exactly two root actions, both readable in full — no shell, no template, no globs
+    assert "ExecStart=/usr/sbin/nft -f /etc/foldyard/host-wall-acme.nft" in text
+    assert "ExecStop=/usr/sbin/nft delete table inet fy_host_wall_acme" in text
+    assert "RemainAfterExit=yes" in text
+
+
+def test_ensure_slice_writes_the_unit_once_and_enables_it(tmp_path, monkeypatch):
+    calls = []
+
     def fake_run(cmd, **kw):
-        assert kw.get("capture_output") is True, "stderr must be captured to be explained"
-        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=_NFT_ENOENT)
+        calls.append(cmd)
+        out = "/user.slice/user-1000.slice/user@1000.service/fy.slice/fy-machine-acme.slice\n"
+        return subprocess.CompletedProcess(cmd, 0, stdout=out if "show" in cmd else "", stderr="")
 
-    monkeypatch.setattr(hostwall, "available", lambda: True)
     monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
-    res = hostwall.install("acme", _SLICE)
-    assert res.ok is False
-    assert res.stderr == _NFT_ENOENT
+    monkeypatch.setattr(hostwall, "user_unit_dir", lambda: tmp_path)
+    assert hostwall.ensure_slice("acme") == _SLICE.replace("user-1000", "user-1000")
+    assert (tmp_path / "fy-machine-acme.slice").read_text() == hostwall.slice_unit_text("acme")
+    assert calls == [
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", "--now", "fy-machine-acme.slice"],
+        ["systemctl", "--user", "show", "-p", "ControlGroup", "--value", "fy-machine-acme.slice"],
+    ]
+    # a second run with the unit unchanged: no reload (not free), still enable --now (idempotent)
+    calls.clear()
+    hostwall.ensure_slice("acme")
+    assert ["systemctl", "--user", "daemon-reload"] not in calls
 
 
-def test_install_declines_when_the_loader_cannot_launch(bands, monkeypatch):
-    # No `sudo` on the host (available() only vouches for nft): the launch itself fails, and
-    # that is a declined load with the OS's reason, not a traceback out of machine start.
-    def fake_run(cmd, **kw):
-        raise FileNotFoundError(2, "No such file or directory", "sudo")
-
-    monkeypatch.setattr(hostwall, "available", lambda: True)
-    monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
-    res = hostwall.install("acme", _SLICE)
-    assert res.ok is False
-    assert "sudo" in res.stderr
+def test_ensure_slice_is_empty_when_the_user_manager_cannot_deliver(tmp_path, monkeypatch):
+    monkeypatch.setattr(hostwall, "user_unit_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        hostwall.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no manager"),
+    )
+    assert hostwall.ensure_slice("acme") == ""
 
 
-def test_remove_declines_when_the_loader_cannot_launch(monkeypatch):
-    # The same door on teardown: machine rm treats a False as "warn, the table is inert" — a
-    # raise here would turn that best-effort step into a traceback after the VM is already gone.
-    def fake_run(cmd, **kw):
-        raise FileNotFoundError(2, "No such file or directory", "sudo")
-
+def test_stage_renders_the_files_and_the_exact_operator_commands(bands, tmp_path, monkeypatch):
     monkeypatch.setattr(hostwall.shutil, "which", lambda name: "/usr/sbin/nft")
+    monkeypatch.setattr(hostwall.os, "getuid", lambda: 1000)
+    staged = hostwall.stage("acme", _SLICE, tmp_path / "host-wall")
+    assert staged.ruleset.read_text() == hostwall.render("acme", _SLICE)
+    assert staged.service.read_text() == hostwall.service_unit_text("acme", 1000, "/usr/sbin/nft")
+    # printed for the operator, never run by foldyard: copies (root-owned, so nothing running
+    # as the operator can change what root loads), a reload, one enable
+    assert staged.install == (
+        f"sudo install -D -m 0644 {staged.ruleset} /etc/foldyard/host-wall-acme.nft",
+        f"sudo install -D -m 0644 {staged.service} /etc/systemd/system/fy-host-wall-acme.service",
+        "sudo systemctl daemon-reload",
+        "sudo systemctl enable --now fy-host-wall-acme.service",
+    )
+    assert staged.uninstall == (
+        "sudo systemctl disable --now fy-host-wall-acme.service",
+        "sudo rm /etc/systemd/system/fy-host-wall-acme.service /etc/foldyard/host-wall-acme.nft",
+        "sudo systemctl daemon-reload",
+    )
+
+
+# ── the probe: enforcement observed from inside the slice, never a table read ──────────────
+
+
+def test_probe_argv_runs_this_interpreter_under_the_slice():
+    argv = hostwall.probe_argv("fy-machine-acme.slice", {"loopback": ("127.0.0.1", 40001)})
+    assert argv[:7] == [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        "--slice",
+        "fy-machine-acme.slice",
+    ]
+    assert argv[7:] == [
+        "--",
+        hostwall.sys.executable,
+        "-m",
+        "foldyard.hostwall",
+        "--probe",
+        "loopback=127.0.0.1:40001",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("checks", "enforcing"),
+    [
+        ({"loopback": "refused", "external": "refused", "band": "ok"}, True),
+        # no route off-host: the wall never saw the SYN, so nothing is proven either way and an
+        # offline laptop is not refused its own VM
+        ({"loopback": "refused", "external": "unreachable", "band": "ok"}, True),
+        # the safety half: an out-of-slice loopback listener reachable = no (or a stale) table
+        ({"loopback": "ok", "external": "refused", "band": "ok"}, False),
+        # the SYN left the host and timed out on TEST-NET: not walled
+        ({"loopback": "refused", "external": "timeout", "band": "ok"}, False),
+        # the staleness half: the band moved and the table still names the old one
+        ({"loopback": "refused", "external": "refused", "band": "refused"}, False),
+        ({}, False),
+    ],
+)
+def test_probe_verdict(checks, enforcing):
+    assert hostwall._verdict(checks) is enforcing
+
+
+def test_probe_opens_the_listeners_outside_the_slice_and_reads_the_childs_verdicts(
+    bands, monkeypatch
+):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        targets = dict(a.split("=") for a in cmd[cmd.index("--probe") + 1 :])
+        # the loopback + band listeners are LIVE while the child runs (a connect would succeed)
+        for name in ("loopback", "band"):
+            host, _, port = targets[name].rpartition(":")
+            with socket.create_connection((host, int(port)), timeout=1):
+                pass
+        seen["targets"] = targets
+        out = '{"loopback": "refused", "external": "refused", "band": "ok"}'
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
     monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
-    assert hostwall.remove("acme") is False
+    res = hostwall.probe("acme")
+    assert res.enforcing is True and res.error == ""
+    assert seen["cmd"][5:7] == ["--slice", "fy-machine-acme.slice"]
+    assert seen["targets"]["external"] == "192.0.2.1:9"
+    assert seen["targets"]["band"].startswith("127.0.0.1:410")  # the first free port of the band
+    assert res.detail() == "loopback ✓ refused, external ✓ refused, band ✓ ok"
+
+
+def test_probe_reports_a_child_that_could_not_run(bands, monkeypatch):
+    monkeypatch.setattr(
+        hostwall.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="Failed to connect to bus"
+        ),
+    )
+    res = hostwall.probe("acme")
+    assert res.enforcing is False and "bus" in res.error
+    monkeypatch.setattr(hostwall.subprocess, "run", _raise(FileNotFoundError(2, "no systemd-run")))
+    assert hostwall.probe("acme").enforcing is False
+
+
+def _raise(exc):
+    def run(*a, **k):
+        raise exc
+
+    return run
+
+
+def test_probe_child_reports_per_target(capsys):
+    # a listener to reach, and a closed port to be refused by — the child's own verdicts
+    lis = socket.socket()
+    lis.bind(("127.0.0.1", 0))
+    lis.listen(1)
+    with socket.socket() as gone:
+        gone.bind(("127.0.0.1", 0))  # a port nothing listens on once this closes
+        refused_port = gone.getsockname()[1]
+    try:
+        ok_port = lis.getsockname()[1]
+        rc = hostwall._probe_main([f"a=127.0.0.1:{ok_port}", f"b=127.0.0.1:{refused_port}"])
+    finally:
+        lis.close()
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {"a": "ok", "b": "refused"}

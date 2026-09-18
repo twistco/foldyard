@@ -1154,6 +1154,7 @@ def doctor(deep: bool = False):
     yield _config_pin_check()
     yield _widenings_check()
     yield from _podman_checks()
+    yield from _host_wall_check()
     yield from registry().doctor_checks(ctx)
 
 
@@ -1512,6 +1513,33 @@ def _podman_checks():
         yield _result(None, label, "", f"{machine} stopped — `fy up` (or press s) starts it")
     else:
         yield _result(None, label, "", f"{machine} not initialised yet — `fy up` creates it")
+
+
+def _host_wall_check():
+    """The operator's host-wall install (`[machine].host_wall`, lima), PROBED — foldyard can't
+    read the table back without root, and one that is there may hold the ID of a slice that no
+    longer exists (a host reboot). Independent of the VM's lifecycle: the row is the same
+    whether the VM is up or not, because the install is bound to the user manager, not the VM.
+    Silent when the option is off — most consumers — so the row only ever appears where it
+    means something."""
+    if _BACKEND.name != "lima" or not config.machine_host_wall():
+        return
+    from . import hostwall  # stdlib-only, but only this row needs it
+
+    fix = "`fy machine host-wall` prints the files and the install steps"
+    if not hostwall.available():
+        yield _result(False, "host wall", "", "wanted, but this host has no nft / cgroup v2")
+        return
+    if not hostwall.slice_path(PODMAN_MACHINE):
+        yield _result(None, "host wall", "", f"no slice yet — `fy up` creates it; then {fix}")
+        return
+    res = hostwall.probe(PODMAN_MACHINE)
+    yield _result(
+        res.enforcing,
+        "host wall",
+        f"enforcing ({res.detail()})",
+        f"NOT enforcing ({res.error or res.detail()}) — {fix}",
+    )
 
 
 def doctor_cli(deep: bool) -> int:

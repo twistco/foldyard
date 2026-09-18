@@ -819,8 +819,8 @@ def test_delete_refused_in_box(fake, monkeypatch):
     assert be.calls == []
 
 
-# ── the host-side wall (lima, [machine].host_wall): loaded after every start, and on every
-# steady-state `fy up`, for the scope the VM ACTUALLY sits in; refused outside its own scope ──
+# ── the host-side wall (lima, [machine].host_wall): the VM under its persistent slice, the
+# wall PROBED after every start and on every steady-state `fy up`; never loaded by foldyard ──
 
 
 _OWN_SLICE = "user.slice/user-1000.slice/user@1000.service/fy.slice/fy-machine-homelab.slice"
@@ -830,8 +830,9 @@ _OWN_SCOPE = f"{_OWN_SLICE}/fy-machine-homelab.scope"
 @pytest.fixture
 def host_wall_env(lima_env, monkeypatch):
     """`lima_env` with the host wall wanted and every host input a seam: returns
-    ``(backend, guest, installs, set_scope)`` — `installs` records (vm, slice) per
-    `hostwall.install`, `set_scope` is what the VM's pid resolves to in /proc."""
+    ``(backend, guest, probes, set_scope)`` — `probes` records each `hostwall.probe` call
+    (answering `probes.result`), `set_scope` is what the VM's pid resolves to in /proc. The
+    slice is delivered (`ensure_slice` → its path) unless a test says otherwise."""
     be, guest, set_wall, guest_ok = lima_env
     set_wall(True)
     guest_ok()
@@ -839,134 +840,210 @@ def host_wall_env(lima_env, monkeypatch):
     be._pids = (4343, 4242)
     monkeypatch.setattr(machine.config, "machine_host_wall", lambda: True)
     monkeypatch.setattr(machine.hostwall, "available", lambda: True)
-    installs: list[tuple[str, str]] = []
+    monkeypatch.setattr(machine.hostwall, "ensure_slice", lambda vm: _OWN_SLICE)
     scope = {"path": ""}
     monkeypatch.setattr(machine.hostwall, "vm_cgroup_scope", lambda pid: scope["path"])
 
-    def install(vm, slice_path):
-        installs.append((vm, slice_path))
-        return machine.hostwall.LoadResult(True)
+    class Probes(list):
+        result = machine.hostwall.Probe(
+            True, {"loopback": "refused", "external": "refused", "band": "ok"}
+        )
 
-    monkeypatch.setattr(machine.hostwall, "install", install)
+    probes = Probes()
+
+    def probe(vm):
+        probes.append(vm)
+        return probes.result
+
+    monkeypatch.setattr(machine.hostwall, "probe", probe)
 
     def set_scope(path):
         scope["path"] = path
 
     set_scope(_OWN_SCOPE)
-    return be, guest, installs, set_scope
+    return be, guest, probes, set_scope
 
 
-def test_host_wall_start_runs_the_vm_in_its_own_scope(host_wall_env, tmp_path):
-    be, _guest, installs, _ = host_wall_env
+def test_host_wall_start_runs_the_vm_in_its_own_scope_under_its_slice(host_wall_env, tmp_path):
+    be, _guest, probes, _ = host_wall_env
     be._state = "stopped"
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     prefix = " ".join(machine.hostwall.scoped_argv_prefix("homelab"))
     assert be.calls == [f"start:homelab under {prefix}"]
-    # …and the wall is rendered for the SLICE the VM landed under — nothing from this boot
-    assert installs == [("homelab", _OWN_SLICE)]
+    # …and the wall is PROBED for the VM once it is up — never loaded
+    assert probes == ["homelab"]
 
 
-def test_host_wall_is_reloaded_on_every_steady_state_up(host_wall_env, tmp_path):
-    # The table can't be read back without root, and re-loading is an idempotent replace — so
-    # a steady-state `fy up` re-applies it, the way the guest re-applies its wall at each boot.
-    be, guest, installs, _ = host_wall_env
+def test_host_wall_start_needs_the_persistent_slice(host_wall_env, monkeypatch, tmp_path, capsys):
+    # `systemd-run --slice` would create a transient slice — a new cgroup ID the operator's
+    # table does not hold. No slice from the user manager: no start, and say what that means.
+    be, _guest, probes, _ = host_wall_env
+    be._state = "stopped"
+    monkeypatch.setattr(machine.hostwall, "ensure_slice", lambda vm: "")
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == [] and probes == []
+    assert "enable-linger" in capsys.readouterr().err
+
+
+def test_host_wall_is_probed_on_every_steady_state_up(host_wall_env, tmp_path, capsys):
+    # The table can't be read back without root, and one that is there may hold a slice ID
+    # that no longer exists (a host reboot) — so every `fy up` asks the wall, not the memory.
+    be, guest, probes, _ = host_wall_env
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == []
-    assert len(installs) == 1 and guest.reads == 1
+    assert probes == ["homelab"] and guest.reads == 1
+    assert "host-side wall enforcing" in capsys.readouterr().err
+
+
+def test_host_wall_not_enforcing_is_a_hard_stop_that_points_at_the_install(
+    host_wall_env, tmp_path, capsys
+):
+    _be, _guest, probes, _ = host_wall_env
+    probes.result = machine.hostwall.Probe(
+        False, {"loopback": "ok", "external": "timeout", "band": "ok"}
+    )
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    err = capsys.readouterr().err
+    assert "NOT enforcing" in err
+    assert "loopback ✗ ok" in err and "external ✗ timeout" in err  # which half, in the open
+    assert "fy machine host-wall" in err
+
+
+def test_host_wall_probe_that_could_not_run_is_a_hard_stop(host_wall_env, tmp_path, capsys):
+    _be, _guest, probes, _ = host_wall_env
+    probes.result = machine.hostwall.Probe(False, {}, "Failed to connect to bus")
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert "Failed to connect to bus" in capsys.readouterr().err
 
 
 def test_host_wall_refuses_a_vm_outside_its_own_scope(host_wall_env, tmp_path, capsys):
     # Started by hand, or before host_wall was turned on: QEMU sits in the login session's
     # scope. Walling THAT would wall the operator's whole shell — refuse and say how to fix.
-    _be, _guest, installs, set_scope = host_wall_env
+    _be, _guest, probes, set_scope = host_wall_env
     set_scope("user.slice/user-1000.slice/session-2.scope")
     with pytest.raises(SystemExit):
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    assert installs == []
+    assert probes == []
     assert "fy machine stop && fy up" in capsys.readouterr().err
 
 
 def test_host_wall_refuses_when_the_vm_pid_is_unknown(host_wall_env, tmp_path):
-    _be, _guest, installs, set_scope = host_wall_env
+    _be, _guest, probes, set_scope = host_wall_env
     set_scope("")  # no pid file → no cgroup line: nothing to place, so nothing safe to match
     with pytest.raises(SystemExit):
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    assert installs == []
+    assert probes == []
 
 
 def test_host_wall_refuses_a_vm_scope_outside_its_slice(host_wall_env, tmp_path, capsys):
     # The right scope name, but started before the slice existed (an older foldyard): the
     # table would bind to a slice the VM is not under and match nothing — refuse, same cure.
-    _be, _guest, installs, set_scope = host_wall_env
+    _be, _guest, probes, set_scope = host_wall_env
     set_scope("user.slice/user-1000.slice/user@1000.service/app.slice/fy-machine-homelab.scope")
     with pytest.raises(SystemExit):
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    assert installs == []
+    assert probes == []
     assert "fy machine stop && fy up" in capsys.readouterr().err
 
 
 def test_host_wall_asked_for_on_a_host_that_cannot_enforce_it_is_a_hard_stop(
     host_wall_env, monkeypatch, tmp_path, capsys
 ):
-    _be, _guest, installs, _ = host_wall_env
+    _be, _guest, probes, _ = host_wall_env
     monkeypatch.setattr(machine.hostwall, "available", lambda: False)
     with pytest.raises(SystemExit):
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    assert installs == [] and "nft" in capsys.readouterr().err
+    assert probes == [] and "nft" in capsys.readouterr().err
 
 
-def test_host_wall_load_failure_is_a_hard_stop(host_wall_env, monkeypatch, tmp_path, capsys):
-    # nft's own words are printed (they are captured, not streamed), and when they name a case
-    # foldyard knows — ENOENT at the `socket cgroupv2` rule: a kernel without CONFIG_NFT_SOCKET,
-    # the stock WSL2 kernel — the reason follows them. A hard stop either way.
-    enoent = (
-        "/dev/stdin:6:5-27: Error: Could not process rule: No such file or directory\n"
-        '    socket cgroupv2 level 5 "user.slice/x.scope" jump vm\n'
-    )
-    monkeypatch.setattr(
-        machine.hostwall, "install", lambda *a: machine.hostwall.LoadResult(False, enoent)
-    )
-    with pytest.raises(SystemExit):
-        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    err = capsys.readouterr().err
-    assert "Could not process rule" in err
-    assert "loading the host-side wall for 'homelab' failed" in err
-    assert "CONFIG_NFT_SOCKET" in err and "in-VM wall" in err
-
-
-def test_host_wall_off_starts_unscoped_and_loads_nothing(lima_env, monkeypatch, tmp_path):
+def test_host_wall_off_starts_unscoped_and_probes_nothing(lima_env, monkeypatch, tmp_path):
     be, _guest, set_wall, guest_ok = lima_env
     set_wall(True)
     guest_ok()
     be._provision = machine.provision_id()
     be._state = "stopped"
     monkeypatch.setattr(machine.config, "machine_host_wall", lambda: False)
-    monkeypatch.setattr(machine.hostwall, "install", lambda *a: pytest.fail("must not load"))
+    monkeypatch.setattr(machine.hostwall, "ensure_slice", lambda vm: pytest.fail("no slice"))
+    monkeypatch.setattr(machine.hostwall, "probe", lambda vm: pytest.fail("must not probe"))
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == ["start:homelab"]
 
 
-def test_host_wall_is_reapplied_after_a_revive(host_wall_env, tmp_path):
-    be, _guest, installs, _ = host_wall_env
+def test_host_wall_is_probed_again_after_a_revive(host_wall_env, tmp_path):
+    be, _guest, probes, _ = host_wall_env
     be._responsive = False
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert any(c.startswith("start:homelab under") for c in be.calls)
-    assert len(installs) == 1
+    assert probes == ["homelab"]
 
 
-def test_delete_removes_the_host_wall_table(host_wall_env, monkeypatch, tmp_path):
-    be, _guest, _installs, _ = host_wall_env
-    removed = []
-    monkeypatch.setattr(machine.hostwall, "remove", lambda vm: removed.append(vm) or True)
+def test_delete_leaves_the_operators_wall_install_and_says_so(host_wall_env, monkeypatch, capsys):
+    # The install is the operator's, bound to their user manager, not to the VM: `rm` neither
+    # touches it nor prompts for root — it names the verb that prints the removal steps.
+    be, _guest, _probes, _ = host_wall_env
     monkeypatch.setattr(machine, "_stop_host_supervisor", lambda: True)
     assert machine.delete(assume_yes=True) == 0
-    assert removed == ["homelab"]
     assert be.calls == ["stop:homelab", "remove:homelab"]
+    assert "fy machine host-wall --uninstall" in capsys.readouterr().err
 
 
-def test_stop_leaves_the_host_wall_table_in_place(host_wall_env, monkeypatch):
-    # A table matching a scope with no processes is inert, and the next `fy up` re-renders it
-    # (the SSH port changes per boot anyway) — so `stop` needs no second root prompt.
-    monkeypatch.setattr(machine.hostwall, "remove", lambda vm: pytest.fail("must not touch nft"))
+def test_stop_leaves_the_host_wall_alone(host_wall_env, monkeypatch):
+    # A table matching an idle slice is inert and still right for the next start.
+    monkeypatch.setattr(machine.hostwall, "probe", lambda vm: pytest.fail("must not probe"))
     monkeypatch.setattr(machine, "_stop_host_supervisor", lambda: True)
     assert machine.stop() == 0
+
+
+# ── `fy machine host-wall`: the operator's side — files + commands printed, never run ──────
+
+
+@pytest.fixture
+def host_wall_verb(host_wall_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(machine.config, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(machine.config, "proxy_port_base", lambda: 41000)
+    monkeypatch.setattr(machine.config, "gcp_minter_port_base", lambda: 41100)
+    monkeypatch.setattr(machine.hostwall.shutil, "which", lambda name: "/usr/sbin/nft")
+    monkeypatch.setattr(machine.hostwall.os, "getuid", lambda: 1000)
+    return host_wall_env
+
+
+def test_host_wall_verb_prints_the_files_and_the_install_steps(host_wall_verb, capsys):
+    assert machine.host_wall() == 0
+    out = capsys.readouterr().out
+    assert "✓ enforcing" in out
+    # the table and the unit, in full, then the four root commands — and a probe, not a load
+    assert (
+        'socket cgroupv2 level 5 "user.slice/user-1000.slice/user@1000.service/fy.slice/fy-machine-homelab.slice"'
+        in out
+    )
+    assert "ExecStart=/usr/sbin/nft -f /etc/foldyard/host-wall-homelab.nft" in out
+    assert "sudo install -D -m 0644" in out
+    assert "sudo systemctl enable --now fy-host-wall-homelab.service" in out
+    assert "foldyard runs none of this" in out
+
+
+def test_host_wall_verb_exits_1_when_not_enforcing(host_wall_verb, capsys):
+    _be, _guest, probes, _ = host_wall_verb
+    probes.result = machine.hostwall.Probe(
+        False, {"loopback": "ok", "external": "ok", "band": "ok"}
+    )
+    assert machine.host_wall() == 1
+    out = capsys.readouterr().out
+    assert "✗ NOT enforcing" in out and "sudo install" in out  # the cure is still printed
+
+
+def test_host_wall_verb_uninstall_prints_the_removal_steps_only(host_wall_verb, capsys):
+    assert machine.host_wall(uninstall=True) == 0
+    out = capsys.readouterr().out
+    assert "sudo systemctl disable --now fy-host-wall-homelab.service" in out
+    assert "sudo rm /etc/systemd/system/fy-host-wall-homelab.service" in out
+    assert "ExecStart" not in out and "sudo install" not in out
+
+
+def test_host_wall_verb_is_a_no_op_note_when_off(host_wall_verb, monkeypatch, capsys):
+    monkeypatch.setattr(machine.config, "machine_host_wall", lambda: False)
+    assert machine.host_wall() == 0
+    assert "host_wall is off" in capsys.readouterr().out
