@@ -147,7 +147,11 @@ Why each line is the way it is:
   `fy box up` fails preflight, and the box's egress would connection-refuse) and an editable
   checkout is swapped for PyPI's. `upgrade` re-resolves the install exactly as it was made. If it
   answers "Nothing to upgrade" (a pinned install), or `fy doctor` shows `mitmproxy` missing,
-  the row says the reinstall to run — `uv tool install --force 'foldyard[host]'`.
+  the row prints the reinstall shaped to *your* install: `uv tool install --force
+  'foldyard[host]'` for a PyPI install, the same with `--editable '<checkout>[host]'` for one
+  made from a foldyard checkout — run the line as printed, not the other one. (Editable from a
+  checkout? `upgrade` rebuilds from whatever that checkout holds, so pull *it* — not the repo
+  you are in — first.)
 - **Adopt explicitly, having read the diff.** `fy box up` would show the same diff and ask, but
   its default answer is *ignore*: press Enter and the host keeps running the *previous*
   config, asks again next time, and the launch looks like it worked. `fy config diff` shows what
