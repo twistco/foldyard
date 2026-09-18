@@ -102,6 +102,15 @@ def test_main_repo_shells_out_once_per_process(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
+def _worktree(fake_repo: Path, name: str) -> Path:
+    """A sibling worktree checkout carrying the fixture's declared compose file — the stack is
+    the worktree's, so that is where the file must be."""
+    wt = Path(f"{fake_repo}-worktrees") / name
+    wt.mkdir(parents=True)
+    (wt / "compose.podman.yml").write_text("services: {}\n")
+    return wt
+
+
 def test_shellenv_main_path(fake_repo, capsys):
     rc = stack.shellenv()
     out = capsys.readouterr().out
@@ -135,8 +144,7 @@ def test_shellenv_preserves_explicit_compose_provider(fake_repo, capsys, monkeyp
 
 
 def test_shellenv_worktree_path(fake_repo, capsys, monkeypatch):
-    wt = Path(f"{fake_repo}-worktrees") / "feat"
-    wt.mkdir(parents=True)
+    wt = _worktree(fake_repo, "feat")
     monkeypatch.setenv("WORKTREE", "feat")
     monkeypatch.setattr(stack, "_offset", lambda name: 7)
     rc = stack.shellenv()
@@ -146,6 +154,30 @@ def test_shellenv_worktree_path(fake_repo, capsys, monkeypatch):
     assert "APP_PORT=3007" in out  # 3000 + offset (shlex.quote leaves digits unquoted)
     assert "SIM_PORT=4507" in out
     assert str(wt) in out  # FOLDYARD_CHECKOUT points at the worktree tree
+    # COMPOSE names the WORKTREE's file, absolute: the recipe `cd`s to MAIN_REPO, so a relative
+    # `-f` there pointed the worktree's stack at main's compose file.
+    assert f"-f {wt / 'compose.podman.yml'}" in out
+
+
+def test_shellenv_without_a_declared_stack_still_emits_the_env(stackless_repo, capsys):
+    # A box-only project has nothing to validate: the shim still emits the shared env (the raw
+    # recipes need MAIN_REPO/DOCKER_HOST/ports), with a COMPOSE that names no `-f` file.
+    assert stack.shellenv() == 0
+    out = capsys.readouterr().out
+    assert "export FOLDYARD_CHECKOUT=" in out and "COMPOSE=(podman compose)\n" in out
+
+
+def test_shellenv_worktree_missing_compose_file_aborts(fake_repo, capsys, monkeypatch):
+    # Declared but not in the worktree (main's copy is): the eval'd `exit 1` + foldyard's own
+    # error naming the file and the checkout, before any raw recipe hands the provider the path.
+    wt = Path(f"{fake_repo}-worktrees") / "feat"
+    wt.mkdir(parents=True)
+    monkeypatch.setenv("WORKTREE", "feat")
+    monkeypatch.setattr(stack, "_offset", lambda name: 7)
+    assert stack.shellenv() == 1
+    out, err = capsys.readouterr()
+    assert "exit 1" in out and "COMPOSE=(" not in out
+    assert "compose.podman.yml" in err and str(wt) in err
 
 
 def test_offset_precedence_env_then_pin_then_cksum(fake_repo, monkeypatch):
@@ -164,8 +196,8 @@ def test_offset_precedence_env_then_pin_then_cksum(fake_repo, monkeypatch):
 def test_shellenv_worktree_inferred_from_cwd(fake_repo, capsys, monkeypatch):
     # No WORKTREE env, but cwd is inside a sibling worktree → infer its name (so `cd`-ing into a
     # worktree means its verbs Just Work without the WORKTREE= prefix).
-    wt = Path(f"{fake_repo}-worktrees") / "feat"
-    (wt / "platform").mkdir(parents=True)
+    wt = _worktree(fake_repo, "feat")
+    (wt / "platform").mkdir()
     monkeypatch.setattr(stack, "_offset", lambda name: 7)
     monkeypatch.chdir(wt / "platform")  # a nested dir under the worktree, not just its root
     rc = stack.shellenv()
@@ -178,9 +210,8 @@ def test_shellenv_worktree_inferred_from_cwd(fake_repo, capsys, monkeypatch):
 
 def test_shellenv_explicit_env_overrides_cwd(fake_repo, capsys, monkeypatch):
     # An explicit WORKTREE wins even when cwd sits in a different worktree.
-    (Path(f"{fake_repo}-worktrees") / "other").mkdir(parents=True)
-    elsewhere = Path(f"{fake_repo}-worktrees") / "feat"
-    elsewhere.mkdir(parents=True)
+    _worktree(fake_repo, "other")
+    elsewhere = _worktree(fake_repo, "feat")
     monkeypatch.chdir(elsewhere)
     monkeypatch.setenv("WORKTREE", "other")
     monkeypatch.setattr(stack, "_offset", lambda name: 7)
@@ -886,9 +917,7 @@ def test_nuke_worktree_reaps_orphans(fake_repo, capture_run, monkeypatch):
     # Same reason as `down`: a profile-gated container from an earlier posture (the metadata
     # emulator after gcp=sa→off) isn't in the rendered config, so a plain `down` strands it —
     # on worktree REMOVAL it then outlives the checkout (observed 2026-09-15).
-    wt = Path(f"{fake_repo}-worktrees") / "feat"
-    wt.mkdir(parents=True)
-    (wt / "compose.podman.yml").write_text("services: {}\n")  # the stack is the worktree's
+    _worktree(fake_repo, "feat")
     monkeypatch.setenv("WORKTREE", "feat")
     monkeypatch.setattr(stack, "_offset", lambda name: 7)
     assert stack.nuke() == 0

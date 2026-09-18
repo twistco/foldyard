@@ -274,6 +274,14 @@ def shellenv(no_machine: bool = False) -> int:
     except SystemExit as e:
         print("exit 1")  # the recipe's `eval` runs this → it aborts (reason already on stderr)
         return e.code if isinstance(e.code, int) else 1
+    # The checkout the stack is bound to (a worktree's tree, or main) — the one resolve() joins
+    # the `-f` paths onto, and the one the declared files must exist in. Validated before the
+    # engine is touched, and before COMPOSE is emitted: a raw recipe would otherwise hand the
+    # provider a file foldyard already knows isn't there.
+    checkout = Path(exported["FOLDYARD_CHECKOUT"])
+    if _report_missing_compose(checkout):
+        print("exit 1")
+        return 1
 
     # An external_network consumer's raw-compose recipes (`"${COMPOSE[@]}" up …`, e.g. a cold
     # `just e2e`) can't rely on a prior `up` having created the network compose now declares
@@ -290,15 +298,18 @@ def shellenv(no_machine: bool = False) -> int:
     mode = devmode.read()["mode"]
     derived = devmode.derive_env(mode)
 
-    # COMPOSE: configured files relative to MAIN_REPO (we `cd` there) + posture overlays. Overlays
+    # COMPOSE: configured files + posture overlays, resolved against the CHECKOUT as absolute
+    # paths (the recipe `cd`s to MAIN_REPO, which is not a worktree's tree — a relative `-f` there
+    # pointed a worktree's stack at main's compose file; resolve() joins the same way). Overlays
     # STACK (a plugin can contribute several; several plugins can each contribute) — e.g. dump +
     # a data-callback overlay — instead of one clobbering the rest. Manual FOLDYARD_COMPOSE_EXTRA
     # entries (os.pathsep-joined) append LAST, so an explicit override wins on conflicting keys.
     # Engine: docker when DOCKER_HOST is preset (the box), else podman.
     compose = config.engine_compose()
     for f in config.compose_files():
-        compose += ["-f", f]
-    for overlay in _compose_overlays(mode, base=main):
+        p = Path(f)
+        compose += ["-f", str(p if p.is_absolute() else checkout / p)]
+    for overlay in _compose_overlays(mode, base=checkout):
         compose += ["-f", overlay]
 
     # Recipe bodies relied on _common.sh's `set -euo pipefail` (they don't set it
@@ -1215,12 +1226,20 @@ def stack_declared(verb: str, box_verb: str | None) -> int | None:
     checkout = worktrees_root(main) / wt if wt else main
     # A worktree that doesn't exist is _context()'s own error ("no worktree at …"), not a
     # missing compose file under it.
-    missing = config.missing_compose_files(checkout) if checkout.is_dir() else []
+    if checkout.is_dir() and _report_missing_compose(checkout):
+        return 1
+    return None
+
+
+def _report_missing_compose(checkout: Path) -> bool:
+    """Report the declared compose files ``checkout`` lacks — foldyard's own error naming the
+    file and the checkout it looked in — and say whether there were any. Shared by the stack
+    verbs' gate and ``shellenv`` so the two never disagree on what a missing file looks like."""
+    missing = config.missing_compose_files(checkout)
     if missing:
         _err(f"✗ [project].compose names {', '.join(missing)} — not found under {checkout}.")
         _err("  Check the branch this checkout is on, or fix the path in foldyard.toml.")
-        return 1
-    return None
+    return bool(missing)
 
 
 def engine_reachable(nothing_to: str) -> bool:
