@@ -7,6 +7,48 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ## Unreleased
 
+### Changed
+
+- **`[machine].host_wall` is the operator's install — foldyard never runs `sudo` on the host
+  ([ADR-0028](./docs/adrs/0028-no-elevation-on-the-host-operator-applies.md)).** 0.3.0 loaded the
+  host table with `sudo nft -f -` on every `fy up`: a password prompt with nothing to read, the
+  ruleset over stdin where the operator could not see it, and the habit it teaches — approving
+  whatever asks. Now `fy machine host-wall` renders the nftables table and a small system unit
+  that loads it with your user manager into `~/.foldyard/<project>/host-wall/`, prints both in
+  full, and prints the four `sudo` lines that install them (two `install`, a `daemon-reload`, an
+  `enable --now`; `--uninstall` prints the reverse). You run those, once per host, with the
+  content in front of you; the installed copies are root-owned. Every `fy up` — and the verb, and
+  doctor's new `host wall` row — then *probes* enforcement from inside the VM's cgroup (a child
+  under it must be refused a loopback listener foldyard opened outside, must be refused an
+  off-host address, must reach the project's band) and refuses with the failing half named when
+  it is not. A launch verb on a host where nothing is set up refuses before booting anything and
+  names the verb. The install is not part of the VM's lifecycle: `fy machine stop` and `rm`
+  leave it (`rm` says so). **Migrating from 0.3.0:** run `fy machine host-wall` once and the
+  four lines it prints; a passwordless sudoers rule for `nft` is no longer needed and can go.
+- **The host wall's table is the same text on every boot, bound to a persistent slice.** It
+  used to name Lima's forwarded SSH port and the hostagent's loopback ports (allocated per boot)
+  and the host's resolvers, which is why it had to be re-rendered and re-loaded every `fy up`.
+  Loopback flows are now allowed out under a per-project conntrack mark and judged on the input
+  hook by the *listening* socket's cgroup — the VM's own plumbing passes whatever ports Lima
+  picked, the project's band passes, the operator's other local services are refused — and DNS
+  is port 53 to any resolver. The VM runs in its scope under a per-VM slice
+  (`fy-machine-<vm>.slice`, a unit under `~/.local/share/systemd/user/` that only the verb
+  writes, saying so once) and the table matches the slice: nftables binds a cgroup *id* at load,
+  a scope dies with its last process, a slice survives being emptied. A host reboot is a new id,
+  which is what the probe above exists to catch — a loaded table that matches nothing is
+  fail-open, and shown to be so on a runner (2026-09-18). A VM already running in its scope but
+  not under its slice (an older foldyard started it) is refused until `fy machine stop && fy up`.
+
+### Fixed
+
+- **`fy machine ensure` no longer fails on a Lima hostagent still leaving after its driver died.**
+  Lima's hostagent notices a dead QEMU, flips the instance to Stopped and exits — but not
+  atomically, and `limactl start` inside that window refuses with "host agent is running but
+  driver is not". The Linux runner never fell into it; the WSL2 runner (3.5× slower) did. The
+  lima backend now waits for a hostagent whose driver is dead to leave on its own (announced, up
+  to 20 s) and signals it only if it lingers — identified by Lima's own `ha.pid`, never by name;
+  a VM whose driver is alive is never touched. Both of `ensure`'s paths are covered.
+
 ## 0.3.0 — 2026-09-18
 
 ### Removed
