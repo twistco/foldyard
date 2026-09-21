@@ -23,6 +23,9 @@ Start with the [package README](../README.md) (what foldyard is and why). Then, 
 - [adrs/](./adrs/) — one file per decision, with status and consequences
 - [prior-art.md](./prior-art.md) — the landscape, positioning, and the nono/agent-sandbox
   analysis
+- [prior-art/](./prior-art/) — the competitor library: per-tool deep-dives read against
+  foldyard (gondolin, vhrn), the axis-by-axis comparison table, and the rules for adding an
+  entry
 
 **Developing foldyard** (library internals and test rigs — start at
 [DEVELOPMENT.md](../DEVELOPMENT.md)):
