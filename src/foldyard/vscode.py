@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -503,18 +504,39 @@ def _reset_markers(engine: str, box: str, env: dict, markers: list[str]) -> bool
     return proc.returncode == 0
 
 
-def _reset_script(paths: str) -> str:
+def _reset_script(paths: str, server_dir: str = ".vscode-server", wait: int = 10) -> str:
     """The in-box shell for :func:`_reset_markers`: remove ``paths``, then stop the running VS Code
     server. Its exit status is the caller's whole signal — a failed `rm` must fail the script
     (an unconditional trailing `true` once masked it, and with it the retry the caller does),
-    while `pgrep` finding no server (status 1) is the normal case and a success. A server that
-    exits between `pgrep` and `kill` is not a failure either: only a process that is STILL there
-    after a failed `kill` is."""
+    while finding no server is the normal case and a success. A server that exits between the
+    scan and `kill` is not a failure either: only a process that is STILL there after a failed
+    `kill` is.
+
+    Signalled is not gone: the script then waits up to ``wait`` seconds for every signalled
+    process to EXIT, and fails if one outlives that. `fy code` launches the attach right after
+    this returns, and an attach that still finds the old server reconnects to it and skips
+    set-up — the markers just reset would sit there unread. A zombie counts as gone (it has
+    exited; only its parent's reap is pending, and `kill -0` still succeeds on one).
+
+    The server is found by scanning ``/proc/*/cmdline``, not with `pgrep`: the packaged box
+    image has no procps, so `pgrep` exited 127, the script failed after the `rm`, and every
+    `fy code` on a packaged box warned and left the old config and the old server in place —
+    nothing ever installed. `grep` is in every base image (Debian's Essential set, busybox).
+    The needle is assembled at runtime (``$n/bin/``) so this script's own command line — which
+    `sh -c` puts in /proc — never contains it and can't match itself. ``server_dir`` exists for
+    the tests: the scan is box-wide, so a test running it for real must aim it at a server of its
+    own — with the default it killed the live VS Code server of the box running the suite."""
     return (
         f"rm -f {paths} || exit 1; "
-        "pids=$(pgrep -f '[.]vscode-server/bin'); s=$?; "
-        '[ "$s" -eq 0 ] || [ "$s" -eq 1 ] || exit "$s"; '
-        'for p in $pids; do kill "$p" 2>/dev/null || ! kill -0 "$p" 2>/dev/null || exit 1; done'
+        f"n={shlex.quote(server_dir)}; pids=; "
+        "for d in /proc/[0-9]*; do "
+        'grep -qsF "$n/bin/" "$d/cmdline" || continue; p=${d#/proc/}; '
+        'kill "$p" 2>/dev/null || ! kill -0 "$p" 2>/dev/null || exit 1; '
+        'pids="$pids $p"; '
+        "done; "
+        'live() { for p in $pids; do kill -0 "$p" 2>/dev/null && '
+        "! grep -qs '^State:[[:space:]]*Z' \"/proc/$p/status\" && return 0; done; return 1; }; "
+        f'i=0; while live; do [ "$i" -ge {int(wait)} ] && exit 1; sleep 1; i=$((i+1)); done'
     )
 
 
@@ -531,6 +553,18 @@ def code() -> int:
     # state dir), and NO pin at all after an operator declined to adopt — there `effective()`
     # falls back to the working tree, which for this verb means the tree chose what the host
     # installs. So `fy code` refuses both rather than inheriting `fy up`'s keep-going default.
+    if config.in_box():
+        # `fy code` launches the HOST's VS Code and attaches it back to this box over the engine
+        # socket — there's no box→host bridge. Refused FIRST: it used to be caught only at the
+        # `code` lookup, after the gate, the stack resolve, a config write under the box's home
+        # and the marker reset — which from in here execs into THIS box, deleting its own markers
+        # and stopping its own VS Code server under an attached window.
+        wt = config.active_worktree()
+        run_hint = f"WORKTREE={wt} fy code" if wt else "fy code"
+        _err("✗ `fy code` has to run on the host, not inside the dev box — it launches the")
+        _err("  host's VS Code and attaches it back to this box. Open a terminal on the host")
+        _err(f"  (in your checkout) and run `{run_hint}` there.")
+        return 1
     status = configpin.gate("fy code")
     if status == "error":
         _err("✗ fy code: couldn't check foldyard.toml against the adopted copy — not launching.")
@@ -595,14 +629,6 @@ def code() -> int:
 
     code_cli = shutil.which("code")
     if not code_cli:
-        if config.in_box():
-            # `fy code` launches the *host's* VS Code (attaches it back to this box over the
-            # engine socket) — there's no box→host bridge, and the box image has no `code`.
-            run_hint = f"WORKTREE={ctx.worktree} fy code" if ctx.worktree else "fy code"
-            _err("✗ `fy code` has to run on your Mac, not inside the dev box — it launches the")
-            _err("  host's VS Code and attaches it back to this box. Open a terminal on the Mac")
-            _err(f"  (in your checkout) and run `{run_hint}` there.")
-            return 1
         _err("✗ `code` (the VS Code CLI) isn't on your PATH. Install it: open VS Code, then")
         _err("  Cmd-Shift-P → \"Shell Command: Install 'code' command in PATH\",")
         _err("  and re-run `fy code`. Manual fallback: in VS Code, Cmd-Shift-P →")
