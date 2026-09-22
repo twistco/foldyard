@@ -549,7 +549,7 @@ def test_learned_hosts_say_what_was_fetched_without_what_could_be_secret(env):
     rows = [
         _row("registry.npmjs.org", ts, "npm/10.8.2 node/v22"),
         req("registry.npmjs.org", "/react"),
-        req("registry.npmjs.org", "/react"),  # a repeat is one example
+        req("registry.npmjs.org", "/react?token=SECRET"),  # same path once the query is gone
         req("registry.npmjs.org", "/@types/node/-/node-22.0.0.tgz?token=SECRET"),
         req("registry.npmjs.org", f"/private/{token}/pkg"),
         req("registry.npmjs.org", "/lodash#frag"),
