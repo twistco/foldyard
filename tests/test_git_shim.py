@@ -468,3 +468,47 @@ def test_unfixable_verdict_is_memoized_and_invalidated_by_staging(rig):
     # Healing the state clears the memo rather than leaving a lie on disk.
     rig.box("reset", "-q")
     assert rig.box("status", "--porcelain").stderr == ""
+
+
+def _status(rig, *args: str, cwd: Path | None = None) -> str:
+    """Box-side porcelain status (the shim), in ``cwd`` (default: the rig's repo)."""
+    r = subprocess.run(
+        [str(rig.shim), "status", "--porcelain", *args],
+        cwd=cwd or rig.repo,
+        env=rig.env,
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def test_worktree_add_writes_the_NEW_checkout_not_this_ones_index(rig, tmp_path):
+    """`git worktree add` checks the new tree out in a child git that INHERITS GIT_INDEX_FILE —
+    like clone/init — so under the shim the new worktree's index went into THIS checkout's
+    index-box. Both sides broke at once, silently: here, `MM` on every file the two commits
+    differ in (a commit would revert them; a later `git switch` took them for local edits and
+    carried them over without a word), and in the new worktree no index at all (staged `D` +
+    `??` for every file, box-side and host-side)."""
+    rig.host("switch", "-qc", "feat")
+    rig.host_commit("feat", fileA="a2\n")
+    assert _status(rig) == ""  # box-side, clean on `feat`
+    wt = tmp_path / "wt"
+    r = rig.box("worktree", "add", "-q", "--detach", str(wt), "main")
+    assert r.returncode == 0, r.stderr
+    assert _status(rig) == ""  # this checkout's index-box untouched
+    assert _status(rig, cwd=wt) == ""  # the new worktree has a real index, box-side…
+    host_wt = subprocess.run(
+        [str(rig.real), "status", "--porcelain"],
+        cwd=wt,
+        env=rig.env,
+        capture_output=True,
+        text=True,
+    )
+    assert host_wt.returncode == 0 and host_wt.stdout == ""  # …and host-side
+    # `worktree remove` runs its cleanliness check in a child git too: judged against this
+    # checkout's index it refuses a clean tree (or passes a dirty one). Clean → removed.
+    r = rig.box("worktree", "remove", str(wt))
+    assert r.returncode == 0, r.stderr
+    assert not wt.exists()
+    assert _status(rig) == ""
