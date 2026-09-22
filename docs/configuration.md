@@ -159,7 +159,7 @@ So: **time-box it.** A recommendation that has sat unchanged for months is warni
 extra steps — either promote it to a floor or delete it. If you find yourself wanting one set
 permanently, what you actually want is a floor.
 
-**Why it only speaks on `up` / `box up` / `host`.** A warning printed on every invocation is
+**Why it only speaks on `up` / `box up` / `host restart`.** A warning printed on every invocation is
 filtered out by the reader within a day, and takes the rest of foldyard's stderr with it — and
 the people it annoys most would set `FOLDYARD_NO_VERSION_NUDGE` and then never see a nudge
 again, including one that mattered. Spending it on the few verbs that start a working session
