@@ -352,3 +352,187 @@ def test_a_damaged_store_stops_offers_and_a_malformed_declined_is_damage(env):
     config.allow_store_file().write_text('{"declined": ["a.example.com"]}')
     assert allowlist.live_hosts() == []  # damage, not defaults — same posture as hosts damage
     assert allowlist.pending_recommendations() == []
+
+
+# ── the learn window (observe, record, then enforce by itself) ─────────────────────────
+
+
+def _at(monkeypatch, iso: str) -> None:
+    """Pin allowlist's clock — the window's deadline is compared against it."""
+    from datetime import datetime
+
+    monkeypatch.setattr(allowlist, "_now", lambda: datetime.fromisoformat(iso))
+
+
+def _seed(env, value: str) -> None:
+    (env["repo"] / "foldyard.toml").write_text(f"[proxy]\ndefault_deny = {value}\n")
+    config.clear_caches()
+
+
+def test_a_learn_window_observes_then_enforces_by_itself(env, monkeypatch):
+    # The property the whole feature rests on: a window cannot be forgotten into an open wall.
+    # Even an operator who had the wall OFF comes back to enforcing when the window lapses.
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    allowlist.set_wall(False)
+    window = allowlist.start_learning(3600)
+    assert window["until"] == "2026-09-22T11:00:00+00:00"
+    assert allowlist.default_deny() is False and allowlist.learning() == window
+
+    _at(monkeypatch, "2026-09-22T11:00:01+00:00")
+    assert allowlist.default_deny() is True  # the deadline alone restores enforcement
+    assert allowlist.learning() is None
+    assert allowlist.sweep() is True  # …and the tick tidies the window into its record
+    raw = json.loads(config.allow_store_file().read_text())
+    assert "learn" not in raw and raw["learned"]["since"] == "2026-09-22T10:00:00+00:00"
+    assert allowlist.last_window() == raw["learned"]
+    assert allowlist.sweep() is False
+
+
+def test_a_learn_window_is_capped(env, monkeypatch):
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    window = allowlist.start_learning(10 * 24 * 3600)
+    assert window["until"] == "2026-09-22T18:00:00+00:00"  # LEARN_MAX_SECONDS (8h)
+
+
+def test_wall_on_or_off_ends_a_window_early_but_keeps_its_record(env, monkeypatch):
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    allowlist.start_learning(3600)
+    _at(monkeypatch, "2026-09-22T10:20:00+00:00")
+    allowlist.set_wall(True)
+    assert allowlist.learning() is None and allowlist.default_deny() is True
+    assert allowlist.last_window() == {
+        "since": "2026-09-22T10:00:00+00:00",
+        "until": "2026-09-22T10:20:00+00:00",  # ended now, not at its old deadline
+    }
+
+
+def test_box_cannot_open_a_learn_window(env, monkeypatch):
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    with pytest.raises(SystemExit):
+        allowlist.start_learning()
+    assert allowlist.seed_learning(print) is None
+
+
+@pytest.mark.parametrize(
+    "value,seed,enforcing",
+    [
+        ("true", "on", True),
+        ("false", "off", False),
+        ('"learn"', "learn", True),  # enforces until a launch verb opens the window
+        ('"lern"', "on", True),  # a typo in a loosening control must not loosen it
+        ("0", "off", False),  # the historical bool() truthiness is kept
+    ],
+)
+def test_the_default_deny_seed(env, value, seed, enforcing):
+    _seed(env, value)
+    assert config.proxy_default_deny_seed() == seed
+    assert allowlist.default_deny() is enforcing
+
+
+def test_a_learn_seed_opens_one_window_on_first_launch_only(env, monkeypatch):
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    _seed(env, '"learn"')
+    said: list[str] = []
+    window = allowlist.seed_learning(said.append)
+    assert window is not None and allowlist.default_deny() is False
+    assert "LEARNING" in said[0] and "fy allow learn" in said[0]
+    # Once is the rule: an open window, a closed one, or any stored answer means no second window.
+    assert allowlist.seed_learning(said.append) is None
+    _at(monkeypatch, "2026-09-22T12:00:00+00:00")
+    allowlist.sweep()
+    assert allowlist.seed_learning(said.append) is None and allowlist.default_deny() is True
+    assert len(said) == 1
+
+
+def test_a_learn_seed_never_overrides_an_operator_answer(env):
+    _seed(env, '"learn"')
+    allowlist.set_wall(True)
+    assert allowlist.seed_learning(print) is None
+    assert allowlist.default_deny() is True
+
+
+def test_only_a_true_or_learn_seed_needs_no_window(env):
+    for value in ("true", "false"):
+        _seed(env, value)
+        assert allowlist.seed_learning(print) is None
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        '{"learn": "yes"}',
+        '{"learn": {"since": "2026-09-22T10:00:00+00:00"}}',
+        '{"learned": {"since": "x", "until": "y"}}',
+    ],
+)
+def test_a_malformed_window_is_damage_and_enforces(env, doc):
+    # A window SUSPENDS enforcement, so a half-written one must not read as open.
+    config.allow_store_file().write_text(doc)
+    assert allowlist.default_deny() is True
+    assert allowlist.learning() is None
+
+
+def _row(host: str, ts: str, ua: str = "", **extra) -> dict:
+    return {"ts": ts, "host": host, "would_block": True, **({"ua": ua} if ua else {}), **extra}
+
+
+def test_learned_hosts_groups_the_window_and_drops_answered_hosts(env):
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    allowlist.grant("*.granted.dev", "permanent")
+    allowlist.decline("never.example.com")
+    rows = [
+        _row("before.example.com", "2026-09-22T09:59:59+00:00"),  # outside the window
+        _row("registry.npmjs.org", "2026-09-22T10:01:00+00:00", "npm/10.8.2 node/v22"),
+        _row("registry.npmjs.org", "2026-09-22T10:02:00+00:00", "npm/10.8.2 node/v22"),
+        _row("registry.npmjs.org", "2026-09-22T10:03:00+00:00", "pnpm/9.1.0"),
+        {"ts": "2026-09-22T10:04:00+00:00", "host": "seen.example.com", "status": 200},
+        _row("api.granted.dev", "2026-09-22T10:05:00+00:00"),  # granted since → not offered
+        _row("never.example.com", "2026-09-22T10:06:00+00:00"),  # declined → not offered
+        _row("github.com:22", "2026-09-22T10:07:00+00:00", "git/2.45"),
+        _row("after.example.com", "2026-09-22T11:00:01+00:00"),
+    ]
+    learned = allowlist.learned_hosts(rows, window)
+    assert [e["host"] for e in learned] == ["registry.npmjs.org", "github.com:22"]
+    npm = learned[0]
+    assert npm["count"] == 3 and npm["uas"] == ["npm/10.8.2 node/v22", "pnpm/9.1.0"]
+    assert (npm["first"], npm["last"]) == ("2026-09-22T10:01:00+00:00", "2026-09-22T10:03:00+00:00")
+
+
+def test_a_port_key_is_only_covered_by_that_exact_grant(env):
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    allowlist.grant("github.com", "permanent")  # :443 only
+    rows = [_row("github.com:22", "2026-09-22T10:01:00+00:00")]
+    assert [e["host"] for e in allowlist.learned_hosts(rows, window)] == ["github.com:22"]
+    allowlist.grant("github.com:22", "permanent")
+    assert allowlist.learned_hosts(rows, window) == []
+
+
+def test_the_learn_cap_matches_the_posture_ttl_cap():
+    from foldyard import devmode
+
+    assert allowlist.LEARN_MAX_SECONDS == devmode.MAX_TTL
+
+
+def test_learned_rows_are_untrusted_box_output(env):
+    # Every field was written from traffic the box originated: a junk host must not reach grant()
+    # (it would abort the batch), a UA must not carry terminal escapes to the operator, and the
+    # printed `recommend` line must not be breakable from a UA.
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    ts = "2026-09-22T10:01:00+00:00"
+    rows = [
+        _row("not a host", ts),
+        _row("*.wild.example.com", ts),  # a glob is a grant SHAPE, never an observed host
+        _row("ok.example.com", ts, 'evil/1 \x1b[2J"}, { host = "x.com'),
+    ]
+    (entry,) = allowlist.learned_hosts(rows, window)
+    assert entry["host"] == "ok.example.com"
+    assert "\x1b" not in entry["uas"][0]
+    why = allowlist.recommend_why(entry["uas"])
+    assert '"' not in why and "{" not in why and why == "evil/1 — learned"
+    assert allowlist.recommend_why([]) == "seen — learned"
+
+
+def test_read_log_rows_skips_damage(env, tmp_path):
+    good, bad = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    good.write_text('{"host": "a.example.com"}\nnot json\n[1]\n')
+    assert allowlist.read_log_rows([good, bad]) == [{"host": "a.example.com"}]

@@ -360,20 +360,27 @@ whenever `[machine] wall = true`. Absent means a clean box: no proxy env at all.
 
 ```toml
 [proxy]
-default_deny = true
+default_deny = "learn"
 # passthrough = ["@all"]
 # no_proxy = ["{project}-postgres", "redis"]
 ```
 
-- **`default_deny`** — the project's STARTING position for enforcement: when `true`, the proxy
-  refuses any host that isn't granted (403 at CONNECT). Built-in default when the key is absent:
-  `false` — observe/capture only, never block. `foldyard init` writes `true`, because a scaffold
-  ships `recommend` entries covering its own bootstrap, so day-one enforcement costs one round of
-  consented yeses rather than a wall of refusals. Blocked hosts show live in `fy tui`, where you
-  can grant them (once / until-restart / permanently) without a restart.
+- **`default_deny`** — the project's STARTING position for enforcement, one of:
+  - `true` — the proxy refuses any host that isn't granted (403 at CONNECT) from the first run.
+  - `"learn"` — the first launch (`fy up`/`fy box up`) opens a one-hour **learn window**:
+    nothing is refused, the proxy records every host it *would* refuse (with the client's
+    User-Agent, so you can see which tool asked), and when the window ends the wall
+    **enforces by itself**. `fy allow learn` then grants what it recorded in one reviewed batch
+    and prints `recommend` lines to commit. `foldyard init` writes this: setup is never a wall of
+    refusals, and the wall can't be left open by mistake the way `false` can.
+  - `false` (the built-in default when the key is absent) — observe only, never block.
 
-  It is a **seed, not the live switch**: once `fy allow wall on|off` has set it, the host-side store
-  is authoritative and this key is ignored. Same reason as the grants below — repo config is
+  Blocked hosts show live in `fy tui`, where you can grant them (once / until-restart /
+  permanently) without a restart. A window can be opened again any time with
+  `fy allow wall learn --for 30m` (8 h at most), and `fy allow wall on` ends one early.
+
+  It is a **seed, not the live switch**: once `fy allow wall on|off|learn` has set it (or a learn
+  window has run), the host-side store is authoritative and this key is ignored. Same reason as the grants below — repo config is
   writable from inside the box, and an enforcement switch the yard can flip off for itself is no
   switch at all.
 

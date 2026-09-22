@@ -182,6 +182,11 @@ def _net_leaf(e: dict, escape) -> str:
         # Refused by the default-deny egress wall — no upstream contacted. Red so it stands out as
         # the row you act on (press the allow key in the TUI to let the host through).
         return f"[dim]{ts}[/dim] [red]⛔ blocked by the egress wall[/red]"
+    if e.get("would_block"):
+        # The wall is observing (`fy allow wall off`, or a learn window): this host went through,
+        # but enforcing would refuse it — what `fy allow learn` offers. The UA names the tool.
+        ua = f" [dim]{escape(e['ua'][:60])}[/dim]" if e.get("ua") else ""
+        return f"[dim]{ts}[/dim] [yellow]◌ the wall would refuse this[/yellow]{ua}"
     if e.get("passthrough"):
         return f"[dim]{ts}[/dim] [dim]· tls tunnel (passthrough, not decrypted)[/dim]"
     status = e.get("status", 0)
@@ -222,6 +227,7 @@ def _network_panel_tree() -> PanelTree:
     for host, evs in ordered:
         inj = sum(bool(e.get("injected")) for e in evs)
         blocked = sum(bool(e.get("blocked")) for e in evs)
+        unlisted = sum(bool(e.get("would_block")) for e in evs)
         # A blocked request synthesises a 403, so it's already in `errs` — subtract it so the
         # tallies don't double-count the same row (blocked is the more specific, actionable label).
         errs = sum(1 for e in evs if e.get("status", 0) >= 400) - blocked
@@ -231,6 +237,8 @@ def _network_panel_tree() -> PanelTree:
             header += f" · [cyan]{inj} inj[/cyan]"
         if blocked:
             header += f" · [red]⛔ {blocked} blocked[/red]"
+        if unlisted:
+            header += " · [yellow]◌ not granted[/yellow]"
         if errs:
             header += f" · [red]{errs} err[/red]"
         children = [_net_leaf(e, escape) for e in reversed(evs)]  # newest first within the host

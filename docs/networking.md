@@ -67,10 +67,17 @@ postures (see [modes.md](./modes.md)).
 Two separate controls, often confused:
 
 **The allowlist**: when enforcement is on, the *proxy* refuses any host that isn't granted.
-`fy allow wall on|off` is the live switch; `[proxy] default_deny` only SEEDS it, for the first run
-before the host store has an answer (`init` starts you at `true` — the scaffold's `recommend`
-entries carry its bootstrap through, and `fy allow wall off` drops to observe-only while you're
-still learning a new dependency's egress). Grants are never repo config either: every level lives
+`fy allow wall on|off|learn` is the live switch; `[proxy] default_deny` only SEEDS it, for the
+first run before the host store has an answer.
+
+**Learning, not guessing.** `init` seeds `default_deny = "learn"`: the first `fy box up`/`fy up`
+opens a one-hour window in which nothing is refused and the proxy records every host the wall
+*would* refuse — with the User-Agent that asked (`npm/10.8.2`, `uv/0.8`, `git/2.45`), so you can
+see which tool wanted it without anything logging commands in the box. When the window ends the
+wall enforces **by itself**, and `fy allow learn` lists what it recorded, grants it in one go, and
+prints the `[proxy] recommend` lines that share it with the team. Open another window for a new
+dependency with `fy allow wall learn --for 30m`. Prefer it to `fy allow wall off`, which observes
+too but stays off until someone remembers to turn it back on. Grants are never repo config either: every level lives
 in the host-side allow-store, added with `fy allow add <host> [--level once|session|permanent]`,
 `fy allow sync [--yes]` for the recommended set, or one keypress on a blocked row in `fy tui`'s
 Network Log. Both live host-side for the same reason — repo config is writable from inside the box,

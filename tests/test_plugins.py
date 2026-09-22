@@ -1759,6 +1759,25 @@ def test_network_panel_marks_blocked_rows_and_tallies_them(monkeypatch, tmp_path
     assert "⛔ blocked by the egress wall" in group.children[0] and "[red]" in group.children[0]
 
 
+def test_network_panel_marks_would_block_rows_with_their_tool(monkeypatch, tmp_path):
+    # While the wall observes, a would-block row is the one to act on (`fy allow learn`): it names
+    # the tool from its User-Agent — escaped, it is box-originated text — and flags the host.
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    row = {
+        "ts": "2026-09-22T10:00:01Z",
+        "host": "registry.npmjs.org",
+        "status": 0,
+        "would_block": True,
+        "ua": "npm/10.8.2 [bold]x[/bold]",
+    }
+    (tmp_path / "egress.jsonl").write_text(json.dumps(row) + "\n")
+    group = proxy._network_panel_tree().groups[0]
+    assert "not granted" in group.label and "err" not in group.label
+    leaf = group.children[0]
+    assert "would refuse" in leaf and "npm/10.8.2" in leaf
+    assert "\\[bold]x" in leaf  # the UA's markup was escaped (rich's \\[), not rendered
+
+
 def test_gcp_panel_data_rows_summary_and_escaping(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
     (tmp_path / "gcp-minter.jsonl").write_text(

@@ -8,7 +8,10 @@ any host that isn't allowed. A host can be allowed at three levels:
   session      until the host supervisor restarts — "don't ask again this task"
   permanent    no expiry; survives a supervisor restart
 
-Enforcement itself (``default_deny``) is host-owned too — see :func:`default_deny`.
+Enforcement itself (``default_deny``) is host-owned too — see :func:`default_deny`. A LEARN
+window (:func:`start_learning`) suspends enforcement until a deadline, while the proxy records
+what it would have refused; enforcement resumes by itself when it lapses, and :func:`learned_hosts`
+turns what was recorded into one reviewed batch of grants.
 
 EVERY level lives in one authoritative store in the Mac home (``allow-store.json``, OUTSIDE the repo
 mount), so **nothing in the box can grant its own egress**. That placement is the whole
@@ -39,6 +42,8 @@ from . import config
 
 LEVELS = ("once", "session", "permanent")
 ONCE_TTL_SECONDS = 120  # "allow once" lifetime before it auto-reverts
+LEARN_DEFAULT_SECONDS = 3600  # a learn window's length unless the operator says otherwise
+LEARN_MAX_SECONDS = 8 * 3600  # an open wall is a lapse, not a posture — devmode.MAX_TTL's cap
 
 
 def in_box() -> bool:
@@ -154,6 +159,14 @@ def _checked_raw() -> dict:
             not isinstance(v, dict) for v in declined.values()
         ):
             raise StoreUnreadable(f"{path}: `declined` is malformed")
+    for key in ("learn", "learned"):
+        # A learn window SUSPENDS enforcement, so a malformed one is damage like a non-bool
+        # default_deny: reading it as "no window" would be harmless, but reading a half-written one
+        # as open could leave the wall down — refuse it and let the readers fail closed.
+        if key in raw:
+            w = raw[key]
+            if not isinstance(w, dict) or any(_parse(w.get(f)) is None for f in ("since", "until")):
+                raise StoreUnreadable(f"{path}: `{key}` is malformed")
     return raw
 
 
@@ -181,25 +194,198 @@ def default_deny() -> bool:
     itself, which is strictly worse than the per-host grants we already moved out (that widened the
     wall by one host; this drops it entirely). Change it with ``fy allow wall on|off``."""
     try:
-        stored = _checked_raw().get("default_deny")
+        raw = _checked_raw()
     except StoreUnreadable as e:
         # Fail CLOSED: a damaged store must not hand enforcement back to `[proxy] default_deny`,
         # which is repo config the box can write — that would turn "my allow-store broke" into
         # "the yard switched its own wall off".
         _warn(f"egress allow-store unreadable ({e}) — ENFORCING until it's repaired or removed")
         return True
+    if _open_window(raw) is not None:
+        return False  # a learn window: observe until its deadline, then enforce again
+    stored = raw.get("default_deny")
     # `_checked_raw` already rejected a present-but-non-bool value, so this is a bool or absent.
+    # An unanswered "learn" seed ENFORCES: the window opens at a launch verb (seed_learning), and
+    # until then nothing has said "open".
     return stored if stored is not None else config.proxy_default_deny()
 
 
 def set_wall(on: bool) -> dict:
-    """Turn enforcement on/off in the host store (Mac only). Returns the new effective."""
+    """Turn enforcement on/off in the host store (Mac only). Returns the new effective. Ends a
+    learn window early (its record is kept, so `fy allow learn` can still review it)."""
     _require_host()
     _require_readable_store()
     doc = _load_raw()
     doc["default_deny"] = bool(on)
+    _close_window(doc)
     _save_raw(doc)
     return write_effective()
+
+
+# ── the learn window (observe, record, then enforce by itself) ───────────────────────
+
+
+def _open_window(raw: dict) -> dict | None:
+    """The store's learn window if it is still open, else None."""
+    w = raw.get("learn")
+    if not isinstance(w, dict):
+        return None
+    until = _parse(w.get("until"))
+    return w if until is not None and until > _now() else None
+
+
+def _close_window(doc: dict) -> bool:
+    """Move an open-or-lapsed ``learn`` window to ``learned`` (ending it now if still open), so
+    the record of what was observed outlives the window. Returns True when there was one."""
+    w = doc.pop("learn", None)
+    if not isinstance(w, dict):
+        return False
+    until = _parse(w.get("until"))
+    end = min(until, _now()) if until is not None else _now()
+    doc["learned"] = {"since": w.get("since"), "until": _iso(end)}
+    return True
+
+
+def learning() -> dict | None:
+    """The open learn window ``{since, until}``, or None. A damaged store is None — no window —
+    which with :func:`default_deny` failing closed means enforcing."""
+    try:
+        return _open_window(_checked_raw())
+    except StoreUnreadable:
+        return None
+
+
+def last_window() -> dict | None:
+    """The window a review should read: the open one, else the last one closed. None if there has
+    never been one."""
+    try:
+        raw = _checked_raw()
+    except StoreUnreadable:
+        return None
+    w = raw.get("learn") or raw.get("learned")
+    return {"since": w["since"], "until": w["until"]} if isinstance(w, dict) else None
+
+
+def start_learning(seconds: int = LEARN_DEFAULT_SECONDS) -> dict:
+    """Open a learn window: enforcement is suspended until now + ``seconds`` (capped at
+    :data:`LEARN_MAX_SECONDS`), the proxy records every host it WOULD have refused, and when the
+    window lapses the wall ENFORCES — whatever it was before. That last part is the point: a
+    window cannot be forgotten into an open wall, which ``fy allow wall off`` can. Mac only.
+    Returns the window."""
+    _require_host()
+    _require_readable_store()
+    seconds = max(1, min(int(seconds), LEARN_MAX_SECONDS))
+    now = _now()
+    doc = _load_raw()
+    window = {"since": _iso(now), "until": _iso(now + timedelta(seconds=seconds))}
+    doc["learn"] = window
+    doc["default_deny"] = True  # what resumes when the window lapses
+    _save_raw(doc)
+    write_effective()
+    return window
+
+
+def seed_learning(echo: Callable[[str], None]) -> dict | None:
+    """First launch on a checkout whose ADOPTED config seeds ``[proxy] default_deny = "learn"``:
+    open the first learn window and say so, loudly. Only when the store has never answered
+    (no ``default_deny``, no window past or present) — so it happens once, and an operator's own
+    ``fy allow wall …`` always wins. Returns the window, or None when nothing was started.
+
+    The seed is repo config, but it can only ever buy a BOUNDED open window before enforcing —
+    strictly less than ``default_deny = false``, which the same repo could already write."""
+    if in_box() or config.proxy_default_deny_seed() != "learn":
+        return None
+    try:
+        raw = _checked_raw()
+    except StoreUnreadable:
+        return None
+    if any(k in raw for k in ("default_deny", "learn", "learned")):
+        return None
+    window = start_learning(LEARN_DEFAULT_SECONDS)
+    until = _parse(window["until"])
+    at = until.astimezone().strftime("%H:%M") if until else window["until"]
+    echo(
+        f"▶ egress wall: LEARNING until {at} (first run) — the box's egress is allowed and every "
+        "host the wall would refuse is recorded. Enforcement resumes by itself; review and grant "
+        "what it saw with `fy allow learn` (`fy allow wall on` ends it now)."
+    )
+    return window
+
+
+def _matches(key: str, patterns: list[str]) -> bool:
+    """The proxy's grant semantics for a recorded host key: ``host:port`` only by that exact
+    grant; a bare host by an exact grant or a ``*.suffix`` one (subdomains, not the bare
+    domain) — mirrors the addon's ``_host_matches``."""
+    if ":" in key:
+        return key in patterns
+    return any(key.endswith(p[1:]) if p.startswith("*.") else key == p for p in patterns)
+
+
+def _printable(text: object, limit: int = 120) -> str:
+    """``text`` cut to printable characters (no terminal escapes), capped."""
+    if not isinstance(text, str):
+        return ""
+    return "".join(c for c in text if c.isprintable())[:limit]
+
+
+def recommend_why(uas: list[str]) -> str:
+    """A ``why`` for a learned host's ``[proxy] recommend`` line: the first User-Agent's product
+    token (``npm/10.8.2``), restricted to characters that can't break out of a TOML string."""
+    token = uas[0].split()[0] if uas and uas[0].split() else ""
+    token = "".join(c for c in token if c.isalnum() or c in "._/+-")[:40]
+    return f"{token or 'seen'} — learned"
+
+
+def read_log_rows(paths: list[Path]) -> list[dict]:
+    """Every JSON row in ``paths`` (oldest file first), skipping unreadable files and malformed
+    lines. The review reads WHOLE files, unlike the TUI's bounded tail: a window can be hours old,
+    and the would-block rows are rate-limited, so they are few among the request rows."""
+    rows: list[dict] = []
+    for path in paths:
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    return rows
+
+
+def learned_hosts(rows: list[dict], window: dict) -> list[dict]:
+    """The hosts the proxy recorded as WOULD-BLOCK inside ``window``, still not granted and not
+    declined: ``{host, count, first, last, uas}`` in first-seen order. ``uas`` is up to three
+    distinct User-Agents — which TOOL reached the host, the attribution a reviewer needs without
+    anything logging commands in the box. Pure over the log rows (tests pass them directly).
+
+    Every field here was written from traffic the BOX originated, so it is untrusted: a host that
+    isn't a valid grant is dropped (``grant`` would refuse it mid-batch), and a User-Agent is cut
+    to printable characters before it reaches the operator's terminal."""
+    since, until = _parse(window.get("since")), _parse(window.get("until"))
+    granted = live_hosts()
+    refused = declined()
+    out: dict[str, dict] = {}
+    for row in rows:
+        if not row.get("would_block"):
+            continue
+        ts, key = _parse(row.get("ts")), row.get("host")
+        if not key or ts is None or since is None or until is None or not since <= ts <= until:
+            continue
+        if not isinstance(key, str) or not valid_host(key) or key.startswith("*."):
+            continue
+        if _matches(key, granted) or key in refused or "*" in refused:
+            continue
+        entry = out.setdefault(key, {"host": key, "count": 0, "first": row["ts"], "uas": []})
+        entry["count"] += 1
+        entry["last"] = row["ts"]
+        ua = _printable(row.get("ua"))
+        if ua and ua not in entry["uas"] and len(entry["uas"]) < 3:
+            entry["uas"].append(ua)
+    return list(out.values())
 
 
 def _prune(hosts: dict[str, dict]) -> tuple[dict[str, dict], bool]:
@@ -465,14 +651,21 @@ def sweep() -> bool:
     if in_box():
         return False
     try:
-        hosts = _load_store()
+        raw = _checked_raw()
     except StoreUnreadable as e:
         # The supervisor tick must not die on it; the fail-closed readers above already cover the
         # posture, and the operator sees the reason.
         _warn(f"egress allow-store unreadable ({e}) — skipping the expiry sweep")
         return False
-    pruned, changed = _prune(hosts)
-    if changed:
-        _save_store(pruned)
+    pruned, changed = _prune(raw.get("hosts", {}))
+    # A lapsed learn window is closed into its `learned` record — enforcement is ALREADY back
+    # (default_deny() stops honouring a window at its deadline); this just tidies the store.
+    lapsed = "learn" in raw and _open_window(raw) is None
+    if changed or lapsed:
+        doc = _load_raw()
+        doc["hosts"] = pruned
+        if lapsed:
+            _close_window(doc)
+        _save_raw(doc)
         write_effective()
-    return changed
+    return changed or lapsed

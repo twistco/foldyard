@@ -21,6 +21,11 @@ controls sit on that path; they get conflated constantly, so name the right one 
   one-line `why`: that commits the recommendation for the whole team — each operator is OFFERED
   it per host (after reviewing your edit at the adoption gate) instead of rediscovering the
   block, and nothing is granted without their yes.
+- **Nothing is blocked, but the operator mentions a "learn window"** — the wall is observing for
+  a while (`fy allow wall learn`): requests pass, and every host that WOULD be refused is recorded
+  for the operator to review. It enforces again by itself when the window ends, so a host that
+  works now may be refused later if the operator doesn't grant it — say which hosts your task
+  needed.
 - **Connection refused / hangs on everything** — the host proxy probably isn't running. `fy doctor`
   names it; the human checks it with `fy host` and restarts it with `fy host restart`, on the
   host (the box can't).

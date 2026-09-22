@@ -929,6 +929,86 @@ def test_default_deny_off_never_blocks(gh, monkeypatch, tmp_path):
     assert f.response is None
 
 
+@pytest.fixture
+def observing(gh, monkeypatch, tmp_path):
+    """An Injector with the wall OBSERVING (no DEFAULT_DENY — `fy allow wall off` or a learn
+    window) but an ALLOW_FILE present, as the plugin always emits it. (Injector, allow, log)."""
+    log = tmp_path / "egress.jsonl"
+    allow = tmp_path / "allow-effective.json"
+    _write_allow(allow, ["granted.example.com"], default_deny=False)
+    monkeypatch.setenv("INJECT_HOST", "api.github.com")
+    monkeypatch.setenv("INJECT_COMMAND", "true")
+    monkeypatch.setenv("ALLOW_FILE", str(allow))
+    monkeypatch.setenv("PROXY_LOG_FILE", str(log))
+    return gh.Injector(), allow, log
+
+
+def _rows(log: Path) -> list[dict]:
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def test_observing_records_what_enforcing_would_refuse_and_refuses_nothing(observing):
+    # The learn-mode signal: while the wall only observes, a CONNECT enforcement would refuse
+    # goes through AND leaves a would_block row carrying the client's User-Agent — the same
+    # policy check, so the learned set is exactly what enforcing needs (ports included).
+    inj, _, log = observing
+    f = _Flow("registry.npmjs.org")
+    f.request.headers["user-agent"] = "npm/10.8.2 node/v22.4.0 linux arm64"
+    f.response = None
+    inj.http_connect(f)
+    assert f.response is None  # nothing refused
+    (row,) = _rows(log)
+    assert row["host"] == "registry.npmjs.org" and row["would_block"] is True
+    assert row["ua"].startswith("npm/10.8.2") and "blocked" not in row
+
+    ssh = _Flow("github.com", port=22)  # another port is its own grant → keyed with the port
+    ssh.response = None
+    inj.http_connect(ssh)
+    assert ssh.response is None and _rows(log)[-1]["host"] == "github.com:22"
+
+
+def test_observing_skips_granted_and_injector_hosts(observing):
+    # A granted host or the injector host would pass under enforcement — no would_block row.
+    inj, _, log = observing
+    for host in ("granted.example.com", "api.github.com"):
+        f = _Flow(host)
+        f.response = None
+        inj.http_connect(f)
+    assert _rows(log) == []
+
+
+def test_would_block_rows_are_rate_limited_per_host(observing):
+    # An install opens hundreds of connections to one registry; one row per host per window is
+    # all the review needs, and anything more rotates the log away.
+    inj, _, log = observing
+    for _ in range(5):
+        f = _Flow("pypi.org")
+        f.response = None
+        inj.http_connect(f)
+    other = _Flow("files.pythonhosted.org")
+    other.response = None
+    inj.http_connect(other)
+    assert [r["host"] for r in _rows(log)] == ["pypi.org", "files.pythonhosted.org"]
+
+
+def test_observing_records_cleartext_but_not_decrypted_https_twice(observing):
+    # Cleartext never CONNECTs, so request() records it; a decrypted HTTPS request was already
+    # recorded at its CONNECT and must not be recorded again per request.
+    inj, _, log = observing
+    inj.request(_Flow("deb.debian.org", port=80, scheme="http"))
+    inj.request(_Flow("example.org"))  # https, not granted — CONNECT's job
+    assert [r["host"] for r in _rows(log)] == ["deb.debian.org"]
+
+
+def test_decrypted_rows_carry_the_user_agent(injector):
+    inj, log = injector
+    flow = _Flow("example.org", status=200)
+    flow.request.headers["user-agent"] = "uv/0.8.0 " + "x" * 500
+    inj._log_flow(flow)
+    row = _last_log(log)
+    assert row["ua"].startswith("uv/0.8.0") and len(row["ua"]) == 120  # capped, untrusted text
+
+
 def test_default_deny_exempts_the_injector_host(gh, monkeypatch, tmp_path):
     # The injector host is ALWAYS reachable even with an empty allowlist — we must reach it to mint.
     allow = tmp_path / "allow-effective.json"

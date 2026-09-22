@@ -215,6 +215,21 @@ _LOG_BACKUPS = int(os.environ.get("PROXY_LOG_BACKUPS", "5"))
 # On a 4xx/5xx, capture this many bytes of the (decrypted) response body into the log entry so the
 # Network Log shows WHY it failed (e.g. an auth-token parse error), not just the status code.
 _ERROR_BODY_MAX = 1024
+# The client's User-Agent, kept on request + would-block rows so a learned host says WHICH TOOL
+# reached it (npm/…, uv/…, curl/…) without instrumenting the box. Capped: it is untrusted text.
+_UA_MAX = 120
+# A would-block row is written at most once per host per this many seconds: observing a package
+# install would otherwise write one per connection (hundreds to the same registry) and rotate the
+# log away. The review needs "this host, this tool, first/last seen" — not every connection.
+_WOULD_BLOCK_EVERY = 60.0
+
+
+def _user_agent(request) -> str:
+    """The request's User-Agent, capped, or '' — never raises (logging must not break the proxy)."""
+    try:
+        return str(request.headers.get("user-agent", ""))[:_UA_MAX]
+    except Exception:
+        return ""
 
 
 def _error_snippet(response) -> str:
@@ -443,6 +458,8 @@ class Injector:
         self.allow_path = Path(allow_file) if allow_file else None
         self._allow_mtime: float = -1.0
         self._allow_patterns: list[str] = []
+        # host key → monotonic time of its last would-block row (see _WOULD_BLOCK_EVERY).
+        self._would_block_seen: dict[str, float] = {}
 
     def _load_rules(self) -> list[_Rule]:
         """Build the injection rule set. ``INJECT_RULES`` (a JSON list of rule objects) is the
@@ -561,6 +578,9 @@ class Injector:
             "injected": flow.request.pretty_host in self.inject_hosts,
             "replayed": bool(flow.metadata.get("egress_proxy_retried")),
         }  # fmt: skip
+        ua = _user_agent(flow.request)
+        if ua:
+            entry["ua"] = ua
         # Error responses carry the reason in their body — capture a short snippet so "injected=True
         # but 401, why?" is answerable at a glance instead of by re-running the failing client.
         if flow.response.status_code >= 400:
@@ -603,6 +623,33 @@ class Injector:
             "blocked": True,
         })  # fmt: skip
 
+    def _log_would_block(self, key: str | None, request) -> None:
+        """While the wall only OBSERVES (``fy allow wall off``, or a learn window): a row for a
+        host enforcement WOULD have refused — the same policy check as the wall, so the set
+        ``fy allow learn`` offers is exactly what enforcing would need, ports included. Nothing
+        is refused. Rate-limited per host (:data:`_WOULD_BLOCK_EVERY`). No host → nothing."""
+        if not key:
+            return
+        now = time.monotonic()
+        last = self._would_block_seen.get(key)
+        if last is not None and now - last < _WOULD_BLOCK_EVERY:
+            return
+        self._would_block_seen[key] = now
+        entry = {
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+            "method": "",
+            "host": key,
+            "path": "",
+            "status": 0,
+            "injected": False,
+            "replayed": False,
+            "would_block": True,
+        }  # fmt: skip
+        ua = _user_agent(request)
+        if ua:
+            entry["ua"] = ua
+        self._write_entry(entry)
+
     # ── mitmproxy hooks ──────────────────────────────────────────────────────────
     def running(self) -> None:
         """Pre-mint every rule's token at proxy start, OFF the request path. ``request`` calls
@@ -633,14 +680,18 @@ class Injector:
         editor attach that is a push path (seen live, 2026-09-17). Another port needs its own
         grant, ``host:port`` (``fy allow add github.com:22``), so the blocked row carries the port
         and the TUI's allow action offers exactly that."""
-        if not self.default_deny:
-            return
         host = flow.request.pretty_host
         port = flow.request.port
         if self._allowed_connect(host, port):
             return
+        key = host if port == _HTTPS_PORT else f"{host}:{port}"
+        if not self.default_deny:
+            # Observing: let it through, but record that enforcing would refuse it — the CONNECT
+            # carries the client's User-Agent even for a host that is then tunnelled blind.
+            self._log_would_block(key, flow.request)
+            return
         flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
-        self._log_blocked(host if port == _HTTPS_PORT else f"{host}:{port}")
+        self._log_blocked(key)
 
     def _allowed_connect(self, host: str | None, port: int) -> bool:
         """The CONNECT policy: the host granted (:meth:`_allowed`) on :443, else ``host:port``
@@ -706,12 +757,17 @@ class Injector:
         # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host
         # grant as CONNECT :22 — here, before it leaves the box. HTTPS is walled at http_connect.
         host, port = flow.request.pretty_host, flow.request.port
-        if self.default_deny and not self._allowed_plain(host, port, flow.request.scheme):
-            flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
-            flow.metadata["egress_proxy_blocked"] = True  # so `response` doesn't re-log it as a 403
+        if not self._allowed_plain(host, port, flow.request.scheme):
             default = _HTTPS_PORT if flow.request.scheme == "https" else _HTTP_PORT
-            self._log_blocked(host if port == default else f"{host}:{port}")
-            return
+            key = host if port == default else f"{host}:{port}"
+            if self.default_deny:
+                flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
+                flow.metadata["egress_proxy_blocked"] = True  # so `response` doesn't re-log a 403
+                self._log_blocked(key)
+                return
+            if flow.request.scheme != "https":
+                # Observing, cleartext: record it (HTTPS was already recorded at its CONNECT).
+                self._log_would_block(key, flow.request)
         rule = self._rule_for(flow)
         if rule is None:
             return  # capture-only, or not a target host/path → log on the way back, rewrite nothing

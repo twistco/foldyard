@@ -27,7 +27,8 @@ def test_render_default_is_a_locked_down_stackless_lima_wall_box():
     assert doc["machine"]["name"] == "acme-app"
     assert doc["machine"]["cpus"] == init.DEFAULT_CPUS
     assert "proxy" in doc  # [proxy] declared so the wall has a way out
-    assert doc["proxy"]["default_deny"] is True  # enforcing from the first run
+    # Learns on the first launch, then enforces by itself (allowlist.seed_learning).
+    assert doc["proxy"]["default_deny"] == "learn"
 
 
 def test_render_agents_and_features_are_present_but_commented():
@@ -327,13 +328,18 @@ def test_update_gitignore_refreshes_managed_block_in_place(tmp_path):
     assert init._update_gitignore(tmp_path) == "unchanged"
 
 
-def test_template_enforces_the_wall_and_recommends_the_bootstrap_hosts():
-    """The starter is ENFORCING from day one (`default_deny = true`), which is only survivable
-    because it also seeds `[proxy] recommend` with the box-bootstrap hosts: one round of consented
-    per-host yeses and the box builds walled. The entries are OFFERS the launch verbs surface,
-    never grants — so the two must ship together."""
+def test_template_learns_then_enforces_and_recommends_the_bootstrap_hosts():
+    """The starter LEARNS for its first launch window and then ENFORCES by itself
+    (`default_deny = "learn"`) — so setup isn't a wall of refusals, and the wall can't be left
+    open by mistake either. It still seeds `[proxy] recommend` with the box-bootstrap hosts:
+    they're the team-shared half, OFFERED per host at the launch verbs, never grants."""
+    from foldyard import config
+
     doc = _parse(init.InitOptions(name="x"))
-    assert doc["proxy"]["default_deny"] is True
+    assert doc["proxy"]["default_deny"] == "learn"
+    with config.using(config.Config(repo_root=config.repo_root(), worktree="", toml=doc)):
+        assert config.proxy_default_deny_seed() == "learn"
+        assert config.proxy_default_deny() is True  # enforces until the window opens
     entries = {e["host"]: e["why"] for e in doc["proxy"]["recommend"]}
     assert "pypi.org" in entries and "github.com" in entries
     assert all(why for why in entries.values())  # every recommendation carries its why

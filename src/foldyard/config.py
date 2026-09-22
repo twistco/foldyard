@@ -766,15 +766,27 @@ def proxy_recommend() -> list[dict]:
     return out
 
 
+def proxy_default_deny_seed() -> str:
+    """``[proxy] default_deny`` as the seed it is: ``"on"`` (true), ``"off"`` (false / absent) or
+    ``"learn"`` — observe for a bounded window on the first launch, then enforce
+    (:func:`foldyard.allowlist.seed_learning`). Anything else keeps the historical truthiness,
+    so a mistyped string reads as ``"on"`` — a typo must not loosen the wall."""
+    raw = _table("proxy").get("default_deny", False)
+    if isinstance(raw, str) and raw.strip().lower() == "learn":
+        return "learn"
+    return "on" if raw else "off"
+
+
 def proxy_default_deny() -> bool:
     """``[proxy] default_deny`` — when true the egress proxy ENFORCES the allowlist: any host
     that isn't allowed (by a live grant in the host-side allow-store, or as an injector host) is
-    REFUSED (403 at CONNECT / on the request). Absent ⇒ false: capture/passthrough only, never
-    blocks. This key only SEEDS the answer — enforcement is host-owned from then on
-    (``fy allow wall``, see :func:`foldyard.allowlist.default_deny`), and the per-host grants
-    live exclusively in the store (``fy allow add``): a ``[proxy] allow`` list is IGNORED
-    (:data:`foldyard.exposure.IGNORED_KEYS`)."""
-    return bool(_table("proxy").get("default_deny", False))
+    REFUSED (403 at CONNECT / on the request). Absent ⇒ false: observe only, never blocks.
+    ``"learn"`` enforces too, until a launch verb opens its first learn window
+    (:func:`proxy_default_deny_seed`). This key only SEEDS the answer — enforcement is host-owned
+    from then on (``fy allow wall``, see :func:`foldyard.allowlist.default_deny`), and the
+    per-host grants live exclusively in the store (``fy allow add``): a ``[proxy] allow`` list is
+    IGNORED (:data:`foldyard.exposure.IGNORED_KEYS`)."""
+    return proxy_default_deny_seed() != "off"
 
 
 def inject_specs() -> list[dict]:
