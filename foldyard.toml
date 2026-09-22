@@ -248,5 +248,57 @@ check = "command -v unzip"
 install = "apt-get install -y --no-install-recommends unzip"
 
 #
-# VS Code attach (`fy code`) — persist the vscode-server volume across box recreations.
+# VS Code attach (`fy code`). Declaring this table mounts the persisted vscode-server volume so
+# the attach reuses its server across box recreations. The root .vscode/settings.json stays
+# yours (gitignored, never generated) — a key there wins over [vscode.settings] below.
+#
+# extensions: what `fy code` installs into the box's server on attach — the ONLY extension
+# list. Config rather than .vscode/extensions.json on purpose: a UI-kind extension installs on
+# the HOST (the operator's shared ~/.vscode/extensions), so the list lives where `fy config
+# adopt` reviews it, and a box edit to it is inert until adopted (ADR-0026).
 [vscode]
+extensions = [
+  "anthropic.claude-code",
+  "charliermarsh.ruff",
+  "ms-python.python",
+  "ms-python.vscode-pylance",
+  "ms-python.debugpy",
+  "astral-sh.ty",
+  "tamasfe.even-better-toml",
+  "nefrob.vscode-just-syntax",
+  "github.vscode-github-actions",
+]
+
+# Settings `fy code` applies to the box's VS Code server (machine scope — the `fy code` window
+# only; editor convenience, not correctness: `just check` gates either way).
+# - remote.autoForwardPorts: the e2e tiers and `fy docs` open listeners in here; VS Code's
+#   auto-forward would bind host ports for each. Manual "Forward a Port" still works.
+# - claudeCode.allowDangerouslySkipPermissions: the in-box extension runs as `fy claude`
+#   does — inside the cage, prompts off.
+# - github.gitAuthentication: the GitHub extension must not act as git's credential provider
+#   in the box — no push credential here, from any direction.
+# - the rest: ruff formats + fixes + sorts imports on save (the `I` rules are selected in
+#   pyproject), with the interpreter at the box's own shadowed .venv — so the ruff/ty
+#   extensions pick up the PINNED ruff/ty from it, matching CI, not their bundled versions.
+#   Pylance reads [tool.pyright] and is `just typecheck`'s pyright half; ty stays
+#   diagnostics-only so hovers/completions aren't doubled. [toml] format-on-save is OFF:
+#   even-better-toml would otherwise re-flow this file's hand-aligned comments.
+#   The inlay-hint keys are taste — override them in your own .vscode/settings.json.
+[vscode.settings]
+"remote.autoForwardPorts" = false
+"claudeCode.allowDangerouslySkipPermissions" = true
+"github.gitAuthentication" = false
+"editor.formatOnSave" = true
+"editor.formatOnSaveMode" = "file"
+"files.trimTrailingWhitespace" = true
+"[python]" = { "editor.defaultFormatter" = "charliermarsh.ruff", "editor.codeActionsOnSave" = { "source.organizeImports" = "explicit", "source.fixAll" = "explicit" } }
+"[toml]" = { "editor.formatOnSave" = false }
+"python.defaultInterpreterPath" = "${workspaceFolder}/.venv/bin/python"
+"python.languageServer" = "Default"
+"python.testing.pytestEnabled" = true
+"python.analysis.languageServerMode" = "full"
+"python.analysis.autoFormatStrings" = true
+"python.analysis.inlayHints.callArgumentNames" = "all"
+"python.analysis.inlayHints.functionReturnTypes" = true
+"python.analysis.inlayHints.pytestParameters" = true
+"ty.disableLanguageServices" = true
