@@ -543,6 +543,18 @@ def code() -> int:
     # state dir), and NO pin at all after an operator declined to adopt — there `effective()`
     # falls back to the working tree, which for this verb means the tree chose what the host
     # installs. So `fy code` refuses both rather than inheriting `fy up`'s keep-going default.
+    if config.in_box():
+        # `fy code` launches the HOST's VS Code and attaches it back to this box over the engine
+        # socket — there's no box→host bridge. Refused FIRST: it used to be caught only at the
+        # `code` lookup, after the gate, the stack resolve, a config write under the box's home
+        # and the marker reset — which from in here execs into THIS box, deleting its own markers
+        # and stopping its own VS Code server under an attached window.
+        wt = config.active_worktree()
+        run_hint = f"WORKTREE={wt} fy code" if wt else "fy code"
+        _err("✗ `fy code` has to run on the host, not inside the dev box — it launches the")
+        _err("  host's VS Code and attaches it back to this box. Open a terminal on the host")
+        _err(f"  (in your checkout) and run `{run_hint}` there.")
+        return 1
     status = configpin.gate("fy code")
     if status == "error":
         _err("✗ fy code: couldn't check foldyard.toml against the adopted copy — not launching.")
@@ -607,14 +619,6 @@ def code() -> int:
 
     code_cli = shutil.which("code")
     if not code_cli:
-        if config.in_box():
-            # `fy code` launches the *host's* VS Code (attaches it back to this box over the
-            # engine socket) — there's no box→host bridge, and the box image has no `code`.
-            run_hint = f"WORKTREE={ctx.worktree} fy code" if ctx.worktree else "fy code"
-            _err("✗ `fy code` has to run on your Mac, not inside the dev box — it launches the")
-            _err("  host's VS Code and attaches it back to this box. Open a terminal on the Mac")
-            _err(f"  (in your checkout) and run `{run_hint}` there.")
-            return 1
         _err("✗ `code` (the VS Code CLI) isn't on your PATH. Install it: open VS Code, then")
         _err("  Cmd-Shift-P → \"Shell Command: Install 'code' command in PATH\",")
         _err("  and re-run `fy code`. Manual fallback: in VS Code, Cmd-Shift-P →")

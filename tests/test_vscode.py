@@ -742,16 +742,27 @@ def test_errors_when_code_not_on_path(fake, monkeypatch, capsys):
     assert not _launch(fake["calls"])
 
 
-def test_errors_when_run_inside_box(fake, monkeypatch, capsys):
-    # In-box there's no `code` AND no host bridge: say so, point at the host, and don't fall
-    # through to the generic "install code" advice.
+def test_refuses_inside_the_box_before_doing_anything(fake, monkeypatch, capsys):
+    # In-box there's no host bridge: say so and point at the host — FIRST. The refusal used to sit
+    # at the `code` lookup, after the gate, the resolve, a config write and the marker reset,
+    # which from in here execs into this very box (its own markers deleted, its own VS Code
+    # server stopped under an attached window) — and with `code` on PATH it was never reached.
     fake["state"]["running"] = True
-    monkeypatch.setattr(vscode.shutil, "which", lambda name: None)
     monkeypatch.setattr(config, "in_box", lambda: True)
     assert vscode.code() == 1
     err = capsys.readouterr().err
-    assert "has to run on your Mac" in err and "fy code" in err
+    assert "has to run on the host" in err and "`fy code`" in err
     assert "Install it" not in err
+    assert fake["gated"] == []  # no gate, no stack resolve
+    assert fake["calls"] == []  # no engine call at all: no probe, no exec, no launch
+    assert not fake["udd"].exists()  # nothing written under the (box's) home
+
+
+def test_the_in_box_refusal_names_the_worktree(fake, monkeypatch, capsys):
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    monkeypatch.setenv("WORKTREE", "feat-x")
+    assert vscode.code() == 1
+    assert "`WORKTREE=feat-x fy code`" in capsys.readouterr().err
 
 
 def test_refuses_when_vscode_table_absent(fake, monkeypatch, capsys):
