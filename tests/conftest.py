@@ -262,13 +262,39 @@ def _is_e2e(request: pytest.FixtureRequest) -> bool:
     return request.node.fspath.basename.endswith("_e2e.py")
 
 
+def _is_box_git_shim(path: str) -> bool:
+    """Whether ``path`` is foldyard's own in-box git shim (``assets/box/git-index-shim.sh``,
+    installed to /usr/local/bin/git by the box bootstrap)."""
+    try:
+        with open(path, "rb") as f:
+            return b"foldyard git shim" in f.read(512)
+    except OSError:
+        return False
+
+
+def _spawnable(tool: str) -> str | None:
+    """The real ``tool`` on the ambient PATH — for git, PAST the box's shim. The shim finds the
+    git it wraps by searching PATH for a `git` that isn't itself, and the shim dir below holds
+    only the symlink back to it: every git a test ran in a dev box exited 127 ("no real git on
+    PATH") — 100-odd failures that CI, which has no shim, never saw. The tests' git works on
+    tmp repos, where the shim's per-kernel index split has nothing to protect; the shim's own
+    tests (test_git_shim.py) run it deliberately, over this real git."""
+    if tool != "git":
+        return shutil.which(tool)
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        found = shutil.which(tool, path=d)
+        if found and not _is_box_git_shim(found):
+            return found
+    return None
+
+
 @pytest.fixture(scope="session")
 def _shim_bin(tmp_path_factory) -> Path:
     """One dir of symlinks to the allowlisted tools, resolved from the REAL PATH once per
     session (workers each build their own; it is a handful of symlinks)."""
     shim = tmp_path_factory.mktemp("shim-bin")
     for tool in SPAWNABLE:
-        real = shutil.which(tool)
+        real = _spawnable(tool)
         if real:
             (shim / tool).symlink_to(real)
     for name in ("python", "python3"):
