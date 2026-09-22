@@ -740,6 +740,11 @@ class Injector:
         flow.response with the result. We can't `replay.client` a *live* flow on modern mitmproxy
         (it rejects it with "Can't replay live flow"), and a replayed copy is detached from the
         original client — so the retry has to be a direct request whose response we hand back."""
+        if flow.request.raw_content is None:
+            # The request body was STREAMED upstream (past stream_large_bodies), so there is no
+            # copy left to re-send. Hand the 401 back as-is; the client's own retry re-mints.
+            ctx.log.warn(f"egress_proxy: 401 from {rule.host} on a streamed upload — not re-issued")
+            return
         value = rule.token(force=True)
         if value is None:
             return

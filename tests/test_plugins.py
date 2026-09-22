@@ -1498,6 +1498,8 @@ def test_proxy_daemon_built_from_the_github_rule():
     # cmd[0] is resolved (foldyard's venv copy or PATH) so it may be an absolute path — the
     # basename is what's invariant. See proxy.mitmdump_path / the github[extra] packaging.
     assert "App token" in spec["label"] and os.path.basename(spec["cmd"][0]) == "mitmdump"
+    # Large bodies stream through rather than buffering whole in the proxy's memory.
+    assert "stream_large_bodies=1m" in spec["cmd"]
     user = reg.desired_daemons({"github": "user"})["egress-proxy"]
     assert user["env"]["INJECT_COMMAND"].endswith("-m foldyard.plugins.gh_cli_token")
     assert user["requires"] == []

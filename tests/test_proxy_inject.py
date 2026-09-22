@@ -747,6 +747,21 @@ async def test_re_mints_and_re_issues_once_on_401(injector, gh):
     assert gh.requests == []
 
 
+async def test_a_401_on_a_streamed_upload_is_handed_back_not_re_issued(injector, gh):
+    # Under stream_large_bodies a request body past the threshold goes upstream as it arrives and
+    # mitmproxy keeps no copy (raw_content is None). Re-issuing would send an EMPTY body with a
+    # fresh token — a silently truncated upload — so the 401 goes back to the client untouched.
+    inj, log = injector
+    flow = _Flow("api.github.com", status=401)
+    flow.request.raw_content = None
+    await inj.response(flow)
+
+    assert gh.requests == []
+    assert not flow.metadata.get("egress_proxy_retried")
+    assert flow.response is not None and flow.response.status_code == 401
+    assert _last_log(log)["status"] == 401
+
+
 # ── the default-deny egress wall (DEFAULT_DENY + ALLOW_FILE) ──────────────────────────────
 
 

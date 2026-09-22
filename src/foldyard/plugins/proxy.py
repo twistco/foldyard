@@ -477,6 +477,14 @@ class ProxyPlugin(Plugin):
                     # connect/listening/error lines (those are termlog, not flow_detail).
                     "--set",
                     "flow_detail=0",
+                    # Relay bodies past 1 MiB as they arrive instead of buffering the whole body
+                    # in the proxy's memory first. mitmproxy buffers by default, so a decrypted
+                    # 2 GB image layer or model download was held in RAM before the box saw a
+                    # byte; streaming also doubled decrypted throughput (~270 → ~590 MB/s on
+                    # loopback, 2026-09-22). Error bodies (the log's snippet) and 401 re-issues
+                    # stay small, so nothing the addon reads is lost.
+                    "--set",
+                    "stream_large_bodies=1m",
                 ],
                 "env": env,
                 "requires": requires,
