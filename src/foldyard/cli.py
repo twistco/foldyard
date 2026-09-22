@@ -754,6 +754,9 @@ def allow_learn(
     width = max(len(e["host"]) for e in learned)
     for e in learned:
         print(f"    {e['host']:<{width}}  {e['count']:>4}×  {', '.join(e['uas']) or '(no UA)'}")
+        if e["paths"]:
+            more = f" (+{e['more_paths']} more)" if e["more_paths"] else ""
+            print(f"    {'':<{width}}         fetched {', '.join(e['paths'])}{more}")
     if yes:
         choice = "y"
     elif sys.stdin.isatty():
@@ -780,11 +783,12 @@ def allow_learn(
     if granted:
         print(
             f"✓ granted {len(granted)} (permanent). To share them with the team, add to "
-            "foldyard.toml:"
+            "foldyard.toml — each `why` is what the box was SEEN doing; replace it with the "
+            "reason the project needs the host before you commit:"
         )
         print("  [proxy]\n  recommend = [")
         for e in granted:
-            why = allowlist.recommend_why(e["uas"])
+            why = allowlist.recommend_why(e)
             print(f'    {{ host = "{e["host"]}", why = "{why}" }},')
         print("  ]")
 

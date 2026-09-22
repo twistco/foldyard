@@ -328,12 +328,47 @@ def _printable(text: object, limit: int = 120) -> str:
     return "".join(c for c in text if c.isprintable())[:limit]
 
 
-def recommend_why(uas: list[str]) -> str:
-    """A ``why`` for a learned host's ``[proxy] recommend`` line: the first User-Agent's product
-    token (``npm/10.8.2``), restricted to characters that can't break out of a TOML string."""
-    token = uas[0].split()[0] if uas and uas[0].split() else ""
-    token = "".join(c for c in token if c.isalnum() or c in "._/+-")[:40]
-    return f"{token or 'seen'} — learned"
+# What a sampled path keeps: its first segments, enough to name the package or endpoint
+# (`/react`, `/@types/node`, `/simple/requests`) and never the query string, where tokens live.
+_PATH_SEGMENTS = 2
+_PATH_SEGMENT_MAX = 40  # longer reads as an id or a token, not a name — shown as `…`
+_PATH_EXAMPLES = 3
+# The characters a learned `why` may carry: enough for tool tokens and package paths, and none
+# that can end a TOML string or open markup. Box-originated text, so allowlisted, not escaped.
+_WHY_SAFE = set("._/+-@~…")
+
+
+def _sample_path(path: object) -> str:
+    """A request path cut down to what explains a host: no query or fragment, the first
+    :data:`_PATH_SEGMENTS` segments, an over-long segment replaced by ``…``. '' when nothing is
+    left."""
+    if not isinstance(path, str):
+        return ""
+    path = path.split("?", 1)[0].split("#", 1)[0]
+    segments = [seg for seg in path.split("/") if seg][:_PATH_SEGMENTS]
+    kept = [seg if len(seg) <= _PATH_SEGMENT_MAX else "…" for seg in segments]
+    return "/" + "/".join(kept) if kept else ""
+
+
+def _why_safe(text: str) -> str:
+    return "".join(c for c in text if c.isalnum() or c in _WHY_SAFE)
+
+
+def recommend_why(entry: dict) -> str:
+    """The ``why`` for a learned host's ``[proxy] recommend`` line — labelled as what it is: an
+    OBSERVATION from box traffic (``observed: npm/10.8.2 GET /react, /lodash (+4) — edit me``),
+    not a reason. The reason is the operator's to write before committing; the box chose every
+    byte here, and teammates see this text at their own consent prompt. Restricted to characters
+    that can't break out of a TOML string."""
+    uas = entry.get("uas") or []
+    tool = _why_safe(uas[0].split()[0])[:40] if uas and uas[0].split() else ""
+    parts = [tool] if tool else []
+    paths = [_why_safe(p)[: _PATH_SEGMENT_MAX * _PATH_SEGMENTS] for p in entry.get("paths") or []]
+    paths = [p for p in paths if p]
+    if paths:
+        more = entry.get("more_paths", 0)
+        parts.append("GET " + ", ".join(paths) + (f" (+{more})" if more else ""))
+    return f"observed: {' '.join(parts) or 'no detail (tunnelled)'} — edit me"
 
 
 def read_log_rows(paths: list[Path]) -> list[dict]:
@@ -358,9 +393,11 @@ def read_log_rows(paths: list[Path]) -> list[dict]:
 
 def learned_hosts(rows: list[dict], window: dict) -> list[dict]:
     """The hosts the proxy recorded as WOULD-BLOCK inside ``window``, still not granted and not
-    declined: ``{host, count, first, last, uas}`` in first-seen order. ``uas`` is up to three
-    distinct User-Agents — which TOOL reached the host, the attribution a reviewer needs without
-    anything logging commands in the box. Pure over the log rows (tests pass them directly).
+    declined: ``{host, count, first, last, uas, paths, more_paths}`` in first-seen order. ``uas``
+    is up to three distinct User-Agents — which TOOL reached the host. ``paths`` samples what it
+    FETCHED there, from the decrypted request rows for the same host in the window (a tunnelled
+    host has none): the attribution a reviewer needs without anything logging commands in the box.
+    Pure over the log rows (tests pass them directly).
 
     Every field here was written from traffic the BOX originated, so it is untrusted: a host that
     isn't a valid grant is dropped (``grant`` would refuse it mid-batch), and a User-Agent is cut
@@ -369,11 +406,18 @@ def learned_hosts(rows: list[dict], window: dict) -> list[dict]:
     granted = live_hosts()
     refused = declined()
     out: dict[str, dict] = {}
+    fetched: dict[str, list[str]] = {}  # host → distinct sampled paths, first-seen order
     for row in rows:
-        if not row.get("would_block"):
-            continue
         ts, key = _parse(row.get("ts")), row.get("host")
         if not key or ts is None or since is None or until is None or not since <= ts <= until:
+            continue
+        if not row.get("would_block"):
+            # A decrypted request row (method + path): what the tool fetched, joined below by
+            # host. Tunnel, blocked and would-block rows carry no path.
+            if row.get("method") and isinstance(key, str):
+                sample = _printable(_sample_path(row.get("path")))
+                if sample and sample not in fetched.setdefault(key, []):
+                    fetched[key].append(sample)
             continue
         if not isinstance(key, str) or not valid_host(key) or key.startswith("*."):
             continue
@@ -385,6 +429,12 @@ def learned_hosts(rows: list[dict], window: dict) -> list[dict]:
         ua = _printable(row.get("ua"))
         if ua and ua not in entry["uas"] and len(entry["uas"]) < 3:
             entry["uas"].append(ua)
+    for key, entry in out.items():
+        # A `host:port` key was a non-TLS-port tunnel — its requests (if any were decrypted) are
+        # logged under the bare host, which may also be a different, granted :443 host; don't mix.
+        seen = [] if ":" in key else fetched.get(key, [])
+        entry["paths"] = seen[:_PATH_EXAMPLES]
+        entry["more_paths"] = max(0, len(seen) - _PATH_EXAMPLES)
     return list(out.values())
 
 

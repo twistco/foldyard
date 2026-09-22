@@ -527,9 +527,63 @@ def test_learned_rows_are_untrusted_box_output(env):
     (entry,) = allowlist.learned_hosts(rows, window)
     assert entry["host"] == "ok.example.com"
     assert "\x1b" not in entry["uas"][0]
-    why = allowlist.recommend_why(entry["uas"])
-    assert '"' not in why and "{" not in why and why == "evil/1 — learned"
-    assert allowlist.recommend_why([]) == "seen — learned"
+    why = allowlist.recommend_why(entry)
+    assert '"' not in why and "{" not in why and why == "observed: evil/1 — edit me"
+    assert allowlist.recommend_why({"uas": [], "paths": []}) == (
+        "observed: no detail (tunnelled) — edit me"
+    )
+
+
+def test_learned_hosts_say_what_was_fetched_without_what_could_be_secret(env):
+    # The decrypted request rows for a learned host (same host, same window) say what the tool
+    # FETCHED there — the part of a `why` a teammate can act on. Only a path's first segments are
+    # kept: never the query (where tokens ride), and a segment long enough to be an id or a token
+    # reads as `…`. The would-block row itself carries no path (it's the CONNECT).
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    ts = "2026-09-22T10:01:00+00:00"
+    token = "t" * 64
+
+    def req(host, path, at=ts):
+        return {"ts": at, "host": host, "method": "GET", "path": path, "status": 200}
+
+    rows = [
+        _row("registry.npmjs.org", ts, "npm/10.8.2 node/v22"),
+        req("registry.npmjs.org", "/react"),
+        req("registry.npmjs.org", "/react"),  # a repeat is one example
+        req("registry.npmjs.org", "/@types/node/-/node-22.0.0.tgz?token=SECRET"),
+        req("registry.npmjs.org", f"/private/{token}/pkg"),
+        req("registry.npmjs.org", "/lodash#frag"),
+        req("registry.npmjs.org", "/zod"),
+        req("registry.npmjs.org", "/outside", at="2026-09-22T12:00:00+00:00"),  # not in window
+        req("other.example.com", "/unrelated"),  # another host's requests stay its own
+    ]
+    (npm,) = allowlist.learned_hosts(rows, window)
+    assert npm["paths"] == ["/react", "/@types/node", "/private/…"]
+    assert npm["more_paths"] == 2  # /lodash, /zod
+    assert not any("SECRET" in p or token in p for p in npm["paths"])
+    assert allowlist.recommend_why(npm) == (
+        "observed: npm/10.8.2 GET /react, /@types/node, /private/… (+2) — edit me"
+    )
+
+
+def test_a_port_keyed_host_borrows_no_paths_from_the_bare_host(env):
+    # `github.com:22` was a raw tunnel; decrypted rows logged under bare `github.com` are :443
+    # traffic — a different grant — and must not dress up the :22 entry.
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    ts = "2026-09-22T10:01:00+00:00"
+    rows = [
+        _row("github.com:22", ts, "git/2.45"),
+        {"ts": ts, "host": "github.com", "method": "GET", "path": "/org/repo", "status": 200},
+    ]
+    (ssh,) = allowlist.learned_hosts(rows, window)
+    assert ssh["paths"] == [] and allowlist.recommend_why(ssh) == "observed: git/2.45 — edit me"
+
+
+def test_a_path_cannot_break_the_printed_toml(env):
+    why = allowlist.recommend_why(
+        {"uas": ["npm/1"], "paths": ['/a"}, { host = "evil.com'], "more_paths": 0}
+    )
+    assert '"' not in why and "{" not in why and "}" not in why and "=" not in why
 
 
 def test_read_log_rows_skips_damage(env, tmp_path):

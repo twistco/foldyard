@@ -75,7 +75,11 @@ opens a one-hour window in which nothing is refused and the proxy records every 
 *would* refuse — with the User-Agent that asked (`npm/10.8.2`, `uv/0.8`, `git/2.45`), so you can
 see which tool wanted it without anything logging commands in the box. When the window ends the
 wall enforces **by itself**, and `fy allow learn` lists what it recorded, grants it in one go, and
-prints the `[proxy] recommend` lines that share it with the team. Open another window for a new
+prints the `[proxy] recommend` lines that share it with the team. Each line's `why` is what the box
+was *seen* doing there — `observed: npm/10.8.2 GET /react, /@types/node (+4) — edit me`, from the
+User-Agent and the first path segments of the decrypted requests (never a query string). It is
+evidence, written by box traffic, not a reason: replace it with why the project needs the host
+before committing, since teammates read it at their own consent prompt. Open another window for a new
 dependency with `fy allow wall learn --for 30m`. Prefer it to `fy allow wall off`, which observes
 too but stays off until someone remembers to turn it back on. Grants are never repo config either: every level lives
 in the host-side allow-store, added with `fy allow add <host> [--level once|session|permanent]`,

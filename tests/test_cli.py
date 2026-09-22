@@ -287,6 +287,7 @@ def test_wall_learn_then_review_grants_the_recorded_hosts(tmp_path, monkeypatch)
         log.parent.mkdir(parents=True)
         rows = [
             {"ts": now, "host": "registry.npmjs.org", "would_block": True, "ua": "npm/10.8.2 x"},
+            {"ts": now, "host": "registry.npmjs.org", "method": "GET", "path": "/react?t=x"},
             {"ts": now, "host": "seen.example.com", "status": 200},  # passed, not would-block
         ]
         log.write_text("".join(json.dumps(r) + "\n" for r in rows))
@@ -295,7 +296,12 @@ def test_wall_learn_then_review_grants_the_recorded_hosts(tmp_path, monkeypatch)
         assert result.exit_code == 0, result.output
         assert "registry.npmjs.org" in result.output and "npm/10.8.2" in result.output
         assert "seen.example.com" not in result.output
-        assert '{ host = "registry.npmjs.org", why = "npm/10.8.2 — learned" }' in result.output
+        assert "fetched /react" in result.output and "t=x" not in result.output
+        assert (
+            '{ host = "registry.npmjs.org", why = "observed: npm/10.8.2 GET /react — edit me" }'
+            in result.output
+        )
+        assert "replace it with the reason" in result.output
         assert "registry.npmjs.org" in allowlist.live_hosts()
         # Granted now, so a second review has nothing left to offer.
         again = runner.invoke(cli.app, ["allow", "learn"])
