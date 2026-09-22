@@ -424,7 +424,7 @@ def _wall_posture(rep: _Report) -> None:
         rep.bad(
             f"the permitted path ({m.group(1)}:{m.group(2)}) is unreachable too — this box has "
             "no egress at all, so a refused direct connect proves nothing. Wall UNPROVEN "
-            "(is `fy host` running?)"
+            "(is the host supervisor running? `fy host` on the host)"
         )
         return
 

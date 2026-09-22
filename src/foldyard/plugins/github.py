@@ -381,7 +381,7 @@ class GithubPlugin(Plugin):
             (
                 f"NOT injected — requests leave this box anonymous (rate limit {limit}/h). "
                 "`fy mode` can still read github=app: the axis and the proxy are host-side "
-                "state, this is the wire. Restart `fy host` on the Mac and re-run; if it "
+                "state, this is the wire. `fy host restart` on the host and re-run; if it "
                 "persists the App installation likely needs re-authorizing."
             ),
         )

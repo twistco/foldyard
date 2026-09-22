@@ -127,10 +127,11 @@ def _run_noninteractive(args: list[str], timeout: int) -> str:
 
     Two failure modes this exists to prevent, both observed live as "the minter never answers":
 
-    stdin. The supervisor runs from `fy host`'s foreground terminal, so an inherited stdin is a
-    live TTY. gcloud, seeing one, answers a reauth requirement with an interactive prompt and
-    waits forever for input nobody will type — and with the output captured, the prompt is
-    invisible, so the daemon merely looks slow. Non-interactive it exits instead with
+    stdin. The supervisor once ran in a foreground terminal (it is always detached now, but a
+    debugging `fy host run` still has one), so an inherited stdin can be a live TTY. gcloud,
+    seeing one, answers a reauth requirement with an interactive prompt and waits forever for
+    input nobody will type — and with the output captured, the prompt is invisible, so the
+    daemon merely looks slow. Non-interactive it exits instead with
     "cannot prompt during non-interactive execution", which is an error we can report.
 
     the bound. `subprocess.run(timeout=…)` bounds only the direct child: on expiry it kills that

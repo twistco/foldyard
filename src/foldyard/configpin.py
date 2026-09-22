@@ -832,7 +832,7 @@ def resolve(
         except ReviewStale as e:
             echo(f"✗ {e}")
             return "unadopted"
-        echo("✓ adopted — later edits need `fy config adopt` (`fy up`/`fy host` ask).")
+        echo("✓ adopted — later edits need `fy config adopt` (`fy up`/`fy host restart` ask).")
         return "pinned"
     if not drift.changed:
         return "clean"

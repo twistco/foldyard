@@ -7,6 +7,28 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ## Unreleased
 
+### Changed
+
+- **`fy host` is the supervisor's status, not a foreground run.** The supervisor was already
+  started detached by `fy up` / `fy box up` almost every time, so the foreground terminal it was
+  documented as living in was one nobody had open — and nothing said whether it was running.
+  Now: `fy host` (or `fy host status`) shows this project's supervisor — running or not, pid,
+  uptime, whether it runs the installed code, its heartbeat, the current worktree's daemons and
+  the last index heal — and exits non-zero when it needs attention. `fy host restart` replaces it
+  (or starts it) and waits until the new one is ticking. `fy host logs [-n N] [-f]` tails its log.
+  There is deliberately no `stop`: a VM without its supervisor is a box whose egress is refused,
+  so it stops with the VM (`fy machine stop`). **Migrating:** `fy host` no longer starts
+  anything — use `fy host restart`; `fy host --restart` is gone the same way. Every "run `fy
+  host`" message now names `fy host restart` or `fy host`.
+
+### Fixed
+
+- **`git worktree add` in the box no longer corrupts both checkouts' indexes.** The box's git
+  shim let the new worktree's checkout write into the calling checkout's `index-box`: phantom
+  `MM` pairs there (a commit would revert the difference; a later `git switch` carried the files
+  over as local edits, silently), no index at all in the new worktree. `git worktree` now runs
+  unredirected, like `clone`/`init`.
+
 ## 0.3.1 — 2026-09-18
 
 ### Changed

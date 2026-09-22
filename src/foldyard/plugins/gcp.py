@@ -93,7 +93,7 @@ def _minter_port_answering() -> tuple[bool, str]:
     opener = urlrequest.build_opener(urlrequest.ProxyHandler({}))
     squatter = (
         f"port {port} is held by another process, not the minter — a port forwarder "
-        "(VS Code auto-forward?) shadows it; free the port, then restart `fy host`"
+        "(VS Code auto-forward?) shadows it; free the port, then `fy host restart`"
     )
     try:
         with opener.open(f"http://127.0.0.1:{port}/", timeout=5) as r:
@@ -105,7 +105,7 @@ def _minter_port_answering() -> tuple[bool, str]:
     except Exception as e:  # unreachable, refused, or accepted-then-silent (the forwarder case)
         return False, (
             f"minter port {port} not answering ({type(e).__name__}) — the box gets no tokens; "
-            "is `fy host` up?"
+            "is the supervisor up? `fy host`"
         )
     # Something answered. Whether it's US is the parse's question, kept OUT of the try above: a
     # squatter that speaks HTTP but not the minter's JSON (a dev server's HTML, a forwarder's
@@ -292,7 +292,7 @@ def _gcp_panel_data() -> PanelData:
     summary = (
         f"{len(entries)} token mints · {granted} granted · [dim]{log}[/dim]"
         if entries
-        else f"no token mints yet — appears once `fy host` runs a gcp mode · [dim]{log}[/dim]"
+        else f"no token mints yet — appears once the supervisor runs a gcp mode · [dim]{log}[/dim]"
     )
     return PanelData(summary=summary, rows=rows)
 

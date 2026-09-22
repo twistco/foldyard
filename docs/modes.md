@@ -51,9 +51,10 @@ A mode is a *desired posture*, not a capability. The state lives in two files:
   informational — nothing ever grants access based on it.
 
 What actually grants access is the **host daemons**: token minters and the egress proxy,
-run by `fy host` — one foreground supervisor process per project, visible in one terminal,
-stopped by Ctrl-C. `fy up` launches it for you when a mode demands daemons; a newer launch
-replaces a stale or out-of-date holder. The supervisor re-reads the mode file every couple
+run by the host supervisor — one background process per project, started with the VM by
+`fy up` / `fy box up` and stopped with it by `fy machine stop`. `fy host` shows whether it is
+running current code and which daemons are up, `fy host restart` replaces it, and `fy host logs
+-f` follows its log. A newer launch also replaces a stale or out-of-date holder by itself. The supervisor re-reads the mode file every couple
 of seconds and reconciles: raise a rung and the daemon starts, drop it and the daemon stops.
 
 This is the whole security story in one line: **no daemon running means no credential
@@ -149,7 +150,7 @@ chain). `fy state` prints one desired → observed row per tier and exits non-ze
 
 ```text
   ✓ posture     gcp=sa llm=record → authoritative (…/dev-mode.json)
-  ✗ daemons     gcp-minter listening on :41100 → DOWN — run `fy host` on the Mac
+  ✗ daemons     gcp-minter listening on :41100 → DOWN — `fy host restart` on the host
   ✗ capability  gcp=sa capability chain works → DEGRADED — … just gcp-elevate
   ✓ stack       overlays: compose.identity.yml, compose.llm.yml → 14 containers on the posture overlays
   ✓ box         dev box env matches the posture → current

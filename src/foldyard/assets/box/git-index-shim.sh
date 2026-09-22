@@ -76,7 +76,12 @@ done
 case "$sub" in
 # Repo-creating commands write the NEW repo's checkout through an inherited GIT_INDEX_FILE
 # (verified: clone hijacks it, leaving the fresh clone looking broken) — never inject here.
-"" | clone | init) exec "$real" "${args[@]}" ;;
+# `worktree` is the same class, and worse: `add` checks the new tree out in a child git that
+# inherits the variable, so the new worktree's index landed in THIS checkout's index-box —
+# phantom `MM` here (a commit reverting whatever the two commits differ in; a later `switch`
+# carrying those files over as "local edits"), and no index at all over there. `remove` runs
+# its cleanliness check the same way. No `worktree` subcommand reads this checkout's index.
+"" | clone | init | worktree) exec "$real" "${args[@]}" ;;
 esac
 
 # Subcommands that never READ the index, so a stale one cannot affect their output and healing

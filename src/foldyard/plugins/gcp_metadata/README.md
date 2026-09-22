@@ -72,7 +72,7 @@ The rung decides which of those SAs the minter will allowlist:
 
 ```bash
 fy mode gcp=logs     # or gcp=sa / gcp=user ttl=30m   (Mac only — posture is host-side)
-fy host              # runs the minter; credentials stay on the Mac
+fy host restart      # the supervisor runs the minter; credentials stay host-side
 fy up                # the compose `metadata` profile is derived from the mode
 fy box up            # GCE_METADATA_HOST is derived from the mode
 ```

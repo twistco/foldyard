@@ -53,8 +53,12 @@ Shim mechanics (each point traces to a verified failure mode):
   `commit -a` hooks), but the shim's *own* injection is marked (`FY_GIT_SHIM_INDEX`), so a
   child git that merely inherited it re-resolves for its own repo instead of reusing the
   parent repo's index.
-- **`clone`/`init` are skip-listed**: `git clone` writes the new repo's checkout through an
-  inherited `GIT_INDEX_FILE`, leaving the fresh clone looking broken.
+- **`clone`/`init`/`worktree` are skip-listed**: `git clone` writes the new repo's checkout
+  through an inherited `GIT_INDEX_FILE`, leaving the fresh clone looking broken. `git worktree
+  add` does the same (skip-listed 2026-09-22) — and the index it hijacks is the CALLING
+  checkout's index-box, so both broke at once: phantom `MM` pairs in the caller (a commit there
+  reverts the difference; a later `switch` silently carries those files over as local edits),
+  no index at all in the new worktree.
 
 ## Consequences
 

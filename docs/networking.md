@@ -7,8 +7,8 @@ matters for trust — which guarantees are cooperative and which are enforced.
 ## How egress flows
 
 The box routes through an always-on `mitmdump` proxy running on the host (declared
-by the `[proxy]` table; `fy up` launches the host supervisor for you, `fy host` runs it in
-the foreground). How strong "routes" is depends on the backend: only Lima with
+by the `[proxy]` table; `fy up` / `fy box up` launch the host supervisor for you; `fy host`
+shows its status). How strong "routes" is depends on the backend: only Lima with
 `[machine] wall = true` **enforces** that all box traffic goes through the proxy; on Podman
 (or with the wall off) the routing is **cooperative** — honoured by well-behaved software,
 bypassable by anything that ignores proxy env vars (see "Blocking, not just watching" below).
@@ -55,7 +55,7 @@ needs a box recreate:
   A host on that list is exempt from the very monitoring this section is about, so `passthrough`
   is not read from your checkout while the yard runs: like the rest of `foldyard.toml`, the host
   uses the copy you **adopted**, and an edit takes effect when you accept it at the next
-  `fy up`/`fy host` (`fy config diff|adopt|revert`; [ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)).
+  `fy up`/`fy host restart` (`fy config diff|adopt|revert`; [ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)).
 
 No credential is involved either way — capture composes with, but is independent of, the
 injector postures (see [modes.md](./modes.md)).

@@ -272,20 +272,62 @@ def clock(
     raise typer.Exit(devmode.main(["clock", *(spec or [])]))
 
 
-@app.command()
-def host(
-    restart: bool = typer.Option(
-        False,
-        "--restart",
-        "-r",
-        help="bounce an already-running supervisor first (it's replaced automatically anyway "
-        "when the installed foldyard code changed or its heartbeat is stale)",
-    ),
-) -> None:
-    """Run the credential daemons the current mode demands (Mac; one foreground terminal)."""
+host_app = typer.Typer(
+    name="host",
+    help="the project's host supervisor — the credential daemons + the egress proxy the box "
+    "rides. `fy up` / `fy box up` start it with the VM and `fy machine stop` stops it with the "
+    "VM, so there is no `stop`. Bare `fy host` = status. Host only.",
+    invoke_without_command=True,
+)
+app.add_typer(host_app)
+
+
+@host_app.callback()
+def host(ctx: typer.Context) -> None:
+    # The root callback sees every `fy host …` as a bare "host"; the version nudge belongs on
+    # `host restart` only (bare `fy host` is a status check) — see _box_version_nudge.
+    from . import compat
+
+    compat.nudge(f"host {ctx.invoked_subcommand}" if ctx.invoked_subcommand else None)
+    if ctx.invoked_subcommand is None:
+        from . import supervisor
+
+        raise typer.Exit(supervisor.status())
+
+
+@host_app.command("status")
+def host_status() -> None:
+    """Is this project's supervisor running current code, with its daemons up? Non-zero if not."""
     from . import supervisor
 
-    raise typer.Exit(supervisor.main(restart=restart))
+    raise typer.Exit(supervisor.status())
+
+
+@host_app.command("restart")
+def host_restart() -> None:
+    """Replace the supervisor with a fresh one (or start it), and wait until it is ticking."""
+    from . import supervisor
+
+    raise typer.Exit(supervisor.restart())
+
+
+@host_app.command("logs")
+def host_logs(
+    lines: int = typer.Option(50, "--lines", "-n", help="how many lines to show"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="keep following until Ctrl-C"),
+) -> None:
+    """The supervisor's log: its own lines and every daemon's, timestamped."""
+    from . import supervisor
+
+    raise typer.Exit(supervisor.logs(lines=lines, follow=follow))
+
+
+@host_app.command("run", hidden=True)
+def host_run() -> None:
+    """The supervisor process itself — what `fy up` launches detached. Not for running by hand."""
+    from . import supervisor
+
+    raise typer.Exit(supervisor.main())
 
 
 @app.command()
@@ -573,8 +615,8 @@ def allow_sync(
     Two sources, both advisory: this repo's ADOPTED foldyard.toml (`[proxy] recommend`) and the
     agents/plugins it declares (Claude Code's installer, npm for Codex). Neither can grant
     anything — entries reach this prompt after the file carrying them passed the adoption gate,
-    and only your per-host answer here grants (also asked at `fy up`/`fy host`, and offered in the
-    TUI's Network Log).
+    and only your per-host answer here grants (also asked at `fy up`/`fy host restart`, and
+    offered in the TUI's Network Log).
 
     `--yes` is the UNATTENDED path, for a scripted first box-up with no terminal to answer on: it
     takes every pending recommendation at `permanent` in one go. Review the list with
@@ -685,7 +727,10 @@ def config_status() -> None:
 
     drift = configpin.inspect(_active_config())
     if not drift.pinned_exists:
-        print(f"✗ nothing adopted yet [{drift.label}] — `fy up`, `fy host`, or `fy config adopt`.")
+        print(
+            f"✗ nothing adopted yet [{drift.label}] — `fy up`, `fy host restart`, "
+            "or `fy config adopt`."
+        )
         raise typer.Exit(1)
     if not drift.changed:
         print(f"✓ [{drift.label}] the checkout matches the adopted config ({drift.tree_digest()})")

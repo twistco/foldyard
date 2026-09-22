@@ -52,7 +52,7 @@ def _patch(monkeypatch, tmp_path, *, in_box=False, has_podman=True, daemon_up=Fa
     monkeypatch.setattr(
         supervisor.devmode, "daemon_status", lambda _m: {"egress-proxy": {"up": daemon_up}}
     )
-    monkeypatch.setattr(supervisor.devmode, "host_command", lambda: ["foldyard", "host"])
+    monkeypatch.setattr(supervisor.devmode, "host_command", lambda: ["foldyard", "host", "run"])
     # The launch path runs the config-pin gate first, and under pytest there's no TTY — so an
     # unadopted checkout REFUSES the launch (configpin.gate). Not these tests' subject; they're
     # about the spawn/singleton logic. test_config_pin.py owns the gate's own behaviour.
@@ -72,7 +72,7 @@ def test_launches_detached_when_nothing_is_serving(monkeypatch, tmp_path):
     spawns = _patch(monkeypatch, tmp_path)
     pid = supervisor.ensure_background()
     assert pid == 4242
-    assert spawns == [["foldyard", "host"]]  # spawned the SAME `foldyard host`, not moved logic
+    assert spawns == [["foldyard", "host", "run"]]  # spawned `foldyard host run`, not moved logic
     assert (tmp_path / "host-supervisor.pid").read_text() == "4242"  # dedup hint written
 
 
@@ -92,7 +92,7 @@ def test_launches_when_only_an_orphan_daemon_is_serving(monkeypatch, tmp_path):
     # its first reconcile safely reaps this project's orphan and stages the current addon.
     spawns = _patch(monkeypatch, tmp_path, daemon_up=True)
     assert supervisor.ensure_background() == 4242
-    assert spawns == [["foldyard", "host"]]
+    assert spawns == [["foldyard", "host", "run"]]
 
 
 def test_noop_when_our_pidfile_records_a_live_launch(monkeypatch, tmp_path):
@@ -112,7 +112,7 @@ def test_stale_pidfile_is_cleared_and_a_fresh_one_launched(monkeypatch, tmp_path
         raise OSError("no such process")
 
     monkeypatch.setattr(supervisor.os, "kill", _dead)
-    assert supervisor.ensure_background() == 4242 and spawns == [["foldyard", "host"]]
+    assert supervisor.ensure_background() == 4242 and spawns == [["foldyard", "host", "run"]]
     assert (tmp_path / "host-supervisor.pid").read_text() == "4242"  # rewritten to the live pid
 
 
@@ -657,7 +657,7 @@ def test_ensure_background_replaces_a_stale_holder(monkeypatch, tmp_path):
     monkeypatch.setattr(supervisor.os, "kill", _kill)
     monkeypatch.setattr(supervisor.time, "sleep", lambda _s: None)
     assert supervisor.ensure_background() == 4242
-    assert spawns == [["foldyard", "host"]]
+    assert spawns == [["foldyard", "host", "run"]]
     assert (4242, supervisor.signal.SIGTERM) in killed
 
 
@@ -1467,3 +1467,125 @@ def test_blocked_file_is_not_created_while_nothing_is_blocked(monkeypatch, tmp_p
     monkeypatch.setattr(supervisor, "_blocked", {})
     _tick_with(monkeypatch, tmp_path, {"gcp-minter": _spec()}, {}, {})
     assert not (tmp_path / "blocked-daemons.json").exists()
+
+
+# ── the operator's verbs: status · restart · logs ─────────────────────────────────────────────
+
+
+def _verbs(
+    monkeypatch,
+    tmp_path,
+    *,
+    running=False,
+    reason=None,
+    heartbeat: float | None = 1.0,
+    holder=(111, "fp"),
+):
+    """Wire status/restart/logs over _patch: a mutable fake of the lock holder + heartbeat."""
+    spawns = _patch(monkeypatch, tmp_path)
+    log = tmp_path / "host-supervisor.log"
+    monkeypatch.setattr(supervisor.config, "supervisor_log_file", lambda: log)
+    monkeypatch.setattr(supervisor.config, "project", lambda: "acme")
+    monkeypatch.setattr(supervisor.config, "active_worktree", lambda: "")
+    st = {"running": running, "holder": holder, "reason": reason, "heartbeat": heartbeat}
+    monkeypatch.setattr(supervisor, "_supervisor_running", lambda: st["running"])
+    monkeypatch.setattr(supervisor, "_holder_info", lambda: st["holder"])
+    monkeypatch.setattr(supervisor, "_holder_stale_reason", lambda: st["reason"])
+    monkeypatch.setattr(supervisor, "_heartbeat_age", lambda: st["heartbeat"])
+    (tmp_path / "host-supervisor.lock").write_text("111 fp\n")
+    return spawns, st, log
+
+
+def test_status_down_says_how_to_start_and_fails(monkeypatch, tmp_path, capsys):
+    _verbs(monkeypatch, tmp_path)
+    assert supervisor.status() == 1
+    out = capsys.readouterr().out
+    assert "not running" in out and "`fy host restart`" in out
+
+
+def test_status_running_current_passes_and_shows_the_last_heal(monkeypatch, tmp_path, capsys):
+    _, _, log = _verbs(monkeypatch, tmp_path, running=True)
+    log.write_text(
+        "2026-09-22T10:00:00Z [host] git-heal: repo: stale index fast-forwarded (a… → b…)\n"
+        "2026-09-22T10:00:01Z [host] something else\n"
+    )
+    assert supervisor.status() == 0
+    out = capsys.readouterr().out
+    assert "● running — pid 111" in out and "egress-proxy" in out
+    assert "last index heal: 2026-09-22T10:00:00Z [host] git-heal: repo: stale index" in out
+
+
+def test_status_running_stale_code_fails_and_names_restart(monkeypatch, tmp_path, capsys):
+    _verbs(monkeypatch, tmp_path, running=True, reason="the installed foldyard code changed")
+    assert supervisor.status() == 1
+    out = capsys.readouterr().out
+    assert "needs a restart" in out and "code changed — `fy host restart`" in out
+
+
+def test_restart_starts_one_when_none_runs_and_waits_for_it(monkeypatch, tmp_path, capsys):
+    spawns, st, _ = _verbs(monkeypatch, tmp_path, holder=(None, None), heartbeat=None)
+
+    def _fake_popen(cmd, **kw):  # the spawned supervisor takes the lock and ticks
+        spawns.append(cmd)
+        st.update(running=True, holder=(4242, "fp"), heartbeat=0.5)
+        return types.SimpleNamespace(pid=4242)
+
+    monkeypatch.setattr(supervisor.subprocess, "Popen", _fake_popen)
+    bounced: list = []
+    monkeypatch.setattr(supervisor, "_bounce_holder", lambda: bounced.append(1) or True)
+    assert supervisor.restart() == 0
+    assert spawns == [["foldyard", "host", "run"]] and bounced == []
+    assert "✓ host supervisor running (pid 4242)" in capsys.readouterr().out
+
+
+def test_restart_replaces_a_running_one_even_when_healthy(monkeypatch, tmp_path):
+    _, st, _ = _verbs(monkeypatch, tmp_path, running=True)
+    order: list = []
+
+    def _bounce():
+        order.append("bounce")
+        st.update(running=False, holder=(111, "fp"))  # the old holder's stamp lingers
+        return True
+
+    def _fake_popen(cmd, **kw):
+        order.append("spawn")
+        st.update(running=True, holder=(5555, "fp"), heartbeat=0.2)
+        return types.SimpleNamespace(pid=5555)
+
+    monkeypatch.setattr(supervisor, "_bounce_holder", _bounce)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", _fake_popen)
+    assert supervisor.restart() == 0 and order == ["bounce", "spawn"]
+
+
+def test_restart_does_not_spawn_over_a_holder_it_could_not_stop(monkeypatch, tmp_path):
+    spawns, _, _ = _verbs(monkeypatch, tmp_path, running=True)
+    monkeypatch.setattr(supervisor, "_bounce_holder", lambda: False)
+    assert supervisor.restart() == 1 and spawns == []
+
+
+def test_restart_reports_a_supervisor_that_never_comes_up(monkeypatch, tmp_path, capsys):
+    # The OLD holder's stamp + a fresh-looking heartbeat must not read as the new one being up.
+    spawns, _, _ = _verbs(monkeypatch, tmp_path, running=True)
+    monkeypatch.setattr(supervisor, "_bounce_holder", lambda: True)
+    monkeypatch.setattr(supervisor, "RESTART_READY_WAIT", 0.3)
+    assert supervisor.restart() == 1 and len(spawns) == 1
+    assert "didn't come up" in capsys.readouterr().err
+
+
+def test_logs_tails_the_last_n_lines(monkeypatch, tmp_path, capsys):
+    _, _, log = _verbs(monkeypatch, tmp_path)
+    log.write_text("".join(f"line {i}\n" for i in range(100)))
+    assert supervisor.logs(lines=3) == 0
+    assert capsys.readouterr().out == "line 97\nline 98\nline 99\n"
+
+
+def test_logs_without_a_log_says_so(monkeypatch, tmp_path, capsys):
+    _verbs(monkeypatch, tmp_path)
+    assert supervisor.logs() == 1 and "no supervisor log yet" in capsys.readouterr().err
+
+
+def test_the_verbs_refuse_in_the_box(monkeypatch, tmp_path, capsys):
+    spawns, _, _ = _verbs(monkeypatch, tmp_path)
+    monkeypatch.setattr(supervisor.devmode, "in_box", lambda: True)
+    assert supervisor.status() == 1 and supervisor.restart() == 1 and supervisor.logs() == 1
+    assert spawns == [] and "runs on the host" in capsys.readouterr().err

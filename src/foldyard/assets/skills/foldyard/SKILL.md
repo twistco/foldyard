@@ -68,7 +68,7 @@ The most common class of confusion here. Full table:
 [when-a-change-doesnt-take.md](references/when-a-change-doesnt-take.md). The three big ones:
 
 - **`foldyard.toml`** — the host runs the copy it **adopted**, not your working tree. Your edit is
-  inert until the human answers the prompt at the next `fy up`/`fy host` (or runs `fy config
+  inert until the human answers the prompt at the next `fy up`/`fy host restart` (or runs `fy config
   adopt`). Check with `fy config status`; see what changed with `fy config diff`.
 - **Compose files** — read from the **primary checkout**, so an edit inside a worktree changes
   nothing until it reaches that checkout.

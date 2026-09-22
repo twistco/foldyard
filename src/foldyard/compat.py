@@ -58,7 +58,8 @@ _WIDTH = 3
 #: starts a session, while `box exec` is what every git hook dispatches through and `box ps`
 #: answers a question. Whole-group scoping (a bare ``"box"``) put the nudge on a commit hook,
 #: which is precisely the every-invocation nag this set exists to avoid — see :func:`nudge`.
-NUDGE_VERBS = frozenset({"up", "box up", "host"})
+#: Likewise `host restart` (re)starts the host side, while bare `fy host` is a status check.
+NUDGE_VERBS = frozenset({"up", "box up", "host restart"})
 
 
 def _parse(raw: str | None) -> tuple[int, ...] | None:

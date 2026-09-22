@@ -6,7 +6,7 @@ separately from the microVM work because it is not about the VMM: it is a defect
 
 ## What happened
 
-First run against a brand-new machine, wall on, no `fy host` running:
+First run against a brand-new machine, wall on, no host supervisor running:
 
 ```
 ✓ PASS  engine is rootless

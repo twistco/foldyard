@@ -60,7 +60,7 @@ editor-config generator) run in a container, and where their output has a host e
 writes it from a validated document rather than letting the script write it. And **`foldyard.toml`
 is not live input to the host**: the supervisor reconciles from a copy you adopted, outside the
 mount, so an edit to `[proxy]`/`[[inject]]` is inert until an operator adopts it at the next
-`fy up`/`fy host` ([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)). Three channels remain
+`fy up`/`fy host restart` ([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)). Three channels remain
 — the reasoning is in
 [ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md):
 
@@ -170,7 +170,7 @@ Every row names *what* failed and stops there. What it usually means, and where 
 - **`probe image … could not run — the boundary battery DID NOT EXECUTE`** — the positive
   control failed, so no boundary row below it was tested. The probe image (`alpine`, or
   `VERIFY_IMG`) has to reach the VM: behind the wall that means the host proxy must be up
-  (`fy host`, or `fy up` which starts it in the background), or pre-pull the image / point
+  (`fy host restart`, or `fy up` which starts it with the VM), or pre-pull the image / point
   `VERIFY_IMG` at one already in the VM. Not an isolation failure — an unproven one.
 - **`engine is NOT reported rootless`** — the machine was created rootful, or the socket
   verify reached isn't foldyard's. Check which socket the section header names, then
@@ -227,8 +227,8 @@ Every row names *what* failed and stops there. What it usually means, and where 
   the runsc socket.
 - **Wall rows** — `no HTTPS_PROXY in the box` means the box predates the wall config
   (`fy box down` + `fy box up`); `the permitted path … is unreachable too` means the box has
-  no egress at all, so the refusals prove nothing — start `fy host` (`fy doctor`'s
-  supervisor-heartbeat row says whether it is running); `direct egress … CONNECTED` means the
+  no egress at all, so the refusals prove nothing — `fy host` says whether the supervisor
+  is running, `fy host restart` (re)starts it; `direct egress … CONNECTED` means the
   wall is not enforcing in the guest. The wall installs as root at VM boot, so
   `fy machine stop` then `fy up` — and `fy up` itself reads the guest's own wall report,
   refusing on a mismatch and printing where the boot log is.

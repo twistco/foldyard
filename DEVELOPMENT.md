@@ -64,8 +64,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   them once, and every `fy up` PROBES enforcement from inside the slice — the table can't be
   read without root, and one that exists may hold a dead slice's id (fail-open otherwise).
 - `box.py` — the dev-box lifecycle (`fy box build|up|shell|down|ps`) + the monitored bootstrap.
-- `supervisor.py` — `fy host`: the ONE Mac-side process running the credential daemons
-  (singleton lock, per-worktree listeners, replace-on-launch staleness handling, the
+- `supervisor.py` — the host supervisor (`fy host` status · `restart` · `logs`; always detached,
+  started with the VM, no `stop`): the ONE host-side process per project running the credential
+  daemons (singleton lock, per-worktree listeners, replace-on-launch staleness handling, the
   capability-probe loop, TTL expiry + settle).
 - `worktree.py` · `transcripts.py` · `tui.py` · `init.py` · `skills.py` · `browser.py` ·
   `vscode.py` — worktrees, agent-transcript sync, the Textual TUI, `foldyard init`, bundled
@@ -186,7 +187,7 @@ foldyard's surface splits by *where it can be validated*:
    posture — stays the recipe in [docs/nested-virt.md](./docs/nested-virt.md).
 
 **In-box validation you CAN do:** `fy verify`, `fy ps/down/up/logs`, the e2e tiers above.
-**CANNOT from inside the box:** `fy host` (real daemons), `fy mode <set>` (authoritative
+**CANNOT from inside the box:** `fy host restart` (real daemons), `fy mode <set>` (authoritative
 state), `fy tui`, real credentialed modes, and box creation (`fy box up`/`build` would
 recreate the running box; `fy box ps`/`shell`/`down` are safe).
 

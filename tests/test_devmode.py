@@ -1043,9 +1043,9 @@ def test_run_stream_missing_command_is_127_not_a_crash():
     assert rc == 127 and any("✗" in line for line in lines)
 
 
-def test_host_command_launches_foldyard_host():
+def test_host_command_launches_foldyard_host_run():
     cmd = devmode.host_command()
-    assert cmd[-1] == "host" and cmd[0].endswith("foldyard")
+    assert cmd[1:] == ["host", "run"] and cmd[0].endswith("foldyard")
 
 
 @pytest.mark.parametrize("bad", ["inf", "-inf", "nan", "999999999999999"])

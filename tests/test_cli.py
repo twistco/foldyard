@@ -91,13 +91,28 @@ def test_workspaces_routes(spy_devmode):
     assert result.exit_code == 0 and spy_devmode == [["workspaces"]]
 
 
-def test_host_routes_to_supervisor(monkeypatch):
-    called: list[bool] = []
-    monkeypatch.setattr(supervisor, "main", lambda restart=False: called.append(restart) or 0)
-    result = runner.invoke(cli.app, ["host"])
-    assert result.exit_code == 0 and called == [False]
-    result = runner.invoke(cli.app, ["host", "--restart"])
-    assert result.exit_code == 0 and called == [False, True]  # -r forces a holder bounce
+def test_host_verbs_route_to_the_supervisor(monkeypatch):
+    called: list = []
+    monkeypatch.setattr(supervisor, "status", lambda: called.append("status") or 0)
+    monkeypatch.setattr(supervisor, "restart", lambda: called.append("restart") or 0)
+    monkeypatch.setattr(supervisor, "main", lambda: called.append("run") or 0)
+    monkeypatch.setattr(
+        supervisor, "logs", lambda lines, follow: called.append(("logs", lines, follow)) or 0
+    )
+    for argv in (["host"], ["host", "status"], ["host", "restart"], ["host", "run"]):
+        assert runner.invoke(cli.app, argv).exit_code == 0, argv
+    assert runner.invoke(cli.app, ["host", "logs", "-n", "5", "-f"]).exit_code == 0
+    assert called == ["status", "status", "restart", "run", ("logs", 5, True)]
+
+
+def test_host_has_no_foreground_or_stop(monkeypatch):
+    # The foreground run is gone (`run` is the hidden process entry, not a verb to hunt a
+    # terminal for), and there is no `stop`: a VM without its supervisor refuses all egress.
+    monkeypatch.setattr(supervisor, "status", lambda: 0)
+    assert runner.invoke(cli.app, ["host", "--restart"]).exit_code != 0
+    assert runner.invoke(cli.app, ["host", "stop"]).exit_code != 0
+    help_text = runner.invoke(cli.app, ["host", "--help"]).output
+    assert "restart" in help_text and "logs" in help_text and " run " not in help_text
 
 
 def test_tui_routes(monkeypatch):

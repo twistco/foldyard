@@ -269,17 +269,20 @@ def test_empty_mount_output_is_not_a_clean_mount_table(secure_engine, capsys):
 def test_host_paths_matches_the_real_host_home_not_just_macos(monkeypatch, tmp_path):
     # The regex was /Users|/private|/var/folders|/Volumes — every member macOS-only, so the
     # mount assertion passed vacuously on any Linux or WSL2 host.
+    monkeypatch.delenv("FY_HOST_HOME", raising=False)  # set in a dev box; it wins over home()
     monkeypatch.setattr(verify.Path, "home", staticmethod(lambda: pathlib.Path("/home/dain")))
     assert verify._host_paths().search("host /home/dain/workspace/repo type virtiofs")
 
 
 def test_host_paths_does_not_false_positive_on_a_guest_home_sharing_the_prefix(monkeypatch):
     # Lima's guest user is <user>.linux, so /home/dain must not match /home/dain.linux.
+    monkeypatch.delenv("FY_HOST_HOME", raising=False)  # set in a dev box; it wins over home()
     monkeypatch.setattr(verify.Path, "home", staticmethod(lambda: pathlib.Path("/home/dain")))
     assert not verify._host_paths().search("x /home/dain.linux/.cache type ext4")
 
 
 def test_wsl_windows_drive_mount_counts_as_a_host_leak(monkeypatch):
+    monkeypatch.delenv("FY_HOST_HOME", raising=False)  # set in a dev box; it wins over home()
     monkeypatch.setattr(verify.Path, "home", staticmethod(lambda: pathlib.Path("/home/dain")))
     assert verify._host_paths().search("C:\\ /mnt/c type 9p")
 

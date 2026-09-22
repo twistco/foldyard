@@ -1049,12 +1049,12 @@ def run_stream(
 
 
 def host_command() -> list[str]:
-    """The command that launches the host supervisor — ``foldyard host``, the SAME process
-    ``fy host`` runs. Prefer the ``foldyard`` console script beside this interpreter (the uv
-    tool venv) so the TUI launches its own install, falling back to whatever ``foldyard`` is on
-    PATH. The TUI runs this as a child it can stream + stop (SIGTERM → clean daemon shutdown)."""
+    """The command that IS the host supervisor — ``foldyard host run`` (hidden), which
+    ``supervisor.ensure_background`` / ``fy host restart`` launch detached. Prefer the
+    ``foldyard`` console script beside this interpreter (the uv tool venv) so a launch starts its
+    own install, falling back to whatever ``foldyard`` is on PATH."""
     local = Path(sys.executable).parent / "foldyard"
-    return [str(local) if local.exists() else "foldyard", "host"]
+    return [str(local) if local.exists() else "foldyard", "host", "run"]
 
 
 def _config_pin_check() -> tuple[str, str, str]:
@@ -1070,7 +1070,10 @@ def _config_pin_check() -> tuple[str, str, str]:
         return _result(None, "adopted config", "", f"couldn't read the adopted copy: {e}")
     if not drift.pinned_exists:
         return _result(
-            None, "adopted config", "", "nothing adopted yet — `fy up` / `fy host` adopts it once"
+            None,
+            "adopted config",
+            "",
+            "nothing adopted yet — `fy up` / `fy host restart` adopts it once",
         )
     return _result(
         True if not drift.changed else None,  # None ⇒ WARN: safe posture, outstanding decision
@@ -1125,13 +1128,13 @@ def doctor(deep: bool = False):
             None if age is None else age < 15,
             "mode mirror",
             f"fresh ({age}s old — supervisor heartbeat live)",
-            "stale/missing — is `fy host` running on the Mac?",
+            "stale/missing — is the host supervisor running? `fy host` on the host",
         )
         yield _result(
             Path("/etc/dev-proxy-ca.pem").exists() or None,
             "egress proxy CA",
             "mounted + trusted (ambient — routing only in a github/capture mode)",
-            "not mounted (no CA on the Mac yet — run `fy host`)",
+            "not mounted (no CA on the host yet — `fy host restart` there)",
         )
         yield ("running", "engine socket", "")
         rc, _ = _run([config.engine(), "info", "--format", "ok"], timeout=5)
@@ -1654,7 +1657,7 @@ def show() -> int:
                 if daemon.get("blocked"):  # the supervisor refused to launch it — and says why
                     mark = f"○ BLOCKED — {daemon['blocked']}"
                 else:
-                    mark = "● up" if up else "○ DOWN — run `fy host` on the Mac"
+                    mark = "● up" if up else "○ DOWN — `fy host restart` on the host"
                 if stale:
                     mark += " (status stale — supervisor heartbeat missing?)"
                 line += f"   [{daemon.get('label', '')}: :{daemon.get('port')} {mark}]"
@@ -1676,7 +1679,7 @@ def show() -> int:
     if not in_box():
         wanted = desired_daemons(mode)
         if wanted and not all(d["up"] for d in daemons.values()):
-            print("  start the host daemons:  fy host        (one terminal, Ctrl-C stops)")
+            print("  host daemons down:  `fy host restart`  (`fy host` says why, `fy host logs`)")
         # Built from the LIVE axes (not a fixed string) so the advertised commands always match the
         # active registry — a different consumer/worktree can have a different axis set.
         axis_spec = " ".join(f"{axis}={'|'.join(rungs)}" for axis, rungs in axes().items())
