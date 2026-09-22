@@ -1024,6 +1024,13 @@ def test_attach_verbs_never_boot_a_stopped_machine(fake, monkeypatch, cmd, args,
     assert hints == ["fy box up"]
 
 
+def test_start_hint_keeps_the_worktree_name_verbatim():
+    # Built directly, never by rewriting the attach hint: a `.replace("shell", "up")` mangled a
+    # worktree whose NAME contains "shell" into one that doesn't exist.
+    assert box._start_hint("myshell") == "WORKTREE=myshell fy box up"
+    assert box._start_hint("") == "fy box up"
+
+
 def test_ps_lists_box(fake):
     assert box.main("ps") == 0
     ps = _find(fake["calls"], has=["ps", "-a"])
