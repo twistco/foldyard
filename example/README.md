@@ -25,7 +25,7 @@ unobserved, unfiltered. That's one notch below what `foldyard init` writes for a
 
 The omission is structural, not simplification. The egress proxy runs **on the host**, and
 declaring `[proxy]` makes every box route through it: `fy box up` then hard-fails unless a CA
-exists that only the host-side supervisor (`fy host`) can generate — and that supervisor
+exists that only the host-side supervisor (`fy host restart`) can generate — and that supervisor
 deliberately refuses to run anywhere but the host. This example has to run where no host side
 exists: inside a dev box, inside a CI container, inside the nested-KVM rig (see below). A fixture
 that required a full host side would stop being the thing we dogfood everywhere.

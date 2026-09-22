@@ -34,7 +34,7 @@ this page is the level below it (TTLs, the settle cascade, capability lapse/heal
 
 ```bash
 fy mode fakecred=user fakedep=on ttl=1h    # emergency rung + dependent axis
-fy host                                     # (or fy up) — starts the fake minter
+fy host restart                             # (or fy up) — starts the fake minter
 curl -s http://127.0.0.1:$(fy mode | grep -o ':[0-9]*' | head -1 | tr -d :)/token
                                             # dummy token while capable
 
@@ -62,7 +62,7 @@ fy clock reset
 | step | machinery under test |
 |---|---|
 | `fy mode fakecred=user … ttl` | emergency rungs, TTL recording, `mode_issues` atomic-set gate |
-| `fy host` starts the minter | supervisor reconcile, staged per-project daemon launch |
+| `fy host restart` starts the minter | supervisor reconcile, staged per-project daemon launch |
 | lapse file → DEGRADED | capability probes (plugin hook → supervisor loop → `capabilities.json` → mirror → `fy mode`/`fy state`) |
 | `echo ok` → recovered | probe transition logging, dashboard recovery |
 | `fy clock ff 2h` | expiry-on-read, the supervisor's durable revert, **the settle cascade** (`devmode.settle_incoherent`), daemon stop on posture change |

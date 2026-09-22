@@ -373,6 +373,18 @@ def test_no_nudge_on_a_non_session_box_subcommand(repo_declaring, sub):
     assert "99.0.0" not in _invoke(["box", sub, "--help"]).output
 
 
+def test_nudge_fires_on_host_restart_through_the_cli(repo_declaring):
+    repo_declaring(recommended_foldyard_version="99.0.0")
+    assert _invoke(["host", "restart", "--help"]).output.count("99.0.0") == 1
+
+
+@pytest.mark.parametrize("sub", ["status", "logs"])
+def test_no_nudge_on_a_host_status_check(repo_declaring, sub):
+    # `fy host` is a status check you run whenever something looks off — not a session start.
+    repo_declaring(recommended_foldyard_version="99.0.0")
+    assert "99.0.0" not in _invoke(["host", sub, "--help"]).output
+
+
 def test_floor_still_blocks_every_box_subcommand(repo_declaring):
     # Scoping is a noise concession for the nudge alone; the floor stays whole-group.
     repo_declaring(min_foldyard_version="99.0.0")

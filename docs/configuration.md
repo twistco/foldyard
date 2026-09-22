@@ -104,7 +104,7 @@ min_foldyard_version = "0.2.0"
   against, so `init` leaves the floor absent and writes commented guidance to fill in instead —
   a floor foldyard would itself ignore reads as protection and is none.
 - **`recommended_foldyard_version`** — a nudge, never a block. Printed only on `fy up`,
-  `fy box up` and `fy host`. Default: none. Silence with `FOLDYARD_NO_VERSION_NUDGE=1`.
+  `fy box up` and `fy host restart`. Default: none. Silence with `FOLDYARD_NO_VERSION_NUDGE=1`.
 - **`[project.foldyard_version_reasons]`** — an optional ledger of *why this repo wanted* each
   foldyard it adopted, keyed by version. Both messages list the entries between the version you
   have and the bound you are being pointed at. Default: empty.
@@ -389,7 +389,7 @@ default_deny = true
   row carries the port when the port was the reason, so the TUI's `a` key offers exactly that.
 - **`recommend`** — the committed half of the allowlist: hosts this repo ASKS operators to grant,
   each `{ host = "…", why = "…" }` (or a bare host string). Advisory by construction — the proxy
-  never reads it. The host OFFERS each entry, per host, at `fy up`/`fy box up`/`fy host`, via
+  never reads it. The host OFFERS each entry, per host, at `fy up`/`fy box up`/`fy host restart`, via
   `fy allow sync`, and in the TUI's Network Log wall pane; the operator answers yes (permanent) /
   session / not now / never, and the answer lands in the host-side store. This is how a team
   shares its allowlist without giving up host-owned grants: the list rides the branch, and every
@@ -736,7 +736,7 @@ since the last `fy box down`.
 transcript_sync_seconds = 30    # rounded DOWN to a multiple of the 2s supervisor tick
 ```
 
-- It runs **host-side**, in `fy host` — the box can't reach the host's home, so it could never
+- It runs **host-side**, in the host supervisor — the box can't reach the host's home, so it could never
   push. It doesn't have to: the transcripts are already on the host continuously (the box binds
   its `projects/` out to the checkout), so a pass is a host-local rsync between two host paths —
   no engine call. Polling, not a watcher, because host-side inotify doesn't fire for guest writes.
@@ -876,11 +876,11 @@ nothing the config itself declares can redirect the lookup (see
 
 What this means day to day:
 
-- The first `fy up` / `fy host` in a fresh checkout adopts it once, and says so.
+- The first `fy up` / `fy host restart` in a fresh checkout adopts it once, and says so.
 - After that, an edit is **inert on the host** until you adopt it. The supervisor logs the drift
   once, posts a notification, and `fy doctor` shows a warn row — you won't be left wondering why a
   change did nothing.
-- `fy up`, `fy box up` and `fy host` ask before starting anything:
+- `fy up`, `fy box up` and `fy host restart` ask before starting anything:
 
   ```
   ⚠ foldyard.toml changed since the host adopted it [main]

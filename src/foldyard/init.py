@@ -129,7 +129,7 @@ def _version_lines(version: str) -> list[str]:
     shown = _orderable(version)
     lines += [
         f'# recommended_foldyard_version = "{shown}"   # a NUDGE, never a block: printed on',
-        "#                     # `fy up` / `fy box up` / `fy host` when you're behind it. Raise it",
+        "#                     # `fy up` / `fy box up` / `fy host restart` when you're behind it. Raise it",
         "#                     # for a version worth having; leave the floor for one you must have.",
     ]
     return lines

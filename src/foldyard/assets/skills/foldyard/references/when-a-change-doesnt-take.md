@@ -6,7 +6,7 @@ and containers freeze parts of their config at creation. Work down the table bef
 
 | you edited | why it didn't take | what makes it take |
 | --- | --- | --- |
-| `foldyard.toml` / `foldyard.local.toml` | the host reconciles from the copy it **adopted**, outside the mount — your edit is inert by design | the human answers the adopt/revert/ignore prompt at the next `fy up`/`fy host`, or runs `fy config adopt`. `fy config status` / `fy config diff` show where you are |
+| `foldyard.toml` / `foldyard.local.toml` | the host reconciles from the copy it **adopted**, outside the mount — your edit is inert by design | the human answers the adopt/revert/ignore prompt at the next `fy up`/`fy host restart`, or runs `fy config adopt`. `fy config status` / `fy config diff` show where you are |
 | a block you deleted from `foldyard.toml` | `foldyard.local.toml` wins the merge and may still declare it (that file is gitignored, so it's invisible in `git status`) | `fy config widenings` names the file behind each one; a local `disabled = true` is how one person opts out of a block the team keeps |
 | a compose file, inside a worktree | compose runs from the **primary checkout**, not your worktree | the edit has to reach the primary checkout |
 | a compose file, anywhere | a running container keeps the command + env it was CREATED with | `fy up` (recreates on a config change) — a `restart` is not enough |

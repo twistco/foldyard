@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`fy host` — the ONE foreground process that runs the Mac-side credential daemons.
+"""The host supervisor — the ONE host-side process per project that runs the credential daemons.
 
 Reads the authoritative mode file (devmode.py) every couple of seconds and reconciles
 the daemons to it: switching github app↔user restarts the proxy with the other minter,
@@ -12,13 +12,15 @@ when an axis's merged verdict flips, the supervisor posts a macOS notification (
 heal), and a heal restarts the consumer's `[resnapshot_on_capability]` services on a worker
 thread — boot-snapshotted credentials only re-fetch by rebooting.
 
-Deliberately foreground, one terminal: daemons holding credentials stay visible, logs
-interleave here, and Ctrl-C reliably stops everything — no pidfiles to go stale, no
-orphan minter still serving tokens after you forgot about it. (If you ever want it
-backgrounded, wrap THIS in launchd; don't grow a second daemon-management path.)
+Always detached: `fy up` / `fy box up` start it with the VM (:func:`ensure_background`) and
+`fy machine stop` stops it with the VM, so a running VM always has its supervisor — the box's
+egress rides its proxy. Nobody owns a terminal for it; the operator's handles are `fy host`
+(status), `fy host restart` and `fy host logs`. There is deliberately no `stop`: a VM without
+its supervisor is a box whose every request is refused. `fy host run` (hidden) is the process
+itself — the command the detached launch spawns — not something to run by hand.
 
 Daemon env (GH_APP_ID etc.) loads from ~/.foldyard/<project>/host.env (KEY=VALUE
-lines; the process env wins on conflict). Stdlib only; Mac only.
+lines; the process env wins on conflict). Stdlib only; host only.
 """
 
 from __future__ import annotations
@@ -61,7 +63,7 @@ BOUNCE_KILL_WAIT = 5.0
 def tee_stdio_to_logfile() -> None:
     """Mirror this process's stdout+stderr — AND its child daemons' (mitmdump etc.), which inherit
     the fds — to ``host-supervisor.log``, while keeping whatever the parent gave us (a terminal for
-    a foreground ``fy host``; /dev/null for the background ``machine up`` launch). So the TUI's
+    /dev/null for the detached launch, a terminal under a debugger). So the TUI's
     log pane + a post-mortem ALWAYS have the proxy's output, however the supervisor was started.
 
     Done at the fd level (not just in ``log()``) so the children's output is captured too. Routes
@@ -118,7 +120,7 @@ def _pidfile():
 def _running_pid() -> int | None:
     """The pid of a background supervisor we launched, if it's still alive — else None (also
     clears a stale pidfile). Best-effort: a launcher dedup hint, NOT the supervisor's own state
-    (it stays pidfile-free; foreground Ctrl-C is its real lifecycle)."""
+    (the singleton lock is the real liveness signal)."""
     try:
         pid = int(_pidfile().read_text().strip())
     except (OSError, ValueError):
@@ -183,7 +185,7 @@ def acquire_singleton() -> bool:
     Takes a non-blocking exclusive ``flock`` on ``state_dir/host-supervisor.lock`` and HOLDS it for
     the process lifetime (the fd is intentionally never closed). One project ⇒ one state dir ⇒ one
     proxy on :8088 ⇒ one supervisor — this is the structural guarantee that EVERY launch path
-    (foreground ``fy host``, the TUI toggle, the detached ``ensure_background``) converges on a
+    (``fy host restart``, the detached ``ensure_background`` from any worktree) converges on a
     single owner instead of two daemons fighting over the port. Returns True if we got the lock,
     False if a live supervisor holds it. Self-healing: the lock releases automatically on death, so
     a crashed supervisor never blocks the next one (no pidfile staleness to reason about).
@@ -337,10 +339,11 @@ def _supervisor_running() -> bool:
 
 
 def stop() -> int:
-    """Stop this project's host supervisor, whether it was launched in the foreground or
-    detached. The singleton lock scopes the signal to this project; once no machine remains,
-    there is no box that needs its proxy or checkout mirror. ``fy up`` / ``fy box up`` launch a
-    fresh supervisor before they create or start a box.
+    """Stop this project's host supervisor — ``fy machine stop``'s, with its VM, never alone (a
+    VM without its supervisor is a box whose egress is refused, which is why there is no
+    ``fy host stop``). The singleton lock scopes the signal to this project; once no machine
+    remains, there is no box that needs its proxy or checkout mirror. ``fy up`` / ``fy box up``
+    launch a fresh supervisor before they create or start a box.
 
     Keep this separate from ``_bounce_holder``'s launcher use: a stop is an intentional teardown,
     so it clears the detached-launch hint as well and reports a failed shutdown to its caller.
@@ -354,6 +357,173 @@ def stop() -> int:
     _pidfile().unlink(missing_ok=True)
     print("✓ host supervisor stopped.")
     return 0
+
+
+# ── the operator's verbs: `fy host` (status) · `fy host restart` · `fy host logs` ──────────────
+
+# How long `restart` waits for the fresh supervisor to take the lock and tick once.
+RESTART_READY_WAIT = 15.0
+# The log tail `status` searches for the last index heal — the heal logs only when it acts, so
+# this is a bound on reading, not a claim that older heals don't matter.
+_HEAL_SCAN_BYTES = 512 * 1024
+
+
+def _refuse_in_box(verb: str) -> int | None:
+    if devmode.in_box():
+        print(
+            f"ℹ `{verb}` runs on the host: the supervisor, its state and its log live there, "
+            "outside this box. From in here, `fy mode` shows the daemons' published status.",
+            file=sys.stderr,
+        )
+        return 1
+    return None
+
+
+def _age(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    if s < 86400:
+        return f"{s // 3600}h{s % 3600 // 60:02d}m"
+    return f"{s // 86400}d{s % 86400 // 3600:02d}h"
+
+
+def _last_heal(log_path: Path) -> str | None:
+    """The last index-heal line in the supervisor's log (``githeal`` logs only when it heals or
+    refuses), or None when the tail holds none."""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - _HEAL_SCAN_BYTES))
+            tail = f.read().decode(errors="replace")
+    except OSError:
+        return None
+    hits = [line for line in tail.splitlines() if "git-heal:" in line]
+    return hits[-1].strip() if hits else None
+
+
+def status() -> int:
+    """`fy host` / `fy host status`: this project's supervisor — running or not, pid, uptime,
+    whether it runs the installed code, its reconcile heartbeat, the current worktree's daemons,
+    and the last index heal. 0 when it is running current code with a live heartbeat, 1
+    otherwise (so a script can gate on it, like `fy state` on drift)."""
+    if (rc := _refuse_in_box("fy host")) is not None:
+        return rc
+    project = config.project()
+    log_path = config.supervisor_log_file()
+    if not _supervisor_running():
+        print(f"host supervisor [{project}]: ○ not running")
+        print("  `fy host restart` starts it (`fy up` / `fy box up` start it with the VM too).")
+        print(f"  log: {log_path}")
+        return 1
+    pid, _ = _holder_info()
+    try:
+        since = f", up {_age(time.time() - _lockfile().stat().st_mtime)}"
+    except OSError:
+        since = ""
+    reason = _holder_stale_reason()
+    mark = "● running" if reason is None else "⚠ running, needs a restart"
+    print(f"host supervisor [{project}]: {mark} — pid {pid if pid else '?'}{since}")
+    if reason is not None:
+        print(f"  {reason} — `fy host restart`")
+    age = _heartbeat_age()
+    print(f"  heartbeat: {'unknown' if age is None else _age(age) + ' ago'}")
+    wt = config.active_worktree()
+    daemons = devmode.daemon_status(devmode.read()["mode"])
+    if not daemons:
+        print(f"  daemons ({wt or 'main'}): none — the current mode demands none")
+    else:
+        print(f"  daemons ({wt or 'main'}):")
+    for name, d in sorted(daemons.items()):
+        state = (
+            f"○ BLOCKED — {d['blocked']}"
+            if d.get("blocked")
+            else ("● up" if d.get("up") else "○ DOWN")
+        )
+        print(f"    {d.get('label', name)} :{d.get('port')} {state}")
+    heal = _last_heal(log_path)
+    print(f"  last index heal: {heal if heal else 'none in the recent log'}")
+    print(f"  log: {log_path}  (`fy host logs -f`)")
+    return 0 if reason is None else 1
+
+
+def restart() -> int:
+    """`fy host restart`: replace this project's supervisor with a fresh one — or start it when
+    none is running — then wait for it to take the lock and tick once, so the verdict printed is
+    the new process's, not a hope."""
+    if (rc := _refuse_in_box("fy host restart")) is not None:
+        return rc
+    # The operator is at a terminal: this is an adopt/revert/ignore moment like `fy up`'s.
+    configpin.gate("fy host restart")
+    # The spawned pid need not be the one that takes the lock (`foldyard` on PATH may be a
+    # wrapper), so "up" is judged as: a holder that isn't the old one, ticking.
+    old = _holder_info()[0] if _supervisor_running() else None
+    if old is not None or _supervisor_running():
+        print("▶ stopping the running supervisor…", file=sys.stderr)
+        if not _bounce_holder():
+            print(
+                f"✗ couldn't stop it — kill the pid in {_lockfile()}, then retry.", file=sys.stderr
+            )
+            return 1
+    _pidfile().unlink(missing_ok=True)
+    pid = _spawn()
+    if pid is None:
+        return 1
+    deadline = time.monotonic() + RESTART_READY_WAIT
+    while time.monotonic() < deadline:
+        holder = _holder_info()[0]
+        age = _heartbeat_age()
+        if _supervisor_running() and holder not in (None, old) and age is not None and age < 5:
+            print(f"✓ host supervisor running (pid {holder}).")
+            return 0
+        time.sleep(0.25)
+    print(
+        f"✗ the new supervisor (pid {pid}) didn't come up within {int(RESTART_READY_WAIT)}s — "
+        "`fy host logs` shows why.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def logs(lines: int = 50, follow: bool = False) -> int:
+    """`fy host logs [-n N] [-f]`: the supervisor's log — its own lines and every child daemon's,
+    ISO-stamped. ``-f`` keeps following (from a truncated/replaced file too) until Ctrl-C."""
+    if (rc := _refuse_in_box("fy host logs")) is not None:
+        return rc
+    path = config.supervisor_log_file()
+    try:
+        f = open(path, "rb")
+    except OSError:
+        print(f"no supervisor log yet at {path} — `fy host restart` starts one.", file=sys.stderr)
+        return 1
+    with f:
+        size = os.fstat(f.fileno()).st_size
+        f.seek(max(0, size - max(lines, 1) * 400))  # generous per-line budget, trimmed below
+        chunk = f.read()
+        if f.tell() > len(chunk) and b"\n" in chunk:
+            chunk = chunk.split(b"\n", 1)[1]  # started mid-line
+        tail = chunk.splitlines(keepends=True)[-lines:] if lines > 0 else []
+        sys.stdout.write(b"".join(tail).decode(errors="replace"))
+        sys.stdout.flush()
+        if not follow:
+            return 0
+        try:
+            while True:
+                data = f.read()
+                if data:
+                    sys.stdout.write(data.decode(errors="replace"))
+                    sys.stdout.flush()
+                    continue
+                time.sleep(0.5)
+                try:
+                    if os.stat(path).st_size < f.tell():
+                        f.seek(0)  # truncated in place
+                except OSError:
+                    pass  # briefly missing — keep the handle, retry next poll
+        except KeyboardInterrupt:
+            return 0
 
 
 def _offer_recommended() -> None:
@@ -390,9 +560,8 @@ def ensure_background() -> int | None:
     orphaned on :8088, and a new supervisor is what safely reaps and restages that child. Returns
     the launched pid, or None when it no-op'd.
 
-    `fy host` stays the foreground, Ctrl-C-stoppable path; this is the unattended companion that
-    keeps the proxy alive across a plain `fy up`. We do NOT move the supervisor's logic here — we
-    just spawn the same `foldyard host` process, logging to the state dir.
+    We do NOT move the supervisor's logic here — we just spawn `foldyard host run` (:func:`main`),
+    which logs to the state dir. `fy host restart` is the operator's explicit twin of this.
 
     A HELD lock is not enough to no-op: the holder must also be CURRENT (same installed code)
     and healthy (heartbeat ticking) — see ``_holder_stale_reason``. A stale holder is bounced
@@ -416,7 +585,7 @@ def ensure_background() -> int | None:
         if not _bounce_holder():
             print(
                 "⚠ couldn't stop the stale supervisor — leaving it in charge "
-                "(`fy host --restart` to force, or Ctrl-C its terminal).",
+                f"(`fy host restart` retries; its pid is in {_lockfile()}).",
                 file=sys.stderr,
             )
             return None
@@ -424,6 +593,11 @@ def ensure_background() -> int | None:
     if not bounced:  # after a bounce, lingering daemons are orphans the successor will reap
         if _running_pid() is not None:
             return None  # we launched one recently; it may still be binding its ports
+    return _spawn()
+
+
+def _spawn() -> int | None:
+    """Launch `foldyard host run` detached; the launched pid, or None if it couldn't start."""
     # No terminal here, and the spawned supervisor tees its OWN output to host-supervisor.log
     # (tee_stdio_to_logfile), so send the child's stdio to /dev/null — don't double-write the file.
     try:
@@ -435,16 +609,18 @@ def ensure_background() -> int | None:
             start_new_session=True,  # detach: survives this process, its own session/pgrp
         )
     except OSError as e:
-        print(f"⚠ couldn't launch host daemons ({e}) — run `fy host` yourself", file=sys.stderr)
+        print(
+            f"⚠ couldn't launch the host supervisor ({e}) — `fy host restart` retries",
+            file=sys.stderr,
+        )
         return None
     try:
         _pidfile().write_text(str(proc.pid))
     except OSError:
         pass
-    log_path = config.supervisor_log_file()
     print(
-        f"▶ host daemons started in the background (pid {proc.pid}; log: {log_path}). "
-        "Change posture with `fy mode …` / the TUI; `fy host` runs it in the foreground.",
+        f"▶ host supervisor started in the background (pid {proc.pid}). "
+        "`fy host` shows its status, `fy host logs -f` follows its log.",
         file=sys.stderr,
     )
     return proc.pid
@@ -856,7 +1032,7 @@ def _report_config_drift(wt: str, cfg: config.Config) -> None:
     log(
         f"⚠ config{where}: foldyard.toml differs from the copy this host adopted ({current}) — "
         "STILL RUNNING THE ADOPTED ONE. Review with `fy config diff`, then `fy config adopt` "
-        "or `fy config revert` (`fy up`/`fy host` also ask)."
+        "or `fy config revert` (`fy up`/`fy host restart` also ask)."
     )
     if not previous:
         _notify(
@@ -1181,37 +1357,37 @@ def _publish_blocked(blocked_now: dict[str, str], labels: dict[str, str]) -> Non
         tmp.unlink(missing_ok=True)
 
 
-def main(restart: bool = False) -> int:
+def main() -> int:
+    """The supervisor process itself (`fy host run`, hidden) — what :func:`_spawn` launches."""
     if devmode.in_box():
-        raise SystemExit("✗ `fy host` runs ON THE MAC (the daemons need its gcloud/gh creds).")
-    # Settle config drift BEFORE the singleton check: the common `fy host` is one where a healthy
-    # supervisor already holds the lock and we return 0 below — which would skip the prompt in
-    # exactly the case where a supervisor is running to be affected by the change. Adoption reaches
-    # it within a tick either way (it re-reads the pin), so no bounce is needed.
+        raise SystemExit("✗ the host supervisor runs on the host (the daemons need its creds).")
+    # Settle config drift BEFORE the singleton check: a run that finds a healthy supervisor
+    # already holding the lock returns 0 below — which would skip the gate in exactly the case
+    # where a supervisor is running to be affected by the change. Adoption reaches it within a
+    # tick either way (it re-reads the pin), so no bounce is needed.
     configpin.gate("fy host")
     _offer_recommended()
     if not acquire_singleton():
         # Someone already owns this project's daemons. If it's CURRENT and healthy, exit
-        # cleanly — this is the idempotency backstop that makes the launch RACE-FREE: a stray
-        # foreground `fy host`, two near-simultaneous `fy up`s, or a second worktree's `fy up`
-        # all converge HERE instead of racing to bind :8088 and restart-looping on EADDRINUSE.
-        # Bail BEFORE the tee so the loser never touches the shared log either. But a holder
-        # running STALE code (or a wedged loop, or `--restart`) is bounced and replaced — a
-        # supervisor snapshots daemon specs/allowlists at start, so `fy host` after a foldyard
-        # update must hand over to the new code, not defer to the old.
-        reason = "restart requested (--restart)" if restart else _holder_stale_reason()
+        # cleanly — this is the idempotency backstop that makes the launch RACE-FREE: two
+        # near-simultaneous `fy up`s, or a second worktree's `fy up`, all converge HERE instead
+        # of racing to bind :8088 and restart-looping on EADDRINUSE. Bail BEFORE the tee so the
+        # loser never touches the shared log either. But a holder running STALE code (or a
+        # wedged loop) is bounced and replaced — a supervisor snapshots daemon specs/allowlists
+        # at start, so a launch after a foldyard update must hand over to the new code.
+        reason = _holder_stale_reason()
         if reason is None:
             print(
                 "✓ a foldyard supervisor is already running and current for this project "
-                f"({config.state_dir()}); leaving it in charge. (`fy host --restart` bounces it.)",
+                f"({config.state_dir()}); leaving it in charge. (`fy host restart` replaces it.)",
                 file=sys.stderr,
             )
             return 0
         print(f"▶ replacing the running supervisor: {reason}…", file=sys.stderr)
         if not _bounce_holder():
             print(
-                "✗ couldn't stop the running supervisor — stop it yourself (Ctrl-C in its "
-                f"terminal, or the pid in {_lockfile()}), then re-run `fy host`.",
+                "✗ couldn't stop the running supervisor — kill the pid in "
+                f"{_lockfile()}, then `fy host restart`.",
                 file=sys.stderr,
             )
             return 1
@@ -1249,19 +1425,8 @@ def main(restart: bool = False) -> int:
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    if sys.__stderr__ is not None and sys.__stderr__.isatty():
-        # Foreground run: tell the user how to reclaim the terminal WITHOUT killing the daemons
-        # (the #1 "now I'm stuck in the foreground" papercut). Gated on a real tty, so the detached
-        # `fy up`/`ensure_background` launch (stdio → /dev/null) doesn't print this misleading hint.
-        log(
-            "↳ to hand this terminal back WITHOUT stopping the daemons: Ctrl-Z, then `bg`, then "
-            "`disown` (or `fy up` to (re)launch detached)."
-        )
     log(f"mode file: {config.mode_file()}   env: {config.host_env_file()}")
-    log(
-        "supervising — change posture from another terminal (`fy mode …`) or the TUI; "
-        "Ctrl-C stops everything."
-    )
+    log("supervising — change posture with `fy mode …` or the TUI; `fy host restart` replaces me.")
 
     while not stopping:
         reconcile_once(children, nagged)

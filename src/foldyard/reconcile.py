@@ -90,7 +90,7 @@ class PostureScope(Scope):
                         "drift",
                         self.name,
                         desired,
-                        f"mirror stale ({shown}s) — is `fy host` running?",
+                        f"mirror stale ({shown}s) — is the host supervisor running? `fy host`",
                     )
                 ]
             return [ScopeRow("ok", self.name, desired, f"mirror fresh ({age}s old)")]
@@ -124,7 +124,9 @@ class DaemonScope(Scope):
                 rows.append(ScopeRow("ok", self.name, desired, "up"))
             elif up is None:
                 rows.append(
-                    ScopeRow("unknown", self.name, desired, "no status — `fy host` running?")
+                    ScopeRow(
+                        "unknown", self.name, desired, "no status — supervisor running? `fy host`"
+                    )
                 )
             elif offline:
                 rows.append(
@@ -134,7 +136,7 @@ class DaemonScope(Scope):
                 )
             else:
                 rows.append(
-                    ScopeRow("drift", self.name, desired, "DOWN — run `fy host` on the Mac")
+                    ScopeRow("drift", self.name, desired, "DOWN — `fy host restart` on the host")
                 )
         return rows
 

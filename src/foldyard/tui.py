@@ -1077,7 +1077,7 @@ class DevModeTui(App):
                     # or a bracketed fragment reads as markup and an unmatched `[/x]` raises.
                     status += f"\n{dn} :{daemon['port']} ○ BLOCKED — {escape(daemon['blocked'])}"
                 elif daemon and current != defaults[row.axis] and not daemon["up"]:
-                    status += f"\n{dn} :{daemon['port']} ○ DOWN — run `fy up` (or `fy host`)"
+                    status += f"\n{dn} :{daemon['port']} ○ DOWN — `fy host restart` (or `fy up`)"
             row.query_one(".axis-status", Static).update(status)
         # The banner stacks every posture-level alarm: the emergency rung (as before) and any
         # probed-and-failing capability (the supervisor's published claim — same source as

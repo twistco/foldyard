@@ -241,7 +241,7 @@ def _network_panel_tree() -> PanelTree:
         f"Authorization · [dim]{log}[/dim]"
         if entries
         else "no proxied traffic yet — the box routes through the always-on proxy; make a request "
-        f"(or check `fy host` is running) · [dim]{log}[/dim]"
+        f"(or check the supervisor: `fy host`) · [dim]{log}[/dim]"
     )
     return PanelTree(summary=summary, groups=groups)
 
@@ -535,7 +535,7 @@ class ProxyPlugin(Plugin):
             return args
         if not ca.exists():
             raise SystemExit(
-                f"✗ FY_PROXY set ({proxy}) but no CA at {ca} — run 'fy host' on the host "
+                f"✗ FY_PROXY set ({proxy}) but no CA at {ca} — `fy host restart` on the host "
                 "once to generate it (or 'fy doctor', which offers the same fix)."
             )
         # In-stack services bypass the proxy (NO_PROXY): it runs on the Mac and can't resolve a
@@ -619,7 +619,7 @@ class ProxyPlugin(Plugin):
             ca.exists() or None,
             "mitm CA",
             str(ca),
-            "not generated yet — first `fy host` run creates it",
+            "not generated yet — the supervisor's first run creates it (`fy host restart`)",
         )
         # RUNTIME: is the always-on egress proxy actually listening? Phase A′ ALWAYS-routes the box
         # through it, so a down proxy means EVERY box request connection-refuses — this is the check
@@ -635,7 +635,7 @@ class ProxyPlugin(Plugin):
             "egress proxy",
             f"running on :{port} (the box routes through it)",
             f"NOT running on :{port} — the box always routes through it, so its egress will "
-            f"hang/refuse. Start it: `fy up` (or `fy host`). Log: {log}",
+            f"hang/refuse. Start it: `fy host restart` (or `fy up`). Log: {log}",
         )
 
     def doctor_fixes(self) -> Iterable[DoctorFix]:

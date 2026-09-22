@@ -22,7 +22,8 @@ controls sit on that path; they get conflated constantly, so name the right one 
   it per host (after reviewing your edit at the adoption gate) instead of rediscovering the
   block, and nothing is granted without their yes.
 - **Connection refused / hangs on everything** — the host proxy probably isn't running. `fy doctor`
-  names it; the fix is `fy up` or `fy host` on the Mac.
+  names it; the human checks it with `fy host` and restarts it with `fy host restart`, on the
+  host (the box can't).
 - **TLS/certificate errors** — the proxy re-signs decrypted traffic with a CA the box trusts, so a
   tool with its own hardcoded trust store (or one that pins) can fail here. Point it at the box's
   combined CA bundle rather than disabling verification.
