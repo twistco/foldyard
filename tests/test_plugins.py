@@ -254,10 +254,9 @@ def test_devmode_accessors_track_the_registry(full_config_bound):
     # import-time snapshot. Under a full config the Tangible-shaped axes are present; the OPTIONAL
     # injectors (inject's penpot, claude/codex keyless) add more only when declared, so assert the
     # core set is a subset rather than an exact equality.
-    assert {"gcp", "storage", "github", "capture", "auth0", "llm"} <= set(devmode.axes())
-    assert devmode.axes()["capture"] == ("off", "on")
+    assert {"gcp", "storage", "github", "auth0", "llm"} <= set(devmode.axes())
+    assert "capture" not in devmode.axes()  # removed: the proxy always decrypts (ADR-0029)
     assert devmode.axis_daemon()["github"] == "egress-proxy"
-    assert devmode.axis_daemon()["capture"] == "egress-proxy"  # capture rides the proxy daemon
     assert devmode.emergency()["gcp"] == ("user",)
     assert devmode.mode_blurb()[("gcp", "off")] == "no GCP identity — zero secrets"
 
@@ -1416,14 +1415,14 @@ def test_proxy_and_gcp_daemons_are_per_worktree(monkeypatch):
     with config.using(cfg):
         config.clear_caches()  # drop any cached offset so WT_OFFSET applies
         reg = Registry([gcp.GcpPlugin(), proxy.ProxyPlugin()], config=cfg)
-        prox = reg.desired_daemons({"capture": "off"})
+        prox = reg.desired_daemons({})
         gcpd = reg.desired_daemons({"gcp": "logs"})
     # the project band's bases (proxy 41000, minter 41100) + this worktree's offset
     assert "egress-proxy@feat" in prox and prox["egress-proxy@feat"]["port"] == 41000 + 5
     assert "gcp-minter@feat" in gcpd and gcpd["gcp-minter@feat"]["port"] == 41100 + 5
     # the box + emulator are pointed at THIS worktree's ports (FY_PROXY + GCP_MINTER_URL)
     with config.using(cfg):
-        prox_env = proxy.ProxyPlugin().derive_env({"github": "off", "capture": "off"})
+        prox_env = proxy.ProxyPlugin().derive_env({"github": "off"})
         gcp_env = gcp.GcpPlugin().derive_env({"gcp": "logs"})
     # The alias half is backend-dependent (podman: host.containers.internal; lima: the guest→host
     # gateway IP) — what this test pins is the PORT half: each worktree gets its own offset.
@@ -1447,7 +1446,7 @@ def test_derive_env_uses_the_lima_host_gateway_on_lima(monkeypatch):
     )
     with config.using(cfg):
         config.clear_caches()
-        prox_env = proxy.ProxyPlugin().derive_env({"github": "off", "capture": "off"})
+        prox_env = proxy.ProxyPlugin().derive_env({"github": "off"})
         gcp_env = gcp.GcpPlugin().derive_env({"gcp": "logs"})
     assert prox_env["FY_PROXY"] == "192.168.5.2:41000"
     assert gcp_env["GCP_MINTER_URL"] == "http://192.168.5.2:41100"
@@ -1457,11 +1456,11 @@ def test_axis_daemon_names_are_per_worktree():
     cfg = config.Config(
         repo_root=config.repo_root(),
         worktree="feat",
-        toml={"proxy": {}, "plugins": {"gcp-metadata": {"project": "acme"}}},
+        toml={"proxy": {}, "plugins": {"gcp-metadata": {"project": "acme"}, "github": {}}},
     )
-    reg = Registry([gcp.GcpPlugin(), proxy.ProxyPlugin()], config=cfg)
+    reg = Registry([gcp.GcpPlugin(), github.GithubPlugin(), proxy.ProxyPlugin()], config=cfg)
     assert reg.axis_daemon()["gcp"] == "gcp-minter@feat"
-    assert reg.axis_daemon()["capture"] == "egress-proxy@feat"
+    assert reg.axis_daemon()["github"] == "egress-proxy@feat"
 
 
 def test_main_worktree_daemons_keep_bare_names_and_base_ports():
@@ -1470,8 +1469,8 @@ def test_main_worktree_daemons_keep_bare_names_and_base_ports():
     cfg = config.Config(repo_root=config.repo_root(), worktree="", toml=_FULL_TOML)
     with config.using(cfg):
         reg = Registry([gcp.GcpPlugin(), proxy.ProxyPlugin()], config=cfg)
-        assert "egress-proxy" in reg.desired_daemons({"capture": "off"})
-        assert reg.desired_daemons({"capture": "off"})["egress-proxy"]["port"] == 41000
+        assert "egress-proxy" in reg.desired_daemons({})
+        assert reg.desired_daemons({})["egress-proxy"]["port"] == 41000
         assert "gcp-minter" in reg.desired_daemons({"gcp": "logs"})
 
 
@@ -1490,8 +1489,7 @@ def test_proxy_daemon_built_from_the_github_rule():
     assert spec["env"]["INJECT_HOST"] == "api.github.com"
     assert spec["env"]["INJECT_HEADER"] == "Authorization"
     assert spec["env"]["INJECT_RETRY_401"] == "1"  # github sets replay_on_401=True
-    # github=off + capture=off ⇒ still passthrough (the injector host is decrypted regardless).
-    assert spec["env"]["CAPTURE_MODE"] == "passthrough"
+    assert spec["env"]["CAPTURE_MODE"] == "full"  # always (ADR-0029)
     # The App identity trio only — the PEM is deliberately not gate-able (see
     # test_github_app_rule_never_requires_the_pem: a proxy that won't launch kills ALL box egress).
     assert spec["requires"] == ["GH_APP_ID", "GH_INSTALLATION_ID", "GH_REPO"]
@@ -1513,10 +1511,10 @@ def test_proxy_routing_is_gated_on_opt_in_or_an_active_injector(monkeypatch):
 
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
     assert "FY_PROXY" in reg.derive_env({"github": "app"})  # injector active → routed
-    assert reg.derive_env({"github": "off", "capture": "off"}) == {}  # bare + no opt-in → clean
+    assert reg.derive_env({"github": "off"}) == {}  # bare + no opt-in → clean
 
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)  # [proxy] declared → always routed
-    assert "FY_PROXY" in reg.derive_env({"github": "off", "capture": "off"})
+    assert "FY_PROXY" in reg.derive_env({"github": "off"})
 
     assert github.GithubPlugin().derive_env({"github": "app"}) == {"GH_INJECT": "app"}
     assert github.GithubPlugin().derive_env({"github": "off"}) == {}
@@ -1529,29 +1527,26 @@ def test_proxy_daemon_gated_on_opt_in_or_injector(monkeypatch):
     reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
 
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
-    assert reg.desired_daemons({"github": "off", "capture": "off"}) == {}  # bare + no opt-in
+    assert reg.desired_daemons({"github": "off"}) == {}  # bare + no opt-in
     assert "egress-proxy" in reg.desired_daemons({"github": "app"})  # injector active → listener
 
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)  # [proxy] declared → always on
-    assert "egress-proxy" in reg.desired_daemons({"github": "off", "capture": "off"})
+    assert "egress-proxy" in reg.desired_daemons({"github": "off"})
 
 
-def test_proxy_is_always_on_with_capture_mode_following_the_axis(monkeypatch):
+def test_proxy_is_always_on_and_always_decrypts(monkeypatch):
     # Phase A′ — always-on FOR AN OPTED-IN CONSUMER ([proxy] declared): the egress-proxy daemon runs
-    # for EVERY mode (was: only an injector or capture=on), even with no injector + capture=off.
-    # CAPTURE_MODE follows the capture axis; with no injector INJECT_* is empty. (A consumer that
-    # never opts in gets no daemon at all — test_proxy_daemon_gated_on_opt_in_or_injector covers it.)
+    # for EVERY mode, even with no injector. It always decrypts except the trusted passthrough hosts
+    # — there is no capture axis to ask (ADR-0029); with no injector INJECT_* is empty. (A consumer
+    # that never opts in gets no daemon at all — test_proxy_daemon_gated_on_opt_in_or_injector.)
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
     reg = Registry([gcp.GcpPlugin(), github.GithubPlugin(), proxy.ProxyPlugin()])
-    off = reg.desired_daemons({"github": "off", "capture": "off"})["egress-proxy"]
-    assert off["env"]["INJECT_HOST"] == "" and off["env"]["INJECT_COMMAND"] == ""
-    assert off["env"]["CAPTURE_MODE"] == "passthrough"
-    assert off["env"]["PROXY_LOG_FILE"].endswith("egress.jsonl") and off["requires"] == []
-    assert "passthrough" in off["label"]
-
-    on = reg.desired_daemons({"github": "off", "capture": "on"})["egress-proxy"]
-    assert on["env"]["INJECT_HOST"] == "" and on["env"]["CAPTURE_MODE"] == "full"
-    assert "capture" in on["label"]
+    assert "capture" not in reg.axis_rungs()
+    spec = reg.desired_daemons({"github": "off"})["egress-proxy"]
+    assert spec["env"]["INJECT_HOST"] == "" and spec["env"]["INJECT_COMMAND"] == ""
+    assert spec["env"]["CAPTURE_MODE"] == "full"
+    assert spec["env"]["PASSTHROUGH_HOSTS"]  # the @all default: the toolchain stays tunnelled
+    assert spec["env"]["PROXY_LOG_FILE"].endswith("egress.jsonl") and spec["requires"] == []
 
 
 def test_proxy_passthrough_resolves_bundles_globs_and_dedups():
@@ -1574,9 +1569,7 @@ def test_proxy_daemon_carries_resolved_passthrough_hosts(monkeypatch):
     monkeypatch.setattr(proxy.config, "proxy_enabled", lambda: True)  # opted-in → daemon runs
     monkeypatch.setattr(proxy.config, "proxy_passthrough", lambda: ["@anthropic", "my.host"])
     reg = Registry([proxy.ProxyPlugin()])
-    hosts = reg.desired_daemons({"capture": "on"})["egress-proxy"]["env"][
-        "PASSTHROUGH_HOSTS"
-    ].split(",")
+    hosts = reg.desired_daemons({})["egress-proxy"]["env"]["PASSTHROUGH_HOSTS"].split(",")
     assert "api.anthropic.com" in hosts and "my.host" in hosts
 
 
@@ -1586,20 +1579,20 @@ def test_proxy_daemon_carries_the_allowlist_env(monkeypatch):
     monkeypatch.setattr(proxy.config, "proxy_enabled", lambda: True)  # opted-in → daemon runs
     monkeypatch.setattr(proxy.config, "proxy_default_deny", lambda: True)
     reg = Registry([proxy.ProxyPlugin()])
-    env = reg.desired_daemons({"capture": "off"})["egress-proxy"]["env"]
+    env = reg.desired_daemons({})["egress-proxy"]["env"]
     assert env["DEFAULT_DENY"] == "1"
     assert env["ALLOW_FILE"].endswith("allow-effective.json")
 
     monkeypatch.setattr(proxy.config, "proxy_default_deny", lambda: False)
-    off = reg.desired_daemons({"capture": "off"})["egress-proxy"]["env"]
+    off = reg.desired_daemons({})["egress-proxy"]["env"]
     assert off["DEFAULT_DENY"] == ""  # only "1" arms the wall; off ⇒ empty (addon ignores it)
 
 
-def test_proxy_capture_composes_with_a_github_injector():
-    # capture=on + github=app: the injector wins the daemon env (it logs everything anyway), so the
-    # api.github.com rewrite is unchanged — capture just flips CAPTURE_MODE to full (MITM all).
+def test_proxy_decrypts_everything_else_beside_a_github_injector():
+    # github=app: the api.github.com rewrite rides the same always-decrypting daemon — an injector
+    # adds its rule without changing what happens to the rest of the box's egress.
     reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
-    spec = reg.desired_daemons({"github": "app", "capture": "on"})["egress-proxy"]
+    spec = reg.desired_daemons({"github": "app"})["egress-proxy"]
     assert spec["env"]["INJECT_HOST"] == "api.github.com"
     assert "-m foldyard.plugins.github_app_token" in spec["env"]["INJECT_COMMAND"]
     assert spec["env"]["CAPTURE_MODE"] == "full"

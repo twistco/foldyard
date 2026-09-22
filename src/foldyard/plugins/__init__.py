@@ -849,7 +849,7 @@ def load_plugins(
         plugins.append(gcp.GcpPlugin())
     plugins.append(github.GithubPlugin())  # CORE: axis (off/app/user) only when [plugins.github]
     plugins.append(inject.InjectPlugin())  # CORE: contributes axes only per [[inject]] config
-    plugins.append(proxy.ProxyPlugin())  # CORE: capture axis self-gates on [proxy] (Step D)
+    plugins.append(proxy.ProxyPlugin())  # CORE: the always-on proxy daemon (Step D)
     if cfg.auth0_sim_declared():  # DECLARED: gated on [plugins.auth0-sim]
         plugins.append(auth0_sim.Auth0SimPlugin())
     if cfg.llm_declared():  # DECLARED: gated on [plugins.llm] (Tangible-bound, spinout D4-style)

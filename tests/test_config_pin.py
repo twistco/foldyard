@@ -50,7 +50,7 @@ def _passthrough_hosts(cfg) -> str:
     ``config.X()`` off the bound context."""
     effective = configpin.effective(cfg)
     with config.using(effective):
-        spec = plugins.registry(effective).desired_daemons({"capture": "on"})
+        spec = plugins.registry(effective).desired_daemons({})
     return spec["egress-proxy"]["env"]["PASSTHROUGH_HOSTS"]
 
 

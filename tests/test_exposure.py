@@ -63,7 +63,7 @@ def test_an_undeclared_passthrough_reports_the_default_it_falls_back_to(checkout
 def test_an_empty_passthrough_says_everything_is_decrypted(checkout):
     exp = collect(checkout(BASE + "passthrough = []\n"))
     assert exp.hosts == 0
-    assert "nothing exempt: capture=on decrypts everything" in rendered(
+    assert "nothing exempt: every host is decrypted" in rendered(
         checkout(BASE + "passthrough = []\n")
     )
 

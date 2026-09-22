@@ -37,28 +37,30 @@ The log is bounded: it rotates past `PROXY_LOG_MAX_BYTES` (default 5 MiB) into d
 pruned to `PROXY_LOG_BACKUPS` (default 5). The TUI reads only a bounded tail
 (`FOLDYARD_LOG_TAIL_BYTES`), so a large log never slows the panel.
 
-## What gets decrypted: the `capture` axis
+## What gets decrypted: everything but the trusted toolchain
 
-`capture` is a host-side decision about what the always-on proxy *does* — flipping it never
-needs a box recreate:
+The proxy decrypts and logs every request — method, host, path, status — *except* hosts on your
+`[proxy] passthrough` list, which are tunnelled with real certificates end-to-end and logged as a
+host-level row (SNI, no path). Entries are exact hosts, `*.suffix` globs, or `@bundle` refs
+(`@anthropic`, `@vcs`, `@node`, … — `@all` is the default), so the default is *decrypt the
+unexpected egress, leave the trusted toolchain fast and quiet*. Hosts an injector owns (say
+`api.github.com` under a GitHub posture) are always decrypted, whatever the list says, so their
+auth header can be rewritten.
 
-- **`capture=off`** (default): TLS **passthrough** — real certificates end-to-end, the log
-  gets host-level rows (SNI, no request bodies). Hosts an injector owns (say
-  `api.github.com` under a GitHub posture) are still decrypted so their auth header can be
-  rewritten.
-- **`capture=on`** (`fy mode capture=on`): full MITM — every request logged with method and
-  path — *except* hosts on your `[proxy] passthrough` list, which stay tunnelled and
-  SNI-logged. Entries are exact hosts, `*.suffix` globs, or `@bundle` refs (`@anthropic`,
-  `@vcs`, `@node`, … — `@all` is the default), so "capture on" means *MITM the unexpected
-  egress, leave the trusted toolchain fast and quiet*.
+There used to be a `capture` axis that switched decryption off altogether. It was removed
+([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)): measured, decryption costs ~3 ms per
+new connection and caps a single checkout's decrypted throughput around 600 MB/s — below what a
+download link reaches — while "off" cost the operator the path-level view of exactly the traffic
+worth looking at. A host that can't be decrypted (it pins its certificate, needs a client
+certificate, or ships its own trust roots) goes on the `passthrough` list instead.
 
   A host on that list is exempt from the very monitoring this section is about, so `passthrough`
   is not read from your checkout while the yard runs: like the rest of `foldyard.toml`, the host
   uses the copy you **adopted**, and an edit takes effect when you accept it at the next
   `fy up`/`fy host restart` (`fy config diff|adopt|revert`; [ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)).
 
-No credential is involved either way — capture composes with, but is independent of, the
-injector postures (see [modes.md](./modes.md)).
+No credential is involved in decrypting — it composes with, but is independent of, the injector
+postures (see [modes.md](./modes.md)).
 
 ## Blocking, not just watching: `default_deny` and the wall
 
@@ -92,7 +94,7 @@ vars are honoured by well-behaved software and ignorable by anything else. So:
 
 ## When something's off
 
-- **"I flipped capture on and see nothing."** A box created before the always-route era has
+- **"The Network Log is empty."** A box created before the always-route era has
   neither the routing env nor the CA — recreate it once (`fy box down && fy box up`). The
   Network Log only rows a request once it gets a response, so a failing TLS handshake (CA
   not trusted) shows nothing.

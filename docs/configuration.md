@@ -420,12 +420,15 @@ default_deny = true
   For an unattended setup (a provisioning script, a fresh CI machine) `fy allow sync --yes` takes
   every pending recommendation at `permanent` in one go. Without it a non-interactive run prints
   the list and grants nothing — "nobody was there to say no" must never read as yes.
-- **`passthrough`** — the trusted hosts the proxy TLS-tunnels *without* decrypting when
-  capture mode is on; everything else is MITM-decrypted and fully logged. Entries are exact
-  hosts, `*.suffix` globs, or `@bundle` refs (`@all` = every built-in toolchain bundle).
-  Default: `["@all"]`. An explicit empty list means decrypt everything under capture.
+- **`passthrough`** — the trusted hosts the proxy TLS-tunnels *without* decrypting; everything
+  else is MITM-decrypted and fully logged (always — there is no switch, see
+  [ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)). Entries are exact hosts, `*.suffix`
+  globs, or `@bundle` refs (`@all` = every built-in toolchain bundle). Default: `["@all"]`. An
+  explicit empty list means decrypt everything. It is also the escape hatch for a host that
+  cannot be decrypted: one that pins its certificate, needs a client certificate, or ships its
+  own trust roots.
 
-  This one is why the whole file is pinned host-side: a host listed here is exempt from capture,
+  This one is why the whole file is pinned host-side: a host listed here is exempt from decryption,
   so a live-read `passthrough` would let the yard switch off the monitoring it's subject to. Like
   every other key, a change takes effect when you adopt it — see
   [The adopted config](#the-adopted-config-what-the-host-actually-runs). `fy config widenings`

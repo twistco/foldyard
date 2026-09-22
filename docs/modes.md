@@ -29,7 +29,7 @@ host-only, by construction (below).
 
 Axes are contributed by plugins, and a plugin contributes nothing until your `foldyard.toml`
 declares it. Core ships a `github` axis (`off | app | user`), an `[[inject]]` table for
-generic header injection, a `capture` axis on the proxy, and the agent axes (`claude`,
+generic header injection, and the agent axes (`claude`,
 `codex`) that appear only when you configure keyless auth. Everything else — cloud identity,
 auth simulators, LLM routing — comes from the plugins your project opts into: no plugin in
 the config, no axis in the dashboard.

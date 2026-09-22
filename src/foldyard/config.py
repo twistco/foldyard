@@ -672,10 +672,10 @@ def proxy_enabled() -> bool:
 
 def proxy_passthrough() -> list[str]:
     """``[proxy] passthrough`` — the TRUSTED hosts the egress proxy TLS-passes-through (does NOT
-    MITM-decrypt) under ``capture=on``; everything else is decrypted + full-logged. Entries are
-    exact hosts, ``*.suffix`` globs, or ``@bundle`` refs (``@all`` = every built-in bundle),
-    expanded by the proxy plugin. Absent ⇒ ``["@all"]`` (trust the whole default toolchain); an
-    explicit empty list ⇒ decrypt everything under capture=on."""
+    MITM-decrypt); everything else is decrypted + full-logged. Entries are exact hosts,
+    ``*.suffix`` globs, or ``@bundle`` refs (``@all`` = every built-in bundle), expanded by the
+    proxy plugin. Absent ⇒ ``["@all"]`` (trust the whole default toolchain); an explicit empty
+    list ⇒ decrypt everything."""
     raw = _table("proxy").get("passthrough")
     if raw is None:
         return ["@all"]
@@ -1679,7 +1679,7 @@ def log_dir() -> Path:
 
 # How many bytes to read from the END of each (rotated) JSONL log when a TUI panel tails it.
 # The panels show at most a few hundred recent lines; at ~150–250 B/line this tail comfortably
-# covers >1000 lines, so we never re-read the whole multi-MB file (esp. under capture=on) just
+# covers >1000 lines, so we never re-read the whole multi-MB (decrypted, per-request) file just
 # to slice the last N. Overridable for tests / very wide lines.
 LOG_TAIL_BYTES = int(os.environ.get("FOLDYARD_LOG_TAIL_BYTES", str(256 * 1024)))
 

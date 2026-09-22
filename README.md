@@ -97,7 +97,7 @@ machine from within the moat, not your host. Safer autonomy, not less of it.
 lifecycle scripts on developer laptops. Run installs, dev servers and your IDE backend in the
 yard, and the worm wakes up with no ambient credentials and no push access, its reach bounded
 to a repo the clean-repo prerequisite keeps boring. Egress routes through the host-side proxy:
-every destination logged (SNI-only by default, full decrypt-and-log under `capture=on`), with
+every request decrypted and logged (the trusted toolchain tunnelled, host-level only), with
 an opt-in default-deny wall and live host grants. → [networking.md](./docs/networking.md)
 
 Two honesty notes. Proxy routing rides proxy env vars, which cooperative software honours and

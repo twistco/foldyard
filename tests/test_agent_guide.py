@@ -67,7 +67,7 @@ def _mentions(text: str) -> set[str]:
             pair = " ".join(words[:2])
             found.add(pair if len(words) > 1 and pair in VALID else words[0])
         if "=" in segments[0]:
-            continue  # `fy mode capture=on|off` — that pipe is inside an ARGUMENT, not a verb list
+            continue  # `fy mode github=app|off` — that pipe is inside an ARGUMENT, not a verb list
         for segment in segments[1:]:  # `fy up | ps | down` — each alternative names a verb too
             rest = segment.split()
             if rest and _VERB.match(rest[0]):

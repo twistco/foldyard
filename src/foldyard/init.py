@@ -247,7 +247,7 @@ def render(opts: InitOptions) -> str:
         '  { host = "ghcr.io", why = "box image build — the uv binary image layer" },',
         '  { host = "pkg-containers.githubusercontent.com", why = "box image build — ghcr.io blob storage" },',
         "]",
-        '# passthrough = ["@all"]   # hosts tunnelled UN-decrypted under capture=on (the toolchain)',
+        '# passthrough = ["@all"]   # hosts tunnelled UN-decrypted (the toolchain); rest is decrypted',
         "",
         "# ── Agents — uncomment ONE, then `fy box up` (step 2) ────────────────────────────────────",
         "# Claude Code (`fy claude`). Declaring [claude] installs it on box-up + mounts its persisted",

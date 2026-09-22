@@ -17,22 +17,22 @@ Run it with mitmdump (`fy host` does this for you; the supervisor passes the pro
 allocated band port — config.proxy_port() — as --listen-port):
     mitmdump -s egress_proxy.py --listen-host 0.0.0.0 --listen-port 41000
 
-The same addon doubles as a pure CAPTURE proxy (foldyard's `capture` axis): with INJECT_HOST
-(or INJECT_COMMAND) empty it injects NOTHING — it just logs every proxied request to
-PROXY_LOG_FILE, so all dev-box egress is observable through the one proxy without any
-credential in play. Injection and capture compose: a github mode logs everything AND rewrites
-api.github.com; capture-only logs everything and rewrites nothing.
+The same addon doubles as a pure CAPTURE proxy: with INJECT_HOST (or INJECT_COMMAND) empty it
+injects NOTHING — it just logs every proxied request to PROXY_LOG_FILE, so all dev-box egress is
+observable through the one proxy without any credential in play. Injection and capture compose: a
+github mode logs everything AND rewrites api.github.com; no injector logs everything and rewrites
+nothing.
 
 Phase A′ — the box ALWAYS routes through this (always-on) proxy, so CAPTURE_MODE decides what it
 does with HTTPS it isn't injecting:
-  - CAPTURE_MODE=full        → MITM-decrypt + log every request (the `capture=on` axis).
+  - CAPTURE_MODE=full        → MITM-decrypt + log every request, except PASSTHROUGH_HOSTS. What
+                               foldyard always sends (ADR-0029 removed the `capture` axis).
   - CAPTURE_MODE=passthrough → blind-tunnel HTTPS without terminating TLS (the box does end-to-end
                                TLS against the REAL cert) and log only an SNI-level row — host +
-                               time, no method/path/status (the `capture=off` axis).
+                               time, no method/path/status. Kept for standalone use of the addon.
 The injector host (api.github.com) is ALWAYS decrypted, whatever CAPTURE_MODE is, because we must
 read + rewrite its Authorization header. Plain HTTP is always logged in full (it's cleartext, so
-there's nothing to passthrough). This lets `capture` toggle on a RUNNING box — flipping it just
-restarts the daemon with a different CAPTURE_MODE; the box's routing + trust never change.
+there's nothing to passthrough).
 
 Config via env (read once at startup):
   INJECT_RULES      a JSON LIST of injection rules (the multi-injector contract) — one proxy
@@ -180,7 +180,7 @@ _HTTP_PORT = 80  # …and, for a request seen in the clear, this one
 def _host_matches(host: str | None, patterns: list[str]) -> bool:
     """Exact host match, or ``*.suffix`` wildcard (matches SUBDOMAINS, not the bare domain) —
     Claude Code Web's allow-list semantics, so its published list drops in unchanged. Used to
-    decide which hosts the capture=on (``full``) path blind-tunnels instead of decrypting."""
+    decide which hosts the ``full`` path blind-tunnels instead of decrypting."""
     if not host:
         return False
     for p in patterns:
@@ -207,7 +207,7 @@ def _with_query_param(url: str, name: str, value: str) -> str:
 
 _DEFAULT_LOG = str(Path.home() / ".foldyard" / "logs" / "egress.jsonl")
 # Rotate the log to a DATED backup (egress-proxy.<UTC-stamp>.jsonl) once it grows past this, then
-# prune to the newest PROXY_LOG_BACKUPS — so the on-disk footprint is bounded (capture=on logs
+# prune to the newest PROXY_LOG_BACKUPS — so the on-disk footprint is bounded (decrypted flows log
 # every request, so the log fills fast) while keeping readable, timestamped history (foldyard's
 # config.tail_jsonl/rotated_logs read this exact naming). Both knobs are env-tunable.
 _LOG_MAX_BYTES = int(os.environ.get("PROXY_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
@@ -694,7 +694,7 @@ class Injector:
         if target in self.inject_hosts:
             return  # an injector host: always decrypt (to rewrite its header), whatever the mode
         # Blind-tunnel (no decrypt, real certs end-to-end, SNI-only log) when either we're in
-        # passthrough mode (capture=off — tunnel everything) OR we're in full mode but the host is
+        # passthrough mode (tunnel everything) OR we're in full mode but the host is
         # trusted. Otherwise (full mode, untrusted host) fall through → mitmproxy decrypts + the
         # request/response hooks log the full request — the surprising egress worth scrutinising.
         if self.capture_mode != "full" or _host_matches(target, self.passthrough_hosts):

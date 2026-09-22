@@ -1118,17 +1118,17 @@ async def test_shared_daemon_status_shown_only_when_active_and_down(monkeypatch)
     proxy_down = {"egress-proxy": {"up": False, "label": "x", "port": 8088}}
     async with tui.DevModeTui().run_test() as pilot:
         app = cast(tui.DevModeTui, pilot.app)
-        cap = next(r for r in app.query(tui.AxisRow) if r.axis == "capture")  # → egress-proxy
+        cap = next(r for r in app.query(tui.AxisRow) if r.axis == "github")  # → egress-proxy
 
         def line() -> str:
             return _text(cap.query_one(".axis-status", tui.Static))
 
-        monkeypatch.setattr(devmode, "read", lambda: mode_with())  # capture off
+        monkeypatch.setattr(devmode, "read", lambda: mode_with())  # github off
         monkeypatch.setattr(devmode, "daemon_status", lambda mode: proxy_up)
         app.refresh_mode()
         assert "8088" not in line() and "up" not in line()  # off → no daemon line
 
-        monkeypatch.setattr(devmode, "read", lambda: mode_with(capture="on"))
+        monkeypatch.setattr(devmode, "read", lambda: mode_with(github="app"))
         app.refresh_mode()
         assert "8088" not in line()  # on + up → still no per-axis line (footer covers it)
 
@@ -1155,8 +1155,8 @@ async def test_blocked_daemon_shows_the_gates_reason_even_when_the_port_answers(
     }
     async with tui.DevModeTui().run_test() as pilot:
         app = cast(tui.DevModeTui, pilot.app)
-        cap = next(r for r in app.query(tui.AxisRow) if r.axis == "capture")
-        monkeypatch.setattr(devmode, "read", lambda: mode_with(capture="on"))
+        cap = next(r for r in app.query(tui.AxisRow) if r.axis == "github")
+        monkeypatch.setattr(devmode, "read", lambda: mode_with(github="app"))
         monkeypatch.setattr(devmode, "daemon_status", lambda mode: blocked)
         app.refresh_mode()
         line = _text(cap.query_one(".axis-status", tui.Static))
@@ -1179,8 +1179,8 @@ async def test_blocked_reason_is_rendered_verbatim_not_as_markup(monkeypatch):
     blocked = {"egress-proxy": {"up": False, "label": "x", "port": 8088, "blocked": reason}}
     async with tui.DevModeTui().run_test() as pilot:
         app = cast(tui.DevModeTui, pilot.app)
-        cap = next(r for r in app.query(tui.AxisRow) if r.axis == "capture")
-        monkeypatch.setattr(devmode, "read", lambda: mode_with(capture="on"))
+        cap = next(r for r in app.query(tui.AxisRow) if r.axis == "github")
+        monkeypatch.setattr(devmode, "read", lambda: mode_with(github="app"))
         monkeypatch.setattr(devmode, "daemon_status", lambda mode: blocked)
         app.refresh_mode()
         assert reason in _text(cap.query_one(".axis-status", tui.Static))

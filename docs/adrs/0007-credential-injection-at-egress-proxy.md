@@ -14,8 +14,9 @@ code can read it, log it, or exfiltrate it for its lifetime. An earlier iteratio
 a token *file* into the container — better, but the secret still materialised inside the
 boundary.
 
-The box already routes all egress through a host-side mitmproxy (always-on: passthrough when
-`capture=off`, MITM-decrypt when `capture=on`), with the proxy CA mounted in. That chokepoint
+The box already routes all egress through a host-side mitmproxy (always-on; MITM-decrypt except
+the trusted passthrough hosts since [ADR-0029](./0029-the-proxy-always-decrypts.md) — before that a
+`capture` axis chose between passthrough and decrypt), with the proxy CA mounted in. That chokepoint
 sits on the Mac, outside the blast radius — exactly where a credential should be attached.
 
 ## Decision
@@ -47,10 +48,10 @@ matching requests as they pass:
   codex + any config-only `[[inject]]` axis can all be `on` at once through one mitmdump. This
   lifted the original single-minter limit that made injectors mutually exclusive. Legacy single
   `INJECT_*` env survives as a one-rule fallback.
-- **Injector hosts are always decrypted**, whatever the capture mode — the header can't be
+- **Injector hosts are always decrypted**, even when a passthrough entry covers them — the header can't be
   rewritten through a blind tunnel — and are identified by SNI or, when a client dials a bare
-  IP, by the CONNECT target. Everything else follows the capture axis (decrypt+log vs
-  SNI-only passthrough). The addon can *cooperatively* denylist non-allowlisted hosts on the
+  IP, by the CONNECT target. Everything else is decrypted and logged unless it is a trusted
+  passthrough host (SNI-only tunnel). The addon can *cooperatively* denylist non-allowlisted hosts on the
   proxy path, but that only bites traffic that chooses to route through the proxy; the real
   default-deny wall is enforced at the VM layer when `[machine].wall` is enabled (ADR-0009),
   not by the addon itself.

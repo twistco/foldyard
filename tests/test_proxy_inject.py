@@ -40,7 +40,7 @@ class _Req:
         self.method = method
         self.path = path
         self.url = f"https://{host}{path}"  # the addon re-issues against this on a 401
-        self.raw_content = b""
+        self.raw_content: bytes | None = b""
         self.headers: dict[str, str] = {}
         # mitmproxy's request.query is a settable MultiDictView reflected into the URL; the addon
         # only ever does `query[name] = value`, so a plain dict is a faithful enough stand-in.

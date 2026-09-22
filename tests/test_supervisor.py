@@ -48,7 +48,7 @@ def _patch(monkeypatch, tmp_path, *, in_box=False, has_podman=True, daemon_up=Fa
     monkeypatch.setattr(supervisor.config, "log_dir", lambda: tmp_path / "logs")
     monkeypatch.setattr(supervisor.devmode, "in_box", lambda: in_box)
     monkeypatch.setattr(supervisor, "which", lambda _x: "/usr/bin/podman" if has_podman else None)
-    monkeypatch.setattr(supervisor.devmode, "read", lambda: {"mode": {"capture": "off"}})
+    monkeypatch.setattr(supervisor.devmode, "read", lambda: {"mode": {"github": "off"}})
     monkeypatch.setattr(
         supervisor.devmode, "daemon_status", lambda _m: {"egress-proxy": {"up": daemon_up}}
     )
@@ -572,7 +572,7 @@ def test_main_clears_ephemeral_grants_on_start_then_sweeps_each_tick(monkeypatch
     monkeypatch.setattr(supervisor, "tee_stdio_to_logfile", lambda: None)
     monkeypatch.setattr(supervisor, "load_host_env", lambda: None)
     monkeypatch.setattr(supervisor, "log", lambda _m: None)
-    monkeypatch.setattr(supervisor, "expire_user_modes", lambda: {"capture": "off"})
+    monkeypatch.setattr(supervisor, "expire_user_modes", lambda: {"github": "off"})
     monkeypatch.setattr(supervisor.devmode, "desired_daemons", lambda _m: {})
     monkeypatch.setattr(supervisor.devmode, "write_mirror", lambda *a, **k: None)
     monkeypatch.setattr(supervisor.devmode, "daemon_status", lambda _m: {})

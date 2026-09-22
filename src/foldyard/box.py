@@ -323,7 +323,7 @@ def _box_home(engine: str, img: str, env: dict) -> tuple[str, str]:
 # The base bootstrap scaffolding (runs once per fresh box). The native Claude installer (now the
 # [claude] plugin's box_bootstrap) hardcodes ~/.local/bin/claude, so that dir must beat
 # /opt/fy-tools/bin on PATH; an npm install would pin the stale prefix.
-# Trust the egress-proxy MITM CA SYSTEM-WIDE when a proxy/capture mode mounted it (the box's
+# Trust the egress-proxy MITM CA SYSTEM-WIDE when the proxy plugin mounted it (the box's
 # box_args `-v …:/etc/dev-proxy-ca.pem`) — so curl, wget, apt, etc. verify proxied HTTPS, not just
 # the runtimes that read NODE_EXTRA_CA_CERTS/REQUESTS_CA_BUNDLE/GIT_SSL_CAINFO. Additive (adds to
 # the system roots), and handles both Debian/Ubuntu (update-ca-certificates) and Fedora/RHEL
@@ -331,9 +331,9 @@ def _box_home(engine: str, img: str, env: dict) -> tuple[str, str]:
 # a clean store. A standalone snippet (prepended to _BASE_SCRIPT) so the capture e2e can run it.
 #
 # It ALSO builds the COMBINED bundle (/etc/dev-proxy-ca-combined.pem = system roots + mitm CA) that
-# box_args points REQUESTS_CA_BUNDLE/GIT_SSL_CAINFO at. Phase A′ always-routes, and capture=off
-# TLS-passthrough leaves un-decrypted hosts presenting their REAL certs end-to-end — a mitm-only
-# bundle would reject those. Built AFTER the system-trust install so the source bundle is fresh.
+# box_args points REQUESTS_CA_BUNDLE/GIT_SSL_CAINFO at. Phase A′ always-routes, and a trusted
+# `[proxy] passthrough` host is tunnelled un-decrypted, presenting its REAL cert end-to-end — a
+# mitm-only bundle would reject those. Built AFTER the system-trust install so the source bundle is fresh.
 _CA_TRUST_SNIPPET = r"""
 if [ -r /etc/dev-proxy-ca.pem ]; then
   if command -v update-ca-certificates >/dev/null; then          # Debian / Ubuntu

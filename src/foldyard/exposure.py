@@ -6,9 +6,9 @@ Everything else in foldyard answers "is the posture what it claims?". This answe
 underneath it: **what did we agree to, and where is it written?** Three kinds of config statement
 loosen a host-side control, and each is easy to lose track of:
 
-  - **capture exemptions** (``[proxy] passthrough``) — hosts the proxy tunnels un-decrypted under
-    ``capture=on``. ``@all`` is one token that resolves to ~200 hosts; nothing anywhere showed that
-    number, so "capture is on" read as "everything is logged" when it never meant that.
+  - **capture exemptions** (``[proxy] passthrough``) — hosts the proxy tunnels un-decrypted.
+    ``@all`` is one token that resolves to ~200 hosts; nothing anywhere showed that number, so
+    "the proxy decrypts" read as "everything is logged" when it never meant that.
   - **injection targets** — the host each mechanism delivers a real credential to. Some are fixed
     in package code (claude, codex, github), some are config (``[[inject]] host``). The difference
     matters, so the report states it per row rather than listing them all as equals.
@@ -402,12 +402,10 @@ def render(exp: Exposure) -> list[str]:
         f"    {source} → {_plural(exp.hosts, 'host', 'hosts')} · "
         f"{_plural(exp.wildcards, 'wildcard suffix', 'wildcard suffixes')}"
         if exp.hosts
-        else f"    {source or '(empty list)'} → nothing exempt: capture=on decrypts everything"
+        else f"    {source or '(empty list)'} → nothing exempt: every host is decrypted"
     )
     if exp.hosts:
-        out.append(
-            "    Under capture=on these are TLS-tunnelled: SNI only, no method/path/body logged."
-        )
+        out.append("    These are TLS-tunnelled: SNI only, no method/path/body logged.")
     out.append(
         f"    Declared literally here: {', '.join(exp.literals)}"
         if exp.literals

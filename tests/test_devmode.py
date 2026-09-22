@@ -44,7 +44,6 @@ def test_set_mode_round_trip(isolated_state):
         "gcp": "logs",
         "storage": "local",
         "github": "off",
-        "capture": "off",
         "auth0": "sim",
         "llm": "off",
     }
@@ -73,6 +72,14 @@ def test_set_mode_does_not_create_a_mirror_when_box_down(isolated_state, monkeyp
     assert not isolated_state["mirror"].exists()
 
 
+def test_a_retired_axis_is_refused_with_its_replacement(isolated_state):
+    # `capture` was removed (ADR-0029) — a habit or an old doc naming it gets the reason, not a
+    # bare "unknown axis", and nothing is written.
+    with pytest.raises(SystemExit, match="always decrypts"):
+        devmode.set_mode({"capture": "on"})
+    assert "capture" not in devmode.read()["mode"]
+
+
 def test_read_defaults_when_files_missing(isolated_state):
     # Each axis rests at its OWN default rung (rungs[0]) — not a blanket "off": storage rests at
     # "local", auth0 at "sim" (the axis-defaults semantics the storage/auth0/llm rework added).
@@ -80,7 +87,6 @@ def test_read_defaults_when_files_missing(isolated_state):
         "gcp": "off",
         "storage": "local",
         "github": "off",
-        "capture": "off",
         "auth0": "sim",
         "llm": "off",
     }
@@ -619,11 +625,11 @@ def test_derive_env_gcp_user_no_box_relabel():
 
 
 def test_desired_daemons_offline_runs_only_the_always_on_proxy():
-    # Phase A′ — always-on: the egress proxy runs for every mode (passthrough when capture=off), so
-    # the box never hits a dead :8088. No gcp/github daemons when both are off.
+    # Phase A′ — always-on: the egress proxy runs for every mode, so the box never hits a dead
+    # :8088. No gcp/github daemons when both are off. It always decrypts (ADR-0029).
     daemons = devmode.desired_daemons({"gcp": "off", "github": "off"})
     assert set(daemons) == {"egress-proxy"}
-    assert daemons["egress-proxy"]["env"]["CAPTURE_MODE"] == "passthrough"
+    assert daemons["egress-proxy"]["env"]["CAPTURE_MODE"] == "full"
 
 
 def test_gh_proxy_app_spec():
