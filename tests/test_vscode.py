@@ -518,7 +518,7 @@ def test_a_failed_marker_reset_leaves_the_config_unwritten_so_the_next_run_retri
 _TEST_SERVER_DIR = f".vscode-server-fy-test-{os.getpid()}"
 
 
-def _run_reset_script(tmp_path, rm_target=None):
+def _run_reset_script(tmp_path, rm_target=None, wait: int = 10):
     """Run the REAL reset script under `sh` and return its exit status. ``PATH`` holds only the
     system dirs of a Debian box — so a script reaching for a tool the packaged image lacks (it
     once called `pgrep`, and there is no procps in there) is caught wherever that tool is absent.
@@ -527,7 +527,7 @@ def _run_reset_script(tmp_path, rm_target=None):
 
     target = str(rm_target or tmp_path / "marker")
     return subprocess.run(
-        ["sh", "-c", vscode._reset_script(f'"{target}"', _TEST_SERVER_DIR)],
+        ["sh", "-c", vscode._reset_script(f'"{target}"', _TEST_SERVER_DIR, wait)],
         env={"PATH": "/usr/bin:/bin"},
     ).returncode
 
@@ -565,29 +565,72 @@ def test_reset_script_needs_no_procps():
     assert "n=.vscode-server;" in script  # the real server dir by default (tests aim it away)
 
 
+# The scan reads /proc; where there is none (a macOS host running the suite) it finds nothing,
+# so these two would prove nothing — skipped, while the procps check above runs everywhere.
+_needs_proc = pytest.mark.skipif(
+    not Path("/proc/self/cmdline").exists(), reason="the server scan reads /proc (Linux)"
+)
+
+
+@_needs_proc
 @pytest.mark.spawns("sh", "/bin/sleep")  # the REAL reset script under sh; a sleep as the "server"
 def test_reset_script_kills_the_server_and_nothing_else(tmp_path):
-    """A process whose command line names the server is killed; an unrelated one is left alone,
-    and the script's own `sh -c` (whose text mentions the server dir) never matches itself."""
+    """A process whose command line names the server is killed — and is already GONE when the
+    script returns (`fy code` attaches right after, and an attach that still finds the old server
+    reconnects to it, skipping set-up). An unrelated process is left alone, and the script's own
+    `sh -c` (whose text mentions the server dir) never matches itself."""
     import os
     import signal
-    import time
 
     server = _fake_server()
     bystander = _fake_server(f"/nonexistent/{_TEST_SERVER_DIR}-not/bin/node")
     try:
         assert _run_reset_script(tmp_path) == 0
-        for _ in range(50):
-            if server.poll() is not None:
-                break
-            time.sleep(0.05)
-        assert server.poll() is not None, "the server was not killed"
+        # No polling here: the script's own wait is the property. (poll() reaps the zombie —
+        # the script counted it as gone, since it had exited.)
+        assert server.poll() is not None, "the script returned before the server exited"
         assert bystander.poll() is None, "a process that is not the server was killed"
     finally:
         for proc in (server, bystander):
             if proc.poll() is None:
                 os.kill(proc.pid, signal.SIGKILL)
             proc.wait()
+
+
+@_needs_proc
+@pytest.mark.spawns("sh")  # the REAL reset script under sh; a TERM-ignoring sh as the "server"
+def test_reset_script_fails_when_the_server_outlives_the_wait(tmp_path):
+    """Signalled is not gone: a server still running after the wait fails the script, so
+    `_reset_markers` reports it and the next `fy code` retries instead of attaching to it."""
+    import os
+    import signal
+    import subprocess
+    import time
+
+    ready = tmp_path / "trapped"
+    # The trailing `:` keeps the shell itself running (dash execs a -c script's LAST command in
+    # place, which would swap this command line for plain `sleep 30`), and `ready` is written
+    # only once the trap is in, so the TERM can't land first.
+    stubborn = subprocess.Popen(
+        [
+            f"/nonexistent/{_TEST_SERVER_DIR}/bin/0123abcd/node",
+            "-c",
+            f"trap '' TERM; : > '{ready}'; sleep 30; :",
+        ],
+        executable="/bin/sh",
+        env={"PATH": "/usr/bin:/bin"},  # the suite's scrubbed PATH has no `sleep`
+        start_new_session=True,  # its `sleep` child goes with it in the cleanup below
+    )
+    for _ in range(100):
+        if ready.exists():
+            break
+        time.sleep(0.05)
+    try:
+        assert _run_reset_script(tmp_path, wait=1) == 1
+        assert stubborn.poll() is None  # still running: exactly what the failure reports
+    finally:
+        os.killpg(stubborn.pid, signal.SIGKILL)
+        stubborn.wait()
 
 
 def test_user_owned_config_is_never_clobbered(fake, capsys):

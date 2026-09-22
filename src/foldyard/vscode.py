@@ -504,13 +504,19 @@ def _reset_markers(engine: str, box: str, env: dict, markers: list[str]) -> bool
     return proc.returncode == 0
 
 
-def _reset_script(paths: str, server_dir: str = ".vscode-server") -> str:
+def _reset_script(paths: str, server_dir: str = ".vscode-server", wait: int = 10) -> str:
     """The in-box shell for :func:`_reset_markers`: remove ``paths``, then stop the running VS Code
     server. Its exit status is the caller's whole signal — a failed `rm` must fail the script
     (an unconditional trailing `true` once masked it, and with it the retry the caller does),
     while finding no server is the normal case and a success. A server that exits between the
     scan and `kill` is not a failure either: only a process that is STILL there after a failed
     `kill` is.
+
+    Signalled is not gone: the script then waits up to ``wait`` seconds for every signalled
+    process to EXIT, and fails if one outlives that. `fy code` launches the attach right after
+    this returns, and an attach that still finds the old server reconnects to it and skips
+    set-up — the markers just reset would sit there unread. A zombie counts as gone (it has
+    exited; only its parent's reap is pending, and `kill -0` still succeeds on one).
 
     The server is found by scanning ``/proc/*/cmdline``, not with `pgrep`: the packaged box
     image has no procps, so `pgrep` exited 127, the script failed after the `rm`, and every
@@ -522,11 +528,15 @@ def _reset_script(paths: str, server_dir: str = ".vscode-server") -> str:
     own — with the default it killed the live VS Code server of the box running the suite."""
     return (
         f"rm -f {paths} || exit 1; "
-        f"n={shlex.quote(server_dir)}; "
+        f"n={shlex.quote(server_dir)}; pids=; "
         "for d in /proc/[0-9]*; do "
         'grep -qsF "$n/bin/" "$d/cmdline" || continue; p=${d#/proc/}; '
         'kill "$p" 2>/dev/null || ! kill -0 "$p" 2>/dev/null || exit 1; '
-        "done"
+        'pids="$pids $p"; '
+        "done; "
+        'live() { for p in $pids; do kill -0 "$p" 2>/dev/null && '
+        "! grep -qs '^State:[[:space:]]*Z' \"/proc/$p/status\" && return 0; done; return 1; }; "
+        f'i=0; while live; do [ "$i" -ge {int(wait)} ] && exit 1; sleep 1; i=$((i+1)); done'
     )
 
 
