@@ -33,7 +33,9 @@ def mac(tmp_path, monkeypatch):
         project="tangible-podman",
         worktree="",
     )
-    monkeypatch.setattr(transcripts.stack, "resolve", lambda *a, **k: ctx)
+    resolved: list[dict] = []
+    monkeypatch.setattr(transcripts.stack, "resolve", lambda *a, **k: resolved.append(k) or ctx)
+    monkeypatch.setattr(transcripts.stack, "machine_down", lambda: None)
     monkeypatch.setattr(config, "codex_enabled", lambda: False)
     monkeypatch.delenv("DEVBOX_TRANSCRIPTS", raising=False)
     monkeypatch.delenv("DEVBOX_CODEX_TRANSCRIPTS", raising=False)
@@ -48,7 +50,7 @@ def mac(tmp_path, monkeypatch):
         return _Proc(0, "")
 
     monkeypatch.setattr(transcripts.subprocess, "run", fake_run)
-    return {"checkout": checkout, "calls": calls}
+    return {"checkout": checkout, "calls": calls, "ctx": ctx, "resolved": resolved}
 
 
 def test_refuses_in_box(monkeypatch, capsys):
@@ -102,6 +104,44 @@ def test_box_cp_fallback(mac, monkeypatch):
     assert transcripts.transcripts() == 0
     assert any(c[1:2] == ["cp"] for c in seq)
     assert any(c and c[0] == "rsync" for c in seq)
+
+
+def test_box_fallback_talks_to_the_projects_engine(mac, monkeypatch):
+    # The probe/exec/cp must carry the resolved env (the machine's socket) — without it, host-side
+    # podman asks its DEFAULT connection, which need not be this project's VM at all.
+    envs = []
+
+    def fake_run(cmd, **kw):
+        if cmd[0] != "rsync":
+            envs.append(kw.get("env"))
+        if cmd[1:2] == ["ps"]:
+            return _Proc(0, "deadbeef\n")
+        if cmd[1:2] == ["cp"]:
+            import pathlib
+
+            (pathlib.Path(cmd[-1]) / "s.jsonl").write_text("{}")
+        return _Proc(0)
+
+    monkeypatch.setattr(transcripts.subprocess, "run", fake_run)
+    assert transcripts.transcripts() == 0
+    assert len(envs) == 3 and all(e is mac["ctx"].env for e in envs)  # ps, exec, cp
+
+
+def test_a_stopped_machine_is_not_booted_for_host_side_transcripts(mac, monkeypatch, capsys):
+    # The bound-out dir is on the host; the engine is only the fallback for a RUNNING box, which a
+    # stopped VM rules out — so resolve without the machine and ask no engine anything.
+    monkeypatch.setattr(transcripts.stack, "machine_down", lambda: "lima machine 'x' is stopped")
+    src = mac["checkout"] / "dev-stack/.devbox-claude/projects"
+    src.mkdir(parents=True)
+    (src / "session.jsonl").write_text("{}")
+    assert transcripts.transcripts() == 0
+    assert mac["resolved"] == [{"no_machine": True}]
+    assert [c[0] for c in mac["calls"]] == ["rsync"]
+    # …and with nothing bound out, the box isn't asked either: it can't be running.
+    (src / "session.jsonl").unlink()
+    mac["calls"].clear()
+    assert transcripts.transcripts() == 1
+    assert mac["calls"] == [] and "nothing to copy" in capsys.readouterr().err
 
 
 def test_dry_run_passes_flag(mac, monkeypatch):

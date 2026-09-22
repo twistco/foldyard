@@ -1174,6 +1174,9 @@ def restart_services(
     so a hung engine can't pin the in-flight guard forever, and it NEVER raises — the caller
     logs (ok, summary) either way. Passing ``worktree`` explicitly (not None) pins the resolve
     to that checkout even when the caller's env carries a different ``WORKTREE``."""
+    # Headless and host-side: a heal must never BOOT a stopped VM — nothing runs in it to restart.
+    if (down := machine_down()) is not None:
+        return False, f"{down} — nothing to restart"
     try:
         ctx = resolve(worktree=worktree)
         cmd = [*ctx.compose, "restart", *services]
@@ -1270,19 +1273,28 @@ def _missing_declared_compose() -> bool:
     return bool(missing)
 
 
-def engine_reachable(nothing_to: str) -> bool:
-    """Gate for verbs that only READ or TEAR DOWN engine state (down/nuke/ps/logs): an
-    inherited DOCKER_HOST (box, CI) passes, a running machine passes — but an absent or
-    stopped machine short-circuits with a note instead of letting ``resolve()`` PROVISION
-    a whole VM just to find nothing inside it (``fy down`` after ``fy machine rm`` used to
-    start downloading a VM image). Only ``fy up``/``ensure`` create machines."""
-    if os.environ.get("DOCKER_HOST"):
-        return True
-    reason = machine.not_running_reason()
+def engine_reachable(nothing_to: str, start: str = "fy up") -> bool:
+    """Gate for verbs that only READ or TEAR DOWN engine state (down/nuke/ps/logs), or that
+    need a box already running (`fy code`, `fy box shell`): an inherited DOCKER_HOST (box, CI)
+    passes, a running machine passes — but an absent or stopped machine short-circuits with a
+    note instead of letting ``resolve()`` PROVISION a whole VM just to find nothing inside it
+    (``fy down`` after ``fy machine rm`` used to start downloading a VM image; ``fy code`` booted
+    the VM only to refuse on the box). Only ``fy up``/``fy box up``/``ensure`` create machines —
+    ``start`` names the one the note should point at."""
+    reason = machine_down()
     if reason is None:
         return True
-    _err(f"({reason} — nothing to {nothing_to}. `fy up` creates/starts it.)")
+    _err(f"({reason} — nothing to {nothing_to}. `{start}` creates/starts it.)")
     return False
+
+
+def machine_down() -> str | None:
+    """Why ``resolve()`` would have to BOOT the machine to reach the engine — None when it
+    wouldn't (an inherited DOCKER_HOST, or a running machine). Read-only: the quiet form of
+    :func:`engine_reachable`, for callers that report on their own terms."""
+    if os.environ.get("DOCKER_HOST"):
+        return None
+    return machine.not_running_reason()
 
 
 def down() -> int:
@@ -1320,6 +1332,8 @@ def logs(svc: list[str]) -> int:
 def shell() -> int:
     if (rc := stack_declared("shell", "fy box shell")) is not None:
         return rc
+    if not engine_reachable("exec into"):
+        return 1
     ctx = resolve()
     return _compose(ctx, ["exec", ctx.app, "bash"])
 

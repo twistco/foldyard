@@ -1007,6 +1007,30 @@ def test_ps_noops_when_machine_gone(fake, monkeypatch):
     assert fake["calls"] == []
 
 
+@pytest.mark.parametrize(
+    ("cmd", "args", "rc"),
+    [("shell", None, 1), ("exec", ["true"], 1), ("exec", ["--skip-if-down", "true"], 0)],
+)
+def test_attach_verbs_never_boot_a_stopped_machine(fake, monkeypatch, cmd, args, rc):
+    # No box runs on a stopped VM, so shell/exec refuse from the read-only probe — letting _ctx()
+    # resolve would ENSURE (boot) the machine only to say "not running". `--skip-if-down` (the
+    # git-hook path) stays a clean no-op. The gate's note points at `fy box up`, not `fy up`.
+    resolved: list = []
+    monkeypatch.setattr(box.stack, "resolve", lambda *a, **k: resolved.append(1))
+    hints: list = []
+    monkeypatch.setattr(box.stack, "engine_reachable", lambda _to, start: hints.append(start))
+    assert box.main(cmd, args) == rc
+    assert resolved == [] and fake["calls"] == []
+    assert hints == ["fy box up"]
+
+
+def test_start_hint_keeps_the_worktree_name_verbatim():
+    # Built directly, never by rewriting the attach hint: a `.replace("shell", "up")` mangled a
+    # worktree whose NAME contains "shell" into one that doesn't exist.
+    assert box._start_hint("myshell") == "WORKTREE=myshell fy box up"
+    assert box._start_hint("") == "fy box up"
+
+
 def test_ps_lists_box(fake):
     assert box.main("ps") == 0
     ps = _find(fake["calls"], has=["ps", "-a"])

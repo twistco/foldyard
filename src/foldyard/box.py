@@ -263,6 +263,10 @@ def _attach_hint(worktree: str) -> str:
     return f"WORKTREE={worktree} fy box shell" if worktree else "fy box shell"
 
 
+def _start_hint(worktree: str) -> str:
+    return f"WORKTREE={worktree} fy box up" if worktree else "fy box up"
+
+
 def _has_compose() -> bool:
     """Does this project ship a compose stack? When it doesn't, `compose up` owns no
     `{project}_default` network, so `box up` must create it itself — see
@@ -1262,6 +1266,13 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         if cmd == "down":
             config.mirror_file().unlink(missing_ok=True)
         return 0
+    if cmd in ("shell", "exec"):
+        # These need the box already RUNNING, which a stopped VM rules out — refuse from the
+        # read-only probe rather than let _ctx() boot the machine only to say "not running".
+        wt = config.active_worktree()
+        if not stack.engine_reachable("attach to", _start_hint(wt)):
+            # `exec --skip-if-down` is the git-hook path: a down box is its clean no-op.
+            return 0 if cmd == "exec" and "--skip-if-down" in (args or []) else 1
     ctx = _ctx()
     engine = config.engine()
     box, net = _names(ctx)
@@ -1278,7 +1289,7 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         return _up(ctx, engine, box, net)
     if cmd == "shell":
         if not _running(engine, box, env):
-            hint = _attach_hint(ctx.worktree).replace("shell", "up")
+            hint = _start_hint(ctx.worktree)
             _err(f"dev box {box} not running — start it: {hint}")
             return 1
         # Same idempotent prepend the bootstrap uses, not a raw `PATH=…:$PATH` — this exec's
@@ -1339,7 +1350,7 @@ def _exec(engine: str, box: str, ctx, env: dict, args: list[str]) -> int:
     # multiple → join them shell-safely (the `fy box exec ls -la` ergonomic path).
     script = rest[0] if len(rest) == 1 else shlex.join(rest)
     if not _running(engine, box, env):
-        hint = _attach_hint(ctx.worktree).replace("shell", "up")
+        hint = _start_hint(ctx.worktree)
         if skip_if_down:
             _err(f"(dev box {box} not running — skipping; start it with `{hint}` or run inside it)")
             return 0

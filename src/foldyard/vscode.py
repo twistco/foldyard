@@ -574,11 +574,16 @@ def code() -> int:
         _err("✗ fy code: nothing adopted for this checkout, and [vscode] is read ONLY from the")
         _err("  adopted copy. Run `fy config adopt` (`fy config diff` first), then retry.")
         return 1
-    ctx = stack.resolve()
     if not cfg.vscode_enabled():
         _err("✗ VS Code support is off — add a [vscode] table to foldyard.toml, then `fy box up`")
         _err("  (it mounts the persisted vscode-server volume the attach reuses).")
         return 1
+    # No box can be running on a VM that isn't, and `stack.resolve()` ENSURES the machine — so
+    # ask the read-only probe first, or `fy code` boots the VM only to refuse on the box below.
+    wt = config.active_worktree()
+    if not stack.engine_reachable("attach to", f"WORKTREE={wt} fy box up" if wt else "fy box up"):
+        return 1
+    ctx = stack.resolve()
     engine = config.engine()
     env = ctx.env
     box = f"{ctx.project}-devbox"

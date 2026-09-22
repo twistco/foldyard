@@ -45,6 +45,8 @@ def fake(tmp_path, monkeypatch):
     # `gated` records the gate and the stack resolve in CALL order: the gate must come first.
     gated: list[str] = []
     monkeypatch.setattr(vscode.stack, "resolve", lambda *a, **k: gated.append("resolve") or ctx)
+    # The machine gate before resolve: the engine is faked, so it passes (tested below).
+    monkeypatch.setattr(vscode.stack, "engine_reachable", lambda *a, **k: True)
     # The ADOPTED config for the checkout — what `fy code` reads `[vscode]` from. Tests mutate
     # `fake["vscode"]` (the table) directly; the tree's own foldyard.toml is never consulted.
     adopted = config.Config(
@@ -243,6 +245,22 @@ def test_worktree_hint_when_not_running(fake, capsys):
     fake["ctx"].worktree = "wt2"
     assert vscode.code() == 1
     assert "WORKTREE=wt2 fy box up" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("worktree", "hint"), [("", "fy box up"), ("wt2", "WORKTREE=wt2 fy box up")]
+)
+def test_a_stopped_machine_refuses_without_booting_it(fake, monkeypatch, worktree, hint):
+    # `stack.resolve()` ENSURES the machine, so reaching it with the VM stopped booted the whole
+    # VM only for the box check to refuse. The read-only gate answers first, pointing at the verb
+    # that starts both — the VM stays down.
+    monkeypatch.setenv("WORKTREE", worktree)
+    hints: list = []
+    monkeypatch.setattr(vscode.stack, "engine_reachable", lambda _to, start: hints.append(start))
+    assert vscode.code() == 1
+    assert hints == [hint]
+    assert "resolve" not in fake["gated"]
+    assert not fake["calls"]
 
 
 def test_launch_uses_isolated_user_data_dir(fake):

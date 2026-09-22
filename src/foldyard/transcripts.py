@@ -33,9 +33,10 @@ def _err(*a: object) -> None:
     print(*a, file=sys.stderr, flush=True)
 
 
-def _box_running(engine: str, box: str) -> bool:
+def _box_running(engine: str, box: str, env: dict) -> bool:
     out = subprocess.run(
         [engine, "ps", "-q", "-f", f"name=^{box}$", "-f", "status=running"],
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -290,8 +291,12 @@ def transcripts(dest: str = "") -> int:
         _err("✗ rsync not found (ships with macOS).")
         return 1
 
-    ctx = stack.resolve()
+    # The bound-out dirs are host-side; the engine is only the fallback for a RUNNING box, which a
+    # stopped VM rules out — so resolve without booting it, and skip that fallback.
+    down = stack.machine_down()
+    ctx = stack.resolve(no_machine=down is not None)
     env = ctx.env
+    engine_env = None if down else env
     engine = config.engine()
     box = f"{ctx.project}-devbox"
     checkout = Path(env["FOLDYARD_CHECKOUT"])
@@ -307,6 +312,7 @@ def transcripts(dest: str = "") -> int:
         claude_dest,
         dry,
         engine=engine,
+        engine_env=engine_env,
         box=box,
         box_home_cmd='printf %s "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"',
         box_rel="projects",
@@ -328,6 +334,7 @@ def transcripts(dest: str = "") -> int:
             codex_dest,
             dry,
             engine=engine,
+            engine_env=engine_env,
             box=box,
             box_home_cmd='printf %s "${CODEX_HOME:-$HOME/.codex}"',
             box_rel="sessions",
@@ -344,6 +351,7 @@ def _sync_source(
     dry: bool,
     *,
     engine: str,
+    engine_env: dict | None,
     box: str,
     box_home_cmd: str,
     box_rel: str,
@@ -357,11 +365,12 @@ def _sync_source(
     tmp: str | None = None
     if src_dir.is_dir() and any(src_dir.iterdir()):
         stage, origin = src_dir, "bound-out dir"
-    elif _box_running(engine, box):
+    elif engine_env is not None and _box_running(engine, box, engine_env):
         # Resolve where Claude actually writes IN the box: the image bakes HOME=/home/vscode,
         # so even as root ~/.claude is /home/vscode/.claude. Honour CLAUDE_CONFIG_DIR too.
         out = subprocess.run(
             [engine, "exec", box, "sh", "-c", box_home_cmd],
+            env=engine_env,
             capture_output=True,
             text=True,
         )
@@ -371,7 +380,8 @@ def _sync_source(
         tmp = tempfile.mkdtemp()
         box_src = f"{box_agent_home}/{box_rel}"
         _err(f"+ {engine} cp {box}:{box_src}/. {tmp}")
-        if subprocess.run([engine, "cp", f"{box}:{box_src}/.", tmp]).returncode != 0:
+        cp = [engine, "cp", f"{box}:{box_src}/.", tmp]
+        if subprocess.run(cp, env=engine_env).returncode != 0:
             _err(f"✗ couldn't read {label.lower()} from {box}:{box_src}.")
             shutil.rmtree(tmp, ignore_errors=True)
             return 1
