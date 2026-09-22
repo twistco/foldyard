@@ -421,10 +421,35 @@ def test_teardown_verbs_do_not_provision_a_missing_machine(
     assert "nothing to stop" in err and "nothing to nuke" in err
 
 
+def test_verbs_that_need_a_running_stack_do_not_boot_a_stopped_machine(
+    fake_repo, capture_run, monkeypatch, capsys
+):
+    # `fy shell` execs into a running app and the supervisor's heal restarts running services —
+    # a stopped VM holds neither, so neither may ensure it (the heal runs HEADLESS on the host).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.setattr(machine, "not_running_reason", lambda: "lima machine 'x' is stopped")
+    ensured: list = []
+    monkeypatch.setattr(machine, "ensure", lambda *a, **k: ensured.append(a))
+    assert stack.shell() == 1
+    assert stack.restart_services(["api"]) == (
+        False,
+        "lima machine 'x' is stopped — nothing to restart",
+    )
+    assert capture_run == [] and ensured == []
+    assert "nothing to exec into" in capsys.readouterr().err
+
+
 def test_engine_reachable_trusts_an_inherited_docker_host(fake_repo, monkeypatch):
     # In the box / CI, DOCKER_HOST is preset — the gate must not consult the machine at all.
     monkeypatch.setattr(machine, "not_running_reason", lambda: "should not be called")
     assert stack.engine_reachable("stop") is True
+
+
+def test_engine_reachable_names_the_verb_that_starts_it(fake_repo, monkeypatch, capsys):
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.setattr(machine, "not_running_reason", lambda: "lima machine 'x' is stopped")
+    assert stack.engine_reachable("attach to", "fy box up") is False
+    assert "nothing to attach to. `fy box up` creates/starts it." in capsys.readouterr().err
 
 
 def test_down_runs_compose_down(fake_repo, capture_run):

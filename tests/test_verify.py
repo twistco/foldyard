@@ -77,6 +77,8 @@ def secure_engine(monkeypatch, tmp_path):
         worktree="",
     )
     monkeypatch.setattr(verify.stack, "resolve", lambda *a, **k: ctx)
+    # The engine is faked, so the machine gate passes (the stopped-VM refusal is tested below).
+    monkeypatch.setattr(verify.stack, "engine_reachable", lambda *a, **k: True)
     monkeypatch.setattr(verify.config, "in_box", lambda: False)  # VM-boundary only by default
     # A real dev box bakes the operator's home; the tests build their tables from Path.home().
     monkeypatch.delenv("FY_HOST_HOME", raising=False)
@@ -109,6 +111,17 @@ def _enter_box(monkeypatch, tmp_path):
 
 
 # ── VM boundary ────────────────────────────────────────────────────────────────────────
+
+
+def test_a_stopped_machine_is_a_refusal_never_booted_or_passed(secure_engine, monkeypatch):
+    # Verify CHECKS the boundary: booting the VM would make the check the thing that changed the
+    # host, and a battery that never ran must not read as a pass.
+    calls, _ = secure_engine
+    resolved: list = []
+    monkeypatch.setattr(verify.stack, "resolve", lambda *a, **k: resolved.append(1))
+    monkeypatch.setattr(verify.stack, "engine_reachable", lambda *a, **k: False)
+    assert verify.verify() == 1
+    assert resolved == [] and calls == []
 
 
 def test_all_pass_returns_0(secure_engine, capsys):

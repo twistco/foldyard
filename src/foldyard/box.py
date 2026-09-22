@@ -1262,6 +1262,13 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         if cmd == "down":
             config.mirror_file().unlink(missing_ok=True)
         return 0
+    if cmd in ("shell", "exec"):
+        # These need the box already RUNNING, which a stopped VM rules out — refuse from the
+        # read-only probe rather than let _ctx() boot the machine only to say "not running".
+        wt = config.active_worktree()
+        if not stack.engine_reachable("attach to", _attach_hint(wt).replace("shell", "up")):
+            # `exec --skip-if-down` is the git-hook path: a down box is its clean no-op.
+            return 0 if cmd == "exec" and "--skip-if-down" in (args or []) else 1
     ctx = _ctx()
     engine = config.engine()
     box, net = _names(ctx)

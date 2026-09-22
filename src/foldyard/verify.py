@@ -495,6 +495,10 @@ def _stack_health(rep: _Report, engine: str, env: dict, project: str) -> None:
 
 
 def verify() -> int:
+    # Verify CHECKS the boundary; it doesn't build one. A stopped VM is a refusal (never a pass),
+    # and booting it here would make the credibility check the thing that changed the host.
+    if not stack.engine_reachable("verify"):
+        return 1
     ctx = stack.resolve()
     engine = config.engine()
     probe = os.environ.get("VERIFY_IMG", "alpine")
