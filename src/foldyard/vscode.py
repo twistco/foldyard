@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -503,18 +504,29 @@ def _reset_markers(engine: str, box: str, env: dict, markers: list[str]) -> bool
     return proc.returncode == 0
 
 
-def _reset_script(paths: str) -> str:
+def _reset_script(paths: str, server_dir: str = ".vscode-server") -> str:
     """The in-box shell for :func:`_reset_markers`: remove ``paths``, then stop the running VS Code
     server. Its exit status is the caller's whole signal — a failed `rm` must fail the script
     (an unconditional trailing `true` once masked it, and with it the retry the caller does),
-    while `pgrep` finding no server (status 1) is the normal case and a success. A server that
-    exits between `pgrep` and `kill` is not a failure either: only a process that is STILL there
-    after a failed `kill` is."""
+    while finding no server is the normal case and a success. A server that exits between the
+    scan and `kill` is not a failure either: only a process that is STILL there after a failed
+    `kill` is.
+
+    The server is found by scanning ``/proc/*/cmdline``, not with `pgrep`: the packaged box
+    image has no procps, so `pgrep` exited 127, the script failed after the `rm`, and every
+    `fy code` on a packaged box warned and left the old config and the old server in place —
+    nothing ever installed. `grep` is in every base image (Debian's Essential set, busybox).
+    The needle is assembled at runtime (``$n/bin/``) so this script's own command line — which
+    `sh -c` puts in /proc — never contains it and can't match itself. ``server_dir`` exists for
+    the tests: the scan is box-wide, so a test running it for real must aim it at a server of its
+    own — with the default it killed the live VS Code server of the box running the suite."""
     return (
         f"rm -f {paths} || exit 1; "
-        "pids=$(pgrep -f '[.]vscode-server/bin'); s=$?; "
-        '[ "$s" -eq 0 ] || [ "$s" -eq 1 ] || exit "$s"; '
-        'for p in $pids; do kill "$p" 2>/dev/null || ! kill -0 "$p" 2>/dev/null || exit 1; done'
+        f"n={shlex.quote(server_dir)}; "
+        "for d in /proc/[0-9]*; do "
+        'grep -qsF "$n/bin/" "$d/cmdline" || continue; p=${d#/proc/}; '
+        'kill "$p" 2>/dev/null || ! kill -0 "$p" 2>/dev/null || exit 1; '
+        "done"
     )
 
 

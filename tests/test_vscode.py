@@ -7,6 +7,7 @@ the launched argv/env shape and the extensions-config plumbing, never opening a 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -471,14 +472,14 @@ def test_a_settings_change_resets_the_machine_settings_marker(fake):
     # …and the box's server is restarted in the same breath: a reset marker is only read during
     # set-up, and an attach that finds the old server running reconnects and skips set-up (seen
     # live: three attaches, zero of seven extensions installed, until the server was restarted).
-    assert _execs(fake["calls"], "rm -f", "vscode-server/bin", "kill")
+    assert _execs(fake["calls"], "rm -f", "n=.vscode-server;", "/proc/[0-9]*", "kill")
     fake["calls"].clear()
     assert vscode.code() == 0  # same settings → the box's copy is current
     assert not _execs(fake["calls"], ".writeMachineSettingsMarker")
     assert not _execs(fake["calls"], "Machine/settings.json")
     # nothing to apply → the running server is left alone (harden.sh's reaper probe is `kill -0`,
-    # so match the reset script's own `pgrep`, not any `kill`)
-    assert not _execs(fake["calls"], "pgrep -f '[.]vscode-server/bin'")
+    # so match the reset script's own /proc scan, not any `kill`)
+    assert not _execs(fake["calls"], "/proc/[0-9]*")
     fake["vscode"]["settings"]["remote.autoForwardPorts"] = False
     assert vscode.code() == 0
     assert _execs(fake["calls"], "rm -f", ".writeMachineSettingsMarker", "Machine/settings.json")
@@ -512,68 +513,81 @@ def test_a_failed_marker_reset_leaves_the_config_unwritten_so_the_next_run_retri
     assert _execs(calls, "rm -f", "Machine/settings.json")
 
 
-def _run_reset_script(tmp_path, pgrep_rc: int, pgrep_out: str = "", rm_target=None):
-    """Run the REAL reset script under `sh` with a fake `pgrep` on PATH (exit ``pgrep_rc``,
-    printing ``pgrep_out``) and return the exit status. ``rm_target`` is the path to remove."""
+# The scan is box-wide, so the tests aim it at a server dir of their own: with the real
+# `.vscode-server` a run inside a dev box killed that box's live VS Code server.
+_TEST_SERVER_DIR = f".vscode-server-fy-test-{os.getpid()}"
+
+
+def _run_reset_script(tmp_path, rm_target=None):
+    """Run the REAL reset script under `sh` and return its exit status. ``PATH`` holds only the
+    system dirs of a Debian box — so a script reaching for a tool the packaged image lacks (it
+    once called `pgrep`, and there is no procps in there) is caught wherever that tool is absent.
+    ``rm_target`` is the path to remove."""
     import subprocess
 
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir(exist_ok=True)
-    pg = fake_bin / "pgrep"
-    pg.write_text(f'#!/bin/sh\nprintf %s "{pgrep_out}"\nexit {pgrep_rc}\n')
-    pg.chmod(0o755)
     target = str(rm_target or tmp_path / "marker")
     return subprocess.run(
-        ["sh", "-c", vscode._reset_script(f'"{target}"')],
-        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        ["sh", "-c", vscode._reset_script(f'"{target}"', _TEST_SERVER_DIR)],
+        env={"PATH": "/usr/bin:/bin"},
     ).returncode
 
 
-@pytest.mark.spawns("sh")  # runs the REAL in-box reset script under sh, with a fake pgrep
+def _fake_server(argv0: str = f"/nonexistent/{_TEST_SERVER_DIR}/bin/0123abcd/node"):
+    """A `sleep` whose command line reads like the box's VS Code server (argv[0] is only the
+    name the child sees; ``executable`` is what runs) — the thing the reset script must find."""
+    import subprocess
+
+    return subprocess.Popen([argv0, "60"], executable="/bin/sleep")
+
+
+@pytest.mark.spawns("sh")  # runs the REAL in-box reset script under sh
 def test_reset_script_propagates_rm_failure_and_treats_no_server_as_success(tmp_path):
     """The script's exit status is `_reset_markers`' whole signal. A trailing `true` once made
     every outcome a success — including a failed `rm`, which then wrote a config saying
-    "applied" with nothing left to retry. So: `rm` failing fails the script; `pgrep` finding no
-    server (1) is the normal case and passes; any other `pgrep` status propagates."""
+    "applied" with nothing left to retry. So: `rm` failing fails the script, and finding no
+    server is the normal case and passes."""
     (tmp_path / "marker").write_text("")
-    assert _run_reset_script(tmp_path, pgrep_rc=1) == 0  # marker removed, no server: fine
+    assert _run_reset_script(tmp_path) == 0  # marker removed, no server: fine
     assert not (tmp_path / "marker").exists()
-    assert _run_reset_script(tmp_path, pgrep_rc=1) == 0  # rm -f of a missing file is still fine
-    assert _run_reset_script(tmp_path, pgrep_rc=3) == 3  # pgrep itself broke → propagated
-    locked = tmp_path / "locked"
-    locked.mkdir()
-    (locked / "marker").write_text("")
-    locked.chmod(0o555)  # rm cannot unlink inside a read-only dir
-    try:
-        assert _run_reset_script(tmp_path, pgrep_rc=1, rm_target=locked / "marker") == 1
-    finally:
-        locked.chmod(0o755)
+    assert _run_reset_script(tmp_path) == 0  # rm -f of a missing file is still fine
+    # A directory: `rm -f` refuses it even as root (the box runs tests as root, where a
+    # read-only parent dir does not stop an unlink).
+    (tmp_path / "a-dir").mkdir()
+    assert _run_reset_script(tmp_path, rm_target=tmp_path / "a-dir") == 1
+
+
+def test_reset_script_needs_no_procps():
+    """The packaged box image has no procps: a `pgrep` in the script exited 127, `fy code`
+    reported the reset failed, and no extension or setting ever landed on a packaged box."""
+    script = vscode._reset_script('"/x"')
+    for tool in ("pgrep", "pkill", "pidof", "ps "):
+        assert tool not in script, tool
+    assert "n=.vscode-server;" in script  # the real server dir by default (tests aim it away)
 
 
 @pytest.mark.spawns("sh", "/bin/sleep")  # the REAL reset script under sh; a sleep as the "server"
-def test_reset_script_kills_the_server_pgrep_reports(tmp_path):
-    """A live process pgrep names is killed; a pid that is already gone is not a failure (the
-    server can exit between `pgrep` and `kill`), and a pid that survives `kill` is."""
+def test_reset_script_kills_the_server_and_nothing_else(tmp_path):
+    """A process whose command line names the server is killed; an unrelated one is left alone,
+    and the script's own `sh -c` (whose text mentions the server dir) never matches itself."""
     import os
     import signal
-    import subprocess
     import time
 
-    sleeper = subprocess.Popen(["/bin/sleep", "60"])
+    server = _fake_server()
+    bystander = _fake_server(f"/nonexistent/{_TEST_SERVER_DIR}-not/bin/node")
     try:
-        assert _run_reset_script(tmp_path, pgrep_rc=0, pgrep_out=str(sleeper.pid)) == 0
+        assert _run_reset_script(tmp_path) == 0
         for _ in range(50):
-            if sleeper.poll() is not None:
+            if server.poll() is not None:
                 break
             time.sleep(0.05)
-        assert sleeper.poll() is not None, "the server pid was not killed"
+        assert server.poll() is not None, "the server was not killed"
+        assert bystander.poll() is None, "a process that is not the server was killed"
     finally:
-        if sleeper.poll() is None:
-            os.kill(sleeper.pid, signal.SIGKILL)
-    gone = subprocess.Popen(["/bin/sleep", "60"])
-    gone.kill()
-    gone.wait()
-    assert _run_reset_script(tmp_path, pgrep_rc=0, pgrep_out=str(gone.pid)) == 0  # already gone
+        for proc in (server, bystander):
+            if proc.poll() is None:
+                os.kill(proc.pid, signal.SIGKILL)
+            proc.wait()
 
 
 def test_user_owned_config_is_never_clobbered(fake, capsys):
