@@ -398,7 +398,8 @@ default_deny = "learn"
   each `{ host = "…", why = "…" }` (or a bare host string). Advisory by construction — the proxy
   never reads it. The host OFFERS each entry, per host, at `fy up`/`fy box up`/`fy host restart`, via
   `fy allow sync`, and in the TUI's Network Log wall pane; the operator answers yes (permanent) /
-  session / not now / never, and the answer lands in the host-side store. This is how a team
+  session / once (15 minutes, for a broad host needed for one build) / not now / never, and the
+  answer lands in the host-side store. This is how a team
   shares its allowlist without giving up host-owned grants: the list rides the branch, and every
   machine still consents host by host. Two properties do the security work — the offer reads the
   **adopted** copy (an in-box edit queues nothing until the operator reviews it at the adoption

@@ -30,7 +30,7 @@ from . import allowlist, config
 MAX_ATTEMPTS = 4
 # `once` sized for a build: the default 120 s can lapse between the grant and the retried step
 # reaching the network again (a cold layer, an apt install before it).
-ONCE_TTL_SECONDS = 900
+ONCE_TTL_SECONDS = allowlist.OFFER_ONCE_SECONDS
 
 _ANSWERS = {"o": "once", "once": "once", "s": "session", "session": "session"}
 _ANSWERS |= {"p": "permanent", "permanent": "permanent"}

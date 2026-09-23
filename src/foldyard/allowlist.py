@@ -43,6 +43,9 @@ from . import config
 
 LEVELS = ("once", "session", "permanent")
 ONCE_TTL_SECONDS = 120  # "allow once" lifetime before it auto-reverts
+# `once` when it's offered ahead of work that takes a while — a recommendation at launch, a host
+# the build gate asks about: the default 120 s can lapse before a build step reaches the network.
+OFFER_ONCE_SECONDS = 900
 LEARN_DEFAULT_SECONDS = 3600  # a learn window's length unless the operator says otherwise
 LEARN_MAX_SECONDS = 8 * 3600  # an open wall is a lapse, not a posture — devmode.MAX_TTL's cap
 
@@ -772,10 +775,10 @@ def offer_recommendations(
     shared allowlist safe. Returns ``{granted, declined, deferred}`` counts.
 
     Per host: ``[y]es`` grants PERMANENT (the team-baseline intent), ``[s]ession`` until the
-    supervisor restarts, ``[n]ot now`` (the default — asked again next launch), ``ne[v]er``
-    records a decline. In the box it is a no-op (grants are host-side only). Injected
-    ``prompt``/``echo``
-    like ``configpin.resolve`` — tests drive it with no real stdin.
+    supervisor restarts, ``[o]nce`` for :data:`OFFER_ONCE_SECONDS` (a broad host needed for one
+    build — it is offered again once it lapses), ``[n]ot now`` (the default — asked again next
+    launch), ``ne[v]er`` records a decline. In the box it is a no-op (grants are host-side only).
+    Injected ``prompt``/``echo`` like ``configpin.resolve`` — tests drive it with no real stdin.
 
     ``accept_all`` grants every pending host permanently WITHOUT asking — the unattended path
     (`fy allow sync --yes`), for a first box-up with no terminal to answer on. It is a separate,
@@ -808,7 +811,7 @@ def offer_recommendations(
         answer = (
             prompt(
                 f"  allow {e['host']}{why}?  [y]es permanent · [s]ession · "
-                f"[n]ot now (default) · ne[v]er: "
+                f"[o]nce ({OFFER_ONCE_SECONDS // 60} min) · [n]ot now (default) · ne[v]er: "
             )
             .strip()
             .lower()
@@ -823,6 +826,13 @@ def offer_recommendations(
         elif answer in ("s", "session"):
             grant(e["host"], "session")
             echo(f"  ✓ {e['host']} allowed (session — until the supervisor restarts)")
+            counts["granted"] += 1
+            counts["deferred"] -= 1
+        elif answer in ("o", "once"):
+            grant(e["host"], "once", OFFER_ONCE_SECONDS)
+            echo(
+                f"  ✓ {e['host']} allowed (once — {OFFER_ONCE_SECONDS // 60} min, then asked again)"
+            )
             counts["granted"] += 1
             counts["deferred"] -= 1
         elif answer in ("v", "never"):

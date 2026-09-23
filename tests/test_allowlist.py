@@ -662,3 +662,19 @@ def test_with_recommends_refuses_what_it_cannot_edit_safely():
     # Anything it can't prove is a pure append comes back None; the caller prints the block.
     assert allowlist.with_recommends("[proxy\nbroken", _NEW) is None
     assert allowlist.with_recommends('[proxy]\nrecommend = "not a list"\n', _NEW) is None
+
+
+def test_offer_can_grant_once_for_a_broad_host(env):
+    # A recommendation like storage.googleapis.com covers every GCS bucket: a teammate who needs
+    # it for one build answers `once` — long enough for that build, then it lapses. It's still a
+    # pending recommendation afterwards, so the next launch asks again.
+    _recommend(env, '["storage.googleapis.com"]')
+    prompt, echo, _lines = _offer(["o"])
+    counts = allowlist.offer_recommendations(interactive=True, prompt=prompt, echo=echo)
+    assert counts == {"granted": 1, "declined": 0, "deferred": 0}
+    grant = next(g for g in allowlist.grants() if g["host"] == "storage.googleapis.com")
+    assert grant["level"] == "once"
+    from datetime import UTC, datetime, timedelta
+
+    left = datetime.fromisoformat(grant["expires"]) - datetime.now(UTC)
+    assert left >= timedelta(seconds=allowlist.OFFER_ONCE_SECONDS - 5)
