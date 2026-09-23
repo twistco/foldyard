@@ -813,15 +813,14 @@ def test_expiry_settles_stranded_dependents(isolated_state):
     # gcp lapsing under llm=record used to strand llm on an error combination (real Vertex
     # calls with no identity — only failure possible) until the next interactive `fy mode`.
     # The expiry write must cascade the dependent down IN THE SAME atomic write.
-    import json as _json
     from datetime import timedelta
 
     from foldyard import devmode
 
     devmode.set_mode({"gcp": "sa", "llm": "record"})
-    raw = _json.loads(isolated_state["auth"].read_text())
+    raw = json.loads(isolated_state["auth"].read_text())
     raw["expires"]["gcp"] = devmode._iso(devmode.now() - timedelta(hours=1))
-    isolated_state["auth"].write_text(_json.dumps(raw))
+    isolated_state["auth"].write_text(json.dumps(raw))
 
     mode = supervisor.expire_user_modes()
 
@@ -836,15 +835,14 @@ def test_expiry_settles_stranded_dependents(isolated_state):
 def test_expiry_without_dependents_reverts_only_the_lapsed_axis(isolated_state):
     # github=app is genuinely UNRELATED to gcp (no mode_issues link) — it must survive the
     # gcp expiry untouched, proving the settle cascade only reaches actual dependents.
-    import json as _json
     from datetime import timedelta
 
     from foldyard import devmode
 
     devmode.set_mode({"gcp": "user", "github": "app"}, ttl=60)
-    raw = _json.loads(isolated_state["auth"].read_text())
+    raw = json.loads(isolated_state["auth"].read_text())
     raw["expires"]["gcp"] = devmode._iso(devmode.now() - timedelta(hours=1))
-    isolated_state["auth"].write_text(_json.dumps(raw))
+    isolated_state["auth"].write_text(json.dumps(raw))
     mode = supervisor.expire_user_modes()
     assert mode["gcp"] == "off" and mode["github"] == "app"  # unrelated raised axis kept
 
@@ -918,9 +916,7 @@ def test_write_capabilities_skips_creating_an_empty_file(tmp_path, monkeypatch):
     supervisor.write_capabilities({"": {"gcp": {"ok": True, "detail": "ok", "checked": "t"}}})
     assert caps_file.exists()
     supervisor.write_capabilities({"": {}})  # rung back at default → cleared, not lingering
-    import json as _json
-
-    assert _json.loads(caps_file.read_text()) == {"": {}}
+    assert json.loads(caps_file.read_text()) == {"": {}}
 
 
 # ── the per-daemon lifecycle decision (consolidation proposal D) ─────────────────────────
@@ -1064,9 +1060,7 @@ def test_heal_edge_spanning_a_supervisor_restart_still_fires(monkeypatch, tmp_pa
     # the heal edge must still fire, or the resnapshot never happens exactly when it matters.
     caps_file = tmp_path / "capabilities.json"
     monkeypatch.setenv("FOLDYARD_CAPABILITIES_FILE", str(caps_file))
-    import json as _json
-
-    caps_file.write_text(_json.dumps({"": {"gcp": _bad()}}))
+    caps_file.write_text(json.dumps({"": {"gcp": _bad()}}))
     edges = supervisor._advance_capability_baseline({"": {"gcp": _ok("healed")}})
     assert edges == [("", "gcp", True, "healed")]
     # The baseline advanced: the same map again is stable → no repeat edge each tick.
@@ -1589,3 +1583,117 @@ def test_the_verbs_refuse_in_the_box(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(supervisor.devmode, "in_box", lambda: True)
     assert supervisor.status() == 1 and supervisor.restart() == 1 and supervisor.logs() == 1
     assert spawns == [] and "runs on the host" in capsys.readouterr().err
+
+
+# ── the proxy's live settings: written, not restarted for ────────────────────────────────
+
+
+def _live_spec(tmp_path, data: dict, *, label: str = "egress proxy") -> dict:
+    return {
+        "cmd": ["proxy"],
+        "env": {"LIVE_FILE": str(tmp_path / "proxy-live.json")},
+        "live": {"path": str(tmp_path / "proxy-live.json"), "data": data},
+        "requires": [],
+        "port": None,
+        "label": label,
+    }
+
+
+def test_sync_live_writes_the_file_whole_and_only_on_change(tmp_path, capsys):
+    spec = _live_spec(tmp_path, {"rules": [], "default_deny": True, "passthrough": []})
+    path = tmp_path / "proxy-live.json"
+    assert supervisor._sync_live("egress-proxy", spec, running=False) is True
+    assert json.loads(path.read_text())["default_deny"] is True
+    inode = path.stat().st_ino
+    assert supervisor._sync_live("egress-proxy", spec, running=True) is False  # unchanged: no write
+    assert path.stat().st_ino == inode
+    spec["live"]["data"]["default_deny"] = False
+    assert supervisor._sync_live("egress-proxy", spec, running=True) is True
+    assert path.stat().st_ino != inode  # renamed into place, never rewritten under the reader
+    assert not list(tmp_path.glob("*.tmp"))
+    # A change reaching a RUNNING proxy is reported: the "started …" line no longer says it.
+    assert "egress-proxy settings updated" in capsys.readouterr().out
+
+
+def test_a_posture_change_rewrites_the_live_file_and_keeps_the_proxy(monkeypatch, tmp_path):
+    # THE regression: a mode switch restarted mitmdump and cut an apt download mid-package. Now a
+    # change confined to the live settings reaches the running proxy through the file.
+    specs = iter(
+        [
+            _live_spec(
+                tmp_path, {"rules": [{"host": "a"}], "default_deny": True, "passthrough": []}
+            ),
+            _live_spec(tmp_path, {"rules": [], "default_deny": True, "passthrough": []}),
+        ]
+    )
+    current: dict = {}
+    events: list[str] = []
+
+    class FakeChild:
+        def __init__(self, name, spec):
+            self.name, self.spec = name, spec
+            self.signature = repr((spec["cmd"], sorted(spec["env"].items())))
+            self.started_at = 0.0
+            self.proc = types.SimpleNamespace(returncode=None)
+            events.append(f"start:{name}")
+
+        def alive(self):
+            return True
+
+        def stop(self):
+            events.append(f"stop:{self.name}")
+
+    def desired(mode):
+        current["spec"] = next(specs)
+        return {"egress-proxy": current["spec"]}
+
+    monkeypatch.setattr(supervisor, "_stamp_heartbeat", lambda: None)
+    monkeypatch.setattr(supervisor, "load_host_env", lambda: None)
+    monkeypatch.setattr(supervisor.allowlist, "sweep", lambda: None)
+    monkeypatch.setattr(supervisor.githeal, "sweep", lambda log: None)
+    monkeypatch.setattr(supervisor.devmode, "up_worktrees", lambda: [""])
+    monkeypatch.setattr(supervisor.devmode, "worktree_config", _fake_cfg)
+    monkeypatch.setattr(supervisor, "expire_user_modes", lambda: {})
+    monkeypatch.setattr(supervisor.devmode, "desired_daemons", desired)
+    monkeypatch.setattr(supervisor.devmode, "env_defaults", lambda mode: {})
+    monkeypatch.setattr(supervisor.devmode, "read", lambda: {"expires": {}})
+    monkeypatch.setattr(supervisor.devmode, "daemon_status", lambda mode: {})
+    monkeypatch.setattr(supervisor.devmode, "write_mirror", lambda *a, **k: None)
+    monkeypatch.setattr(supervisor, "Child", FakeChild)
+
+    children: dict = {}
+    supervisor.reconcile_once(children, {})
+    live = tmp_path / "proxy-live.json"
+    assert json.loads(live.read_text())["rules"] == [{"host": "a"}]  # written BEFORE the spawn
+    supervisor.reconcile_once(children, {})
+    assert events == ["start:egress-proxy"]  # never stopped
+    assert json.loads(live.read_text())["rules"] == []
+
+
+def test_a_scrubbing_daemon_runs_without_host_env_keys(monkeypatch, tmp_path):
+    # The supervisor's environment carries every axis's host.env secret. The proxy reads the names
+    # its rules declare from host.env itself, so its process gets none of them; an operator's own
+    # export (ambient) stays, since it wins over host.env for the addon too.
+    host_env = tmp_path / "host.env"
+    host_env.write_text("SECRET_ONE=s1\nAMBIENT_TWO=from-file\n")
+    monkeypatch.setattr(supervisor.config, "host_env_file", lambda: host_env)
+    monkeypatch.setenv("AMBIENT_TWO", "exported")
+    monkeypatch.delenv("SECRET_ONE", raising=False)
+    monkeypatch.setattr(supervisor, "_host_env_ambient", None)
+    monkeypatch.setattr(supervisor, "_host_env_loaded", set())
+    supervisor.load_host_env()
+    assert supervisor.os.environ["SECRET_ONE"] == "s1"
+
+    seen: list[dict] = []
+
+    def fake_popen(cmd, env: dict, **_):
+        seen.append(env)
+        return types.SimpleNamespace(pid=1, poll=lambda: None)
+
+    monkeypatch.setattr(supervisor.subprocess, "Popen", fake_popen)
+    spec = {"cmd": ["proxy"], "env": {"X": "1"}, "label": "p", "scrub_host_env": True}
+    supervisor.Child("egress-proxy", spec)
+    assert "SECRET_ONE" not in seen[-1] and seen[-1]["AMBIENT_TWO"] == "exported"
+    assert seen[-1]["X"] == "1"
+    supervisor.Child("gcp-minter", {**spec, "scrub_host_env": False})
+    assert seen[-1]["SECRET_ONE"] == "s1"  # a daemon that reads its secrets from env keeps them

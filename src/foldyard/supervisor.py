@@ -635,6 +635,9 @@ def _spawn() -> int | None:
 # captured AFTER the supervisor started, or a rotated secret — without ever clobbering that ambient
 # override. A fresh `foldyard host` process starts with this None, so it snapshots its own env.
 _host_env_ambient: frozenset[str] | None = None
+# Every key a load put into os.environ FROM host.env (never shrinks: a key dropped from the file
+# keeps its stale value in os.environ, and must stay stripped). What `scrub_host_env` removes.
+_host_env_loaded: set[str] = set()
 
 
 def load_host_env() -> None:
@@ -663,6 +666,7 @@ def load_host_env() -> None:
         if key in _host_env_ambient:
             continue  # an operator-exported var wins over host.env (original setdefault semantics)
         os.environ[key] = value.strip().strip("'\"")
+        _host_env_loaded.add(key)
 
 
 def _stage(pairs: list[tuple[str, str]]) -> None:
@@ -687,7 +691,14 @@ class Child:
         self.signature = repr((spec["cmd"], sorted(spec["env"].items())))
         self.started_at = time.monotonic()
         _stage(spec.get("stage", []))  # snapshot e.g. the proxy addon to its stable launch path
-        self.proc = subprocess.Popen(spec["cmd"], env={**os.environ, **spec["env"]})
+        env = dict(os.environ)
+        if spec.get("scrub_host_env"):
+            # A daemon that reads its secrets from host.env by NAME (the proxy) runs without the
+            # values host.env put in OUR environment — every axis's secret, which it has no use
+            # for as env and which would otherwise sit in its process environment.
+            for key in _host_env_loaded:
+                env.pop(key, None)
+        self.proc = subprocess.Popen(spec["cmd"], env={**env, **spec["env"]})
         log(f"started {name} (pid {self.proc.pid}): {spec['label']}")
 
     def alive(self) -> bool:
@@ -1244,6 +1255,9 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
 
     blocked_now: dict[str, str] = {}
     for name, spec in desired.items():
+        # BEFORE the step: a spawn must find its live settings, and a running daemon picks a
+        # change up from the file — the change that used to be a restart (see _sync_live).
+        _sync_live(name, spec, running=name in children)
         step = _child_step(children.get(name), spec)
         if step in (ChildStep.KEEP, ChildStep.BACKOFF):
             continue
@@ -1257,6 +1271,33 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
         if reason:
             blocked_now[name] = reason
     _publish_blocked(blocked_now, {name: spec["label"] for name, spec in desired.items()})
+
+
+def _sync_live(name: str, spec: dict, *, running: bool) -> bool:
+    """Write ``spec["live"]`` — the settings a daemon re-reads without restarting (the proxy's
+    rules, wall and passthrough) — when it differs from the file; True when it wrote. Whole, then
+    renamed into place, so the reader sees the old file or the new one and never half of either.
+
+    Reported when it reaches a RUNNING daemon: a posture change used to show up as a restart line
+    naming the new label, and a change that happens silently is the "my change did nothing"
+    mystery the adopted-config tick already refuses to create."""
+    live = spec.get("live")
+    if not live:
+        return False
+    path = Path(live["path"])
+    text = json.dumps(live["data"], indent=2, sort_keys=True) + "\n"
+    try:
+        if path.read_text() == text:
+            return False
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+    if running:
+        log(f"{name} settings updated — {spec.get('label', '')} (no restart)")
+    return True
 
 
 class ChildStep(enum.Enum):
