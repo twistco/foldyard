@@ -730,6 +730,37 @@ def test_github_declares_its_pem_secret_only_on_the_app_rung(monkeypatch, tmp_pa
     assert "PRIVATE KEY" in secret.pattern
 
 
+def test_keyless_agents_declare_their_credential_only_when_on(monkeypatch):
+    # Turning `claude`/`codex` on is the moment the proxy needs the real credential, so it's
+    # declared as a Secret there — the TUI modal and `fy mode`'s prompt then ask for it, instead
+    # of the mode going on silently with nothing to inject until the next `fy box up`.
+    monkeypatch.setattr(config, "claude_keyless", lambda: "api-key")
+    monkeypatch.setattr(config, "codex_keyless", lambda: "api-key")
+    assert claude.ClaudePlugin().secrets({"claude": "off"}) == []
+    (secret,) = claude.ClaudePlugin().secrets({"claude": "on"})
+    assert secret.var == "ANTHROPIC_API_KEY" and secret.pattern == "sk-ant-api*"
+    assert "console.anthropic.com" in secret.how
+    (secret,) = codex.CodexPlugin().secrets({"codex": "on"})
+    assert secret.var == "OPENAI_API_KEY" and secret.pattern == "sk-*"
+    monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
+    (secret,) = claude.ClaudePlugin().secrets({"claude": "on"})
+    assert secret.var == "CLAUDE_CODE_OAUTH_TOKEN" and secret.pattern == "sk-ant-oat*"
+    # ChatGPT mode's credential is the host's ~/.codex/auth.json, not a host.env var
+    monkeypatch.setattr(config, "codex_keyless", lambda: "chatgpt")
+    assert codex.CodexPlugin().secrets({"codex": "on"}) == []
+    monkeypatch.setattr(config, "claude_keyless", lambda: "")
+    assert claude.ClaudePlugin().secrets({"claude": "on"}) == []  # not configured: no axis at all
+
+
+@pytest.mark.parametrize(
+    "taxonomy", [keyless.CLAUDE_KEYLESS, keyless.CODEX_KEYLESS], ids=["claude", "codex"]
+)
+def test_keyless_prefix_agrees_with_the_classifier(taxonomy):
+    # the Secret's glob and box-up's prefix classifier must accept the same pastes
+    for spec in taxonomy.values():
+        assert keyless.classify(spec["prefix"] + "x")[0] == spec["env"]
+
+
 def test_github_pem_hint_defaults_generic_and_yields_to_the_consumer(
     fresh_config, monkeypatch, tmp_path
 ):
@@ -2025,6 +2056,16 @@ def test_inject_axis_from_config(monkeypatch):
     ax = axes[0]
     assert ax.name == "penpot" and ax.rungs == ("off", "on") and ax.daemon == "egress-proxy"
     assert ax.emergency == ()  # a plain injector axis carries no TTL'd emergency rung
+
+
+def test_inject_declares_its_derived_token_only_when_on(monkeypatch):
+    # the token var is derived, so nothing else would ever ask for it: without this the axis goes
+    # on and the proxy has nothing to inject
+    plugin = _inject_plugin(monkeypatch, [_PENPOT_SPEC])
+    assert plugin.secrets({"penpot": "off"}) == []
+    (secret,) = plugin.secrets({"penpot": "on"})
+    assert secret.var == "FY_INJECT_PENPOT"
+    assert "truenas.example.ts.net" in secret.label  # the operator sees who receives it
 
 
 def test_inject_rule_built_for_query_param_token_env(monkeypatch):

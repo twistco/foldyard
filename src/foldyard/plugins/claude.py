@@ -39,7 +39,7 @@ from pathlib import Path
 from .. import config, keyless
 from ..keyless import CLAUDE_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CLAUDE_KEYLESS_HOST as _KEYLESS_HOST
-from . import Axis, InjectRule, Plugin
+from . import Axis, InjectRule, Plugin, Secret
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
 
 # Remove a stale npm/global Claude so the native installer's ~/.local/bin copy wins on PATH (an
@@ -102,6 +102,22 @@ class ClaudePlugin(Plugin):
         spec = keyless.inject_spec(_KEYLESS, _KEYLESS_HOST, kind, f"Claude keyless proxy ({kind})")
         rule = _spec_to_rule(spec) if spec else None
         return [rule] if rule else []
+
+    def secrets(self, mode: dict) -> list[Secret]:
+        # The moment the axis goes on is when the proxy needs the real credential, so it's asked
+        # for there (the TUI modal / `fy mode`'s prompt); box-up's capture stays the backstop.
+        kind = config.claude_keyless()
+        spec = _KEYLESS.get(kind)
+        if not spec or mode.get("claude", "off") == "off":
+            return []
+        return [
+            Secret(
+                var=spec["env"],
+                label=f"Claude keyless credential ({kind})",
+                how=spec["how"],
+                pattern=spec["prefix"] + "*",
+            )
+        ]
 
     def derive_env(self, mode: dict) -> dict[str, str]:
         # A claude-owned marker so the box's DUMMY key is baked ONLY when the injector is active —

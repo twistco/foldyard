@@ -44,7 +44,8 @@ CLAUDE_KEYLESS_HOST = "api.anthropic.com"
 #   oauth    — ``sk-ant-oat…`` tokens (≈1yr, no refresh → static injection): the client sends
 #              ``authorization: Bearer <token>`` (+ auto ``anthropic-beta``), so prepend Bearer.
 # ``how`` is the one-line "where do I get this?" hint echoed at the capture prompt (below) — so a
-# first-timer isn't left guessing what to paste.
+# first-timer isn't left guessing what to paste. ``prefix`` is what a real value starts with: the
+# Secret the agent plugin declares globs on it, and it must agree with ``_CLASSIFY`` below.
 CLAUDE_KEYLESS: dict[str, dict[str, str]] = {
     "api-key": {
         "env": "ANTHROPIC_API_KEY",
@@ -52,6 +53,7 @@ CLAUDE_KEYLESS: dict[str, dict[str, str]] = {
         "dummy": "sk-ant-dummy",
         "value_prefix": "",
         "how": "create one at https://console.anthropic.com/settings/keys",
+        "prefix": "sk-ant-api",
     },
     "oauth": {
         "env": "CLAUDE_CODE_OAUTH_TOKEN",
@@ -59,6 +61,7 @@ CLAUDE_KEYLESS: dict[str, dict[str, str]] = {
         "dummy": "sk-ant-oat-dummy",
         "value_prefix": "Bearer ",
         "how": "run `claude setup-token` on the Mac to mint one",
+        "prefix": "sk-ant-oat",
     },
 }
 
@@ -74,6 +77,7 @@ CODEX_KEYLESS: dict[str, dict[str, str]] = {
         "dummy": "sk-dummy",
         "value_prefix": "Bearer ",
         "how": "create one at https://platform.openai.com/api-keys",
+        "prefix": "sk-",
     },
 }
 

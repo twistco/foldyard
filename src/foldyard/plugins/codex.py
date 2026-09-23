@@ -44,7 +44,7 @@ from pathlib import Path
 from .. import config, keyless
 from ..keyless import CODEX_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CODEX_KEYLESS_HOST as _KEYLESS_HOST
-from . import Axis, InjectRule, Plugin
+from . import Axis, InjectRule, Plugin, Secret
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
 
 # Remove a stale npm-managed Codex so the native installer's ~/.local/bin copy wins on PATH (the
@@ -120,6 +120,22 @@ class CodexPlugin(Plugin):
         spec = keyless.inject_spec(_KEYLESS, _KEYLESS_HOST, kind, f"Codex keyless proxy ({kind})")
         rule = _spec_to_rule(spec) if spec else None
         return [rule] if rule else []
+
+    def secrets(self, mode: dict) -> list[Secret]:
+        # As claude's: asked for when the axis goes on. ChatGPT mode has no entry here — its
+        # credential is the host's ~/.codex/auth.json, not a host.env var.
+        kind = config.codex_keyless()
+        spec = _KEYLESS.get(kind)
+        if not spec or mode.get("codex", "off") == "off":
+            return []
+        return [
+            Secret(
+                var=spec["env"],
+                label=f"Codex keyless credential ({kind})",
+                how=spec["how"],
+                pattern=spec["prefix"] + "*",
+            )
+        ]
 
     def derive_env(self, mode: dict) -> dict[str, str]:
         # A codex-owned marker recording the rung in the box env, like github's GH_INJECT. Nothing

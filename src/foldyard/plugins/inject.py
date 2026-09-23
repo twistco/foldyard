@@ -53,7 +53,7 @@ import shlex
 import sys
 
 from .. import config
-from . import Axis, InjectRule, Plugin
+from . import Axis, InjectRule, Plugin, Secret
 
 
 class InjectPlugin(Plugin):
@@ -112,6 +112,22 @@ class InjectPlugin(Plugin):
             if rule is not None:
                 rules.append(rule)
         return rules
+
+    def secrets(self, mode: dict) -> list[Secret]:
+        # The var is derived, so nothing else would ever ask for it: declared here, an axis going
+        # on prompts for its token (a `[[secret]]` row naming the var can still retarget the hint).
+        out: list[Secret] = []
+        for spec in self._specs():
+            axis = spec.get("axis")
+            if not axis or mode.get(str(axis), "off") == "off":
+                continue
+            out.append(
+                Secret(
+                    var=token_var(str(axis)),
+                    label=f"{axis} token (injected on {spec.get('host', '?')})",
+                )
+            )
+        return out
 
 
 def token_var(axis: str) -> str:
