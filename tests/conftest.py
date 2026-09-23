@@ -139,6 +139,8 @@ def isolated_allow_store(tmp_path, monkeypatch):
     posture itself: `allowlist.grant(...)` / `allowlist.set_wall(...)` into this isolated store.)"""
     monkeypatch.setenv("FOLDYARD_ALLOW_STORE", str(tmp_path / "allow-store.json"))
     monkeypatch.setenv("FOLDYARD_ALLOW_FILE", str(tmp_path / "allow-effective.json"))
+    # The build gate's per-build secrets (hashes): a build test must never write the real one.
+    monkeypatch.setenv("FOLDYARD_BUILD_TOKENS", str(tmp_path / "build-tokens.json"))
 
 
 @pytest.fixture(autouse=True)

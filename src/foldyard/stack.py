@@ -439,6 +439,7 @@ def _redact_build_args(cmd: list[str]) -> list[str]:
 
 def _podman_build(
     ctx: Context,
+    build_proxy: str | None,
     *,
     extra_profiles: list[str] | None = None,
     services: list[str] | None = None,
@@ -511,10 +512,6 @@ def _podman_build(
         # `platform` (compose's own precedence). Part of the group key below so services with
         # identical build mappings but different targets never share one image.
         return ",".join(svc["build"].get("platforms") or []) or svc.get("platform") or ""
-
-    from .plugins import proxy  # lazy: keep the registry-load hot path import-light
-
-    build_proxy = proxy.build_proxy_url()
 
     def build_one(group: list[tuple[str, dict]], log) -> tuple[str, int]:
         name, svc = group[0]
@@ -663,8 +660,12 @@ def _build(
 
     if config.engine() == "podman":
         return buildgate.run(
-            lambda: _podman_build(
-                ctx, extra_profiles=extra_profiles, services=services, superseded=superseded
+            lambda proxy_url: _podman_build(
+                ctx,
+                proxy_url,
+                extra_profiles=extra_profiles,
+                services=services,
+                superseded=superseded,
             ),
             what="stack build",
         )

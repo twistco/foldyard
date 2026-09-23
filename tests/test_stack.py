@@ -768,8 +768,10 @@ def test_walled_stack_build_is_a_trusted_build(fake_repo, monkeypatch):
     assert stack.build([]) == 0
     build = next(c for c in calls if len(c) >= 2 and c[1] == "build")
     args = [build[i + 1] for i, tok in enumerate(build) if tok == "--build-arg"]
-    url = proxy.build_proxy_url()
-    assert url and f"https_proxy={url}" in args and f"HTTPS_PROXY={url}" in args
+    marker = f"http://{proxy.BUILD_TUNNEL_USER}:"
+    assert any(a.startswith(f"https_proxy={marker}") for a in args)
+    assert any(a.startswith(f"HTTPS_PROXY={marker}") for a in args)
+    assert f"https_proxy={proxy.build_proxy_url()}" not in args  # a secret, not the bare marker
     assert args[-1] == "HTTPS_PROXY=mine"
 
 
@@ -792,7 +794,7 @@ def test_stack_builds_run_under_the_build_gate(fake_repo, monkeypatch):
 
     def fake_gate(build, *, what, **_):
         gated.append(what)
-        return build()
+        return build(None)
 
     monkeypatch.setattr(buildgate, "run", fake_gate)
     _run_returning(monkeypatch, json.dumps({"services": {"app": {"build": {"context": "/a"}}}}))

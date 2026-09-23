@@ -116,9 +116,17 @@ When the wall refuses a build, the tool's error names the URL it *asked* for, wh
 the host that was refused: a CDN redirects inside the tunnel (Playwright's `cdn.playwright.dev`
 sends browser downloads to `storage.googleapis.com`). So the build reports the refused hosts
 itself. On the host, with a terminal, it asks about each one — once (15 minutes, long enough for
-the build), session, permanent or no — then builds again. The layer cache makes that cheap, and a
+the build), session, permanent or no — then builds again. **What you grant there is for builds
+only**: the box can't use it, so the runtime wall stays as narrow as before. A build proves it is
+one with a secret the gate mints for that build (the password in its proxy URL, recorded
+host-side only as a hash, revoked when the build ends); the public `fy-build` marker still gets a
+build tunnelled but unlocks no build grant, so neither the box nor an in-box build can present
+one. `fy allow add <host> --build` makes the same kind of grant by hand, and `fy allow list`
+shows them apart. The layer cache makes that cheap, and a
 redirect chain gets one hop further per attempt. It then offers to add whatever you granted to
-`foldyard.toml`'s `[proxy] recommend`, so the team is offered it at their own `fy up`. The edit
+`foldyard.toml`'s `[proxy] recommend` as `when = "build"` entries. Those aren't offered at `fy up`
+(where every launch would ask about a host only a build needs); a teammate's build gate offers
+them, with their `why`, when their build is refused. The edit
 keeps the file's comments. It is adopted at once if the checkout matched what the host runs
 (the edit is then yours alone); otherwise it waits for the adoption gate like any other change.
 Each `why` records what was *seen*: reword it before you commit. Without a terminal it prints the

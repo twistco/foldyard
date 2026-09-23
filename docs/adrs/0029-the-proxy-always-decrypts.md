@@ -97,7 +97,12 @@ belongs in the middle — but *one* middle, not a switch between two.
   concession, which ADR-0009 already classes as not enforcement. The stack's own image builds
   (`fy up`/`fy build`, the native podman path) carry the marker too; the running stack's
   containers take the VM's unmarked proxy env and stay decrypted. A refused build is reported and
-  offered host by host, then retried (`foldyard.buildgate`; docs/networking.md).
+  offered host by host, then retried (`foldyard.buildgate`; docs/networking.md). Grants made there
+  are **build-scoped**: the proxy honours them only for a connection presenting a live per-build
+  secret the gate mints (hashed host-side, revoked when the build ends), so the runtime wall stays
+  narrower and the public marker unlocks none of them. The residual: during a build, the box could
+  inspect the build container through the engine socket and read that build's secret — a window of
+  one build, where a fixed marker would be permanent.
 - **The egress log grows**: a request row per request rather than a row per connection, and full
   paths — query strings included — on the host. The log stays outside the mount and rotation
   bounds it (5 MiB × 6 by default). A token carried in a URL now lands there; the `query_param`

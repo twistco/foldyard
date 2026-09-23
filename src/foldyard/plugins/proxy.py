@@ -44,14 +44,17 @@ from ._passthrough_bundles import BUNDLES
 BUILD_TUNNEL_USER = "fy-build"
 
 
-def build_proxy_url() -> str | None:
+def build_proxy_url(token: str | None = None) -> str | None:
     """The proxy URL an image build should use, or ``None`` when builds don't route through the
     proxy (no in-VM wall ⇒ they egress directly, as they always have). The MAIN proxy port, like
-    the wall's own VM-level proxy env: building isn't per-worktree."""
+    the wall's own VM-level proxy env: building isn't per-worktree. ``token`` — the build's secret
+    from the build gate — goes in the password; it is what unlocks build-scoped grants. Without
+    it the build still tunnels, on runtime grants only."""
     if not config.machine_wall():
         return None
     user = BUILD_TUNNEL_USER
-    return f"http://{user}:{user}@{config.LIMA_HOST_GATEWAY}:{config.proxy_port_base()}"
+    password = token or user
+    return f"http://{user}:{password}@{config.LIMA_HOST_GATEWAY}:{config.proxy_port_base()}"
 
 
 def mitmdump_path() -> str | None:
@@ -368,6 +371,8 @@ class ProxyPlugin(Plugin):
             "ALLOW_FILE": str(config.allow_effective_file()),
             "LIVE_FILE": str(_live_file()),
             "HOST_ENV_FILE": str(config.host_env_file()),
+            # The hashes of the live build secrets (buildgate): what unlocks build-scoped grants.
+            "BUILD_TOKENS_FILE": str(config.build_tokens_file()),
         }
         live = {
             "rules": [_rule_to_json(r) for r in rules],

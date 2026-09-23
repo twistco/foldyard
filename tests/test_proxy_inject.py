@@ -1125,12 +1125,13 @@ def test_mint_subprocess_really_cannot_see_undeclared_secrets(gh, monkeypatch, t
 # ── trusted builds: the build marker blind-tunnels, still walled ──────────────────────
 
 
-def _marked(flow: _Flow, user: str = "fy-build") -> _Flow:
-    """Mark a flow the way a build's proxy URL (`http://fy-build:fy-build@gw:port`) does: clients
-    turn the URL's userinfo into a Basic Proxy-Authorization header on the CONNECT."""
+def _marked(flow: _Flow, user: str = "fy-build", password: str | None = None) -> _Flow:
+    """Mark a flow the way a build's proxy URL (`http://fy-build:<secret>@gw:port`) does: clients
+    turn the URL's userinfo into a Basic Proxy-Authorization header on the CONNECT. No password:
+    the bare marker (`fy-build:fy-build`)."""
     import base64
 
-    token = base64.b64encode(f"{user}:{user}".encode()).decode()
+    token = base64.b64encode(f"{user}:{password or user}".encode()).decode()
     flow.request.headers["Proxy-Authorization"] = f"Basic {token}"
     return flow
 
@@ -1704,3 +1705,98 @@ def test_a_new_learn_window_resets_the_would_block_limit(live):
         if r.get("would_block")
     ]
     assert len(rows) == 2
+
+
+# ── build-scoped grants: only a build the host started can use them ─────────────────────
+
+
+def _write_tokens(path: Path, *secrets: str, expired: bool = False) -> None:
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    when = datetime.now(UTC) + timedelta(hours=-1 if expired else 1)
+    tokens = {hashlib.sha256(t.encode()).hexdigest(): when.isoformat() for t in secrets}
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"tokens": tokens}))
+    tmp.replace(path)
+
+
+@pytest.fixture
+def build_walled(walled, monkeypatch, tmp_path):
+    """The walled Injector with a build-only grant for cdn.example.com and a live build secret."""
+    _inj, allow, log = walled  # a fresh Injector per test reads the files below
+    tokens = tmp_path / "build-tokens.json"
+    _write_tokens(tokens, "s3cret")
+    monkeypatch.setenv("BUILD_TOKENS_FILE", str(tokens))
+    allow.write_text(
+        json.dumps({"default_deny": True, "allow": [], "build_allow": ["cdn.example.com"]})
+    )
+    return types.SimpleNamespace(tokens=tokens, allow=allow, log=log)
+
+
+def _connect(inj, host: str, **mark) -> _Flow:
+    flow = _Flow(host)
+    if mark:
+        _marked(flow, **mark)
+    flow.response = None
+    inj.http_connect(flow)
+    return flow
+
+
+def _refused(flow: _Flow) -> bool:
+    return flow.response is not None and flow.response.status_code == 403
+
+
+def test_a_build_with_its_secret_reaches_a_build_only_host(gh, build_walled):
+    inj = gh.Injector()
+    assert _connect(inj, "cdn.example.com", password="s3cret").response is None
+    hello = _ClientHello("cdn.example.com")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is True  # and it is tunnelled, as any build is
+
+
+def test_the_box_cannot_reach_a_build_only_host(gh, build_walled):
+    inj = gh.Injector()
+    assert _refused(_connect(inj, "cdn.example.com"))  # unmarked
+    # The bare marker is public — anyone, the box included, can present it.
+    assert _refused(_connect(inj, "cdn.example.com", user="fy-build"))
+    assert _refused(_connect(inj, "cdn.example.com", password="guessed"))
+
+
+def test_an_expired_or_revoked_secret_unlocks_nothing(gh, build_walled):
+    _write_tokens(build_walled.tokens, "s3cret", expired=True)
+    inj = gh.Injector()
+    assert _refused(_connect(inj, "cdn.example.com", password="s3cret"))
+    _write_tokens(build_walled.tokens)  # revoked when the build ended
+    assert _refused(_connect(inj, "cdn.example.com", password="s3cret"))
+
+
+def test_a_cleartext_build_request_uses_build_grants_too(gh, build_walled):
+    inj = gh.Injector()
+    ok = _marked(_Flow("cdn.example.com", port=80, scheme="http"), password="s3cret")
+    ok.response = None
+    inj.request(ok)
+    assert ok.response is None and "Proxy-Authorization" not in ok.request.headers
+    bare = _Flow("cdn.example.com", port=80, scheme="http")
+    bare.response = None
+    inj.request(bare)
+    assert bare.response is not None and bare.response.status_code == 403
+
+
+def test_a_revoked_build_grant_closes_the_builds_tunnel(gh, build_walled, closer):
+    import os
+
+    inj = gh.Injector()
+    closer.track("b1")
+    flow = _Flow("cdn.example.com")
+    flow.client_conn = types.SimpleNamespace(id="b1")
+    _marked(flow, password="s3cret")
+    flow.response = None
+    inj.http_connect(flow)
+    assert flow.response is None
+    build_walled.allow.write_text(
+        json.dumps({"default_deny": True, "allow": [], "build_allow": []})
+    )
+    os.utime(build_walled.allow, (inj._allow_mtime + 10, inj._allow_mtime + 10))
+    inj.refresh()
+    assert closer.closed == ["b1"]

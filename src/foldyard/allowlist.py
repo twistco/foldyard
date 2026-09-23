@@ -42,6 +42,9 @@ from pathlib import Path
 from . import config
 
 LEVELS = ("once", "session", "permanent")
+# Who a grant is for: the box and everything in it (``runtime``), or only an image build the host
+# started (``build``) — which proves itself to the proxy with a per-build secret (buildgate).
+SCOPES = ("runtime", "build")
 ONCE_TTL_SECONDS = 120  # "allow once" lifetime before it auto-reverts
 # `once` when it's offered ahead of work that takes a while — a recommendation at launch, a host
 # the build gate asks about: the default 120 s can lapse before a build step reaches the network.
@@ -160,11 +163,13 @@ def _checked_raw() -> dict:
             raise StoreUnreadable(f"{path}: `hosts` is not an object")
         # A present `expires` must be an aware time: read as "no expiry" a once-grant would be
         # permanent, and compared as it is it crashes the prune instead of failing closed.
+        # …and a scope is one we know: an unknown one read as runtime would widen the box's wall.
         bad = sorted(
             h
             for h, entry in hosts.items()
             if not isinstance(entry, dict)
             or (entry.get("expires") is not None and _aware(entry.get("expires")) is None)
+            or entry.get("scope", "runtime") not in SCOPES
         )
         if bad:
             raise StoreUnreadable(f"{path}: malformed entries for {', '.join(bad)}")
@@ -496,7 +501,7 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
     from the build marker) count — a box session refused in the same minute is not the build's.
     A build is tunnelled, so there are never paths. Box-originated text, handled as in
     :func:`learned_hosts`."""
-    granted = live_hosts()
+    granted = live_hosts() + build_hosts()  # either answers a build
     out: dict[str, dict] = {}
     for row in rows:
         ts, key = _parse(row.get("ts")), row.get("host")
@@ -514,12 +519,13 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
     return list(out.values())
 
 
-def recommend_block(entries: list[dict]) -> list[str]:
+def recommend_block(entries: list[dict], *, when: str = "") -> list[str]:
     """The ``[proxy] recommend`` TOML for ``entries`` (``learned_hosts``/``build_refusals``
     shape), each ``why`` the labelled observation of :func:`recommend_why` — ready to paste, and
     to reword before committing."""
     lines = ["  [proxy]", "  recommend = ["]
-    lines += [f'    {{ host = "{e["host"]}", why = "{recommend_why(e)}" }},' for e in entries]
+    tail = f', when = "{when}"' if when else ""
+    lines += [f'    {{ host = "{e["host"]}", why = "{recommend_why(e)}"{tail} }},' for e in entries]
     return [*lines, "  ]"]
 
 
@@ -564,7 +570,7 @@ def _array_bounds(text: str, start: int) -> tuple[int, int] | None:
     return None
 
 
-def with_recommends(text: str, entries: list[dict]) -> str | None:
+def with_recommends(text: str, entries: list[dict], *, when: str = "") -> str | None:
     """``text`` (a ``foldyard.toml``) with ``entries`` appended to ``[proxy] recommend`` — hosts
     already recommended skipped, their ``why`` the observation of :func:`recommend_why`. Edits the
     TEXT, so comments and layout survive, then proves it: the result must parse to exactly the
@@ -586,7 +592,8 @@ def with_recommends(text: str, entries: list[dict]) -> str | None:
     new = [e for e in entries if e["host"] not in have]
     if not new:
         return text
-    items = [f'{{ host = "{e["host"]}", why = "{recommend_why(e)}" }}' for e in new]
+    tail = f', when = "{when}"' if when else ""
+    items = [f'{{ host = "{e["host"]}", why = "{recommend_why(e)}"{tail} }}' for e in new]
     block = "".join(f"  {item},\n" for item in items)
 
     lines = text.splitlines(keepends=True)
@@ -623,7 +630,10 @@ def with_recommends(text: str, entries: list[dict]) -> str | None:
         after = tomllib.loads(out)
     except tomllib.TOMLDecodeError:
         return None
-    added = [{"host": e["host"], "why": recommend_why(e)} for e in new]
+    added = [
+        {"host": e["host"], "why": recommend_why(e), **({"when": when} if when else {})}
+        for e in new
+    ]
     expected = {**before, "proxy": {**proxy, "recommend": [*existing, *added]}}
     return out if after == expected else None
 
@@ -640,9 +650,15 @@ def _prune(hosts: dict[str, dict]) -> tuple[dict[str, dict], bool]:
 
 
 def live_hosts() -> list[str]:
-    """Every non-expired grant (once / session / permanent) — the patterns the proxy allows. A
-    damaged store grants NOTHING (fail closed, matching :func:`default_deny`)."""
-    return [g["host"] for g in grants()]
+    """Every non-expired RUNTIME grant (once / session / permanent) — the patterns the proxy
+    allows for everything. A damaged store grants NOTHING (fail closed, matching
+    :func:`default_deny`)."""
+    return [g["host"] for g in grants() if g["scope"] == "runtime"]
+
+
+def build_hosts() -> list[str]:
+    """Every non-expired BUILD-scoped grant — allowed only for a host-started image build."""
+    return [g["host"] for g in grants() if g["scope"] == "build"]
 
 
 def grants() -> list[dict]:
@@ -655,7 +671,12 @@ def grants() -> list[dict]:
         _warn(f"egress allow-store unreadable ({e}) — granting nothing until it's repaired")
         return []
     return [
-        {"host": h, "level": e.get("level", "?"), "expires": e.get("expires")}
+        {
+            "host": h,
+            "level": e.get("level", "?"),
+            "expires": e.get("expires"),
+            "scope": e.get("scope", "runtime"),
+        }
         for h, e in sorted(hosts.items())
     ]
 
@@ -666,7 +687,7 @@ def grants() -> list[dict]:
 def effective() -> dict:
     """The resolved allowlist the egress proxy enforces — every grant in the host-side store. The
     injector host + in-stack ``NO_PROXY`` hosts are handled proxy-side, not here."""
-    return {"default_deny": default_deny(), "allow": live_hosts()}
+    return {"default_deny": default_deny(), "allow": live_hosts(), "build_allow": build_hosts()}
 
 
 def write_effective() -> dict:
@@ -699,8 +720,12 @@ def _require_readable_store() -> None:
         )
 
 
-def grant(host: str, level: str, ttl: int | None = None) -> dict:
-    """Allow ``host`` at ``level`` (once|session|permanent). Mac only. Returns the new effective."""
+def grant(host: str, level: str, ttl: int | None = None, *, build: bool = False) -> dict:
+    """Allow ``host`` at ``level`` (once|session|permanent) — for everything, or with ``build``
+    only for a host-started image build. Mac only. Returns the new effective.
+
+    A build grant never replaces a live runtime one (which already covers builds); a runtime grant
+    replaces a build one."""
     _require_host()
     _require_readable_store()
     host = host.strip()
@@ -710,8 +735,13 @@ def grant(host: str, level: str, ttl: int | None = None) -> dict:
         raise SystemExit(f"✗ not a valid host/glob: {host!r}")
 
     hosts, _ = _prune(_load_store())
+    current = hosts.get(host)
+    if build and current is not None and current.get("scope", "runtime") == "runtime":
+        return write_effective()  # already allowed for everything, builds included
     expires = _iso(_now() + timedelta(seconds=ttl or ONCE_TTL_SECONDS)) if level == "once" else None
     hosts[host] = {"level": level, "expires": expires, "added": _iso(_now())}
+    if build:
+        hosts[host]["scope"] = "build"
     doc = _load_raw()
     doc["hosts"] = hosts
     # Granting supersedes a standing "never" on the same host: the operator changed their mind,
@@ -798,6 +828,12 @@ def recommendations() -> list[dict]:
     return out
 
 
+def build_recommendations() -> dict[str, str]:
+    """The bound config's ``when = "build"`` recommendations, host → why: what the build gate
+    shows beside a refused host it offers."""
+    return {e["host"]: e["why"] for e in recommendations() if e.get("when") == "build"}
+
+
 def pending_recommendations() -> list[dict]:
     """The BOUND config's recommendations (:func:`recommendations`) still awaiting an answer: not
     granted at any live level, not declined. Callers bind the ADOPTED config first (``devmode.
@@ -808,7 +844,11 @@ def pending_recommendations() -> list[dict]:
     if "*" in refused:
         return []
     granted = set(live_hosts())
-    return [e for e in recommendations() if e["host"] not in granted and e["host"] not in refused]
+    return [
+        e
+        for e in recommendations()
+        if e.get("when") != "build" and e["host"] not in granted and e["host"] not in refused
+    ]
 
 
 def offer_recommendations(
@@ -837,6 +877,8 @@ def offer_recommendations(
     pending = pending_recommendations()
     counts = {"granted": 0, "declined": 0, "deferred": len(pending)}
     if not pending:
+        if accept_all:
+            _accept_build_recommendations(echo)
         return counts
     n = len(pending)
     echo(f"▶ {n} recommended egress host{'s' if n != 1 else ''} not yet granted:")
@@ -844,6 +886,7 @@ def offer_recommendations(
         for e in pending:
             grant(e["host"], "permanent")
             echo(f"  ✓ {e['host']} allowed (permanent)" + (f" — {e['why']}" if e["why"] else ""))
+        _accept_build_recommendations(echo)
         return {"granted": n, "declined": 0, "deferred": 0}
     if not interactive:
         for e in pending:
@@ -890,6 +933,16 @@ def offer_recommendations(
         else:
             echo(f"    ({e['host']} deferred — you'll be offered it again)")
     return counts
+
+
+def _accept_build_recommendations(echo: Callable[[str], None]) -> None:
+    """The unattended path (`fy allow sync --yes`) takes the build-only recommendations too — for
+    builds only, as they ask; an unattended first build has nobody to answer the build gate."""
+    have = set(live_hosts()) | set(build_hosts())
+    for host, why in build_recommendations().items():
+        if host not in have and host not in declined():
+            grant(host, "permanent", build=True)
+            echo(f"  ✓ {host} allowed for builds (permanent)" + (f" — {why}" if why else ""))
 
 
 def sweep() -> bool:

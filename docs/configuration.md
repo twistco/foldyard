@@ -395,7 +395,9 @@ default_deny = "learn"
   that is a push path. Another port is its own grant, `fy allow add github.com:22`; the blocked
   row carries the port when the port was the reason, so the TUI's `a` key offers exactly that.
 - **`recommend`** — the committed half of the allowlist: hosts this repo ASKS operators to grant,
-  each `{ host = "…", why = "…" }` (or a bare host string). Advisory by construction — the proxy
+  each `{ host = "…", why = "…" }` (or a bare host string); add `when = "build"` for a host only
+  an image build needs (a browser download, a base-image CDN): it is offered by the build gate
+  when a build is refused, not at launch, and granted for builds only. Advisory by construction — the proxy
   never reads it. The host OFFERS each entry, per host, at `fy up`/`fy box up`/`fy host restart`, via
   `fy allow sync`, and in the TUI's Network Log wall pane; the operator answers yes (permanent) /
   session / once (15 minutes, for a broad host needed for one build) / not now / never, and the

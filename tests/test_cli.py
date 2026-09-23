@@ -227,14 +227,23 @@ def test_allow_verbs_are_the_replacement_for_a_committed_allowlist(monkeypatch, 
 
     granted: list = []
     monkeypatch.setattr(
-        allowlist, "grant", lambda h, lvl, ttl: granted.append((h, lvl, ttl)) or {"allow": [h]}
+        allowlist,
+        "grant",
+        lambda h, lvl, ttl, build=False: granted.append((h, lvl, ttl, build)) or {"allow": [h]},
     )
-    monkeypatch.setattr(allowlist, "effective", lambda: {"default_deny": True, "allow": ["a.test"]})
+    monkeypatch.setattr(
+        allowlist,
+        "effective",
+        lambda: {"default_deny": True, "allow": ["a.test"], "build_allow": ["b.test"]},
+    )
     monkeypatch.setattr(allowlist, "revoke", lambda h: {"allow": []})
     assert runner.invoke(cli.app, ["allow", "add", "x.test", "--level", "permanent"]).exit_code == 0
-    assert granted == [("x.test", "permanent", None)]
+    assert granted == [("x.test", "permanent", None, False)]
+    assert runner.invoke(cli.app, ["allow", "add", "y.test", "--build"]).exit_code == 0
+    assert granted[-1] == ("y.test", "session", None, True)  # for image builds only
     out = runner.invoke(cli.app, ["allow", "list"])
     assert out.exit_code == 0 and "a.test" in out.output and "default_deny: on" in out.output
+    assert "b.test" in out.output and "builds only" in out.output
     assert runner.invoke(cli.app, ["allow", "remove", "x.test"]).exit_code == 0
 
 

@@ -234,9 +234,15 @@ def test_walled_build_routes_through_the_proxy_as_a_trusted_build(fake, monkeypa
     monkeypatch.setattr(config, "proxy_port_base", lambda: 41000)
     assert box.main("build") == 0
     args = _build_args(_find(fake["calls"], has=["build", "-t", "img:tag"])[0])
-    url = f"http://{proxy.BUILD_TUNNEL_USER}:{proxy.BUILD_TUNNEL_USER}@192.168.5.2:41000"
+    from urllib.parse import urlsplit
+
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-        assert f"{key}={url}" in args
+        (value,) = [a.split("=", 1)[1] for a in args if a.startswith(f"{key}=")]
+        url = urlsplit(value)
+        assert (url.hostname, url.port) == ("192.168.5.2", 41000)
+        # The marker user, with the gate's per-build secret as the password — never the marker.
+        assert url.username == proxy.BUILD_TUNNEL_USER
+        assert url.password and url.password != proxy.BUILD_TUNNEL_USER
 
 
 def test_box_build_runs_under_the_build_gate(fake, monkeypatch):
@@ -246,7 +252,7 @@ def test_box_build_runs_under_the_build_gate(fake, monkeypatch):
 
     def fake_gate(build, *, what, **_):
         gated.append(what)
-        return build()
+        return build(None)
 
     monkeypatch.setattr(buildgate, "run", fake_gate)
     assert box.main("build") == 0

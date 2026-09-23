@@ -745,8 +745,11 @@ def proxy_recommend() -> list[dict]:
     SHARES its allowlist: the list travels with the branch, the grants stay host-owned.
 
     Entries are ``{ host = "pypi.org", why = "…" }`` tables or bare host strings (``why`` then
-    empty). Malformed entries and invalid hosts are dropped rather than raising — this is read on
-    prompt paths that must not crash — and the widenings report names what a config declares."""
+    empty). ``when = "build"`` marks a host only an IMAGE BUILD needs: it isn't offered at launch
+    but by the build gate when a build is refused, and granted for builds only — the runtime wall
+    stays narrower. Every entry carries ``when`` (``"build"`` or ``""``). Malformed entries and
+    invalid hosts are dropped rather than raising — this is read on prompt paths that must not
+    crash — and the widenings report names what a config declares."""
     from .allowlist import valid_host  # stdlib-only, no cycle: allowlist never imports config-time
 
     raw = _table("proxy").get("recommend")
@@ -754,15 +757,17 @@ def proxy_recommend() -> list[dict]:
         return []
     out: list[dict] = []
     for entry in raw:
+        when = ""
         if isinstance(entry, str):
             host, why = entry, ""
         elif isinstance(entry, dict):
             host, why = str(entry.get("host") or ""), str(entry.get("why") or "")
+            when = "build" if entry.get("when") == "build" else ""
         else:
             continue
         host = host.strip()
         if valid_host(host) and host not in {e["host"] for e in out}:
-            out.append({"host": host, "why": why.strip()})
+            out.append({"host": host, "why": why.strip(), "when": when})
     return out
 
 
@@ -1679,6 +1684,14 @@ def allow_effective_file() -> Path:
     can't import foldyard) via ``ALLOW_FILE``."""
     env = os.environ.get("FOLDYARD_ALLOW_FILE")
     return Path(env).expanduser() if env else state_dir() / "allow-effective.json"
+
+
+def build_tokens_file() -> Path:
+    """The live image-build secrets, as SHA-256 hashes → expiry (see :mod:`foldyard.buildgate`):
+    what unlocks build-scoped grants at the proxy. Written by the host; read by the proxy addon via
+    ``BUILD_TOKENS_FILE``. ``FOLDYARD_BUILD_TOKENS`` wins."""
+    env = os.environ.get("FOLDYARD_BUILD_TOKENS")
+    return Path(env).expanduser() if env else state_dir() / "build-tokens.json"
 
 
 def log_dir() -> Path:

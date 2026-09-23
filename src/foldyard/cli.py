@@ -571,6 +571,9 @@ def allow_add(
         help="once (short TTL) | session (until the supervisor restarts) | permanent",
     ),
     ttl: int = typer.Option(0, "--ttl", help="seconds for --level once (default 120)"),
+    build: bool = typer.Option(
+        False, "--build", help="for image builds only (fy box build, the stack build), not the box"
+    ),
 ) -> None:
     """Allow a host through the egress wall.
 
@@ -580,8 +583,10 @@ def allow_add(
     """
     from . import allowlist
 
-    eff = allowlist.grant(host, level, ttl or None)
-    print(f"✓ {host} allowed ({level}). Effective allowlist: {', '.join(eff['allow']) or 'empty'}")
+    eff = allowlist.grant(host, level, ttl or None, build=build)
+    scope = "for builds, " if build else ""
+    listed = ", ".join(eff["allow"]) or "empty"
+    print(f"✓ {host} allowed ({scope}{level}). Effective allowlist: {listed}")
 
 
 @allow_app.command("list")
@@ -604,6 +609,10 @@ def allow_list() -> None:
         print(f"  {host}")
     if not eff["allow"]:
         print("  (no grants — `fy allow add <host>`, or the TUI's `a` key on a blocked row)")
+    if eff.get("build_allow"):
+        print("for image builds only (the build proves itself; the box can't use these):")
+        for host in eff["build_allow"]:
+            print(f"  {host}")
     with _config_bound():
         pending = allowlist.pending_recommendations()
     if pending:

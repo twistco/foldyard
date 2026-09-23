@@ -64,8 +64,10 @@ class _Build:
 
     def __init__(self, log, steps: list[tuple[int, list[dict]]]) -> None:
         self.log, self.steps, self.calls = log, list(steps), 0
+        self.urls: list[str | None] = []
 
-    def __call__(self) -> int:
+    def __call__(self, proxy_url: str | None) -> int:
+        self.urls.append(proxy_url)
         rc, rows = self.steps[self.calls]
         self.calls += 1
         _append(self.log, *rows)
@@ -88,6 +90,11 @@ def test_build_log_is_the_main_listeners(env, monkeypatch):
     # main checkout's log even when `fy up` runs from a worktree.
     monkeypatch.setattr(config, "active_worktree", lambda: "feature")
     assert buildgate.build_log() == env["log"]
+
+
+def test_build_tokens_never_touch_the_real_state_dir(env):
+    # conftest pins FOLDYARD_BUILD_TOKENS per test; a stray one was once written to ~/.foldyard.
+    assert str(buildgate.tokens_file()).startswith(str(env["log"].parents[3]))
     assert env["log"].parent.name == "logs" and env["log"].parent.parent.name == "main"
 
 
@@ -156,8 +163,8 @@ def test_a_redirect_chain_is_walked_one_refusal_at_a_time(env):
     assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 0
     assert build.calls == 3
     assert [q.split("?")[0] for q in asked[:2]] == [
-        "  allow cdn.example.com (1×)",
-        "  allow storage.example.com (1×)",
+        "  allow cdn.example.com (1×) for builds",
+        "  allow storage.example.com (1×) for builds",
     ]
 
 
@@ -267,3 +274,93 @@ def test_declining_the_write_leaves_the_file_alone_and_prints_the_block(env, cap
     buildgate.run(build, what="box image", interactive=True, prompt=prompt)
     assert _checkout_toml(env).read_text() == before
     assert "recommend = [" in capsys.readouterr().out
+
+
+# ── build-scoped grants: the gate grants for builds, proven by a per-build secret ─────────
+
+
+def _tokens(env) -> dict:
+    path = buildgate.tokens_file()
+    return json.loads(path.read_text())["tokens"] if path.exists() else {}
+
+
+def test_a_build_carries_a_secret_the_host_recorded_and_revokes_after(env):
+    # The fixed `fy-build` marker is readable by anyone, the box included; a build-only grant
+    # needs proof the box can't simply present. The gate mints one per build.
+    import hashlib
+    from urllib.parse import urlsplit
+
+    seen: dict = {}
+
+    def build(url: str | None) -> int:
+        parts = urlsplit(url or "")
+        seen["user"], seen["secret"] = parts.username, parts.password
+        seen["recorded"] = dict(_tokens(env))
+        return 0
+
+    assert buildgate.run(build, what="box image", interactive=True, prompt=lambda q: "") == 0
+    assert seen["user"] == "fy-build" and seen["secret"] not in ("", "fy-build", None)
+    digest = hashlib.sha256(seen["secret"].encode()).hexdigest()
+    assert list(seen["recorded"]) == [digest]  # the file holds a hash, never the secret
+    assert seen["secret"] not in buildgate.tokens_file().read_text()
+    assert _tokens(env) == {}  # revoked once the build ended
+
+
+def test_the_secret_is_revoked_even_when_the_build_raises(env):
+    def build(url):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        buildgate.run(build, what="box image", interactive=True, prompt=lambda q: "")
+    assert _tokens(env) == {}
+
+
+def test_the_gate_grants_for_builds_only(env):
+    build = _Build(env["log"], [(1, [_row("storage.googleapis.com")]), (0, [])])
+    prompt, asked = _answers("s")
+    assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 0
+    assert "for builds" in asked[0]
+    eff = allowlist.effective()
+    assert eff["build_allow"] == ["storage.googleapis.com"] and eff["allow"] == []
+
+
+def test_the_gate_shows_a_build_recommendations_why(env):
+    toml = config.current().repo_root / "foldyard.toml"
+    toml.write_text(
+        toml.read_text().replace(
+            "[proxy]\n",
+            '[proxy]\nrecommend = [{ host = "storage.googleapis.com", why = "CfT downloads",'
+            ' when = "build" }]\n',
+        )
+    )
+    config.clear_caches()
+    build = _Build(env["log"], [(1, [_row("storage.googleapis.com")]), (0, [])])
+    prompt, asked = _answers("o")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert "CfT downloads" in asked[0]
+
+
+def test_the_shared_lines_are_build_recommendations(env):
+    from foldyard import configpin
+
+    configpin.adopt(config.current())
+    build = _Build(env["log"], [(1, [_row("storage.googleapis.com")]), (0, [])])
+    prompt, _ = _answers("s", "y")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert 'when = "build"' in _checkout_toml(env).read_text()
+
+
+def test_in_the_box_a_build_gets_the_marker_but_no_secret(env, monkeypatch):
+    # It still tunnels (the build has no CA), but it can't use build-only grants.
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    build = _Build(env["log"], [(0, [])])
+    buildgate.run(build, what="box image", interactive=True, prompt=lambda q: "")
+    assert build.urls[0] is not None and "fy-build:fy-build@" in build.urls[0]
+    assert _tokens(env) == {}
+
+
+def test_an_unwalled_build_gets_no_proxy(env, monkeypatch):
+    monkeypatch.setattr(config, "machine_wall", lambda: False)
+    build = _Build(env["log"], [(0, [])])
+    buildgate.run(build, what="box image", interactive=True, prompt=lambda q: "")
+    assert build.urls == [None]

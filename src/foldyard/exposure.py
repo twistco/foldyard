@@ -329,7 +329,7 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
     """Gather ``cfg``'s widenings. Bind ``cfg`` first (``with config.using(cfg)``) — every helper
     reads through the module config functions, so the caller's binding is what selects the
     checkout."""
-    from .allowlist import declined, default_deny, live_hosts
+    from .allowlist import build_hosts, declined, default_deny, live_hosts
     from .plugins.proxy import _resolve_passthrough
 
     drift = configpin.inspect(cfg)
@@ -338,7 +338,7 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
     refs, unknown, literals = _passthrough_parts(entries)
     resolved = _resolve_passthrough(entries)
     proxy = cfg.toml.get("proxy")
-    granted, refused = set(live_hosts()), declined()
+    granted, refused = set(live_hosts()) | set(build_hosts()), declined()
     recommended = [
         (
             e["host"],

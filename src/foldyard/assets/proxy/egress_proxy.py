@@ -193,6 +193,21 @@ _HTTP_PORT = 80  # …and, for a request seen in the clear, this one
 _BUILD_TUNNEL_USER = "fy-build"
 
 
+def _basic_credentials(value: str | None) -> tuple[str, str] | None:
+    """A Basic ``Proxy-Authorization`` header's (user, password), or None. Never raises."""
+    import base64
+    import binascii
+
+    scheme, _, token = (value or "").partition(" ")
+    if scheme.lower() != "basic":
+        return None
+    try:
+        user, _, password = base64.b64decode(token.strip(), validate=True).decode().partition(":")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+    return user, password
+
+
 def _is_build_marker(value: str | None) -> bool:
     """True when a Proxy-Authorization header is the build marker: Basic, user = the marker (any
     password — clients differ in what they send for an empty one). Never raises."""
@@ -574,6 +589,14 @@ class Injector:
         self._allow_patterns: list[str] = []
         # host key → monotonic time of its last would-block row (see _WOULD_BLOCK_EVERY).
         self._would_block_seen: dict[str, float] = {}
+        # The live build secrets' hashes → expiry (BUILD_TOKENS_FILE, written by the host's build
+        # gate): a connection presenting one is a build the host started, and may use the
+        # build-scoped grants (ALLOW_FILE's `build_allow`). The bare marker never can.
+        tokens = os.environ.get("BUILD_TOKENS_FILE", "")
+        self.tokens_path = Path(tokens) if tokens else None
+        self._tokens_stamp: tuple | None = None
+        self._tokens: dict[str, float] = {}
+        self._build_patterns: list[str] = []
         # Client connections whose CONNECT carried the build marker and passed the wall: their TLS
         # is tunnelled, not decrypted (see _BUILD_TUNNEL_USER). Dropped on disconnect.
         self._build_clients: set[str] = set()
@@ -743,26 +766,27 @@ class Injector:
         """Re-read ALLOW_FILE when its mtime changes, so a host-side `allow` grant takes effect
         with NO daemon restart. Fail toward MORE blocking: a missing/unreadable/malformed file
         leaves the allow set EMPTY — a parse error never widens egress."""
-        before = self._allow_patterns
+        before = (self._allow_patterns, self._build_patterns)
         if self.allow_path is None:
-            self._allow_patterns = []
+            self._allow_patterns, self._build_patterns = [], []
         else:
             try:
                 mtime = self.allow_path.stat().st_mtime
             except OSError:
-                self._allow_patterns = []
+                self._allow_patterns, self._build_patterns = [], []
                 self._allow_mtime = -1.0
                 mtime = None
             if mtime is not None and mtime != self._allow_mtime:
                 self._allow_mtime = mtime
                 try:
                     data = json.loads(self.allow_path.read_text())
-                    allow = data.get("allow", []) if isinstance(data, dict) else []
-                    patterns = [str(p) for p in allow] if isinstance(allow, list) else []
+                    data = data if isinstance(data, dict) else {}
                 except (OSError, ValueError):
-                    patterns = []
-                self._allow_patterns = patterns
-        if self._allow_patterns != before:
+                    data = {}
+                allow, build = data.get("allow", []), data.get("build_allow", [])
+                self._allow_patterns = [str(p) for p in allow] if isinstance(allow, list) else []
+                self._build_patterns = [str(p) for p in build] if isinstance(build, list) else []
+        if (self._allow_patterns, self._build_patterns) != before:
             self._policy_dirty = True  # a grant came or went: `refresh` re-judges open tunnels
 
     def _allowed(self, host: str | None) -> bool:
@@ -945,7 +969,9 @@ class Injector:
         self.refresh()
         host = flow.request.pretty_host
         port = flow.request.port
-        if self._allowed_connect(host, port):
+        if self._allowed_connect(host, port) or (
+            self._trusted_build(flow.request) and self._build_granted(host, port, _HTTPS_PORT)
+        ):
             self._note_build(flow)
             return
         key = host if port == _HTTPS_PORT else f"{host}:{port}"
@@ -957,6 +983,35 @@ class Injector:
             return
         flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
         self._log_blocked(key, flow.request)
+
+    def _trusted_build(self, request) -> bool:
+        """Did this request present a LIVE build secret (not just the public marker)?"""
+        creds = _basic_credentials(request.headers.get("Proxy-Authorization"))
+        if creds is None or creds[0] != _BUILD_TUNNEL_USER or self.tokens_path is None:
+            return False
+        stamp = _file_stamp(self.tokens_path)
+        if stamp != self._tokens_stamp:
+            self._tokens_stamp = stamp
+            tokens: dict[str, float] = {}
+            try:
+                doc = json.loads(self.tokens_path.read_text())
+                for digest, expires in (doc.get("tokens") or {}).items():
+                    tokens[str(digest)] = datetime.fromisoformat(expires).timestamp()
+            except (OSError, ValueError, TypeError, AttributeError):
+                tokens = {}  # unreadable ⇒ no build is trusted (fail toward MORE blocking)
+            self._tokens = tokens
+        import hashlib
+
+        expires = self._tokens.get(hashlib.sha256(creds[1].encode()).hexdigest())
+        return expires is not None and expires > time.time()
+
+    def _build_granted(self, host: str | None, port: int, default_port: int) -> bool:
+        """The build-scoped grants, with the same port rule as the runtime ones."""
+        if not host:
+            return False
+        self._refresh_allow()
+        key = host if port == default_port else f"{host}:{port}"
+        return _host_matches(key, self._build_patterns)
 
     def _note_build(self, flow: http.HTTPFlow) -> None:
         """Remember a CONNECT that got through (granted, or let through while observing): for
@@ -972,6 +1027,7 @@ class Injector:
             "port": flow.request.port,
             "blind": None,  # the tunnelled SNI target once tls_clienthello tunnels it
             "build": build,
+            "trusted": self._trusted_build(flow.request),  # may use build-scoped grants
         }
 
     def client_disconnected(self, client) -> None:
@@ -988,7 +1044,10 @@ class Injector:
         """Close each open connection the current policy would not have allowed (see `refresh`)."""
         for client_id, conn in list(self._conns.items()):
             host, port, blind = conn["host"], conn["port"], conn["blind"]
-            refused = self.default_deny and not self._allowed_connect(host, port)
+            refused = self.default_deny and not (
+                self._allowed_connect(host, port)
+                or (conn["trusted"] and self._build_granted(host, port, _HTTPS_PORT))
+            )
             decrypt_now = blind is not None and not self._tunnel(blind, conn["build"])
             if not (refused or decrypt_now):
                 continue
@@ -1103,8 +1162,11 @@ class Injector:
         # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host
         # grant as CONNECT :22 — here, before it leaves the box. HTTPS is walled at http_connect.
         host, port = flow.request.pretty_host, flow.request.port
-        if not self._allowed_plain(host, port, flow.request.scheme):
-            default = _HTTPS_PORT if flow.request.scheme == "https" else _HTTP_PORT
+        default = _HTTPS_PORT if flow.request.scheme == "https" else _HTTP_PORT
+        allowed = self._allowed_plain(host, port, flow.request.scheme) or (
+            self._trusted_build(flow.request) and self._build_granted(host, port, default)
+        )
+        if not allowed:
             key = host if port == default else f"{host}:{port}"
             if self.default_deny:
                 flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")

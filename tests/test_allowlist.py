@@ -235,8 +235,8 @@ def test_recommend_parses_tables_strings_and_drops_junk(env):
         '{ host = "not a host" }, { why = "no host" }, 42, "pypi.org"]',
     )
     assert config.proxy_recommend() == [
-        {"host": "pypi.org", "why": "box bootstrap"},
-        {"host": "unpkg.com", "why": ""},
+        {"host": "pypi.org", "why": "box bootstrap", "when": ""},
+        {"host": "unpkg.com", "why": "", "when": ""},
     ]
 
 
@@ -746,3 +746,69 @@ def test_a_port_wildcard_grant_answers_a_port_keyed_host(env):
     allowlist.grant("*.example.com:22", "permanent")
     window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
     assert allowlist.learned_hosts(rows, window) == []
+
+
+# ── build-scoped grants: the build reaches it, the box doesn't ─────────────────────────
+
+
+def test_a_build_grant_reaches_the_build_list_not_the_runtime_one(env):
+    allowlist.grant("storage.googleapis.com", "once", 900, build=True)
+    eff = allowlist.effective()
+    assert "storage.googleapis.com" not in eff["allow"]
+    assert eff["build_allow"] == ["storage.googleapis.com"]
+    (g,) = allowlist.grants()
+    assert g["scope"] == "build" and g["level"] == "once"
+
+
+def test_a_build_grant_never_narrows_a_runtime_one(env):
+    # A runtime grant already covers builds; answering the build gate must not downgrade it.
+    allowlist.grant("pypi.org", "permanent")
+    allowlist.grant("pypi.org", "once", 900, build=True)
+    (g,) = allowlist.grants()
+    assert g["scope"] == "runtime" and g["level"] == "permanent"
+    assert allowlist.effective()["allow"] == ["pypi.org"]
+
+
+def test_a_runtime_grant_replaces_a_build_one(env):
+    allowlist.grant("pypi.org", "session", build=True)
+    allowlist.grant("pypi.org", "session")
+    assert allowlist.effective() == {
+        "default_deny": allowlist.default_deny(),
+        "allow": ["pypi.org"],
+        "build_allow": [],
+    }
+
+
+def test_an_unknown_grant_scope_is_damage(env):
+    config.allow_store_file().parent.mkdir(parents=True, exist_ok=True)
+    config.allow_store_file().write_text(
+        json.dumps({"hosts": {"a.example.com": {"level": "permanent", "scope": "everything"}}})
+    )
+    assert allowlist.live_hosts() == [] and allowlist.build_hosts() == []
+
+
+def test_build_recommendations_are_offered_by_the_build_not_at_launch(env):
+    _recommend(
+        env,
+        '[{ host = "pypi.org", why = "deps" }, '
+        '{ host = "cdn.playwright.dev", why = "browsers", when = "build" }]',
+    )
+    assert [e["host"] for e in allowlist.pending_recommendations()] == ["pypi.org"]
+    assert allowlist.build_recommendations() == {"cdn.playwright.dev": "browsers"}
+
+
+def test_sync_yes_grants_build_recommendations_for_builds_only(env):
+    _recommend(env, '[{ host = "cdn.playwright.dev", why = "browsers", when = "build" }]')
+    prompt, echo, _lines = _offer([])
+    allowlist.offer_recommendations(interactive=False, prompt=prompt, echo=echo, accept_all=True)
+    assert allowlist.effective()["allow"] == []
+    assert allowlist.effective()["build_allow"] == ["cdn.playwright.dev"]
+
+
+def test_with_recommends_can_write_a_build_entry():
+    import tomllib
+
+    out = allowlist.with_recommends("[proxy]\n", _NEW, when="build")
+    assert out is not None
+    (entry,) = tomllib.loads(out)["proxy"]["recommend"]
+    assert entry["when"] == "build" and entry["host"] == "storage.googleapis.com"
