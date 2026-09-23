@@ -216,6 +216,53 @@ def test_build_command_shape(fake):
     assert f"{box._BOX_FINGERPRINT_LABEL}=expected-fingerprint" in build
 
 
+def _build_args(build: list[str]) -> list[str]:
+    return [build[i + 1] for i, tok in enumerate(build) if tok == "--build-arg"]
+
+
+def test_walled_build_routes_through_the_proxy_as_a_trusted_build(fake, monkeypatch):
+    # Under the in-VM wall a build's RUN steps egress through the proxy, which decrypts every
+    # host off `[proxy] passthrough` (ADR-0029) — and a build container has no proxy CA, so a
+    # tool fetching an undecryptable-to-it host dies on UNABLE_TO_VERIFY_LEAF_SIGNATURE (the
+    # playwright CDN, seen live). The build gets the proxy URL carrying the build marker, which
+    # the addon blind-tunnels (still walled at CONNECT). Proxy build-args are predefined — no
+    # ARG line needed — and never persisted into the image.
+    from foldyard.plugins import proxy
+
+    monkeypatch.setattr(config, "machine_wall", lambda: True)
+    monkeypatch.setattr(config, "proxy_port_base", lambda: 41000)
+    assert box.main("build") == 0
+    args = _build_args(_find(fake["calls"], has=["build", "-t", "img:tag"])[0])
+    url = f"http://{proxy.BUILD_TUNNEL_USER}:{proxy.BUILD_TUNNEL_USER}@192.168.5.2:41000"
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        assert f"{key}={url}" in args
+
+
+def test_unwalled_build_gets_no_proxy_args(fake, monkeypatch):
+    # No wall ⇒ builds egress directly, as before; routing them through the proxy would be new.
+    monkeypatch.setattr(config, "machine_wall", lambda: False)
+    assert box.main("build") == 0
+    assert _build_args(_find(fake["calls"], has=["build", "-t", "img:tag"])[0]) == []
+
+
+def test_consumer_build_args_come_after_the_proxy_ones(fake, monkeypatch):
+    # A consumer that sets its own proxy build-arg wins: the engine takes the last occurrence.
+    monkeypatch.setattr(config, "machine_wall", lambda: True)
+    monkeypatch.setattr(
+        config,
+        "box_image",
+        lambda: {
+            "dockerfile": "dev-stack/box.Dockerfile",
+            "tag": "img:tag",
+            "build_args": {"HTTPS_PROXY": "http://mine:1"},
+        },
+    )
+    assert box.main("build") == 0
+    args = _build_args(_find(fake["calls"], has=["build", "-t", "img:tag"])[0])
+    assert args[-1] == "HTTPS_PROXY=http://mine:1"
+    assert any(a.startswith("HTTPS_PROXY=http://fy-build") for a in args[:-1])
+
+
 # ── up ────────────────────────────────────────────────────────────────────────────────
 
 

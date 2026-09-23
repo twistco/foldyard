@@ -176,6 +176,27 @@ logging.getLogger("mitmproxy.proxy.server").addFilter(_DropWebsocketPingPong())
 _HTTPS_PORT = 443  # the one port a bare host grant covers at CONNECT
 _HTTP_PORT = 80  # …and, for a request seen in the clear, this one
 
+# The proxy-URL user an image BUILD reaches us as (foldyard's `plugins/proxy.BUILD_TUNNEL_USER`,
+# duplicated because this addon runs standalone; a test pins the two equal). A build has no proxy
+# CA, so a connection carrying it is blind-tunnelled rather than decrypted — after the wall.
+_BUILD_TUNNEL_USER = "fy-build"
+
+
+def _is_build_marker(value: str | None) -> bool:
+    """True when a Proxy-Authorization header is the build marker: Basic, user = the marker (any
+    password — clients differ in what they send for an empty one). Never raises."""
+    import base64
+    import binascii
+
+    scheme, _, token = (value or "").partition(" ")
+    if scheme.lower() != "basic":
+        return False
+    try:
+        user = base64.b64decode(token.strip(), validate=True).decode().partition(":")[0]
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return False
+    return user == _BUILD_TUNNEL_USER
+
 
 def _host_matches(host: str | None, patterns: list[str]) -> bool:
     """Exact host match, or ``*.suffix`` wildcard (matches SUBDOMAINS, not the bare domain) —
@@ -460,6 +481,9 @@ class Injector:
         self._allow_patterns: list[str] = []
         # host key → monotonic time of its last would-block row (see _WOULD_BLOCK_EVERY).
         self._would_block_seen: dict[str, float] = {}
+        # Client connections whose CONNECT carried the build marker and passed the wall: their TLS
+        # is tunnelled, not decrypted (see _BUILD_TUNNEL_USER). Dropped on disconnect.
+        self._build_clients: set[str] = set()
 
     def _load_rules(self) -> list[_Rule]:
         """Build the injection rule set. ``INJECT_RULES`` (a JSON list of rule objects) is the
@@ -589,13 +613,14 @@ class Injector:
                 entry["error_body"] = snippet
         self._write_entry(entry)
 
-    def _log_passthrough(self, host: str | None) -> None:
+    def _log_passthrough(self, host: str | None, *, build: bool = False) -> None:
         """An SNI-level row for a blind-tunnelled (not decrypted) HTTPS connection: host + time
         only — TLS hides method/path/status. The Network Log panel renders `passthrough` rows as
-        a `tls tunnel` marker. No host (a client that sent no SNI) → nothing to log."""
+        a `tls tunnel` marker; ``build`` says it was tunnelled because an image build asked, not
+        because the host is on the passthrough list. No host (no SNI) → nothing to log."""
         if not host:
             return
-        self._write_entry({
+        entry = {
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             "method": "",
             "host": host,
@@ -604,7 +629,10 @@ class Injector:
             "injected": False,
             "replayed": False,
             "passthrough": True,
-        })  # fmt: skip
+        }  # fmt: skip
+        if build:
+            entry["build"] = True
+        self._write_entry(entry)
 
     def _log_blocked(self, host: str | None) -> None:
         """A row for a host REFUSED by the default-deny wall — no upstream is ever contacted, so
@@ -683,15 +711,26 @@ class Injector:
         host = flow.request.pretty_host
         port = flow.request.port
         if self._allowed_connect(host, port):
+            self._note_build(flow)
             return
         key = host if port == _HTTPS_PORT else f"{host}:{port}"
         if not self.default_deny:
             # Observing: let it through, but record that enforcing would refuse it — the CONNECT
             # carries the client's User-Agent even for a host that is then tunnelled blind.
             self._log_would_block(key, flow.request)
+            self._note_build(flow)
             return
         flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
         self._log_blocked(key)
+
+    def _note_build(self, flow: http.HTTPFlow) -> None:
+        """Remember a CONNECT that got through (granted, or let through while observing) and
+        carried the build marker, so ``tls_clienthello`` tunnels its connection."""
+        if _is_build_marker(flow.request.headers.get("Proxy-Authorization")):
+            self._build_clients.add(flow.client_conn.id)
+
+    def client_disconnected(self, client) -> None:
+        self._build_clients.discard(client.id)
 
     def _allowed_connect(self, host: str | None, port: int) -> bool:
         """The CONNECT policy: the host granted (:meth:`_allowed`) on :443, else ``host:port``
@@ -744,6 +783,11 @@ class Injector:
                 target = None
         if target in self.inject_hosts:
             return  # an injector host: always decrypt (to rewrite its header), whatever the mode
+        client = getattr(getattr(data, "context", None), "client", None)
+        if client is not None and client.id in self._build_clients:
+            data.ignore_connection = True  # a trusted build: it has no CA to verify ours with
+            self._log_passthrough(target, build=True)
+            return
         # Blind-tunnel (no decrypt, real certs end-to-end, SNI-only log) when either we're in
         # passthrough mode (tunnel everything) OR we're in full mode but the host is
         # trusted. Otherwise (full mode, untrusted host) fall through → mitmproxy decrypts + the
@@ -757,6 +801,8 @@ class Injector:
         # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host
         # grant as CONNECT :22 — here, before it leaves the box. HTTPS is walled at http_connect.
         host, port = flow.request.pretty_host, flow.request.port
+        if _is_build_marker(flow.request.headers.get("Proxy-Authorization")):
+            del flow.request.headers["Proxy-Authorization"]  # ours, not the upstream's
         if not self._allowed_plain(host, port, flow.request.scheme):
             default = _HTTPS_PORT if flow.request.scheme == "https" else _HTTP_PORT
             key = host if port == default else f"{host}:{port}"

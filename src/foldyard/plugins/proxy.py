@@ -37,6 +37,24 @@ from ._passthrough_bundles import BUNDLES
 # per-project band + per-worktree offset; there is deliberately no module-level constant (it
 # would freeze the env at import and bypass the band allocation).
 
+# The proxy-URL user an image BUILD reaches the proxy as. A build container has no proxy CA, so a
+# decrypted host fails its TLS verify; the addon blind-tunnels a CONNECT that carries this user
+# (the client turns the URL's userinfo into a Basic Proxy-Authorization header) — still walled at
+# CONNECT. It is a marker, not a credential: the box can present it too, and gains only an
+# undecrypted tunnel to a host the wall already lets it reach. Duplicated in the addon (which
+# can't import foldyard); a test pins the two equal.
+BUILD_TUNNEL_USER = "fy-build"
+
+
+def build_proxy_url() -> str | None:
+    """The proxy URL an image build should use, or ``None`` when builds don't route through the
+    proxy (no in-VM wall ⇒ they egress directly, as they always have). The MAIN proxy port, like
+    the wall's own VM-level proxy env: building isn't per-worktree."""
+    if not config.machine_wall():
+        return None
+    user = BUILD_TUNNEL_USER
+    return f"http://{user}:{user}@{config.LIMA_HOST_GATEWAY}:{config.proxy_port_base()}"
+
 
 def mitmdump_path() -> str | None:
     """Resolve the ``mitmdump`` executable, or ``None`` if it isn't installed.

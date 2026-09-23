@@ -85,6 +85,17 @@ belongs in the middle — but *one* middle, not a switch between two.
   no change. A client with its own trust store that worked only because nothing was decrypted
   will now fail TLS against a non-toolchain host; the fix is a `passthrough` entry, and the
   release note must say so.
+- **Image builds are trusted, not decrypted** (amended 2026-09-23). "The box already trusts the
+  CA" missed the *build*: under the in-VM wall a `fy box build` RUN step also egresses through the
+  proxy, and a build container has no CA — Playwright's browser download from `cdn.playwright.dev`
+  died on `UNABLE_TO_VERIFY_LEAF_SIGNATURE`. `fy box build` now passes the proxy URL as build-args
+  with a marker user (`http://fy-build:fy-build@…`; proxy build-args need no `ARG` line and are
+  not persisted into the image), and the addon blind-tunnels a CONNECT carrying it, logging a
+  `passthrough` row flagged `build`. **The wall still applies** — the marker is checked only
+  after the CONNECT is granted. It is a marker, not a credential: the box can present it too, and
+  gains only an undecrypted tunnel to a host it could already reach. That is a visibility
+  concession, which ADR-0009 already classes as not enforcement. Stack images built by compose
+  (`fy up`) take the VM's unmarked proxy env and are still decrypted.
 - **The egress log grows**: a request row per request rather than a row per connection, and full
   paths — query strings included — on the host. The log stays outside the mount and rotation
   bounds it (5 MiB × 6 by default). A token carried in a URL now lands there; the `query_param`

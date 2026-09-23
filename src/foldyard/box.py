@@ -289,6 +289,15 @@ def _build_img(engine: str, main: Path, env: dict) -> int:
     cmd += ["--label", f"{_BOX_FINGERPRINT_LABEL}={fingerprint}"]
     if img.get("target"):
         cmd += ["--target", str(img["target"])]
+    from .plugins import proxy  # lazy: keep the registry-load hot path import-light
+
+    # A walled build reaches the proxy as a TRUSTED BUILD (tunnelled, not decrypted — it has no
+    # proxy CA). Proxy build-args need no ARG line and never persist into the image. Before the
+    # consumer's own build_args, so a consumer that sets a proxy arg wins (last one counts).
+    build_proxy = proxy.build_proxy_url()
+    if build_proxy:
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            cmd += ["--build-arg", f"{key}={build_proxy}"]
     for key, value in (img.get("build_args") or {}).items():
         cmd += ["--build-arg", f"{key}={value}"]
     cmd += ["-f", dockerfile, "-t", img["tag"], context]
