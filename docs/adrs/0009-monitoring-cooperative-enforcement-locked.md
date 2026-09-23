@@ -30,11 +30,10 @@ layers, each labelled with what it actually guarantees:
 
 1. **Phase A/A′ capture (shipped, cooperative).** The box **always** routes through the always-on
    proxy (`ProxyPlugin.derive_env` in `src/foldyard/plugins/proxy.py` always sets `FY_PROXY`;
-   `fy up` launches the host supervisor). The `capture` axis is a host-side decision about what
-   the daemon *does*, not whether the box routes: `capture=off` = TLS-passthrough (real certs
-   end-to-end, SNI/host-level log rows), `capture=on` = full MITM decrypt-and-log, with a
-   `[proxy] passthrough` trusted-host list to keep the toolchain quiet. Flipping it never needs a
-   box recreate. This is **visibility**, and the docs say so.
+   `fy up` launches the host supervisor). What the daemon *does* is decided host-side: full MITM
+   decrypt-and-log, with a `[proxy] passthrough` trusted-host list tunnelled un-decrypted to keep
+   the toolchain quiet. (Until [ADR-0029](./0029-the-proxy-always-decrypts.md) a `capture` axis
+   could switch decryption off altogether.) This is **visibility**, and the docs say so.
 2. **Addon default-deny allowlist (shipped, config-gated, still cooperative).** With
    `[proxy] default_deny` on, the packaged addon (`src/foldyard/assets/proxy/egress_proxy.py`)
    refuses any CONNECT/request to a host not on the allowlist. Grants are leveled

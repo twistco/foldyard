@@ -235,8 +235,8 @@ def test_recommend_parses_tables_strings_and_drops_junk(env):
         '{ host = "not a host" }, { why = "no host" }, 42, "pypi.org"]',
     )
     assert config.proxy_recommend() == [
-        {"host": "pypi.org", "why": "box bootstrap"},
-        {"host": "unpkg.com", "why": ""},
+        {"host": "pypi.org", "why": "box bootstrap", "when": ""},
+        {"host": "unpkg.com", "why": "", "when": ""},
     ]
 
 
@@ -352,3 +352,487 @@ def test_a_damaged_store_stops_offers_and_a_malformed_declined_is_damage(env):
     config.allow_store_file().write_text('{"declined": ["a.example.com"]}')
     assert allowlist.live_hosts() == []  # damage, not defaults — same posture as hosts damage
     assert allowlist.pending_recommendations() == []
+
+
+# ── the learn window (observe, record, then enforce by itself) ─────────────────────────
+
+
+def _at(monkeypatch, iso: str) -> None:
+    """Pin allowlist's clock — the window's deadline is compared against it."""
+    from datetime import datetime
+
+    monkeypatch.setattr(allowlist, "_now", lambda: datetime.fromisoformat(iso))
+
+
+def _seed(env, value: str) -> None:
+    (env["repo"] / "foldyard.toml").write_text(f"[proxy]\ndefault_deny = {value}\n")
+    config.clear_caches()
+
+
+def test_a_learn_window_observes_then_enforces_by_itself(env, monkeypatch):
+    # The property the whole feature rests on: a window cannot be forgotten into an open wall.
+    # Even an operator who had the wall OFF comes back to enforcing when the window lapses.
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    allowlist.set_wall(False)
+    window = allowlist.start_learning(3600)
+    assert window["until"] == "2026-09-22T11:00:00+00:00"
+    assert allowlist.default_deny() is False and allowlist.learning() == window
+
+    _at(monkeypatch, "2026-09-22T11:00:01+00:00")
+    assert allowlist.default_deny() is True  # the deadline alone restores enforcement
+    assert allowlist.learning() is None
+    assert allowlist.sweep() is True  # …and the tick tidies the window into its record
+    raw = json.loads(config.allow_store_file().read_text())
+    assert "learn" not in raw and raw["learned"]["since"] == "2026-09-22T10:00:00+00:00"
+    assert allowlist.last_window() == raw["learned"]
+    assert allowlist.sweep() is False
+
+
+def test_a_learn_window_is_capped(env, monkeypatch):
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    window = allowlist.start_learning(10 * 24 * 3600)
+    assert window["until"] == "2026-09-22T18:00:00+00:00"  # LEARN_MAX_SECONDS (8h)
+
+
+def test_wall_on_or_off_ends_a_window_early_but_keeps_its_record(env, monkeypatch):
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    allowlist.start_learning(3600)
+    _at(monkeypatch, "2026-09-22T10:20:00+00:00")
+    allowlist.set_wall(True)
+    assert allowlist.learning() is None and allowlist.default_deny() is True
+    assert allowlist.last_window() == {
+        "since": "2026-09-22T10:00:00+00:00",
+        "until": "2026-09-22T10:20:00+00:00",  # ended now, not at its old deadline
+    }
+
+
+def test_box_cannot_open_a_learn_window(env, monkeypatch):
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    with pytest.raises(SystemExit):
+        allowlist.start_learning()
+    assert allowlist.seed_learning(print) is None
+
+
+@pytest.mark.parametrize(
+    "value,seed,enforcing",
+    [
+        ("true", "on", True),
+        ("false", "off", False),
+        ('"learn"', "learn", True),  # enforces until a launch verb opens the window
+        ('"lern"', "on", True),  # a typo in a loosening control must not loosen it
+        ("0", "off", False),  # the historical bool() truthiness is kept
+    ],
+)
+def test_the_default_deny_seed(env, value, seed, enforcing):
+    _seed(env, value)
+    assert config.proxy_default_deny_seed() == seed
+    assert allowlist.default_deny() is enforcing
+
+
+def test_a_learn_seed_opens_one_window_on_first_launch_only(env, monkeypatch):
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    _seed(env, '"learn"')
+    said: list[str] = []
+    window = allowlist.seed_learning(said.append)
+    assert window is not None and allowlist.default_deny() is False
+    assert "LEARNING" in said[0] and "fy allow learn" in said[0]
+    # Once is the rule: an open window, a closed one, or any stored answer means no second window.
+    assert allowlist.seed_learning(said.append) is None
+    _at(monkeypatch, "2026-09-22T12:00:00+00:00")
+    allowlist.sweep()
+    assert allowlist.seed_learning(said.append) is None and allowlist.default_deny() is True
+    assert len(said) == 1
+
+
+def test_a_learn_seed_never_overrides_an_operator_answer(env):
+    _seed(env, '"learn"')
+    allowlist.set_wall(True)
+    assert allowlist.seed_learning(print) is None
+    assert allowlist.default_deny() is True
+
+
+def test_only_a_true_or_learn_seed_needs_no_window(env):
+    for value in ("true", "false"):
+        _seed(env, value)
+        assert allowlist.seed_learning(print) is None
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        '{"learn": "yes"}',
+        '{"learn": {"since": "2026-09-22T10:00:00+00:00"}}',
+        '{"learned": {"since": "x", "until": "y"}}',
+    ],
+)
+def test_a_malformed_window_is_damage_and_enforces(env, doc):
+    # A window SUSPENDS enforcement, so a half-written one must not read as open.
+    config.allow_store_file().write_text(doc)
+    assert allowlist.default_deny() is True
+    assert allowlist.learning() is None
+
+
+def _row(host: str, ts: str, ua: str = "", **extra) -> dict:
+    return {"ts": ts, "host": host, "would_block": True, **({"ua": ua} if ua else {}), **extra}
+
+
+def test_learned_hosts_groups_the_window_and_drops_answered_hosts(env):
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    allowlist.grant("*.granted.dev", "permanent")
+    allowlist.decline("never.example.com")
+    rows = [
+        _row("before.example.com", "2026-09-22T09:59:59+00:00"),  # outside the window
+        _row("registry.npmjs.org", "2026-09-22T10:01:00+00:00", "npm/10.8.2 node/v22"),
+        _row("registry.npmjs.org", "2026-09-22T10:02:00+00:00", "npm/10.8.2 node/v22"),
+        _row("registry.npmjs.org", "2026-09-22T10:03:00+00:00", "pnpm/9.1.0"),
+        {"ts": "2026-09-22T10:04:00+00:00", "host": "seen.example.com", "status": 200},
+        _row("api.granted.dev", "2026-09-22T10:05:00+00:00"),  # granted since → not offered
+        _row("never.example.com", "2026-09-22T10:06:00+00:00"),  # declined → not offered
+        _row("github.com:22", "2026-09-22T10:07:00+00:00", "git/2.45"),
+        _row("after.example.com", "2026-09-22T11:00:01+00:00"),
+    ]
+    learned = allowlist.learned_hosts(rows, window)
+    assert [e["host"] for e in learned] == ["registry.npmjs.org", "github.com:22"]
+    npm = learned[0]
+    assert npm["count"] == 3 and npm["uas"] == ["npm/10.8.2 node/v22", "pnpm/9.1.0"]
+    assert (npm["first"], npm["last"]) == ("2026-09-22T10:01:00+00:00", "2026-09-22T10:03:00+00:00")
+
+
+def test_a_port_key_is_only_covered_by_that_exact_grant(env):
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    allowlist.grant("github.com", "permanent")  # :443 only
+    rows = [_row("github.com:22", "2026-09-22T10:01:00+00:00")]
+    assert [e["host"] for e in allowlist.learned_hosts(rows, window)] == ["github.com:22"]
+    allowlist.grant("github.com:22", "permanent")
+    assert allowlist.learned_hosts(rows, window) == []
+
+
+def test_the_learn_cap_matches_the_posture_ttl_cap():
+    from foldyard import devmode
+
+    assert allowlist.LEARN_MAX_SECONDS == devmode.MAX_TTL
+
+
+def test_learned_rows_are_untrusted_box_output(env):
+    # Every field was written from traffic the box originated: a junk host must not reach grant()
+    # (it would abort the batch), a UA must not carry terminal escapes to the operator, and the
+    # printed `recommend` line must not be breakable from a UA.
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    ts = "2026-09-22T10:01:00+00:00"
+    rows = [
+        _row("not a host", ts),
+        _row("*.wild.example.com", ts),  # a glob is a grant SHAPE, never an observed host
+        _row("ok.example.com", ts, 'evil/1 \x1b[2J"}, { host = "x.com'),
+    ]
+    (entry,) = allowlist.learned_hosts(rows, window)
+    assert entry["host"] == "ok.example.com"
+    assert "\x1b" not in entry["uas"][0]
+    why = allowlist.recommend_why(entry)
+    assert '"' not in why and "{" not in why and why == "observed: evil/1 — edit me"
+    assert allowlist.recommend_why({"uas": [], "paths": []}) == (
+        "observed: no detail (tunnelled) — edit me"
+    )
+
+
+def test_learned_hosts_say_what_was_fetched_without_what_could_be_secret(env):
+    # The decrypted request rows for a learned host (same host, same window) say what the tool
+    # FETCHED there — the part of a `why` a teammate can act on. Only a path's first segments are
+    # kept: never the query (where tokens ride), and a segment long enough to be an id or a token
+    # reads as `…`. The would-block row itself carries no path (it's the CONNECT).
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    ts = "2026-09-22T10:01:00+00:00"
+    token = "t" * 64
+
+    def req(host, path, at=ts):
+        return {"ts": at, "host": host, "method": "GET", "path": path, "status": 200}
+
+    rows = [
+        _row("registry.npmjs.org", ts, "npm/10.8.2 node/v22"),
+        req("registry.npmjs.org", "/react"),
+        req("registry.npmjs.org", "/react?token=SECRET"),  # same path once the query is gone
+        req("registry.npmjs.org", "/@types/node/-/node-22.0.0.tgz?token=SECRET"),
+        req("registry.npmjs.org", f"/private/{token}/pkg"),
+        req("registry.npmjs.org", "/lodash#frag"),
+        req("registry.npmjs.org", "/zod"),
+        req("registry.npmjs.org", "/outside", at="2026-09-22T12:00:00+00:00"),  # not in window
+        req("other.example.com", "/unrelated"),  # another host's requests stay its own
+    ]
+    (npm,) = allowlist.learned_hosts(rows, window)
+    assert npm["paths"] == ["/react", "/@types/node", "/private/…"]
+    assert npm["more_paths"] == 2  # /lodash, /zod
+    assert not any("SECRET" in p or token in p for p in npm["paths"])
+    assert allowlist.recommend_why(npm) == (
+        "observed: npm/10.8.2 GET /react, /@types/node, /private/… (+2) — edit me"
+    )
+
+
+def test_a_port_keyed_host_borrows_no_paths_from_the_bare_host(env):
+    # `github.com:22` was a raw tunnel; decrypted rows logged under bare `github.com` are :443
+    # traffic — a different grant — and must not dress up the :22 entry.
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    ts = "2026-09-22T10:01:00+00:00"
+    rows = [
+        _row("github.com:22", ts, "git/2.45"),
+        {"ts": ts, "host": "github.com", "method": "GET", "path": "/org/repo", "status": 200},
+    ]
+    (ssh,) = allowlist.learned_hosts(rows, window)
+    assert ssh["paths"] == [] and allowlist.recommend_why(ssh) == "observed: git/2.45 — edit me"
+
+
+def test_a_path_cannot_break_the_printed_toml(env):
+    why = allowlist.recommend_why(
+        {"uas": ["npm/1"], "paths": ['/a"}, { host = "evil.com'], "more_paths": 0}
+    )
+    assert '"' not in why and "{" not in why and "}" not in why and "=" not in why
+
+
+def test_read_log_rows_skips_damage(env, tmp_path):
+    good, bad = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    good.write_text('{"host": "a.example.com"}\nnot json\n[1]\n')
+    assert allowlist.read_log_rows([good, bad]) == [{"host": "a.example.com"}]
+
+
+# ── writing recommend lines into foldyard.toml (the build gate's "share with the team") ──
+
+_NEW = [{"host": "storage.googleapis.com", "uas": ["node"], "paths": [], "more_paths": 0}]
+
+
+def _recommended(text: str) -> list:
+    import tomllib
+
+    return tomllib.loads(text)["proxy"]["recommend"]
+
+
+def test_with_recommends_appends_inside_an_existing_multiline_list_keeping_comments():
+    text = (
+        "[project]\nname = 'x'\n\n[proxy]\ndefault_deny = true\n# the team's list\nrecommend = [\n"
+        '  { host = "pypi.org", why = "uv" },\n'
+        "  # ── this project ──\n"
+        "]\n\n[machine]\nwall = true\n"
+    )
+    out = allowlist.with_recommends(text, _NEW)
+    assert out is not None
+    assert [e["host"] for e in _recommended(out)] == ["pypi.org", "storage.googleapis.com"]
+    assert "# the team's list" in out and "# ── this project ──" in out  # comments survive
+    assert out.startswith(text.split("]\n\n[machine]")[0])  # nothing above the end is touched
+
+
+def test_with_recommends_adds_the_missing_comma():
+    text = '[proxy]\nrecommend = [\n  { host = "pypi.org", why = "uv" }\n]\n'
+    out = allowlist.with_recommends(text, _NEW)
+    assert out is not None and len(_recommended(out)) == 2
+
+
+def test_with_recommends_handles_an_inline_list():
+    text = '[proxy]\nrecommend = ["pypi.org"]\n'
+    out = allowlist.with_recommends(text, _NEW)
+    assert out is not None
+    assert _recommended(out)[0] == "pypi.org"
+    assert _recommended(out)[1]["host"] == "storage.googleapis.com"
+
+
+def test_with_recommends_creates_the_key_and_the_table():
+    no_key = "[proxy]\ndefault_deny = true\n\n[machine]\nwall = true\n"
+    out = allowlist.with_recommends(no_key, _NEW)
+    assert out is not None and _recommended(out)[0]["host"] == "storage.googleapis.com"
+    no_table = "[project]\nname = 'x'\n"
+    out = allowlist.with_recommends(no_table, _NEW)
+    assert out is not None and _recommended(out)[0]["host"] == "storage.googleapis.com"
+
+
+def test_with_recommends_skips_hosts_already_recommended():
+    text = '[proxy]\nrecommend = [{ host = "storage.googleapis.com", why = "mine" }]\n'
+    assert allowlist.with_recommends(text, _NEW) == text  # nothing to add, nothing changed
+
+
+def test_with_recommends_ignores_brackets_inside_strings_and_comments():
+    text = (
+        "[proxy]\nrecommend = [\n"
+        '  { host = "pypi.org", why = "has ] and [ in it" },  # and ] here\n'
+        "]\n"
+    )
+    out = allowlist.with_recommends(text, _NEW)
+    assert out is not None and [e["host"] for e in _recommended(out)] == [
+        "pypi.org",
+        "storage.googleapis.com",
+    ]
+
+
+def test_with_recommends_refuses_what_it_cannot_edit_safely():
+    # Anything it can't prove is a pure append comes back None; the caller prints the block.
+    assert allowlist.with_recommends("[proxy\nbroken", _NEW) is None
+    assert allowlist.with_recommends('[proxy]\nrecommend = "not a list"\n', _NEW) is None
+
+
+def test_offer_can_grant_once_for_a_broad_host(env):
+    # A recommendation like storage.googleapis.com covers every GCS bucket: a teammate who needs
+    # it for one build answers `once` — long enough for that build, then it lapses. It's still a
+    # pending recommendation afterwards, so the next launch asks again.
+    _recommend(env, '["storage.googleapis.com"]')
+    prompt, echo, _lines = _offer(["o"])
+    counts = allowlist.offer_recommendations(interactive=True, prompt=prompt, echo=echo)
+    assert counts == {"granted": 1, "declined": 0, "deferred": 0}
+    grant = next(g for g in allowlist.grants() if g["host"] == "storage.googleapis.com")
+    assert grant["level"] == "once"
+    from datetime import UTC, datetime, timedelta
+
+    left = datetime.fromisoformat(grant["expires"]) - datetime.now(UTC)
+    assert left >= timedelta(seconds=allowlist.OFFER_ONCE_SECONDS - 5)
+
+
+# ── CodeRabbit on #31: timestamps, unreviewed windows, port-wildcard grants ─────────────
+
+
+def _store(raw: dict) -> None:
+    config.allow_store_file().parent.mkdir(parents=True, exist_ok=True)
+    config.allow_store_file().write_text(json.dumps(raw))
+
+
+def test_a_timezone_free_learn_window_is_damage_and_fails_closed(env):
+    # `fromisoformat` accepts "2026-09-22T11:00:00"; comparing that with an aware `now` raised
+    # TypeError out of the wall check instead of failing closed.
+    _store(
+        {
+            "default_deny": False,
+            "learn": {"since": "2026-09-22T10:00:00", "until": "2099-01-01T00:00:00"},
+        }
+    )
+    assert allowlist.learning() is None
+    assert allowlist.default_deny() is True  # damaged ⇒ enforcing
+
+
+def test_a_timezone_free_grant_expiry_is_damage_too(env):
+    # The same comparison in `_prune`: and reading it as "no expiry" would make a once-grant
+    # permanent, so it must be damage (grants nothing), never a default.
+    _store({"hosts": {"a.example.com": {"level": "once", "expires": "2099-01-01T00:00:00"}}})
+    assert allowlist.live_hosts() == []
+
+
+def test_a_new_window_keeps_an_unreviewed_one_in_the_review(env, monkeypatch):
+    # `fy allow learn` reads one window; starting another before reviewing the first used to drop
+    # everything only the first had seen. The new window now reaches back to it.
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    allowlist.start_learning(600)
+    _at(monkeypatch, "2026-09-22T12:00:00+00:00")  # the first lapsed, never reviewed
+    window = allowlist.start_learning(600)
+    assert window["since"] == "2026-09-22T10:00:00+00:00"
+    assert window["until"] == "2026-09-22T12:10:00+00:00"
+
+
+def test_a_reviewed_window_is_not_carried_into_the_next(env, monkeypatch):
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    allowlist.start_learning(600)
+    _at(monkeypatch, "2026-09-22T10:30:00+00:00")
+    allowlist.mark_reviewed()
+    _at(monkeypatch, "2026-09-22T12:00:00+00:00")
+    assert allowlist.start_learning(600)["since"] == "2026-09-22T12:00:00+00:00"
+
+
+def test_a_review_mid_window_carries_only_what_came_after_it(env, monkeypatch):
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    allowlist.start_learning(3600)
+    _at(monkeypatch, "2026-09-22T10:20:00+00:00")
+    allowlist.mark_reviewed()
+    _at(monkeypatch, "2026-09-22T10:40:00+00:00")  # still open, restarted after the review
+    assert allowlist.start_learning(600)["since"] == "2026-09-22T10:20:00+00:00"
+
+
+def test_a_port_wildcard_grant_answers_a_port_keyed_host(env):
+    # The proxy lets `*.example.com:22` through for git.example.com:22; the review must agree, or
+    # it keeps offering a host that is already granted.
+    rows = [
+        {"ts": "2026-09-22T10:05:00+00:00", "host": "git.example.com:22", "would_block": True},
+    ]
+    allowlist.grant("*.example.com:22", "permanent")
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    assert allowlist.learned_hosts(rows, window) == []
+
+
+# ── build-scoped grants: the build reaches it, the box doesn't ─────────────────────────
+
+
+def test_a_build_grant_reaches_the_build_list_not_the_runtime_one(env):
+    allowlist.grant("storage.googleapis.com", "once", 900, build=True)
+    eff = allowlist.effective()
+    assert "storage.googleapis.com" not in eff["allow"]
+    assert eff["build_allow"] == ["storage.googleapis.com"]
+    (g,) = allowlist.grants()
+    assert g["scope"] == "build" and g["level"] == "once"
+
+
+def test_a_build_grant_never_narrows_a_runtime_one(env):
+    # A runtime grant already covers builds; answering the build gate must not downgrade it.
+    allowlist.grant("pypi.org", "permanent")
+    allowlist.grant("pypi.org", "once", 900, build=True)
+    (g,) = allowlist.grants()
+    assert g["scope"] == "runtime" and g["level"] == "permanent"
+    assert allowlist.effective()["allow"] == ["pypi.org"]
+
+
+def test_a_runtime_grant_replaces_a_build_one(env):
+    allowlist.grant("pypi.org", "session", build=True)
+    allowlist.grant("pypi.org", "session")
+    assert allowlist.effective() == {
+        "default_deny": allowlist.default_deny(),
+        "allow": ["pypi.org"],
+        "build_allow": [],
+    }
+
+
+def test_an_unknown_grant_scope_is_damage(env):
+    config.allow_store_file().parent.mkdir(parents=True, exist_ok=True)
+    config.allow_store_file().write_text(
+        json.dumps({"hosts": {"a.example.com": {"level": "permanent", "scope": "everything"}}})
+    )
+    assert allowlist.live_hosts() == [] and allowlist.build_hosts() == []
+
+
+def test_build_recommendations_are_offered_by_the_build_not_at_launch(env):
+    _recommend(
+        env,
+        '[{ host = "pypi.org", why = "deps" }, '
+        '{ host = "cdn.playwright.dev", why = "browsers", when = "build" }]',
+    )
+    assert [e["host"] for e in allowlist.pending_recommendations()] == ["pypi.org"]
+    assert allowlist.build_recommendations() == {"cdn.playwright.dev": "browsers"}
+
+
+def test_sync_yes_grants_build_recommendations_for_builds_only(env):
+    _recommend(env, '[{ host = "cdn.playwright.dev", why = "browsers", when = "build" }]')
+    prompt, echo, _lines = _offer([])
+    allowlist.offer_recommendations(interactive=False, prompt=prompt, echo=echo, accept_all=True)
+    assert allowlist.effective()["allow"] == []
+    assert allowlist.effective()["build_allow"] == ["cdn.playwright.dev"]
+
+
+def test_with_recommends_can_write_a_build_entry():
+    import tomllib
+
+    out = allowlist.with_recommends("[proxy]\n", _NEW, when="build")
+    assert out is not None
+    (entry,) = tomllib.loads(out)["proxy"]["recommend"]
+    assert entry["when"] == "build" and entry["host"] == "storage.googleapis.com"
+
+
+def test_a_shorter_runtime_grant_does_not_swallow_a_lasting_build_grant(env):
+    # A `once` runtime grant would have been kept and the build grant dropped — then gone for
+    # builds too when the once lapsed, while the CLI said "allowed (for builds, permanent)".
+    allowlist.grant("cdn.example.com", "once", 120)
+    with pytest.raises(SystemExit) as refused:
+        allowlist.grant("cdn.example.com", "permanent", build=True)
+    assert "fy allow remove cdn.example.com" in str(refused.value)
+    # One that lasts at least as long already covers builds: a no-op, as before.
+    allowlist.grant("pypi.org", "permanent")
+    allowlist.grant("pypi.org", "session", build=True)
+    assert allowlist.effective()["allow"] == ["cdn.example.com", "pypi.org"]
+
+
+def test_sync_yes_on_a_damaged_store_does_not_die_on_build_recommendations(env):
+    _recommend(env, '[{ host = "cdn.playwright.dev", why = "browsers", when = "build" }]')
+    config.allow_store_file().parent.mkdir(parents=True, exist_ok=True)
+    config.allow_store_file().write_text("{ not json")
+    prompt, echo, _lines = _offer([])
+    counts = allowlist.offer_recommendations(
+        interactive=False, prompt=prompt, echo=echo, accept_all=True
+    )
+    assert counts["granted"] == 0

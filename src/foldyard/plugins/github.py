@@ -126,11 +126,11 @@ def _pem_hint() -> str:
 
 def _box_github_mode(env: dict) -> str:
     """The box's GitHub posture, mode-aware (ported from verify). No proxy CA mounted ⇒
-    ``off``. The CA can now be mounted by the proxy's ``capture`` axis with github OFF, so read
+    ``off``. The CA is mounted by the proxy plugin with github OFF too, so read
     the actual github rung from the gitignored repo mirror — ``off``/``app``/``user`` all honoured
-    (capture-only ⇒ ``off``); only a missing/corrupt mirror falls back to ``app`` (CA present, mode
+    (proxy-only ⇒ ``off``); only a missing/corrupt mirror falls back to ``app`` (CA present, mode
     unknown → assume the historical github-proxy reason rather than under-reporting). A consumer
-    with no ``[plugins.github]`` is ``off`` outright: the CA is ambient proxy substrate (capture,
+    with no ``[plugins.github]`` is ``off`` outright: the CA is ambient proxy substrate (routing,
     claude keyless, …), so its presence must never read as github intent — the old fallback made
     verify assert app-mode invariants in boxes that never had github at all."""
     if not config.github_declared() or not proxy.BOX_CA.exists():

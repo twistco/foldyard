@@ -232,8 +232,8 @@ class InjectRule:
     addon runs each minter with a small base env plus these, rather than inheriting the supervisor's
     environment, which carries every axis's secret from ``host.env``.
     ``label`` names the proxy in daemon status. Many rules coexist: the proxy serializes them into
-    ``egress_proxy.py``'s ``INJECT_RULES`` set (one proxy, N hosts, each its own minter + cache —
-    so github + claude + codex + any ``[[inject]]`` can all be live at once)."""
+    the rule set of ``egress_proxy.py``'s live file (one proxy, N hosts, each its own minter +
+    cache — so github + claude + codex + any ``[[inject]]`` can all be live at once)."""
 
     host: str  # the host pattern to inject on (e.g. "api.github.com")
     header: str  # the header to inject (e.g. "Authorization"); ignored when query_param is set
@@ -849,7 +849,7 @@ def load_plugins(
         plugins.append(gcp.GcpPlugin())
     plugins.append(github.GithubPlugin())  # CORE: axis (off/app/user) only when [plugins.github]
     plugins.append(inject.InjectPlugin())  # CORE: contributes axes only per [[inject]] config
-    plugins.append(proxy.ProxyPlugin())  # CORE: capture axis self-gates on [proxy] (Step D)
+    plugins.append(proxy.ProxyPlugin())  # CORE: the always-on proxy daemon (Step D)
     if cfg.auth0_sim_declared():  # DECLARED: gated on [plugins.auth0-sim]
         plugins.append(auth0_sim.Auth0SimPlugin())
     if cfg.llm_declared():  # DECLARED: gated on [plugins.llm] (Tangible-bound, spinout D4-style)

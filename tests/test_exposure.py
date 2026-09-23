@@ -63,7 +63,7 @@ def test_an_undeclared_passthrough_reports_the_default_it_falls_back_to(checkout
 def test_an_empty_passthrough_says_everything_is_decrypted(checkout):
     exp = collect(checkout(BASE + "passthrough = []\n"))
     assert exp.hosts == 0
-    assert "nothing exempt: capture=on decrypts everything" in rendered(
+    assert "nothing exempt: every host is decrypted" in rendered(
         checkout(BASE + "passthrough = []\n")
     )
 
@@ -334,3 +334,19 @@ def test_a_pending_recommendation_rides_the_doctor_detail_not_a_warning(checkout
 
 def test_recommend_is_absent_from_the_report_when_not_declared(checkout):
     assert "recommended egress" not in rendered(checkout(BASE + "default_deny = true\n"))
+
+
+def test_a_build_grant_answers_only_a_build_recommendation(checkout):
+    # A build-scoped grant lets only a host-started build through; the box is still refused. So it
+    # answers a `when = "build"` recommendation, never a runtime one.
+    from foldyard import allowlist
+
+    cfg = checkout(
+        BASE + 'recommend = [{ host = "pypi.org", why = "deps" }, '
+        '{ host = "cdn.example.com", why = "browsers", when = "build" }]\n'
+    )
+    with config.using(cfg):
+        allowlist.grant("pypi.org", "permanent", build=True)
+        allowlist.grant("cdn.example.com", "permanent", build=True)
+    status = {host: s for host, _why, s in collect(cfg).recommended}
+    assert status == {"pypi.org": "pending", "cdn.example.com": "granted"}

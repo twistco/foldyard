@@ -571,6 +571,9 @@ def allow_add(
         help="once (short TTL) | session (until the supervisor restarts) | permanent",
     ),
     ttl: int = typer.Option(0, "--ttl", help="seconds for --level once (default 120)"),
+    build: bool = typer.Option(
+        False, "--build", help="for image builds only (fy box build, the stack build), not the box"
+    ),
 ) -> None:
     """Allow a host through the egress wall.
 
@@ -580,8 +583,10 @@ def allow_add(
     """
     from . import allowlist
 
-    eff = allowlist.grant(host, level, ttl or None)
-    print(f"✓ {host} allowed ({level}). Effective allowlist: {', '.join(eff['allow']) or 'empty'}")
+    eff = allowlist.grant(host, level, ttl or None, build=build)
+    scope = "for builds, " if build else ""
+    listed = ", ".join(eff["allow"]) or "empty"
+    print(f"✓ {host} allowed ({scope}{level}). Effective allowlist: {listed}")
 
 
 @allow_app.command("list")
@@ -590,11 +595,24 @@ def allow_list() -> None:
     from . import allowlist
 
     eff = allowlist.effective()
-    print(f"default_deny: {'on — unlisted hosts are refused' if eff['default_deny'] else 'off'}")
+    window = allowlist.learning()
+    if window:
+        print(
+            f"default_deny: LEARNING until {_local_hm(window['until'])} — nothing refused, "
+            "would-be refusals recorded (`fy allow learn` to review); enforcing after"
+        )
+    else:
+        print(
+            f"default_deny: {'on — unlisted hosts are refused' if eff['default_deny'] else 'off'}"
+        )
     for host in eff["allow"]:
         print(f"  {host}")
     if not eff["allow"]:
         print("  (no grants — `fy allow add <host>`, or the TUI's `a` key on a blocked row)")
+    if eff.get("build_allow"):
+        print("for image builds only (the build proves itself; the box can't use these):")
+        for host in eff["build_allow"]:
+            print(f"  {host}")
     with _config_bound():
         pending = allowlist.pending_recommendations()
     if pending:
@@ -653,21 +671,132 @@ def _config_bound():
     return config.using(devmode.worktree_config(config.active_worktree()))
 
 
+def _local_hm(iso: str) -> str:
+    """An ISO timestamp as local HH:MM, for a deadline the operator reads."""
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(iso).astimezone().strftime("%H:%M")
+    except (ValueError, TypeError):
+        return iso
+
+
 @allow_app.command("wall")
 def allow_wall(
-    state: str = typer.Argument(..., help="on (enforce the allowlist) | off (observe only)"),
+    state: str = typer.Argument(
+        ..., help="on (enforce) | off (observe only) | learn (observe for a while, then enforce)"
+    ),
+    duration: str = typer.Option(
+        "1h", "--for", help="learn: how long before enforcing again (90s · 30m · 2h; max 8h)"
+    ),
 ) -> None:
-    """Turn egress ENFORCEMENT on or off.
+    """Turn egress ENFORCEMENT on or off — or `learn`: observe for a bounded window, then enforce.
 
     Host-owned, like the grants: `[proxy] default_deny` only seeds the first answer, because repo
     config is writable from inside the box and an enforcement switch the yard can flip is no switch.
-    """
-    from . import allowlist
 
+    `learn` lets everything through while the proxy records each host the wall WOULD refuse, and
+    turns enforcement back on by itself when the window ends — unlike `off`, it can't be forgotten
+    open. Use it while a new dependency's egress is unknown, then `fy allow learn` to grant what it
+    recorded in one reviewed batch.
+    """
+    from . import allowlist, devmode
+
+    if state == "learn":
+        try:
+            seconds = devmode.parse_ttl(duration)
+        except ValueError as e:
+            raise typer.BadParameter(str(e), param_hint="--for")
+        window = allowlist.start_learning(seconds)
+        print(
+            f"✓ egress wall LEARNING until {_local_hm(window['until'])} — nothing is refused, "
+            "every host the wall would refuse is recorded; enforcing after. "
+            "Review: `fy allow learn`"
+        )
+        return
     if state not in ("on", "off"):
-        raise typer.BadParameter("expected `on` or `off`")
+        raise typer.BadParameter("expected `on`, `off` or `learn`")
     eff = allowlist.set_wall(state == "on")
     print(f"✓ egress wall {'ENFORCING' if eff['default_deny'] else 'observing only'}")
+
+
+@allow_app.command("learn")
+def allow_learn(
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="grant every learned host permanently, without asking"
+    ),
+) -> None:
+    """Review what the last learn window recorded, and grant it in one go.
+
+    Lists each host the wall would have refused during the window (open or last closed) with how
+    often and WHICH TOOL reached it (the User-Agent the proxy saw), minus anything granted or
+    declined since. Then: grant them all, go one by one, or leave them. It also prints the
+    `[proxy] recommend` lines that share the result with the team — a repo edit you review and
+    commit, adopted by each operator like any other.
+    """
+    import sys
+
+    from . import allowlist, config
+    from .plugins import proxy
+
+    if allowlist.in_box():
+        print(
+            "• learn windows and grants are host-side only — run `fy allow learn` on the host. "
+            "From here, a blocked host is one to name to the operator."
+        )
+        return
+    window = allowlist.last_window()
+    if window is None:
+        print("• no learn window yet — `fy allow wall learn [--for 1h]` starts one")
+        return
+    with _config_bound():
+        log = proxy._proxy_log()
+        rows = allowlist.read_log_rows([*config.rotated_logs(log), log])
+        learned = allowlist.learned_hosts(rows, window)
+    state = "open" if allowlist.learning() else "closed"
+    span = f"{_local_hm(window['since'])}–{_local_hm(window['until'])}, {state}"
+    allowlist.mark_reviewed()  # shown now: the next window starts fresh instead of carrying this
+    if not learned:
+        print(f"✓ nothing to grant from the learn window ({span}) — the wall refused nothing new")
+        return
+    n = len(learned)
+    print(f"▶ the wall would have refused {n} host{'s' if n != 1 else ''} ({span}):")
+    width = max(len(e["host"]) for e in learned)
+    for e in learned:
+        print(f"    {e['host']:<{width}}  {e['count']:>4}×  {', '.join(e['uas']) or '(no UA)'}")
+        if e["paths"]:
+            more = f" (+{e['more_paths']} more)" if e["more_paths"] else ""
+            print(f"    {'':<{width}}         fetched {', '.join(e['paths'])}{more}")
+    if yes:
+        choice = "y"
+    elif sys.stdin.isatty():
+        choice = (
+            input(f"  grant all {n} permanently?  [y]es · [r]eview one by one · [n]o (default): ")
+            .strip()
+            .lower()
+        )
+    else:
+        print("  No terminal here — grant them all with `fy allow learn --yes`, or one at a time.")
+        choice = "n"
+    granted = []
+    for e in learned:
+        if choice in ("y", "yes"):
+            ok = True
+        elif choice in ("r", "review"):
+            answer = input(f"  allow {e['host']}?  [y]es permanent · [n]o (default): ")
+            ok = answer.strip().lower() in ("y", "yes")
+        else:
+            ok = False
+        if ok:
+            allowlist.grant(e["host"], "permanent")
+            granted.append(e)
+    if granted:
+        print(
+            f"✓ granted {len(granted)} (permanent). To share them with the team, add to "
+            "foldyard.toml — each `why` is what the box was SEEN doing; replace it with the "
+            "reason the project needs the host before you commit:"
+        )
+        print("\n".join(allowlist.recommend_block(granted)))
 
 
 @allow_app.command("remove")

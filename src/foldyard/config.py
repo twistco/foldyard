@@ -672,10 +672,10 @@ def proxy_enabled() -> bool:
 
 def proxy_passthrough() -> list[str]:
     """``[proxy] passthrough`` — the TRUSTED hosts the egress proxy TLS-passes-through (does NOT
-    MITM-decrypt) under ``capture=on``; everything else is decrypted + full-logged. Entries are
-    exact hosts, ``*.suffix`` globs, or ``@bundle`` refs (``@all`` = every built-in bundle),
-    expanded by the proxy plugin. Absent ⇒ ``["@all"]`` (trust the whole default toolchain); an
-    explicit empty list ⇒ decrypt everything under capture=on."""
+    MITM-decrypt); everything else is decrypted + full-logged. Entries are exact hosts,
+    ``*.suffix`` globs, or ``@bundle`` refs (``@all`` = every built-in bundle), expanded by the
+    proxy plugin. Absent ⇒ ``["@all"]`` (trust the whole default toolchain); an explicit empty
+    list ⇒ decrypt everything."""
     raw = _table("proxy").get("passthrough")
     if raw is None:
         return ["@all"]
@@ -745,8 +745,11 @@ def proxy_recommend() -> list[dict]:
     SHARES its allowlist: the list travels with the branch, the grants stay host-owned.
 
     Entries are ``{ host = "pypi.org", why = "…" }`` tables or bare host strings (``why`` then
-    empty). Malformed entries and invalid hosts are dropped rather than raising — this is read on
-    prompt paths that must not crash — and the widenings report names what a config declares."""
+    empty). ``when = "build"`` marks a host only an IMAGE BUILD needs: it isn't offered at launch
+    but by the build gate when a build is refused, and granted for builds only — the runtime wall
+    stays narrower. Every entry carries ``when`` (``"build"`` or ``""``). Malformed entries and
+    invalid hosts are dropped rather than raising — this is read on prompt paths that must not
+    crash — and the widenings report names what a config declares."""
     from .allowlist import valid_host  # stdlib-only, no cycle: allowlist never imports config-time
 
     raw = _table("proxy").get("recommend")
@@ -754,27 +757,41 @@ def proxy_recommend() -> list[dict]:
         return []
     out: list[dict] = []
     for entry in raw:
+        when = ""
         if isinstance(entry, str):
             host, why = entry, ""
         elif isinstance(entry, dict):
             host, why = str(entry.get("host") or ""), str(entry.get("why") or "")
+            when = "build" if entry.get("when") == "build" else ""
         else:
             continue
         host = host.strip()
         if valid_host(host) and host not in {e["host"] for e in out}:
-            out.append({"host": host, "why": why.strip()})
+            out.append({"host": host, "why": why.strip(), "when": when})
     return out
+
+
+def proxy_default_deny_seed() -> str:
+    """``[proxy] default_deny`` as the seed it is: ``"on"`` (true), ``"off"`` (false / absent) or
+    ``"learn"`` — observe for a bounded window on the first launch, then enforce
+    (:func:`foldyard.allowlist.seed_learning`). Anything else keeps the historical truthiness,
+    so a mistyped string reads as ``"on"`` — a typo must not loosen the wall."""
+    raw = _table("proxy").get("default_deny", False)
+    if isinstance(raw, str) and raw.strip().lower() == "learn":
+        return "learn"
+    return "on" if raw else "off"
 
 
 def proxy_default_deny() -> bool:
     """``[proxy] default_deny`` — when true the egress proxy ENFORCES the allowlist: any host
     that isn't allowed (by a live grant in the host-side allow-store, or as an injector host) is
-    REFUSED (403 at CONNECT / on the request). Absent ⇒ false: capture/passthrough only, never
-    blocks. This key only SEEDS the answer — enforcement is host-owned from then on
-    (``fy allow wall``, see :func:`foldyard.allowlist.default_deny`), and the per-host grants
-    live exclusively in the store (``fy allow add``): a ``[proxy] allow`` list is IGNORED
-    (:data:`foldyard.exposure.IGNORED_KEYS`)."""
-    return bool(_table("proxy").get("default_deny", False))
+    REFUSED (403 at CONNECT / on the request). Absent ⇒ false: observe only, never blocks.
+    ``"learn"`` enforces too, until a launch verb opens its first learn window
+    (:func:`proxy_default_deny_seed`). This key only SEEDS the answer — enforcement is host-owned
+    from then on (``fy allow wall``, see :func:`foldyard.allowlist.default_deny`), and the
+    per-host grants live exclusively in the store (``fy allow add``): a ``[proxy] allow`` list is
+    IGNORED (:data:`foldyard.exposure.IGNORED_KEYS`)."""
+    return proxy_default_deny_seed() != "off"
 
 
 def inject_specs() -> list[dict]:
@@ -1669,6 +1686,14 @@ def allow_effective_file() -> Path:
     return Path(env).expanduser() if env else state_dir() / "allow-effective.json"
 
 
+def build_tokens_file() -> Path:
+    """The live image-build secrets, as SHA-256 hashes → expiry (see :mod:`foldyard.buildgate`):
+    what unlocks build-scoped grants at the proxy. Written by the host; read by the proxy addon via
+    ``BUILD_TOKENS_FILE``. ``FOLDYARD_BUILD_TOKENS`` wins."""
+    env = os.environ.get("FOLDYARD_BUILD_TOKENS")
+    return Path(env).expanduser() if env else state_dir() / "build-tokens.json"
+
+
 def log_dir() -> Path:
     """This worktree's host-daemon logs (egress proxy, gcp minter, supervisor). Per-worktree so
     each branch's proxy listener logs separately. ``FOLDYARD_LOG_DIR`` wins, else
@@ -1677,9 +1702,17 @@ def log_dir() -> Path:
     return Path(env).expanduser().resolve() if env else posture_dir() / "logs"
 
 
+def main_log_dir() -> Path:
+    """The MAIN checkout's host-daemon logs, from any worktree: where the main proxy listener
+    writes, which is the one image builds reach (building isn't per-worktree). Same override as
+    :func:`log_dir`."""
+    env = os.environ.get("FOLDYARD_LOG_DIR")
+    return Path(env).expanduser().resolve() if env else state_dir() / "main" / "logs"
+
+
 # How many bytes to read from the END of each (rotated) JSONL log when a TUI panel tails it.
 # The panels show at most a few hundred recent lines; at ~150–250 B/line this tail comfortably
-# covers >1000 lines, so we never re-read the whole multi-MB file (esp. under capture=on) just
+# covers >1000 lines, so we never re-read the whole multi-MB (decrypted, per-request) file just
 # to slice the last N. Overridable for tests / very wide lines.
 LOG_TAIL_BYTES = int(os.environ.get("FOLDYARD_LOG_TAIL_BYTES", str(256 * 1024)))
 

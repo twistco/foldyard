@@ -9,7 +9,7 @@ controls sit on that path; they get conflated constantly, so name the right one 
 | **routing** | does traffic go through the proxy at all? | baked in at box creation (always on) |
 | **the wall** | can traffic *ignore* the proxy and go direct? | project config, at VM provisioning |
 | **the allowlist** | which hosts may the proxy reach? | `fy allow …` on the host, live |
-| **capture** | is traffic decrypted and logged? | `fy mode capture=on` / `fy mode capture=off`, on the host, live |
+| **passthrough** | which hosts are tunnelled *without* decryption? | `[proxy] passthrough` in `foldyard.toml`, adopted on the host |
 
 ## Diagnosing a failed request
 
@@ -21,6 +21,11 @@ controls sit on that path; they get conflated constantly, so name the right one 
   one-line `why`: that commits the recommendation for the whole team — each operator is OFFERED
   it per host (after reviewing your edit at the adoption gate) instead of rediscovering the
   block, and nothing is granted without their yes.
+- **Nothing is blocked, but the operator mentions a "learn window"** — the wall is observing for
+  a while (`fy allow wall learn`): requests pass, and every host that WOULD be refused is recorded
+  for the operator to review. It enforces again by itself when the window ends, so a host that
+  works now may be refused later if the operator doesn't grant it — say which hosts your task
+  needed.
 - **Connection refused / hangs on everything** — the host proxy probably isn't running. `fy doctor`
   names it; the human checks it with `fy host` and restarts it with `fy host restart`, on the
   host (the box can't).
@@ -30,12 +35,13 @@ controls sit on that path; they get conflated constantly, so name the right one 
 - **Works for a while, then dies ~60s in** — that's an idle-connection reset from the upstream,
   not the proxy. Streaming or keepalives fix it; the proxy doesn't.
 
-## Capture is not filtering
+## Decryption is not filtering
 
-`capture=on` decrypts and logs requests so the human can *see* what the yard talks to. It doesn't
-block anything, and hosts on the project's `passthrough` list are tunnelled without decryption —
-often a couple of hundred of them, since one `@bundle` reference expands to a whole toolchain.
-`fy config widenings` prints the real count.
+The proxy always decrypts and logs requests so the human can *see* what the yard talks to. That
+doesn't block anything, and hosts on the project's `passthrough` list are tunnelled without
+decryption — often a couple of hundred of them, since one `@bundle` reference expands to a whole
+toolchain. `fy config widenings` prints the real count. (There is no `capture` switch any more:
+decryption is always on.)
 
 Conversely the wall (`[machine] wall = true`) is the enforcing control: traffic that ignores the
 proxy environment is *rejected*, not silently allowed. Without it, routing is cooperative — it

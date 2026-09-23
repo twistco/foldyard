@@ -1,6 +1,6 @@
 """Built-in host bundles for the proxy's `[proxy] passthrough` allow-list.
 
-These are the *trusted, expected* dev-toolchain hosts. Under `capture=on` the proxy TLS-PASSES
+These are the *trusted, expected* dev-toolchain hosts. The proxy TLS-PASSES
 THROUGH them (real certs end-to-end, SNI/host-level log only — we already know what they are and
 don't need request-level scrutiny) and MITM-DECRYPTS everything NOT listed (the surprising egress
 worth inspecting). A project references them by `@bundle` in `foldyard.toml`
@@ -51,11 +51,15 @@ BUNDLES: dict[str, tuple[str, ...]] = {
         "index.docker.io",
         "hub.docker.com",
         "www.docker.com",
+        # Docker Hub serves blobs from either CDN; a pull is the guest podman's own traffic, which
+        # trusts no proxy CA, so a decrypted blob host fails it (x509 "unknown authority").
         "production.cloudflare.docker.com",
+        "production.cloudfront.docker.com",
         "download.docker.com",
         "gcr.io",
         "*.gcr.io",
         "ghcr.io",
+        "pkg-containers.githubusercontent.com",  # ghcr.io's blob storage
         "mcr.microsoft.com",
         "*.data.mcr.microsoft.com",
         "public.ecr.aws",

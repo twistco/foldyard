@@ -40,7 +40,7 @@ class _Req:
         self.method = method
         self.path = path
         self.url = f"https://{host}{path}"  # the addon re-issues against this on a 401
-        self.raw_content = b""
+        self.raw_content: bytes | None = b""
         self.headers: dict[str, str] = {}
         # mitmproxy's request.query is a settable MultiDictView reflected into the URL; the addon
         # only ever does `query[name] = value`, so a plain dict is a faithful enough stand-in.
@@ -69,6 +69,7 @@ class _Flow:
         self.request = _Req(host, method, path, port, scheme)
         self.response: _Resp | None = _Resp(status, content)
         self.metadata: dict = {}
+        self.client_conn = types.SimpleNamespace(id="client-1")
 
 
 @pytest.fixture
@@ -447,8 +448,9 @@ class _ClientHello:
     """A stand-in for mitmproxy's tls.ClientHelloData — the surface tls_clienthello touches:
     `.client_hello.sni` (the SNI) and the writable `.ignore_connection` (passthrough decision)."""
 
-    def __init__(self, sni: str | None) -> None:
+    def __init__(self, sni: str | None, client_id: str = "client-1") -> None:
         self.client_hello = types.SimpleNamespace(sni=sni)
+        self.context = types.SimpleNamespace(client=types.SimpleNamespace(id=client_id))
         self.ignore_connection = False
 
 
@@ -747,6 +749,21 @@ async def test_re_mints_and_re_issues_once_on_401(injector, gh):
     assert gh.requests == []
 
 
+async def test_a_401_on_a_streamed_upload_is_handed_back_not_re_issued(injector, gh):
+    # Under stream_large_bodies a request body past the threshold goes upstream as it arrives and
+    # mitmproxy keeps no copy (raw_content is None). Re-issuing would send an EMPTY body with a
+    # fresh token — a silently truncated upload — so the 401 goes back to the client untouched.
+    inj, log = injector
+    flow = _Flow("api.github.com", status=401)
+    flow.request.raw_content = None
+    await inj.response(flow)
+
+    assert gh.requests == []
+    assert not flow.metadata.get("egress_proxy_retried")
+    assert flow.response is not None and flow.response.status_code == 401
+    assert _last_log(log)["status"] == 401
+
+
 # ── the default-deny egress wall (DEFAULT_DENY + ALLOW_FILE) ──────────────────────────────
 
 
@@ -914,6 +931,86 @@ def test_default_deny_off_never_blocks(gh, monkeypatch, tmp_path):
     assert f.response is None
 
 
+@pytest.fixture
+def observing(gh, monkeypatch, tmp_path):
+    """An Injector with the wall OBSERVING (no DEFAULT_DENY — `fy allow wall off` or a learn
+    window) but an ALLOW_FILE present, as the plugin always emits it. (Injector, allow, log)."""
+    log = tmp_path / "egress.jsonl"
+    allow = tmp_path / "allow-effective.json"
+    _write_allow(allow, ["granted.example.com"], default_deny=False)
+    monkeypatch.setenv("INJECT_HOST", "api.github.com")
+    monkeypatch.setenv("INJECT_COMMAND", "true")
+    monkeypatch.setenv("ALLOW_FILE", str(allow))
+    monkeypatch.setenv("PROXY_LOG_FILE", str(log))
+    return gh.Injector(), allow, log
+
+
+def _rows(log: Path) -> list[dict]:
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def test_observing_records_what_enforcing_would_refuse_and_refuses_nothing(observing):
+    # The learn-mode signal: while the wall only observes, a CONNECT enforcement would refuse
+    # goes through AND leaves a would_block row carrying the client's User-Agent — the same
+    # policy check, so the learned set is exactly what enforcing needs (ports included).
+    inj, _, log = observing
+    f = _Flow("registry.npmjs.org")
+    f.request.headers["user-agent"] = "npm/10.8.2 node/v22.4.0 linux arm64"
+    f.response = None
+    inj.http_connect(f)
+    assert f.response is None  # nothing refused
+    (row,) = _rows(log)
+    assert row["host"] == "registry.npmjs.org" and row["would_block"] is True
+    assert row["ua"].startswith("npm/10.8.2") and "blocked" not in row
+
+    ssh = _Flow("github.com", port=22)  # another port is its own grant → keyed with the port
+    ssh.response = None
+    inj.http_connect(ssh)
+    assert ssh.response is None and _rows(log)[-1]["host"] == "github.com:22"
+
+
+def test_observing_skips_granted_and_injector_hosts(observing):
+    # A granted host or the injector host would pass under enforcement — no would_block row.
+    inj, _, log = observing
+    for host in ("granted.example.com", "api.github.com"):
+        f = _Flow(host)
+        f.response = None
+        inj.http_connect(f)
+    assert _rows(log) == []
+
+
+def test_would_block_rows_are_rate_limited_per_host(observing):
+    # An install opens hundreds of connections to one registry; one row per host per window is
+    # all the review needs, and anything more rotates the log away.
+    inj, _, log = observing
+    for _ in range(5):
+        f = _Flow("pypi.org")
+        f.response = None
+        inj.http_connect(f)
+    other = _Flow("files.pythonhosted.org")
+    other.response = None
+    inj.http_connect(other)
+    assert [r["host"] for r in _rows(log)] == ["pypi.org", "files.pythonhosted.org"]
+
+
+def test_observing_records_cleartext_but_not_decrypted_https_twice(observing):
+    # Cleartext never CONNECTs, so request() records it; a decrypted HTTPS request was already
+    # recorded at its CONNECT and must not be recorded again per request.
+    inj, _, log = observing
+    inj.request(_Flow("deb.debian.org", port=80, scheme="http"))
+    inj.request(_Flow("example.org"))  # https, not granted — CONNECT's job
+    assert [r["host"] for r in _rows(log)] == ["deb.debian.org"]
+
+
+def test_decrypted_rows_carry_the_user_agent(injector):
+    inj, log = injector
+    flow = _Flow("example.org", status=200)
+    flow.request.headers["user-agent"] = "uv/0.8.0 " + "x" * 500
+    inj._log_flow(flow)
+    row = _last_log(log)
+    assert row["ua"].startswith("uv/0.8.0") and len(row["ua"]) == 120  # capped, untrusted text
+
+
 def test_default_deny_exempts_the_injector_host(gh, monkeypatch, tmp_path):
     # The injector host is ALWAYS reachable even with an empty allowlist — we must reach it to mint.
     allow = tmp_path / "allow-effective.json"
@@ -1023,3 +1120,748 @@ def test_mint_subprocess_really_cannot_see_undeclared_secrets(gh, monkeypatch, t
         }
     )
     assert rule.token() == "GH_APP_ID"
+
+
+# ── trusted builds: the build marker blind-tunnels, still walled ──────────────────────
+
+
+def _marked(flow: _Flow, user: str = "fy-build", password: str | None = None) -> _Flow:
+    """Mark a flow the way a build's proxy URL (`http://fy-build:<secret>@gw:port`) does: clients
+    turn the URL's userinfo into a Basic Proxy-Authorization header on the CONNECT. No password:
+    the bare marker (`fy-build:fy-build`)."""
+    import base64
+
+    token = base64.b64encode(f"{user}:{password or user}".encode()).decode()
+    flow.request.headers["Proxy-Authorization"] = f"Basic {token}"
+    return flow
+
+
+def test_build_marker_matches_the_plugins(gh):
+    # The addon runs standalone under mitmdump (it can't import foldyard), so the marker is
+    # duplicated — pinned equal here so the two can't drift apart.
+    from foldyard.plugins import proxy
+
+    assert gh.module._BUILD_TUNNEL_USER == proxy.BUILD_TUNNEL_USER
+
+
+def test_a_marked_connect_is_blind_tunnelled_and_logged_as_a_build(walled):
+    # An image build has no proxy CA, so a decrypted host fails its TLS verify. Its CONNECT
+    # carries the build marker; the addon then tunnels that connection instead of decrypting.
+    inj, allow, log = walled
+    _write_allow(allow, ["cdn.playwright.dev"])
+    connect = _marked(_Flow("cdn.playwright.dev"))
+    connect.response = None
+    inj.http_connect(connect)
+    assert connect.response is None  # allowed
+
+    hello = _ClientHello("cdn.playwright.dev")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is True  # real cert end to end: the build can verify it
+    row = _last_log(log)
+    assert row["passthrough"] is True and row["build"] is True
+
+
+def test_the_build_marker_never_opens_the_wall(walled):
+    # The marker decides DECRYPTION only. A marked CONNECT to an ungranted host is refused.
+    inj, _allow, log = walled
+    connect = _marked(_Flow("evil.example.com"))
+    connect.request.headers["user-agent"] = "node"
+    connect.response = None
+    inj.http_connect(connect)
+    assert connect.response is not None and connect.response.status_code == 403
+    row = _last_log(log)
+    # Attributed to the build, with the tool: what `fy box build` reads back to offer the host.
+    assert row["blocked"] is True and row["build"] is True and row["ua"] == "node"
+
+
+def test_an_unmarked_refusal_is_not_attributed_to_a_build(walled):
+    inj, _allow, log = walled
+    connect = _Flow("evil.example.com")
+    connect.response = None
+    inj.http_connect(connect)
+    assert "build" not in _last_log(log)
+
+
+def test_an_unmarked_connection_is_still_decrypted(walled):
+    inj, allow, _log = walled
+    _write_allow(allow, ["cdn.playwright.dev"])
+    connect = _Flow("cdn.playwright.dev")
+    connect.response = None
+    inj.http_connect(connect)
+    hello = _ClientHello("cdn.playwright.dev")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is False
+
+
+def test_the_marker_is_per_connection(walled):
+    # Another client's connection to the same host is not tunnelled because a build's was.
+    inj, allow, _log = walled
+    _write_allow(allow, ["cdn.playwright.dev"])
+    connect = _marked(_Flow("cdn.playwright.dev"))
+    connect.response = None
+    inj.http_connect(connect)
+    other = _ClientHello("cdn.playwright.dev", client_id="client-2")
+    inj.tls_clienthello(other)
+    assert other.ignore_connection is False
+
+
+def test_another_user_in_the_proxy_url_is_no_marker(walled):
+    inj, allow, _log = walled
+    _write_allow(allow, ["cdn.playwright.dev"])
+    connect = _marked(_Flow("cdn.playwright.dev"), user="someone")
+    connect.response = None
+    inj.http_connect(connect)
+    hello = _ClientHello("cdn.playwright.dev")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is False
+
+
+def test_a_marked_connect_to_an_injector_host_is_still_decrypted(gh, monkeypatch, tmp_path):
+    # The injector host is decrypted whatever else says otherwise (unchanged: ADR-0007).
+    monkeypatch.setenv("INJECT_HOST", "api.github.com")
+    monkeypatch.setenv("INJECT_COMMAND", "true")
+    monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
+    inj = gh.Injector()
+    connect = _marked(_Flow("api.github.com"))
+    connect.response = None
+    inj.http_connect(connect)
+    hello = _ClientHello("api.github.com")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is False
+
+
+def test_a_disconnected_builds_mark_is_forgotten(walled):
+    inj, allow, _log = walled
+    _write_allow(allow, ["cdn.playwright.dev"])
+    connect = _marked(_Flow("cdn.playwright.dev"))
+    connect.response = None
+    inj.http_connect(connect)
+    inj.client_disconnected(connect.client_conn)
+    hello = _ClientHello("cdn.playwright.dev")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is False
+
+
+def test_the_marker_header_is_not_forwarded_on_cleartext(walled):
+    # A cleartext request carries the Proxy-Authorization to the proxy, which would otherwise
+    # pass it upstream. It says nothing secret, but it isn't the upstream's business.
+    inj, allow, _log = walled
+    _write_allow(allow, ["deb.debian.org"])
+    flow = _marked(_Flow("deb.debian.org", port=80, scheme="http"))
+    flow.response = None
+    inj.request(flow)
+    assert flow.response is None  # granted, not refused
+    assert "Proxy-Authorization" not in flow.request.headers
+
+
+def test_a_refused_cleartext_build_request_is_attributed_too(walled):
+    # apt fetches over plain HTTP: its refusal must reach the build gate like a CONNECT's.
+    inj, _allow, log = walled
+    flow = _marked(_Flow("deb.example.org", port=80, scheme="http"))
+    flow.response = None
+    inj.request(flow)
+    assert flow.response is not None and flow.response.status_code == 403
+    assert _last_log(log)["build"] is True
+
+
+# ── the live settings file: posture changes without a restart ─────────────────────────
+
+
+def _write_live(path: Path, rules=(), default_deny=False, passthrough=()) -> None:
+    """Write the live file the way the supervisor does: whole, then renamed into place."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(
+            {"rules": list(rules), "default_deny": default_deny, "passthrough": list(passthrough)}
+        )
+    )
+    tmp.replace(path)
+
+
+@pytest.fixture
+def live(gh, monkeypatch, tmp_path):
+    """An Injector configured by LIVE_FILE (+ HOST_ENV_FILE for secrets). Returns a namespace with
+    the Injector factory, the live/host-env/allow/log paths."""
+    paths = types.SimpleNamespace(
+        live=tmp_path / "proxy-live.json",
+        host_env=tmp_path / "host.env",
+        allow=tmp_path / "allow-effective.json",
+        log=tmp_path / "egress.jsonl",
+    )
+    _write_live(paths.live)
+    paths.host_env.write_text("")
+    _write_allow(paths.allow, [])
+    # A stray legacy env must not leak into a live-configured proxy.
+    monkeypatch.setenv("INJECT_HOST", "legacy.example.com")
+    monkeypatch.setenv("INJECT_COMMAND", "should-be-ignored")
+    monkeypatch.setenv("DEFAULT_DENY", "")
+    monkeypatch.setenv("LIVE_FILE", str(paths.live))
+    monkeypatch.setenv("HOST_ENV_FILE", str(paths.host_env))
+    monkeypatch.setenv("ALLOW_FILE", str(paths.allow))
+    monkeypatch.setenv("PROXY_LOG_FILE", str(paths.log))
+    paths.Injector = gh.Injector
+    paths.logs = gh.logs
+    return paths
+
+
+def _counting_minter(tmp_path: Path, name: str, value: str = "token FAKE", env_key: str = ""):
+    """A minter that counts its runs and prints `value` (or, with env_key, that var's value)."""
+    calls = tmp_path / f"{name}.calls"
+    script = tmp_path / f"{name}.py"
+    emit = f"os.environ.get({env_key!r}, 'MISSING')" if env_key else repr(value)
+    script.write_text(
+        "import json, os, pathlib\n"
+        f"p = pathlib.Path({str(calls)!r})\n"
+        "p.write_text(str((int(p.read_text()) if p.exists() else 0) + 1))\n"
+        f"print(json.dumps({{'value': {emit}, 'ttl': 3600}}))\n"
+    )
+    return types.SimpleNamespace(command=f"{sys.executable} {script}", calls=calls)
+
+
+def test_the_live_file_configures_the_rules_over_the_legacy_env(live, tmp_path):
+    minter = _counting_minter(tmp_path, "gh")
+    _write_live(live.live, rules=[{"host": "api.github.com", "command": minter.command}])
+    inj = live.Injector()
+    flow = _Flow("api.github.com")
+    inj.request(flow)
+    assert flow.request.headers["Authorization"] == "token FAKE"
+    assert inj.inject_hosts == {"api.github.com"}  # legacy.example.com never appears
+
+
+def test_a_rule_added_live_injects_without_a_new_process(live, tmp_path):
+    gh_minter = _counting_minter(tmp_path, "gh")
+    sanity = _counting_minter(tmp_path, "sanity", value="Bearer S")
+    gh_rule = {"host": "api.github.com", "command": gh_minter.command}
+    _write_live(live.live, rules=[gh_rule])
+    inj = live.Injector()
+    inj.request(_Flow("api.github.com"))
+
+    _write_live(live.live, rules=[gh_rule, {"host": "api.sanity.io", "command": sanity.command}])
+    added = _Flow("api.sanity.io")
+    inj.request(added)
+    assert added.request.headers["Authorization"] == "Bearer S"
+    inj.request(_Flow("api.github.com"))
+    # The unchanged rule kept its cached token across the reload: the whole point is that a
+    # posture change costs the rules that DIDN'T change nothing.
+    assert gh_minter.calls.read_text() == "1"
+
+
+def test_a_rule_removed_live_stops_injecting_at_once(live, tmp_path):
+    minter = _counting_minter(tmp_path, "gh")
+    _write_live(live.live, rules=[{"host": "api.github.com", "command": minter.command}])
+    inj = live.Injector()
+    inj.request(_Flow("api.github.com"))
+    _write_live(live.live, rules=[])
+    flow = _Flow("api.github.com")
+    flow.request.headers["Authorization"] = "token DUMMY"
+    inj.request(flow)
+    assert flow.request.headers["Authorization"] == "token DUMMY"  # revoked on the next request
+
+
+def test_the_wall_switches_live(live):
+    inj = live.Injector()
+    open_ = _Flow("anywhere.example.com")
+    open_.response = None
+    inj.http_connect(open_)
+    assert open_.response is None  # observing
+    _write_live(live.live, default_deny=True)
+    walled = _Flow("anywhere.example.com")
+    walled.response = None
+    inj.http_connect(walled)
+    assert walled.response is not None and walled.response.status_code == 403
+
+
+def test_passthrough_changes_live(live):
+    inj = live.Injector()
+    hello = _ClientHello("files.example.com")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is False  # decrypted
+    _write_live(live.live, passthrough=["*.example.com"])
+    hello = _ClientHello("files.example.com", client_id="client-2")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is True  # tunnelled now
+
+
+def test_a_missing_or_malformed_live_file_fails_closed(live):
+    live.live.write_text("{ not json")
+    inj = live.Injector()
+    f = _Flow("anywhere.example.com")
+    f.response = None
+    inj.http_connect(f)
+    assert f.response is not None and f.response.status_code == 403  # the wall, not open egress
+    assert inj.injecting is False
+    live.live.unlink()
+    g = _Flow("anywhere.example.com", method="POST")
+    g.response = None
+    inj.http_connect(g)
+    assert g.response is not None and g.response.status_code == 403
+
+
+def test_a_rules_secret_is_read_from_host_env_by_name(live, tmp_path, monkeypatch):
+    # The proxy's own environment no longer carries host.env (the supervisor strips it), so the
+    # addon reads the names its rules declare, and only those, from the file.
+    monkeypatch.delenv("SANITY_TOKEN", raising=False)
+    live.host_env.write_text("SANITY_TOKEN='from-host-env'\nOTHER=nope\n")
+    minter = _counting_minter(tmp_path, "sanity", env_key="SANITY_TOKEN")
+    rule = {"host": "api.sanity.io", "command": minter.command, "env": ["SANITY_TOKEN"]}
+    _write_live(live.live, rules=[rule])
+    inj = live.Injector()
+    flow = _Flow("api.sanity.io")
+    inj.request(flow)
+    assert flow.request.headers["Authorization"] == "from-host-env"
+
+
+def test_an_operator_exported_secret_wins_over_host_env(live, tmp_path, monkeypatch):
+    monkeypatch.setenv("SANITY_TOKEN", "exported")
+    live.host_env.write_text("SANITY_TOKEN=from-host-env\n")
+    minter = _counting_minter(tmp_path, "sanity", env_key="SANITY_TOKEN")
+    _write_live(
+        live.live,
+        rules=[{"host": "api.sanity.io", "command": minter.command, "env": ["SANITY_TOKEN"]}],
+    )
+    flow = _Flow("api.sanity.io")
+    live.Injector().request(flow)
+    assert flow.request.headers["Authorization"] == "exported"
+
+
+def test_a_rotated_secret_drops_the_cached_token(live, tmp_path, monkeypatch):
+    # Before: a rotation changed the daemon's env stamp and the restart dropped every cache. Now
+    # the reload notices the value changed and rebuilds just that rule.
+    monkeypatch.delenv("SANITY_TOKEN", raising=False)
+    live.host_env.write_text("SANITY_TOKEN=one\n")
+    minter = _counting_minter(tmp_path, "sanity", env_key="SANITY_TOKEN")
+    _write_live(
+        live.live,
+        rules=[{"host": "api.sanity.io", "command": minter.command, "env": ["SANITY_TOKEN"]}],
+    )
+    inj = live.Injector()
+    inj.request(_Flow("api.sanity.io"))
+    tmp = live.host_env.with_suffix(".tmp")
+    tmp.write_text("SANITY_TOKEN=two\n")
+    tmp.replace(live.host_env)
+    flow = _Flow("api.sanity.io")
+    inj.request(flow)
+    assert flow.request.headers["Authorization"] == "two"
+    assert minter.calls.read_text() == "2"
+
+
+def test_a_rule_added_live_is_warmed_below_error(live, tmp_path):
+    # A reload is not the startup window, but a new rule's warm-up is still off the request path,
+    # and a missing credential there is one host's problem: WARN, like the startup warm-up.
+    inj = live.Injector()
+    inj.running()
+    boom = tmp_path / "boom.py"
+    boom.write_text("import sys; sys.exit(1)\n")
+    _write_live(
+        live.live, rules=[{"host": "api.github.com", "command": f"{sys.executable} {boom}"}]
+    )
+    assert inj.refresh() is True
+    for t in inj._warm_threads:
+        t.join(timeout=10)
+    assert {lvl for lvl, msg in live.logs if "mint failed" in msg} == {"warn"}
+    assert any("reloaded" in msg for _lvl, msg in live.logs)  # the change is reported
+
+
+# ── narrowing closes what the new policy wouldn't allow ───────────────────────────────
+
+
+class _Closer:
+    """Stands in for mitmproxy's proxyserver addon: `connections[client.id]` → a handler whose
+    `close_connection(handler.client)` records the close (the internal the addon relies on)."""
+
+    def __init__(self) -> None:
+        self.closed: list[str] = []
+        self.connections: dict[str, object] = {}
+
+    def track(self, client_id: str) -> None:
+        closer = self
+        client = types.SimpleNamespace(id=client_id)
+
+        class _Handler:
+            def __init__(self) -> None:
+                self.client = client
+
+            def close_connection(self, conn) -> None:
+                closer.closed.append(conn.id)
+
+        self.connections[client_id] = _Handler()
+
+
+@pytest.fixture
+def closer(gh, monkeypatch):
+    c = _Closer()
+    addons = types.SimpleNamespace(get=lambda name: c if name == "proxyserver" else None)
+    monkeypatch.setattr(gh.module.ctx, "master", types.SimpleNamespace(addons=addons))
+    return c
+
+
+def _open(inj, closer: _Closer, host: str, client_id: str, *, marked: bool = False) -> bool:
+    """CONNECT + ClientHello on one client connection, as mitmproxy delivers them; returns whether
+    the connection was blind-tunnelled."""
+    closer.track(client_id)
+    connect = _Flow(host)
+    connect.client_conn = types.SimpleNamespace(id=client_id)
+    if marked:
+        _marked(connect)
+    connect.response = None
+    inj.http_connect(connect)
+    assert connect.response is None, f"{host} refused at CONNECT"
+    hello = _ClientHello(host, client_id=client_id)
+    inj.tls_clienthello(hello)
+    return hello.ignore_connection
+
+
+def test_a_tunnel_whose_host_leaves_passthrough_is_closed(live, closer):
+    _write_live(live.live, passthrough=["files.example.com", "keep.example.com"])
+    inj = live.Injector()
+    assert _open(inj, closer, "files.example.com", "c1") is True
+    assert _open(inj, closer, "keep.example.com", "c2") is True
+    _write_live(live.live, passthrough=["keep.example.com"])
+    inj.refresh()
+    # The first must reconnect to be decrypted; the second is untouched.
+    assert closer.closed == ["c1"]
+
+
+def test_the_wall_going_up_closes_what_it_would_refuse(live, closer):
+    _write_allow(live.allow, ["granted.example.com"])
+    _write_live(live.live, passthrough=["blind.example.com"])
+    inj = live.Injector()
+    _open(inj, closer, "blind.example.com", "blind")  # tunnelled, not granted
+    _open(inj, closer, "seen.example.com", "seen")  # decrypted, not granted
+    _open(inj, closer, "granted.example.com", "ok")
+    _write_live(live.live, default_deny=True, passthrough=["blind.example.com"])
+    inj.refresh()
+    assert sorted(closer.closed) == ["blind", "seen"]
+
+
+def test_a_revoked_grant_closes_its_open_tunnels(walled, closer):
+    # Before, this was a gap: `fy allow remove` never restarted the proxy, so a revoked host kept
+    # any tunnel it already had.
+    inj, allow, _log = walled  # a legacy, env-configured Injector: allow changes still sweep
+    _write_allow(allow, ["gone.example.com", "stays.example.com"])
+    _open(inj, closer, "gone.example.com", "c1")
+    _open(inj, closer, "stays.example.com", "c2")
+    import os
+
+    _write_allow(allow, ["stays.example.com"])
+    os.utime(allow, (inj._allow_mtime + 10, inj._allow_mtime + 10))
+    inj.refresh()
+    assert closer.closed == ["c1"]
+
+
+def test_a_new_injector_host_closes_its_blind_tunnel(live, closer, tmp_path):
+    # An injector has to decrypt its host to rewrite the header; a tunnel opened before the rule
+    # existed would carry the box's dummy credential upstream untouched.
+    _write_live(live.live, passthrough=["api.sanity.io"])
+    inj = live.Injector()
+    assert _open(inj, closer, "api.sanity.io", "c1") is True
+    minter = _counting_minter(tmp_path, "sanity")
+    _write_live(
+        live.live,
+        rules=[{"host": "api.sanity.io", "command": minter.command}],
+        passthrough=["api.sanity.io"],
+    )
+    inj.refresh()
+    assert closer.closed == ["c1"]
+
+
+def test_widening_closes_nothing(live, closer):
+    inj = live.Injector()
+    _open(inj, closer, "files.example.com", "c1")  # decrypted
+    _write_live(live.live, passthrough=["files.example.com"])  # more trust, not less
+    inj.refresh()
+    _write_live(live.live, passthrough=["files.example.com"], default_deny=False)
+    inj.refresh()
+    assert closer.closed == []
+
+
+def test_a_build_tunnel_survives_a_passthrough_change_while_still_allowed(live, closer):
+    inj = live.Injector()
+    assert _open(inj, closer, "cdn.example.com", "b1", marked=True) is True
+    _write_live(live.live, passthrough=["other.example.com"])
+    inj.refresh()
+    assert closer.closed == []
+
+
+def test_a_disconnected_connection_is_not_closed_again(live, closer):
+    _write_live(live.live, passthrough=["files.example.com"])
+    inj = live.Injector()
+    _open(inj, closer, "files.example.com", "c1")
+    inj.client_disconnected(types.SimpleNamespace(id="c1"))
+    _write_live(live.live, passthrough=[])
+    inj.refresh()
+    assert closer.closed == []
+
+
+def test_a_close_that_fails_is_reported_not_raised(live, closer):
+    _write_live(live.live, passthrough=["files.example.com"])
+    inj = live.Injector()
+    _open(inj, closer, "files.example.com", "c1")
+    closer.connections.clear()  # mitmproxy no longer knows it (or its internals moved)
+    _write_live(live.live, passthrough=[])
+    assert inj.refresh() is True
+    assert any("couldn't close" in msg for _lvl, msg in live.logs)
+
+
+# ── injection happens on the HEADERS, before a streamed body goes upstream ─────────────
+
+
+def test_injection_happens_at_requestheaders(injector):
+    # With stream_large_bodies set, mitmproxy forwards a big request's headers + body as they
+    # arrive and fires `request` only after the body has gone — too late to rewrite a header.
+    # A long Claude conversation (>1 MiB) reached Anthropic with the box's dummy token: 401
+    # "OAuth access token is invalid". `requestheaders` fires first, for every request.
+    inj, _ = injector
+    flow = _Flow("api.github.com")
+    flow.request.headers["Authorization"] = "token DUMMY"
+    inj.requestheaders(flow)
+    assert flow.request.headers["Authorization"] == "token FAKE"
+
+
+def test_the_request_hook_after_requestheaders_does_nothing_twice(walled):
+    # Both hooks fire for a buffered request; the work (and its log row) happens once.
+    inj, _allow, log = walled
+    flow = _Flow("plain.example.com", port=80, scheme="http")
+    flow.response = None
+    inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 403
+    inj.request(flow)
+    assert sum(1 for line in log.read_text().splitlines() if '"blocked": true' in line) == 1
+
+
+# ── CodeRabbit on #31: would-block state, streamed 401s, tokens in logged paths ─────────
+
+
+async def test_a_streamed_401_still_drops_the_rejected_token(injector, fake_minter):
+    # The body is gone so the request can't be re-issued, but the token the upstream just refused
+    # must not be served to the next request for the rest of its TTL.
+    inj, _ = injector
+    inj.request(_Flow("api.github.com"))
+    assert fake_minter.calls.read_text() == "1"
+    flow = _Flow("api.github.com", status=401)
+    flow.request.raw_content = None
+    await inj.response(flow)
+    inj.request(_Flow("api.github.com"))
+    assert fake_minter.calls.read_text() == "2"  # re-minted, not the cached reject
+
+
+async def test_a_query_param_credential_never_reaches_the_log(qp_injector):
+    # The injector writes the minted value into the URL; the log keeps the path (ADR-0029) but
+    # not the credential in it. Other parameters stay readable.
+    inj, log = qp_injector
+    flow = _Flow("truenas.example.ts.net", path="/mcp/stream?userToken=sk-live-secret&x=1")
+    await inj.response(flow)
+    logged = _last_log(log)["path"]
+    assert "sk-live-secret" not in logged
+    assert "userToken=‹redacted›" in logged and "x=1" in logged
+
+
+def test_the_would_block_map_is_bounded(observing, gh, monkeypatch):
+    # One entry per distinct refused host, never expired: generated hostnames grew it for ever.
+    inj, _allow, _log = observing
+    monkeypatch.setattr(gh.module, "_WOULD_BLOCK_MAX", 3)
+    for i in range(10):
+        f = _Flow(f"h{i}.example.com")
+        f.response = None
+        inj.http_connect(f)
+    assert len(inj._would_block_seen) <= 3
+
+
+def test_a_new_learn_window_resets_the_would_block_limit(live):
+    # A host recorded just before a new window, and seen again inside it, must get a row IN the
+    # window, or the window's review never shows it.
+    inj = live.Injector()
+    first = _Flow("new.example.com")
+    first.response = None
+    inj.http_connect(first)
+    _write_live(live.live)  # same settings, re-written: no reset
+    again = _Flow("new.example.com")
+    again.response = None
+    inj.http_connect(again)
+    rows = [
+        r
+        for r in (json.loads(x) for x in live.log.read_text().splitlines())
+        if r.get("would_block")
+    ]
+    assert len(rows) == 1
+    tmp = live.live.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(
+            {
+                "rules": [],
+                "default_deny": False,
+                "passthrough": [],
+                "observing_since": "2026-09-23T18:00:00+00:00",
+            }
+        )
+    )
+    tmp.replace(live.live)
+    third = _Flow("new.example.com")
+    third.response = None
+    inj.http_connect(third)
+    rows = [
+        r
+        for r in (json.loads(x) for x in live.log.read_text().splitlines())
+        if r.get("would_block")
+    ]
+    assert len(rows) == 2
+
+
+# ── build-scoped grants: only a build the host started can use them ─────────────────────
+
+
+def _write_tokens(path: Path, *secrets: str, expired: bool = False) -> None:
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    when = datetime.now(UTC) + timedelta(hours=-1 if expired else 1)
+    tokens = {hashlib.sha256(t.encode()).hexdigest(): when.isoformat() for t in secrets}
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"tokens": tokens}))
+    tmp.replace(path)
+
+
+@pytest.fixture
+def build_walled(walled, monkeypatch, tmp_path):
+    """The walled Injector with a build-only grant for cdn.example.com and a live build secret."""
+    _inj, allow, log = walled  # a fresh Injector per test reads the files below
+    tokens = tmp_path / "build-tokens.json"
+    _write_tokens(tokens, "s3cret")
+    monkeypatch.setenv("BUILD_TOKENS_FILE", str(tokens))
+    allow.write_text(
+        json.dumps({"default_deny": True, "allow": [], "build_allow": ["cdn.example.com"]})
+    )
+    return types.SimpleNamespace(tokens=tokens, allow=allow, log=log)
+
+
+def _connect(inj, host: str, **mark) -> _Flow:
+    flow = _Flow(host)
+    if mark:
+        _marked(flow, **mark)
+    flow.response = None
+    inj.http_connect(flow)
+    return flow
+
+
+def _refused(flow: _Flow) -> bool:
+    return flow.response is not None and flow.response.status_code == 403
+
+
+def test_a_build_with_its_secret_reaches_a_build_only_host(gh, build_walled):
+    inj = gh.Injector()
+    assert _connect(inj, "cdn.example.com", password="s3cret").response is None
+    hello = _ClientHello("cdn.example.com")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is True  # and it is tunnelled, as any build is
+
+
+def test_the_box_cannot_reach_a_build_only_host(gh, build_walled):
+    inj = gh.Injector()
+    assert _refused(_connect(inj, "cdn.example.com"))  # unmarked
+    # The bare marker is public — anyone, the box included, can present it.
+    assert _refused(_connect(inj, "cdn.example.com", user="fy-build"))
+    assert _refused(_connect(inj, "cdn.example.com", password="guessed"))
+
+
+def test_an_expired_or_revoked_secret_unlocks_nothing(gh, build_walled):
+    _write_tokens(build_walled.tokens, "s3cret", expired=True)
+    inj = gh.Injector()
+    assert _refused(_connect(inj, "cdn.example.com", password="s3cret"))
+    _write_tokens(build_walled.tokens)  # revoked when the build ended
+    assert _refused(_connect(inj, "cdn.example.com", password="s3cret"))
+
+
+def test_a_cleartext_build_request_uses_build_grants_too(gh, build_walled):
+    inj = gh.Injector()
+    ok = _marked(_Flow("cdn.example.com", port=80, scheme="http"), password="s3cret")
+    ok.response = None
+    inj.request(ok)
+    assert ok.response is None and "Proxy-Authorization" not in ok.request.headers
+    bare = _Flow("cdn.example.com", port=80, scheme="http")
+    bare.response = None
+    inj.request(bare)
+    assert bare.response is not None and bare.response.status_code == 403
+
+
+def test_a_revoked_build_grant_closes_the_builds_tunnel(gh, build_walled, closer):
+    import os
+
+    inj = gh.Injector()
+    closer.track("b1")
+    flow = _Flow("cdn.example.com")
+    flow.client_conn = types.SimpleNamespace(id="b1")
+    _marked(flow, password="s3cret")
+    flow.response = None
+    inj.http_connect(flow)
+    assert flow.response is None
+    build_walled.allow.write_text(
+        json.dumps({"default_deny": True, "allow": [], "build_allow": []})
+    )
+    os.utime(build_walled.allow, (inj._allow_mtime + 10, inj._allow_mtime + 10))
+    inj.refresh()
+    assert closer.closed == ["b1"]
+
+
+# ── CodeRabbit, second pass: derived defaults, redaction by what was injected ────────────
+
+
+def test_a_rules_derived_default_reaches_the_running_proxy(live, tmp_path, monkeypatch):
+    # github=app derives GH_APP_ID & co. from committed config (env_defaults). The proxy used to get
+    # them by restarting on the mode change; it no longer restarts, so the live file carries them.
+    monkeypatch.delenv("GH_APP_ID", raising=False)
+    minter = _counting_minter(tmp_path, "gh", env_key="GH_APP_ID")
+    rule = {"host": "api.github.com", "command": minter.command, "env": ["GH_APP_ID"]}
+    tmp = live.live.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(
+            {
+                "rules": [rule],
+                "default_deny": False,
+                "passthrough": [],
+                "defaults": {"GH_APP_ID": "123"},
+            }
+        )
+    )
+    tmp.replace(live.live)
+    flow = _Flow("api.github.com")
+    live.Injector().request(flow)
+    assert flow.request.headers["Authorization"] == "123"
+
+
+def test_a_derived_default_never_beats_host_env_or_an_export(live, tmp_path, monkeypatch):
+    monkeypatch.delenv("GH_APP_ID", raising=False)
+    live.host_env.write_text("GH_APP_ID=from-host-env\n")
+    minter = _counting_minter(tmp_path, "gh", env_key="GH_APP_ID")
+    rule = {"host": "api.github.com", "command": minter.command, "env": ["GH_APP_ID"]}
+    tmp = live.live.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"rules": [rule], "defaults": {"GH_APP_ID": "derived"}}))
+    tmp.replace(live.live)
+    flow = _Flow("api.github.com")
+    live.Injector().request(flow)
+    assert flow.request.headers["Authorization"] == "from-host-env"
+
+
+async def test_redaction_follows_what_was_injected_not_the_current_rules(live, tmp_path):
+    # The rule set can change between the request and its response (the live file is re-read
+    # per hook). The token already in the URL must still be redacted from the log.
+    minter = _counting_minter(tmp_path, "svc", value="sk-live-secret")
+    rule = {"host": "svc.example.com", "command": minter.command, "query_param": "userToken"}
+    _write_live(live.live, rules=[rule])
+    inj = live.Injector()
+    flow = _Flow("svc.example.com", path="/mcp?x=1")
+    inj.request(flow)
+    flow.request.path = "/mcp?x=1&userToken=sk-live-secret"  # what mitmproxy's query write does
+    _write_live(live.live, rules=[])  # the rule goes away while the request is in flight
+    inj.refresh()  # the addon's one-second poll lands before the response does
+    await inj.response(flow)
+    assert "sk-live-secret" not in _last_log(live.log)["path"]
+
+
+def test_an_encoded_query_key_is_redacted_too(gh):
+    # mitmproxy writes `auth[token]` as `auth%5Btoken%5D`; the comparison must see through that.
+    redact = gh.module._redact_param
+    assert (
+        redact("/x?auth%5Btoken%5D=sk-secret&y=1", "auth[token]")
+        == "/x?auth%5Btoken%5D=‹redacted›&y=1"
+    )
+    assert redact("/x?auth+token=sk-secret", "auth token") == "/x?auth+token=‹redacted›"

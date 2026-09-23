@@ -75,6 +75,7 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "gcp_metadata_declared", lambda: True)
     monkeypatch.setattr(config, "gcp_project", lambda: "p")
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)  # proxy off by default; opt in/test
+    monkeypatch.setattr(config, "machine_wall", lambda: False)  # no in-VM wall; opt in per test
     # foldyard self-install resolution is exercised in its own tests; stub it here so the golden
     # sequences don't build a real wheel / probe the host's foldyard install.
     monkeypatch.setattr(
@@ -214,6 +215,73 @@ def test_build_command_shape(fake):
     assert build[-1] == str(fake["main"])  # build context = the main checkout
     assert "dev-stack/box.Dockerfile" in build
     assert f"{box._BOX_FINGERPRINT_LABEL}=expected-fingerprint" in build
+
+
+def _build_args(build: list[str]) -> list[str]:
+    return [build[i + 1] for i, tok in enumerate(build) if tok == "--build-arg"]
+
+
+def test_walled_build_routes_through_the_proxy_as_a_trusted_build(fake, monkeypatch):
+    # Under the in-VM wall a build's RUN steps egress through the proxy, which decrypts every
+    # host off `[proxy] passthrough` (ADR-0029) — and a build container has no proxy CA, so a
+    # tool fetching an undecryptable-to-it host dies on UNABLE_TO_VERIFY_LEAF_SIGNATURE (the
+    # playwright CDN, seen live). The build gets the proxy URL carrying the build marker, which
+    # the addon blind-tunnels (still walled at CONNECT). Proxy build-args are predefined — no
+    # ARG line needed — and never persisted into the image.
+    from foldyard.plugins import proxy
+
+    monkeypatch.setattr(config, "machine_wall", lambda: True)
+    monkeypatch.setattr(config, "proxy_port_base", lambda: 41000)
+    assert box.main("build") == 0
+    args = _build_args(_find(fake["calls"], has=["build", "-t", "img:tag"])[0])
+    from urllib.parse import urlsplit
+
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        (value,) = [a.split("=", 1)[1] for a in args if a.startswith(f"{key}=")]
+        url = urlsplit(value)
+        assert (url.hostname, url.port) == ("192.168.5.2", 41000)
+        # The marker user, with the gate's per-build secret as the password — never the marker.
+        assert url.username == proxy.BUILD_TUNNEL_USER
+        assert url.password and url.password != proxy.BUILD_TUNNEL_USER
+
+
+def test_box_build_runs_under_the_build_gate(fake, monkeypatch):
+    from foldyard import buildgate
+
+    gated: list[str] = []
+
+    def fake_gate(build, *, what, **_):
+        gated.append(what)
+        return build(None)
+
+    monkeypatch.setattr(buildgate, "run", fake_gate)
+    assert box.main("build") == 0
+    assert gated == ["box image build"]
+
+
+def test_unwalled_build_gets_no_proxy_args(fake, monkeypatch):
+    # No wall ⇒ builds egress directly, as before; routing them through the proxy would be new.
+    monkeypatch.setattr(config, "machine_wall", lambda: False)
+    assert box.main("build") == 0
+    assert _build_args(_find(fake["calls"], has=["build", "-t", "img:tag"])[0]) == []
+
+
+def test_consumer_build_args_come_after_the_proxy_ones(fake, monkeypatch):
+    # A consumer that sets its own proxy build-arg wins: the engine takes the last occurrence.
+    monkeypatch.setattr(config, "machine_wall", lambda: True)
+    monkeypatch.setattr(
+        config,
+        "box_image",
+        lambda: {
+            "dockerfile": "dev-stack/box.Dockerfile",
+            "tag": "img:tag",
+            "build_args": {"HTTPS_PROXY": "http://mine:1"},
+        },
+    )
+    assert box.main("build") == 0
+    args = _build_args(_find(fake["calls"], has=["build", "-t", "img:tag"])[0])
+    assert args[-1] == "HTTPS_PROXY=http://mine:1"
+    assert any(a.startswith("HTTPS_PROXY=http://fy-build") for a in args[:-1])
 
 
 # ── up ────────────────────────────────────────────────────────────────────────────────

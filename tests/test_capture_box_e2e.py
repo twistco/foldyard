@@ -1,8 +1,8 @@
-"""Opt-in LIVE capture e2e — the `capture` axis end to end through a REAL dev box.
+"""Opt-in LIVE capture e2e — the always-decrypting proxy end to end through a REAL dev box.
 
 Where ``test_proxy_box_e2e.py`` drives the INJECTION path (a github rule rewriting a header), this
 drives the CAPTURE path: the proxy run with NO injector (logging-only) plus a real box brought up
-with the REAL ``capture=on`` wiring, proving the whole "MITM-log all egress" flow Daniel asked
+with the REAL proxy wiring (always decrypt, ADR-0029), proving the whole "MITM-log all egress" flow Daniel asked
 about:
 
     a real box ──naive HTTPS via $https_proxy, trusting the SYSTEM store──▶ mitmdump (capture-only)
@@ -231,7 +231,7 @@ def _wall_enforcing_with(host: str) -> None:
     here, because the fake upstream sits on a random port and the wall fences the CONNECT port (a
     bare grant means ``:443``; a bare ``github.com`` used to reach ``github.com:22``).
 
-    The daemon spec carries the wall (``DEFAULT_DENY`` + ``ALLOW_FILE``), so left unstated the fake
+    The daemon spec carries the wall (the live file's switch + ``ALLOW_FILE``), so left unstated the fake
     upstream is judged by whatever is ambient — the repo's own ``[proxy] default_deny`` seed and
     whatever the machine's allow-store happens to hold. That passed on a developer box with grants
     and 403'd every CONNECT in CI, where the seed is `true` and nothing has ever been granted.
@@ -241,6 +241,15 @@ def _wall_enforcing_with(host: str) -> None:
     pins, never the real one."""
     allowlist.grant(host, "permanent")
     allowlist.set_wall(True)  # rewrites the effective allowlist the addon re-reads per request
+
+
+def _live_env(spec: dict, path: Path, **overrides) -> dict[str, str]:
+    """Write ``spec``'s live settings to ``path`` (with ``overrides`` on top), the way the
+    supervisor does, and return the launch env pointing the addon at that file."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({**spec["live"]["data"], **overrides}))
+    tmp.replace(path)
+    return {**spec["env"], "LIVE_FILE": str(path)}
 
 
 def _seed_system_trust(box: _Box) -> None:
@@ -288,7 +297,7 @@ def capture_box(tmp_path, monkeypatch):
     confdir = tmp_path / "mitm"
     mitm_log = tmp_path / "mitmdump.log"
 
-    # ── the capture daemon, from the REAL ProxyPlugin with capture=on and NO injector ─────────
+    # ── the capture daemon, from the REAL ProxyPlugin with NO injector ──────────────────────
     # Opt the consumer into the proxy ([proxy] declared) so the always-on daemon exists with no
     # injector — capture rides an opted-in proxy, exactly as a real stack-carrying consumer.
     # [plugins.github] declared too: the ambient dummy-token wiring asserted below is a
@@ -297,21 +306,22 @@ def capture_box(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "github_declared", lambda: True)
     _wall_enforcing_with(
         f"{ip}:{uport}"
-    )  # before the spec is built — it reads DEFAULT_DENY + ALLOW_FILE
+    )  # before the spec is built — it reads the wall + ALLOW_FILE
     reg = Registry([GithubPlugin(), ProxyPlugin()])
-    spec = reg.desired_daemons({"github": "off", "capture": "on"})["egress-proxy"]
-    assert spec["env"]["DEFAULT_DENY"] == "1"  # the wall is up; the upstream is granted through it
-    # The wiring under test: capture-only ⇒ EMPTY inject config (egress_proxy logs, rewrites nothing),
-    # and the log path is the project log dir we redirected above.
-    assert spec["env"]["INJECT_HOST"] == "" and spec["env"]["INJECT_COMMAND"] == ""
+    spec = reg.desired_daemons({"github": "off"})["egress-proxy"]
+    live = spec["live"]["data"]
+    assert live["default_deny"] is True  # the wall is up; the upstream is granted through it
+    # The wiring under test: capture-only ⇒ NO rules (egress_proxy logs, rewrites nothing), and the
+    # log path is the project log dir we redirected above.
+    assert live["rules"] == []
     assert spec["env"]["PROXY_LOG_FILE"] == str(log)
-    assert "capture" in spec["label"]
+    assert spec["env"]["CAPTURE_MODE"] == "full"
 
     proc = subprocess.Popen(
         ["mitmdump", "-s", str(ADDON), "--listen-host", "0.0.0.0", "--listen-port", str(pport),
          "--set", f"confdir={confdir}", "--set", "ssl_insecure=true",
          "--set", "termlog_verbosity=info"],
-        env={**os.environ, **spec["env"]},  # the real capture-mode (empty-inject) wiring
+        env={**os.environ, **_live_env(spec, tmp_path / "proxy-live.json")},  # capture-only wiring
         stdout=mitm_log.open("w"), stderr=subprocess.STDOUT,
     )  # fmt: skip
     ca = confdir / "mitmproxy-ca-cert.pem"
@@ -399,7 +409,7 @@ def test_capture_logs_naive_box_egress_without_injecting(capture_box):
 
 def test_capture_routes_egress_without_leaking_a_real_github_token(capture_box):
     box, _, ip, _ = capture_box
-    # capture=on routes the box through the proxy …
+    # the proxy routes the box's egress …
     proxied = box.exec("printenv", "HTTPS_PROXY")
     assert proxied.returncode == 0 and f"{ip}:" in proxied.stdout, "HTTPS_PROXY not set in the box"
     # … and with github=off the box holds at most the AMBIENT dummy 'x' (pre-positioned with the
@@ -411,28 +421,27 @@ def test_capture_routes_egress_without_leaking_a_real_github_token(capture_box):
     )
 
 
-# ── Phase A′ — always-route + runtime-toggleable capture ───────────────────────────────────────
+# ── Phase A′ — always-route: decrypt the unknown, tunnel the trusted ─────────────────────────
 
 
-def _launch_mitm(spec: dict, confdir: Path, pport: int, mitm_log: Path):
-    """Launch mitmdump with a daemon SPEC's env (so CAPTURE_MODE rides along). Reused to RESTART
-    the daemon in the other mode mid-test — the box keeps routing to the same port, proving a
-    capture flip needs no box recreate."""
+def _launch_mitm(env: dict, confdir: Path, pport: int, mitm_log: Path):
+    """Launch mitmdump with a daemon spec's launch env (see ``_live_env``)."""
     return subprocess.Popen(
         ["mitmdump", "-s", str(ADDON), "--listen-host", "0.0.0.0", "--listen-port", str(pport),
          "--set", f"confdir={confdir}", "--set", "ssl_insecure=true",
          "--set", "termlog_verbosity=info", "--set", "flow_detail=0"],
-        env={**os.environ, **spec["env"]},
+        env={**os.environ, **env},
         stdout=mitm_log.open("a"), stderr=subprocess.STDOUT,
     )  # fmt: skip
 
 
 @pytest.fixture
 def av_box(tmp_path, monkeypatch):
-    """Phase A′: a box brought up with the ALWAYS-ROUTE wiring, and a daemon started in PASSTHROUGH
-    (capture=off) that a test can RESTART into full MITM (capture=on) without touching the box.
-    Yields a controller: box, ip, upstream port, egress log, the upstream's real cert path IN the
-    box, and ``restart(capture_on)``. Specs + box args come from the REAL registry."""
+    """Phase A′: a box brought up with the ALWAYS-ROUTE wiring, and the REAL (always-decrypting)
+    daemon, whose trusted passthrough list a test can change LIVE — the same process, the box
+    untouched. Yields a controller: box, ip, upstream port, egress log, the upstream's real cert
+    path IN the box, and ``set_passthrough(hosts)``. Spec + box args come from the REAL
+    registry."""
     assert _SELF is not None
     net, ip = _SELF
     engine, eng_env = _engine(), _engine_env()
@@ -445,23 +454,23 @@ def av_box(tmp_path, monkeypatch):
     httpd = _make_upstream(uport, cert, key)
     confdir, mitm_log = tmp_path / "mitm", tmp_path / "mitmdump.log"
 
-    # Both daemon specs from the REAL ProxyPlugin: capture=off → passthrough, capture=on → full.
+    # The daemon spec from the REAL ProxyPlugin — always CAPTURE_MODE=full (ADR-0029).
     # Opt the consumer into the proxy ([proxy] declared) so the always-on daemon exists with no
     # injector — Phase A′ always-route is an opted-in-consumer property.
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
     _wall_enforcing_with(
         f"{ip}:{uport}"
-    )  # before the specs are built — they read DEFAULT_DENY + ALLOW_FILE
+    )  # before the specs are built — they read the wall + ALLOW_FILE
     reg = Registry([GithubPlugin(), ProxyPlugin()])
-    spec_pass = reg.desired_daemons({"github": "off", "capture": "off"})["egress-proxy"]
-    spec_full = reg.desired_daemons({"github": "off", "capture": "on"})["egress-proxy"]
-    assert spec_pass["env"]["CAPTURE_MODE"] == "passthrough"
-    assert spec_full["env"]["CAPTURE_MODE"] == "full"
-    assert spec_pass["env"]["PROXY_LOG_FILE"] == str(log)
-    # Both modes carry the wall: passthrough tunnels blind, but it still refuses an ungranted host.
-    assert spec_pass["env"]["DEFAULT_DENY"] == spec_full["env"]["DEFAULT_DENY"] == "1"
+    spec = reg.desired_daemons({"github": "off"})["egress-proxy"]
+    assert spec["env"]["CAPTURE_MODE"] == "full"
+    assert spec["env"]["PROXY_LOG_FILE"] == str(log)
+    assert (
+        spec["live"]["data"]["default_deny"] is True
+    )  # the wall is up; upstream granted through it
 
-    proc = _launch_mitm(spec_pass, confdir, pport, mitm_log)
+    live = tmp_path / "proxy-live.json"
+    proc = _launch_mitm(_live_env(spec, live), confdir, pport, mitm_log)
     ca = confdir / "mitmproxy-ca-cert.pem"
     box = None
     vm_dir = _VM_TMP / f"av-{os.getpid()}"
@@ -503,18 +512,14 @@ def av_box(tmp_path, monkeypatch):
 
         controller = {"proc": proc}
 
-        def restart(capture_on: bool) -> None:
-            """Reconcile the daemon to the other capture mode (what the supervisor does on a `just
-            mode capture=…` flip) — terminate + relaunch on the SAME port; the box is untouched."""
-            controller["proc"].terminate()
-            try:
-                controller["proc"].wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                controller["proc"].kill()
-            controller["proc"] = _launch_mitm(
-                spec_full if capture_on else spec_pass, confdir, pport, mitm_log
-            )
-            _wait(lambda: _port_open(ip, pport), 30, "mitmdump to relisten", diag())
+        def set_passthrough(hosts: list[str]) -> None:
+            """Change the trusted-host list the way the supervisor now applies an adopted
+            `[proxy] passthrough`: rewrite the live file under the RUNNING daemon — no restart,
+            the box untouched. The addon notices within its one-second poll."""
+            pid = controller["proc"].pid
+            _live_env(spec, live, passthrough=hosts)
+            time.sleep(1.5)
+            assert controller["proc"].poll() is None and controller["proc"].pid == pid
 
         yield {
             "box": box,
@@ -522,8 +527,7 @@ def av_box(tmp_path, monkeypatch):
             "uport": uport,
             "log": log,
             "up_ca": up_in_box,
-            "restart": restart,
-            "spec_full": spec_full,  # tests can set env["PASSTHROUGH_HOSTS"] before restart(True)
+            "set_passthrough": set_passthrough,
         }
     finally:
         if box is not None:
@@ -541,61 +545,53 @@ def av_box(tmp_path, monkeypatch):
         shutil.rmtree(vm_dir, ignore_errors=True)
 
 
-def test_passthrough_routes_egress_without_decrypting(av_box):
-    box, ip, uport, up_ca = av_box["box"], av_box["ip"], av_box["uport"], av_box["up_ca"]
-    url = f"https://{ip}:{uport}/echo"
-
-    # Passthrough (capture=off) blind-tunnels HTTPS: the box does end-to-end TLS against the REAL
-    # upstream cert. Trusting THAT cert → curl succeeds AND the upstream echoes the ORIGINAL header
-    # (nothing rewritten). This is the always-route egress that capture=off must NOT break.
-    got = box.exec("curl", "-sS", "--cacert", up_ca, "-H", "Authorization: Bearer DUMMY", url)
-    assert got.returncode == 0, f"passthrough curl (real cert) failed:\n{got.stderr}"
-    assert got.stdout == "Bearer DUMMY"
-
-    # The load-bearing proof of NO decryption: trusting ONLY the mitm CA must FAIL — the cert the
-    # box saw was the upstream's real one, not a mitm-re-signed one (which `full` would present).
-    mitm_only = box.exec("curl", "-sS", "--cacert", "/etc/dev-proxy-ca.pem", url)
-    assert mitm_only.returncode != 0, "mitm CA verified a passthrough cert — it WAS decrypted"
-
-
-def test_capture_toggles_on_a_running_box_without_recreate(av_box):
+def test_an_untrusted_host_is_decrypted_and_logged(av_box):
     box, ip, uport, log = av_box["box"], av_box["ip"], av_box["uport"], av_box["log"]
     url = f"https://{ip}:{uport}/echo"
 
-    # Flip capture on host-side — the daemon reconciles to full MITM; the box is NOT recreated.
-    av_box["restart"](capture_on=True)
-
-    # Now a NAIVE curl (system store, which carries the mitm CA) succeeds because full-MITM
-    # re-signs with the mitm CA — proving the SAME box now routes through a decrypting proxy …
+    # The upstream is on no passthrough list, so the always-decrypting proxy re-signs it with the
+    # mitm CA: a NAIVE curl (system store, which carries the mitm CA) succeeds …
     got = box.exec("curl", "-sS", "-H", "Authorization: Bearer DUMMY", url)
-    assert got.returncode == 0, f"curl after toggling capture on failed:\n{got.stderr}"
-    # … and the egress log now has a DECRYPTED request row (method/path/status), not a passthrough
-    # tunnel marker — the runtime toggle reached the wire with no box recreate.
+    assert got.returncode == 0, f"naive curl through the decrypting proxy failed:\n{got.stderr}"
+    assert got.stdout == "Bearer DUMMY"  # no injector → nothing rewritten
+    # (No "trusting ONLY the real cert fails" check here: the box's curl also reads its default CA
+    # PATH, where box-up installed the mitm CA, so --cacert can't narrow trust in that direction.
+    # The decrypted row below is the proof — a tunnel logs no method/path.)
+    # The egress log has a DECRYPTED request row (method/path/status), not a tunnel marker.
     _wait(
         lambda: any(
             e.get("host") == ip and e.get("method") == "GET" and not e.get("passthrough")
             for e in _log_entries(log)
         ),
         5,
-        "a decrypted GET row after the capture toggle",
+        "a decrypted GET row",
         log.read_text() if log.exists() else "",
     )
 
 
-def test_capture_on_passes_through_a_trusted_host(av_box):
+def test_a_trusted_host_is_tunnelled_not_decrypted(av_box):
     box, ip, uport, up_ca = av_box["box"], av_box["ip"], av_box["uport"], av_box["up_ca"]
     url = f"https://{ip}:{uport}/echo"
 
-    # capture=on, but the upstream is TRUSTED (in PASSTHROUGH_HOSTS) → it must be tunnelled, NOT
-    # decrypted: the fast/quiet path for the toolchain even while we scrutinise the unknowns.
-    av_box["spec_full"]["env"]["PASSTHROUGH_HOSTS"] = ip
-    av_box["restart"](capture_on=True)
+    # The upstream is TRUSTED (on the passthrough list) → it must be tunnelled, NOT decrypted: the
+    # fast/quiet path for the toolchain, and the escape hatch for a host that can't be decrypted.
+    # Set LIVE: the same proxy process picks it up, as a supervisor-applied change now does.
+    av_box["set_passthrough"]([ip])
 
     # Trusting the upstream's REAL cert succeeds (end-to-end TLS, header untouched) …
     got = box.exec("curl", "-sS", "--cacert", up_ca, "-H", "Authorization: Bearer DUMMY", url)
     assert got.returncode == 0, f"trusted-passthrough curl failed:\n{got.stderr}"
     assert got.stdout == "Bearer DUMMY"
-    # … and trusting ONLY the mitm CA FAILS — proof the trusted host was NOT decrypted even under
-    # capture=on (a decrypting proxy would have presented a mitm-re-signed cert the mitm CA trusts).
+    # … and trusting ONLY the mitm CA FAILS — proof the trusted host was NOT decrypted (a
+    # decrypting proxy would have presented a mitm-re-signed cert the mitm CA trusts).
     mitm_only = box.exec("curl", "-sS", "--cacert", "/etc/dev-proxy-ca.pem", url)
-    assert mitm_only.returncode != 0, "a trusted host was decrypted under capture=on"
+    assert mitm_only.returncode != 0, "a trusted host was decrypted"
+    # The log still rows it — at host level (a tunnel marker), which is what learn mode reads.
+    _wait(
+        lambda: any(
+            e.get("host") == ip and e.get("passthrough") for e in _log_entries(av_box["log"])
+        ),
+        5,
+        "a passthrough row for the trusted host",
+        av_box["log"].read_text() if av_box["log"].exists() else "",
+    )

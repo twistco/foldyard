@@ -282,7 +282,7 @@ def box_proxy(tmp_path, monkeypatch):
     # The wall fences the CONNECT port: a bare grant — and the injector host's exemption — means
     # ``:443`` (a bare ``github.com`` used to reach ``github.com:22``), and our upstream sits on a
     # random port, so it is granted as ``host:port`` into the per-test store
-    # (conftest.isolated_allow_store), BEFORE the spec is built — it reads DEFAULT_DENY + ALLOW_FILE.
+    # (conftest.isolated_allow_store), BEFORE the spec is built — it reads the wall + ALLOW_FILE.
     allowlist.grant(f"{ip}:{uport}", "permanent")
     allowlist.set_wall(True)
     reg = Registry([ProxyPlugin(), _TestInjector(ip, f"{sys.executable} {minter}")])
@@ -294,10 +294,16 @@ def box_proxy(tmp_path, monkeypatch):
     assert os.path.basename(spec["cmd"][0]) == "mitmdump" and spec["cmd"][2].endswith(
         "egress_proxy.py"
     )
-    assert spec["env"]["INJECT_HOST"] == ip
-    assert spec["env"]["INJECT_HEADER"] == "Authorization"
-    assert spec["env"]["INJECT_RETRY_401"] == "1"  # replay_on_401=True on the rule
-    assert spec["env"]["INJECT_COMMAND"].endswith("minter.py")
+    (rule,) = spec["live"]["data"]["rules"]
+    assert rule["host"] == ip and rule["header"] == "Authorization"
+    assert rule["retry_401"] is True  # replay_on_401=True on the rule
+    assert rule["command"].endswith("minter.py")
+    # The live file the supervisor would write, plus the upstream's self-signed cert for the 401
+    # re-issue to verify against (a rule field the plugin never sets; the addon honours it).
+    live = tmp_path / "proxy-live.json"
+    live.write_text(
+        json.dumps({**spec["live"]["data"], "rules": [{**rule, "ca_bundle": str(cert)}]})
+    )
 
     proc = subprocess.Popen(
         ["mitmdump", "-s", str(ADDON), "--listen-host", "0.0.0.0", "--listen-port", str(pport),
@@ -305,8 +311,8 @@ def box_proxy(tmp_path, monkeypatch):
          "--set", "termlog_verbosity=info"],
         env={
             **os.environ,
-            **spec["env"],  # the real rule-derived INJECT_* wiring
-            "INJECT_RETRY_CA_BUNDLE": str(cert),  # verify the upstream against its self-signed cert
+            **spec["env"],  # the real launch env: LIVE_FILE/ALLOW_FILE/HOST_ENV_FILE wiring
+            "LIVE_FILE": str(live),  # the rule-derived settings, with the test's CA bundle
             "PROXY_LOG_FILE": str(log),  # override the daemon's config-dir log to our tmp
         },
         stdout=mitm_log.open("w"), stderr=subprocess.STDOUT,

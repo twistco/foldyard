@@ -208,10 +208,31 @@ def test_dns_still_resolves_in_the_guest(repo):
 
 
 def test_the_proxy_is_the_way_out(repo):
-    via = lima_shell(
+    # A toolchain host on the default passthrough list is tunnelled: TLS verifies end to end
+    # against the REAL certificate, as image pulls from the guest need (ADR-0029).
+    tunnelled = lima_shell(
+        "curl",
+        "-sS",
+        "-m",
+        "20",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
+        "https://pypi.org/simple/",
+    )
+    assert tunnelled.stdout.strip() == "200", f"{tunnelled.stdout!r} {tunnelled.stderr!r}"
+    # Any other host is decrypted (ADR-0029), and the guest holds no proxy CA — so it is reached
+    # through the proxy but presents the proxy's certificate: verification fails, the relay works.
+    decrypted = lima_shell(
         "curl", "-sS", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}", "https://example.com"
     )
-    assert via.stdout.strip() == "200", f"{via.stdout!r} {via.stderr!r}"
+    assert "certificate" in decrypted.stderr, f"{decrypted.stdout!r} {decrypted.stderr!r}"
+    relayed = lima_shell(
+        "curl", "-sS", "-k", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}",
+        "https://example.com",
+    )  # fmt: skip
+    assert relayed.stdout.strip() == "200", f"{relayed.stdout!r} {relayed.stderr!r}"
 
 
 def test_the_api_is_still_served_through_the_walled_stack(repo):

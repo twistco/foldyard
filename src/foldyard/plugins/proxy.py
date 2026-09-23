@@ -20,8 +20,6 @@ Stdlib only on the registry hot path (rich is imported lazily, only when the TUI
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import shlex
 import shutil
@@ -30,12 +28,33 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .. import config
-from . import Axis, DoctorContext, DoctorFix, PanelGroup, PanelTree, Plugin, TuiPanel
+from . import DoctorContext, DoctorFix, PanelGroup, PanelTree, Plugin, TuiPanel
 from ._passthrough_bundles import BUNDLES
 
 # The host ports the mitmdump injection proxy listens on come from ``config.proxy_port()`` —
 # per-project band + per-worktree offset; there is deliberately no module-level constant (it
 # would freeze the env at import and bypass the band allocation).
+
+# The proxy-URL user an image BUILD reaches the proxy as. A build container has no proxy CA, so a
+# decrypted host fails its TLS verify; the addon blind-tunnels a CONNECT that carries this user
+# (the client turns the URL's userinfo into a Basic Proxy-Authorization header) — still walled at
+# CONNECT. It is a marker, not a credential: the box can present it too, and gains only an
+# undecrypted tunnel to a host the wall already lets it reach. Duplicated in the addon (which
+# can't import foldyard); a test pins the two equal.
+BUILD_TUNNEL_USER = "fy-build"
+
+
+def build_proxy_url(token: str | None = None) -> str | None:
+    """The proxy URL an image build should use, or ``None`` when builds don't route through the
+    proxy (no in-VM wall ⇒ they egress directly, as they always have). The MAIN proxy port, like
+    the wall's own VM-level proxy env: building isn't per-worktree. ``token`` — the build's secret
+    from the build gate — goes in the password; it is what unlocks build-scoped grants. Without
+    it the build still tunnels, on runtime grants only."""
+    if not config.machine_wall():
+        return None
+    user = BUILD_TUNNEL_USER
+    password = token or user
+    return f"http://{user}:{password}@{config.LIMA_HOST_GATEWAY}:{config.proxy_port_base()}"
 
 
 def mitmdump_path() -> str | None:
@@ -115,7 +134,7 @@ def host_install_hint() -> str:
 BOX_CA = Path("/etc/dev-proxy-ca.pem")
 
 # The COMBINED trust bundle the box-up snippet builds (system roots + the mitm CA). Phase A′
-# always-routes, and capture=off TLS-passthrough leaves un-decrypted hosts presenting their REAL
+# always-routes, and a `[proxy] passthrough` host is tunnelled un-decrypted, presenting its REAL
 # certs end-to-end — so the bundle-replacing vars (REQUESTS_CA_BUNDLE/GIT_SSL_CAINFO) must trust
 # both real and mitm certs, not ONLY the mitm CA (which would reject every passthrough host). See
 # box._CA_TRUST_SNIPPET, which writes this file additively after the system-trust install.
@@ -132,26 +151,17 @@ def _proxy_log() -> Path:
     return config.log_dir() / _PROXY_LOG
 
 
+def _live_file() -> Path:
+    """This worktree's live proxy settings (rules, wall, passthrough) — host-side state, beside
+    the posture it's derived from, never in the mount."""
+    return config.posture_dir() / "proxy-live.json"
+
+
 def _packaged_addon() -> Path:
     """The mitmdump injection addon, shipped INSIDE the package (``assets/proxy/egress_proxy.py``).
     Was consumer-side (``<dev_vm_dir>/proxy/egress_proxy.py``); now packaged so consumers get the
     proxy/capture/keyless path without vendoring the script, and the tests load this one source."""
     return Path(__file__).resolve().parent.parent / "assets" / "proxy" / "egress_proxy.py"
-
-
-def _secret_stamp(keys: Iterable[str]) -> str:
-    """A short fingerprint of the named env vars' CURRENT values (missing hashes as empty), for the
-    daemon spec env — so a captured/rotated secret changes the spec and the supervisor restarts the
-    daemon that reads it (see the INJECT_ENV_STAMP comment in :meth:`ProxyPlugin.daemons`).
-    Truncated sha256: enough to never collide in practice, and not invertible for the high-entropy
-    values it hashes — the stamp is visible in ``ps eww`` on the child, the secret must not be."""
-    digest = hashlib.sha256()
-    for key in keys:
-        digest.update(key.encode())
-        digest.update(b"\x00")
-        digest.update(os.environ.get(key, "").encode())
-        digest.update(b"\x00")
-    return digest.hexdigest()[:16]
 
 
 def _launch_addon_path() -> Path:
@@ -175,13 +185,18 @@ def _tail_network_log(limit: int = _NET_ROWS) -> list[dict]:
 def _net_leaf(e: dict, escape) -> str:
     """One request as a leaf line under its host group: time · method · path · status · marks.
 
-    A passthrough row (capture=off, TLS not decrypted) has no method/path/status — only the SNI
+    A passthrough row (a trusted host, TLS not decrypted) has no method/path/status — only the SNI
     host + time — so it renders as a dim `tls` tunnel marker instead of a request line."""
     ts = escape(e.get("ts", "")[11:19])
     if e.get("blocked"):
         # Refused by the default-deny egress wall — no upstream contacted. Red so it stands out as
         # the row you act on (press the allow key in the TUI to let the host through).
         return f"[dim]{ts}[/dim] [red]⛔ blocked by the egress wall[/red]"
+    if e.get("would_block"):
+        # The wall is observing (`fy allow wall off`, or a learn window): this host went through,
+        # but enforcing would refuse it — what `fy allow learn` offers. The UA names the tool.
+        ua = f" [dim]{escape(e['ua'][:60])}[/dim]" if e.get("ua") else ""
+        return f"[dim]{ts}[/dim] [yellow]◌ the wall would refuse this[/yellow]{ua}"
     if e.get("passthrough"):
         return f"[dim]{ts}[/dim] [dim]· tls tunnel (passthrough, not decrypted)[/dim]"
     status = e.get("status", 0)
@@ -222,6 +237,7 @@ def _network_panel_tree() -> PanelTree:
     for host, evs in ordered:
         inj = sum(bool(e.get("injected")) for e in evs)
         blocked = sum(bool(e.get("blocked")) for e in evs)
+        unlisted = sum(bool(e.get("would_block")) for e in evs)
         # A blocked request synthesises a 403, so it's already in `errs` — subtract it so the
         # tallies don't double-count the same row (blocked is the more specific, actionable label).
         errs = sum(1 for e in evs if e.get("status", 0) >= 400) - blocked
@@ -231,6 +247,8 @@ def _network_panel_tree() -> PanelTree:
             header += f" · [cyan]{inj} inj[/cyan]"
         if blocked:
             header += f" · [red]⛔ {blocked} blocked[/red]"
+        if unlisted:
+            header += " · [yellow]◌ not granted[/yellow]"
         if errs:
             header += f" · [red]{errs} err[/red]"
         children = [_net_leaf(e, escape) for e in reversed(evs)]  # newest first within the host
@@ -247,7 +265,7 @@ def _network_panel_tree() -> PanelTree:
 
 
 def _rule_to_json(rule) -> dict:
-    """One :class:`InjectRule` → the JSON object egress_proxy.py's ``INJECT_RULES`` rule expects
+    """One :class:`InjectRule` → the JSON object egress_proxy.py's live-file rule expects
     (``minter``→``command``, ``replay_on_401``→``retry_401``). Only non-empty optional fields are
     emitted, so the serialized rule set stays compact + stable. Used for the multi-injector case."""
     out: dict = {"host": rule.host, "command": rule.minter, "retry_401": rule.replay_on_401}
@@ -272,9 +290,12 @@ def _default_deny() -> bool:
     return allowlist.default_deny()
 
 
-def _capturing(mode: dict) -> bool:
-    """The capture axis: MITM-log all dev-box egress through the proxy even with no injector."""
-    return mode.get("capture", "off") == "on"
+def _observing_since() -> str | None:
+    """The open learn window's start, or None (host-owned, like :func:`_default_deny`)."""
+    from .. import allowlist  # lazy, as in _default_deny
+
+    window = allowlist.learning()
+    return window["since"] if window else None
 
 
 def _resolve_passthrough(entries: list[str]) -> list[str]:
@@ -306,37 +327,21 @@ def _resolve_passthrough(entries: list[str]) -> list[str]:
 class ProxyPlugin(Plugin):
     name = "proxy"
 
-    def axes(self) -> list[Axis]:
-        # The proxy plugin owns its own `capture` axis (the github/gcp axes are the injectors').
-        # Phase A′ — ALWAYS-ROUTE: the box's egress always goes through the always-on proxy
-        # (derive_env always sets FY_PROXY), so `capture` is a HOST-SIDE decision about what the
-        # proxy DOES, toggleable on a RUNNING box (no recreate). `off` TLS-passthrough (blind-
-        # tunnel, real certs end-to-end, SNI-only log); `on` MITM-decrypts + logs every request.
-        # It composes with the injector axes (github=app always MITM-rewrites api.github.com on
-        # top, whatever capture is). Maps to the same "egress-proxy" daemon.
-        #
-        # Self-gate on the consumer OPTING IN ([proxy] table; registry plan Step D): a generic /
-        # stack-less repo that declares no [proxy] gets no `capture` axis (and derive_env/box_args
-        # already emit no proxy wiring for it), so the mode TUI doesn't advertise a posture that
-        # means nothing there. An active injector still lights routing up via derive_env.
-        if not config.proxy_enabled():
-            return []
-        return [
-            Axis(
-                name="capture",
-                rungs=("off", "on"),
-                blurb={
-                    "off": "route egress through the proxy, TLS-passthrough + SNI-log (no decrypt)",
-                    "on": "MITM-decrypt + log UNTRUSTED egress; trusted hosts pass through",
-                },
-                daemon="egress-proxy",
-            )
-        ]
+    # No axis of its own. There was a `capture` axis (off = blind-tunnel everything, on = decrypt);
+    # it is gone (ADR-0029): the proxy ALWAYS decrypts and logs, except the trusted `[proxy]
+    # passthrough` hosts, which is what `capture=on` meant. Off bought ~3 ms per new connection and
+    # bulk throughput a download link rarely reaches — for a posture switch an operator had to
+    # understand. The injector axes (github/gcp/…) still map to this plugin's daemon.
 
     def _rules(self, mode: dict) -> list:
         """The injection rules from every plugin (this registry's, not necessarily the global
         one — `_registry` is bound in Registry.__init__)."""
         return self._registry.proxy_rules(mode) if self._registry else []
+
+    def _rule_defaults(self, mode: dict, rules: list) -> dict[str, str]:
+        names = {key for r in rules for key in r.env}
+        derived = self._registry.env_defaults(mode) if self._registry else {}
+        return {k: v for k, v in derived.items() if k in names}
 
     def daemons(self, mode: dict) -> dict[str, dict]:
         rules = self._rules(mode)
@@ -346,101 +351,52 @@ class ProxyPlugin(Plugin):
         # consumer (proxy_enabled) or any active rule keeps the always-on proxy, as Phase A′ needs.
         if not config.proxy_enabled() and not rules:
             return {}
-        # Phase A′ — ALWAYS-ON: the proxy runs unconditionally (was: only for an injector or
-        # capture=on), because the box ALWAYS routes through it (derive_env). A dead :8088 would
-        # connection-refuse every box request, so the daemon must never be absent while a box
-        # exists. CAPTURE_MODE tells egress_proxy.py what to do with HTTPS it isn't injecting:
-        #   on  → "full":        MITM-decrypt + log every request
-        #   off → "passthrough": blind-tunnel (real certs end-to-end), SNI-only log
-        # An injector host (github=app) is ALWAYS decrypted + rewritten, whatever CAPTURE_MODE is.
-        # Flipping capture host-side changes only this env → the supervisor restarts the daemon
-        # (signature change) live, with the box still routing + trusting — no box recreate.
-        capture_mode = "full" if _capturing(mode) else "passthrough"
-        # The TRUSTED hosts to TLS-passthrough even under capture=on (everything else is decrypted).
-        # Resolved host-side from `[proxy] passthrough` (+ @bundles) and handed to the addon as a
-        # comma-list. Only consulted in full mode, but always emitted (harmless, keeps the contract
-        # simple). The injector host overrides this — it's always decrypted to rewrite its header.
-        passthrough = ",".join(_resolve_passthrough(config.proxy_passthrough()))
-        base_env = {
+        # Phase A′ — ALWAYS-ON: the proxy runs unconditionally (was: only for an injector), because
+        # the box ALWAYS routes through it (derive_env). A dead :8088 would connection-refuse every
+        # box request, so the daemon must never be absent while a box exists.
+        #
+        # Always CAPTURE_MODE=full (ADR-0029): decrypt + log every request EXCEPT the trusted hosts
+        # in the passthrough list, which are blind-tunnelled with an SNI-only log row. The addon
+        # keeps its "passthrough" mode as a standalone option; foldyard no longer asks for it.
+        #
+        # The launch env holds only what never changes with posture. Everything that does — the
+        # injection rules, the wall switch, the passthrough list — goes in the LIVE file the
+        # supervisor writes and the addon re-reads (see `live` below). The supervisor restarts a
+        # daemon whose cmd/env changed, and a restart cuts every connection in flight: a mode
+        # switch used to kill a running apt download mid-package. So a posture change must never
+        # reach the env.
+        #
+        # Secrets aren't here either, as values or as a stamp: the addon reads each rule's
+        # declared names from host.env (HOST_ENV_FILE) whenever that file changes, and the
+        # supervisor strips host.env's keys from this daemon's environment (`scrub_host_env`).
+        env = {
             "PROXY_LOG_FILE": str(_proxy_log()),
-            "CAPTURE_MODE": capture_mode,
-            "PASSTHROUGH_HOSTS": passthrough,
-            # The egress wall (foldyard.allowlist). DEFAULT_DENY is the static on/off — toggling it
-            # changes the daemon signature → the supervisor restarts the proxy with it. ALLOW_FILE
-            # is the resolved effective allowlist the addon re-reads PER REQUEST (mtime-cached),
-            # so a host-side grant takes effect with NO restart (the supervisor just sweeps + writes
-            # that file). Always emitted (harmless when default-deny is off — the addon ignores it).
-            "DEFAULT_DENY": "1" if _default_deny() else "",
+            "CAPTURE_MODE": "full",
+            # The effective allowlist, re-read per request (mtime-cached) — grants never restart.
             "ALLOW_FILE": str(config.allow_effective_file()),
+            "LIVE_FILE": str(_live_file()),
+            "HOST_ENV_FILE": str(config.host_env_file()),
+            # The hashes of the live build secrets (buildgate): what unlocks build-scoped grants.
+            "BUILD_TOKENS_FILE": str(config.build_tokens_file()),
         }
-        if len(rules) == 1:
-            # ONE injector: emit the legacy single INJECT_* env (byte-identical to before — every
-            # single-rule caller reads these keys). The addon uses them when INJECT_RULES is
-            # empty, so this is the MAINLINE path, not a shim. Its label names the credential.
-            rule = rules[0]
-            env = {
-                **base_env,
-                "INJECT_HOST": rule.host,
-                # Query-param injection clears the header (the addon: query_param wins). Emitted
-                # ONLY when set, so the github (header) case stays byte-identical to before.
-                "INJECT_HEADER": "" if rule.query_param else rule.header,
-                "INJECT_RETRY_401": "1" if rule.replay_on_401 else "0",
-                "INJECT_COMMAND": rule.minter,
-                # The minter's env allowlist — the addon withholds everything else, because the
-                # supervisor's environment carries every axis's host.env secret.
-                "INJECT_ENV_KEYS": ",".join(rule.env),
-            }
-            if rule.query_param:
-                env["INJECT_QUERY_PARAM"] = rule.query_param
-            if rule.path_prefix:
-                env["INJECT_PATH_PREFIX"] = rule.path_prefix
-            if rule.value_prefix:
-                # The proxy PREPENDS this to the minted value (e.g. "Bearer " for an OAuth
-                # `authorization` header) — emitted only when set, so github stays byte-identical.
-                env["INJECT_VALUE_PREFIX"] = rule.value_prefix
-            label, requires = rule.label, list(rule.requires)
-        elif rules:
-            # MANY injectors (the rule-set contract): hand the addon ALL of them as INJECT_RULES
-            # JSON — it injects on each host with that host's own minter + token cache + 401 retry.
-            # INJECT_RULES wins over the single INJECT_* (left empty), so the injectors coexist.
-            env = {
-                **base_env,
-                "INJECT_HOST": "",
-                "INJECT_HEADER": "",
-                "INJECT_RETRY_401": "0",
-                "INJECT_COMMAND": "",
-                "INJECT_RULES": json.dumps([_rule_to_json(r) for r in rules]),
-            }
+        live = {
+            "rules": [_rule_to_json(r) for r in rules],
+            # From the HOST-owned allow-store, never straight from the repo's `[proxy]`.
+            "default_deny": _default_deny(),
+            "passthrough": _resolve_passthrough(config.proxy_passthrough()),
+            # The open learn window's start: a new window resets the addon's per-host would-block
+            # rate limit, or a host seen just before it would get no row inside it.
+            "observing_since": _observing_since(),
+            # Derived, non-secret identity a rule's minter reads (github=app's GH_APP_ID & co.,
+            # from env_defaults): the running proxy never restarts to inherit the supervisor's env,
+            # so it gets them here. After exports and host.env, as the supervisor's setdefault.
+            "defaults": self._rule_defaults(mode, rules),
+        }
+        if rules:
             label = "egress proxy (" + ", ".join(r.label or r.host for r in rules) + ")"
-            requires = sorted({req for r in rules for req in r.requires})
         else:
-            # No injector: EMPTY INJECT_HOST/COMMAND → the addon rewrites nothing; CAPTURE_MODE
-            # alone decides decrypt-and-log (capture=on) vs passthrough+SNI-log (capture=off).
-            env = {
-                **base_env,
-                "INJECT_HOST": "",
-                "INJECT_HEADER": "",
-                "INJECT_RETRY_401": "0",
-                "INJECT_COMMAND": "",
-            }
-            label = (
-                "egress capture proxy (MITM-log all)"
-                if _capturing(mode)
-                else "egress proxy (passthrough + SNI log)"
-            )
-            requires = []
-        # A fingerprint of every rule-declared secret VALUE (never the value itself — the spec env
-        # lands in the child's `ps eww` and the supervisor's Child.signature). The daemon reads
-        # secrets from its OWN environment, frozen at spawn — so a keyless token captured to
-        # host.env AFTER the proxy launched (`fy box up` prompting once the box was already routing)
-        # or a rotated secret would otherwise never reach the minter: the mint fails forever and the
-        # box's dummy credential goes upstream verbatim (days of Anthropic 401s with a valid token
-        # sitting in host.env). The supervisor merges host.env into its environment every tick, so
-        # stamping the values here flips the spec signature → it restarts the daemon with the fresh
-        # value within a tick. Same mechanism CAPTURE_MODE already rides (env change → restart).
-        secret_keys = sorted({key for r in rules for key in r.env})
-        if secret_keys:
-            env["INJECT_ENV_STAMP"] = _secret_stamp(secret_keys)
+            label = "egress proxy (decrypt + log; trusted hosts tunnelled)"
+        requires = sorted({req for r in rules for req in r.requires})
         # One proxy listener PER WORKTREE (ADR-0016): the daemon name carries the
         # worktree suffix and the port is the worktree's offset port, so the ONE supervisor can run
         # N listeners without name/port collisions. The main checkout keeps the bare "egress-proxy"
@@ -449,8 +405,8 @@ class ProxyPlugin(Plugin):
         port = config.proxy_port()
         return {
             # Keep the main daemon name "egress-proxy" + the INJECT_*/PROXY_LOG_FILE/-s
-            # egress_proxy.py contract byte-identical (a worktree appends "@<name>"): the github/
-            # capture axes map to this daemon, and the addon reads these exact keys.
+            # egress_proxy.py contract byte-identical (a worktree appends "@<name>"): the injector
+            # axes map to this daemon, and the addon reads these exact keys.
             # For github the env equals egress_proxy.py's defaults.
             f"egress-proxy{config.worktree_suffix()}": {
                 "label": label,
@@ -477,18 +433,29 @@ class ProxyPlugin(Plugin):
                     # connect/listening/error lines (those are termlog, not flow_detail).
                     "--set",
                     "flow_detail=0",
+                    # Relay bodies past 1 MiB as they arrive instead of buffering the whole body
+                    # in the proxy's memory first. mitmproxy buffers by default, so a decrypted
+                    # 2 GB image layer or model download was held in RAM before the box saw a
+                    # byte; streaming also doubled decrypted throughput (~270 → ~590 MB/s on
+                    # loopback, 2026-09-22). Error bodies (the log's snippet) and 401 re-issues
+                    # stay small, so nothing the addon reads is lost.
+                    "--set",
+                    "stream_large_bodies=1m",
                 ],
                 "env": env,
+                # Written by the supervisor (whole, renamed into place) whenever it changes; the
+                # addon picks it up within a second, with no restart. See `env` above.
+                "live": {"path": str(_live_file()), "data": live},
+                "scrub_host_env": True,
                 "requires": requires,
             }
         }
 
     def derive_env(self, mode: dict) -> dict[str, str]:
-        # Phase A′ — ALWAYS route box egress through the always-on proxy (was: only for an injector
-        # or capture=on). This is what makes `capture` toggleable on a RUNNING box: the routing env
-        # is baked once at box-up and never changes; flipping capture only changes the daemon's
-        # CAPTURE_MODE host-side. An explicit FY_PROXY still wins downstream. The cost (accepted in
-        # the 2-rung model): a box always needs the proxy alive — `machine up` launches `foldyard
+        # Phase A′ — ALWAYS route box egress through the always-on proxy (was: only for an
+        # injector). The routing env is baked once at box-up and never changes; what the proxy does
+        # with it (inject, wall) is decided host-side. An explicit FY_PROXY still wins downstream.
+        # The cost: a box always needs the proxy alive — `machine up` launches `foldyard
         # host` so it is (and the supervisor auto-restarts it). box_args keys off this for routing.
         #
         # Gated on the consumer OPTING IN (`[proxy]` table) — without it, a generic/stack-less
@@ -511,17 +478,18 @@ class ProxyPlugin(Plugin):
         #  1. CA TRUST — AMBIENT: mount + additively trust the CA whenever it EXISTS, regardless
         #     of routing. `box_up`'s `_CA_TRUST_SNIPPET` appends it to the system store and
         #     NODE_EXTRA_CA_CERTS adds it to Node's built-in roots — both ADDITIVE, so a box with
-        #     no proxy routing keeps verifying real certs normally. Pre-positions trust so capture
-        #     can later be flipped host-side without re-creating the box (env can't change in a
-        #     running box). The bind SOURCE must be VM-visible — `box_up` stages it under the
-        #     checkout and points MITMPROXY_CA there (the machine mounts ONLY repo + worktrees).
+        #     no proxy routing keeps verifying real certs normally. Pre-positions trust so an
+        #     injector can later be enabled host-side without re-creating the box (env can't
+        #     change in a running box). The bind SOURCE must be VM-visible — `box_up` stages it
+        #     under the checkout and points MITMPROXY_CA there (the machine mounts ONLY repo +
+        #     worktrees).
         #
         #  2. ROUTING — GATED on FY_PROXY (derive_env now ALWAYS sets it — Phase A′ always-route;
         #     an explicit env var still wins). Sends egress through the host proxy. Here we set
         #     REQUESTS_CA_BUNDLE/GIT_SSL_CAINFO/SSL_CERT_FILE to the COMBINED bundle (BOX_CA_BUNDLE
         #     = system roots + mitm CA, built by the box-up snippet) — NOT the mitm CA alone. Under
-        #     always-route, capture=off TLS-passthrough leaves un-decrypted hosts presenting REAL
-        #     certs, so a mitm-only bundle would reject them; the combined bundle trusts both.
+        #     always-route, a `[proxy] passthrough` host is tunnelled un-decrypted and presents its
+        #     REAL cert, so a mitm-only bundle would reject them; the combined bundle trusts both.
         #     Routing requires the CA (decrypted/MITM'd flows are mitm-signed), so no CA with
         #     routing is a hard error — `machine up`'s `foldyard host` generates it on first run.
         #
@@ -657,7 +625,7 @@ class ProxyPlugin(Plugin):
     def tui_panels(self) -> list[TuiPanel]:
         # The egress Network Log: the proxy's per-request JSONL, GROUPED BY HOST into a collapsible
         # tree (expand a domain to see its requests). A proxy concern — it shows ALL traffic the
-        # proxy sees (capture + every injector), with host-injected Authorization marked.
+        # proxy sees (every request + injector), with host-injected Authorization marked.
         return [
             TuiPanel(
                 id="network",

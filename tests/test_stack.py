@@ -754,6 +754,54 @@ def test_podman_build_redacts_build_arg_values_in_echo_and_log(fake_repo, monkey
         assert "PLAIN" in surface  # a valueless (env-passthrough) arg has nothing to redact
 
 
+def test_walled_stack_build_is_a_trusted_build(fake_repo, monkeypatch):
+    # Same concession as `fy box build` (ADR-0029's amendment): a stack image build has no proxy
+    # CA either, so it reaches the proxy with the build marker — tunnelled, still walled. Before
+    # the service's own args, so a service that sets a proxy arg wins.
+    from foldyard.plugins import proxy
+
+    monkeypatch.setattr(config, "machine_wall", lambda: True)
+    cfg = json.dumps(
+        {"services": {"app": {"build": {"context": "/repo/app", "args": {"HTTPS_PROXY": "mine"}}}}}
+    )
+    calls = _run_returning(monkeypatch, cfg)
+    assert stack.build([]) == 0
+    build = next(c for c in calls if len(c) >= 2 and c[1] == "build")
+    args = [build[i + 1] for i, tok in enumerate(build) if tok == "--build-arg"]
+    marker = f"http://{proxy.BUILD_TUNNEL_USER}:"
+    assert any(a.startswith(f"https_proxy={marker}") for a in args)
+    assert any(a.startswith(f"HTTPS_PROXY={marker}") for a in args)
+    assert f"https_proxy={proxy.build_proxy_url()}" not in args  # a secret, not the bare marker
+    assert args[-1] == "HTTPS_PROXY=mine"
+
+
+def test_unwalled_stack_build_gets_no_proxy_args(fake_repo, monkeypatch):
+    monkeypatch.setattr(config, "machine_wall", lambda: False)
+    calls = _run_returning(
+        monkeypatch, json.dumps({"services": {"app": {"build": {"context": "/a"}}}})
+    )
+    assert stack.build([]) == 0
+    build = next(c for c in calls if len(c) >= 2 and c[1] == "build")
+    assert "--build-arg" not in build
+
+
+def test_stack_builds_run_under_the_build_gate(fake_repo, monkeypatch):
+    # Both entry points — `fy build` and `fy up` — hand their build to the gate, which reports
+    # and offers what the wall refused, then retries.
+    from foldyard import buildgate
+
+    gated: list[str] = []
+
+    def fake_gate(build, *, what, **_):
+        gated.append(what)
+        return build(None)
+
+    monkeypatch.setattr(buildgate, "run", fake_gate)
+    _run_returning(monkeypatch, json.dumps({"services": {"app": {"build": {"context": "/a"}}}}))
+    assert stack.build([]) == 0
+    assert gated == ["stack build"]
+
+
 def test_up_docker_engine_builds_then_starts_without_rebuilding(
     fake_repo, capture_run, monkeypatch
 ):

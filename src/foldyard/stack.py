@@ -439,6 +439,7 @@ def _redact_build_args(cmd: list[str]) -> list[str]:
 
 def _podman_build(
     ctx: Context,
+    build_proxy: str | None,
     *,
     extra_profiles: list[str] | None = None,
     services: list[str] | None = None,
@@ -526,6 +527,11 @@ def _podman_build(
             cmd += ["--target", build["target"]]
         if platform_for(svc):
             cmd += ["--platform", platform_for(svc)]
+        # A walled build reaches the proxy as a TRUSTED BUILD (tunnelled, not decrypted — it has
+        # no proxy CA), before the service's own args so a service's proxy arg wins.
+        if build_proxy:
+            for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                cmd += ["--build-arg", f"{key}={build_proxy}"]
         for k, v in (build.get("args") or {}).items():
             cmd += ["--build-arg", k if v is None else f"{k}={v}"]
         # podman-compose normalizes additional_contexts to either a {name: value} map or a list
@@ -650,9 +656,18 @@ def _build(
     Compose provider's BuildKit path. Docker (including CI) retains Compose's
     regular BuildKit build.
     """
+    from . import buildgate
+
     if config.engine() == "podman":
-        return _podman_build(
-            ctx, extra_profiles=extra_profiles, services=services, superseded=superseded
+        return buildgate.run(
+            lambda proxy_url: _podman_build(
+                ctx,
+                proxy_url,
+                extra_profiles=extra_profiles,
+                services=services,
+                superseded=superseded,
+            ),
+            what="stack build",
         )
     return _compose(ctx, ["build", *(services or [])], extra_profiles=extra_profiles)
 

@@ -8,7 +8,10 @@ any host that isn't allowed. A host can be allowed at three levels:
   session      until the host supervisor restarts — "don't ask again this task"
   permanent    no expiry; survives a supervisor restart
 
-Enforcement itself (``default_deny``) is host-owned too — see :func:`default_deny`.
+Enforcement itself (``default_deny``) is host-owned too — see :func:`default_deny`. A LEARN
+window (:func:`start_learning`) suspends enforcement until a deadline, while the proxy records
+what it would have refused; enforcement resumes by itself when it lapses, and :func:`learned_hosts`
+turns what was recorded into one reviewed batch of grants.
 
 EVERY level lives in one authoritative store in the Mac home (``allow-store.json``, OUTSIDE the repo
 mount), so **nothing in the box can grant its own egress**. That placement is the whole
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 from collections.abc import Callable
@@ -38,7 +42,15 @@ from pathlib import Path
 from . import config
 
 LEVELS = ("once", "session", "permanent")
+# Who a grant is for: the box and everything in it (``runtime``), or only an image build the host
+# started (``build``) — which proves itself to the proxy with a per-build secret (buildgate).
+SCOPES = ("runtime", "build")
 ONCE_TTL_SECONDS = 120  # "allow once" lifetime before it auto-reverts
+# `once` when it's offered ahead of work that takes a while — a recommendation at launch, a host
+# the build gate asks about: the default 120 s can lapse before a build step reaches the network.
+OFFER_ONCE_SECONDS = 900
+LEARN_DEFAULT_SECONDS = 3600  # a learn window's length unless the operator says otherwise
+LEARN_MAX_SECONDS = 8 * 3600  # an open wall is a lapse, not a posture — devmode.MAX_TTL's cap
 
 
 def in_box() -> bool:
@@ -51,6 +63,14 @@ def _now() -> datetime:
 
 def _iso(dt: datetime) -> str:
     return dt.astimezone(UTC).isoformat(timespec="seconds")
+
+
+def _aware(iso: object) -> datetime | None:
+    """``iso`` as a timezone-AWARE datetime, else None. The store's own timestamps are always
+    written aware (:func:`_iso`); a naive one is damage — comparing it with :func:`_now` raises
+    ``TypeError`` rather than failing closed."""
+    dt = _parse(iso) if isinstance(iso, str) else None
+    return dt if dt is not None and dt.tzinfo is not None else None
 
 
 def _parse(iso: str | None) -> datetime | None:
@@ -141,7 +161,16 @@ def _checked_raw() -> dict:
         hosts = raw["hosts"]
         if not isinstance(hosts, dict):
             raise StoreUnreadable(f"{path}: `hosts` is not an object")
-        bad = sorted(h for h, entry in hosts.items() if not isinstance(entry, dict))
+        # A present `expires` must be an aware time: read as "no expiry" a once-grant would be
+        # permanent, and compared as it is it crashes the prune instead of failing closed.
+        # …and a scope is one we know: an unknown one read as runtime would widen the box's wall.
+        bad = sorted(
+            h
+            for h, entry in hosts.items()
+            if not isinstance(entry, dict)
+            or (entry.get("expires") is not None and _aware(entry.get("expires")) is None)
+            or entry.get("scope", "runtime") not in SCOPES
+        )
         if bad:
             raise StoreUnreadable(f"{path}: malformed entries for {', '.join(bad)}")
     if "default_deny" in raw and not isinstance(raw["default_deny"], bool):
@@ -154,6 +183,14 @@ def _checked_raw() -> dict:
             not isinstance(v, dict) for v in declined.values()
         ):
             raise StoreUnreadable(f"{path}: `declined` is malformed")
+    for key in ("learn", "learned"):
+        # A learn window SUSPENDS enforcement, so a malformed one is damage like a non-bool
+        # default_deny: reading it as "no window" would be harmless, but reading a half-written one
+        # as open could leave the wall down — refuse it and let the readers fail closed.
+        if key in raw:
+            w = raw[key]
+            if not isinstance(w, dict) or any(_aware(w.get(f)) is None for f in ("since", "until")):
+                raise StoreUnreadable(f"{path}: `{key}` is malformed")
     return raw
 
 
@@ -181,25 +218,424 @@ def default_deny() -> bool:
     itself, which is strictly worse than the per-host grants we already moved out (that widened the
     wall by one host; this drops it entirely). Change it with ``fy allow wall on|off``."""
     try:
-        stored = _checked_raw().get("default_deny")
+        raw = _checked_raw()
     except StoreUnreadable as e:
         # Fail CLOSED: a damaged store must not hand enforcement back to `[proxy] default_deny`,
         # which is repo config the box can write — that would turn "my allow-store broke" into
         # "the yard switched its own wall off".
         _warn(f"egress allow-store unreadable ({e}) — ENFORCING until it's repaired or removed")
         return True
+    if _open_window(raw) is not None:
+        return False  # a learn window: observe until its deadline, then enforce again
+    stored = raw.get("default_deny")
     # `_checked_raw` already rejected a present-but-non-bool value, so this is a bool or absent.
+    # An unanswered "learn" seed ENFORCES: the window opens at a launch verb (seed_learning), and
+    # until then nothing has said "open".
     return stored if stored is not None else config.proxy_default_deny()
 
 
 def set_wall(on: bool) -> dict:
-    """Turn enforcement on/off in the host store (Mac only). Returns the new effective."""
+    """Turn enforcement on/off in the host store (Mac only). Returns the new effective. Ends a
+    learn window early (its record is kept, so `fy allow learn` can still review it)."""
     _require_host()
     _require_readable_store()
     doc = _load_raw()
     doc["default_deny"] = bool(on)
+    _close_window(doc)
     _save_raw(doc)
     return write_effective()
+
+
+# ── the learn window (observe, record, then enforce by itself) ───────────────────────
+
+
+def _open_window(raw: dict) -> dict | None:
+    """The store's learn window if it is still open, else None."""
+    w = raw.get("learn")
+    if not isinstance(w, dict):
+        return None
+    until = _parse(w.get("until"))
+    return w if until is not None and until > _now() else None
+
+
+def _close_window(doc: dict) -> bool:
+    """Move an open-or-lapsed ``learn`` window to ``learned`` (ending it now if still open), so
+    the record of what was observed outlives the window. Returns True when there was one."""
+    w = doc.pop("learn", None)
+    if not isinstance(w, dict):
+        return False
+    until = _parse(w.get("until"))
+    end = min(until, _now()) if until is not None else _now()
+    doc["learned"] = {"since": w.get("since"), "until": _iso(end)}
+    return True
+
+
+def learning() -> dict | None:
+    """The open learn window ``{since, until}``, or None. A damaged store is None — no window —
+    which with :func:`default_deny` failing closed means enforcing."""
+    try:
+        return _open_window(_checked_raw())
+    except StoreUnreadable:
+        return None
+
+
+def last_window() -> dict | None:
+    """The window a review should read: the open one, else the last one closed. None if there has
+    never been one."""
+    try:
+        raw = _checked_raw()
+    except StoreUnreadable:
+        return None
+    w = raw.get("learn") or raw.get("learned")
+    return {"since": w["since"], "until": w["until"]} if isinstance(w, dict) else None
+
+
+def start_learning(seconds: int = LEARN_DEFAULT_SECONDS) -> dict:
+    """Open a learn window: enforcement is suspended until now + ``seconds`` (capped at
+    :data:`LEARN_MAX_SECONDS`), the proxy records every host it WOULD have refused, and when the
+    window lapses the wall ENFORCES — whatever it was before. That last part is the point: a
+    window cannot be forgotten into an open wall, which ``fy allow wall off`` can. Mac only.
+    Returns the window."""
+    _require_host()
+    _require_readable_store()
+    seconds = max(1, min(int(seconds), LEARN_MAX_SECONDS))
+    now = _now()
+    doc = _load_raw()
+    since = _unreviewed_since(doc) or now
+    window = {"since": _iso(since), "until": _iso(now + timedelta(seconds=seconds))}
+    doc["learn"] = window
+    doc["default_deny"] = True  # what resumes when the window lapses
+    _save_raw(doc)
+    write_effective()
+    return window
+
+
+def _unreviewed_since(doc: dict) -> datetime | None:
+    """Where the review of the previous window would start, if any of it is still unreviewed.
+
+    `fy allow learn` reviews ONE window, so a window replaced before its review would take every
+    host only it had seen out of the workflow. The replacement reaches back instead: to the
+    previous window's start, or to the last review if that fell inside it. The stretch in between
+    adds nothing — the wall was enforcing, and a review reads only would-block rows."""
+    prior = doc.get("learn") or doc.get("learned")
+    if not isinstance(prior, dict):
+        return None
+    since, until = _aware(prior.get("since")), _aware(prior.get("until"))
+    if since is None or until is None:
+        return None
+    reviewed = _aware(doc.get("reviewed"))
+    if reviewed is None or reviewed <= since:
+        return since
+    return reviewed if reviewed < min(until, _now()) else None
+
+
+def mark_reviewed() -> None:
+    """Record that the operator was shown the current window's review (`fy allow learn`), so the
+    next window starts fresh rather than carrying this one. Host-side, best-effort."""
+    if in_box():
+        return
+    try:
+        doc = _checked_raw()
+    except StoreUnreadable:
+        return
+    doc["reviewed"] = _iso(_now())
+    _save_raw(doc)
+
+
+def seed_learning(echo: Callable[[str], None]) -> dict | None:
+    """First launch on a checkout whose ADOPTED config seeds ``[proxy] default_deny = "learn"``:
+    open the first learn window and say so, loudly. Only when the store has never answered
+    (no ``default_deny``, no window past or present) — so it happens once, and an operator's own
+    ``fy allow wall …`` always wins. Returns the window, or None when nothing was started.
+
+    The seed is repo config, but it can only ever buy a BOUNDED open window before enforcing —
+    strictly less than ``default_deny = false``, which the same repo could already write."""
+    if in_box() or config.proxy_default_deny_seed() != "learn":
+        return None
+    try:
+        raw = _checked_raw()
+    except StoreUnreadable:
+        return None
+    if any(k in raw for k in ("default_deny", "learn", "learned")):
+        return None
+    window = start_learning(LEARN_DEFAULT_SECONDS)
+    until = _parse(window["until"])
+    at = until.astimezone().strftime("%H:%M") if until else window["until"]
+    echo(
+        f"▶ egress wall: LEARNING until {at} (first run) — the box's egress is allowed and every "
+        "host the wall would refuse is recorded. Enforcement resumes by itself; review and grant "
+        "what it saw with `fy allow learn` (`fy allow wall on` ends it now)."
+    )
+    return window
+
+
+def _matches(key: str, patterns: list[str]) -> bool:
+    """The proxy's grant semantics for a recorded host key — the addon's ``_host_matches`` over the
+    whole key: an exact grant, or a ``*.suffix`` one (subdomains, not the bare domain). A
+    ``host:port`` key is matched the same way, so ``*.example.com:22`` answers
+    ``git.example.com:22`` as the proxy does, and a bare grant never answers a ``host:port``."""
+    return any(key.endswith(p[1:]) if p.startswith("*.") else key == p for p in patterns)
+
+
+def _printable(text: object, limit: int = 120) -> str:
+    """``text`` cut to printable characters (no terminal escapes), capped."""
+    if not isinstance(text, str):
+        return ""
+    return "".join(c for c in text if c.isprintable())[:limit]
+
+
+# What a sampled path keeps: its first segments, enough to name the package or endpoint
+# (`/react`, `/@types/node`, `/simple/requests`) and never the query string, where tokens live.
+_PATH_SEGMENTS = 2
+_PATH_SEGMENT_MAX = 40  # longer reads as an id or a token, not a name — shown as `…`
+_PATH_EXAMPLES = 3
+# The characters a learned `why` may carry: enough for tool tokens and package paths, and none
+# that can end a TOML string or open markup. Box-originated text, so allowlisted, not escaped.
+_WHY_SAFE = set("._/+-@~…")
+
+
+def _sample_path(path: object) -> str:
+    """A request path cut down to what explains a host: no query or fragment, the first
+    :data:`_PATH_SEGMENTS` segments, an over-long segment replaced by ``…``. '' when nothing is
+    left."""
+    if not isinstance(path, str):
+        return ""
+    path = path.split("?", 1)[0].split("#", 1)[0]
+    segments = [seg for seg in path.split("/") if seg][:_PATH_SEGMENTS]
+    kept = [seg if len(seg) <= _PATH_SEGMENT_MAX else "…" for seg in segments]
+    return "/" + "/".join(kept) if kept else ""
+
+
+def _why_safe(text: str) -> str:
+    return "".join(c for c in text if c.isalnum() or c in _WHY_SAFE)
+
+
+def recommend_why(entry: dict) -> str:
+    """The ``why`` for a learned host's ``[proxy] recommend`` line — labelled as what it is: an
+    OBSERVATION from box traffic (``observed: npm/10.8.2 GET /react, /lodash (+4) — edit me``),
+    not a reason. The reason is the operator's to write before committing; the box chose every
+    byte here, and teammates see this text at their own consent prompt. Restricted to characters
+    that can't break out of a TOML string."""
+    uas = entry.get("uas") or []
+    tool = _why_safe(uas[0].split()[0])[:40] if uas and uas[0].split() else ""
+    parts = [tool] if tool else []
+    paths = [_why_safe(p)[: _PATH_SEGMENT_MAX * _PATH_SEGMENTS] for p in entry.get("paths") or []]
+    paths = [p for p in paths if p]
+    if paths:
+        more = entry.get("more_paths", 0)
+        parts.append("GET " + ", ".join(paths) + (f" (+{more})" if more else ""))
+    return f"observed: {' '.join(parts) or 'no detail (tunnelled)'} — edit me"
+
+
+def read_log_rows(paths: list[Path]) -> list[dict]:
+    """Every JSON row in ``paths`` (oldest file first), skipping unreadable files and malformed
+    lines. The review reads WHOLE files, unlike the TUI's bounded tail: a window can be hours old,
+    and the would-block rows are rate-limited, so they are few among the request rows."""
+    rows: list[dict] = []
+    for path in paths:
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    return rows
+
+
+def learned_hosts(rows: list[dict], window: dict) -> list[dict]:
+    """The hosts the proxy recorded as WOULD-BLOCK inside ``window``, still not granted and not
+    declined: ``{host, count, first, last, uas, paths, more_paths}`` in first-seen order. ``uas``
+    is up to three distinct User-Agents — which TOOL reached the host. ``paths`` samples what it
+    FETCHED there, from the decrypted request rows for the same host in the window (a tunnelled
+    host has none): the attribution a reviewer needs without anything logging commands in the box.
+    Pure over the log rows (tests pass them directly).
+
+    Every field here was written from traffic the BOX originated, so it is untrusted: a host that
+    isn't a valid grant is dropped (``grant`` would refuse it mid-batch), and a User-Agent is cut
+    to printable characters before it reaches the operator's terminal."""
+    since, until = _parse(window.get("since")), _parse(window.get("until"))
+    granted = live_hosts()
+    refused = declined()
+    out: dict[str, dict] = {}
+    fetched: dict[str, list[str]] = {}  # host → distinct sampled paths, first-seen order
+    for row in rows:
+        ts, key = _parse(row.get("ts")), row.get("host")
+        if not key or ts is None or since is None or until is None or not since <= ts <= until:
+            continue
+        if not row.get("would_block"):
+            # A decrypted request row (method + path): what the tool fetched, joined below by
+            # host. Tunnel, blocked and would-block rows carry no path.
+            if row.get("method") and isinstance(key, str):
+                sample = _printable(_sample_path(row.get("path")))
+                if sample and sample not in fetched.setdefault(key, []):
+                    fetched[key].append(sample)
+            continue
+        if not isinstance(key, str) or not valid_host(key) or key.startswith("*."):
+            continue
+        if _matches(key, granted) or key in refused or "*" in refused:
+            continue
+        entry = out.setdefault(key, {"host": key, "count": 0, "first": row["ts"], "uas": []})
+        entry["count"] += 1
+        entry["last"] = row["ts"]
+        ua = _printable(row.get("ua"))
+        if ua and ua not in entry["uas"] and len(entry["uas"]) < 3:
+            entry["uas"].append(ua)
+    for key, entry in out.items():
+        # A `host:port` key was a non-TLS-port tunnel — its requests (if any were decrypted) are
+        # logged under the bare host, which may also be a different, granted :443 host; don't mix.
+        seen = [] if ":" in key else fetched.get(key, [])
+        entry["paths"] = seen[:_PATH_EXAMPLES]
+        entry["more_paths"] = max(0, len(seen) - _PATH_EXAMPLES)
+    return list(out.values())
+
+
+def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
+    """The hosts the wall REFUSED an image build since ``since``, still not granted:
+    ``{host, count, uas, paths, more_paths}`` in first-seen order (the ``learned_hosts`` shape, so
+    :func:`recommend_why` reads it). Only rows the proxy attributed to a build (its ``build`` flag,
+    from the build marker) count — a box session refused in the same minute is not the build's.
+    A build is tunnelled, so there are never paths. Box-originated text, handled as in
+    :func:`learned_hosts`."""
+    granted = live_hosts() + build_hosts()  # either answers a build
+    out: dict[str, dict] = {}
+    for row in rows:
+        ts, key = _parse(row.get("ts")), row.get("host")
+        if not (row.get("blocked") and row.get("build")) or ts is None or ts < since:
+            continue
+        if not isinstance(key, str) or not valid_host(key) or _matches(key, granted):
+            continue
+        entry = out.setdefault(
+            key, {"host": key, "count": 0, "uas": [], "paths": [], "more_paths": 0}
+        )
+        entry["count"] += 1
+        ua = _printable(row.get("ua"))
+        if ua and ua not in entry["uas"] and len(entry["uas"]) < 3:
+            entry["uas"].append(ua)
+    return list(out.values())
+
+
+def recommend_block(entries: list[dict], *, when: str = "") -> list[str]:
+    """The ``[proxy] recommend`` TOML for ``entries`` (``learned_hosts``/``build_refusals``
+    shape), each ``why`` the labelled observation of :func:`recommend_why` — ready to paste, and
+    to reword before committing."""
+    lines = ["  [proxy]", "  recommend = ["]
+    tail = f', when = "{when}"' if when else ""
+    lines += [f'    {{ host = "{e["host"]}", why = "{recommend_why(e)}"{tail} }},' for e in entries]
+    return [*lines, "  ]"]
+
+
+_TABLE_HEADER = re.compile(r"^\s*\[\[?[^\]]*\]\]?\s*(#.*)?$")
+_PROXY_HEADER = re.compile(r"^\s*\[proxy\]\s*(#.*)?$")
+_RECOMMEND_KEY = re.compile(r"^\s*recommend\s*=\s*")
+
+
+def _array_bounds(text: str, start: int) -> tuple[int, int] | None:
+    """For the TOML array whose ``[`` is at ``start``: ``(close, last)`` — the index of its
+    matching ``]`` and of the last significant character inside it (``start`` itself when empty).
+    Strings and comments are skipped, so a bracket in either never counts. ``None`` if it never
+    closes."""
+    depth, last, i = 0, start, start
+    while i < len(text):
+        ch = text[i]
+        if ch == "#":
+            i = text.find("\n", i)
+            if i < 0:
+                return None
+            continue
+        if ch in "\"'":
+            triple = text.startswith(ch * 3, i)
+            quote = ch * 3 if triple else ch
+            j = i + len(quote)
+            while j < len(text) and not text.startswith(quote, j):
+                j += 2 if ch == '"' and text[j] == "\\" else 1
+            if j >= len(text):
+                return None
+            i = j + len(quote)
+            last = i - 1
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return i, last
+        if not ch.isspace():
+            last = i
+        i += 1
+    return None
+
+
+def with_recommends(text: str, entries: list[dict], *, when: str = "") -> str | None:
+    """``text`` (a ``foldyard.toml``) with ``entries`` appended to ``[proxy] recommend`` — hosts
+    already recommended skipped, their ``why`` the observation of :func:`recommend_why`. Edits the
+    TEXT, so comments and layout survive, then proves it: the result must parse to exactly the
+    original plus the new entries, or this returns ``None`` and the caller prints the block
+    instead. A file it can't parse, or a ``recommend`` that isn't a list, is ``None`` too."""
+    import tomllib
+
+    try:
+        before = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    proxy = before.get("proxy", {})
+    existing = proxy.get("recommend", []) if isinstance(proxy, dict) else None
+    if not isinstance(existing, list):
+        return None
+    have = {
+        e if isinstance(e, str) else e.get("host") for e in existing if isinstance(e, str | dict)
+    }
+    new = [e for e in entries if e["host"] not in have]
+    if not new:
+        return text
+    tail = f', when = "{when}"' if when else ""
+    items = [f'{{ host = "{e["host"]}", why = "{recommend_why(e)}"{tail} }}' for e in new]
+    block = "".join(f"  {item},\n" for item in items)
+
+    lines = text.splitlines(keepends=True)
+    header = next((n for n, line in enumerate(lines) if _PROXY_HEADER.match(line)), None)
+    if header is None:
+        sep = "" if not text or text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+        out = f"{text}{sep}[proxy]\nrecommend = [\n{block}]\n"
+    else:
+        end = next(
+            (n for n in range(header + 1, len(lines)) if _TABLE_HEADER.match(lines[n])),
+            len(lines),
+        )
+        key = next((n for n in range(header + 1, end) if _RECOMMEND_KEY.match(lines[n])), None)
+        if key is None:
+            at = sum(len(line) for line in lines[: header + 1])
+            out = f"{text[:at]}recommend = [\n{block}]\n{text[at:]}"
+        else:
+            offset = sum(len(line) for line in lines[:key])
+            matched = _RECOMMEND_KEY.match(lines[key])
+            assert matched  # `key` was chosen by this same match
+            opening = text.find("[", offset + matched.end() - 1)
+            bounds = _array_bounds(text, opening) if opening >= 0 else None
+            if bounds is None:
+                return None
+            close, last = bounds
+            comma = "" if text[last] in "[," else ","
+            line_start = text.rfind("\n", 0, close) + 1
+            if text[line_start:close].strip():  # `]` shares its line: an inline list
+                out = f"{text[: last + 1]}{comma} {', '.join(items)}{text[last + 1 :]}"
+            else:
+                head = f"{text[: last + 1]}{comma}{text[last + 1 : line_start]}"
+                out = f"{head}{block}{text[line_start:]}"
+    try:
+        after = tomllib.loads(out)
+    except tomllib.TOMLDecodeError:
+        return None
+    added = [
+        {"host": e["host"], "why": recommend_why(e), **({"when": when} if when else {})}
+        for e in new
+    ]
+    expected = {**before, "proxy": {**proxy, "recommend": [*existing, *added]}}
+    return out if after == expected else None
 
 
 def _prune(hosts: dict[str, dict]) -> tuple[dict[str, dict], bool]:
@@ -214,9 +650,15 @@ def _prune(hosts: dict[str, dict]) -> tuple[dict[str, dict], bool]:
 
 
 def live_hosts() -> list[str]:
-    """Every non-expired grant (once / session / permanent) — the patterns the proxy allows. A
-    damaged store grants NOTHING (fail closed, matching :func:`default_deny`)."""
-    return [g["host"] for g in grants()]
+    """Every non-expired RUNTIME grant (once / session / permanent) — the patterns the proxy
+    allows for everything. A damaged store grants NOTHING (fail closed, matching
+    :func:`default_deny`)."""
+    return [g["host"] for g in grants() if g["scope"] == "runtime"]
+
+
+def build_hosts() -> list[str]:
+    """Every non-expired BUILD-scoped grant — allowed only for a host-started image build."""
+    return [g["host"] for g in grants() if g["scope"] == "build"]
 
 
 def grants() -> list[dict]:
@@ -229,7 +671,12 @@ def grants() -> list[dict]:
         _warn(f"egress allow-store unreadable ({e}) — granting nothing until it's repaired")
         return []
     return [
-        {"host": h, "level": e.get("level", "?"), "expires": e.get("expires")}
+        {
+            "host": h,
+            "level": e.get("level", "?"),
+            "expires": e.get("expires"),
+            "scope": e.get("scope", "runtime"),
+        }
         for h, e in sorted(hosts.items())
     ]
 
@@ -240,7 +687,7 @@ def grants() -> list[dict]:
 def effective() -> dict:
     """The resolved allowlist the egress proxy enforces — every grant in the host-side store. The
     injector host + in-stack ``NO_PROXY`` hosts are handled proxy-side, not here."""
-    return {"default_deny": default_deny(), "allow": live_hosts()}
+    return {"default_deny": default_deny(), "allow": live_hosts(), "build_allow": build_hosts()}
 
 
 def write_effective() -> dict:
@@ -273,8 +720,12 @@ def _require_readable_store() -> None:
         )
 
 
-def grant(host: str, level: str, ttl: int | None = None) -> dict:
-    """Allow ``host`` at ``level`` (once|session|permanent). Mac only. Returns the new effective."""
+def grant(host: str, level: str, ttl: int | None = None, *, build: bool = False) -> dict:
+    """Allow ``host`` at ``level`` (once|session|permanent) — for everything, or with ``build``
+    only for a host-started image build. Mac only. Returns the new effective.
+
+    A build grant never replaces a live runtime one (which already covers builds); a runtime grant
+    replaces a build one."""
     _require_host()
     _require_readable_store()
     host = host.strip()
@@ -284,8 +735,21 @@ def grant(host: str, level: str, ttl: int | None = None) -> dict:
         raise SystemExit(f"✗ not a valid host/glob: {host!r}")
 
     hosts, _ = _prune(_load_store())
+    current = hosts.get(host)
     expires = _iso(_now() + timedelta(seconds=ttl or ONCE_TTL_SECONDS)) if level == "once" else None
+    if build and current is not None and current.get("scope", "runtime") == "runtime":
+        if _lasts_as_long(current, level, expires):
+            return write_effective()  # already allowed for everything, builds included
+        # One entry per host: replacing it would narrow what the operator granted the box, and
+        # keeping it would drop the build grant when it lapses. Say so rather than choose.
+        raise SystemExit(
+            f"✗ {host} already has a shorter runtime grant ({current.get('level')}), which "
+            f"covers builds until it lapses. `fy allow remove {host}` first to make it a "
+            "build-only grant, or grant it for runtime at the level you want."
+        )
     hosts[host] = {"level": level, "expires": expires, "added": _iso(_now())}
+    if build:
+        hosts[host]["scope"] = "build"
     doc = _load_raw()
     doc["hosts"] = hosts
     # Granting supersedes a standing "never" on the same host: the operator changed their mind,
@@ -294,6 +758,20 @@ def grant(host: str, level: str, ttl: int | None = None) -> dict:
         doc["declined"].pop(host, None)
     _save_raw(doc)
     return write_effective()
+
+
+_RANK = {"once": 0, "session": 1, "permanent": 2}
+
+
+def _lasts_as_long(current: dict, level: str, expires: str | None) -> bool:
+    """Does the existing grant ``current`` last at least as long as ``level`` (``expires``)?"""
+    have = _RANK.get(str(current.get("level")), -1)
+    if have != _RANK[level]:
+        return have > _RANK[level]
+    if level != "once":
+        return True
+    mine, theirs = _aware(current.get("expires")), _aware(expires)
+    return mine is not None and theirs is not None and mine >= theirs
 
 
 def revoke(host: str) -> dict:
@@ -372,6 +850,12 @@ def recommendations() -> list[dict]:
     return out
 
 
+def build_recommendations() -> dict[str, str]:
+    """The bound config's ``when = "build"`` recommendations, host → why: what the build gate
+    shows beside a refused host it offers."""
+    return {e["host"]: e["why"] for e in recommendations() if e.get("when") == "build"}
+
+
 def pending_recommendations() -> list[dict]:
     """The BOUND config's recommendations (:func:`recommendations`) still awaiting an answer: not
     granted at any live level, not declined. Callers bind the ADOPTED config first (``devmode.
@@ -382,7 +866,11 @@ def pending_recommendations() -> list[dict]:
     if "*" in refused:
         return []
     granted = set(live_hosts())
-    return [e for e in recommendations() if e["host"] not in granted and e["host"] not in refused]
+    return [
+        e
+        for e in recommendations()
+        if e.get("when") != "build" and e["host"] not in granted and e["host"] not in refused
+    ]
 
 
 def offer_recommendations(
@@ -396,10 +884,10 @@ def offer_recommendations(
     shared allowlist safe. Returns ``{granted, declined, deferred}`` counts.
 
     Per host: ``[y]es`` grants PERMANENT (the team-baseline intent), ``[s]ession`` until the
-    supervisor restarts, ``[n]ot now`` (the default — asked again next launch), ``ne[v]er``
-    records a decline. In the box it is a no-op (grants are host-side only). Injected
-    ``prompt``/``echo``
-    like ``configpin.resolve`` — tests drive it with no real stdin.
+    supervisor restarts, ``[o]nce`` for :data:`OFFER_ONCE_SECONDS` (a broad host needed for one
+    build — it is offered again once it lapses), ``[n]ot now`` (the default — asked again next
+    launch), ``ne[v]er`` records a decline. In the box it is a no-op (grants are host-side only).
+    Injected ``prompt``/``echo`` like ``configpin.resolve`` — tests drive it with no real stdin.
 
     ``accept_all`` grants every pending host permanently WITHOUT asking — the unattended path
     (`fy allow sync --yes`), for a first box-up with no terminal to answer on. It is a separate,
@@ -411,6 +899,8 @@ def offer_recommendations(
     pending = pending_recommendations()
     counts = {"granted": 0, "declined": 0, "deferred": len(pending)}
     if not pending:
+        if accept_all:
+            _accept_build_recommendations(echo)
         return counts
     n = len(pending)
     echo(f"▶ {n} recommended egress host{'s' if n != 1 else ''} not yet granted:")
@@ -418,6 +908,7 @@ def offer_recommendations(
         for e in pending:
             grant(e["host"], "permanent")
             echo(f"  ✓ {e['host']} allowed (permanent)" + (f" — {e['why']}" if e["why"] else ""))
+        _accept_build_recommendations(echo)
         return {"granted": n, "declined": 0, "deferred": 0}
     if not interactive:
         for e in pending:
@@ -432,7 +923,7 @@ def offer_recommendations(
         answer = (
             prompt(
                 f"  allow {e['host']}{why}?  [y]es permanent · [s]ession · "
-                f"[n]ot now (default) · ne[v]er: "
+                f"[o]nce ({OFFER_ONCE_SECONDS // 60} min) · [n]ot now (default) · ne[v]er: "
             )
             .strip()
             .lower()
@@ -449,6 +940,13 @@ def offer_recommendations(
             echo(f"  ✓ {e['host']} allowed (session — until the supervisor restarts)")
             counts["granted"] += 1
             counts["deferred"] -= 1
+        elif answer in ("o", "once"):
+            grant(e["host"], "once", OFFER_ONCE_SECONDS)
+            echo(
+                f"  ✓ {e['host']} allowed (once — {OFFER_ONCE_SECONDS // 60} min, then asked again)"
+            )
+            counts["granted"] += 1
+            counts["deferred"] -= 1
         elif answer in ("v", "never"):
             decline(e["host"])
             echo(f"  ✗ {e['host']} declined — not offered again (`fy allow add` re-allows)")
@@ -459,20 +957,40 @@ def offer_recommendations(
     return counts
 
 
+def _accept_build_recommendations(echo: Callable[[str], None]) -> None:
+    """The unattended path (`fy allow sync --yes`) takes the build-only recommendations too — for
+    builds only, as they ask; an unattended first build has nobody to answer the build gate."""
+    refused = declined()
+    if "*" in refused:  # a damaged store: grant nothing, as pending_recommendations does
+        return
+    have = set(live_hosts()) | set(build_hosts())
+    for host, why in build_recommendations().items():
+        if host not in have and host not in refused:
+            grant(host, "permanent", build=True)
+            echo(f"  ✓ {host} allowed for builds (permanent)" + (f" — {why}" if why else ""))
+
+
 def sweep() -> bool:
     """Expire lapsed ``once`` grants; rewrite the store + effective file if anything changed.
     Returns True when it changed. Called from the supervisor tick. Mac only."""
     if in_box():
         return False
     try:
-        hosts = _load_store()
+        raw = _checked_raw()
     except StoreUnreadable as e:
         # The supervisor tick must not die on it; the fail-closed readers above already cover the
         # posture, and the operator sees the reason.
         _warn(f"egress allow-store unreadable ({e}) — skipping the expiry sweep")
         return False
-    pruned, changed = _prune(hosts)
-    if changed:
-        _save_store(pruned)
+    pruned, changed = _prune(raw.get("hosts", {}))
+    # A lapsed learn window is closed into its `learned` record — enforcement is ALREADY back
+    # (default_deny() stops honouring a window at its deadline); this just tidies the store.
+    lapsed = "learn" in raw and _open_window(raw) is None
+    if changed or lapsed:
+        doc = _load_raw()
+        doc["hosts"] = pruned
+        if lapsed:
+            _close_window(doc)
+        _save_raw(doc)
         write_effective()
-    return changed
+    return changed or lapsed

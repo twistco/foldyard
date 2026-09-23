@@ -39,9 +39,9 @@ checkout could choose what the host runs (ADR-0023). A mechanism
 needing more than a static token is a packaged minter KIND (``github_app_token``,
 ``gh_cli_token``, ``codex_chatgpt_token``) or an entry-point plugin — both installed, host-side
 acts. Many
-injectors coexist: the proxy serializes every active rule into the addon's ``INJECT_RULES``
-set, so any number of ``[[inject]]`` axes (and ``github``/``claude``) can be "on" at once, each with
-its own host + minter.
+injectors coexist: the proxy serializes every active rule into the rule set of the addon's live
+file, so any number of ``[[inject]]`` axes (and ``github``/``claude``) can be "on" at once, each
+with its own host + minter.
 
 Stdlib only — this loads on the registry hot path.
 """

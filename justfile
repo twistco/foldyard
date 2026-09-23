@@ -55,7 +55,7 @@ test-proxy-e2e *args:
     export UV_PROJECT_ENVIRONMENT="${XDG_CACHE_HOME:-$HOME/.cache}/foldyard/dev-venv-$(echo "{{_dir}}" | cksum | cut -d\  -f1)"
     cd "{{_dir}}"
     exec env FOLDYARD_E2E=1 uv run --project . --group e2e \
-        pytest -k "proxy_e2e or proxy_box_e2e or capture_box_e2e or metadata_box_e2e" {{args}}
+        pytest -k "proxy_e2e or proxy_reload_e2e or proxy_box_e2e or capture_box_e2e or metadata_box_e2e" {{args}}
 
 # The subprocess census — a REPORT, not a gate: every process the suite spawns, binary × test,
 # aggregated across xdist workers (tests/tools/census.py). Says what the hermetic guard's allowlist

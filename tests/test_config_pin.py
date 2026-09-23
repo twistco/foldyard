@@ -45,13 +45,13 @@ def worktree(checkout, monkeypatch):
 
 
 def _passthrough_hosts(cfg) -> str:
-    """The proxy daemon's PASSTHROUGH_HOSTS under ``cfg``'s ADOPTED config — resolved the way the
+    """The proxy daemon's passthrough list under ``cfg``'s ADOPTED config — resolved the way the
     supervisor tick does it (bind the config, then ask the registry), since the plugins read
     ``config.X()`` off the bound context."""
     effective = configpin.effective(cfg)
     with config.using(effective):
-        spec = plugins.registry(effective).desired_daemons({"capture": "on"})
-    return spec["egress-proxy"]["env"]["PASSTHROUGH_HOSTS"]
+        spec = plugins.registry(effective).desired_daemons({})
+    return ",".join(spec["egress-proxy"]["live"]["data"]["passthrough"])
 
 
 def _current(cfg) -> Path:
@@ -82,7 +82,7 @@ def test_effective_serves_the_adopted_copy_not_the_working_tree(checkout):
 
 def test_the_proxy_daemon_keeps_the_adopted_passthrough_after_an_in_box_edit(checkout):
     """End to end through the plugin that owns the knob: an edit to `[proxy] passthrough` must not
-    reach PASSTHROUGH_HOSTS (the hosts the proxy does NOT decrypt or request-log), because that is
+    reach the passthrough list (the hosts the proxy does NOT decrypt or request-log), because that is
     the reported bug — capture, switched off for a host of the checkout's choosing, in one tick."""
     configpin.adopt(checkout)
     (checkout.repo_root / "foldyard.toml").write_text(EDITED)
@@ -850,6 +850,31 @@ def test_offer_reads_the_adopted_copy_not_the_tree(monkeypatch, checkout, capsys
     configpin.adopt(checkout)  # the operator adopts the edit — NOW it may be offered
     supervisor._offer_recommended()
     assert "conjured.example.com" in capsys.readouterr().err
+
+
+def test_a_learn_seed_only_opens_a_window_from_the_adopted_copy(
+    monkeypatch, checkout, tmp_path, capsys
+):
+    """`default_deny = "learn"` SUSPENDS the wall for a window, so it must ride the pin: an
+    in-box edit adding it opens nothing until the operator adopts that edit. Then the launch path
+    opens the window — before the recommendation offer, so "learning" is the first thing read."""
+    from foldyard import allowlist
+
+    monkeypatch.setenv("FOLDYARD_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    configpin.adopt(checkout)  # adopted copy: no seed at all (→ observe, but nothing to open)
+    (checkout.repo_root / "foldyard.toml").write_text(TOML + 'default_deny = "learn"\n')
+    monkeypatch.setattr(
+        supervisor.devmode, "worktree_config", lambda wt: configpin.effective(checkout)
+    )
+
+    supervisor._offer_recommended()
+    assert allowlist.learning() is None and "LEARNING" not in capsys.readouterr().err
+
+    configpin.adopt(checkout)
+    supervisor._offer_recommended()
+    assert allowlist.learning() is not None
+    assert "LEARNING" in capsys.readouterr().err
 
 
 # ── PR #215 review: the diff filter vs TOML multiline strings, and adopt-after-review ──

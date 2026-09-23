@@ -237,11 +237,24 @@ def missing_secrets(updates: dict[str, str]) -> list:
     return [s for s in registry().secrets(mode) if not keyless.host_env_has(host_env, s.var)]
 
 
+# Axes that existed and were removed, with what replaced them — so a habit, a script or an old
+# doc naming one gets the answer instead of "unknown axis". A stale key in the state file is
+# already ignored by `read`; this is only for the doors an operator types into.
+RETIRED_AXES = {
+    "capture": (
+        "the proxy always decrypts + logs now, except the trusted `[proxy] passthrough` hosts "
+        "(ADR-0029). Nothing to switch on."
+    ),
+}
+
+
 def validate_updates(updates: dict[str, str]) -> None:
     """Refuse an unknown axis or rung. Shared by :func:`set_mode` and the doors that do work
     BEFORE it (the CLI's secret prompt), so a typo never stores a paste and then fails."""
     rungs = axes()
     for axis, value in updates.items():
+        if axis in RETIRED_AXES:
+            raise SystemExit(f"✗ the {axis!r} axis was removed — {RETIRED_AXES[axis]}")
         if axis not in rungs:
             raise SystemExit(f"✗ unknown axis {axis!r} (have: {', '.join(rungs)})")
         if value not in rungs[axis]:
@@ -1133,7 +1146,7 @@ def doctor(deep: bool = False):
         yield _result(
             Path("/etc/dev-proxy-ca.pem").exists() or None,
             "egress proxy CA",
-            "mounted + trusted (ambient — routing only in a github/capture mode)",
+            "mounted + trusted (ambient — routing follows a declared [proxy])",
             "not mounted (no CA on the host yet — `fy host restart` there)",
         )
         yield ("running", "engine socket", "")

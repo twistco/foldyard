@@ -6,9 +6,9 @@ Everything else in foldyard answers "is the posture what it claims?". This answe
 underneath it: **what did we agree to, and where is it written?** Three kinds of config statement
 loosen a host-side control, and each is easy to lose track of:
 
-  - **capture exemptions** (``[proxy] passthrough``) — hosts the proxy tunnels un-decrypted under
-    ``capture=on``. ``@all`` is one token that resolves to ~200 hosts; nothing anywhere showed that
-    number, so "capture is on" read as "everything is logged" when it never meant that.
+  - **capture exemptions** (``[proxy] passthrough``) — hosts the proxy tunnels un-decrypted.
+    ``@all`` is one token that resolves to ~200 hosts; nothing anywhere showed that number, so
+    "the proxy decrypts" read as "everything is logged" when it never meant that.
   - **injection targets** — the host each mechanism delivers a real credential to. Some are fixed
     in package code (claude, codex, github), some are config (``[[inject]] host``). The difference
     matters, so the report states it per row rather than listing them all as equals.
@@ -329,7 +329,7 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
     """Gather ``cfg``'s widenings. Bind ``cfg`` first (``with config.using(cfg)``) — every helper
     reads through the module config functions, so the caller's binding is what selects the
     checkout."""
-    from .allowlist import declined, default_deny, live_hosts
+    from .allowlist import build_hosts, declined, default_deny, live_hosts
     from .plugins.proxy import _resolve_passthrough
 
     drift = configpin.inspect(cfg)
@@ -338,7 +338,7 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
     refs, unknown, literals = _passthrough_parts(entries)
     resolved = _resolve_passthrough(entries)
     proxy = cfg.toml.get("proxy")
-    granted, refused = set(live_hosts()), declined()
+    runtime, for_builds, refused = set(live_hosts()), set(build_hosts()), declined()
     recommended = [
         (
             e["host"],
@@ -346,7 +346,8 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
             "store unreadable"
             if "*" in refused
             else "granted"
-            if e["host"] in granted
+            # A build grant lets only a host-started build through; it answers a build ask only.
+            if e["host"] in runtime or (e.get("when") == "build" and e["host"] in for_builds)
             else "declined"
             if e["host"] in refused
             else "pending",
@@ -402,12 +403,10 @@ def render(exp: Exposure) -> list[str]:
         f"    {source} → {_plural(exp.hosts, 'host', 'hosts')} · "
         f"{_plural(exp.wildcards, 'wildcard suffix', 'wildcard suffixes')}"
         if exp.hosts
-        else f"    {source or '(empty list)'} → nothing exempt: capture=on decrypts everything"
+        else f"    {source or '(empty list)'} → nothing exempt: every host is decrypted"
     )
     if exp.hosts:
-        out.append(
-            "    Under capture=on these are TLS-tunnelled: SNI only, no method/path/body logged."
-        )
+        out.append("    These are TLS-tunnelled: SNI only, no method/path/body logged.")
     out.append(
         f"    Declared literally here: {', '.join(exp.literals)}"
         if exp.literals

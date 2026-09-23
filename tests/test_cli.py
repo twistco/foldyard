@@ -227,14 +227,23 @@ def test_allow_verbs_are_the_replacement_for_a_committed_allowlist(monkeypatch, 
 
     granted: list = []
     monkeypatch.setattr(
-        allowlist, "grant", lambda h, lvl, ttl: granted.append((h, lvl, ttl)) or {"allow": [h]}
+        allowlist,
+        "grant",
+        lambda h, lvl, ttl, build=False: granted.append((h, lvl, ttl, build)) or {"allow": [h]},
     )
-    monkeypatch.setattr(allowlist, "effective", lambda: {"default_deny": True, "allow": ["a.test"]})
+    monkeypatch.setattr(
+        allowlist,
+        "effective",
+        lambda: {"default_deny": True, "allow": ["a.test"], "build_allow": ["b.test"]},
+    )
     monkeypatch.setattr(allowlist, "revoke", lambda h: {"allow": []})
     assert runner.invoke(cli.app, ["allow", "add", "x.test", "--level", "permanent"]).exit_code == 0
-    assert granted == [("x.test", "permanent", None)]
+    assert granted == [("x.test", "permanent", None, False)]
+    assert runner.invoke(cli.app, ["allow", "add", "y.test", "--build"]).exit_code == 0
+    assert granted[-1] == ("y.test", "session", None, True)  # for image builds only
     out = runner.invoke(cli.app, ["allow", "list"])
     assert out.exit_code == 0 and "a.test" in out.output and "default_deny: on" in out.output
+    assert "b.test" in out.output and "builds only" in out.output
     assert runner.invoke(cli.app, ["allow", "remove", "x.test"]).exit_code == 0
 
 
@@ -252,6 +261,84 @@ def test_allow_sync_reports_nothing_pending(tmp_path, monkeypatch):
     config.clear_caches()
     assert result.exit_code == 0
     assert "nothing pending" in result.output
+
+
+def _scratch(tmp_path, monkeypatch, toml: str = '[project]\nname = "scratch"\n[proxy]\n'):
+    """A scratch checkout + host state + log dir, host-side — a real allow-store, no live one."""
+    from foldyard import config
+
+    (tmp_path / "foldyard.toml").write_text(toml)
+    monkeypatch.setenv("FOLDYARD_REPO", str(tmp_path))
+    monkeypatch.setenv("FOLDYARD_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("FOLDYARD_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    config.clear_caches()
+    return tmp_path / "logs" / "egress.jsonl"
+
+
+def test_wall_learn_then_review_grants_the_recorded_hosts(tmp_path, monkeypatch):
+    # The loop the feature exists for: open a window, the proxy records what it would refuse,
+    # the review grants it in one batch and prints the lines that share it with the team.
+    import json
+    from datetime import UTC, datetime
+
+    from foldyard import allowlist, config
+
+    log = _scratch(tmp_path, monkeypatch)
+    try:
+        result = runner.invoke(cli.app, ["allow", "wall", "learn", "--for", "30m"])
+        assert result.exit_code == 0 and "LEARNING until" in result.output
+        assert allowlist.learning() is not None and allowlist.default_deny() is False
+        listed = runner.invoke(cli.app, ["allow", "list"])
+        assert "LEARNING until" in listed.output
+
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        log.parent.mkdir(parents=True)
+        rows = [
+            {"ts": now, "host": "registry.npmjs.org", "would_block": True, "ua": "npm/10.8.2 x"},
+            {"ts": now, "host": "registry.npmjs.org", "method": "GET", "path": "/react?t=x"},
+            {"ts": now, "host": "seen.example.com", "status": 200},  # passed, not would-block
+        ]
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+        result = runner.invoke(cli.app, ["allow", "learn", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "registry.npmjs.org" in result.output and "npm/10.8.2" in result.output
+        assert "seen.example.com" not in result.output
+        assert "fetched /react" in result.output and "t=x" not in result.output
+        assert (
+            '{ host = "registry.npmjs.org", why = "observed: npm/10.8.2 GET /react — edit me" }'
+            in result.output
+        )
+        assert "replace it with the reason" in result.output
+        assert "registry.npmjs.org" in allowlist.live_hosts()
+        # Granted now, so a second review has nothing left to offer.
+        again = runner.invoke(cli.app, ["allow", "learn"])
+        assert "nothing to grant" in again.output
+    finally:
+        config.clear_caches()
+
+
+def test_allow_learn_without_a_window_says_how_to_start_one(tmp_path, monkeypatch):
+    from foldyard import config
+
+    _scratch(tmp_path, monkeypatch)
+    try:
+        result = runner.invoke(cli.app, ["allow", "learn"])
+        assert result.exit_code == 0 and "fy allow wall learn" in result.output
+    finally:
+        config.clear_caches()
+
+
+def test_wall_learn_rejects_a_bad_duration(tmp_path, monkeypatch):
+    from foldyard import allowlist, config
+
+    _scratch(tmp_path, monkeypatch)
+    try:
+        result = runner.invoke(cli.app, ["allow", "wall", "learn", "--for", "0s"])
+        assert result.exit_code != 0 and allowlist.learning() is None
+    finally:
+        config.clear_caches()
 
 
 # ── `fy --version` ────────────────────────────────────────────────────────────

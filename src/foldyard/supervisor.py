@@ -25,6 +25,7 @@ lines; the process env wins on conflict). Stdlib only; host only.
 
 from __future__ import annotations
 
+import contextlib
 import enum
 import fcntl
 import hashlib
@@ -540,6 +541,9 @@ def _offer_recommended() -> None:
     try:
         cfg = devmode.worktree_config(config.active_worktree())
         with config.using(cfg):
+            # A `default_deny = "learn"` seed opens its one learn window here, on the first launch
+            # after adoption — before the offer, so the operator reads "learning" first.
+            allowlist.seed_learning(lambda m: print(m, file=sys.stderr, flush=True))
             allowlist.offer_recommendations(
                 interactive=sys.stdin.isatty(),
                 prompt=input,
@@ -632,6 +636,13 @@ def _spawn() -> int | None:
 # captured AFTER the supervisor started, or a rotated secret — without ever clobbering that ambient
 # override. A fresh `foldyard host` process starts with this None, so it snapshots its own env.
 _host_env_ambient: frozenset[str] | None = None
+# Every key a load put into os.environ FROM host.env (never shrinks: a key dropped from the file
+# keeps its stale value in os.environ, and must stay stripped). What `scrub_host_env` removes.
+_host_env_loaded: set[str] = set()
+# Every key the supervisor itself DERIVED into os.environ (env_defaults, via setdefault). Stripped
+# from a `scrub_host_env` daemon too: inherited, it would read as an operator export and shadow
+# the live file's defaults, which can change (a new App id, another worktree's) without a restart.
+_derived_loaded: set[str] = set()
 
 
 def load_host_env() -> None:
@@ -660,6 +671,16 @@ def load_host_env() -> None:
         if key in _host_env_ambient:
             continue  # an operator-exported var wins over host.env (original setdefault semantics)
         os.environ[key] = value.strip().strip("'\"")
+        _host_env_loaded.add(key)
+
+
+def apply_env_defaults(defaults: dict[str, str]) -> None:
+    """``setdefault`` the posture's derived env into ours (an export or a host.env value wins),
+    remembering which keys WE set — see :data:`_derived_loaded`."""
+    for key, value in defaults.items():
+        if key not in os.environ:
+            _derived_loaded.add(key)
+        os.environ.setdefault(key, value)
 
 
 def _stage(pairs: list[tuple[str, str]]) -> None:
@@ -684,7 +705,14 @@ class Child:
         self.signature = repr((spec["cmd"], sorted(spec["env"].items())))
         self.started_at = time.monotonic()
         _stage(spec.get("stage", []))  # snapshot e.g. the proxy addon to its stable launch path
-        self.proc = subprocess.Popen(spec["cmd"], env={**os.environ, **spec["env"]})
+        env = dict(os.environ)
+        if spec.get("scrub_host_env"):
+            # A daemon that reads its secrets from host.env by NAME (the proxy) runs without the
+            # values host.env put in OUR environment — every axis's secret, which it has no use
+            # for as env and which would otherwise sit in its process environment.
+            for key in _host_env_loaded | _derived_loaded:
+                env.pop(key, None)
+        self.proc = subprocess.Popen(spec["cmd"], env={**env, **spec["env"]})
         log(f"started {name} (pid {self.proc.pid}): {spec['label']}")
 
     def alive(self) -> bool:
@@ -1205,8 +1233,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
             # id, a deterministic SA email — see plugins.Plugin.env_defaults) BEFORE the
             # `requires` gate below reads os.environ, so github=app etc. work with no host.env
             # entry at all. setdefault: an ambient export or a real host.env secret always wins.
-            for key, value in devmode.env_defaults(mode).items():
-                os.environ.setdefault(key, value)
+            apply_env_defaults(devmode.env_defaults(mode))
             desired.update(devmode.desired_daemons(mode))
             # Promote this checkout's agent transcripts into their durable host archive on the
             # configured interval (`[claude]/[codex] transcript_sync_seconds`; off by default).
@@ -1241,6 +1268,9 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
 
     blocked_now: dict[str, str] = {}
     for name, spec in desired.items():
+        # BEFORE the step: a spawn must find its live settings, and a running daemon picks a
+        # change up from the file — the change that used to be a restart (see _sync_live).
+        _sync_live(name, spec, running=name in children)
         step = _child_step(children.get(name), spec)
         if step in (ChildStep.KEEP, ChildStep.BACKOFF):
             continue
@@ -1254,6 +1284,39 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
         if reason:
             blocked_now[name] = reason
     _publish_blocked(blocked_now, {name: spec["label"] for name, spec in desired.items()})
+
+
+def _sync_live(name: str, spec: dict, *, running: bool) -> bool:
+    """Write ``spec["live"]`` — the settings a daemon re-reads without restarting (the proxy's
+    rules, wall and passthrough) — when it differs from the file; True when it wrote. Whole, then
+    renamed into place, so the reader sees the old file or the new one and never half of either.
+
+    Reported when it reaches a RUNNING daemon: a posture change used to show up as a restart line
+    naming the new label, and a change that happens silently is the "my change did nothing"
+    mystery the adopted-config tick already refuses to create."""
+    live = spec.get("live")
+    if not live:
+        return False
+    path = Path(live["path"])
+    text = json.dumps(live["data"], indent=2, sort_keys=True) + "\n"
+    try:
+        if path.read_text() == text:
+            return False
+    except OSError:
+        pass
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(text)
+        tmp.replace(path)
+    except OSError as e:  # like the other state writers: log it, never stop the tick
+        log(f"✗ {name}: couldn't write its live settings ({path}): {e}")
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        return False
+    if running:
+        log(f"{name} settings updated — {spec.get('label', '')} (no restart)")
+    return True
 
 
 class ChildStep(enum.Enum):

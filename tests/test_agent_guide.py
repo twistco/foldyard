@@ -67,7 +67,7 @@ def _mentions(text: str) -> set[str]:
             pair = " ".join(words[:2])
             found.add(pair if len(words) > 1 and pair in VALID else words[0])
         if "=" in segments[0]:
-            continue  # `fy mode capture=on|off` — that pipe is inside an ARGUMENT, not a verb list
+            continue  # `fy mode github=app|off` — that pipe is inside an ARGUMENT, not a verb list
         for segment in segments[1:]:  # `fy up | ps | down` — each alternative names a verb too
             rest = segment.split()
             if rest and _VERB.match(rest[0]):
@@ -123,7 +123,7 @@ def test_the_init_scaffold_never_teaches_a_key_foldyard_stopped_honouring():
 
 def test_the_init_scaffold_is_valid_toml_and_declares_the_proxy():
     doc = tomllib.loads(init.render(init.InitOptions(name="demo")))
-    assert doc["proxy"]["default_deny"] is True  # enforcing, carried by `recommend` (test_init)
+    assert doc["proxy"]["default_deny"] == "learn"  # learns, then enforces by itself (test_init)
     assert "allow" not in doc["proxy"]  # grants are host-side (`fy allow add`), never config
 
 

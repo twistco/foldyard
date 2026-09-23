@@ -360,20 +360,27 @@ whenever `[machine] wall = true`. Absent means a clean box: no proxy env at all.
 
 ```toml
 [proxy]
-default_deny = true
+default_deny = "learn"
 # passthrough = ["@all"]
 # no_proxy = ["{project}-postgres", "redis"]
 ```
 
-- **`default_deny`** — the project's STARTING position for enforcement: when `true`, the proxy
-  refuses any host that isn't granted (403 at CONNECT). Built-in default when the key is absent:
-  `false` — observe/capture only, never block. `foldyard init` writes `true`, because a scaffold
-  ships `recommend` entries covering its own bootstrap, so day-one enforcement costs one round of
-  consented yeses rather than a wall of refusals. Blocked hosts show live in `fy tui`, where you
-  can grant them (once / until-restart / permanently) without a restart.
+- **`default_deny`** — the project's STARTING position for enforcement, one of:
+  - `true` — the proxy refuses any host that isn't granted (403 at CONNECT) from the first run.
+  - `"learn"` — the first launch (`fy up`/`fy box up`) opens a one-hour **learn window**:
+    nothing is refused, the proxy records every host it *would* refuse (with the client's
+    User-Agent, so you can see which tool asked), and when the window ends the wall
+    **enforces by itself**. `fy allow learn` then grants what it recorded in one reviewed batch
+    and prints `recommend` lines to commit. `foldyard init` writes this: setup is never a wall of
+    refusals, and the wall can't be left open by mistake the way `false` can.
+  - `false` (the built-in default when the key is absent) — observe only, never block.
 
-  It is a **seed, not the live switch**: once `fy allow wall on|off` has set it, the host-side store
-  is authoritative and this key is ignored. Same reason as the grants below — repo config is
+  Blocked hosts show live in `fy tui`, where you can grant them (once / until-restart /
+  permanently) without a restart. A window can be opened again any time with
+  `fy allow wall learn --for 30m` (8 h at most), and `fy allow wall on` ends one early.
+
+  It is a **seed, not the live switch**: once `fy allow wall on|off|learn` has set it (or a learn
+  window has run), the host-side store is authoritative and this key is ignored. Same reason as the grants below — repo config is
   writable from inside the box, and an enforcement switch the yard can flip off for itself is no
   switch at all.
 
@@ -388,10 +395,13 @@ default_deny = true
   that is a push path. Another port is its own grant, `fy allow add github.com:22`; the blocked
   row carries the port when the port was the reason, so the TUI's `a` key offers exactly that.
 - **`recommend`** — the committed half of the allowlist: hosts this repo ASKS operators to grant,
-  each `{ host = "…", why = "…" }` (or a bare host string). Advisory by construction — the proxy
+  each `{ host = "…", why = "…" }` (or a bare host string); add `when = "build"` for a host only
+  an image build needs (a browser download, a base-image CDN): it is offered by the build gate
+  when a build is refused, not at launch, and granted for builds only. Advisory by construction — the proxy
   never reads it. The host OFFERS each entry, per host, at `fy up`/`fy box up`/`fy host restart`, via
   `fy allow sync`, and in the TUI's Network Log wall pane; the operator answers yes (permanent) /
-  session / not now / never, and the answer lands in the host-side store. This is how a team
+  session / once (15 minutes, for a broad host needed for one build) / not now / never, and the
+  answer lands in the host-side store. This is how a team
   shares its allowlist without giving up host-owned grants: the list rides the branch, and every
   machine still consents host by host. Two properties do the security work — the offer reads the
   **adopted** copy (an in-box edit queues nothing until the operator reviews it at the adoption
@@ -420,12 +430,15 @@ default_deny = true
   For an unattended setup (a provisioning script, a fresh CI machine) `fy allow sync --yes` takes
   every pending recommendation at `permanent` in one go. Without it a non-interactive run prints
   the list and grants nothing — "nobody was there to say no" must never read as yes.
-- **`passthrough`** — the trusted hosts the proxy TLS-tunnels *without* decrypting when
-  capture mode is on; everything else is MITM-decrypted and fully logged. Entries are exact
-  hosts, `*.suffix` globs, or `@bundle` refs (`@all` = every built-in toolchain bundle).
-  Default: `["@all"]`. An explicit empty list means decrypt everything under capture.
+- **`passthrough`** — the trusted hosts the proxy TLS-tunnels *without* decrypting; everything
+  else is MITM-decrypted and fully logged (always — there is no switch, see
+  [ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)). Entries are exact hosts, `*.suffix`
+  globs, or `@bundle` refs (`@all` = every built-in toolchain bundle). Default: `["@all"]`. An
+  explicit empty list means decrypt everything. It is also the escape hatch for a host that
+  cannot be decrypted: one that pins its certificate, needs a client certificate, or ships its
+  own trust roots.
 
-  This one is why the whole file is pinned host-side: a host listed here is exempt from capture,
+  This one is why the whole file is pinned host-side: a host listed here is exempt from decryption,
   so a live-read `passthrough` would let the yard switch off the monitoring it's subject to. Like
   every other key, a change takes effect when you adopt it — see
   [The adopted config](#the-adopted-config-what-the-host-actually-runs). `fy config widenings`

@@ -17,24 +17,35 @@ Run it with mitmdump (`fy host` does this for you; the supervisor passes the pro
 allocated band port — config.proxy_port() — as --listen-port):
     mitmdump -s egress_proxy.py --listen-host 0.0.0.0 --listen-port 41000
 
-The same addon doubles as a pure CAPTURE proxy (foldyard's `capture` axis): with INJECT_HOST
-(or INJECT_COMMAND) empty it injects NOTHING — it just logs every proxied request to
-PROXY_LOG_FILE, so all dev-box egress is observable through the one proxy without any
-credential in play. Injection and capture compose: a github mode logs everything AND rewrites
-api.github.com; capture-only logs everything and rewrites nothing.
+The same addon doubles as a pure CAPTURE proxy: with INJECT_HOST (or INJECT_COMMAND) empty it
+injects NOTHING — it just logs every proxied request to PROXY_LOG_FILE, so all dev-box egress is
+observable through the one proxy without any credential in play. Injection and capture compose: a
+github mode logs everything AND rewrites api.github.com; no injector logs everything and rewrites
+nothing.
 
 Phase A′ — the box ALWAYS routes through this (always-on) proxy, so CAPTURE_MODE decides what it
 does with HTTPS it isn't injecting:
-  - CAPTURE_MODE=full        → MITM-decrypt + log every request (the `capture=on` axis).
+  - CAPTURE_MODE=full        → MITM-decrypt + log every request, except PASSTHROUGH_HOSTS. What
+                               foldyard always sends (ADR-0029 removed the `capture` axis).
   - CAPTURE_MODE=passthrough → blind-tunnel HTTPS without terminating TLS (the box does end-to-end
                                TLS against the REAL cert) and log only an SNI-level row — host +
-                               time, no method/path/status (the `capture=off` axis).
+                               time, no method/path/status. Kept for standalone use of the addon.
 The injector host (api.github.com) is ALWAYS decrypted, whatever CAPTURE_MODE is, because we must
 read + rewrite its Authorization header. Plain HTTP is always logged in full (it's cleartext, so
-there's nothing to passthrough). This lets `capture` toggle on a RUNNING box — flipping it just
-restarts the daemon with a different CAPTURE_MODE; the box's routing + trust never change.
+there's nothing to passthrough).
 
-Config via env (read once at startup):
+Config via env (read once at startup). foldyard's supervisor sets LIVE_FILE, which moves the
+rules, the wall switch and the passthrough list out of the env and makes them live:
+  LIVE_FILE         a JSON file {"rules": [<rule>, ...], "default_deny": bool, "passthrough":
+                    [<pattern>, ...]}, re-read when it changes (per hook + once a second) with no
+                    restart. When set, INJECT_*, DEFAULT_DENY and PASSTHROUGH_HOSTS are ignored.
+                    Unreadable/malformed ⇒ fail closed (no rules, the wall enforcing, nothing
+                    tunnelled). A change that narrows the policy closes the open connections it no
+                    longer allows (see Injector.refresh).
+  HOST_ENV_FILE     host.env: where a live rule's declared `env` names are resolved (this
+                    process's env first — the operator's exports — then the file), re-read when it
+                    changes.
+Without LIVE_FILE:
   INJECT_RULES      a JSON LIST of injection rules (the multi-injector contract) — one proxy
                     rewriting N hosts, each with its OWN minter + token cache + 401 retry:
                       [{"host","command","header"?,"value_prefix"?,"query_param"?,
@@ -176,11 +187,47 @@ logging.getLogger("mitmproxy.proxy.server").addFilter(_DropWebsocketPingPong())
 _HTTPS_PORT = 443  # the one port a bare host grant covers at CONNECT
 _HTTP_PORT = 80  # …and, for a request seen in the clear, this one
 
+# The proxy-URL user an image BUILD reaches us as (foldyard's `plugins/proxy.BUILD_TUNNEL_USER`,
+# duplicated because this addon runs standalone; a test pins the two equal). A build has no proxy
+# CA, so a connection carrying it is blind-tunnelled rather than decrypted — after the wall.
+_BUILD_TUNNEL_USER = "fy-build"
+
+
+def _basic_credentials(value: str | None) -> tuple[str, str] | None:
+    """A Basic ``Proxy-Authorization`` header's (user, password), or None. Never raises."""
+    import base64
+    import binascii
+
+    scheme, _, token = (value or "").partition(" ")
+    if scheme.lower() != "basic":
+        return None
+    try:
+        user, _, password = base64.b64decode(token.strip(), validate=True).decode().partition(":")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+    return user, password
+
+
+def _is_build_marker(value: str | None) -> bool:
+    """True when a Proxy-Authorization header is the build marker: Basic, user = the marker (any
+    password — clients differ in what they send for an empty one). Never raises."""
+    import base64
+    import binascii
+
+    scheme, _, token = (value or "").partition(" ")
+    if scheme.lower() != "basic":
+        return False
+    try:
+        user = base64.b64decode(token.strip(), validate=True).decode().partition(":")[0]
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return False
+    return user == _BUILD_TUNNEL_USER
+
 
 def _host_matches(host: str | None, patterns: list[str]) -> bool:
     """Exact host match, or ``*.suffix`` wildcard (matches SUBDOMAINS, not the bare domain) —
     Claude Code Web's allow-list semantics, so its published list drops in unchanged. Used to
-    decide which hosts the capture=on (``full``) path blind-tunnels instead of decrypting."""
+    decide which hosts the ``full`` path blind-tunnels instead of decrypting."""
     if not host:
         return False
     for p in patterns:
@@ -207,7 +254,7 @@ def _with_query_param(url: str, name: str, value: str) -> str:
 
 _DEFAULT_LOG = str(Path.home() / ".foldyard" / "logs" / "egress.jsonl")
 # Rotate the log to a DATED backup (egress-proxy.<UTC-stamp>.jsonl) once it grows past this, then
-# prune to the newest PROXY_LOG_BACKUPS — so the on-disk footprint is bounded (capture=on logs
+# prune to the newest PROXY_LOG_BACKUPS — so the on-disk footprint is bounded (decrypted flows log
 # every request, so the log fills fast) while keeping readable, timestamped history (foldyard's
 # config.tail_jsonl/rotated_logs read this exact naming). Both knobs are env-tunable.
 _LOG_MAX_BYTES = int(os.environ.get("PROXY_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
@@ -215,6 +262,41 @@ _LOG_BACKUPS = int(os.environ.get("PROXY_LOG_BACKUPS", "5"))
 # On a 4xx/5xx, capture this many bytes of the (decrypted) response body into the log entry so the
 # Network Log shows WHY it failed (e.g. an auth-token parse error), not just the status code.
 _ERROR_BODY_MAX = 1024
+# The client's User-Agent, kept on request + would-block rows so a learned host says WHICH TOOL
+# reached it (npm/…, uv/…, curl/…) without instrumenting the box. Capped: it is untrusted text.
+_UA_MAX = 120
+# A would-block row is written at most once per host per this many seconds: observing a package
+# install would otherwise write one per connection (hundreds to the same registry) and rotate the
+# log away. The review needs "this host, this tool, first/last seen" — not every connection.
+_WOULD_BLOCK_EVERY = 60.0
+# …and the per-host timestamps behind that limit are bounded: one entry per distinct refused host
+# would otherwise grow for ever on a proxy seeing generated hostnames.
+_WOULD_BLOCK_MAX = 4096
+
+
+def _redact_param(path: str, name: str) -> str:
+    """``path`` with the value of query parameter ``name`` replaced by ``‹redacted›`` — the
+    injector's credential, which it wrote into the URL, never reaches the egress log. Everything
+    else in the path is kept as sent (ADR-0029 logs full paths)."""
+    from urllib.parse import unquote_plus
+
+    base, sep, query = path.partition("?")
+    if not sep:
+        return path
+    parts = []
+    for part in query.split("&"):
+        key = part.split("=", 1)[0]
+        # Compared DECODED (mitmproxy writes `auth[token]` as `auth%5Btoken%5D`); logged as sent.
+        parts.append(f"{key}=‹redacted›" if unquote_plus(key) == name else part)
+    return base + "?" + "&".join(parts)
+
+
+def _user_agent(request) -> str:
+    """The request's User-Agent, capped, or '' — never raises (logging must not break the proxy)."""
+    try:
+        return str(request.headers.get("user-agent", ""))[:_UA_MAX]
+    except Exception:
+        return ""
 
 
 def _error_snippet(response) -> str:
@@ -249,7 +331,7 @@ _MINTER_BASE_ENV = (
 )
 
 
-def _minter_env(env_keys: tuple[str, ...]) -> dict[str, str]:
+def _minter_env(env_keys: tuple[str, ...], values: dict[str, str] | None = None) -> dict[str, str]:
     """The environment a minter subprocess runs with: the base above plus the names its own rule
     declared — NOT this process's whole environment.
 
@@ -260,8 +342,61 @@ def _minter_env(env_keys: tuple[str, ...]) -> dict[str, str]:
     the github minter has no business reading the Anthropic key. Withholding is cheap and each
     plugin already knows exactly which vars its minter reads."""
     env = {k: os.environ[k] for k in _MINTER_BASE_ENV if k in os.environ}
-    env.update({k: os.environ[k] for k in env_keys if k in os.environ})
+    # A live-configured rule carries its secrets resolved (see `_resolve_secrets`); the legacy env
+    # path still reads this process's environment.
+    source = os.environ if values is None else values
+    env.update({k: source[k] for k in env_keys if k in source})
     return env
+
+
+def _read_host_env(path: Path | None) -> dict[str, str]:
+    """``host.env``'s ``KEY=VALUE`` lines, parsed exactly as the supervisor's ``load_host_env``
+    does (blank/comment lines skipped, surrounding quotes stripped). Missing/unreadable → ``{}``."""
+    if path is None:
+        return {}
+    try:
+        text = path.read_text()
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        out[key.strip()] = value.strip().strip("'\"")
+    return out
+
+
+def _resolve_secrets(
+    keys, host_env: dict[str, str], defaults: dict[str, str] | None = None
+) -> dict[str, str]:
+    """The values of ``keys`` a rule's minter may read: this process's environment first (the
+    operator's own exports — the supervisor strips host.env's keys from it, so what remains is
+    ambient, and ambient has always won), else ``host.env``, else the live file's derived
+    ``defaults`` (non-secret identity a plugin computes from committed config — the supervisor's
+    ``env_defaults``, same precedence as its ``setdefault``). Absent names are simply absent."""
+    out: dict[str, str] = {}
+    for key in keys:
+        if key in os.environ:
+            out[key] = os.environ[key]
+        elif key in host_env:
+            out[key] = host_env[key]
+        elif defaults and key in defaults:
+            out[key] = str(defaults[key])
+    return out
+
+
+def _file_stamp(path: Path | None) -> tuple[int, int, int] | None:
+    """Identity + mtime + size: a writer that renames a new file into place (the supervisor)
+    always changes the inode, so this can't miss a same-second rewrite the way mtime alone can."""
+    if path is None:
+        return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
 
 
 # 20+ unbroken chars from the base64/token alphabet: longer than any word a human-written
@@ -317,7 +452,10 @@ class _Rule:
     the legacy single ``INJECT_HOST``/``INJECT_COMMAND``/… env, which the proxy plugin still
     emits whenever there is exactly ONE rule."""
 
-    def __init__(self, spec: dict) -> None:
+    def __init__(self, spec: dict, secrets: dict[str, str] | None = None) -> None:
+        # The resolved values of `env_keys` for a live-configured rule (None → read os.environ).
+        self._secrets = secrets
+        self.key: str | None = None  # the live file's identity for this rule (see `refresh`)
         self.host = spec.get("host") or None
         self.command = spec.get("command") or None
         self.header = spec.get("header") or "Authorization"
@@ -369,7 +507,7 @@ class _Rule:
             text=True,
             timeout=30,
             check=True,
-            env=_minter_env(self.env_keys),
+            env=_minter_env(self.env_keys, self._secrets),
         ).stdout
         data = json.loads(out)
         self._value = str(data["value"])
@@ -406,6 +544,12 @@ class _Rule:
                     return None
             return self._value
 
+    def invalidate(self) -> None:
+        """Forget the cached value, so the next request mints afresh."""
+        with self._lock:
+            self._value = None
+            self._expires_at = 0.0
+
     def apply(self, request, value: str) -> None:
         """Inject the minted value — a URL query param or, by default, an OVERWRITTEN header (the
         box only ever sends a dummy). ``value_prefix`` (e.g. "Bearer ") is added here so the
@@ -422,9 +566,19 @@ class Injector:
         # The injection rule SET. INJECT_RULES (a JSON list) wins — the multi-injector rules the
         # foldyard proxy plugin emits; else the legacy single INJECT_HOST/COMMAND/… env. That is
         # NOT a compatibility shim: the plugin emits those keys for every single-rule config.
-        self.rules = self._load_rules()
-        self.inject_hosts = {r.host for r in self.rules}
-        self.injecting = bool(self.rules)
+        #
+        # With LIVE_FILE set (foldyard's supervisor always sets it) the rules, the wall switch and
+        # the passthrough list come from that file instead, re-read whenever it changes — so a
+        # posture change reaches a RUNNING proxy and nothing in flight is cut (see `refresh`).
+        live = os.environ.get("LIVE_FILE", "")
+        self.live_path = Path(live) if live else None
+        host_env = os.environ.get("HOST_ENV_FILE", "")
+        self.host_env_path = Path(host_env) if host_env else None
+        self._live_stamp: tuple | None = None
+        self._observing_since: str | None = None
+        self._running = False
+        self._warm_threads: list[threading.Thread] = []
+        self._set_rules([] if self.live_path else self._load_rules())
         # Phase A′: what to do with HTTPS we aren't injecting — "full" (decrypt+log) or
         # "passthrough" (blind-tunnel + SNI-log). Default "full" keeps the pre-A′ behaviour for
         # any caller that doesn't set CAPTURE_MODE.
@@ -443,6 +597,137 @@ class Injector:
         self.allow_path = Path(allow_file) if allow_file else None
         self._allow_mtime: float = -1.0
         self._allow_patterns: list[str] = []
+        # host key → monotonic time of its last would-block row (see _WOULD_BLOCK_EVERY).
+        self._would_block_seen: dict[str, float] = {}
+        # The live build secrets' hashes → expiry (BUILD_TOKENS_FILE, written by the host's build
+        # gate): a connection presenting one is a build the host started, and may use the
+        # build-scoped grants (ALLOW_FILE's `build_allow`). The bare marker never can.
+        tokens = os.environ.get("BUILD_TOKENS_FILE", "")
+        self.tokens_path = Path(tokens) if tokens else None
+        self._tokens_stamp: tuple | None = None
+        self._tokens: dict[str, float] = {}
+        self._build_patterns: list[str] = []
+        # Client connections whose CONNECT carried the build marker and passed the wall: their TLS
+        # is tunnelled, not decrypted (see _BUILD_TUNNEL_USER). Dropped on disconnect.
+        self._build_clients: set[str] = set()
+        # Every connection a CONNECT let through, by client id: what `_sweep` re-judges when the
+        # policy narrows (see `refresh`). Dropped on disconnect.
+        self._conns: dict[str, dict] = {}
+        self._policy_dirty = False
+        if self.live_path is not None:
+            self.refresh()  # the first read: rules, wall and passthrough all come from the file
+
+    def _set_rules(self, rules: list[_Rule]) -> None:
+        self.rules = rules
+        self.inject_hosts = {r.host for r in rules}
+        self.injecting = bool(rules)
+
+    def refresh(self) -> bool:
+        """Pick up any policy change — the live settings, the allowlist — and close the open
+        connections the new policy would not have allowed; True when something changed. Called at
+        the top of every hook and once a second by ``_watch`` (an idle tunnel sends no requests,
+        and a narrowing must still reach it).
+
+        The restart this replaced cut every connection, which also cut the ones a narrowing no
+        longer allows. Keeping that property without the collateral means re-judging each one:
+        a connection whose CONNECT the wall would now refuse is closed, and so is a blind tunnel
+        the policy would now decrypt (its host left the passthrough list, or became an injector's).
+        Widening closes nothing."""
+        changed = self._refresh_live()
+        self._refresh_allow()
+        if self._policy_dirty:
+            self._policy_dirty = False
+            changed = True
+            self._sweep()
+        return changed
+
+    def _refresh_live(self) -> bool:
+        """Re-read LIVE_FILE (and the host.env its rules' secrets come from) if either changed;
+        True when it did.
+
+        A rule whose spec AND resolved secrets are unchanged keeps its object — so its cached
+        token survives a posture change that only touched other rules. A new or changed rule
+        starts cold and, once the proxy is running, is warmed off the request path (at WARN, as
+        at startup: one host's missing credential is never all egress). An unreadable or
+        malformed file fails CLOSED — no rules, the wall enforcing, nothing tunnelled blind —
+        like ALLOW_FILE: a parse error never widens egress."""
+        if self.live_path is None:
+            return False
+        stamp = (_file_stamp(self.live_path), _file_stamp(self.host_env_path))
+        if stamp == self._live_stamp:
+            return False
+        first = self._live_stamp is None
+        self._live_stamp = stamp
+        try:
+            data = json.loads(self.live_path.read_text())
+            if not isinstance(data, dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError) as e:
+            ctx.log.warn(f"egress_proxy: live settings unreadable ({e}) — failing closed")
+            data = {}
+        host_env = _read_host_env(self.host_env_path)
+        defaults = data.get("defaults") if isinstance(data.get("defaults"), dict) else {}
+        previous = {getattr(r, "key", None): r for r in self.rules}
+        rules: list[_Rule] = []
+        fresh: list[_Rule] = []
+        specs = data.get("rules")
+        for spec in specs if isinstance(specs, list) else []:
+            if not isinstance(spec, dict):
+                continue
+            secrets = _resolve_secrets(spec.get("env") or (), host_env, defaults)
+            key = json.dumps([spec, secrets], sort_keys=True)
+            rule = previous.get(key)
+            if rule is None:
+                rule = _Rule(spec, secrets)
+                rule.key = key
+                fresh.append(rule)
+            if rule.active:
+                rules.append(rule)
+        self._set_rules(rules)
+        # A new learn window: rows rate-limited before it must not hide a host inside it.
+        observing = data.get("observing_since")
+        if not first and observing != self._observing_since:
+            self._would_block_seen = {}
+        self._observing_since = observing
+        self.default_deny = data.get("default_deny", True) is not False
+        passthrough = data.get("passthrough")
+        self.passthrough_hosts = (
+            [str(h) for h in passthrough if h] if isinstance(passthrough, list) else []
+        )
+        if not first:
+            wall = "on" if self.default_deny else "off"
+            hosts = ", ".join(sorted(r.host for r in rules if r.host)) or "none"
+            ctx.log.info(f"egress_proxy: settings reloaded — injecting {hosts}; wall {wall}")
+        if self._running:
+            self._warm([r for r in fresh if r.active])
+        self._policy_dirty = True
+        return True
+
+    def _warm(self, rules: list[_Rule]) -> None:
+        threads = [
+            threading.Thread(
+                target=lambda r=r: r.token(warm=True), daemon=True, name=f"egress-warm-{r.host}"
+            )
+            for r in rules
+        ]
+        self._warm_threads += threads
+        for t in threads:
+            t.start()
+
+    async def _watch(self) -> None:
+        """Poll the live settings once a second, so a change lands even on a proxy with no new
+        requests — an idle tunnel sends none, and a narrowing must still reach it."""
+        while True:
+            await asyncio.sleep(1)
+            try:
+                self.refresh()
+            except Exception as e:  # the watcher must outlive any one bad read
+                ctx.log.warn(f"egress_proxy: live settings refresh failed: {e}")
+
+    def done(self) -> None:
+        watcher = getattr(self, "_watcher", None)
+        if watcher is not None:
+            watcher.cancel()
 
     def _load_rules(self) -> list[_Rule]:
         """Build the injection rule set. ``INJECT_RULES`` (a JSON list of rule objects) is the
@@ -492,24 +777,28 @@ class Injector:
         """Re-read ALLOW_FILE when its mtime changes, so a host-side `allow` grant takes effect
         with NO daemon restart. Fail toward MORE blocking: a missing/unreadable/malformed file
         leaves the allow set EMPTY — a parse error never widens egress."""
+        before = (self._allow_patterns, self._build_patterns)
         if self.allow_path is None:
-            self._allow_patterns = []
-            return
-        try:
-            mtime = self.allow_path.stat().st_mtime
-        except OSError:
-            self._allow_patterns = []
-            self._allow_mtime = -1.0
-            return
-        if mtime == self._allow_mtime:
-            return
-        self._allow_mtime = mtime
-        try:
-            data = json.loads(self.allow_path.read_text())
-            allow = data.get("allow", []) if isinstance(data, dict) else []
-            self._allow_patterns = [str(p) for p in allow] if isinstance(allow, list) else []
-        except (OSError, ValueError):
-            self._allow_patterns = []
+            self._allow_patterns, self._build_patterns = [], []
+        else:
+            try:
+                mtime = self.allow_path.stat().st_mtime
+            except OSError:
+                self._allow_patterns, self._build_patterns = [], []
+                self._allow_mtime = -1.0
+                mtime = None
+            if mtime is not None and mtime != self._allow_mtime:
+                self._allow_mtime = mtime
+                try:
+                    data = json.loads(self.allow_path.read_text())
+                    data = data if isinstance(data, dict) else {}
+                except (OSError, ValueError):
+                    data = {}
+                allow, build = data.get("allow", []), data.get("build_allow", [])
+                self._allow_patterns = [str(p) for p in allow] if isinstance(allow, list) else []
+                self._build_patterns = [str(p) for p in build] if isinstance(build, list) else []
+        if (self._allow_patterns, self._build_patterns) != before:
+            self._policy_dirty = True  # a grant came or went: `refresh` re-judges open tunnels
 
     def _allowed(self, host: str | None) -> bool:
         """True if `host` may egress under default-deny: any injector host is always exempt (we must
@@ -556,11 +845,14 @@ class Injector:
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             "method": flow.request.method,
             "host": flow.request.pretty_host,
-            "path": flow.request.path[:200],
+            "path": self._logged_path(flow)[:200],
             "status": flow.response.status_code,
             "injected": flow.request.pretty_host in self.inject_hosts,
             "replayed": bool(flow.metadata.get("egress_proxy_retried")),
         }  # fmt: skip
+        ua = _user_agent(flow.request)
+        if ua:
+            entry["ua"] = ua
         # Error responses carry the reason in their body — capture a short snippet so "injected=True
         # but 401, why?" is answerable at a glance instead of by re-running the failing client.
         if flow.response.status_code >= 400:
@@ -569,13 +861,24 @@ class Injector:
                 entry["error_body"] = snippet
         self._write_entry(entry)
 
-    def _log_passthrough(self, host: str | None) -> None:
+    def _logged_path(self, flow: http.HTTPFlow) -> str:
+        """The request path as logged: a query-param injector's credential redacted (its rule
+        wrote the minted value into the URL — the header case never reaches the path)."""
+        path = flow.request.path
+        rule = self._rule_for(flow)
+        for name in {flow.metadata.get("egress_proxy_redact"), rule.query_param if rule else None}:
+            if name:
+                path = _redact_param(path, name)
+        return path
+
+    def _log_passthrough(self, host: str | None, *, build: bool = False) -> None:
         """An SNI-level row for a blind-tunnelled (not decrypted) HTTPS connection: host + time
         only — TLS hides method/path/status. The Network Log panel renders `passthrough` rows as
-        a `tls tunnel` marker. No host (a client that sent no SNI) → nothing to log."""
+        a `tls tunnel` marker; ``build`` says it was tunnelled because an image build asked, not
+        because the host is on the passthrough list. No host (no SNI) → nothing to log."""
         if not host:
             return
-        self._write_entry({
+        entry = {
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             "method": "",
             "host": host,
@@ -584,15 +887,20 @@ class Injector:
             "injected": False,
             "replayed": False,
             "passthrough": True,
-        })  # fmt: skip
+        }  # fmt: skip
+        if build:
+            entry["build"] = True
+        self._write_entry(entry)
 
-    def _log_blocked(self, host: str | None) -> None:
+    def _log_blocked(self, host: str | None, request=None) -> None:
         """A row for a host REFUSED by the default-deny wall — no upstream is ever contacted, so
         there's no method/path/real status (we synthesise a 403). The Network Log panel keys off
-        ``blocked`` to paint it red and offer an 'allow' action. No host → nothing to log."""
+        ``blocked`` to paint it red and offer an 'allow' action. With the refused ``request``,
+        the row also carries its User-Agent and, when it carried the build marker, ``build`` —
+        what `fy box build`/`fy up` read back to offer the host. No host → nothing to log."""
         if not host:
             return
-        self._write_entry({
+        entry = {
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             "method": "",
             "host": host,
@@ -601,7 +909,47 @@ class Injector:
             "injected": False,
             "replayed": False,
             "blocked": True,
-        })  # fmt: skip
+        }  # fmt: skip
+        if request is not None:
+            ua = _user_agent(request)
+            if ua:
+                entry["ua"] = ua
+            if _is_build_marker(request.headers.get("Proxy-Authorization")):
+                entry["build"] = True
+        self._write_entry(entry)
+
+    def _log_would_block(self, key: str | None, request) -> None:
+        """While the wall only OBSERVES (``fy allow wall off``, or a learn window): a row for a
+        host enforcement WOULD have refused — the same policy check as the wall, so the set
+        ``fy allow learn`` offers is exactly what enforcing would need, ports included. Nothing
+        is refused. Rate-limited per host (:data:`_WOULD_BLOCK_EVERY`). No host → nothing."""
+        if not key:
+            return
+        now = time.monotonic()
+        last = self._would_block_seen.get(key)
+        if last is not None and now - last < _WOULD_BLOCK_EVERY:
+            return
+        if len(self._would_block_seen) >= _WOULD_BLOCK_MAX:
+            self._would_block_seen = {
+                k: t for k, t in self._would_block_seen.items() if now - t < _WOULD_BLOCK_EVERY
+            }
+            if len(self._would_block_seen) >= _WOULD_BLOCK_MAX:
+                self._would_block_seen = {}  # all recent: forgetting costs only extra rows
+        self._would_block_seen[key] = now
+        entry = {
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+            "method": "",
+            "host": key,
+            "path": "",
+            "status": 0,
+            "injected": False,
+            "replayed": False,
+            "would_block": True,
+        }  # fmt: skip
+        ua = _user_agent(request)
+        if ua:
+            entry["ua"] = ua
+        self._write_entry(entry)
 
     # ── mitmproxy hooks ──────────────────────────────────────────────────────────
     def running(self) -> None:
@@ -611,14 +959,13 @@ class Injector:
         egress for its duration. Fire-and-forget daemon threads: a warm failure just logs (at WARN
         — ``warm=True``; an ERROR here makes mitmproxy exit, see ``token``) and the request path
         re-mints as before. Handles kept on ``self`` so tests can join."""
-        self._warm_threads = [
-            threading.Thread(
-                target=lambda r=r: r.token(warm=True), daemon=True, name=f"egress-warm-{r.host}"
-            )
-            for r in self.rules
-        ]
-        for t in self._warm_threads:
-            t.start()
+        self._running = True
+        self._warm(list(self.rules))
+        if self.live_path is not None:
+            try:
+                self._watcher = asyncio.get_running_loop().create_task(self._watch())
+            except RuntimeError:
+                pass  # no event loop (the unit tests): the hooks still refresh per request
 
     def http_connect(self, flow: http.HTTPFlow) -> None:
         """The egress wall for proxied HTTPS. The box reaches every HTTPS host through an explicit
@@ -633,14 +980,108 @@ class Injector:
         editor attach that is a push path (seen live, 2026-09-17). Another port needs its own
         grant, ``host:port`` (``fy allow add github.com:22``), so the blocked row carries the port
         and the TUI's allow action offers exactly that."""
-        if not self.default_deny:
-            return
+        self.refresh()
         host = flow.request.pretty_host
         port = flow.request.port
-        if self._allowed_connect(host, port):
+        if self._allowed_connect(host, port) or (
+            self._trusted_build(flow.request) and self._build_granted(host, port, _HTTPS_PORT)
+        ):
+            self._note_build(flow)
+            return
+        key = host if port == _HTTPS_PORT else f"{host}:{port}"
+        if not self.default_deny:
+            # Observing: let it through, but record that enforcing would refuse it — the CONNECT
+            # carries the client's User-Agent even for a host that is then tunnelled blind.
+            self._log_would_block(key, flow.request)
+            self._note_build(flow)
             return
         flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
-        self._log_blocked(host if port == _HTTPS_PORT else f"{host}:{port}")
+        self._log_blocked(key, flow.request)
+
+    def _trusted_build(self, request) -> bool:
+        """Did this request present a LIVE build secret (not just the public marker)?"""
+        creds = _basic_credentials(request.headers.get("Proxy-Authorization"))
+        if creds is None or creds[0] != _BUILD_TUNNEL_USER or self.tokens_path is None:
+            return False
+        stamp = _file_stamp(self.tokens_path)
+        if stamp != self._tokens_stamp:
+            self._tokens_stamp = stamp
+            tokens: dict[str, float] = {}
+            try:
+                doc = json.loads(self.tokens_path.read_text())
+                for digest, expires in (doc.get("tokens") or {}).items():
+                    tokens[str(digest)] = datetime.fromisoformat(expires).timestamp()
+            except (OSError, ValueError, TypeError, AttributeError):
+                tokens = {}  # unreadable ⇒ no build is trusted (fail toward MORE blocking)
+            self._tokens = tokens
+        import hashlib
+
+        expires = self._tokens.get(hashlib.sha256(creds[1].encode()).hexdigest())
+        return expires is not None and expires > time.time()
+
+    def _build_granted(self, host: str | None, port: int, default_port: int) -> bool:
+        """The build-scoped grants, with the same port rule as the runtime ones."""
+        if not host:
+            return False
+        self._refresh_allow()
+        key = host if port == default_port else f"{host}:{port}"
+        return _host_matches(key, self._build_patterns)
+
+    def _note_build(self, flow: http.HTTPFlow) -> None:
+        """Remember a CONNECT that got through (granted, or let through while observing): for
+        ``_sweep``, and — when it carried the build marker — so ``tls_clienthello`` tunnels it."""
+        client = getattr(flow, "client_conn", None)
+        if client is None:
+            return
+        build = _is_build_marker(flow.request.headers.get("Proxy-Authorization"))
+        if build:
+            self._build_clients.add(client.id)
+        self._conns[client.id] = {
+            "host": flow.request.pretty_host,
+            "port": flow.request.port,
+            "blind": None,  # the tunnelled SNI target once tls_clienthello tunnels it
+            "build": build,
+            "trusted": self._trusted_build(flow.request),  # may use build-scoped grants
+        }
+
+    def client_disconnected(self, client) -> None:
+        self._build_clients.discard(client.id)
+        self._conns.pop(client.id, None)
+
+    def _tunnel(self, target: str | None, build: bool) -> bool:
+        """Would a TLS connection to ``target`` be blind-tunnelled now? (``tls_clienthello``.)"""
+        if target in self.inject_hosts:
+            return False
+        return build or self.capture_mode != "full" or _host_matches(target, self.passthrough_hosts)
+
+    def _sweep(self) -> None:
+        """Close each open connection the current policy would not have allowed (see `refresh`)."""
+        for client_id, conn in list(self._conns.items()):
+            host, port, blind = conn["host"], conn["port"], conn["blind"]
+            refused = self.default_deny and not (
+                self._allowed_connect(host, port)
+                or (conn["trusted"] and self._build_granted(host, port, _HTTPS_PORT))
+            )
+            decrypt_now = blind is not None and not self._tunnel(blind, conn["build"])
+            if not (refused or decrypt_now):
+                continue
+            key = host if port == _HTTPS_PORT else f"{host}:{port}"
+            why = "the wall refuses it now" if refused else "it is decrypted now"
+            self._close(client_id, key, why)
+
+    def _close(self, client_id: str, key: str, why: str) -> None:
+        """Close one client connection (and so its upstream). mitmproxy has no public API for a
+        connection without a flow — a blind tunnel is exactly that — so this reaches its
+        ``proxyserver`` addon's connection table, pinned by the real-mitmdump e2e."""
+        self._conns.pop(client_id, None)
+        self._build_clients.discard(client_id)
+        try:
+            handler = ctx.master.addons.get("proxyserver").connections[client_id]
+            handler.close_connection(handler.client)
+        except Exception as e:
+            ctx.log.warn(f"egress_proxy: couldn't close the connection to {key} ({why}): {e!r}")
+            return
+        ctx.log.info(f"egress_proxy: closed the connection to {key} — {why}")
 
     def _allowed_connect(self, host: str | None, port: int) -> bool:
         """The CONNECT policy: the host granted (:meth:`_allowed`) on :443, else ``host:port``
@@ -681,6 +1122,7 @@ class Injector:
           - CAPTURE_MODE=full → fall through → mitmproxy terminates TLS and the request/response
             hooks log the decrypted request.
         """
+        self.refresh()
         # The target host: the SNI if the client sent one, else the CONNECT target address (a
         # client reaching a bare IP sends no SNI). We must identify the injector host either way,
         # so it's NEVER tunnelled — even when addressed by IP — or we couldn't rewrite its header.
@@ -693,31 +1135,71 @@ class Injector:
                 target = None
         if target in self.inject_hosts:
             return  # an injector host: always decrypt (to rewrite its header), whatever the mode
+        client = getattr(getattr(data, "context", None), "client", None)
+        conn = self._conns.get(client.id) if client is not None else None
+        if client is not None and client.id in self._build_clients:
+            data.ignore_connection = True  # a trusted build: it has no CA to verify ours with
+            self._log_passthrough(target, build=True)
+            if conn is not None:
+                conn["blind"] = target
+            return
         # Blind-tunnel (no decrypt, real certs end-to-end, SNI-only log) when either we're in
-        # passthrough mode (capture=off — tunnel everything) OR we're in full mode but the host is
+        # passthrough mode (tunnel everything) OR we're in full mode but the host is
         # trusted. Otherwise (full mode, untrusted host) fall through → mitmproxy decrypts + the
         # request/response hooks log the full request — the surprising egress worth scrutinising.
         if self.capture_mode != "full" or _host_matches(target, self.passthrough_hosts):
             data.ignore_connection = True
             self._log_passthrough(target)
+            if conn is not None:
+                conn["blind"] = target
+
+    def requestheaders(self, flow: http.HTTPFlow) -> None:
+        """Where a request is judged and its credential written: the headers are in, the body
+        isn't. With ``stream_large_bodies`` set, a body past the threshold goes upstream as it
+        arrives and ``request`` fires only once it's gone — too late for a header. A long Claude
+        conversation (>1 MiB) reached Anthropic with the box's dummy token that way (401 "OAuth
+        access token is invalid", 2026-09-23). Refusing here also means a refused request never
+        streams its body anywhere."""
+        self._on_request(flow)
 
     def request(self, flow: http.HTTPFlow) -> None:
+        """Fires after ``requestheaders`` (after a buffered body, or after a streamed one has gone
+        upstream). The work happened there; this only covers a caller that skips that hook."""
+        self._on_request(flow)
+
+    def _on_request(self, flow: http.HTTPFlow) -> None:
+        if flow.metadata.get("egress_proxy_judged"):
+            return
+        flow.metadata["egress_proxy_judged"] = True
+        self.refresh()
         # The egress wall for plain HTTP (cleartext never CONNECTs, so http_connect can't catch it):
         # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host
         # grant as CONNECT :22 — here, before it leaves the box. HTTPS is walled at http_connect.
         host, port = flow.request.pretty_host, flow.request.port
-        if self.default_deny and not self._allowed_plain(host, port, flow.request.scheme):
-            flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
-            flow.metadata["egress_proxy_blocked"] = True  # so `response` doesn't re-log it as a 403
-            default = _HTTPS_PORT if flow.request.scheme == "https" else _HTTP_PORT
-            self._log_blocked(host if port == default else f"{host}:{port}")
-            return
+        default = _HTTPS_PORT if flow.request.scheme == "https" else _HTTP_PORT
+        allowed = self._allowed_plain(host, port, flow.request.scheme) or (
+            self._trusted_build(flow.request) and self._build_granted(host, port, default)
+        )
+        if not allowed:
+            key = host if port == default else f"{host}:{port}"
+            if self.default_deny:
+                flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
+                flow.metadata["egress_proxy_blocked"] = True  # so `response` doesn't re-log a 403
+                self._log_blocked(key, flow.request)
+                return
+            if flow.request.scheme != "https":
+                # Observing, cleartext: record it (HTTPS was already recorded at its CONNECT).
+                self._log_would_block(key, flow.request)
+        if _is_build_marker(flow.request.headers.get("Proxy-Authorization")):
+            del flow.request.headers["Proxy-Authorization"]  # ours, not the upstream's
         rule = self._rule_for(flow)
         if rule is None:
             return  # capture-only, or not a target host/path → log on the way back, rewrite nothing
         value = rule.token()
         if value is not None:
             rule.apply(flow.request, value)
+            if rule.query_param:  # redact what WAS written, whatever the rules are at log time
+                flow.metadata["egress_proxy_redact"] = rule.query_param
 
     async def response(self, flow: http.HTTPFlow) -> None:
         # Re-issue once on an upstream 401 BEFORE logging, so the log + the client both see the
@@ -740,6 +1222,14 @@ class Injector:
         flow.response with the result. We can't `replay.client` a *live* flow on modern mitmproxy
         (it rejects it with "Can't replay live flow"), and a replayed copy is detached from the
         original client — so the retry has to be a direct request whose response we hand back."""
+        if flow.request.raw_content is None:
+            # The request body was STREAMED upstream (past stream_large_bodies), so there is no
+            # copy left to re-send. Hand the 401 back as-is; the client's own retry re-mints.
+            # …but the token it was refused with must not serve the next request for the rest of
+            # its TTL: drop it, so the next one re-mints.
+            rule.invalidate()
+            ctx.log.warn(f"egress_proxy: 401 from {rule.host} on a streamed upload — not re-issued")
+            return
         value = rule.token(force=True)
         if value is None:
             return
