@@ -494,6 +494,25 @@ def learned_hosts(rows: list[dict], window: dict) -> list[dict]:
     return list(out.values())
 
 
+def refused_hosts(rows: list[dict]) -> list[str]:
+    """The hosts the log shows the wall refusing (or, observing, would refuse), still not granted
+    and not declined, in first-seen order — what the TUI's Network Log offers to accept, which is
+    a different list from the recommendations. Box-originated, so filtered as in
+    :func:`learned_hosts`."""
+    granted, refused = live_hosts(), declined()
+    out: list[str] = []
+    for row in rows:
+        key = row.get("host")
+        if not (row.get("blocked") or row.get("would_block")) or not isinstance(key, str):
+            continue
+        if not valid_host(key) or key.startswith("*.") or key in out:
+            continue
+        if _matches(key, granted) or key in refused or "*" in refused:
+            continue
+        out.append(key)
+    return out
+
+
 def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
     """The hosts the wall REFUSED an image build since ``since``, still not granted:
     ``{host, count, uas, paths, more_paths}`` in first-seen order (the ``learned_hosts`` shape, so

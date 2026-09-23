@@ -319,6 +319,37 @@ def test_wall_learn_then_review_grants_the_recorded_hosts(tmp_path, monkeypatch)
         config.clear_caches()
 
 
+def test_allow_sync_points_at_refused_hosts_when_nothing_is_recommended(tmp_path, monkeypatch):
+    # "nothing pending" was read as "nothing to answer" while the TUI's Network Log listed refused
+    # hosts to accept — those aren't recommendations, so name them and where they're answered
+    import json
+    from datetime import UTC, datetime
+
+    from foldyard import allowlist, config
+
+    log = _scratch(tmp_path, monkeypatch)
+    try:
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        log.parent.mkdir(parents=True)
+        rows = [
+            {"ts": now, "host": "deb.example.org", "blocked": True, "status": 403},
+            {"ts": now, "host": "deb.example.org", "blocked": True, "status": 403},
+            {"ts": now, "host": "pypi.example.org", "would_block": True},
+            {"ts": now, "host": "granted.example.org", "blocked": True},
+            {"ts": now, "host": "ok.example.org", "status": 200},
+        ]
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        allowlist.grant("granted.example.org", "permanent")
+        result = runner.invoke(cli.app, ["allow", "sync"])
+        assert result.exit_code == 0, result.output
+        assert "nothing pending" in result.output
+        assert "2 hosts the wall refused" in result.output
+        assert "deb.example.org, pypi.example.org" in result.output
+        assert "granted.example.org" not in result.output
+    finally:
+        config.clear_caches()
+
+
 def test_allow_learn_without_a_window_says_how_to_start_one(tmp_path, monkeypatch):
     from foldyard import config
 

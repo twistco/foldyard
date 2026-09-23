@@ -661,6 +661,25 @@ def allow_sync(
             )
         else:
             print("✓ nothing pending — every recommended host is granted or answered.")
+            _point_at_refused_hosts()
+
+
+def _point_at_refused_hosts() -> None:
+    """Refused hosts aren't recommendations, but the TUI's Network Log offers them for the same
+    `a`: without this line "nothing pending" reads as "nothing to answer"."""
+    from . import allowlist, config
+    from .plugins import proxy
+
+    with _config_bound():
+        log = proxy._proxy_log()
+        refused = allowlist.refused_hosts(allowlist.read_log_rows([*config.rotated_logs(log), log]))
+    if not refused:
+        return
+    n, shown = len(refused), ", ".join(refused[:5]) + (", …" if len(refused) > 5 else "")
+    print(
+        f"• {n} host{'s' if n != 1 else ''} the wall refused, still unanswered: {shown}\n"
+        "  Not recommendations — answer them in the TUI's Network Log, or `fy allow add <host>`."
+    )
 
 
 def _config_bound():
