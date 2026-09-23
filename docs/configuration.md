@@ -477,7 +477,8 @@ default_deny = "learn"
 
 A generic, config-only egress injector: each entry becomes one on/off mode axis
 (`fy mode <axis>=on`) plus one proxy rewrite rule. The secret lives only in `host.env` on the
-host — it never enters the box or the repo.
+host — it never enters the box or the repo. Turning the axis on (`fy mode`, or the TUI) prompts
+for that token when `host.env` doesn't have it yet.
 
 ```toml
 [[inject]]
@@ -506,7 +507,11 @@ Per entry:
 - **`value_prefix`** — optional prefix for the injected value (e.g. `"Bearer "`).
 - **`path_prefix`** — optional: only inject on request paths under this prefix.
 - **`replay_on_401`** — optional: re-mint and replay once on a 401. Default: `false`.
-- **`ttl`** — optional re-read cadence in seconds for a static token.
+- **`ttl`** — optional re-read cadence in seconds for a static token. (Not the mode's lifetime —
+  that's `emergency`.)
+- **`emergency`** — optional `true`: `on` becomes an emergency rung, like `github=user` — it
+  expires (`fy mode <axis>=on ttl=30m`, default 1h, max 8h) and the supervisor switches it off.
+  For a token whose access you never want left on by accident (write access, a shared account).
 - **`label`** — optional; shown in daemon status.
 
 Any number of injectors can be on at once, each with its own host and token.

@@ -36,7 +36,7 @@ supervisor (supervisor.py) import this module; the `foldyard` CLI (cli.py) route
 its main():
 
   foldyard mode                    the dashboard (Mac: live probes; box: the mirror)
-  foldyard mode gcp=logs [ttl=1h]  set axes (Mac only); ttl applies to user modes
+  foldyard mode gcp=user [ttl=1h]  set axes (host only); ttl applies to emergency rungs only
   foldyard mode env                shell `export` lines deriving recipe env from the
                                    mode (only as defaults — explicit env always wins)
 """
@@ -1762,6 +1762,20 @@ def _capture_secrets_for(updates: dict[str, str]) -> None:
     )
 
 
+def _refuse_a_ttl_nothing_carries(updates: dict[str, str]) -> None:
+    """Only an emergency rung expires; ``set_mode`` drops a TTL on anything else. Accepting it
+    would let the operator believe a posture lapses when it never will."""
+    rungs = emergency()
+    if any(value in rungs.get(axis, ()) for axis, value in updates.items()):
+        return
+    asked = " ".join(f"{axis}={value}" for axis, value in updates.items())
+    ttld = ", ".join(f"{axis}={r}" for axis, rs in rungs.items() for r in rs) or "none here"
+    raise SystemExit(
+        f"✗ ttl= would be ignored: {asked} doesn't expire. Only emergency rungs carry a TTL "
+        f"({ttld}); drop the ttl, or mark an [[inject]] axis `emergency = true`."
+    )
+
+
 def main(argv: list[str]) -> int:
     cmd = argv[0] if argv else "show"
     if cmd == "show":
@@ -1778,7 +1792,9 @@ def main(argv: list[str]) -> int:
             else:
                 updates[key] = value
         if not updates:
-            raise SystemExit("✗ nothing to set (e.g. `fy mode gcp=logs github=app ttl=1h`)")
+            raise SystemExit("✗ nothing to set (e.g. `fy mode gcp=logs github=user ttl=1h`)")
+        if ttl is not None:
+            _refuse_a_ttl_nothing_carries(updates)
         if not in_box():  # set_mode refuses in-box anyway; don't prompt for a secret first
             validate_updates(updates)  # …nor for a mode set_mode would refuse
             _capture_secrets_for(updates)

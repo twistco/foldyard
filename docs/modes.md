@@ -70,7 +70,9 @@ the box never does. Real secrets the minters need live in `~/.foldyard/<project>
 Two guard rails keep escalation honest:
 
 - **Emergency rungs auto-revert — and land coherent.** Rungs marked emergency (your own
-  identity, push access) carry a mandatory TTL. Every reader treats a lapsed TTL as the
+  identity, push access) carry a mandatory TTL. A `ttl=` on a command that turns on no
+  emergency rung is refused rather than dropped; a consumer `[[inject]]` axis becomes one with
+  `emergency = true` (see [configuration](./configuration.md#inject)). Every reader treats a lapsed TTL as the
   default rung, and the supervisor kills the daemon and writes the axis back down at expiry
   — an emergency can never quietly become your resting posture. If the revert would strand
   a *dependent* axis on a combination that can only fail, the same write settles it down to

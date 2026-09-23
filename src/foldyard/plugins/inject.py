@@ -5,7 +5,7 @@ Each ``[[inject]]`` entry in ``foldyard.toml`` becomes one on/off mode axis + on
 :class:`~foldyard.plugins.InjectRule`, so a consumer adds a host-side credential injector with
 CONFIG ONLY — no Python. This covers the plain "rewrite ONE thing on ONE host with a host-side
 token" case. ``github`` deliberately stays its OWN plugin: it carries non-generic, security-
-load-bearing posture (the off/app/user ladder with a TTL'd emergency rung, the dummy ``GH_TOKEN``
+load-bearing posture (the off/app/user ladder with its gh-cli emergency rung, the dummy ``GH_TOKEN``
 baked into the box, its mode-aware verify + doctor checks) that shouldn't be flattened into config.
 
 Config (``foldyard.toml``)::
@@ -18,6 +18,11 @@ Config (``foldyard.toml``)::
     replay_on_401 = false                               # optional; re-mint + replay once on a 401
     path_prefix = "/mcp"                                # optional; only inject on these paths
     ttl         = 43200                                 # optional; static-token re-read cadence (s)
+    emergency   = true                                  # optional; `on` expires (see below)
+
+``emergency = true`` gives the axis ``github=user``'s lifecycle: ``on`` is an emergency rung, so
+it carries a TTL (``fy mode <axis>=on ttl=30m``, else the default) and the supervisor switches it
+off when that lapses — for a token whose access should never be left on by accident.
 
 Token handling: the secret lives ONLY in ``host.env`` on the Mac, under a var foldyard DERIVES from
 the axis — ``FY_INJECT_<AXIS>`` (see :func:`token_var`) — and the shipped
@@ -75,6 +80,12 @@ class InjectPlugin(Plugin):
             axis = spec.get("axis")
             if not axis:
                 continue
+            if not isinstance(spec.get("emergency", False), bool):
+                # a quoted "false" is truthy: the axis would expire when the operator said not to
+                raise ValueError(
+                    f"[[inject]] {axis!r}: emergency must be true or false, "
+                    f"got {spec['emergency']!r}"
+                )
             first = owner.setdefault(token_var(str(axis)), str(axis))
             if first != str(axis):
                 raise ValueError(
@@ -96,6 +107,8 @@ class InjectPlugin(Plugin):
                     rungs=("off", "on"),
                     blurb={"off": "no injection", "on": str(on_blurb)},
                     daemon="egress-proxy",
+                    # github=user's lifecycle: `on` carries a TTL and the supervisor reverts it
+                    emergency=("on",) if spec.get("emergency") else (),
                 )
             )
         return axes

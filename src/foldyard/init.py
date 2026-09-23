@@ -466,6 +466,7 @@ def render_local(opts: InitOptions) -> str:
         '# host   = "my-host.example.com"',
         '# header = "Authorization"',
         '# label  = "My private service"',
+        "# emergency = true   # optional: `on` expires (default 1h) and switches itself off",
     ]
     return "\n".join(lines) + "\n"
 

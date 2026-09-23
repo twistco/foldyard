@@ -758,7 +758,8 @@ def test_keyless_agents_declare_their_credential_only_when_on(monkeypatch):
 def test_keyless_prefix_agrees_with_the_classifier(taxonomy):
     # the Secret's glob and box-up's prefix classifier must accept the same pastes
     for spec in taxonomy.values():
-        assert keyless.classify(spec["prefix"] + "x")[0] == spec["env"]
+        who = keyless.classify(spec["prefix"] + "x")
+        assert who is not None and who[0] == spec["env"]
 
 
 def test_github_pem_hint_defaults_generic_and_yields_to_the_consumer(
@@ -2056,6 +2057,21 @@ def test_inject_axis_from_config(monkeypatch):
     ax = axes[0]
     assert ax.name == "penpot" and ax.rungs == ("off", "on") and ax.daemon == "egress-proxy"
     assert ax.emergency == ()  # a plain injector axis carries no TTL'd emergency rung
+
+
+def test_inject_emergency_key_makes_on_a_ttld_rung(monkeypatch):
+    # `emergency = true` gives an [[inject]] axis github=user's lifecycle: `on` expires (default
+    # TTL, or `ttl=`) and the supervisor switches it off — for a credential with write access
+    ax = _inject_plugin(monkeypatch, [{**_PENPOT_SPEC, "emergency": True}]).axes()[0]
+    assert ax.emergency == ("on",)
+    ax = _inject_plugin(monkeypatch, [{**_PENPOT_SPEC, "emergency": False}]).axes()[0]
+    assert ax.emergency == ()
+
+
+def test_inject_emergency_must_be_a_bool(monkeypatch):
+    # a quoted "false" is truthy: loud, not an axis that silently expires (or silently doesn't)
+    with pytest.raises(ValueError, match="emergency"):
+        _inject_plugin(monkeypatch, [{**_PENPOT_SPEC, "emergency": "false"}]).axes()
 
 
 def test_inject_declares_its_derived_token_only_when_on(monkeypatch):

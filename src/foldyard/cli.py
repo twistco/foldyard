@@ -238,7 +238,7 @@ def mode(
         None,
         metavar="[axis=value ... | ttl=...]",
         help="No args: show the posture. Else SET axes (Mac only), e.g. "
-        "`foldyard mode gcp=logs github=app ttl=1h`. "
+        "`foldyard mode gcp=logs github=user ttl=1h` (ttl: emergency rungs only). "
         "Axes: gcp=off|logs|sa|user, github=off|app|user.",
     ),
 ) -> None:

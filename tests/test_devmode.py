@@ -1300,6 +1300,21 @@ def test_mode_set_validates_the_updates_before_prompting(isolated_state, monkeyp
     assert devmode.read()["mode"]["github"] == "off"
 
 
+def test_mode_set_refuses_a_ttl_that_nothing_would_carry(isolated_state, monkeypatch):
+    # Only an emergency rung expires, so `ttl=` on anything else used to be accepted and dropped:
+    # the operator believed the posture would lapse and it never did. Refused before prompting.
+    monkeypatch.setattr(
+        devmode.getpass, "getpass", lambda _p: pytest.fail("must not prompt for a refused mode")
+    )
+    with pytest.raises(SystemExit, match=r"ttl=.*github=app.*gcp=user"):
+        devmode.main(["set", "github=app", "ttl=30m"])
+    assert devmode.read()["mode"]["github"] == "off"
+    # one emergency rung in the same command carries it
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: False)
+    assert devmode.main(["set", "gcp=user", "storage=local", "ttl=30m"]) == 0
+    assert "gcp" in devmode.read(apply_expiry=False)["expires"]
+
+
 def test_mode_set_with_the_secret_present_does_not_prompt(isolated_state, monkeypatch):
     isolated_state["host_env"].write_text(f"GH_PEM_B64={_PEM_B64}\n")
     monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
