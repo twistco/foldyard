@@ -34,7 +34,18 @@ The injector host (api.github.com) is ALWAYS decrypted, whatever CAPTURE_MODE is
 read + rewrite its Authorization header. Plain HTTP is always logged in full (it's cleartext, so
 there's nothing to passthrough).
 
-Config via env (read once at startup):
+Config via env (read once at startup). foldyard's supervisor sets LIVE_FILE, which moves the
+rules, the wall switch and the passthrough list out of the env and makes them live:
+  LIVE_FILE         a JSON file {"rules": [<rule>, ...], "default_deny": bool, "passthrough":
+                    [<pattern>, ...]}, re-read when it changes (per hook + once a second) with no
+                    restart. When set, INJECT_*, DEFAULT_DENY and PASSTHROUGH_HOSTS are ignored.
+                    Unreadable/malformed ⇒ fail closed (no rules, the wall enforcing, nothing
+                    tunnelled). A change that narrows the policy closes the open connections it no
+                    longer allows (see Injector.refresh).
+  HOST_ENV_FILE     host.env: where a live rule's declared `env` names are resolved (this
+                    process's env first — the operator's exports — then the file), re-read when it
+                    changes.
+Without LIVE_FILE:
   INJECT_RULES      a JSON LIST of injection rules (the multi-injector contract) — one proxy
                     rewriting N hosts, each with its OWN minter + token cache + 401 retry:
                       [{"host","command","header"?,"value_prefix"?,"query_param"?,

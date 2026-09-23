@@ -105,7 +105,8 @@ belongs in the middle — but *one* middle, not a switch between two.
   open.
 - **One axis fewer** in the posture dashboard, `fy mode`, the TUI and the reconciler; the proxy
   daemon's spec no longer changes with posture, so it restarts only for a real change (a wall
-  toggle, a secret, an adopted `passthrough`).
+  toggle, a secret, an adopted `passthrough`). Since [0030](./0030-the-proxy-reloads-instead-of-restarting.md)
+  none of those restart it either: they reach the running proxy through its live file.
 - **A User-Agent on every decrypted row** becomes available by default — what an observe-first
   allowlist can use to say *which tool* reached a host, without instrumenting the box.
 

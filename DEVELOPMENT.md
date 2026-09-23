@@ -140,9 +140,12 @@ foldyard's surface splits by *where it can be validated*:
      (`just test -k e2e`). Isolated by the example's own `fyex` project.
    - `tests/test_proxy_e2e.py`: a real `mitmdump` + the `egress_proxy` addon + a fake minter + a
      CA-trusting `requests` client — host-side header rewrite, network log, 401 re-issue.
+   - `tests/test_proxy_reload_e2e.py`: the same real `mitmdump` driven by its live file — a
+     download survives a settings change on the same process, a tunnel whose host leaves
+     `passthrough` is closed, an untouched one stays open.
    - `tests/test_proxy_box_e2e.py`: the **proxy plugin driving a REAL dev-box container** over
      the socket — runs in an adapted topology so it works inside a dev box; see
-     [docs/nested-virt.md](./docs/nested-virt.md). Both proxy e2es:
+     [docs/nested-virt.md](./docs/nested-virt.md). The proxy e2es:
      `just test-proxy-e2e` (pulls the `e2e` group).
 4. **The host tier** — `machine ensure|stop|recreate`, `box up|build`, `host`, `mode set`,
    `verify`'s real VM boundary, the walls. These deliberately **refuse to run inside a dev box**
@@ -439,7 +442,15 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   (so it must never carry one mechanism's credential — a proxy that won't launch
   connection-refuses every box request under always-route); `env` is what that rule's minter may
   READ, since the addon runs minters with a base env plus those names instead of inheriting the
-  supervisor's environment, which holds every axis's host.env secret.
+  supervisor's environment, which holds every axis's host.env secret. The addon resolves those
+  names itself (the operator's exports, then `host.env`) and the proxy runs with host.env's keys
+  stripped from its environment ([ADR-0030](./docs/adrs/0030-the-proxy-reloads-instead-of-restarting.md)).
+- **Nothing that varies with posture may reach the proxy's launch env.** The supervisor restarts
+  a daemon whose cmd/env changed, and a restart cuts every connection in flight (a mode switch
+  once killed an apt download mid-package). Rules, the wall switch and `passthrough` go in the
+  spec's `live` data, which the supervisor writes and the addon re-reads; a narrowing closes only
+  the connections it no longer allows, through mitmproxy internals pinned by
+  `tests/test_proxy_reload_e2e.py` ([ADR-0030](./docs/adrs/0030-the-proxy-reloads-instead-of-restarting.md)).
 - **A failing minter must never log at ERROR during proxy STARTUP** — mitmproxy's `ErrorCheck`
   addon exits the process ("Error logged during startup, exiting…") on any ERROR logged while
   starting, and the supervisor respawns it, so one rule whose host.env secret is missing
