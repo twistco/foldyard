@@ -1459,3 +1459,144 @@ def test_a_rule_added_live_is_warmed_below_error(live, tmp_path):
         t.join(timeout=10)
     assert {lvl for lvl, msg in live.logs if "mint failed" in msg} == {"warn"}
     assert any("reloaded" in msg for _lvl, msg in live.logs)  # the change is reported
+
+
+# ── narrowing closes what the new policy wouldn't allow ───────────────────────────────
+
+
+class _Closer:
+    """Stands in for mitmproxy's proxyserver addon: `connections[client.id]` → a handler whose
+    `close_connection(handler.client)` records the close (the internal the addon relies on)."""
+
+    def __init__(self) -> None:
+        self.closed: list[str] = []
+        self.connections: dict[str, object] = {}
+
+    def track(self, client_id: str) -> None:
+        closer = self
+        client = types.SimpleNamespace(id=client_id)
+
+        class _Handler:
+            def __init__(self) -> None:
+                self.client = client
+
+            def close_connection(self, conn) -> None:
+                closer.closed.append(conn.id)
+
+        self.connections[client_id] = _Handler()
+
+
+@pytest.fixture
+def closer(gh, monkeypatch):
+    c = _Closer()
+    addons = types.SimpleNamespace(get=lambda name: c if name == "proxyserver" else None)
+    monkeypatch.setattr(gh.module.ctx, "master", types.SimpleNamespace(addons=addons))
+    return c
+
+
+def _open(inj, closer: _Closer, host: str, client_id: str, *, marked: bool = False) -> bool:
+    """CONNECT + ClientHello on one client connection, as mitmproxy delivers them; returns whether
+    the connection was blind-tunnelled."""
+    closer.track(client_id)
+    connect = _Flow(host)
+    connect.client_conn = types.SimpleNamespace(id=client_id)
+    if marked:
+        _marked(connect)
+    connect.response = None
+    inj.http_connect(connect)
+    assert connect.response is None, f"{host} refused at CONNECT"
+    hello = _ClientHello(host, client_id=client_id)
+    inj.tls_clienthello(hello)
+    return hello.ignore_connection
+
+
+def test_a_tunnel_whose_host_leaves_passthrough_is_closed(live, closer):
+    _write_live(live.live, passthrough=["files.example.com", "keep.example.com"])
+    inj = live.Injector()
+    assert _open(inj, closer, "files.example.com", "c1") is True
+    assert _open(inj, closer, "keep.example.com", "c2") is True
+    _write_live(live.live, passthrough=["keep.example.com"])
+    inj.refresh()
+    # The first must reconnect to be decrypted; the second is untouched.
+    assert closer.closed == ["c1"]
+
+
+def test_the_wall_going_up_closes_what_it_would_refuse(live, closer):
+    _write_allow(live.allow, ["granted.example.com"])
+    _write_live(live.live, passthrough=["blind.example.com"])
+    inj = live.Injector()
+    _open(inj, closer, "blind.example.com", "blind")  # tunnelled, not granted
+    _open(inj, closer, "seen.example.com", "seen")  # decrypted, not granted
+    _open(inj, closer, "granted.example.com", "ok")
+    _write_live(live.live, default_deny=True, passthrough=["blind.example.com"])
+    inj.refresh()
+    assert sorted(closer.closed) == ["blind", "seen"]
+
+
+def test_a_revoked_grant_closes_its_open_tunnels(walled, closer):
+    # Before, this was a gap: `fy allow remove` never restarted the proxy, so a revoked host kept
+    # any tunnel it already had.
+    inj, allow, _log = walled  # a legacy, env-configured Injector: allow changes still sweep
+    _write_allow(allow, ["gone.example.com", "stays.example.com"])
+    _open(inj, closer, "gone.example.com", "c1")
+    _open(inj, closer, "stays.example.com", "c2")
+    import os
+
+    _write_allow(allow, ["stays.example.com"])
+    os.utime(allow, (inj._allow_mtime + 10, inj._allow_mtime + 10))
+    inj.refresh()
+    assert closer.closed == ["c1"]
+
+
+def test_a_new_injector_host_closes_its_blind_tunnel(live, closer, tmp_path):
+    # An injector has to decrypt its host to rewrite the header; a tunnel opened before the rule
+    # existed would carry the box's dummy credential upstream untouched.
+    _write_live(live.live, passthrough=["api.sanity.io"])
+    inj = live.Injector()
+    assert _open(inj, closer, "api.sanity.io", "c1") is True
+    minter = _counting_minter(tmp_path, "sanity")
+    _write_live(
+        live.live,
+        rules=[{"host": "api.sanity.io", "command": minter.command}],
+        passthrough=["api.sanity.io"],
+    )
+    inj.refresh()
+    assert closer.closed == ["c1"]
+
+
+def test_widening_closes_nothing(live, closer):
+    inj = live.Injector()
+    _open(inj, closer, "files.example.com", "c1")  # decrypted
+    _write_live(live.live, passthrough=["files.example.com"])  # more trust, not less
+    inj.refresh()
+    _write_live(live.live, passthrough=["files.example.com"], default_deny=False)
+    inj.refresh()
+    assert closer.closed == []
+
+
+def test_a_build_tunnel_survives_a_passthrough_change_while_still_allowed(live, closer):
+    inj = live.Injector()
+    assert _open(inj, closer, "cdn.example.com", "b1", marked=True) is True
+    _write_live(live.live, passthrough=["other.example.com"])
+    inj.refresh()
+    assert closer.closed == []
+
+
+def test_a_disconnected_connection_is_not_closed_again(live, closer):
+    _write_live(live.live, passthrough=["files.example.com"])
+    inj = live.Injector()
+    _open(inj, closer, "files.example.com", "c1")
+    inj.client_disconnected(types.SimpleNamespace(id="c1"))
+    _write_live(live.live, passthrough=[])
+    inj.refresh()
+    assert closer.closed == []
+
+
+def test_a_close_that_fails_is_reported_not_raised(live, closer):
+    _write_live(live.live, passthrough=["files.example.com"])
+    inj = live.Injector()
+    _open(inj, closer, "files.example.com", "c1")
+    closer.connections.clear()  # mitmproxy no longer knows it (or its internals moved)
+    _write_live(live.live, passthrough=[])
+    assert inj.refresh() is True
+    assert any("couldn't close" in msg for _lvl, msg in live.logs)

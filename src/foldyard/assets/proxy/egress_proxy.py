@@ -540,11 +540,15 @@ class Injector:
         self._allow_patterns: list[str] = []
         # host key → monotonic time of its last would-block row (see _WOULD_BLOCK_EVERY).
         self._would_block_seen: dict[str, float] = {}
-        if self.live_path is not None:
-            self.refresh()  # the first read: rules, wall and passthrough all come from the file
         # Client connections whose CONNECT carried the build marker and passed the wall: their TLS
         # is tunnelled, not decrypted (see _BUILD_TUNNEL_USER). Dropped on disconnect.
         self._build_clients: set[str] = set()
+        # Every connection a CONNECT let through, by client id: what `_sweep` re-judges when the
+        # policy narrows (see `refresh`). Dropped on disconnect.
+        self._conns: dict[str, dict] = {}
+        self._policy_dirty = False
+        if self.live_path is not None:
+            self.refresh()  # the first read: rules, wall and passthrough all come from the file
 
     def _set_rules(self, rules: list[_Rule]) -> None:
         self.rules = rules
@@ -552,8 +556,27 @@ class Injector:
         self.injecting = bool(rules)
 
     def refresh(self) -> bool:
+        """Pick up any policy change — the live settings, the allowlist — and close the open
+        connections the new policy would not have allowed; True when something changed. Called at
+        the top of every hook and once a second by ``_watch`` (an idle tunnel sends no requests,
+        and a narrowing must still reach it).
+
+        The restart this replaced cut every connection, which also cut the ones a narrowing no
+        longer allows. Keeping that property without the collateral means re-judging each one:
+        a connection whose CONNECT the wall would now refuse is closed, and so is a blind tunnel
+        the policy would now decrypt (its host left the passthrough list, or became an injector's).
+        Widening closes nothing."""
+        changed = self._refresh_live()
+        self._refresh_allow()
+        if self._policy_dirty:
+            self._policy_dirty = False
+            changed = True
+            self._sweep()
+        return changed
+
+    def _refresh_live(self) -> bool:
         """Re-read LIVE_FILE (and the host.env its rules' secrets come from) if either changed;
-        True when it did. Called at the top of every hook and once a second by ``_watch``.
+        True when it did.
 
         A rule whose spec AND resolved secrets are unchanged keeps its object — so its cached
         token survives a posture change that only touched other rules. A new or changed rule
@@ -604,6 +627,7 @@ class Injector:
             ctx.log.info(f"egress_proxy: settings reloaded — injecting {hosts}; wall {wall}")
         if self._running:
             self._warm([r for r in fresh if r.active])
+        self._policy_dirty = True
         return True
 
     def _warm(self, rules: list[_Rule]) -> None:
@@ -680,24 +704,27 @@ class Injector:
         """Re-read ALLOW_FILE when its mtime changes, so a host-side `allow` grant takes effect
         with NO daemon restart. Fail toward MORE blocking: a missing/unreadable/malformed file
         leaves the allow set EMPTY — a parse error never widens egress."""
+        before = self._allow_patterns
         if self.allow_path is None:
             self._allow_patterns = []
-            return
-        try:
-            mtime = self.allow_path.stat().st_mtime
-        except OSError:
-            self._allow_patterns = []
-            self._allow_mtime = -1.0
-            return
-        if mtime == self._allow_mtime:
-            return
-        self._allow_mtime = mtime
-        try:
-            data = json.loads(self.allow_path.read_text())
-            allow = data.get("allow", []) if isinstance(data, dict) else []
-            self._allow_patterns = [str(p) for p in allow] if isinstance(allow, list) else []
-        except (OSError, ValueError):
-            self._allow_patterns = []
+        else:
+            try:
+                mtime = self.allow_path.stat().st_mtime
+            except OSError:
+                self._allow_patterns = []
+                self._allow_mtime = -1.0
+                mtime = None
+            if mtime is not None and mtime != self._allow_mtime:
+                self._allow_mtime = mtime
+                try:
+                    data = json.loads(self.allow_path.read_text())
+                    allow = data.get("allow", []) if isinstance(data, dict) else []
+                    patterns = [str(p) for p in allow] if isinstance(allow, list) else []
+                except (OSError, ValueError):
+                    patterns = []
+                self._allow_patterns = patterns
+        if self._allow_patterns != before:
+            self._policy_dirty = True  # a grant came or went: `refresh` re-judges open tunnels
 
     def _allowed(self, host: str | None) -> bool:
         """True if `host` may egress under default-deny: any injector host is always exempt (we must
@@ -880,13 +907,56 @@ class Injector:
         self._log_blocked(key, flow.request)
 
     def _note_build(self, flow: http.HTTPFlow) -> None:
-        """Remember a CONNECT that got through (granted, or let through while observing) and
-        carried the build marker, so ``tls_clienthello`` tunnels its connection."""
-        if _is_build_marker(flow.request.headers.get("Proxy-Authorization")):
-            self._build_clients.add(flow.client_conn.id)
+        """Remember a CONNECT that got through (granted, or let through while observing): for
+        ``_sweep``, and — when it carried the build marker — so ``tls_clienthello`` tunnels it."""
+        client = getattr(flow, "client_conn", None)
+        if client is None:
+            return
+        build = _is_build_marker(flow.request.headers.get("Proxy-Authorization"))
+        if build:
+            self._build_clients.add(client.id)
+        self._conns[client.id] = {
+            "host": flow.request.pretty_host,
+            "port": flow.request.port,
+            "blind": None,  # the tunnelled SNI target once tls_clienthello tunnels it
+            "build": build,
+        }
 
     def client_disconnected(self, client) -> None:
         self._build_clients.discard(client.id)
+        self._conns.pop(client.id, None)
+
+    def _tunnel(self, target: str | None, build: bool) -> bool:
+        """Would a TLS connection to ``target`` be blind-tunnelled now? (``tls_clienthello``.)"""
+        if target in self.inject_hosts:
+            return False
+        return build or self.capture_mode != "full" or _host_matches(target, self.passthrough_hosts)
+
+    def _sweep(self) -> None:
+        """Close each open connection the current policy would not have allowed (see `refresh`)."""
+        for client_id, conn in list(self._conns.items()):
+            host, port, blind = conn["host"], conn["port"], conn["blind"]
+            refused = self.default_deny and not self._allowed_connect(host, port)
+            decrypt_now = blind is not None and not self._tunnel(blind, conn["build"])
+            if not (refused or decrypt_now):
+                continue
+            key = host if port == _HTTPS_PORT else f"{host}:{port}"
+            why = "the wall refuses it now" if refused else "it is decrypted now"
+            self._close(client_id, key, why)
+
+    def _close(self, client_id: str, key: str, why: str) -> None:
+        """Close one client connection (and so its upstream). mitmproxy has no public API for a
+        connection without a flow — a blind tunnel is exactly that — so this reaches its
+        ``proxyserver`` addon's connection table, pinned by the real-mitmdump e2e."""
+        self._conns.pop(client_id, None)
+        self._build_clients.discard(client_id)
+        try:
+            handler = ctx.master.addons.get("proxyserver").connections[client_id]
+            handler.close_connection(handler.client)
+        except Exception as e:
+            ctx.log.warn(f"egress_proxy: couldn't close the connection to {key} ({why}): {e!r}")
+            return
+        ctx.log.info(f"egress_proxy: closed the connection to {key} — {why}")
 
     def _allowed_connect(self, host: str | None, port: int) -> bool:
         """The CONNECT policy: the host granted (:meth:`_allowed`) on :443, else ``host:port``
@@ -941,9 +1011,12 @@ class Injector:
         if target in self.inject_hosts:
             return  # an injector host: always decrypt (to rewrite its header), whatever the mode
         client = getattr(getattr(data, "context", None), "client", None)
+        conn = self._conns.get(client.id) if client is not None else None
         if client is not None and client.id in self._build_clients:
             data.ignore_connection = True  # a trusted build: it has no CA to verify ours with
             self._log_passthrough(target, build=True)
+            if conn is not None:
+                conn["blind"] = target
             return
         # Blind-tunnel (no decrypt, real certs end-to-end, SNI-only log) when either we're in
         # passthrough mode (tunnel everything) OR we're in full mode but the host is
@@ -952,6 +1025,8 @@ class Injector:
         if self.capture_mode != "full" or _host_matches(target, self.passthrough_hosts):
             data.ignore_connection = True
             self._log_passthrough(target)
+            if conn is not None:
+                conn["blind"] = target
 
     def request(self, flow: http.HTTPFlow) -> None:
         self.refresh()
