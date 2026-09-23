@@ -1855,3 +1855,13 @@ async def test_redaction_follows_what_was_injected_not_the_current_rules(live, t
     inj.refresh()  # the addon's one-second poll lands before the response does
     await inj.response(flow)
     assert "sk-live-secret" not in _last_log(live.log)["path"]
+
+
+def test_an_encoded_query_key_is_redacted_too(gh):
+    # mitmproxy writes `auth[token]` as `auth%5Btoken%5D`; the comparison must see through that.
+    redact = gh.module._redact_param
+    assert (
+        redact("/x?auth%5Btoken%5D=sk-secret&y=1", "auth[token]")
+        == "/x?auth%5Btoken%5D=‹redacted›&y=1"
+    )
+    assert redact("/x?auth+token=sk-secret", "auth token") == "/x?auth+token=‹redacted›"

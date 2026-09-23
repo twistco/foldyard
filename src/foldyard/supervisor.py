@@ -639,6 +639,10 @@ _host_env_ambient: frozenset[str] | None = None
 # Every key a load put into os.environ FROM host.env (never shrinks: a key dropped from the file
 # keeps its stale value in os.environ, and must stay stripped). What `scrub_host_env` removes.
 _host_env_loaded: set[str] = set()
+# Every key the supervisor itself DERIVED into os.environ (env_defaults, via setdefault). Stripped
+# from a `scrub_host_env` daemon too: inherited, it would read as an operator export and shadow
+# the live file's defaults, which can change (a new App id, another worktree's) without a restart.
+_derived_loaded: set[str] = set()
 
 
 def load_host_env() -> None:
@@ -670,6 +674,15 @@ def load_host_env() -> None:
         _host_env_loaded.add(key)
 
 
+def apply_env_defaults(defaults: dict[str, str]) -> None:
+    """``setdefault`` the posture's derived env into ours (an export or a host.env value wins),
+    remembering which keys WE set — see :data:`_derived_loaded`."""
+    for key, value in defaults.items():
+        if key not in os.environ:
+            _derived_loaded.add(key)
+        os.environ.setdefault(key, value)
+
+
 def _stage(pairs: list[tuple[str, str]]) -> None:
     """Snapshot each ``(src, dst)`` just before a daemon launches: copy src→dst when dst is missing
     or differs (idempotent). Lets a daemon point at a STABLE launch path instead of
@@ -697,7 +710,7 @@ class Child:
             # A daemon that reads its secrets from host.env by NAME (the proxy) runs without the
             # values host.env put in OUR environment — every axis's secret, which it has no use
             # for as env and which would otherwise sit in its process environment.
-            for key in _host_env_loaded:
+            for key in _host_env_loaded | _derived_loaded:
                 env.pop(key, None)
         self.proc = subprocess.Popen(spec["cmd"], env={**env, **spec["env"]})
         log(f"started {name} (pid {self.proc.pid}): {spec['label']}")
@@ -1220,8 +1233,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
             # id, a deterministic SA email — see plugins.Plugin.env_defaults) BEFORE the
             # `requires` gate below reads os.environ, so github=app etc. work with no host.env
             # entry at all. setdefault: an ambient export or a real host.env secret always wins.
-            for key, value in devmode.env_defaults(mode).items():
-                os.environ.setdefault(key, value)
+            apply_env_defaults(devmode.env_defaults(mode))
             desired.update(devmode.desired_daemons(mode))
             # Promote this checkout's agent transcripts into their durable host archive on the
             # configured interval (`[claude]/[codex] transcript_sync_seconds`; off by default).

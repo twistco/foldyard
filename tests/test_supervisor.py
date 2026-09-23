@@ -1706,3 +1706,27 @@ def test_a_live_file_that_cannot_be_written_does_not_stop_the_tick(tmp_path, mon
     spec["live"]["path"] = str(blocker / "proxy-live.json")  # its parent is a file: mkdir fails
     assert supervisor._sync_live("egress-proxy", spec, running=True) is False
     assert "couldn't write" in capsys.readouterr().out
+
+
+def test_a_derived_default_is_not_inherited_by_the_proxy(monkeypatch, tmp_path):
+    # The supervisor setdefaults env_defaults into its own env. Inherited, such a value would read
+    # as an operator export in the proxy and shadow the live file's defaults — a changed GH_APP_ID
+    # (or another worktree's) would never reach the minter. Strip what the supervisor derived.
+    monkeypatch.delenv("GH_APP_ID", raising=False)
+    monkeypatch.setenv("OPERATOR_EXPORT", "mine")
+    monkeypatch.setattr(supervisor, "_derived_loaded", set())
+    supervisor.apply_env_defaults({"GH_APP_ID": "123", "OPERATOR_EXPORT": "derived"})
+    assert supervisor.os.environ["GH_APP_ID"] == "123"  # the supervisor still has it (requires)
+    assert supervisor.os.environ["OPERATOR_EXPORT"] == "mine"  # setdefault: the export wins
+
+    seen: list[dict] = []
+
+    def fake_popen(cmd, env: dict, **_):
+        seen.append(env)
+        return types.SimpleNamespace(pid=1, poll=lambda: None)
+
+    monkeypatch.setattr(supervisor.subprocess, "Popen", fake_popen)
+    supervisor.Child(
+        "egress-proxy", {"cmd": ["p"], "env": {}, "label": "p", "scrub_host_env": True}
+    )
+    assert "GH_APP_ID" not in seen[-1] and seen[-1]["OPERATOR_EXPORT"] == "mine"

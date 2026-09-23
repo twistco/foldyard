@@ -278,12 +278,16 @@ def _redact_param(path: str, name: str) -> str:
     """``path`` with the value of query parameter ``name`` replaced by ``‹redacted›`` — the
     injector's credential, which it wrote into the URL, never reaches the egress log. Everything
     else in the path is kept as sent (ADR-0029 logs full paths)."""
+    from urllib.parse import unquote_plus
+
     base, sep, query = path.partition("?")
     if not sep:
         return path
-    parts = [
-        f"{name}=‹redacted›" if part.split("=", 1)[0] == name else part for part in query.split("&")
-    ]
+    parts = []
+    for part in query.split("&"):
+        key = part.split("=", 1)[0]
+        # Compared DECODED (mitmproxy writes `auth[token]` as `auth%5Btoken%5D`); logged as sent.
+        parts.append(f"{key}=‹redacted›" if unquote_plus(key) == name else part)
     return base + "?" + "&".join(parts)
 
 
