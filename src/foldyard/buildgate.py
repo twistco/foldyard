@@ -125,10 +125,60 @@ def run(
             echo(f"▶ retrying the {what}")
     else:
         echo(f"✗ still refused after {MAX_ATTEMPTS} attempts — look at the hosts above")
-    if shared:
+    if shared and not (interactive and _share(shared, prompt, echo)):
         echo(
             "  To offer these to the team at their own `fy up`, add to foldyard.toml (each `why`"
             " is what was SEEN — reword it before you commit):"
         )
         echo("\n".join(allowlist.recommend_block(shared)))
     return rc
+
+
+def _share(shared: list[dict], prompt: Callable[[str], str], echo: Callable[[str], None]) -> bool:
+    """Offer to write ``shared`` into this checkout's ``[proxy] recommend``; True once written.
+
+    If the checkout matched the adopted copy, this edit is the only difference and the operator
+    just made it, so it is adopted at once, pinned to exactly the bytes written. An edit landing in
+    between (the box writes the checkout) makes that adoption fail, not include it. A checkout that
+    had already drifted is left to the adoption gate at the next `fy up`: the edit would otherwise
+    carry changes the operator never reviewed."""
+    from . import configpin
+
+    hosts = ", ".join(e["host"] for e in shared)
+    answer = prompt(
+        f"  add {hosts} to foldyard.toml's [proxy] recommend, so the team is offered "
+        f"{'them' if len(shared) > 1 else 'it'}?  [y]es · [n]o (default): "
+    )
+    if answer.strip().lower() not in ("y", "yes"):
+        return False
+    cfg = config.current()
+    drift = configpin.inspect(cfg)
+    original = drift.tree.get("foldyard.toml")
+    edited = allowlist.with_recommends(original.decode() if original else "", shared)
+    if edited is None:
+        echo("  ✗ couldn't add them safely to foldyard.toml — here are the lines instead:")
+        return False
+    path = cfg.repo_root / "foldyard.toml"
+    current = path.read_bytes() if path.exists() else None
+    if current != original:
+        echo("  ✗ foldyard.toml changed while you answered — here are the lines instead:")
+        return False
+    path.write_text(edited)
+    note = "reword each `why` (what was SEEN), then commit"
+    if drift.adopted and not drift.changed:
+        tree = {**drift.tree, "foldyard.toml": edited.encode()}
+        try:
+            configpin.adopt(cfg, reviewed=configpin.digest(tree))
+        except configpin.ReviewStale:
+            echo(
+                "  ✓ added to foldyard.toml — it changed again, so adopt at the next `fy up`; "
+                + note
+            )
+            return True
+        echo(f"  ✓ added to foldyard.toml and adopted (the change is yours); {note}")
+    else:
+        echo(
+            "  ✓ added to foldyard.toml — the checkout already differed from what the host runs,"
+            f" so review and adopt it at the next `fy up`; {note}"
+        )
+    return True

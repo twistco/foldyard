@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -77,7 +78,7 @@ def _answers(*replies: str):
 
     def prompt(question: str) -> str:
         asked.append(question)
-        return queue.pop(0)
+        return queue.pop(0) if queue else ""  # past the scripted replies: the default, no
 
     return prompt, asked
 
@@ -153,7 +154,11 @@ def test_a_redirect_chain_is_walked_one_refusal_at_a_time(env):
     )
     prompt, asked = _answers("s", "s")
     assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 0
-    assert build.calls == 3 and len(asked) == 2
+    assert build.calls == 3
+    assert [q.split("?")[0] for q in asked[:2]] == [
+        "  allow cdn.example.com (1×)",
+        "  allow storage.example.com (1×)",
+    ]
 
 
 def test_the_retries_are_bounded(env):
@@ -214,3 +219,51 @@ def test_an_unwalled_build_is_not_gated(env, monkeypatch):
     prompt, asked = _answers()
     assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 1
     assert asked == []
+
+
+def _checkout_toml(env) -> Path:
+    return config.current().repo_root / "foldyard.toml"
+
+
+def test_the_gate_offers_to_write_the_recommend_lines_and_readopts_a_clean_checkout(env, capsys):
+    from foldyard import configpin
+
+    cfg = config.current()
+    configpin.adopt(
+        cfg
+    )  # the checkout matches what the host runs: the edit will be the only change
+    build = _Build(env["log"], [(1, [_row("storage.googleapis.com", ua="node")]), (0, [])])
+    prompt, asked = _answers("s", "y")
+    assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 0
+    assert "foldyard.toml" in asked[-1]
+    text = _checkout_toml(env).read_text()
+    assert 'host = "storage.googleapis.com"' in text
+    drift = configpin.inspect(cfg)
+    assert not drift.changed  # re-adopted: the operator's own edit needs no second review
+    assert "adopted" in capsys.readouterr().out
+
+
+def test_a_drifted_checkout_is_edited_but_left_to_the_adoption_gate(env, capsys):
+    from foldyard import configpin
+
+    cfg = config.current()
+    configpin.adopt(cfg)
+    toml = _checkout_toml(env)
+    toml.write_text(toml.read_text() + "\n[project]\nname = 'edited-in-the-box'\n")
+    build = _Build(env["log"], [(1, [_row("storage.googleapis.com")]), (0, [])])
+    prompt, _ = _answers("s", "y")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert 'host = "storage.googleapis.com"' in toml.read_text()
+    assert configpin.inspect(
+        cfg
+    ).changed  # NOT adopted: an edit the operator didn't make rides in it
+    assert "fy up" in capsys.readouterr().out
+
+
+def test_declining_the_write_leaves_the_file_alone_and_prints_the_block(env, capsys):
+    before = _checkout_toml(env).read_text()
+    build = _Build(env["log"], [(1, [_row("storage.googleapis.com")]), (0, [])])
+    prompt, _ = _answers("s", "")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert _checkout_toml(env).read_text() == before
+    assert "recommend = [" in capsys.readouterr().out

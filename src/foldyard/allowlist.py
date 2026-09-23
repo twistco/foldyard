@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 from collections.abc import Callable
@@ -470,6 +471,111 @@ def recommend_block(entries: list[dict]) -> list[str]:
     lines = ["  [proxy]", "  recommend = ["]
     lines += [f'    {{ host = "{e["host"]}", why = "{recommend_why(e)}" }},' for e in entries]
     return [*lines, "  ]"]
+
+
+_TABLE_HEADER = re.compile(r"^\s*\[\[?[^\]]*\]\]?\s*(#.*)?$")
+_PROXY_HEADER = re.compile(r"^\s*\[proxy\]\s*(#.*)?$")
+_RECOMMEND_KEY = re.compile(r"^\s*recommend\s*=\s*")
+
+
+def _array_bounds(text: str, start: int) -> tuple[int, int] | None:
+    """For the TOML array whose ``[`` is at ``start``: ``(close, last)`` — the index of its
+    matching ``]`` and of the last significant character inside it (``start`` itself when empty).
+    Strings and comments are skipped, so a bracket in either never counts. ``None`` if it never
+    closes."""
+    depth, last, i = 0, start, start
+    while i < len(text):
+        ch = text[i]
+        if ch == "#":
+            i = text.find("\n", i)
+            if i < 0:
+                return None
+            continue
+        if ch in "\"'":
+            triple = text.startswith(ch * 3, i)
+            quote = ch * 3 if triple else ch
+            j = i + len(quote)
+            while j < len(text) and not text.startswith(quote, j):
+                j += 2 if ch == '"' and text[j] == "\\" else 1
+            if j >= len(text):
+                return None
+            i = j + len(quote)
+            last = i - 1
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return i, last
+        if not ch.isspace():
+            last = i
+        i += 1
+    return None
+
+
+def with_recommends(text: str, entries: list[dict]) -> str | None:
+    """``text`` (a ``foldyard.toml``) with ``entries`` appended to ``[proxy] recommend`` — hosts
+    already recommended skipped, their ``why`` the observation of :func:`recommend_why`. Edits the
+    TEXT, so comments and layout survive, then proves it: the result must parse to exactly the
+    original plus the new entries, or this returns ``None`` and the caller prints the block
+    instead. A file it can't parse, or a ``recommend`` that isn't a list, is ``None`` too."""
+    import tomllib
+
+    try:
+        before = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    proxy = before.get("proxy", {})
+    existing = proxy.get("recommend", []) if isinstance(proxy, dict) else None
+    if not isinstance(existing, list):
+        return None
+    have = {
+        e if isinstance(e, str) else e.get("host") for e in existing if isinstance(e, str | dict)
+    }
+    new = [e for e in entries if e["host"] not in have]
+    if not new:
+        return text
+    items = [f'{{ host = "{e["host"]}", why = "{recommend_why(e)}" }}' for e in new]
+    block = "".join(f"  {item},\n" for item in items)
+
+    lines = text.splitlines(keepends=True)
+    header = next((n for n, line in enumerate(lines) if _PROXY_HEADER.match(line)), None)
+    if header is None:
+        sep = "" if not text or text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+        out = f"{text}{sep}[proxy]\nrecommend = [\n{block}]\n"
+    else:
+        end = next(
+            (n for n in range(header + 1, len(lines)) if _TABLE_HEADER.match(lines[n])),
+            len(lines),
+        )
+        key = next((n for n in range(header + 1, end) if _RECOMMEND_KEY.match(lines[n])), None)
+        if key is None:
+            at = sum(len(line) for line in lines[: header + 1])
+            out = f"{text[:at]}recommend = [\n{block}]\n{text[at:]}"
+        else:
+            offset = sum(len(line) for line in lines[:key])
+            matched = _RECOMMEND_KEY.match(lines[key])
+            assert matched  # `key` was chosen by this same match
+            opening = text.find("[", offset + matched.end() - 1)
+            bounds = _array_bounds(text, opening) if opening >= 0 else None
+            if bounds is None:
+                return None
+            close, last = bounds
+            comma = "" if text[last] in "[," else ","
+            line_start = text.rfind("\n", 0, close) + 1
+            if text[line_start:close].strip():  # `]` shares its line: an inline list
+                out = f"{text[: last + 1]}{comma} {', '.join(items)}{text[last + 1 :]}"
+            else:
+                head = f"{text[: last + 1]}{comma}{text[last + 1 : line_start]}"
+                out = f"{head}{block}{text[line_start:]}"
+    try:
+        after = tomllib.loads(out)
+    except tomllib.TOMLDecodeError:
+        return None
+    added = [{"host": e["host"], "why": recommend_why(e)} for e in new]
+    expected = {**before, "proxy": {**proxy, "recommend": [*existing, *added]}}
+    return out if after == expected else None
 
 
 def _prune(hosts: dict[str, dict]) -> tuple[dict[str, dict], bool]:

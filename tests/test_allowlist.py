@@ -590,3 +590,75 @@ def test_read_log_rows_skips_damage(env, tmp_path):
     good, bad = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
     good.write_text('{"host": "a.example.com"}\nnot json\n[1]\n')
     assert allowlist.read_log_rows([good, bad]) == [{"host": "a.example.com"}]
+
+
+# ── writing recommend lines into foldyard.toml (the build gate's "share with the team") ──
+
+_NEW = [{"host": "storage.googleapis.com", "uas": ["node"], "paths": [], "more_paths": 0}]
+
+
+def _recommended(text: str) -> list:
+    import tomllib
+
+    return tomllib.loads(text)["proxy"]["recommend"]
+
+
+def test_with_recommends_appends_inside_an_existing_multiline_list_keeping_comments():
+    text = (
+        "[project]\nname = 'x'\n\n[proxy]\ndefault_deny = true\n# the team's list\nrecommend = [\n"
+        '  { host = "pypi.org", why = "uv" },\n'
+        "  # ── this project ──\n"
+        "]\n\n[machine]\nwall = true\n"
+    )
+    out = allowlist.with_recommends(text, _NEW)
+    assert out is not None
+    assert [e["host"] for e in _recommended(out)] == ["pypi.org", "storage.googleapis.com"]
+    assert "# the team's list" in out and "# ── this project ──" in out  # comments survive
+    assert out.startswith(text.split("]\n\n[machine]")[0])  # nothing above the end is touched
+
+
+def test_with_recommends_adds_the_missing_comma():
+    text = '[proxy]\nrecommend = [\n  { host = "pypi.org", why = "uv" }\n]\n'
+    out = allowlist.with_recommends(text, _NEW)
+    assert out is not None and len(_recommended(out)) == 2
+
+
+def test_with_recommends_handles_an_inline_list():
+    text = '[proxy]\nrecommend = ["pypi.org"]\n'
+    out = allowlist.with_recommends(text, _NEW)
+    assert out is not None
+    assert _recommended(out)[0] == "pypi.org"
+    assert _recommended(out)[1]["host"] == "storage.googleapis.com"
+
+
+def test_with_recommends_creates_the_key_and_the_table():
+    no_key = "[proxy]\ndefault_deny = true\n\n[machine]\nwall = true\n"
+    out = allowlist.with_recommends(no_key, _NEW)
+    assert out is not None and _recommended(out)[0]["host"] == "storage.googleapis.com"
+    no_table = "[project]\nname = 'x'\n"
+    out = allowlist.with_recommends(no_table, _NEW)
+    assert out is not None and _recommended(out)[0]["host"] == "storage.googleapis.com"
+
+
+def test_with_recommends_skips_hosts_already_recommended():
+    text = '[proxy]\nrecommend = [{ host = "storage.googleapis.com", why = "mine" }]\n'
+    assert allowlist.with_recommends(text, _NEW) == text  # nothing to add, nothing changed
+
+
+def test_with_recommends_ignores_brackets_inside_strings_and_comments():
+    text = (
+        "[proxy]\nrecommend = [\n"
+        '  { host = "pypi.org", why = "has ] and [ in it" },  # and ] here\n'
+        "]\n"
+    )
+    out = allowlist.with_recommends(text, _NEW)
+    assert out is not None and [e["host"] for e in _recommended(out)] == [
+        "pypi.org",
+        "storage.googleapis.com",
+    ]
+
+
+def test_with_recommends_refuses_what_it_cannot_edit_safely():
+    # Anything it can't prove is a pure append comes back None; the caller prints the block.
+    assert allowlist.with_recommends("[proxy\nbroken", _NEW) is None
+    assert allowlist.with_recommends('[proxy]\nrecommend = "not a list"\n', _NEW) is None
