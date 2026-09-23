@@ -8,6 +8,7 @@ listener's cgroup, a per-project ct mark carrying the origin across — on a Git
 from __future__ import annotations
 
 import json
+import random
 import re
 import socket
 import subprocess
@@ -375,9 +376,29 @@ def test_probe_verdict(checks, enforcing):
     assert hostwall._verdict(checks) is enforcing
 
 
+def _free_band_base() -> int:
+    """A free port BELOW every OS's ephemeral range (Linux 32768+, macOS 49152+): the probe's
+    out-of-band listener is a port-0 bind, and macOS hands those out near-sequentially — a base
+    taken from that range traps every retry inside the band."""
+    rng = random.Random()
+    while True:
+        port = rng.randrange(20000, 32000)
+        with socket.socket() as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+        return port
+
+
 def test_probe_opens_the_listeners_outside_the_slice_and_reads_the_childs_verdicts(
     bands, monkeypatch
 ):
+    # the listeners are REAL, so the band must not be the shared 41000: anything else on the
+    # machine connecting there (another worker, a live foldyard project's own proxy port) fills
+    # the listener's backlog of one and the fake child's connect times out
+    base = _free_band_base()
+    monkeypatch.setattr(config, "proxy_port_base", lambda: base)
     seen = {}
 
     def fake_run(cmd, **kw):
@@ -394,10 +415,11 @@ def test_probe_opens_the_listeners_outside_the_slice_and_reads_the_childs_verdic
 
     monkeypatch.setattr(hostwall.subprocess, "run", fake_run)
     res = hostwall.probe("acme")
-    assert res.enforcing is True and res.error == ""
+    assert res.enforcing is True and res.error == "", res.error
     assert seen["cmd"][5:7] == ["--slice", "fy-machine-acme.slice"]
     assert seen["targets"]["external"] == "192.0.2.1:9"
-    assert seen["targets"]["band"].startswith("127.0.0.1:410")  # the first free port of the band
+    band_port = int(seen["targets"]["band"].rpartition(":")[2])
+    assert base <= band_port <= base + hostwall._SPAN  # the first free port of the band
     assert res.detail() == "loopback ✓ refused, external ✓ refused, band ✓ ok"
 
 
