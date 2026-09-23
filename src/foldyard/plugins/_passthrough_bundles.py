@@ -51,11 +51,15 @@ BUNDLES: dict[str, tuple[str, ...]] = {
         "index.docker.io",
         "hub.docker.com",
         "www.docker.com",
+        # Docker Hub serves blobs from either CDN; a pull is the guest podman's own traffic, which
+        # trusts no proxy CA, so a decrypted blob host fails it (x509 "unknown authority").
         "production.cloudflare.docker.com",
+        "production.cloudfront.docker.com",
         "download.docker.com",
         "gcr.io",
         "*.gcr.io",
         "ghcr.io",
+        "pkg-containers.githubusercontent.com",  # ghcr.io's blob storage
         "mcr.microsoft.com",
         "*.data.mcr.microsoft.com",
         "public.ecr.aws",

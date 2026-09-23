@@ -103,6 +103,11 @@ belongs in the middle — but *one* middle, not a switch between two.
   narrower and the public marker unlocks none of them. The residual: during a build, the box could
   inspect the build container through the engine socket and read that build's secret — a window of
   one build, where a fixed marker would be permanent.
+- **Image pulls rely on `passthrough`.** A pull is the guest podman's own traffic, through the
+  VM-wide proxy env: no build marker, no proxy CA. A decrypted registry blob host fails it with
+  x509 "unknown authority" (the Lima host e2e, when Docker Hub served a blob from
+  `production.cloudfront.docker.com`, which `@containers` lacked). The registry hosts must stay in
+  the default bundles; `test_image_pull_hosts_are_tunnelled_by_the_default_passthrough` pins them.
 - **The egress log grows**: a request row per request rather than a row per connection, and full
   paths — query strings included — on the host. The log stays outside the mount and rotation
   bounds it (5 MiB × 6 by default). A token carried in a URL now lands there; the `query_param`

@@ -2607,3 +2607,28 @@ def test_the_live_file_names_the_open_learn_window(monkeypatch):
     monkeypatch.setattr(allowlist, "learning", lambda: window)
     live = reg.desired_daemons({})["egress-proxy"]["live"]["data"]
     assert live["observing_since"] == window["since"]
+
+
+def test_image_pull_hosts_are_tunnelled_by_the_default_passthrough():
+    # A pull is podman's own traffic in the guest, through the VM-wide proxy env: it carries no
+    # build marker and trusts no proxy CA, so a decrypted registry blob host fails the pull with
+    # x509 "unknown authority" (the Lima host e2e, 2026-09-23: Docker Hub served a blob from
+    # production.cloudfront.docker.com). Every registry host `fy init` recommends for image builds
+    # must therefore be on the default `@all` list.
+    import inspect
+
+    from foldyard import init as init_mod
+
+    scaffold = inspect.getsource(init_mod)
+    pull_hosts = {
+        "registry-1.docker.io",
+        "auth.docker.io",
+        "production.cloudfront.docker.com",
+        "production.cloudflare.docker.com",
+        "ghcr.io",
+        "pkg-containers.githubusercontent.com",
+    }
+    tunnelled = proxy._resolve_passthrough(["@all"])
+    assert pull_hosts <= set(tunnelled), pull_hosts - set(tunnelled)
+    for host in pull_hosts - {"production.cloudflare.docker.com"}:
+        assert host in scaffold  # the scaffold recommends them; the bundle must tunnel them
