@@ -786,11 +786,7 @@ def allow_learn(
             "foldyard.toml — each `why` is what the box was SEEN doing; replace it with the "
             "reason the project needs the host before you commit:"
         )
-        print("  [proxy]\n  recommend = [")
-        for e in granted:
-            why = allowlist.recommend_why(e)
-            print(f'    {{ host = "{e["host"]}", why = "{why}" }},')
-        print("  ]")
+        print("\n".join(allowlist.recommend_block(granted)))
 
 
 @allow_app.command("remove")

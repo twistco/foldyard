@@ -1164,10 +1164,21 @@ def test_the_build_marker_never_opens_the_wall(walled):
     # The marker decides DECRYPTION only. A marked CONNECT to an ungranted host is refused.
     inj, _allow, log = walled
     connect = _marked(_Flow("evil.example.com"))
+    connect.request.headers["user-agent"] = "node"
     connect.response = None
     inj.http_connect(connect)
     assert connect.response is not None and connect.response.status_code == 403
-    assert _last_log(log)["blocked"] is True
+    row = _last_log(log)
+    # Attributed to the build, with the tool: what `fy box build` reads back to offer the host.
+    assert row["blocked"] is True and row["build"] is True and row["ua"] == "node"
+
+
+def test_an_unmarked_refusal_is_not_attributed_to_a_build(walled):
+    inj, _allow, log = walled
+    connect = _Flow("evil.example.com")
+    connect.response = None
+    inj.http_connect(connect)
+    assert "build" not in _last_log(log)
 
 
 def test_an_unmarked_connection_is_still_decrypted(walled):
@@ -1240,3 +1251,13 @@ def test_the_marker_header_is_not_forwarded_on_cleartext(walled):
     inj.request(flow)
     assert flow.response is None  # granted, not refused
     assert "Proxy-Authorization" not in flow.request.headers
+
+
+def test_a_refused_cleartext_build_request_is_attributed_too(walled):
+    # apt fetches over plain HTTP: its refusal must reach the build gate like a CONNECT's.
+    inj, _allow, log = walled
+    flow = _marked(_Flow("deb.example.org", port=80, scheme="http"))
+    flow.response = None
+    inj.request(flow)
+    assert flow.response is not None and flow.response.status_code == 403
+    assert _last_log(log)["build"] is True

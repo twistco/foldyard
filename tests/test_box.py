@@ -75,6 +75,7 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "gcp_metadata_declared", lambda: True)
     monkeypatch.setattr(config, "gcp_project", lambda: "p")
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)  # proxy off by default; opt in/test
+    monkeypatch.setattr(config, "machine_wall", lambda: False)  # no in-VM wall; opt in per test
     # foldyard self-install resolution is exercised in its own tests; stub it here so the golden
     # sequences don't build a real wheel / probe the host's foldyard install.
     monkeypatch.setattr(
@@ -236,6 +237,20 @@ def test_walled_build_routes_through_the_proxy_as_a_trusted_build(fake, monkeypa
     url = f"http://{proxy.BUILD_TUNNEL_USER}:{proxy.BUILD_TUNNEL_USER}@192.168.5.2:41000"
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         assert f"{key}={url}" in args
+
+
+def test_box_build_runs_under_the_build_gate(fake, monkeypatch):
+    from foldyard import buildgate
+
+    gated: list[str] = []
+
+    def fake_gate(build, *, what, **_):
+        gated.append(what)
+        return build()
+
+    monkeypatch.setattr(buildgate, "run", fake_gate)
+    assert box.main("build") == 0
+    assert gated == ["box image build"]
 
 
 def test_unwalled_build_gets_no_proxy_args(fake, monkeypatch):

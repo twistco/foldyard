@@ -1689,6 +1689,14 @@ def log_dir() -> Path:
     return Path(env).expanduser().resolve() if env else posture_dir() / "logs"
 
 
+def main_log_dir() -> Path:
+    """The MAIN checkout's host-daemon logs, from any worktree: where the main proxy listener
+    writes, which is the one image builds reach (building isn't per-worktree). Same override as
+    :func:`log_dir`."""
+    env = os.environ.get("FOLDYARD_LOG_DIR")
+    return Path(env).expanduser().resolve() if env else state_dir() / "main" / "logs"
+
+
 # How many bytes to read from the END of each (rotated) JSONL log when a TUI panel tails it.
 # The panels show at most a few hundred recent lines; at ~150–250 B/line this tail comfortably
 # covers >1000 lines, so we never re-read the whole multi-MB (decrypted, per-request) file just

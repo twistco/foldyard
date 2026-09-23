@@ -301,8 +301,14 @@ def _build_img(engine: str, main: Path, env: dict) -> int:
     for key, value in (img.get("build_args") or {}).items():
         cmd += ["--build-arg", f"{key}={value}"]
     cmd += ["-f", dockerfile, "-t", img["tag"], context]
-    _echo(cmd)
-    return subprocess.run(cmd, env=env, cwd=context).returncode
+
+    def build() -> int:
+        _echo(cmd)
+        return subprocess.run(cmd, env=env, cwd=context).returncode
+
+    from . import buildgate
+
+    return buildgate.run(build, what="box image build")
 
 
 def _box_home(engine: str, img: str, env: dict) -> tuple[str, str]:

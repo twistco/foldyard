@@ -103,6 +103,24 @@ vars are honoured by well-behaved software and ignorable by anything else. So:
   (UDP/443)** bypasses a CONNECT proxy entirely. The wall's default-deny covers it; on
   cooperative-only setups it's simply not captured.
 
+### Image builds: trusted, still walled
+
+Under the wall an image build (`fy box build`, and the stack build `fy up` runs) also goes out
+through the proxy, but a build container doesn't have the proxy's CA. foldyard therefore gives the
+build a proxy URL carrying a marker (`fy-build`), and the proxy tunnels those connections instead
+of decrypting them. The log shows them as `tls tunnel` rows flagged `build`. **The allowlist still
+applies**: the marker changes what is decrypted, never what is allowed
+([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)).
+
+When the wall refuses a build, the tool's error names the URL it *asked* for, which is often not
+the host that was refused: a CDN redirects inside the tunnel (Playwright's `cdn.playwright.dev`
+sends browser downloads to `storage.googleapis.com`). So the build reports the refused hosts
+itself. On the host, with a terminal, it asks about each one — once (15 minutes, long enough for
+the build), session, permanent or no — then builds again. The layer cache makes that cheap, and a
+redirect chain gets one hop further per attempt. Anything you grant comes back as `[proxy]
+recommend` lines, so the team is offered it at their own `fy up`. Without a terminal it prints the
+`fy allow add` commands instead. Inside the box it does nothing: grants are the operator's.
+
 ## When something's off
 
 - **"The Network Log is empty."** A box created before the always-route era has

@@ -94,8 +94,10 @@ belongs in the middle — but *one* middle, not a switch between two.
   `passthrough` row flagged `build`. **The wall still applies** — the marker is checked only
   after the CONNECT is granted. It is a marker, not a credential: the box can present it too, and
   gains only an undecrypted tunnel to a host it could already reach. That is a visibility
-  concession, which ADR-0009 already classes as not enforcement. Stack images built by compose
-  (`fy up`) take the VM's unmarked proxy env and are still decrypted.
+  concession, which ADR-0009 already classes as not enforcement. The stack's own image builds
+  (`fy up`/`fy build`, the native podman path) carry the marker too; the running stack's
+  containers take the VM's unmarked proxy env and stay decrypted. A refused build is reported and
+  offered host by host, then retried (`foldyard.buildgate`; docs/networking.md).
 - **The egress log grows**: a request row per request rather than a row per connection, and full
   paths — query strings included — on the host. The log stays outside the mount and rotation
   bounds it (5 MiB × 6 by default). A token carried in a URL now lands there; the `query_param`

@@ -634,13 +634,15 @@ class Injector:
             entry["build"] = True
         self._write_entry(entry)
 
-    def _log_blocked(self, host: str | None) -> None:
+    def _log_blocked(self, host: str | None, request=None) -> None:
         """A row for a host REFUSED by the default-deny wall — no upstream is ever contacted, so
         there's no method/path/real status (we synthesise a 403). The Network Log panel keys off
-        ``blocked`` to paint it red and offer an 'allow' action. No host → nothing to log."""
+        ``blocked`` to paint it red and offer an 'allow' action. With the refused ``request``,
+        the row also carries its User-Agent and, when it carried the build marker, ``build`` —
+        what `fy box build`/`fy up` read back to offer the host. No host → nothing to log."""
         if not host:
             return
-        self._write_entry({
+        entry = {
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             "method": "",
             "host": host,
@@ -649,7 +651,14 @@ class Injector:
             "injected": False,
             "replayed": False,
             "blocked": True,
-        })  # fmt: skip
+        }  # fmt: skip
+        if request is not None:
+            ua = _user_agent(request)
+            if ua:
+                entry["ua"] = ua
+            if _is_build_marker(request.headers.get("Proxy-Authorization")):
+                entry["build"] = True
+        self._write_entry(entry)
 
     def _log_would_block(self, key: str | None, request) -> None:
         """While the wall only OBSERVES (``fy allow wall off``, or a learn window): a row for a
@@ -721,7 +730,7 @@ class Injector:
             self._note_build(flow)
             return
         flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
-        self._log_blocked(key)
+        self._log_blocked(key, flow.request)
 
     def _note_build(self, flow: http.HTTPFlow) -> None:
         """Remember a CONNECT that got through (granted, or let through while observing) and
@@ -801,19 +810,19 @@ class Injector:
         # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host
         # grant as CONNECT :22 — here, before it leaves the box. HTTPS is walled at http_connect.
         host, port = flow.request.pretty_host, flow.request.port
-        if _is_build_marker(flow.request.headers.get("Proxy-Authorization")):
-            del flow.request.headers["Proxy-Authorization"]  # ours, not the upstream's
         if not self._allowed_plain(host, port, flow.request.scheme):
             default = _HTTPS_PORT if flow.request.scheme == "https" else _HTTP_PORT
             key = host if port == default else f"{host}:{port}"
             if self.default_deny:
                 flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
                 flow.metadata["egress_proxy_blocked"] = True  # so `response` doesn't re-log a 403
-                self._log_blocked(key)
+                self._log_blocked(key, flow.request)
                 return
             if flow.request.scheme != "https":
                 # Observing, cleartext: record it (HTTPS was already recorded at its CONNECT).
                 self._log_would_block(key, flow.request)
+        if _is_build_marker(flow.request.headers.get("Proxy-Authorization")):
+            del flow.request.headers["Proxy-Authorization"]  # ours, not the upstream's
         rule = self._rule_for(flow)
         if rule is None:
             return  # capture-only, or not a target host/path → log on the way back, rewrite nothing

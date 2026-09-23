@@ -438,6 +438,40 @@ def learned_hosts(rows: list[dict], window: dict) -> list[dict]:
     return list(out.values())
 
 
+def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
+    """The hosts the wall REFUSED an image build since ``since``, still not granted:
+    ``{host, count, uas, paths, more_paths}`` in first-seen order (the ``learned_hosts`` shape, so
+    :func:`recommend_why` reads it). Only rows the proxy attributed to a build (its ``build`` flag,
+    from the build marker) count — a box session refused in the same minute is not the build's.
+    A build is tunnelled, so there are never paths. Box-originated text, handled as in
+    :func:`learned_hosts`."""
+    granted = live_hosts()
+    out: dict[str, dict] = {}
+    for row in rows:
+        ts, key = _parse(row.get("ts")), row.get("host")
+        if not (row.get("blocked") and row.get("build")) or ts is None or ts < since:
+            continue
+        if not isinstance(key, str) or not valid_host(key) or _matches(key, granted):
+            continue
+        entry = out.setdefault(
+            key, {"host": key, "count": 0, "uas": [], "paths": [], "more_paths": 0}
+        )
+        entry["count"] += 1
+        ua = _printable(row.get("ua"))
+        if ua and ua not in entry["uas"] and len(entry["uas"]) < 3:
+            entry["uas"].append(ua)
+    return list(out.values())
+
+
+def recommend_block(entries: list[dict]) -> list[str]:
+    """The ``[proxy] recommend`` TOML for ``entries`` (``learned_hosts``/``build_refusals``
+    shape), each ``why`` the labelled observation of :func:`recommend_why` — ready to paste, and
+    to reword before committing."""
+    lines = ["  [proxy]", "  recommend = ["]
+    lines += [f'    {{ host = "{e["host"]}", why = "{recommend_why(e)}" }},' for e in entries]
+    return [*lines, "  ]"]
+
+
 def _prune(hosts: dict[str, dict]) -> tuple[dict[str, dict], bool]:
     """Drop expired ``once`` grants. Returns (hosts, changed)."""
     keep = {}
