@@ -746,6 +746,7 @@ def allow_learn(
         learned = allowlist.learned_hosts(rows, window)
     state = "open" if allowlist.learning() else "closed"
     span = f"{_local_hm(window['since'])}–{_local_hm(window['until'])}, {state}"
+    allowlist.mark_reviewed()  # shown now: the next window starts fresh instead of carrying this
     if not learned:
         print(f"✓ nothing to grant from the learn window ({span}) — the wall refused nothing new")
         return

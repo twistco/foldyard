@@ -678,3 +678,71 @@ def test_offer_can_grant_once_for_a_broad_host(env):
 
     left = datetime.fromisoformat(grant["expires"]) - datetime.now(UTC)
     assert left >= timedelta(seconds=allowlist.OFFER_ONCE_SECONDS - 5)
+
+
+# ── CodeRabbit on #31: timestamps, unreviewed windows, port-wildcard grants ─────────────
+
+
+def _store(raw: dict) -> None:
+    config.allow_store_file().parent.mkdir(parents=True, exist_ok=True)
+    config.allow_store_file().write_text(json.dumps(raw))
+
+
+def test_a_timezone_free_learn_window_is_damage_and_fails_closed(env):
+    # `fromisoformat` accepts "2026-09-22T11:00:00"; comparing that with an aware `now` raised
+    # TypeError out of the wall check instead of failing closed.
+    _store(
+        {
+            "default_deny": False,
+            "learn": {"since": "2026-09-22T10:00:00", "until": "2099-01-01T00:00:00"},
+        }
+    )
+    assert allowlist.learning() is None
+    assert allowlist.default_deny() is True  # damaged ⇒ enforcing
+
+
+def test_a_timezone_free_grant_expiry_is_damage_too(env):
+    # The same comparison in `_prune`: and reading it as "no expiry" would make a once-grant
+    # permanent, so it must be damage (grants nothing), never a default.
+    _store({"hosts": {"a.example.com": {"level": "once", "expires": "2099-01-01T00:00:00"}}})
+    assert allowlist.live_hosts() == []
+
+
+def test_a_new_window_keeps_an_unreviewed_one_in_the_review(env, monkeypatch):
+    # `fy allow learn` reads one window; starting another before reviewing the first used to drop
+    # everything only the first had seen. The new window now reaches back to it.
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    allowlist.start_learning(600)
+    _at(monkeypatch, "2026-09-22T12:00:00+00:00")  # the first lapsed, never reviewed
+    window = allowlist.start_learning(600)
+    assert window["since"] == "2026-09-22T10:00:00+00:00"
+    assert window["until"] == "2026-09-22T12:10:00+00:00"
+
+
+def test_a_reviewed_window_is_not_carried_into_the_next(env, monkeypatch):
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    allowlist.start_learning(600)
+    _at(monkeypatch, "2026-09-22T10:30:00+00:00")
+    allowlist.mark_reviewed()
+    _at(monkeypatch, "2026-09-22T12:00:00+00:00")
+    assert allowlist.start_learning(600)["since"] == "2026-09-22T12:00:00+00:00"
+
+
+def test_a_review_mid_window_carries_only_what_came_after_it(env, monkeypatch):
+    _at(monkeypatch, "2026-09-22T10:00:00+00:00")
+    allowlist.start_learning(3600)
+    _at(monkeypatch, "2026-09-22T10:20:00+00:00")
+    allowlist.mark_reviewed()
+    _at(monkeypatch, "2026-09-22T10:40:00+00:00")  # still open, restarted after the review
+    assert allowlist.start_learning(600)["since"] == "2026-09-22T10:20:00+00:00"
+
+
+def test_a_port_wildcard_grant_answers_a_port_keyed_host(env):
+    # The proxy lets `*.example.com:22` through for git.example.com:22; the review must agree, or
+    # it keeps offering a host that is already granted.
+    rows = [
+        {"ts": "2026-09-22T10:05:00+00:00", "host": "git.example.com:22", "would_block": True},
+    ]
+    allowlist.grant("*.example.com:22", "permanent")
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    assert allowlist.learned_hosts(rows, window) == []

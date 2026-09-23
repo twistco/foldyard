@@ -287,6 +287,14 @@ def _default_deny() -> bool:
     return allowlist.default_deny()
 
 
+def _observing_since() -> str | None:
+    """The open learn window's start, or None (host-owned, like :func:`_default_deny`)."""
+    from .. import allowlist  # lazy, as in _default_deny
+
+    window = allowlist.learning()
+    return window["since"] if window else None
+
+
 def _resolve_passthrough(entries: list[str]) -> list[str]:
     """Expand the ``[proxy] passthrough`` entries into a flat, deduped, order-preserving pattern
     list the daemon matches against: ``@all`` → every built-in bundle, ``@name`` → that bundle,
@@ -366,6 +374,9 @@ class ProxyPlugin(Plugin):
             # From the HOST-owned allow-store, never straight from the repo's `[proxy]`.
             "default_deny": _default_deny(),
             "passthrough": _resolve_passthrough(config.proxy_passthrough()),
+            # The open learn window's start: a new window resets the addon's per-host would-block
+            # rate limit, or a host seen just before it would get no row inside it.
+            "observing_since": _observing_since(),
         }
         if rules:
             label = "egress proxy (" + ", ".join(r.label or r.host for r in rules) + ")"

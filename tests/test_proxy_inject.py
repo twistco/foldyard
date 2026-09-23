@@ -1626,3 +1626,81 @@ def test_the_request_hook_after_requestheaders_does_nothing_twice(walled):
     assert flow.response is not None and flow.response.status_code == 403
     inj.request(flow)
     assert sum(1 for line in log.read_text().splitlines() if '"blocked": true' in line) == 1
+
+
+# ── CodeRabbit on #31: would-block state, streamed 401s, tokens in logged paths ─────────
+
+
+async def test_a_streamed_401_still_drops_the_rejected_token(injector, fake_minter):
+    # The body is gone so the request can't be re-issued, but the token the upstream just refused
+    # must not be served to the next request for the rest of its TTL.
+    inj, _ = injector
+    inj.request(_Flow("api.github.com"))
+    assert fake_minter.calls.read_text() == "1"
+    flow = _Flow("api.github.com", status=401)
+    flow.request.raw_content = None
+    await inj.response(flow)
+    inj.request(_Flow("api.github.com"))
+    assert fake_minter.calls.read_text() == "2"  # re-minted, not the cached reject
+
+
+async def test_a_query_param_credential_never_reaches_the_log(qp_injector):
+    # The injector writes the minted value into the URL; the log keeps the path (ADR-0029) but
+    # not the credential in it. Other parameters stay readable.
+    inj, log = qp_injector
+    flow = _Flow("truenas.example.ts.net", path="/mcp/stream?userToken=sk-live-secret&x=1")
+    await inj.response(flow)
+    logged = _last_log(log)["path"]
+    assert "sk-live-secret" not in logged
+    assert "userToken=‹redacted›" in logged and "x=1" in logged
+
+
+def test_the_would_block_map_is_bounded(observing, gh, monkeypatch):
+    # One entry per distinct refused host, never expired: generated hostnames grew it for ever.
+    inj, _allow, _log = observing
+    monkeypatch.setattr(gh.module, "_WOULD_BLOCK_MAX", 3)
+    for i in range(10):
+        f = _Flow(f"h{i}.example.com")
+        f.response = None
+        inj.http_connect(f)
+    assert len(inj._would_block_seen) <= 3
+
+
+def test_a_new_learn_window_resets_the_would_block_limit(live):
+    # A host recorded just before a new window, and seen again inside it, must get a row IN the
+    # window, or the window's review never shows it.
+    inj = live.Injector()
+    first = _Flow("new.example.com")
+    first.response = None
+    inj.http_connect(first)
+    _write_live(live.live)  # same settings, re-written: no reset
+    again = _Flow("new.example.com")
+    again.response = None
+    inj.http_connect(again)
+    rows = [
+        r
+        for r in (json.loads(x) for x in live.log.read_text().splitlines())
+        if r.get("would_block")
+    ]
+    assert len(rows) == 1
+    tmp = live.live.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(
+            {
+                "rules": [],
+                "default_deny": False,
+                "passthrough": [],
+                "observing_since": "2026-09-23T18:00:00+00:00",
+            }
+        )
+    )
+    tmp.replace(live.live)
+    third = _Flow("new.example.com")
+    third.response = None
+    inj.http_connect(third)
+    rows = [
+        r
+        for r in (json.loads(x) for x in live.log.read_text().splitlines())
+        if r.get("would_block")
+    ]
+    assert len(rows) == 2

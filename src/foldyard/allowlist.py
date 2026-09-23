@@ -62,6 +62,14 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(UTC).isoformat(timespec="seconds")
 
 
+def _aware(iso: object) -> datetime | None:
+    """``iso`` as a timezone-AWARE datetime, else None. The store's own timestamps are always
+    written aware (:func:`_iso`); a naive one is damage — comparing it with :func:`_now` raises
+    ``TypeError`` rather than failing closed."""
+    dt = _parse(iso) if isinstance(iso, str) else None
+    return dt if dt is not None and dt.tzinfo is not None else None
+
+
 def _parse(iso: str | None) -> datetime | None:
     try:
         return datetime.fromisoformat(iso) if iso else None
@@ -150,7 +158,14 @@ def _checked_raw() -> dict:
         hosts = raw["hosts"]
         if not isinstance(hosts, dict):
             raise StoreUnreadable(f"{path}: `hosts` is not an object")
-        bad = sorted(h for h, entry in hosts.items() if not isinstance(entry, dict))
+        # A present `expires` must be an aware time: read as "no expiry" a once-grant would be
+        # permanent, and compared as it is it crashes the prune instead of failing closed.
+        bad = sorted(
+            h
+            for h, entry in hosts.items()
+            if not isinstance(entry, dict)
+            or (entry.get("expires") is not None and _aware(entry.get("expires")) is None)
+        )
         if bad:
             raise StoreUnreadable(f"{path}: malformed entries for {', '.join(bad)}")
     if "default_deny" in raw and not isinstance(raw["default_deny"], bool):
@@ -169,7 +184,7 @@ def _checked_raw() -> dict:
         # as open could leave the wall down — refuse it and let the readers fail closed.
         if key in raw:
             w = raw[key]
-            if not isinstance(w, dict) or any(_parse(w.get(f)) is None for f in ("since", "until")):
+            if not isinstance(w, dict) or any(_aware(w.get(f)) is None for f in ("since", "until")):
                 raise StoreUnreadable(f"{path}: `{key}` is malformed")
     return raw
 
@@ -281,12 +296,45 @@ def start_learning(seconds: int = LEARN_DEFAULT_SECONDS) -> dict:
     seconds = max(1, min(int(seconds), LEARN_MAX_SECONDS))
     now = _now()
     doc = _load_raw()
-    window = {"since": _iso(now), "until": _iso(now + timedelta(seconds=seconds))}
+    since = _unreviewed_since(doc) or now
+    window = {"since": _iso(since), "until": _iso(now + timedelta(seconds=seconds))}
     doc["learn"] = window
     doc["default_deny"] = True  # what resumes when the window lapses
     _save_raw(doc)
     write_effective()
     return window
+
+
+def _unreviewed_since(doc: dict) -> datetime | None:
+    """Where the review of the previous window would start, if any of it is still unreviewed.
+
+    `fy allow learn` reviews ONE window, so a window replaced before its review would take every
+    host only it had seen out of the workflow. The replacement reaches back instead: to the
+    previous window's start, or to the last review if that fell inside it. The stretch in between
+    adds nothing — the wall was enforcing, and a review reads only would-block rows."""
+    prior = doc.get("learn") or doc.get("learned")
+    if not isinstance(prior, dict):
+        return None
+    since, until = _aware(prior.get("since")), _aware(prior.get("until"))
+    if since is None or until is None:
+        return None
+    reviewed = _aware(doc.get("reviewed"))
+    if reviewed is None or reviewed <= since:
+        return since
+    return reviewed if reviewed < min(until, _now()) else None
+
+
+def mark_reviewed() -> None:
+    """Record that the operator was shown the current window's review (`fy allow learn`), so the
+    next window starts fresh rather than carrying this one. Host-side, best-effort."""
+    if in_box():
+        return
+    try:
+        doc = _checked_raw()
+    except StoreUnreadable:
+        return
+    doc["reviewed"] = _iso(_now())
+    _save_raw(doc)
 
 
 def seed_learning(echo: Callable[[str], None]) -> dict | None:
@@ -317,11 +365,10 @@ def seed_learning(echo: Callable[[str], None]) -> dict | None:
 
 
 def _matches(key: str, patterns: list[str]) -> bool:
-    """The proxy's grant semantics for a recorded host key: ``host:port`` only by that exact
-    grant; a bare host by an exact grant or a ``*.suffix`` one (subdomains, not the bare
-    domain) — mirrors the addon's ``_host_matches``."""
-    if ":" in key:
-        return key in patterns
+    """The proxy's grant semantics for a recorded host key — the addon's ``_host_matches`` over the
+    whole key: an exact grant, or a ``*.suffix`` one (subdomains, not the bare domain). A
+    ``host:port`` key is matched the same way, so ``*.example.com:22`` answers
+    ``git.example.com:22`` as the proxy does, and a bare grant never answers a ``host:port``."""
     return any(key.endswith(p[1:]) if p.startswith("*.") else key == p for p in patterns)
 
 

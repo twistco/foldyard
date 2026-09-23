@@ -2592,3 +2592,18 @@ def test_capability_probe_duplicate_names_are_rejected():
 
     with pytest.raises(ValueError, match="duplicate capability probe name 'dup'"):
         Registry([_mk("one"), _mk("two")]).capability_probes({"ax": "on"})
+
+
+def test_the_live_file_names_the_open_learn_window(monkeypatch):
+    # The addon rate-limits would-block rows per host; a new window must reset that, or a host
+    # seen just before it gets no row inside it. The window's start is the signal.
+    from foldyard import allowlist
+
+    monkeypatch.setattr(proxy.config, "proxy_enabled", lambda: True)
+    reg = Registry([proxy.ProxyPlugin()])
+    monkeypatch.setattr(allowlist, "learning", lambda: None)
+    assert reg.desired_daemons({})["egress-proxy"]["live"]["data"]["observing_since"] is None
+    window = {"since": "2026-09-23T18:00:00+00:00", "until": "2026-09-23T19:00:00+00:00"}
+    monkeypatch.setattr(allowlist, "learning", lambda: window)
+    live = reg.desired_daemons({})["egress-proxy"]["live"]["data"]
+    assert live["observing_since"] == window["since"]

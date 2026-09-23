@@ -254,6 +254,22 @@ _UA_MAX = 120
 # install would otherwise write one per connection (hundreds to the same registry) and rotate the
 # log away. The review needs "this host, this tool, first/last seen" — not every connection.
 _WOULD_BLOCK_EVERY = 60.0
+# …and the per-host timestamps behind that limit are bounded: one entry per distinct refused host
+# would otherwise grow for ever on a proxy seeing generated hostnames.
+_WOULD_BLOCK_MAX = 4096
+
+
+def _redact_param(path: str, name: str) -> str:
+    """``path`` with the value of query parameter ``name`` replaced by ``‹redacted›`` — the
+    injector's credential, which it wrote into the URL, never reaches the egress log. Everything
+    else in the path is kept as sent (ADR-0029 logs full paths)."""
+    base, sep, query = path.partition("?")
+    if not sep:
+        return path
+    parts = [
+        f"{name}=‹redacted›" if part.split("=", 1)[0] == name else part for part in query.split("&")
+    ]
+    return base + "?" + "&".join(parts)
 
 
 def _user_agent(request) -> str:
@@ -503,6 +519,12 @@ class _Rule:
                     return None
             return self._value
 
+    def invalidate(self) -> None:
+        """Forget the cached value, so the next request mints afresh."""
+        with self._lock:
+            self._value = None
+            self._expires_at = 0.0
+
     def apply(self, request, value: str) -> None:
         """Inject the minted value — a URL query param or, by default, an OVERWRITTEN header (the
         box only ever sends a dummy). ``value_prefix`` (e.g. "Bearer ") is added here so the
@@ -528,6 +550,7 @@ class Injector:
         host_env = os.environ.get("HOST_ENV_FILE", "")
         self.host_env_path = Path(host_env) if host_env else None
         self._live_stamp: tuple | None = None
+        self._observing_since: str | None = None
         self._running = False
         self._warm_threads: list[threading.Thread] = []
         self._set_rules([] if self.live_path else self._load_rules())
@@ -627,6 +650,11 @@ class Injector:
             if rule.active:
                 rules.append(rule)
         self._set_rules(rules)
+        # A new learn window: rows rate-limited before it must not hide a host inside it.
+        observing = data.get("observing_since")
+        if not first and observing != self._observing_since:
+            self._would_block_seen = {}
+        self._observing_since = observing
         self.default_deny = data.get("default_deny", True) is not False
         passthrough = data.get("passthrough")
         self.passthrough_hosts = (
@@ -782,7 +810,7 @@ class Injector:
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             "method": flow.request.method,
             "host": flow.request.pretty_host,
-            "path": flow.request.path[:200],
+            "path": self._logged_path(flow)[:200],
             "status": flow.response.status_code,
             "injected": flow.request.pretty_host in self.inject_hosts,
             "replayed": bool(flow.metadata.get("egress_proxy_retried")),
@@ -797,6 +825,13 @@ class Injector:
             if snippet:
                 entry["error_body"] = snippet
         self._write_entry(entry)
+
+    def _logged_path(self, flow: http.HTTPFlow) -> str:
+        """The request path as logged: a query-param injector's credential redacted (its rule
+        wrote the minted value into the URL — the header case never reaches the path)."""
+        rule = self._rule_for(flow)
+        path = flow.request.path
+        return _redact_param(path, rule.query_param) if rule and rule.query_param else path
 
     def _log_passthrough(self, host: str | None, *, build: bool = False) -> None:
         """An SNI-level row for a blind-tunnelled (not decrypted) HTTPS connection: host + time
@@ -856,6 +891,12 @@ class Injector:
         last = self._would_block_seen.get(key)
         if last is not None and now - last < _WOULD_BLOCK_EVERY:
             return
+        if len(self._would_block_seen) >= _WOULD_BLOCK_MAX:
+            self._would_block_seen = {
+                k: t for k, t in self._would_block_seen.items() if now - t < _WOULD_BLOCK_EVERY
+            }
+            if len(self._would_block_seen) >= _WOULD_BLOCK_MAX:
+                self._would_block_seen = {}  # all recent: forgetting costs only extra rows
         self._would_block_seen[key] = now
         entry = {
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -1106,6 +1147,9 @@ class Injector:
         if flow.request.raw_content is None:
             # The request body was STREAMED upstream (past stream_large_bodies), so there is no
             # copy left to re-send. Hand the 401 back as-is; the client's own retry re-mints.
+            # …but the token it was refused with must not serve the next request for the rest of
+            # its TTL: drop it, so the next one re-mints.
+            rule.invalidate()
             ctx.log.warn(f"egress_proxy: 401 from {rule.host} on a streamed upload — not re-issued")
             return
         value = rule.token(force=True)
