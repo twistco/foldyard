@@ -1215,6 +1215,8 @@ class Injector:
             and not flow.metadata.get("egress_proxy_retried")  # at most once — loop guard
         ):
             await self._reissue_401(flow, rule)
+        if flow.metadata.get("egress_proxy_blocked"):
+            return  # our own 403, already logged as blocked — nothing went upstream
         self._log_flow(flow)
 
     async def _reissue_401(self, flow: http.HTTPFlow, rule: _Rule) -> None:

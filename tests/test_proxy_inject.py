@@ -1038,6 +1038,17 @@ def test_default_deny_blocks_plain_http_in_the_request_hook(walled):
     assert entry["host"] == "plain.example.com" and entry["blocked"] is True
 
 
+async def test_a_refused_plain_http_request_is_logged_once(walled):
+    # mitmproxy still runs `response` for the proxy's OWN 403: logging it there too would add a
+    # second row that reads as the upstream refusing a request that never left the box
+    inj, _allow, log = walled
+    f = _Flow("plain.example.com")
+    inj.request(f)
+    await inj.response(f)
+    assert [r["host"] for r in _rows(log)] == ["plain.example.com"]
+    assert _last_log(log)["blocked"] is True
+
+
 def test_allow_grant_takes_effect_live_without_a_restart(walled):
     # The whole point of re-reading ALLOW_FILE per request (mtime-cached): a host-side `allow`
     # lands with NO daemon restart. Same Injector instance, blocked → granted → allowed.
