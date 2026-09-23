@@ -232,8 +232,8 @@ class InjectRule:
     addon runs each minter with a small base env plus these, rather than inheriting the supervisor's
     environment, which carries every axis's secret from ``host.env``.
     ``label`` names the proxy in daemon status. Many rules coexist: the proxy serializes them into
-    ``egress_proxy.py``'s ``INJECT_RULES`` set (one proxy, N hosts, each its own minter + cache —
-    so github + claude + codex + any ``[[inject]]`` can all be live at once)."""
+    the rule set of ``egress_proxy.py``'s live file (one proxy, N hosts, each its own minter +
+    cache — so github + claude + codex + any ``[[inject]]`` can all be live at once)."""
 
     host: str  # the host pattern to inject on (e.g. "api.github.com")
     header: str  # the header to inject (e.g. "Authorization"); ignored when query_param is set

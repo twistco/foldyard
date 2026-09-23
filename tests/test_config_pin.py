@@ -45,13 +45,13 @@ def worktree(checkout, monkeypatch):
 
 
 def _passthrough_hosts(cfg) -> str:
-    """The proxy daemon's PASSTHROUGH_HOSTS under ``cfg``'s ADOPTED config — resolved the way the
+    """The proxy daemon's passthrough list under ``cfg``'s ADOPTED config — resolved the way the
     supervisor tick does it (bind the config, then ask the registry), since the plugins read
     ``config.X()`` off the bound context."""
     effective = configpin.effective(cfg)
     with config.using(effective):
         spec = plugins.registry(effective).desired_daemons({})
-    return spec["egress-proxy"]["env"]["PASSTHROUGH_HOSTS"]
+    return ",".join(spec["egress-proxy"]["live"]["data"]["passthrough"])
 
 
 def _current(cfg) -> Path:
@@ -82,7 +82,7 @@ def test_effective_serves_the_adopted_copy_not_the_working_tree(checkout):
 
 def test_the_proxy_daemon_keeps_the_adopted_passthrough_after_an_in_box_edit(checkout):
     """End to end through the plugin that owns the knob: an edit to `[proxy] passthrough` must not
-    reach PASSTHROUGH_HOSTS (the hosts the proxy does NOT decrypt or request-log), because that is
+    reach the passthrough list (the hosts the proxy does NOT decrypt or request-log), because that is
     the reported bug — capture, switched off for a host of the checkout's choosing, in one tick."""
     configpin.adopt(checkout)
     (checkout.repo_root / "foldyard.toml").write_text(EDITED)

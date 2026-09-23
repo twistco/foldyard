@@ -231,7 +231,7 @@ def _wall_enforcing_with(host: str) -> None:
     here, because the fake upstream sits on a random port and the wall fences the CONNECT port (a
     bare grant means ``:443``; a bare ``github.com`` used to reach ``github.com:22``).
 
-    The daemon spec carries the wall (``DEFAULT_DENY`` + ``ALLOW_FILE``), so left unstated the fake
+    The daemon spec carries the wall (the live file's switch + ``ALLOW_FILE``), so left unstated the fake
     upstream is judged by whatever is ambient — the repo's own ``[proxy] default_deny`` seed and
     whatever the machine's allow-store happens to hold. That passed on a developer box with grants
     and 403'd every CONNECT in CI, where the seed is `true` and nothing has ever been granted.
@@ -241,6 +241,15 @@ def _wall_enforcing_with(host: str) -> None:
     pins, never the real one."""
     allowlist.grant(host, "permanent")
     allowlist.set_wall(True)  # rewrites the effective allowlist the addon re-reads per request
+
+
+def _live_env(spec: dict, path: Path, **overrides) -> dict[str, str]:
+    """Write ``spec``'s live settings to ``path`` (with ``overrides`` on top), the way the
+    supervisor does, and return the launch env pointing the addon at that file."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({**spec["live"]["data"], **overrides}))
+    tmp.replace(path)
+    return {**spec["env"], "LIVE_FILE": str(path)}
 
 
 def _seed_system_trust(box: _Box) -> None:
@@ -297,13 +306,14 @@ def capture_box(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "github_declared", lambda: True)
     _wall_enforcing_with(
         f"{ip}:{uport}"
-    )  # before the spec is built — it reads DEFAULT_DENY + ALLOW_FILE
+    )  # before the spec is built — it reads the wall + ALLOW_FILE
     reg = Registry([GithubPlugin(), ProxyPlugin()])
     spec = reg.desired_daemons({"github": "off"})["egress-proxy"]
-    assert spec["env"]["DEFAULT_DENY"] == "1"  # the wall is up; the upstream is granted through it
-    # The wiring under test: capture-only ⇒ EMPTY inject config (egress_proxy logs, rewrites nothing),
-    # and the log path is the project log dir we redirected above.
-    assert spec["env"]["INJECT_HOST"] == "" and spec["env"]["INJECT_COMMAND"] == ""
+    live = spec["live"]["data"]
+    assert live["default_deny"] is True  # the wall is up; the upstream is granted through it
+    # The wiring under test: capture-only ⇒ NO rules (egress_proxy logs, rewrites nothing), and the
+    # log path is the project log dir we redirected above.
+    assert live["rules"] == []
     assert spec["env"]["PROXY_LOG_FILE"] == str(log)
     assert spec["env"]["CAPTURE_MODE"] == "full"
 
@@ -311,7 +321,7 @@ def capture_box(tmp_path, monkeypatch):
         ["mitmdump", "-s", str(ADDON), "--listen-host", "0.0.0.0", "--listen-port", str(pport),
          "--set", f"confdir={confdir}", "--set", "ssl_insecure=true",
          "--set", "termlog_verbosity=info"],
-        env={**os.environ, **spec["env"]},  # the real capture-mode (empty-inject) wiring
+        env={**os.environ, **_live_env(spec, tmp_path / "proxy-live.json")},  # capture-only wiring
         stdout=mitm_log.open("w"), stderr=subprocess.STDOUT,
     )  # fmt: skip
     ca = confdir / "mitmproxy-ca-cert.pem"
@@ -414,15 +424,13 @@ def test_capture_routes_egress_without_leaking_a_real_github_token(capture_box):
 # ── Phase A′ — always-route: decrypt the unknown, tunnel the trusted ─────────────────────────
 
 
-def _launch_mitm(spec: dict, confdir: Path, pport: int, mitm_log: Path):
-    """Launch mitmdump with a daemon SPEC's env (so CAPTURE_MODE + PASSTHROUGH_HOSTS ride along).
-    Reused to RESTART the daemon with a changed trusted-host list mid-test — the box keeps routing
-    to the same port, as it does when the supervisor applies an adopted `[proxy] passthrough`."""
+def _launch_mitm(env: dict, confdir: Path, pport: int, mitm_log: Path):
+    """Launch mitmdump with a daemon spec's launch env (see ``_live_env``)."""
     return subprocess.Popen(
         ["mitmdump", "-s", str(ADDON), "--listen-host", "0.0.0.0", "--listen-port", str(pport),
          "--set", f"confdir={confdir}", "--set", "ssl_insecure=true",
          "--set", "termlog_verbosity=info", "--set", "flow_detail=0"],
-        env={**os.environ, **spec["env"]},
+        env={**os.environ, **env},
         stdout=mitm_log.open("a"), stderr=subprocess.STDOUT,
     )  # fmt: skip
 
@@ -430,9 +438,9 @@ def _launch_mitm(spec: dict, confdir: Path, pport: int, mitm_log: Path):
 @pytest.fixture
 def av_box(tmp_path, monkeypatch):
     """Phase A′: a box brought up with the ALWAYS-ROUTE wiring, and the REAL (always-decrypting)
-    daemon, which a test can RESTART with the upstream on the trusted passthrough list without
-    touching the box. Yields a controller: box, ip, upstream port, egress log, the upstream's real
-    cert path IN the box, and ``restart(passthrough)``. Spec + box args come from the REAL
+    daemon, whose trusted passthrough list a test can change LIVE — the same process, the box
+    untouched. Yields a controller: box, ip, upstream port, egress log, the upstream's real cert
+    path IN the box, and ``set_passthrough(hosts)``. Spec + box args come from the REAL
     registry."""
     assert _SELF is not None
     net, ip = _SELF
@@ -452,14 +460,17 @@ def av_box(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
     _wall_enforcing_with(
         f"{ip}:{uport}"
-    )  # before the specs are built — they read DEFAULT_DENY + ALLOW_FILE
+    )  # before the specs are built — they read the wall + ALLOW_FILE
     reg = Registry([GithubPlugin(), ProxyPlugin()])
     spec = reg.desired_daemons({"github": "off"})["egress-proxy"]
     assert spec["env"]["CAPTURE_MODE"] == "full"
     assert spec["env"]["PROXY_LOG_FILE"] == str(log)
-    assert spec["env"]["DEFAULT_DENY"] == "1"  # the wall is up; the upstream is granted through it
+    assert (
+        spec["live"]["data"]["default_deny"] is True
+    )  # the wall is up; upstream granted through it
 
-    proc = _launch_mitm(spec, confdir, pport, mitm_log)
+    live = tmp_path / "proxy-live.json"
+    proc = _launch_mitm(_live_env(spec, live), confdir, pport, mitm_log)
     ca = confdir / "mitmproxy-ca-cert.pem"
     box = None
     vm_dir = _VM_TMP / f"av-{os.getpid()}"
@@ -501,18 +512,14 @@ def av_box(tmp_path, monkeypatch):
 
         controller = {"proc": proc}
 
-        def restart(passthrough: str) -> None:
-            """Relaunch the daemon with PASSTHROUGH_HOSTS set (what the supervisor does when an
-            adopted `[proxy] passthrough` changes the spec) — terminate + relaunch on the SAME
-            port; the box is untouched."""
-            controller["proc"].terminate()
-            try:
-                controller["proc"].wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                controller["proc"].kill()
-            env = {**spec["env"], "PASSTHROUGH_HOSTS": passthrough}
-            controller["proc"] = _launch_mitm({"env": env}, confdir, pport, mitm_log)
-            _wait(lambda: _port_open(ip, pport), 30, "mitmdump to relisten", diag())
+        def set_passthrough(hosts: list[str]) -> None:
+            """Change the trusted-host list the way the supervisor now applies an adopted
+            `[proxy] passthrough`: rewrite the live file under the RUNNING daemon — no restart,
+            the box untouched. The addon notices within its one-second poll."""
+            pid = controller["proc"].pid
+            _live_env(spec, live, passthrough=hosts)
+            time.sleep(1.5)
+            assert controller["proc"].poll() is None and controller["proc"].pid == pid
 
         yield {
             "box": box,
@@ -520,7 +527,7 @@ def av_box(tmp_path, monkeypatch):
             "uport": uport,
             "log": log,
             "up_ca": up_in_box,
-            "restart": restart,
+            "set_passthrough": set_passthrough,
         }
     finally:
         if box is not None:
@@ -566,9 +573,10 @@ def test_a_trusted_host_is_tunnelled_not_decrypted(av_box):
     box, ip, uport, up_ca = av_box["box"], av_box["ip"], av_box["uport"], av_box["up_ca"]
     url = f"https://{ip}:{uport}/echo"
 
-    # The upstream is TRUSTED (in PASSTHROUGH_HOSTS) → it must be tunnelled, NOT decrypted: the
+    # The upstream is TRUSTED (on the passthrough list) → it must be tunnelled, NOT decrypted: the
     # fast/quiet path for the toolchain, and the escape hatch for a host that can't be decrypted.
-    av_box["restart"](passthrough=ip)
+    # Set LIVE: the same proxy process picks it up, as a supervisor-applied change now does.
+    av_box["set_passthrough"]([ip])
 
     # Trusting the upstream's REAL cert succeeds (end-to-end TLS, header untouched) …
     got = box.exec("curl", "-sS", "--cacert", up_ca, "-H", "Authorization: Bearer DUMMY", url)

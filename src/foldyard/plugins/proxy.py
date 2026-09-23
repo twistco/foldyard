@@ -20,8 +20,6 @@ Stdlib only on the registry hot path (rich is imported lazily, only when the TUI
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import shlex
 import shutil
@@ -150,26 +148,17 @@ def _proxy_log() -> Path:
     return config.log_dir() / _PROXY_LOG
 
 
+def _live_file() -> Path:
+    """This worktree's live proxy settings (rules, wall, passthrough) — host-side state, beside
+    the posture it's derived from, never in the mount."""
+    return config.posture_dir() / "proxy-live.json"
+
+
 def _packaged_addon() -> Path:
     """The mitmdump injection addon, shipped INSIDE the package (``assets/proxy/egress_proxy.py``).
     Was consumer-side (``<dev_vm_dir>/proxy/egress_proxy.py``); now packaged so consumers get the
     proxy/capture/keyless path without vendoring the script, and the tests load this one source."""
     return Path(__file__).resolve().parent.parent / "assets" / "proxy" / "egress_proxy.py"
-
-
-def _secret_stamp(keys: Iterable[str]) -> str:
-    """A short fingerprint of the named env vars' CURRENT values (missing hashes as empty), for the
-    daemon spec env — so a captured/rotated secret changes the spec and the supervisor restarts the
-    daemon that reads it (see the INJECT_ENV_STAMP comment in :meth:`ProxyPlugin.daemons`).
-    Truncated sha256: enough to never collide in practice, and not invertible for the high-entropy
-    values it hashes — the stamp is visible in ``ps eww`` on the child, the secret must not be."""
-    digest = hashlib.sha256()
-    for key in keys:
-        digest.update(key.encode())
-        digest.update(b"\x00")
-        digest.update(os.environ.get(key, "").encode())
-        digest.update(b"\x00")
-    return digest.hexdigest()[:16]
 
 
 def _launch_addon_path() -> Path:
@@ -273,7 +262,7 @@ def _network_panel_tree() -> PanelTree:
 
 
 def _rule_to_json(rule) -> dict:
-    """One :class:`InjectRule` → the JSON object egress_proxy.py's ``INJECT_RULES`` rule expects
+    """One :class:`InjectRule` → the JSON object egress_proxy.py's live-file rule expects
     (``minter``→``command``, ``replay_on_401``→``retry_401``). Only non-empty optional fields are
     emitted, so the serialized rule set stays compact + stable. Used for the multi-injector case."""
     out: dict = {"host": rule.host, "command": rule.minter, "retry_401": rule.replay_on_401}
@@ -351,85 +340,38 @@ class ProxyPlugin(Plugin):
         # box request, so the daemon must never be absent while a box exists.
         #
         # Always CAPTURE_MODE=full (ADR-0029): decrypt + log every request EXCEPT the trusted hosts
-        # below, which are blind-tunnelled with an SNI-only log row. The addon keeps its
-        # "passthrough" mode as a standalone option; foldyard no longer asks for it. The
-        # injector host is decrypted + rewritten even if a passthrough entry covers it.
-        passthrough = ",".join(_resolve_passthrough(config.proxy_passthrough()))
-        base_env = {
+        # in the passthrough list, which are blind-tunnelled with an SNI-only log row. The addon
+        # keeps its "passthrough" mode as a standalone option; foldyard no longer asks for it.
+        #
+        # The launch env holds only what never changes with posture. Everything that does — the
+        # injection rules, the wall switch, the passthrough list — goes in the LIVE file the
+        # supervisor writes and the addon re-reads (see `live` below). The supervisor restarts a
+        # daemon whose cmd/env changed, and a restart cuts every connection in flight: a mode
+        # switch used to kill a running apt download mid-package. So a posture change must never
+        # reach the env.
+        #
+        # Secrets aren't here either, as values or as a stamp: the addon reads each rule's
+        # declared names from host.env (HOST_ENV_FILE) whenever that file changes, and the
+        # supervisor strips host.env's keys from this daemon's environment (`scrub_host_env`).
+        env = {
             "PROXY_LOG_FILE": str(_proxy_log()),
             "CAPTURE_MODE": "full",
-            "PASSTHROUGH_HOSTS": passthrough,
-            # The egress wall (foldyard.allowlist). DEFAULT_DENY is the static on/off — toggling it
-            # changes the daemon signature → the supervisor restarts the proxy with it. ALLOW_FILE
-            # is the resolved effective allowlist the addon re-reads PER REQUEST (mtime-cached),
-            # so a host-side grant takes effect with NO restart (the supervisor just sweeps + writes
-            # that file). Always emitted (harmless when default-deny is off — the addon ignores it).
-            "DEFAULT_DENY": "1" if _default_deny() else "",
+            # The effective allowlist, re-read per request (mtime-cached) — grants never restart.
             "ALLOW_FILE": str(config.allow_effective_file()),
+            "LIVE_FILE": str(_live_file()),
+            "HOST_ENV_FILE": str(config.host_env_file()),
         }
-        if len(rules) == 1:
-            # ONE injector: emit the legacy single INJECT_* env (byte-identical to before — every
-            # single-rule caller reads these keys). The addon uses them when INJECT_RULES is
-            # empty, so this is the MAINLINE path, not a shim. Its label names the credential.
-            rule = rules[0]
-            env = {
-                **base_env,
-                "INJECT_HOST": rule.host,
-                # Query-param injection clears the header (the addon: query_param wins). Emitted
-                # ONLY when set, so the github (header) case stays byte-identical to before.
-                "INJECT_HEADER": "" if rule.query_param else rule.header,
-                "INJECT_RETRY_401": "1" if rule.replay_on_401 else "0",
-                "INJECT_COMMAND": rule.minter,
-                # The minter's env allowlist — the addon withholds everything else, because the
-                # supervisor's environment carries every axis's host.env secret.
-                "INJECT_ENV_KEYS": ",".join(rule.env),
-            }
-            if rule.query_param:
-                env["INJECT_QUERY_PARAM"] = rule.query_param
-            if rule.path_prefix:
-                env["INJECT_PATH_PREFIX"] = rule.path_prefix
-            if rule.value_prefix:
-                # The proxy PREPENDS this to the minted value (e.g. "Bearer " for an OAuth
-                # `authorization` header) — emitted only when set, so github stays byte-identical.
-                env["INJECT_VALUE_PREFIX"] = rule.value_prefix
-            label, requires = rule.label, list(rule.requires)
-        elif rules:
-            # MANY injectors (the rule-set contract): hand the addon ALL of them as INJECT_RULES
-            # JSON — it injects on each host with that host's own minter + token cache + 401 retry.
-            # INJECT_RULES wins over the single INJECT_* (left empty), so the injectors coexist.
-            env = {
-                **base_env,
-                "INJECT_HOST": "",
-                "INJECT_HEADER": "",
-                "INJECT_RETRY_401": "0",
-                "INJECT_COMMAND": "",
-                "INJECT_RULES": json.dumps([_rule_to_json(r) for r in rules]),
-            }
+        live = {
+            "rules": [_rule_to_json(r) for r in rules],
+            # From the HOST-owned allow-store, never straight from the repo's `[proxy]`.
+            "default_deny": _default_deny(),
+            "passthrough": _resolve_passthrough(config.proxy_passthrough()),
+        }
+        if rules:
             label = "egress proxy (" + ", ".join(r.label or r.host for r in rules) + ")"
-            requires = sorted({req for r in rules for req in r.requires})
         else:
-            # No injector: EMPTY INJECT_HOST/COMMAND → the addon rewrites nothing, only logs.
-            env = {
-                **base_env,
-                "INJECT_HOST": "",
-                "INJECT_HEADER": "",
-                "INJECT_RETRY_401": "0",
-                "INJECT_COMMAND": "",
-            }
             label = "egress proxy (decrypt + log; trusted hosts tunnelled)"
-            requires = []
-        # A fingerprint of every rule-declared secret VALUE (never the value itself — the spec env
-        # lands in the child's `ps eww` and the supervisor's Child.signature). The daemon reads
-        # secrets from its OWN environment, frozen at spawn — so a keyless token captured to
-        # host.env AFTER the proxy launched (`fy box up` prompting once the box was already routing)
-        # or a rotated secret would otherwise never reach the minter: the mint fails forever and the
-        # box's dummy credential goes upstream verbatim (days of Anthropic 401s with a valid token
-        # sitting in host.env). The supervisor merges host.env into its environment every tick, so
-        # stamping the values here flips the spec signature → it restarts the daemon with the fresh
-        # value within a tick. Same mechanism a wall toggle rides (env change → restart).
-        secret_keys = sorted({key for r in rules for key in r.env})
-        if secret_keys:
-            env["INJECT_ENV_STAMP"] = _secret_stamp(secret_keys)
+        requires = sorted({req for r in rules for req in r.requires})
         # One proxy listener PER WORKTREE (ADR-0016): the daemon name carries the
         # worktree suffix and the port is the worktree's offset port, so the ONE supervisor can run
         # N listeners without name/port collisions. The main checkout keeps the bare "egress-proxy"
@@ -476,6 +418,10 @@ class ProxyPlugin(Plugin):
                     "stream_large_bodies=1m",
                 ],
                 "env": env,
+                # Written by the supervisor (whole, renamed into place) whenever it changes; the
+                # addon picks it up within a second, with no restart. See `env` above.
+                "live": {"path": str(_live_file()), "data": live},
+                "scrub_host_env": True,
                 "requires": requires,
             }
         }

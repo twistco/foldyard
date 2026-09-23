@@ -1480,15 +1480,18 @@ def test_registry_proxy_rules_merges_only_injectors():
     assert len(rules) == 1 and rules[0].host == "api.github.com"  # gcp + proxy add none
 
 
+def _live_rules(spec: dict) -> dict[str, dict]:
+    """The injection rules a proxy daemon spec hands the addon through its live file, by host."""
+    return {r["host"]: r for r in spec["live"]["data"]["rules"]}
+
+
 def test_proxy_daemon_built_from_the_github_rule():
     reg = Registry([gcp.GcpPlugin(), github.GithubPlugin(), proxy.ProxyPlugin()])
     spec = reg.desired_daemons({"github": "app"})["egress-proxy"]  # proxy owns the daemon now
-    assert "-m foldyard.plugins.github_app_token" in spec["env"]["INJECT_COMMAND"]
-    # The daemon env is derived from the rule (not egress_proxy.py's defaults) — for github the
-    # values equal those defaults, so the emitted command stays byte-identical.
-    assert spec["env"]["INJECT_HOST"] == "api.github.com"
-    assert spec["env"]["INJECT_HEADER"] == "Authorization"
-    assert spec["env"]["INJECT_RETRY_401"] == "1"  # github sets replay_on_401=True
+    rule = _live_rules(spec)["api.github.com"]
+    assert "-m foldyard.plugins.github_app_token" in rule["command"]
+    assert rule["header"] == "Authorization"
+    assert rule["retry_401"] is True  # github sets replay_on_401=True
     assert spec["env"]["CAPTURE_MODE"] == "full"  # always (ADR-0029)
     # The App identity trio only — the PEM is deliberately not gate-able (see
     # test_github_app_rule_never_requires_the_pem: a proxy that won't launch kills ALL box egress).
@@ -1499,7 +1502,9 @@ def test_proxy_daemon_built_from_the_github_rule():
     # Large bodies stream through rather than buffering whole in the proxy's memory.
     assert "stream_large_bodies=1m" in spec["cmd"]
     user = reg.desired_daemons({"github": "user"})["egress-proxy"]
-    assert user["env"]["INJECT_COMMAND"].endswith("-m foldyard.plugins.gh_cli_token")
+    assert _live_rules(user)["api.github.com"]["command"].endswith(
+        "-m foldyard.plugins.gh_cli_token"
+    )
     assert user["requires"] == []
 
 
@@ -1537,15 +1542,15 @@ def test_proxy_daemon_gated_on_opt_in_or_injector(monkeypatch):
 def test_proxy_is_always_on_and_always_decrypts(monkeypatch):
     # Phase A′ — always-on FOR AN OPTED-IN CONSUMER ([proxy] declared): the egress-proxy daemon runs
     # for EVERY mode, even with no injector. It always decrypts except the trusted passthrough hosts
-    # — there is no capture axis to ask (ADR-0029); with no injector INJECT_* is empty. (A consumer
+    # — there is no capture axis to ask (ADR-0029); with no injector there are no rules. (A consumer
     # that never opts in gets no daemon at all — test_proxy_daemon_gated_on_opt_in_or_injector.)
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
     reg = Registry([gcp.GcpPlugin(), github.GithubPlugin(), proxy.ProxyPlugin()])
     assert "capture" not in reg.axis_rungs()
     spec = reg.desired_daemons({"github": "off"})["egress-proxy"]
-    assert spec["env"]["INJECT_HOST"] == "" and spec["env"]["INJECT_COMMAND"] == ""
+    assert spec["live"]["data"]["rules"] == []
     assert spec["env"]["CAPTURE_MODE"] == "full"
-    assert spec["env"]["PASSTHROUGH_HOSTS"]  # the @all default: the toolchain stays tunnelled
+    assert spec["live"]["data"]["passthrough"]  # the @all default: the toolchain stays tunnelled
     assert spec["env"]["PROXY_LOG_FILE"].endswith("egress.jsonl") and spec["requires"] == []
 
 
@@ -1565,27 +1570,50 @@ def test_proxy_passthrough_resolves_bundles_globs_and_dedups():
 
 
 def test_proxy_daemon_carries_resolved_passthrough_hosts(monkeypatch):
-    # The daemon spec hands egress_proxy.py the resolved trusted-host list as PASSTHROUGH_HOSTS.
+    # The daemon spec hands egress_proxy.py the resolved trusted-host list in its live file.
     monkeypatch.setattr(proxy.config, "proxy_enabled", lambda: True)  # opted-in → daemon runs
     monkeypatch.setattr(proxy.config, "proxy_passthrough", lambda: ["@anthropic", "my.host"])
     reg = Registry([proxy.ProxyPlugin()])
-    hosts = reg.desired_daemons({})["egress-proxy"]["env"]["PASSTHROUGH_HOSTS"].split(",")
+    hosts = reg.desired_daemons({})["egress-proxy"]["live"]["data"]["passthrough"]
     assert "api.anthropic.com" in hosts and "my.host" in hosts
 
 
-def test_proxy_daemon_carries_the_allowlist_env(monkeypatch):
-    # The daemon hands egress_proxy.py the egress-wall env: DEFAULT_DENY (static on/off, restart on
-    # toggle) + ALLOW_FILE (the effective allowlist re-read per request, so grants need no restart).
+def test_proxy_daemon_carries_the_wall(monkeypatch):
+    # The wall switch rides the live file (re-read without a restart); ALLOW_FILE, the effective
+    # allowlist, is re-read per request, so grants need no restart either.
     monkeypatch.setattr(proxy.config, "proxy_enabled", lambda: True)  # opted-in → daemon runs
     monkeypatch.setattr(proxy.config, "proxy_default_deny", lambda: True)
     reg = Registry([proxy.ProxyPlugin()])
-    env = reg.desired_daemons({})["egress-proxy"]["env"]
-    assert env["DEFAULT_DENY"] == "1"
-    assert env["ALLOW_FILE"].endswith("allow-effective.json")
+    spec = reg.desired_daemons({})["egress-proxy"]
+    assert spec["live"]["data"]["default_deny"] is True
+    assert spec["env"]["ALLOW_FILE"].endswith("allow-effective.json")
 
     monkeypatch.setattr(proxy.config, "proxy_default_deny", lambda: False)
-    off = reg.desired_daemons({})["egress-proxy"]["env"]
-    assert off["DEFAULT_DENY"] == ""  # only "1" arms the wall; off ⇒ empty (addon ignores it)
+    off = reg.desired_daemons({})["egress-proxy"]
+    assert off["live"]["data"]["default_deny"] is False
+    assert off["env"] == spec["env"] and off["cmd"] == spec["cmd"]  # no restart for a wall toggle
+
+
+def test_a_posture_change_leaves_the_proxy_launch_settings_alone():
+    # The regression that cut a running apt download: turning an injector off (or on) changed the
+    # daemon's env, and the supervisor restarts a daemon whose cmd/env changed. Rules now travel in
+    # the live file the addon re-reads, so every posture launches — and keeps — the same process.
+    reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
+    off = reg.desired_daemons({"github": "off"})["egress-proxy"]
+    on = reg.desired_daemons({"github": "app"})["egress-proxy"]
+    assert (off["cmd"], off["env"]) == (on["cmd"], on["env"])
+    assert off["live"]["path"] == on["live"]["path"]
+    assert off["live"]["data"] != on["live"]["data"]
+    assert on["env"]["LIVE_FILE"] == on["live"]["path"]
+    for gone in ("INJECT_RULES", "INJECT_HOST", "DEFAULT_DENY", "PASSTHROUGH_HOSTS"):
+        assert gone not in on["env"]
+
+
+def test_the_proxy_runs_without_host_env_in_its_environment():
+    # The supervisor holds every axis's host.env secret in its environment; the proxy asks for it
+    # to be stripped, and reads the names its rules declare from host.env itself.
+    reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
+    assert reg.desired_daemons({"github": "app"})["egress-proxy"]["scrub_host_env"] is True
 
 
 def test_proxy_decrypts_everything_else_beside_a_github_injector():
@@ -1593,15 +1621,13 @@ def test_proxy_decrypts_everything_else_beside_a_github_injector():
     # adds its rule without changing what happens to the rest of the box's egress.
     reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
     spec = reg.desired_daemons({"github": "app"})["egress-proxy"]
-    assert spec["env"]["INJECT_HOST"] == "api.github.com"
-    assert "-m foldyard.plugins.github_app_token" in spec["env"]["INJECT_COMMAND"]
+    assert "-m foldyard.plugins.github_app_token" in _live_rules(spec)["api.github.com"]["command"]
     assert spec["env"]["CAPTURE_MODE"] == "full"
 
 
 def test_proxy_serializes_multiple_injectors_into_a_rule_set():
     # The multi-injector rule-set contract: two live injectors no longer collide — both flow into
-    # the one egress-proxy daemon as INJECT_RULES JSON, each with its own host/header/minter, and the
-    # single INJECT_* keys are left empty (egress_proxy.py uses INJECT_RULES when present).
+    # the one egress-proxy daemon's rule set, each with its own host/header/minter.
     class _SecondInjector(Plugin):
         name = "second"
 
@@ -1618,10 +1644,7 @@ def test_proxy_serializes_multiple_injectors_into_a_rule_set():
             ]
 
     reg = Registry([github.GithubPlugin(), _SecondInjector(), proxy.ProxyPlugin()])
-    env = reg.desired_daemons({"github": "app"})["egress-proxy"]["env"]
-    assert env["INJECT_HOST"] == "" and env["INJECT_COMMAND"] == ""  # single-rule keys cleared
-    ruleset = json.loads(env["INJECT_RULES"])
-    by_host = {r["host"]: r for r in ruleset}
+    by_host = _live_rules(reg.desired_daemons({"github": "app"})["egress-proxy"])
     assert set(by_host) == {"api.github.com", "api.other.com"}  # both injectors present
     other = by_host["api.other.com"]
     assert other["command"] == "/m" and other["header"] == "authorization"
@@ -2030,13 +2053,13 @@ def test_inject_header_mode_defaults_authorization(monkeypatch):
 
 def test_inject_value_prefix_flows_through(monkeypatch):
     # A generic [[inject]] can carry value_prefix too (e.g. "Bearer " / "token ") — the proxy
-    # prepends it, so the host.env token stays bare. Reaches the daemon env as INJECT_VALUE_PREFIX.
+    # prepends it, so the host.env token stays bare. Reaches the daemon's rule as value_prefix.
     spec = {"axis": "svc", "host": "api.svc.test", "value_prefix": "token "}
     rule = _inject_plugin(monkeypatch, [spec]).proxy_rules({"svc": "on"})[0]
     assert rule.value_prefix == "token "
     reg = Registry([_inject_plugin(monkeypatch, [spec]), proxy.ProxyPlugin()])
-    env = reg.desired_daemons({"svc": "on"})["egress-proxy"]["env"]
-    assert env["INJECT_VALUE_PREFIX"] == "token "
+    spec = reg.desired_daemons({"svc": "on"})["egress-proxy"]
+    assert _live_rules(spec)["api.svc.test"]["value_prefix"] == "token "
 
 
 def test_inject_spec_without_a_host_is_dropped(monkeypatch):
@@ -2078,13 +2101,14 @@ def test_inject_axes_that_collide_on_the_token_var_are_refused(monkeypatch, firs
         plugin.proxy_rules({first: "on"})
 
 
-def test_inject_rule_flows_into_the_proxy_daemon_env(monkeypatch):
-    # End-to-end through the registry: penpot=on → the egress-proxy daemon gets the query-param env.
+def test_inject_rule_flows_into_the_proxy_daemon(monkeypatch):
+    # End-to-end through the registry: penpot=on → the egress-proxy daemon gets the query-param rule.
     reg = Registry([_inject_plugin(monkeypatch, [_PENPOT_SPEC]), proxy.ProxyPlugin()])
-    env = reg.desired_daemons({"penpot": "on"})["egress-proxy"]["env"]
-    assert env["INJECT_HOST"] == "truenas.example.ts.net"
-    assert env["INJECT_QUERY_PARAM"] == "userToken" and env["INJECT_HEADER"] == ""
-    assert env["INJECT_PATH_PREFIX"] == "/mcp"
+    rule = _live_rules(reg.desired_daemons({"penpot": "on"})["egress-proxy"])[
+        "truenas.example.ts.net"
+    ]
+    assert rule["query_param"] == "userToken" and "header" not in rule
+    assert rule["path_prefix"] == "/mcp"
 
 
 def test_static_token_minter_emits_value_ttl_json(monkeypatch, capsys):
@@ -2287,38 +2311,37 @@ def test_claude_keyless_oauth_rule_carries_bearer_prefix(monkeypatch):
     assert not any("ANTHROPIC_API_KEY" in a for a in args)  # not the api-key var
 
 
-def test_claude_keyless_oauth_value_prefix_reaches_the_daemon_env(monkeypatch):
-    # End-to-end through the registry: the oauth rule's value_prefix lands as INJECT_VALUE_PREFIX in
-    # the single egress-proxy daemon env, so egress_proxy.py prepends "Bearer " to the minted token.
+def test_claude_keyless_oauth_value_prefix_reaches_the_daemon(monkeypatch):
+    # End-to-end through the registry: the oauth rule's value_prefix reaches the egress-proxy
+    # daemon's rule, so egress_proxy.py prepends "Bearer " to the minted token.
     monkeypatch.setattr(config, "claude_enabled", lambda: True)
     monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
     monkeypatch.setattr(config, "proxy_passthrough", lambda: [])
     monkeypatch.setattr(config, "proxy_default_deny", lambda: False)
     reg = Registry([claude.ClaudePlugin(), proxy.ProxyPlugin()])
-    env = reg.desired_daemons({"claude": "on"})["egress-proxy"]["env"]
-    assert env["INJECT_HEADER"] == "authorization" and env["INJECT_VALUE_PREFIX"] == "Bearer "
+    rule = _live_rules(reg.desired_daemons({"claude": "on"})["egress-proxy"])["api.anthropic.com"]
+    assert rule["header"] == "authorization" and rule["value_prefix"] == "Bearer "
 
 
 def test_claude_keyless_api_key_emits_no_value_prefix(monkeypatch):
-    # api-key needs no scheme prefix, so INJECT_VALUE_PREFIX is absent (github stays byte-identical).
+    # api-key needs no scheme prefix, so the rule carries no value_prefix at all.
     monkeypatch.setattr(config, "claude_enabled", lambda: True)
     monkeypatch.setattr(config, "claude_keyless", lambda: "api-key")
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
     monkeypatch.setattr(config, "proxy_passthrough", lambda: [])
     monkeypatch.setattr(config, "proxy_default_deny", lambda: False)
     reg = Registry([claude.ClaudePlugin(), proxy.ProxyPlugin()])
-    env = reg.desired_daemons({"claude": "on"})["egress-proxy"]["env"]
-    assert "INJECT_VALUE_PREFIX" not in env
+    rule = _live_rules(reg.desired_daemons({"claude": "on"})["egress-proxy"])["api.anthropic.com"]
+    assert "value_prefix" not in rule
 
 
-def test_secret_value_change_flips_the_proxy_daemon_stamp(monkeypatch):
-    # A minter reads its secret from the DAEMON's environment, which is frozen at spawn — so a
-    # keyless token captured (or rotated) in host.env AFTER the proxy launched never reaches the
-    # minter, and the box's dummy credential goes upstream verbatim (the observed failure:
-    # "OAuth access token is invalid" for days, with a perfectly good token in host.env). The spec
-    # env therefore carries a fingerprint of every rule-declared secret VALUE: the supervisor's
-    # per-tick signature comparison sees the flip and restarts the daemon with the fresh value.
+def test_a_secret_rotation_changes_nothing_the_supervisor_restarts_for(monkeypatch):
+    # A minter used to read its secret from the daemon's environment, frozen at spawn — so a keyless
+    # token captured (or rotated) in host.env after launch never reached it (days of "OAuth access
+    # token is invalid" with a good token in host.env). The fix was a stamp in the spec env that
+    # restarted the proxy, cutting everything in flight. The addon now reads the secret by NAME
+    # from host.env when that file changes, so the launch settings stay put and nothing restarts.
     monkeypatch.setattr(config, "claude_enabled", lambda: True)
     monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
@@ -2327,25 +2350,21 @@ def test_secret_value_change_flips_the_proxy_daemon_stamp(monkeypatch):
     reg = Registry([claude.ClaudePlugin(), proxy.ProxyPlugin()])
 
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    absent = reg.desired_daemons({"claude": "on"})["egress-proxy"]["env"]
+    absent = reg.desired_daemons({"claude": "on"})["egress-proxy"]
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-first")
-    first = reg.desired_daemons({"claude": "on"})["egress-proxy"]["env"]
-    again = reg.desired_daemons({"claude": "on"})["egress-proxy"]["env"]
+    first = reg.desired_daemons({"claude": "on"})["egress-proxy"]
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-second")
-    second = reg.desired_daemons({"claude": "on"})["egress-proxy"]["env"]
+    second = reg.desired_daemons({"claude": "on"})["egress-proxy"]
 
-    # Late capture AND rotation each flip the stamp → restart; unchanged → no restart churn.
-    assert len({e["INJECT_ENV_STAMP"] for e in (absent, first, second)}) == 3
-    assert first == again
-    # The stamp is a fingerprint — the secret itself must never appear in the spec env (it would
-    # land in `ps eww` on the child and in the supervisor's Child.signature repr).
-    for env in (absent, first, second):
-        assert "sk-ant-oat01" not in json.dumps(env)
+    assert absent == first == second
+    assert first["env"]["HOST_ENV_FILE"] == str(config.host_env_file())
+    for spec in (absent, first, second):
+        assert "sk-ant-oat01" not in json.dumps(spec)  # names travel, never values
 
 
 def test_claude_keyless_routes_through_proxy(monkeypatch):
     # End-to-end: claude=on is an active injector, so the proxy routes the box through it (FY_PROXY)
-    # AND its rule flows into the single egress-proxy daemon env — without any [proxy] table declared.
+    # AND its rule flows into the single egress-proxy daemon — without any [proxy] table declared.
     monkeypatch.setattr(config, "claude_enabled", lambda: True)
     monkeypatch.setattr(config, "claude_keyless", lambda: "api-key")
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
@@ -2354,8 +2373,8 @@ def test_claude_keyless_routes_through_proxy(monkeypatch):
     reg = Registry([claude.ClaudePlugin(), proxy.ProxyPlugin()])
     assert "FY_PROXY" in reg.derive_env({"claude": "on"})  # injector active → routed (no [proxy])
     assert reg.derive_env({"claude": "off"}) == {}  # off + no opt-in → clean box
-    env = reg.desired_daemons({"claude": "on"})["egress-proxy"]["env"]
-    assert env["INJECT_HOST"] == "api.anthropic.com" and env["INJECT_HEADER"] == "x-api-key"
+    rules = _live_rules(reg.desired_daemons({"claude": "on"})["egress-proxy"])
+    assert rules["api.anthropic.com"]["header"] == "x-api-key"
 
 
 def test_vscode_plugin_gated(monkeypatch):
@@ -2517,7 +2536,7 @@ def test_codex_keyless_chatgpt_without_mac_auth_fails_loudly(monkeypatch, tmp_pa
 
 def test_claude_and_codex_keyless_coexist_in_one_rule_set(monkeypatch):
     # The whole point of lifting the single-minter limit: claude=on AND codex=on at once produce
-    # TWO rules in one egress-proxy daemon (INJECT_RULES), each its own host + minter — no collision.
+    # TWO rules in one egress-proxy daemon's rule set, each its own host + minter — no collision.
     monkeypatch.setattr(config, "claude_enabled", lambda: True)
     monkeypatch.setattr(config, "claude_keyless", lambda: "api-key")
     monkeypatch.setattr(config, "codex_enabled", lambda: True)
@@ -2527,7 +2546,7 @@ def test_claude_and_codex_keyless_coexist_in_one_rule_set(monkeypatch):
     monkeypatch.setattr(config, "proxy_default_deny", lambda: False)
     reg = Registry([claude.ClaudePlugin(), codex.CodexPlugin(), proxy.ProxyPlugin()])
     daemon = reg.desired_daemons({"claude": "on", "codex": "on"})["egress-proxy"]
-    ruleset = {r["host"]: r for r in json.loads(daemon["env"]["INJECT_RULES"])}
+    ruleset = _live_rules(daemon)
     assert set(ruleset) == {"api.anthropic.com", "api.openai.com"}  # both injectors, one proxy
     assert ruleset["api.openai.com"]["header"] == "Authorization"
     assert ruleset["api.anthropic.com"]["header"] == "x-api-key"

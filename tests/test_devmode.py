@@ -637,7 +637,7 @@ def test_gh_proxy_app_spec():
     from foldyard import config
 
     spec = devmode.desired_daemons({"gcp": "off", "github": "app"})["egress-proxy"]
-    cmd = spec["env"]["INJECT_COMMAND"]
+    cmd = spec["live"]["data"]["rules"][0]["command"]
     # A PACKAGE module under foldyard's own interpreter — never a path inside the repo mount (that
     # was host-side execution of agent-writable code; see ADR-0023).
     assert "-m foldyard.plugins.github_app_token" in cmd
@@ -649,7 +649,7 @@ def test_gh_proxy_app_spec():
 
 def test_gh_proxy_user_spec_needs_no_app_keys():
     spec = devmode.desired_daemons({"gcp": "off", "github": "user"})["egress-proxy"]
-    assert spec["env"]["INJECT_COMMAND"].endswith("-m foldyard.plugins.gh_cli_token")
+    assert spec["live"]["data"]["rules"][0]["command"].endswith("-m foldyard.plugins.gh_cli_token")
     assert spec["requires"] == []
 
 
