@@ -812,3 +812,27 @@ def test_with_recommends_can_write_a_build_entry():
     assert out is not None
     (entry,) = tomllib.loads(out)["proxy"]["recommend"]
     assert entry["when"] == "build" and entry["host"] == "storage.googleapis.com"
+
+
+def test_a_shorter_runtime_grant_does_not_swallow_a_lasting_build_grant(env):
+    # A `once` runtime grant would have been kept and the build grant dropped — then gone for
+    # builds too when the once lapsed, while the CLI said "allowed (for builds, permanent)".
+    allowlist.grant("cdn.example.com", "once", 120)
+    with pytest.raises(SystemExit) as refused:
+        allowlist.grant("cdn.example.com", "permanent", build=True)
+    assert "fy allow remove cdn.example.com" in str(refused.value)
+    # One that lasts at least as long already covers builds: a no-op, as before.
+    allowlist.grant("pypi.org", "permanent")
+    allowlist.grant("pypi.org", "session", build=True)
+    assert allowlist.effective()["allow"] == ["cdn.example.com", "pypi.org"]
+
+
+def test_sync_yes_on_a_damaged_store_does_not_die_on_build_recommendations(env):
+    _recommend(env, '[{ host = "cdn.playwright.dev", why = "browsers", when = "build" }]')
+    config.allow_store_file().parent.mkdir(parents=True, exist_ok=True)
+    config.allow_store_file().write_text("{ not json")
+    prompt, echo, _lines = _offer([])
+    counts = allowlist.offer_recommendations(
+        interactive=False, prompt=prompt, echo=echo, accept_all=True
+    )
+    assert counts["granted"] == 0

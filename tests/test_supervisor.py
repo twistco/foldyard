@@ -1697,3 +1697,12 @@ def test_a_scrubbing_daemon_runs_without_host_env_keys(monkeypatch, tmp_path):
     assert seen[-1]["X"] == "1"
     supervisor.Child("gcp-minter", {**spec, "scrub_host_env": False})
     assert seen[-1]["SECRET_ONE"] == "s1"  # a daemon that reads its secrets from env keeps them
+
+
+def test_a_live_file_that_cannot_be_written_does_not_stop_the_tick(tmp_path, monkeypatch, capsys):
+    spec = _live_spec(tmp_path, {"rules": []})
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    spec["live"]["path"] = str(blocker / "proxy-live.json")  # its parent is a file: mkdir fails
+    assert supervisor._sync_live("egress-proxy", spec, running=True) is False
+    assert "couldn't write" in capsys.readouterr().out

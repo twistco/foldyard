@@ -364,3 +364,37 @@ def test_an_unwalled_build_gets_no_proxy(env, monkeypatch):
     build = _Build(env["log"], [(0, [])])
     buildgate.run(build, what="box image", interactive=True, prompt=lambda q: "")
     assert build.urls == [None]
+
+
+def test_without_a_terminal_the_printed_command_is_a_build_grant(env, capsys):
+    # The interactive path grants for builds; the printed fallback must not widen the runtime wall.
+    build = _Build(env["log"], [(1, [_row("storage.googleapis.com")])])
+    buildgate.run(build, what="box image", interactive=False, prompt=lambda q: "")
+    assert "fy allow add storage.googleapis.com --build" in capsys.readouterr().out
+
+
+def test_concurrent_token_updates_are_serialized(env):
+    # Two builds (fy up in two worktrees) issue and revoke against one project-wide file: without
+    # a lock a token is lost (that build can't use its grants) or a revoked one is written back.
+    import threading
+
+    tokens: list[str] = []
+    lock = threading.Lock()
+
+    def issue() -> None:
+        t = buildgate._issue_token()
+        with lock:
+            tokens.append(t)
+
+    threads = [threading.Thread(target=issue) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(_tokens(env)) == 16
+    revokers = [threading.Thread(target=buildgate._revoke_token, args=(t,)) for t in tokens]
+    for t in revokers:
+        t.start()
+    for t in revokers:
+        t.join()
+    assert _tokens(env) == {}

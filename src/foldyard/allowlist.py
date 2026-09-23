@@ -736,9 +736,17 @@ def grant(host: str, level: str, ttl: int | None = None, *, build: bool = False)
 
     hosts, _ = _prune(_load_store())
     current = hosts.get(host)
-    if build and current is not None and current.get("scope", "runtime") == "runtime":
-        return write_effective()  # already allowed for everything, builds included
     expires = _iso(_now() + timedelta(seconds=ttl or ONCE_TTL_SECONDS)) if level == "once" else None
+    if build and current is not None and current.get("scope", "runtime") == "runtime":
+        if _lasts_as_long(current, level, expires):
+            return write_effective()  # already allowed for everything, builds included
+        # One entry per host: replacing it would narrow what the operator granted the box, and
+        # keeping it would drop the build grant when it lapses. Say so rather than choose.
+        raise SystemExit(
+            f"✗ {host} already has a shorter runtime grant ({current.get('level')}), which "
+            f"covers builds until it lapses. `fy allow remove {host}` first to make it a "
+            "build-only grant, or grant it for runtime at the level you want."
+        )
     hosts[host] = {"level": level, "expires": expires, "added": _iso(_now())}
     if build:
         hosts[host]["scope"] = "build"
@@ -750,6 +758,20 @@ def grant(host: str, level: str, ttl: int | None = None, *, build: bool = False)
         doc["declined"].pop(host, None)
     _save_raw(doc)
     return write_effective()
+
+
+_RANK = {"once": 0, "session": 1, "permanent": 2}
+
+
+def _lasts_as_long(current: dict, level: str, expires: str | None) -> bool:
+    """Does the existing grant ``current`` last at least as long as ``level`` (``expires``)?"""
+    have = _RANK.get(str(current.get("level")), -1)
+    if have != _RANK[level]:
+        return have > _RANK[level]
+    if level != "once":
+        return True
+    mine, theirs = _aware(current.get("expires")), _aware(expires)
+    return mine is not None and theirs is not None and mine >= theirs
 
 
 def revoke(host: str) -> dict:
@@ -938,9 +960,12 @@ def offer_recommendations(
 def _accept_build_recommendations(echo: Callable[[str], None]) -> None:
     """The unattended path (`fy allow sync --yes`) takes the build-only recommendations too — for
     builds only, as they ask; an unattended first build has nobody to answer the build gate."""
+    refused = declined()
+    if "*" in refused:  # a damaged store: grant nothing, as pending_recommendations does
+        return
     have = set(live_hosts()) | set(build_hosts())
     for host, why in build_recommendations().items():
-        if host not in have and host not in declined():
+        if host not in have and host not in refused:
             grant(host, "permanent", build=True)
             echo(f"  ✓ {host} allowed for builds (permanent)" + (f" — {why}" if why else ""))
 

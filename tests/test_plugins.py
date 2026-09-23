@@ -2630,5 +2630,15 @@ def test_image_pull_hosts_are_tunnelled_by_the_default_passthrough():
     }
     tunnelled = proxy._resolve_passthrough(["@all"])
     assert pull_hosts <= set(tunnelled), pull_hosts - set(tunnelled)
-    for host in pull_hosts - {"production.cloudflare.docker.com"}:
-        assert host in scaffold  # the scaffold recommends them; the bundle must tunnel them
+    # …and the scaffold RECOMMENDS all of them: tunnelling decides decryption, not the wall. Docker
+    # Hub serves blobs from either CDN, so an enforcing wall missing one refuses the pull.
+    for host in pull_hosts:
+        assert f'host = "{host}"' in scaffold, host
+
+
+def test_the_live_file_carries_the_rules_derived_defaults(monkeypatch):
+    # Only the names a rule reads, and only derived (non-secret) values — env_defaults.
+    reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
+    monkeypatch.setattr(reg, "env_defaults", lambda mode: {"GH_APP_ID": "123", "UNRELATED": "x"})
+    live = reg.desired_daemons({"github": "app"})["egress-proxy"]["live"]["data"]
+    assert live["defaults"] == {"GH_APP_ID": "123"}

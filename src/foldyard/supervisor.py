@@ -25,6 +25,7 @@ lines; the process env wins on conflict). Stdlib only; host only.
 
 from __future__ import annotations
 
+import contextlib
 import enum
 import fcntl
 import hashlib
@@ -1291,10 +1292,16 @@ def _sync_live(name: str, spec: dict, *, running: bool) -> bool:
             return False
     except OSError:
         pass
-    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(text)
-    tmp.replace(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(text)
+        tmp.replace(path)
+    except OSError as e:  # like the other state writers: log it, never stop the tick
+        log(f"✗ {name}: couldn't write its live settings ({path}): {e}")
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        return False
     if running:
         log(f"{name} settings updated — {spec.get('label', '')} (no restart)")
     return True

@@ -338,7 +338,7 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
     refs, unknown, literals = _passthrough_parts(entries)
     resolved = _resolve_passthrough(entries)
     proxy = cfg.toml.get("proxy")
-    granted, refused = set(live_hosts()) | set(build_hosts()), declined()
+    runtime, for_builds, refused = set(live_hosts()), set(build_hosts()), declined()
     recommended = [
         (
             e["host"],
@@ -346,7 +346,8 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
             "store unreadable"
             if "*" in refused
             else "granted"
-            if e["host"] in granted
+            # A build grant lets only a host-started build through; it answers a build ask only.
+            if e["host"] in runtime or (e.get("when") == "build" and e["host"] in for_builds)
             else "declined"
             if e["host"] in refused
             else "pending",

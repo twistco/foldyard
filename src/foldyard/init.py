@@ -247,6 +247,7 @@ def render(opts: InitOptions) -> str:
         '  { host = "registry-1.docker.io", why = "box image build — base image manifest/blobs" },',
         '  { host = "auth.docker.io", why = "box image build — Docker Hub auth token" },',
         '  { host = "production.cloudfront.docker.com", why = "box image build — Docker Hub blob CDN" },',
+        '  { host = "production.cloudflare.docker.com", why = "box image build — Docker Hub\'s other blob CDN" },',
         '  { host = "ghcr.io", why = "box image build — the uv binary image layer" },',
         '  { host = "pkg-containers.githubusercontent.com", why = "box image build — ghcr.io blob storage" },',
         "]",

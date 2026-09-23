@@ -65,7 +65,19 @@ def tokens_file() -> Path:
 
 
 def _tokens_update(change: Callable[[dict], None]) -> None:
+    """Read-modify-write the token file under an exclusive lock: builds in two worktrees issue and
+    revoke against the one project-wide file, and an unlocked interleave loses a token (that build
+    can't use its grants) or writes a revoked one back (live for up to the TTL)."""
+    import fcntl
+
     path = tokens_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name(f".{path.name}.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _tokens_update_locked(path, change)
+
+
+def _tokens_update_locked(path: Path, change: Callable[[dict], None]) -> None:
     try:
         doc = json.loads(path.read_text())
         tokens = doc.get("tokens") if isinstance(doc, dict) else None
@@ -80,11 +92,14 @@ def _tokens_update(change: Callable[[dict], None]) -> None:
         except (TypeError, ValueError):
             del tokens[digest]
     change(tokens)
-    path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    with os.fdopen(fd, "w") as fh:
-        fh.write(json.dumps({"tokens": tokens}, indent=2) + "\n")
-    os.replace(name, path)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps({"tokens": tokens}, indent=2) + "\n")
+        os.replace(name, path)
+    except BaseException:
+        Path(name).unlink(missing_ok=True)
+        raise
 
 
 def _issue_token() -> str:
@@ -194,7 +209,7 @@ def _run(
         echo(f"✗ the egress wall refused {hosts} during the {what}")
         if not interactive:
             for e in refused:
-                echo(f"    fy allow add {e['host']} --level once --ttl {ONCE_TTL_SECONDS}")
+                echo(f"    fy allow add {e['host']} --build --level once --ttl {ONCE_TTL_SECONDS}")
             echo("  No terminal here — grant with the commands above, then build again.")
             break
         granted = _offer(refused, prompt, echo)

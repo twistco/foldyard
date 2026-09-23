@@ -338,6 +338,11 @@ class ProxyPlugin(Plugin):
         one — `_registry` is bound in Registry.__init__)."""
         return self._registry.proxy_rules(mode) if self._registry else []
 
+    def _rule_defaults(self, mode: dict, rules: list) -> dict[str, str]:
+        names = {key for r in rules for key in r.env}
+        derived = self._registry.env_defaults(mode) if self._registry else {}
+        return {k: v for k, v in derived.items() if k in names}
+
     def daemons(self, mode: dict) -> dict[str, dict]:
         rules = self._rules(mode)
         # Same opt-in gate as axes()/derive_env(): a generic/stack-less consumer that declares no
@@ -382,6 +387,10 @@ class ProxyPlugin(Plugin):
             # The open learn window's start: a new window resets the addon's per-host would-block
             # rate limit, or a host seen just before it would get no row inside it.
             "observing_since": _observing_since(),
+            # Derived, non-secret identity a rule's minter reads (github=app's GH_APP_ID & co.,
+            # from env_defaults): the running proxy never restarts to inherit the supervisor's env,
+            # so it gets them here. After exports and host.env, as the supervisor's setdefault.
+            "defaults": self._rule_defaults(mode, rules),
         }
         if rules:
             label = "egress proxy (" + ", ".join(r.label or r.host for r in rules) + ")"

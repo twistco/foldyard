@@ -1800,3 +1800,58 @@ def test_a_revoked_build_grant_closes_the_builds_tunnel(gh, build_walled, closer
     os.utime(build_walled.allow, (inj._allow_mtime + 10, inj._allow_mtime + 10))
     inj.refresh()
     assert closer.closed == ["b1"]
+
+
+# ── CodeRabbit, second pass: derived defaults, redaction by what was injected ────────────
+
+
+def test_a_rules_derived_default_reaches_the_running_proxy(live, tmp_path, monkeypatch):
+    # github=app derives GH_APP_ID & co. from committed config (env_defaults). The proxy used to get
+    # them by restarting on the mode change; it no longer restarts, so the live file carries them.
+    monkeypatch.delenv("GH_APP_ID", raising=False)
+    minter = _counting_minter(tmp_path, "gh", env_key="GH_APP_ID")
+    rule = {"host": "api.github.com", "command": minter.command, "env": ["GH_APP_ID"]}
+    tmp = live.live.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(
+            {
+                "rules": [rule],
+                "default_deny": False,
+                "passthrough": [],
+                "defaults": {"GH_APP_ID": "123"},
+            }
+        )
+    )
+    tmp.replace(live.live)
+    flow = _Flow("api.github.com")
+    live.Injector().request(flow)
+    assert flow.request.headers["Authorization"] == "123"
+
+
+def test_a_derived_default_never_beats_host_env_or_an_export(live, tmp_path, monkeypatch):
+    monkeypatch.delenv("GH_APP_ID", raising=False)
+    live.host_env.write_text("GH_APP_ID=from-host-env\n")
+    minter = _counting_minter(tmp_path, "gh", env_key="GH_APP_ID")
+    rule = {"host": "api.github.com", "command": minter.command, "env": ["GH_APP_ID"]}
+    tmp = live.live.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"rules": [rule], "defaults": {"GH_APP_ID": "derived"}}))
+    tmp.replace(live.live)
+    flow = _Flow("api.github.com")
+    live.Injector().request(flow)
+    assert flow.request.headers["Authorization"] == "from-host-env"
+
+
+async def test_redaction_follows_what_was_injected_not_the_current_rules(live, tmp_path):
+    # The rule set can change between the request and its response (the live file is re-read
+    # per hook). The token already in the URL must still be redacted from the log.
+    minter = _counting_minter(tmp_path, "svc", value="sk-live-secret")
+    rule = {"host": "svc.example.com", "command": minter.command, "query_param": "userToken"}
+    _write_live(live.live, rules=[rule])
+    inj = live.Injector()
+    flow = _Flow("svc.example.com", path="/mcp?x=1")
+    inj.request(flow)
+    flow.request.path = "/mcp?x=1&userToken=sk-live-secret"  # what mitmproxy's query write does
+    _write_live(live.live, rules=[])  # the rule goes away while the request is in flight
+    inj.refresh()  # the addon's one-second poll lands before the response does
+    await inj.response(flow)
+    assert "sk-live-secret" not in _last_log(live.log)["path"]

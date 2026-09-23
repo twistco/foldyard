@@ -364,16 +364,22 @@ def _read_host_env(path: Path | None) -> dict[str, str]:
     return out
 
 
-def _resolve_secrets(keys, host_env: dict[str, str]) -> dict[str, str]:
+def _resolve_secrets(
+    keys, host_env: dict[str, str], defaults: dict[str, str] | None = None
+) -> dict[str, str]:
     """The values of ``keys`` a rule's minter may read: this process's environment first (the
     operator's own exports — the supervisor strips host.env's keys from it, so what remains is
-    ambient, and ambient has always won), else ``host.env``. Absent names are simply absent."""
+    ambient, and ambient has always won), else ``host.env``, else the live file's derived
+    ``defaults`` (non-secret identity a plugin computes from committed config — the supervisor's
+    ``env_defaults``, same precedence as its ``setdefault``). Absent names are simply absent."""
     out: dict[str, str] = {}
     for key in keys:
         if key in os.environ:
             out[key] = os.environ[key]
         elif key in host_env:
             out[key] = host_env[key]
+        elif defaults and key in defaults:
+            out[key] = str(defaults[key])
     return out
 
 
@@ -656,6 +662,7 @@ class Injector:
             ctx.log.warn(f"egress_proxy: live settings unreadable ({e}) — failing closed")
             data = {}
         host_env = _read_host_env(self.host_env_path)
+        defaults = data.get("defaults") if isinstance(data.get("defaults"), dict) else {}
         previous = {getattr(r, "key", None): r for r in self.rules}
         rules: list[_Rule] = []
         fresh: list[_Rule] = []
@@ -663,7 +670,7 @@ class Injector:
         for spec in specs if isinstance(specs, list) else []:
             if not isinstance(spec, dict):
                 continue
-            secrets = _resolve_secrets(spec.get("env") or (), host_env)
+            secrets = _resolve_secrets(spec.get("env") or (), host_env, defaults)
             key = json.dumps([spec, secrets], sort_keys=True)
             rule = previous.get(key)
             if rule is None:
@@ -853,9 +860,12 @@ class Injector:
     def _logged_path(self, flow: http.HTTPFlow) -> str:
         """The request path as logged: a query-param injector's credential redacted (its rule
         wrote the minted value into the URL — the header case never reaches the path)."""
-        rule = self._rule_for(flow)
         path = flow.request.path
-        return _redact_param(path, rule.query_param) if rule and rule.query_param else path
+        rule = self._rule_for(flow)
+        for name in {flow.metadata.get("egress_proxy_redact"), rule.query_param if rule else None}:
+            if name:
+                path = _redact_param(path, name)
+        return path
 
     def _log_passthrough(self, host: str | None, *, build: bool = False) -> None:
         """An SNI-level row for a blind-tunnelled (not decrypted) HTTPS connection: host + time
@@ -1184,6 +1194,8 @@ class Injector:
         value = rule.token()
         if value is not None:
             rule.apply(flow.request, value)
+            if rule.query_param:  # redact what WAS written, whatever the rules are at log time
+                flow.metadata["egress_proxy_redact"] = rule.query_param
 
     async def response(self, flow: http.HTTPFlow) -> None:
         # Re-issue once on an upstream 401 BEFORE logging, so the log + the client both see the
