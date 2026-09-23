@@ -285,7 +285,7 @@ _MINTER_BASE_ENV = (
 )
 
 
-def _minter_env(env_keys: tuple[str, ...]) -> dict[str, str]:
+def _minter_env(env_keys: tuple[str, ...], values: dict[str, str] | None = None) -> dict[str, str]:
     """The environment a minter subprocess runs with: the base above plus the names its own rule
     declared — NOT this process's whole environment.
 
@@ -296,8 +296,55 @@ def _minter_env(env_keys: tuple[str, ...]) -> dict[str, str]:
     the github minter has no business reading the Anthropic key. Withholding is cheap and each
     plugin already knows exactly which vars its minter reads."""
     env = {k: os.environ[k] for k in _MINTER_BASE_ENV if k in os.environ}
-    env.update({k: os.environ[k] for k in env_keys if k in os.environ})
+    # A live-configured rule carries its secrets resolved (see `_resolve_secrets`); the legacy env
+    # path still reads this process's environment.
+    source = os.environ if values is None else values
+    env.update({k: source[k] for k in env_keys if k in source})
     return env
+
+
+def _read_host_env(path: Path | None) -> dict[str, str]:
+    """``host.env``'s ``KEY=VALUE`` lines, parsed exactly as the supervisor's ``load_host_env``
+    does (blank/comment lines skipped, surrounding quotes stripped). Missing/unreadable → ``{}``."""
+    if path is None:
+        return {}
+    try:
+        text = path.read_text()
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        out[key.strip()] = value.strip().strip("'\"")
+    return out
+
+
+def _resolve_secrets(keys, host_env: dict[str, str]) -> dict[str, str]:
+    """The values of ``keys`` a rule's minter may read: this process's environment first (the
+    operator's own exports — the supervisor strips host.env's keys from it, so what remains is
+    ambient, and ambient has always won), else ``host.env``. Absent names are simply absent."""
+    out: dict[str, str] = {}
+    for key in keys:
+        if key in os.environ:
+            out[key] = os.environ[key]
+        elif key in host_env:
+            out[key] = host_env[key]
+    return out
+
+
+def _file_stamp(path: Path | None) -> tuple[int, int, int] | None:
+    """Identity + mtime + size: a writer that renames a new file into place (the supervisor)
+    always changes the inode, so this can't miss a same-second rewrite the way mtime alone can."""
+    if path is None:
+        return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
 
 
 # 20+ unbroken chars from the base64/token alphabet: longer than any word a human-written
@@ -353,7 +400,10 @@ class _Rule:
     the legacy single ``INJECT_HOST``/``INJECT_COMMAND``/… env, which the proxy plugin still
     emits whenever there is exactly ONE rule."""
 
-    def __init__(self, spec: dict) -> None:
+    def __init__(self, spec: dict, secrets: dict[str, str] | None = None) -> None:
+        # The resolved values of `env_keys` for a live-configured rule (None → read os.environ).
+        self._secrets = secrets
+        self.key: str | None = None  # the live file's identity for this rule (see `refresh`)
         self.host = spec.get("host") or None
         self.command = spec.get("command") or None
         self.header = spec.get("header") or "Authorization"
@@ -405,7 +455,7 @@ class _Rule:
             text=True,
             timeout=30,
             check=True,
-            env=_minter_env(self.env_keys),
+            env=_minter_env(self.env_keys, self._secrets),
         ).stdout
         data = json.loads(out)
         self._value = str(data["value"])
@@ -458,9 +508,18 @@ class Injector:
         # The injection rule SET. INJECT_RULES (a JSON list) wins — the multi-injector rules the
         # foldyard proxy plugin emits; else the legacy single INJECT_HOST/COMMAND/… env. That is
         # NOT a compatibility shim: the plugin emits those keys for every single-rule config.
-        self.rules = self._load_rules()
-        self.inject_hosts = {r.host for r in self.rules}
-        self.injecting = bool(self.rules)
+        #
+        # With LIVE_FILE set (foldyard's supervisor always sets it) the rules, the wall switch and
+        # the passthrough list come from that file instead, re-read whenever it changes — so a
+        # posture change reaches a RUNNING proxy and nothing in flight is cut (see `refresh`).
+        live = os.environ.get("LIVE_FILE", "")
+        self.live_path = Path(live) if live else None
+        host_env = os.environ.get("HOST_ENV_FILE", "")
+        self.host_env_path = Path(host_env) if host_env else None
+        self._live_stamp: tuple | None = None
+        self._running = False
+        self._warm_threads: list[threading.Thread] = []
+        self._set_rules([] if self.live_path else self._load_rules())
         # Phase A′: what to do with HTTPS we aren't injecting — "full" (decrypt+log) or
         # "passthrough" (blind-tunnel + SNI-log). Default "full" keeps the pre-A′ behaviour for
         # any caller that doesn't set CAPTURE_MODE.
@@ -481,9 +540,97 @@ class Injector:
         self._allow_patterns: list[str] = []
         # host key → monotonic time of its last would-block row (see _WOULD_BLOCK_EVERY).
         self._would_block_seen: dict[str, float] = {}
+        if self.live_path is not None:
+            self.refresh()  # the first read: rules, wall and passthrough all come from the file
         # Client connections whose CONNECT carried the build marker and passed the wall: their TLS
         # is tunnelled, not decrypted (see _BUILD_TUNNEL_USER). Dropped on disconnect.
         self._build_clients: set[str] = set()
+
+    def _set_rules(self, rules: list[_Rule]) -> None:
+        self.rules = rules
+        self.inject_hosts = {r.host for r in rules}
+        self.injecting = bool(rules)
+
+    def refresh(self) -> bool:
+        """Re-read LIVE_FILE (and the host.env its rules' secrets come from) if either changed;
+        True when it did. Called at the top of every hook and once a second by ``_watch``.
+
+        A rule whose spec AND resolved secrets are unchanged keeps its object — so its cached
+        token survives a posture change that only touched other rules. A new or changed rule
+        starts cold and, once the proxy is running, is warmed off the request path (at WARN, as
+        at startup: one host's missing credential is never all egress). An unreadable or
+        malformed file fails CLOSED — no rules, the wall enforcing, nothing tunnelled blind —
+        like ALLOW_FILE: a parse error never widens egress."""
+        if self.live_path is None:
+            return False
+        stamp = (_file_stamp(self.live_path), _file_stamp(self.host_env_path))
+        if stamp == self._live_stamp:
+            return False
+        first = self._live_stamp is None
+        self._live_stamp = stamp
+        try:
+            data = json.loads(self.live_path.read_text())
+            if not isinstance(data, dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError) as e:
+            ctx.log.warn(f"egress_proxy: live settings unreadable ({e}) — failing closed")
+            data = {}
+        host_env = _read_host_env(self.host_env_path)
+        previous = {getattr(r, "key", None): r for r in self.rules}
+        rules: list[_Rule] = []
+        fresh: list[_Rule] = []
+        specs = data.get("rules")
+        for spec in specs if isinstance(specs, list) else []:
+            if not isinstance(spec, dict):
+                continue
+            secrets = _resolve_secrets(spec.get("env") or (), host_env)
+            key = json.dumps([spec, secrets], sort_keys=True)
+            rule = previous.get(key)
+            if rule is None:
+                rule = _Rule(spec, secrets)
+                rule.key = key
+                fresh.append(rule)
+            if rule.active:
+                rules.append(rule)
+        self._set_rules(rules)
+        self.default_deny = data.get("default_deny", True) is not False
+        passthrough = data.get("passthrough")
+        self.passthrough_hosts = (
+            [str(h) for h in passthrough if h] if isinstance(passthrough, list) else []
+        )
+        if not first:
+            wall = "on" if self.default_deny else "off"
+            hosts = ", ".join(sorted(r.host for r in rules if r.host)) or "none"
+            ctx.log.info(f"egress_proxy: settings reloaded — injecting {hosts}; wall {wall}")
+        if self._running:
+            self._warm([r for r in fresh if r.active])
+        return True
+
+    def _warm(self, rules: list[_Rule]) -> None:
+        threads = [
+            threading.Thread(
+                target=lambda r=r: r.token(warm=True), daemon=True, name=f"egress-warm-{r.host}"
+            )
+            for r in rules
+        ]
+        self._warm_threads += threads
+        for t in threads:
+            t.start()
+
+    async def _watch(self) -> None:
+        """Poll the live settings once a second, so a change lands even on a proxy with no new
+        requests — an idle tunnel sends none, and a narrowing must still reach it."""
+        while True:
+            await asyncio.sleep(1)
+            try:
+                self.refresh()
+            except Exception as e:  # the watcher must outlive any one bad read
+                ctx.log.warn(f"egress_proxy: live settings refresh failed: {e}")
+
+    def done(self) -> None:
+        watcher = getattr(self, "_watcher", None)
+        if watcher is not None:
+            watcher.cancel()
 
     def _load_rules(self) -> list[_Rule]:
         """Build the injection rule set. ``INJECT_RULES`` (a JSON list of rule objects) is the
@@ -695,14 +842,13 @@ class Injector:
         egress for its duration. Fire-and-forget daemon threads: a warm failure just logs (at WARN
         — ``warm=True``; an ERROR here makes mitmproxy exit, see ``token``) and the request path
         re-mints as before. Handles kept on ``self`` so tests can join."""
-        self._warm_threads = [
-            threading.Thread(
-                target=lambda r=r: r.token(warm=True), daemon=True, name=f"egress-warm-{r.host}"
-            )
-            for r in self.rules
-        ]
-        for t in self._warm_threads:
-            t.start()
+        self._running = True
+        self._warm(list(self.rules))
+        if self.live_path is not None:
+            try:
+                self._watcher = asyncio.get_running_loop().create_task(self._watch())
+            except RuntimeError:
+                pass  # no event loop (the unit tests): the hooks still refresh per request
 
     def http_connect(self, flow: http.HTTPFlow) -> None:
         """The egress wall for proxied HTTPS. The box reaches every HTTPS host through an explicit
@@ -717,6 +863,7 @@ class Injector:
         editor attach that is a push path (seen live, 2026-09-17). Another port needs its own
         grant, ``host:port`` (``fy allow add github.com:22``), so the blocked row carries the port
         and the TUI's allow action offers exactly that."""
+        self.refresh()
         host = flow.request.pretty_host
         port = flow.request.port
         if self._allowed_connect(host, port):
@@ -780,6 +927,7 @@ class Injector:
           - CAPTURE_MODE=full → fall through → mitmproxy terminates TLS and the request/response
             hooks log the decrypted request.
         """
+        self.refresh()
         # The target host: the SNI if the client sent one, else the CONNECT target address (a
         # client reaching a bare IP sends no SNI). We must identify the injector host either way,
         # so it's NEVER tunnelled — even when addressed by IP — or we couldn't rewrite its header.
@@ -806,6 +954,7 @@ class Injector:
             self._log_passthrough(target)
 
     def request(self, flow: http.HTTPFlow) -> None:
+        self.refresh()
         # The egress wall for plain HTTP (cleartext never CONNECTs, so http_connect can't catch it):
         # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host
         # grant as CONNECT :22 — here, before it leaves the box. HTTPS is walled at http_connect.

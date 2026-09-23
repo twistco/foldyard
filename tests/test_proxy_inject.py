@@ -1261,3 +1261,201 @@ def test_a_refused_cleartext_build_request_is_attributed_too(walled):
     inj.request(flow)
     assert flow.response is not None and flow.response.status_code == 403
     assert _last_log(log)["build"] is True
+
+
+# ── the live settings file: posture changes without a restart ─────────────────────────
+
+
+def _write_live(path: Path, rules=(), default_deny=False, passthrough=()) -> None:
+    """Write the live file the way the supervisor does: whole, then renamed into place."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(
+            {"rules": list(rules), "default_deny": default_deny, "passthrough": list(passthrough)}
+        )
+    )
+    tmp.replace(path)
+
+
+@pytest.fixture
+def live(gh, monkeypatch, tmp_path):
+    """An Injector configured by LIVE_FILE (+ HOST_ENV_FILE for secrets). Returns a namespace with
+    the Injector factory, the live/host-env/allow/log paths."""
+    paths = types.SimpleNamespace(
+        live=tmp_path / "proxy-live.json",
+        host_env=tmp_path / "host.env",
+        allow=tmp_path / "allow-effective.json",
+        log=tmp_path / "egress.jsonl",
+    )
+    _write_live(paths.live)
+    paths.host_env.write_text("")
+    _write_allow(paths.allow, [])
+    # A stray legacy env must not leak into a live-configured proxy.
+    monkeypatch.setenv("INJECT_HOST", "legacy.example.com")
+    monkeypatch.setenv("INJECT_COMMAND", "should-be-ignored")
+    monkeypatch.setenv("DEFAULT_DENY", "")
+    monkeypatch.setenv("LIVE_FILE", str(paths.live))
+    monkeypatch.setenv("HOST_ENV_FILE", str(paths.host_env))
+    monkeypatch.setenv("ALLOW_FILE", str(paths.allow))
+    monkeypatch.setenv("PROXY_LOG_FILE", str(paths.log))
+    paths.Injector = gh.Injector
+    paths.logs = gh.logs
+    return paths
+
+
+def _counting_minter(tmp_path: Path, name: str, value: str = "token FAKE", env_key: str = ""):
+    """A minter that counts its runs and prints `value` (or, with env_key, that var's value)."""
+    calls = tmp_path / f"{name}.calls"
+    script = tmp_path / f"{name}.py"
+    emit = f"os.environ.get({env_key!r}, 'MISSING')" if env_key else repr(value)
+    script.write_text(
+        "import json, os, pathlib\n"
+        f"p = pathlib.Path({str(calls)!r})\n"
+        "p.write_text(str((int(p.read_text()) if p.exists() else 0) + 1))\n"
+        f"print(json.dumps({{'value': {emit}, 'ttl': 3600}}))\n"
+    )
+    return types.SimpleNamespace(command=f"{sys.executable} {script}", calls=calls)
+
+
+def test_the_live_file_configures_the_rules_over_the_legacy_env(live, tmp_path):
+    minter = _counting_minter(tmp_path, "gh")
+    _write_live(live.live, rules=[{"host": "api.github.com", "command": minter.command}])
+    inj = live.Injector()
+    flow = _Flow("api.github.com")
+    inj.request(flow)
+    assert flow.request.headers["Authorization"] == "token FAKE"
+    assert inj.inject_hosts == {"api.github.com"}  # legacy.example.com never appears
+
+
+def test_a_rule_added_live_injects_without_a_new_process(live, tmp_path):
+    gh_minter = _counting_minter(tmp_path, "gh")
+    sanity = _counting_minter(tmp_path, "sanity", value="Bearer S")
+    gh_rule = {"host": "api.github.com", "command": gh_minter.command}
+    _write_live(live.live, rules=[gh_rule])
+    inj = live.Injector()
+    inj.request(_Flow("api.github.com"))
+
+    _write_live(live.live, rules=[gh_rule, {"host": "api.sanity.io", "command": sanity.command}])
+    added = _Flow("api.sanity.io")
+    inj.request(added)
+    assert added.request.headers["Authorization"] == "Bearer S"
+    inj.request(_Flow("api.github.com"))
+    # The unchanged rule kept its cached token across the reload: the whole point is that a
+    # posture change costs the rules that DIDN'T change nothing.
+    assert gh_minter.calls.read_text() == "1"
+
+
+def test_a_rule_removed_live_stops_injecting_at_once(live, tmp_path):
+    minter = _counting_minter(tmp_path, "gh")
+    _write_live(live.live, rules=[{"host": "api.github.com", "command": minter.command}])
+    inj = live.Injector()
+    inj.request(_Flow("api.github.com"))
+    _write_live(live.live, rules=[])
+    flow = _Flow("api.github.com")
+    flow.request.headers["Authorization"] = "token DUMMY"
+    inj.request(flow)
+    assert flow.request.headers["Authorization"] == "token DUMMY"  # revoked on the next request
+
+
+def test_the_wall_switches_live(live):
+    inj = live.Injector()
+    open_ = _Flow("anywhere.example.com")
+    open_.response = None
+    inj.http_connect(open_)
+    assert open_.response is None  # observing
+    _write_live(live.live, default_deny=True)
+    walled = _Flow("anywhere.example.com")
+    walled.response = None
+    inj.http_connect(walled)
+    assert walled.response is not None and walled.response.status_code == 403
+
+
+def test_passthrough_changes_live(live):
+    inj = live.Injector()
+    hello = _ClientHello("files.example.com")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is False  # decrypted
+    _write_live(live.live, passthrough=["*.example.com"])
+    hello = _ClientHello("files.example.com", client_id="client-2")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is True  # tunnelled now
+
+
+def test_a_missing_or_malformed_live_file_fails_closed(live):
+    live.live.write_text("{ not json")
+    inj = live.Injector()
+    f = _Flow("anywhere.example.com")
+    f.response = None
+    inj.http_connect(f)
+    assert f.response is not None and f.response.status_code == 403  # the wall, not open egress
+    assert inj.injecting is False
+    live.live.unlink()
+    g = _Flow("anywhere.example.com", method="POST")
+    g.response = None
+    inj.http_connect(g)
+    assert g.response is not None and g.response.status_code == 403
+
+
+def test_a_rules_secret_is_read_from_host_env_by_name(live, tmp_path, monkeypatch):
+    # The proxy's own environment no longer carries host.env (the supervisor strips it), so the
+    # addon reads the names its rules declare, and only those, from the file.
+    monkeypatch.delenv("SANITY_TOKEN", raising=False)
+    live.host_env.write_text("SANITY_TOKEN='from-host-env'\nOTHER=nope\n")
+    minter = _counting_minter(tmp_path, "sanity", env_key="SANITY_TOKEN")
+    rule = {"host": "api.sanity.io", "command": minter.command, "env": ["SANITY_TOKEN"]}
+    _write_live(live.live, rules=[rule])
+    inj = live.Injector()
+    flow = _Flow("api.sanity.io")
+    inj.request(flow)
+    assert flow.request.headers["Authorization"] == "from-host-env"
+
+
+def test_an_operator_exported_secret_wins_over_host_env(live, tmp_path, monkeypatch):
+    monkeypatch.setenv("SANITY_TOKEN", "exported")
+    live.host_env.write_text("SANITY_TOKEN=from-host-env\n")
+    minter = _counting_minter(tmp_path, "sanity", env_key="SANITY_TOKEN")
+    _write_live(
+        live.live,
+        rules=[{"host": "api.sanity.io", "command": minter.command, "env": ["SANITY_TOKEN"]}],
+    )
+    flow = _Flow("api.sanity.io")
+    live.Injector().request(flow)
+    assert flow.request.headers["Authorization"] == "exported"
+
+
+def test_a_rotated_secret_drops_the_cached_token(live, tmp_path, monkeypatch):
+    # Before: a rotation changed the daemon's env stamp and the restart dropped every cache. Now
+    # the reload notices the value changed and rebuilds just that rule.
+    monkeypatch.delenv("SANITY_TOKEN", raising=False)
+    live.host_env.write_text("SANITY_TOKEN=one\n")
+    minter = _counting_minter(tmp_path, "sanity", env_key="SANITY_TOKEN")
+    _write_live(
+        live.live,
+        rules=[{"host": "api.sanity.io", "command": minter.command, "env": ["SANITY_TOKEN"]}],
+    )
+    inj = live.Injector()
+    inj.request(_Flow("api.sanity.io"))
+    tmp = live.host_env.with_suffix(".tmp")
+    tmp.write_text("SANITY_TOKEN=two\n")
+    tmp.replace(live.host_env)
+    flow = _Flow("api.sanity.io")
+    inj.request(flow)
+    assert flow.request.headers["Authorization"] == "two"
+    assert minter.calls.read_text() == "2"
+
+
+def test_a_rule_added_live_is_warmed_below_error(live, tmp_path):
+    # A reload is not the startup window, but a new rule's warm-up is still off the request path,
+    # and a missing credential there is one host's problem: WARN, like the startup warm-up.
+    inj = live.Injector()
+    inj.running()
+    boom = tmp_path / "boom.py"
+    boom.write_text("import sys; sys.exit(1)\n")
+    _write_live(
+        live.live, rules=[{"host": "api.github.com", "command": f"{sys.executable} {boom}"}]
+    )
+    assert inj.refresh() is True
+    for t in inj._warm_threads:
+        t.join(timeout=10)
+    assert {lvl for lvl, msg in live.logs if "mint failed" in msg} == {"warn"}
+    assert any("reloaded" in msg for _lvl, msg in live.logs)  # the change is reported
