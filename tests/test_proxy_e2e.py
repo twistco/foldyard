@@ -110,6 +110,17 @@ def _make_upstream(port: int, cert: Path, key: Path) -> http.server.ThreadingHTT
             self.end_headers()
             self.wfile.write(auth.encode())
 
+        def do_POST(self):
+            # Drain the body (a streamed upload must arrive whole), then echo the header.
+            length = int(self.headers.get("Content-Length", "0"))
+            while length:
+                length -= len(self.rfile.read(min(length, 65536)))
+            auth = self.headers.get("Authorization", "<none>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(auth.encode())
+
         def log_message(self, format, *args):  # match the base signature; keep output clean
             pass
 
@@ -175,6 +186,8 @@ def proxy(tmp_path):
         "--listen-host", HOST, "--listen-port", str(pport),
         "--set", f"confdir={confdir}", "--set", "ssl_insecure=true",
         "--set", "termlog_verbosity=info",
+        # What the proxy plugin launches with: a body past 1 MiB is streamed, not buffered.
+        "--set", "stream_large_bodies=1m",
     ]  # fmt: skip
     proc = subprocess.Popen(
         cmd,
@@ -237,6 +250,27 @@ def test_proxy_rewrites_header_and_logs_while_box_trusts_the_ca(proxy):
         "an injected entry in the egress log",
         proxy.log.read_text() if proxy.log.exists() else "",
     )
+
+
+def test_a_streamed_upload_is_injected_too(proxy):
+    # A request body past stream_large_bodies goes upstream as it arrives, headers first — so the
+    # credential must be written at `requestheaders`, not `request` (which fires after the body is
+    # gone). A long Claude conversation is exactly this shape; it reached Anthropic with the box's
+    # dummy token and got 401 "OAuth access token is invalid" (2026-09-23).
+    import requests
+
+    s = requests.Session()
+    s.trust_env = False
+    r = s.post(
+        f"https://{HOST}:{proxy.uport}/echo",
+        proxies={"https": f"http://{HOST}:{proxy.pport}"},
+        verify=str(proxy.ca),
+        headers={"Authorization": "Bearer DUMMY"},
+        data=b"x" * (2 * 1024 * 1024),
+        timeout=30,
+    )
+    assert r.status_code == 200
+    assert r.text == "token FAKE", "the streamed request reached the upstream un-injected"
 
 
 def test_ca_trust_is_load_bearing(proxy):

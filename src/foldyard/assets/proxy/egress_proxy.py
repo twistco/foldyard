@@ -1039,7 +1039,24 @@ class Injector:
             if conn is not None:
                 conn["blind"] = target
 
+    def requestheaders(self, flow: http.HTTPFlow) -> None:
+        """Where a request is judged and its credential written: the headers are in, the body
+        isn't. With ``stream_large_bodies`` set, a body past the threshold goes upstream as it
+        arrives and ``request`` fires only once it's gone — too late for a header. A long Claude
+        conversation (>1 MiB) reached Anthropic with the box's dummy token that way (401 "OAuth
+        access token is invalid", 2026-09-23). Refusing here also means a refused request never
+        streams its body anywhere."""
+        self._on_request(flow)
+
     def request(self, flow: http.HTTPFlow) -> None:
+        """Fires after ``requestheaders`` (after a buffered body, or after a streamed one has gone
+        upstream). The work happened there; this only covers a caller that skips that hook."""
+        self._on_request(flow)
+
+    def _on_request(self, flow: http.HTTPFlow) -> None:
+        if flow.metadata.get("egress_proxy_judged"):
+            return
+        flow.metadata["egress_proxy_judged"] = True
         self.refresh()
         # The egress wall for plain HTTP (cleartext never CONNECTs, so http_connect can't catch it):
         # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host

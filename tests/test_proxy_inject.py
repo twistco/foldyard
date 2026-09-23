@@ -1600,3 +1600,29 @@ def test_a_close_that_fails_is_reported_not_raised(live, closer):
     _write_live(live.live, passthrough=[])
     assert inj.refresh() is True
     assert any("couldn't close" in msg for _lvl, msg in live.logs)
+
+
+# ── injection happens on the HEADERS, before a streamed body goes upstream ─────────────
+
+
+def test_injection_happens_at_requestheaders(injector):
+    # With stream_large_bodies set, mitmproxy forwards a big request's headers + body as they
+    # arrive and fires `request` only after the body has gone — too late to rewrite a header.
+    # A long Claude conversation (>1 MiB) reached Anthropic with the box's dummy token: 401
+    # "OAuth access token is invalid". `requestheaders` fires first, for every request.
+    inj, _ = injector
+    flow = _Flow("api.github.com")
+    flow.request.headers["Authorization"] = "token DUMMY"
+    inj.requestheaders(flow)
+    assert flow.request.headers["Authorization"] == "token FAKE"
+
+
+def test_the_request_hook_after_requestheaders_does_nothing_twice(walled):
+    # Both hooks fire for a buffered request; the work (and its log row) happens once.
+    inj, _allow, log = walled
+    flow = _Flow("plain.example.com", port=80, scheme="http")
+    flow.response = None
+    inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 403
+    inj.request(flow)
+    assert sum(1 for line in log.read_text().splitlines() if '"blocked": true' in line) == 1
