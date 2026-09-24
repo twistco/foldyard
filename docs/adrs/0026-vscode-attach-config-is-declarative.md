@@ -99,8 +99,10 @@ Each layer has one job:
   foldyard never writes it, so a consumer can keep it gitignored and let each operator hold their
   own tweaks there — window colours per worktree, a personal ruler — without a diff. Being
   per-checkout, it is per-worktree by construction.
-- **User is foldyard's instance plumbing** (the local-terminal shims, the port pin, `update.mode`)
-  and nothing a consumer declares.
+- **User is the operator's, plus foldyard's instance plumbing** (the local-terminal shims, the
+  port and git-bridge pins) and nothing a consumer declares. A new instance is seeded once from
+  the operator's own VS Code User folder, minus the settings that name a container engine; that
+  is where `update.mode` comes from now (amended 2026-09-24 — foldyard pinned it to `manual`).
 
 Per-operator overrides of the *policy* go in `foldyard.local.toml`: its `[vscode.settings]`
 deep-merges key-by-key over the shared table and is adopted alongside it, so one setting can be

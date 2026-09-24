@@ -630,6 +630,11 @@ redeclaring the team's. `fy config widenings` lists their keys under **agent ste
   `fy code` window only. Personal tweaks go in `foldyard.local.toml`. Deleting the
   `_generatedBy` key from the written config file stops `fy code` writing it.
 
+  Each worktree gets its own VS Code instance. The first `fy code` for a worktree copies your own
+  VS Code's user settings, keybindings and snippets into it, leaving out settings that point at
+  another container engine (Docker Desktop's socket or context). After that the instance's
+  settings are its own; delete its `User/settings.json` to copy yours again.
+
   ```toml
   [vscode]
   extensions = ["anthropic.claude-code", "charliermarsh.ruff", "biomejs.biome"]

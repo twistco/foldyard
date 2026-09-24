@@ -68,6 +68,10 @@ def fake(tmp_path, monkeypatch):
     )
     state = tmp_path / "state"
     monkeypatch.setattr(config, "state_dir", lambda: state)
+    # The operator's own VS Code User folder, which a new instance is seeded from. Absent unless a
+    # test creates it — the suite must never read the real one.
+    global_user = tmp_path / "global-user"
+    monkeypatch.setattr(vscode, "_global_user_dir", lambda: global_user)
     tools = {
         "code": "/usr/local/bin/code",
         "ssh-agent": "/usr/bin/ssh-agent",
@@ -105,6 +109,7 @@ def fake(tmp_path, monkeypatch):
         "ctx": ctx,
         "udd": state / "vscode" / "main",
         "sock": sock,
+        "global": global_user,
     }
 
 
@@ -348,8 +353,27 @@ def test_invalid_settings_json_is_not_overwritten(fake, capsys):
     original = "{ // jsonc comment that stdlib json will not parse\n}"
     path.write_text(original)
     assert vscode.code() == 0
+    # Rewriting would drop the comment, so a commented file is left alone and the step said.
     assert path.read_text() == original
-    assert "not strict JSON" in capsys.readouterr().err
+    assert "has comments" in capsys.readouterr().err
+
+
+def test_settings_json_with_trailing_commas_is_configured(fake):
+    # VS Code's settings.json is JSONC: trailing commas are legal there (VS Code writes them itself
+    # when an operator edits by hand), and they carry nothing a rewrite could lose.
+    fake["state"]["running"] = True
+    path = _settings(fake)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{\n  "json.schemaDownload.trustedDomains": {"https://json.schemastore.org/": true,},\n'
+        '  "editor.rulers": [100, 120,],\n  "odd.string": "a,}b",\n}\n'
+    )
+    assert vscode.code() == 0
+    settings = json.loads(path.read_text())
+    assert settings["json.schemaDownload.trustedDomains"] == {"https://json.schemastore.org/": True}
+    assert settings["editor.rulers"] == [100, 120]
+    assert settings["odd.string"] == "a,}b"
+    assert "ZDOTDIR" in settings["terminal.integrated.env.osx"]
 
 
 def test_launch_env_carries_docker_host_only_to_isolated_instance(fake):
@@ -664,6 +688,51 @@ def test_user_owned_config_is_never_clobbered(fake, capsys):
     assert not _execs(fake["calls"], "Marker")
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"extensions": ["mine.only",],}',
+        '{\n  // my own list\n  "extensions": ["mine.only"] /* keep */\n}',
+    ],
+)
+def test_a_user_owned_jsonc_config_is_never_clobbered(fake, capsys, text):
+    # The operator edits this file in VS Code, which accepts JSONC — a trailing comma or a comment
+    # there is still THEIR file, not "garbage, safe to replace".
+    fake["state"]["running"] = True
+    path = _cfg_path(fake)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    assert vscode.code() == 0
+    assert path.read_text() == text
+    assert "kept your customised" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('{"a": 1,}', ({"a": 1}, False)),
+        ('{"a": [1, 2,\n],\n}', ({"a": [1, 2]}, False)),
+        ('{"u": "https://x.org/*y*/"}', ({"u": "https://x.org/*y*/"}, False)),
+        ('{"q": "say \\"hi\\", }", }', ({"q": 'say "hi", }'}, False)),
+        ('{"a": 1, // note\n}', ({"a": 1}, True)),
+        ('{"a": /* x */ 1 /* y */,}', ({"a": 1}, True)),
+        # VS Code's scanner ends a line comment at any of its line breaks, not only \n.
+        ('{"a": 1, // c\r"b": 2}', ({"a": 1, "b": 2}, True)),
+        ('{"a": 1, // c\u2028"b": 2}', ({"a": 1, "b": 2}, True)),
+        ('{"a": 1,\u2029"b": 2 // c\u2029}', ({"a": 1, "b": 2}, True)),
+        ('{"s": "keep\u2028me"}', ({"s": "keep\u2028me"}, False)),
+    ],
+)
+def test_loads_jsonc(text, expected):
+    assert vscode._loads_jsonc(text) == expected
+
+
+@pytest.mark.parametrize("text", ['{"a": 1,,}', "[,]", '{"a": 1 /* unterminated'])
+def test_loads_jsonc_still_rejects_malformed(text):
+    with pytest.raises(ValueError):
+        vscode._loads_jsonc(text)
+
+
 def test_a_foreign_marker_is_someone_elses_file_too(fake, capsys):
     # Ownership is "the marker is OURS", not "a marker exists": another tool stamping its own
     # `_generatedBy` owns the file just as much as a user who removed ours.
@@ -925,11 +994,10 @@ def test_published_port_pin_is_absent_without_a_ports_table(monkeypatch):
     assert set(clean["settings"]["remote.portsAttributes"]) == {"8188", "8088"}
 
 
-def test_instance_settings_pin_update_mode_and_daemon_ports(fake, monkeypatch):
+def test_instance_settings_pin_daemon_ports(fake, monkeypatch):
     """The user-data-dir settings.json is written on every `fy code`, so it carries the pins that
-    must not depend on the attached config still being foldyard-owned. `update.mode` is manual
-    because this per-worktree instance is scaffolding — an update prompt on each attach is pure
-    interruption, and the operator's own VS Code install is untouched."""
+    must not depend on the attached config still being foldyard-owned. `update.mode` is NOT one of
+    them: it is the operator's preference, and arrives with the seed from their own settings."""
     monkeypatch.setattr(config, "gcp_minter_port", lambda: 8188)
     monkeypatch.setattr(config, "proxy_port", lambda: 8088)
     fake["state"]["running"] = True
@@ -937,9 +1005,115 @@ def test_instance_settings_pin_update_mode_and_daemon_ports(fake, monkeypatch):
     assert vscode.code() == 0
 
     settings = json.loads(_settings(fake).read_text())
-    assert settings["update.mode"] == "manual"
+    assert "update.mode" not in settings
     attrs = settings["remote.portsAttributes"]
     assert attrs["8188"]["onAutoForward"] == "ignore"
     assert attrs["8088"]["onAutoForward"] == "ignore"
     # The pins merge — they must not cost the local-terminal wiring this file exists for.
     assert vscode._TERMINAL_ENV_OSX in settings
+
+
+def _global(fake, settings: str | None = None) -> Path:
+    """Populate the fake operator's VS Code User folder."""
+    g = fake["global"]
+    (g / "snippets").mkdir(parents=True)
+    if settings is not None:
+        (g / "settings.json").write_text(settings)
+    (g / "keybindings.json").write_text('[ // mine\n  {"key": "cmd+k", "command": "x"},\n]\n')
+    (g / "snippets" / "python.json").write_text('{"p": {"body": "print()"}}')
+    return g
+
+
+def test_a_new_instance_is_seeded_from_the_operators_vscode(fake, capsys):
+    # The isolated instance shares nothing with the operator's own VS Code but the extensions
+    # folder, so without a seed every worktree starts from factory defaults. The seed is theirs
+    # (update.mode included); the pins still apply on top.
+    fake["state"]["running"] = True
+    _global(fake, '{\n  // mine\n  "editor.fontSize": 15,\n  "update.mode": "manual",\n}\n')
+
+    assert vscode.code() == 0
+
+    settings = json.loads(_settings(fake).read_text())
+    assert settings["editor.fontSize"] == 15
+    assert settings["update.mode"] == "manual"
+    assert settings["git.useIntegratedAskPass"] is False
+    assert vscode._TERMINAL_ENV_OSX in settings
+    user = fake["udd"] / "User"
+    assert (user / "keybindings.json").read_text() == (
+        fake["global"] / "keybindings.json"
+    ).read_text()
+    assert (user / "snippets" / "python.json").exists()
+    assert "seeded" in capsys.readouterr().out
+
+
+def test_the_seed_drops_settings_that_point_at_another_engine(fake):
+    # A global Dev Containers / Docker setting naming Docker Desktop's socket would send the attach
+    # to the wrong engine — the leak the isolated instance exists to prevent.
+    fake["state"]["running"] = True
+    _global(
+        fake,
+        json.dumps(
+            {
+                "dev.containers.dockerSocketPath": "/Users/me/.docker/run/docker.sock",
+                "dev.containers.dockerPath": "docker",
+                "remote.containers.dockerPath": "docker",
+                "docker.environment": {"DOCKER_HOST": "unix:///elsewhere.sock"},
+                "docker.host": "unix:///elsewhere.sock",
+                "docker.context": "desktop-linux",
+                "containers.environment": {"DOCKER_HOST": "unix:///elsewhere.sock"},
+                "containers.containerClient": "com.microsoft.visualstudio.containers.docker",
+                # The same redirection, one level down: this window's terminals.
+                "terminal.integrated.env.osx": {"DOCKER_HOST": "unix:///elsewhere.sock", "A": "1"},
+                "terminal.integrated.env.linux": {"DOCKER_CONTEXT": "desktop-linux"},
+                "terminal.integrated.env.windows": {"CONTAINER_HOST": "ssh://elsewhere"},
+                "editor.fontSize": 15,
+            }
+        ),
+    )
+
+    assert vscode.code() == 0
+
+    settings = json.loads(_settings(fake).read_text())
+    assert settings["editor.fontSize"] == 15
+    osx = settings["terminal.integrated.env.osx"]
+    assert osx["A"] == "1"
+    assert "DOCKER_HOST" not in osx
+    assert settings["terminal.integrated.env.linux"] == {}
+    assert settings["terminal.integrated.env.windows"] == {}
+    assert not [k for k in settings if k.startswith(("dev.containers", "remote.containers"))]
+    assert not [k for k in settings if k.startswith(("docker.", "containers."))]
+
+
+def test_an_existing_instance_is_never_reseeded(fake):
+    # Seeding happens once, when the instance is created; after that its settings are its own
+    # (edited in that window) and a later global change must not overwrite them.
+    fake["state"]["running"] = True
+    _global(fake, '{"editor.fontSize": 15}')
+    path = _settings(fake)
+    path.parent.mkdir(parents=True)
+    path.write_text('{"editor.fontSize": 11}')
+
+    assert vscode.code() == 0
+
+    assert json.loads(path.read_text())["editor.fontSize"] == 11
+    assert not (fake["udd"] / "User" / "keybindings.json").exists()
+
+
+def test_an_unparseable_global_settings_still_seeds_the_rest(fake, capsys):
+    fake["state"]["running"] = True
+    _global(fake, '{"editor.fontSize": }')
+
+    assert vscode.code() == 0
+
+    assert "editor.fontSize" not in json.loads(_settings(fake).read_text())
+    assert (fake["udd"] / "User" / "keybindings.json").exists()
+    assert "couldn't seed" in capsys.readouterr().err
+
+
+def test_no_operator_vscode_seeds_nothing(fake):
+    fake["state"]["running"] = True
+
+    assert vscode.code() == 0
+
+    assert not (fake["udd"] / "User" / "keybindings.json").exists()
+    assert "update.mode" not in json.loads(_settings(fake).read_text())

@@ -57,7 +57,16 @@ break config or CLI shape, and say so here. How a release is cut:
   anything — use `fy host restart`; `fy host --restart` is gone the same way. Every "run `fy
   host`" message now names `fy host restart` or `fy host`.
 
+- **`fy code` starts a new worktree's VS Code with your own settings.** The first `fy code` for a
+  worktree copies your VS Code user settings, keybindings and snippets into its instance, leaving
+  out any that point at another container engine. Existing instances are left as they are.
+  foldyard no longer sets `update.mode` to `manual`; your own setting carries over instead.
+
 ### Fixed
+
+- **`fy code` accepts VS Code's own JSON flavour.** A trailing comma in the instance's
+  `settings.json` no longer skips the local-terminal setup, and a hand-edited attached-container
+  config with a trailing comma or a comment is kept rather than replaced.
 
 - **`git worktree add` in the box no longer corrupts both checkouts' indexes.** The box's git
   shim let the new worktree's checkout write into the calling checkout's `index-box`: phantom

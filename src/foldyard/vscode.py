@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import config, configpin, devmode, stack
 
@@ -189,10 +190,6 @@ def _user_settings(udd: Path) -> Path:
 # and `remote.restoreForwardedPorts` re-bound it on every reopen — the container can never start
 # (`bind: address already in use` on every `up`, nothing in the box to see it with).
 #
-# `update.mode` — this instance is per-worktree scaffolding, not the operator's daily editor, so an
-# update prompt on each attach is pure interruption (and updating a running attached instance is
-# worse than deferring it). The operator's own VS Code is a separate install and is unaffected.
-#
 # `git.terminalAuthentication` / `git.useIntegratedAskPass` — off. On, the git extension running IN
 # the box sets `GIT_ASKPASS` (+ its IPC socket) in every terminal it opens, so a `git push` there
 # asks the HOST — the VS Code GitHub session, the keychain — for a credential: an HTTPS push path
@@ -204,7 +201,6 @@ def _user_settings(udd: Path) -> Path:
 # the IPC socket reaped) and `fy verify`, which fails a checkout that flips these back on. Only
 # the SSH side is by construction (`_empty_agent`): no setting chooses what agent is forwarded.
 _PORTS_ATTRIBUTES = "remote.portsAttributes"
-_UPDATE_MODE = "update.mode"
 _GIT_BRIDGE_PINS = {"git.terminalAuthentication": False, "git.useIntegratedAskPass": False}
 # Widest default worktree offset (`stack._offset`: cksum % 89 + 1).
 _MAX_WORKTREE_OFFSET = 89
@@ -243,11 +239,167 @@ def _pin_ports(settings: dict) -> dict:
 
 
 def _pinned_settings(settings: dict) -> dict:
-    """The isolated instance's pins: the port guard plus the update mode. Applied to the
+    """The isolated instance's pins: the port guard and the git bridge. Applied to the
     user-data-dir's own settings.json, which foldyard always writes — the attached config carries
-    the port guard too, but that file is skipped once an operator takes ownership of it, and a
-    protection that disappears when someone customises an unrelated key is not a protection."""
-    return {**_pin_ports(settings), **_GIT_BRIDGE_PINS, _UPDATE_MODE: "manual"}
+    them too, but that file is skipped once an operator takes ownership of it, and a protection
+    that disappears when someone customises an unrelated key is not a protection."""
+    return {**_pin_ports(settings), **_GIT_BRIDGE_PINS}
+
+
+# Seeding a NEW instance from the operator's own VS Code. `--user-data-dir` isolates everything but
+# the extensions folder, so without it each worktree's first window is factory VS Code — theme,
+# keybindings, `update.mode` all gone. Copied once, at creation (the instance's settings.json does
+# not exist yet); after that the instance's settings are its own, edited in its own window. The
+# source is the operator's file on this computer, not mount data (ADR-0023 is not in tension), and
+# never another instance's: those carry their own checkout's paths in the local-terminal shim.
+_SEEDED_FILES = ("keybindings.json",)
+_SEEDED_DIRS = ("snippets",)
+# Settings that say WHERE the engine is. The instance is launched with the box's DOCKER_HOST, and a
+# global value naming Docker Desktop's socket or context would send the attach there instead —
+# the cross-engine leak the isolated instance exists to prevent. Dropped from the seed.
+_ENGINE_SETTINGS = frozenset(
+    {
+        "dev.containers.dockerPath",
+        "dev.containers.dockerComposePath",
+        "dev.containers.dockerSocketPath",
+        "remote.containers.dockerPath",
+        "remote.containers.dockerComposePath",
+        "remote.containers.dockerSocketPath",
+        "docker.host",
+        "docker.context",
+        "docker.environment",
+        "docker.dockerPath",
+        "docker.dockerComposePath",
+        "containers.environment",
+        "containers.containerClient",
+        "containers.orchestratorClient",
+    }
+)
+# The same redirection one level down: an engine variable in the terminal env would point this
+# window's terminals at a different engine than the one it is attached through.
+_TERMINAL_ENV_SETTINGS = tuple(
+    f"terminal.integrated.env.{os_}" for os_ in ("osx", "linux", "windows")
+)
+_ENGINE_ENV_VARS = frozenset(
+    {"DOCKER_HOST", "DOCKER_CONTEXT", "CONTAINER_HOST", "CONTAINER_CONNECTION"}
+)
+
+
+def _global_user_dir() -> Path | None:
+    """The operator's own VS Code User folder — the first that exists of macOS's and the XDG
+    location (Linux, and WSL2 when VS Code runs inside the distro). ``None`` when neither does."""
+    home = Path.home()
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    for d in (home / "Library" / "Application Support" / "Code" / "User", xdg / "Code" / "User"):
+        if d.is_dir():
+            return d
+    return None
+
+
+def _seed_from_global(udd: Path) -> bool:
+    """Seed a NEW instance (no settings.json yet) from the operator's own VS Code: settings minus
+    :data:`_ENGINE_SETTINGS`, keybindings and snippets. Returns whether anything was copied.
+    Best-effort — a failure is a warning, and the instance starts from defaults as before."""
+    source = _global_user_dir()
+    user = _user_settings(udd).parent
+    if source is None or not source.is_dir() or _user_settings(udd).exists():
+        return False
+    seeded = False
+    try:
+        user.mkdir(parents=True, exist_ok=True)
+        for name in _SEEDED_FILES:
+            if (source / name).is_file() and not (user / name).exists():
+                shutil.copyfile(source / name, user / name)
+                seeded = True
+        for name in _SEEDED_DIRS:
+            if (source / name).is_dir() and not (user / name).exists():
+                shutil.copytree(source / name, user / name)
+                seeded = True
+    except OSError as e:
+        _err(f"⚠ couldn't seed from {source}: {e}")
+    settings_src = source / "settings.json"
+    if settings_src.is_file():
+        try:
+            loaded, _ = _loads_jsonc(settings_src.read_text())
+            if not isinstance(loaded, dict):
+                raise ValueError("top-level JSON is not an object")
+            kept = {k: v for k, v in loaded.items() if k not in _ENGINE_SETTINGS}
+            for key in _TERMINAL_ENV_SETTINGS:
+                env = kept.get(key)
+                if isinstance(env, dict):
+                    kept[key] = {k: v for k, v in env.items() if k not in _ENGINE_ENV_VARS}
+            # Written as JSON: the copy's comments are dropped (the original is untouched), so the
+            # instance file stays one foldyard can keep its pins in.
+            _user_settings(udd).write_text(json.dumps(kept, indent=2) + "\n")
+            seeded = True
+        except (OSError, UnicodeDecodeError, ValueError) as e:
+            _err(f"⚠ couldn't seed settings from {settings_src}: {e}")
+    if seeded:
+        print(f"▶ seeded from your VS Code settings: {source}")
+    return seeded
+
+
+# What VS Code's JSONC scanner treats as a line break (its `isLineBreak`: 10, 13, 8232, 8233) — so
+# what ends a `//` comment.
+_JSONC_LINE_BREAKS = ("\n", "\r", "\u2028", "\u2029")
+
+
+def _strip_jsonc(text: str) -> tuple[str, bool]:
+    """``text`` with JSONC's two extensions removed — comments and trailing commas — plus whether
+    it had comments. String-aware (a URL's ``//`` stays), and the output keeps every newline so a
+    later parse error still points at the right line. A comma is only dropped straight before a
+    closing bracket AFTER a value, so ``[,]`` and ``{"a": 1,,}`` stay malformed, as in VS Code."""
+    out: list[str] = []
+    had_comments = False
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i : j + 1])
+            i = j + 1
+        elif text.startswith("//", i):
+            had_comments = True
+            ends = [e for e in (text.find(b, i) for b in _JSONC_LINE_BREAKS) if e >= 0]
+            i = min(ends, default=n)
+        elif text.startswith("/*", i):
+            had_comments = True
+            end = text.find("*/", i + 2)
+            if end < 0:
+                raise json.JSONDecodeError("Unterminated comment", text, i)
+            out.append("\n" * text.count("\n", i, end))
+            i = end + 2
+        else:
+            # JSON's whitespace has no U+2028/U+2029; VS Code's scanner counts them as line breaks.
+            out.append("\n" if c in "\u2028\u2029" else c)
+            i += 1
+    stripped = "".join(out)
+    # Second pass over comment-free text, so a comment between the comma and the bracket is moot.
+    kept: list[str] = []
+    in_string = escaped = False
+    for k, c in enumerate(stripped):
+        if in_string:
+            escaped = not escaped and c == "\\"
+            in_string = escaped or c != '"'
+        elif c == '"':
+            in_string = True
+        elif c == ",":
+            after = stripped[k + 1 :].lstrip()
+            before = "".join(kept).rstrip()
+            if after[:1] in ("}", "]") and before[-1:] not in ("", "[", "{", ","):
+                continue
+        kept.append(c)
+    return "".join(kept), had_comments
+
+
+def _loads_jsonc(text: str) -> tuple[Any, bool]:
+    """Parse VS Code's JSONC (its settings and attached-config files): the document, and whether it
+    had comments — which a rewrite through :mod:`json` would drop. Raises :class:`ValueError`
+    (a :class:`json.JSONDecodeError`) on anything else malformed."""
+    stripped, had_comments = _strip_jsonc(text)
+    return json.loads(stripped), had_comments
 
 
 def _local_terminal_zdotdir(udd: Path) -> Path:
@@ -271,10 +423,10 @@ def _write_local_terminal_cwd(
     settings: dict[str, object] = {}
     if path.exists() and path.stat().st_size:
         try:
-            loaded = json.loads(path.read_text())
+            loaded, had_comments = _loads_jsonc(path.read_text())
         except json.JSONDecodeError as e:
             _err(f"⚠ couldn't configure local terminal cwd in {path}:")
-            _err("  settings.json is not strict JSON")
+            _err("  settings.json is not valid JSON")
             _err(f"  ({e.msg} at line {e.lineno}, column {e.colno}).")
             _err(f"  Make Terminal: Create New Integrated Terminal (Local) cd to: {host_checkout}")
             return False
@@ -284,6 +436,12 @@ def _write_local_terminal_cwd(
         if not isinstance(loaded, dict):
             _err(f"⚠ couldn't configure local terminal cwd in {path}:")
             _err("  top-level JSON is not an object")
+            return False
+        if had_comments:
+            # Trailing commas are noise a rewrite may drop; comments are the operator's words.
+            _err(f"⚠ couldn't configure local terminal cwd in {path}:")
+            _err("  settings.json has comments, which rewriting it would lose.")
+            _err(f"  Make Terminal: Create New Integrated Terminal (Local) cd to: {host_checkout}")
             return False
         settings = loaded
 
@@ -438,13 +596,13 @@ _UNREADABLE = _Unreadable()
 
 
 def _read_config(path: Path) -> dict | _Unreadable | None:
-    """The attached config currently on disk: ``None`` when there isn't a JSON object there
-    (missing, garbage, or a non-dict document — all "nothing to preserve"), :data:`_UNREADABLE`
-    when there is a file but reading it failed."""
+    """The attached config currently on disk, read as the JSONC VS Code accepts: ``None`` when
+    there isn't a JSON object there (missing, garbage, or a non-dict document — all "nothing to
+    preserve"), :data:`_UNREADABLE` when there is a file but reading it failed."""
     if not path.exists():
         return None
     try:
-        existing = json.loads(path.read_text())
+        existing, _ = _loads_jsonc(path.read_text())
     except OSError:
         return _UNREADABLE
     except ValueError:
@@ -601,6 +759,7 @@ def code() -> int:
     print(f"▶ folder: {checkout}  (inside the box)")
     print(f"▶ uri:    {uri}")
     print(f"▶ isolated VS Code: --user-data-dir {udd}  (your default VS Code is untouched)")
+    _seed_from_global(udd)
     if _write_local_terminal_cwd(udd, host_checkout, env.get("ZDOTDIR")):
         print(f"▶ local terminal cwd: {host_checkout}")
 
