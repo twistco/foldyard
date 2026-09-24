@@ -451,9 +451,9 @@ def machine_stop() -> None:
 def machine_desktop() -> None:
     """List this project's VM in Podman Desktop, beside every other project's.
 
-    Registers an `fy-<machine>` podman connection and turns on Podman Desktop's "Load remote
-    system connections (ssh)". `export FOLDYARD_PODMAN_DESKTOP=1` makes `fy up`/`fy box up` keep it
-    current, pinning the VM's ssh port so the entry survives reboots."""
+    Registers an `fy-<machine>` podman connection, which Podman Desktop lists once its "Load
+    remote system connections (ssh)" preference is on. `export FOLDYARD_PODMAN_DESKTOP=1` makes
+    `fy up`/`fy box up` keep it current, pinning the VM's ssh port so it survives reboots."""
     from . import machine
 
     raise typer.Exit(machine.point_podman_desktop())

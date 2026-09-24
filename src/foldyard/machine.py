@@ -507,7 +507,7 @@ def _follow_in_podman_desktop() -> None:
         _err(line)
 
 
-def _show_in_podman_desktop() -> list[str]:
+def _show_in_podman_desktop(*, verbose: bool = False) -> list[str]:
     target = BACKEND.ssh_target(MACHINE)
     if target is None:
         return [f"⚠ no ssh route into '{MACHINE}' yet — Podman Desktop left as it was"]
@@ -515,7 +515,7 @@ def _show_in_podman_desktop() -> list[str]:
     registered = podman_desktop.register(
         name, podman_desktop.uri(target, BACKEND.guest_socket()), target.identity
     )
-    return podman_desktop.messages(name, registered, podman_desktop.enable_remote())
+    return podman_desktop.messages(name, registered, podman_desktop.remote_state(), verbose=verbose)
 
 
 def point_podman_desktop() -> int:
@@ -526,9 +526,10 @@ def point_podman_desktop() -> int:
     if BACKEND.name != "lima":
         print(f"✗ Podman Desktop shows {BACKEND.name} machines itself — nothing to register")
         return 1
-    lines = _show_in_podman_desktop() or [
-        f"✓ Podman Desktop already lists '{podman_desktop.connection_name(MACHINE)}'"
-    ]
+    lines = _show_in_podman_desktop(verbose=True)
+    if not any(line.startswith(("▶", "⚠")) for line in lines):
+        name = podman_desktop.connection_name(MACHINE)
+        lines.insert(0, f"✓ '{name}' is registered for Podman Desktop")
     for line in lines:
         print(line)
     if not podman_desktop.following():

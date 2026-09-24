@@ -6,14 +6,16 @@ extension has a better door: with "Load remote system connections (ssh)" on
 (``podman.system.connections.remote``), it polls ``podman system connection list`` every 5s and
 shows each ``ssh://`` connection as its own entry, live. So foldyard registers one connection per
 VM, ``fy-<machine>``, pointing at the VM's rootless podman socket over Lima's own ssh forward and
-key, and turns the setting on.
+key, and says where the setting is when it's off (the setting is only ever read — see
+:func:`remote_state`).
 
 Podman Desktop tracks those connections by NAME: a connection whose port moved keeps its old
 tunnel until Podman Desktop restarts. Lima picks a fresh ssh port at every boot, so
 :mod:`foldyard.machine` pins it to the project's band first — the entry then survives reboots.
 
-Opt-in (:func:`following`), because both files belong to other tools: ``machine.ensure`` keeps
-the connection current only when the operator exports ``FOLDYARD_PODMAN_DESKTOP=1``;
+Opt-in (:func:`following`), because the connection list belongs to another tool:
+``machine.ensure`` keeps the connection current only when the operator exports
+``FOLDYARD_PODMAN_DESKTOP=1``;
 `fy machine desktop` does it on demand. Never the DEFAULT connection — bare ``podman`` on the host
 keeps talking to what it did. Best-effort throughout: never a reason to fail a verb.
 
@@ -112,34 +114,25 @@ def unregister(name: str) -> str:
     return "removed" if ok else "failed"
 
 
-def enable_remote() -> str:
-    """Turn on "Load remote system connections (ssh)": ``enabled`` · ``already`` · ``absent`` (no
-    settings file — not installed or never started; never created here) · ``unreadable``.
-    Podman Desktop only notices its own edits, so a change here needs one restart of it."""
-    path = settings_path()
+def remote_state() -> str:
+    """Is "Load remote system connections (ssh)" on: ``on`` · ``off`` · ``absent`` (no settings
+    file — not installed or never started) · ``unreadable``. READ ONLY: Podman Desktop writes its
+    in-memory settings back on quit, so an edit made while it runs is silently undone — the
+    operator flips the switch in its Preferences, which it applies live."""
     try:
-        doc = json.loads(path.read_text())
+        doc = json.loads(settings_path().read_text())
     except FileNotFoundError:
         return "absent"
     except (OSError, ValueError):
         return "unreadable"
     if not isinstance(doc, dict):
         return "unreadable"
-    if doc.get(REMOTE_KEY) is True:
-        return "already"
-    doc[REMOTE_KEY] = True
-    tmp = path.with_name(path.name + ".fy-tmp")
-    try:
-        tmp.write_text(json.dumps(doc, indent=2) + "\n")
-        os.replace(tmp, path)  # Podman Desktop never sees a half-written file
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        return "unreadable"
-    return "enabled"
+    return "on" if doc.get(REMOTE_KEY) is True else "off"
 
 
-def messages(name: str, registered: str, remote: str) -> list[str]:
-    """What changed, for the operator; empty when nothing did."""
+def messages(name: str, registered: str, remote: str, *, verbose: bool = False) -> list[str]:
+    """What the operator should know: the registration if it changed, and — with it, or when
+    asked (``verbose``) — where the switch is if it's off. The steady state says nothing."""
     out = {
         "added": [f"▶ Podman Desktop: added connection '{name}' (`podman system connection`)"],
         "updated": [
@@ -151,14 +144,9 @@ def messages(name: str, registered: str, remote: str) -> list[str]:
         ],
         "failed": [f"⚠ couldn't register '{name}' with `podman system connection` — skipped"],
     }.get(registered, [])
-    out += {
-        "enabled": [
-            f'▶ turned on Podman Desktop\'s "Load remote system connections (ssh)" '
-            f"({settings_path()}) — restart Podman Desktop once to pick it up"
-        ],
-        "unreadable": [
-            f"⚠ couldn't update {settings_path()} — turn on \"Load remote system "
-            "connections (ssh)\" in Podman Desktop's podman settings yourself"
-        ],
-    }.get(remote, [])
+    if remote in ("off", "unreadable") and (verbose or registered in ("added", "updated")):
+        out.append(
+            '  To see it: Podman Desktop → Settings → Preferences, search "remote", turn on '
+            '"Load remote system connections (ssh)" (applies live)'
+        )
     return out

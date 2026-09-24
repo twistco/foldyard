@@ -3,8 +3,8 @@
 Podman Desktop's Lima extension shows ONE instance, read once at start. Its podman extension,
 with "Load remote system connections (ssh)" on, polls `podman system connection list` every 5s
 and shows each `ssh://` connection as its own entry — so foldyard registers `fy-<machine>` per
-VM (never the default), pins the VM's ssh port so the entry survives a reboot, and turns the
-setting on. Nothing else in the operator's settings or connections changes."""
+VM (never the default), pins the VM's ssh port so the entry survives a reboot, and points at
+the setting when it's off. Podman Desktop's own settings file is only ever read."""
 
 from __future__ import annotations
 
@@ -116,24 +116,25 @@ def test_unregister_removes_only_ours(podman):
     assert fake.connections == []
 
 
-def test_turns_on_remote_connections_and_keeps_every_other_key(settings):
-    settings.write_text(json.dumps({"window.bounds": {"x": 1}, "lima.name": "garmin"}, indent=2))
-    assert podman_desktop.enable_remote() == "enabled"
-    doc = json.loads(settings.read_text())
-    assert doc == {
-        "window.bounds": {"x": 1},
-        "lima.name": "garmin",
-        "podman.system.connections.remote": True,
-    }
-    assert podman_desktop.enable_remote() == "already"
-
-
-def test_leaves_an_absent_or_unreadable_settings_file_alone(settings):
-    # not installed / never started: never a file we create
-    assert podman_desktop.enable_remote() == "absent" and not settings.exists()
+def test_reads_the_remote_connections_setting_and_never_writes_it(settings):
+    # Podman Desktop writes its in-memory settings back on quit, so an edit made while it runs is
+    # silently undone (seen live): foldyard only reads the file and says where the switch is
+    assert podman_desktop.remote_state() == "absent" and not settings.exists()
     settings.write_text("{ half written")
-    assert podman_desktop.enable_remote() == "unreadable"
-    assert settings.read_text() == "{ half written"
+    assert podman_desktop.remote_state() == "unreadable"
+    settings.write_text(json.dumps({"lima.name": "garmin"}))
+    assert podman_desktop.remote_state() == "off"
+    settings.write_text(json.dumps({"podman.system.connections.remote": True}))
+    assert podman_desktop.remote_state() == "on"
+    assert settings.read_text() == json.dumps({"podman.system.connections.remote": True})
+
+
+def test_the_setting_hint_comes_with_a_change_not_every_up():
+    assert podman_desktop.messages("fy-repower", "unchanged", "off") == []
+    (added, hint) = podman_desktop.messages("fy-repower", "added", "off")
+    assert "fy-repower" in added and "Load remote system connections (ssh)" in hint
+    assert podman_desktop.messages("fy-repower", "added", "on") == [added]
+    assert len(podman_desktop.messages("fy-repower", "unchanged", "off", verbose=True)) == 1
 
 
 def test_follows_only_when_the_operator_says_so(monkeypatch):
@@ -218,8 +219,8 @@ def test_the_verb_registers_on_demand_without_the_opt_in(lima, podman, settings,
     result = CliRunner().invoke(cli.app, ["machine", "desktop"])
     assert result.exit_code == 0, result.output
     assert [c["URI"] for c in fake.connections] == [_URI]
-    assert json.loads(settings.read_text())["podman.system.connections.remote"] is True
-    assert "restart Podman Desktop once" in result.output
+    assert settings.read_text() == "{}"  # read, never written
+    assert "Settings → Preferences" in result.output
     assert "FOLDYARD_PODMAN_DESKTOP=1" in result.output  # how to keep it current
     # the box has no Podman Desktop, and a podman-machine VM is shown natively
     monkeypatch.setattr(machine.config, "in_box", lambda: True)
