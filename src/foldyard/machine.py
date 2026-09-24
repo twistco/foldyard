@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, guestlog, hostwall, sandbox
+from . import config, guestlog, hostwall, podman_desktop, sandbox
 from .machine_backend import default_unavailable_block, get_backend
 
 MACHINE = config.machine_name()
@@ -459,6 +459,7 @@ def ensure(main: Path, wt_root: Path) -> None:
     # Boot provisioning (the sudo grant + the wall) is recorded BEFORE the VM boots — it is
     # what runs as root at boot — and a running VM whose recording is stale is refused here.
     _record_provisioning()
+    _pin_ssh_port()
     if state() != "running":
         if not _start():
             raise SystemExit(1)
@@ -479,6 +480,61 @@ def ensure(main: Path, wt_root: Path) -> None:
     # over the backend's ssh once the VM is up and its root-side provisioning is verified.
     if sandbox.wanted():
         sandbox.ensure(BACKEND, MACHINE)
+    _follow_in_podman_desktop()
+
+
+def _pin_ssh_port() -> None:
+    """Pin the VM's ssh forward to its band (``ssh.localPort``) so the Podman Desktop connection
+    survives a reboot — Lima picks a fresh port at every start otherwise. Only for an operator
+    who opted in, and only on a STOPPED VM (``limactl edit`` refuses a running one): a running
+    VM picks it up at its next start."""
+    if BACKEND.name != "lima" or not podman_desktop.following():
+        return
+    want = config.machine_ssh_port()
+    if BACKEND.ssh_port(MACHINE) == want or state() == "running":
+        return
+    if not BACKEND.pin_ssh_port(MACHINE, want):
+        _err(f"⚠ couldn't pin '{MACHINE}''s ssh port to {want} — Podman Desktop's entry for it")
+        _err("  goes stale at each reboot until it is")
+
+
+def _follow_in_podman_desktop() -> None:
+    """Keep this VM's Podman Desktop entry current, when the operator opted in. Silent unless
+    it changed something."""
+    if BACKEND.name != "lima" or not podman_desktop.following():
+        return
+    for line in _show_in_podman_desktop():
+        _err(line)
+
+
+def _show_in_podman_desktop() -> list[str]:
+    target = BACKEND.ssh_target(MACHINE)
+    if target is None:
+        return [f"⚠ no ssh route into '{MACHINE}' yet — Podman Desktop left as it was"]
+    name = podman_desktop.connection_name(MACHINE)
+    registered = podman_desktop.register(
+        name, podman_desktop.uri(target, BACKEND.guest_socket()), target.identity
+    )
+    return podman_desktop.messages(name, registered, podman_desktop.enable_remote())
+
+
+def point_podman_desktop() -> int:
+    """`fy machine desktop`: register this VM with Podman Desktop now."""
+    if config.in_box():
+        print("✗ run on the host — Podman Desktop lives there, not in the box")
+        return 1
+    if BACKEND.name != "lima":
+        print(f"✗ Podman Desktop shows {BACKEND.name} machines itself — nothing to register")
+        return 1
+    lines = _show_in_podman_desktop() or [
+        f"✓ Podman Desktop already lists '{podman_desktop.connection_name(MACHINE)}'"
+    ]
+    for line in lines:
+        print(line)
+    if not podman_desktop.following():
+        print("  To keep it current across reboots (a pinned ssh port), export")
+        print("  FOLDYARD_PODMAN_DESKTOP=1 in your shell profile; `fy up` then maintains it.")
+    return 1 if any(line.startswith("⚠") for line in lines) else 0
 
 
 def not_running_reason() -> str | None:
@@ -581,6 +637,10 @@ def delete(assume_yes: bool = False) -> int:
     # The boot provisioning lives in the instance config, which the backend removes with the VM;
     # the host-side wall is the operator's install, not the VM's.
     _note_host_wall_install()
+    if podman_desktop.unregister(podman_desktop.connection_name(MACHINE)) == "removed":
+        print(
+            f"✓ removed its Podman Desktop connection '{podman_desktop.connection_name(MACHINE)}'"
+        )
     if not _stop_host_supervisor():
         return 1
     print(f"✓ machine '{MACHINE}' deleted. `fy up` / `fy machine ensure` re-creates it.")

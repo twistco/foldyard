@@ -173,6 +173,14 @@ class Backend(ABC):
         ``/var/run/docker.sock``). Differs by backend: podman machine exposes a docker-compat
         path; Lima's podman template forwards a rootless ``/run/user/<uid>/…`` socket."""
 
+    def ssh_port(self, name: str) -> int | None:
+        """The pinned-or-current ssh forward port, where the backend exposes one (Lima)."""
+        return None
+
+    def pin_ssh_port(self, name: str, port: int) -> bool:
+        """Pin the ssh forward port in the stopped instance's config (Lima only)."""
+        return False
+
     def ssh_target(self, name: str) -> SshTarget | None:
         """How to ssh into the guest as the VM user — the backend's own loopback port and
         identity, i.e. the trust its ``shell`` verb already has. What the gVisor posture rides
@@ -711,6 +719,18 @@ class LimaBackend(Backend):
             if not _alive(ha):
                 break
         return [ha]
+
+    def ssh_port(self, name: str) -> int | None:
+        """The instance's ssh forward port as Lima reports it (``sshLocalPort``)."""
+        inst = self._instance(name)
+        port = inst.get("sshLocalPort") if inst else None
+        return port if isinstance(port, int) else None
+
+    def pin_ssh_port(self, name: str, port: int) -> bool:
+        """``ssh.localPort`` in the (stopped) instance config — Lima otherwise picks a new one at
+        every start."""
+        cmd = ["limactl", "edit", "--tty=false", name, "--set", f".ssh.localPort = {int(port)}"]
+        return subprocess.run(cmd).returncode == 0
 
     def ssh_target(self, name: str) -> SshTarget | None:
         """Lima writes ``~/.lima/<name>/ssh.config`` for the instance (the port changes per

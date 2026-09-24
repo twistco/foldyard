@@ -207,8 +207,12 @@ def scrubbed_box_session_env(monkeypatch):
     tests therefore passed in-box on the ambient value and failed in CI, where nothing exports one
     — the divergence this fixture exists to prevent. Scrubbing them makes local runs agree with
     CI; the wall tests set the var themselves. NOT the CA vars beside them (SSL_CERT_FILE,
-    REQUESTS_CA_BUNDLE…): the opt-in proxy e2es need a real trust store."""
+    REQUESTS_CA_BUNDLE…): the opt-in proxy e2es need a real trust store.
+
+    ``FOLDYARD_PODMAN_DESKTOP`` because an operator who sets it in their shell profile would
+    otherwise have every ``machine.ensure`` test pin a VM's ssh port and register a connection."""
     for var in (
+        "FOLDYARD_PODMAN_DESKTOP",
         "IN_DEVBOX",
         "FY_PROXY_PORT",
         "GCP_MINTER_PORT",

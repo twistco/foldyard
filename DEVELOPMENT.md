@@ -69,8 +69,10 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   daemons (singleton lock, per-worktree listeners, replace-on-launch staleness handling, the
   capability-probe loop, TTL expiry + settle).
 - `worktree.py` · `transcripts.py` · `tui.py` · `init.py` · `skills.py` · `browser.py` ·
-  `vscode.py` — worktrees, agent-transcript sync, the Textual TUI, `foldyard init`, bundled
-  skills, `fy open`, `fy code`.
+  `vscode.py` · `podman_desktop.py` — worktrees, agent-transcript sync, the Textual TUI,
+  `foldyard init`, bundled skills, `fy open`, `fy code`, `fy machine desktop` (an `fy-<machine>`
+  podman connection per VM, which Podman Desktop lists side by side; with
+  `FOLDYARD_PODMAN_DESKTOP=1`, `machine.ensure` keeps it current and pins the ssh port).
 - `docs.py` — `fy docs [topic]`: the manual served from THIS install (the consumer subset is
   force-included into the wheel; see pyproject). Version-matched by construction, works with no
   egress — the reason an agent should never clone the project to read about it.

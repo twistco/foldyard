@@ -307,6 +307,17 @@ disk_gib = 60
   when that isn't discoverable; the point is that new worktrees fork off the trunk, not off
   whatever branch your main checkout has out. Env: `FOLDYARD_WORKTREE_BASE`.
 
+**Podman Desktop.** Its Lima extension shows one instance at a time, so foldyard uses a different
+route: `fy machine desktop` registers this project's VM as a podman connection named
+`fy-<machine>` (over Lima's own ssh forward and key, never the default connection) and turns on
+Podman Desktop's "Load remote system connections (ssh)". Podman Desktop checks for connections
+every 5 s, so each project shows up as its own entry, side by side. Restart Podman Desktop once
+after the setting is first turned on. `export FOLDYARD_PODMAN_DESKTOP=1` in your shell profile
+makes every `fy up`/`fy box up` keep the entry current. It also pins the VM's ssh port to its
+port band (applied the next time the VM starts), because Lima otherwise picks a new port at each
+boot and Podman Desktop would keep the stale one. `fy machine rm` removes the connection. It's an
+operator preference, so it has no `foldyard.toml` key.
+
 ## `[engine]`
 
 ```toml

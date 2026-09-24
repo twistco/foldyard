@@ -13,6 +13,7 @@ So each project gets a 200-port BAND, allocated first-come from a tiny flock-gua
 
   base + 0..89     egress-proxy listeners (the 1..89 worktree-offset span; main is +0)
   base + 100..189  gcp-minter listeners   (same span)
+  base + 190       the Lima VM's ssh forward, pinned when Podman Desktop follows the VM
 
 Bands start at 41000 — well away from the crowded 8xxx dev-server neighbourhood, and below
 the macOS ephemeral range (49152+) so the OS never hands our ports to outbound connections.
@@ -38,6 +39,7 @@ FIRST_BASE = 41000
 LAST_BASE = 48800  # last full band ends at 48999, below the macOS ephemeral range (49152+)
 PROXY_SLOT = 0  # egress-proxy base within the band
 MINTER_SLOT = 100  # gcp-minter base within the band
+SSH_SLOT = 190  # the Lima VM's pinned ssh forward (Podman Desktop's connection to it)
 
 
 def registry_file() -> Path:

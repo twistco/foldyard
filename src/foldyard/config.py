@@ -187,6 +187,14 @@ def proxy_port_base() -> int:
     return _daemon_port_base("FY_PROXY_PORT", 8088, ports.PROXY_SLOT)
 
 
+def machine_ssh_port() -> int:
+    """The Lima VM's pinned ssh forward: a port of this project's band, so it can't collide
+    with another project's (see :mod:`foldyard.podman_desktop` for why it is pinned at all)."""
+    from . import ports
+
+    return ports.project_base(project()) + ports.SSH_SLOT
+
+
 def gcp_minter_port_base() -> int:
     """The gcp-minter base port for THIS PROJECT (``GCP_MINTER_PORT`` env wins, else the
     allocated band's minter slot — a disjoint 90-port span, so no worktree's minter can land on

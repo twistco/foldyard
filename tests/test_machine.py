@@ -793,6 +793,19 @@ def test_delete_stops_then_removes_a_lima_machine(fake, monkeypatch, tmp_path, c
     assert "deleted" in capsys.readouterr().out
 
 
+def test_delete_drops_the_vms_podman_desktop_connection(fake, monkeypatch, capsys):
+    from foldyard import podman_desktop
+
+    be = fake(concurrent=True, available=True, name="lima", cli="limactl")
+    be._exists = True
+    monkeypatch.setattr(machine.config, "in_box", lambda: False)
+    dropped = []
+    monkeypatch.setattr(podman_desktop, "unregister", lambda n: dropped.append(n) or "removed")
+    assert machine.delete(assume_yes=True) == 0
+    assert dropped == ["fy-homelab"]  # a connection to a VM that no longer exists is noise
+    assert "Podman Desktop connection 'fy-homelab'" in capsys.readouterr().out
+
+
 def test_delete_skips_stop_when_machine_not_running(fake, monkeypatch, tmp_path):
     be = fake(concurrent=False, available=True)
     be._exists = True  # state stays "stopped"

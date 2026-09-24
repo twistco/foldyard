@@ -447,6 +447,18 @@ def machine_stop() -> None:
     raise typer.Exit(machine.stop())
 
 
+@machine_app.command("desktop")
+def machine_desktop() -> None:
+    """List this project's VM in Podman Desktop, beside every other project's.
+
+    Registers an `fy-<machine>` podman connection and turns on Podman Desktop's "Load remote
+    system connections (ssh)". `export FOLDYARD_PODMAN_DESKTOP=1` makes `fy up`/`fy box up` keep it
+    current, pinning the VM's ssh port so the entry survives reboots."""
+    from . import machine
+
+    raise typer.Exit(machine.point_podman_desktop())
+
+
 @machine_app.command("rm")
 def machine_rm(
     yes: bool = typer.Option(False, "--yes", "-y", help="skip the confirmation prompt"),
