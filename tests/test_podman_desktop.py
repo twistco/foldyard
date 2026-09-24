@@ -19,6 +19,8 @@ from foldyard.machine_backend import SshTarget
 
 _URI = "ssh://dain@127.0.0.1:41390/run/user/501/podman/podman.sock"
 _KEY = "/Users/dain/.lima/_config/user"
+# the operator's own default connection — what bare `podman` on the host talks to
+_THEIRS = {"Name": "tangible", "URI": "ssh://core@x", "Identity": "k", "Default": True}
 
 
 @pytest.fixture
@@ -91,6 +93,18 @@ def test_registers_without_taking_the_default(podman):
     ]
 
 
+def test_never_becomes_the_default_where_podman_has_no_connection_yet(podman):
+    # podman makes a first connection the default and can't be told otherwise, so adding one
+    # to an empty list would repoint bare `podman` on the host at the VM: refuse, and say so
+    fake = podman()
+    assert podman_desktop.register("fy-repower", _URI, _KEY) == "would-default"
+    assert fake.connections == []
+    (warning,) = podman_desktop.messages("fy-repower", "would-default", "on")
+    assert (
+        warning.startswith("⚠") and "default" in warning and "FOLDYARD_PODMAN_DESKTOP=0" in warning
+    )
+
+
 def test_a_moved_port_replaces_the_connection(podman):
     old = _URI.replace("41390", "63841")
     fake = podman(
@@ -137,10 +151,33 @@ def test_the_setting_hint_comes_with_a_change_not_every_up():
     assert len(podman_desktop.messages("fy-repower", "unchanged", "off", verbose=True)) == 1
 
 
-def test_follows_only_when_the_operator_says_so(monkeypatch):
+def test_follows_podman_desktop_where_it_is_installed(settings):
+    # no settings file = Podman Desktop never ran as this user: leave the VM and podman's
+    # connection list alone — no pinned port, no entry, no warning about a missing podman CLI
     assert podman_desktop.following() is False
-    monkeypatch.setenv("FOLDYARD_PODMAN_DESKTOP", "1")
-    assert podman_desktop.following() is True
+    settings.write_text(json.dumps({"lima.name": "garmin"}))
+    assert podman_desktop.following() is True  # installed, whatever the remote setting says
+    settings.write_text("{ half written")
+    assert podman_desktop.following() is True  # there, just unreadable right now
+
+
+@pytest.mark.parametrize(
+    ("value", "installed", "follows"),
+    [
+        ("1", False, True),  # forced on — e.g. a settings file somewhere we don't look
+        ("true", False, True),
+        ("0", True, False),  # opted out
+        ("off", True, False),
+        ("no", True, False),
+        ("", True, True),  # empty = unset: detection decides
+        ("maybe", False, False),
+    ],
+)
+def test_the_operators_choice_wins_either_way(settings, monkeypatch, value, installed, follows):
+    if installed:
+        settings.write_text("{}")
+    monkeypatch.setenv("FOLDYARD_PODMAN_DESKTOP", value)
+    assert podman_desktop.following() is follows
 
 
 # ── the machine side: pin the port, register, clean up ────────────────────────────────────
@@ -180,11 +217,11 @@ def lima(monkeypatch):
     return install
 
 
-def test_the_ssh_port_is_pinned_only_on_a_stopped_vm_of_an_opted_in_operator(lima, monkeypatch):
+def test_the_ssh_port_is_pinned_only_on_a_stopped_vm_where_podman_desktop_is(lima, settings):
     be = lima(running=False)
     machine._pin_ssh_port()
-    assert be.pinned == []  # not opted in
-    monkeypatch.setenv("FOLDYARD_PODMAN_DESKTOP", "1")
+    assert be.pinned == []  # no Podman Desktop here: the VM keeps Lima's own port choice
+    settings.write_text("{}")
     be = lima(running=True)
     machine._pin_ssh_port()
     assert be.pinned == []  # `limactl edit` refuses a running VM: pinned at its next start
@@ -194,34 +231,59 @@ def test_the_ssh_port_is_pinned_only_on_a_stopped_vm_of_an_opted_in_operator(lim
     assert be.pinned == [41390]  # once: already pinned the second time
 
 
-def test_ensure_registers_the_vm_when_opted_in(lima, podman, settings, monkeypatch, capsys):
+def test_ensure_registers_the_vm_where_podman_desktop_is(lima, podman, settings, capsys):
     lima(port=41390)
-    fake = podman()
+    fake = podman(connections=[_THEIRS])
     machine._follow_in_podman_desktop()
-    assert fake.calls == []  # not opted in
-    monkeypatch.setenv("FOLDYARD_PODMAN_DESKTOP", "1")
+    assert fake.calls == [] and capsys.readouterr().err == ""  # not installed: not a word
+    settings.write_text(json.dumps({"podman.system.connections.remote": True}))
     machine._follow_in_podman_desktop()
-    assert [c["Name"] for c in fake.connections] == ["fy-repower"]
+    assert [c["Name"] for c in fake.connections] == ["tangible", "fy-repower"]
     assert "fy-repower" in capsys.readouterr().err
     machine._follow_in_podman_desktop()
     assert capsys.readouterr().err == ""  # the steady state says nothing
 
 
-def test_the_verb_registers_on_demand_without_the_opt_in(lima, podman, settings, monkeypatch):
+def test_an_operator_who_opted_out_is_left_alone(lima, podman, settings, monkeypatch, capsys):
+    be = lima(port=63841, running=False)
+    fake = podman()
+    settings.write_text("{}")
+    monkeypatch.setenv("FOLDYARD_PODMAN_DESKTOP", "0")
+    machine._pin_ssh_port()
+    machine._follow_in_podman_desktop()
+    assert be.pinned == [] and fake.calls == [] and capsys.readouterr().err == ""
+
+
+def test_the_verb_registers_on_demand_whatever_is_detected(lima, podman, settings, monkeypatch):
     from typer.testing import CliRunner
 
     from foldyard import cli
 
     lima(port=41390)
-    fake = podman()
+    fake = podman(connections=[_THEIRS])
     settings.write_text("{}")
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
     result = CliRunner().invoke(cli.app, ["machine", "desktop"])
     assert result.exit_code == 0, result.output
-    assert [c["URI"] for c in fake.connections] == [_URI]
+    assert [c["URI"] for c in fake.connections] == [_THEIRS["URI"], _URI]
     assert settings.read_text() == "{}"  # read, never written
     assert "Settings → Preferences" in result.output
-    assert "FOLDYARD_PODMAN_DESKTOP=1" in result.output  # how to keep it current
+    assert "FOLDYARD_PODMAN_DESKTOP" not in result.output  # detected: `fy up` keeps it current
+    # not detected (a settings file we don't know where to find): how to force it on
+    settings.unlink()
+    result = CliRunner().invoke(cli.app, ["machine", "desktop"])
+    assert result.exit_code == 0 and "FOLDYARD_PODMAN_DESKTOP=1" in result.output
+    # opted out AND not detected: unsetting =0 wouldn't help, forcing it on would
+    monkeypatch.setenv("FOLDYARD_PODMAN_DESKTOP", "0")
+    result = CliRunner().invoke(cli.app, ["machine", "desktop"])
+    assert result.exit_code == 0 and "FOLDYARD_PODMAN_DESKTOP=1" in result.output
+    assert "unset" not in result.output
+    # opted out where it IS detected: registered as asked, and told what `fy up` would need
+    settings.write_text("{}")
+    result = CliRunner().invoke(cli.app, ["machine", "desktop"])
+    assert result.exit_code == 0 and "FOLDYARD_PODMAN_DESKTOP=0" in result.output
+    assert "unset" in result.output
+    monkeypatch.delenv("FOLDYARD_PODMAN_DESKTOP")
     # the box has no Podman Desktop, and a podman-machine VM is shown natively
     monkeypatch.setattr(machine.config, "in_box", lambda: True)
     assert CliRunner().invoke(cli.app, ["machine", "desktop"]).exit_code == 1

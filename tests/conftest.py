@@ -188,6 +188,19 @@ def isolated_config_pin(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_podman_desktop(tmp_path, monkeypatch):
+    """Point Podman Desktop's settings file at a per-test path that does not exist, so "is Podman
+    Desktop installed?" reads NO everywhere — as on a CI runner. The machine follows Podman
+    Desktop by default when its settings file exists, so on a developer's Mac every
+    ``machine.ensure`` test would otherwise pin a VM's ssh port and register a connection. The
+    Podman Desktop tests write the file themselves."""
+    from foldyard import podman_desktop
+
+    path = tmp_path / "podman-desktop-settings.json"
+    monkeypatch.setattr(podman_desktop, "settings_path", lambda: path)
+
+
+@pytest.fixture(autouse=True)
 def scrubbed_box_session_env(monkeypatch):
     """Strip the ambient dev-box session env so the suite behaves identically on a Mac, in CI,
     and INSIDE a foldyard box. A box session exports IN_DEVBOX=1 (flips ``config.in_box()`` onto
@@ -209,8 +222,9 @@ def scrubbed_box_session_env(monkeypatch):
     CI; the wall tests set the var themselves. NOT the CA vars beside them (SSL_CERT_FILE,
     REQUESTS_CA_BUNDLE…): the opt-in proxy e2es need a real trust store.
 
-    ``FOLDYARD_PODMAN_DESKTOP`` because an operator who sets it in their shell profile would
-    otherwise have every ``machine.ensure`` test pin a VM's ssh port and register a connection."""
+    ``FOLDYARD_PODMAN_DESKTOP`` because an operator's explicit ``=1`` would win over the
+    isolated "not installed" answer (``isolated_podman_desktop``) and have every
+    ``machine.ensure`` test pin a VM's ssh port and register a connection."""
     for var in (
         "FOLDYARD_PODMAN_DESKTOP",
         "IN_DEVBOX",

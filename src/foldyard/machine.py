@@ -485,9 +485,9 @@ def ensure(main: Path, wt_root: Path) -> None:
 
 def _pin_ssh_port() -> None:
     """Pin the VM's ssh forward to its band (``ssh.localPort``) so the Podman Desktop connection
-    survives a reboot — Lima picks a fresh port at every start otherwise. Only for an operator
-    who opted in, and only on a STOPPED VM (``limactl edit`` refuses a running one): a running
-    VM picks it up at its next start."""
+    survives a reboot — Lima picks a fresh port at every start otherwise. Only where Podman
+    Desktop is followed (:func:`podman_desktop.following`), and only on a STOPPED VM
+    (``limactl edit`` refuses a running one): a running VM picks it up at its next start."""
     if BACKEND.name != "lima" or not podman_desktop.following():
         return
     want = config.machine_ssh_port()
@@ -499,8 +499,8 @@ def _pin_ssh_port() -> None:
 
 
 def _follow_in_podman_desktop() -> None:
-    """Keep this VM's Podman Desktop entry current, when the operator opted in. Silent unless
-    it changed something."""
+    """Keep this VM's Podman Desktop entry current, where Podman Desktop is followed. Silent
+    unless it changed something."""
     if BACKEND.name != "lima" or not podman_desktop.following():
         return
     for line in _show_in_podman_desktop():
@@ -532,9 +532,13 @@ def point_podman_desktop() -> int:
         lines.insert(0, f"✓ '{name}' is registered for Podman Desktop")
     for line in lines:
         print(line)
-    if not podman_desktop.following():
-        print("  To keep it current across reboots (a pinned ssh port), export")
-        print("  FOLDYARD_PODMAN_DESKTOP=1 in your shell profile; `fy up` then maintains it.")
+    detected = podman_desktop.remote_state() != "absent"
+    if podman_desktop.choice() is False and detected:
+        print("  FOLDYARD_PODMAN_DESKTOP=0 is set, so `fy up` won't keep it current across reboots")
+        print("  (a pinned ssh port) — unset it to let `fy up` maintain it.")
+    elif not podman_desktop.following():
+        print("  Podman Desktop wasn't detected, so `fy up` won't keep it current across reboots")
+        print("  (a pinned ssh port) — export FOLDYARD_PODMAN_DESKTOP=1 in your shell profile.")
     return 1 if any(line.startswith("⚠") for line in lines) else 0
 
 

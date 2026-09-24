@@ -13,11 +13,13 @@ Podman Desktop tracks those connections by NAME: a connection whose port moved k
 tunnel until Podman Desktop restarts. Lima picks a fresh ssh port at every boot, so
 :mod:`foldyard.machine` pins it to the project's band first — the entry then survives reboots.
 
-Opt-in (:func:`following`), because the connection list belongs to another tool:
-``machine.ensure`` keeps the connection current only when the operator exports
-``FOLDYARD_PODMAN_DESKTOP=1``;
-`fy machine desktop` does it on demand. Never the DEFAULT connection — bare ``podman`` on the host
-keeps talking to what it did. Best-effort throughout: never a reason to fail a verb.
+Followed where Podman Desktop is installed (:func:`following`): ``machine.ensure`` keeps the
+connection current when its settings file exists, and leaves the VM's port and podman's connection
+list alone where it doesn't — they belong to another tool, and nobody there would look.
+``FOLDYARD_PODMAN_DESKTOP`` overrides the detection either way (``0`` opts out, ``1`` forces it,
+e.g. for a settings file somewhere we don't look); `fy machine desktop` does it on demand. Never
+the DEFAULT connection — bare ``podman`` on the host keeps talking to what it did. Best-effort
+throughout: never a reason to fail a verb.
 
 Stdlib only.
 """
@@ -41,10 +43,22 @@ def settings_path() -> Path:
     return Path.home() / ".local/share/containers/podman-desktop/configuration/settings.json"
 
 
+_ON = ("1", "true", "yes", "on")
+_OFF = ("0", "false", "no", "off")
+
+
+def choice() -> bool | None:
+    """The operator's explicit choice, from their shell — a preference about THIS machine across
+    every project, so it is not a foldyard.toml key. ``None`` when unset (or unrecognised)."""
+    value = os.environ.get("FOLDYARD_PODMAN_DESKTOP", "").strip().lower()
+    return True if value in _ON else False if value in _OFF else None
+
+
 def following() -> bool:
-    """The operator's choice, from their shell — a preference about THIS machine across every
-    project, so it is not a foldyard.toml key."""
-    return os.environ.get("FOLDYARD_PODMAN_DESKTOP", "").lower() in ("1", "true", "yes", "on")
+    """Keep this machine's VMs listed in Podman Desktop: the operator's choice if they made one,
+    else whether Podman Desktop is here — its settings file exists once it has run as this user."""
+    chosen = choice()
+    return chosen if chosen is not None else remote_state() != "absent"
 
 
 def connection_name(machine: str) -> str:
@@ -76,7 +90,10 @@ def _connections(podman: str) -> list[dict] | None:
 
 def register(name: str, uri: str, identity: str) -> str:
     """Make ``name`` point at ``uri``: ``added`` · ``updated`` · ``unchanged`` · ``no-podman`` ·
-    ``failed``. Restores the previous default if podman promoted the new connection."""
+    ``would-default`` · ``failed``. Restores the previous default if podman promoted the new
+    connection; with NO default to restore (an empty list) it adds nothing — podman makes a first
+    connection the default and can't be told otherwise, which would repoint bare ``podman`` on
+    the host at the VM."""
     podman = _podman()
     if podman is None:
         return "no-podman"
@@ -89,6 +106,8 @@ def register(name: str, uri: str, identity: str) -> str:
     default = next(
         (r.get("Name") for r in rows if r.get("Default") and r.get("Name") != name), None
     )
+    if default is None and mine is None:
+        return "would-default"
     if mine and _run([podman, "system", "connection", "remove", name]).returncode != 0:
         return "failed"
     add = [podman, "system", "connection", "add", name, uri, "--identity", identity]
@@ -141,6 +160,11 @@ def messages(name: str, registered: str, remote: str, *, verbose: bool = False) 
         ],
         "no-podman": [
             f"⚠ no podman CLI on PATH — Podman Desktop lists '{name}' through it; skipped"
+        ],
+        "would-default": [
+            f"⚠ '{name}' not registered for Podman Desktop: podman has no connection yet, so it "
+            "would become the default one bare `podman` uses — add yours first, or export "
+            "FOLDYARD_PODMAN_DESKTOP=0 to stop trying"
         ],
         "failed": [f"⚠ couldn't register '{name}' with `podman system connection` — skipped"],
     }.get(registered, [])
