@@ -4,7 +4,7 @@
   live-validated on both VM backends, and the strip was **shown live on podman 6.1.1** the same
   day (Consequences); the **broader mount/endpoint allowlist** is deferred (see Decision §5 and
   Consequences). Layer ③ of
-  [../isolation-layers.md](../isolation-layers.md) — the living measurement page — is the evidence
+  [isolation-layers.md](https://github.com/twistco/foldyard/blob/main/docs/isolation-layers.md) — the living measurement page — is the evidence
   behind every number here.
 - **Sources:** the GCP nested-virt rig run-logs and `handover.md` (pre-merge working notes,
   internal); `../isolation-layers.md`. Related:
@@ -22,7 +22,7 @@ foldyard's isolation boundary is the rootless podman VM ([ADR-0001](./0001-rootl
 credentials never enter the VM (they stay host-side behind the egress proxy), the box mounts only
 the repo and its worktrees, and `fy verify` proves the box cannot escape to the VM kernel. That
 boundary rests on one assumption — that the VM kernel is not itself exploitable from inside a
-container. Layer ③ of [../isolation-layers.md](../isolation-layers.md) asks what a second boundary
+container. Layer ③ of [isolation-layers.md](https://github.com/twistco/foldyard/blob/main/docs/isolation-layers.md) asks what a second boundary
 would cost: run the dev box under **gVisor** (`runsc`), a userspace kernel written in Go behind a
 seccomp filter, so a container-to-kernel exploit has to defeat gVisor's Sentry before it reaches
 the VM kernel that holds the engine socket, the stack and the mount.

@@ -35,7 +35,7 @@ One machine; worktrees are **namespaced compose projects** on it.
   caches and the one image store are kept (`stack.py` nuke path).
 - **Deterministic host-port offsets.** Every `[ports]` base gets `+offset(worktree)`, a stable
   1..89 derived from the worktree name via `cksum` (`stack.py _offset()`), so a given worktree
-  always lands on the same host ports and simultaneous stacks usually avoid colliding on Mac
+  always lands on the same host ports and simultaneous stacks usually avoid colliding on
   localhost. The offset is a hash into 89 slots, so two worktree names *can* collide; the pin
   below is the escape hatch when they do. Precedence: an explicit `WT_OFFSET` env → a pin in the main
   checkout's gitignored `foldyard.local.toml` `[worktree-offsets]` table (PR #21;
@@ -49,7 +49,7 @@ One machine; worktrees are **namespaced compose projects** on it.
   `[machine].worktree_base` / `FOLDYARD_WORKTREE_BASE`, then auto-detects (`origin/HEAD`, then
   `main`/`master`), falling back to current HEAD only when nothing resolves.
 - **Worktree lifecycle verbs**: `fy worktree add|list|remove`. `remove` tears down the worktree's
-  box and stack, archives its Claude transcripts to the durable Mac store *before* git deletes the
+  box and stack, archives its Claude transcripts to the durable host-side store *before* git deletes the
   checkout, and refuses (without `--force`) if archiving fails.
 
 **Escape hatch:** for a genuinely untrusted worktree — reviewing unknown code — spin a *throwaway

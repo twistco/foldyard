@@ -1,7 +1,16 @@
 # ADR-0009 — Monitoring is cooperative, enforcement is not: don't market filtering until it's the locked kind
 
 - **Status:** Accepted (2026-06-13; layers landed through 2026-07-05) — capture shipped; addon
-  default-deny shipped (config-gated); VM-level wall built, Mac-unvalidated
+  default-deny shipped (config-gated); VM-level wall built, Mac-unvalidated. **Amended
+  2026-09-24:** the VM-level wall is validated on real Lima VMs — on a Linux host (2026-09-11)
+  and in CI on every `lima-host-e2e` run since 2026-09-17 (`tests/test_wall_e2e.py`); it still
+  ships opt-in and Lima-only. The `capture` axis is gone
+  ([ADR-0029](./0029-the-proxy-always-decrypts.md)). The rejected "host-side interception"
+  alternative is partly reversed on Linux: the *host wall* matches the VM's own process by
+  cgroup on the host ([ADR-0028](./0028-no-elevation-on-the-host-operator-applies.md)) — still
+  no per-container packet path, and still not on macOS or WSL2. Renamed keys: `[machine].wall`
+  → `[machine] firewall` (the *VM firewall*), `[proxy] default_deny` → `[proxy] enforce` (the
+  *allowlist*), `host_wall` → `host_firewall`; the old names still work as aliases.
 - **Sources:** PLAN.md §6 (honesty rules), docs/history/network-capture.md,
   docs/history/lima-network-forcing-spike.md, docs/lima-wall-machine-integration.md
 
@@ -49,7 +58,7 @@ layers, each labelled with what it actually guarantees:
    drops the VM user's passwordless sudo — where before it was reconciled by
    `machine.wall_sync()` over `sudo` on every ensure/recreate/start): default-deny the VM user's
    uid **and its rootless subuid range**,
-   open only loopback, DNS to local resolvers, and the Mac gateway (`config.host_alias()` →
+   open only loopback, DNS to local resolvers, and the host gateway (`config.host_alias()` →
    Lima's `192.168.5.2`) on this project's allocated daemon port band (`src/foldyard/ports.py`).
    Egress that ignores the proxy env is REJECTED, not silently missed — fail-closed. `fy verify`
    probes it from the box (direct `1.1.1.1:443` *and* `:53` must be refused). Status is stated
@@ -59,7 +68,7 @@ layers, each labelled with what it actually guarantees:
 
 The corollary rules: README/marketing language must track layer 3's *validated* status, never
 layer 1–2's feature list; and the spike's own conclusion is kept — no in-VM wall holds against
-VM-root, so real credentials stay on the Mac regardless (the wall is enforcement for the
+VM-root, so real credentials stay on the host regardless (the wall is enforcement for the
 unprivileged agent, defense-in-depth against escalation; the outside-the-VM backstop is that
 tokens are injected in flight and never enter the box — ADR-0007).
 
@@ -90,8 +99,8 @@ tokens are injected in flight and never enter the box — ADR-0007).
   there is no per-container packet path on the Mac to hook — observation (pcap) or DNS games
   only. Confirmed in the network-capture investigation.
 - **Run the proxy inside the VM** (earlier draft of the lima integration): drags creds, minters,
-  and the CA lifecycle into the very VM the agent lives in, breaking creds-never-leave-the-Mac.
-  Routing to the Mac gateway fixes every consumer at once; the proxy never moved.
+  and the CA lifecycle into the very VM the agent lives in, breaking creds-never-leave-the-host.
+  Routing to the host gateway fixes every consumer at once; the proxy never moved.
 - **Wrap the agent process with a kernel connect() lock (Nono-style Landlock/Seatbelt).**
   Per-process, same-kernel — cannot wrap a VM from outside, and covers only one process tree,
   not the stack. The VM-boundary analogue *is* nftables default-deny.

@@ -115,7 +115,7 @@ that half doesn't.
 - **Two things this does not claim.** Adopting is a human reading a diff, so it is exactly as
   strong as that reading; and foldyard is installed `--editable` from the consumer checkout
   ([ADR-0013](./0013-in-repo-carve-out-until-extraction.md)), so until the spinout the package's
-  own code is box-writable and a Mac-side launch adopts it through the code fingerprint
+  own code is box-writable and a host-side launch adopts it through the code fingerprint
   (`supervisor._holder_stale_reason`). The pin closes the unattended *config* channel; it does not
   make a box-writable checkout unable to influence the host at all. `docs/security.md` states both.
 - A worktree keeps its own pin (its `foldyard.toml` may legitimately differ per branch), so

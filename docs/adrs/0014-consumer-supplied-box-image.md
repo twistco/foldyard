@@ -73,7 +73,7 @@ versions with foldyard and needs no separate registry.
   client — the contract says "an engine client", not "podman specifically" (the engine-selection
   decision made podman the default *foldyard* drives, with docker as fallback).
 - The box stays light: every self-install branch installs foldyard **bare** (never the `[host]`
-  extra) because the box only routes egress through the Mac's proxy, it never runs mitmproxy —
+  extra) because the box only routes egress through the host's proxy, it never runs mitmproxy —
   which also shrinks bootstrap egress.
 - Zero-authoring onboarding works end to end: `foldyard init --box-only && foldyard box up` on a
   stack-less repo, then the skill when the generic box stops being enough.

@@ -5,9 +5,10 @@ description: Grow a project's foldyard config from INSIDE the locked-down starte
 
 # Bootstrap a foldyard project from inside its box
 
-`foldyard init` writes a LOCKED-DOWN starter: a stack-less Lima dev box, egress walled to a
-Mac allowlisting proxy, only this repo mounted, no push credential — and an agent (you) can
-run *inside* it. That's the point of this skill: you grow the config from the safe sandbox,
+`foldyard init` writes a LOCKED-DOWN starter: a dev box with no stack yet, in a VM (Lima by
+default) that mounts only this repo, its egress held by the VM firewall to one way out — the
+allowlisting proxy on the human's computer — and no push credential. An agent (you) can run
+*inside* it. That's the point of this skill: you grow the config from the safe sandbox,
 discovering what the project needs by trying the real thing and watching it fail, then
 codifying the result. You never touch the host, and a broken experiment is thrown away on
 the next `foldyard box up`.
@@ -19,17 +20,17 @@ configure until it works" into committed `foldyard.toml` + `box.Dockerfile` chan
 ## Ground rules (the isolation is the point — don't break it)
 
 - **Never** put a credential, token, or SSH key in `foldyard.toml`, the Dockerfile, or the
-  repo. foldyard is secretless: real auth is injected at the Mac proxy (keyless), never baked
-  in. If a step needs a secret, that's a `keyless`/proxy concern on the host, not an image layer.
-- **Egress is walled + allowlisted.** If a download fails with a proxy `403`/refusal, the host
-  isn't on the allowlist — don't try to disable the wall. Grants live in the HOST-side
-  allow-store, deliberately NOT in the repo (a `[proxy] allow` list in `foldyard.toml` is
-  IGNORED — the box must not widen its own wall). You CAN recommend: add the host to
-  `[proxy] recommend` in `foldyard.toml` with a one-line `why` — the host OFFERS each entry
-  to the operator (at `fy up` / `fy allow sync` / the TUI's wall pane) after your edit passes
-  the adoption gate, and nothing is granted without their per-host yes. For an immediate
-  unblock, ask the operator to `fy allow add <host>` or grant it live in `fy tui`'s Network
-  Log. `fy verify` should keep passing throughout.
+  repo. foldyard is secretless: real auth is injected at the proxy on the human's computer
+  (keyless), never baked in. If a step needs a secret, that's a `keyless`/proxy concern on the host, not an image layer.
+- **Egress is firewalled + allowlisted.** If a download fails with a proxy `403`/refusal, the
+  host isn't on the allowlist — don't try to get around the proxy or the VM firewall. Grants
+  live in the allow-store on the human's computer, deliberately NOT in the repo (a
+  `[proxy] allow` list in `foldyard.toml` is IGNORED — the box must not widen its own
+  allowlist). You CAN recommend: add the host to `[proxy] recommend` in `foldyard.toml` with a
+  one-line `why` — after your edit passes the adoption gate, the human is OFFERED each entry
+  (at `fy up` / `fy allow sync` / the allowlist pane in `fy tui`), and nothing is granted
+  without their per-host yes. For an immediate unblock, ask them to `fy allow add <host>` or
+  grant it live in `fy tui`'s Network Log. `fy verify` should keep passing throughout.
 - **Keep image layers about TOOLING; keep repo-tracking deps in `[box].warmup`** so a lockfile
   bump doesn't invalidate the image cache.
 
@@ -38,7 +39,7 @@ configure until it works" into committed `foldyard.toml` + `box.Dockerfile` chan
 ### 1. Confirm where you are
 
 ```bash
-fy verify            # the cage is intact (rootless, walled egress, no push credential)
+fy verify            # the isolation holds (rootless, firewalled egress, no push credential)
 cat foldyard.toml    # the starter — note what's still commented
 ```
 
@@ -99,11 +100,13 @@ image = { dockerfile = "box.Dockerfile", tag = "<prefix>-box:latest" }
 (Use your project's `prefix` from `[project]`.) Leave `uv sync` / `npm install` to `[box].warmup`,
 not the image — they track the lockfiles on the mount.
 
-**c) The egress allowlist** → a scaffolded project ENFORCES from the start (`fy init` seeds
-`[proxy] enforce = true`; `fy allow enforce off` turns it back to observe-only while you're
-still discovering a dependency's egress). Collect every host the build/test/run legitimately
-reaches (watch `fy tui`'s Network Log for blocks) and COMMIT them as `[proxy] recommend` entries,
-each with its `why`:
+**c) The egress allowlist** → a scaffolded project starts in a *learn window* (`fy init` seeds
+`[proxy] enforce = "learn"`): for the first hour nothing is refused, every host that *would* be
+is recorded, and then the allowlist enforces by itself. The human reviews and grants what it
+recorded with `fy allow learn`, and can open a new window with `fy allow enforce learn` while
+you're discovering a dependency's egress. Either way, collect every host the build/test/run
+legitimately reaches (the learn record, or blocks in `fy tui`'s Network Log) and COMMIT them as
+`[proxy] recommend` entries, each with its `why`:
 
 ```toml
 [proxy]
@@ -112,15 +115,15 @@ recommend = [
 ]
 ```
 
-Recommendations are offers, not grants: every teammate (and this machine's operator) is asked
-per host at `fy up` / `fy allow sync` / the TUI's wall pane, and can answer yes / session /
+Recommendations are offers, not grants: every teammate (and the human here) is asked per host
+at `fy up` / `fy allow sync` / the allowlist pane in `fy tui`, and can answer yes / session /
 never. That's the committed half; the answers stay host-owned. Keyless hosts are allowed
 implicitly — never list them, and neither list an agent's install hosts: a declared `[claude]` /
 `[codex]` contributes its own (foldyard knows where its installers fetch from).
 
 ### 4. Rebuild from the codified config and verify
 
-Prove the Dockerfile + config reproduce the hand-built box. **The rebuild is the operator's, not
+Prove the Dockerfile + config reproduce the hand-built box. **The rebuild is the human's, not
 yours:** `fy box down` from inside the box tears down the box you are running in, and the new
 config only takes effect once they approve it on their computer anyway. Commit, then ask them to
 run, on their computer:
@@ -129,14 +132,15 @@ run, on their computer:
 fy config diff                              # read your foldyard.toml changes…
 fy config adopt                             # …and approve them
 fy box down
-fy box up                                   # now builds box.Dockerfile + brings the wired stack up
+fy up                                       # the wired stack (skip if there is none)
+fy box up                                   # builds box.Dockerfile, starts the new box
 ```
 
 Then, back in the new box:
 
 ```bash
 <the project build + test command>          # succeeds with no manual installs
-fy verify                                   # isolation battery still passes (incl. the wall check)
+fy verify                                   # isolation battery still passes (incl. the VM firewall)
 ```
 
 If something's missing, you skipped a recipe line — add it and rebuild. Once a clean rebuild runs

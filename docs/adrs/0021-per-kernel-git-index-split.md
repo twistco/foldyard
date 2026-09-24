@@ -10,6 +10,11 @@
   in `worktree remove`.
 - **Amended 2026-09-18:** `.git/config` added to the shared-file residuals below — foldyard
   itself was its most frequent writer (issue #6).
+- **Amended 2026-09-24:** the "podman/lima on macOS" scope below is now every host. The
+  one-kernel `native` backend was retired ([ADR-0027](./0027-always-a-vm-native-backend-retired.md)),
+  and Linux and WSL2 hosts run the same Lima VM (validated in CI; the repo is shared over 9p
+  there rather than virtiofs), so the checkout is always shared between two kernels and the
+  split applies on every backend.
 
 ## Context
 

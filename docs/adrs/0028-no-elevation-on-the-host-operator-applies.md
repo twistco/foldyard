@@ -1,11 +1,13 @@
 # ADR-0028 — foldyard never elevates on the host: it renders, the operator applies, foldyard probes
 
-- **Status:** Accepted (2026-09-18). Implemented on the same branch for the one host-side
-  escalation the package had — the host wall (`[machine].host_wall`): `hostwall.install` /
-  `remove` (a `sudo nft -f -` on every `fy up`) are gone; `fy machine host-wall` renders and
-  prints, `fy up` probes.
+- **Status:** Accepted (2026-09-18). Implemented (on `main` since #24, released in 0.3.1) for
+  the one host-side escalation the package had — the host wall (`[machine].host_wall`):
+  `hostwall.install` / `remove` (a `sudo nft -f -` on every `fy up`) are gone;
+  `fy machine host-wall` renders and prints, `fy up` probes. **Amended 2026-09-24:** renamed
+  since — `[machine].host_wall` is now `[machine] host_firewall` (the *host firewall*) and the
+  verb is `fy machine host-firewall`; the old names still work as aliases.
 - **Sources:** [configuration.md](../configuration.md) (`[machine].host_wall`),
-  [lima-wall-machine-integration.md §3](../lima-wall-machine-integration.md#3-host-side-enforcement--machinehost_wall--true-linux),
+  [lima-wall-machine-integration.md §3](https://github.com/twistco/foldyard/blob/main/docs/lima-wall-machine-integration.md#3-host-side-enforcement--machinehost_wall--true-linux),
   the 2026-09-18 runner experiment recorded there. Related:
   [0009](./0009-monitoring-cooperative-enforcement-locked.md) (the wall is enforcement, not
   cooperation), [0022](./0022-host-runs-the-adopted-config.md) and
@@ -39,7 +41,7 @@ whatever messing with their system."*
 
 Two facts about the mechanism decide what the alternative can look like. They were established
 on a GitHub `ubuntu-24.04` runner on 2026-09-18 (a throwaway workflow; the results are in
-[lima-wall-machine-integration.md §3](../lima-wall-machine-integration.md#3-host-side-enforcement--machinehost_wall--true-linux)):
+[lima-wall-machine-integration.md §3](https://github.com/twistco/foldyard/blob/main/docs/lima-wall-machine-integration.md#3-host-side-enforcement--machinehost_wall--true-linux)):
 
 - **The ruleset can be boot-stable.** Loopback flows from the VM can be allowed OUT under a
   conntrack mark and judged on the INPUT hook by the *listening* socket's cgroup

@@ -182,8 +182,8 @@ nothing to bypass because there is no NAT to fall back to. The honest comparison
 
 | Property | gondolin | foldyard today |
 | --- | --- | --- |
-| Enforcement without guest cooperation | always (host is the network) | only with `[machine].wall` (Lima, Mac-unvalidated) |
-| Content-level policy (paths, methods, bodies) | always (everything parsed) | only `capture=on` decrypted hosts |
+| Enforcement without guest cooperation | always (host is the network) | only with `[machine].wall` — now `[machine] firewall` (opt-in, Lima only; validated in CI since 2026-09-17) |
+| Content-level policy (paths, methods, bodies) | always (everything parsed) | only decrypted hosts — `capture=on` at review time; every non-`passthrough` host since ADR-0029 |
 | Protocol compatibility | HTTP/1.x + explicit exceptions; h2/QUIC/UDP break | full (passthrough tunnels anything TLS; wall denies UDP so QUIC falls back to TCP) |
 | CONNECT | denied (it's a generic tunnel) | *is* the transport; the CONNECT target is the policy point under `default_deny` |
 | Internal-range upstreams | blocked by default, connect-time re-checked | **not checked at all — see gap 1** |
@@ -203,10 +203,11 @@ Ordered by how much they matter. 1 and 2 were verified against
 
 1. **The proxy will dial internal upstreams on the box's behalf — from outside the wall.**
    The addon's only gate is the hostname allowlist, and only when `default_deny = true`
-   (`init` default is `false`). `mitmdump` runs on the Mac, so a box-side
+   (now `[proxy] enforce`; `init` seeds `enforce = "learn"`, which records instead of refusing
+   until the learn window ends). `mitmdump` runs on the host, so a box-side
    `curl -x $FY_PROXY https://127.0.0.1:8443/` (or `http://192.168.1.x/`,
-   `http://169.254.169.254/`) makes the *Mac* connect to Mac loopback / the LAN — precisely
-   the "probe arbitrary Mac-loopback services" the wall's port-band design exists to
+   `http://169.254.169.254/`) makes the *host* connect to host loopback / the LAN — precisely
+   the "probe arbitrary host-loopback services" the wall's port-band design exists to
    prevent, resurrected through the front door. Even with `default_deny` on, an allowlisted
    hostname that later resolves to an internal IP (rebinding) walks through, because policy
    never looks at IPs. **Fix shape:** in the addon, resolve the upstream and refuse

@@ -7,7 +7,7 @@ June sweep was found to have missed [gondolin](./prior-art/gondolin.md) (public 
 2026-02) entirely — that pass added the gondolin deep-dive and re-swept the neighbourhood.
 **Upgraded 2026-09-21** with the [vhrn](./prior-art/vhrn.md) deep-dive, and the per-tool
 deep-dives moved into [prior-art/](./prior-art/) — the competitor library, which carries the
-axis-by-axis comparison table, the entry template, and the maintenance rules. This file stays
+property-by-property comparison table, the entry template, and the maintenance rules. This file stays
 the landscape: the whole neighbourhood, one row per tool, and the positioning argument.
 
 ## The verdict
@@ -50,9 +50,9 @@ the landscape: the whole neighbourhood, one row per tool, and the positioning ar
   referenced MUST/SHOULD, exact error bodies, fail-closed policy reads) and whose address
   handling — an IANA-registry unicast boundary applied in every mode, resolve-once-and-pin
   against rebinding, host-loopback as a separate narrow capability — is simply better than
-  ours, on axes where foldyard has no answer written down at all. The placeholder mechanism
+  ours, on points where foldyard has no answer written down at all. The placeholder mechanism
   commoditized in 2026-07; the *quality* of the mediation is the 2026-09 frontier, and it is
-  the one axis where a neighbour is ahead of foldyard rather than beside it. The four cheap
+  the one area where a neighbour is ahead of foldyard rather than beside it. The four cheap
   closes (address discipline, grant provenance, proxy containment, a written proxy contract)
   are listed in [prior-art/README.md](./prior-art/README.md#how-foldyard-compares).
 - **Demand is recurring, not speculative:** worm waves keep landing (Shai-Hulud Sep + Nov
@@ -78,7 +78,7 @@ the landscape: the whole neighbourhood, one row per tool, and the positioning ar
 | **Apple `container`** + ecosystem (CodeRunner, drydock, sand; added 2026-07) | Apache-2.0 per-container lightweight VMs on Apple Silicon (macOS 26); spawned a macOS agent-sandbox wave | Substrate, not product — per-container VM primitive vs one VM around a project; no secrets/egress opinions. A future foldyard backend candidate at most |
 | **AgentFS** (Turso, added 2026-07) | CoW filesystem for agent writes: read-only base + SQLite-backed delta, FUSE/NFS, fork-by-copying-the-delta, file-op audit queryable in SQL | The strongest programmable-FS-view answer in the field (cf. gondolin's VFS); write-isolation and audit, not secret-hiding — complement, not competitor |
 | **container-use** (Dagger, added 2026-07; missed — since 2025-06) | container + git branch per agent task, via MCP | Container-per-task for parallel agents; no VM boundary, no secrets/egress story |
-| **Claw Patrol** (Deno, added 2026-07) | protocol-aware egress gateway: parses PostgreSQL/ClickHouse/kubectl/HTTP at the wire, HCL/CEL rules, can pause a destructive query for human approval | No isolation of its own — but a big-name proof that egress gating is going *protocol-aware*, one level deeper than foldyard's hostname allowlist + wall |
+| **Claw Patrol** (Deno, added 2026-07) | protocol-aware egress gateway: parses PostgreSQL/ClickHouse/kubectl/HTTP at the wire, HCL/CEL rules, can pause a destructive query for human approval | No isolation of its own — but a big-name proof that egress gating is going *protocol-aware*, one level deeper than foldyard's hostname allowlist + VM firewall |
 | **nono** (Landlock/Seatbelt) | kernel-capability sandbox for agent processes | Complementary, not competing — see the deep-dive below |
 | **srt / ags / yolobox / agent-sandbox** | per-agent sandboxes | Same genre as nono; crowded, deliberately not entered |
 | **VS Code devcontainers** | reproducible toolchain container | On Docker Desktop: rootful daemon + `/Users` mounted ⇒ not a security boundary; secrets via env; no posture, no verify |
@@ -104,7 +104,7 @@ transfer to a VM-bounded tool:
   the same kernel as the wrapped process; foldyard's containers run in a separate VM with
   their own kernel and many process trees — there is no single tree to wrap from the host.
   The VM-boundary equivalent of nono's kernel lock is **nftables default-deny inside the VM**
-  — which is exactly what `[machine].wall` provisions.
+  — which is exactly what the VM firewall (`[machine] firewall`) provisions.
 - **The other half — proxy + ephemeral CA + allowlist — transfers, and foldyard has it**
   (the egress proxy, CA trust injection, `[proxy]` allowlist + live grants).
 - **They compose:** if you care specifically about the coding agent's own traffic, a
@@ -117,7 +117,7 @@ Nearest first-party analog: Anthropic's
 proxies on Linux, Seatbelt on macOS) — architecturally nono-like. The best public
 *VM-wrapping* blueprint is INNOQ's
 ["I sandboxed my coding agents"](https://www.innoq.com/en/blog/2026/03/dev-sandbox-network/)
-(Squid + Lima + nftables default-deny) — the same shape as foldyard's wall, host-side.
+(Squid + Lima + nftables default-deny) — the same shape as foldyard's VM firewall, host-side.
 
 ## Deep-dive: gondolin (separate doc)
 

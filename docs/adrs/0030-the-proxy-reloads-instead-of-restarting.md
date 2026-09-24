@@ -1,6 +1,6 @@
 # ADR-0030 — The proxy reloads its settings instead of restarting
 
-- **Status:** Accepted (2026-09-23). Implemented on `proxy-hot-reload`.
+- **Status:** Accepted (2026-09-23). Implemented (on `main` since #31).
 - **Sources:** the 2026-09-23 `repower` build failure below; `tests/test_proxy_reload_e2e.py`
   (a real mitmdump). Related: [0007](./0007-credential-injection-at-egress-proxy.md) (the proxy
   is where credentials are attached), [0022](./0022-host-runs-the-adopted-config.md) (the host

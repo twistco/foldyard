@@ -11,11 +11,10 @@ and containers freeze parts of their config at creation. Work down the table bef
 | a compose file, inside a worktree | compose runs from the **primary checkout**, not your worktree | the edit has to reach the primary checkout |
 | a compose file, anywhere | a running container keeps the command + env it was CREATED with | `fy up` (recreates on a config change) — a `restart` is not enough |
 | an env var in the stack's env file | same: baked at container creation | recreate the service |
-| posture (`fy mode …`) | setting is host-only; from the box it refuses | ask the human, then re-check `fy mode` |
-| an egress allow / the wall | grants live in the host's home | `fy allow add <host>` on the host |
+| the mode (`fy mode …`) | setting it is host-only; from the box it refuses | ask the human, then re-check `fy mode` |
+| an allowlist grant | grants live in the host's home, never in the repo | `fy allow add <host>` on the host |
 | a code file, expecting hot reload | the watcher may not see host-side writes across the VM's shared filesystem — but **edits made in the box do** propagate | make the edit in the box (you're already there); if a host-side edit was the trigger, touch the file from here |
-| foldyard's own source (vendored consumers only) | a running supervisor holds the code it started with | the next host-side `fy up` bounces it and adopts the new code |
-| a bundled skill / docs | they ship inside the installed package | reinstall foldyard, or run from the source checkout |
+| a bundled skill (this one) | `.claude/skills/` holds a *copy*; upgrading foldyard doesn't refresh it | `fy skill install <name> --force` copies the installed version over it. `fy docs` always matches the install |
 
 ## Diagnosing, in order
 
@@ -27,6 +26,6 @@ and containers freeze parts of their config at creation. Work down the table bef
 
 ## The general rule
 
-If a change would let the **box** widen what the **host** does — its credentials, its egress, its
-capture — assume it needs a host-side act, and say which one. That's not an obstacle to route
+If a change would let the **box** widen what the **host** does — its credentials, its egress, what
+it decrypts — assume it needs a host-side act, and say which one. That's not an obstacle to route
 around; it's the property that makes it safe to run an agent here with permissions skipped.

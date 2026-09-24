@@ -57,7 +57,7 @@ names.** Concretely:
 
 ## Consequences
 
-- One engine story across Mac, box, and worktrees: foldyard echoes `"$ENGINE" …` commands the
+- One engine story across host, box, and worktrees: foldyard echoes `"$ENGINE" …` commands the
   user can copy-paste, and the golden tests (ADR-0017 tier 2) assert podman command sequences
   deterministically (`conftest` pins `FOLDYARD_ENGINE=podman`).
 - `CONTAINER_HOST` is load-bearing. Dropping it, or making `engine()` "prefer docker" again,

@@ -4,10 +4,11 @@
   (its third implementation is removed; the socket contract and the two VM backends stand) and
   **supersedes the "CI uses containers, not KVM" clause of
   [ADR-0017](./0017-nested-virt-validation-strategy.md)** (a real Lima/QEMU VM now runs in CI).
-  Implemented on the same branch: `machine_backend.NativeBackend` and its branches in
-  `machine`, `preflight`, `init`, `sandbox` are gone; a config still naming it is told so.
-- **Sources:** [linux-support.md](../linux-support.md) (the 2026-09-17 runner rows),
-  [isolation-layers.md](../isolation-layers.md) (the Linux and WSL2 sections), the
+  Implemented, on `main` since #17 (released in 0.3.0): `machine_backend.NativeBackend` and its
+  branches in `machine`, `preflight`, `init`, `sandbox` are gone; a config still naming it is
+  told so.
+- **Sources:** [linux-support.md](https://github.com/twistco/foldyard/blob/main/docs/linux-support.md) (the 2026-09-17 runner rows),
+  [isolation-layers.md](https://github.com/twistco/foldyard/blob/main/docs/isolation-layers.md) (the Linux and WSL2 sections), the
   `lima-host-e2e` job in `.github/workflows/foldyard-e2e.yml`. Related:
   [0001](./0001-rootless-podman-vm-isolation-boundary.md) (the VM is required everywhere,
   including Linux), [0009](./0009-monitoring-cooperative-enforcement-locked.md) (the wall),
@@ -23,14 +24,14 @@ reasons are gone, and the profile turned out to be weaker than "weaker" says.
 **1. The CI reason is gone.** On 2026-09-17 foldyard's default `lima` backend booted a QEMU/KVM
 VM on GitHub-hosted `ubuntu-24.04` runners, 10/10 with no retry wrapper, and the whole host tier —
 `machine ensure|stop|recreate`, the config-adopt gate, the supervisor, both walls, the box, verify's
-negative, `reclaim`, the worktree verbs — runs there, 36/36 ([linux-support.md](../linux-support.md)).
+negative, `reclaim`, the worktree verbs — runs there, 36/36 ([linux-support.md](https://github.com/twistco/foldyard/blob/main/docs/linux-support.md)).
 The "VMs are flaky on runners" sentence that justified a VM-less CI backend was never evidenced
 for Lima. `native-host-e2e` was deleted the same day; nothing live has covered `native` since.
 
 **2. WSL2 does not rescue it.** Inside the distro the supervisor, the minters, the allow-store and
 the engine share one kernel and one uid — Hyper-V separates Windows from the distro and puts
 nothing between the agent and the credentials. `WSL2 + native` is bare-Linux `native`
-([isolation-layers.md](../isolation-layers.md#wsl2--a-linux-host-whose-hyper-v-boundary-protects-the-wrong-asset)).
+([isolation-layers.md](https://github.com/twistco/foldyard/blob/main/docs/isolation-layers.md#wsl2--a-linux-host-whose-hyper-v-boundary-protects-the-wrong-asset)).
 The consistent design there is the same as on Linux: a Lima/QEMU VM inside the distro, which the
 stock WSL2 kernel supports on Windows 11 x86 (`/dev/kvm` after `wsl --shutdown`). Windows-on-ARM
 boots the distro at EL1 and can never have KVM; that is a platform foldyard does not reach, not a
@@ -70,7 +71,7 @@ described it; and a per-platform column in the isolation page existed only to sa
 - The fail-closed message for a missing `limactl` on the inherited default offers two ways out
   (install it, or name `podman`), never a VM-less one.
 - The WSL2 route is Lima/QEMU inside the distro (Windows 11 x86, nested virtualisation on,
-  automount off); it stays "not yet validated" in [linux-support.md](../linux-support.md) until
+  automount off); it stays "not yet validated" in [linux-support.md](https://github.com/twistco/foldyard/blob/main/docs/linux-support.md) until
   someone runs the two-minute `/dev/kvm` check on a real machine. Windows-on-ARM is out of scope.
 - ADR-0017's "keep CI on containers, no KVM job" clause is superseded by the `lima-host-e2e`
   job; its nested-virt rig remains the answer for what a runner VM cannot reach (the gVisor
@@ -84,7 +85,7 @@ described it; and a per-platform column in the isolation page existed only to sa
   container on a VM-less engine) stays on the page as the record of what it traded, marked as
   no longer offered.
 - Linux/WSL2 hosts need `limactl` + QEMU + `/dev/kvm` (or `podman machine`), exactly as the
-  runner recipe in [linux-support.md](../linux-support.md) installs them. A machine without any
+  runner recipe in [linux-support.md](https://github.com/twistco/foldyard/blob/main/docs/linux-support.md) installs them. A machine without any
   VM technology cannot run foldyard — before, it could run something that looked like foldyard.
 - `machine.py` and `preflight` lose their VM-less branches, and the retired-name message is the
   one place `native` is still spelled in code.

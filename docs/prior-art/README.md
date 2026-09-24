@@ -17,28 +17,29 @@ only needs a row stays in the landscape.
 
 ## How foldyard compares
 
-The axes that actually separate these tools. Filled from the reviews above — every cell is a claim
-some entry file defends.
+The properties that actually separate these tools. Filled from the reviews above — every cell is a
+claim some entry file defends. foldyard's column is kept current (2026-09-24); the others are as of
+each review.
 
-| Axis | foldyard | gondolin | vhrn |
+| Property | foldyard | gondolin | vhrn |
 | --- | --- | --- | --- |
 | Unit of isolation | the **project** (long-lived) | the **task** (VM per turn) | the **run** (container per invocation) |
 | Boundary | VM, always (ADR-0001, ADR-0027) | micro-VM (QEMU/libkrun) | container; VM only via Apple `container` |
 | Whole compose stack inside | **yes** — the differentiator | no | no |
 | Human dev loop (IDE, worktrees, TUI) | yes | no | no |
-| Egress enforcement without guest cooperation | only with `[machine].wall` (Lima, Mac-unvalidated) | always (host *is* the network) | always (in-container nftables, pre-privilege-drop) |
+| Egress enforcement without guest cooperation | only with the VM firewall, `[machine] firewall` (opt-in, Lima only; validated in CI since 2026-09-17) | always (host *is* the network) | always (in-container nftables, pre-privilege-drop) |
 | Address discipline (internal ranges, rebinding) | **none** | blocked by default, connect-time recheck | IANA registry boundary + resolve-once-and-pin |
-| Content-level policy | on `capture=on` hosts | everything parsed (HTTP/1.x only) | none (no TLS termination) |
+| Content-level policy | on every decrypted host (all but `passthrough` since ADR-0029) | everything parsed (HTTP/1.x only) | none (no TLS termination) |
 | Credential model | dummy in guest, minted + injected at the proxy (ADR-0007/0008) | placeholder in guest, substituted at the proxy | real token in the container, agent logs in itself |
 | Credential *minting* (short-lived, scoped) | yes | no (static values) | no |
 | Policy ownership | host-owned, adopt-gated (ADR-0022) | host-owned (SDK code) | host-owned, repo never read |
 | Grant model | lifetime: `once`/`session`/`permanent` | SDK-declared per VM | scope: base/harness/global/project/run, with provenance |
-| Posture ladder (axes, rungs, TTL, auto-revert) | yes | no | run-scoped modes only |
+| Credential modes (switches, levels, TTL, auto-revert) | yes | no | run-scoped modes only |
 | Proxy's own containment | host process, holds every secret | host process (Node) | scratch container, no caps, 3 mounts |
 | Written proxy contract | none | limitations + security docs | 570-line normative spec + coverage ledger |
 | Filesystem policy (hide/shadow/audit) | shadow volumes only | programmable VFS (hide, ro, tmpfs-upper, audit hooks) | project dir only; config copied, not mounted |
 
-Read down foldyard's column: the stack, the posture ladder and credential minting are ours alone;
+Read down foldyard's column: the stack, credential modes and credential minting are ours alone;
 **address discipline, proxy containment, grant provenance and a written proxy contract are the four
 places where both neighbours are ahead of us**, and all four are cheap.
 
@@ -49,7 +50,7 @@ is worthless three months later — a set of findings against ours is not.
 
 1. **One-paragraph identification** — what it is, licence, author, and *the exact commit and date
    reviewed*. Claims rot; a pinned commit makes staleness visible.
-2. **The verdict**, up front, as bullets: competitor or not, on which axis, and what reading it
+2. **The verdict**, up front, as bullets: competitor or not, on which dimension, and what reading it
    changed.
 3. **What it is** — mechanism and *scale* (lines of code, where the effort went). Scale is the
    honest guard against "we should just build that".
@@ -69,7 +70,7 @@ is worthless three months later — a set of findings against ours is not.
 
 - **Findings are the deliverable.** A gap found here is not fixed here. Carry it into an issue or
   an ADR; the entry file records what was found and stays a snapshot of that review.
-- **Re-review on a version bump that touches the compared axes**, not on a schedule. Both current
+- **Re-review on a version bump that touches the compared properties**, not on a schedule. Both current
   entries are fast-moving single-author projects; the roster's `Reviewed` column is the staleness
   signal, and a claim older than its subject's last release should be treated as unverified.
 - **Cross-check before claiming a gap.** Both entries' most useful findings came from grepping
@@ -77,8 +78,8 @@ is worthless three months later — a set of findings against ours is not.
   open by the vhrn review two months later — which is the library working.
 - **The landscape and the library must agree.** When an entry changes a verdict, update that
   tool's row and the positioning bullets in [../prior-art.md](../prior-art.md) in the same commit.
-- **Keep the axis table above filled.** A new entry that cannot fill a row either found a genuinely
-  new axis (add it, and backfill the others) or wasn't read closely enough.
+- **Keep the comparison table above filled.** A new entry that cannot fill a row either found a genuinely
+  new property (add it, and backfill the others) or wasn't read closely enough.
 
 ## Candidates not yet promoted
 

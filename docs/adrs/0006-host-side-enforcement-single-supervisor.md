@@ -1,7 +1,13 @@
 # ADR-0006 — Host-side enforcement: ONE supervisor, reconciling a per-worktree mode-map
 
 - **Status:** Accepted (singleton lock 2026-06-16; per-worktree mode-map 2026-06-30; stale-holder
-  bounce 2026-07-03; per-project port bands 2026-07-05) — implemented
+  bounce 2026-07-03; per-project port bands 2026-07-05) — implemented. **Amended 2026-09-24:**
+  the supervisor is no longer a foreground `fy host` process — it is always started detached,
+  with the VM, and stops with it. `fy host` (or `fy host status`) now reports on it,
+  `fy host restart` replaces it (the forced bounce `fy host --restart` used to be), and
+  `fy host logs` tails its log; there is deliberately no `stop`. The singleton lock, the
+  mode-map and the replace-on-launch bounce below stand. See the
+  [CHANGELOG](https://github.com/twistco/foldyard/blob/main/CHANGELOG.md) (Unreleased).
 - **Sources:** docs/history/per-worktree-proxy.md, docs/history/per-consumer-registry-plan.md,
   src/foldyard/supervisor.py, src/foldyard/ports.py
 
@@ -40,7 +46,7 @@ incident).
   minter ports close that leak). Identity stays shared: `host.env`, the CA, the lock.
 - **Per-project port bands** (`src/foldyard/ports.py`): each project gets a 200-port band from
   a flock-guarded `~/.foldyard/ports.json` registry (bands from 41000; proxy = base+0..89
-  worktree offsets, minter = base+100..189). Two projects on one Mac previously bound the same
+  worktree offsets, minter = base+100..189). Two projects on one host previously bound the same
   fixed port and — each correctly holding its *own* singleton lock — reaped each other's proxy
   every tick, forever. The orphan reaper is likewise scoped to this project's staged addon path
   (`_is_our_proxy`), never "any foldyard proxy", and never a foreign process.

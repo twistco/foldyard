@@ -116,20 +116,20 @@ says so in those words.
 
 | Property | vhrn | foldyard today |
 | --- | --- | --- |
-| Enforcement without guest cooperation | always (in-container nftables installed pre-privilege-drop; no sudo) | only with `[machine].wall` (Lima, Mac-unvalidated) — the box's own netns is unfenced |
+| Enforcement without guest cooperation | always (in-container nftables installed pre-privilege-drop; no sudo) | only with `[machine] firewall` (opt-in, Lima only; validated in CI since 2026-09-17) — the box's own netns is unfenced |
 | Proxy's own privilege | scratch container, uid 65532, read-only rootfs, no caps, three mounts | `mitmdump` as the operator on the host, full host network, holds every axis's secret — **see gap 5** |
 | Internal-range upstreams | denied in every mode, by IANA registry classification | **not checked at all** — gondolin gap 1, still open |
 | Loopback access | separate capability, exact authority, brokered, always enforced | not expressible; reachable only as an unchecked side effect of gap 1 |
 | DNS rebinding | closed (resolve once, validate, pin the answer set) | open — policy never looks at IPs |
 | Policy re-read | every request, decision never cached, fail-closed to empty-enforce | `allow-effective.json` per request; allow-store unreadable ⇒ enforce ✓ (converges) |
 | Grant scoping | base / harness / global / **exact project** / run, with provenance in `net status` | `once` / `session` / `permanent` — *lifetime*, not scope; one store per project dir |
-| Content-level policy, credential injection | impossible by construction (no TLS termination) | `capture=on` hosts decrypted; `[[inject]]` mints and substitutes |
+| Content-level policy, credential injection | impossible by construction (no TLS termination) | every non-`passthrough` host decrypted (ADR-0029); `[[inject]]` mints and substitutes |
 | Written proxy contract | 570-line normative spec + coverage ledger + black-box process suite | none |
 | Denial observability | `vhrn net denied` since last idle, append-only log the agent cannot read | `egress.jsonl` + TUI network log |
-| Protocol reach | HTTP/1.0–1.1 ingress; CONNECT is an opaque relay, so h2/h3 tunnel fine | full; CONNECT is the policy point under `default_deny` |
+| Protocol reach | HTTP/1.0–1.1 ingress; CONNECT is an opaque relay, so h2/h3 tunnel fine | full; CONNECT is the policy point under `[proxy] enforce` |
 
 The two systems are near-mirror-images: **vhrn is rigorous about *where* a connection may go and
-blind to *what* travels; foldyard is rigorous about *what* travels on captured hosts and blind to
+blind to *what* travels; foldyard is rigorous about *what* travels on decrypted hosts and blind to
 where the connection actually lands.** Each one's strength is precisely the other's gap. Nothing in
 vhrn's address discipline conflicts with foldyard's injection model — they compose, and gap 1 is
 exactly the missing half.
@@ -180,7 +180,7 @@ vhrn cannot inject, so it does the next best thing and is careful about it:
 Read against ADR-0007/0008, the comparison is clean: foldyard's guest holds a dummy and the real
 token exists only on the host for the duration of one substituted request; vhrn's guest holds a
 real, long-lived, agent-scoped token. foldyard's posture is strictly stronger *and* costs a TLS
-MITM, a minter per mechanism, a supervisor, and the capture/passthrough distinction. vhrn's costs a
+MITM, a minter per mechanism, a supervisor, and the decrypt/passthrough distinction. vhrn's costs a
 login prompt. Their honesty about what remains exposed — trusted repo content executing with the
 forwarded GitHub token in reach of an allowed domain — is the part to match, not the mechanism.
 
@@ -238,7 +238,7 @@ New in this review:
 
 1. **Write the proxy's consumer contract.** A normative document specifying observable behaviour
    and security outcomes of `egress_proxy.py` — accepted request forms, exact refusal responses,
-   the policy re-read rule and its fail-closed behaviour, what capture does and does not see, what
+   the policy re-read rule and its fail-closed behaviour, what decryption does and does not see, what
    injection guarantees, and the address boundary once gaps 1/4 land. vhrn's is the template, down
    to the "where this contract is stricter than the protocol permits, this contract wins" line.
    foldyard's proxy is the component where a subtle behavioural drift is most expensive and least
@@ -253,7 +253,7 @@ New in this review:
 4. **Per-box nftables installed before the privilege drop.** vhrn gets non-cooperative egress
    enforcement on *every* engine and platform from ~10 lines in an entrypoint, because the rules
    are installed by root and the agent user has no sudo. foldyard's equivalent rung today is
-   `[machine].wall` — Lima-only and Mac-unvalidated. A box-local `table inet` with `policy drop`,
+   `[machine] firewall` — opt-in and Lima-only (validated in CI). A box-local `table inet` with `policy drop`,
    permitting the compose network (in-stack traffic must stay direct under `NO_PROXY`) and the
    proxy, would close the "cooperative capture is bypassable" hole for the box on backends the VM
    wall doesn't cover. This needs a spike against the compose network and the socket mount before
