@@ -174,6 +174,9 @@ def test_reconcile_scopes_see_the_live_stack(bound):
             f"env DOCKER_HOST={devmode._engine_env().get('DOCKER_HOST')!r}"
         )
     assert all(r.status != "unknown" for r in stack_rows), stack_rows
+    # The oracle for foldyard's config hash (confighash): labels a REAL `up` wrote must equal the
+    # fresh render — a mismatch here means the hash reads drift on every converged stack.
+    assert any("match the rendered config" in (r.observed or "") for r in stack_rows), stack_rows
 
 
 def test_fy_state_reports_no_drift_with_the_stack_up(repo):

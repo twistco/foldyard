@@ -12,6 +12,21 @@ from foldyard import devmode, state_view
 
 pytestmark = pytest.mark.usefixtures("full_config_bound")
 
+HASH = "io.podman.compose.config-hash"  # conftest pins FOLDYARD_ENGINE=podman
+
+
+@pytest.fixture(autouse=True)
+def no_render(monkeypatch):
+    """No unit test renders the ambient repo's compose files: the fresh config hash is
+    'unavailable' unless a test says what it is (tests/test_confighash.py covers the render)."""
+    from foldyard import reconcile
+
+    monkeypatch.setattr(
+        reconcile.StackScope,
+        "_desired_hashes",
+        lambda self: (None, "not rendered in unit tests", HASH),
+    )
+
 
 @pytest.fixture
 def offline_engine(monkeypatch):
@@ -107,91 +122,126 @@ def overlay_repo(tmp_path, isolated_state):
         yield stack_dir
 
 
-def _container(service: str, *overlays: str) -> tuple[str, dict]:
+def _container(service: str, *overlays: str, hash: str = "current") -> tuple[str, dict]:
     files = ",".join(["/repo/compose.yml", *(f"/repo/dev-stack/{o}" for o in overlays)])
     return (
         f"tangible_{service}_1",
         {
             "com.docker.compose.service": service,
             "com.docker.compose.project.config_files": files,
+            HASH: f"{service}-{hash}",
         },
     )
 
 
-def _stack_rows(monkeypatch, running):
+def _stack_rows(monkeypatch, running, rendered: set[str] | None = None):
+    """The stack scope's rows over ``running``, with every ``rendered`` service's fresh hash
+    ``<service>-current`` (default: every running service); None = the render is unavailable."""
     from foldyard import reconcile
 
     monkeypatch.setattr(devmode, "ps_labels", lambda *a, **k: running)
+    if rendered is not None or running:
+        names = (
+            rendered
+            if rendered is not None
+            else {r[1]["com.docker.compose.service"] for r in running}
+        )
+        monkeypatch.setattr(
+            reconcile.StackScope,
+            "_desired_hashes",
+            lambda self: ({n: f"{n}-current" for n in names}, "", HASH),
+        )
     return reconcile.StackScope().rows(devmode.read())
 
 
-def test_stack_drift_is_judged_per_container_not_by_the_longest_label(overlay_repo, monkeypatch):
-    # #33: podman-compose recreates only the services an overlay changes, so postgres keeps a
-    # label from an earlier posture indefinitely. It carrying the full -f list must NOT vouch for
-    # a queue-worker that was never re-rendered onto the identity overlays.
+def _unrendered(monkeypatch):
+    from foldyard import reconcile
+
+    monkeypatch.setattr(
+        reconcile.StackScope, "_desired_hashes", lambda self: (None, "podman-compose moved", HASH)
+    )
+
+
+def test_stack_drift_is_the_config_hash_not_the_longest_label(overlay_repo, monkeypatch):
+    # #33: postgres keeps an older posture's config_files label for as long as nothing touches
+    # it, so no label vouches for another container. What compose itself compares — the
+    # service's config hash against a fresh render — says queue-worker is stale; the overlay
+    # comparison then says why.
     devmode.set_mode({"gcp": "sa"})
     (row,) = _stack_rows(
         monkeypatch,
         [
             _container("postgres", "compose.identity.yml", "compose.identity-data.yml"),
-            _container("queue-worker"),
+            _container("queue-worker", hash="old"),
         ],
     )
     assert row.status == "drift"
     assert "queue-worker" in row.observed and "postgres" not in row.observed
-    assert "compose.identity.yml" in row.observed
+    assert "WITHOUT overlay compose.identity-data.yml, compose.identity.yml" in row.observed
 
 
-def test_stack_label_predating_an_overlay_is_not_drift_when_it_leaves_that_service_alone(
-    overlay_repo, monkeypatch
-):
-    # The converse: compose never recreated postgres for the identity overlays because they don't
-    # define it — its older label is correct, not drift.
+def test_stack_env_only_drift_is_seen(overlay_repo, monkeypatch):
+    # The gap the overlay comparison could not close: every overlay is on the container, yet a
+    # value the mode interpolates changed — the hash moved, so `up` would recreate it.
+    devmode.set_mode({"gcp": "sa"})
+    identity = ("compose.identity.yml", "compose.identity-data.yml")
+    (row,) = _stack_rows(
+        monkeypatch,
+        [_container("queue-worker", *identity, hash="old"), _container("postgres")],
+    )
+    assert row.status == "drift"
+    assert "queue-worker: its rendered config changed" in row.observed
+    assert "postgres" not in row.observed and "`fy up` recreates" in row.observed
+
+
+def test_stack_matching_hashes_are_ok_whatever_the_labels_say(overlay_repo, monkeypatch):
+    # postgres predates the identity overlays and app still carries storage-staging, but their
+    # hashes match a fresh render — compose would recreate nothing, so nothing is drift.
     devmode.set_mode({"gcp": "sa"})
     (row,) = _stack_rows(
         monkeypatch,
         [
-            _container("postgres"),
-            _container("queue-worker", "compose.identity.yml", "compose.identity-data.yml"),
-            _container("app", "compose.identity.yml", "compose.identity-data.yml"),
+            _container("postgres", "compose.storage-staging.yml"),
+            _container("app", "compose.storage-staging.yml"),
         ],
     )
     assert row.status == "ok", row.observed
+    assert row.observed == "2 containers match the rendered config"
 
 
-def test_stack_stale_overlay_only_counts_for_the_services_it_touched(overlay_repo, monkeypatch):
-    # storage-staging only ever touched `app`: postgres still labelled with it is fine, app still
-    # carrying it is drift.
+def test_stack_container_outside_the_render_is_not_compared(overlay_repo, monkeypatch):
     devmode.set_mode({"gcp": "sa"})
-    identity = ("compose.identity.yml", "compose.identity-data.yml")
-    (ok,) = _stack_rows(
-        monkeypatch,
-        [
-            _container("postgres", "compose.storage-staging.yml"),
-            _container("queue-worker", *identity),
-            _container("app", *identity),
-        ],
-    )
-    assert ok.status == "ok", ok.observed
     (row,) = _stack_rows(
         monkeypatch,
-        [
-            _container("postgres", "compose.storage-staging.yml"),
-            _container("app", *identity, "compose.storage-staging.yml"),
-        ],
+        [_container("postgres"), _container("e2e-app", hash="whatever")],
+        rendered={"postgres"},
     )
-    assert row.status == "drift"
-    assert "app" in row.observed and "stale overlay" in row.observed
-    assert "postgres" not in row.observed
+    assert row.status == "ok"
+    assert row.observed == "1 containers match the rendered config; 1 not in it (e2e-app)"
 
 
-def test_stack_unreadable_overlay_counts_as_touching_every_service(overlay_repo, monkeypatch):
-    # When the overlay can't be read, "does it touch this service?" has no answer — fall back to
-    # the conservative reading (drift), never to a silent ✓.
+def test_stack_without_a_render_falls_back_to_overlays_but_never_to_ok(overlay_repo, monkeypatch):
+    # The hash leans on podman-compose internals; if they move, the overlay comparison still
+    # reports what it CAN see, and what it can't see is "unknown" — never a ✓ it can't back.
     devmode.set_mode({"gcp": "sa"})
+    identity = ("compose.identity.yml", "compose.identity-data.yml")
+    _unrendered(monkeypatch)
+    from foldyard import reconcile
+
+    def rows(running):
+        monkeypatch.setattr(devmode, "ps_labels", lambda *a, **k: running)
+        (row,) = reconcile.StackScope().rows(devmode.read())
+        return row
+
+    fine = rows([_container("queue-worker", *identity), _container("postgres")])
+    assert fine.status == "unknown"
+    assert "podman-compose moved" in fine.observed
+    stale = rows([_container("queue-worker")])
+    assert stale.status == "drift" and "WITHOUT overlay" in stale.observed
+    # …and an overlay it can't read still counts as touching every service (conservative).
     (overlay_repo / "compose.identity-data.yml").write_text("services: [not, a, mapping")
-    (row,) = _stack_rows(monkeypatch, [_container("postgres", "compose.identity.yml")])
-    assert row.status == "drift" and "compose.identity-data.yml" in row.observed
+    unreadable = rows([_container("postgres", "compose.identity.yml")])
+    assert unreadable.status == "drift" and "compose.identity-data.yml" in unreadable.observed
 
 
 def test_state_names_a_blocked_daemons_reason(isolated_state, offline_engine, monkeypatch, capsys):

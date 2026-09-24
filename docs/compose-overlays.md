@@ -69,7 +69,8 @@ when = { llm = "live" }
 - **A mode change updates the running stack.** The overlay list is part of what foldyard compares
   across a `fy mode` change (with the mode-derived environment). If it changes, foldyard
   re-creates exactly the affected containers of a running stack — nothing to do by hand.
-- **`fy state`** shows the overlays the current mode wants on its `stack` row.
+- **`fy state`** shows the overlays the current mode wants on its `stack` row, and names any
+  container whose rendered config no longer matches them (the check `fy up` itself makes).
 - **A plugin can offer a switch only when an overlay uses it.** A switch that would change nothing
   without an overlay can hide itself: foldyard collects every switch named in any `when`, and a
   plugin offers the switch only if it's in that set. For example, the built-in `gcp` plugin

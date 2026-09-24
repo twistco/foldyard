@@ -168,12 +168,19 @@ and exits non-zero if any disagree:
   ✗ capability  gcp=sa capability chain works
                 → DEGRADED — … <the fix>
   ✓ stack       overlays: compose.identity.yml, compose.llm.yml
-                → 14 containers on the mode overlays
+                → 14 containers match the rendered config
   ✓ box         dev box env matches the mode
                 → current (or box down)
 ```
 
 The ✗ row tells you which layer is stale and how to fix it.
+
+The `stack` row asks the same question `fy up` does: compose records a hash of each service's
+rendered config on its container, and a container is stale when that hash differs from a fresh
+render of the current mode. So it catches a change that only alters a value the mode fills in
+(no overlay added or removed), and it never flags a container the change doesn't touch. When a
+container is stale, the row names it and, where it can, the overlay it is missing. If the fresh
+render isn't possible, the row says `unknown` rather than ✓.
 
 ## Testing all of this without secrets
 

@@ -178,11 +178,13 @@ class CapabilityScope(Scope):
 
 
 class StackScope(Scope):
-    """The running compose stack vs the posture's overlay/profile signature. The action is
-    the mode-change edge (:meth:`reconcile` → ``stack.reconcile_posture``); here: compose
-    stamps every container with its ``-f`` list (the ``config_files`` label), so BOTH drift
-    directions are observable — a desired overlay the stack lacks, and a stack still
-    carrying a posture overlay the current mode no longer wants."""
+    """The running compose stack vs its rendered config. The action is the mode-change edge
+    (:meth:`reconcile` → ``stack.reconcile_posture``). The verdict is the compose provider's own
+    per-service config hash against a fresh render (:mod:`foldyard.confighash`) — exactly what
+    ``up`` compares, so it sees env-only posture changes and never flags a service no change
+    touched. The ``config_files`` label comparison (both directions: a desired overlay a
+    container lacks, a posture overlay it still carries) then says WHY a stale container is
+    stale — and stands in, reporting ``unknown`` rather than ✓, when the render is unavailable."""
 
     name = "stack"
 
@@ -192,6 +194,20 @@ class StackScope(Scope):
         from . import stack
 
         return stack.reconcile_posture(prev_posture, new_posture, cfg=cfg, sink=sink)
+
+    def _desired_hashes(self) -> tuple[dict[str, str] | None, str, str]:
+        """``(hashes, why, label)``: the fresh render's hashes (spanning the running profiles) or
+        None with why, and the label the ACTIVE provider records its hash under — decided
+        together, so a docker-compose override on podman can't pair one's hash with the
+        other's label."""
+        from . import confighash, stack
+
+        try:
+            ctx = stack.resolve(no_machine=True)
+            hashes, why = confighash.desired(ctx, stack._running_extra_profiles(ctx))
+            return hashes, why, confighash.label(ctx)
+        except (Exception, SystemExit) as e:  # resolve aborts a missing worktree with SystemExit
+            return None, f"{type(e).__name__}: {e}", ""
 
     def rows(self, state: dict) -> list[ScopeRow]:
         signature = devmode.posture_signature(state["mode"])
@@ -206,56 +222,82 @@ class StackScope(Scope):
         if rows is None:
             return [ScopeRow("unknown", self.name, desired, "engine unreachable")]
         containers = [
-            (labels.get("com.docker.compose.service", ""), files)
+            (labels.get("com.docker.compose.service", ""), labels)
             for _, labels in rows
-            if (files := labels.get("com.docker.compose.project.config_files", "").strip())
+            if labels.get("com.docker.compose.project.config_files", "").strip()
         ]
         if not containers:
             return [
                 ScopeRow("ok", self.name, desired, "stack down (the mode applies on next `fy up`)")
             ]
-        # Filenames are the stable part (label paths may be absolute or relative; posture
-        # overlays have distinct names by construction). Only files from the declared
-        # [[overlay]] table count as posture overlays — base compose files are not ours.
-        desired_names = {o.rsplit("/", 1)[-1] for o in overlays}
-        declared: dict[str, Path] = {}
-        for entry in config.overlays_declared():
-            if path := config._overlay_path(entry.get("file")):
-                declared[path.name] = path
-        touches = _overlay_services({**declared, **{Path(o).name: Path(o) for o in overlays}})
-        # Judged PER CONTAINER (#33): compose stamps a container's -f list when it CREATES it,
-        # and recreates only the services an overlay changes — so a label is only stale for the
-        # overlays that define that container's service. (No single container "carries the full
-        # list": postgres keeps an older posture's label for as long as nothing touches it.)
-        missing: dict[str, set[str]] = {}
-        stale: dict[str, set[str]] = {}
-        for service, files in containers:
-            observed_names = {part.rsplit("/", 1)[-1] for part in files.split(",") if part}
-            for name in desired_names - observed_names:
-                if _touches(touches, name, service):
-                    missing.setdefault(name, set()).add(service or "?")
-            for name in (observed_names & declared.keys()) - desired_names:
-                if _touches(touches, name, service):
-                    stale.setdefault(name, set()).add(service or "?")
-        if missing or stale:
-            parts = [
-                f"{', '.join(sorted(services))} WITHOUT overlay {name}"
-                for name, services in sorted(missing.items())
-            ] + [
-                f"{', '.join(sorted(services))} still carrying stale overlay {name}"
-                for name, services in sorted(stale.items())
-            ]
+        why = _overlay_reasons(overlays, containers)
+        fix = "`fy up` recreates them (or change any mode to reconcile)"
+        hashes, unavailable, label = self._desired_hashes()
+        if hashes is None:
+            if why:
+                return [ScopeRow("drift", self.name, desired, f"{_explain(why)} — {fix}")]
             return [
                 ScopeRow(
-                    "drift",
+                    "unknown",
                     self.name,
                     desired,
-                    f"{'; '.join(parts)} — `fy up` re-renders (or change any mode to reconcile)",
+                    f"{len(containers)} containers on the mode overlays, but their rendered "
+                    f"config can't be checked ({unavailable})",
                 )
             ]
-        return [
-            ScopeRow("ok", self.name, desired, f"{len(containers)} containers on the mode overlays")
-        ]
+        compared = [(svc, labels) for svc, labels in containers if svc in hashes]
+        stale = {svc for svc, labels in compared if labels.get(label) != hashes[svc]}
+        if stale:
+            reasons = {svc: why.get(svc) or "its rendered config changed" for svc in stale}
+            return [ScopeRow("drift", self.name, desired, f"{_explain(reasons)} — {fix}")]
+        outside = sorted({svc or "?" for svc, _ in containers if svc not in hashes})
+        observed = f"{len(compared)} containers match the rendered config"
+        if outside:
+            observed += f"; {len(outside)} not in it ({', '.join(outside)})"
+        return [ScopeRow("ok", self.name, desired, observed)]
+
+
+def _overlay_reasons(overlays: list[str], containers: list[tuple[str, dict]]) -> dict[str, str]:
+    """Service → why its ``config_files`` label disagrees with the posture's overlays, for the
+    services that do. Compose stamps a container's ``-f`` list when it CREATES it and recreates
+    only the services an overlay changes, so a label is only stale for the overlays that define
+    that container's service (no single container "carries the full list"). Only the declared
+    ``[[overlay]]`` table counts as posture overlays — base compose files are not ours; names are
+    compared (label paths may be absolute or relative; overlay names are distinct)."""
+    desired_names = {o.rsplit("/", 1)[-1] for o in overlays}
+    declared: dict[str, Path] = {}
+    for entry in config.overlays_declared():
+        if path := config._overlay_path(entry.get("file")):
+            declared[path.name] = path
+    touches = _overlay_services({**declared, **{Path(o).name: Path(o) for o in overlays}})
+    missing: dict[str, set[str]] = {}
+    extra: dict[str, set[str]] = {}
+    for service, labels in containers:
+        files = labels.get("com.docker.compose.project.config_files", "")
+        observed_names = {part.rsplit("/", 1)[-1] for part in files.split(",") if part}
+        for name in desired_names - observed_names:
+            if _touches(touches, name, service):
+                missing.setdefault(service or "?", set()).add(name)
+        for name in (observed_names & declared.keys()) - desired_names:
+            if _touches(touches, name, service):
+                extra.setdefault(service or "?", set()).add(name)
+    out: dict[str, str] = {}
+    for service in sorted(missing.keys() | extra.keys()):
+        parts = []
+        if service in missing:
+            parts.append(f"WITHOUT overlay {', '.join(sorted(missing[service]))}")
+        if service in extra:
+            parts.append(f"still carrying stale overlay {', '.join(sorted(extra[service]))}")
+        out[service] = " and ".join(parts)
+    return out
+
+
+def _explain(reasons: dict[str, str]) -> str:
+    """``{service: reason}`` as one line, services sharing a reason grouped."""
+    grouped: dict[str, list[str]] = {}
+    for service, reason in sorted(reasons.items()):
+        grouped.setdefault(reason, []).append(service)
+    return "; ".join(f"{', '.join(services)}: {reason}" for reason, services in grouped.items())
 
 
 def _overlay_services(paths: dict[str, Path]) -> dict[str, set[str] | None]:
