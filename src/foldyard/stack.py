@@ -772,10 +772,18 @@ def _provider_signature_filter(ctx: Context) -> str:
     provider that writes ``com.docker.compose.config-hash``. So: podman-compose active → its
     valued project label; docker-compose active (docker engine, or an explicit
     ``PODMAN_COMPOSE_PROVIDER`` override on podman) → the config-hash label's existence."""
-    provider = Path(ctx.env.get("PODMAN_COMPOSE_PROVIDER", "")).name
-    if config.engine() == "podman" and "podman-compose" in provider:
+    if _podman_compose_active(ctx):
         return f"label=io.podman.compose.project={ctx.project}"
     return "label=com.docker.compose.config-hash"
+
+
+def _podman_compose_active(ctx: Context) -> bool:
+    """Whether podman-compose is the ACTIVE compose provider — the podman engine with its
+    provider pinned to podman-compose (foldyard's bundled one, unless an explicit
+    ``PODMAN_COMPOSE_PROVIDER`` overrides it). Else docker-compose runs: the docker engine, or
+    that override naming docker-compose on podman. The providers label (and hash) differently."""
+    provider = Path(ctx.env.get("PODMAN_COMPOSE_PROVIDER", "")).name
+    return config.engine() == "podman" and "podman-compose" in provider
 
 
 def _reconcile_foreign_containers(ctx: Context, emit: Callable[[str], None] | None = None) -> None:

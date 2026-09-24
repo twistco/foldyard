@@ -16,7 +16,10 @@ Each provider is asked in its own terms, and neither needs the engine:
   ``os.environ`` and the working directory. It leans on podman-compose internals, so it
   degrades to "unavailable" (never to a guess) if those move; tests/test_confighash.py pins
   the contract against the installed version.
-- **docker** (the CI fallback, ``config.engine``): ``docker compose config --hash '*'``.
+- **docker-compose** (the CI fallback engine, ``config.engine``, or an explicit
+  ``PODMAN_COMPOSE_PROVIDER`` naming it on podman): ``<engine> compose config --hash '*'``.
+  Which provider is active is ``stack._podman_compose_active`` — the same test the foreign-
+  container sweep uses, so the hash, the label and the sweep can never disagree about it.
 
 Stdlib-only at import; reconcile imports this lazily for ``fy state``.
 """
@@ -27,13 +30,15 @@ import json
 import subprocess
 import sys
 
-_LABELS = {"docker": "com.docker.compose.config-hash"}
+_DOCKER_LABEL = "com.docker.compose.config-hash"
 _PODMAN_LABEL = "io.podman.compose.config-hash"
 
 
-def label(engine: str) -> str:
-    """The container label ``engine``'s compose provider records its config hash under."""
-    return _LABELS.get(engine, _PODMAN_LABEL)
+def label(ctx) -> str:
+    """The container label ``ctx``'s active compose provider records its config hash under."""
+    from . import stack
+
+    return _PODMAN_LABEL if stack._podman_compose_active(ctx) else _DOCKER_LABEL
 
 
 def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0):
@@ -44,8 +49,8 @@ def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0)
     from . import stack
 
     flags = stack._profile_flags(ctx, extra_profiles)
-    engine = ctx.compose[0]
-    if engine == "docker":
+    docker = not stack._podman_compose_active(ctx)
+    if docker:
         cmd = [*ctx.compose, *flags, "config", "--hash", "*"]
     else:
         cmd = [sys.executable, "-m", __name__, *ctx.compose[2:], *flags]
@@ -58,7 +63,7 @@ def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0)
     if proc.returncode != 0:
         lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
         return None, lines[-1] if lines else f"exited {proc.returncode}"
-    hashes = _parse(proc.stdout, docker=engine == "docker")
+    hashes = _parse(proc.stdout, docker=docker)
     return (hashes, "") if hashes else (None, "no service hashes in the render")
 
 

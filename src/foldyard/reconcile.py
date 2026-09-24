@@ -195,15 +195,19 @@ class StackScope(Scope):
 
         return stack.reconcile_posture(prev_posture, new_posture, cfg=cfg, sink=sink)
 
-    def _desired_hashes(self) -> tuple[dict[str, str] | None, str]:
-        """The fresh render's hashes (spanning the running profiles), or (None, why)."""
+    def _desired_hashes(self) -> tuple[dict[str, str] | None, str, str]:
+        """``(hashes, why, label)``: the fresh render's hashes (spanning the running profiles) or
+        None with why, and the label the ACTIVE provider records its hash under — decided
+        together, so a docker-compose override on podman can't pair one's hash with the
+        other's label."""
         from . import confighash, stack
 
         try:
             ctx = stack.resolve(no_machine=True)
-            return confighash.desired(ctx, stack._running_extra_profiles(ctx))
+            hashes, why = confighash.desired(ctx, stack._running_extra_profiles(ctx))
+            return hashes, why, confighash.label(ctx)
         except (Exception, SystemExit) as e:  # resolve aborts a missing worktree with SystemExit
-            return None, f"{type(e).__name__}: {e}"
+            return None, f"{type(e).__name__}: {e}", ""
 
     def rows(self, state: dict) -> list[ScopeRow]:
         signature = devmode.posture_signature(state["mode"])
@@ -228,7 +232,7 @@ class StackScope(Scope):
             ]
         why = _overlay_reasons(overlays, containers)
         fix = "`fy up` recreates them (or change any mode to reconcile)"
-        hashes, unavailable = self._desired_hashes()
+        hashes, unavailable, label = self._desired_hashes()
         if hashes is None:
             if why:
                 return [ScopeRow("drift", self.name, desired, f"{_explain(why)} — {fix}")]
@@ -241,9 +245,6 @@ class StackScope(Scope):
                     f"config can't be checked ({unavailable})",
                 )
             ]
-        from . import confighash
-
-        label = confighash.label(config.engine())
         compared = [(svc, labels) for svc, labels in containers if svc in hashes]
         stale = {svc for svc, labels in compared if labels.get(label) != hashes[svc]}
         if stale:

@@ -22,7 +22,9 @@ def no_render(monkeypatch):
     from foldyard import reconcile
 
     monkeypatch.setattr(
-        reconcile.StackScope, "_desired_hashes", lambda self: (None, "not rendered in unit tests")
+        reconcile.StackScope,
+        "_desired_hashes",
+        lambda self: (None, "not rendered in unit tests", HASH),
     )
 
 
@@ -147,7 +149,7 @@ def _stack_rows(monkeypatch, running, rendered: set[str] | None = None):
         monkeypatch.setattr(
             reconcile.StackScope,
             "_desired_hashes",
-            lambda self: ({n: f"{n}-current" for n in names}, ""),
+            lambda self: ({n: f"{n}-current" for n in names}, "", HASH),
         )
     return reconcile.StackScope().rows(devmode.read())
 
@@ -156,7 +158,7 @@ def _unrendered(monkeypatch):
     from foldyard import reconcile
 
     monkeypatch.setattr(
-        reconcile.StackScope, "_desired_hashes", lambda self: (None, "podman-compose moved")
+        reconcile.StackScope, "_desired_hashes", lambda self: (None, "podman-compose moved", HASH)
     )
 
 

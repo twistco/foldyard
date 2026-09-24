@@ -30,11 +30,14 @@ services:
 """
 
 
-def _ctx(tmp_path: Path, engine: str = "podman", **env: str) -> stack.Context:
+def _ctx(
+    tmp_path: Path, engine: str = "podman", provider: str = "/venv/bin/podman-compose", **env: str
+) -> stack.Context:
     (tmp_path / "compose.yml").write_text(_COMPOSE)
+    pinned = {"PODMAN_COMPOSE_PROVIDER": provider} if engine == "podman" else {}
     return stack.Context(
         main=tmp_path,
-        env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), **env},
+        env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), **pinned, **env},
         compose=[engine, "compose", "-f", str(tmp_path / "compose.yml")],
         app="api",
         project="proj",
@@ -92,6 +95,25 @@ def test_docker_failure_or_garbage_is_unavailable(tmp_path, monkeypatch):
         assert hashes is None and why, proc
 
 
-def test_label_names_the_providers_own_hash_label():
-    assert confighash.label("podman") == "io.podman.compose.config-hash"
-    assert confighash.label("docker") == "com.docker.compose.config-hash"
+def test_label_names_the_active_providers_own_hash_label(tmp_path):
+    assert confighash.label(_ctx(tmp_path)) == "io.podman.compose.config-hash"
+    assert confighash.label(_ctx(tmp_path, engine="docker")) == "com.docker.compose.config-hash"
+    # An explicit PODMAN_COMPOSE_PROVIDER overrides foldyard's pin: podman engine, docker-compose
+    # provider — it writes (and `up` compares) docker's label.
+    over = _ctx(tmp_path, provider="/usr/libexec/docker/cli-plugins/docker-compose")
+    assert confighash.label(over) == "com.docker.compose.config-hash"
+
+
+def test_docker_compose_on_podman_is_asked_natively(tmp_path, monkeypatch):
+    # Hashing it through bundled podman-compose would compare podman-compose's hash with
+    # labels docker-compose wrote: drift on every matching container.
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout="api 111\n", stderr="")
+
+    monkeypatch.setattr(confighash.subprocess, "run", fake_run)
+    over = _ctx(tmp_path, provider="/usr/libexec/docker/cli-plugins/docker-compose")
+    assert confighash.desired(over) == ({"api": "111"}, "")
+    assert calls[-1][:2] == ["podman", "compose"] and calls[-1][-3:] == ["config", "--hash", "*"]
