@@ -28,6 +28,17 @@ def test_no_args_shows_help():
     assert "mode" in result.output and "doctor" in result.output
 
 
+def test_help_keeps_bracketed_config_tables():
+    """Help text names config tables as `[claude]`/`[proxy]`; under typer's default "rich" markup
+    those parse as style tags and vanish ("Needs `` in foldyard.toml"). Every sub-app must render
+    help as markdown, where brackets are literal."""
+    assert "[claude]" in runner.invoke(cli.app, ["claude", "--help"]).output
+    assert "[proxy]" in runner.invoke(cli.app, ["allow", "--help"]).output
+    for sub in cli.app.registered_groups:
+        assert sub.typer_instance is not None
+        assert sub.typer_instance.rich_markup_mode == "markdown", sub.name
+
+
 def test_mode_no_args_routes_to_show(spy_devmode):
     result = runner.invoke(cli.app, ["mode"])
     assert result.exit_code == 0 and spy_devmode == [["show"]]

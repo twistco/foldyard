@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import typer
 
+# Every Typer here renders help as MARKDOWN: under the default "rich" mode a config table named in
+# help (`[claude]`, `[proxy]`) parses as a style tag and silently disappears.
 app = typer.Typer(
+    rich_markup_mode="markdown",
     name="foldyard",
     help="secretless-by-default, laptop-local isolated dev environment",
     no_args_is_help=True,
@@ -273,6 +276,7 @@ def clock(
 
 
 host_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="host",
     help="the project's host supervisor — the credential daemons + the egress proxy the box "
     "rides. `fy up` / `fy box up` start it with the VM and `fy machine stop` stops it with the "
@@ -410,6 +414,7 @@ def banner() -> None:
 
 
 machine_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="machine",
     help="rootless podman-machine lifecycle (Mac; no-op/refused in the box)",
     no_args_is_help=True,
@@ -493,6 +498,7 @@ def machine_delete(
 
 
 box_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="box",
     help="the long-lived, per-worktree dev box (engine socket + repo mount)",
     no_args_is_help=True,
@@ -565,6 +571,7 @@ def box_ps() -> None:
 
 
 allow_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="allow",
     help="the egress allowlist the proxy enforces under [proxy] default_deny (Mac)",
     no_args_is_help=True,
@@ -843,6 +850,7 @@ def allow_remove(
 
 
 config_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="config",
     help="the foldyard.toml this host ADOPTED — what the supervisor actually runs (Mac)",
     no_args_is_help=True,
@@ -987,6 +995,7 @@ def config_revert() -> None:
 
 
 worktree_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="worktree",
     help="host-sibling worktrees sharing the one rootless machine (Mac)",
     no_args_is_help=True,
@@ -1047,6 +1056,7 @@ def worktree_list() -> None:
 
 
 skill_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="skill",
     help="Claude Code skills bundled with foldyard (list / install into .claude/skills)",
     no_args_is_help=True,

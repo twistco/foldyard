@@ -120,12 +120,22 @@ implicitly — never list them, and neither list an agent's install hosts: a dec
 
 ### 4. Rebuild from the codified config and verify
 
-Prove the Dockerfile + config reproduce the hand-built box:
+Prove the Dockerfile + config reproduce the hand-built box. **The rebuild is the operator's, not
+yours:** `fy box down` from inside the box tears down the box you are running in, and the new
+config only takes effect once they approve it on their computer anyway. Commit, then ask them to
+run, on their computer:
 
 ```bash
+fy config diff                              # read your foldyard.toml changes…
+fy config adopt                             # …and approve them
 fy box down
 fy box up                                   # now builds box.Dockerfile + brings the wired stack up
-fy box shell -c '<the project build + test command>'   # succeeds with no manual installs
+```
+
+Then, back in the new box:
+
+```bash
+<the project build + test command>          # succeeds with no manual installs
 fy verify                                   # isolation battery still passes (incl. the wall check)
 ```
 
