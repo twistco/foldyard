@@ -190,10 +190,6 @@ def _user_settings(udd: Path) -> Path:
 # and `remote.restoreForwardedPorts` re-bound it on every reopen — the container can never start
 # (`bind: address already in use` on every `up`, nothing in the box to see it with).
 #
-# `update.mode` — this instance is per-worktree scaffolding, not the operator's daily editor, so an
-# update prompt on each attach is pure interruption (and updating a running attached instance is
-# worse than deferring it). The operator's own VS Code is a separate install and is unaffected.
-#
 # `git.terminalAuthentication` / `git.useIntegratedAskPass` — off. On, the git extension running IN
 # the box sets `GIT_ASKPASS` (+ its IPC socket) in every terminal it opens, so a `git push` there
 # asks the HOST — the VS Code GitHub session, the keychain — for a credential: an HTTPS push path
@@ -205,7 +201,6 @@ def _user_settings(udd: Path) -> Path:
 # the IPC socket reaped) and `fy verify`, which fails a checkout that flips these back on. Only
 # the SSH side is by construction (`_empty_agent`): no setting chooses what agent is forwarded.
 _PORTS_ATTRIBUTES = "remote.portsAttributes"
-_UPDATE_MODE = "update.mode"
 _GIT_BRIDGE_PINS = {"git.terminalAuthentication": False, "git.useIntegratedAskPass": False}
 # Widest default worktree offset (`stack._offset`: cksum % 89 + 1).
 _MAX_WORKTREE_OFFSET = 89
@@ -244,11 +239,92 @@ def _pin_ports(settings: dict) -> dict:
 
 
 def _pinned_settings(settings: dict) -> dict:
-    """The isolated instance's pins: the port guard plus the update mode. Applied to the
+    """The isolated instance's pins: the port guard and the git bridge. Applied to the
     user-data-dir's own settings.json, which foldyard always writes — the attached config carries
-    the port guard too, but that file is skipped once an operator takes ownership of it, and a
-    protection that disappears when someone customises an unrelated key is not a protection."""
-    return {**_pin_ports(settings), **_GIT_BRIDGE_PINS, _UPDATE_MODE: "manual"}
+    them too, but that file is skipped once an operator takes ownership of it, and a protection
+    that disappears when someone customises an unrelated key is not a protection."""
+    return {**_pin_ports(settings), **_GIT_BRIDGE_PINS}
+
+
+# Seeding a NEW instance from the operator's own VS Code. `--user-data-dir` isolates everything but
+# the extensions folder, so without it each worktree's first window is factory VS Code — theme,
+# keybindings, `update.mode` all gone. Copied once, at creation (the instance's settings.json does
+# not exist yet); after that the instance's settings are its own, edited in its own window. The
+# source is the operator's file on this computer, not mount data (ADR-0023 is not in tension), and
+# never another instance's: those carry their own checkout's paths in the local-terminal shim.
+_SEEDED_FILES = ("keybindings.json",)
+_SEEDED_DIRS = ("snippets",)
+# Settings that say WHERE the engine is. The instance is launched with the box's DOCKER_HOST, and a
+# global value naming Docker Desktop's socket or context would send the attach there instead —
+# the cross-engine leak the isolated instance exists to prevent. Dropped from the seed.
+_ENGINE_SETTINGS = frozenset(
+    {
+        "dev.containers.dockerPath",
+        "dev.containers.dockerComposePath",
+        "dev.containers.dockerSocketPath",
+        "remote.containers.dockerPath",
+        "remote.containers.dockerComposePath",
+        "remote.containers.dockerSocketPath",
+        "docker.host",
+        "docker.context",
+        "docker.environment",
+        "docker.dockerPath",
+        "docker.dockerComposePath",
+        "containers.environment",
+        "containers.containerClient",
+        "containers.orchestratorClient",
+    }
+)
+
+
+def _global_user_dir() -> Path | None:
+    """The operator's own VS Code User folder — the first that exists of macOS's and the XDG
+    location (Linux, and WSL2 when VS Code runs inside the distro). ``None`` when neither does."""
+    home = Path.home()
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    for d in (home / "Library" / "Application Support" / "Code" / "User", xdg / "Code" / "User"):
+        if d.is_dir():
+            return d
+    return None
+
+
+def _seed_from_global(udd: Path) -> bool:
+    """Seed a NEW instance (no settings.json yet) from the operator's own VS Code: settings minus
+    :data:`_ENGINE_SETTINGS`, keybindings and snippets. Returns whether anything was copied.
+    Best-effort — a failure is a warning, and the instance starts from defaults as before."""
+    source = _global_user_dir()
+    user = _user_settings(udd).parent
+    if source is None or not source.is_dir() or _user_settings(udd).exists():
+        return False
+    seeded = False
+    try:
+        user.mkdir(parents=True, exist_ok=True)
+        for name in _SEEDED_FILES:
+            if (source / name).is_file() and not (user / name).exists():
+                shutil.copyfile(source / name, user / name)
+                seeded = True
+        for name in _SEEDED_DIRS:
+            if (source / name).is_dir() and not (user / name).exists():
+                shutil.copytree(source / name, user / name)
+                seeded = True
+    except OSError as e:
+        _err(f"⚠ couldn't seed from {source}: {e}")
+    settings_src = source / "settings.json"
+    if settings_src.is_file():
+        try:
+            loaded, _ = _loads_jsonc(settings_src.read_text())
+            if not isinstance(loaded, dict):
+                raise ValueError("top-level JSON is not an object")
+            kept = {k: v for k, v in loaded.items() if k not in _ENGINE_SETTINGS}
+            # Written as JSON: the copy's comments are dropped (the original is untouched), so the
+            # instance file stays one foldyard can keep its pins in.
+            _user_settings(udd).write_text(json.dumps(kept, indent=2) + "\n")
+            seeded = True
+        except (OSError, UnicodeDecodeError, ValueError) as e:
+            _err(f"⚠ couldn't seed settings from {settings_src}: {e}")
+    if seeded:
+        print(f"▶ seeded from your VS Code settings: {source}")
+    return seeded
 
 
 def _strip_jsonc(text: str) -> tuple[str, bool]:
@@ -665,6 +741,7 @@ def code() -> int:
     print(f"▶ folder: {checkout}  (inside the box)")
     print(f"▶ uri:    {uri}")
     print(f"▶ isolated VS Code: --user-data-dir {udd}  (your default VS Code is untouched)")
+    _seed_from_global(udd)
     if _write_local_terminal_cwd(udd, host_checkout, env.get("ZDOTDIR")):
         print(f"▶ local terminal cwd: {host_checkout}")
 
