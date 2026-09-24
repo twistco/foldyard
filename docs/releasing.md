@@ -64,7 +64,7 @@ re-validates and rebuilds.
   sets `UV_FROZEN=1` in `[box].env` to stop it; if you hit it anyway, `git restore uv.lock` and
   redo the version line with `sed`, not `uv`.
 - **`pyright` needs a Node runtime in the box.** The PyPI package is a wrapper that prefers a
-  global `node` and otherwise fetches one from nodejs.org — which the wall refuses. The
+  global `node` and otherwise fetches one from nodejs.org — which the allowlist refuses. The
   `nodejs-for-pyright` entry under `[[box.tools]]` installs Debian's nodejs; a box built before
   that entry existed needs `fy box up` to pick it up. `ty` runs regardless. If pyright could not
   run, **say so** rather than reporting a green typecheck — CI is what actually gates it.
