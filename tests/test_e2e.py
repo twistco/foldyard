@@ -171,6 +171,11 @@ def test_example_stack_up_serves_then_down(example_repo):
     body = _probe_db()
     assert "reachable" in body, f"api /db never became reachable; last response: {body!r}"
 
+    # The config-hash drift check against labels a real `up` just wrote — on whichever provider
+    # this tier runs (docker compose in live-e2e, podman-compose on the Lima host tier).
+    state = _foldyard(["state"], example_repo, timeout=60)
+    assert "match the rendered config" in state.stdout, state.stdout + state.stderr
+
     down = _foldyard(["down"], example_repo, timeout=180)
     assert down.returncode == 0, down.stderr
     remaining = subprocess.run(

@@ -47,6 +47,11 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   orchestration.
 - `state_view.py` — `fy state`: thin renderer over `reconcile.scopes()`; non-zero exit on
   drift.
+- `confighash.py` — the stack scope's verdict: the compose provider's own per-service config
+  hash vs a fresh render (what `up` compares). podman: a `python -m foldyard.confighash`
+  subprocess drives the bundled podman-compose's parser (its internals — degrades to
+  "unavailable", never a guess; `tests/test_confighash.py` pins the contract); docker:
+  `config --hash '*'`. The live oracles are `test_probes_e2e.py` / `test_e2e.py`.
 - `verify.py` — the isolation battery, the product's credibility check; plugin-agnostic core +
   the registry's `verify_checks`.
 - `machine.py` / `machine_backend.py` — rootless dev-VM lifecycle behind the pluggable
