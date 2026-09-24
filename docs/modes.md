@@ -119,10 +119,11 @@ supervisor also reacts when a switch goes DEGRADED or recovers:
 - **It posts a desktop notification** (macOS only today: `terminal-notifier` if installed, else
   `osascript`). The DEGRADED one carries the fix. Turn them off with
   `[host] notifications = false`.
-- **On recovery, it restarts the services listed for that switch in
+- **On recovery, it recreates the services listed for that switch in
   `[resnapshot_on_capability]`.** Some services read credentials once at startup and keep them;
-  they only pick up a recovered credential by restarting. So your only job is the fix the
-  notification names; the restart is automatic.
+  they only pick up a recovered credential by starting again. They are recreated from the
+  current mode rather than restarted, so one still on an older mode's settings catches up as
+  well. So your only job is the fix the notification names; the recreate is automatic.
 
 Neither reaction grants, blocks or changes the mode.
 

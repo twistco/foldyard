@@ -9,7 +9,7 @@ Each tick also stamps a project-shared liveness heartbeat (so the launch paths c
 healthy holder from a wedged one) and refreshes each active worktree's mirror with daemon
 health so box sessions' `fy mode` shows live status. Capability probes ride the tick too:
 when an axis's merged verdict flips, the supervisor posts a macOS notification (lapse AND
-heal), and a heal restarts the consumer's `[resnapshot_on_capability]` services on a worker
+heal), and a heal recreates the consumer's `[resnapshot_on_capability]` services on a worker
 thread — boot-snapshotted credentials only re-fetch by rebooting.
 
 Always detached: `fy up` / `fy box up` start it with the VM (:func:`ensure_background`) and
@@ -112,6 +112,22 @@ def _stamp_log_lines(buf: bytes) -> tuple[bytes, bytes]:
         stamp = datetime.now(UTC).isoformat(timespec="milliseconds")
         out += stamp.encode() + b" " + line + b"\n"
     return out, buf
+
+
+def append_log(message: str) -> None:
+    """Write one stamped line into ``host-supervisor.log`` from ANOTHER process — the posture
+    reconcile runs in ``fy mode`` (or the TUI), whose output only ever reached that terminal, so
+    ``fy host logs`` had no trace of whether a mode change re-rendered the stack (#33). Same
+    ISO-8601 stamp as the tee; one short append is atomic under ``O_APPEND``, so it can't tear the
+    supervisor's own lines. Best-effort: logging must never fail a mode change."""
+    try:
+        path = config.supervisor_log_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamped, _ = _stamp_log_lines(f"{message}\n".encode())
+        with open(path, "ab") as f:
+            f.write(stamped)
+    except OSError:
+        pass
 
 
 def _pidfile():
@@ -888,8 +904,8 @@ def write_capabilities(capabilities: dict[str, dict]) -> None:
 # not seeded yet. Module-global like _probe_state: one supervisor per process.
 _published_caps: dict[str, dict] | None = None
 
-# In-flight capability-heal restarts, keyed (worktree, axis) — a flapping probe must never
-# stack a second `compose restart` onto one still running.
+# In-flight capability-heal recreates, keyed (worktree, axis) — a flapping probe must never
+# stack a second recreate onto one still running.
 _resnapshot_inflight: set[tuple[str, str]] = set()
 
 
@@ -979,11 +995,11 @@ def _notify(title: str, body: str) -> None:
 def _react_to_capability_edges(edges: list[tuple[str, str, bool, str]]) -> None:
     """Push each capability edge to the operator and, on a heal, kick the configured
     resnapshot (``[resnapshot_on_capability]``): services that snapshot credentials at boot
-    re-fetch only by restarting, so after a lapse the operator's ONLY job is the fix the
+    re-fetch only by rebooting, so after a lapse the operator's ONLY job is the fix the
     DEGRADED notification names (e.g. ``just gcp-elevate``) — recovery, including the container
-    bounce, is automatic. The restart runs on a daemon worker thread: it shells out to compose
+    recreate, is automatic. The recreate runs on a daemon worker thread: it shells out to compose
     (possibly slow), and the tick owns the heartbeat launchers use to spot a wedged supervisor
-    — blocking here would get a healthy supervisor bounced mid-restart."""
+    — blocking here would get a healthy supervisor bounced mid-recreate."""
     for wt, axis, ok, detail in edges:
         where = f" [worktree {wt}]" if wt else ""
         if not ok:
@@ -1005,12 +1021,12 @@ def _react_to_capability_edges(edges: list[tuple[str, str, bool, str]]) -> None:
                 daemon=True,
                 name=f"resnapshot-{axis}" + (f"@{wt}" if wt else ""),
             ).start()
-            body = f"restarting {', '.join(services)} — {body}"
+            body = f"recreating {', '.join(services)} — {body}"
         _notify(f"fy {config.project()}: {axis} recovered{where}", body)
 
 
 def _resnapshot_worker(cfg: config.Config, wt: str, axis: str, services: list[str]) -> None:
-    """The off-tick body of one capability-heal restart. Binds the worktree's config itself —
+    """The off-tick body of one capability-heal recreate. Binds the worktree's config itself —
     a fresh thread starts with an empty contextvar context, so the tick's binding never reaches
     here — and always clears its in-flight key, even on a crash, so a later heal can retry."""
     from . import stack  # deferred: keep the supervisor's import hot path stack-free
@@ -1018,12 +1034,12 @@ def _resnapshot_worker(cfg: config.Config, wt: str, axis: str, services: list[st
     label = ", ".join(services) + (f" [worktree {wt}]" if wt else "")
     try:
         with config.using(cfg):
-            log(f"capability {axis} healed — restarting {label} (resnapshot_on_capability)")
-            ok, summary = stack.restart_services(services, worktree=wt)
+            log(f"capability {axis} healed — recreating {label} (resnapshot_on_capability)")
+            ok, summary = stack.recreate_services(services, worktree=wt)
         if ok:
-            log(f"resnapshot: restarted {label}")
+            log(f"resnapshot: {summary}" + (f" [worktree {wt}]" if wt else ""))
         else:
-            log(f"resnapshot: restart FAILED for {label} — {summary}")
+            log(f"resnapshot: recreate FAILED for {label} — {summary}")
     finally:
         _resnapshot_inflight.discard((wt, axis))
 

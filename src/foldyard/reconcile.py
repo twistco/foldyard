@@ -25,12 +25,14 @@ conformance suite (tests/test_reconcile_scenarios.py), which pins what fires whe
 |            |                            | staging has no observation hook to render)     |
 | box env    | `fy box up` (observe-only) | can't act — devmode._box_env_hint nags         |
 
-Stdlib only (loads on the `fy state` path).
+Stdlib only at import (loads on the `fy state` path); the stack scope reads overlays with PyYAML,
+imported lazily — it rides in with the bundled podman-compose.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import config, devmode
 
@@ -203,43 +205,80 @@ class StackScope(Scope):
         )
         if rows is None:
             return [ScopeRow("unknown", self.name, desired, "engine unreachable")]
-        lines = [
-            labels.get("com.docker.compose.project.config_files", "").strip() for _, labels in rows
+        containers = [
+            (labels.get("com.docker.compose.service", ""), files)
+            for _, labels in rows
+            if (files := labels.get("com.docker.compose.project.config_files", "").strip())
         ]
-        lines = [ln for ln in lines if ln]
-        if not lines:
+        if not containers:
             return [
                 ScopeRow("ok", self.name, desired, "stack down (the mode applies on next `fy up`)")
             ]
-        config_files = max(lines, key=len)  # any container carries the full -f list
         # Filenames are the stable part (label paths may be absolute or relative; posture
         # overlays have distinct names by construction). Only files from the declared
         # [[overlay]] table count as posture overlays — base compose files are not ours.
-        observed_names = {part.rsplit("/", 1)[-1] for part in config_files.split(",") if part}
         desired_names = {o.rsplit("/", 1)[-1] for o in overlays}
-        known_names = {
-            str(entry.get("file", "")).rsplit("/", 1)[-1]
-            for entry in config.overlays_declared()
-            if entry.get("file")
-        }
-        missing = sorted(desired_names - observed_names)
-        stale = sorted((observed_names & known_names) - desired_names)
+        declared: dict[str, Path] = {}
+        for entry in config.overlays_declared():
+            if path := config._overlay_path(entry.get("file")):
+                declared[path.name] = path
+        touches = _overlay_services({**declared, **{Path(o).name: Path(o) for o in overlays}})
+        # Judged PER CONTAINER (#33): compose stamps a container's -f list when it CREATES it,
+        # and recreates only the services an overlay changes — so a label is only stale for the
+        # overlays that define that container's service. (No single container "carries the full
+        # list": postgres keeps an older posture's label for as long as nothing touches it.)
+        missing: dict[str, set[str]] = {}
+        stale: dict[str, set[str]] = {}
+        for service, files in containers:
+            observed_names = {part.rsplit("/", 1)[-1] for part in files.split(",") if part}
+            for name in desired_names - observed_names:
+                if _touches(touches, name, service):
+                    missing.setdefault(name, set()).add(service or "?")
+            for name in (observed_names & declared.keys()) - desired_names:
+                if _touches(touches, name, service):
+                    stale.setdefault(name, set()).add(service or "?")
         if missing or stale:
-            parts = []
-            if missing:
-                parts.append(f"WITHOUT overlay(s) {', '.join(missing)}")
-            if stale:
-                parts.append(f"still carrying stale overlay(s) {', '.join(stale)}")
+            parts = [
+                f"{', '.join(sorted(services))} WITHOUT overlay {name}"
+                for name, services in sorted(missing.items())
+            ] + [
+                f"{', '.join(sorted(services))} still carrying stale overlay {name}"
+                for name, services in sorted(stale.items())
+            ]
             return [
                 ScopeRow(
                     "drift",
                     self.name,
                     desired,
-                    f"{len(lines)} containers {' and '.join(parts)} — "
-                    "`fy up` re-renders (or change any mode to reconcile)",
+                    f"{'; '.join(parts)} — `fy up` re-renders (or change any mode to reconcile)",
                 )
             ]
-        return [ScopeRow("ok", self.name, desired, f"{len(lines)} containers on the mode overlays")]
+        return [
+            ScopeRow("ok", self.name, desired, f"{len(containers)} containers on the mode overlays")
+        ]
+
+
+def _overlay_services(paths: dict[str, Path]) -> dict[str, set[str] | None]:
+    """Overlay filename → the compose services it defines; ``None`` when that can't be read
+    (missing, unparseable, not a mapping) — which :func:`_touches` reads as "every service",
+    so an unanswerable question reports drift rather than a silent ✓. PyYAML rides in with the
+    bundled podman-compose and is imported only here, off the hot path (as ``stack`` does)."""
+    import yaml
+
+    out: dict[str, set[str] | None] = {}
+    for name, path in paths.items():
+        try:
+            services = (yaml.safe_load(path.read_text()) or {}).get("services") or {}
+            out[name] = set(services) if isinstance(services, dict) else None
+        except (OSError, yaml.YAMLError, AttributeError):
+            out[name] = None
+    return out
+
+
+def _touches(touches: dict[str, set[str] | None], overlay: str, service: str) -> bool:
+    """Whether ``overlay`` shapes ``service`` — conservatively True when either is unknown."""
+    services = touches.get(overlay)
+    return services is None or not service or service in services
 
 
 class BoxEnvScope(Scope):

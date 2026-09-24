@@ -22,6 +22,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
@@ -983,6 +984,10 @@ def reconcile_posture(
     emit = sink or _err
     if prev_posture == new_posture or config.in_box():
         return True
+    prev_profiles = prev_posture["env"].get("COMPOSE_PROFILES", "")
+    new_profiles = new_posture["env"].get("COMPOSE_PROFILES", "")
+    overlays = ", ".join(o.rsplit("/", 1)[-1] for o in new_posture["overlays"]) or "none"
+    posture = f"profiles {prev_profiles or 'none'} → {new_profiles or 'none'}, overlays {overlays}"
     try:
         ctx_mgr = config.using(cfg) if cfg is not None else nullcontext()
         with ctx_mgr:
@@ -1001,7 +1006,12 @@ def reconcile_posture(
                 # guardrail (2): never START the stack on a posture change — but DO converge the
                 # declared posture services: they are exactly what the flip is asking for (see
                 # _reconcile_posture_services).
-                return _reconcile_posture_services(ctx, mode, managed, emit)
+                ok = _reconcile_posture_services(ctx, mode, managed, emit)
+                _host_log(
+                    f"stack {ctx.project} down — the mode applies on next `fy up` ({posture})"
+                    + ("" if ok else "; posture services FAILED to converge")
+                )
+                return ok
             # Stage VM-visible assets a newly-active profile needs (e.g. the gcp metadata emulator's
             # server.py) before compose recreates with the new profile set.
             registry().stage_assets(
@@ -1009,8 +1019,6 @@ def reconcile_posture(
                 ctx.env["FOLDYARD_CHECKOUT"],
                 ctx.env.get("HERE") or config.dev_vm_rel(),
             )
-            prev_profiles = prev_posture["env"].get("COMPOSE_PROFILES", "")
-            new_profiles = new_posture["env"].get("COMPOSE_PROFILES", "")
             extra = _running_extra_profiles(ctx)
             emit(
                 f"▶ mode changed — reconciling stack "
@@ -1028,13 +1036,31 @@ def reconcile_posture(
                     f"✗ reconcile failed (compose exited {rc}) — the stack may still be "
                     "on the OLD mode; check the output above, then `fy up`"
                 )
+                _host_log(
+                    f"stack {ctx.project} reconcile FAILED (compose exited {rc}) — it may still "
+                    f"be on the OLD mode; `fy up` re-renders ({posture})"
+                )
                 return False
             # Only after a SUCCESSFUL up: reap containers whose service left the new
             # posture's config (dropped profile/overlay). A failed up keeps everything.
             _remove_orphan_containers(ctx, emit, extra_profiles=extra)
+            _host_log(
+                f"stack {ctx.project} reconciled ({posture}"
+                + (f", keeping running: {','.join(extra)}" if extra else "")
+                + ")"
+            )
     except Exception as e:  # never let a reconcile hiccup break the mode write
         emit(f"⚠ stack mode reconcile skipped: {e}")
+        _host_log(f"stack reconcile skipped: {e} ({posture})")
     return True
+
+
+def _host_log(message: str) -> None:
+    """The reconcile's outcome, as one ``[mode]`` line in the host supervisor log — the only
+    record that outlives the terminal it ran in (see ``supervisor.append_log``)."""
+    from . import supervisor  # deferred like stack.up's: the supervisor imports stack lazily too
+
+    supervisor.append_log(f"[mode] {message}")
 
 
 def _running_managed_containers(ctx: Context, services: set[str]) -> list[tuple[str, str]]:
@@ -1139,73 +1165,153 @@ def _profile_flags(ctx: Context, extra_profiles: list[str] | None) -> list[str]:
     return flags
 
 
-def _running_extra_profiles(ctx: Context) -> list[str]:
+def _left(deadline: float | None) -> float | None:
+    """The seconds a ``deadline`` (a ``time.monotonic()`` value) leaves for the next call; None
+    (unbounded) without one. Never zero — subprocess treats that as expired before it starts."""
+    return None if deadline is None else max(0.1, deadline - time.monotonic())
+
+
+def _running_services(ctx: Context, deadline: float | None = None) -> set[str] | None:
+    """The project's RUNNING compose services (``compose ps``); None when the engine can't say."""
+    try:
+        out = _run(
+            [*ctx.compose, "ps", "--format", "json"],
+            env=ctx.env,
+            cwd=str(ctx.main),
+            timeout=_left(deadline),
+        )
+    except Exception:
+        return None
+    return _compose_ps_services(out.stdout) if out.returncode == 0 else None
+
+
+def _running_extra_profiles(ctx: Context, deadline: float | None = None) -> list[str]:
     """Compose profiles OUTSIDE the posture-derived active set that currently have RUNNING
     services — e.g. the ``data`` workers ``just data-up`` started (that profile belongs to the
     developer, not the mode system). The posture reconcile and ``up`` union these into their
     ``up -d`` so those services' config is re-rendered too; without this, profile-gated services
     kept their OLD identity/env across a ``gcp=sa⇄off`` flip (they aren't in the active-profile
-    config, so compose ignored them). Fully generic: discovered from the compose config +
-    running containers, no profile names baked in. Best-effort: [] on any error (the reconcile
-    then covers just the derived set, as before)."""
+    config, so compose ignored them) — and the reconcile's orphan sweep, rendering without them,
+    took a running one for departed. Each service's profiles come from the ``-f`` files
+    themselves (:func:`_service_profiles`), not ``config --profiles``: the bundled podman-compose
+    has no such flag, so discovery always came back empty there (#33). Fully generic, no profile
+    names baked in. Best-effort: [] on any error (the reconcile then covers just the derived set,
+    as before). ``deadline`` bounds the probe (the heal's)."""
     try:
-        out = _run([*ctx.compose, "ps", "--format", "json"], env=ctx.env, cwd=str(ctx.main))
-        if out.returncode != 0:
-            return []
-        running = _compose_ps_services(out.stdout)
+        running = _running_services(ctx, deadline)
         if not running:
             return []
-        active = {p for p in (ctx.env.get("COMPOSE_PROFILES") or "").split(",") if p}
-
-        def _services(*profile_args: str) -> set[str]:
-            res = _run(
-                [*ctx.compose, *profile_args, "config", "--services"],
-                env=ctx.env,
-                cwd=str(ctx.main),
-            )
-            return {s.strip() for s in res.stdout.splitlines() if s.strip()}
-
-        all_profiles = _run([*ctx.compose, "config", "--profiles"], env=ctx.env, cwd=str(ctx.main))
-        candidates = [
-            p
-            for p in (s.strip() for s in all_profiles.stdout.splitlines())
-            if p and p not in active
-        ]
-        if not candidates:
-            return []
-        default_services = _services()
-        return [p for p in candidates if running & (_services("--profile", p) - default_services)]
+        profiles = _service_profiles(ctx)
+        enabled = {p for p in (ctx.env.get("COMPOSE_PROFILES") or "").split(",") if p}
+        extra: list[str] = []
+        # As FEW profiles as enable every running service: an unscoped reconcile `up` starts every
+        # service of each profile it names. Single-profile services go first — they leave no
+        # choice — so a multi-profile one reuses theirs before adding its own first profile.
+        gated = sorted(
+            ((profiles[s], s) for s in running if profiles.get(s)), key=lambda x: (len(x[0]), x[1])
+        )
+        for service_profiles, _ in gated:
+            if not enabled.intersection(service_profiles):
+                enabled.add(service_profiles[0])
+                extra.append(service_profiles[0])
+        return sorted(extra)
     except Exception:
         return []
 
 
-def restart_services(
+def _service_profiles(ctx: Context) -> dict[str, list[str]]:
+    """Service → its ``profiles``, merged across the ``-f`` files in order the way compose
+    merges them: a later file's list APPENDS (podman-compose's list merge, compose-spec's rule for
+    sequences), de-duplicated in order. Raises on an unreadable file — callers are best-effort.
+    PyYAML rides in with the bundled podman-compose; imported here only, off the hot path."""
+    import yaml
+
+    files = [ctx.compose[i + 1] for i, arg in enumerate(ctx.compose[:-1]) if arg == "-f"]
+    out: dict[str, list[str]] = {}
+    for f in files:
+        path = Path(f) if Path(f).is_absolute() else ctx.main / f
+        services = (yaml.safe_load(path.read_text()) or {}).get("services") or {}
+        for name, spec in services.items():
+            if isinstance(spec, dict) and spec.get("profiles"):
+                merged = [*out.get(name, []), *(str(p) for p in spec["profiles"])]
+                out[name] = list(dict.fromkeys(merged))
+    return out
+
+
+def recreate_services(
     services: list[str], *, worktree: str = "", timeout: float = 180.0
 ) -> tuple[bool, str]:
-    """Restart the named compose services in ``worktree``'s stack (``""`` = main) — the
+    """Recreate the named compose services in ``worktree``'s stack (``""`` = main) — the
     capability-heal "resnapshot" action (``[resnapshot_on_capability]``): a service that
-    snapshots credentials once at boot only picks a healed chain up by rebooting. Headless by
-    design (it runs on a supervisor worker thread): output is captured, bounded by ``timeout``
-    so a hung engine can't pin the in-flight guard forever, and it NEVER raises — the caller
-    logs (ok, summary) either way. Passing ``worktree`` explicitly (not None) pins the resolve
-    to that checkout even when the caller's env carries a different ``WORKTREE``."""
-    # Headless and host-side: a heal must never BOOT a stopped VM — nothing runs in it to restart.
+    snapshots credentials once at boot only picks a healed chain up by rebooting. RECREATE, not
+    ``compose restart`` (#33): a restart reboots the existing container with its create-time
+    env and ignores the ``-f`` list entirely, so a service created under an older posture came
+    back on it while looking healed. ``up --force-recreate`` renders it from the CURRENT posture,
+    so a heal re-reads credentials AND converges any drift. ``--no-build`` (a heal never builds),
+    ``--no-deps`` (only the named services), and the running extra profiles spanned the way the
+    posture reconcile spans them, so a profile-gated worker isn't dropped from the render. Only
+    services that are RUNNING are named: a heal refreshes what runs and never starts anything —
+    ``up`` would create a named service that never ran (under docker compose, enabling its
+    inactive profile too) without the dependencies ``--no-deps`` skips. An engine that can't say
+    what runs recreates nothing (fail-safe). The summary says what was recreated and what not.
+    Headless by design (it runs on a supervisor worker thread): output is captured, and
+    ``timeout`` is ONE deadline over every compose call here — the probes as well as the ``up`` —
+    so a hung engine can't pin the in-flight guard forever, and it NEVER raises — the
+    caller logs (ok, summary) either way. Passing ``worktree`` explicitly (not None) pins the
+    resolve to that checkout even when the caller's env carries a different ``WORKTREE``."""
+    # Headless and host-side: a heal must never BOOT a stopped VM — nothing runs in it to recreate.
     if (down := machine_down()) is not None:
-        return False, f"{down} — nothing to restart"
+        return False, f"{down} — nothing to recreate"
     try:
+        deadline = time.monotonic() + timeout
         ctx = resolve(worktree=worktree)
-        cmd = [*ctx.compose, "restart", *services]
+        running = _running_services(ctx, deadline)
+        if running is None:
+            return False, "couldn't list running services — nothing recreated"
+        wanted = [s for s in services if s in running]
+        idle = [s for s in services if s not in running]
+        if not wanted:
+            return True, f"none of {', '.join(services)} running — nothing to recreate"
+        extra = _running_extra_profiles(ctx, deadline)
+        # A named service the render leaves out is silently skipped by podman-compose (exit 0),
+        # so only claim what the render has — the rest is reported, never "recreated".
+        rendered = _rendered_services(ctx, extra, deadline)
+        if not rendered:
+            return False, "couldn't render the compose config — nothing recreated"
+        unrendered = [s for s in wanted if s not in rendered]
+        wanted = [s for s in wanted if s in rendered]
+        if not wanted:
+            return False, f"{', '.join(unrendered)} not in the rendered config — nothing recreated"
+        cmd = [
+            *ctx.compose,
+            *_profile_flags(ctx, extra),
+            *["up", "-d", "--no-build", "--force-recreate", "--no-deps", *wanted],
+        ]
         _err("+ " + " ".join(shlex.quote(c) for c in cmd))
-        proc = _run(cmd, env=ctx.env, cwd=str(ctx.main), timeout=timeout)
-        lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
-        return proc.returncode == 0, (lines[-1] if lines else "")
+        proc = _run(cmd, env=ctx.env, cwd=str(ctx.main), timeout=_left(deadline))
+        if proc.returncode != 0:
+            lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
+            return False, (lines[-1] if lines else f"compose exited {proc.returncode}")
+        return (not unrendered), f"recreated {', '.join(wanted)}" + (
+            f"; not running, left alone: {', '.join(idle)}" if idle else ""
+        ) + (
+            f"; not in the rendered config, NOT recreated: {', '.join(unrendered)}"
+            if unrendered
+            else ""
+        )
     except (Exception, SystemExit) as e:  # resolve aborts a missing worktree with SystemExit
         return False, f"{type(e).__name__}: {e}"
 
 
-def _compose_ps_services(stdout: str) -> set[str]:
-    """Service names out of ``compose ps --format json`` — one JSON object per line on current
-    compose (NDJSON), a single JSON array on older releases. Tolerant of both."""
+def _compose_ps_services(stdout: str) -> set[str] | None:
+    """RUNNING service names out of ``compose ps --format json`` — one JSON object per line on
+    current docker compose (NDJSON), a single JSON array on older releases and under the bundled
+    podman-compose, whose ``ps`` is ``podman ps -a``: no ``Service`` key (the service is only the
+    ``com.docker.compose.service`` label) and exited containers included. Reading ``Service``
+    alone made every running profile invisible there, so a posture reconcile never re-rendered
+    the profile-gated workers (#33). Tolerant of all three shapes. None when non-empty output
+    yields no row at all: that says nothing about what runs, and an empty set would claim
+    nothing does."""
     text = stdout.strip()
     if not text:
         return set()
@@ -1219,7 +1325,19 @@ def _compose_ps_services(stdout: str) -> set[str]:
                 rows.append(json.loads(line))
             except ValueError:
                 continue
-    return {r.get("Service", "") for r in rows if isinstance(r, dict)} - {""}
+        if not rows:
+            return None
+    services: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("State", "running") != "running":
+            continue
+        labels = row.get("Labels")
+        service = row.get("Service") or (
+            labels.get("com.docker.compose.service") if isinstance(labels, dict) else None
+        )
+        if service:
+            services.add(service)
+    return services
 
 
 def _compose_captured(
@@ -1469,13 +1587,16 @@ def disk_headroom(env: dict[str, str] | None = None, timeout: float = 15) -> Dis
     return DiskHeadroom(used, total) if total > 0 else None
 
 
-def _rendered_services(ctx: Context, extra_profiles: list[str] | None = None) -> set[str]:
+def _rendered_services(
+    ctx: Context, extra_profiles: list[str] | None = None, deadline: float | None = None
+) -> set[str]:
     """The compose config's service names (``set()`` on any render failure — callers then
-    decompose no image names at all, which keeps everything)."""
+    decompose no image names at all, which keeps everything). ``deadline`` bounds the render."""
     proc = _run(
         [*ctx.compose, *_profile_flags(ctx, extra_profiles), "config", "--services"],
         env=ctx.env,
         cwd=str(ctx.main),
+        timeout=_left(deadline),
     )
     if proc.returncode != 0:
         return set()

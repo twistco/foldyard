@@ -84,6 +84,116 @@ def test_state_flags_a_stale_extra_overlay_as_drift(isolated_state, monkeypatch,
     assert rc == 1 and "stale overlay" in out and "compose.storage-staging.yml" in out
 
 
+@pytest.fixture
+def overlay_repo(tmp_path, isolated_state):
+    """The full config bound to a checkout whose posture overlays EXIST, each touching only the
+    services a real consumer's would: the identity overlays re-render the workers, never
+    postgres — so which containers an overlay leaves alone is observable (#33)."""
+    from conftest import FULL_TOML
+    from foldyard import config
+
+    stack_dir = tmp_path / "repo" / "dev-stack"
+    stack_dir.mkdir(parents=True)
+    (stack_dir / "compose.identity.yml").write_text(
+        "services:\n  queue-worker:\n    environment: {A: '1'}\n  app:\n    environment: {}\n"
+    )
+    (stack_dir / "compose.identity-data.yml").write_text(
+        "services:\n  queue-worker:\n    environment: {B: '1'}\n"
+    )
+    (stack_dir / "compose.storage-staging.yml").write_text(
+        "services:\n  app:\n    environment: {C: '1'}\n"
+    )
+    with config.using(config.Config(repo_root=tmp_path / "repo", worktree="", toml=FULL_TOML)):
+        yield stack_dir
+
+
+def _container(service: str, *overlays: str) -> tuple[str, dict]:
+    files = ",".join(["/repo/compose.yml", *(f"/repo/dev-stack/{o}" for o in overlays)])
+    return (
+        f"tangible_{service}_1",
+        {
+            "com.docker.compose.service": service,
+            "com.docker.compose.project.config_files": files,
+        },
+    )
+
+
+def _stack_rows(monkeypatch, running):
+    from foldyard import reconcile
+
+    monkeypatch.setattr(devmode, "ps_labels", lambda *a, **k: running)
+    return reconcile.StackScope().rows(devmode.read())
+
+
+def test_stack_drift_is_judged_per_container_not_by_the_longest_label(overlay_repo, monkeypatch):
+    # #33: podman-compose recreates only the services an overlay changes, so postgres keeps a
+    # label from an earlier posture indefinitely. It carrying the full -f list must NOT vouch for
+    # a queue-worker that was never re-rendered onto the identity overlays.
+    devmode.set_mode({"gcp": "sa"})
+    (row,) = _stack_rows(
+        monkeypatch,
+        [
+            _container("postgres", "compose.identity.yml", "compose.identity-data.yml"),
+            _container("queue-worker"),
+        ],
+    )
+    assert row.status == "drift"
+    assert "queue-worker" in row.observed and "postgres" not in row.observed
+    assert "compose.identity.yml" in row.observed
+
+
+def test_stack_label_predating_an_overlay_is_not_drift_when_it_leaves_that_service_alone(
+    overlay_repo, monkeypatch
+):
+    # The converse: compose never recreated postgres for the identity overlays because they don't
+    # define it — its older label is correct, not drift.
+    devmode.set_mode({"gcp": "sa"})
+    (row,) = _stack_rows(
+        monkeypatch,
+        [
+            _container("postgres"),
+            _container("queue-worker", "compose.identity.yml", "compose.identity-data.yml"),
+            _container("app", "compose.identity.yml", "compose.identity-data.yml"),
+        ],
+    )
+    assert row.status == "ok", row.observed
+
+
+def test_stack_stale_overlay_only_counts_for_the_services_it_touched(overlay_repo, monkeypatch):
+    # storage-staging only ever touched `app`: postgres still labelled with it is fine, app still
+    # carrying it is drift.
+    devmode.set_mode({"gcp": "sa"})
+    identity = ("compose.identity.yml", "compose.identity-data.yml")
+    (ok,) = _stack_rows(
+        monkeypatch,
+        [
+            _container("postgres", "compose.storage-staging.yml"),
+            _container("queue-worker", *identity),
+            _container("app", *identity),
+        ],
+    )
+    assert ok.status == "ok", ok.observed
+    (row,) = _stack_rows(
+        monkeypatch,
+        [
+            _container("postgres", "compose.storage-staging.yml"),
+            _container("app", *identity, "compose.storage-staging.yml"),
+        ],
+    )
+    assert row.status == "drift"
+    assert "app" in row.observed and "stale overlay" in row.observed
+    assert "postgres" not in row.observed
+
+
+def test_stack_unreadable_overlay_counts_as_touching_every_service(overlay_repo, monkeypatch):
+    # When the overlay can't be read, "does it touch this service?" has no answer — fall back to
+    # the conservative reading (drift), never to a silent ✓.
+    devmode.set_mode({"gcp": "sa"})
+    (overlay_repo / "compose.identity-data.yml").write_text("services: [not, a, mapping")
+    (row,) = _stack_rows(monkeypatch, [_container("postgres", "compose.identity.yml")])
+    assert row.status == "drift" and "compose.identity-data.yml" in row.observed
+
+
 def test_state_names_a_blocked_daemons_reason(isolated_state, offline_engine, monkeypatch, capsys):
     # The spawn gate's reason, published by the supervisor, replaces the generic DOWN advice.
     devmode.set_mode({"gcp": "sa"})

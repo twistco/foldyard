@@ -431,9 +431,9 @@ def test_verbs_that_need_a_running_stack_do_not_boot_a_stopped_machine(
     ensured: list = []
     monkeypatch.setattr(machine, "ensure", lambda *a, **k: ensured.append(a))
     assert stack.shell() == 1
-    assert stack.restart_services(["api"]) == (
+    assert stack.recreate_services(["api"]) == (
         False,
-        "lima machine 'x' is stopped — nothing to restart",
+        "lima machine 'x' is stopped — nothing to recreate",
     )
     assert capture_run == [] and ensured == []
     assert "nothing to exec into" in capsys.readouterr().err
@@ -551,22 +551,138 @@ def test_sweep_signature_on_docker_engine_is_the_config_hash(fake_repo, foreign_
     assert rm[3:] == ["aaa"]
 
 
-def test_restart_services_runs_compose_restart(fake_repo, capture_run):
-    # The capability-heal resnapshot action: a plain `compose restart <services>` in the resolved
-    # stack context (headless — output captured, never raises).
-    ok, summary = stack.restart_services(["queue-worker", "graph-api"])
-    assert ok is True and summary == ""
+@pytest.fixture
+def running_services(monkeypatch):
+    """What the engine reports running, for the heal's filter — mutate the set in the test."""
+    running = {"queue-worker", "graph-api"}
+    monkeypatch.setattr(stack, "_running_services", lambda ctx, deadline=None: running)
+    monkeypatch.setattr(
+        stack,
+        "_rendered_services",
+        lambda ctx, extra_profiles=None, deadline=None: running | {"postgres"},
+    )
+    return running
+
+
+def test_recreate_services_never_claims_a_service_the_render_leaves_out(
+    fake_repo, capture_run, running_services, monkeypatch
+):
+    # Seen live: podman-compose skips a named service outside the rendered profiles and exits 0,
+    # so the heal logged "recreated e2e-app" having touched nothing. Only the render's services
+    # are named; one it lacks fails the heal loudly instead.
+    running_services.add("e2e-app")
+    monkeypatch.setattr(
+        stack,
+        "_rendered_services",
+        lambda ctx, extra_profiles=None, deadline=None: {"queue-worker"},
+    )
+    ok, summary = stack.recreate_services(["queue-worker", "e2e-app"])
+    assert ok is False
+    assert summary == ("recreated queue-worker; not in the rendered config, NOT recreated: e2e-app")
+    assert _composes(capture_run)[-1][-1] == "queue-worker"
+
+
+def test_recreate_services_force_recreates_on_the_current_posture(
+    fake_repo, capture_run, running_services
+):
+    # The capability-heal resnapshot action (#33): `compose restart` reboots the EXISTING
+    # container with its create-time env, cementing whatever posture it was created under — so
+    # the heal recreates the named services from the current -f list instead. Headless: never
+    # builds, never drags dependencies up, output captured, never raises.
+    ok, summary = stack.recreate_services(["queue-worker", "graph-api"])
+    assert ok is True and summary == "recreated queue-worker, graph-api"
     last = _composes(capture_run)[-1]
-    assert last[-3:] == ["restart", "queue-worker", "graph-api"]
+    assert last[-7:] == [
+        "up",
+        "-d",
+        "--no-build",
+        "--force-recreate",
+        "--no-deps",
+        "queue-worker",
+        "graph-api",
+    ]
+    assert "restart" not in last
     assert "-f" in last and any("compose.podman.yml" in x for x in last)
 
 
-def test_restart_services_reports_failure_instead_of_raising(fake_repo, monkeypatch):
+def test_recreate_services_leaves_services_that_are_not_running_alone(
+    fake_repo, capture_run, running_services
+):
+    # A heal refreshes what runs; it never STARTS anything. An explicitly named service is created
+    # by `up` even when it never ran (and under docker compose its inactive profile is enabled for
+    # it), and with --no-deps its dependencies would not come up either.
+    ok, summary = stack.recreate_services(["queue-worker", "asset-tape-extract"])
+    assert ok is True
+    assert summary == "recreated queue-worker; not running, left alone: asset-tape-extract"
+    last = _composes(capture_run)[-1]
+    assert last[-1] == "queue-worker" and "asset-tape-extract" not in last
+
+
+def test_recreate_services_with_nothing_running_runs_no_compose(
+    fake_repo, capture_run, running_services
+):
+    running_services.clear()
+    assert stack.recreate_services(["queue-worker"]) == (
+        True,
+        "none of queue-worker running — nothing to recreate",
+    )
+    assert not any("up" in c for c in _composes(capture_run))
+
+
+def test_recreate_services_refuses_when_it_cannot_see_what_runs(
+    fake_repo, capture_run, monkeypatch
+):
+    # Fail-safe: an unreadable engine must not turn into "recreate everything named".
+    monkeypatch.setattr(stack, "_running_services", lambda ctx, deadline=None: None)
+    ok, summary = stack.recreate_services(["queue-worker"])
+    assert ok is False and "couldn't list running services" in summary
+    assert not any("up" in c for c in _composes(capture_run))
+
+
+def test_recreate_services_bounds_every_compose_call_by_one_deadline(fake_repo, monkeypatch):
+    # The heal runs on a supervisor worker whose in-flight key clears only when this returns, so
+    # the probes BEFORE the up (what runs, what renders) must be bounded too, and by the same
+    # budget — not each by a fresh one.
+    import types
+
+    timeouts: list[float | None] = []
+
+    def fake_run(cmd, **kw):
+        timeouts.append(kw.get("timeout"))
+        out = ""
+        if "ps" in cmd:
+            out = '{"Service":"queue-worker"}\n'
+        if cmd[-1] == "--services":
+            out = "queue-worker\n"
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+    monkeypatch.setattr(stack, "_run", fake_run)
+    ok, _ = stack.recreate_services(["queue-worker"], timeout=30.0)
+    assert ok is True
+    assert len(timeouts) >= 3  # ps (the extras probe runs its own), the render, the up
+    assert all(t is not None and 0 < t <= 30.0 for t in timeouts), timeouts
+
+
+def test_recreate_services_spans_running_extra_profiles(
+    fake_repo, capture_run, monkeypatch, running_services
+):
+    # Resnapshot services are typically profile-gated workers (`data`); a provider that drops a
+    # service outside the requested profiles would otherwise make the heal a silent no-op.
+    monkeypatch.setattr(stack, "_running_extra_profiles", lambda ctx, deadline=None: ["data"])
+    ok, _ = stack.recreate_services(["queue-worker"])
+    last = _composes(capture_run)[-1]
+    assert ok is True
+    assert last[last.index("--profile") + 1] == "data" and last.index("--profile") < last.index(
+        "up"
+    )
+
+
+def test_recreate_services_reports_failure_instead_of_raising(fake_repo, monkeypatch):
     def _boom(cmd, **kw):
         raise OSError("engine gone")
 
     monkeypatch.setattr(stack.subprocess, "run", _boom)
-    ok, summary = stack.restart_services(["queue-worker"])
+    ok, summary = stack.recreate_services(["queue-worker"])
     assert ok is False and "engine gone" in summary
 
 
@@ -1709,12 +1825,42 @@ def test_reconcile_reports_compose_failure(fake_repo, capture_stream, monkeypatc
     assert any("✗ reconcile failed" in ln and "17" in ln for ln in lines)
 
 
+def _host_log_lines() -> list[str]:
+    path = config.supervisor_log_file()
+    return path.read_text().splitlines() if path.exists() else []
+
+
+def test_reconcile_outcome_lands_in_the_host_log(fake_repo, capture_stream, monkeypatch):
+    # #33: the reconcile runs in the `fy mode` process, so its output only ever reached that
+    # terminal — `fy host logs` had no trace of whether a mode change re-rendered the stack.
+    # One stamped [mode] line per outcome, beside the supervisor's own lines.
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): True)
+    assert stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lambda _l: None) is True
+    (ok,) = _host_log_lines()
+    assert "[mode]" in ok and "reconciled" in ok and "metadata" in ok
+    assert ok.split(" ", 1)[0].startswith("20")  # the ISO date stamp the supervisor's tee uses
+
+    capture_stream.rc["value"] = 17
+    assert stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lambda _l: None) is False
+    failed = _host_log_lines()[-1]
+    assert "[mode]" in failed and "FAILED" in failed and "17" in failed
+
+
+def test_reconcile_on_a_down_stack_says_so_in_the_host_log(fake_repo, capture_stream, monkeypatch):
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): False)
+    assert stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lambda _l: None) is True
+    (line,) = _host_log_lines()
+    assert "[mode]" in line and " down — the mode applies on next `fy up`" in line
+
+
 def test_reconcile_unions_running_extra_profiles(fake_repo, capture_stream, monkeypatch):
     # Profile-gated services a dev started OUTSIDE the mode system (just data-up) must be
     # re-rendered into the new posture too: their profile is unioned into the up.
     monkeypatch.setattr(config, "in_box", lambda: False)
     monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): True)
-    monkeypatch.setattr(stack, "_running_extra_profiles", lambda ctx: ["data"])
+    monkeypatch.setattr(stack, "_running_extra_profiles", lambda ctx, deadline=None: ["data"])
     assert stack.reconcile_posture(_sig(""), _sig("metadata")) is True
     cmd = capture_stream[-1]
     assert cmd[cmd.index("--profile") + 1] == "data"
@@ -1896,6 +2042,28 @@ def test_compose_ps_services_parses_ndjson_and_array():
     assert stack._compose_ps_services("") == set()
 
 
+def test_compose_ps_services_reads_podman_compose_rows():
+    # #33: the bundled podman-compose's `ps --format json` is `podman ps -a --format json` —
+    # no `Service` key (the service is a label) and exited containers included. Reading only
+    # `Service` made every running profile invisible, so a posture reconcile never re-rendered
+    # the `data` workers.
+    rows = [
+        {"Labels": {"com.docker.compose.service": "queue-worker"}, "State": "running"},
+        {"Labels": {"com.docker.compose.service": "graph-api"}, "State": "running"},
+        {"Labels": {"com.docker.compose.service": "e2e-app"}, "State": "exited"},
+        {"Labels": None, "State": "running"},
+    ]
+    assert stack._compose_ps_services(json.dumps(rows)) == {"queue-worker", "graph-api"}
+
+
+def test_compose_ps_services_cannot_read_garbage_as_nothing_running():
+    # An empty set means "the engine says nothing runs"; output that parses to no row at all
+    # says nothing, and must not skip a heal as if it did.
+    assert stack._compose_ps_services("Error: something odd\n") is None
+    assert stack._compose_ps_services("[]") == set()
+    assert stack._compose_ps_services("") == set()
+
+
 def _fake_ctx(fake_repo, env: dict[str, str]) -> stack.Context:
     return stack.Context(
         main=fake_repo,
@@ -1927,34 +2095,47 @@ def test_profile_flags_reasserts_actives_alongside_extras(fake_repo):
 
 
 def test_running_extra_profiles_discovers_from_compose(fake_repo, monkeypatch):
-    # queue-worker (profile `data`) is running; profile `e2e` has no running service; the
-    # active `metadata` profile is excluded. Fully generic — no profile names baked in.
-    import types
-
-    def fake_run(cmd, **_kw):
-        out = ""
-        if "ps" in cmd:
-            out = '{"Service":"queue-worker"}\n{"Service":"app"}\n'
-        if cmd[-1] == "--profiles":
-            out = "data\ne2e\nmetadata\n"
-        if cmd[-1] == "--services":
-            if "data" in cmd:
-                out = "app\npostgres\nqueue-worker\n"
-            elif "e2e" in cmd:
-                out = "app\npostgres\ne2e-app\n"
-            else:
-                out = "app\npostgres\n"
-        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
-
-    monkeypatch.setattr(stack, "_run", fake_run)
-    ctx = _fake_ctx(fake_repo, {"COMPOSE_PROFILES": "metadata"})
+    # queue-worker (profile `data`) is running; profile `e2e` has no running service; the active
+    # `metadata` profile is excluded. Read from the -f files themselves, not `config --profiles`:
+    # the bundled podman-compose has no such flag (exit 2), so discovery always came back empty
+    # there — profile-gated services were never re-rendered, and the reconcile's orphan sweep
+    # took a running one for departed. Profiles APPEND across -f files (podman-compose's list
+    # merge, and compose-spec's for sequences), and discovery adds as few as it can: graph-api
+    # (old ∪ data) is already enabled by queue-worker's `data`, so `old` — whose other services
+    # an unscoped reconcile `up` would start — stays out.
+    base = fake_repo / "compose.base.yml"
+    base.write_text(
+        "services:\n"
+        "  app: {image: a}\n"
+        "  queue-worker: {image: q, profiles: [data]}\n"
+        "  e2e-app: {image: e, profiles: [e2e]}\n"
+        "  metadata-emulator: {image: m, profiles: [metadata]}\n"
+        "  graph-api: {image: g, profiles: [old]}\n"
+    )
+    overlay = fake_repo / "compose.overlay.yml"
+    overlay.write_text("services:\n  graph-api: {profiles: [data]}\n  app: {environment: {}}\n")
+    ctx = stack.Context(
+        main=fake_repo,
+        env={"COMPOSE_PROFILES": "metadata"},
+        compose=["podman", "compose", "-f", str(base), "-f", "compose.overlay.yml"],
+        app="app",
+        project="p",
+        worktree="",
+    )
+    running = {"app", "queue-worker", "graph-api", "metadata-emulator"}
+    monkeypatch.setattr(stack, "_running_services", lambda ctx, deadline=None: running)
+    assert stack._service_profiles(ctx)["graph-api"] == ["old", "data"]
     assert stack._running_extra_profiles(ctx) == ["data"]
+    running.add("e2e-app")
+    assert stack._running_extra_profiles(ctx) == ["data", "e2e"]
+    overlay.write_text("services: [broken")  # unreadable -f file → best-effort []
+    assert stack._running_extra_profiles(ctx) == []
 
 
 def test_up_unions_running_extra_profiles(fake_repo, capture_run, monkeypatch):
     # `fy up` after a posture change must re-render running profile-gated services too — the
     # user-visible symptom was data workers keeping their old identity across fy up.
-    monkeypatch.setattr(stack, "_running_extra_profiles", lambda ctx: ["data"])
+    monkeypatch.setattr(stack, "_running_extra_profiles", lambda ctx, deadline=None: ["data"])
     assert stack.up() == 0
     up_calls = [c for c in _composes(capture_run) if "up" in c]
     assert up_calls and "--profile" in up_calls[0]
