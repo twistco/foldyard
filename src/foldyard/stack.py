@@ -1202,22 +1202,28 @@ def _running_extra_profiles(ctx: Context, deadline: float | None = None) -> list
         if not running:
             return []
         profiles = _service_profiles(ctx)
-        active = {p for p in (ctx.env.get("COMPOSE_PROFILES") or "").split(",") if p}
-        extra: set[str] = set()
-        for service in running:
-            gated = profiles.get(service) or []
-            if gated and not active.intersection(gated):
-                extra.update(gated)
+        enabled = {p for p in (ctx.env.get("COMPOSE_PROFILES") or "").split(",") if p}
+        extra: list[str] = []
+        # As FEW profiles as enable every running service: an unscoped reconcile `up` starts every
+        # service of each profile it names. Single-profile services go first — they leave no
+        # choice — so a multi-profile one reuses theirs before adding its own first profile.
+        gated = sorted(
+            ((profiles[s], s) for s in running if profiles.get(s)), key=lambda x: (len(x[0]), x[1])
+        )
+        for service_profiles, _ in gated:
+            if not enabled.intersection(service_profiles):
+                enabled.add(service_profiles[0])
+                extra.append(service_profiles[0])
         return sorted(extra)
     except Exception:
         return []
 
 
 def _service_profiles(ctx: Context) -> dict[str, list[str]]:
-    """Service → its ``profiles``, merged across the ``-f`` files in order (a later file that
-    re-declares a service's ``profiles`` wins, the compose merge rule for sequences like this
-    one). Raises on an unreadable file — callers are best-effort. PyYAML rides in with the
-    bundled podman-compose; imported here only, off the hot path."""
+    """Service → its ``profiles``, merged across the ``-f`` files in order the way compose
+    merges them: a later file's list APPENDS (podman-compose's list merge, compose-spec's rule for
+    sequences), de-duplicated in order. Raises on an unreadable file — callers are best-effort.
+    PyYAML rides in with the bundled podman-compose; imported here only, off the hot path."""
     import yaml
 
     files = [ctx.compose[i + 1] for i, arg in enumerate(ctx.compose[:-1]) if arg == "-f"]
@@ -1226,8 +1232,9 @@ def _service_profiles(ctx: Context) -> dict[str, list[str]]:
         path = Path(f) if Path(f).is_absolute() else ctx.main / f
         services = (yaml.safe_load(path.read_text()) or {}).get("services") or {}
         for name, spec in services.items():
-            if isinstance(spec, dict) and "profiles" in spec:
-                out[name] = [str(p) for p in spec["profiles"] or []]
+            if isinstance(spec, dict) and spec.get("profiles"):
+                merged = [*out.get(name, []), *(str(p) for p in spec["profiles"])]
+                out[name] = list(dict.fromkeys(merged))
     return out
 
 

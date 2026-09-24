@@ -2099,7 +2099,10 @@ def test_running_extra_profiles_discovers_from_compose(fake_repo, monkeypatch):
     # `metadata` profile is excluded. Read from the -f files themselves, not `config --profiles`:
     # the bundled podman-compose has no such flag (exit 2), so discovery always came back empty
     # there — profile-gated services were never re-rendered, and the reconcile's orphan sweep
-    # took a running one for departed. An overlay that re-declares a service's profiles wins.
+    # took a running one for departed. Profiles APPEND across -f files (podman-compose's list
+    # merge, and compose-spec's for sequences), and discovery adds as few as it can: graph-api
+    # (old ∪ data) is already enabled by queue-worker's `data`, so `old` — whose other services
+    # an unscoped reconcile `up` would start — stays out.
     base = fake_repo / "compose.base.yml"
     base.write_text(
         "services:\n"
@@ -2121,6 +2124,7 @@ def test_running_extra_profiles_discovers_from_compose(fake_repo, monkeypatch):
     )
     running = {"app", "queue-worker", "graph-api", "metadata-emulator"}
     monkeypatch.setattr(stack, "_running_services", lambda ctx, deadline=None: running)
+    assert stack._service_profiles(ctx)["graph-api"] == ["old", "data"]
     assert stack._running_extra_profiles(ctx) == ["data"]
     running.add("e2e-app")
     assert stack._running_extra_profiles(ctx) == ["data", "e2e"]
