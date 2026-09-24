@@ -22,6 +22,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
@@ -1164,16 +1165,27 @@ def _profile_flags(ctx: Context, extra_profiles: list[str] | None) -> list[str]:
     return flags
 
 
-def _running_services(ctx: Context) -> set[str] | None:
+def _left(deadline: float | None) -> float | None:
+    """The seconds a ``deadline`` (a ``time.monotonic()`` value) leaves for the next call; None
+    (unbounded) without one. Never zero — subprocess treats that as expired before it starts."""
+    return None if deadline is None else max(0.1, deadline - time.monotonic())
+
+
+def _running_services(ctx: Context, deadline: float | None = None) -> set[str] | None:
     """The project's RUNNING compose services (``compose ps``); None when the engine can't say."""
     try:
-        out = _run([*ctx.compose, "ps", "--format", "json"], env=ctx.env, cwd=str(ctx.main))
+        out = _run(
+            [*ctx.compose, "ps", "--format", "json"],
+            env=ctx.env,
+            cwd=str(ctx.main),
+            timeout=_left(deadline),
+        )
     except Exception:
         return None
     return _compose_ps_services(out.stdout) if out.returncode == 0 else None
 
 
-def _running_extra_profiles(ctx: Context) -> list[str]:
+def _running_extra_profiles(ctx: Context, deadline: float | None = None) -> list[str]:
     """Compose profiles OUTSIDE the posture-derived active set that currently have RUNNING
     services — e.g. the ``data`` workers ``just data-up`` started (that profile belongs to the
     developer, not the mode system). The posture reconcile and ``up`` union these into their
@@ -1181,9 +1193,9 @@ def _running_extra_profiles(ctx: Context) -> list[str]:
     kept their OLD identity/env across a ``gcp=sa⇄off`` flip (they aren't in the active-profile
     config, so compose ignored them). Fully generic: discovered from the compose config +
     running containers, no profile names baked in. Best-effort: [] on any error (the reconcile
-    then covers just the derived set, as before)."""
+    then covers just the derived set, as before). ``deadline`` bounds every probe (the heal's)."""
     try:
-        running = _running_services(ctx)
+        running = _running_services(ctx, deadline)
         if not running:
             return []
         active = {p for p in (ctx.env.get("COMPOSE_PROFILES") or "").split(",") if p}
@@ -1193,10 +1205,16 @@ def _running_extra_profiles(ctx: Context) -> list[str]:
                 [*ctx.compose, *profile_args, "config", "--services"],
                 env=ctx.env,
                 cwd=str(ctx.main),
+                timeout=_left(deadline),
             )
             return {s.strip() for s in res.stdout.splitlines() if s.strip()}
 
-        all_profiles = _run([*ctx.compose, "config", "--profiles"], env=ctx.env, cwd=str(ctx.main))
+        all_profiles = _run(
+            [*ctx.compose, "config", "--profiles"],
+            env=ctx.env,
+            cwd=str(ctx.main),
+            timeout=_left(deadline),
+        )
         candidates = [
             p
             for p in (s.strip() for s in all_profiles.stdout.splitlines())
@@ -1226,16 +1244,18 @@ def recreate_services(
     ``up`` would create a named service that never ran (under docker compose, enabling its
     inactive profile too) without the dependencies ``--no-deps`` skips. An engine that can't say
     what runs recreates nothing (fail-safe). The summary says what was recreated and what not.
-    Headless by design (it runs on a supervisor worker thread): output is captured, bounded by
-    ``timeout`` so a hung engine can't pin the in-flight guard forever, and it NEVER raises — the
+    Headless by design (it runs on a supervisor worker thread): output is captured, and
+    ``timeout`` is ONE deadline over every compose call here — the probes as well as the ``up`` —
+    so a hung engine can't pin the in-flight guard forever, and it NEVER raises — the
     caller logs (ok, summary) either way. Passing ``worktree`` explicitly (not None) pins the
     resolve to that checkout even when the caller's env carries a different ``WORKTREE``."""
     # Headless and host-side: a heal must never BOOT a stopped VM — nothing runs in it to recreate.
     if (down := machine_down()) is not None:
         return False, f"{down} — nothing to recreate"
     try:
+        deadline = time.monotonic() + timeout
         ctx = resolve(worktree=worktree)
-        running = _running_services(ctx)
+        running = _running_services(ctx, deadline)
         if running is None:
             return False, "couldn't list running services — nothing recreated"
         wanted = [s for s in services if s in running]
@@ -1244,11 +1264,11 @@ def recreate_services(
             return True, f"none of {', '.join(services)} running — nothing to recreate"
         cmd = [
             *ctx.compose,
-            *_profile_flags(ctx, _running_extra_profiles(ctx)),
+            *_profile_flags(ctx, _running_extra_profiles(ctx, deadline)),
             *["up", "-d", "--no-build", "--force-recreate", "--no-deps", *wanted],
         ]
         _err("+ " + " ".join(shlex.quote(c) for c in cmd))
-        proc = _run(cmd, env=ctx.env, cwd=str(ctx.main), timeout=timeout)
+        proc = _run(cmd, env=ctx.env, cwd=str(ctx.main), timeout=_left(deadline))
         if proc.returncode != 0:
             lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
             return False, (lines[-1] if lines else f"compose exited {proc.returncode}")
@@ -1259,13 +1279,15 @@ def recreate_services(
         return False, f"{type(e).__name__}: {e}"
 
 
-def _compose_ps_services(stdout: str) -> set[str]:
+def _compose_ps_services(stdout: str) -> set[str] | None:
     """RUNNING service names out of ``compose ps --format json`` — one JSON object per line on
     current docker compose (NDJSON), a single JSON array on older releases and under the bundled
     podman-compose, whose ``ps`` is ``podman ps -a``: no ``Service`` key (the service is only the
     ``com.docker.compose.service`` label) and exited containers included. Reading ``Service``
     alone made every running profile invisible there, so a posture reconcile never re-rendered
-    the profile-gated workers (#33). Tolerant of all three shapes."""
+    the profile-gated workers (#33). Tolerant of all three shapes. None when non-empty output
+    yields no row at all: that says nothing about what runs, and an empty set would claim
+    nothing does."""
     text = stdout.strip()
     if not text:
         return set()
@@ -1279,6 +1301,8 @@ def _compose_ps_services(stdout: str) -> set[str]:
                 rows.append(json.loads(line))
             except ValueError:
                 continue
+        if not rows:
+            return None
     services: set[str] = set()
     for row in rows:
         if not isinstance(row, dict) or row.get("State", "running") != "running":
