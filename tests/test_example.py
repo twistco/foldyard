@@ -107,7 +107,7 @@ def test_example_registry_refuses_a_strandable_fakedep(example_repo):
     from foldyard import plugins
 
     reg = plugins.registry()
-    assert {"fakecred", "fakedep"} <= set(reg.axes())
+    assert {"fakecred", "fakedep"} <= set(reg.switches())
     ((_sev, msg),) = [i for i in reg.mode_issues({"fakedep": "on"}) if i[0] == "error"]
     assert "`fy mode fakecred=on fakedep=on`" in msg
     assert reg.mode_issues({"fakecred": "on", "fakedep": "on"}) == []

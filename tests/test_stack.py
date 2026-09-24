@@ -1743,7 +1743,7 @@ def test_reconcile_targets_bound_worktree(fake_repo, capture_stream, monkeypatch
     assert seen == {"project": "tangible-podman-feat", "worktree": "feat"}
 
 
-# ── the stack-down posture-service path (Plugin.posture_services) ─
+# ── the stack-down posture-service path (Plugin.mode_services) ─
 # A posture flip must never start the heavy stack (the guardrail above) — but the tiny services
 # a rung is ENFORCED by (the gcp metadata emulator) must materialize even when the stack is
 # down: the 2026-08-07 gcp=user-in-a-fresh-worktree trap left `fy mode` reading as granted

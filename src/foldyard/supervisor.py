@@ -817,8 +817,8 @@ def run_capability_probes(wt: str, mode: dict, warming: Collection[str] = ()) ->
     results: dict[str, dict] = {}
     active_keys: set[tuple[str, str, str]] = set()
     for probe in devmode.capability_probes(mode):
-        key = (wt, probe.name, mode.get(probe.axis, ""))
-        if probe.axis in warming:
+        key = (wt, probe.name, mode.get(probe.switch, ""))
+        if probe.switch in warming:
             _probe_state.pop(key, None)
             continue
         active_keys.add(key)
@@ -844,12 +844,12 @@ def run_capability_probes(wt: str, mode: dict, warming: Collection[str] = ()) ->
             }
             _probe_state[key] = state
             if not ok and previous is not False:  # new failure OR first probe failing
-                log(f"⚠ capability {probe.name} ({probe.axis}) DEGRADED — {detail}")
+                log(f"⚠ capability {probe.name} ({probe.switch}) DEGRADED — {detail}")
             elif ok and previous is False:
-                log(f"✓ capability {probe.name} ({probe.axis}) recovered — {detail}")
-        merged = results.get(probe.axis)
+                log(f"✓ capability {probe.name} ({probe.switch}) recovered — {detail}")
+        merged = results.get(probe.switch)
         if merged is None or (merged["ok"] and not state["ok"]):
-            results[probe.axis] = {
+            results[probe.switch] = {
                 "ok": state["ok"],
                 "detail": state["detail"],
                 "checked": state["checked"],

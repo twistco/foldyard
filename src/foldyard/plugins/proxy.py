@@ -554,7 +554,7 @@ class ProxyPlugin(Plugin):
             return False
         if self._registry.proxy_rules(mode):
             return True
-        for axis, rungs in self._registry.axis_rungs().items():
+        for axis, rungs in self._registry.switch_levels().items():
             for rung in rungs:
                 if rung != mode.get(axis, rungs[0]) and self._registry.proxy_rules(
                     {**mode, axis: rung}

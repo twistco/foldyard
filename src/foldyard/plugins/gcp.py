@@ -40,7 +40,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from .. import config
-from . import Axis, CapabilityProbe, DoctorContext, PanelData, Plugin, TuiPanel
+from . import CapabilityProbe, DoctorContext, PanelData, Plugin, Switch, TuiPanel
 
 # The host port the SA-token minter listens on comes from ``config.gcp_minter_port()`` —
 # per-project band + per-worktree offset (the metadata emulator forwards to it).
@@ -300,7 +300,7 @@ def _gcp_panel_data() -> PanelData:
 class GcpPlugin(Plugin):
     name = "gcp"
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         # Self-gate on the gcp config (registry plan Step D): even though the plugin only LOADS
         # when [plugins.gcp-metadata] is declared (Step C), the axis appears only once a real GCP
         # project is configured — without it the rungs (`devbox-log-reader`, `app-runtime` SAs)
@@ -309,11 +309,11 @@ class GcpPlugin(Plugin):
         if not gcp_project():
             return []
         axes = [
-            Axis(
+            Switch(
                 name="gcp",
                 # IDENTITY ONLY (what credential is reachable). App behaviour that consumes it
                 # (real LLM, real-Auth0-from-GSM, real storage) lives on its own axes.
-                rungs=("off", "logs", "sa", "user"),
+                levels=("off", "logs", "sa", "user"),
                 blurb=_BLURB,
                 daemon="gcp-minter",
                 emergency=("user",),
@@ -324,9 +324,9 @@ class GcpPlugin(Plugin):
         # That's the opt-in; without one, `staging` would be a rung that changes nothing.
         if "storage" in config.overlay_when_axes():
             axes.append(
-                Axis(
+                Switch(
                     name="storage",
-                    rungs=("local", "staging"),
+                    levels=("local", "staging"),
                     blurb=_STORAGE_BLURB,
                     # No `requires` here: staging→gcp=sa is a consequence of the CONSUMER's
                     # storage overlay (the swapped endpoints resolve via ADC), so it's declared
@@ -377,7 +377,7 @@ class GcpPlugin(Plugin):
             }
         }
 
-    def posture_services(self, mode: dict) -> dict[str, bool]:
+    def mode_services(self, mode: dict) -> dict[str, bool]:
         # The emulator is the in-VM half of EVERY gcp rung — the Mac minter alone grants nothing,
         # so a rung declared while the stack is down (fresh worktree, devbox-only session) read
         # as granted while the box couldn't mint a token (2026-08-07: a gcp=user prod
@@ -436,7 +436,7 @@ class GcpPlugin(Plugin):
     # The gcp/storage compose overlays (identity, identity-data, storage-staging) are declared as
     # `[[overlay]]` entries in foldyard.toml now (config-only, matched on their `when`) — see
     # docs/compose-overlays.md. This plugin keeps only the identity/minter behaviour; the storage
-    # rung's identity requirement is declared on its Axis (`requires`), and it no longer
+    # rung's identity requirement is declared on its Switch (`requires`), and it no longer
     # hardcodes any overlay path.
 
     def no_proxy_hosts(self) -> list[str]:
@@ -540,10 +540,10 @@ class GcpPlugin(Plugin):
         # and the box still can't reach it. Cheaper than a mint, so a shorter interval.
         return [
             CapabilityProbe(
-                axis="gcp", name="gcp-minter-port", check=_minter_port_answering, interval=60.0
+                switch="gcp", name="gcp-minter-port", check=_minter_port_answering, interval=60.0
             ),
             *(
-                CapabilityProbe(axis="gcp", name=name, check=_mint_check(sa), interval=120.0)
+                CapabilityProbe(switch="gcp", name=name, check=_mint_check(sa), interval=120.0)
                 for name, sa in targets
             ),
         ]

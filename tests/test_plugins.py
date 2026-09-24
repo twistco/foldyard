@@ -15,13 +15,13 @@ import pytest
 
 from foldyard import config, devmode, keyless, plugins
 from foldyard.plugins import (
-    Axis,
     DoctorContext,
     InjectRule,
     PanelData,
     Plugin,
     Registry,
     Requires,
+    Switch,
     TuiPanel,
     VerifyContext,
     auth0_sim,
@@ -35,31 +35,31 @@ from foldyard.plugins import (
     vscode,
 )
 
-# ── Axis validation ───────────────────────────────────────────────────────────────────
+# ── Switch validation ───────────────────────────────────────────────────────────────────
 
 
 def test_axis_default_is_rung_zero():
     # rungs[0] is the axis's zero-secret resting default — no longer necessarily "off" (storage
     # rests at "local", auth0 at "sim"); unset/invalid/expired values read as it.
-    ax = Axis(name="x", rungs=("local", "staging"), blurb={"local": "", "staging": ""})
+    ax = Switch(name="x", levels=("local", "staging"), blurb={"local": "", "staging": ""})
     assert ax.default == "local"
 
 
 def test_axis_rejects_empty_rungs_and_emergency_default():
     with pytest.raises(ValueError):
-        Axis(name="x", rungs=(), blurb={})
+        Switch(name="x", levels=(), blurb={})
     with pytest.raises(ValueError):  # expiry reverts TO the default, so it can't BE emergency
-        Axis(name="x", rungs=("off", "on"), blurb={"off": "", "on": ""}, emergency=("off",))
+        Switch(name="x", levels=("off", "on"), blurb={"off": "", "on": ""}, emergency=("off",))
 
 
 def test_axis_blurb_must_cover_rungs():
     with pytest.raises(ValueError):
-        Axis(name="x", rungs=("off", "on"), blurb={"off": "zero"})  # missing "on"
+        Switch(name="x", levels=("off", "on"), blurb={"off": "zero"})  # missing "on"
 
 
 def test_axis_emergency_must_be_a_rung():
     with pytest.raises(ValueError):
-        Axis(name="x", rungs=("off", "on"), blurb={"off": "", "on": ""}, emergency=("boom",))
+        Switch(name="x", levels=("off", "on"), blurb={"off": "", "on": ""}, emergency=("boom",))
 
 
 def test_axis_requires_validates_the_owning_side():
@@ -67,28 +67,28 @@ def test_axis_requires_validates_the_owning_side():
     # axis side is deliberately NOT validated (it may be absent under this consumer's config —
     # that's the "absent satisfies nothing" semantics, not a declaration error).
     blurb = {"off": "", "on": ""}
-    ok = Requires(when=("on",), axis="other", accepts=("x",))
-    Axis(name="a", rungs=("off", "on"), blurb=blurb, requires=(ok,))  # fine, incl. unknown axis
+    ok = Requires(when=("on",), switch="other", accepts=("x",))
+    Switch(name="a", levels=("off", "on"), blurb=blurb, requires=(ok,))  # fine, incl. unknown axis
     with pytest.raises(ValueError):  # when outside the owner's rungs
-        Axis(
+        Switch(
             name="a",
-            rungs=("off", "on"),
+            levels=("off", "on"),
             blurb=blurb,
-            requires=(Requires(when=("boom",), axis="other", accepts=("x",)),),
+            requires=(Requires(when=("boom",), switch="other", accepts=("x",)),),
         )
     with pytest.raises(ValueError):  # empty when — a requirement that never fires
-        Axis(
+        Switch(
             name="a",
-            rungs=("off", "on"),
+            levels=("off", "on"),
             blurb=blurb,
-            requires=(Requires(when=(), axis="other", accepts=("x",)),),
+            requires=(Requires(when=(), switch="other", accepts=("x",)),),
         )
     with pytest.raises(ValueError):  # unknown severity
-        Axis(
+        Switch(
             name="a",
-            rungs=("off", "on"),
+            levels=("off", "on"),
             blurb=blurb,
-            requires=(Requires(when=("on",), axis="other", accepts=("x",), severity="fatal"),),
+            requires=(Requires(when=("on",), switch="other", accepts=("x",), severity="fatal"),),
         )
 
 
@@ -98,11 +98,11 @@ def test_axis_requires_validates_the_owning_side():
 class DemoPlugin(Plugin):
     name = "demo"
 
-    def axes(self):
+    def switches(self):
         return [
-            Axis(
+            Switch(
                 name="demo",
-                rungs=("off", "on"),
+                levels=("off", "on"),
                 blurb={"off": "z", "on": "y"},
                 daemon="demo-daemon",
                 emergency=("on",),
@@ -161,17 +161,17 @@ def test_builtins_provide_gcp_and_github():
     reg = Registry([gcp.GcpPlugin(), github.GithubPlugin()], config=_cfg(_FULL_TOML))
     # gcp contributes BOTH its axes: gcp (identity-only — the llm rung is gone) and storage
     # (present because _FULL_TOML wires an [[overlay]] onto storage=staging, the axis's opt-in).
-    assert set(reg.axes()) == {"gcp", "storage", "github"}
-    assert reg.axis_rungs()["gcp"] == ("off", "logs", "sa", "user")
-    assert reg.axis_rungs()["storage"] == ("local", "staging")
-    assert reg.axis_defaults() == {"gcp": "off", "storage": "local", "github": "off"}
-    assert reg.axis_daemon() == {"gcp": "gcp-minter", "storage": None, "github": "egress-proxy"}
-    assert reg.emergency_rungs() == {"gcp": ("user",), "storage": (), "github": ("user",)}
+    assert set(reg.switches()) == {"gcp", "storage", "github"}
+    assert reg.switch_levels()["gcp"] == ("off", "logs", "sa", "user")
+    assert reg.switch_levels()["storage"] == ("local", "staging")
+    assert reg.switch_defaults() == {"gcp": "off", "storage": "local", "github": "off"}
+    assert reg.switch_daemon() == {"gcp": "gcp-minter", "storage": None, "github": "egress-proxy"}
+    assert reg.emergency_levels() == {"gcp": ("user",), "storage": (), "github": ("user",)}
     assert reg.blurbs()[("github", "app")].startswith("PR/issue")
 
 
 def test_duplicate_axis_is_rejected():
-    with pytest.raises(ValueError, match="duplicate mode axis 'gcp'"):
+    with pytest.raises(ValueError, match="duplicate switch 'gcp'"):
         Registry([gcp.GcpPlugin(), gcp.GcpPlugin()], config=_cfg(_FULL_TOML))
 
 
@@ -338,9 +338,9 @@ def test_gcp_grants_identity_only_and_storage_axis_gated_on_an_overlay(monkeypat
     plugin = gcp.GcpPlugin()
     # storage axis present iff some overlay's `when` references it; absent otherwise.
     monkeypatch.setattr(config, "overlay_when_axes", lambda: {"gcp", "storage"})
-    assert any(ax.name == "storage" for ax in plugin.axes())
+    assert any(ax.name == "storage" for ax in plugin.switches())
     monkeypatch.setattr(config, "overlay_when_axes", lambda: {"gcp"})
-    assert not any(ax.name == "storage" for ax in plugin.axes())
+    assert not any(ax.name == "storage" for ax in plugin.switches())
     # The minter allows the app runtime SA AND each data-service SA on the sa rung only (identity
     # is the ONLY thing gcp grants).
     allow = plugin.daemons({"gcp": "sa"})["gcp-minter"]["env"]["GCP_SA_ALLOWLIST"]
@@ -410,7 +410,7 @@ def test_gcp_storage_staging_requires_sa_identity():
     assert reg.mode_issues({"gcp": "off", "storage": "local"}) == []
 
 
-# ── [[require]] — the config tier of Axis.requires ────────────────────────────────────
+# ── [[require]] — the config tier of Switch.requires ────────────────────────────────────
 
 
 def test_config_declared_require_rides_the_owning_axis():
@@ -438,13 +438,13 @@ def test_config_require_appends_after_the_plugins_own_rows():
     class P(Plugin):
         name = "p"
 
-        def axes(self):
+        def switches(self):
             return [
-                Axis(
+                Switch(
                     name="a",
-                    rungs=("off", "on"),
+                    levels=("off", "on"),
                     blurb={"off": "", "on": ""},
-                    requires=(Requires(when=("on",), axis="x", accepts=("y",)),),
+                    requires=(Requires(when=("on",), switch="x", accepts=("y",)),),
                 )
             ]
 
@@ -457,10 +457,10 @@ def test_config_require_appends_after_the_plugins_own_rows():
 
 
 def test_config_require_validation_is_loud():
-    # A broken [[require]] declaration fails at Registry construction (the Axis-validation
+    # A broken [[require]] declaration fails at Registry construction (the Switch-validation
     # philosophy: loud in development, never a guard that silently stops firing). Unlike an
     # overlay's `when`, an owner axis nobody loaded is a config bug, not an inert row.
-    with pytest.raises(ValueError, match="unknown axis 'nope'"):
+    with pytest.raises(ValueError, match="unknown switch 'nope'"):
         Registry(
             [DemoPlugin()],
             config=_cfg({"require": [{"switch": "nope", "when": "on", "needs": "gcp"}]}),
@@ -544,10 +544,10 @@ def test_github_axis_gated_on_the_declared_table(monkeypatch):
     # gh doctor rows it never asked for. The opt-in is [plugins.github] — any table, even empty
     # (the user emergency needs no App fields).
     monkeypatch.setattr(config, "github_declared", lambda: False)
-    assert github.GithubPlugin().axes() == []
+    assert github.GithubPlugin().switches() == []
     monkeypatch.setattr(config, "github_declared", lambda: True)
-    (axis,) = github.GithubPlugin().axes()
-    assert axis.name == "github" and axis.rungs == ("off", "app", "user")
+    (axis,) = github.GithubPlugin().switches()
+    assert axis.name == "github" and axis.levels == ("off", "app", "user")
 
 
 def test_github_box_plumbing_absent_for_an_undeclared_consumer(monkeypatch):
@@ -1017,10 +1017,10 @@ def test_llm_axis_gated_on_declared_table(monkeypatch):
     from foldyard.plugins import llm as llm_mod
 
     monkeypatch.setattr(config, "llm_declared", lambda: False)
-    assert llm_mod.LlmPlugin().axes() == []
+    assert llm_mod.LlmPlugin().switches() == []
     monkeypatch.setattr(config, "llm_declared", lambda: True)
-    (axis,) = llm_mod.LlmPlugin().axes()
-    assert axis.name == "llm" and axis.rungs == ("off", "record", "live")
+    (axis,) = llm_mod.LlmPlugin().switches()
+    assert axis.name == "llm" and axis.levels == ("off", "record", "live")
     assert axis.default == "off"
 
 
@@ -1047,7 +1047,7 @@ def test_llm_requires_sa_identity():
         ],
     }
     with config.using(make_config(toml)):
-        (axis,) = llm_mod.LlmPlugin().axes()
+        (axis,) = llm_mod.LlmPlugin().switches()
     assert axis.requires == ()  # the PLUGIN declares nothing — the coupling is config
     reg = Registry([llm_mod.LlmPlugin()], config=make_config(toml))
     issues = reg.mode_issues({"llm": "record", "gcp": "off"})
@@ -1491,8 +1491,8 @@ def test_axis_daemon_names_are_per_worktree():
         toml={"proxy": {}, "plugins": {"gcp-metadata": {"project": "acme"}, "github": {}}},
     )
     reg = Registry([gcp.GcpPlugin(), github.GithubPlugin(), proxy.ProxyPlugin()], config=cfg)
-    assert reg.axis_daemon()["gcp"] == "gcp-minter@feat"
-    assert reg.axis_daemon()["github"] == "egress-proxy@feat"
+    assert reg.switch_daemon()["gcp"] == "gcp-minter@feat"
+    assert reg.switch_daemon()["github"] == "egress-proxy@feat"
 
 
 def test_main_worktree_daemons_keep_bare_names_and_base_ports():
@@ -1578,7 +1578,7 @@ def test_proxy_is_always_on_and_always_decrypts(monkeypatch):
     # that never opts in gets no daemon at all — test_proxy_daemon_gated_on_opt_in_or_injector.)
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
     reg = Registry([gcp.GcpPlugin(), github.GithubPlugin(), proxy.ProxyPlugin()])
-    assert "capture" not in reg.axis_rungs()
+    assert "capture" not in reg.switch_levels()
     spec = reg.desired_daemons({"github": "off"})["egress-proxy"]
     assert spec["live"]["data"]["rules"] == []
     assert spec["env"]["CAPTURE_MODE"] == "full"
@@ -2052,26 +2052,26 @@ def _inject_plugin(monkeypatch, specs):
 
 
 def test_inject_axis_from_config(monkeypatch):
-    axes = _inject_plugin(monkeypatch, [_PENPOT_SPEC]).axes()
+    axes = _inject_plugin(monkeypatch, [_PENPOT_SPEC]).switches()
     assert len(axes) == 1
     ax = axes[0]
-    assert ax.name == "penpot" and ax.rungs == ("off", "on") and ax.daemon == "egress-proxy"
+    assert ax.name == "penpot" and ax.levels == ("off", "on") and ax.daemon == "egress-proxy"
     assert ax.emergency == ()  # a plain injector axis carries no TTL'd emergency rung
 
 
 def test_inject_emergency_key_makes_on_a_ttld_rung(monkeypatch):
     # `emergency = true` gives an [[inject]] axis github=user's lifecycle: `on` expires (default
     # TTL, or `ttl=`) and the supervisor switches it off — for a credential with write access
-    ax = _inject_plugin(monkeypatch, [{**_PENPOT_SPEC, "emergency": True}]).axes()[0]
+    ax = _inject_plugin(monkeypatch, [{**_PENPOT_SPEC, "emergency": True}]).switches()[0]
     assert ax.emergency == ("on",)
-    ax = _inject_plugin(monkeypatch, [{**_PENPOT_SPEC, "emergency": False}]).axes()[0]
+    ax = _inject_plugin(monkeypatch, [{**_PENPOT_SPEC, "emergency": False}]).switches()[0]
     assert ax.emergency == ()
 
 
 def test_inject_emergency_must_be_a_bool(monkeypatch):
     # a quoted "false" is truthy: loud, not an axis that silently expires (or silently doesn't)
     with pytest.raises(ValueError, match="emergency"):
-        _inject_plugin(monkeypatch, [{**_PENPOT_SPEC, "emergency": "false"}]).axes()
+        _inject_plugin(monkeypatch, [{**_PENPOT_SPEC, "emergency": "false"}]).switches()
 
 
 def test_inject_declares_its_derived_token_only_when_on(monkeypatch):
@@ -2153,7 +2153,7 @@ def test_inject_axes_that_collide_on_the_token_var_are_refused(monkeypatch, firs
     specs = [{"switch": first, "host": "a.test"}, {"switch": second, "host": "collector.test"}]
     plugin = _inject_plugin(monkeypatch, specs)
     with pytest.raises(ValueError, match="derive the token var"):
-        plugin.axes()
+        plugin.switches()
     with pytest.raises(ValueError, match="derive the token var"):
         plugin.proxy_rules({first: "on"})
 
@@ -2304,7 +2304,7 @@ def test_a_bare_agent_block_is_the_manual_login_box(
     monkeypatch.setattr(config, keyless, lambda: "")
     p = plugin()
     env = {**_BOX_ENV, "FY_PROXY": "1"}
-    assert p.axes() == []  # no mode switch: there is no host-side decision to make
+    assert p.switches() == []  # no mode switch: there is no host-side decision to make
     assert p.proxy_rules({}) == [] and p.derive_env({}) == {}
     assert not any(cred in a for a in p.box_args(dict(env)))  # no dummy to shadow a real token
     assert all(s["label"] != seed for s in p.box_bootstrap(dict(env)))
@@ -2320,7 +2320,7 @@ def test_claude_keyless_inert_when_off(monkeypatch):
     monkeypatch.setattr(config, "claude_enabled", lambda: True)
     monkeypatch.setattr(config, "claude_keyless", lambda: "")
     p = claude.ClaudePlugin()
-    assert p.axes() == []
+    assert p.switches() == []
     assert p.proxy_rules({"claude": "on"}) == []  # no mode configured → nothing, even if axis "on"
     assert p.derive_env({"claude": "on"}) == {}
     assert not any("ANTHROPIC_API_KEY" in a for a in p.box_args(dict(_BOX_ENV)))  # no dummy baked
@@ -2332,9 +2332,9 @@ def test_claude_keyless_api_key_axis_rule_and_dummy(monkeypatch):
     p = claude.ClaudePlugin()
 
     # The on/off injector axis, mapping to the shared egress-proxy daemon (like github/inject).
-    axes = p.axes()
+    axes = p.switches()
     assert len(axes) == 1 and axes[0].name == "claude"
-    assert axes[0].rungs == ("off", "on") and axes[0].daemon == "egress-proxy"
+    assert axes[0].levels == ("off", "on") and axes[0].daemon == "egress-proxy"
 
     # off → no rule / no marker; on → the InjectRule (x-api-key on api.anthropic.com via static_token
     # reading ANTHROPIC_API_KEY from host.env) + the CLAUDE_INJECT marker derive_env sets.
@@ -2358,7 +2358,7 @@ def test_claude_keyless_oauth_rule_carries_bearer_prefix(monkeypatch):
     monkeypatch.setattr(config, "claude_enabled", lambda: True)
     monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
     p = claude.ClaudePlugin()
-    assert p.axes()[0].name == "claude"
+    assert p.switches()[0].name == "claude"
     rule = p.proxy_rules({"claude": "on"})[0]
     assert rule.host == "api.anthropic.com" and rule.header == "authorization"
     assert rule.value_prefix == "Bearer " and rule.env == ("CLAUDE_CODE_OAUTH_TOKEN",)
@@ -2484,7 +2484,7 @@ def test_codex_keyless_inert_when_off(monkeypatch):
     monkeypatch.setattr(config, "codex_keyless", lambda: "")
     p = codex.CodexPlugin()
     assert (
-        p.axes() == []
+        p.switches() == []
         and p.proxy_rules({"codex": "on"}) == []
         and p.derive_env({"codex": "on"}) == {}
     )
@@ -2495,7 +2495,7 @@ def test_codex_keyless_api_key_axis_rule_and_dummy(monkeypatch):
     monkeypatch.setattr(config, "codex_enabled", lambda: True)
     monkeypatch.setattr(config, "codex_keyless", lambda: "api-key")
     p = codex.CodexPlugin()
-    axes = p.axes()
+    axes = p.switches()
     assert len(axes) == 1 and axes[0].name == "codex" and axes[0].daemon == "egress-proxy"
     # off → nothing; on → the InjectRule (Authorization ← OPENAI_API_KEY, Bearer-prefixed) + marker.
     assert p.proxy_rules({"codex": "off"}) == [] and p.derive_env({"codex": "off"}) == {}
@@ -2525,7 +2525,7 @@ def test_codex_keyless_chatgpt_rule_and_dummy_auth_json(monkeypatch, tmp_path):
     monkeypatch.setattr(keyless, "codex_auth_json_path", lambda: mac_auth)
     p = codex.CodexPlugin()
 
-    assert p.axes()[0].name == "codex"
+    assert p.switches()[0].name == "codex"
     rule = p.proxy_rules({"codex": "on"})[0]
     assert rule.host == "chatgpt.com" and rule.path_prefix == "/backend-api/codex"
     assert rule.header == "Authorization" and rule.value_prefix == "Bearer "
@@ -2614,35 +2614,35 @@ def test_claude_and_codex_keyless_coexist_in_one_rule_set(monkeypatch):
 
 
 def test_capability_probe_unknown_axis_is_rejected():
-    from foldyard.plugins import Axis, CapabilityProbe, Plugin, Registry
+    from foldyard.plugins import CapabilityProbe, Plugin, Registry, Switch
 
     class Bad(Plugin):
         name = "bad"
 
-        def axes(self):
-            return [Axis(name="real", rungs=("off", "on"), blurb={"off": "-", "on": "-"})]
+        def switches(self):
+            return [Switch(name="real", levels=("off", "on"), blurb={"off": "-", "on": "-"})]
 
         def capability_probes(self, mode):
-            return [CapabilityProbe(axis="ghost", name="p", check=lambda: (True, "ok"))]
+            return [CapabilityProbe(switch="ghost", name="p", check=lambda: (True, "ok"))]
 
-    with pytest.raises(ValueError, match="unknown axis 'ghost'"):
+    with pytest.raises(ValueError, match="unknown switch 'ghost'"):
         Registry([Bad()]).capability_probes({"real": "on"})
 
 
 def test_capability_probe_duplicate_names_are_rejected():
-    from foldyard.plugins import Axis, CapabilityProbe, Plugin, Registry
+    from foldyard.plugins import CapabilityProbe, Plugin, Registry, Switch
 
     def _mk(name):
         class P(Plugin):
-            def axes(self):
+            def switches(self):
                 return (
-                    [Axis(name="ax", rungs=("off", "on"), blurb={"off": "-", "on": "-"})]
+                    [Switch(name="ax", levels=("off", "on"), blurb={"off": "-", "on": "-"})]
                     if name == "one"
                     else []
                 )
 
             def capability_probes(self, mode):
-                return [CapabilityProbe(axis="ax", name="dup", check=lambda: (True, "ok"))]
+                return [CapabilityProbe(switch="ax", name="dup", check=lambda: (True, "ok"))]
 
         P.name = name
         return P()

@@ -1077,15 +1077,15 @@ def test_clock_ff_rejects_malformed_durations_as_usage_error(isolated_state, mon
 def test_settle_coordinated_fallback_when_no_single_downgrade_helps(monkeypatch):
     # Two axes whose ONE error only clears together: no single downgrade reduces the count, so
     # the greedy loop stalls — the coordinated fallback settles everything-at-rest instead.
-    from foldyard.plugins import Axis, Plugin, Registry
+    from foldyard.plugins import Plugin, Registry, Switch
 
     class Tangled(Plugin):
         name = "tangled"
 
-        def axes(self):
+        def switches(self):
             return [
-                Axis(name="a", rungs=("off", "on"), blurb={"off": "-", "on": "-"}),
-                Axis(name="b", rungs=("off", "on"), blurb={"off": "-", "on": "-"}),
+                Switch(name="a", levels=("off", "on"), blurb={"off": "-", "on": "-"}),
+                Switch(name="b", levels=("off", "on"), blurb={"off": "-", "on": "-"}),
             ]
 
         def mode_issues(self, mode):
@@ -1105,13 +1105,13 @@ def test_settle_coordinated_fallback_when_no_single_downgrade_helps(monkeypatch)
 def test_settle_leaves_unfixable_errors_visible(monkeypatch):
     # A plugin erroring even at all-defaults (a misconfiguration, not a combination) must not
     # make settle thrash — nothing helps, so nothing flips and `fy mode` keeps surfacing it.
-    from foldyard.plugins import Axis, Plugin, Registry
+    from foldyard.plugins import Plugin, Registry, Switch
 
     class Broken(Plugin):
         name = "broken"
 
-        def axes(self):
-            return [Axis(name="a", rungs=("off", "on"), blurb={"off": "-", "on": "-"})]
+        def switches(self):
+            return [Switch(name="a", levels=("off", "on"), blurb={"off": "-", "on": "-"})]
 
         def mode_issues(self, mode):
             yield ("error", "always broken")

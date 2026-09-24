@@ -77,14 +77,14 @@ _BACKEND = get_backend(config.machine_backend())
 
 def axes() -> dict[str, tuple[str, ...]]:
     """axis -> its rungs (rung 0 = the zero-secret default), from the active registry."""
-    return registry().axis_rungs()
+    return registry().switch_levels()
 
 
 def axis_defaults() -> dict[str, str]:
     """axis -> its zero-secret resting rung (rung 0; usually but not necessarily "off" — e.g.
     storage's "local", auth0's "sim"), from the active registry. Unset/invalid/expired values
     read as this."""
-    return registry().axis_defaults()
+    return registry().switch_defaults()
 
 
 def mode_blurb() -> dict[tuple[str, str], str]:
@@ -94,12 +94,12 @@ def mode_blurb() -> dict[tuple[str, str], str]:
 
 def axis_daemon() -> dict[str, str | None]:
     """axis -> the daemon name its status maps to (None ⇒ no daemon), from the active registry."""
-    return registry().axis_daemon()
+    return registry().switch_daemon()
 
 
 def emergency() -> dict[str, tuple[str, ...]]:
     """axis -> rungs that carry a TTL + auto-revert, from the active registry."""
-    return registry().emergency_rungs()
+    return registry().emergency_levels()
 
 
 def in_box() -> bool:

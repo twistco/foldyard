@@ -136,7 +136,7 @@ def test_port_allocation_survives_a_corrupt_registry(junk):
 
 # ── the declarative Requires evaluator (both tiers) vs the hook vs the oracle ────────────
 # The shipped cross-plugin guards are declarative Requires DATA evaluated by
-# Registry.mode_issues — in-code Axis.requires rows for intrinsic couplings
+# Registry.mode_issues — in-code Switch.requires rows for intrinsic couplings
 # (fakedep→fakecred) and consumer [[require]] config rows for wiring-dependent ones
 # (llm→gcp, storage→gcp); the mode_issues hook remains the escape hatch. All three
 # representations must agree with direct evaluation of the constraint data, for any
@@ -169,7 +169,7 @@ def test_requires_messages_carry_their_own_atomic_fix(world, source):
     # fix; de-escalation is never trapped").
     violated = []
     for ax in world.axes:
-        value = world.mode.get(ax.name, ax.rungs[0])
+        value = world.mode.get(ax.name, ax.levels[0])
         for axis, trigger, other, allowed, severity in world.constraints:
             if axis == ax.name and value in trigger and world.mode.get(other) not in allowed:
                 violated.append((severity, ax.name, value, other, sorted(allowed)))
@@ -185,7 +185,7 @@ def test_requires_messages_carry_their_own_atomic_fix(world, source):
 # ── devmode.settle_incoherent — the expiry cascade over GENERATED registries ─────────────
 # The plugin-agnostic claim, tested against synthetic worlds (tests/pbt.py): axes with 2-4
 # rungs, requires-style constraints that may be unsatisfiable or error even at all-defaults —
-# run over ALL THREE constraint representations (mode_issues hook, in-code Axis.requires,
+# run over ALL THREE constraint representations (mode_issues hook, in-code Switch.requires,
 # and config [[require]] rows), so settle's whole contract also exercises the core Requires
 # evaluator — and the config parse/merge in front of it — end-to-end.
 # Validated red against: settling to rungs[-1] instead of the default (downgrade-only shrinks

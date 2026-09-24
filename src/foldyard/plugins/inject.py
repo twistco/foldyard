@@ -58,7 +58,7 @@ import shlex
 import sys
 
 from .. import config
-from . import Axis, InjectRule, Plugin, Secret
+from . import InjectRule, Plugin, Secret, Switch
 
 
 class InjectPlugin(Plugin):
@@ -94,17 +94,17 @@ class InjectPlugin(Plugin):
                 )
         return specs
 
-    def axes(self) -> list[Axis]:
-        axes: list[Axis] = []
+    def switches(self) -> list[Switch]:
+        axes: list[Switch] = []
         for spec in self._specs():
             axis = spec.get("switch")
             if not axis:
                 continue
             on_blurb = spec.get("label") or f"inject on {spec.get('host', '?')}"
             axes.append(
-                Axis(
+                Switch(
                     name=str(axis),
-                    rungs=("off", "on"),
+                    levels=("off", "on"),
                     blurb={"off": "no injection", "on": str(on_blurb)},
                     daemon="egress-proxy",
                     # github=user's lifecycle: `on` carries a TTL and the supervisor reverts it

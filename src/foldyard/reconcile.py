@@ -163,7 +163,7 @@ class CapabilityScope(Scope):
             cap = caps.get(axis)
             desired = f"{axis}={value} capability chain works"
             if cap is None:
-                if any(p.axis == axis for p in devmode.capability_probes(mode)):
+                if any(p.switch == axis for p in devmode.capability_probes(mode)):
                     rows.append(ScopeRow("unknown", self.name, desired, "not probed yet"))
                 continue  # no probe targets this axis — no claim either way
             if cap.get("ok"):

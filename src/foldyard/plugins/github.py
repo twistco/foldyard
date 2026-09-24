@@ -28,13 +28,13 @@ from pathlib import Path
 
 from .. import config
 from . import (
-    Axis,
     CapabilityProbe,
     DoctorContext,
     DoctorFix,
     InjectRule,
     Plugin,
     Secret,
+    Switch,
     VerifyContext,
     proxy,
 )
@@ -192,7 +192,7 @@ def _verify_rows(
 class GithubPlugin(Plugin):
     name = "github"
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         # Self-gated on [plugins.github] — any table, even empty (the user emergency needs no App
         # fields) — like claude/codex keyless: the registry contract is CORE plugins stay inert
         # until their own config is declared, and github was the last always-on exception. No
@@ -200,9 +200,9 @@ class GithubPlugin(Plugin):
         if not config.github_declared():
             return []
         return [
-            Axis(
+            Switch(
                 name="github",
-                rungs=("off", "app", "user"),
+                levels=("off", "app", "user"),
                 blurb=_BLURB,
                 daemon="egress-proxy",
                 emergency=("user",),
@@ -467,7 +467,7 @@ class GithubPlugin(Plugin):
 
         return [
             CapabilityProbe(
-                axis="github",
+                switch="github",
                 name="github-app-identity",
                 check=_check,
                 interval=300.0,  # a rotated key is rare; the call is cheap but not free

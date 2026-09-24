@@ -33,7 +33,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .. import config
-from . import Axis, DoctorContext, DoctorFix, Plugin
+from . import DoctorContext, DoctorFix, Plugin, Switch
 
 _BLURB = {
     "sim": "browse a dump: app → Auth0 simulator seeded from the dump DB (offline default)",
@@ -44,7 +44,7 @@ _BLURB = {
 class Auth0SimPlugin(Plugin):
     name = "auth0-sim"
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         # Self-gate on the consumer declaring [plugins.auth0-sim] (registry plan Step D): the auth0
         # axis is meaningless without a simulator harness to point the app at, so a generic repo
         # never gets an `auth0` axis it can't back. (The plugin already only LOADS when the table is
@@ -55,7 +55,7 @@ class Auth0SimPlugin(Plugin):
         # repo's "offline by default" posture, and the always-on data services' callbacks expect
         # it). `real` reaches real staging Auth0 and needs an identity to fully log in, so it's the
         # opt-in rung. (Was the `dump` axis off|on — renamed so the axis names what it selects.)
-        return [Axis(name="auth0", rungs=("sim", "real"), blurb=_BLURB)]
+        return [Switch(name="auth0", levels=("sim", "real"), blurb=_BLURB)]
 
     # The auth0 compose overlays are declared as `[[overlay]]` entries in foldyard.toml now
     # (config-only, matched on their `when`) — see docs/compose-overlays.md:
@@ -73,7 +73,7 @@ class Auth0SimPlugin(Plugin):
         # Dump-browsing (sim login, local dump DB) while the app's storage points at the REAL
         # remote data plane mixes fixture data with live buckets — legal (a deliberate hybrid)
         # but rarely what you meant, so warn rather than refuse. Deliberately a HOOK, not an
-        # Axis.requires row: this is a combination WARNING whose absence semantics are the
+        # Switch.requires row: this is a combination WARNING whose absence semantics are the
         # OPPOSITE of a requirement — with no storage axis loaded there is nothing to warn
         # about, whereas a requires row treats an absent axis as unmet and would fire.
         if mode.get("auth0") == "sim" and mode.get("storage") == "staging":

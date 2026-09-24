@@ -602,7 +602,7 @@ ordering discipline, and a worked example: [compose-overlays.md](./compose-overl
 ## `[[require]]`
 
 Cross-axis coherence requirements, pure config — the consumer tier of the plugins'
-`Axis.requires` (same evaluator, same semantics, same synthesized fix message). While `axis`
+`Switch.requires` (same evaluator, same semantics, same synthesized fix message). While `axis`
 sits at a rung in `when`, `needs` must sit at a rung in `accepts`; otherwise `fy mode`
 refuses the combination (`severity = "error"`, the default) or prints a warning and applies
 it (`"warn"`).
@@ -622,7 +622,7 @@ Declare a requirement here when it is a consequence of *your wiring* rather than
 itself — e.g. `llm=record/live` needs the gcp identity only because your `[[overlay]]` routes
 LLM traffic through Vertex/ADC; a consumer on another provider would declare a different
 `needs` (perhaps an `[[inject]]` credential axis, which no plugin code could name) or none.
-Intrinsic couplings ship in the plugin, on its `Axis.requires`.
+Intrinsic couplings ship in the plugin, on its `Switch.requires`.
 
 Semantics match the in-code tier: an absent `needs` axis satisfies nothing (the requirement
 still fires); an absent owner *key* in a mode reads as the axis default. Rows merge onto the

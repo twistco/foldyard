@@ -1519,7 +1519,7 @@ def requires_declared() -> list[dict]:
     gcp=sa only because THIS consumer's ``[[overlay]]`` routes real LLM traffic through
     Vertex/ADC — lives here next to the overlays that cause it, and can reference config-defined
     axes (an ``[[inject]]`` credential) no plugin file could name. Intrinsic couplings stay
-    in-code on the plugin's own :attr:`~foldyard.plugins.Axis.requires`. Non-dict rows are
+    in-code on the plugin's own :attr:`~foldyard.plugins.Switch.requires`. Non-dict rows are
     ignored (like ``[[overlay]]``); FIELD validation is the registry's (loud, at construction —
     see ``Registry.__init__``), since only it knows the loaded axes."""
     raw = _toml().get("require")

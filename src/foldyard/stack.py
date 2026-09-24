@@ -960,7 +960,7 @@ def reconcile_posture(
     (``llm=off→record``) reconcile too, not just profile toggles. Two guardrails keep it tame:
     (1) a NO-OP unless the signature actually changed, and (2) only touch a stack that is
     ALREADY up — a posture flip must never START a heavy stack the dev didn't ask for. The one
-    carve-out from (2): the tiny plugin-declared POSTURE services (``Plugin.posture_services``,
+    carve-out from (2): the tiny plugin-declared POSTURE services (``Plugin.mode_services``,
     e.g. the gcp metadata emulator) are converged even when the stack is down — they are what
     the flip is asking for, and without them a gcp rung declared in a never-upped worktree read
     as granted while the box couldn't mint a token (see ``_reconcile_posture_services``). No
@@ -996,7 +996,7 @@ def reconcile_posture(
             # Posture-critical services (service → wanted under this mode): the tiny stateless
             # containers a rung is enforced by (the gcp metadata emulator). The reconcile itself
             # materializes them, so they don't count toward "the stack is up".
-            managed = registry().posture_services(mode)
+            managed = registry().mode_services(mode)
             if not _stack_is_up(ctx, ignore_services=set(managed)):
                 # guardrail (2): never START the stack on a posture change — but DO converge the
                 # declared posture services: they are exactly what the flip is asking for (see

@@ -90,9 +90,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   hard-prerequisite checks before `up`, and the keyless-agent credential taxonomy + host-side
   secret capture (`ensure_cred` for agent creds, `ensure_secret` for declared `[[secret]]` rows).
 
-`plugins/` — the framework (`__init__.py`: `Axis`/`Requires`/`Plugin`/`Registry`, per-consumer
+`plugins/` — the framework (`__init__.py`: `Switch`/`Requires`/`Plugin`/`Registry`, per-consumer
 loading; cross-axis coherence is declared as `Requires` DATA on two tiers — in-code
-`Axis.requires` for intrinsic couplings, the consumer's `[[require]]` table for
+`Switch.requires` for intrinsic couplings, the consumer's `[[require]]` table for
 wiring-dependent ones (docs/configuration.md), merged at Registry construction; the
 `mode_issues` hook is the escape hatch for logic the data can't express, e.g. combination
 warnings)

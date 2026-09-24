@@ -233,7 +233,7 @@ def _targets(
             )
     for rule in reg.proxy_rules(mode):  # what the CURRENT posture activates
         add(rule.host + rule.path_prefix, rule.label or "packaged injector", True, False)
-    for axis, rungs in reg.axis_rungs().items():  # …and what another rung would
+    for axis, rungs in reg.switch_levels().items():  # …and what another rung would
         if not rungs or mode.get(axis, rungs[0]) != rungs[0]:
             continue  # already armed — its rules came from the pass above
         for rung in rungs[1:]:

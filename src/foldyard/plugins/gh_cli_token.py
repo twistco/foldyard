@@ -3,7 +3,7 @@
 Packaged rather than a consumer script, for the reason in ADR-0023. Same
 ``{"value", "ttl"}`` contract as :mod:`~foldyard.plugins.github_app_token`, but the value is full
 user authority — including push — so it is only ever wired up while the mode is ``github=user``,
-which carries a mandatory TTL and auto-reverts (``Axis.emergency``). The token is still injected
+which carries a mandatory TTL and auto-reverts (``Switch.emergency``). The token is still injected
 host-side by the proxy, so it never enters the box.
 
 The reported ttl is deliberately short: the proxy re-runs this every few minutes, so revoking is

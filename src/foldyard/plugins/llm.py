@@ -26,7 +26,7 @@ auth0-sim: it migrates into the consumer repo via ``[plugins].load`` in spinout 
 from __future__ import annotations
 
 from .. import config
-from . import Axis, Plugin
+from . import Plugin, Switch
 
 _BLURB = {
     "off": "LLM mocked/cassettes — no AI egress, zero secrets",
@@ -38,16 +38,16 @@ _BLURB = {
 class LlmPlugin(Plugin):
     name = "llm"
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         # Self-gate on the consumer declaring [plugins.llm] (registry plan Step D — the plugin
         # already only LOADS when the table is declared, Step C; belt-and-suspenders for a
         # bare/extra-injected plugin). Without a compose override the rungs would change nothing.
         if not config.llm_declared():
             return []
         return [
-            Axis(
+            Switch(
                 name="llm",
-                rungs=("off", "record", "live"),
+                levels=("off", "record", "live"),
                 blurb=_BLURB,
                 # No `requires` here: what credential real record/live traffic consumes is
                 # WIRING, declared consumer-side. Tangible's foldyard.toml carries

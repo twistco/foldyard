@@ -44,7 +44,7 @@ from pathlib import Path
 from .. import config, keyless
 from ..keyless import CODEX_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CODEX_KEYLESS_HOST as _KEYLESS_HOST
-from . import Axis, InjectRule, Plugin, Secret
+from . import InjectRule, Plugin, Secret, Switch
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
 
 # Remove a stale npm-managed Codex so the native installer's ~/.local/bin copy wins on PATH (the
@@ -73,16 +73,16 @@ _INSTALL = (
 class CodexPlugin(Plugin):
     name = "codex"
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         # Only when keyless is configured: a github-shaped on/off injector axis (like claude's).
         # Off (the zero-secret default) → the box holds only a dummy key; on → the proxy injects the
         # real key host-side. Maps to the shared "egress-proxy" daemon (one proxy, many injectors).
         if not config.codex_keyless():
             return []
         return [
-            Axis(
+            Switch(
                 name="codex",
-                rungs=("off", "on"),
+                levels=("off", "on"),
                 blurb={
                     "off": "no Codex credential reaches OpenAI (box holds only a dummy)",
                     "on": "keyless Codex: proxy injects your credential host-side (none in box)",

@@ -27,6 +27,12 @@ break config or CLI shape, and say so here. How a release is cut:
   `fy config widenings` list any still in use. Rename them in the same commit that raises
   `[project] min_foldyard_version` to this release: an older `fy` doesn't know the new names, so it
   would read `firewall = true` as no firewall at all.
+- **Plugin API: `Axis` is now `Switch`, and its `rungs` are `levels`.** The rest follows:
+  `Plugin.axes()` → `switches()`, `Plugin.posture_services()` → `mode_services()`,
+  `Requires.axis` / `CapabilityProbe.axis` → `.switch`, and on `Registry`: `axes()` → `switches()`,
+  `axis_rungs()` → `switch_levels()`, `axis_defaults()` → `switch_defaults()`, `axis_daemon()` →
+  `switch_daemon()`, `emergency_rungs()` → `emergency_levels()`. There are no aliases: rename them
+  in an entry-point plugin when you upgrade.
 
 - **`fy host` is the supervisor's status, not a foreground run.** The supervisor was already
   started detached by `fy up` / `fy box up` almost every time, so the foreground terminal it was

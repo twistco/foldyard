@@ -39,7 +39,7 @@ from pathlib import Path
 from .. import config, keyless
 from ..keyless import CLAUDE_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CLAUDE_KEYLESS_HOST as _KEYLESS_HOST
-from . import Axis, InjectRule, Plugin, Secret
+from . import InjectRule, Plugin, Secret, Switch
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
 
 # Remove a stale npm/global Claude so the native installer's ~/.local/bin copy wins on PATH (an
@@ -73,16 +73,16 @@ _ONBOARD_PY = (
 class ClaudePlugin(Plugin):
     name = "claude"
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         # Only when keyless is configured: a github-shaped on/off injector axis. Off (the
         # zero-secret default) → the box holds only a dummy key and can't reach Claude; on → the
         # proxy injects the real key/token host-side. Maps to the shared "egress-proxy" daemon.
         if not config.claude_keyless():
             return []
         return [
-            Axis(
+            Switch(
                 name="claude",
-                rungs=("off", "on"),
+                levels=("off", "on"),
                 blurb={
                     "off": "no Claude credential reaches Anthropic (box holds only a dummy)",
                     "on": "keyless Claude: proxy injects your key/token host-side (none in box)",
