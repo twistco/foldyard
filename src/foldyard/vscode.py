@@ -275,6 +275,14 @@ _ENGINE_SETTINGS = frozenset(
         "containers.orchestratorClient",
     }
 )
+# The same redirection one level down: an engine variable in the terminal env would point this
+# window's terminals at a different engine than the one it is attached through.
+_TERMINAL_ENV_SETTINGS = tuple(
+    f"terminal.integrated.env.{os_}" for os_ in ("osx", "linux", "windows")
+)
+_ENGINE_ENV_VARS = frozenset(
+    {"DOCKER_HOST", "DOCKER_CONTEXT", "CONTAINER_HOST", "CONTAINER_CONNECTION"}
+)
 
 
 def _global_user_dir() -> Path | None:
@@ -316,6 +324,10 @@ def _seed_from_global(udd: Path) -> bool:
             if not isinstance(loaded, dict):
                 raise ValueError("top-level JSON is not an object")
             kept = {k: v for k, v in loaded.items() if k not in _ENGINE_SETTINGS}
+            for key in _TERMINAL_ENV_SETTINGS:
+                env = kept.get(key)
+                if isinstance(env, dict):
+                    kept[key] = {k: v for k, v in env.items() if k not in _ENGINE_ENV_VARS}
             # Written as JSON: the copy's comments are dropped (the original is untouched), so the
             # instance file stays one foldyard can keep its pins in.
             _user_settings(udd).write_text(json.dumps(kept, indent=2) + "\n")
@@ -325,6 +337,11 @@ def _seed_from_global(udd: Path) -> bool:
     if seeded:
         print(f"▶ seeded from your VS Code settings: {source}")
     return seeded
+
+
+# What VS Code's JSONC scanner treats as a line break (its `isLineBreak`: 10, 13, 8232, 8233) — so
+# what ends a `//` comment.
+_JSONC_LINE_BREAKS = ("\n", "\r", "\u2028", "\u2029")
 
 
 def _strip_jsonc(text: str) -> tuple[str, bool]:
@@ -345,8 +362,8 @@ def _strip_jsonc(text: str) -> tuple[str, bool]:
             i = j + 1
         elif text.startswith("//", i):
             had_comments = True
-            end = text.find("\n", i)
-            i = n if end < 0 else end
+            ends = [e for e in (text.find(b, i) for b in _JSONC_LINE_BREAKS) if e >= 0]
+            i = min(ends, default=n)
         elif text.startswith("/*", i):
             had_comments = True
             end = text.find("*/", i + 2)
@@ -355,7 +372,8 @@ def _strip_jsonc(text: str) -> tuple[str, bool]:
             out.append("\n" * text.count("\n", i, end))
             i = end + 2
         else:
-            out.append(c)
+            # JSON's whitespace has no U+2028/U+2029; VS Code's scanner counts them as line breaks.
+            out.append("\n" if c in "\u2028\u2029" else c)
             i += 1
     stripped = "".join(out)
     # Second pass over comment-free text, so a comment between the comma and the bracket is moot.

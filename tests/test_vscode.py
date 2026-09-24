@@ -716,6 +716,11 @@ def test_a_user_owned_jsonc_config_is_never_clobbered(fake, capsys, text):
         ('{"q": "say \\"hi\\", }", }', ({"q": 'say "hi", }'}, False)),
         ('{"a": 1, // note\n}', ({"a": 1}, True)),
         ('{"a": /* x */ 1 /* y */,}', ({"a": 1}, True)),
+        # VS Code's scanner ends a line comment at any of its line breaks, not only \n.
+        ('{"a": 1, // c\r"b": 2}', ({"a": 1, "b": 2}, True)),
+        ('{"a": 1, // c\u2028"b": 2}', ({"a": 1, "b": 2}, True)),
+        ('{"a": 1,\u2029"b": 2 // c\u2029}', ({"a": 1, "b": 2}, True)),
+        ('{"s": "keep\u2028me"}', ({"s": "keep\u2028me"}, False)),
     ],
 )
 def test_loads_jsonc(text, expected):
@@ -1057,6 +1062,10 @@ def test_the_seed_drops_settings_that_point_at_another_engine(fake):
                 "docker.context": "desktop-linux",
                 "containers.environment": {"DOCKER_HOST": "unix:///elsewhere.sock"},
                 "containers.containerClient": "com.microsoft.visualstudio.containers.docker",
+                # The same redirection, one level down: this window's terminals.
+                "terminal.integrated.env.osx": {"DOCKER_HOST": "unix:///elsewhere.sock", "A": "1"},
+                "terminal.integrated.env.linux": {"DOCKER_CONTEXT": "desktop-linux"},
+                "terminal.integrated.env.windows": {"CONTAINER_HOST": "ssh://elsewhere"},
                 "editor.fontSize": 15,
             }
         ),
@@ -1066,6 +1075,11 @@ def test_the_seed_drops_settings_that_point_at_another_engine(fake):
 
     settings = json.loads(_settings(fake).read_text())
     assert settings["editor.fontSize"] == 15
+    osx = settings["terminal.integrated.env.osx"]
+    assert osx["A"] == "1"
+    assert "DOCKER_HOST" not in osx
+    assert settings["terminal.integrated.env.linux"] == {}
+    assert settings["terminal.integrated.env.windows"] == {}
     assert not [k for k in settings if k.startswith(("dev.containers", "remote.containers"))]
     assert not [k for k in settings if k.startswith(("docker.", "containers."))]
 
