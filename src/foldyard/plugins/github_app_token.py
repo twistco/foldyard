@@ -26,7 +26,7 @@ Deliberately NOT here: any vault client. Where the PEM comes from is the operato
 foldyard checks PRESENCE (a doctor row) and the ``[[secret]]`` capture prompt echoes the consumer's
 ``how`` hint (e.g. a ``gcloud secrets versions access …`` command) for the human to run themselves.
 Reading a vault from inside the minter is what coupled `github=app` to a live gcloud/PAM chain and
-inverted the privilege scope — the highest-value identity on the Mac gating a PR comment.
+inverted the privilege scope — the highest-value identity on the host gating a PR comment.
 
 Run (the github plugin builds this command from ``sys.executable``)::
 
@@ -143,7 +143,7 @@ def _env_proxies(skip_port: int | None = None) -> dict[str, str]:
     The shell that launched ``fy host`` may export ``HTTPS_PROXY``. If that is foldyard's own
     egress proxy we must not mint through it: the inject rule we are minting FOR rewrites
     ``Authorization`` on api.github.com, so our App JWT would be replaced by the very token we're
-    trying to obtain. Everything else is honoured, because on a Mac behind a mandatory egress proxy
+    trying to obtain. Everything else is honoured, because on a host behind a mandatory egress proxy
     (corporate, or a local Zscaler-style client) it is the only way out.
 
     ``skip_port`` is foldyard's proxy port, passed on argv by the github plugin, which knows it

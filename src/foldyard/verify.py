@@ -72,7 +72,7 @@ def _mountpoint(line: str) -> str:
 def _host_home() -> str:
     """The OPERATOR's home — the identity the leak pattern looks for. In-box ``Path.home()`` is
     the box user's (``/root``, ``/home/vscode``), which on a Linux host is not the home a leaked
-    mount would carry (``/home/<user>``; a Mac's is caught by ``/Users`` regardless), so
+    mount would carry (``/home/<user>``; a macOS home is caught by ``/Users`` regardless), so
     ``fy box up`` bakes the host's as ``FY_HOST_HOME`` and an in-box audit judges by that. A box
     from before the bake falls back to the process's own."""
     return os.environ.get("FY_HOST_HOME") or str(Path.home())
@@ -199,8 +199,8 @@ def _vm_boundary(
     if not _probe_runs(engine, env, probe):
         rep.bad(
             f"probe image '{probe}' could not run — the boundary battery DID NOT EXECUTE, so "
-            "nothing below is proven. (Behind the wall? Start the host supervisor, or pre-pull "
-            f"the image / set VERIFY_IMG to one already in the VM.)"
+            "nothing below is proven. (Behind the VM firewall? Start the host supervisor, or "
+            f"pre-pull the image / set VERIFY_IMG to one already in the VM.)"
         )
         return
 
@@ -214,10 +214,10 @@ def _vm_boundary(
     # The VM's mount table is PID 1's, read through the host PID namespace: `mount` (or
     # `ls /Users`) inside a --privileged container shows the CONTAINER's mount namespace, in
     # which a VM-level mount of the operator's whole home never appears — a Lima VM mounting all
-    # of `$HOME` passed the old probe (2026-09-11, docs/archive/verify-false-pass.md). `/proc/1/mounts`
-    # is world-readable, so this coexists with the escape probe above, which relies on
-    # `/proc/1/ns/*` being unreadable. An EMPTY table is not a clean one: nothing printed means
-    # the probe did not run, and grepping no lines for host paths finds none of them.
+    # of `$HOME` passed the old probe (2026-09-11, docs/archive/verify-false-pass.md).
+    # `/proc/1/mounts` is world-readable, so this coexists with the escape probe above, which
+    # relies on `/proc/1/ns/*` being unreadable. An EMPTY table is not a clean one: nothing
+    # printed means the probe did not run, and grepping no lines for host paths finds none of them.
     mp = _run(
         [engine, "run", "--rm", "--privileged", "--pid=host", probe, "sh", "-c", _PID1_MOUNTS],
         env,
@@ -280,7 +280,7 @@ def _kernel_release() -> str:
 
 
 def _box_posture(rep: _Report, env: dict) -> None:
-    print("▶ dev-box posture (credential-less: read+commit, never push)")
+    print("▶ dev-box checks (credential-less: read+commit, never push)")
     home = Path(os.environ.get("HOME") or str(Path.home()))
 
     # [machine].runtime = "gvisor" bakes FY_MACHINE_RUNTIME into the box at create; the claim is
@@ -290,7 +290,10 @@ def _box_posture(rep: _Report, env: dict) -> None:
         if "gvisor" in kernel.lower():
             rep.ok(f"box runs under gVisor (kernel {kernel})")
         else:
-            rep.bad(f"box is NOT under gVisor — kernel {kernel} is the VM's (posture not applied)")
+            rep.bad(
+                f"box is NOT under gVisor — kernel {kernel} is the VM's "
+                "([machine].runtime not applied)"
+            )
 
     # The editor attach's host bridges (docs/security.md § fy verify). VS Code's Dev Containers
     # attach forwards the host's SSH agent and its git-credential store into the box and sets the
@@ -398,9 +401,9 @@ def _wall_posture(rep: _Report) -> None:
     fail-closed property the wall exists for. Two probes, both bypassing HTTPS_PROXY: a raw connect
     to a public IP on 443 (the baseline), AND one on port 53 — the wall now allows :53 only to
     LOCAL resolvers, so a public-IP :53 connect (the exfil-tunnel class) must also fail. Only the
-    Mac proxy path may be open.
+    host proxy path may be open.
 
-    The former caveat here — "an offline Mac also fails these, a false PASS" — is now CHECKED
+    The former caveat here — "an offline host also fails these, a false PASS" — is now CHECKED
     rather than noted. Both probes assert a refusal, so a box with no egress at all passes them
     both and the wall reads as enforcing when nothing was tested. The PERMITTED path (the proxy
     the wall exists to funnel traffic into) is the positive control: if that is unreachable too,
@@ -409,12 +412,15 @@ def _wall_posture(rep: _Report) -> None:
     fuller red-team battery — rootful socket masked, nft-flush denied, host-network egress caught
     — is the host-side `_guest_state` probe on every `fy up` + example-lima-wall/
     test_network.sh; the box can't inspect VM-root state from an unprivileged container.)"""
-    print("▶ egress wall ([machine] firewall — direct egress from the box must be refused)")
+    print("▶ VM firewall ([machine] firewall — direct egress from the box must be refused)")
 
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
     m = re.search(r"//(?:[^@/]*@)?([^:/]+):(\d+)", proxy)
     if not m:
-        rep.bad("no HTTPS_PROXY in the box — the wall's permitted path is unknown, wall UNPROVEN")
+        rep.bad(
+            "no HTTPS_PROXY in the box — the VM firewall's permitted path is unknown, "
+            "VM firewall UNPROVEN"
+        )
         return
     try:
         with socket.create_connection((m.group(1), int(m.group(2))), timeout=5):
@@ -423,7 +429,7 @@ def _wall_posture(rep: _Report) -> None:
         # No egress AT ALL. The refusals below would pass for the wrong reason.
         rep.bad(
             f"the permitted path ({m.group(1)}:{m.group(2)}) is unreachable too — this box has "
-            "no egress at all, so a refused direct connect proves nothing. Wall UNPROVEN "
+            "no egress at all, so a refused direct connect proves nothing. VM firewall UNPROVEN "
             "(is the host supervisor running? `fy host` on the host)"
         )
         return
@@ -431,7 +437,9 @@ def _wall_posture(rep: _Report) -> None:
     for host, port, what in (("1.1.1.1", 443, "443"), ("1.1.1.1", 53, "53 (exfil-tunnel port)")):
         try:
             with socket.create_connection((host, port), timeout=5):
-                rep.bad(f"direct egress to {host}:{what} CONNECTED — the wall is NOT enforcing")
+                rep.bad(
+                    f"direct egress to {host}:{what} CONNECTED — the VM firewall is NOT enforcing"
+                )
         except OSError:
             rep.ok(f"direct egress to a public IP:{what} rejected")
 
@@ -514,7 +522,7 @@ def verify() -> int:
             _wall_posture(rep)
     else:
         print(
-            "▶ dev-box posture — skipped (not inside the box; run via 'fy box shell' "
+            "▶ dev-box checks — skipped (not inside the box; run via 'fy box shell' "
             "then 'fy verify')"
         )
 

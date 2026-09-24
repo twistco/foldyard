@@ -171,9 +171,9 @@ def test_revert_refuses_when_nothing_was_adopted(checkout):
 def test_adopt_and_revert_refuse_in_the_box(checkout, monkeypatch):
     """Same boundary as `allowlist.grant`: the yard must not adopt its own config."""
     monkeypatch.setattr(config, "in_box", lambda: True)
-    with pytest.raises(SystemExit, match="Mac-only"):
+    with pytest.raises(SystemExit, match="only works on your computer"):
         configpin.adopt(checkout)
-    with pytest.raises(SystemExit, match="Mac-only"):
+    with pytest.raises(SystemExit, match="only works on your computer"):
         configpin.revert(checkout)
 
 

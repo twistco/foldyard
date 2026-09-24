@@ -171,7 +171,7 @@ def test_ensure_cred_echoes_the_how_hint_before_prompting(tmp_path):
         interactive=True,
         prompt=lambda _: "sk-ant-oat01-REAL",
         echo=echo,
-        how="run `claude setup-token` on the Mac to mint one",
+        how="run `claude setup-token` on your computer to mint one",
     )
     assert any("claude setup-token" in m for m in out)
 

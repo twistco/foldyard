@@ -1,4 +1,4 @@
-"""``gh-cli`` minter — inject the Mac user's OWN ``gh`` token (the ``github=user`` EMERGENCY rung).
+"""``gh-cli`` minter — inject the host user's OWN ``gh`` token (the ``github=user`` EMERGENCY rung).
 
 Packaged rather than a consumer script, for the reason in ADR-0023. Same
 ``{"value", "ttl"}`` contract as :mod:`~foldyard.plugins.github_app_token`, but the value is full
@@ -30,7 +30,11 @@ def main(argv: list[str] | None = None) -> int:
             ["gh", "auth", "token"], capture_output=True, text=True, timeout=15, check=True
         )
     except FileNotFoundError:
-        print("gh_cli_token: the gh CLI isn't installed (brew install gh)", file=sys.stderr)
+        print(
+            "gh_cli_token: the gh CLI isn't installed "
+            "(https://cli.github.com — `brew install gh` on macOS)",
+            file=sys.stderr,
+        )
         return 1
     except subprocess.TimeoutExpired:
         print("gh_cli_token: `gh auth token` timed out", file=sys.stderr)

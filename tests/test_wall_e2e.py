@@ -175,7 +175,7 @@ def test_host_wall_is_enforcing_once_installed(repo):
     shown = fy(["machine", "host-firewall"], repo, timeout=120, env_extra=WALL)
     assert shown.rc == 0 and "✓ enforcing" in shown.out, shown.out
     doc = fy(["doctor"], repo, timeout=120, env_extra=WALL)
-    rows = [ln for ln in doc.out.splitlines() if "host wall" in ln]
+    rows = [ln for ln in doc.out.splitlines() if "host firewall" in ln]
     assert rows and "enforcing (" in rows[0] and "NOT" not in rows[0], doc.out
 
 

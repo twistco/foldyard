@@ -152,7 +152,7 @@ class DoctorContext:
     run: Callable[..., tuple[int, str]]  # devmode._run(cmd, timeout=…) -> (rc, output)
     which: Callable[[str], bool]  # devmode._which
     result: Callable[..., tuple[str, str, str]]  # devmode._result(ok, name, good, bad)
-    probe: Callable[[int], bool]  # devmode.probe(port) — TCP liveness (box→host.containers vs Mac)
+    probe: Callable[[int], bool]  # devmode.probe(port) — TCP liveness (box→host.containers vs host)
     # The mode the state file resolves to right now (devmode.read()["mode"]) — the same mode
     # the supervisor reconciles daemons from, so a plugin's host-side rows can be gated the way
     # its daemons are (the proxy's listener row is only a finding when the listener is desired).
@@ -262,11 +262,11 @@ class Secret:
     replacement for "the consumer ships a script that fetches it from somewhere".
 
     Foldyard's business is PRESENCE, not provenance: it checks whether ``var`` is in
-    ``~/.foldyard/<project>/host.env`` (a doctor row) and, on a Mac TTY, prompts once for a paste
+    ``~/.foldyard/<project>/host.env`` (a doctor row) and, on a host TTY, prompts once for a paste
     (:func:`foldyard.keyless.ensure_secret`). ``how`` is the one-line "where do I get this?" hint
     echoed at that prompt — e.g. a ``gcloud secrets versions access …`` command, a 1Password item,
     a URL. It is **PRINTED, NEVER EXECUTED**: running a consumer-declared command string host-side
-    would rebuild exactly the repo-code-runs-on-the-Mac hole that moving the minters in-package
+    would rebuild exactly the repo-code-runs-on-the-host hole that moving the minters in-package
     closed (ADR-0023). A vault-fetching ``source`` may arrive later
     as a fixed set of package-implemented kinds — never as a command.
 
@@ -388,7 +388,7 @@ class Plugin:
     def box_doctor_checks(self, ctx: DoctorContext) -> Iterable[tuple[str, str, str]]:
         """Yield ``(status, name, detail)`` rows for `fy doctor` run INSIDE the box.
 
-        Distinct from :meth:`doctor_checks`, which answers the Mac-side question "what can
+        Distinct from :meth:`doctor_checks`, which answers the host-side question "what can
         this machine grant?" — this answers the box-side one, "is what the mode claims
         actually reaching me?". They are not the same question, and the difference is a real
         failure mode: an injection whose host-side mint is failing leaves `fy mode` showing
@@ -414,7 +414,7 @@ class Plugin:
 
     def no_proxy_hosts(self) -> list[str]:
         """In-stack hostnames this plugin's own containers must reach DIRECTLY, bypassing the
-        egress proxy (they end up in the box's ``NO_PROXY``). The proxy runs on the Mac and can't
+        egress proxy (they end up in the box's ``NO_PROXY``). The proxy runs on the host and can't
         resolve a stack-network hostname, so a proxied call to one 502s — or hangs first.
 
         Only for services the PLUGIN owns (the gcp metadata emulator). Consumer stack services go

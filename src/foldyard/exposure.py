@@ -48,16 +48,16 @@ from . import config, configpin
 IGNORED_KEYS: dict[str, str] = {
     "proxy.allow": (
         "grants moved to the host-side allow-store (outside the repo mount, so the box can't "
-        "widen its own wall) — re-add with `fy allow add <host> --level permanent`, or declare "
-        "the hosts under `[proxy] recommend` (with a why) for the host to OFFER at adoption"
+        "widen its own allowlist) — re-add with `fy allow add <host> --level permanent`, or "
+        "declare the hosts under `[proxy] recommend` (with a why) for the host to OFFER at adoption"
     ),
     "inject.minter": (
-        "consumer minter COMMANDS were removed — a minter is a packaged kind or an installed "
-        "plugin, never a string the host executes (ADR-0023)"
+        "consumer token-service COMMANDS were removed — a token service is a packaged kind or "
+        "an installed plugin, never a string the host executes (ADR-0023)"
     ),
     "inject.token_env": (
-        "the token var is DERIVED from the axis (FY_INJECT_<AXIS>) — a declared one is ignored, "
-        "so a config rule can't point at another mechanism's secret"
+        "the token var is DERIVED from the switch (FY_INJECT_<SWITCH>) — a declared one is "
+        "ignored, so a config rule can't point at another mechanism's secret"
     ),
     "vscode.workspace_file": (
         "`fy code` always attaches to the checkout folder (ADR-0026) — the generated multi-root "
@@ -482,7 +482,7 @@ def render(exp: Exposure) -> list[str]:
             "off (workspace"
         )
         out.append(
-            "    settings can re-arm it); the box unsets + reaps either way; the wall fences "
+            "    settings can re-arm it); the box unsets + reaps either way; the allowlist fences "
             "CONNECT to :443."
         )
         out.append("    `fy verify` in the box reports what is left, incl. a re-armed workspace.")
@@ -504,11 +504,11 @@ def render(exp: Exposure) -> list[str]:
             out.append(f"    {old} → {new}{_shared_note(origin)}")
         out.append("")
 
-    out.append(f"  Not counted — runs in the yard, not on the host: {' · '.join(BOX_SCOPED)}")
+    out.append(f"  Not counted — runs in the VM, not on your computer: {' · '.join(BOX_SCOPED)}")
     wall = (
-        f"wall ON ({exp.backend}{', host-enforced too' if exp.host_wall else ''})"
+        f"VM firewall ON ({exp.backend}{', host firewall too' if exp.host_wall else ''})"
         if exp.wall
-        else f"wall OFF ({exp.backend}) — proxy routing is cooperative"
+        else f"VM firewall OFF ({exp.backend}) — proxy routing is cooperative"
     )
     allowlist = "allowlist ENFORCING" if exp.enforcing else "allowlist observing only"
     out.append(f"  Context: egress {wall} · {allowlist}.")

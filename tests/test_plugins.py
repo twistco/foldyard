@@ -1811,7 +1811,7 @@ def test_network_panel_marks_blocked_rows_and_tallies_them(monkeypatch, tmp_path
     group = data.groups[0]
     assert "⛔ 1 blocked" in group.label
     assert "err" not in group.label  # the 403 is the blocked tally, not also a generic error
-    assert "⛔ blocked by the egress wall" in group.children[0] and "[red]" in group.children[0]
+    assert "⛔ refused by the allowlist" in group.children[0] and "[red]" in group.children[0]
 
 
 def test_network_panel_marks_would_block_rows_with_their_tool(monkeypatch, tmp_path):

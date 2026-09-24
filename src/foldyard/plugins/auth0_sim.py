@@ -94,22 +94,24 @@ class Auth0SimPlugin(Plugin):
         if not config.auth0_sim_dir():
             return
         # Dump-browse serves the Auth0 sim over HTTPS on https://localhost:<sim_port>; without a
-        # locally-trusted cert the Mac browser shows net::ERR_CERT_AUTHORITY_INVALID. mkcert signs
+        # locally-trusted cert the host browser shows net::ERR_CERT_AUTHORITY_INVALID. mkcert signs
         # the cert (its nss-provided certutil installs the CA into the Firefox/Chrome trust stores).
         # All WARN, not fail: only needed for auth0=sim, and the cert warning is click-through-able.
-        # Mac-only — doctor's in_box() branch returns before plugin checks run. The TUI fix
+        # Host-only — doctor's in_box() branch returns before plugin checks run. The TUI fix
         # buttons (or the consumer's own cert recipe) repair these.
         yield ctx.result(
             ctx.which("mkcert") or None,
             "mkcert",
             "installed (trusted local HTTPS for the dump-browse Auth0 sim)",
-            "missing — dump-browse shows a cert warning. `brew install mkcert nss` (or the fix)",
+            "missing — dump-browse shows a cert warning. Install mkcert + nss "
+            "(`brew install mkcert nss` on macOS) or use the fix",
         )
         yield ctx.result(
             ctx.which("certutil") or None,
             "mkcert nss",
             "installed (browser trust-store support for mkcert)",
-            "missing — Firefox/Chrome won't trust mkcert's CA. `brew install nss` (or the fix)",
+            "missing — Firefox/Chrome won't trust mkcert's CA. Install nss "
+            "(`brew install nss` on macOS) or use the fix",
         )
         cert = self._cert_dir() / "localhost.pem"
         yield ctx.result(

@@ -4,7 +4,7 @@ contract expects (see the packaged ``assets/proxy/egress_proxy.py`` addon).
 
 The ``inject`` plugin points an injector's minter here when a ``[[inject]]`` entry gives a
 ``token_env`` (a long-lived static token) instead of its own ``minter`` command. The token
-itself lives ONLY in ``~/.foldyard/<project>/host.env`` on the Mac and is read from the
+itself lives ONLY in ``~/.foldyard/<project>/host.env`` on the host and is read from the
 process env here — never in the repo, never in the box, and never in the command string
 (only the VARIABLE NAME is passed on argv, so the secret can't leak into a daemon-status or
 command log). The proxy re-runs the minter every ``ttl`` seconds, so a token rotated in
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     value = os.environ.get(var)
     if not value:
         # Non-zero so the proxy logs a clear mint failure (and keeps any cached value) rather
-        # than injecting an empty token. The fix is to set the var in host.env on the Mac.
+        # than injecting an empty token. The fix is to set the var in host.env on the host.
         print(f"static_token: ${var} is empty/unset — set it in host.env", file=sys.stderr)
         return 1
     json.dump({"value": value, "ttl": ttl}, sys.stdout)

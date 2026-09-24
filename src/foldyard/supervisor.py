@@ -558,7 +558,7 @@ def _offer_recommended() -> None:
 def ensure_background() -> int | None:
     """Launch `foldyard host` DETACHED so the always-on egress proxy (Phase A′) is up whenever the
     stack/box is — `machine up` calls this so a box that ALWAYS routes never hits a dead :8088.
-    Mac-only and idempotent: a no-op in the box, where there's no podman, when a live supervisor
+    Host-only and idempotent: a no-op in the box, where there's no podman, when a live supervisor
     holds this project's singleton lock, or when our pidfile records a live launch. A listening
     daemon alone is deliberately NOT a no-op signal: a dead supervisor can leave its child proxy
     orphaned on :8088, and a new supervisor is what safely reaps and restages that child. Returns
@@ -748,7 +748,7 @@ def expire_user_modes() -> dict:
         settle = devmode.settle_incoherent(live["mode"])
         if settle:
             log(
-                "TTL expiry strands dependent axes — settling "
+                "TTL expiry strands dependent switches — settling "
                 + ", ".join(f"{a}={r}" for a, r in settle.items())
             )
         flips.update(settle)
@@ -960,7 +960,7 @@ def _notify(title: str, body: str) -> None:
     allow/deny on first use — delivery no longer depends on which terminal launched `fy host`.
 
     Gated on ``[host] notifications`` (default on); silently a no-op with neither tool on PATH
-    (non-Mac hosts, CI); never raises and never blocks the tick for long (5s timeout)."""
+    (non-macOS hosts, CI); never raises and never blocks the tick for long (5s timeout)."""
     if not config.host_notifications():
         return
     if which("terminal-notifier"):
@@ -1038,10 +1038,10 @@ def _report_config_drift(wt: str, cfg: config.Config) -> None:
     """Say — once per change — that this checkout's ``foldyard.toml`` differs from the copy the
     host adopted, and that the ADOPTED one is still what's running (:mod:`foldyard.configpin`).
 
-    Reporting, never applying: that's the point of the pin. The notification fires only on the
-    clean→drifted edge (a file being rewritten repeatedly is one event to an operator, not twenty),
-    while every distinct content gets its own log line so the sequence is reconstructable
-    afterwards. Best-effort — a state-dir read hiccup must not break the tick."""
+    Reporting, never applying: that's the point of the pin. The macOS notification fires only on
+    the clean→drifted edge (a file being rewritten repeatedly is one event to an operator, not
+    twenty), while every distinct content gets its own log line so the sequence is
+    reconstructable afterwards. Best-effort — a state-dir read hiccup must not break the tick."""
     try:
         drift = configpin.inspect(cfg)
     except OSError as e:  # pragma: no cover — unreadable state dir
@@ -1070,7 +1070,7 @@ def _report_config_drift(wt: str, cfg: config.Config) -> None:
 
 
 def _port_listener_pids(port: int) -> list[int]:
-    """PIDs LISTENing on TCP ``port`` (Mac ``lsof``). Best-effort: [] if lsof absent/errors."""
+    """PIDs LISTENing on TCP ``port`` (host ``lsof``). Best-effort: [] if lsof absent/errors."""
     if not which("lsof"):
         return []
     try:
@@ -1203,7 +1203,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
         log(f"allowlist: sweep failed: {e}")
 
     # Fast-forward each checkout's SHARED index after box-side commits (the split's staleness
-    # illusion — phantom staged deletions in Mac GUIs). Conditional + non-destructive by design
+    # illusion — phantom staged deletions in host GUIs). Conditional + non-destructive by design
     # (side-attributed, staged work carried or refused); self-guards + never raises. githeal.py.
     githeal.sweep(log)
 
@@ -1369,7 +1369,7 @@ def _spawn_child(
         reason = (
             f"can't bind :{port} — another process is listening (this project's leftover "
             f"daemon would have been reaped, so it's foreign — `lsof -nP -iTCP:{port} "
-            "-sTCP:LISTEN` to see whose). Free the port, or move this project's band: edit "
+            "-sTCP:LISTEN` to see whose). Free the port, or move this project's port range: edit "
             "~/.foldyard/ports.json or set FY_PROXY_PORT"
         )
         if time.monotonic() - nagged.get(name, 0.0) > MISSING_ENV_NAG:
@@ -1392,7 +1392,7 @@ def _spawn_child(
 # The daemons a spawn gate is currently holding back, name → {reason, since}: the supervisor's
 # own memory between ticks (`since` is the first blocked tick), published each tick to
 # `config.blocked_daemons_file` for the posture surfaces (devmode.daemon_status reads it, only
-# while the heartbeat is fresh). A newly-blocked daemon also pushes one notification — the
+# while the heartbeat is fresh). A newly-blocked daemon also pushes one (macOS) notification — the
 # gate's reason is the fix, and the log's 30s nag was the only place it used to reach.
 _blocked: dict[str, dict] = {}
 
@@ -1489,7 +1489,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, shutdown)
 
     log(f"mode file: {config.mode_file()}   env: {config.host_env_file()}")
-    log("supervising — change posture with `fy mode …` or the TUI; `fy host restart` replaces me.")
+    log("supervising — change the mode with `fy mode …` or the TUI; `fy host restart` replaces me.")
 
     while not stopping:
         reconcile_once(children, nagged)

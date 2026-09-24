@@ -18,7 +18,7 @@ App *behaviour* toggles that merely CONSUME the identity (real-LLM modes, real-A
 Secret Manager) belong to their own axes/plugins (``llm``, ``auth0``) — that split is what
 lets an always-offline e2e loop coexist with a credentialed browse stack.
 
-The mechanism is the on-network GCE metadata emulator + a Mac-side allowlisted SA-token
+The mechanism is the on-network GCE metadata emulator + a host-side allowlisted SA-token
 minter (different from github's header injection — its own plugin, also the template for a
 future AWS IMDS twin). Built-in for now; becomes the ``gcp-metadata`` package at extraction
 time. Owns its axes, the gcp-minter daemon spec, the gcp recipe env, the SA-naming config,
@@ -47,13 +47,13 @@ from . import CapabilityProbe, DoctorContext, PanelData, Plugin, Switch, TuiPane
 
 # The metadata-emulator scripts (minter.py + server.py) live alongside this plugin — gcp-metadata
 # capability owns both halves. Path is package-relative so a checkout/worktree move never breaks it.
-# The Mac-side minter is run by path (below); the on-stack server is bind-mounted by the compose
+# The host-side minter is run by path (below); the on-stack server is bind-mounted by the compose
 # `metadata` profile from this same dir (see compose.podman.yml). Tests derive paths from here too.
 METADATA_DIR = Path(__file__).resolve().parent / "gcp_metadata"
 
 # The on-network metadata emulator's stable hostname:port. The box ALWAYS points here (it's
 # mode-independent — the same string for every rung), so changing the gcp rung never re-bakes the
-# box: only the Mac-side minter is reconciled live by `fy host`. When gcp=off the minter is down
+# box: only the host-side minter is reconciled live by `fy host`. When gcp=off the minter is down
 # and the emulator returns "no token", so the box cleanly has no credentials.
 METADATA_EMULATOR_HOST = "metadata-emulator:80"
 
@@ -92,7 +92,7 @@ def _minter_port_answering() -> tuple[bool, str]:
     # loopback through it, and this probe exists to test the DIRECT path the VM gateway dials.
     opener = urlrequest.build_opener(urlrequest.ProxyHandler({}))
     squatter = (
-        f"port {port} is held by another process, not the minter — a port forwarder "
+        f"port {port} is held by another process, not the token service — a port forwarder "
         "(VS Code auto-forward?) shadows it; free the port, then `fy host restart`"
     )
     try:
@@ -104,8 +104,8 @@ def _minter_port_answering() -> tuple[bool, str]:
         return False, f"{squatter} (it answered HTTP {e.code})"
     except Exception as e:  # unreachable, refused, or accepted-then-silent (the forwarder case)
         return False, (
-            f"minter port {port} not answering ({type(e).__name__}) — the box gets no tokens; "
-            "is the supervisor up? `fy host`"
+            f"token-service port {port} not answering ({type(e).__name__}) — the box gets no "
+            "tokens; is the supervisor up? `fy host`"
         )
     # Something answered. Whether it's US is the parse's question, kept OUT of the try above: a
     # squatter that speaks HTTP but not the minter's JSON (a dev server's HTML, a forwarder's
@@ -116,7 +116,7 @@ def _minter_port_answering() -> tuple[bool, str]:
         body = None
     if not isinstance(body, dict) or body.get("foldyard") != _MINTER_MARKER:
         return False, squatter
-    return True, f"minter answering on :{port}"
+    return True, f"token service answering on :{port}"
 
 
 # What `expires_in` the minter reports to clients (and how long the emulator caches): a SHORT
@@ -125,7 +125,7 @@ def _minter_port_answering() -> tuple[bool, str]:
 # real impersonated token lives longer; clients just refetch early. Tunable via GCP_TOKEN_REFRESH.
 TOKEN_REFRESH = int(os.environ.get("GCP_TOKEN_REFRESH", "60"))
 
-# The per-request mint log the Mac minter writes and the "GCP Tokens" TUI panel tails. One
+# The per-request mint log the host minter writes and the "GCP Tokens" TUI panel tails. One
 # filename constant so the daemon's GCP_MINTER_LOG_FILE and the panel can never drift (mirrors the
 # proxy plugin's _PROXY_LOG / Network Log pairing).
 _MINTER_LOG = "gcp-minter.jsonl"
@@ -238,7 +238,7 @@ def _pam_summary(out: str, account: str | None = None) -> str | None:
 
 # ── the "GCP Tokens" TUI panel (the minter's mint log) ──────────────────────────────────
 # The GCP credential path doesn't ride the mitmproxy egress proxy (that's github's Network Log) —
-# tokens are minted Mac-side by the minter and served by the on-network metadata emulator. So gcp
+# tokens are minted host-side by the minter and served by the on-network metadata emulator. So gcp
 # gets its OWN panel: the minter's per-request log, showing WHICH identity was minted, granted or
 # refused. The token itself is never logged, so this panel never carries a credential.
 
@@ -367,7 +367,8 @@ class GcpPlugin(Plugin):
             env["GCP_ALLOW_USER_TOKEN"] = "1"
         return {
             f"gcp-minter{config.worktree_suffix()}": {
-                "label": "GCP SA-token minter" + (" (+ YOUR user token)" if rung == "user" else ""),
+                "label": "GCP SA-token service"
+                + (" (+ YOUR user token)" if rung == "user" else ""),
                 "port": port,
                 # Launch the staged snapshot, not the packaged file — see _launch_minter_path.
                 "stage": [(str(METADATA_DIR / "minter.py"), str(_launch_minter_path()))],
@@ -378,7 +379,7 @@ class GcpPlugin(Plugin):
         }
 
     def mode_services(self, mode: dict) -> dict[str, bool]:
-        # The emulator is the in-VM half of EVERY gcp rung — the Mac minter alone grants nothing,
+        # The emulator is the in-VM half of EVERY gcp rung — the host minter alone grants nothing,
         # so a rung declared while the stack is down (fresh worktree, devbox-only session) read
         # as granted while the box couldn't mint a token (2026-08-07: a gcp=user prod
         # investigation burned a session on exactly this). Same config gate as stage_assets:
@@ -409,7 +410,7 @@ class GcpPlugin(Plugin):
     def derive_env(self, mode: dict) -> dict[str, str]:
         # Stack-side (not box) env: which compose profiles `fy up` runs. The metadata emulator
         # runs whenever a gcp rung is active; the box wiring is mode-INDEPENDENT (see box_args), so
-        # switching rungs never re-bakes the box — only the Mac minter is reconciled live, and
+        # switching rungs never re-bakes the box — only the host minter is reconciled live, and
         # crossing off↔non-off just toggles the emulator via `fy up` (which leaves the box alone).
         rung = mode.get("gcp", "off")
         if rung == "off":
@@ -423,7 +424,7 @@ class GcpPlugin(Plugin):
             # leak tokens to a sibling on gcp=off — each emulator hits its OWN minter. The address
             # is backend-dependent (config.host_alias — lima needs the host gateway IP); under the
             # wall, that IP is in NO_PROXY (machine-wall.sh) so the container reaches it DIRECT, not
-            # via the mitmdump proxy (which can't reach the Lima gateway from the Mac).
+            # via the mitmdump proxy (which can't reach the Lima gateway from the host).
             "GCP_MINTER_URL": f"http://{config.host_alias()}:{config.gcp_minter_port()}",
         }
         if mode.get("storage") == "staging":
@@ -440,7 +441,7 @@ class GcpPlugin(Plugin):
     # hardcodes any overlay path.
 
     def no_proxy_hosts(self) -> list[str]:
-        # The emulator lives on the STACK network, so a token fetch routed through the Mac-side
+        # The emulator lives on the STACK network, so a token fetch routed through the host-side
         # egress proxy 502s (the proxy can't resolve a stack hostname). Config-gated, not
         # mode-gated, for the reason in the hook's docstring — the box bakes NO_PROXY once.
         if not gcp_project():
@@ -455,7 +456,7 @@ class GcpPlugin(Plugin):
             return []
         # MODE-INDEPENDENT box wiring (baked once, never re-baked for a gcp change): always point at
         # the emulator and always carry both the dev box's read-only SA label and the escalatable
-        # marker. The rung is then served entirely by the live Mac minter — gcp=off ⇒ minter down ⇒
+        # marker. The rung is then served entirely by the live host minter — gcp=off ⇒ minter down ⇒
         # emulator returns no token; logs/sa ⇒ impersonate the SA; user ⇒ the minter swaps in YOUR
         # token for the escalatable box (apps, lacking the marker, only ever get their own SA).
         return [
@@ -551,7 +552,7 @@ class GcpPlugin(Plugin):
     def tui_panels(self) -> list[TuiPanel]:
         # The GCP Tokens log: the minter's per-request mint events (which identity, granted/denied).
         # Separate from github's Network Log because GCP tokens don't ride the egress proxy — they
-        # are minted Mac-side, served by the metadata emulator. off ⇒ "no token mints yet".
+        # are minted host-side, served by the metadata emulator. off ⇒ "no token mints yet".
         return [
             TuiPanel(id="gcp", title="GCP Tokens", columns=_GCP_COLUMNS, refresh=_gcp_panel_data)
         ]
@@ -561,7 +562,8 @@ class GcpPlugin(Plugin):
             ctx.which("gcloud"),
             "gcloud CLI",
             "installed",
-            "missing — brew install google-cloud-sdk",
+            "missing — install the gcloud CLI (https://cloud.google.com/sdk; "
+            "`brew install google-cloud-sdk` on macOS)",
         )
         account = ""  # the active gcloud identity — gates the PAM + impersonation checks
         if ctx.which("gcloud"):
@@ -578,7 +580,7 @@ class GcpPlugin(Plugin):
                 "ADC (application-default)",
                 str(adc),
                 "missing — gcloud auth application-default login "
-                "(needed by the minters; NOT an SA key)",
+                "(needed by the token services; NOT an SA key)",
             )
 
         # PAM elevation (the 12h grant `just gcp-elevate` creates). Runs whenever we have a

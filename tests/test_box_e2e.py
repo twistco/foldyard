@@ -66,4 +66,4 @@ def test_in_box_fy_ps_reaches_the_engine_over_container_host(repo):
 def test_in_box_verify_is_all_pass(repo):
     inside = fy_ok(["box", "exec", "fy verify"], repo, timeout=600)
     assert "ALL PASS" in inside.out, inside.out
-    assert "dev-box posture — skipped" not in inside.out, inside.out
+    assert "dev-box checks — skipped" not in inside.out, inside.out

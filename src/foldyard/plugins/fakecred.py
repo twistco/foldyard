@@ -31,7 +31,7 @@ FAKECRED_DIR = Path(__file__).resolve().parent
 
 _BLURB = {
     "off": "no fake credential — zero secrets (like everything else here)",
-    "on": "fake minter serves dummy tokens (testing the daemon/probe machinery)",
+    "on": "a fake token service serves dummy tokens (testing the daemon/probe machinery)",
     "user": "EMERGENCY (fake): TTL-bound, auto-reverts — testing expiry + settle",
 }
 
@@ -90,7 +90,7 @@ class FakecredPlugin(Plugin):
         port = config.fakecred_port()
         return {
             f"fake-minter{config.worktree_suffix()}": {
-                "label": "fake credential minter (testing)",
+                "label": "fake credential token service (testing)",
                 "port": port,
                 "stage": [(str(FAKECRED_DIR / "fakecred_minter.py"), str(_staged_minter()))],
                 "cmd": [sys.executable, str(_staged_minter())],

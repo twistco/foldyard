@@ -390,7 +390,7 @@ def test_probe_fails_when_another_process_holds_the_port(monkeypatch):
     finally:
         srv.shutdown()
     assert not ok
-    assert str(port) in detail and "not the minter" in detail
+    assert str(port) in detail and "not the token service" in detail
 
 
 def test_probe_names_a_squatter_that_does_not_speak_json(monkeypatch):
@@ -417,7 +417,7 @@ def test_probe_names_a_squatter_that_does_not_speak_json(monkeypatch):
     finally:
         srv.shutdown()
     assert not ok
-    assert "not the minter" in detail and "not answering" not in detail
+    assert "not the token service" in detail and "not answering" not in detail
 
 
 def test_probe_names_a_squatter_that_answers_an_http_error(monkeypatch):
@@ -438,7 +438,7 @@ def test_probe_names_a_squatter_that_answers_an_http_error(monkeypatch):
     finally:
         srv.shutdown()
     assert not ok
-    assert "not the minter" in detail and "404" in detail and "not answering" not in detail
+    assert "not the token service" in detail and "404" in detail and "not answering" not in detail
 
 
 def test_probe_fails_when_nothing_listens(monkeypatch):

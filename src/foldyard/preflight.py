@@ -1,13 +1,13 @@
 """Preflight — hard-prerequisite checks run BEFORE `fy up` / `fy box up` (host-only).
 
 A stored posture is not a running daemon, and a declared backend is not an installed CLI. The box
-routes ALL egress through the Mac's mitmdump proxy (Phase A′) whenever any injector/keyless or a
+routes ALL egress through the host's mitmdump proxy (Phase A′) whenever any injector/keyless or a
 `[proxy]` table is active, so a missing host tool or an un-routable backend leaves a freshly-built
 box unable to reach even PyPI at bootstrap — which used to surface only as a cryptic
 `tunnel error / Connection refused` deep inside the box's bootstrap, long after `✓ up` printed.
 
 This module turns those into an early, actionable ABORT before anything is built or started. It's
-host-only (the checks concern the Mac's tools/posture; the box neither manages the machine nor runs
+host-only (the checks concern host tools/posture; the box neither manages the machine nor runs
 the proxy), so :func:`check_or_abort` no-ops in the box. Stdlib + a lazy plugin import, so it stays
 cheap on the up path.
 """
@@ -21,14 +21,14 @@ from . import config, devmode, hostwall, machine_backend
 
 
 def _proxy_required(mode: dict) -> bool:
-    """Would this project's box route egress through the Mac proxy? Must MIRROR the proxy plugin's
+    """Would this project's box route egress through the host proxy? Must MIRROR the proxy plugin's
     ``derive_env`` routing signal exactly — ``config.proxy_enabled()`` OR any active injection rule
     (``registry().proxy_rules``, which aggregates github, keyless Claude/Codex, AND generic
     ``[[inject]]`` axes). An earlier hand-rolled list checked only proxy/keyless/github and MISSED
     ``[[inject]]``: an inject-only box then skipped the mitmproxy-missing check (cryptic PyPI
     connect-refuse at bootstrap) and, under ``[machine] firewall``, got wrongly aborted as 'nothing
     routes through the proxy'. When true, a box with no reachable proxy can't reach ANYTHING — so
-    the proxy's prerequisites (mitmproxy installed, an address that routes to the Mac) are HARD."""
+    the proxy's prerequisites (mitmproxy installed, an address that routes to the host) are HARD."""
     if config.proxy_enabled() or config.claude_keyless() != "" or config.codex_keyless() != "":
         return True
     from .plugins import registry  # lazy: plugins load on the hot path
@@ -49,8 +49,8 @@ def issues() -> list[str]:
     if not which(config.engine()):
         out.append(
             f"✗ the container engine `{config.engine()}` isn't installed — every stack, box and\n"
-            "    compose verb shells out to it. Install podman (`brew install podman`); it is\n"
-            "    also what drives the VM's socket under the lima backend."
+            "    compose verb shells out to it. Install podman (your package manager;\n"
+            "    `brew install podman` on macOS); it also drives the VM's socket under lima."
         )
 
     # 2. The backend's own host CLI must exist too, or the machine can't be created/targeted —
@@ -127,9 +127,9 @@ def issues() -> list[str]:
         if not 0 <= offset <= 89:
             out.append(
                 f"✗ worktree '{wt}' has port offset {offset}, outside the required 0..89 — its\n"
-                "    proxy/minter daemon ports would fall outside the band (and the wall's opened\n"
-                "    ranges) or collide across daemons. Pin an offset ≤89 in foldyard.local.toml\n"
-                "    [worktree-offsets] (or unset WT_OFFSET)."
+                "    proxy/token-service ports would fall outside the port range (and the VM\n"
+                "    firewall's opened ranges) or collide across daemons. Pin an offset ≤89 in\n"
+                "    foldyard.local.toml [worktree-offsets] (or unset WT_OFFSET)."
             )
 
     # 7. The wall only exists for lima (podman-machine's CoreOS appliance can't be provisioned),
@@ -194,5 +194,5 @@ def check_or_abort(context: str) -> None:
     print(f"✗ {context}: prerequisites not met —\n", file=sys.stderr)
     for p in problems:
         print(p, file=sys.stderr)
-    print("\n  Fix the above (or adjust the backend/posture) and retry.", file=sys.stderr)
+    print("\n  Fix the above (or adjust the backend/mode) and retry.", file=sys.stderr)
     raise SystemExit(1)

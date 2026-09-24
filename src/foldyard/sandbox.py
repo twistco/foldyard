@@ -13,7 +13,7 @@ the enforcement tier — until it lands, the socket default is the mechanism and
 
 Why a second socket and not ``podman run --runtime``: over the engine socket podman 5.8 has no
 per-container runtime selection at all (``podman-remote`` has no ``--runtime``; the REST field
-is ignored until 6.0) — measured on the rig, isolation-layers.md "The route". The runsc flags
+is ignored until 6.0) — measured on the rig, docs/archive/isolation-layers-sessions.md "The route". The runsc flags
 the box needs live in a wrapper INSIDE the VM with no ``--allow-flag-override``, so a client
 of the socket cannot reach runsc's flags (a widening annotation is refused, a narrowing one
 honoured — both observed). Podman-remote reaches the second socket over the backend's own ssh
@@ -367,6 +367,6 @@ def ensure(backend: SshBackend, name: str) -> None:
     if got != RUNTIME:
         raise SystemExit(
             f"✗ the gVisor socket in '{name}' answers with runtime {got!r}, not {RUNTIME!r} — "
-            "refusing to create boxes outside the posture [machine].runtime asks for."
+            "refusing to create boxes outside the gVisor sandbox [machine].runtime asks for."
         )
-    _err(f"✓ gVisor posture: {RUNTIME} via the box-facing filter on {box_socket()}")
+    _err(f"✓ gVisor sandbox: {RUNTIME} via the box-facing filter on {box_socket()}")

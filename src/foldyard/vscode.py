@@ -18,7 +18,7 @@ Each worktree gets its own isolated instance. Besides preventing settings (notab
 terminal's host checkout) from bleeding between worktrees, that keeps each window bound to the
 environment and attached-container config it was launched with.
 
-RUN ON THE MAC. The attach is over the Docker API ("Attach to Running Container"), so the
+RUN ON THE HOST. The attach is over the Docker API ("Attach to Running Container"), so the
 launched VS Code's `DOCKER_HOST` must point at the same machine socket — which is exactly,
 and only, this isolated instance's env.
 """
@@ -260,7 +260,7 @@ def _write_local_terminal_cwd(
     """Make VS Code's explicit *local terminal* command enter the host checkout.
 
     In a remote window, ``Create New Integrated Terminal (Local)`` explicitly launches the shell
-    with the Mac user's home as its cwd. That launch argument takes precedence over
+    with the host user's home as its cwd. That launch argument takes precedence over
     ``terminal.integrated.cwd``; VS Code also deliberately bypasses configured terminal profiles
     for this local-in-remote case. It does apply ``terminal.integrated.env.osx``, so point zsh's
     ``ZDOTDIR`` at generated startup shims. They source the user's real dotfiles, restore our
@@ -542,7 +542,7 @@ def _reset_script(paths: str, server_dir: str = ".vscode-server", wait: int = 10
 
 def code() -> int:
     """Resolve the (worktree's) box, ensure it's running, refresh its extensions config, then
-    launch VS Code attached to it in the isolated user-data-dir. Mac only."""
+    launch VS Code attached to it in the isolated user-data-dir. Host only."""
     # `[vscode]` decides what the HOST installs and applies, so it is read from the checkout's
     # ADOPTED config, never the working tree (ADR-0022: the channel, not the field) — and the
     # adopt/revert/ignore gate runs first, before `stack.resolve()` can so much as provision the
@@ -561,8 +561,8 @@ def code() -> int:
         # and stopping its own VS Code server under an attached window.
         wt = config.active_worktree()
         run_hint = f"WORKTREE={wt} fy code" if wt else "fy code"
-        _err("✗ `fy code` has to run on the host, not inside the dev box — it launches the")
-        _err("  host's VS Code and attaches it back to this box. Open a terminal on the host")
+        _err("✗ `fy code` has to run on your computer, not inside the dev box — it launches")
+        _err("  VS Code there and attaches it back to this box. Open a terminal on your computer")
         _err(f"  (in your checkout) and run `{run_hint}` there.")
         return 1
     status = configpin.gate("fy code")
@@ -647,7 +647,7 @@ def code() -> int:
 
     if not box_mod.ensure_harden(engine, box, env):
         _err(f"✗ couldn't apply the in-box editor-attach hygiene to {box} (bash in the box failed)")
-        _err("  — not attaching: the attach would forward host credentials into an unguarded box.")
+        _err("  — not attaching: the attach would forward your credentials into an unguarded box.")
         _err("  `fy box shell` to look; `fy box down && fy box up` rebuilds it.")
         return 1
     agent = _empty_agent(udd)

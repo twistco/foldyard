@@ -2,7 +2,7 @@
 
 VS Code attaches over the container-engine API (``docker/podman exec`` via the Remote-Containers
 extension — no sshd), so the only box-side need is a persisted ``~/.vscode-server`` volume so the
-uploaded VS Code Server survives box recreation / ``fy nuke``. The Mac-side launcher is
+uploaded VS Code Server survives box recreation / ``fy nuke``. The host-side launcher is
 ``fy code`` (see ``vscode.py``'s ``code()``), which this table also gates.
 
 Without ``[vscode]`` no server volume is mounted (shell-only box). The volume TARGET resolves

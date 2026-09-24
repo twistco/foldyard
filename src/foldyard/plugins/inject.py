@@ -24,7 +24,7 @@ Config (``foldyard.toml``)::
 it carries a TTL (``fy mode <axis>=on ttl=30m``, else the default) and the supervisor switches it
 off when that lapses — for a token whose access should never be left on by accident.
 
-Token handling: the secret lives ONLY in ``host.env`` on the Mac, under a var foldyard DERIVES from
+Token handling: the secret lives ONLY in ``host.env`` on the host, under a var foldyard DERIVES from
 the axis — ``FY_INJECT_<AXIS>`` (see :func:`token_var`) — and the shipped
 :mod:`~foldyard.plugins.static_token` minter echoes it as ``{"value","ttl"}`` host-side. It never
 enters the box or the repo (only the variable NAME reaches the daemon command).
@@ -34,7 +34,7 @@ consumer-named ``token_env`` let anything that can write the checkout point a ru
 mechanism's host.env secret (``ANTHROPIC_API_KEY``, ``GH_PEM_B64``…) and at a ``host`` of its
 choosing — the proxy would then hand that secret to that host, in flight, with the box none the
 wiser. Under the derived name a config rule can only read the one var the operator created FOR that
-injector; every other credential on the Mac is out of its reach. (Packaged plugins — claude, codex —
+injector; every other host credential is out of its reach. (Packaged plugins — claude, codex —
 build their spec in code via ``keyless.inject_spec`` and legitimately name their own var; the
 constraint is on the config tier, which is the untrusted one.)
 
@@ -89,7 +89,7 @@ class InjectPlugin(Plugin):
             first = owner.setdefault(token_var(str(axis)), str(axis))
             if first != str(axis):
                 raise ValueError(
-                    f"[[inject]] axes {first!r} and {axis!r} both derive the token var "
+                    f"[[inject]] switches {first!r} and {axis!r} both derive the token var "
                     f"{token_var(str(axis))} — rename one so each injector reads its own secret"
                 )
         return specs

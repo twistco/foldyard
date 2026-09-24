@@ -1,8 +1,8 @@
-"""Keyless agent auth — the credential taxonomy + the host-side (Mac) capture of the real secret.
+"""Keyless agent auth — the credential taxonomy + the host-side capture of the real secret.
 
 The prize (ADR-0008): the box runs Claude Code / Codex with a PLACEHOLDER
 credential and the egress proxy rewrites it in flight with the real one, which lives ONLY in
-``~/.foldyard/<project>/host.env`` on the Mac — never in the box, never in the repo. The same shape
+``~/.foldyard/<project>/host.env`` on the host — never in the box, never in the repo. The same shape
 as the github injector (``[[inject]]`` + a dummy + the ``static_token`` minter).
 
 This module owns two things, both stdlib-only so the agent plugins can import the taxonomy on the
@@ -14,7 +14,7 @@ registry hot path:
     The plugin reads this to derive its :class:`~foldyard.plugins.InjectRule` + dummy ``box_args``;
     the capture below reads it to know which host.env var to store under.
 
-  - **The capture** (:func:`classify`, :func:`ensure_cred`): on ``fy box up`` (Mac, TTY) with a
+  - **The capture** (:func:`classify`, :func:`ensure_cred`): on ``fy box up`` (host, TTY) with a
     keyless mode configured and no matching cred in host.env yet, prompt ONCE for "an API key or
     token", classify it by prefix (no need to ask which — ``sk-ant-api`` → Claude key,
     ``sk-ant-oat`` → Claude OAuth, ``sk-`` → OpenAI/Codex key), and append it to host.env. The
@@ -60,7 +60,7 @@ CLAUDE_KEYLESS: dict[str, dict[str, str]] = {
         "header": "authorization",
         "dummy": "sk-ant-oat-dummy",
         "value_prefix": "Bearer ",
-        "how": "run `claude setup-token` on the Mac to mint one",
+        "how": "run `claude setup-token` on your computer to mint one",
         "prefix": "sk-ant-oat",
     },
 }
@@ -86,22 +86,23 @@ CODEX_KEYLESS: dict[str, dict[str, str]] = {
 # ~/.codex/auth.json, not OPENAI_API_KEY), so it's structurally different from the api-key modes
 # above and handled directly in the codex plugin. The proxy injects Authorization on this host+path;
 # the account_id is baked into the box's dummy auth.json (an identifier, not a secret), and the
-# Bearer access token is minted+refreshed host-side from the Mac's real auth.json.
+# Bearer access token is minted+refreshed host-side from the host's real auth.json.
 CODEX_CHATGPT_HOST = "chatgpt.com"
 CODEX_CHATGPT_PATH_PREFIX = "/backend-api/codex"
 _FAR_FUTURE_EXP = 4102444800  # 2100-01-01 — codex refreshes at exp-5min, so this never triggers
 
 
 def codex_auth_json_path() -> Path:
-    """The Mac's Codex credential file the ChatGPT minter reads/refreshes: ``$CODEX_HOME``/auth.json
-    (default ``~/.codex/auth.json``). The same path codex itself uses, so there's ONE source of
-    truth — the minter refreshing it keeps a real codex on the Mac working too."""
+    """The host's Codex credential file the ChatGPT minter reads/refreshes:
+    ``$CODEX_HOME``/auth.json (default ``~/.codex/auth.json``). The same path codex itself uses,
+    so there's ONE source of truth — the minter refreshing it keeps a real codex on the host
+    working too."""
     base = os.environ.get("CODEX_HOME")
     return (Path(base) if base else Path.home() / ".codex").expanduser() / "auth.json"
 
 
 def codex_account_id(path: Path | None = None) -> str | None:
-    """The ChatGPT ``account_id`` from the Mac's ``auth.json`` (``tokens.account_id``), or ``None``
+    """The ChatGPT ``account_id`` from the host's ``auth.json`` (``tokens.account_id``), or ``None``
     if absent/unreadable/not-chatgpt. Read host-side at box-up to bake into the box's dummy
     auth.json (so codex sends the right ``ChatGPT-Account-Id`` header). An id, not a secret."""
     try:
@@ -294,7 +295,7 @@ def ensure_secret(
     echo: Callable[[str], None],
 ) -> str:
     """Make sure a declared :class:`~foldyard.plugins.Secret` is in host.env, prompting once on a
-    Mac TTY. Same status vocabulary as :func:`ensure_cred` (``present`` / ``skipped`` / ``stored`` /
+    host TTY. Same status words as :func:`ensure_cred` (``present`` / ``skipped`` / ``stored`` /
     ``mismatch`` / ``empty``) and the same non-blocking contract: without a TTY it WARNS and carries
     on, because a missing credential must never stop the box from booting — the minter degrades that
     one host (the proxy logs the mint failure) while everything else works.
@@ -307,12 +308,15 @@ def ensure_secret(
         return "present"
     if not interactive:
         echo(
-            f"⚠ {secret.label} isn't in {host_env} (${secret.var}) — the posture that needs it "
-            f"can't mint until it's set. Run `fy mode …` or `fy box up` on the host with a TTY "
-            "to be prompted."
+            f"⚠ {secret.label} isn't in {host_env} (${secret.var}) — the mode that needs it "
+            f"can't mint until it's set. Run `fy mode …` or `fy box up` on your computer with a "
+            "TTY to be prompted."
         )
         return "skipped"
-    echo(f"▶ {secret.label}: paste it (stored on the host at 0600, never in the box or the repo).")
+    echo(
+        f"▶ {secret.label}: paste it (stored on your computer at 0600, never in the box or the "
+        "repo)."
+    )
     if secret.how:
         echo(f"  (get it with: {secret.how})")
     if secret.b64:
@@ -320,8 +324,8 @@ def ensure_secret(
     value = prompt("  value (hidden): ").strip()
     if not value:
         echo(
-            "  (nothing entered — skipped; set it later from a host TTY: `fy mode …` or "
-            "`fy box up`.)"
+            "  (nothing entered — skipped; set it later from a TTY on your computer: `fy mode …` "
+            "or `fy box up`.)"
         )
         return "empty"
     to_store = secret_ok(value, secret.pattern, secret.b64)
@@ -329,11 +333,14 @@ def ensure_secret(
         echo(
             f"✗ that doesn't look like {secret.label}"
             + (" (expected single-line base64)" if secret.b64 else "")
-            + " — stored nothing, so nothing wrong-shaped reaches the minter."
+            + " — stored nothing, so nothing wrong-shaped reaches the token service."
         )
         return "mismatch"
     append_host_env(host_env, secret.var, to_store)
-    echo(f"✓ stored {secret.label} in {host_env} (0600). The host minter reads it at mint time.")
+    echo(
+        f"✓ stored {secret.label} in {host_env} (0600). The token service on your computer "
+        "reads it when it mints."
+    )
     return "stored"
 
 
@@ -368,7 +375,7 @@ def ensure_cred(
     """Make sure ``expected_var`` is in host.env, prompting once on a TTY if not. Returns a status:
 
       - ``"present"`` — already set (nothing to do).
-      - ``"skipped"`` — not set but no TTY: warn (the Mac user must add it) and carry on (box-up
+      - ``"skipped"`` — not set but no TTY: warn (the host user must add it) and carry on (box-up
         must NOT block on a missing keyless cred — the box still boots, just can't reach Anthropic).
       - ``"stored"`` — prompted, classified, and appended under ``expected_var``.
       - ``"mismatch"`` / ``"empty"`` — the pasted value didn't classify to ``expected_var`` (or was
@@ -380,10 +387,12 @@ def ensure_cred(
     if not interactive:
         echo(
             f"⚠ keyless is on but ${expected_var} isn't in {host_env} — the box will hold only a "
-            f"dummy, can't reach the provider. Set it on the Mac (a TTY `fy box up` prompts)."
+            f"dummy, can't reach the provider. Set it on your computer (a TTY `fy box up` prompts)."
         )
         return "skipped"
-    echo(f"▶ keyless auth: paste your {expected_label} (stored on the host, never in the box).")
+    echo(
+        f"▶ keyless auth: paste your {expected_label} (stored on your computer, never in the box)."
+    )
     if how:
         echo(f"  ({how})")
     # The paste is hidden (no echo) — see box.py's getpass prompt — so it never lands in scrollback.

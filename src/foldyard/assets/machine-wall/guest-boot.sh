@@ -48,7 +48,7 @@ __FY_WALL_ASSET__
 chmod 0755 @@WALL_PATH@@.tmp
 mv -f @@WALL_PATH@@.tmp @@WALL_PATH@@
 
-# 3. Apply the wall state the host recorded (`[machine] firewall` + this project's port band).
+# 3. Apply the wall state the host recorded (`[machine].wall` + this project's port band).
 FY_WALL_UID="$uid" @@WALL_PATH@@ @@WALL_ARGS@@
 
 # 4. Report, LAST: an absent report means "not applied", which the host fails closed on.

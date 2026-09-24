@@ -187,6 +187,12 @@ logging.getLogger("mitmproxy.proxy.server").addFilter(_DropWebsocketPingPong())
 _HTTPS_PORT = 443  # the one port a bare host grant covers at CONNECT
 _HTTP_PORT = 80  # …and, for a request seen in the clear, this one
 
+# The 403 body the box sees for a host the allowlist refuses. Grants are made on the host
+# machine (never from the box), so the body says where the fix is run.
+_REFUSED_BODY = (
+    b"refused by the foldyard allowlist - grant it on your computer: `fy allow add <host>`\n"
+)
+
 # The proxy-URL user an image BUILD reaches us as (foldyard's `plugins/proxy.BUILD_TUNNEL_USER`,
 # duplicated because this addon runs standalone; a test pins the two equal). A build has no proxy
 # CA, so a connection carrying it is blind-tunnelled rather than decrypted — after the wall.
@@ -315,7 +321,7 @@ def _error_snippet(response) -> str:
 
 # What EVERY minter gets: enough to run a program and reach the network, and nothing else.
 # HOME matters (gh reads ~/.config/gh, the Codex minter its auth.json); the proxy vars matter
-# because a minter on a Mac behind a mandatory egress proxy has no other way out.
+# because a minter on a host machine behind a mandatory egress proxy has no other way out.
 _MINTER_BASE_ENV = (
     "PATH",
     "HOME",
@@ -434,12 +440,12 @@ def _mint_failure_detail(e: BaseException) -> str:
         tail = " / ".join(lines[-3:])
         return f"exit {e.returncode}: {_redact_token_runs(tail)[:500]}"
     if isinstance(e, subprocess.TimeoutExpired):
-        return f"no output after {e.timeout}s — minter hung"
+        return f"no output after {e.timeout}s — token service hung"
     if isinstance(e, json.JSONDecodeError):
         # The token rides in this stdout, so report the shape of the failure, never the bytes.
-        return f"minter stdout was not the expected JSON ({e.msg} at position {e.pos})"
+        return f"token service stdout was not the expected JSON ({e.msg} at position {e.pos})"
     if isinstance(e, KeyError):
-        return f"minter JSON is missing the {e} key (expected 'value' and 'ttl')"
+        return f"token service JSON is missing the {e} key (expected 'value' and 'ttl')"
     return f"{type(e).__name__}: {e}"
 
 
@@ -695,9 +701,11 @@ class Injector:
             [str(h) for h in passthrough if h] if isinstance(passthrough, list) else []
         )
         if not first:
-            wall = "on" if self.default_deny else "off"
+            enforce = "on" if self.default_deny else "off"
             hosts = ", ".join(sorted(r.host for r in rules if r.host)) or "none"
-            ctx.log.info(f"egress_proxy: settings reloaded — injecting {hosts}; wall {wall}")
+            ctx.log.info(
+                f"egress_proxy: settings reloaded — injecting {hosts}; allowlist enforce {enforce}"
+            )
         if self._running:
             self._warm([r for r in fresh if r.active])
         self._policy_dirty = True
@@ -995,7 +1003,7 @@ class Injector:
             self._log_would_block(key, flow.request)
             self._note_build(flow)
             return
-        flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
+        flow.response = http.Response.make(403, _REFUSED_BODY)
         self._log_blocked(key, flow.request)
 
     def _trusted_build(self, request) -> bool:
@@ -1066,7 +1074,7 @@ class Injector:
             if not (refused or decrypt_now):
                 continue
             key = host if port == _HTTPS_PORT else f"{host}:{port}"
-            why = "the wall refuses it now" if refused else "it is decrypted now"
+            why = "the allowlist refuses it now" if refused else "it is decrypted now"
             self._close(client_id, key, why)
 
     def _close(self, client_id: str, key: str, why: str) -> None:
@@ -1183,7 +1191,7 @@ class Injector:
         if not allowed:
             key = host if port == default else f"{host}:{port}"
             if self.default_deny:
-                flow.response = http.Response.make(403, b"blocked by foldyard egress wall\n")
+                flow.response = http.Response.make(403, _REFUSED_BODY)
                 flow.metadata["egress_proxy_blocked"] = True  # so `response` doesn't re-log a 403
                 self._log_blocked(key, flow.request)
                 return
@@ -1253,8 +1261,8 @@ class Injector:
         # Dial the upstream DIRECTLY, exactly like the mitmproxy flow being replayed —
         # trust_env=False keeps requests from honouring an ambient HTTPS_PROXY, which would
         # re-route the re-issue through ANOTHER proxy the upstream may not be reachable from
-        # (a dev box's Phase A′ env routes ALL egress at the Mac proxy: the re-issue then dials
-        # a box-network upstream via the Mac and read-times-out — the in-box e2e failure mode).
+        # (a dev box's Phase A′ env routes ALL egress at the host proxy: the re-issue then dials
+        # a box-network upstream via the host and read-times-out — the in-box e2e failure mode).
         session = requests.Session()
         session.trust_env = False
         try:

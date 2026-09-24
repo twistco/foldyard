@@ -32,7 +32,7 @@ def test_refuses_inside_box_before_resolving_stack(monkeypatch, capsys):
     monkeypatch.setattr(stack, "resolve", lambda **_: (_ for _ in ()).throw(AssertionError))
 
     assert browser.open_app() == 1
-    assert "must run on the host" in capsys.readouterr().err
+    assert "must run on your computer" in capsys.readouterr().err
 
 
 def test_requires_explicit_app_port_key(monkeypatch, capsys):

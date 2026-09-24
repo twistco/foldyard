@@ -8,7 +8,7 @@ request it:
 
   1. resolves the CALLER by source IP → its container (via the rootless podman socket),
   2. reads that container's `gcp.serviceAccount` label to get the target SA,
-  3. asks the Mac-side minter (which holds the gcloud creds — they never enter the VM)
+  3. asks the host-side minter (which holds the gcloud creds — they never enter the VM)
      for a short-lived impersonated token for that SA, caching per-SA until expiry,
   4. returns it in the GCE metadata JSON shape.
 
@@ -16,12 +16,12 @@ So the app container (label = the app's runtime SA) and the dev box (label = a r
 log-reader SA) each transparently get a token for THEIR identity — the same mechanism
 prod uses (attached SA via the metadata server), with no token on any disk.
 
-Why source-IP resolution lives here and not on the Mac: a container→Mac request is
-NAT'd through gvproxy, so the Mac only sees the gateway IP. On the podman network the
+Why source-IP resolution lives here and not on the host: a container→host request is
+NAT'd through gvproxy, so the host only sees the gateway IP. On the podman network the
 emulator sees the real container IP, which is what makes per-caller resolution possible.
 
 Env:
-  GCP_MINTER_URL   URL of the Mac-side minter (e.g. http://host.containers.internal:8079)
+  GCP_MINTER_URL   URL of the host-side minter (e.g. http://host.containers.internal:8079)
   GCP_PROJECT      project id served at /project/project-id — REQUIRED, no default
   SA_LABEL         container label holding the SA email (default gcp.serviceAccount)
   MINTER_SECRET    shared secret sent to the minter as X-Minter-Secret (optional)
@@ -116,9 +116,9 @@ def sa_for_ip(ip: str) -> tuple[str, bool] | None:
     return None
 
 
-# ── token minting (delegated to the Mac, cached per (sa, escalatable)) ──────────────
+# ── token minting (delegated to the host, cached per (sa, escalatable)) ──────────────
 def token_for_sa(sa: str, escalatable: bool) -> tuple[str, int]:
-    """Return (access_token, expires_in_seconds), minting via the Mac on miss/expiry. Raises on a
+    """Return (access_token, expires_in_seconds), minting via the host on miss/expiry. Raises on a
     minter error (down / refused) so the caller can answer 404 ⇒ "no service account"."""
     key = f"{sa}\x00{int(escalatable)}"
     now = time.monotonic()
@@ -161,7 +161,7 @@ def _reason(e: Exception) -> str:
                 msg = parsed.get("error", body) if isinstance(parsed, dict) else body
             except ValueError:
                 pass
-        return f"minter {e.code}: {msg[:300]}" if msg else f"minter {e.code}"
+        return f"token service {e.code}: {msg[:300]}" if msg else f"token service {e.code}"
     return f"{type(e).__name__}: {e}"
 
 

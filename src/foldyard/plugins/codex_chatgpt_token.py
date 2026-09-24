@@ -3,7 +3,7 @@
 Codex in ``auth_mode: chatgpt`` authenticates with a SHORT-LIVED access-token JWT held in
 ``~/.codex/auth.json`` and refreshed via a (rotating) refresh token — unlike a static API key. So
 keyless Codex-ChatGPT can't ride the :mod:`static_token` minter; this is a real refresh-minter that
-runs HOST-side (on the Mac, where the real ``auth.json`` lives) and the proxy injects the *current*
+runs HOST-side (on the host, where the real ``auth.json`` lives) and the proxy injects the *current*
 access token into the box's egress to ``chatgpt.com``. The box only ever carries a DUMMY auth.json
 (a far-future-exp JWT, so codex there never refreshes); the real token never enters it.
 
@@ -17,11 +17,11 @@ It reads the access + refresh tokens from ``auth.json`` (default ``$CODEX_HOME``
     codex itself uses — verified from openai/codex ``login/src/auth/manager.rs``: JSON body
     ``{client_id, grant_type, refresh_token}``, ``CLIENT_ID`` below), then writes the rotated tokens
     back to ``auth.json`` ATOMICALLY (preserving every other field), exactly like codex does — so
-    the one canonical ``auth.json`` keeps the real codex on the Mac working too.
+    the one canonical ``auth.json`` keeps the real codex on the host working too.
 
 Concurrency: the whole read→refresh→write runs under an ``flock`` on a sidecar lock + re-reads the
 file inside the lock (another minter call, or codex if it flocked, may have rotated meanwhile) — so
-the single-use refresh token isn't double-spent by concurrent minter calls. (Codex on the Mac
+the single-use refresh token isn't double-spent by concurrent minter calls. (Codex on the host
 doesn't take this lock, so a refresh racing a manual codex run is still possible but unlikely; if it
 ever invalidates the refresh token, ``codex login`` re-establishes it.)
 
@@ -42,7 +42,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 # Verified from openai/codex (login/src/auth/manager.rs): the OAuth client id + token endpoint codex
-# uses for the ChatGPT refresh-token grant. The egress to these is host-side (the Mac), never the
+# uses for the ChatGPT refresh-token grant. The egress to these is host-side, never the
 # box, so they're not behind the box's egress wall.
 _TOKEN_URL = "https://auth.openai.com/oauth/token"
 _CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -102,7 +102,7 @@ def _atomic_write(path: Path, data: dict) -> None:
 def _locked(path: Path):
     """Best-effort exclusive lock (flock on a sidecar) so concurrent MINTER calls serialize their
     refresh — the single-use refresh token can't be double-spent within this process family. No-op
-    where fcntl is unavailable (non-unix); codex on the Mac doesn't take this lock (documented)."""
+    where fcntl is unavailable (non-unix); codex on the host doesn't take this lock (documented)."""
     try:
         import fcntl
     except ImportError:  # pragma: no cover — non-unix

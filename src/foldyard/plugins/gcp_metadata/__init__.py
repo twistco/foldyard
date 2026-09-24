@@ -1,6 +1,6 @@
 """gcp-metadata emulator — the two halves of the GCE metadata mechanism the gcp plugin owns.
 
-  minter.py   runs on the Mac (holds the gcloud creds); the supervisor runs it (fy host).
+  minter.py   runs on the host (holds the gcloud creds); the supervisor runs it (fy host).
   server.py   an on-stack container (the compose `metadata` profile bind-mounts it in) that
               resolves caller-IP → container label → token via the minter.
 

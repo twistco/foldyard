@@ -380,8 +380,8 @@ class GithubPlugin(Plugin):
             f"App token reaching requests (rate limit {limit}/h)",
             (
                 f"NOT injected — requests leave this box anonymous (rate limit {limit}/h). "
-                "`fy mode` can still read github=app: the axis and the proxy are host-side "
-                "state, this is the wire. `fy host restart` on the host and re-run; if it "
+                "`fy mode` can still read github=app: the switch and the proxy are host-side "
+                "state, this is the wire. `fy host restart` on your computer and re-run; if it "
                 "persists the App installation likely needs re-authorizing."
             ),
         )
@@ -396,7 +396,8 @@ class GithubPlugin(Plugin):
             ctx.which("gh"),
             "gh CLI",
             "installed",
-            "missing — brew install gh (needed for github=user)",
+            "missing — install gh (https://cli.github.com; `brew install gh` on macOS) "
+            "(needed for github=user)",
         )
         if ctx.which("gh"):
             yield ("running", "gh login", "")

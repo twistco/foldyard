@@ -28,7 +28,7 @@ def show() -> int:
             print(f"    {'':<11} → {row.observed}")
             worst = max(worst, {"ok": 0, "unknown": 0, "drift": 1}[row.status])
     if worst:
-        print("  (✗ = a tier disagrees with the desired posture — the fix is in its row)")
+        print("  (✗ = a tier disagrees with the desired mode — the fix is in its row)")
     return worst
 
 

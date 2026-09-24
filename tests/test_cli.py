@@ -354,7 +354,7 @@ def test_allow_sync_points_at_refused_hosts_when_nothing_is_recommended(tmp_path
         result = runner.invoke(cli.app, ["allow", "sync"])
         assert result.exit_code == 0, result.output
         assert "nothing pending" in result.output
-        assert "2 hosts the wall refused" in result.output
+        assert "2 hosts the allowlist refused" in result.output
         assert "deb.example.org, pypi.example.org" in result.output
         assert "granted.example.org" not in result.output
     finally:

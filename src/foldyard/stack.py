@@ -972,7 +972,7 @@ def reconcile_posture(
     The ``up`` also spans every profile that currently has RUNNING services (see
     ``_running_extra_profiles``), so profile-gated services a developer started outside the mode
     system — e.g. the ``data`` workers from ``just data-up`` — are re-rendered into the new
-    posture instead of silently keeping the old identity/env. Mac-only and best-effort: any
+    posture instead of silently keeping the old identity/env. Host-only and best-effort: any
     environment hiccup is swallowed so it never breaks ``fy mode`` — but a compose run that
     actually FAILED returns False so callers (the TUI) can say so instead of claiming success.
 
@@ -1013,7 +1013,7 @@ def reconcile_posture(
             new_profiles = new_posture["env"].get("COMPOSE_PROFILES", "")
             extra = _running_extra_profiles(ctx)
             emit(
-                f"▶ posture changed — reconciling stack "
+                f"▶ mode changed — reconciling stack "
                 f"({prev_profiles or 'none'} → {new_profiles or 'none'}"
                 + (f", keeping running: {','.join(extra)}" if extra else "")
                 + f") for {ctx.project}…"
@@ -1026,14 +1026,14 @@ def reconcile_posture(
             if rc != 0:
                 emit(
                     f"✗ reconcile failed (compose exited {rc}) — the stack may still be "
-                    "on the OLD posture; check the output above, then `fy up`"
+                    "on the OLD mode; check the output above, then `fy up`"
                 )
                 return False
             # Only after a SUCCESSFUL up: reap containers whose service left the new
             # posture's config (dropped profile/overlay). A failed up keeps everything.
             _remove_orphan_containers(ctx, emit, extra_profiles=extra)
     except Exception as e:  # never let a reconcile hiccup break the mode write
-        emit(f"⚠ stack posture reconcile skipped: {e}")
+        emit(f"⚠ stack mode reconcile skipped: {e}")
     return True
 
 
@@ -1088,7 +1088,7 @@ def _reconcile_posture_services(
     The stack-down complement of the full reconcile: a posture flip must never start the heavy
     stack (guardrail 2), but the tiny containers a rung is ENFORCED by — the gcp metadata
     emulator — are exactly what the flip is asking for. Without this, a gcp rung declared in a
-    checkout that never ran ``fy up`` read as granted (`fy mode` showed it, the Mac minter ran)
+    checkout that never ran ``fy up`` read as granted (`fy mode` showed it, the host minter ran)
     while the box couldn't mint a single token, and a 2026-08-07 prod investigation burned a
     session chasing the phantom permission errors. Reaps managed services whose rung dropped
     (a zero-secret posture must not keep an identity emulator around), ``up -d``s the wanted
@@ -1101,7 +1101,7 @@ def _reconcile_posture_services(
     ]
     if stale:
         names = ", ".join(svc for _, svc in stale)
-        emit(f"▶ removing posture service(s) whose rung dropped ({names})…")
+        emit(f"▶ removing mode service(s) whose level dropped ({names})…")
         _run([config.engine(), "rm", "-f", *[cid for cid, _ in stale]], env=ctx.env)
     wanted = sorted(s for s, w in managed.items() if w)
     if not wanted:
@@ -1115,12 +1115,12 @@ def _reconcile_posture_services(
     if config.external_network():
         ensure_network(config.engine(), f"{ctx.project}_default", ctx.env)
     emit(
-        f"▶ stack is down — starting the posture service(s) the mode depends on "
+        f"▶ stack is down — starting the service(s) the mode depends on "
         f"({', '.join(wanted)}) for {ctx.project}…"
     )
     rc = _compose_captured(ctx, ["up", "-d", *wanted], emit)
     if rc != 0:
-        emit(f"✗ posture service start failed (compose exited {rc}) — check above, then `fy up`")
+        emit(f"✗ mode service start failed (compose exited {rc}) — check above, then `fy up`")
         return False
     return True
 
@@ -1446,7 +1446,7 @@ def disk_headroom(env: dict[str, str] | None = None, timeout: float = 15) -> Dis
     """Free space on the engine's store, or ``None`` when it cannot be known.
 
     Read from ``podman info`` (``store.graphRootAllocated``/``graphRootUsed``) rather than a
-    ``statvfs``: the store lives inside the VM, so a host-side ``df`` measures the Mac's disk
+    ``statvfs``: the store lives inside the VM, so a host-side ``df`` measures the host's disk
     and not the one that runs out mid-build. docker exposes no equivalent field, and guessing
     is worse than declining to answer — every caller treats ``None`` as "no finding, change
     nothing".
@@ -1658,8 +1658,8 @@ def nuke() -> int:
     if not engine_reachable("nuke"):
         return 0
     ctx = resolve()
-    # Promote transcripts to the durable Mac store before tearing volumes down. The bound-out
-    # dir survives nuke, but archiving keeps the Mac's `claude --resume` current. Best-effort —
+    # Promote transcripts to the durable host store before tearing volumes down. The bound-out
+    # dir survives nuke, but archiving keeps the host's `claude --resume` current. Best-effort —
     # never block. Lazy import: transcripts imports stack, so a top-level import would cycle.
     from . import transcripts
 

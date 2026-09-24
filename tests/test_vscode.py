@@ -812,7 +812,7 @@ def test_refuses_inside_the_box_before_doing_anything(fake, monkeypatch, capsys)
     monkeypatch.setattr(config, "in_box", lambda: True)
     assert vscode.code() == 1
     err = capsys.readouterr().err
-    assert "has to run on the host" in err and "`fy code`" in err
+    assert "has to run on your computer" in err and "`fy code`" in err
     assert "Install it" not in err
     assert fake["gated"] == []  # no gate, no stack resolve
     assert fake["calls"] == []  # no engine call at all: no probe, no exec, no launch

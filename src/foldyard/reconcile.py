@@ -71,7 +71,7 @@ class PostureScope(Scope):
     the mirror is the readable tier and staleness means the supervisor isn't heartbeating.
     Standing incoherence (a pre-settle force-write) surfaces as drift."""
 
-    name = "posture"
+    name = "mode"
 
     def rows(self, state: dict) -> list[ScopeRow]:
         written = devmode._parse(state.get("written") or "")
@@ -110,7 +110,7 @@ class DaemonScope(Scope):
         mode = state["mode"]
         wanted = devmode.desired_daemons(mode)
         if not wanted:
-            return [ScopeRow("ok", self.name, "none (posture demands no daemon)", "—")]
+            return [ScopeRow("ok", self.name, "none (the mode demands no daemon)", "—")]
         daemons = (state.get("daemons") or {}) if devmode.in_box() else devmode.daemon_status(mode)
         offline = all(v == devmode.axis_defaults().get(a) for a, v in mode.items())
         rows = []
@@ -172,7 +172,7 @@ class CapabilityScope(Scope):
                 rows.append(
                     ScopeRow("drift", self.name, desired, f"DEGRADED — {cap.get('detail')}")
                 )
-        return rows or [ScopeRow("ok", self.name, "none (no active rung is probed)", "—")]
+        return rows or [ScopeRow("ok", self.name, "none (no active level is probed)", "—")]
 
 
 class StackScope(Scope):
@@ -209,7 +209,7 @@ class StackScope(Scope):
         lines = [ln for ln in lines if ln]
         if not lines:
             return [
-                ScopeRow("ok", self.name, desired, "stack down (posture applies on next `fy up`)")
+                ScopeRow("ok", self.name, desired, "stack down (the mode applies on next `fy up`)")
             ]
         config_files = max(lines, key=len)  # any container carries the full -f list
         # Filenames are the stable part (label paths may be absolute or relative; posture
@@ -239,9 +239,7 @@ class StackScope(Scope):
                     "`fy up` re-renders (or change any mode to reconcile)",
                 )
             ]
-        return [
-            ScopeRow("ok", self.name, desired, f"{len(lines)} containers on the posture overlays")
-        ]
+        return [ScopeRow("ok", self.name, desired, f"{len(lines)} containers on the mode overlays")]
 
 
 class BoxEnvScope(Scope):
@@ -253,7 +251,7 @@ class BoxEnvScope(Scope):
     host_only = True
 
     def rows(self, state: dict) -> list[ScopeRow]:
-        desired = "dev box env matches the posture"
+        desired = "dev box env matches the mode"
         try:
             hint = devmode._box_env_hint(state["mode"])
         except Exception:

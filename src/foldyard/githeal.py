@@ -1,7 +1,7 @@
 """Heal the SHARED git index after a box-side git moved HEAD (ADR-0021's follow-up).
 
 The per-kernel index split (the box's git shim) ended the cross-kernel index corruption, but
-left a deterministic illusion on the Mac: a box-side commit/checkout moves the SHARED HEAD
+left a deterministic illusion on the host: a box-side commit/checkout moves the SHARED HEAD
 while the host's ``.git/index`` still describes the old one, so every host-side ``git status``
 (and GUI) shows the gap as phantom staged deletions/modifications until a manual ``git reset``.
 The supervisor sweeps this module once per tick to fast-forward that pure staleness away —
@@ -48,7 +48,7 @@ _warned: dict[str, tuple[str, str]] = {}
 
 def _git(repo: Path, *args: str, input_bytes: bytes | None = None, env: dict | None = None):
     """Raw git in ``repo``. FY_GIT_SHIM_OFF pins the REAL binary + the SHARED index even when
-    this code runs where the box shim owns PATH (the in-box test suite) — on the Mac it's inert."""
+    this code runs where the box shim owns PATH (the in-box test suite) — on the host it's inert."""
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True,

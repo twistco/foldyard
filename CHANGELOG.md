@@ -27,6 +27,17 @@ break config or CLI shape, and say so here. How a release is cut:
   `fy config widenings` list any still in use. Rename them in the same commit that raises
   `[project] min_foldyard_version` to this release: an older `fy` doesn't know the new names, so it
   would read `firewall = true` as no firewall at all.
+- **Messages say "your computer", and use the docs' vocabulary.** `fy --help`, `fy doctor`,
+  `fy mode`, `fy state`, the TUI and error messages no longer say "Mac" (foldyard runs on Linux
+  and WSL2 hosts too), and speak of the mode's *switches* and *levels* (was "posture", "axes",
+  "rungs"), the VM firewall / host firewall / allowlist (was "the wall"), token services (was
+  "minters"). `fy state`'s first row is now `mode` (was `posture`). The proxy's refusal body now
+  reads ``refused by the foldyard allowlist - grant it on your computer: `fy allow add <host>` ``.
+  `brew install` hints name the macOS case and give the Linux one.
+- **The manual is rewritten for clarity** — shorter, current, and in one vocabulary, defined in
+  the new [glossary](./docs/glossary.md) (`fy docs glossary`). Install steps cover Linux. Finished
+  studies and incident records moved to [docs/archive/](./docs/archive/); contributor docs
+  (`nested-virt`, `lima-backend-scope`) no longer ship in the wheel.
 - **Plugin API: `Axis` is now `Switch`, and its `rungs` are `levels`.** The rest follows:
   `Plugin.axes()` → `switches()`, `Plugin.posture_services()` → `mode_services()`,
   `Requires.axis` / `CapabilityProbe.axis` → `.switch`, and on `Registry`: `axes()` → `switches()`,

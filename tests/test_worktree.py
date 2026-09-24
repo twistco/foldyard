@@ -464,7 +464,7 @@ def test_add_refuses_in_box(fake_main, monkeypatch, capsys):
     monkeypatch.setattr(config, "in_box", lambda: True)
     assert worktree.add("feat") == 1
     assert not fake_main["calls"]  # bailed before shelling git
-    assert "run on the host" in capsys.readouterr().err
+    assert "run on your computer" in capsys.readouterr().err
 
 
 def test_remove_refuses_in_box(fake_main, monkeypatch, capsys):
@@ -474,7 +474,7 @@ def test_remove_refuses_in_box(fake_main, monkeypatch, capsys):
     monkeypatch.setattr(config, "in_box", lambda: True)
     assert worktree.remove("feat", force=True) == 1
     assert fake_main["teardown"] == []  # nothing torn down
-    assert "run on the host" in capsys.readouterr().err
+    assert "run on your computer" in capsys.readouterr().err
 
 
 def test_remove_orphaned_checkout_requires_force(fake_main, capsys):

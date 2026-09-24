@@ -1,10 +1,10 @@
 """`foldyard transcripts [dest]` — copy the dev box's agent transcripts out to a
-stable host archive (RUN ON THE MAC).
+stable host archive (RUN ON THE HOST).
 
 Faithful port of the `transcripts` recipe. In-box agents write session transcripts to
 gitignored bound-out dirs inside the repo. Those dirs survive `nuke`, but they're fragile
 for long-term keeping (`git clean -fdx` wipes them, the worktree may be removed, they carry
-two-hop ownership). This copies configured agents' transcripts into their native Mac history
+two-hop ownership). This copies configured agents' transcripts into their native host history
 dirs — or a dir you pass / set in FOLDYARD_TRANSCRIPTS_ARCHIVE.
 
 SAFE by construction: we only ever read an agent's transcript subtree (Claude ``projects/``
@@ -12,7 +12,7 @@ or Codex ``sessions/``) — never sibling credential/config files or settings. T
 ADDITIVE: rsync with --update and NO --delete, so the archive only grows and nothing there
 is removed or overwritten by an older copy (set DRY_RUN=1 to preview).
 
-RUN ON THE MAC: the archive lives in the Mac's home, which the box can't reach.
+RUN ON THE HOST: the archive lives in the host's home, which the box can't reach.
 Becomes part of the `claude-code` plugin later (ADR-0015). Stdlib only.
 """
 
@@ -44,8 +44,8 @@ def _box_running(engine: str, box: str, env: dict) -> bool:
 
 
 def _archive_dest(dest: str = "") -> Path:
-    """The durable Mac archive: an explicit ``dest`` / ``$FOLDYARD_TRANSCRIPTS_ARCHIVE``,
-    else the Mac's own ``~/.claude/projects`` (so ``claude --resume`` lists in-box sessions)."""
+    """The durable host archive: an explicit ``dest`` / ``$FOLDYARD_TRANSCRIPTS_ARCHIVE``,
+    else the host's own ``~/.claude/projects`` (so ``claude --resume`` lists in-box sessions)."""
     return Path(
         dest or os.environ.get("FOLDYARD_TRANSCRIPTS_ARCHIVE") or (Path.home() / ".claude/projects")
     ).expanduser()
@@ -84,7 +84,7 @@ def _rsync_additive(
 ) -> tuple[int, str]:
     """Additive rsync (``-u``, NO ``--delete``) of a transcript tree into the archive, so
     the archive only grows and nothing is overwritten by an older copy. ``-rt`` keeps mtimes
-    (needed for ``-u``); no ``-p/-o/-g`` so the archive gets clean Mac-user ownership/perms.
+    (needed for ``-u``); no ``-p/-o/-g`` so the archive gets clean host-user ownership/perms.
 
     Returns ``(returncode, stderr)``. ``quiet`` drops both the echoed command and ``--stats`` and
     captures the output instead of inheriting our fds — the supervisor tees stdout to
@@ -103,25 +103,25 @@ def _rsync_additive(
 
 
 def bound_out_dir(checkout: Path, here: str) -> Path:
-    """The Mac-side dir a box binds Claude's ``projects/`` out to. It survives ``nuke`` (a
+    """The host-side dir a box binds Claude's ``projects/`` out to. It survives ``nuke`` (a
     plain host dir), but is fragile to ``git clean -fdx`` and worktree removal — which is
     why destructive ops :func:`sync_archive` it to the durable store first."""
     return checkout / here / ".devbox-claude/projects"
 
 
 def codex_bound_out_dir(checkout: Path, here: str) -> Path:
-    """The Mac-side directory bound to Codex's resumable ``~/.codex/sessions`` tree."""
+    """The host-side directory bound to Codex's resumable ``~/.codex/sessions`` tree."""
     return checkout / here / ".devbox-codex/sessions"
 
 
 def sync_archive(
     src_dir: Path, *, dest: str = "", what: str = "transcripts", quiet: bool = False
 ) -> int:
-    """Additively copy one bound-out agent transcript dir → its durable Mac archive BEFORE a
+    """Additively copy one bound-out agent transcript dir → its durable host archive BEFORE a
     destructive op deletes the source. Returns 0 on success or nothing-to-do, non-zero only when
     a real copy was attempted and rsync failed. Never raises.
 
-    No-op (0) inside the box (the archive lives in the Mac's home, unreachable there) and when
+    No-op (0) inside the box (the archive lives in the host's home, unreachable there) and when
     ``src_dir`` is missing/empty. SAFE by construction: only ever reads the transcript tree handed
     in — never sibling credential/config files.
 
@@ -133,7 +133,7 @@ def sync_archive(
         return 0  # nothing worth keeping
     if not which("rsync"):
         if not quiet:
-            _err("⚠ rsync not found (ships with macOS) — can't archive transcripts.")
+            _err("⚠ rsync not found (install it; ships with macOS) — can't archive transcripts.")
         return 1
     dest_dir = _archive_dest(dest)
     if not quiet:
@@ -150,12 +150,12 @@ def sync_archive(
 
 # ── the supervisor's per-interval auto-sync (`[claude]/[codex] transcript_sync_seconds`) ──────
 #
-# Why a HOST-side timer and not something in the box: the box cannot reach the Mac's home, so it
+# Why a HOST-side timer and not something in the box: the box cannot reach the host's home, so it
 # can never push. It doesn't have to — `FY_TRANSCRIPTS` bind-mounts the bound-out dir into the box
 # at the agent's own `projects/`/`sessions/` path, so an in-box write lands on the host path as it
 # happens. The sweep is therefore a HOST-LOCAL rsync between two host paths: no engine call, no box
-# round-trip. It is also why polling is right rather than a watcher — Mac-side inotify doesn't fire
-# for guest writes (virtiofs, podman#22343), the very gap that makes hot reload miss Mac edits.
+# round-trip. It is also why polling is right rather than a watcher — host-side inotify doesn't fire
+# for guest writes (virtiofs, podman#22343), the very gap that makes hot reload miss host edits.
 #
 # What it buys, given the data is already on the host: the bound-out dir is fragile (a `git clean
 # -fdx` wipes it, `worktree remove` takes it away) and invisible to `claude --resume`, which reads
@@ -285,10 +285,10 @@ def sync_current(env: dict, *, what: str = "transcripts", dest: str = "") -> int
 def transcripts(dest: str = "") -> int:
     # Same box-detection `verify`/the recipe use: IN_DEVBOX, or the preset in-box socket.
     if config.in_box():
-        _err("✗ run this ON THE MAC — the archive is in the Mac's home, unreachable from the box.")
+        _err("✗ run this ON YOUR COMPUTER — the archive is in its home, unreachable from the box.")
         return 1
     if not which("rsync"):
-        _err("✗ rsync not found (ships with macOS).")
+        _err("✗ rsync not found — install it (your package manager; it ships with macOS).")
         return 1
 
     # The bound-out dirs are host-side; the engine is only the fallback for a RUNNING box, which a
@@ -301,9 +301,9 @@ def transcripts(dest: str = "") -> int:
     box = f"{ctx.project}-devbox"
     checkout = Path(env["FOLDYARD_CHECKOUT"])
     here = env.get("HERE") or config.dev_vm_rel()
-    # The Claude bound-out dir on the Mac, honouring the same override as `devbox up`.
+    # The Claude bound-out dir on the host, honouring the same override as `devbox up`.
     src_dir = Path(os.environ.get("DEVBOX_TRANSCRIPTS") or bound_out_dir(checkout, here))
-    # Default into the Mac's own history so `claude --resume` lists these in-box sessions.
+    # Default into the host's own history so `claude --resume` lists these in-box sessions.
     claude_dest = _archive_dest(dest)
     dry = bool(os.environ.get("DRY_RUN"))
 
@@ -359,7 +359,7 @@ def _sync_source(
     missing_ok: bool = False,
 ) -> int:
     """Sync one agent's bound history, falling back to its live in-box directory."""
-    # Stage the source. Prefer the bound-out dir (already on the Mac, no engine needed);
+    # Stage the source. Prefer the bound-out dir (already on the host, no engine needed);
     # if it's empty, fall back to pulling the live projects/ tree out of the running box
     # over the socket with `<engine> cp` — projects/ ONLY, so creds never come along.
     tmp: str | None = None

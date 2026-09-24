@@ -13,8 +13,8 @@ window (:func:`start_learning`) suspends enforcement until a deadline, while the
 what it would have refused; enforcement resumes by itself when it lapses, and :func:`learned_hosts`
 turns what was recorded into one reviewed batch of grants.
 
-EVERY level lives in one authoritative store in the Mac home (``allow-store.json``, OUTSIDE the repo
-mount), so **nothing in the box can grant its own egress**. That placement is the whole
+EVERY level lives in one authoritative store in the host's home (``allow-store.json``, OUTSIDE the
+repo mount), so **nothing in the box can grant its own egress**. That placement is the whole
 guarantee, so
 permanent grants live there too rather than in the repo's ``foldyard.toml``: config travels with the
 branch, and a store the box can edit is not a store — it read as "team-shared" but meant "the box
@@ -25,7 +25,7 @@ The proxy daemon (a standalone mitmproxy addon that can't import foldyard) re-re
 *effective* file (``allow-effective.json``) per request, so grants take effect live with no daemon
 restart. The host writes that file on every grant and on the supervisor's expiry sweep.
 
-Stdlib only. Grants are Mac-only (the box must not escalate its own posture).
+Stdlib only. Grants are host-only (the box must not escalate its own posture).
 """
 
 from __future__ import annotations
@@ -235,7 +235,7 @@ def default_deny() -> bool:
 
 
 def set_wall(on: bool) -> dict:
-    """Turn enforcement on/off in the host store (Mac only). Returns the new effective. Ends a
+    """Turn enforcement on/off in the host store (host only). Returns the new effective. Ends a
     learn window early (its record is kept, so `fy allow learn` can still review it)."""
     _require_host()
     _require_readable_store()
@@ -294,7 +294,7 @@ def start_learning(seconds: int = LEARN_DEFAULT_SECONDS) -> dict:
     """Open a learn window: enforcement is suspended until now + ``seconds`` (capped at
     :data:`LEARN_MAX_SECONDS`), the proxy records every host it WOULD have refused, and when the
     window lapses the wall ENFORCES — whatever it was before. That last part is the point: a
-    window cannot be forgotten into an open wall, which ``fy allow enforce off`` can. Mac only.
+    window cannot be forgotten into an open wall, which ``fy allow enforce off`` can. Host only.
     Returns the window."""
     _require_host()
     _require_readable_store()
@@ -362,9 +362,9 @@ def seed_learning(echo: Callable[[str], None]) -> dict | None:
     until = _parse(window["until"])
     at = until.astimezone().strftime("%H:%M") if until else window["until"]
     echo(
-        f"▶ egress wall: LEARNING until {at} (first run) — the box's egress is allowed and every "
-        "host the wall would refuse is recorded. Enforcement resumes by itself; review and grant "
-        "what it saw with `fy allow learn` (`fy allow enforce on` ends it now)."
+        f"▶ allowlist: LEARNING until {at} (first run) — the box's egress is allowed and every "
+        "host the allowlist would refuse is recorded. Enforcement resumes by itself; review and "
+        "grant what it saw with `fy allow learn` (`fy allow enforce on` ends it now)."
     )
     return window
 
@@ -710,20 +710,20 @@ def effective() -> dict:
 
 
 def write_effective() -> dict:
-    """Write the effective file the proxy daemon re-reads per request. Host-side (Mac) only."""
+    """Write the effective file the proxy daemon re-reads per request. Host-side only."""
     payload = effective()
     _write_json(config.allow_effective_file(), payload)
     return payload
 
 
-# ── grants / revokes (Mac only) ──────────────────────────────────────────────────────
+# ── grants / revokes (host only) ─────────────────────────────────────────────────────
 
 
 def _require_host() -> None:
     if in_box():
         raise SystemExit(
-            "✗ egress allows are Mac-only: the box must not grant its own egress "
-            "(the allow-store lives in the Mac home, outside the shared mount)."
+            "✗ egress allows are made on your computer only: the box must not grant its own egress "
+            "(the allow-store lives in your home directory there, outside the shared mount)."
         )
 
 
@@ -741,7 +741,7 @@ def _require_readable_store() -> None:
 
 def grant(host: str, level: str, ttl: int | None = None, *, build: bool = False) -> dict:
     """Allow ``host`` at ``level`` (once|session|permanent) — for everything, or with ``build``
-    only for a host-started image build. Mac only. Returns the new effective.
+    only for a host-started image build. Host only. Returns the new effective.
 
     A build grant never replaces a live runtime one (which already covers builds); a runtime grant
     replaces a build one."""
@@ -794,7 +794,7 @@ def _lasts_as_long(current: dict, level: str, expires: str | None) -> bool:
 
 
 def revoke(host: str) -> dict:
-    """Remove ``host`` from the store at any level. Mac only."""
+    """Remove ``host`` from the store at any level. Host only."""
     _require_host()
     _require_readable_store()
     host = host.strip()
@@ -807,7 +807,7 @@ def revoke(host: str) -> dict:
 
 def clear_ephemeral() -> dict:
     """Drop all once/session grants, KEEPING permanent ones. For supervisor start — 'until restart'
-    grants end here. Mac only."""
+    grants end here. Host only."""
     _require_host()
     _require_readable_store()
     hosts, _ = _prune(_load_store())
@@ -834,7 +834,7 @@ def declined() -> set[str]:
 
 
 def decline(host: str) -> None:
-    """Record "never offer ``host`` again" (Mac only). Undone by granting it (any level) —
+    """Record "never offer ``host`` again" (host only). Undone by granting it (any level) —
     :func:`grant` drops the record — or by re-adding it by hand with `fy allow add`."""
     _require_host()
     _require_readable_store()
@@ -991,7 +991,7 @@ def _accept_build_recommendations(echo: Callable[[str], None]) -> None:
 
 def sweep() -> bool:
     """Expire lapsed ``once`` grants; rewrite the store + effective file if anything changed.
-    Returns True when it changed. Called from the supervisor tick. Mac only."""
+    Returns True when it changed. Called from the supervisor tick. Host only."""
     if in_box():
         return False
     try:

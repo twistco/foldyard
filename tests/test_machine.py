@@ -901,7 +901,7 @@ def test_host_wall_start_refuses_before_booting_when_not_set_up(
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == [] and probes == []
     err = capsys.readouterr().err
-    assert "not set up" in err and "fy machine host-firewall" in err
+    assert "isn't set up" in err and "fy machine host-firewall" in err
 
 
 def test_host_wall_is_probed_on_every_steady_state_up(host_wall_env, tmp_path, capsys):
@@ -911,7 +911,7 @@ def test_host_wall_is_probed_on_every_steady_state_up(host_wall_env, tmp_path, c
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == []
     assert probes == ["homelab"] and guest.reads == 1
-    assert "host-side wall enforcing" in capsys.readouterr().err
+    assert "host firewall enforcing" in capsys.readouterr().err
 
 
 def test_host_wall_not_enforcing_is_a_hard_stop_that_points_at_the_install(
@@ -1075,7 +1075,7 @@ def test_host_wall_verb_is_quiet_about_a_slice_already_set_up(host_wall_verb, mo
 def test_host_wall_verb_is_a_no_op_note_when_off(host_wall_verb, monkeypatch, capsys):
     monkeypatch.setattr(machine.config, "machine_host_wall", lambda: False)
     assert machine.host_wall() == 0
-    assert "host_wall is off" in capsys.readouterr().out
+    assert "host firewall is off" in capsys.readouterr().out
 
 
 def test_host_wall_verb_uninstall_never_sets_the_slice_up(host_wall_verb, monkeypatch, capsys):

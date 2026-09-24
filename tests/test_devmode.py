@@ -1292,7 +1292,7 @@ def test_mode_set_validates_the_updates_before_prompting(isolated_state, monkeyp
     monkeypatch.setattr(
         devmode.getpass, "getpass", lambda _p: pytest.fail("must not prompt for a refused mode")
     )
-    with pytest.raises(SystemExit, match="unknown axis 'gihtub'"):
+    with pytest.raises(SystemExit, match="unknown switch 'gihtub'"):
         devmode.main(["set", "github=app", "gihtub=off"])
     with pytest.raises(SystemExit, match="github mode 'nope'"):
         devmode.main(["set", "github=nope"])
@@ -1500,8 +1500,12 @@ def test_host_wall_doctor_row_enforcing(host_wall_row, monkeypatch):
     checks = {"loopback": "refused", "external": "refused", "band": "ok"}
     monkeypatch.setattr(host_wall_row, "probe", lambda vm: host_wall_row.Probe(True, checks))
     assert list(devmode._host_wall_check()) == [
-        ("running", "host wall", ""),  # the spinner placeholder a live UI replaces by name
-        ("ok", "host wall", "enforcing (loopback ✓ refused, external ✓ refused, band ✓ ok)"),
+        ("running", "host firewall", ""),  # the spinner placeholder a live UI replaces by name
+        (
+            "ok",
+            "host firewall",
+            "enforcing (loopback ✓ refused, external ✓ refused, port range ✓ ok)",
+        ),
     ]
 
 

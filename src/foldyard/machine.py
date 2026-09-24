@@ -105,7 +105,7 @@ def _start() -> bool:
     prefix: list[str] = []
     if _host_wall_wanted():
         if not hostwall.slice_path(MACHINE):
-            _err("✗ [machine] host_firewall = true but the host wall is not set up on this host:")
+            _err("✗ [machine] host_firewall = true but the host firewall isn't set up here:")
             _err(f"  the user slice '{hostwall.slice_unit(MACHINE)}' is not active. Set it up")
             _err("  (and see the install steps) with:   fy machine host-firewall")
             return False
@@ -192,26 +192,26 @@ def _check_host_wall() -> None:
         _err(
             "✗ [machine] host_firewall = true but this host has no `nft` / cgroup v2 to enforce it."
         )
-        _err("  Install nftables, or drop `host_wall` (the in-VM wall still applies).")
+        _err("  Install nftables, or drop `host_firewall` (the VM firewall still applies).")
         raise SystemExit(1)
     pids = BACKEND.host_pids(MACHINE)
     scope = hostwall.vm_cgroup_scope(pids[0] if pids else 0)
     if not hostwall.in_own_scope(MACHINE, scope):
         _err(f"✗ '{MACHINE}' is running OUTSIDE its own scope ({scope or 'no VM pid found'}), so")
-        _err("  the host wall has nothing safe to match — walling the scope it is in would wall")
-        _err("  the shell that started it. Restart it under foldyard:   fy machine stop && fy up")
+        _err("  the host firewall has nothing safe to match — the scope it is in holds the shell")
+        _err("  that started it. Restart it under foldyard:   fy machine stop && fy up")
         raise SystemExit(1)
     result = hostwall.probe(MACHINE)
     if result.enforcing:
-        _err(f"✓ host-side wall enforcing for '{MACHINE}' ({result.detail()})")
+        _err(f"✓ host firewall enforcing for '{MACHINE}' ({result.detail()})")
         return
-    _err(f"✗ the host-side wall is NOT enforcing for '{MACHINE}'.")
+    _err(f"✗ the host firewall is NOT enforcing for '{MACHINE}'.")
     if result.error:
         _err(f"  probe: {result.error}")
     else:
         _err(f"  probe: {result.detail()}")
     _err("  Not installed, or installed for a slice that no longer exists (a host reboot, a")
-    _err("  changed band). foldyard never loads it itself — see the files and the steps:")
+    _err("  changed port range). foldyard never loads it itself — see the files and the steps:")
     _err("      fy machine host-firewall")
     raise SystemExit(1)
 
@@ -223,10 +223,10 @@ def host_wall(uninstall: bool = False) -> int:
     wall is enforcing right now. Exit 0 when it is, 1 when it is not (so a script can ask).
     foldyard runs none of the printed commands: what root does is in front of the operator."""
     if not _host_wall_wanted():
-        print("host_wall is off for this project ([machine] host_firewall; lima backend only).")
+        print("host firewall is off for this project ([machine] host_firewall; lima backend only).")
         return 0
     if not hostwall.available():
-        print("✗ this host can't enforce a host wall: it needs `nft` (nftables) and cgroup v2.")
+        print("✗ this host can't enforce a host firewall: it needs `nft` (nftables) and cgroup v2.")
         return 1
     fresh = False
     if uninstall:
@@ -248,7 +248,7 @@ def host_wall(uninstall: bool = False) -> int:
         result = hostwall.probe(MACHINE)
     else:  # uninstall with no slice: probing would create a transient one — nothing to ask
         result = hostwall.Probe(False, {}, "not set up (no slice)")
-    print(f"host-side wall for machine '{MACHINE}' — slice {slice_path or '(none)'}")
+    print(f"host firewall for machine '{MACHINE}' — slice {slice_path or '(none)'}")
     if result.enforcing:
         print(f"  ✓ enforcing ({result.detail()})")
     else:
@@ -267,7 +267,7 @@ def host_wall(uninstall: bool = False) -> int:
     for line in staged.install:
         print(f"    {line}")
     print("\nThen `fy up` (or this verb again) probes it. Re-run the install after a change to")
-    print("the project's daemon band, and once per host if the files were removed.")
+    print("the project's daemon port range, and once per host if the files were removed.")
     return 0 if result.enforcing else 1
 
 
@@ -276,7 +276,7 @@ def _note_host_wall_install() -> None:
     is empty and right again for the next VM of this name. Say so, once."""
     if _host_wall_wanted() and hostwall.available():
         _err(
-            "ℹ the host-side wall install is untouched (`fy machine host-firewall --uninstall` says"
+            "ℹ the host firewall install is untouched (`fy machine host-firewall --uninstall` says"
         )
         _err("  how to remove it).")
 
@@ -393,9 +393,10 @@ def _record_provisioning() -> None:
     if BACKEND.provision_id(MACHINE) == ident:
         return
     if state() == "running":
-        _err(f"✗ '{MACHINE}' is running with STALE boot provisioning — the sudo grant, the egress")
-        _err("  wall or its port band changed (or the VM predates boot provisioning). It applies")
-        _err("  at boot, as root, from the recorded config, so restart:   fy machine stop && fy up")
+        _err(f"✗ '{MACHINE}' is running with STALE boot provisioning — the sudo grant, the VM")
+        _err("  firewall or its port range changed (or the VM predates boot provisioning).")
+        _err("  It applies at boot, as root, from the recorded config, so restart:")
+        _err("      fy machine stop && fy up")
         raise SystemExit(1)
     _err(f"▶ recording boot provisioning for '{MACHINE}' ({_provision_want()}; VM user gets no")
     _err("  sudo)…")
@@ -452,8 +453,9 @@ def ensure(main: Path, wt_root: Path) -> None:
         _err("  (one-time, a few minutes: downloads the VM image + provisions disk)")
         if not BACKEND.create(MACHINE, _resources(), _volumes(main, wt_root)):
             _err(
-                f"✗ creating {BACKEND.name} machine '{MACHINE}' failed (Apple Virtualization "
-                "blocked — e.g. under nono? Then create it in a plain terminal)."
+                f"✗ creating {BACKEND.name} machine '{MACHINE}' failed — see the output above. "
+                "(On macOS, a sandbox like nono can block Apple Virtualization: create it from a "
+                "plain terminal.)"
             )
             raise SystemExit(1)
     elif str(wt_root) not in mounts():
@@ -568,7 +570,7 @@ def _host_only_or_rc(verb: str) -> int | None:
     """The shared guard for the stop/rm lifecycle verbs: host-only (the box must not manage the
     VM it lives in). None when OK to proceed."""
     if config.in_box():
-        print(f"✗ run on the host (Mac) — the box can't {verb} its own machine")
+        print(f"✗ run on your computer — the box can't {verb} its own machine")
         return 1
     if not BACKEND.available():
         print(f"✗ no '{BACKEND.cli}' CLI on this host — can't {verb} the machine")
@@ -661,7 +663,7 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
     are init-only — neither podman's ``--volume`` nor Lima's ``mounts:`` can be edited live).
     Interactive unless assume_yes."""
     if config.in_box() or not BACKEND.available():
-        print("✗ run on the host (Mac) — the box can't recreate its own machine")
+        print("✗ run on your computer — the box can't recreate its own machine")
         return 1
     print(f"This stops + REMOVES {BACKEND.name} machine '{MACHINE}' and re-creates it with mounts:")
     print(f"    {main}")
