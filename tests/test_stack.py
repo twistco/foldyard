@@ -556,7 +556,30 @@ def running_services(monkeypatch):
     """What the engine reports running, for the heal's filter — mutate the set in the test."""
     running = {"queue-worker", "graph-api"}
     monkeypatch.setattr(stack, "_running_services", lambda ctx, deadline=None: running)
+    monkeypatch.setattr(
+        stack,
+        "_rendered_services",
+        lambda ctx, extra_profiles=None, deadline=None: running | {"postgres"},
+    )
     return running
+
+
+def test_recreate_services_never_claims_a_service_the_render_leaves_out(
+    fake_repo, capture_run, running_services, monkeypatch
+):
+    # Seen live: podman-compose skips a named service outside the rendered profiles and exits 0,
+    # so the heal logged "recreated e2e-app" having touched nothing. Only the render's services
+    # are named; one it lacks fails the heal loudly instead.
+    running_services.add("e2e-app")
+    monkeypatch.setattr(
+        stack,
+        "_rendered_services",
+        lambda ctx, extra_profiles=None, deadline=None: {"queue-worker"},
+    )
+    ok, summary = stack.recreate_services(["queue-worker", "e2e-app"])
+    assert ok is False
+    assert summary == ("recreated queue-worker; not in the rendered config, NOT recreated: e2e-app")
+    assert _composes(capture_run)[-1][-1] == "queue-worker"
 
 
 def test_recreate_services_force_recreates_on_the_current_posture(
@@ -618,7 +641,7 @@ def test_recreate_services_refuses_when_it_cannot_see_what_runs(
 
 def test_recreate_services_bounds_every_compose_call_by_one_deadline(fake_repo, monkeypatch):
     # The heal runs on a supervisor worker whose in-flight key clears only when this returns, so
-    # the probes BEFORE the up (what runs, which profiles) must be bounded too, and by the same
+    # the probes BEFORE the up (what runs, what renders) must be bounded too, and by the same
     # budget — not each by a fresh one.
     import types
 
@@ -629,14 +652,14 @@ def test_recreate_services_bounds_every_compose_call_by_one_deadline(fake_repo, 
         out = ""
         if "ps" in cmd:
             out = '{"Service":"queue-worker"}\n'
-        if cmd[-1] == "--profiles":
-            out = "data\n"
+        if cmd[-1] == "--services":
+            out = "queue-worker\n"
         return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
 
     monkeypatch.setattr(stack, "_run", fake_run)
     ok, _ = stack.recreate_services(["queue-worker"], timeout=30.0)
     assert ok is True
-    assert len(timeouts) >= 4  # ps, the profile probes, the up
+    assert len(timeouts) >= 3  # ps (the extras probe runs its own), the render, the up
     assert all(t is not None and 0 < t <= 30.0 for t in timeouts), timeouts
 
 
@@ -2072,28 +2095,37 @@ def test_profile_flags_reasserts_actives_alongside_extras(fake_repo):
 
 
 def test_running_extra_profiles_discovers_from_compose(fake_repo, monkeypatch):
-    # queue-worker (profile `data`) is running; profile `e2e` has no running service; the
-    # active `metadata` profile is excluded. Fully generic — no profile names baked in.
-    import types
-
-    def fake_run(cmd, **_kw):
-        out = ""
-        if "ps" in cmd:
-            out = '{"Service":"queue-worker"}\n{"Service":"app"}\n'
-        if cmd[-1] == "--profiles":
-            out = "data\ne2e\nmetadata\n"
-        if cmd[-1] == "--services":
-            if "data" in cmd:
-                out = "app\npostgres\nqueue-worker\n"
-            elif "e2e" in cmd:
-                out = "app\npostgres\ne2e-app\n"
-            else:
-                out = "app\npostgres\n"
-        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
-
-    monkeypatch.setattr(stack, "_run", fake_run)
-    ctx = _fake_ctx(fake_repo, {"COMPOSE_PROFILES": "metadata"})
+    # queue-worker (profile `data`) is running; profile `e2e` has no running service; the active
+    # `metadata` profile is excluded. Read from the -f files themselves, not `config --profiles`:
+    # the bundled podman-compose has no such flag (exit 2), so discovery always came back empty
+    # there — profile-gated services were never re-rendered, and the reconcile's orphan sweep
+    # took a running one for departed. An overlay that re-declares a service's profiles wins.
+    base = fake_repo / "compose.base.yml"
+    base.write_text(
+        "services:\n"
+        "  app: {image: a}\n"
+        "  queue-worker: {image: q, profiles: [data]}\n"
+        "  e2e-app: {image: e, profiles: [e2e]}\n"
+        "  metadata-emulator: {image: m, profiles: [metadata]}\n"
+        "  graph-api: {image: g, profiles: [old]}\n"
+    )
+    overlay = fake_repo / "compose.overlay.yml"
+    overlay.write_text("services:\n  graph-api: {profiles: [data]}\n  app: {environment: {}}\n")
+    ctx = stack.Context(
+        main=fake_repo,
+        env={"COMPOSE_PROFILES": "metadata"},
+        compose=["podman", "compose", "-f", str(base), "-f", "compose.overlay.yml"],
+        app="app",
+        project="p",
+        worktree="",
+    )
+    running = {"app", "queue-worker", "graph-api", "metadata-emulator"}
+    monkeypatch.setattr(stack, "_running_services", lambda ctx, deadline=None: running)
     assert stack._running_extra_profiles(ctx) == ["data"]
+    running.add("e2e-app")
+    assert stack._running_extra_profiles(ctx) == ["data", "e2e"]
+    overlay.write_text("services: [broken")  # unreadable -f file → best-effort []
+    assert stack._running_extra_profiles(ctx) == []
 
 
 def test_up_unions_running_extra_profiles(fake_repo, capture_run, monkeypatch):

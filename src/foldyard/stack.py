@@ -1191,41 +1191,44 @@ def _running_extra_profiles(ctx: Context, deadline: float | None = None) -> list
     developer, not the mode system). The posture reconcile and ``up`` union these into their
     ``up -d`` so those services' config is re-rendered too; without this, profile-gated services
     kept their OLD identity/env across a ``gcp=sa⇄off`` flip (they aren't in the active-profile
-    config, so compose ignored them). Fully generic: discovered from the compose config +
-    running containers, no profile names baked in. Best-effort: [] on any error (the reconcile
-    then covers just the derived set, as before). ``deadline`` bounds every probe (the heal's)."""
+    config, so compose ignored them) — and the reconcile's orphan sweep, rendering without them,
+    took a running one for departed. Each service's profiles come from the ``-f`` files
+    themselves (:func:`_service_profiles`), not ``config --profiles``: the bundled podman-compose
+    has no such flag, so discovery always came back empty there (#33). Fully generic, no profile
+    names baked in. Best-effort: [] on any error (the reconcile then covers just the derived set,
+    as before). ``deadline`` bounds the probe (the heal's)."""
     try:
         running = _running_services(ctx, deadline)
         if not running:
             return []
+        profiles = _service_profiles(ctx)
         active = {p for p in (ctx.env.get("COMPOSE_PROFILES") or "").split(",") if p}
-
-        def _services(*profile_args: str) -> set[str]:
-            res = _run(
-                [*ctx.compose, *profile_args, "config", "--services"],
-                env=ctx.env,
-                cwd=str(ctx.main),
-                timeout=_left(deadline),
-            )
-            return {s.strip() for s in res.stdout.splitlines() if s.strip()}
-
-        all_profiles = _run(
-            [*ctx.compose, "config", "--profiles"],
-            env=ctx.env,
-            cwd=str(ctx.main),
-            timeout=_left(deadline),
-        )
-        candidates = [
-            p
-            for p in (s.strip() for s in all_profiles.stdout.splitlines())
-            if p and p not in active
-        ]
-        if not candidates:
-            return []
-        default_services = _services()
-        return [p for p in candidates if running & (_services("--profile", p) - default_services)]
+        extra: set[str] = set()
+        for service in running:
+            gated = profiles.get(service) or []
+            if gated and not active.intersection(gated):
+                extra.update(gated)
+        return sorted(extra)
     except Exception:
         return []
+
+
+def _service_profiles(ctx: Context) -> dict[str, list[str]]:
+    """Service → its ``profiles``, merged across the ``-f`` files in order (a later file that
+    re-declares a service's ``profiles`` wins, the compose merge rule for sequences like this
+    one). Raises on an unreadable file — callers are best-effort. PyYAML rides in with the
+    bundled podman-compose; imported here only, off the hot path."""
+    import yaml
+
+    files = [ctx.compose[i + 1] for i, arg in enumerate(ctx.compose[:-1]) if arg == "-f"]
+    out: dict[str, list[str]] = {}
+    for f in files:
+        path = Path(f) if Path(f).is_absolute() else ctx.main / f
+        services = (yaml.safe_load(path.read_text()) or {}).get("services") or {}
+        for name, spec in services.items():
+            if isinstance(spec, dict) and "profiles" in spec:
+                out[name] = [str(p) for p in spec["profiles"] or []]
+    return out
 
 
 def recreate_services(
@@ -1262,9 +1265,19 @@ def recreate_services(
         idle = [s for s in services if s not in running]
         if not wanted:
             return True, f"none of {', '.join(services)} running — nothing to recreate"
+        extra = _running_extra_profiles(ctx, deadline)
+        # A named service the render leaves out is silently skipped by podman-compose (exit 0),
+        # so only claim what the render has — the rest is reported, never "recreated".
+        rendered = _rendered_services(ctx, extra, deadline)
+        if not rendered:
+            return False, "couldn't render the compose config — nothing recreated"
+        unrendered = [s for s in wanted if s not in rendered]
+        wanted = [s for s in wanted if s in rendered]
+        if not wanted:
+            return False, f"{', '.join(unrendered)} not in the rendered config — nothing recreated"
         cmd = [
             *ctx.compose,
-            *_profile_flags(ctx, _running_extra_profiles(ctx, deadline)),
+            *_profile_flags(ctx, extra),
             *["up", "-d", "--no-build", "--force-recreate", "--no-deps", *wanted],
         ]
         _err("+ " + " ".join(shlex.quote(c) for c in cmd))
@@ -1272,8 +1285,12 @@ def recreate_services(
         if proc.returncode != 0:
             lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
             return False, (lines[-1] if lines else f"compose exited {proc.returncode}")
-        return True, f"recreated {', '.join(wanted)}" + (
+        return (not unrendered), f"recreated {', '.join(wanted)}" + (
             f"; not running, left alone: {', '.join(idle)}" if idle else ""
+        ) + (
+            f"; not in the rendered config, NOT recreated: {', '.join(unrendered)}"
+            if unrendered
+            else ""
         )
     except (Exception, SystemExit) as e:  # resolve aborts a missing worktree with SystemExit
         return False, f"{type(e).__name__}: {e}"
@@ -1563,13 +1580,16 @@ def disk_headroom(env: dict[str, str] | None = None, timeout: float = 15) -> Dis
     return DiskHeadroom(used, total) if total > 0 else None
 
 
-def _rendered_services(ctx: Context, extra_profiles: list[str] | None = None) -> set[str]:
+def _rendered_services(
+    ctx: Context, extra_profiles: list[str] | None = None, deadline: float | None = None
+) -> set[str]:
     """The compose config's service names (``set()`` on any render failure — callers then
-    decompose no image names at all, which keeps everything)."""
+    decompose no image names at all, which keeps everything). ``deadline`` bounds the render."""
     proc = _run(
         [*ctx.compose, *_profile_flags(ctx, extra_profiles), "config", "--services"],
         env=ctx.env,
         cwd=str(ctx.main),
+        timeout=_left(deadline),
     )
     if proc.returncode != 0:
         return set()
