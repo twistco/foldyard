@@ -1,36 +1,40 @@
 # Configuration — `foldyard.toml` and the environment
 
-All project config lives in `foldyard.toml` at the repo root — `foldyard init` writes the
-starter, and foldyard finds the repo by walking up from your working directory to it. Every
-value resolves the same way, everywhere:
+All project config lives in `foldyard.toml` at the repo root. `foldyard init` writes a starter;
+foldyard finds the repo by walking up from your working directory to that file. Terms such as
+*mode*, *switch* and *level* are defined in the [glossary](./glossary.md).
 
-1. **an explicit environment variable** (always wins),
-2. **`foldyard.local.toml`** — a gitignored, per-developer override file beside
-   `foldyard.toml`, deep-merged *over* it,
-3. **`foldyard.toml`** — the committed, team-shared file,
+## How values resolve
+
+Every value resolves the same way, everywhere:
+
+1. **an environment variable** (always wins),
+2. **`foldyard.local.toml`** — your gitignored, personal overrides beside `foldyard.toml`,
+3. **`foldyard.toml`** — the committed file the team shares,
 4. **the built-in default.**
 
-The deep merge is per-key: a local `[claude] keyless = "oauth"` lands *beside* the committed
-`[claude] system_prompt`, it doesn't replace the whole table. Arrays (including
-arrays-of-tables like `[[overlay]]`) are replaced wholesale, not merged. Use the local file
-for anything personal — your `keyless` choice, a private `[[inject]]` — so it never imposes a
-credential prompt on a colleague who doesn't use it. A missing or malformed file simply
-contributes nothing.
+The local file is deep-merged *over* the shared one, key by key: a local `[claude] keyless`
+lands beside the committed `[claude] system_prompt` instead of replacing the table. Arrays,
+including arrays of tables such as `[[overlay]]`, are replaced whole. Put anything personal
+there (your `keyless` choice, a private `[[inject]]`) so it never puts a credential prompt in
+front of a colleague. A missing or malformed file contributes nothing.
 
-`foldyard init` writes a commented **`foldyard.local.toml.example`** beside the scaffold and
-gitignores `foldyard.local.toml` itself: the template is committed, the copy each developer makes
-from it is not.
+`foldyard init` writes a commented `foldyard.local.toml.example` and gitignores
+`foldyard.local.toml` itself (at any depth, so worktree copies are ignored too).
 
-One config semantic to know up front: several tables are **presence-gated** — declaring the
-table, even empty, is the opt-in. `[proxy]`, `[claude]`, `[codex]`, `[vscode]`, and every
-`[plugins.<name>]` table work this way. Delete the table to turn the feature off entirely.
+**Presence-gated tables.** Declaring the table, even empty, is the opt-in: `[proxy]`,
+`[claude]`, `[codex]`, `[vscode]` and every `[plugins.<name>]`. Delete the table to turn the
+feature off.
+
+**Edits don't reach your computer until you adopt them.** The box and the stack read the files
+live; what runs on your computer (the proxy, the token services, credential injection) reads an
+adopted copy. See [The adopted config](#the-adopted-config-what-the-host-actually-runs).
 
 ### `disabled = true` — the one key that subtracts
 
-A deep merge can only ever *add*, which leaves no way to say "not for me" about a block the team
-committed — and because those tables are presence-gated, blanking their keys locally doesn't
-switch them off. So any table can carry `disabled = true`, and it is dropped from the resolved
-config as if it had never been written:
+A merge can only add, and blanking a presence-gated table's keys doesn't switch it off. So any
+table can carry `disabled = true`, and it is dropped from the resolved config as if never
+written:
 
 ```toml
 # foldyard.local.toml — the repo commits [codex]; you don't have that subscription.
@@ -38,20 +42,31 @@ config as if it had never been written:
 disabled = true
 ```
 
-No Codex CLI installed on box-up, no credential prompt at `fy box up`, no codex row in `fy mode`
-or `fy state` — for you, while your colleagues keep it. It works at any depth
-(`[plugins.github]`), on entries inside an array-of-tables (an `[[inject]]` rule can be parked
-without deleting it), and in either file — so a project can ship a block disabled and a developer
-opt *in* with `disabled = false`. The marker itself never reaches the rest of foldyard; pruning
-happens after the merge, which is what makes both directions work.
+For you, that means no Codex CLI installed at box-up, no credential prompt, and no codex row in
+`fy mode` or `fy state`. It works at any depth (`[plugins.github]`), on single entries of an
+array of tables (park one `[[inject]]` rule), and in either file: a project can ship a block
+disabled and a developer can opt in with `disabled = false`. Only a real TOML boolean counts.
+The marker is removed after the merge and never reaches the rest of foldyard.
+`fy config widenings` lists the blocks you've removed and which file removed them.
 
-Subtraction is the one config statement whose effect is an *absence*, so `fy config widenings`
-lists the blocks you've removed and which file removed them.
+### Renamed keys
 
-And one property that surprises people the first time: **editing these files doesn't change what
-the host is doing until you adopt the change** — see [The adopted config](#the-adopted-config-what-the-host-actually-runs)
-below. Everything the *box* and the *stack* read is live as always; what's pinned is the half the
-Mac acts on.
+| Old name | Current name |
+| --- | --- |
+| `[machine] wall` | `[machine] firewall` |
+| `[machine] host_wall` | `[machine] host_firewall` |
+| `[proxy] default_deny` | `[proxy] enforce` |
+| `axis` in `[[inject]]` / `[[require]]` | `switch` |
+| `MACHINE_WALL` / `MACHINE_HOST_WALL` | `MACHINE_FIREWALL` / `MACHINE_HOST_FIREWALL` |
+
+The old names still work as aliases (if a file has both, the new one wins); `fy doctor` and
+`fy config widenings` flag them. When you rename them, raise `min_foldyard_version` in the same
+commit: an older `fy` reads the new names as absent and would, for example, silently leave the
+VM firewall off.
+
+Some keys are no longer honoured at all — `[proxy] allow`, `[[inject]] minter`, `[[inject]]
+token_env`, `[vscode] workspace_file`. `fy config widenings` names each one with its
+replacement, and `fy doctor` warns about them.
 
 ## `[project]`
 
@@ -67,47 +82,43 @@ compose = ["compose.yml"]
 min_foldyard_version = "0.2.0"
 ```
 
-- **`name`** — the project key: it names the host state dir `~/.foldyard/<name>/`. Default:
-  the repo directory name, lowercased. Env: `FOLDYARD_PROJECT`.
-- **`prefix`** — the container/volume/network name prefix (a worktree appends `-<name>`).
-  Default: `name`. Env: `FOLDYARD_PROJECT_PREFIX`.
+- **`name`** — the project key; names the state dir `~/.foldyard/<name>/`. Default: the repo
+  directory name, lowercased. Env: `FOLDYARD_PROJECT`.
+- **`prefix`** — container/volume/network name prefix (a worktree appends `-<name>`). Default:
+  `name`. Env: `FOLDYARD_PROJECT_PREFIX`.
 - **`app`** — the compose service `fy shell` targets. Default: `"app"`. Env: `FOLDYARD_APP`.
-- **`app_port`** — which `[ports]` key is the browsable app's port; `fy open` opens it and
-  the TUI shows it. Port keys are yours, so foldyard never guesses a name here. Absent means
-  no browsable-app URL. Env: `FOLDYARD_APP_PORT_KEY`.
-- **`compose`** — your compose files, in `-f` order; a single string also works. Paths are
-  relative to the active checkout (or absolute). No default: unset means the project drives
-  no compose stack (box-only), and every stack verb (`fy up | ps | logs | shell | build | down
-  | nuke`) says so instead of guessing a file — pointing at its `fy box …` counterpart where one
-  exists (`fy logs` has none) — and `fy up` still brings the machine and the host daemons up
-  first. A declared file that is missing on disk (a branch from before it, a rename) is an
-  error naming the file and the checkout.
-- **`ensure_dirs`** — bind-mount source dirs (checkout-relative) your compose file expects to
-  pre-exist; foldyard creates them empty on `up`. Default: `[]`.
-- **`external_network`** — set `true` to let foldyard own the `{prefix}_default` network's
-  lifecycle: pre-created on `up`/`box up`, removed on `nuke`. Your compose file must then
-  declare `networks.default` with `external: true` and an explicit `name`. Opt in when the
-  dev box's permanent attachment to the network makes compose-owned networks noisy (`down`
-  warnings, `box up` before the first `up` failing). Default: `false`.
-- **`worktree_init`** — an optional script `fy worktree add` runs in each new worktree, as
-  `sh <script> --source <main-repo>` with the new worktree as cwd — use it to copy gitignored
-  local config (env files, editor settings) across. Path relative to the repo root, or
-  absolute. Default: none. Env: `FOLDYARD_WORKTREE_INIT`.
-- **`dev_vm_dir`** — *transitional*: where foldyard's generated assets and the gitignored
-  `.dev-mode.json` posture mirror land, relative to the repo root. Default: `"."`. Env:
-  `FOLDYARD_DEV_VM_DIR`. Leave it alone unless you want those files tucked into a subdir.
+- **`app_port`** — which `[ports]` key is the browsable app; `fy open` opens it and the TUI
+  shows it. Port keys are yours, so foldyard never guesses. Default: none (no app URL). Env:
+  `FOLDYARD_APP_PORT_KEY`.
+- **`compose`** — your compose files in `-f` order (a single string works too), relative to the
+  active checkout or absolute. Default: none — the project is box-only. Every stack verb (`fy up`,
+  `fy ps`, `fy logs`, `fy shell`, `fy build`, `fy down`, `fy nuke`) then says so and points at
+  its `fy box …` counterpart where one exists; `fy up` still starts the VM and the supervisor.
+  A declared file missing from the checkout is an error naming the file.
+- **`ensure_dirs`** — bind-mount source dirs (checkout-relative) your compose file expects;
+  created empty on `up`. Default: `[]`.
+- **`external_network`** — `true` lets foldyard own the `{prefix}_default` network: created on
+  `up`/`box up`, removed on `nuke`. Your compose file must then declare `networks.default` with
+  `external: true` and an explicit `name`. Use it when the box's permanent attachment makes a
+  compose-owned network noisy (`down` warnings, `box up` before the first `up` failing).
+  Default: `false`.
+- **`worktree_init`** — a script `fy worktree add` runs for each new worktree, to copy
+  gitignored local config (env files, editor settings) across. It runs in a throwaway container
+  in the VM from the box image, never on your computer, as `sh <script> --source <main-repo>`
+  with the new worktree as the working directory. The path is relative to the repo root and must
+  stay inside the repo. If the box image isn't built yet it is skipped with the command to run
+  later (`fy worktree init <name>`). Default: none. Env: `FOLDYARD_WORKTREE_INIT`.
+- **`dev_vm_dir`** — *transitional*: where generated assets and the `.dev-mode.json` mirror
+  land, relative to the repo root. Default: `"."`. Env: `FOLDYARD_DEV_VM_DIR`.
 - **`min_foldyard_version`** — a **floor**, not a pin: `fy` refuses to run in this checkout
-  below it. Raise it in the same commit that adds a setting an older `fy` cannot honour.
-  Default: none — but `fy init` stamps one, set to the `fy` that scaffolded the file (the only
-  version that file is known to be right for). It stamps only when that version is *orderable*:
-  a `fy` that reports `0+unknown` (a bare source-tree import) or a local build cannot be compared
-  against, so `init` leaves the floor absent and writes commented guidance to fill in instead —
-  a floor foldyard would itself ignore reads as protection and is none.
-- **`recommended_foldyard_version`** — a nudge, never a block. Printed only on `fy up`,
-  `fy box up` and `fy host restart`. Default: none. Silence with `FOLDYARD_NO_VERSION_NUDGE=1`.
-- **`[project.foldyard_version_reasons]`** — an optional ledger of *why this repo wanted* each
-  foldyard it adopted, keyed by version. Both messages list the entries between the version you
-  have and the bound you are being pointed at. Default: empty.
+  below it. Must be a string. Default: none, but `fy init` stamps the version that scaffolded
+  the file — unless that version can't be compared (`0+unknown` from a bare source tree, or a
+  local build), in which case it writes a commented placeholder instead.
+- **`recommended_foldyard_version`** — a nudge, never a block, printed only on `fy up`,
+  `fy box up` and `fy host restart`. Default: none. `FOLDYARD_NO_VERSION_NUDGE=1` silences it.
+- **`[project.foldyard_version_reasons]`** — a ledger of *why* this repo adopted each version,
+  keyed by version. Both messages list the entries between your version and the one you're
+  pointed at. Default: empty.
 
 ```toml
 [project.foldyard_version_reasons]
@@ -122,78 +133,36 @@ min_foldyard_version = "0.2.0"
   Run `uv tool upgrade foldyard`.
 ```
 
-Entries are **appended, never rewritten** — which is the point. A single "why" field next to
-the version has to be re-edited on every bump, and the bump where someone forgets is the one
-that starts lying. A ledger entry describes a version that is already frozen, so it cannot
-drift. It also lets the message say what you would gain across *several* hops rather than only
-the newest, which is a much stronger reason to act.
+Append entries; never rewrite them — an entry describes a version that's already frozen, so it
+can't go stale. Delete entries below the floor: they can no longer be shown. A malformed key or
+a non-string reason drops that one line.
 
-It does not grow without bound, because **the floor is its garbage collector**: once
-`min_foldyard_version` is `0.5.0`, every entry below `0.5.0` is unreachable and should be
-deleted. What stays live is the versions between your floor and your recommendation — one or
-two, if you follow the escalation below.
+### Using the two version bounds
 
-A version with no entry simply doesn't appear; a malformed key or a non-string reason drops
-that line alone rather than blanking the rest.
+1. Adopt a version: pin CI to it, run the suite, merge.
+2. Set `recommended_foldyard_version` to it. Colleagues see one line at their next session start
+   and upgrade when it suits them.
+3. When something actually *needs* that version, raise `min_foldyard_version` to match. By then
+   almost everyone has upgraded, so the floor blocks nobody mid-task.
 
+Time-box a recommendation: one left unchanged for months is noise — promote it to a floor or
+delete it. Leave it unset if unsure.
 
-### What the recommendation is for (and when not to set one)
+Why it works this way:
 
-It is **not** a news feed. foldyard does not tell you a release exists; the consumer repo tells
-you which release *it* has adopted. Those are different claims, and only the second is
-actionable — a version this repo has never tested is not one you should be upgrading to on its
-account.
-
-Its real job is to be **stage one of an escalation that ends in a floor**:
-
-1. You adopt a version — pin CI to it, run the suite, merge.
-2. Set `recommended_foldyard_version` to it. Colleagues see one line the next time they start a
-   session and upgrade when it suits them.
-3. Later, when something actually *needs* that version, raise `min_foldyard_version` to match.
-
-By step 3 almost everyone has already upgraded, so the floor lands as a formality instead of
-blocking someone mid-task. That staging is the whole value. Skip step 2 and every floor arrives
-as an ambush.
-
-So: **time-box it.** A recommendation that has sat unchanged for months is warning fatigue with
-extra steps — either promote it to a floor or delete it. If you find yourself wanting one set
-permanently, what you actually want is a floor.
-
-**Why it only speaks on `up` / `box up` / `host restart`.** A warning printed on every invocation is
-filtered out by the reader within a day, and takes the rest of foldyard's stderr with it — and
-the people it annoys most would set `FOLDYARD_NO_VERSION_NUDGE` and then never see a nudge
-again, including one that mattered. Spending it on the few verbs that start a working session
-keeps it worth reading. `fy doctor` reports the window unconditionally for anyone who wants to
-ask, including when that variable is set.
-
-This is the bound to leave unset if you are unsure. An absent recommendation costs nothing; a
-stale one costs attention every session, and attention does not come back.
-
-### Why the floor is a refusal rather than a warning
-
-foldyard reads `foldyard.toml` with `.get()` and no schema, so unknown keys are tolerated by
-construction. An old `fy` against a new config therefore doesn't fail — it silently ignores
-the new keys and does the old thing. A warning isn't enough for a failure mode that leaves no
-trace, so the floor stops the command.
-
-Both bounds are **declarative, and foldyard never asks PyPI what the latest release is**.
-`fy` runs on the host *and* inside the box, where egress is default-deny through the proxy —
-a version check would mean punching an allowlist hole in the zero-egress posture to power a
-cosmetic message. The consumer's own opinion of "current" is the more useful one anyway: a
-repo pins its CI deliberately so it doesn't float with someone else's release.
-
-`fy doctor` shows the window as its own row, and reports the nudge even when
-`FOLDYARD_NO_VERSION_NUDGE` is set — that variable silences a per-invocation nag, not an
-explicit request to be told everything.
-
-**Inherent limit.** A floor only protects from the release that *implements* it onward; any
-older `fy` ignores the key and always will. It can't rescue a migration already in flight —
-it earns its keep on the next one.
+- **The floor refuses instead of warning** because foldyard ignores unknown keys, so an old `fy`
+  reading a new config silently does the old thing.
+- **The nudge speaks only on session-start verbs** so it stays worth reading. `fy doctor` always
+  shows the version window, even with `FOLDYARD_NO_VERSION_NUDGE` set.
+- **foldyard never asks PyPI for the latest release.** `fy` also runs in the box, where egress
+  goes through the allowlist; the repo's own tested version is the useful answer anyway.
+- **A floor only protects from the release that implements it onward** — an older `fy` ignores
+  the key.
 
 ## `[machine]`
 
-The rootless VM that mounts only this repo. Sizing applies at **first creation** — resize
-later with `foldyard machine recreate`.
+The rootless VM that mounts only this repo. Sizing, `vmtype` and mounts apply at **first
+creation**; change them with `fy machine recreate`.
 
 ```toml
 [machine]
@@ -207,120 +176,83 @@ memory_mib = 8192
 disk_gib = 60
 ```
 
-- **`backend`** — `"lima"` | `"podman"`. **Default: `lima`** (also what `init`
-  writes) — per-project VMs that run concurrently, and the only backend that supports the wall.
-  `podman` is one shared podman machine for everything: no concurrent per-project VMs and no
-  in-VM wall, but nothing extra to install. Both are VM backends: there is no VM-less option (the
-  `native` backend was retired, [ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md);
-  a config still naming it gets a warning and the podman backend). Env: `MACHINE_BACKEND`.
-
-  The backend CLI is **not** the whole prerequisite: it creates the VM, and the container engine
-  (`podman`) drives the socket it hands out. So lima needs `limactl` *and* podman; the podman
-  backend needs only what you already have. A missing CLI is a hard error either way — one
-  message when you NAMED the backend, another when you inherited the default: a quiet skip there
-  would leave the socket unset and drop every engine verb onto the host's own podman, the VM-less
-  profile nobody chose (ADR-0011's amendment; the message names the two ways out, install
-  `limactl` or name `podman`).
-- **`firewall`** (formerly `wall`) — provision the in-VM nftables egress wall, so the box's only way out is the
-  Mac-side proxy — fail-closed: traffic that ignores the proxy env is rejected, not silently
-  allowed. Lima-only (preflight enforces the pairing); requires `[proxy]` to be declared, or
-  the box has no way out at all. Default: `false` (`init` writes `true`). Env: `MACHINE_WALL`
-  (`1`/`true`/`on`/`yes`).
-- **`host_firewall`** (formerly `host_wall`) — ALSO enforce the wall on the **host**: nftables matching the VM process's
-  own traffic by its cgroup v2 slice (foldyard starts the VM inside
-  `systemd-run --user --scope --slice fy-machine-<vm>.slice --unit fy-machine-<vm>.scope`),
-  allowing only DNS, this project's daemon band, and loopback flows whose LISTENER is in the
-  VM's own slice (the forwarded SSH port, the hostagent's DNS resolver — whatever ports Lima
-  picked this boot; judged on the input hook, so the table names none of them). So a
-  guest-kernel exploit that flushes the in-VM wall still leaves through a host that rejects it.
-  The rendered table is a function of the VM name, its slice and the bands alone — the same
-  text on every boot. Needs `firewall = true`
-  and a host with `nft` + cgroup v2 + a kernel built with nftables' `socket` expression
-  (`CONFIG_NFT_SOCKET`; the match is `socket cgroupv2`) — a Linux host; macOS reports it
-  unavailable, the stock WSL2 kernel lacks the expression, and preflight refuses either rather
-  than silently downgrading (on WSL2 the in-VM wall still applies; a custom kernel is the only
-  route to the host wall there). **foldyard never loads the table itself** — it is the
-  operator's install ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)):
-  `fy machine host-firewall` sets up the user slice the VM runs under (its one user-level change —
-  `~/.local/share/systemd/user/fy-machine-<vm>.slice`, said once when written) and prints the
-  table and a system unit that loads it with your user manager, plus the four root commands
-  that install them (`--uninstall` prints the lines that remove all of it); you run those, once
-  per host. A launch verb before that setup refuses before booting anything. Every `fy up` then
-  PROBES that the wall is
-  enforcing — from inside the VM's slice, never by reading the table — and refuses with the
-  reason when it is not (not installed; installed before a host reboot, when the slice's cgroup
-  id changed; the band changed). `fy doctor` has the same row. The install is not part of the
-  VM's lifecycle: `fy machine stop` and `rm` leave it alone. A VM already running outside its
-  own scope-under-slice (started before the option was on, or by an older foldyard) is refused
-  with `fy machine stop && fy up`. Default: `false`. Env: `MACHINE_HOST_WALL`.
-- **`vmtype`** — the Lima **driver**, i.e. the hypervisor the VM actually runs on: `"vz"`
-  (Apple Virtualization.framework) | `"qemu"` | `"krunkit"` | any external Lima driver plugin.
-  Lima-only. **Create-only** — like mounts and sizing, changing it means `fy machine recreate`.
-  Env: `MACHINE_VMTYPE`.
-
-  Default: the best of `vz` → `qemu` that *this host registers*, asked of `limactl info` rather
-  than inferred from the operating system. That resolves to `vz` on a Mac and `qemu` on Linux,
-  and is printed at create so the choice is on the record. The point of pinning it is that the
-  VMM is a security decision: QEMU is roughly two million lines emulating decades of hardware
-  and is where essentially every published guest→host escape lives, while a Mac on `vz` runs
-  neither QEMU nor KVM. Left unpinned, which one you got depended on an unexamined `runtime.GOOS`
-  branch inside Lima. See
-  [isolation-layers.md](./isolation-layers.md#macos-arm64--the-machine-layer-does-the-work).
-
-  `krunkit` (libkrun — a microVM with a Firecracker-derived device model) is never selected
-  automatically: it is upstream-experimental, macOS/arm64 only, and needs `brew install krunkit`.
-  Name it explicitly to try it.
-- **`runtime`** — `"gvisor"` to run the dev box, and everything the box creates, under
-  gVisor's userspace kernel (`runsc`) instead of directly on the VM kernel — layer ③ of
-  [isolation-layers.md](./isolation-layers.md): a kernel exploit from inside the box has to get
-  through gVisor's Sentry before it reaches the kernel that holds the engine socket, the stack
-  and the mounted checkout. A **machine** posture, not a per-box knob: `fy up`/`fy box up`
-  (`machine ensure`) provisions a second podman API service in the VM whose default runtime is
-  runsc — a pinned, sha512-verified `runsc` release installed user-level (no root, nothing in
-  the boot script), a wrapper with the flags fixed and no per-container override, and an enabled
-  user unit — then creates the box through that socket (podman-remote over the backend's own
-  ssh port, so no VM config change and no restart) and **hands the box a narrowed view of it as
-  its own** engine socket, so a sibling or an in-box `fy up` cannot come up unsandboxed. The
-  narrowing is a small in-VM filter (a further user unit) the box's socket points at: it forwards
-  to the runsc socket but strips the runtime-selecting fields (`oci_runtime`, `dev.gvisor.*`, the
-  compat `Runtime`) from every container-create, so the box cannot opt a container back out even
-  on a podman that would honour a client-chosen runtime — and refuses a create it cannot parse.
-  Fail-closed: a socket that does not answer with the gVisor runtime aborts the verb, and a box
-  that came up under another runtime is removed before its bootstrap. Both backends
-  (`lima`, `podman`). The runtime is fixed when a container is created, so changing this means
-  `fy box down && fy box up` (the box, not the VM); an already-up box nags. Cost: ~1.2× on a
-  Python test suite, 2–4× on sub-second git/lint calls. **File watching:** edits made *inside*
-  the box (the agent, the attached editor) fire in-box `inotify` normally, but edits made on the
-  *host* do not cross into the box — so a dev server that hot-reloads on host-side edits must poll
-  (`CHOKIDAR_USEPOLLING=1`, Vite `server.watch.usePolling`, webpack `watchOptions.poll`). In the
-  box, `fy verify` adds a row that checks the kernel it actually runs on (and the VM mount audit
-  reports `N/A` there — it can only run host-side under the sandbox, so run `fy verify` on the
-  host to audit it). Default: unset (the engine's own runtime). Env: `MACHINE_RUNTIME`.
+- **`backend`** — `"lima"` | `"podman"`. Default: `"lima"` (also what `init` writes): one VM per
+  project, running concurrently, and the only backend with the VM firewall. `"podman"` is one
+  shared podman machine for everything — nothing extra to install, but no per-project VMs and no
+  VM firewall. There is no VM-less option; a config still naming the retired `native` backend
+  gets a warning and the podman backend
+  ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)). Lima needs `limactl` *and*
+  `podman` (which drives the VM's socket). A missing CLI is a hard error, whether you named the
+  backend or inherited the default. Env: `MACHINE_BACKEND`.
+- **`firewall`** — the VM firewall: nftables rules in the VM, installed as root at boot, so the
+  box's only way out is the proxy on your computer. Traffic that ignores the proxy settings is
+  rejected, not let through. Lima only (preflight enforces it), and needs `[proxy]` declared, or
+  the box has no way out at all. Default: `false` (`init` writes `true`). Env:
+  `MACHINE_FIREWALL` (`1`/`true`/`on`/`yes`).
+- **`host_firewall`** — the host firewall: the same rules again on your computer, matching the
+  VM process's own traffic, so a guest-kernel exploit that removes the VM firewall still can't
+  get out. It allows only DNS, this project's port range, and the VM's own loopback plumbing
+  (the SSH forward, Lima's DNS resolver). Default: `false`. Env: `MACHINE_HOST_FIREWALL`.
+  - **Needs** `firewall = true` and a Linux host with `nft`, cgroup v2 and a kernel built with
+    `CONFIG_NFT_SOCKET` (the rule matches `socket cgroupv2`). macOS can't provide it and the stock
+    WSL2 kernel lacks that option; preflight refuses rather than silently downgrading (on WSL2 the
+    VM firewall still applies).
+  - **You install it once** — foldyard never loads it
+    ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)). `fy machine
+    host-firewall` writes the user slice the VM runs in
+    (`~/.local/share/systemd/user/fy-machine-<vm>.slice`) and prints the table, a system unit
+    that loads it, and the root commands to install them; `--uninstall` prints the removal
+    steps. Launch verbs refuse until it's installed.
+  - **Every `fy up` checks it's enforcing**, from inside the VM's slice, and refuses with the
+    reason if not (not installed; installed before a reboot changed the slice's id; the port
+    range changed). `fy doctor` shows the same row. A VM already running outside its own slice
+    is refused with `fy machine stop && fy up`. `fy machine stop` and `fy machine rm` leave the
+    install alone.
+- **`vmtype`** — the Lima driver, i.e. the hypervisor: `"vz"` (Apple Virtualization.framework) |
+  `"qemu"` | `"krunkit"` | any external Lima driver plugin. Lima only, create-only. Default: the
+  best of `vz` → `qemu` that `limactl info` reports on this computer (so `vz` on macOS, `qemu` on
+  Linux), printed at create. Pin it deliberately: the hypervisor is a security decision, and QEMU
+  is where nearly every published VM escape lives (see
+  [isolation-layers.md](https://github.com/twistco/foldyard/blob/main/docs/isolation-layers.md#macos-arm64--the-machine-layer-does-the-work)).
+  `krunkit` (libkrun microVM) is never picked automatically: experimental upstream,
+  macOS/arm64 only, needs `brew install krunkit`. Env: `MACHINE_VMTYPE`.
+- **`runtime`** — `"gvisor"` runs the box, and every container the box creates, under gVisor's
+  userspace kernel (`runsc`) instead of directly on the VM kernel — layer ③ in
+  [isolation-layers.md](https://github.com/twistco/foldyard/blob/main/docs/isolation-layers.md).
+  A kernel exploit from the box then has to get through gVisor before it reaches the engine
+  socket, the stack and your checkout. Default: unset (the engine's own runtime); any other
+  value is an error. Env: `MACHINE_RUNTIME`.
+  - `machine ensure` (run by `fy up`/`fy box up`) installs a pinned, checksummed `runsc` user-level
+    in the VM plus a second podman API socket that defaults to it, and creates the box through
+    that socket. Both backends.
+  - The box gets a *filtered* view of that socket as its own engine socket: the filter strips
+    runtime-selecting fields from every container create, so the box can't opt a container out
+    of gVisor, and refuses a create it can't parse. A box that came up under another runtime is
+    removed before bootstrap.
+  - Changing it means `fy box down && fy box up` (the box, not the VM).
+  - Cost: about 1.2× on a Python test suite, 2–4× on sub-second git/lint calls.
+  - File watching: edits made on your computer don't fire `inotify` in the box, so a dev server
+    that hot-reloads on them must poll (`CHOKIDAR_USEPOLLING=1`, Vite `server.watch.usePolling`,
+    webpack `watchOptions.poll`). Edits made in the box work normally.
+  - `fy verify` in the box adds a row checking the kernel it runs on; its VM mount audit reads
+    `N/A` there, so run `fy verify` on your computer for that.
 - **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`.
-- **`cpus`** / **`memory_mib`** / **`disk_gib`** — sizing at first creation. Defaults:
-  `4` / `8192` / `60`. Env: `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK`.
-- **`worktrees_root`** — the parent dir holding sibling worktree checkouts (mounted into the
-  VM alongside the repo). A relative value resolves against the main checkout's path.
-  Default: `<repo>-worktrees` beside the repo. Env: `FOLDYARD_WORKTREES_ROOT`.
-- **`worktree_base`** — the git ref a brand-new worktree branch forks from. Default: none —
-  foldyard auto-detects the default branch (`origin/HEAD`, then `main`/`master`). Set it only
-  when that isn't discoverable; the point is that new worktrees fork off the trunk, not off
-  whatever branch your main checkout has out. Env: `FOLDYARD_WORKTREE_BASE`.
+- **`cpus`** / **`memory_mib`** / **`disk_gib`** — sizing at first creation. Defaults: `4` /
+  `8192` / `60`. Env: `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK`.
+- **`worktrees_root`** — the parent dir of sibling worktree checkouts, mounted into the VM
+  beside the repo. Relative values resolve against the main checkout's path. Default:
+  `<repo>-worktrees` beside the repo. Env: `FOLDYARD_WORKTREES_ROOT`.
+- **`worktree_base`** — the git ref a new worktree branch forks from. Default: auto-detected
+  (`origin/HEAD`, then `main`/`master`), so new worktrees fork off the trunk rather than whatever
+  your main checkout has out. Env: `FOLDYARD_WORKTREE_BASE`.
 
-**Podman Desktop.** Its Lima extension shows one instance at a time, so foldyard uses a different
-route: `fy machine desktop` registers this project's VM as a podman connection named
-`fy-<machine>` (over Lima's own ssh forward and key, never the default connection). With
-"Load remote system connections (ssh)" turned on (Podman Desktop → Settings → Preferences,
-search "remote"; it applies live), Podman Desktop checks for connections every 5 s, so each
-project shows up as its own entry, side by side. foldyard only reads that setting and never writes
-it: Podman Desktop saves its settings over the file when it quits, which would undo an edit.
-Where Podman Desktop is installed (its settings file exists), every `fy up`/`fy box up` keeps the
-entry current by itself. It also pins the VM's ssh port to its port band (applied the next time
-the VM starts), because Lima otherwise picks a new port at each boot and Podman Desktop would keep
-the stale one. Where it isn't installed, foldyard leaves the VM's port and podman's connection
-list alone. `export FOLDYARD_PODMAN_DESKTOP=0` in your shell profile opts out; `=1` forces it on
-when Podman Desktop keeps its settings somewhere foldyard doesn't look. `fy machine rm` removes
-the connection. It's an operator preference, so it has no `foldyard.toml` key.
+**Podman Desktop** (no `foldyard.toml` key — it's a personal preference). `fy machine desktop`
+registers the VM as a podman connection named `fy-<machine>`, so each project appears as its
+own entry once you turn on "Load remote system connections (ssh)" in Podman Desktop's
+preferences. Where Podman Desktop is installed, every `fy up`/`fy box up` keeps the entry
+current and pins the VM's ssh port to its port range (from the next VM start). `fy machine rm`
+removes the connection. Env: `FOLDYARD_PODMAN_DESKTOP=0` opts out, `=1` forces it on where
+foldyard doesn't detect the install.
 
 ## `[engine]`
 
@@ -329,22 +261,18 @@ the connection. It's an operator preference, so it has no `foldyard.toml` key.
 cli = "podman"
 ```
 
-- **`cli`** — the container-engine CLI that drives the stack. Default: `podman` if installed,
-  else `docker`. foldyard exports `CONTAINER_HOST` pointing at the machine's socket, so plain
-  podman works everywhere — including inside the box. Env: `FOLDYARD_ENGINE`.
+- **`cli`** — the container-engine CLI: `"podman"` or `"docker"`, as a name, never a path (the
+  value is run on your computer — [ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)).
+  Default: `podman` if installed, else `docker`. Env: `FOLDYARD_ENGINE`.
 
-  **The docker fallback is for CI, not a second supported engine.** GitHub-hosted runners ship
-  docker and no podman, so foldyard degrades there and `docker compose` runs the same stack.
-  On a dev host, a resolved engine of `docker` means podman is missing rather than chosen —
-  and podman is needed regardless, since machine lifecycle has no docker equivalent (even the
-  lima backend runs a podman service inside the VM). Only names are accepted here, never a
-  path: this value is executed host-side, so an arbitrary string would be a code-execution
-  channel from repo config (see [ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)).
+The docker fallback exists for CI runners, which ship docker and no podman. On a dev machine you
+need podman regardless: VM lifecycle has no docker equivalent. foldyard exports `CONTAINER_HOST`
+pointing at the VM's socket, so plain podman works everywhere, including in the box.
 
 ## `[ports]`
 
-Host-published port bases. **Keys are the exact env-var names your compose file reads** —
-not friendly aliases:
+Ports your stack publishes on your computer. **Keys are the exact env-var names your compose
+file reads.**
 
 ```toml
 [ports]
@@ -352,14 +280,13 @@ WEB_PORT = 3000
 PG_PORT = 5544
 ```
 
-In-container ports never move; each worktree adds a deterministic per-name offset (1–89) to
-every base, so a second stack beside main never collides. No `[ports]` table means worktrees
-publish no offset ports.
+In-container ports never move. Each worktree adds a fixed per-name offset (1–89) to every base,
+so a second stack beside main never collides. No `[ports]` table means worktrees publish no
+offset ports.
 
-The offset itself resolves as: `WT_OFFSET` env var → a pin in the main checkout's
-`foldyard.local.toml` → a stable hash of the worktree name. Pin an offset when a worktree's
-app must land on a known host port (say, one a third-party callback allowlist already
-accepts):
+The offset resolves as: `WT_OFFSET` env → a pin in the main checkout's `foldyard.local.toml` →
+a hash of the worktree name. Pin one when a worktree's app must land on a known port (say, one
+a third-party callback allowlist accepts):
 
 ```toml
 # foldyard.local.toml (main checkout, gitignored)
@@ -369,9 +296,9 @@ my-feature = 2
 
 ## `[proxy]`
 
-**Presence-gated**: declaring `[proxy]` — even empty — routes the box's egress through the
-Mac-side allowlisting proxy (CA mount + `HTTPS_PROXY`/`NO_PROXY` env in the box). Required
-whenever `[machine] firewall = true`. Absent means a clean box: no proxy env at all.
+**Presence-gated.** Declaring `[proxy]`, even empty, routes the box's internet traffic through
+the proxy on your computer (the box gets its CA and `HTTPS_PROXY`/`NO_PROXY`). Required when
+`[machine] firewall = true`. Absent: no proxy settings in the box at all.
 
 ```toml
 [proxy]
@@ -380,47 +307,34 @@ enforce = "learn"
 # no_proxy = ["{project}-postgres", "redis"]
 ```
 
-- **`enforce`** (formerly `default_deny`) — the project's STARTING position for enforcement, one of:
-  - `true` — the proxy refuses any host that isn't granted (403 at CONNECT) from the first run.
-  - `"learn"` — the first launch (`fy up`/`fy box up`) opens a one-hour **learn window**:
-    nothing is refused, the proxy records every host it *would* refuse (with the client's
-    User-Agent, so you can see which tool asked), and when the window ends the wall
-    **enforces by itself**. `fy allow learn` then grants what it recorded in one reviewed batch
-    and prints `recommend` lines to commit. `foldyard init` writes this: setup is never a wall of
-    refusals, and the wall can't be left open by mistake the way `false` can.
-  - `false` (the built-in default when the key is absent) — observe only, never block.
+- **`enforce`** — where the allowlist *starts*:
+  - `true` — refuse any host not granted (403 at CONNECT) from the first run.
+  - `"learn"` — the first `fy up`/`fy box up` opens a one-hour learn window: nothing is refused,
+    every host that *would* be is recorded with the client's User-Agent, and enforcement turns
+    on by itself when the window ends. `fy allow learn` then grants what it recorded in one
+    reviewed batch. `init` writes this.
+  - `false` — observe only, never block. Default (key absent).
 
-  Blocked hosts show live in `fy tui`, where you can grant them (once / until-restart /
-  permanently) without a restart. A window can be opened again any time with
-  `fy allow enforce learn --for 30m` (8 h at most), and `fy allow enforce on` ends one early.
+  Any other value counts as `true`, so a typo never loosens the allowlist. It is a *seed*: once
+  `fy allow enforce on|off|learn` has run (or a learn window has), the setting stored on your
+  computer wins and this key is ignored — the box can write repo config, so it mustn't be able
+  to switch enforcement off. Reopen a window with `fy allow enforce learn --for 30m` (8 h max);
+  end one early with `fy allow enforce on`. Blocked hosts show live in `fy tui`, where you can
+  grant them without a restart.
 
-  It is a **seed, not the live switch**: once `fy allow enforce on|off|learn` has set it (or a learn
-  window has run), the host-side store is authoritative and this key is ignored. Same reason as the grants below — repo config is
-  writable from inside the box, and an enforcement switch the yard can flip off for itself is no
-  switch at all.
-
-  There is deliberately **no `allow` list here.** Grants of every level live in the host-side
-  allow-store (`~/.foldyard/<project>/allow-store.json`, outside the mount) — `fy allow add
-  <host> [--level once|session|permanent]`, `fy allow list`, or the TUI's `a` key on a blocked row. That placement is the whole guarantee: config travels with the branch and
-  the box can write it, so a `[proxy] allow` list would let the yard widen its own wall by editing a
-  file it already owns. A grant is a property of an operator on a host, like the posture itself.
-  Any keyless/injector host is allowed implicitly — never list those. **A host grant means
-  `host:443`.** CONNECT is a raw tunnel — whatever the client speaks through it is relayed — so a
-  bare grant used to reach `github.com:22`, and with an SSH agent forwarded in by an editor attach
-  that is a push path. Another port is its own grant, `fy allow add github.com:22`; the blocked
-  row carries the port when the port was the reason, so the TUI's `a` key offers exactly that.
-- **`recommend`** — the committed half of the allowlist: hosts this repo ASKS operators to grant,
-  each `{ host = "…", why = "…" }` (or a bare host string); add `when = "build"` for a host only
-  an image build needs (a browser download, a base-image CDN): it is offered by the build gate
-  when a build is refused, not at launch, and granted for builds only. Advisory by construction — the proxy
-  never reads it. The host OFFERS each entry, per host, at `fy up`/`fy box up`/`fy host restart`, via
-  `fy allow sync`, and in the TUI's Network Log wall pane; the operator answers yes (permanent) /
-  session / once (15 minutes, for a broad host needed for one build) / not now / never, and the
-  answer lands in the host-side store. This is how a team
-  shares its allowlist without giving up host-owned grants: the list rides the branch, and every
-  machine still consents host by host. Two properties do the security work — the offer reads the
-  **adopted** copy (an in-box edit queues nothing until the operator reviews it at the adoption
-  gate), and a "never" is remembered (re-offered only if the operator grants it themselves).
+  There is **no `allow` list here**. Grants of every level live on your computer in
+  `~/.foldyard/<project>/allow-store.json`, outside the repo: `fy allow add <host> [--level
+  once|session|permanent]`, `fy allow list`, or `a` on a blocked row in the TUI. Hosts the
+  proxy injects credentials for are allowed automatically. **A grant means `host:443`** — another
+  port is its own grant (`fy allow add github.com:22`), because CONNECT relays whatever the
+  client speaks.
+- **`recommend`** — hosts this repo *asks* you to grant, each `{ host = "…", why = "…" }` or a
+  bare host string. The proxy never reads it. `fy up`, `fy box up`, `fy host restart`,
+  `fy allow sync` and the TUI's Network Log offer each pending host, and you answer yes
+  (permanent) / session / once (15 minutes) / not now / never; the answer is stored on your
+  computer. The offer reads the *adopted* config, and a "never" is remembered.
+  `when = "build"` marks a host only an image build needs: it's offered when a build is refused,
+  not at launch, and granted for builds only. Default: `[]`.
 
   ```toml
   [proxy]
@@ -430,70 +344,41 @@ enforce = "learn"
   ]
   ```
 
-  Seeded with the box-bootstrap hosts by `foldyard init`, which is what makes its
-  `enforce = true` survivable: the box comes up walled and working after one round of
-  consented yeses. `fy config widenings` reports each entry's standing answer (granted / pending /
-  declined).
-
-  **Plugins recommend too, and you don't list theirs.** A declared `[claude]`/`[codex]` (or any
-  plugin implementing `Plugin.egress_recommend`) contributes the hosts its OWN install step
-  reaches — `claude.ai`/`downloads.claude.ai`, `chatgpt.com`/`releases.openai.com` — into the same per-host
-  offer. Foldyard knows where its installers fetch from; a copy of that list in your repo would
-  only rot. Injector hosts are still absent from both lists: the proxy exempts those structurally,
-  since it has to reach them to mint.
-
-  For an unattended setup (a provisioning script, a fresh CI machine) `fy allow sync --yes` takes
-  every pending recommendation at `permanent` in one go. Without it a non-interactive run prints
-  the list and grants nothing — "nobody was there to say no" must never read as yes.
-- **`passthrough`** — the trusted hosts the proxy TLS-tunnels *without* decrypting; everything
-  else is MITM-decrypted and fully logged (always — there is no switch, see
-  [ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)). Entries are exact hosts, `*.suffix`
-  globs, or `@bundle` refs (`@all` = every built-in toolchain bundle). Default: `["@all"]`. An
-  explicit empty list means decrypt everything. It is also the escape hatch for a host that
-  cannot be decrypted: one that pins its certificate, needs a client certificate, or ships its
-  own trust roots.
-
-  This one is why the whole file is pinned host-side: a host listed here is exempt from decryption,
-  so a live-read `passthrough` would let the yard switch off the monitoring it's subject to. Like
-  every other key, a change takes effect when you adopt it — see
-  [The adopted config](#the-adopted-config-what-the-host-actually-runs). `fy config widenings`
-  prints how many hosts your list actually resolves to, and flags a `@bundle` typo (which expands
-  to nothing, so it silently trusts *less*).
-- **`no_proxy`** — your stack's own hostnames the box must reach **directly**, bypassing the proxy
-  entirely. The proxy runs on the Mac and can't resolve a stack-network name, so a proxied call to
-  one 502s — after hanging first, which is how it usually presents: a mysteriously slow test
-  against an emulator. List the names your containers use for each other:
+  `init` seeds it with the box-bootstrap hosts. Declared `[claude]`/`[codex]` tables (and any
+  plugin with an `egress_recommend` hook) add the hosts their own installers reach
+  (`claude.ai`/`downloads.claude.ai`, `chatgpt.com`/`releases.openai.com`) — don't list those.
+  `fy allow sync --yes` grants every pending host permanently for unattended setup; without it,
+  a run with no terminal grants nothing. `fy config widenings` shows each entry's answer.
+- **`passthrough`** — trusted hosts the proxy tunnels *without* decrypting; everything else is
+  decrypted and logged, always ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)). Entries
+  are exact hosts, `*.suffix` globs, or `@bundle` names (`@all` = every built-in toolchain
+  bundle). Default: `["@all"]`; `[]` decrypts everything. Also the escape hatch for a host that
+  breaks under decryption (pinned certificate, client certificate, own trust roots). Like every
+  host-side key it takes effect when adopted. `fy config widenings` shows how many hosts your
+  list resolves to and flags a mistyped `@bundle` (which expands to nothing).
+- **`no_proxy`** — your stack's own hostnames the box must reach **directly**. The proxy runs on
+  your computer and can't resolve them, so a proxied call hangs, then fails with 502 — usually
+  seen as a mysteriously slow test against an emulator. Default: `[]`.
 
   ```toml
   [proxy]
   no_proxy = ["{project}-postgres", "redis", "fake-gcs"]
   ```
 
-  `{project}` expands to the compose project name, so one entry covers every worktree's
-  container-name prefix. `localhost` and `127.0.0.1` are always included, and foldyard's own
-  plugins add their services themselves (the gcp metadata emulator) — you never list those.
-  An entry for a service that isn't running is inert, so it's fine to list your whole stack.
-
-  **Entries may not contain a dot**, and `fy up` refuses the config if one does. NO_PROXY is a
-  stronger exemption than `passthrough`: a bypassed host doesn't reach the proxy at all, so it is
-  neither captured nor subject to `default_deny`. Stack hostnames are single DNS labels, so
-  refusing dots admits every real use and structurally excludes every public host — which is what
-  keeps a box-writable key from becoming a hole in the wall. To reach an external host, grant it
-  on the Mac: `fy allow add <host>`.
-
-  The one dotted shape allowed is a name under `.localhost` (`supabase.localhost`). RFC 6761 has
-  resolvers answer those with loopback and never send them upstream, so from the box such a name
-  can only reach the box itself or a compose network alias — never a public host. It is the
-  pattern for a single `NEXT_PUBLIC_*`-style URL that must work from the browser on the host
-  (where `*.localhost` is loopback) *and* from a container (give the gateway service the alias,
-  and publish it on the same port number it listens on).
+  `{project}` expands to the compose project name, so one entry covers every worktree.
+  `localhost`, `127.0.0.1` and foldyard's own services are always included. Listing a service
+  that isn't running is harmless. **Entries may not contain a dot or a `*`** (`fy up` refuses
+  them): a bypassed host skips the proxy entirely — no logging, no allowlist — and single-label
+  names can never be public hosts. The one dotted form allowed is a name under `.localhost`
+  (`supabase.localhost`), which resolves to loopback — useful for one URL that must work from
+  your browser and from a container (give the gateway service that alias, published on the port
+  it listens on). To reach an external host, grant it: `fy allow add <host>`.
 
 ## `[[inject]]`
 
-A generic, config-only egress injector: each entry becomes one on/off mode axis
-(`fy mode <axis>=on`) plus one proxy rewrite rule. The secret lives only in `host.env` on the
-host — it never enters the box or the repo. Turning the axis on (`fy mode`, or the TUI) prompts
-for that token when `host.env` doesn't have it yet.
+A credential injector from config alone. Each entry becomes one on/off switch
+(`fy mode <switch>=on`) and one proxy rule that adds a token to requests for one host. The token
+lives only in `host.env` on your computer; turning the switch on prompts for it if missing.
 
 ```toml
 [[inject]]
@@ -502,87 +387,66 @@ host = "api.tracker.example"       # the host to inject on
 header = "Authorization"           # XOR query_param = "userToken"
 ```
 
-Per entry:
+- **`switch`** — the switch name (required). It also names the token: `host.env`'s
+  **`FY_INJECT_<SWITCH>`** (uppercased, non-alphanumerics become `_`). You can't choose another
+  variable, so a repo edit can't point a rule at another mechanism's secret.
+- **`host`** — the host to inject on (required).
+- **`header`** XOR **`query_param`** — where the token goes. Neither: the `Authorization` header.
+- **`value_prefix`** — prefix for the injected value, e.g. `"Bearer "`.
+- **`path_prefix`** — only inject on paths under this prefix.
+- **`replay_on_401`** — re-read the token and replay once on a 401. Default: `false`.
+- **`ttl`** — how often (seconds) the token is re-read. Not the switch's lifetime — that's
+  `emergency`.
+- **`emergency`** — `true` makes `on` an emergency level: it expires (`fy mode <switch>=on
+  ttl=30m`; default 1 h, max 8 h) and switches itself off. For tokens you never want left on
+  (write access, a shared account).
+- **`label`** — shown in daemon status.
 
-- **`switch`** (formerly `axis`) — the switch name (required for the switch to appear). It also names the token:
-  foldyard reads it from `host.env`'s **`FY_INJECT_<AXIS>`** (uppercased, non-alphanumerics folded
-  to `_`), and its packaged `static_token` minter passes only that NAME on a command line — the
-  value stays host-side. There is deliberately **no `token_env`**: this table is repo config, so a
-  consumer-named var would let anything that can write the checkout point a rule at another
-  mechanism's secret (`ANTHROPIC_API_KEY`, `GH_PEM_B64`…) and at a `host` of its choosing. Under the
-  derived name a rule can only read the var you created for that injector.
-- **`host`** — the host to rewrite on (required).
-- **`header`** XOR **`query_param`** — inject as a header or a URL query parameter. Neither
-  set defaults to the `Authorization` header.
-- There is likewise **no `minter = "<command>"`**: a command string in committed config is code the
-  host executes, which is the hole the packaged minter kinds closed
-  ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)). A mechanism that needs more
-  than a static token is a minter KIND in the package (`github-app`, `gh-cli`, the Codex refresh
-  flow) or an entry-point plugin.
-- **`value_prefix`** — optional prefix for the injected value (e.g. `"Bearer "`).
-- **`path_prefix`** — optional: only inject on request paths under this prefix.
-- **`replay_on_401`** — optional: re-mint and replay once on a 401. Default: `false`.
-- **`ttl`** — optional re-read cadence in seconds for a static token. (Not the mode's lifetime —
-  that's `emergency`.)
-- **`emergency`** — optional `true`: `on` becomes an emergency rung, like `github=user` — it
-  expires (`fy mode <axis>=on ttl=30m`, default 1h, max 8h) and the supervisor switches it off.
-  For a token whose access you never want left on by accident (write access, a shared account).
-- **`label`** — optional; shown in daemon status.
-
-Any number of injectors can be on at once, each with its own host and token.
+There is no `minter` key: a token service that needs more than a static token is a kind built
+into foldyard (`github-app`, `gh-cli`, the Codex refresh) or an installed plugin, never a command
+from config ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)). Any number of
+injectors can be on at once.
 
 ## `[[secret]]`
 
-Host-side secrets a posture needs **present** before its minter can work. Foldyard's business is
-presence, not provenance: it checks `host.env`, surfaces a doctor row, and prompts once for a
-paste. Where the value comes from is yours to decide.
+Secrets a mode needs present in `host.env` before its token service can work. foldyard checks
+presence, shows a `fy doctor` row, and prompts once for a paste; where the value comes from is
+up to you.
 
-The prompt comes at the **posture change**, because that is what consumes the secret (the
-supervisor's proxy reloads `host.env` every tick — the box never holds it): `fy mode sanity=on`
-asks on a host TTY *before* it writes the posture, so a Ctrl-C leaves the posture unchanged and
-the proxy never warms up against an empty `host.env`; a mode button in `fy tui` raises the same
-prompt as a modal (an empty paste skips — arm now, paste later; esc leaves the posture unchanged).
-`fy box up` re-checks the current posture as the backstop, for a posture that arrived by another
-door (a seeded worktree, a set with no TTY). Without a TTY foldyard warns and carries on — a
-missing secret degrades that one host, never the rest.
+The prompt comes when you change mode: `fy mode sanity=on` asks on your terminal *before*
+switching, so Ctrl-C leaves the mode unchanged; a mode button in `fy tui` shows the same prompt
+(an empty paste arms now, paste later; esc cancels). `fy box up` re-checks as a backstop. With no
+terminal foldyard warns and carries on — a missing secret breaks that one host, nothing else.
 
 ```toml
 [[secret]]
-var     = "GH_PEM_B64"                       # the host.env key the minter reads (required)
+var     = "GH_PEM_B64"                       # the host.env key (required)
 label   = "GitHub App private key (PEM)"     # shown at the prompt
 how     = "gcloud secrets versions access <resource> --impersonate-service-account=<sa> | base64"
 pattern = "*-----BEGIN *PRIVATE KEY-----?*-----END *PRIVATE KEY-----*"   # glob the value must match
 base64  = true                               # store encoded — host.env is single-line
-when    = { github = "app" }                 # posture gate, same semantics as `[[overlay]]`
+when    = { github = "app" }                 # mode gate, same semantics as `[[overlay]]`
 ```
 
-- **`var`** — required; the `host.env` key. Absent ⇒ a loud error at registry build.
-- **`label`** — human name at the prompt (defaults to `var`).
-- **`how`** — the "where do I get this?" line. **Foldyard PRINTS it; it never runs it.** Executing a
-  command string from committed config would re-create host-side execution of repo-controlled code,
-  so this stays documentation the operator runs themselves — a gcloud command, an `op read`, a URL,
-  "ask Ops".
-- **`pattern`** — optional **glob** (`fnmatch`: `*`, `?`, `[seq]`) the value must match, decoded
-  first when `base64`. A paste that doesn't match stores **nothing**, so a wrong-shaped secret never
-  reaches a minter. A glob rather than a regex on purpose: this is repo config, and repo-controlled
-  input to Python's backtracking regex engine makes `fy box up` hangable by a crafted pattern.
-- **`base64`** — the value is stored base64-encoded, which is the only way `host.env`
-  (single-line `KEY=VALUE`) can carry a multi-line secret like a PEM. It also makes a truncated
-  paste fail loudly rather than silently storing half a key.
-- **`when`** — posture gate; `axis = value` or `axis = [values]`, AND across keys. When you're
-  overriding a plugin's secret, repeat ITS gate — an override must not turn into a prompt for a
-  credential the posture never asked for.
+- **`var`** — the `host.env` key. Required; missing is an error at startup.
+- **`label`** — the name at the prompt. Default: `var`.
+- **`how`** — "where do I get this?" — **printed, never run** (a gcloud command, an `op read`, a
+  URL, "ask Ops").
+- **`pattern`** — a glob (`*`, `?`, `[seq]`) the value must match, checked after decoding when
+  `base64`. A non-matching paste stores nothing. A glob, not a regex, so a crafted pattern from
+  repo config can't hang `fy box up`.
+- **`base64`** — store the value base64-encoded, the only way `host.env` (single-line
+  `KEY=VALUE`) can hold a multi-line secret such as a PEM; a truncated paste then fails loudly.
+- **`when`** — mode gate: `switch = level` or `switch = [levels]`, AND across keys. When
+  overriding a plugin's secret, repeat its gate.
 
-Plugins declare their own via the `secrets` hook (e.g. `github=app`'s PEM, whose default `how`
-points at the App settings page). A `[[secret]]` row with the same `var` overrides **the fields it
-names** and inherits the rest, so retargeting a hint at your own vault — a `gcloud secrets versions
-access`, an `op read`, a URL — is one `how = …` line, with no copy of the plugin's `pattern` to rot
-the day the plugin tightens it.
+Plugins declare their own secrets (e.g. `github=app`'s PEM). A `[[secret]]` with the same `var`
+overrides only the fields it names, so retargeting the hint at your own vault is one `how = …`
+line.
 
 ## `[[overlay]]`
 
-Posture-conditional compose overlays, pure config: each entry layers an extra compose file
-onto the `-f` chain when the current mode matches.
+Compose files added to the `-f` chain while the mode matches.
 
 ```toml
 [[overlay]]
@@ -591,49 +455,44 @@ when = { gcp = "sa" }               # optional — AND across keys, OR within a 
 env  = "MY_IDENTITY_COMPOSE"        # optional — path-override env var (test/CI hatch)
 ```
 
-- **`file`** — the compose file to add. A non-existent file is silently skipped.
-- **`when`** — `axis = value` or `axis = [values]`; matches iff every named axis holds one of
-  its values. Missing/empty `when` always matches (an unconditional base overlay).
-- **`env`** — when that variable is set, its value replaces `file` for this entry.
+- **`file`** — the compose file to add. Silently skipped if it doesn't exist.
+- **`when`** — `switch = level` or `switch = [levels]`; matches when every named switch is at
+  one of its levels. Missing or empty always matches.
+- **`env`** — if this variable is set, its value replaces `file`.
 
-Declaration order is `-f` order — later files override earlier ones. Full semantics,
-ordering discipline, and a worked example: [compose-overlays.md](./compose-overlays.md).
+Declaration order is `-f` order: later files override earlier ones. Details and a worked example:
+[compose-overlays.md](./compose-overlays.md).
 
 ## `[[require]]`
 
-Cross-axis coherence requirements, pure config — the consumer tier of the plugins'
-`Switch.requires` (same evaluator, same semantics, same synthesized fix message). While `axis`
-sits at a rung in `when`, `needs` must sit at a rung in `accepts`; otherwise `fy mode`
-refuses the combination (`severity = "error"`, the default) or prints a warning and applies
-it (`"warn"`).
+Rules that one switch needs another, from config. The same check as a plugin's
+`Switch.requires`: while `switch` is at a level in `when`, `needs` must be at a level in
+`accepts`, otherwise `fy mode` refuses (`severity = "error"`) or warns and applies (`"warn"`).
 
 ```toml
 [[require]]
-switch = "llm"               # required — the OWNING switch (whose levels activate the rule)
-when = ["record", "live"]    # required — owning-axis rungs; scalar or list
-needs = "gcp"                # required — the required axis, by name
-accepts = ["sa", "user"]     # rungs of `needs` that satisfy it; FIRST is the suggested fix
+switch = "llm"               # required — the owning switch (whose levels activate the rule)
+when = ["record", "live"]    # required — owning-switch levels; scalar or list
+needs = "gcp"                # required — the required switch, by name
+accepts = ["sa", "user"]     # levels of `needs` that satisfy it; FIRST is the suggested fix
 reason = "the runtime-SA identity"   # optional — human name for what's needed
 severity = "error"           # optional — "error" (default) | "warn"
-message = ""                 # optional — full custom message, overrides synthesis
+message = ""                 # optional — full custom message, overrides the generated one
 ```
 
-Declare a requirement here when it is a consequence of *your wiring* rather than of the axis
-itself — e.g. `llm=record/live` needs the gcp identity only because your `[[overlay]]` routes
-LLM traffic through Vertex/ADC; a consumer on another provider would declare a different
-`needs` (perhaps an `[[inject]]` credential axis, which no plugin code could name) or none.
-Intrinsic couplings ship in the plugin, on its `Switch.requires`.
+Use it when the coupling comes from *your wiring* — `llm=record/live` needs gcp only because
+your `[[overlay]]` sends LLM traffic through Vertex; another project would need something else,
+perhaps an `[[inject]]` switch no plugin could name. Couplings intrinsic to a switch ship in its
+plugin's `Switch.requires`.
 
-Semantics match the in-code tier: an absent `needs` axis satisfies nothing (the requirement
-still fires); an absent owner *key* in a mode reads as the axis default. Rows merge onto the
-owning axis at registry construction, after any in-code rows. Validation is loud: an unknown
-owning `axis`, a `when` rung outside its rungs, or a bad `severity` fails every command
-rather than becoming a guard that silently never fires.
+An absent `needs` switch satisfies nothing; an owning switch missing from a mode reads as its
+default. Config rows are checked after the plugin's own. Mistakes fail every command: an unknown
+owning `switch`, a `when` level it doesn't have, or a bad `severity`.
 
 ## `[box]`
 
-The dev box itself. With no `[box].image`, foldyard uses its packaged generic box (engine
-client + git + uv) — a stack-less project can `fy box up` with no Dockerfile to author.
+The dev box. With no `image`, foldyard uses its packaged generic box (engine client + git + uv),
+so a stack-less project can `fy box up` with no Dockerfile.
 
 ```toml
 [box]
@@ -643,30 +502,25 @@ caches = [{ volume = "shared-pnpm", path = ".local/share/pnpm" }]
 warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
 ```
 
-- **`image`** — your own toolchain image: `{ dockerfile, tag?, context?, target?,
-  build_args? }`. `dockerfile` is repo-root-relative; `context` defaults to the repo root;
-  `tag` defaults to `<prefix>-devbox:latest`; `target` selects a multi-stage stage. The image
-  contract is small: an engine client that speaks the mounted socket, plus git. foldyard
-  injects its own bits (socket, CLI, proxy CA) at box-up.
-- **`sock_in_vm`** — the rootless podman socket path inside the VM, bind-mounted to the box's
-  `/var/run/docker.sock`. Default: the active backend's guest socket. Env:
-  `PODMAN_SOCK_IN_VM`. You rarely need this.
-- **`shadow_volumes`** — in-tree build-artifact dirs (checkout-relative) shadowed with
-  per-box named volumes — the workaround for bind-mount uid squashing, and the isolation line
-  for dependencies: what the box installs there stays in the volume, off the host tree, so a
-  package pulled inside the box (compromised or merely different) is never something the host's
-  own toolchain or editor loads. On a VM disk, too, rather than the shared mount — installs and
-  imports run at native speed (see [isolation-layers.md](./isolation-layers.md)). Default: `[]`.
-- **`caches`** — shared caches mounted into the box: a list of `{ volume, path }`, where
-  `path` is relative to the box's `HOME`. Default: `[]`.
-- **`warmup`** — background dependency warm-up steps run after box-up: a list of
-  `{ dir, run }`, each `run` executed in `<checkout>/<dir>`. Default: `[]`.
-- **`env`** — extra static env baked into the box (e.g. tool-cache pinning). `~` in a value
-  is expanded against the box's `HOME`. Default: `{}`.
-- **`[[box.tools]]`** — one-time tool installs, run as monitored bootstrap steps (reported
-  ✓/✗): `{ name, install, check? }`. `check` is a shell guard — skip the install when it
-  succeeds; defaults to `command -v <name>`. Keeps project toolchain out of the image when
-  you'd rather not rebuild for it.
+- **`image`** — your toolchain image: `{ dockerfile, tag?, context?, target?, build_args? }`.
+  `dockerfile` is repo-root-relative; `context` defaults to the repo root; `tag` to
+  `<prefix>-devbox:latest`; `target` picks a multi-stage stage. The image needs an engine client
+  and git; foldyard adds its own pieces (socket, CLI, proxy CA) at box-up.
+- **`sock_in_vm`** — the rootless podman socket inside the VM, mounted as the box's
+  `/var/run/docker.sock`. Default: the backend's own. Env: `PODMAN_SOCK_IN_VM`. Rarely needed.
+- **`shadow_volumes`** — in-tree dirs (checkout-relative) covered by per-box named volumes. Works
+  around bind-mount uid squashing, runs installs at VM-disk speed, and keeps what the box
+  installs (compromised or merely different) off your checkout, where your own tools would load
+  it (see [isolation-layers.md](https://github.com/twistco/foldyard/blob/main/docs/isolation-layers.md)).
+  Default: `[]`.
+- **`caches`** — shared cache volumes: `[{ volume, path }]`, `path` relative to the box's `HOME`.
+  Default: `[]`.
+- **`warmup`** — background steps after box-up: `[{ dir, run }]`, each run in `<checkout>/<dir>`.
+  Default: `[]`.
+- **`env`** — extra static env in the box; `~` expands to the box's `HOME`. Default: `{}`.
+- **`[[box.tools]]`** — one-time tool installs, run as bootstrap steps reported ✓/✗:
+  `{ name, install, check? }`. `check` is a shell test that skips the install when it succeeds;
+  default `command -v <name>`.
 
   ```toml
   [[box.tools]]
@@ -674,10 +528,8 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   install = "curl -fsSL https://get.pulumi.com | sh -s -- --install-root /opt/fy-tools --no-edit-path"
   ```
 
-  The packaged box image (and any image that follows its `apt-get … && rm -rf /var/lib/apt/lists/*`
-  shape) ships **no apt package lists**, so a bare `apt-get install` step fails with
-  `Unable to locate package`. Make the lists their own step, first — `check` keeps it a no-op
-  once they exist, and every apt step after it stays a one-liner:
+  The packaged box image ships no apt package lists, so a bare `apt-get install` fails with
+  `Unable to locate package`. Add the lists as the first step:
 
   ```toml
   [[box.tools]]
@@ -686,22 +538,17 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   install = "apt-get update -qq"
   ```
 
-- **`bootstrap`** — free-form shell run once per fresh box, after the structured steps — the
-  escape hatch for setup that doesn't fit `[[box.tools]]`. Default: `""`.
-- **`clean_docker_config`** — point the box's `DOCKER_CONFIG` at a clean, foldyard-owned
-  config dir instead of `~/.docker`. Editor attaches inject a credential helper into
-  `~/.docker/config.json` that fails under the box's root user and breaks even anonymous
-  pulls; the clean config sidesteps that, and `docker login` still works against it. Default:
-  `true`. Set `false` only if your setup genuinely needs its credential helper.
-- **`git_index_split`** — install the git index-split shim in the box, so box-side git writes
-  its own `.git/index-box` instead of racing host-side git on the shared checkout's index
-  (the two-kernel lockfile-atomicity gap on shared mounts). Default: `true`. Turning it off
-  just restores plain shared-index behaviour.
+- **`bootstrap`** — free-form shell run once per fresh box, after the steps above. Default: `""`.
+- **`clean_docker_config`** — point `DOCKER_CONFIG` at a clean foldyard-owned dir instead of
+  `~/.docker`, whose editor-injected credential helper fails as root and breaks even anonymous
+  pulls. `docker login` still works. Default: `true`.
+- **`git_index_split`** — box-side git uses its own `.git/index-box`, so it doesn't race git on
+  your computer over the shared index
+  ([ADR-0021](./adrs/0021-per-kernel-git-index-split.md)). Default: `true`.
 
 ## `[claude]` / `[codex]` / `[vscode]`
 
-All three are **presence-gated** — declare the table (even empty) to opt in; delete it for a
-plain shell box.
+All three are **presence-gated**: declare the table (even empty) to opt in.
 
 ```toml
 [claude]
@@ -718,113 +565,70 @@ model_reasoning_summary = "auto"
 tui = { raw_output_mode = false }
 ```
 
-- **`[claude]`** — installs Claude Code on box-up and mounts its persisted
-  config/transcripts volumes.
-  - **`keyless`** — keep the real credential out of the box: a dummy lives inside, and the
-    proxy injects the real one (held host-side in `host.env`) in flight. `"oauth"` rewrites
-    the bearer token from a `claude setup-token` token; `"api-key"` (or `true`) rewrites
-    `x-api-key` on `api.anthropic.com`. Absent/`false` means a normal login — real creds in
-    the box's `~/.claude`, persisted across recreation and `fy nuke`. A bare table gets no
-    dummy, no onboarding seed and **no mode axis** (nothing host-side to flip), and its login
-    + API hosts join the `recommend` offer, since no injector is there to exempt them.
-  - **`system_prompt`** — an inline orientation prompt `fy claude` passes via
-    `--append-system-prompt`. `init` seeds a generic one; edit it in place. Default: `""`.
-  - **`[claude.settings]`** — the non-prompt half of the same idea: a settings table `fy claude`
-    passes as JSON to `--settings`, which Claude MERGES into the settings hierarchy — so it
-    overrides the box's `~/.claude/settings.json` **per key** rather than replacing it. Write any
-    key `settings.json` takes (`model`, `env`, `permissions`, `statusLine`, …). Default: `{}` (no
-    flag). An explicit `fy claude --settings …` comes later on the command line and wins.
-- **`[codex]`** — installs the OpenAI Codex CLI on box-up (OpenAI's native installer — a static
-  binary, so no node needed) and mounts its persisted `~/.codex`.
+- **`[claude]`** — installs Claude Code at box-up and mounts its config/transcript volumes.
+  - **`keyless`** — keep the real credential out of the box: the box holds a dummy, and the
+    proxy swaps in the real one from `host.env`. `"oauth"` injects a `claude setup-token` token
+    as the bearer; `"api-key"` (or `true`) injects `x-api-key` on `api.anthropic.com`. Default:
+    off — a normal login, real credentials in the box's `~/.claude`, kept across recreation and
+    `fy nuke`. Without `keyless` there's no switch, and the login and API hosts join the
+    `recommend` offer instead.
+  - **`system_prompt`** — text `fy claude` passes via `--append-system-prompt`. `init` seeds a
+    generic one. Default: `""`.
+  - **`[claude.settings]`** — a settings table `fy claude` passes as JSON to `--settings`; Claude
+    merges it over the box's `~/.claude/settings.json` per key. Any `settings.json` key works
+    (`model`, `env`, `permissions`, `statusLine`, …). Default: `{}`. `fy claude --settings …`
+    wins.
+- **`[codex]`** — installs the OpenAI Codex CLI at box-up (native installer, no node) and
+  mounts its `~/.codex`.
   - **`keyless`** — `"api-key"` (or `true`) injects the real `OPENAI_API_KEY` as a bearer on
-    `api.openai.com`; `"chatgpt"` uses your ChatGPT subscription — the box holds a dummy
-    `auth.json` and the host-side minter injects the current access token, refreshed from
-    your real one. Absent/`false` means a normal login, with the same bare-table shape as
-    `[claude]` above — though in-box that means `codex login --api-key`: the ChatGPT browser
-    flow redirects to `127.0.0.1:1455`, a loopback inside the box your browser can't reach,
-    which is what `keyless = "chatgpt"` exists to solve.
-  - **`system_prompt`** — same key and same job as `[claude]`'s, different delivery: Codex has
-    no `--append-system-prompt`, so `fy codex` passes it as `-c developer_instructions="…"`,
-    which *adds* one item to the developer message the model already gets. (Not
-    `base_instructions`, which would REPLACE Codex's own base prompt.) The value is emitted as a
-    quoted TOML string, because `-c` parses its value as TOML and mangles a raw one that happens
-    to parse. Default: `""`.
-  - **`[codex.config]`** — `[claude.settings]`'s counterpart, in the shape Codex's own
-    `~/.codex/config.toml` has: every LEAF becomes one `-c key=value`, with nested tables flattened
-    to Codex's dotted paths (`tui = { raw_output_mode = false }` → `-c tui.raw_output_mode=false`).
-    Flattened rather than passed whole because `-c tui={ … }` would *replace* the box's entire
-    `tui` table instead of overriding one knob. Values are rendered back into TOML (a bool as
-    `true`, a string quoted) — `-c` parses them as TOML and silently falls back to a literal string
-    when that parse fails. Default: `{}`. Repeated `-c` is last-wins, so `[codex.config]` beats
-    `system_prompt` if it sets `developer_instructions`, and `fy codex -c …` beats both.
+    `api.openai.com`; `"chatgpt"` uses your ChatGPT subscription: the box holds a dummy
+    `auth.json` and the proxy injects a current access token, refreshed on your computer from
+    your real one. Default: off (normal login). In the box that means `codex login --api-key`:
+    the ChatGPT browser login redirects to a loopback port in the box your browser can't reach,
+    which `"chatgpt"` solves.
+  - **`system_prompt`** — same job as `[claude]`'s; `fy codex` passes it as
+    `-c developer_instructions="…"`, which adds to (doesn't replace) Codex's own prompt.
+    Default: `""`.
+  - **`[codex.config]`** — overrides in the shape of Codex's `~/.codex/config.toml`. Each leaf
+    becomes one `-c key=value`, nested tables flattened to dotted paths, so one knob is
+    overridden without replacing its table. Default: `{}`. Later `-c` wins: `[codex.config]`
+    beats `system_prompt` on `developer_instructions`, and `fy codex -c …` beats both.
+- **`transcript_sync_seconds`** (both tables) — while the box is up, the supervisor copies that
+  agent's transcripts into their archive on your computer (`~/.claude/projects` /
+  `~/.codex/sessions`) at this interval, so a crashed box or a `git clean -fdx` loses nothing.
+  Default: `0` (off — transcripts are archived at `fy box down`, or by hand with
+  `fy transcripts`). Rounded down to a multiple of the 2-second supervisor tick (minimum one
+  tick). A failing sync logs once to `host-supervisor.log` when it breaks and once when it
+  heals, and notifies only if it stays broken. Read from the adopted config.
 
-Both tables also take **`transcript_sync_seconds`** (default `0` = off), which turns the one-shot
-`fy transcripts` into a continuous one: while the box is up, the host supervisor promotes that
-agent's bound-out transcripts into its durable archive (`~/.claude/projects` / `~/.codex/sessions`)
-on that interval, so a crashed box or a `git clean -fdx` costs you nothing instead of everything
-since the last `fy box down`.
+  ```toml
+  [claude]
+  transcript_sync_seconds = 30
+  ```
 
-```toml
-[claude]
-transcript_sync_seconds = 30    # rounded DOWN to a multiple of the 2s supervisor tick
-```
+Both tables deep-merge, so `foldyard.local.toml` can set one key (your model) without
+redeclaring the team's. `fy config widenings` lists their keys under **agent steering**.
 
-- It runs **host-side**, in the host supervisor — the box can't reach the host's home, so it could never
-  push. It doesn't have to: the transcripts are already on the host continuously (the box binds
-  its `projects/` out to the checkout), so a pass is a host-local rsync between two host paths —
-  no engine call. Polling, not a watcher, because host-side inotify doesn't fire for guest writes.
-- The interval is expressed in **ticks** (`interval // 2s`, floored, minimum 1), so `30` is 15
-  ticks and `15` is 7 ticks = 14s effective. A slow tick stretches the real interval rather than
-  firing a catch-up burst.
-- **Silent when healthy.** A failed pass logs one line to `host-supervisor.log` when it breaks and
-  one when it heals — never one per interval — and escalates to a notification only if it stays
-  broken. There is no doctor row on purpose: a failed *archive* sync degrades nothing the box
-  does (the bound-out dir still holds every transcript, live), it only means the archive is going
-  stale, and `fy transcripts` fixes it by hand.
-- Read from the **adopted** config like everything the host acts on, so setting it needs a
-  `fy config adopt` before it takes effect.
-
-Both tables deep-merge like everything else, so `foldyard.local.toml` can override a single key
-(your model, your reasoning verbosity) without redeclaring the team's. Both also reach a
-privileged actor from repo config, so `fy config widenings` lists them under **agent steering** —
-by key, since that's where a `hooks` or `permissions` entry would show up.
-- **`[vscode]`** — mounts the vscode-server volume so `fy code` (VS Code attach) reuses its
-  server across box recreations. `fy code` also writes the attached-container config the attach
-  applies (extensions + settings, keyed by the box name, under its own isolated
-  `--user-data-dir`), built from these keys. Foldyard authors that document itself — no repo
-  script produces it, and nothing under the mount (no `.vscode/extensions.json`) is read for it.
-  **The whole table is read from the ADOPTED config**, and `fy code` runs the adopt/revert/ignore
-  gate first: the extensions list decides what the host installs (a UI-kind extension lands in
-  the operator's shared `~/.vscode/extensions`), so a box edit to it is inert until an operator
-  adopts it ([ADR-0026](./adrs/0026-vscode-attach-config-is-declarative.md)). Know what the
-  attach itself does: Dev Containers forwards the SSH agent the VS Code process holds and its
-  git-credential store into the box — so `fy code` launches VS Code with foldyard's own EMPTY
-  agent and switches the git bridge off (`git.terminalAuthentication`), the box unsets and reaps
-  whatever a manual attach still brings, and the wall fences CONNECT to `:443`; `fy config
-  widenings` lists it and `fy verify` reports what is left
+- **`[vscode]`** — mounts the vscode-server volume so `fy code` reuses its server across box
+  recreations, and has `fy code` write the attached-container config (extensions + settings)
+  from these keys. foldyard writes that file itself; nothing from the repo (such as
+  `.vscode/extensions.json`) feeds it. The table is read from the *adopted* config, and `fy code`
+  runs the adopt gate first, because extensions can install into your own `~/.vscode/extensions`
+  ([ADR-0026](./adrs/0026-vscode-attach-config-is-declarative.md)). `fy code` also starts VS Code
+  with an empty SSH agent and the git credential bridge off; what a manual attach still brings is
+  removed in the box, and `fy verify` reports what's left
   ([security](./security.md#fy-verify-prove-it-dont-trust-it)).
-  - **`extensions`** — marketplace ids (`publisher.name`) installed on attach. The Dev Containers
-    extension is dropped (meaningless inside the container); an invalid id is dropped rather than
-    handed to VS Code. Keep the sub-projects' `.vscode/extensions.json` for plain VS Code's
-    click-to-install recommendations — this list is what installs *without* a click, which is
-    why it is config. Default: `[]`.
-  - **`settings`** — a table of VS Code settings carried in the attached config, which Dev
-    Containers applies to the box's server (machine scope) — e.g.
-    `"remote.autoForwardPorts" = false`, `"github.gitAuthentication" = false`. Settings can't
-    execute; the schema's lifecycle hooks are not a key and never will be. foldyard merges its
-    own pin on top (the minter/proxy ports are never auto-forwarded — a forward would shadow the
-    daemon the box dials). Dev Containers writes these ONCE per server install; `fy code` clears
-    that marker whenever the table changed, so an edit lands on the next attach.
+  - **`extensions`** — marketplace ids (`publisher.name`) installed on attach, without a click.
+    The Dev Containers extension and invalid ids are dropped. Default: `[]`.
+  - **`settings`** — VS Code settings applied to the box's server (Remote [Machine] scope), e.g.
+    `"remote.autoForwardPorts" = false`. Settings can't run code. foldyard adds its own pin (the
+    proxy and token-service ports are never auto-forwarded). Values must be JSON-compatible (no
+    TOML dates). `fy code` re-applies them on the next attach after a change. Default: `{}`.
 
-  Where this lands: the box's **Remote [Machine]** layer — above the isolated instance's own user
-  settings, below the checkout's `.vscode/settings.json`. So the table is the team's policy, and
-  that gitignored workspace file stays each operator's own (window colours per worktree and the
-  like override the policy, never diff). It reaches the `fy code` window only; a native VS Code
-  window on the same checkout sees none of it.
-
-  Per-operator tweaks go in `foldyard.local.toml` (deep-merged, and adopted alongside). Removing
-  the `_generatedBy` key from the written config file is the host-side hatch that stops
-  `fy code` writing it at all — the whole table then stops applying to that instance.
+  The settings sit above the instance's own user settings and below the checkout's gitignored
+  `.vscode/settings.json`, so the table is team policy and that file stays yours. They reach the
+  `fy code` window only. Personal tweaks go in `foldyard.local.toml`. Deleting the
+  `_generatedBy` key from the written config file stops `fy code` writing it.
 
   ```toml
   [vscode]
@@ -837,13 +641,11 @@ by key, since that's where a `hooks` or `permissions` entry would show up.
 
 ## `[reclaim]`
 
-The project's own space sweep. foldyard decides *when* (the engine store under 20% headroom —
-the same line `fy doctor` warns at — checked before every `fy up` build, or on demand with
-`fy reclaim`) and does the engine-level sweeps only it can reason about: dangling images older
-than a day, images of removed worktrees, and the images its own build just superseded. What
-*else* fills the store is the project's business, and it lives in volumes only the dev box
-mounts, with tools only the box has — so it's a script, run **in the box** with cwd = the
-checkout, after those sweeps.
+Your project's own disk cleanup. foldyard decides *when* — before a `fy up` build when the engine
+store is under 20% free (or under 5 GiB), the same threshold `fy doctor` warns at, or on demand
+with `fy reclaim` — and first runs its own sweeps: dangling images over a day old, images of
+removed worktrees, and images its build just replaced. Then it runs your script **in the box**,
+with the checkout as working directory.
 
 ```toml
 [reclaim]
@@ -851,15 +653,16 @@ script = "dev-stack/reclaim.sh"   # checkout-relative; e.g. pnpm store prune, uv
                                   # trimming test artefacts, a stale buildx state volume
 ```
 
-Best-effort like the rest: output streams to the terminal, a non-zero exit is not a failure,
-and a stopped box is a note (the engine sweeps still ran — run `fy reclaim` inside the box
-to reach its volumes). Per-worktree caches are only reached from that worktree's box; shared
-ones from any.
+- **`script`** — checkout-relative path. Default: none.
+
+Best-effort: output streams to the terminal, a non-zero exit isn't a failure, and a stopped box
+is a note (run `fy reclaim` in the box to reach its volumes). Per-worktree caches are reachable
+only from that worktree's box.
 
 ## `[plugins.<name>]`
 
-Plugin opt-ins — declaring the table (even empty) loads that plugin; a repo that declares
-none never sees its mode axes, daemons, or box wiring.
+Plugin opt-ins: declaring the table, even empty, loads the plugin. Without it you never see its
+switches, daemons or box wiring.
 
 ```toml
 [plugins.gcp-metadata]
@@ -867,53 +670,64 @@ project = "my-gcp-project"
 sa_labels = { app = "app-runtime", box = "log-reader" }
 ```
 
-- **`[plugins.gcp-metadata]`** — the GCP metadata-emulator/minter plugin.
-  - **`project`** — the GCP project whose service accounts the minter impersonates. The gcp
-    modes need it set. Env: `GCP_PROJECT`.
-  - **`sa_labels`** — service-account local-parts by role, e.g.
+- **`[plugins.gcp-metadata]`** — the GCP metadata emulator and its token service.
+  - **`project`** — the GCP project whose service accounts it impersonates; the gcp levels need
+    it. Env: `GCP_PROJECT`.
+  - **`sa_labels`** — service-account names by role, e.g.
     `{ app = "app-runtime", box = "log-reader" }`. Default: `{}`.
-- **`[plugins.github]`** — the opt-in for the whole `github` axis (`off`/`app`/`user`), plus
-  the GitHub App identity the `github=app` rung mints with. Declaring the table — even empty,
-  which is all the `github=user` emergency needs — is what makes the axis (and the gh
-  CLI/login doctor rows, the box's dummy `GH_TOKEN`, the gh bootstrap) appear at all; a
-  consumer without it gets no github surface anywhere. None of the fields are secrets
-  (they're identifiers), so they live in committed config rather than `host.env`; the App's
-  private KEY is captured separately (see `[[secret]]`).
-  - **`app_id`** / **`installation_id`** / **`repo`** — the App's numeric id, its installation
-    id, and the bare repo name (not `owner/repo`) the token is scoped to. Env: `GH_APP_ID`,
+- **`[plugins.github]`** — enables the `github` switch (`off`/`app`/`user`) and everything with
+  it (gh doctor rows, the box's dummy `GH_TOKEN`, the gh bootstrap). An empty table is enough for
+  `github=user`. The fields are identifiers, not secrets; the App's private key is a
+  `[[secret]]`.
+  - **`app_id`** / **`installation_id`** / **`repo`** — the App id, its installation id, and the
+    bare repo name (not `owner/repo`) the `github=app` token is scoped to. Env: `GH_APP_ID`,
     `GH_INSTALLATION_ID`, `GH_REPO`.
-  - **`permissions`** — optional table narrowing the installation token, e.g.
-    `{ issues = "read" }`. Default: `{ pull_requests = "write", issues = "write" }` (the PR-bot
-    shape). Env: `GH_APP_PERMISSIONS` (JSON).
-- **`[plugins.auth0-sim]`** — an Auth0-simulator harness plugin (consumer-specific; slated to
-  move out of the foldyard package into its consumer).
-  - **`sim_dir`** — repo-relative dir holding the harness; its `.certs-local/` is where the
-    localhost cert lands (the cert doctor checks read it). Absent disables the cert checks.
-    Env: `FOLDYARD_AUTH0_SIM_DIR`.
-  - **`container`** — the simulator's compose-service suffix (full name =
-    `<prefix>-<suffix>`), bounced when a fresh cert is served. Default: `"auth0-sim"`. Env:
+  - **`permissions`** — narrows the installation token, e.g. `{ issues = "read" }`. Default:
+    `{ pull_requests = "write", issues = "write" }`. Env: `GH_APP_PERMISSIONS` (JSON).
+- **`[plugins.fakecred]`** — a zero-secret testing switch pair and fake token service, for
+  exercising modes, TTLs and daemons without real credentials; see
+  [testing-modes.md](./testing-modes.md). Env: `FAKECRED_PORT` (the fake service's port).
+- **`[plugins.auth0-sim]`** — an Auth0-simulator harness (project-specific; slated for removal
+  from foldyard, [ADR-0024](./adrs/0024-declarative-consumer-axes-no-repo-path-plugins.md)).
+  - **`sim_dir`** — repo-relative harness dir; its `.certs-local/` holds the localhost cert the
+    doctor checks read. Absent disables those checks. Env: `FOLDYARD_AUTH0_SIM_DIR`.
+  - **`container`** — the simulator's compose-service suffix (full name `<prefix>-<suffix>`),
+    restarted when a fresh cert is served. Default: `"auth0-sim"`. Env:
     `FOLDYARD_AUTH0_SIM_CONTAINER`.
-- **`[plugins.llm]`** — opts into the `llm` mode axis (also consumer-specific and slated to
-  move out). No keys.
+- **`[plugins.llm]`** — enables the `llm` switch (project-specific, slated for removal likewise).
+  No keys.
+
+## Supervisor settings
+
+Two more top-level tables tune the supervisor, foldyard's background process on your computer:
+
+- **`[host] notifications`** — post desktop notifications when a credential stops or starts
+  working again (macOS only today). Default: `true`.
+- **`[resnapshot_on_capability]`** — `switch = ["service", …]`: compose services the supervisor
+  restarts when that switch's credential check goes from failing to working. For a service that
+  fetches credentials once at startup and would otherwise keep the broken state. Default: `{}`.
+
+```toml
+[resnapshot_on_capability]
+gcp = ["api"]
+```
 
 ## The adopted config: what the host actually runs
 
-`foldyard.toml` (and its local overlay) sits **inside the mount**, so anything that can write the
-checkout can rewrite it: an in-box agent, an `npm install` lifecycle script, a branch you checked
-out to review. Yet parts of it decide host-side credential behaviour — which host an `[[inject]]`
-axis hands its token to, which egress `[proxy] passthrough` exempts from decryption. So the host
-does **not** read the working tree. It reads a copy you **adopted**, kept in
-`~/.foldyard/adopted/<checkout>-<hash>/`, outside the mount and keyed by the checkout PATH — so
-nothing the config itself declares can redirect the lookup (see
-[ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)).
+`foldyard.toml` and its local overlay sit **inside the repo**, so anything that can write the
+checkout can change them: an agent in the box, an `npm install` script, a branch you checked out
+to review. Parts of it decide what your computer does with credentials — which host an
+`[[inject]]` switch sends its token to, which traffic `passthrough` leaves undecrypted. So your
+computer doesn't read the working tree. It reads a copy you **adopted**, kept in
+`~/.foldyard/adopted/<checkout>-<hash>/`, keyed by the checkout's path so the config can't
+redirect the lookup ([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)).
 
-What this means day to day:
+Day to day:
 
-- The first `fy up` / `fy host restart` in a fresh checkout adopts it once, and says so.
-- After that, an edit is **inert on the host** until you adopt it. The supervisor logs the drift
-  once, posts a notification, and `fy doctor` shows a warn row — you won't be left wondering why a
-  change did nothing.
-- `fy up`, `fy box up` and `fy host restart` ask before starting anything:
+- The first `fy up` / `fy host restart` in a fresh checkout adopts it, and says so.
+- After that, an edit does nothing on your computer until adopted. The supervisor logs the change
+  once and notifies you, and `fy doctor` shows a warning row.
+- `fy up`, `fy box up`, `fy host restart` and `fy code` ask before starting anything:
 
   ```
   ⚠ foldyard.toml changed since the host adopted it [main]
@@ -923,98 +737,96 @@ What this means day to day:
     [a]dopt · [r]evert the file · [i]gnore for now (default):
   ```
 
-  **adopt** — run the new config (live within a tick; no supervisor restart).
-  **revert** — put the file back to the adopted copy; a file the adopted copy doesn't have (a
-  `foldyard.local.toml` that appeared, say) is moved aside into the pin dir rather than deleted.
-  **ignore** — keep running the adopted copy and ask again next time. With no TTY (the detached
-  launch, CI) nothing is adopted.
-- The verbs are the same operations: `fy config status`, `fy config diff`, `fy config adopt`,
-  `fy config revert`. All Mac-only — the box must not adopt its own config, exactly like
-  `fy allow`.
-- **`fy config widenings`** inventories what the adopted config asks the host to allow: how many
-  hosts `passthrough` actually exempts from capture (`@all` is one token meaning ~200), where each
-  mechanism delivers its credential (including axes that are declared but not yet armed), which
-  agent prompts are shared vs personal — and any key that reads as security config but is no
-  longer honoured. A `fy doctor` row summarises it and warns on that last group.
-- Each worktree has its own adopted copy, since a branch may legitimately declare different
-  plugins. Switching branches is drift, and gets asked about.
+  **adopt** runs the new config (within a tick, no restart). **revert** puts the file back to
+  the adopted copy (a file the copy doesn't have is moved aside into the adopted dir, not
+  deleted). **ignore** keeps the adopted copy and asks again next time. With no terminal (CI, a
+  detached launch) nothing is adopted.
+- The same as commands: `fy config status`, `fy config diff`, `fy config adopt`,
+  `fy config revert`. They run on your computer only — the box can't adopt its own config.
+- `fy config widenings` lists what the adopted config lets through: how many hosts
+  `passthrough` leaves undecrypted (`@all` is about 200), where each switch delivers its
+  credential (including ones not switched on), which agent prompts are shared vs personal, and
+  keys that are renamed or no longer honoured. A `fy doctor` row summarises it.
+- Each worktree has its own adopted copy, since a branch may declare different plugins.
+  Switching branches counts as a change and gets asked about.
 
-**Scope:** the pin governs what the HOST does — daemons, injection rules, capture/passthrough, and
-the posture surface `fy mode`/the TUI show. Compose files, `[box]` tools and bootstrap, and ports
-still read the working tree: their blast radius is the VM the yard already owns.
+**Scope:** adoption governs what your computer does — daemons, injection, `passthrough`, and the
+switches `fy mode`/the TUI show. Compose files, `[box]` tools and bootstrap, and ports still read
+the working tree: they only affect the VM, which untrusted code can already reach.
 
 ## Host state: `~/.foldyard/`
 
-Foldyard keeps all host-side state under `~/.foldyard/`, deliberately **outside the repo
-mount** — nothing running in the VM or box can read or escalate its own posture.
+All state on your computer lives under `~/.foldyard/`, outside the repo, so nothing in the VM or
+box can read it or raise its own access.
 
-Cross-project:
+Shared by all projects:
 
-- **`ports.json`** — the port-band registry. Each project gets a 200-port band (first-come,
-  starting at 41000) for its Mac-side daemons: proxy listeners at `base+0..89` (the worktree
-  offset span), minters at `base+100..189`. Bands are stable across restarts; stale entries
-  from deleted projects are harmless and can be pruned by editing the file.
-  `FY_PROXY_PORT` / `GCP_MINTER_PORT` bypass allocation entirely.
+- **`ports.json`** — the port-range registry. Each project gets 200 ports (first come, from
+  41000): proxy listeners at `base+0..89` (one per worktree offset), token services at
+  `base+100..189`, the VM's ssh forward at `base+190`. Stable across restarts; entries for
+  deleted projects are harmless and can be removed by hand. Env: `FY_PORTS_FILE`;
+  `FY_PROXY_PORT` / `GCP_MINTER_PORT` bypass allocation.
+- **`adopted/<checkout>-<hash>/`** — the adopted config per checkout (see above).
 
-Per project, `~/.foldyard/<project>/`:
+Per project, `~/.foldyard/<project>/` (env `FOLDYARD_STATE_DIR` relocates it):
 
-- **`host.env`** — the shared identity env (App IDs, captured keyless tokens, injector
-  secrets). One per project — the daemons serving every worktree read it.
-- **`allow-store.json`** — the authoritative egress grants, at EVERY level (once /
-  until-restart / permanent). Outside the mount, so the box can't grant its own egress.
-- **`allow-effective.json`** — the resolved allowlist the proxy re-reads per request: the
-  store's grants with expired entries dropped.
-- **`host-supervisor.log`** — the one supervisor's combined log (its own output plus every
-  child daemon's).
-- **`host-supervisor.heartbeat`** — the supervisor's liveness stamp, refreshed each
-  reconcile tick; launch paths read its age to tell a healthy holder from a wedged one.
-- **`main/`** — the primary checkout's per-worktree posture: `dev-mode.json` (the
-  authoritative mode file) and `logs/` (the per-daemon JSONL logs — egress proxy, minter).
-- **`worktrees/<name>/`** — the same pair for each worktree, so branches hold independent
-  postures under the one supervisor.
+- **`host.env`** — secrets and identities the token services read (App ids, captured keyless
+  tokens, injector tokens). One per project, shared by every worktree.
+- **`allow-store.json`** — the egress grants, at every level. Outside the repo, so the box
+  can't grant itself access.
+- **`allow-effective.json`** — the resolved allowlist the proxy re-reads per request (the
+  store minus expired grants).
+- **`build-tokens.json`** — hashed secrets for live image builds, which unlock build-only
+  grants at the proxy.
+- **`host-supervisor.log`** — the supervisor's combined log, including every daemon it runs.
+- **`host-supervisor.heartbeat`** — refreshed each supervisor tick; launch verbs read its age to
+  tell a healthy supervisor from a stuck one.
+- **`capabilities.json`** — the latest credential-check results `fy mode`/`fy state` show.
+- **`blocked-daemons.json`** — daemons the supervisor is holding back, with the reason.
+- **`clock-offset`** — test-only clock skew set by `fy clock`; absent normally.
+- **`main/`** — the main checkout's `dev-mode.json` (its mode) and `logs/` (per-daemon JSONL
+  logs: proxy, token services).
+- **`worktrees/<name>/`** — the same for each worktree, so each branch holds its own mode.
 
-(An older install may still have a top-level `dev-mode.json`; the main checkout keeps using
-it until the per-worktree file exists.)
+(An older install may still have a top-level `dev-mode.json`; the main checkout keeps using it
+until `main/dev-mode.json` exists.)
 
-Inside the repo, foldyard also generates a few gitignored files next to `foldyard.toml`
-(`init` fences them into `.gitignore`): `.devbox-ca/`, `.devbox-claude/`,
-`.devbox-foldyard/`, and `.dev-mode.json` — the read-only posture mirror the box can see
-(informational only; enforcement stays on the host).
+In the repo, foldyard also generates gitignored files next to `foldyard.toml` (`init` adds them
+to `.gitignore`): `.devbox-ca/`, `.devbox-claude/`, `.devbox-codex/`, `.devbox-foldyard/`, and
+`.dev-mode.json` — a read-only copy of the mode for tools in the box. Nothing grants access based
+on it.
 
 ## Environment variables
 
-The per-key overrides are listed with their keys above. The globals:
+Per-key overrides are listed with their keys above. The globals:
 
 | Variable | What it does |
 | --- | --- |
-| `FOLDYARD_REPO` | The repo root, skipping CWD-walk resolution. |
+| `FOLDYARD_REPO` | The repo root, skipping the walk up from the working directory. |
 | `FOLDYARD_PROJECT` | The project name (state-dir key). |
 | `FOLDYARD_ENGINE` | The engine CLI (`podman`/`docker`). |
-| `WORKTREE` | The active worktree name; empty = the main checkout. Usually inferred (set inside the box; inferred from CWD on the host). |
-| `WT_OFFSET` | Explicit worktree port offset, bypassing pins and the hash. |
+| `WORKTREE` | The active worktree; empty = the main checkout. Set in the box; inferred from the working directory on your computer. |
+| `WT_OFFSET` | Worktree port offset, bypassing pins and the hash. |
 | `PODMAN_MACHINE` | The VM name. |
-| `MACHINE_BACKEND` / `MACHINE_VMTYPE` / `MACHINE_WALL` / `MACHINE_HOST_WALL` / `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK` | `[machine]` overrides. |
-| `FY_PROXY_PORT` | The egress-proxy base port, bypassing the port-band registry. |
-| `GCP_MINTER_PORT` | The gcp-minter base port, likewise. |
-| `FY_HOST_ALIAS` | The address containers use to reach the host-side daemons — the escape hatch for a customised Lima network whose host gateway differs. |
-| `FOLDYARD_COMPOSE_EXTRA` | Extra compose overlay files (path-separator-joined), appended after everything else so an explicit override wins on conflicting keys. |
-| `FOLDYARD_NO_VERSION_NUDGE` | Silences the `recommended_foldyard_version` nudge. Never affects the floor, or `fy doctor`'s row. |
-| `IN_DEVBOX` | `1` inside the dev box; the signature foldyard's "am I on the host?" guards use. Set by foldyard — don't set it yourself. |
+| `MACHINE_BACKEND` / `MACHINE_VMTYPE` / `MACHINE_FIREWALL` / `MACHINE_HOST_FIREWALL` / `MACHINE_RUNTIME` / `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK` | `[machine]` overrides. |
+| `FY_PROXY_PORT` | The proxy's base port, bypassing the port-range registry. |
+| `GCP_MINTER_PORT` | The gcp token service's base port, likewise. |
+| `FY_HOST_ALIAS` | The address containers use to reach daemons on your computer — for a customised Lima network with a different host gateway. |
+| `FOLDYARD_COMPOSE_EXTRA` | Extra compose files (path-separator-joined), appended last so they win. |
+| `FOLDYARD_NO_VERSION_NUDGE` | Silences the `recommended_foldyard_version` nudge. Never affects the floor or `fy doctor`. |
+| `FOLDYARD_PODMAN_DESKTOP` | `0`/`1`: Podman Desktop integration off/forced on (see `[machine]`). |
+| `IN_DEVBOX` | `1` inside the box; what foldyard's "am I on your computer?" checks use. Set by foldyard — don't set it yourself. |
 
 ## Internal / advanced
 
-These exist mainly as test/CI hatches or for unusual setups; you should not normally need
-them, and none have `foldyard.toml` keys:
+Test and CI hatches with no `foldyard.toml` keys; you shouldn't normally need them.
 
-- **State-path overrides** — `FOLDYARD_STATE_DIR` (the per-project state root),
-  `FOLDYARD_MODE_FILE`, `FOLDYARD_HOST_ENV`, `FOLDYARD_ALLOW_STORE`, `FOLDYARD_ALLOW_FILE`,
-  `FOLDYARD_LOG_DIR`, `FOLDYARD_SUPERVISOR_LOG`, `FOLDYARD_HEARTBEAT_FILE` — each repoints
-  one of the host-state files/dirs described above.
-- **`FY_PORTS_FILE`** — repoints the cross-project port registry.
-- **`FOLDYARD_LOG_TAIL_BYTES`** — how much of each JSONL log's tail the TUI panels read
-  (default 256 KiB).
-- **`FOLDYARD_DEV_VM_DIR`** — overrides `[project] dev_vm_dir`.
-- **`FOLDYARD_CHECKOUT`** / **`FOLDYARD_ENV_OVERRIDE`** — set *by* foldyard for the stack:
-  the active checkout the stack mounts (main or a worktree dir — distinct from
-  `FOLDYARD_REPO`, which is always the main checkout) and the per-checkout env-override file
-  path.
+- **State-path overrides** — `FOLDYARD_STATE_DIR`, `FOLDYARD_MODE_FILE`, `FOLDYARD_HOST_ENV`,
+  `FOLDYARD_ALLOW_STORE`, `FOLDYARD_ALLOW_FILE`, `FOLDYARD_BUILD_TOKENS`, `FOLDYARD_LOG_DIR`,
+  `FOLDYARD_SUPERVISOR_LOG`, `FOLDYARD_HEARTBEAT_FILE`, `FOLDYARD_CAPABILITIES_FILE`,
+  `FOLDYARD_BLOCKED_DAEMONS_FILE` — each repoints one of the state files above.
+- **`FOLDYARD_CLOCK_OFFSET`** — clock skew in seconds, overriding `fy clock`'s file.
+- **`FOLDYARD_LOG_TAIL_BYTES`** — how much of each JSONL log's end the TUI reads (default
+  256 KiB).
+- **`FOLDYARD_CHECKOUT`** / **`FOLDYARD_ENV_OVERRIDE`** — set *by* foldyard for the stack: the
+  checkout it mounts (main or a worktree) and the per-checkout env-override file.
