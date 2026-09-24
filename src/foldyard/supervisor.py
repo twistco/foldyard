@@ -1037,7 +1037,7 @@ def _resnapshot_worker(cfg: config.Config, wt: str, axis: str, services: list[st
             log(f"capability {axis} healed — recreating {label} (resnapshot_on_capability)")
             ok, summary = stack.recreate_services(services, worktree=wt)
         if ok:
-            log(f"resnapshot: recreated {label}")
+            log(f"resnapshot: {summary}" + (f" [worktree {wt}]" if wt else ""))
         else:
             log(f"resnapshot: recreate FAILED for {label} — {summary}")
     finally:

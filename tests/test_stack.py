@@ -551,13 +551,23 @@ def test_sweep_signature_on_docker_engine_is_the_config_hash(fake_repo, foreign_
     assert rm[3:] == ["aaa"]
 
 
-def test_recreate_services_force_recreates_on_the_current_posture(fake_repo, capture_run):
+@pytest.fixture
+def running_services(monkeypatch):
+    """What the engine reports running, for the heal's filter — mutate the set in the test."""
+    running = {"queue-worker", "graph-api"}
+    monkeypatch.setattr(stack, "_running_services", lambda ctx: running)
+    return running
+
+
+def test_recreate_services_force_recreates_on_the_current_posture(
+    fake_repo, capture_run, running_services
+):
     # The capability-heal resnapshot action (#33): `compose restart` reboots the EXISTING
     # container with its create-time env, cementing whatever posture it was created under — so
     # the heal recreates the named services from the current -f list instead. Headless: never
     # builds, never drags dependencies up, output captured, never raises.
     ok, summary = stack.recreate_services(["queue-worker", "graph-api"])
-    assert ok is True and summary == ""
+    assert ok is True and summary == "recreated queue-worker, graph-api"
     last = _composes(capture_run)[-1]
     assert last[-7:] == [
         "up",
@@ -572,7 +582,43 @@ def test_recreate_services_force_recreates_on_the_current_posture(fake_repo, cap
     assert "-f" in last and any("compose.podman.yml" in x for x in last)
 
 
-def test_recreate_services_spans_running_extra_profiles(fake_repo, capture_run, monkeypatch):
+def test_recreate_services_leaves_services_that_are_not_running_alone(
+    fake_repo, capture_run, running_services
+):
+    # A heal refreshes what runs; it never STARTS anything. An explicitly named service is created
+    # by `up` even when it never ran (and under docker compose its inactive profile is enabled for
+    # it), and with --no-deps its dependencies would not come up either.
+    ok, summary = stack.recreate_services(["queue-worker", "asset-tape-extract"])
+    assert ok is True
+    assert summary == "recreated queue-worker; not running, left alone: asset-tape-extract"
+    last = _composes(capture_run)[-1]
+    assert last[-1] == "queue-worker" and "asset-tape-extract" not in last
+
+
+def test_recreate_services_with_nothing_running_runs_no_compose(
+    fake_repo, capture_run, running_services
+):
+    running_services.clear()
+    assert stack.recreate_services(["queue-worker"]) == (
+        True,
+        "none of queue-worker running — nothing to recreate",
+    )
+    assert not any("up" in c for c in _composes(capture_run))
+
+
+def test_recreate_services_refuses_when_it_cannot_see_what_runs(
+    fake_repo, capture_run, monkeypatch
+):
+    # Fail-safe: an unreadable engine must not turn into "recreate everything named".
+    monkeypatch.setattr(stack, "_running_services", lambda ctx: None)
+    ok, summary = stack.recreate_services(["queue-worker"])
+    assert ok is False and "couldn't list running services" in summary
+    assert not any("up" in c for c in _composes(capture_run))
+
+
+def test_recreate_services_spans_running_extra_profiles(
+    fake_repo, capture_run, monkeypatch, running_services
+):
     # Resnapshot services are typically profile-gated workers (`data`); a provider that drops a
     # service outside the requested profiles would otherwise make the heal a silent no-op.
     monkeypatch.setattr(stack, "_running_extra_profiles", lambda ctx: ["data"])

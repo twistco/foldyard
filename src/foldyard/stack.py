@@ -1164,6 +1164,15 @@ def _profile_flags(ctx: Context, extra_profiles: list[str] | None) -> list[str]:
     return flags
 
 
+def _running_services(ctx: Context) -> set[str] | None:
+    """The project's RUNNING compose services (``compose ps``); None when the engine can't say."""
+    try:
+        out = _run([*ctx.compose, "ps", "--format", "json"], env=ctx.env, cwd=str(ctx.main))
+    except Exception:
+        return None
+    return _compose_ps_services(out.stdout) if out.returncode == 0 else None
+
+
 def _running_extra_profiles(ctx: Context) -> list[str]:
     """Compose profiles OUTSIDE the posture-derived active set that currently have RUNNING
     services — e.g. the ``data`` workers ``just data-up`` started (that profile belongs to the
@@ -1174,10 +1183,7 @@ def _running_extra_profiles(ctx: Context) -> list[str]:
     running containers, no profile names baked in. Best-effort: [] on any error (the reconcile
     then covers just the derived set, as before)."""
     try:
-        out = _run([*ctx.compose, "ps", "--format", "json"], env=ctx.env, cwd=str(ctx.main))
-        if out.returncode != 0:
-            return []
-        running = _compose_ps_services(out.stdout)
+        running = _running_services(ctx)
         if not running:
             return []
         active = {p for p in (ctx.env.get("COMPOSE_PROFILES") or "").split(",") if p}
@@ -1215,7 +1221,11 @@ def recreate_services(
     back on it while looking healed. ``up --force-recreate`` renders it from the CURRENT posture,
     so a heal re-reads credentials AND converges any drift. ``--no-build`` (a heal never builds),
     ``--no-deps`` (only the named services), and the running extra profiles spanned the way the
-    posture reconcile spans them, so a profile-gated worker isn't dropped from the render.
+    posture reconcile spans them, so a profile-gated worker isn't dropped from the render. Only
+    services that are RUNNING are named: a heal refreshes what runs and never starts anything —
+    ``up`` would create a named service that never ran (under docker compose, enabling its
+    inactive profile too) without the dependencies ``--no-deps`` skips. An engine that can't say
+    what runs recreates nothing (fail-safe). The summary says what was recreated and what not.
     Headless by design (it runs on a supervisor worker thread): output is captured, bounded by
     ``timeout`` so a hung engine can't pin the in-flight guard forever, and it NEVER raises — the
     caller logs (ok, summary) either way. Passing ``worktree`` explicitly (not None) pins the
@@ -1225,15 +1235,26 @@ def recreate_services(
         return False, f"{down} — nothing to recreate"
     try:
         ctx = resolve(worktree=worktree)
+        running = _running_services(ctx)
+        if running is None:
+            return False, "couldn't list running services — nothing recreated"
+        wanted = [s for s in services if s in running]
+        idle = [s for s in services if s not in running]
+        if not wanted:
+            return True, f"none of {', '.join(services)} running — nothing to recreate"
         cmd = [
             *ctx.compose,
             *_profile_flags(ctx, _running_extra_profiles(ctx)),
-            *["up", "-d", "--no-build", "--force-recreate", "--no-deps", *services],
+            *["up", "-d", "--no-build", "--force-recreate", "--no-deps", *wanted],
         ]
         _err("+ " + " ".join(shlex.quote(c) for c in cmd))
         proc = _run(cmd, env=ctx.env, cwd=str(ctx.main), timeout=timeout)
-        lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
-        return proc.returncode == 0, (lines[-1] if lines else "")
+        if proc.returncode != 0:
+            lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
+            return False, (lines[-1] if lines else f"compose exited {proc.returncode}")
+        return True, f"recreated {', '.join(wanted)}" + (
+            f"; not running, left alone: {', '.join(idle)}" if idle else ""
+        )
     except (Exception, SystemExit) as e:  # resolve aborts a missing worktree with SystemExit
         return False, f"{type(e).__name__}: {e}"
 
