@@ -77,7 +77,7 @@ tokens are injected in flight and never enter the box — ADR-0007).
   `backend = "lima"`.
 - An earlier packaged proof rig (`fy wall` verb + `assets/wall/`) was retired in PR #36 when the
   real-machine integration landed — foldyard no longer ships a separate proof VM; the standalone
-  red-team kit stays under `docs/lima-network-forcing-kit/`.
+  red-team kit stays under `docs/archive/lima-network-forcing-kit/`.
 - Known residuals stay documented, not hidden: QUIC/UDP-443 can bypass a CONNECT proxy (the wall
   closes this under lima; cooperative-only setups are told), and the fuller red-team battery runs
   only in `test_network.sh`, not per-`fy up`.

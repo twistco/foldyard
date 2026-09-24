@@ -10,7 +10,7 @@ relocating the egress proxy INTO the lima VM. That design was dropped before imp
    into the real lima machine VM makes that Mac proxy the *only* way out — fail-closed.
 
 Companions: [lima-backend-scope.md](./lima-backend-scope.md) (the backend contract) and the runnable
-[lima-network-forcing-kit/](./lima-network-forcing-kit/) (the standalone proof + security
+[archive/lima-network-forcing-kit/](./archive/lima-network-forcing-kit/) (the standalone proof + security
 argument). NB the packaged `fy wall` verb and `assets/wall/` were RETIRED once this real-machine
 integration landed — the kit under `docs/` remains as the standalone red-team rig, but foldyard
 no longer ships a separate proof VM (it couldn't be exercised through an example project anyway).

@@ -212,7 +212,7 @@ the host with systemd as init, or trigger the check manually (`podman healthchec
 - **Don't use the nested rig for *network*-forcing tests** — it adds an L2 that only burns CPU
   and doesn't reproduce macOS net stacks. The in-VM nftables forcing wall is identical regardless
   of how the VM is made; test it in a **native Lima VM on the Mac** instead. See
-  [lima-network-forcing-kit/](./lima-network-forcing-kit/) (the runnable kit).
+  [archive/lima-network-forcing-kit/](./archive/lima-network-forcing-kit/) (the runnable kit).
 
 ## ⚠ Caution: tear nested guests down gracefully (this bites hard)
 

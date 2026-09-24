@@ -17,7 +17,7 @@ So the wall is on **container egress**, and a spawned box can't escape it.
 ## Run it (uses its own `wallt` VM — won't clash with the explicit kit's `wall`)
 
 ```bash
-cd foldyard/docs/lima-network-forcing-kit/transparent
+cd foldyard/docs/archive/lima-network-forcing-kit/transparent
 bash run-cwall.sh                 # start/reuse VM + install + test
 bash run-cwall.sh teardown        # stop + delete
 ```

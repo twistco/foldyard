@@ -109,7 +109,7 @@ shape and passes for the same reason on every platform. Measured on the leaky VM
 | `--privileged -v /:/host … ls /host/home/dain` | yes (lists the host home) |
 
 So the two "repo-only mount" ✅s in
-[isolation-layers.md](./isolation-layers.md#what-fy-verify-proves-per-platform) are, today,
+[isolation-layers.md](../isolation-layers.md#what-fy-verify-proves-per-platform) are, today,
 proven by the mount configuration `machine ensure` writes and not by `verify`. This is the same
 class as the two above — green while asserting nothing — reached by a third road: the probe ran,
 produced non-empty output, and looked in the wrong place.

@@ -2,7 +2,7 @@
 
 Two claims, both only provable on a VM: the boundary foldyard builds passes (rootless engine, the
 `--privileged --pid=host` escape refused, PID 1's mount table free of the operator's paths beyond
-the repo mounts), and — the negative `docs/verify-false-pass.md` owed and the rig proved — a VM
+the repo mounts), and — the negative `docs/archive/verify-false-pass.md` owed and the rig proved — a VM
 that mounts the operator's WHOLE home makes `verify` FAIL, then PASS again once the mount is gone.
 Without the negative, a verify that always passes is indistinguishable from one that checks
 nothing.

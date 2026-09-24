@@ -1024,7 +1024,7 @@ def machine_vmtype() -> str:
     own default is ``vz`` on macOS and ``qemu`` everywhere else, applied silently; QEMU is
     ~2M lines emulating decades of hardware and is where essentially every published VM-escape
     CVE lives, so which one you get should not depend on an unexamined ``runtime.GOOS`` branch
-    inside a dependency. See docs/firecracker-and-microvm-backends.md.
+    inside a dependency. See docs/archive/firecracker-and-microvm-backends.md.
 
     Lima-only, and **create-only** — like mounts and sizing, a live instance's vmType cannot be
     edited; changing it means ``fy machine recreate``."""

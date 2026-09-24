@@ -159,7 +159,7 @@ foldyard's surface splits by *where it can be validated*:
    PATH; each module takes a throwaway example copy, leaves the VM running and un-walled):
    - `test_verify_e2e.py` — ALL PASS on the boundary foldyard builds, **FAIL against a VM
      mounting the operator's whole home**, PASS again once the mount is gone (the negative
-     [docs/verify-false-pass.md](./docs/verify-false-pass.md) owed). Never weaken this one.
+     [docs/archive/verify-false-pass.md](./docs/archive/verify-false-pass.md) owed). Never weaken this one.
    - `test_probes_e2e.py` — the read-only engine probes in-process (`devmode.workspaces` /
      `up_worktrees` / `_stack_mounts` / `_stack_shadow_check`, `stack.disk_headroom`,
      `machine.state/socket/responsive` with the moved-socket invariant, `reconcile.scopes()`),

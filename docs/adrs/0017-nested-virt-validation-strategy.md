@@ -75,7 +75,7 @@ by a *container*, not a second VM — and keep CI on containers, with no KVM job
 - **Don't use the nested rig for network-forcing tests.** The in-VM nftables wall (ADR-0009) is
   identical regardless of how the VM is created; nesting adds an L2 that only burns CPU and
   reproduces no macOS network stack. Those tests run in a **native Lima VM on the Mac**
-  (the runnable kit, docs/lima-network-forcing-kit/) — the 2026-06-24 spike's explicit
+  (the runnable kit, docs/archive/lima-network-forcing-kit/) — the 2026-06-24 spike's explicit
   recommendation after the L1-wedge incident.
 
 ## Consequences

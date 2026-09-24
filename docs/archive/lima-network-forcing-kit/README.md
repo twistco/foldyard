@@ -11,8 +11,8 @@ Model (the [INNOQ blueprint](https://www.innoq.com/en/blog/2026/03/dev-sandbox-n
 The agent is handed `HTTP(S)_PROXY` pointing at the proxy; anything that ignores it hits the
 wall and is dropped. No transparent `REDIRECT`/conntrack-NAT (which proved unreliable on the vz
 guest kernel) — this is robust and fail-closed. Companion to
-[`../lima-wall-machine-integration.md`](../lima-wall-machine-integration.md) and
-[ADR-0009](../adrs/0009-monitoring-cooperative-enforcement-locked.md).
+[`../lima-wall-machine-integration.md`](../../lima-wall-machine-integration.md) and
+[ADR-0009](../../adrs/0009-monitoring-cooperative-enforcement-locked.md).
 
 ## Requirements
 
@@ -24,7 +24,7 @@ guest kernel) — this is robust and fail-closed. Companion to
 ## Run it
 
 ```bash
-cd foldyard/docs/lima-network-forcing-kit
+cd foldyard/docs/archive/lima-network-forcing-kit
 bash run.sh                  # boots (or reuses) the VM, installs the wall, runs the tests
 # ... when done:
 bash run.sh teardown         # graceful stop + delete

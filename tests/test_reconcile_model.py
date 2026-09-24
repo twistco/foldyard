@@ -1,6 +1,6 @@
 """Model-based stateful test of the mode/state control loop (hypothesis RuleBasedStateMachine).
 
-The audited failure history (docs/mode-state-consolidation.md) is SEQUENCES — mode set, TTL
+The audited failure history (docs/archive/mode-state-consolidation.md) is SEQUENCES — mode set, TTL
 lapse, probe flip, box up/down, supervisor restart — landing the tiers in a combination nobody
 enumerated. The conformance suite (test_reconcile_scenarios.py) pins the sequences someone
 already thought of; this machine generates the rest: random interleavings of the real

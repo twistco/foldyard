@@ -6,7 +6,7 @@
 # root-owned at /usr/local/libexec/fy-machine-wall from its own embedded copy — never from the
 # repo mount, never via sudo from the VM user, who has no sudo (the same boot script narrows
 # Lima's grant to `shutdown` only). NOT the standalone proof rig — that lives at
-# docs/lima-network-forcing-kit/ (its own throwaway VM + red-team battery; the packaged
+# docs/archive/lima-network-forcing-kit/ (its own throwaway VM + red-team battery; the packaged
 # `fy wall` verb was retired). This script enforces the SAME model on
 # the project's real machine, with one architectural difference: there is NO in-VM proxy. The
 # chokepoint stays the Mac-side mitmdump egress proxy (allowlist + keyless injection + network

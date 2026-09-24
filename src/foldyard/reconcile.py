@@ -1,7 +1,7 @@
 """The reconciler scope contract — every state tier in ONE inventory (proposal A).
 
 Posture state lives on tiers with different refresh lifetimes, and the audited bug history
-(docs/mode-state-consolidation.md) is mostly "two tiers disagreeing about one fact". This
+(docs/archive/mode-state-consolidation.md) is mostly "two tiers disagreeing about one fact". This
 module is the consolidation: each tier is a :class:`Scope` that declares how to DESCRIBE
 desired vs observed (``rows`` — what ``fy state`` renders) and, where the scope can act,
 how to CONVERGE (``reconcile``/``publish`` — invoked from the tier's existing trigger).

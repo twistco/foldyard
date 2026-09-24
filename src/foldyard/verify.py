@@ -214,7 +214,7 @@ def _vm_boundary(
     # The VM's mount table is PID 1's, read through the host PID namespace: `mount` (or
     # `ls /Users`) inside a --privileged container shows the CONTAINER's mount namespace, in
     # which a VM-level mount of the operator's whole home never appears — a Lima VM mounting all
-    # of `$HOME` passed the old probe (2026-09-11, docs/verify-false-pass.md). `/proc/1/mounts`
+    # of `$HOME` passed the old probe (2026-09-11, docs/archive/verify-false-pass.md). `/proc/1/mounts`
     # is world-readable, so this coexists with the escape probe above, which relies on
     # `/proc/1/ns/*` being unreadable. An EMPTY table is not a clean one: nothing printed means
     # the probe did not run, and grepping no lines for host paths finds none of them.

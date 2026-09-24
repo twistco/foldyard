@@ -310,7 +310,7 @@ Still true, and still prerequisites rather than tuning:
 A boundary nothing checks is a boundary asserted on trust. As of 2026-09 the mount-leak assertion
 is derived from the real host (`verify._host_paths`) rather than a macOS-only regex, and every
 absence-check is gated on a positive control — see
-[verify-false-pass.md](./verify-false-pass.md). What still differs:
+[archive/verify-false-pass.md](./archive/verify-false-pass.md). What still differs:
 
 | claim | macOS | Linux / WSL2 (lima) |
 | --- | --- | --- |
@@ -333,7 +333,7 @@ leak, and exempts only the repo and worktrees-root mounts by exact path. Run liv
 passes on exactly those two, and on the rig (2026-09-12) `verify` itself — not the probe by hand —
 FAILED against a Lima VM deliberately mounting the whole home (`VM exposes host paths: … /home/dain
 9p ro`) and PASSED once the leak was removed. See
-[verify-false-pass.md](./verify-false-pass.md#a-second-gap-2026-09-11-the-probe-reads-the-wrong-mount-namespace).
+[archive/verify-false-pass.md](./archive/verify-false-pass.md#a-second-gap-2026-09-11-the-probe-reads-the-wrong-mount-namespace).
 
 ## What can be measured where
 
@@ -994,7 +994,7 @@ First-ever run of `foldyard machine ensure` with the lima backend on Linux, agai
 
 Measured 2026-09-07 on M3 Max / macOS 26.6.1 / podman 6.0.2 / Lima 2.1.3 — the
 [Measured on macOS](#measured-on-macos-2026-09-07) section, including the krunkit probe. Why
-Firecracker itself is out: [firecracker-and-microvm-backends.md](./firecracker-and-microvm-backends.md).
+Firecracker itself is out: [archive/firecracker-and-microvm-backends.md](./archive/firecracker-and-microvm-backends.md).
 
 Measured 2026-09-11 on GCP `n2-standard-4` with nested virtualisation / Fedora 44 / kernel 7.1.10 /
 podman 5.8.4 / crun 1.28 + `crun-krun` / libkrun 1.19.0 (and 1.19.4 from source) / libkrunfw
@@ -1005,7 +1005,7 @@ podman 5.8.4 / crun 1.28 + `crun-krun` / libkrun 1.19.0 (and 1.19.4 from source)
 Measured 2026-09-12 on the same rig (third session): gVisor's agent-loop cost (git/node/python
 walks), the host-side cgroup wall against the running `foldyard-example` VM, and `fy verify`
 itself against a deliberately leaky VM — folded into [The outs, measured](#the-outs-measured) and
-[verify-false-pass.md](./verify-false-pass.md).
+[archive/verify-false-pass.md](./archive/verify-false-pass.md).
 
 Read 2026-09-11: libkrun README (security model, 2.0 status)
 <https://github.com/libkrun/libkrun> (moved out of the `containers` org; old URLs redirect) ·

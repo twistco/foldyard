@@ -401,7 +401,7 @@ break config or CLI shape, and say so here. How a release is cut:
 - **`fy verify` under `[machine].runtime = "gvisor"`**: the VM mount audit needs a
   `--pid=host` reach into the VM that gVisor blocks (the same property `escape refused` proves),
   so from inside a gVisor box it cannot run — now an advisory naming the reason and where to
-  audit the boundary instead, not a FAIL (docs/verify-false-pass.md). The crun path keeps its
+  audit the boundary instead, not a FAIL (docs/archive/verify-false-pass.md). The crun path keeps its
   FAIL on an empty mount table.
 - **foldyard's own `[[box.tools]]` apt steps failed on every fresh box** (`Unable to locate
   package nodejs/just/unzip`): the packaged image ships no apt lists. An `apt-lists` step
@@ -531,7 +531,7 @@ carved out of; from here history is real and pull requests are merged rather tha
   from `[project].version`, which is what the box already pins itself to.
 - **`[machine].vmtype`** — pin the Lima VM type (`vz`, `qemu`, `krunkit`) rather than taking Lima's
   default. See `docs/isolation-layers.md` for which layer each backend actually gives you, and
-  `docs/firecracker-and-microvm-backends.md` for why Firecracker is not one of them.
+  `docs/archive/firecracker-and-microvm-backends.md` for why Firecracker is not one of them.
 
 ### Fixed
 

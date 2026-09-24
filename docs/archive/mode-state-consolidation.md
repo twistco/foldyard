@@ -149,7 +149,7 @@ instead of one that errors.
   `mode_issues`).
 
 All of it is testable with zero secrets: the `[plugins.fakecred]` rig + `fy clock`
-fast-forward ([testing-modes.md](./testing-modes.md)) exercise expiry, the cascade, probe
+fast-forward ([testing-modes.md](../testing-modes.md)) exercise expiry, the cascade, probe
 degrade/recover, and daemon lifecycle live; the unit suite covers the same paths.
 
 Design line worth keeping (from review discussion): a capability lapse renders as DEGRADED

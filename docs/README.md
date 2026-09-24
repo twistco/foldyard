@@ -36,18 +36,18 @@ Start with the [package README](../README.md) (what foldyard is and why). Then, 
   (podman | lima | native)
 - [lima-wall-machine-integration.md](./lima-wall-machine-integration.md) — the wall's design
   and per-project port bands
-- [lima-network-forcing-kit/](./lima-network-forcing-kit/) — the runnable wall proof kit
+- [archive/lima-network-forcing-kit/](./archive/lima-network-forcing-kit/) — the runnable wall proof kit
 - [podman-multi-vm-issue-26281.md](./podman-multi-vm-issue-26281.md) — why the podman backend
   runs one VM at a time
-- [firecracker-and-microvm-backends.md](./firecracker-and-microvm-backends.md) — why Firecracker
+- [archive/firecracker-and-microvm-backends.md](./archive/firecracker-and-microvm-backends.md) — why Firecracker
   does not fit (no filesystem sharing, by design); the libkrun measurements live in isolation-layers
 - [isolation-layers.md](./isolation-layers.md) — which layer carries the boundary on each host
   (macOS · Linux · WSL2), with the hypervisor stacks drawn out
-- [verify-false-pass.md](./verify-false-pass.md) — how `fy verify` could print ALL PASS while
+- [archive/verify-false-pass.md](./archive/verify-false-pass.md) — how `fy verify` could print ALL PASS while
   asserting nothing, and the control that fixed it
 - [testing-modes.md](./testing-modes.md) — the zero-secret `fakecred` rig for exercising the
   posture machinery live (ships in the wheel)
-- [mode-state-consolidation.md](./mode-state-consolidation.md) — the state-tier inventory and the
+- [archive/mode-state-consolidation.md](./archive/mode-state-consolidation.md) — the state-tier inventory and the
   reconcile SCOPE design, distilled from every mode/lifecycle bug in the history
 
 **Archaeology:** foldyard was extracted from Twist's monorepo as a squash-start

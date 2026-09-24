@@ -83,5 +83,5 @@ Because Lima lets you **own VM provisioning** (root `provision:` scripts, declar
 the in-VM nftables forcing wall ([ADR-0009](./adrs/0009-monitoring-cooperative-enforcement-locked.md)) easy —
 the thing podman's immutable CoreOS appliance makes hard. See
 [lima-wall-machine-integration.md](./lima-wall-machine-integration.md) and the runnable
-[lima-network-forcing-kit/](./lima-network-forcing-kit/). This is a *consequence* of adopting
+[archive/lima-network-forcing-kit/](./archive/lima-network-forcing-kit/). This is a *consequence* of adopting
 Lima for concurrency, not a separate reason — but it's a real bonus for the capture roadmap.

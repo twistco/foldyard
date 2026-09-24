@@ -6,7 +6,7 @@ Trail of Bits, ["VMs won't contain cyber-capable agents"](https://blog.trailofbi
 KVM, and *failing* to escape [Firecracker](https://github.com/firecracker-microvm/firecracker).
 Could foldyard use Firecracker? **No**, for one structural reason and two practical ones. The
 platform-by-platform answer to the post itself — which layer carries the boundary, what was
-measured, and what was decided — lives in [isolation-layers.md](./isolation-layers.md).
+measured, and what was decided — lives in [isolation-layers.md](../isolation-layers.md).
 
 ## No filesystem sharing, by design
 
@@ -50,8 +50,8 @@ in isolation-layers.md.
 The microVM property foldyard *did* want — a Firecracker-derived device model plus virtio-fs, on
 macOS and Linux — is [libkrun](https://github.com/libkrun/libkrun): as Lima's `krunkit` driver
 for the machine layer, and as `podman run --runtime krun` for a per-container kernel. Both were
-measured ([macOS 2026-09-07](./isolation-layers.md#measured-on-macos-2026-09-07),
-[GCP 2026-09-11](./isolation-layers.md#measured-on-gcp-2026-09-11)); the per-container layer is
+measured ([macOS 2026-09-07](../isolation-layers.md#measured-on-macos-2026-09-07),
+[GCP 2026-09-11](../isolation-layers.md#measured-on-gcp-2026-09-11)); the per-container layer is
 deferred on its cost, krunkit stays opt-in, and snapshot/restore — Firecracker's one unique
 capability — is not wanted.
 

@@ -10,7 +10,7 @@ set is init-only, so the module RECREATES the VM from its own example copy first
 recreate --yes`) — the one module that needs the VM to mount its copy; the others' stacks ship
 their build context over the socket. The example's origin is set to a PRIVATE (nonexistent)
 remote: a public one answers `ls-remote` without credentials and reads as pushable
-(docs/verify-false-pass.md, 2026-09-13). Lima 2.2.0, Fedora 44 guest.
+(docs/archive/verify-false-pass.md, 2026-09-13). Lima 2.2.0, Fedora 44 guest.
 """
 
 from __future__ import annotations
