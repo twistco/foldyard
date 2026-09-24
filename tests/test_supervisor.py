@@ -1095,7 +1095,7 @@ def _wire_react(monkeypatch, resnapshot: dict):
         restarts.append((tuple(services), worktree))
         return True, ""
 
-    monkeypatch.setattr(stack, "restart_services", _restart)
+    monkeypatch.setattr(stack, "recreate_services", _restart)
     monkeypatch.setattr(supervisor.threading, "Thread", _SyncThread)
     monkeypatch.setattr(supervisor, "log", lambda _m: None)
     return notified, restarts
@@ -1174,7 +1174,7 @@ def test_reconcile_once_notifies_lapse_then_heals_with_a_restart(monkeypatch, tm
     restarts: list[tuple[str, ...]] = []
     monkeypatch.setattr(
         stack,
-        "restart_services",
+        "recreate_services",
         lambda services, *, worktree="", timeout=180.0: (
             restarts.append(tuple(services)),
             (True, ""),

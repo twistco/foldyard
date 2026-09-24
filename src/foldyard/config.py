@@ -1719,12 +1719,12 @@ def host_notifications() -> bool:
 
 
 def resnapshot_on_capability() -> dict[str, list[str]]:
-    """``[resnapshot_on_capability]``: axis → compose services the supervisor restarts when that
+    """``[resnapshot_on_capability]``: axis → compose services the supervisor recreates when that
     axis's capability probe flips failing→ok (mode-state consolidation proposal C). For a service
     that snapshots credentials ONCE at boot (a startup secret fetch frozen into import-time
-    state), a healed chain is useless until it reboots — the restart re-runs the boot fetch under
-    the recovered capability. Malformed entries are dropped, never raised: this is read on the
-    supervisor tick."""
+    state), a healed chain is useless until it reboots — the recreate re-runs the boot fetch under
+    the recovered capability AND the current posture (``stack.recreate_services``). Malformed
+    entries are dropped, never raised: this is read on the supervisor tick."""
     raw = _toml().get("resnapshot_on_capability")
     if not isinstance(raw, dict):
         return {}

@@ -709,8 +709,9 @@ Two more top-level tables tune the supervisor, foldyard's background process on 
 - **`[host] notifications`** — post desktop notifications when a credential stops or starts
   working again (macOS only today). Default: `true`.
 - **`[resnapshot_on_capability]`** — `switch = ["service", …]`: compose services the supervisor
-  restarts when that switch's credential check goes from failing to working. For a service that
-  fetches credentials once at startup and would otherwise keep the broken state. Default: `{}`.
+  recreates when that switch's credential check goes from failing to working — from the current
+  mode, so a service still on an older mode's settings catches up too. For a service that fetches
+  credentials once at startup and would otherwise keep the broken state. Default: `{}`.
 
 ```toml
 [resnapshot_on_capability]

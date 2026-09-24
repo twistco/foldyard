@@ -983,6 +983,10 @@ def reconcile_posture(
     emit = sink or _err
     if prev_posture == new_posture or config.in_box():
         return True
+    prev_profiles = prev_posture["env"].get("COMPOSE_PROFILES", "")
+    new_profiles = new_posture["env"].get("COMPOSE_PROFILES", "")
+    overlays = ", ".join(o.rsplit("/", 1)[-1] for o in new_posture["overlays"]) or "none"
+    posture = f"profiles {prev_profiles or 'none'} → {new_profiles or 'none'}, overlays {overlays}"
     try:
         ctx_mgr = config.using(cfg) if cfg is not None else nullcontext()
         with ctx_mgr:
@@ -1001,7 +1005,12 @@ def reconcile_posture(
                 # guardrail (2): never START the stack on a posture change — but DO converge the
                 # declared posture services: they are exactly what the flip is asking for (see
                 # _reconcile_posture_services).
-                return _reconcile_posture_services(ctx, mode, managed, emit)
+                ok = _reconcile_posture_services(ctx, mode, managed, emit)
+                _host_log(
+                    f"stack {ctx.project} down — the mode applies on next `fy up` ({posture})"
+                    + ("" if ok else "; posture services FAILED to converge")
+                )
+                return ok
             # Stage VM-visible assets a newly-active profile needs (e.g. the gcp metadata emulator's
             # server.py) before compose recreates with the new profile set.
             registry().stage_assets(
@@ -1009,8 +1018,6 @@ def reconcile_posture(
                 ctx.env["FOLDYARD_CHECKOUT"],
                 ctx.env.get("HERE") or config.dev_vm_rel(),
             )
-            prev_profiles = prev_posture["env"].get("COMPOSE_PROFILES", "")
-            new_profiles = new_posture["env"].get("COMPOSE_PROFILES", "")
             extra = _running_extra_profiles(ctx)
             emit(
                 f"▶ mode changed — reconciling stack "
@@ -1028,13 +1035,31 @@ def reconcile_posture(
                     f"✗ reconcile failed (compose exited {rc}) — the stack may still be "
                     "on the OLD mode; check the output above, then `fy up`"
                 )
+                _host_log(
+                    f"stack {ctx.project} reconcile FAILED (compose exited {rc}) — it may still "
+                    f"be on the OLD mode; `fy up` re-renders ({posture})"
+                )
                 return False
             # Only after a SUCCESSFUL up: reap containers whose service left the new
             # posture's config (dropped profile/overlay). A failed up keeps everything.
             _remove_orphan_containers(ctx, emit, extra_profiles=extra)
+            _host_log(
+                f"stack {ctx.project} reconciled ({posture}"
+                + (f", keeping running: {','.join(extra)}" if extra else "")
+                + ")"
+            )
     except Exception as e:  # never let a reconcile hiccup break the mode write
         emit(f"⚠ stack mode reconcile skipped: {e}")
+        _host_log(f"stack reconcile skipped: {e} ({posture})")
     return True
+
+
+def _host_log(message: str) -> None:
+    """The reconcile's outcome, as one ``[mode]`` line in the host supervisor log — the only
+    record that outlives the terminal it ran in (see ``supervisor.append_log``)."""
+    from . import supervisor  # deferred like stack.up's: the supervisor imports stack lazily too
+
+    supervisor.append_log(f"[mode] {message}")
 
 
 def _running_managed_containers(ctx: Context, services: set[str]) -> list[tuple[str, str]]:
@@ -1179,22 +1204,32 @@ def _running_extra_profiles(ctx: Context) -> list[str]:
         return []
 
 
-def restart_services(
+def recreate_services(
     services: list[str], *, worktree: str = "", timeout: float = 180.0
 ) -> tuple[bool, str]:
-    """Restart the named compose services in ``worktree``'s stack (``""`` = main) — the
+    """Recreate the named compose services in ``worktree``'s stack (``""`` = main) — the
     capability-heal "resnapshot" action (``[resnapshot_on_capability]``): a service that
-    snapshots credentials once at boot only picks a healed chain up by rebooting. Headless by
-    design (it runs on a supervisor worker thread): output is captured, bounded by ``timeout``
-    so a hung engine can't pin the in-flight guard forever, and it NEVER raises — the caller
-    logs (ok, summary) either way. Passing ``worktree`` explicitly (not None) pins the resolve
-    to that checkout even when the caller's env carries a different ``WORKTREE``."""
-    # Headless and host-side: a heal must never BOOT a stopped VM — nothing runs in it to restart.
+    snapshots credentials once at boot only picks a healed chain up by rebooting. RECREATE, not
+    ``compose restart`` (#33): a restart reboots the existing container with its create-time
+    env and ignores the ``-f`` list entirely, so a service created under an older posture came
+    back on it while looking healed. ``up --force-recreate`` renders it from the CURRENT posture,
+    so a heal re-reads credentials AND converges any drift. ``--no-build`` (a heal never builds),
+    ``--no-deps`` (only the named services), and the running extra profiles spanned the way the
+    posture reconcile spans them, so a profile-gated worker isn't dropped from the render.
+    Headless by design (it runs on a supervisor worker thread): output is captured, bounded by
+    ``timeout`` so a hung engine can't pin the in-flight guard forever, and it NEVER raises — the
+    caller logs (ok, summary) either way. Passing ``worktree`` explicitly (not None) pins the
+    resolve to that checkout even when the caller's env carries a different ``WORKTREE``."""
+    # Headless and host-side: a heal must never BOOT a stopped VM — nothing runs in it to recreate.
     if (down := machine_down()) is not None:
-        return False, f"{down} — nothing to restart"
+        return False, f"{down} — nothing to recreate"
     try:
         ctx = resolve(worktree=worktree)
-        cmd = [*ctx.compose, "restart", *services]
+        cmd = [
+            *ctx.compose,
+            *_profile_flags(ctx, _running_extra_profiles(ctx)),
+            *["up", "-d", "--no-build", "--force-recreate", "--no-deps", *services],
+        ]
         _err("+ " + " ".join(shlex.quote(c) for c in cmd))
         proc = _run(cmd, env=ctx.env, cwd=str(ctx.main), timeout=timeout)
         lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
@@ -1204,8 +1239,12 @@ def restart_services(
 
 
 def _compose_ps_services(stdout: str) -> set[str]:
-    """Service names out of ``compose ps --format json`` — one JSON object per line on current
-    compose (NDJSON), a single JSON array on older releases. Tolerant of both."""
+    """RUNNING service names out of ``compose ps --format json`` — one JSON object per line on
+    current docker compose (NDJSON), a single JSON array on older releases and under the bundled
+    podman-compose, whose ``ps`` is ``podman ps -a``: no ``Service`` key (the service is only the
+    ``com.docker.compose.service`` label) and exited containers included. Reading ``Service``
+    alone made every running profile invisible there, so a posture reconcile never re-rendered
+    the profile-gated workers (#33). Tolerant of all three shapes."""
     text = stdout.strip()
     if not text:
         return set()
@@ -1219,7 +1258,17 @@ def _compose_ps_services(stdout: str) -> set[str]:
                 rows.append(json.loads(line))
             except ValueError:
                 continue
-    return {r.get("Service", "") for r in rows if isinstance(r, dict)} - {""}
+    services: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("State", "running") != "running":
+            continue
+        labels = row.get("Labels")
+        service = row.get("Service") or (
+            labels.get("com.docker.compose.service") if isinstance(labels, dict) else None
+        )
+        if service:
+            services.add(service)
+    return services
 
 
 def _compose_captured(

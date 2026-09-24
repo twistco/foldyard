@@ -431,9 +431,9 @@ def test_verbs_that_need_a_running_stack_do_not_boot_a_stopped_machine(
     ensured: list = []
     monkeypatch.setattr(machine, "ensure", lambda *a, **k: ensured.append(a))
     assert stack.shell() == 1
-    assert stack.restart_services(["api"]) == (
+    assert stack.recreate_services(["api"]) == (
         False,
-        "lima machine 'x' is stopped — nothing to restart",
+        "lima machine 'x' is stopped — nothing to recreate",
     )
     assert capture_run == [] and ensured == []
     assert "nothing to exec into" in capsys.readouterr().err
@@ -551,22 +551,45 @@ def test_sweep_signature_on_docker_engine_is_the_config_hash(fake_repo, foreign_
     assert rm[3:] == ["aaa"]
 
 
-def test_restart_services_runs_compose_restart(fake_repo, capture_run):
-    # The capability-heal resnapshot action: a plain `compose restart <services>` in the resolved
-    # stack context (headless — output captured, never raises).
-    ok, summary = stack.restart_services(["queue-worker", "graph-api"])
+def test_recreate_services_force_recreates_on_the_current_posture(fake_repo, capture_run):
+    # The capability-heal resnapshot action (#33): `compose restart` reboots the EXISTING
+    # container with its create-time env, cementing whatever posture it was created under — so
+    # the heal recreates the named services from the current -f list instead. Headless: never
+    # builds, never drags dependencies up, output captured, never raises.
+    ok, summary = stack.recreate_services(["queue-worker", "graph-api"])
     assert ok is True and summary == ""
     last = _composes(capture_run)[-1]
-    assert last[-3:] == ["restart", "queue-worker", "graph-api"]
+    assert last[-7:] == [
+        "up",
+        "-d",
+        "--no-build",
+        "--force-recreate",
+        "--no-deps",
+        "queue-worker",
+        "graph-api",
+    ]
+    assert "restart" not in last
     assert "-f" in last and any("compose.podman.yml" in x for x in last)
 
 
-def test_restart_services_reports_failure_instead_of_raising(fake_repo, monkeypatch):
+def test_recreate_services_spans_running_extra_profiles(fake_repo, capture_run, monkeypatch):
+    # Resnapshot services are typically profile-gated workers (`data`); a provider that drops a
+    # service outside the requested profiles would otherwise make the heal a silent no-op.
+    monkeypatch.setattr(stack, "_running_extra_profiles", lambda ctx: ["data"])
+    ok, _ = stack.recreate_services(["queue-worker"])
+    last = _composes(capture_run)[-1]
+    assert ok is True
+    assert last[last.index("--profile") + 1] == "data" and last.index("--profile") < last.index(
+        "up"
+    )
+
+
+def test_recreate_services_reports_failure_instead_of_raising(fake_repo, monkeypatch):
     def _boom(cmd, **kw):
         raise OSError("engine gone")
 
     monkeypatch.setattr(stack.subprocess, "run", _boom)
-    ok, summary = stack.restart_services(["queue-worker"])
+    ok, summary = stack.recreate_services(["queue-worker"])
     assert ok is False and "engine gone" in summary
 
 
@@ -1709,6 +1732,36 @@ def test_reconcile_reports_compose_failure(fake_repo, capture_stream, monkeypatc
     assert any("✗ reconcile failed" in ln and "17" in ln for ln in lines)
 
 
+def _host_log_lines() -> list[str]:
+    path = config.supervisor_log_file()
+    return path.read_text().splitlines() if path.exists() else []
+
+
+def test_reconcile_outcome_lands_in_the_host_log(fake_repo, capture_stream, monkeypatch):
+    # #33: the reconcile runs in the `fy mode` process, so its output only ever reached that
+    # terminal — `fy host logs` had no trace of whether a mode change re-rendered the stack.
+    # One stamped [mode] line per outcome, beside the supervisor's own lines.
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): True)
+    assert stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lambda _l: None) is True
+    (ok,) = _host_log_lines()
+    assert "[mode]" in ok and "reconciled" in ok and "metadata" in ok
+    assert ok.split(" ", 1)[0].startswith("20")  # the ISO date stamp the supervisor's tee uses
+
+    capture_stream.rc["value"] = 17
+    assert stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lambda _l: None) is False
+    failed = _host_log_lines()[-1]
+    assert "[mode]" in failed and "FAILED" in failed and "17" in failed
+
+
+def test_reconcile_on_a_down_stack_says_so_in_the_host_log(fake_repo, capture_stream, monkeypatch):
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): False)
+    assert stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lambda _l: None) is True
+    (line,) = _host_log_lines()
+    assert "[mode]" in line and " down — the mode applies on next `fy up`" in line
+
+
 def test_reconcile_unions_running_extra_profiles(fake_repo, capture_stream, monkeypatch):
     # Profile-gated services a dev started OUTSIDE the mode system (just data-up) must be
     # re-rendered into the new posture too: their profile is unioned into the up.
@@ -1894,6 +1947,20 @@ def test_compose_ps_services_parses_ndjson_and_array():
     array = '[{"Service":"app"},{"Service":""},{"Name":"x"}]'
     assert stack._compose_ps_services(array) == {"app"}
     assert stack._compose_ps_services("") == set()
+
+
+def test_compose_ps_services_reads_podman_compose_rows():
+    # #33: the bundled podman-compose's `ps --format json` is `podman ps -a --format json` —
+    # no `Service` key (the service is a label) and exited containers included. Reading only
+    # `Service` made every running profile invisible, so a posture reconcile never re-rendered
+    # the `data` workers.
+    rows = [
+        {"Labels": {"com.docker.compose.service": "queue-worker"}, "State": "running"},
+        {"Labels": {"com.docker.compose.service": "graph-api"}, "State": "running"},
+        {"Labels": {"com.docker.compose.service": "e2e-app"}, "State": "exited"},
+        {"Labels": None, "State": "running"},
+    ]
+    assert stack._compose_ps_services(json.dumps(rows)) == {"queue-worker", "graph-api"}
 
 
 def _fake_ctx(fake_repo, env: dict[str, str]) -> stack.Context:
