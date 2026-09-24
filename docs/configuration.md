@@ -313,11 +313,14 @@ route: `fy machine desktop` registers this project's VM as a podman connection n
 "Load remote system connections (ssh)" turned on (Podman Desktop → Settings → Preferences,
 search "remote"; it applies live), Podman Desktop checks for connections every 5 s, so each
 project shows up as its own entry, side by side. foldyard only reads that setting and never writes
-it: Podman Desktop saves its settings over the file when it quits, which would undo an edit. `export FOLDYARD_PODMAN_DESKTOP=1` in your shell profile
-makes every `fy up`/`fy box up` keep the entry current. It also pins the VM's ssh port to its
-port band (applied the next time the VM starts), because Lima otherwise picks a new port at each
-boot and Podman Desktop would keep the stale one. `fy machine rm` removes the connection. It's an
-operator preference, so it has no `foldyard.toml` key.
+it: Podman Desktop saves its settings over the file when it quits, which would undo an edit.
+Where Podman Desktop is installed (its settings file exists), every `fy up`/`fy box up` keeps the
+entry current by itself. It also pins the VM's ssh port to its port band (applied the next time
+the VM starts), because Lima otherwise picks a new port at each boot and Podman Desktop would keep
+the stale one. Where it isn't installed, foldyard leaves the VM's port and podman's connection
+list alone. `export FOLDYARD_PODMAN_DESKTOP=0` in your shell profile opts out; `=1` forces it on
+when Podman Desktop keeps its settings somewhere foldyard doesn't look. `fy machine rm` removes
+the connection. It's an operator preference, so it has no `foldyard.toml` key.
 
 ## `[engine]`
 
