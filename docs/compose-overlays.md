@@ -1,48 +1,46 @@
-# Posture compose overlays — the `[[overlay]]` table
+# Compose overlays — the `[[overlay]]` table
 
-A foldyard consumer drives its compose stack through **posture axes** (`gcp`, `auth0`, `llm`,
-…). Most of what a posture *does* is "layer this extra `docker compose -f` file when the mode
-matches." That layering is **pure config**: a `[[overlay]]` array-of-tables in `foldyard.toml`,
-matched against the current mode. No plugin code names an overlay path.
+Most of what a mode does to your compose stack is "add this extra compose file when the mode
+matches". That is plain config: an `[[overlay]]` array of tables in `foldyard.toml`, matched
+against the current [mode](./modes.md). No plugin code is needed.
 
-This is the same idea as `[[inject]]` (an egress-injector per table entry) and `[[box.tools]]`
-(a toolchain install per entry): a generic mechanism the consumer *declares*, not a
-Tangible-specific hook baked into the package.
+(A **mode** is a set of switches, each at a level — e.g. `gcp=sa llm=live`. See the
+[glossary](./glossary.md).)
 
 ## Schema
 
 ```toml
 [[overlay]]
-file = "dev-stack/compose.identity.yml"     # required — checkout-relative or absolute
+file = "dev-stack/compose.identity.yml"     # required — relative to the checkout, or absolute
 when = { gcp = "sa" }                        # optional — see matching below
-env  = "FOLDYARD_GCP_IDENTITY_COMPOSE"        # optional — a path-override env var (test/CI hatch)
+env  = "FOLDYARD_GCP_IDENTITY_COMPOSE"       # optional — an env var that overrides `file`
 ```
 
-- **`file`** — the compose file to add to the `-f` chain. A checkout-relative path resolves
-  against the repo root; a non-existent file is silently skipped (so an overlay for a stack
-  component you haven't added yet is inert, not an error).
-- **`when`** — a dict of `axis = value`, or `axis = [values]`. The entry matches iff **every**
-  named axis holds one of its values: **AND across keys, OR within a list**. A missing or empty
-  `when` **always matches** — an unconditional base overlay.
-- **`env`** — optional name of an environment variable that, when set, **overrides `file`** for
-  that entry. Purely an escape hatch for tests/CI to point one overlay at a scratch file; normal
-  runs never set it.
+- **`file`** — the compose file to add as another `-f`. A relative path resolves against the
+  checkout's root. A file that doesn't exist is skipped silently, so an overlay for a part of the
+  stack a branch doesn't have yet does nothing rather than failing.
+- **`when`** — a table of `switch = level` or `switch = [levels]`. The entry matches when
+  **every** named switch is at one of its levels: **AND across keys, OR within a list**. A missing
+  or empty `when` **always matches** — an unconditional base overlay.
+- **`env`** — the name of an environment variable that, when set, **replaces `file`** for that
+  entry. An escape hatch for tests and CI to point one overlay at a scratch file; normal runs
+  don't set it.
 
-## Ordering — declaration order is `-f` order
+## Order: declaration order is `-f` order
 
-Overlays are appended to the compose command **in the order they appear in `foldyard.toml`**, and
-`docker compose` lets a later `-f` file override an earlier one's keys. So the table's order *is*
-the base→override stack. Put the file others build on first (e.g. an identity overlay before the
-storage/auth0/llm overlays that consume that identity), and put an app override before its
-data-plane twin.
+Matching overlays are added after your configured compose files, **in the order they appear in
+`foldyard.toml`**. `docker compose` lets a later `-f` file override an earlier one, so the table's
+order *is* the base → override order. Put the file others build on first (e.g. an identity
+overlay before the overlays that use that identity), and an app override before its data-layer
+twin.
 
-Only the entries whose `when` matches a given mode appear, but their **relative** order is always
-the declaration order — so you reason about the stack once, in one place.
+Only matching entries are added, but they always keep their declaration order — so you reason
+about the stack once, in one place.
 
 ## Worked example
 
 ```toml
-[[overlay]]                                   # base: app + data ADC at the metadata emulator
+[[overlay]]                                   # base: point the app at the identity emulator
 file = "compose.identity.yml"
 when = { gcp = "sa" }
 
@@ -50,11 +48,11 @@ when = { gcp = "sa" }
 file = "compose.auth0-real.yml"
 when = { auth0 = "real", gcp = "sa" }
 
-[[overlay]]                                   # OR within one axis
+[[overlay]]                                   # OR within one switch
 file = "compose.llm.yml"
 when = { llm = ["record", "live"] }
 
-[[overlay]]                                   # stacks AFTER compose.llm.yml (later -f wins)
+[[overlay]]                                   # added AFTER compose.llm.yml (later -f wins)
 file = "compose.llm-live.yml"
 when = { llm = "live" }
 ```
@@ -68,21 +66,21 @@ when = { llm = "live" }
 
 ## How it fits the mode system
 
-- **Resolution** lives in `config.matching_overlays(mode)`; `Registry.compose_overlays(mode)`
-  lays the table down first, then appends anything a plugin still adds programmatically (see the
-  escape hatch below). The `-f` chain and the reconcile's `posture_signature` both consume that.
-- **Reconcile for free.** Because an overlay is part of the posture signature (derived env +
-  overlay list), adding/removing one across a `fy mode` change flips the signature, so the
-  supervisor recreates exactly the affected containers — no special-casing.
-- **Gating an optional axis on an overlay.** An axis that would be a no-op without something to
-  layer on it can self-gate: `config.overlay_when_axes()` returns every axis name any `when`
-  references, and a plugin offers the axis only when it's in that set. (Tangible's `storage` axis
-  appears only because an `[[overlay]] when = { storage = "staging" }` is declared.)
+- **A mode change updates the running stack.** The overlay list is part of what foldyard compares
+  across a `fy mode` change (with the mode-derived environment). If it changes, foldyard
+  re-creates exactly the affected containers of a running stack — nothing to do by hand.
+- **`fy state`** shows the overlays the current mode wants on its `stack` row.
+- **A plugin can offer a switch only when an overlay uses it.** A switch that would change nothing
+  without an overlay can hide itself: foldyard collects every switch named in any `when`, and a
+  plugin offers the switch only if it's in that set. For example, the built-in `gcp` plugin
+  offers its `storage` switch only when some `[[overlay]]` has `when = { storage = "staging" }`.
 
 ## When you still need a plugin
 
-`when` expresses **axis-equality conjunctions and disjunctions** — which covers essentially every
-posture overlay. A plugin's `compose_overlays(mode)` hook remains for the rare overlay whose
-condition `when` can't state (negation, a value derived across axes, an overlay path computed at
-runtime). Plugins keep the parts config can't express anyway: axis declarations + rungs, the
-cross-axis `mode_issues` guards, daemons, and `stage_assets`.
+`when` expresses "these switches at these levels" — which covers almost every overlay. A plugin's
+`compose_overlays(mode)` hook remains for the rare condition `when` can't state (a negation, a
+value derived from several switches, a path computed at run time); plugin overlays are added
+after the table's. Plugins also keep what config can't express: switch declarations and their
+levels, token services, and staged assets. Requirements between switches are data — in the
+plugin (`Switch.requires`) or in your config (`[[require]]`, see
+[configuration](./configuration.md#require)).

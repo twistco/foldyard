@@ -1,12 +1,15 @@
 # ADR-0029 — The proxy always decrypts: the `capture` axis is removed
 
-- **Status:** Accepted (2026-09-22). Implemented on the same branch: `ProxyPlugin` contributes no
-  axis and always emits `CAPTURE_MODE=full`; `[proxy] passthrough` is the one decryption control.
+- **Status:** Accepted (2026-09-22). Implemented (on `main` since #31): `ProxyPlugin`
+  contributes no axis and always emits `CAPTURE_MODE=full`; `[proxy] passthrough` is the one
+  decryption control.
 - **Sources:** the loopback measurement below (2026-09-22); the prior-art deep-dives of
   [gondolin](https://github.com/earendil-works/gondolin) (at `29fa74d`, v0.12.0) and
   [vhrn](https://github.com/aravind-n/vhrn) (at `0e3926d`, v0.5.1), which sit at the two ends of
-  this choice — written up as `docs/prior-art/{gondolin,vhrn}.md` on the
-  `claude/admiring-fermi-anb2ug` branch (`7e53648`), not yet on `main`. Related:
+  this choice — written up as
+  [prior-art/gondolin.md](https://github.com/twistco/foldyard/blob/main/docs/prior-art/gondolin.md)
+  and [prior-art/vhrn.md](https://github.com/twistco/foldyard/blob/main/docs/prior-art/vhrn.md).
+  Related:
   [0007](./0007-credential-injection-at-egress-proxy.md) (the proxy is where credentials are
   attached, so it decrypts injector hosts regardless),
   [0009](./0009-monitoring-cooperative-enforcement-locked.md) (capture is visibility, not

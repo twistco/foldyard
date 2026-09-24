@@ -141,7 +141,7 @@ def test_tick_converges_daemons_and_writes_mirror_and_capabilities_for_up_box(
         supervisor.devmode,
         "capability_probes",
         lambda mode: (
-            [CapabilityProbe(axis="gcp", name="t", check=_fake_probe, interval=3600.0)]
+            [CapabilityProbe(switch="gcp", name="t", check=_fake_probe, interval=3600.0)]
             if mode.get("gcp", "off") != "off"
             else []
         ),

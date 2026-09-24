@@ -5,7 +5,7 @@
 an in-box agent, a package postinstall, or a branch you checked out to review can all rewrite it.
 Yet the host supervisor used to re-read it from the working tree on EVERY reconcile tick, rebuild
 its daemon specs from it, and restart the affected daemon on any change — so a repo edit reached
-the Mac's credential daemons within ~2 seconds, unattended. That is the same class the host-exec
+the host's credential daemons within ~2 seconds, unattended. That is the same class the host-exec
 audit closed field by field (``[proxy] allow``, ``default_deny``, ``[[inject]] token_env``,
 ``[engine].cli``, ``[plugins.github].permissions`` — see
 ``ADR-0023``), but at the level of the CHANNEL rather than any one
@@ -30,7 +30,7 @@ and that half doesn't.
 Two things this deliberately does NOT claim. Adopting is a human reading a diff, so it is only as
 strong as that reading — and foldyard itself is installed ``--editable`` from the consumer checkout
 (ADR-0013's in-repo carve-out), so until the spinout the package's own code is box-writable and a
-Mac-side launch adopts it via the code fingerprint. The pin closes the unattended config channel,
+host-side launch adopts it via the code fingerprint. The pin closes the unattended config channel,
 not those.
 
 Host-only (like :mod:`foldyard.allowlist`): in the box there is no pin and everything falls back to
@@ -191,7 +191,7 @@ class Drift:
         """Has anything been adopted yet? Reads the recorded MARKER, not the stored bytes: "we
         adopted a checkout with no config" and "nobody has adopted anything" are different states
         and only one of them may fall back to the working tree. ``False`` on a first run (and only
-        then — the record lives in the Mac home, out of the yard's reach)."""
+        then — the record lives in the host home, out of the yard's reach)."""
         return self.adopted
 
     @property
@@ -576,14 +576,14 @@ def effective(cfg: config.Config) -> config.Config:
         return cfg
 
 
-# ── mutating the pin (Mac only) ───────────────────────────────────────────────────────
+# ── mutating the pin (host only) ──────────────────────────────────────────────────────
 
 
 def _require_host() -> None:
     if config.in_box():
         raise SystemExit(
-            "✗ adopting config is Mac-only: the box must not adopt its own foldyard.toml "
-            "(the adopted copy lives in the Mac home, outside the shared mount)."
+            "✗ adopting config only works on your computer: the box must not adopt its own "
+            "foldyard.toml (the adopted copy lives in your home, outside the shared mount)."
         )
 
 
@@ -777,7 +777,7 @@ def resolve(
         returns next time. Also what an unparseable answer settles on — the safe default is the
         one that changes nothing.
       - ``"unresolved"`` — drift with no TTY (the detached supervisor launch, CI): warn loudly,
-        keep running the adopted copy, resolve later on a Mac terminal.
+        keep running the adopted copy, resolve later on a host terminal.
       - ``"unadopted"`` — NOTHING adopted yet and no TTY: nothing was adopted, and there is no
         reviewed copy to fall back on either. :func:`gate` refuses the launch verb on this one.
 
@@ -814,7 +814,7 @@ def resolve(
             # launch gate turns this status into a refusal — see :func:`gate`.
             echo(
                 "  No terminal here, so nothing was adopted — the host won't run a config nobody "
-                "has read. On the Mac: `fy config diff`, then `fy config adopt`."
+                "has read. On your computer: `fy config diff`, then `fy config adopt`."
             )
             return "unadopted"
         answer = prompt("  [a]dopt (default) · [i]gnore for now: ").strip().lower()
@@ -851,7 +851,7 @@ def resolve(
     )
     if not interactive:
         echo(
-            "  No terminal here, so nothing was adopted. On the Mac: `fy config diff`, then "
+            "  No terminal here, so nothing was adopted. On your computer: `fy config diff`, then "
             "`fy config adopt` (accept) or `fy config revert` (put the file back)."
         )
         return "unresolved"
@@ -903,7 +903,7 @@ def gate(verb: str) -> str:
             raise SystemExit(
                 f"✗ {verb}: this checkout's foldyard.toml has never been adopted, and there is no "
                 "terminal here to adopt it on.\n"
-                "  Run `fy config adopt` on the Mac (`fy config diff` first), then retry."
+                "  Run `fy config adopt` on your computer (`fy config diff` first), then retry."
             )
         return status
     except SystemExit:

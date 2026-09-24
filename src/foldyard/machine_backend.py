@@ -17,19 +17,19 @@ resolves to, not limactl *instead of* one.
   VMs concurrently, so per-project machines coexist — no stop/swap dance, and a project's open
   ``box shell`` / ``code`` session survives while you work in another project — and it is the
   only backend that can be provisioned with the in-VM fail-closed egress wall
-  (``[machine].wall``), which turns cooperative proxy routing into enforcement.
+  (``[machine] firewall``), which turns cooperative proxy routing into enforcement.
 
 * :class:`PodmanBackend` (``[machine].backend = "podman"``): ``podman machine``. The
   zero-EXTRA-dependency floor: the engine CLI you already need is also the lifecycle CLI, so
   there is nothing further to install. macOS runs **one** VM at a time (the applehv/libkrun
-  providers' ``RequireExclusiveActive`` gate; see ``docs/podman-multi-vm-issue-26281.md``), so it
+  providers' ``RequireExclusiveActive`` gate; see ``docs/lima-backend-scope.md``), so it
   is NOT concurrent — :func:`machine.ensure` refuses to start beside another running machine and
   tells you to stop it (or switch to Lima) — and its CoreOS appliance can't be provisioned with
   the wall.
 
-The Lima paths marked ``SPIKE`` below follow Lima's documented podman-template behaviour
-but have not been exercised in CI (no ``limactl`` in the dev box). Verify on a Mac with
-``brew install lima`` before relying on them — see the scope doc's "trickiest bits".
+The Lima paths below began as a spike on Lima's documented podman-template
+behaviour; they are now validated on real ``limactl`` — on macOS and in CI on Linux and WSL2
+hosts (the ``lima-host-e2e`` / ``wsl2-host-e2e`` jobs). See docs/lima-backend-scope.md.
 """
 
 from __future__ import annotations
@@ -233,7 +233,7 @@ class PodmanBackend(Backend):
 
     name = "podman"
     cli = "podman"
-    install_hint = "brew install podman"
+    install_hint = "your package manager; `brew install podman` on macOS"
 
     def supports_concurrent(self) -> bool:
         return False  # macOS applehv/libkrun: RequireExclusiveActive — one VM at a time
@@ -460,7 +460,7 @@ class LimaBackend(Backend):
 
     name = "lima"
     cli = "limactl"
-    install_hint = "brew install lima"
+    install_hint = "https://lima-vm.io — `brew install lima` on macOS"
 
     def supports_concurrent(self) -> bool:
         return True  # Lima runs N VMs natively — no exclusive-active gate
@@ -552,9 +552,9 @@ class LimaBackend(Backend):
         return subprocess.run(cmd).returncode == 0
 
     def socket(self, name: str) -> str:
-        """SPIKE: Lima's podman template forwards the guest libpod socket to
-        ``<instance dir>/sock/podman.sock`` on the host. Confirm the path/forward survives
-        across Lima versions before trusting it (scope doc risk #3)."""
+        """Lima's podman template forwards the guest libpod socket to
+        ``<instance dir>/sock/podman.sock`` on the host — validated on macOS and on the CI Linux
+        and WSL2 hosts (scope doc risk #3)."""
         inst = self._instance(name)
         if inst and inst.get("dir"):
             return "unix://" + str(Path(inst["dir"]) / "sock" / "podman.sock")
@@ -584,7 +584,7 @@ class LimaBackend(Backend):
     # Preference order when the consumer hasn't named a vmType, best-first. Both entries are
     # Lima BUILT-IN drivers, so this never silently selects something that needs a separate
     # install: `vz` (Apple Virtualization.framework) exposes a small fixed virtio set and, on a
-    # Mac, means the stack runs neither QEMU nor KVM — the two components with the published
+    # macOS host, means the stack runs neither QEMU nor KVM — the two components with the published
     # guest→host escape history. `qemu` is the fallback because on a Linux host Lima registers
     # nothing else. `krunkit` is deliberately ABSENT: it is upstream-experimental and needs
     # `brew install krunkit`, so it must be asked for by name, never auto-selected.
@@ -594,7 +594,7 @@ class LimaBackend(Backend):
         """The Lima drivers REGISTERED on this host (`limactl info`'s ``vmTypes``), including
         external plugins. Capability detection, not platform detection — foldyard carries no
         ``sys.platform`` branch, and "which hypervisors does this machine have?" is exactly the
-        question, not "is this a Mac?". ``[]`` when limactl is missing or the JSON is unreadable
+        question, not "is this macOS?". ``[]`` when limactl is missing or the JSON is unreadable
         (an older limactl predating the field), which callers treat as "don't pin anything"."""
         res = _run(["limactl", "info"])
         if res.returncode != 0:
@@ -644,7 +644,7 @@ class LimaBackend(Backend):
         return f'{expr} | .vmType = "{vmtype}"' if vmtype else expr
 
     def create(self, name: str, resources: dict, volumes: list[tuple[str, str]]) -> bool:
-        """SPIKE: create (stopped) from the podman template, overriding sizing + mounts + the
+        """Create (stopped) from the podman template, overriding sizing + mounts + the
         vmType via ``--set``. Keeps the template's podman provisioning + socket forward;
         ``--tty=false`` skips the interactive review.
 
@@ -765,7 +765,7 @@ class LimaBackend(Backend):
         return pids
 
     def _wait_for_socket(self, name: str, tries: int = 30, delay: float = 1.0) -> bool:
-        """SPIKE: the forwarded podman socket appears a moment after `start` returns — poll
+        """The forwarded podman socket appears a moment after `start` returns — poll
         for it so callers can use ``socket()`` immediately (scope doc risk #3)."""
         uri = self.socket(name)
         if not uri:
@@ -797,16 +797,16 @@ def get_backend(name: str) -> Backend:
         _err(
             '⚠ [machine].backend = "native" was RETIRED (ADR-0027): foldyard always has a VM;\n'
             "    the host's own podman socket is no longer a backend. Using podman (one shared\n"
-            '    VM) for now — name "lima" (per-project VMs + the wall) or "podman" in [machine]\n'
-            "    and adopt the config. A backend switch is a new VM: box, volumes and caches\n"
-            "    start over."
+            '    VM) for now — name "lima" (per-project VMs + the VM firewall) or "podman"\n'
+            "    in [machine] and adopt the config. A backend switch is a new VM: box, volumes\n"
+            "    and caches start over."
         )
         return PodmanBackend()
     if name == "podman":
         return PodmanBackend()
     _err(
         f"⚠ unknown [machine].backend '{name}' — falling back to podman (one shared VM, no "
-        "in-VM wall). Fix the name to get the backend you asked for."
+        "VM firewall). Fix the name to get the backend you asked for."
     )
     return PodmanBackend()
 
@@ -830,6 +830,6 @@ def default_unavailable_block(backend: Backend) -> str:
         f"✗ `{backend.cli}` isn't installed, and '{backend.name}' is foldyard's DEFAULT\n"
         "    [machine].backend — so there is no VM to target. Refusing to fall back to this\n"
         "    host's own podman socket: that would drop the VM boundary silently. Pick one:\n"
-        f"      • install it ({backend.install_hint}) — per-project VMs + the in-VM egress wall\n"
+        f"      • install it ({backend.install_hint}) — per-project VMs + the VM firewall\n"
         '      • [machine] backend = "podman"  — one shared VM, no extra CLI to install'
     )

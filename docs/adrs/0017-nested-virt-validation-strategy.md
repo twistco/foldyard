@@ -5,6 +5,11 @@
   containers, not KVM" clause is superseded** (2026-09-17, recorded in
   [ADR-0027](./0027-always-a-vm-native-backend-retired.md)): the `lima-host-e2e` job boots a real
   Lima/QEMU VM on x86 runners; the rig remains for what a runner VM cannot reach.
+  **Amended 2026-09-24:** the "native-backend e2e tier" the Consequences lean on no longer
+  exists — the native backend was retired
+  ([ADR-0027](./0027-always-a-vm-native-backend-retired.md)); real-engine coverage of the machine
+  lifecycle now comes from the host tier (`tests/test_*_e2e.py`) on Lima VMs in CI, on Linux and
+  inside WSL2. `podman machine` itself still has no CI gate.
 - **Sources:** DEVELOPMENT.md (test tiers, nested-virt architecture, confirmations),
   docs/history/nested-podman-in-devbox.md, docs/history/lima-network-forcing-spike.md
 
@@ -75,7 +80,7 @@ by a *container*, not a second VM — and keep CI on containers, with no KVM job
 - **Don't use the nested rig for network-forcing tests.** The in-VM nftables wall (ADR-0009) is
   identical regardless of how the VM is created; nesting adds an L2 that only burns CPU and
   reproduces no macOS network stack. Those tests run in a **native Lima VM on the Mac**
-  (the runnable kit, docs/lima-network-forcing-kit/) — the 2026-06-24 spike's explicit
+  (the runnable kit, docs/archive/lima-network-forcing-kit/) — the 2026-06-24 spike's explicit
   recommendation after the L1-wedge incident.
 
 ## Consequences

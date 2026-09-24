@@ -23,7 +23,7 @@ Sources, in priority order: explicit env vars (always win — the SPIKE rule tha
 explicit env beats mode-derived config), then ``foldyard.local.toml`` (gitignored,
 per-developer; deep-merged over the next — and able to SUBTRACT a block with
 ``disabled = true``, see :func:`merge_config`), then ``foldyard.toml`` in the repo
-root, then sensible defaults. Stdlib only — this runs on the Mac system python3 and
+root, then sensible defaults. Stdlib only — this runs on the host system python3 and
 in the box, on the recipe hot path.
 """
 
@@ -162,11 +162,11 @@ def worktree_suffix() -> str:
 
 
 def _daemon_port_base(env_var: str, legacy: int, slot: int) -> int:
-    """A Mac daemon family's base port: explicit env override → the project's allocated band
+    """A host daemon family's base port: explicit env override → the project's allocated band
     (``ports.project_base``) + the family's slot. Per-PROJECT (not just per-worktree) because
-    every project's supervisor binds its daemons on the one Mac — a shared base made two
+    every project's supervisor binds its daemons on the one host — a shared base made two
     projects' supervisors reap each other's proxies forever (see ports.py). In-box there's no
-    registry (it lives in the Mac's ``~/.foldyard``), so ``box_up`` PINS both env vars into the
+    registry (it lives in the host's ``~/.foldyard``), so ``box_up`` PINS both env vars into the
     box at create; the legacy pre-band base is only the fallback for boxes created before that."""
     env = os.environ.get(env_var)
     if env:
@@ -340,15 +340,68 @@ def _prune_disabled(doc: dict) -> dict:
     return out
 
 
+# Keys that were RENAMED, as (table, old key, new key). The old spelling keeps working: each file
+# is rewritten to the new names as it is read, BEFORE the merge (so a local file on the old name
+# still overrides a shared one on the new). An alias rather than a refusal or an ignore, because
+# ignoring `[machine] wall = true` would switch the VM firewall off without a word, and the host's
+# adopted snapshot keeps the spelling it was adopted with across an upgrade. When a file carries
+# both spellings the new one wins. `renamed_keys` names every old spelling still in use, for the
+# `config widenings` doctor row and `fy config widenings`. `inject`/`require` are arrays of
+# tables: the rename applies to each entry.
+RENAMED_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("machine", "wall", "firewall"),
+    ("machine", "host_wall", "host_firewall"),
+    ("proxy", "default_deny", "enforce"),
+    ("inject", "axis", "switch"),
+    ("require", "axis", "switch"),
+)
+
+
+def _renamed_entry(entry: dict, old: str, new: str) -> dict:
+    if old not in entry:
+        return entry
+    out = {k: v for k, v in entry.items() if k != old}
+    out.setdefault(new, entry[old])
+    return out
+
+
+def _apply_renames(doc: dict) -> dict:
+    """``doc`` with every :data:`RENAMED_KEYS` old spelling moved to its new name."""
+    out = dict(doc)
+    for table, old, new in RENAMED_KEYS:
+        value = out.get(table)
+        if isinstance(value, dict):
+            out[table] = _renamed_entry(value, old, new)
+        elif isinstance(value, list):
+            out[table] = [_renamed_entry(e, old, new) if isinstance(e, dict) else e for e in value]
+    return out
+
+
+def renamed_keys(shared: dict, local: dict) -> list[tuple[str, str, bool]]:
+    """``(old spelling, new spelling, declared in the LOCAL file)`` for every renamed key a
+    checkout's files still use — e.g. ``("[machine] firewall", "[machine] firewall", False)``."""
+    found: list[tuple[str, str, bool]] = []
+    for in_local, doc in ((False, shared), (True, local)):
+        for table, old, new in RENAMED_KEYS:
+            value = doc.get(table)
+            entries = [value] if isinstance(value, dict) else value
+            if not isinstance(entries, list):
+                continue
+            if any(isinstance(e, dict) and old in e for e in entries):
+                label = f"[[{table}]]" if isinstance(value, list) else f"[{table}]"
+                found.append((f"{label} {old}", f"{label} {new}", in_local))
+    return found
+
+
 def merge_config(shared: dict, local: dict) -> dict:
     """Resolve one checkout's ``(foldyard.toml, foldyard.local.toml)`` pair into the document the
-    rest of foldyard reads: deep-merge the local overlay over the shared file, then apply
-    :func:`_prune_disabled`.
+    rest of foldyard reads: move renamed keys to their new names (:data:`RENAMED_KEYS`), deep-merge
+    the local overlay over the shared file, then apply :func:`_prune_disabled`.
 
     THE place the two files become one — the box/ambient parse here, the host's adopted snapshot in
     ``configpin.merged_toml`` — so the box, the supervisor and `fy config widenings` can never
     disagree about what a checkout declares."""
-    return _prune_disabled(_deep_merge(shared, local))
+    return _prune_disabled(_deep_merge(_apply_renames(shared), _apply_renames(local)))
 
 
 def disabled_blocks(shared: dict, local: dict) -> list[tuple[str, bool]]:
@@ -422,7 +475,7 @@ def _project_table() -> dict:
 
 def project() -> str:
     """The project name — prefixes ``~/.foldyard/<project>/``. Resolved the SAME way
-    under every python (env → toml → repo dir name) so the Mac's mode/host/tui all
+    under every python (env → toml → repo dir name) so the host's mode/host/tui all
     agree on one state dir."""
     return (
         os.environ.get("FOLDYARD_PROJECT")
@@ -525,7 +578,7 @@ def engine() -> str:
     The override is a NAME from :data:`ENGINES`, never a path. `[engine].cli` is repo config, and
     this value is exec'd host-side by every engine verb (`fy up`, `fy box up`, the reconciler, the
     worktree init container) — so an unconstrained string would let anything that can write the
-    checkout choose a binary the Mac then runs, which is the hole
+    checkout choose a binary the host then runs, which is the hole
     ADR-0023 closed everywhere else. Two engines exist; anything else
     is a typo or an attack, and both deserve the same loud refusal."""
     from shutil import which
@@ -693,7 +746,7 @@ def proxy_passthrough() -> list[str]:
 def proxy_no_proxy() -> list[str]:
     """``[proxy] no_proxy`` — the consumer's OWN in-stack hostnames the dev box must reach
     directly, bypassing the egress proxy (they join the box's ``NO_PROXY``). The proxy runs on
-    the Mac and can't resolve a stack-network name, so a proxied call to one 502s — or hangs
+    the host and can't resolve a stack-network name, so a proxied call to one 502s — or hangs
     first, which is how a proxied emulator read reads as a mysteriously slow test.
 
     ``localhost``/``127.0.0.1`` are always included, and foldyard's own plugins add their own
@@ -726,9 +779,9 @@ def proxy_no_proxy() -> list[str]:
         raise SystemExit(
             f"✗ [proxy] no_proxy may not contain dotted names or wildcards: {', '.join(bad)}\n"
             "  Only in-stack service/container names (single DNS labels) belong here — a dotted\n"
-            "  or `*` entry would exempt PUBLIC hosts from capture and from the egress wall.\n"
+            "  or `*` entry would exempt PUBLIC hosts from capture and from the allowlist.\n"
             "  (The exception is a name under `.localhost`, which can never be public.)\n"
-            "  To reach an external host, grant it on the Mac instead: `fy allow add <host>`."
+            "  To reach an external host, grant it on your computer instead: `fy allow add <host>`."
         )
     return out
 
@@ -748,7 +801,7 @@ def proxy_recommend() -> list[dict]:
     each ``{host, why}``. ADVISORY BY CONSTRUCTION: the proxy never reads it; the host offers to
     import entries into the allow-store at the adoption gate / ``fy allow sync`` / the TUI, and an
     operator answers per host. That is the difference from the removed ``[proxy] allow``: repo
-    config (box-writable) can ASK for egress here, but only a Mac-side yes turns it into a grant —
+    config (box-writable) can ASK for egress here, but only a host-side yes turns it into a grant —
     the same repo-proposes/host-decides shape as config adoption itself. This is also how a team
     SHARES its allowlist: the list travels with the branch, the grants stay host-owned.
 
@@ -780,23 +833,24 @@ def proxy_recommend() -> list[dict]:
 
 
 def proxy_default_deny_seed() -> str:
-    """``[proxy] default_deny`` as the seed it is: ``"on"`` (true), ``"off"`` (false / absent) or
-    ``"learn"`` — observe for a bounded window on the first launch, then enforce
-    (:func:`foldyard.allowlist.seed_learning`). Anything else keeps the historical truthiness,
-    so a mistyped string reads as ``"on"`` — a typo must not loosen the wall."""
-    raw = _table("proxy").get("default_deny", False)
+    """``[proxy] enforce`` (formerly ``default_deny``) as the seed it is: ``"on"`` (true),
+    ``"off"`` (false / absent) or ``"learn"`` — observe for a bounded window on the first
+    launch, then enforce (:func:`foldyard.allowlist.seed_learning`). Anything else keeps the
+    historical truthiness, so a mistyped string reads as ``"on"`` — a typo must not loosen the
+    allowlist."""
+    raw = _table("proxy").get("enforce", False)
     if isinstance(raw, str) and raw.strip().lower() == "learn":
         return "learn"
     return "on" if raw else "off"
 
 
 def proxy_default_deny() -> bool:
-    """``[proxy] default_deny`` — when true the egress proxy ENFORCES the allowlist: any host
+    """``[proxy] enforce`` — when true the egress proxy ENFORCES the allowlist: any host
     that isn't allowed (by a live grant in the host-side allow-store, or as an injector host) is
     REFUSED (403 at CONNECT / on the request). Absent ⇒ false: observe only, never blocks.
     ``"learn"`` enforces too, until a launch verb opens its first learn window
     (:func:`proxy_default_deny_seed`). This key only SEEDS the answer — enforcement is host-owned
-    from then on (``fy allow wall``, see :func:`foldyard.allowlist.default_deny`), and the
+    from then on (``fy allow enforce``, see :func:`foldyard.allowlist.default_deny`), and the
     per-host grants live exclusively in the store (``fy allow add``): a ``[proxy] allow`` list is
     IGNORED (:data:`foldyard.exposure.IGNORED_KEYS`)."""
     return proxy_default_deny_seed() != "off"
@@ -864,7 +918,7 @@ def machine_backend() -> str:
 
     Lima is the default because it is the only backend that delivers the full boundary: per-project
     VMs that run concurrently (``podman machine`` on macOS allows one at a time — upstream
-    podman#26281), and the in-VM fail-closed egress wall (``[machine].wall``), which podman
+    podman#26281), and the in-VM fail-closed egress wall (``[machine] firewall``), which podman
     machine's CoreOS appliance can't be provisioned with. ``backend = "podman"`` remains supported
     and is the zero-extra-dependency floor. ``foldyard init`` has scaffolded ``lima`` + ``wall``
     since it shipped; this default just stops a hand-written config from silently getting less.
@@ -874,32 +928,45 @@ def machine_backend() -> str:
     return machine_backend_explicit() or "lima"
 
 
+def _env_flag(*names: str) -> bool | None:
+    """The first of ``names`` set in the environment, as a flag (1/true/on/yes ⇒ on); ``None`` when
+    none is set. Several names = a renamed variable whose old spelling still works."""
+    for name in names:
+        env = os.environ.get(name)
+        if env is not None:
+            return env.strip().lower() in ("1", "true", "on", "yes")
+    return None
+
+
 def machine_wall() -> bool:
-    """``[machine].wall`` — provision the in-VM nftables egress wall into the REAL lima machine, so
-    the VM user's (and thus every container's) only way out is the Mac-side egress proxy at
+    """``[machine].firewall`` (formerly ``wall``) — provision the in-VM nftables egress firewall
+    into the REAL lima machine, so
+    the VM user's (and thus every container's) only way out is the host-side egress proxy at
     :data:`LIMA_HOST_GATEWAY` (fail-closed: egress that ignores the proxy env is REJECTED, not
     silently allowed). Only meaningful for ``backend = "lima"`` (podman-machine's immutable CoreOS
     appliance can't be provisioned like this) — preflight enforces the pairing.
-    ``MACHINE_WALL`` env wins (1/true/on/yes ⇒ on)."""
-    env = os.environ.get("MACHINE_WALL")
+    ``MACHINE_FIREWALL`` env wins (1/true/on/yes ⇒ on; ``MACHINE_WALL`` is the old spelling)."""
+    env = _env_flag("MACHINE_FIREWALL", "MACHINE_WALL")
     if env is not None:
-        return env.strip().lower() in ("1", "true", "on", "yes")
-    return bool(_table("machine").get("wall", False))
+        return env
+    return bool(_table("machine").get("firewall", False))
 
 
 def machine_host_wall() -> bool:
-    """``[machine].host_wall`` — ALSO enforce the wall on the HOST, matching the VM process's own
-    traffic by its cgroup scope with host nftables (:mod:`foldyard.hostwall`), so a guest-kernel
-    exploit that flushes the in-VM wall still leaves through a host that rejects everything but
-    this project's daemon band. The tier above ``wall``: needs it (preflight enforces), and a host
+    """``[machine] host_firewall`` (formerly ``host_wall``) — ALSO enforce the firewall on the
+    HOST, matching the VM process's own traffic by its cgroup scope with host nftables
+    (:mod:`foldyard.hostwall`), so a guest-kernel exploit that flushes the VM firewall still
+    leaves through a host that rejects everything but this project's daemon ports. The tier above
+    ``firewall``: needs it (preflight enforces), and a host
     that HAS nftables + cgroup v2 — Linux; asked for on a host that can't deliver it is a hard
     stop, never a silent downgrade. The table is the OPERATOR's install (``fy machine
     host-wall`` prints it and the steps; ADR-0028) — foldyard probes it on every ``fy up``,
-    never loads it. ``MACHINE_HOST_WALL`` env wins (1/true/on/yes ⇒ on)."""
-    env = os.environ.get("MACHINE_HOST_WALL")
+    never loads it. ``MACHINE_HOST_FIREWALL`` env wins (1/true/on/yes ⇒ on; ``MACHINE_HOST_WALL``
+    is the old spelling)."""
+    env = _env_flag("MACHINE_HOST_FIREWALL", "MACHINE_HOST_WALL")
     if env is not None:
-        return env.strip().lower() in ("1", "true", "on", "yes")
-    return bool(_table("machine").get("host_wall", False))
+        return env
+    return bool(_table("machine").get("host_firewall", False))
 
 
 _MACHINE_RUNTIMES = ("", "gvisor")
@@ -921,24 +988,24 @@ def machine_runtime() -> str:
     if name not in _MACHINE_RUNTIMES:
         raise SystemExit(
             f'✗ [machine].runtime must be "gvisor" or unset (the engine\'s own runtime), '
-            f"not {name!r} — it names a posture foldyard provisions, never a runtime binary."
+            f"not {name!r} — it names a sandbox foldyard provisions, never a runtime binary."
         )
     return name
 
 
 # Lima's documented guest→host address: the user-mode network's host gateway, which the usernet
-# forwards to the Mac (the same trick gvproxy plays with host.containers.internal, different
+# forwards to the host (the same trick gvproxy plays with host.containers.internal, different
 # constant). Lima also writes it into the guest's /etc/hosts as `host.lima.internal`, but that
 # alias is invisible inside a podman CONTAINER in the guest — so foldyard emits the literal IP.
 LIMA_HOST_GATEWAY = "192.168.5.2"
 
 
 def host_alias() -> str:
-    """The address a CONTAINER in the machine uses to reach the Mac-side foldyard daemons (egress
-    proxy, gcp minter). Backend-dependent: under podman-machine, gvproxy publishes the Mac as
+    """The address a CONTAINER in the machine uses to reach the host-side foldyard daemons (egress
+    proxy, gcp minter). Backend-dependent: under podman-machine, gvproxy publishes the host as
     ``host.containers.internal``, and native podman's netavark publishes the host under the same
-    alias. Under LIMA that alias resolves to the VM's own gateway — NOT the Mac — so emit Lima's
-    guest→host address instead (:data:`LIMA_HOST_GATEWAY`): container → pasta → VM → usernet → Mac.
+    alias. Under LIMA that alias resolves to the VM's own gateway — NOT the host — so emit Lima's
+    guest→host address instead (:data:`LIMA_HOST_GATEWAY`): container → pasta → VM → usernet → host.
     Emitting the literal IP sidesteps podman's alias machinery entirely (no containers.conf
     provisioning, works for already-created VMs). ``FY_HOST_ALIAS`` env is the escape hatch (e.g.
     a customised Lima network whose host gateway differs)."""
@@ -957,7 +1024,7 @@ def machine_vmtype() -> str:
     own default is ``vz`` on macOS and ``qemu`` everywhere else, applied silently; QEMU is
     ~2M lines emulating decades of hardware and is where essentially every published VM-escape
     CVE lives, so which one you get should not depend on an unexamined ``runtime.GOOS`` branch
-    inside a dependency. See docs/firecracker-and-microvm-backends.md.
+    inside a dependency. See docs/archive/firecracker-and-microvm-backends.md.
 
     Lima-only, and **create-only** — like mounts and sizing, a live instance's vmType cannot be
     edited; changing it means ``fy machine recreate``."""
@@ -1139,7 +1206,7 @@ def claude_settings() -> dict:
 
 def claude_keyless() -> str:
     """``[claude].keyless`` — opt the box into KEYLESS Claude auth: NO real key/token in the box,
-    the egress proxy injects the real one (held in ``host.env`` on the Mac) in flight, exactly like
+    the egress proxy injects the real one (held in ``host.env`` on the host) in flight, exactly like
     the github injector. Returns the mode the box's dummy + the proxy rule are derived from:
 
       - ``"api-key"`` (``true`` is an alias) — dummy ``ANTHROPIC_API_KEY``; rewrite ``x-api-key`` on
@@ -1247,14 +1314,14 @@ def codex_enabled() -> bool:
 
 def codex_keyless() -> str:
     """``[codex].keyless`` — opt the box into KEYLESS Codex auth: NO real key in the box, the egress
-    proxy injects the real ``OPENAI_API_KEY`` (held in ``host.env`` on the Mac) in flight, like the
+    proxy injects the real ``OPENAI_API_KEY`` (held in ``host.env`` on the host) in flight, like the
     Claude/github injectors. Modes:
 
       - ``"api-key"`` (``true`` aliases it) — dummy ``OPENAI_API_KEY``; rewrite ``Authorization``
         with ``Bearer `` + the real key on ``api.openai.com``.
       - ``"chatgpt"`` — use your ChatGPT SUBSCRIPTION: the box holds a dummy ``~/.codex/auth.json``
         (far-future-exp JWT so it never refreshes), and the proxy injects the *current* access token
-        (refreshed host-side from the Mac's real ``~/.codex/auth.json`` by the
+        (refreshed host-side from the host's real ``~/.codex/auth.json`` by the
         :mod:`~foldyard.plugins.codex_chatgpt_token` minter) onto ``chatgpt.com/backend-api/codex``.
 
     Absent/false/unrecognised ⇒ ``""`` (off — normal login)."""
@@ -1452,7 +1519,7 @@ def requires_declared() -> list[dict]:
     gcp=sa only because THIS consumer's ``[[overlay]]`` routes real LLM traffic through
     Vertex/ADC — lives here next to the overlays that cause it, and can reference config-defined
     axes (an ``[[inject]]`` credential) no plugin file could name. Intrinsic couplings stay
-    in-code on the plugin's own :attr:`~foldyard.plugins.Axis.requires`. Non-dict rows are
+    in-code on the plugin's own :attr:`~foldyard.plugins.Switch.requires`. Non-dict rows are
     ignored (like ``[[overlay]]``); FIELD validation is the registry's (loud, at construction —
     see ``Registry.__init__``), since only it knows the loaded axes."""
     raw = _toml().get("require")
@@ -1637,7 +1704,7 @@ def blocked_daemons_file() -> Path:
 
 
 def _host_table() -> dict:
-    """The optional ``[host]`` table — Mac-side supervisor behaviour knobs."""
+    """The optional ``[host]`` table — host-side supervisor behaviour knobs."""
     raw = _toml().get("host")
     return raw if isinstance(raw, dict) else {}
 
@@ -1678,7 +1745,7 @@ def clock_offset_file() -> Path:
 
 
 def allow_store_file() -> Path:
-    """Authoritative live egress grants (once / until-restart), in the Mac home OUTSIDE the repo
+    """Authoritative live egress grants (once / until-restart), in the host home OUTSIDE the repo
     mount — so nothing in the box can grant its own egress (mirrors :func:`mode_file`)."""
     env = os.environ.get("FOLDYARD_ALLOW_STORE")
     return Path(env).expanduser() if env else state_dir() / "allow-store.json"
@@ -1776,7 +1843,7 @@ def tail_jsonl(log: Path, limit: int) -> list[dict]:
 
 
 def mirror_file() -> Path:
-    """The read-only, gitignored posture mirror the box sees (informational; the Mac
+    """The read-only, gitignored posture mirror the box sees (informational; the host
     daemons remain the enforcement point). Lives in the dev-VM dir on the shared
     mount so box sessions can read it."""
     return dev_vm_dir() / ".dev-mode.json"

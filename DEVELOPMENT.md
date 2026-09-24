@@ -54,15 +54,15 @@ Core (stdlib-only on the hot path; heavy imports lazy):
 - `guestlog.py` — the VM's log budget (`machine ensure`, every VM backend): journald cap as root
   (Lima: rendered into the boot script; podman machine: `sudo -n` over ssh) + the rootless API
   service's log level as a user drop-in over ssh. Best-effort — a warning, never an abort.
-- `hostwall.py` — the host-side egress wall for the machine VM on Linux: nftables matched by the
-  VM's cgroup v2 SLICE (the VM is started in a per-VM scope under a persistent per-VM slice, so
-  the match is predictable and its cgroup id survives restarts), wired via `[machine].host_wall`;
-  fail-closed — a VM outside its own scope-under-slice is refused, not walled. Boot-stable: the
-  VM's loopback plumbing (Lima's host resolver, the SSH forward) is judged on the INPUT hook by
-  the listener's cgroup, never named. **foldyard never loads it** (ADR-0028): `fy machine
-  host-wall` renders the table + a system unit and prints the `sudo` lines, the operator runs
-  them once, and every `fy up` PROBES enforcement from inside the slice — the table can't be
-  read without root, and one that exists may hold a dead slice's id (fail-open otherwise).
+- `hostwall.py` — the host firewall for the machine VM on Linux: nftables matched by the VM's cgroup
+  v2 SLICE (the VM is started in a per-VM scope under a persistent per-VM slice, so the match is
+  predictable and its cgroup id survives restarts), wired via `[machine] host_firewall`; fail-closed
+  — a VM outside its own scope-under-slice is refused, not walled. Boot-stable: the VM's loopback
+  plumbing (Lima's host resolver, the SSH forward) is judged on the INPUT hook by the listener's
+  cgroup, never named. **foldyard never loads it** (ADR-0028): `fy machine host-firewall` renders
+  the table + a system unit and prints the `sudo` lines, the operator runs them once, and every
+  `fy up` PROBES enforcement from inside the slice — the table can't be read without root, and one
+  that exists may hold a dead slice's id (fail-open otherwise).
 - `box.py` — the dev-box lifecycle (`fy box build|up|shell|down|ps`) + the monitored bootstrap.
 - `supervisor.py` — the host supervisor (`fy host` status · `restart` · `logs`; always detached,
   started with the VM, no `stop`): the ONE host-side process per project running the credential
@@ -71,8 +71,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
 - `worktree.py` · `transcripts.py` · `tui.py` · `init.py` · `skills.py` · `browser.py` ·
   `vscode.py` · `podman_desktop.py` — worktrees, agent-transcript sync, the Textual TUI,
   `foldyard init`, bundled skills, `fy open`, `fy code`, `fy machine desktop` (an `fy-<machine>`
-  podman connection per VM, which Podman Desktop lists side by side; with
-  `FOLDYARD_PODMAN_DESKTOP=1`, `machine.ensure` keeps it current and pins the ssh port).
+  podman connection per VM, which Podman Desktop lists side by side; where Podman Desktop is
+  installed, `machine.ensure` keeps it current and pins the ssh port — `FOLDYARD_PODMAN_DESKTOP`
+  `0`/`1` overrides the detection).
 - `docs.py` — `fy docs [topic]`: the manual served from THIS install (the consumer subset is
   force-included into the wheel; see pyproject). Version-matched by construction, works with no
   egress — the reason an agent should never clone the project to read about it.
@@ -80,9 +81,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   mount, so the supervisor reads a snapshot under `~/.foldyard/adopted/<checkout>-<hash>/`
   instead — keyed by checkout PATH, never by anything the config declares): drift detection + diff, the `adopt`/`revert`/`ignore` gate every launch verb runs,
   and `fy config …`. See [ADR-0022](./docs/adrs/0022-host-runs-the-adopted-config.md).
-- `exposure.py` — the widenings inventory (`fy config widenings` + its doctor row): what the
-  adopted config asks the HOST to allow — capture exemptions with `@bundle` refs RESOLVED to a
-  count, injection targets (armed and latent, asked of the registry so an odd shape like Codex's
+- `exposure.py` — the widenings inventory (`fy config widenings` + its doctor row): what the adopted
+  config asks the HOST to allow — `passthrough` (undecrypted) hosts with `@bundle` refs RESOLVED to
+  a count, injection targets (armed and latent, asked of the registry so an odd shape like Codex's
   ChatGPT rung reports its real host), agent prompts attributed to the shared vs the gitignored
   file, and `IGNORED_KEYS` — config that reads as a control and is no longer honoured.
 - `allowlist.py` · `ports.py` · `preflight.py` · `keyless.py` — the egress allow-store behind
@@ -90,9 +91,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   hard-prerequisite checks before `up`, and the keyless-agent credential taxonomy + host-side
   secret capture (`ensure_cred` for agent creds, `ensure_secret` for declared `[[secret]]` rows).
 
-`plugins/` — the framework (`__init__.py`: `Axis`/`Requires`/`Plugin`/`Registry`, per-consumer
+`plugins/` — the framework (`__init__.py`: `Switch`/`Requires`/`Plugin`/`Registry`, per-consumer
 loading; cross-axis coherence is declared as `Requires` DATA on two tiers — in-code
-`Axis.requires` for intrinsic couplings, the consumer's `[[require]]` table for
+`Switch.requires` for intrinsic couplings, the consumer's `[[require]]` table for
 wiring-dependent ones (docs/configuration.md), merged at Registry construction; the
 `mode_issues` hook is the escape hatch for logic the data can't express, e.g. combination
 warnings)
@@ -159,7 +160,7 @@ foldyard's surface splits by *where it can be validated*:
    PATH; each module takes a throwaway example copy, leaves the VM running and un-walled):
    - `test_verify_e2e.py` — ALL PASS on the boundary foldyard builds, **FAIL against a VM
      mounting the operator's whole home**, PASS again once the mount is gone (the negative
-     [docs/verify-false-pass.md](./docs/verify-false-pass.md) owed). Never weaken this one.
+     [docs/archive/verify-false-pass.md](./docs/archive/verify-false-pass.md) owed). Never weaken this one.
    - `test_probes_e2e.py` — the read-only engine probes in-process (`devmode.workspaces` /
      `up_worktrees` / `_stack_mounts` / `_stack_shadow_check`, `stack.disk_headroom`,
      `machine.state/socket/responsive` with the moved-socket invariant, `reconcile.scopes()`),
@@ -177,9 +178,9 @@ foldyard's surface splits by *where it can be validated*:
    - `test_worktree_e2e.py` — `fy worktree add` (registered, own branch, clean tree), its stack
      up beside main's, `remove`: containers + volumes gone, the bound-out transcript ARCHIVED
      before the tree is deleted, main untouched, the branch kept, local state dropped.
-   - `test_wall_e2e.py` — `[machine].wall` + `host_wall` via `fy up`: the fixture IS the operator
-     — the first `fy up` refused (nothing installed), then the `sudo` lines `fy machine
-     host-wall` printed run verbatim, then `fy up` passes; the host table on the VM's own slice,
+   - `test_wall_e2e.py` — `[machine] firewall` + `host_firewall` via `fy up`: the fixture IS the
+     operator — the first `fy up` refused (nothing installed), then the `sudo` lines `fy machine
+     host-firewall` printed run verbatim, then `fy up` passes; the host table on the VM's own slice,
      the unit active, direct guest egress refused, DNS resolving, the proxy the way out, the api
      still served, and the stale-provisioning refusal.
    - `test_host_daemons_e2e.py` — the supervisor with the zero-secret rig
@@ -292,12 +293,12 @@ drives. The tests' `foldyard up` then runs the real host path: machine ensure �
 supervisor → compose. First catch of the tier: podman 4.9.3's `ps --format` (Ubuntu 24.04's
 package) has no `{{.Label "k"}}`, so every probe built on it read "engine unreachable" on a
 Linux host — now `{{json .Labels}}` (`devmode.ps_labels`).
-Things a Linux runner needs that a Mac does not: `qemu-img` (from `qemu-utils`, not implied by
-`qemu-system-x86-core`), a `systemd --user` manager for anything scoped (`loginctl
+Things a Linux runner needs that a macOS host does not: `qemu-img` (from `qemu-utils`, not implied
+by `qemu-system-x86-core`), a `systemd --user` manager for anything scoped (`loginctl
 enable-linger`), and Lima from the release tarball into `/usr/local`. **arm64 runners have no
 KVM** (`ubuntu-24.04-arm`: no `/dev/kvm` before or after `modprobe kvm`, probed 2026-09-17), so
 the job is x86-only. The `podman` backend (podman-machine) has not been tried on a runner; the
-`lima` backend is the product path and the one tested. The Mac / nested-KVM-host recipe in
+`lima` backend is the product path and the one tested. The nested-KVM rig recipe in
 [docs/nested-virt.md](./docs/nested-virt.md) remains for what a VM job cannot reach (the gVisor
 posture under nested virtualisation).
 
@@ -321,15 +322,15 @@ committed modes and LF endings — the 9p automount shows 0777 and the runner's 
 `core.autocrlf`; a local clone needs a global `safe.directory`, the automount is root-owned and
 `upload-pack` runs as a child). Automount stays on because the wrapper reads each step's script
 through `/mnt/<drive>`. The action caches the distro installer (372 MB): the first run's 5.5 min
-install is 40 s after. **What WSL2 cannot do: the host-side wall.** `[machine].host_wall`
+install is 40 s after. **What WSL2 cannot do: the host firewall.** `[machine] host_firewall`
 matches the VM by `socket cgroupv2`, and the stock WSL2 kernel has `# CONFIG_NFT_SOCKET is not
 set` (both the 6.6 and 6.18 branches), so `nft` refuses the rule with ENOENT — the wall fails
 closed, as designed. `test_wall_e2e.py` now probes the kernel for the expression in its gate
 (one rule into a throwaway table, `sudo -n`) and skips; before that its fixture had already
 re-provisioned the VM walled, and the error left the worktree module refusing the stale
-provisioning — 9 errors from one kernel option. The in-VM `[machine].wall` is unaffected (it
-runs in the guest). Everything else passed unchanged — 30 passed, 6 skipped; the tier is ~3.5×
-slower than on Linux (the test step 43 min vs 12; `test_box_e2e` 8 min, `test_machine_e2e` 9;
+provisioning — 9 errors from one kernel option. The VM firewall (`[machine] firewall`) is
+unaffected (it runs in the guest). Everything else passed unchanged — 30 passed, 6 skipped; the
+tier is ~3.5× slower than on Linux (the test step 43 min vs 12; `test_box_e2e` 8 min, `test_machine_e2e` 9;
 the job 47 min against a 75-minute budget). Facts about the
 runner worth knowing: 16 GB / 4 vCPU, of which WSL2 takes half the memory; the distro's root
 is a sparse 1 TB vhdx on `C:` with ~30 GB actually free; the `ubuntu-24.04-arm` finding carries
@@ -350,11 +351,12 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   Linux/WSL2 hosts export one too), NEVER `which("podman")`.
 - **Write "host", not "Mac" — in new code, docstrings, messages and docs.** foldyard's split is
   host vs box, and the host being a Mac is a fact about today's users, not about the design (there
-  is no platform branching in the package: no `sys.platform`, no `Darwin` test; the sweep of the
-  ~700 legacy mentions is still pending — Linux and WSL2 hosts are now validated in CI, see the
-  two host-tier jobs). Say **macOS** only
+  is no platform branching in the package: no `sys.platform`, no `Darwin` test; Linux and WSL2
+  hosts are validated in CI, see the two host-tier jobs). User-facing text says *your computer*
+  (see [docs/glossary.md](./docs/glossary.md)); `tests/test_docs_shipped.py` refuses "Mac" in the
+  shipped docs, the skills and `--help`. Say **macOS** only
   where the claim really is macOS-only — `brew`, the login keychain, `security add-trusted-cert`,
-  Virtualization.framework/`vz`. One trap: **`host` already means an
+  Virtualization.framework/`vz`, desktop notifications. One trap: **`host` already means an
   egress HOSTNAME** across the allowlist/proxy surface (`fy allow add <host>`, `[proxy] recommend`,
   `_allowed(host)`), so near that code prefer *host-side*, *the operator*, or *the host machine*
   rather than writing "the host offers the host".
@@ -447,12 +449,13 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   supervisor's environment, which holds every axis's host.env secret. The addon resolves those
   names itself (the operator's exports, then `host.env`) and the proxy runs with host.env's keys
   stripped from its environment ([ADR-0030](./docs/adrs/0030-the-proxy-reloads-instead-of-restarting.md)).
-- **Nothing that varies with posture may reach the proxy's launch env.** The supervisor restarts
-  a daemon whose cmd/env changed, and a restart cuts every connection in flight (a mode switch
-  once killed an apt download mid-package). Rules, the wall switch and `passthrough` go in the
-  spec's `live` data, which the supervisor writes and the addon re-reads; a narrowing closes only
-  the connections it no longer allows, through mitmproxy internals pinned by
-  `tests/test_proxy_reload_e2e.py` ([ADR-0030](./docs/adrs/0030-the-proxy-reloads-instead-of-restarting.md)).
+- **Nothing that varies with posture may reach the proxy's launch env.** The supervisor restarts a
+  daemon whose cmd/env changed, and a restart cuts every connection in flight (a mode switch once
+  killed an apt download mid-package). Rules, the allowlist's enforce switch and `passthrough` go in
+  the spec's `live` data, which the supervisor writes and the addon re-reads; a narrowing closes
+  only the connections it no longer allows, through mitmproxy internals pinned by
+  `tests/test_proxy_reload_e2e.py`
+  ([ADR-0030](./docs/adrs/0030-the-proxy-reloads-instead-of-restarting.md)).
 - **A failing minter must never log at ERROR during proxy STARTUP** — mitmproxy's `ErrorCheck`
   addon exits the process ("Error logged during startup, exiting…") on any ERROR logged while
   starting, and the supervisor respawns it, so one rule whose host.env secret is missing
@@ -464,7 +467,7 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   work in the addon inherits this constraint.
 - **Egress grants live in the host store at EVERY level** (`allow-store.json`) — never in
   `foldyard.toml`. Repo config travels with the branch and the box can write it, so a committed
-  allowlist lets the yard widen its own wall.
+  allowlist lets the yard widen its own allowlist.
 - **Plugins stay stdlib-only + import-light** (`plugins.registry()` loads on the hot path).
   Don't register the built-ins as entry points (double-load → duplicate-axis error). When
   adding a plugin hook, thread it through the `Registry` — never let `devmode`/`verify`/`tui`
@@ -482,6 +485,10 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   id ⇒ `fy machine stop && fy up`), not into a new sudo call — a sudo path would hand a
   container escape VM-root again. Lima renders the script as a Go template (`{{.User}}`,
   `{{.UID}}`), so no other `{{` may appear in it, and `bash -n` gates it in the tests.
+  **Every byte of `guest-boot.sh` and `machine-wall.sh` is in that id** — a comment edit too —
+  so any change refuses every existing VM as stale until its user runs `fy machine stop && fy up`.
+  Don't reword them in a sweep; batch text changes with a change that needs the re-provision
+  anyway. (They still say "wall" and "Mac" for that reason.)
 - **Under the gVisor posture the box mounts the NARROWED socket, never the runsc socket
   directly.** `box.py` mounts `sandbox.box_socket()` (`podman-runsc-filtered.sock`), not
   `guest_socket()` — the filter (`assets/sandbox/socket_filter.py`, a guest user unit provisioned

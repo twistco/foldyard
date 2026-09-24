@@ -1389,7 +1389,7 @@ def test_up_is_quiet_once_the_axis_is_armed(fake, capsys, keyless_posture):
 
 
 def test_up_does_not_warn_for_a_bare_agent_table(fake, capsys, keyless_posture):
-    # No keyless ⇒ ClaudePlugin.axes() returns NOTHING, so there is no rung to arm: that box logs
+    # No keyless ⇒ ClaudePlugin.switches() returns NOTHING, so there is no rung to arm: that box logs
     # in inside the container. Telling this user to run `fy mode claude=on` would name an axis
     # that does not exist.
     keyless_posture({}, claude_keyless="")

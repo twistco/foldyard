@@ -28,13 +28,13 @@ from pathlib import Path
 
 from .. import config
 from . import (
-    Axis,
     CapabilityProbe,
     DoctorContext,
     DoctorFix,
     InjectRule,
     Plugin,
     Secret,
+    Switch,
     VerifyContext,
     proxy,
 )
@@ -192,7 +192,7 @@ def _verify_rows(
 class GithubPlugin(Plugin):
     name = "github"
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         # Self-gated on [plugins.github] — any table, even empty (the user emergency needs no App
         # fields) — like claude/codex keyless: the registry contract is CORE plugins stay inert
         # until their own config is declared, and github was the last always-on exception. No
@@ -200,9 +200,9 @@ class GithubPlugin(Plugin):
         if not config.github_declared():
             return []
         return [
-            Axis(
+            Switch(
                 name="github",
-                rungs=("off", "app", "user"),
+                levels=("off", "app", "user"),
                 blurb=_BLURB,
                 daemon="egress-proxy",
                 emergency=("user",),
@@ -380,8 +380,8 @@ class GithubPlugin(Plugin):
             f"App token reaching requests (rate limit {limit}/h)",
             (
                 f"NOT injected — requests leave this box anonymous (rate limit {limit}/h). "
-                "`fy mode` can still read github=app: the axis and the proxy are host-side "
-                "state, this is the wire. `fy host restart` on the host and re-run; if it "
+                "`fy mode` can still read github=app: the switch and the proxy are host-side "
+                "state, this is the wire. `fy host restart` on your computer and re-run; if it "
                 "persists the App installation likely needs re-authorizing."
             ),
         )
@@ -396,7 +396,8 @@ class GithubPlugin(Plugin):
             ctx.which("gh"),
             "gh CLI",
             "installed",
-            "missing — brew install gh (needed for github=user)",
+            "missing — install gh (https://cli.github.com; `brew install gh` on macOS) "
+            "(needed for github=user)",
         )
         if ctx.which("gh"):
             yield ("running", "gh login", "")
@@ -467,7 +468,7 @@ class GithubPlugin(Plugin):
 
         return [
             CapabilityProbe(
-                axis="github",
+                switch="github",
                 name="github-app-identity",
                 check=_check,
                 interval=300.0,  # a rotated key is rare; the call is cheap but not free

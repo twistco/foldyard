@@ -1743,7 +1743,7 @@ def test_reconcile_targets_bound_worktree(fake_repo, capture_stream, monkeypatch
     assert seen == {"project": "tangible-podman-feat", "worktree": "feat"}
 
 
-# ── the stack-down posture-service path (Plugin.posture_services) ─
+# ── the stack-down posture-service path (Plugin.mode_services) ─
 # A posture flip must never start the heavy stack (the guardrail above) — but the tiny services
 # a rung is ENFORCED by (the gcp metadata emulator) must materialize even when the stack is
 # down: the 2026-08-07 gcp=user-in-a-fresh-worktree trap left `fy mode` reading as granted
@@ -1772,7 +1772,7 @@ def test_reconcile_stack_down_posture_service_failure_reported(
     capture_stream.rc["value"] = 9
     lines: list[str] = []
     assert stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lines.append) is False
-    assert any("posture service start failed" in ln and "9" in ln for ln in lines)
+    assert any("mode service start failed" in ln and "9" in ln for ln in lines)
 
 
 def test_reconcile_stack_down_reaps_dropped_posture_service(fake_repo, capture_stream, monkeypatch):
@@ -1798,7 +1798,7 @@ def test_reconcile_stack_down_reaps_dropped_posture_service(fake_repo, capture_s
     assert stack.reconcile_posture(_sig("metadata"), _sig(""), sink=lines.append) is True
     assert ["podman", "rm", "-f", "eee"] in calls
     assert capture_stream == []  # nothing started
-    assert any("rung dropped" in ln and "metadata-emulator" in ln for ln in lines)
+    assert any("level dropped" in ln and "metadata-emulator" in ln for ln in lines)
 
 
 def test_stack_is_up_ignores_posture_services(fake_repo, monkeypatch):

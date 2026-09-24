@@ -23,7 +23,7 @@ present — so keyless agents are mostly configuration of existing machinery.
 ## Decision
 
 **The agent CLIs run in the box with dummy credentials; the proxy injects the real ones
-host-side.** `src/foldyard/keyless.py` owns the credential taxonomy and the Mac-side capture;
+host-side.** `src/foldyard/keyless.py` owns the credential taxonomy and the host-side capture;
 the `claude`/`codex` plugins derive their injector from it identically (shared
 `inject_spec`/`dummy_box_args` helpers — neither imports the other).
 
@@ -43,10 +43,10 @@ the `claude`/`codex` plugins derive their injector from it identically (shared
     (codex refreshes at `exp − 5 min`, so the box never tries its dummy refresh token) plus the
     **real `account_id`** (an identifier, not a secret) so codex emits `ChatGPT-Account-Id`.
     The proxy rewrites `Authorization` on `chatgpt.com/backend-api/codex` with the *current*
-    access token from the `codex_chatgpt_token` **refresh-minter**: it reads the Mac's real
+    access token from the `codex_chatgpt_token` **refresh-minter**: it reads the host's real
     `auth.json`, refreshes via the provider's token endpoint when near expiry, and writes the
     rotated tokens back atomically under an flock — one canonical file, so real codex on the
-    Mac keeps working. `replay_on_401 = True` forces a refresh-check on rejection.
+    host keeps working. `replay_on_401 = True` forces a refresh-check on rejection.
 - **Keyless is a posture axis** (ADR-0005): each plugin contributes an off/on axis mapped to
   the shared `egress-proxy` daemon, absent entirely unless `keyless` is configured. `off` (the
   zero-secret default) means the box holds only the dummy and cannot reach the provider.
@@ -65,10 +65,10 @@ the `claude`/`codex` plugins derive their injector from it identically (shared
 - A compromised agent session (prompt injection, malicious dependency) cannot exfiltrate the
   API key or OAuth/session token — the box never has it; flipping the axis off cuts access
   immediately without touching the agent's install or login state.
-- The real credential is entered once on the Mac and survives box recreation and `fy nuke`;
+- The real credential is entered once on the host and survives box recreation and `fy nuke`;
   `verify`/doctor can assert no real key is present in the box.
 - ChatGPT keyless carries one accepted risk: the host minter and a *manual* codex run on the
-  Mac share the rotating refresh token, and a racing refresh can invalidate it — recovery is
+  host share the rotating refresh token, and a racing refresh can invalidate it — recovery is
   `codex login`.
 - Coupling to provider auth shapes is real: header names, token prefixes, and codex's
   refresh-at-`exp` behaviour are verified facts that can drift with agent releases.

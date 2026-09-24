@@ -34,7 +34,7 @@ from dataclasses import dataclass, replace
 from hypothesis import strategies as st
 
 from foldyard import config as config_mod
-from foldyard.plugins import Axis, Plugin, Registry, Requires
+from foldyard.plugins import Plugin, Registry, Requires, Switch
 
 # A constraint row: (axis, trigger_rungs, other_axis, allowed_rungs, severity) — an issue of
 # `severity` while mode[axis] ∈ trigger_rungs and mode[other_axis] ∉ allowed_rungs.
@@ -46,11 +46,11 @@ class SyntheticPlugin(Plugin):
 
     name = "synthetic"
 
-    def __init__(self, axes: list[Axis], constraints: list[Constraint]):
+    def __init__(self, axes: list[Switch], constraints: list[Constraint]):
         self._axes = axes
         self._constraints = constraints
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         return list(self._axes)
 
     def mode_issues(self, mode: dict):
@@ -66,7 +66,7 @@ class SyntheticPlugin(Plugin):
 class World:
     """One generated consumer: its axes, constraints, a Registry, and an input mode."""
 
-    axes: tuple[Axis, ...]
+    axes: tuple[Switch, ...]
     constraints: tuple[Constraint, ...]
     mode: dict[str, str]
 
@@ -76,7 +76,7 @@ class World:
     def registry(self, source: str = "hook") -> Registry:
         """The world as a real Registry — the constraints represented as ``source`` says, so
         properties can run against EVERY evaluator path and hold them to the same oracle:
-        ``"hook"`` (the ``mode_issues`` escape hatch), ``"axis"`` (in-code ``Axis.requires``
+        ``"hook"`` (the ``mode_issues`` escape hatch), ``"axis"`` (in-code ``Switch.requires``
         rows), or ``"config"`` (consumer ``[[require]]`` rows in a synthetic Config, exercising
         the parse + construction-time merge in front of the same evaluator)."""
         if source == "hook":
@@ -87,7 +87,7 @@ class World:
                 by_axis.setdefault(axis, []).append(
                     Requires(
                         when=tuple(sorted(trigger)),
-                        axis=other,
+                        switch=other,
                         accepts=tuple(sorted(allowed)),
                         severity=severity,
                     )
@@ -97,7 +97,7 @@ class World:
         if source == "config":
             rows = [
                 {
-                    "axis": axis,
+                    "switch": axis,
                     "when": sorted(trigger),
                     "needs": other,
                     "accepts": sorted(allowed),
@@ -132,23 +132,23 @@ class World:
 def worlds(draw, max_axes: int = 5, max_constraints: int = 6) -> World:
     """A synthetic consumer + an input mode over its axes (any rung, incl. defaults)."""
     n_axes = draw(st.integers(min_value=1, max_value=max_axes))
-    axes: list[Axis] = []
+    axes: list[Switch] = []
     for i in range(n_axes):
         n_rungs = draw(st.integers(min_value=2, max_value=4))
         rungs = tuple(f"r{j}" for j in range(n_rungs))
-        axes.append(Axis(name=f"ax{i}", rungs=rungs, blurb=dict.fromkeys(rungs, "-")))
+        axes.append(Switch(name=f"ax{i}", levels=rungs, blurb=dict.fromkeys(rungs, "-")))
     constraints: list[Constraint] = []
     for _ in range(draw(st.integers(min_value=0, max_value=max_constraints))):
         axis = draw(st.sampled_from(axes))
-        trigger = draw(st.frozensets(st.sampled_from(axis.rungs), min_size=1))
+        trigger = draw(st.frozensets(st.sampled_from(axis.levels), min_size=1))
         other = draw(st.sampled_from(axes))
         # allowed may be EMPTY (unsatisfiable while trigger holds) and may or may not contain
         # the other axis's default — both matter for settle's fallback paths. Error-biased:
         # warns exercise the severity path but never gate/settle anything.
-        allowed = draw(st.frozensets(st.sampled_from(other.rungs)))
+        allowed = draw(st.frozensets(st.sampled_from(other.levels)))
         severity = draw(st.sampled_from(["error", "error", "warn"]))
         constraints.append((axis.name, trigger, other.name, allowed, severity))
-    mode = {ax.name: draw(st.sampled_from(ax.rungs)) for ax in axes}
+    mode = {ax.name: draw(st.sampled_from(ax.levels)) for ax in axes}
     return World(axes=tuple(axes), constraints=tuple(constraints), mode=mode)
 
 

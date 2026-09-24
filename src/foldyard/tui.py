@@ -17,7 +17,7 @@ re-runs). The TUI follows the terminal's system light/dark theme (detected via O
 ALL state changes go through devmode.set_mode — the TUI has no logic of its own, so
 it can never drift from what the recipes and the supervisor do. Keep it that way.
 
-Run with `fy tui` (Mac; Textual comes from the foldyard package's deps).
+Run with `fy tui` (host; Textual comes from the foldyard package's deps).
 Tested headlessly with `fy tui-test` (Textual's run_test pilot — test_tui.py).
 
 Navigation is zoned (see DevModeTui / ModeGrid / WorkspaceList for the seams):
@@ -95,7 +95,7 @@ def _detect_terminal_theme(timeout: float = 0.2) -> str | None:
     colour via OSC 11 and map its luminance to ``textual-light`` / ``textual-dark``. Returns
     None when the terminal can't be queried — not a TTY, a headless test, or no reply within
     ``timeout`` — so the caller keeps Textual's default. MUST run before the app takes over the
-    terminal (called from ``main`` before ``run``). Mac/Linux only, which the TUI already is."""
+    terminal (called from ``main`` before ``run``). macOS/Linux only, which the TUI already is."""
     import os
     import select
     import sys
@@ -420,7 +420,7 @@ class _Ticket:
 
 
 class DevModeTui(App):
-    TITLE = f"{config.project()} dev posture"
+    TITLE = f"{config.project()} dev mode"
     SUB_TITLE = str(config.mode_file())
     # Start with nothing focused (the "tab strip"): ◀/▶ switch panels, ↓ enters the
     # active panel. Without this Textual auto-focuses a widget and steals the arrows.
@@ -1144,7 +1144,7 @@ class DevModeTui(App):
 
         def _after(value: str | None) -> None:
             if value is None:
-                self.notify(f"[{ws_name}] {secret.label} not entered — posture unchanged.")
+                self.notify(f"[{ws_name}] {secret.label} not entered — mode unchanged.")
                 return
             if value:
                 try:
@@ -1160,7 +1160,7 @@ class DevModeTui(App):
                 self.notify(f"[{ws_name}] stored {secret.label} on the host (0600).")
             else:
                 self.notify(
-                    f"[{ws_name}] {secret.label} skipped — that host can't mint until it's set "
+                    f"[{ws_name}] {secret.label} skipped — that host gets no token until it's set "
                     f"(`fy mode …` or `fy box up` on a TTY prompts again).",
                     severity="warning",
                 )
@@ -1322,7 +1322,7 @@ class DevModeTui(App):
         sel = self._manage_selection()
         if sel is None:
             self.notify(
-                "focus a row in the wall pane below the log (tab / click), then press x",
+                "focus a row in the allowlist pane below the log (tab / click), then press x",
                 severity="warning",
             )
             return
@@ -1545,7 +1545,7 @@ class DevModeTui(App):
             keys.append(("grant", g["host"]))
         wall = "ENFORCING" if enforcing else "observing only"
         summary = (
-            f"[b]egress wall[/b] — {wall} · {len(granted)} granted"
+            f"[b]allowlist[/b] — {wall} · {len(granted)} granted"
             + (f" · [magenta]{len(pending)} recommended pending[/magenta]" if pending else "")
             + "   [dim]a allow · x decline/revoke[/dim]"
         )
@@ -1772,7 +1772,7 @@ class AllowHostScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="allow-dialog"):
             yield Static(
-                Text.from_markup(f"Allow [b]{escape(self.host)}[/b] through the egress wall"),
+                Text.from_markup(f"Allow [b]{escape(self.host)}[/b] through the allowlist"),
                 id="allow-title",
             )
             yield ListView(id="allow-list")
@@ -1923,7 +1923,7 @@ class RemoveWorktreeScreen(ModalScreen):
             f"  • stops + removes its dev box ([dim]{project}-devbox[/dim])\n"
             f"  • tears down its stack ([dim]{project}[/dim]): compose down + drops its volumes\n"
             "    ([dim]postgres + GCS/BigQuery data; shared caches are kept[/dim])\n"
-            "  • archives its Claude transcripts to the durable Mac store\n"
+            "  • archives its Claude transcripts to the durable store on your computer\n"
             "  • deletes the checkout directory (git worktree remove)"
         )
         if branch:
@@ -1976,13 +1976,11 @@ class SecretScreen(ModalScreen):
         if sec.b64:
             lines.append("single-line base64 — pipe the value through `base64` if the hint didn't")
         with Vertical(id="sec-dialog"):
-            yield Static(
-                Text.from_markup(f"This posture needs {escape(sec.label)}"), id="sec-title"
-            )
+            yield Static(Text.from_markup(f"This mode needs {escape(sec.label)}"), id="sec-title")
             yield Static(Text.from_markup("\n".join(lines)), id="sec-body")
             yield Input(placeholder="paste the value (hidden)", password=True, id="sec-input")
             yield Static(
-                "enter store · empty enter skip · esc leave the posture unchanged", id="sec-hint"
+                "enter store · empty enter skip · esc leave the mode unchanged", id="sec-hint"
             )
 
     def on_mount(self) -> None:
@@ -2149,7 +2147,7 @@ class NewWorktreeScreen(ModalScreen):
 def main() -> int:
     """`foldyard tui` entry point."""
     if devmode.in_box():
-        raise SystemExit("✗ the TUI runs ON THE MAC (mode changes are Mac-only).")
+        raise SystemExit("✗ the TUI runs ON YOUR COMPUTER (mode changes only happen there).")
     # Detect the terminal's light/dark theme BEFORE Textual grabs the terminal, then let the app
     # adopt it on mount (so the TUI follows the system theme like cmux does).
     DevModeTui(start_theme=_detect_terminal_theme()).run()

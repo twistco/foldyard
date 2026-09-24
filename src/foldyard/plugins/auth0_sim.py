@@ -33,7 +33,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .. import config
-from . import Axis, DoctorContext, DoctorFix, Plugin
+from . import DoctorContext, DoctorFix, Plugin, Switch
 
 _BLURB = {
     "sim": "browse a dump: app → Auth0 simulator seeded from the dump DB (offline default)",
@@ -44,7 +44,7 @@ _BLURB = {
 class Auth0SimPlugin(Plugin):
     name = "auth0-sim"
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         # Self-gate on the consumer declaring [plugins.auth0-sim] (registry plan Step D): the auth0
         # axis is meaningless without a simulator harness to point the app at, so a generic repo
         # never gets an `auth0` axis it can't back. (The plugin already only LOADS when the table is
@@ -55,7 +55,7 @@ class Auth0SimPlugin(Plugin):
         # repo's "offline by default" posture, and the always-on data services' callbacks expect
         # it). `real` reaches real staging Auth0 and needs an identity to fully log in, so it's the
         # opt-in rung. (Was the `dump` axis off|on — renamed so the axis names what it selects.)
-        return [Axis(name="auth0", rungs=("sim", "real"), blurb=_BLURB)]
+        return [Switch(name="auth0", levels=("sim", "real"), blurb=_BLURB)]
 
     # The auth0 compose overlays are declared as `[[overlay]]` entries in foldyard.toml now
     # (config-only, matched on their `when`) — see docs/compose-overlays.md:
@@ -73,7 +73,7 @@ class Auth0SimPlugin(Plugin):
         # Dump-browsing (sim login, local dump DB) while the app's storage points at the REAL
         # remote data plane mixes fixture data with live buckets — legal (a deliberate hybrid)
         # but rarely what you meant, so warn rather than refuse. Deliberately a HOOK, not an
-        # Axis.requires row: this is a combination WARNING whose absence semantics are the
+        # Switch.requires row: this is a combination WARNING whose absence semantics are the
         # OPPOSITE of a requirement — with no storage axis loaded there is nothing to warn
         # about, whereas a requires row treats an absent axis as unmet and would fire.
         if mode.get("auth0") == "sim" and mode.get("storage") == "staging":
@@ -94,22 +94,24 @@ class Auth0SimPlugin(Plugin):
         if not config.auth0_sim_dir():
             return
         # Dump-browse serves the Auth0 sim over HTTPS on https://localhost:<sim_port>; without a
-        # locally-trusted cert the Mac browser shows net::ERR_CERT_AUTHORITY_INVALID. mkcert signs
+        # locally-trusted cert the host browser shows net::ERR_CERT_AUTHORITY_INVALID. mkcert signs
         # the cert (its nss-provided certutil installs the CA into the Firefox/Chrome trust stores).
         # All WARN, not fail: only needed for auth0=sim, and the cert warning is click-through-able.
-        # Mac-only — doctor's in_box() branch returns before plugin checks run. The TUI fix
+        # Host-only — doctor's in_box() branch returns before plugin checks run. The TUI fix
         # buttons (or the consumer's own cert recipe) repair these.
         yield ctx.result(
             ctx.which("mkcert") or None,
             "mkcert",
             "installed (trusted local HTTPS for the dump-browse Auth0 sim)",
-            "missing — dump-browse shows a cert warning. `brew install mkcert nss` (or the fix)",
+            "missing — dump-browse shows a cert warning. Install mkcert + nss "
+            "(`brew install mkcert nss` on macOS) or use the fix",
         )
         yield ctx.result(
             ctx.which("certutil") or None,
             "mkcert nss",
             "installed (browser trust-store support for mkcert)",
-            "missing — Firefox/Chrome won't trust mkcert's CA. `brew install nss` (or the fix)",
+            "missing — Firefox/Chrome won't trust mkcert's CA. Install nss "
+            "(`brew install nss` on macOS) or use the fix",
         )
         cert = self._cert_dir() / "localhost.pem"
         yield ctx.result(

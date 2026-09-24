@@ -162,11 +162,65 @@ def test_disabled_entries_drop_out_of_an_array_of_tables(fresh_config, tmp_path)
     # itself is still replaced wholesale by a local one — the merge rule, unchanged.)
     (tmp_path / "foldyard.toml").write_text(
         '[project]\nname = "p"\n'
-        '[[inject]]\naxis = "keep"\nhost = "a.example.com"\n'
-        '[[inject]]\naxis = "parked"\nhost = "b.example.com"\ndisabled = true\n'
+        '[[inject]]\nswitch = "keep"\nhost = "a.example.com"\n'
+        '[[inject]]\nswitch = "parked"\nhost = "b.example.com"\ndisabled = true\n'
     )
     fresh_config(FOLDYARD_REPO=tmp_path)
-    assert [spec["axis"] for spec in config.inject_specs()] == ["keep"]
+    assert [spec["switch"] for spec in config.inject_specs()] == ["keep"]
+
+
+# ── renamed keys: the old spelling still works, and is reported ──────────────────────────────────
+
+
+def test_renamed_keys_are_honoured_under_their_old_names(fresh_config, tmp_path):
+    # An ignored `wall = true` would switch the VM firewall off without a word, and the host's
+    # adopted snapshot keeps the spelling it was adopted with across an upgrade — so old names
+    # are aliases, never dropped.
+    (tmp_path / "foldyard.toml").write_text(
+        '[project]\nname = "p"\n'
+        '[machine]\nbackend = "lima"\nwall = true\nhost_wall = true\n'
+        '[proxy]\ndefault_deny = "learn"\n'
+        '[[inject]]\naxis = "tracker"\nhost = "a.example.com"\n'
+        '[[require]]\naxis = "tracker"\nwhen = "on"\nneeds = "github"\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_FIREWALL=None, MACHINE_HOST_FIREWALL=None)
+    assert config.machine_wall() is True
+    assert config.machine_host_wall() is True
+    assert config.proxy_default_deny_seed() == "learn"
+    assert [s["switch"] for s in config.inject_specs()] == ["tracker"]
+    assert [r["switch"] for r in config.requires_declared()] == ["tracker"]
+    assert "axis" not in config.inject_specs()[0]
+
+
+def test_a_local_old_spelling_overrides_a_shared_new_one(fresh_config, tmp_path):
+    # Renames apply per FILE, before the merge — so the override order is unchanged by spelling.
+    (tmp_path / "foldyard.toml").write_text('[project]\nname = "p"\n[machine]\nfirewall = true\n')
+    (tmp_path / "foldyard.local.toml").write_text("[machine]\nwall = false\n")
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_FIREWALL=None)
+    assert config.machine_wall() is False
+
+
+def test_the_new_spelling_wins_within_one_file():
+    doc = config.merge_config({"machine": {"wall": False, "firewall": True}}, {})
+    assert doc["machine"] == {"firewall": True}
+
+
+def test_renamed_keys_names_each_old_spelling_and_its_file():
+    shared = {"machine": {"wall": True}, "inject": [{"axis": "a"}, {"switch": "b"}]}
+    local = {"proxy": {"default_deny": True}}
+    assert config.renamed_keys(shared, local) == [
+        ("[machine] wall", "[machine] firewall", False),
+        ("[[inject]] axis", "[[inject]] switch", False),
+        ("[proxy] default_deny", "[proxy] enforce", True),
+    ]
+    assert config.renamed_keys({"machine": {"firewall": True}}, {}) == []
+
+
+def test_the_old_firewall_env_names_still_work(fresh_config, tmp_path):
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_FIREWALL=None, MACHINE_WALL="on")
+    assert config.machine_wall() is True
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_FIREWALL="0", MACHINE_WALL="on")
+    assert config.machine_wall() is False  # the new name wins
 
 
 def test_disabled_blocks_are_reportable_with_the_file_that_switched_them_off(tmp_path):
@@ -363,26 +417,26 @@ def test_host_alias_env_escape_hatch_wins(fresh_config, tmp_path):
     assert config.host_alias() == "10.9.8.7"
 
 
-# ── machine_wall ([machine].wall — lima in-VM egress enforcement) ──────────────────────
+# ── machine_wall ([machine] firewall — lima in-VM egress enforcement) ──────────────────────
 
 
 def test_machine_wall_defaults_off(fresh_config, tmp_path):
     (tmp_path / "foldyard.toml").write_text('[machine]\nbackend = "lima"\n')
-    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_WALL=None)
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_FIREWALL=None)
     assert config.machine_wall() is False
 
 
 def test_machine_wall_toml_opt_in(fresh_config, tmp_path):
     (tmp_path / "foldyard.toml").write_text('[machine]\nbackend = "lima"\nwall = true\n')
-    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_WALL=None)
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_FIREWALL=None)
     assert config.machine_wall() is True
 
 
 def test_machine_wall_env_overrides_toml_both_ways(fresh_config, tmp_path):
     (tmp_path / "foldyard.toml").write_text("[machine]\nwall = true\n")
-    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_WALL="0")
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_FIREWALL="0")
     assert config.machine_wall() is False
-    fresh_config(MACHINE_WALL="on")
+    fresh_config(MACHINE_FIREWALL="on")
     assert config.machine_wall() is True
 
 
@@ -666,7 +720,7 @@ def test_inject_specs_parses_array_of_tables(fresh_config, tmp_path):
     specs = config.inject_specs()
     assert specs == [
         {
-            "axis": "penpot",
+            "switch": "penpot",
             "host": "truenas.example.ts.net",
             "query_param": "userToken",
             "token_env": "PENPOT_USER_TOKEN",
@@ -853,18 +907,18 @@ def test_github_app_identity_absent_is_empty(fresh_config, tmp_path):
     assert config.github_app_id() == config.github_installation_id() == config.github_repo() == ""
 
 
-# ── machine_host_wall ([machine].host_wall — the host-side cgroup wall, Linux) ─────────
+# ── machine_host_wall ([machine] host_firewall — the host-side cgroup wall, Linux) ─────────
 
 
 def test_machine_host_wall_defaults_off(fresh_config, tmp_path):
     (tmp_path / "foldyard.toml").write_text('[machine]\nbackend = "lima"\nwall = true\n')
-    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_HOST_WALL=None)
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_HOST_FIREWALL=None)
     assert config.machine_host_wall() is False
 
 
 def test_machine_host_wall_toml_opt_in_and_env_override(fresh_config, tmp_path):
     (tmp_path / "foldyard.toml").write_text("[machine]\nwall = true\nhost_wall = true\n")
-    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_HOST_WALL=None)
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_HOST_FIREWALL=None)
     assert config.machine_host_wall() is True
     fresh_config(MACHINE_HOST_WALL="0")
     assert config.machine_host_wall() is False

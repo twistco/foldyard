@@ -149,7 +149,7 @@ def test_reconcile_scopes_see_the_live_stack(bound):
     for scope in reconcile.scopes():
         for row in scope.rows(state):
             rows.setdefault(scope.name, []).append(row)
-    assert set(rows) >= {"posture", "daemons", "stack", "box"}, rows
+    assert set(rows) >= {"mode", "daemons", "stack", "box"}, rows
     stack_rows = rows["stack"]
     if any("engine unreachable" in (r.observed or "") for r in stack_rows):
         # Re-run the scope's exact engine call so the CI log shows WHY (a template the host CLI

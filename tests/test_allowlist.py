@@ -131,10 +131,10 @@ def test_valid_host(host, ok):
 
 
 def test_enforcement_is_host_owned_once_set(env):
-    # `[proxy] default_deny` only SEEDS the answer: repo config is writable from inside the box, so a
+    # `[proxy] enforce` only SEEDS the answer: repo config is writable from inside the box, so a
     # committed enforcement switch is one the yard can flip off for itself — strictly worse than the
     # per-host grants, since it drops the wall entirely rather than widening it by one host.
-    assert allowlist.default_deny() is True  # seeded from the repo's [proxy] default_deny
+    assert allowlist.default_deny() is True  # seeded from the repo's [proxy] enforce
     allowlist.set_wall(True)  # an operator pins it host-side
     (env["repo"] / "foldyard.toml").write_text("[proxy]\ndefault_deny = false\n")
     config.clear_caches()
@@ -154,7 +154,7 @@ def test_box_cannot_set_the_wall(env, monkeypatch):
 
 def test_a_damaged_store_fails_closed_and_refuses_to_be_rebuilt(env, capsys):
     # This file backs a security control, so its own damage must never weaken it: enforcement can't
-    # fall back to `[proxy] default_deny` (repo config the box writes), and grants read as none.
+    # fall back to `[proxy] enforce` (repo config the box writes), and grants read as none.
     # Mutators refuse rather than rebuild — a rebuild would silently drop every grant it held.
     allowlist.grant("keep.example.com", "permanent")
     config.allow_store_file().write_text("{ not json")
@@ -171,7 +171,7 @@ def test_a_missing_store_is_just_first_run(env):
     # the starting enforcement position.
     assert not config.allow_store_file().exists()
     assert allowlist.live_hosts() == []
-    assert allowlist.default_deny() is True  # from the [proxy] default_deny seed
+    assert allowlist.default_deny() is True  # from the [proxy] enforce seed
     allowlist.grant("ok.example.com", "session")  # and mutating works
 
 

@@ -56,7 +56,7 @@ def mac(tmp_path, monkeypatch):
 def test_refuses_in_box(monkeypatch, capsys):
     monkeypatch.setattr(config, "in_box", lambda: True)
     assert transcripts.transcripts() == 1
-    assert "ON THE MAC" in capsys.readouterr().err
+    assert "ON YOUR COMPUTER" in capsys.readouterr().err
 
 
 def test_missing_rsync_fails(mac, monkeypatch):

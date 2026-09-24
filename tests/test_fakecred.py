@@ -60,7 +60,7 @@ def test_fakedep_requires_fakecred(fakecred_bound):
 
 def test_fakecred_probe_toggles_with_the_capability_file(fakecred_bound):
     (probe,) = devmode.capability_probes({"fakecred": "on"})
-    assert probe.axis == "fakecred" and devmode.capability_probes({"fakecred": "off"}) == []
+    assert probe.switch == "fakecred" and devmode.capability_probes({"fakecred": "off"}) == []
     ok, detail = probe.check()
     assert ok  # no lapse file = capable (the resting state)
     fakecred.capability_file().write_text("lapsed\n")

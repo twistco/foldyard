@@ -67,7 +67,7 @@ question per surface — *does this actually need host privileges?* — which ha
    both inside the mount; it needs zero host privileges. It runs in a throwaway container over the
    worktrees root (`worktree._init_in_yard`). The engine becomes a prerequisite and `fy worktree
    add` SKIPS with a retry hint when there's no image yet — deliberately **not** a host fallback,
-   because "the yard wasn't ready" must never silently become "so we ran it on the Mac".
+   because "the yard wasn't ready" must never silently become "so we ran it on the host".
 2. **Yes, but it needs no credentials → split it: read in the yard, write on the host.**
    *(Superseded for this surface by
    [ADR-0026](./0026-vscode-attach-config-is-declarative.md): the generator turned out to be data

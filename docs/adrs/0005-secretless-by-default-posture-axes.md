@@ -1,6 +1,11 @@
 # ADR-0005 — Secretless by default: posture axes/rungs as data, TTLs, host-side state
 
-- **Status:** Accepted (2026-06; four-axis form landed 2026-07-02, PR #25) — implemented
+- **Status:** Accepted (2026-06; four-axis form landed 2026-07-02, PR #25) — implemented.
+  **Amended 2026-09-24:** the `capture` axis is gone — the proxy always decrypts, and
+  `[proxy] passthrough` is the one decryption control — see
+  [ADR-0029](./0029-the-proxy-always-decrypts.md). The model stands under new names: posture →
+  *mode*, `Axis` → `Switch`, `rungs` → `levels` (plugin API and config; see
+  [../glossary.md](../glossary.md)).
 - **Sources:** PLAN.md §4.1 + §6, README.md thesis 2, docs/history/per-consumer-registry-plan.md
 
 ## Context
@@ -42,7 +47,7 @@ enforces them uniformly. A consumer's active axis set is a pure function of its 
   the supervisor refreshes with daemon health while that worktree's box is up — informational
   only, never read for enforcement.
 - **The box cannot escalate its own posture.** `devmode.set_mode` hard-refuses under
-  `in_box()`: mode changes are Mac-only, because the file that matters is in the Mac home where
+  `in_box()`: mode changes are host-only, because the file that matters is in the host's home where
   no in-yard process can reach it. Editing the mirror changes nothing.
 - **No daemon running ⇒ no credential flows.** Daemons (minters, the injecting proxy) are the
   only path a real credential takes, and the supervisor runs exactly the daemons the current

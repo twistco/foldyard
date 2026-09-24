@@ -25,13 +25,13 @@ import sys
 from pathlib import Path
 
 from .. import config
-from . import Axis, CapabilityProbe, Plugin, Requires
+from . import CapabilityProbe, Plugin, Requires, Switch
 
 FAKECRED_DIR = Path(__file__).resolve().parent
 
 _BLURB = {
     "off": "no fake credential — zero secrets (like everything else here)",
-    "on": "fake minter serves dummy tokens (testing the daemon/probe machinery)",
+    "on": "a fake token service serves dummy tokens (testing the daemon/probe machinery)",
     "user": "EMERGENCY (fake): TTL-bound, auto-reverts — testing expiry + settle",
 }
 
@@ -56,18 +56,18 @@ def _staged_minter() -> Path:
 class FakecredPlugin(Plugin):
     name = "fakecred"
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         return [
-            Axis(
+            Switch(
                 name="fakecred",
-                rungs=("off", "on", "user"),
+                levels=("off", "on", "user"),
                 blurb=_BLURB,
                 daemon="fake-minter",
                 emergency=("user",),
             ),
-            Axis(
+            Switch(
                 name="fakedep",
-                rungs=("off", "on"),
+                levels=("off", "on"),
                 blurb=_DEP_BLURB,
                 # The dependency that exercises the settle cascade: like llm≠off without
                 # gcp=sa, a dependent rung whose credential axis rests at default can only
@@ -76,7 +76,7 @@ class FakecredPlugin(Plugin):
                 requires=(
                     Requires(
                         when=("on",),
-                        axis="fakecred",
+                        switch="fakecred",
                         accepts=("on", "user"),
                         reason="the fake credential",
                     ),
@@ -90,7 +90,7 @@ class FakecredPlugin(Plugin):
         port = config.fakecred_port()
         return {
             f"fake-minter{config.worktree_suffix()}": {
-                "label": "fake credential minter (testing)",
+                "label": "fake credential token service (testing)",
                 "port": port,
                 "stage": [(str(FAKECRED_DIR / "fakecred_minter.py"), str(_staged_minter()))],
                 "cmd": [sys.executable, str(_staged_minter())],
@@ -118,4 +118,4 @@ class FakecredPlugin(Plugin):
             return False, f"fake capability lapsed ({text}) — `echo ok > {capability_file()}`"
 
         # Short interval: this axis exists to watch the machinery react, so feedback in ~2s.
-        return [CapabilityProbe(axis="fakecred", name="fakecred", check=_check, interval=2.0)]
+        return [CapabilityProbe(switch="fakecred", name="fakecred", check=_check, interval=2.0)]

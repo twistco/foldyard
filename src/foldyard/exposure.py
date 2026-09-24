@@ -48,16 +48,16 @@ from . import config, configpin
 IGNORED_KEYS: dict[str, str] = {
     "proxy.allow": (
         "grants moved to the host-side allow-store (outside the repo mount, so the box can't "
-        "widen its own wall) — re-add with `fy allow add <host> --level permanent`, or declare "
-        "the hosts under `[proxy] recommend` (with a why) for the host to OFFER at adoption"
+        "widen its own allowlist) — re-add with `fy allow add <host> --level permanent`, or "
+        "declare the hosts under `[proxy] recommend` (with a why) for the host to OFFER at adoption"
     ),
     "inject.minter": (
-        "consumer minter COMMANDS were removed — a minter is a packaged kind or an installed "
-        "plugin, never a string the host executes (ADR-0023)"
+        "consumer token-service COMMANDS were removed — a token service is a packaged kind or "
+        "an installed plugin, never a string the host executes (ADR-0023)"
     ),
     "inject.token_env": (
-        "the token var is DERIVED from the axis (FY_INJECT_<AXIS>) — a declared one is ignored, "
-        "so a config rule can't point at another mechanism's secret"
+        "the token var is DERIVED from the switch (FY_INJECT_<SWITCH>) — a declared one is "
+        "ignored, so a config rule can't point at another mechanism's secret"
     ),
     "vscode.workspace_file": (
         "`fy code` always attaches to the checkout folder (ADR-0026) — the generated multi-root "
@@ -118,6 +118,9 @@ class Exposure:
     recommend_origin: str = DEFAULT
     # (key, values, fix, origin)
     ignored: list[tuple[str, list[str], str, str]] = field(default_factory=list)
+    # (old spelling, new spelling, origin) for renamed keys still written the old way. Still
+    # honoured (config.RENAMED_KEYS aliases them), so this is a nudge to rename, not a gap.
+    renamed: list[tuple[str, str, str]] = field(default_factory=list)
     # `[vscode]` declared, and where: the editor attach `fy code` sets up forwards the host's SSH
     # agent + git credentials into the box (Dev Containers does; no setting stops it) — the one
     # declared surface that carries a push path IN. Reported so the neutralisation is a known
@@ -136,6 +139,7 @@ class Exposure:
             for key, values, _fix, _origin in self.ignored
         ]
         out += [f"unknown passthrough bundle @{ref}" for ref in self.unknown_refs]
+        out += [f"`{old}` was renamed to `{new}`" for old, new, _origin in self.renamed]
         return out
 
 
@@ -218,7 +222,7 @@ def _targets(
         )
 
     for spec in config.inject_specs():
-        axis, host = str(spec.get("axis") or ""), str(spec.get("host") or "")
+        axis, host = str(spec.get("switch") or ""), str(spec.get("host") or "")
         if axis and host:
             add(
                 host + str(spec.get("path_prefix") or ""),
@@ -229,7 +233,7 @@ def _targets(
             )
     for rule in reg.proxy_rules(mode):  # what the CURRENT posture activates
         add(rule.host + rule.path_prefix, rule.label or "packaged injector", True, False)
-    for axis, rungs in reg.axis_rungs().items():  # …and what another rung would
+    for axis, rungs in reg.switch_levels().items():  # …and what another rung would
         if not rungs or mode.get(axis, rungs[0]) != rungs[0]:
             continue  # already armed — its rules came from the pass above
         for rung in rungs[1:]:
@@ -317,7 +321,7 @@ def _ignored(
             found.append(
                 (
                     f"[[inject]] {key}",
-                    [f"{e.get('axis', '?')} = {e[key]}" for e in rows],
+                    [f"{e.get('switch', '?')} = {e[key]}" for e in rows],
                     IGNORED_KEYS[f"inject.{key}"],
                     inject_origin,
                 )
@@ -376,6 +380,10 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
         recommended=recommended,
         recommend_origin=_origin(shared, local, "proxy", "recommend"),
         ignored=_ignored(cfg, shared, local),
+        renamed=[
+            (old, new, LOCAL if in_local else SHARED)
+            for old, new, in_local in config.renamed_keys(shared, local)
+        ],
         vscode_origin=_origin(shared, local, "vscode") if config.vscode_enabled() else None,
         wall=config.machine_wall(),
         host_wall=config.machine_host_wall(),
@@ -474,7 +482,7 @@ def render(exp: Exposure) -> list[str]:
             "off (workspace"
         )
         out.append(
-            "    settings can re-arm it); the box unsets + reaps either way; the wall fences "
+            "    settings can re-arm it); the box unsets + reaps either way; the allowlist fences "
             "CONNECT to :443."
         )
         out.append("    `fy verify` in the box reports what is left, incl. a re-armed workspace.")
@@ -490,11 +498,17 @@ def render(exp: Exposure) -> list[str]:
             out.append(f"      {fix}")
         out.append("")
 
-    out.append(f"  Not counted — runs in the yard, not on the host: {' · '.join(BOX_SCOPED)}")
+    if exp.renamed:
+        out.append("  ⚠ renamed keys — still honoured under the old name; rename them")
+        for old, new, origin in exp.renamed:
+            out.append(f"    {old} → {new}{_shared_note(origin)}")
+        out.append("")
+
+    out.append(f"  Not counted — runs in the VM, not on your computer: {' · '.join(BOX_SCOPED)}")
     wall = (
-        f"wall ON ({exp.backend}{', host-enforced too' if exp.host_wall else ''})"
+        f"VM firewall ON ({exp.backend}{', host firewall too' if exp.host_wall else ''})"
         if exp.wall
-        else f"wall OFF ({exp.backend}) — proxy routing is cooperative"
+        else f"VM firewall OFF ({exp.backend}) — proxy routing is cooperative"
     )
     allowlist = "allowlist ENFORCING" if exp.enforcing else "allowlist observing only"
     out.append(f"  Context: egress {wall} · {allowlist}.")

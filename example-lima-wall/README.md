@@ -6,7 +6,7 @@ demonstrates the single caveat they introduce.
 
 ```
 example-lima-wall/
-├── foldyard.toml     # backend=lima · [machine].wall · [proxy] default_deny · [claude] keyless
+├── foldyard.toml     # backend=lima · [machine] firewall · [proxy] enforce · [claude] keyless
 ├── compose.yml       # api + worker (worker shows the no_proxy caveat)
 ├── box.Dockerfile    # same minimal box image as ../example
 └── test_network.sh   # HOST-RUN test + diagnostics harness (run after `fy up`)
@@ -17,8 +17,8 @@ example-lima-wall/
 | layer | config | effect |
 |-------|--------|--------|
 | concurrent VM | `backend = "lima"` | a per-project Lima VM (not the one podman machine) |
-| **fail-closed egress** | `[machine].wall = true` | nftables default-deny in the VM; the Mac proxy is the ONLY way out |
-| enforced allowlist | `[proxy] default_deny = true` | non-allowlisted hosts are refused (403) at the proxy |
+| **fail-closed egress** | `[machine] firewall = true` | nftables default-deny in the VM; the Mac proxy is the ONLY way out |
+| enforced allowlist | `[proxy] enforce = true` | non-allowlisted hosts are refused (403) at the proxy |
 | shared allowlist | `[proxy] recommend` | the repo ASKS; the first `fy up` offers each host, you answer (`fy allow sync --yes` to take them all) — grants stay in the host-side store |
 | keyless auth | `[claude] keyless = "oauth"` | the real token is injected at the Mac proxy, never in the box |
 
@@ -73,7 +73,7 @@ service shows it. Delete that line and re-run `test_network.sh` to watch check *
 
 ## Turning the wall off
 
-Comment out `wall = true` in `foldyard.toml` and `fy up` again — the wall is removed from the VM
+Comment out `firewall = true` in `foldyard.toml` and `fy up` again — the wall is removed from the VM
 on the next start (it reconciles to the config). Egress then falls back to cooperative routing
 (the box still uses the proxy via its env, but nothing enforces it), exactly like the podman
 backend. There's no separate command: toggling the wall *is* editing the toml.

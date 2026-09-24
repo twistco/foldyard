@@ -103,7 +103,7 @@ def _enter_box(monkeypatch, tmp_path):
     monkeypatch.setattr(proxy, "BOX_CA", tmp_path / "no-ca.pem")
     # The wall section is a different subject with its own tests below, and it needs a live proxy
     # + network. Left unpinned it resolves the REPO's OWN foldyard.toml — so this repo declaring
-    # `[machine] wall = true` silently bolted a failing check onto every test here: green locally,
+    # `[machine] firewall = true` silently bolted a failing check onto every test here: green locally,
     # where a dev box exports HTTPS_PROXY ambiently, red in CI where nothing does. The `== 1` tests
     # kept passing throughout, on the wall's failure rather than their own subject's.
     monkeypatch.setattr(verify.config, "machine_wall", lambda: False)

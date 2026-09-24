@@ -46,7 +46,7 @@
 
   <!-- header -->
   <text class="title" x="160" y="160">Foldyard Isolation Layers</text>
-  <text class="tagline" x="160" y="191">The same yard, hardened one ring at a time — each step is one line in foldyard.toml, and the credentials never move.</text>
+  <text class="tagline" x="160" y="191">The same VM, hardened one ring at a time — each step is one line in foldyard.toml, and the credentials never move.</text>
 
   <!-- THE CONTAINMENT STACK — what an escape from the box has to get through -->
   <rect class="fence" x="140" y="228" width="1040" height="496" rx="16"/>
@@ -65,7 +65,7 @@
   <text class="ring" x="186" y="417">
     <tspan x="186">rootless podman, one engine socket</tspan>
     <tspan x="186" dy="14">mounts only repo + worktrees root</tspan>
-    <tspan x="186" dy="14">no wall — egress is the dial below</tspan>
+    <tspan x="186" dy="14">no firewall — egress is the dial below</tspan>
   </text>
   <rect class="box" x="202" y="468" width="151" height="62" rx="8"/>
   <text class="box-h" x="214" y="488">dev box</text>
@@ -82,11 +82,11 @@
     <tspan x="160" dy="15">install beyond podman. An escape lands</tspan>
     <tspan x="160" dy="15">in a throwaway VM, not on your machine.</tspan>
     <tspan x="160" dy="15">What it lacks: a VM per project, and any</tspan>
-    <tspan x="160" dy="15">wall — traffic that skips the proxy leaves.</tspan>
+    <tspan x="160" dy="15">firewall — traffic that skips the proxy leaves.</tspan>
   </text>
   <!-- step 2: Lima, walled -->
-  <text class="card-h" x="415" y="293">2 · Lima, walled</text>
-  <text class="mono" x="415" y="311">[machine] backend = "lima", wall = true</text>
+  <text class="card-h" x="415" y="293">2 · Lima + VM firewall</text>
+  <text class="mono" x="415" y="311">[machine] backend = "lima", firewall = true</text>
   <text class="tag" x="415" y="327">MACOS · LINUX</text>
   <rect class="host" x="415" y="340" width="235" height="250" rx="12"/>
   <text class="ring-h" x="427" y="357">HOST</text>
@@ -95,9 +95,9 @@
   <text class="ring-h-vm" x="441" y="385">MACHINE VM</text>
   <text class="ring" x="441" y="399">one VM per project, side by side</text>
   <text class="ring" x="441" y="417">
-    <tspan x="441">hypervisor pinned: vz (Mac) · qemu</tspan>
+    <tspan x="441">hypervisor pinned: vz (macOS) · qemu</tspan>
     <tspan x="441" dy="14">mounts only repo + worktrees root</tspan>
-    <tspan x="441" dy="14">wall: nftables, installed at boot</tspan>
+    <tspan x="441" dy="14">firewall: nftables, installed at boot</tspan>
   </text>
   <rect class="box" x="457" y="468" width="151" height="62" rx="8"/>
   <text class="box-h" x="469" y="488">dev box</text>
@@ -109,9 +109,9 @@
   <text class="pill-t" x="532" y="560">engine socket ▶ the box</text>
   <text class="body" x="415" y="610">
     <tspan x="415">Today's default. The hypervisor is a pinned</tspan>
-    <tspan x="415" dy="15">decision (a Mac runs neither QEMU nor</tspan>
+    <tspan x="415" dy="15">decision (macOS runs neither QEMU nor</tspan>
     <tspan x="415" dy="15">KVM), and root in the guest is boot-time</tspan>
-    <tspan x="415" dy="15">only: the wall goes in at boot and nothing</tspan>
+    <tspan x="415" dy="15">only: the firewall goes in at boot; nothing</tspan>
     <tspan x="415" dy="15">the box can reach can flush it. Traffic that</tspan>
     <tspan x="415" dy="15">ignores the proxy is refused, not silently</tspan>
     <tspan x="415" dy="15">allowed; verify checks both directions.</tspan>
@@ -146,13 +146,13 @@
     <tspan x="670" dy="15">gVisor's userspace kernel: an exploit has to</tspan>
     <tspan x="670" dy="15">beat the Sentry before it reaches the kernel</tspan>
     <tspan x="670" dy="15">that holds the socket, stack and mount.</tspan>
-    <tspan x="670" dy="15">A machine posture, not a box knob — the</tspan>
+    <tspan x="670" dy="15">A VM setting, not a box knob — the</tspan>
     <tspan x="670" dy="15">socket the box holds strips the runtime</tspan>
-    <tspan x="670" dy="15">opt-out — the yard cannot leave it.</tspan>
+    <tspan x="670" dy="15">opt-out — the box cannot leave it.</tspan>
   </text>
   <!-- step 4: + host wall -->
-  <text class="card-h" x="925" y="293">4 · + host wall</text>
-  <text class="mono" x="925" y="311">[machine] host_wall = true</text>
+  <text class="card-h" x="925" y="293">4 · + host firewall</text>
+  <text class="mono" x="925" y="311">[machine] host_firewall = true</text>
   <text class="tag" x="925" y="327">LINUX ONLY</text>
   <rect class="host-wall" x="925" y="340" width="235" height="250" rx="12"/>
   <text class="ring-h" x="937" y="357">HOST</text>
@@ -176,56 +176,56 @@
   <rect class="pill-n" x="967" y="546" width="151" height="20" rx="10"/>
   <text class="pill-t" x="1042" y="560">narrowed socket ▶ the box</text>
   <text class="body" x="925" y="610">
-    <tspan x="925">The wall again, where the guest has no</tspan>
+    <tspan x="925">The firewall again, where the guest has no</tspan>
     <tspan x="925" dy="15">reach: the host matches the VM's cgroup</tspan>
-    <tspan x="925" dy="15">scope, allows only the proxy band, and</tspan>
+    <tspan x="925" dy="15">scope, allows only the proxy ports, and</tspan>
     <tspan x="925" dy="15">refuses a VM found outside its scope. A</tspan>
     <tspan x="925" dy="15">guest-kernel exploit that flushes the VM's</tspan>
-    <tspan x="925" dy="15">wall still leaves through a host that says</tspan>
+    <tspan x="925" dy="15">firewall still leaves through a host that says</tspan>
     <tspan x="925" dy="15">no. macOS can't: the VM's net runs as you.</tspan>
   </text>
 
   <!-- THE WAY OUT — one dial, four positions -->
   <rect class="strip" x="140" y="748" width="1040" height="250" rx="16"/>
   <text class="band" x="160" y="779">THE WAY OUT</text>
-  <text class="band-sub" x="266" y="779">egress from the yard — one dial, four positions; grants of every level live in the host store, never in the repo</text>
-  <text class="flow" x="660" y="808">the box ▶ in-VM wall ▶ host wall ▶ <tspan class="flow-b">egress proxy — the token is injected here</tspan> ▶ upstream API</text>
+  <text class="band-sub" x="266" y="779">egress from the VM — one dial, four positions; grants of every level live on your computer, never in the repo</text>
+  <text class="flow" x="660" y="808">the box ▶ VM firewall ▶ host firewall ▶ <tspan class="flow-b">egress proxy — the token is injected here</tspan> ▶ upstream API</text>
   <rect class="card" x="160" y="828" width="235" height="150" rx="12"/>
   <text class="card-h" x="178" y="855">Open</text>
   <text class="mono" x="178" y="872">[proxy] absent</text>
   <text class="body" x="178" y="894">
     <tspan x="178">A clean box: no proxy env, no CA</tspan>
     <tspan x="178" dy="15">mounted. Egress is direct, unlogged,</tspan>
-    <tspan x="178" dy="15">and no wall is possible: the wall</tspan>
+    <tspan x="178" dy="15">and no firewall is possible: it</tspan>
     <tspan x="178" dy="15">needs a proxy to be the only way out.</tspan>
     <tspan x="178" dy="15">For a stack that never talks out, or</tspan>
     <tspan x="178" dy="15">one you trust entirely.</tspan>
   </text>
   <rect class="card" x="415" y="828" width="235" height="150" rx="12"/>
   <text class="card-h" x="433" y="855">Observe</text>
-  <text class="mono" x="433" y="872">[proxy] · default_deny = false</text>
+  <text class="mono" x="433" y="872">[proxy] · enforce = false</text>
   <text class="body" x="433" y="894">
     <tspan x="433">Everything leaves through the host-</tspan>
     <tspan x="433" dy="15">side proxy: decrypted and logged,</tspan>
     <tspan x="433" dy="15">passthrough hosts tunnelled as-is.</tspan>
     <tspan x="433" dy="15">Nothing is blocked; the network log</tspan>
-    <tspan x="433" dy="15">shows what the yard reaches for. The</tspan>
+    <tspan x="433" dy="15">shows what the box reaches for. The</tspan>
     <tspan x="433" dy="15">token is already injected here.</tspan>
   </text>
   <rect class="card" x="670" y="828" width="235" height="150" rx="12"/>
   <text class="card-h" x="688" y="855">Enforce</text>
-  <text class="mono" x="688" y="872">default_deny = true</text>
+  <text class="mono" x="688" y="872">enforce = true</text>
   <text class="body" x="688" y="894">
     <tspan x="688">A host that isn't granted gets 403</tspan>
     <tspan x="688" dy="15">at CONNECT. Grants (once · session ·</tspan>
     <tspan x="688" dy="15">permanent) live in the host-side</tspan>
     <tspan x="688" dy="15">allow-store — never in foldyard.toml,</tspan>
-    <tspan x="688" dy="15">which the yard can write. A repo may</tspan>
-    <tspan x="688" dy="15">recommend; the operator says yes.</tspan>
+    <tspan x="688" dy="15">which the box can write. A repo may</tspan>
+    <tspan x="688" dy="15">recommend; you say yes.</tspan>
   </text>
   <rect class="card" x="925" y="828" width="235" height="150" rx="12"/>
   <text class="card-h" x="943" y="855">Fail-closed</text>
-  <text class="mono" x="943" y="872">[machine] wall = true, host_wall</text>
+  <text class="mono" x="943" y="872">[machine] firewall, host_firewall</text>
   <text class="body" x="943" y="894">
     <tspan x="943">Steps 2–4 above: traffic that</tspan>
     <tspan x="943" dy="15">ignores the proxy env is refused by</tspan>
@@ -239,13 +239,13 @@
   <rect class="panel" x="1210" y="228" width="210" height="770" rx="12"/>
   <text class="col-h" x="1228" y="258">What never moves</text>
   <text class="idea-h" x="1228" y="290">
-    <tspan x="1228">1 · The moat</tspan>
+    <tspan x="1228">1 · The credentials</tspan>
   </text>
   <text class="idea" x="1228" y="312">
     <tspan x="1228">Whichever ring you pick, the</tspan>
     <tspan x="1228" dy="15">token is injected at the proxy</tspan>
     <tspan x="1228" dy="15">edge, on your machine. A VM-</tspan>
-    <tspan x="1228" dy="15">root escape can flush a wall;</tspan>
+    <tspan x="1228" dy="15">root escape can flush a firewall;</tspan>
     <tspan x="1228" dy="15">it steals no credential.</tspan>
   </text>
   <text class="idea-h" x="1228" y="402">
@@ -268,17 +268,17 @@
   </text>
   <text class="idea" x="1228" y="615">
     <tspan x="1228">PID 1's mount table, the</tspan>
-    <tspan x="1228" dy="15">escape battery, the wall in</tspan>
+    <tspan x="1228" dy="15">escape battery, the firewall in</tspan>
     <tspan x="1228" dy="15">both directions — and under</tspan>
     <tspan x="1228" dy="15">gVisor, the kernel the box</tspan>
     <tspan x="1228" dy="15">actually runs on.</tspan>
   </text>
   <line class="rule" x1="1228" y1="693" x2="1402" y2="693"/>
   <text class="idea" x="1228" y="717">
-    <tspan x="1228">Cost, measured on a Mac: gVisor</tspan>
+    <tspan x="1228">Cost, measured on macOS: gVisor</tspan>
     <tspan x="1228" dy="15">is ~1.2× on a test suite and</tspan>
     <tspan x="1228" dy="15">2–4× on sub-second git and lint</tspan>
-    <tspan x="1228" dy="15">calls; the walls cost nothing at</tspan>
+    <tspan x="1228" dy="15">calls; the firewalls cost nothing at</tspan>
     <tspan x="1228" dy="15">runtime.</tspan>
   </text>
   <line class="rule" x1="1228" y1="795" x2="1402" y2="795"/>
@@ -288,10 +288,10 @@
   <text class="idea-mono" x="1228" y="839">
     <tspan x="1228">[machine]</tspan>
     <tspan x="1228" dy="14">backend   = "lima"</tspan>
-    <tspan x="1228" dy="14">wall      = true</tspan>
-    <tspan x="1228" dy="14">host_wall = true   # Linux</tspan>
+    <tspan x="1228" dy="14">firewall  = true</tspan>
+    <tspan x="1228" dy="14">host_firewall = true   # Linux</tspan>
     <tspan x="1228" dy="14">runtime   = "gvisor"</tspan>
     <tspan x="1228" dy="14">[proxy]</tspan>
-    <tspan x="1228" dy="14">default_deny = true</tspan>
+    <tspan x="1228" dy="14">enforce = true</tspan>
   </text>
 </svg>

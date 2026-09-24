@@ -1,14 +1,19 @@
 """foldyard plugin framework — the spine that turns the hardcoded gcp/github credential
-machinery into pluggable axes (ADR-0015).
+machinery into pluggable mode switches (ADR-0015).
+
+Vocabulary: the **mode** is the set of every switch's current level (`fy mode gcp=logs`). A
+**switch** (:class:`Switch`) is one credential mechanism's setting — ``gcp``, ``github``,
+``claude`` — and its **levels** run from the zero-secret default (``off``) up to emergency
+(``user``). Older code and docs call these "axes" and "rungs", and the whole mode a "posture".
 
 A plugin contributes, for its credential mechanism:
-  - one or more mode **axes** (name, rungs, per-rung blurb, the daemon its status maps to,
-    which rungs are emergency/TTL-bound),
-  - the host **daemons** a given posture demands (the supervisor reconciles to them),
-  - the recipe **env** the posture derives (emitted as ``${K:-v}`` defaults),
+  - one or more **switches** (name, levels, per-level blurb, the daemon its status maps to,
+    which levels are emergency/TTL-bound),
+  - the host **daemons** a given mode demands (the supervisor reconciles to them),
+  - the recipe **env** the mode derives (emitted as ``${K:-v}`` defaults),
   - **doctor** checks ("what can this machine grant?", shallow + deep IAM probes),
-  - **verify** assertions (mode-aware posture for its mechanism),
-  - **box** env+mounts (``box_args`` — what the posture bakes into the dev box),
+  - **verify** assertions (mode-aware mode for its mechanism),
+  - **box** env+mounts (``box_args`` — what the mode bakes into the dev box),
   - **TUI** panels (``tui_panels`` — a data-only tab the TUI renders, e.g. the Network Log),
   - egress-proxy **injection rules** (``proxy_rules`` — header rewrites the shared mitm proxy
     applies; the built-in ``proxy`` plugin aggregates them and owns the proxy/log/panel).
@@ -41,33 +46,33 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 @dataclass(frozen=True)
 class Requires:
-    """One DECLARATIVE cross-axis requirement: while the owning axis sits at a rung in
-    ``when``, ``axis`` must sit at a rung in ``accepts`` — else ``Registry.mode_issues``
+    """One DECLARATIVE cross-switch requirement: while the owning switch sits at a level in
+    ``when``, ``switch`` must sit at a level in ``accepts`` — else ``Registry.mode_issues``
     emits a ``severity`` row whose synthesized message carries the full atomic fix
-    (``fy mode <axis>=<accepts[0]> <owner>=<value>``).
+    (``fy mode <switch>=<accepts[0]> <owner>=<value>``).
 
     This is the data form of the hand-coded cross-plugin ``mode_issues`` guards (llm→gcp,
     storage→gcp, fakedep→fakecred all had this exact shape): the dependency lives on the
-    axis that HAS it, referencing the other axis by NAME only — no plugin's code reads
-    another plugin's posture — and one evaluator (property-tested over generated constraint
+    switch that HAS it, referencing the other switch by NAME only — no plugin's code reads
+    another plugin's mode — and one evaluator (property-tested over generated constraint
     graphs in tests/test_properties.py) replaces N hand-rolled guards. Uniform semantics the
-    guards used to re-derive individually: an ABSENT required axis (not loaded under this
+    guards used to re-derive individually: an ABSENT required switch (not loaded under this
     consumer's config) satisfies nothing, so the requirement still fires; and ``accepts``
-    lists every satisfying rung, so a superset rung (gcp=user ⊇ sa) is declared once instead
+    lists every satisfying level, so a superset level (gcp=user ⊇ sa) is declared once instead
     of remembered per guard. Combination WARNINGS with the opposite absence semantics (warn
-    only when the other axis IS at a specific rung — auth0×storage) stay on the
+    only when the other switch IS at a specific level — auth0×storage) stay on the
     ``mode_issues`` hook.
 
     Rows come from TWO tiers, merged at Registry construction: the owning plugin's
-    ``Axis.requires`` for INTRINSIC couplings (fakedep→fakecred — true wherever the plugin
+    ``Switch.requires`` for INTRINSIC couplings (fakedep→fakecred — true wherever the plugin
     runs), and the consumer's ``[[require]]`` table in ``foldyard.toml`` for WIRING-dependent
     ones (llm→gcp holds only because Tangible's overlays route LLM traffic through Vertex/ADC;
-    another consumer's llm rungs might need an ``[[inject]]`` credential axis instead — an axis
+    another consumer's llm levels might need an ``[[inject]]`` credential switch instead — an switch
     no plugin file could name). See ``config.requires_declared``."""
 
-    when: tuple[str, ...]  # owning-axis rungs that activate the requirement
-    axis: str  # the required axis, by name (may be another plugin's, or absent entirely)
-    accepts: tuple[str, ...]  # rungs of ``axis`` that satisfy it; FIRST is the suggested fix
+    when: tuple[str, ...]  # owning-switch levels that activate the requirement
+    switch: str  # the required switch, by name (may be another plugin's, or absent entirely)
+    accepts: tuple[str, ...]  # levels of ``switch`` that satisfy it; FIRST is the suggested fix
     severity: str = "error"  # "error" (set_mode refuses) | "warn" (printed, still applied)
     reason: str = ""  # human name for what's needed, e.g. "the runtime-SA identity"
     message: str = ""  # full custom message — overrides synthesis entirely
@@ -76,62 +81,64 @@ class Requires:
         """The issue message for ``owner=value`` violating this requirement."""
         if self.message:
             return self.message
-        need = self.reason or f"{self.axis}={'/'.join(self.accepts) or '<no rung>'}"
-        fix = f": `fy mode {self.axis}={self.accepts[0]} {owner}={value}`" if self.accepts else ""
+        need = self.reason or f"{self.switch}={'/'.join(self.accepts) or '<no level>'}"
+        fix = f": `fy mode {self.switch}={self.accepts[0]} {owner}={value}`" if self.accepts else ""
         return f"{owner}={value} needs {need}{fix} (or drop back to {owner}={owner_default})"
 
 
 @dataclass(frozen=True)
-class Axis:
-    """A posture dimension from its zero-secret DEFAULT (rung 0) to emergency. Rung 0 is the
-    axis's resting state — what an unset/expired/unknown value reads as. Credential ladders
-    name it ``off`` by convention; a swap-style axis whose resting state isn't an on/off
-    toggle names it for what it IS (``storage``'s ``local``, ``auth0``'s ``real``). ``blurb``
-    must cover every rung; ``emergency`` rungs carry a TTL and auto-revert to the default
-    (the supervisor's structural guarantee); ``requires`` declares the rungs' cross-axis
-    coherence requirements as data (see :class:`Requires`)."""
+class Switch:
+    """One mode switch: a credential mechanism's settings, from its zero-secret DEFAULT (level 0)
+    up to emergency. Level 0 is the switch's resting state — what an unset/expired/unknown value
+    reads as. Credential switches name it ``off`` by convention; a swap-style switch whose
+    resting state isn't an on/off toggle names it for what it IS (``storage``'s ``local``,
+    ``auth0``'s ``real``). ``blurb`` must cover every level; ``emergency`` levels carry a TTL and
+    auto-revert to the default (the supervisor's structural guarantee); ``requires`` declares the
+    levels' cross-switch coherence requirements as data (see :class:`Requires`)."""
 
     name: str  # e.g. "gcp"
-    rungs: tuple[str, ...]  # ("off", "logs", "sa", "user") — rungs[0] is the default
-    blurb: dict[str, str]  # rung -> one-line human description
-    daemon: str | None = None  # the daemon name this axis's status maps to (show/TUI)
-    emergency: tuple[str, ...] = ()  # rungs that carry a TTL + auto-revert (e.g. ("user",))
-    requires: tuple[Requires, ...] = ()  # declarative cross-axis requirements (see Requires)
+    levels: tuple[str, ...]  # ("off", "logs", "sa", "user") — levels[0] is the default
+    blurb: dict[str, str]  # level -> one-line human description
+    daemon: str | None = None  # the daemon name this switch's status maps to (show/TUI)
+    emergency: tuple[str, ...] = ()  # levels that carry a TTL + auto-revert (e.g. ("user",))
+    requires: tuple[Requires, ...] = ()  # declarative cross-switch requirements (see Requires)
 
     def __post_init__(self) -> None:
-        if not self.rungs:
-            raise ValueError(f"axis {self.name!r}: rungs must be non-empty")
-        if set(self.blurb) != set(self.rungs):
-            raise ValueError(f"axis {self.name!r}: blurb must cover exactly its rungs {self.rungs}")
-        if not set(self.emergency) <= set(self.rungs):
+        if not self.levels:
+            raise ValueError(f"switch {self.name!r}: levels must be non-empty")
+        if set(self.blurb) != set(self.levels):
             raise ValueError(
-                f"axis {self.name!r}: emergency rungs {self.emergency} not all in rungs"
+                f"switch {self.name!r}: blurb must cover exactly its levels {self.levels}"
+            )
+        if not set(self.emergency) <= set(self.levels):
+            raise ValueError(
+                f"switch {self.name!r}: emergency levels {self.emergency} not all in levels"
             )
         if self.default in self.emergency:
             raise ValueError(
-                f"axis {self.name!r}: the default rung {self.default!r} cannot be emergency "
+                f"switch {self.name!r}: the default level {self.default!r} cannot be emergency "
                 "(expiry reverts TO the default)"
             )
         for req in self.requires:
-            # Only the OWNING side is validated here (the required axis may be absent under
+            # Only the OWNING side is validated here (the required switch may be absent under
             # this consumer's config — that's the "absent satisfies nothing" semantics, not
-            # an error). Loud ValueError like the axis checks: a broken declaration fails in
+            # an error). Loud ValueError like the other checks: a broken declaration fails in
             # development, not as a requirement that silently never fires.
             if req.severity not in ("error", "warn"):
                 raise ValueError(
-                    f"axis {self.name!r}: requires severity {req.severity!r} "
+                    f"switch {self.name!r}: requires severity {req.severity!r} "
                     "must be 'error' or 'warn'"
                 )
-            if not req.when or not set(req.when) <= set(self.rungs):
+            if not req.when or not set(req.when) <= set(self.levels):
                 raise ValueError(
-                    f"axis {self.name!r}: requires.when {req.when} must be a non-empty "
-                    f"subset of its rungs {self.rungs}"
+                    f"switch {self.name!r}: requires.when {req.when} must be a non-empty "
+                    f"subset of its levels {self.levels}"
                 )
 
     @property
     def default(self) -> str:
-        """The zero-secret resting rung — what unset/invalid/expired values read as."""
-        return self.rungs[0]
+        """The zero-secret resting level — what unset/invalid/expired values read as."""
+        return self.levels[0]
 
 
 @dataclass
@@ -145,8 +152,8 @@ class DoctorContext:
     run: Callable[..., tuple[int, str]]  # devmode._run(cmd, timeout=…) -> (rc, output)
     which: Callable[[str], bool]  # devmode._which
     result: Callable[..., tuple[str, str, str]]  # devmode._result(ok, name, good, bad)
-    probe: Callable[[int], bool]  # devmode.probe(port) — TCP liveness (box→host.containers vs Mac)
-    # The posture the state file resolves to right now (devmode.read()["mode"]) — the same mode
+    probe: Callable[[int], bool]  # devmode.probe(port) — TCP liveness (box→host.containers vs host)
+    # The mode the state file resolves to right now (devmode.read()["mode"]) — the same mode
     # the supervisor reconciles daemons from, so a plugin's host-side rows can be gated the way
     # its daemons are (the proxy's listener row is only a finding when the listener is desired).
     mode: dict = field(default_factory=dict)
@@ -157,7 +164,7 @@ class VerifyContext:
     """What a plugin's verify assertions need, passed in (not imported) so the plugin never
     imports verify. ``env`` is the resolved stack env (carries ``FOLDYARD_CHECKOUT`` etc.);
     ``which`` returns True when a command is on PATH. Plugins contribute MECHANISM-specific
-    posture checks only — the credential-AGNOSTIC backstops (no ssh keys, no netrc, git push
+    mode checks only — the credential-AGNOSTIC backstops (no ssh keys, no netrc, git push
     refused) stay in core's verify and must never depend on a plugin being present."""
 
     in_box: bool
@@ -230,7 +237,7 @@ class InjectRule:
     mechanism's credential (under always-route a proxy that won't start connection-refuses every box
     request). ``env`` is the separate, usually larger set of names this rule's minter may READ: the
     addon runs each minter with a small base env plus these, rather than inheriting the supervisor's
-    environment, which carries every axis's secret from ``host.env``.
+    environment, which carries every switch's secret from ``host.env``.
     ``label`` names the proxy in daemon status. Many rules coexist: the proxy serializes them into
     the rule set of ``egress_proxy.py``'s live file (one proxy, N hosts, each its own minter +
     cache — so github + claude + codex + any ``[[inject]]`` can all be live at once)."""
@@ -251,19 +258,19 @@ class InjectRule:
 
 @dataclass(frozen=True)
 class Secret:
-    """One host-side secret a posture needs present before its minter can work — the DECLARATIVE
+    """One host-side secret a mode needs present before its minter can work — the DECLARATIVE
     replacement for "the consumer ships a script that fetches it from somewhere".
 
     Foldyard's business is PRESENCE, not provenance: it checks whether ``var`` is in
-    ``~/.foldyard/<project>/host.env`` (a doctor row) and, on a Mac TTY, prompts once for a paste
+    ``~/.foldyard/<project>/host.env`` (a doctor row) and, on a host TTY, prompts once for a paste
     (:func:`foldyard.keyless.ensure_secret`). ``how`` is the one-line "where do I get this?" hint
     echoed at that prompt — e.g. a ``gcloud secrets versions access …`` command, a 1Password item,
     a URL. It is **PRINTED, NEVER EXECUTED**: running a consumer-declared command string host-side
-    would rebuild exactly the repo-code-runs-on-the-Mac hole that moving the minters in-package
+    would rebuild exactly the repo-code-runs-on-the-host hole that moving the minters in-package
     closed (ADR-0023). A vault-fetching ``source`` may arrive later
     as a fixed set of package-implemented kinds — never as a command.
 
-    Contributed by a plugin for its ACTIVE rungs (``Plugin.secrets``) and/or declared by the
+    Contributed by a plugin for its ACTIVE levels (``Plugin.secrets``) and/or declared by the
     consumer as ``[[secret]]`` (``config.secret_specs``); the config tier wins on ``var`` so a
     consumer can retarget the hint without touching plugin code."""
 
@@ -279,12 +286,12 @@ class Secret:
 
 @dataclass(frozen=True)
 class CapabilityProbe:
-    """A liveness check for the EXTERNAL capability a posture rung promises (mode-state
-    consolidation proposal B). A mode is a desired posture, not a capability — the PAM grant
+    """A liveness check for the EXTERNAL capability a mode level promises (mode-state
+    consolidation proposal B). A mode is a desired mode, not a capability — the PAM grant
     behind ``gcp=sa``, the operator's ADC, a keyless token can all lapse while every dashboard
-    shows green. A plugin that knows its rung's capability chain contributes a probe; the
+    shows green. A plugin that knows its level's capability chain contributes a probe; the
     supervisor runs due probes each tick and publishes results to ``state_dir/capabilities.json``
-    + each up worktree's mirror, so ``fy mode``/``fy state`` (host and box) render the axis
+    + each up worktree's mirror, so ``fy mode``/``fy state`` (host and box) render the switch
     DEGRADED with the fix instead of silently 401ing. Observation only — a probe never grants,
     blocks, or writes mode state, so the security model is untouched.
 
@@ -293,15 +300,15 @@ class CapabilityProbe:
     It may be slow (a gcloud call); it runs on the supervisor tick, which re-stamps its liveness
     heartbeat before each due probe — so the budget is PER PROBE, not per tick: implement your
     own timeout well under ``HEARTBEAT_STALE_SECONDS`` (30s) and rely on ``interval`` to keep it
-    cheap. The supervisor also reacts to the axis's MERGED verdict flipping: a lapse posts a
-    macOS notification, a heal notifies and restarts the consumer's
+    cheap. The supervisor also reacts to the switch's MERGED verdict flipping: a lapse posts a
+    desktop notification (macOS only today), a heal notifies and restarts the consumer's
     ``[resnapshot_on_capability]`` services (boot-snapshotted credentials re-fetch only by
     rebooting)."""
 
-    axis: str  # the axis whose active rung this capability backs
+    switch: str  # the switch whose active level this capability backs
     name: str  # unique probe name (also the log/reap key), e.g. "gcp-impersonation"
     check: Callable[[], tuple[bool, str]]  # () -> (ok, human detail); NEVER returns a secret
-    interval: float = 120.0  # seconds between runs while the axis is active
+    interval: float = 120.0  # seconds between runs while the switch is on
 
 
 @dataclass(frozen=True)
@@ -321,7 +328,7 @@ class DoctorFix:
 
 class Plugin:
     """Base class — override the hooks a plugin needs; the rest stay no-ops. A plugin
-    sees the FULL mode dict and contributes only what its own axes imply."""
+    sees the FULL mode dict and contributes only what its own switches imply."""
 
     name: str = ""
     # Back-reference to the owning Registry, set in Registry.__init__. Lets a plugin that
@@ -329,19 +336,19 @@ class Plugin:
     # the right registry — the one it's in (test-local or the global), not always the global.
     _registry: Registry | None = None
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         return []
 
     def daemons(self, mode: dict) -> dict[str, dict]:
-        """name -> daemon spec ``{label, port, cmd, env, requires}`` the posture demands."""
+        """name -> daemon spec ``{label, port, cmd, env, requires}`` the mode demands."""
         return {}
 
     def derive_env(self, mode: dict) -> dict[str, str]:
-        """Recipe env the posture implies (merged as ``${K:-v}`` defaults; explicit env wins)."""
+        """Recipe env the mode implies (merged as ``${K:-v}`` defaults; explicit env wins)."""
         return {}
 
     def env_defaults(self, mode: dict) -> dict[str, str]:
-        """HOST-process env this posture can derive from committed, non-secret config (e.g. a
+        """HOST-process env this mode can derive from committed, non-secret config (e.g. a
         Pulumi App id, a deterministic SA email) instead of requiring a human to hand-populate
         ``host.env``. The supervisor applies these via ``os.environ.setdefault`` each reconcile
         tick — BEFORE a daemon's ``requires`` gate and its launch env are read — so an ambient
@@ -351,7 +358,7 @@ class Plugin:
         return {}
 
     def compose_overlays(self, mode: dict) -> list[str]:
-        """Extra compose ``-f`` overlay files this posture appends to the stack, in order. Unlike a
+        """Extra compose ``-f`` overlay files this mode appends to the stack, in order. Unlike a
         scalar env var, overlays from every plugin STACK (all are appended), so ``gcp=sa`` +
         ``auth0=sim`` layer both their overrides instead of one clobbering the other. Paths may be
         absolute or checkout-relative; a non-existent file is skipped. Later entries win on
@@ -361,12 +368,12 @@ class Plugin:
     def mode_issues(self, mode: dict) -> Iterable[tuple[str, str]]:
         """Coherence problems in the FULL prospective mode, as ``("error"|"warn", message)``.
 
-        Axes are orthogonal by design, but not every combination functions. PREFER declaring
-        a rung's cross-axis requirement as DATA — :attr:`Axis.requires` for an intrinsic
+        Switches are orthogonal by design, but not every combination functions. PREFER declaring
+        a level's cross-switch requirement as DATA — :attr:`Switch.requires` for an intrinsic
         coupling, the consumer's ``[[require]]`` table for a wiring-dependent one — which the
-        registry evaluates uniformly (synthesized fix message, absent-axis-is-unmet semantics,
+        registry evaluates uniformly (synthesized fix message, absent-switch-is-unmet semantics,
         one property-tested evaluator); this hook remains for coherence logic the data can't
-        express, e.g. a combination WARNING that must stay quiet when the other axis is
+        express, e.g. a combination WARNING that must stay quiet when the other switch is
         absent (auth0×storage). ``"error"`` = the combination cannot work (``fy mode``
         refuses to set it — include the fix in the message, e.g. the full ``fy mode a=x b=y``
         to run); ``"warn"`` = it functions but is probably not what you want (printed, still
@@ -381,25 +388,25 @@ class Plugin:
     def box_doctor_checks(self, ctx: DoctorContext) -> Iterable[tuple[str, str, str]]:
         """Yield ``(status, name, detail)`` rows for `fy doctor` run INSIDE the box.
 
-        Distinct from :meth:`doctor_checks`, which answers the Mac-side question "what can
+        Distinct from :meth:`doctor_checks`, which answers the host-side question "what can
         this machine grant?" — this answers the box-side one, "is what the mode claims
         actually reaching me?". They are not the same question, and the difference is a real
         failure mode: an injection whose host-side mint is failing leaves `fy mode` showing
-        the axis on and the proxy daemon up (both true), while every request from the box
+        the switch on and the proxy daemon up (both true), while every request from the box
         goes out unauthenticated. Prefer an END-TO-END probe of the injected path over
         re-reading state the box was handed.
         """
         return ()
 
     def verify_checks(self, ctx: VerifyContext) -> Iterable[tuple[str, str]]:
-        """Yield ``(status, message)`` posture assertions for this plugin's credential
+        """Yield ``(status, message)`` mode assertions for this plugin's credential
         mechanism: status is ``"pass"`` | ``"fail"`` | ``"info"`` (info is a non-pass/fail
         annotation, e.g. an emergency-mode banner). A ``"fail"`` makes ``foldyard verify``
         exit non-zero. Keep these mechanism-specific — the agnostic backstops live in core."""
         return ()
 
     def box_args(self, env: dict) -> list[str]:
-        """Extra ``<engine> run`` args (``-e``/``-v``/``--label``) this posture bakes into
+        """Extra ``<engine> run`` args (``-e``/``-v``/``--label``) this mode bakes into
         the dev box — e.g. the proxy CA mount + env, the GCE metadata host + SA label. Keys
         off the RESOLVED box env (so an explicit env var wins, like the recipe did). May
         raise ``SystemExit(msg)`` to block box-up on a misconfiguration (e.g. CA missing)."""
@@ -407,15 +414,15 @@ class Plugin:
 
     def no_proxy_hosts(self) -> list[str]:
         """In-stack hostnames this plugin's own containers must reach DIRECTLY, bypassing the
-        egress proxy (they end up in the box's ``NO_PROXY``). The proxy runs on the Mac and can't
+        egress proxy (they end up in the box's ``NO_PROXY``). The proxy runs on the host and can't
         resolve a stack-network hostname, so a proxied call to one 502s — or hangs first.
 
         Only for services the PLUGIN owns (the gcp metadata emulator). Consumer stack services go
         in ``[proxy].no_proxy`` instead; foldyard has no business knowing their names.
 
         Gate on the plugin's CONFIG, not on the mode: ``NO_PROXY`` is baked into the box at create
-        time, so a bypass that appeared only on an active rung would be missing from a box created
-        while that rung was off — and re-baking the box on a mode change is exactly what the
+        time, so a bypass that appeared only on an active level would be missing from a box created
+        while that level was off — and re-baking the box on a mode change is exactly what the
         mode-independent box wiring exists to avoid. Default: none."""
         return []
 
@@ -438,7 +445,7 @@ class Plugin:
         return []
 
     def stage_assets(self, mode: dict, checkout: str, here: str) -> None:
-        """Copy any VM-visible assets this posture's STACK containers need into the checkout, before
+        """Copy any VM-visible assets this mode's STACK containers need into the checkout, before
         ``fy up`` runs ``compose up``. The machine mounts ONLY repo + worktrees root, so a file a
         compose service bind-mounts (e.g. the gcp metadata emulator's ``server.py``, shipped inside
         the package and off the mount) must be staged under the repo first — into the gitignored
@@ -446,13 +453,13 @@ class Plugin:
         disabled feature stages nothing. Default: none."""
         return None
 
-    def posture_services(self, mode: dict) -> dict[str, bool]:
-        """Posture-critical compose services: service name → should it be RUNNING under ``mode``.
-        Declare ONLY tiny, stateless, image-only containers a rung is ENFORCED by (the gcp
-        metadata emulator) — never app/stack services. The stack posture reconcile converges
+    def mode_services(self, mode: dict) -> dict[str, bool]:
+        """Mode-critical compose services: service name → should it be RUNNING under ``mode``.
+        Declare ONLY tiny, stateless, image-only containers a level is ENFORCED by (the gcp
+        metadata emulator) — never app/stack services. The stack mode reconcile converges
         exactly these when the stack is otherwise down (start the wanted, reap the dropped), so
         a mode change works in a checkout whose stack was never brought up — without this, a
-        declared gcp rung in a fresh worktree read as granted while the box couldn't mint a
+        declared gcp level in a fresh worktree read as granted while the box couldn't mint a
         single token. Gate on the plugin's config so an unconfigured consumer claims nothing.
         Default: none."""
         return {}
@@ -470,7 +477,7 @@ class Plugin:
         return []
 
     def proxy_rules(self, mode: dict) -> list[InjectRule]:
-        """Egress-proxy header-injection rules this plugin's posture implies (ADR-0015).
+        """Egress-proxy header-injection rules this plugin's mode implies (ADR-0015).
         The built-in ``proxy`` plugin aggregates these across all plugins and runs ONE mitmdump
         from them; an injector plugin contributes rules here instead of owning a proxy daemon."""
         return []
@@ -481,48 +488,48 @@ class Plugin:
         return ()
 
     def secrets(self, mode: dict) -> list[Secret]:
-        """Host-side secrets THIS posture needs present in host.env (see :class:`Secret`).
-        Contribute only for ACTIVE rungs (return ``[]`` at your axis's default), like
+        """Host-side secrets THIS mode needs present in host.env (see :class:`Secret`).
+        Contribute only for ACTIVE levels (return ``[]`` at your switch's default), like
         ``proxy_rules``/``capability_probes`` — an inactive mechanism must not prompt for a
         credential nobody asked for."""
         return []
 
     def capability_probes(self, mode: dict) -> list[CapabilityProbe]:
-        """Continuous "does the capability this posture promises actually work right now?"
-        checks (see :class:`CapabilityProbe`). Contribute probes only for ACTIVE rungs (return
-        ``[]`` when your axis is at its default) — an empty list clears the axis's published
+        """Continuous "does the capability this mode promises actually work right now?"
+        checks (see :class:`CapabilityProbe`). Contribute probes only for ACTIVE levels (return
+        ``[]`` when your switch is at its default) — an empty list clears the switch's published
         capability state. Doctor is the on-demand version of this; a probe is the same check
         run continuously by the supervisor so a lapse (an expired PAM grant, a revoked token)
-        surfaces on the posture dashboards instead of as silent request-time failures."""
+        surfaces on the mode dashboards instead of as silent request-time failures."""
         return []
 
 
 def _declared_requires() -> dict[str, list[Requires]]:
-    """The consumer's ``[[require]]`` rows as :class:`Requires`, keyed by OWNING axis — the
-    config tier of ``Axis.requires`` (see the class docstring). Reads the AMBIENT config, so
-    the caller (``Registry.__init__``) binds the registry's config around it, like the axis
-    snapshot. Malformed entries raise loudly (matching the Axis validation philosophy: a broken
+    """The consumer's ``[[require]]`` rows as :class:`Requires`, keyed by OWNING switch — the
+    config tier of ``Switch.requires`` (see the class docstring). Reads the AMBIENT config, so
+    the caller (``Registry.__init__``) binds the registry's config around it, like the switch
+    snapshot. Malformed entries raise loudly (matching the Switch validation philosophy: a broken
     declaration fails in development, not as a guard that silently never fires); ``when`` /
     ``accepts`` take a scalar or a list, like an ``[[overlay]]`` entry's ``when`` values."""
     from .. import config as config_mod
 
-    def rungs(raw: object) -> tuple[str, ...]:
+    def levels(raw: object) -> tuple[str, ...]:
         vals = raw if isinstance(raw, list) else [] if raw in (None, "") else [raw]
         return tuple(str(v) for v in vals)
 
     out: dict[str, list[Requires]] = {}
     for entry in config_mod.requires_declared():
-        owner, needs = entry.get("axis"), entry.get("needs")
+        owner, needs = entry.get("switch"), entry.get("needs")
         if not (isinstance(owner, str) and owner and isinstance(needs, str) and needs):
             raise ValueError(
-                f"[[require]] entry must name a string `axis` (the owning axis) and `needs` "
-                f"(the required axis): {entry!r}"
+                f"[[require]] entry must name a string `switch` (the owning switch) and `needs` "
+                f"(the required switch): {entry!r}"
             )
         out.setdefault(owner, []).append(
             Requires(
-                when=rungs(entry.get("when")),
-                axis=needs,
-                accepts=rungs(entry.get("accepts")),
+                when=levels(entry.get("when")),
+                switch=needs,
+                accepts=levels(entry.get("accepts")),
                 severity=str(entry.get("severity", "error")),
                 reason=str(entry.get("reason", "")),
                 message=str(entry.get("message", "")),
@@ -535,11 +542,11 @@ class Registry:
     """The merged view of all loaded plugins. The substrate talks only to this.
 
     Built FROM a resolved :class:`~foldyard.config.Config` (registry plan Step B): ``config`` is
-    the consumer/worktree this registry is for. Axes are snapshotted at construction UNDER that
-    config's binding, so each plugin's ``axes()`` self-gating (Step D) sees the right config even
-    in a long-lived process holding several registries. Live hooks (``desired_daemons``,
+    the consumer/worktree this registry is for. Switches are snapshotted at construction UNDER
+    that config's binding, so each plugin's ``switches()`` self-gating (Step D) sees the right
+    config even in a long-lived process holding several registries. Live hooks (``desired_daemons``,
     ``derive_env``, ``box_args``) read the ambient config; the supervisor binds the worktree's
-    config around them (per-worktree posture). ``config`` is None only for bare test registries,
+    config around them (per-worktree mode). ``config`` is None only for bare test registries,
     which resolve ambiently."""
 
     def __init__(self, plugins: list[Plugin], config: Config | None = None):
@@ -547,67 +554,69 @@ class Registry:
 
         self.config = config
         self.plugins = list(plugins)
-        self._axes: dict[str, Axis] = {}
+        self._switches: dict[str, Switch] = {}
         owner: dict[str, str] = {}
-        # Snapshot axes under this registry's config so each plugin's axes() self-gating resolves
-        # against it (no-op binding when config is None — bare test registries stay ambient).
+        # Snapshot switches under this registry's config so each plugin's switches() self-gating
+        # resolves against it (no-op binding when config is None — bare test registries stay
+        # ambient).
         ctx = config_mod.using(config) if config is not None else nullcontext()
         with ctx:
             for plugin in self.plugins:
                 plugin._registry = self  # so aggregating plugins (proxy) read THIS registry's rules
-                for ax in plugin.axes():
-                    if ax.name in self._axes:
+                for ax in plugin.switches():
+                    if ax.name in self._switches:
                         raise ValueError(
-                            f"duplicate mode axis {ax.name!r} "
+                            f"duplicate switch {ax.name!r} "
                             f"(plugins {owner[ax.name]!r} and {plugin.name!r})"
                         )
-                    self._axes[ax.name] = ax
+                    self._switches[ax.name] = ax
                     owner[ax.name] = plugin.name
-            # Fold the consumer's [[require]] rows onto their owning axes (after plugin rows, so
-            # intrinsic requirements evaluate first). `replace` re-runs Axis.__post_init__, so a
-            # config row with a rung outside the owner's or a bad severity fails as loudly as an
-            # in-code one. An owner axis nobody loaded is a config bug (a stale row after its
+            # Fold the consumer's [[require]] rows onto their owning switches (after plugin rows, so
+            # intrinsic requirements evaluate first). `replace` re-runs Switch.__post_init__, so a
+            # config row with a level outside the owner's or a bad severity fails as loudly as an
+            # in-code one. An owner switch nobody loaded is a config bug (a stale row after its
             # plugin table was removed, or a typo) — unlike an overlay `when`, there is no
-            # legitimate reason to constrain an axis you haven't summoned, so it errors rather
+            # legitimate reason to constrain an switch you haven't summoned, so it errors rather
             # than becoming a guard that silently never fires.
             for owning, rows in _declared_requires().items():
-                ax = self._axes.get(owning)
+                ax = self._switches.get(owning)
                 if ax is None:
                     raise ValueError(
-                        f"[[require]] names unknown axis {owning!r} "
-                        f"(loaded: {', '.join(self._axes) or 'none'}) — declare the plugin/axis "
-                        "that owns it or remove the stale entry"
+                        f"[[require]] names unknown switch {owning!r} "
+                        f"(loaded: {', '.join(self._switches) or 'none'}) — declare the "
+                        "plugin/switch that owns it or remove the stale entry"
                     )
-                self._axes[owning] = replace(ax, requires=ax.requires + tuple(rows))
+                self._switches[owning] = replace(ax, requires=ax.requires + tuple(rows))
 
-    # ── axis metadata ─────────────────────────────────────────────────────────────────
-    def axes(self) -> dict[str, Axis]:
-        return dict(self._axes)
+    # ── switch metadata ─────────────────────────────────────────────────────────────────
+    def switches(self) -> dict[str, Switch]:
+        return dict(self._switches)
 
-    def axis_rungs(self) -> dict[str, tuple[str, ...]]:
-        return {name: ax.rungs for name, ax in self._axes.items()}
+    def switch_levels(self) -> dict[str, tuple[str, ...]]:
+        return {name: ax.levels for name, ax in self._switches.items()}
 
-    def axis_defaults(self) -> dict[str, str]:
-        """axis -> its zero-secret resting rung (rungs[0]) — what unset/expired reads as."""
-        return {name: ax.default for name, ax in self._axes.items()}
+    def switch_defaults(self) -> dict[str, str]:
+        """switch -> its zero-secret resting level (levels[0]) — what unset/expired reads as."""
+        return {name: ax.default for name, ax in self._switches.items()}
 
     def blurbs(self) -> dict[tuple[str, str], str]:
-        return {(n, r): t for n, ax in self._axes.items() for r, t in ax.blurb.items()}
+        return {(n, r): t for n, ax in self._switches.items() for r, t in ax.blurb.items()}
 
-    def axis_daemon(self) -> dict[str, str | None]:
+    def switch_daemon(self) -> dict[str, str | None]:
         from .. import config as config_mod
 
         ctx = config_mod.using(self.config) if self.config is not None else nullcontext()
         with ctx:
             suffix = config_mod.worktree_suffix()
         return {
-            name: (f"{ax.daemon}{suffix}" if ax.daemon else None) for name, ax in self._axes.items()
+            name: (f"{ax.daemon}{suffix}" if ax.daemon else None)
+            for name, ax in self._switches.items()
         }
 
-    def emergency_rungs(self) -> dict[str, tuple[str, ...]]:
-        return {name: ax.emergency for name, ax in self._axes.items()}
+    def emergency_levels(self) -> dict[str, tuple[str, ...]]:
+        return {name: ax.emergency for name, ax in self._switches.items()}
 
-    # ── posture → effects ────────────────────────────────────────────────────────────
+    # ── mode → effects ────────────────────────────────────────────────────────────
     def desired_daemons(self, mode: dict) -> dict[str, dict]:
         out: dict[str, dict] = {}
         for plugin in self.plugins:
@@ -627,10 +636,10 @@ class Registry:
         return out
 
     def compose_overlays(self, mode: dict) -> list[str]:
-        """The posture overlays for a mode: FIRST the declarative ``[[overlay]]`` table (config
+        """The mode overlays for a mode: FIRST the declarative ``[[overlay]]`` table (config
         only — each entry layered when its ``when`` matches, in declaration = ``-f`` order), THEN
         any overlay a plugin still adds PROGRAMMATICALLY (so a plugin overlay stacks after and can
-        ``-f``-override the table). Nearly every posture overlay is a plain "layer file X under
+        ``-f``-override the table). Nearly every mode overlay is a plain "layer file X under
         mode Y" and lives in the table; the plugin hook remains for logic ``when`` can't express.
         The stack appends each existing file after the configured compose files."""
         from .. import config as config_mod
@@ -643,18 +652,18 @@ class Registry:
         return out
 
     def mode_issues(self, mode: dict) -> list[tuple[str, str]]:
-        """Every coherence issue for a prospective mode: first the axes' declarative
-        :class:`Requires` rows (axis declaration order), then every plugin's ``mode_issues``
+        """Every coherence issue for a prospective mode: first the switches' declarative
+        :class:`Requires` rows (switch declaration order), then every plugin's ``mode_issues``
         hook (load order). ``set_mode`` refuses on any ``"error"``; ``"warn"`` rows are
         printed and applied."""
         out: list[tuple[str, str]] = []
-        for name, ax in self._axes.items():
+        for name, ax in self._switches.items():
             value = mode.get(name, ax.default)
             for req in ax.requires:
-                # `mode.get(req.axis)` deliberately without a default: a required axis that
+                # `mode.get(req.switch)` deliberately without a default: a required switch that
                 # is absent (not loaded, or missing from a partial mode dict) satisfies
                 # nothing — its requirement is unmet either way (see Requires).
-                if value in req.when and mode.get(req.axis) not in req.accepts:
+                if value in req.when and mode.get(req.switch) not in req.accepts:
                     out.append((req.severity, req.render(name, value, ax.default)))
         for plugin in self.plugins:
             out += list(plugin.mode_issues(mode))
@@ -710,10 +719,10 @@ class Registry:
         for plugin in self.plugins:
             plugin.stage_assets(mode, checkout, here)
 
-    def posture_services(self, mode: dict) -> dict[str, bool]:
+    def mode_services(self, mode: dict) -> dict[str, bool]:
         out: dict[str, bool] = {}
         for plugin in self.plugins:
-            out.update(plugin.posture_services(mode))
+            out.update(plugin.mode_services(mode))
         return out
 
     def tui_panels(self) -> list[TuiPanel]:
@@ -775,20 +784,20 @@ class Registry:
         return list(by_var.values())
 
     def capability_probes(self, mode: dict) -> list[CapabilityProbe]:
-        """Merged probes, validated like axes at construction: a probe must target a REGISTERED
-        axis (results are keyed/rendered per axis — an unknown one would publish claims nothing
+        """Merged probes, validated like switches at construction: a probe must target a REGISTERED
+        switch (results are keyed/rendered per switch — an unknown one would publish claims nothing
         displays) and names must be unique across plugins (the name keys the supervisor's result
         cache — a collision would silently interleave two mechanisms' verdicts). Loud ValueError,
-        matching the duplicate-axis error, so a broken plugin fails in development, not as a
+        matching the duplicate-switch error, so a broken plugin fails in development, not as a
         quietly-wrong dashboard."""
         out: list[CapabilityProbe] = []
         seen: dict[str, str] = {}
         for plugin in self.plugins:
             for probe in plugin.capability_probes(mode):
-                if probe.axis not in self._axes:
+                if probe.switch not in self._switches:
                     raise ValueError(
                         f"plugin {plugin.name!r}: capability probe {probe.name!r} targets "
-                        f"unknown axis {probe.axis!r} (have: {', '.join(self._axes)})"
+                        f"unknown switch {probe.switch!r} (have: {', '.join(self._switches)})"
                     )
                 if probe.name in seen:
                     raise ValueError(
@@ -829,13 +838,14 @@ def load_plugins(
     The CORE is the project-agnostic spine + the batteries-included agent/editor/injector surface
     (github, inject, proxy, claude, vscode, codex) — each already contributes nothing until its own
     config is declared, so a plain ``foldyard init`` repo gets them inert. The DECLARED plugins
-    (gcp, auth0-sim, llm) carry axes/wiring that are MEANINGLESS without their config (a ``gcp``
-    axis centred on a real GCP project, an ``auth0`` axis backed by a simulator harness, an ``llm``
-    axis backed by consumer LLM-mode overlays), so they load ONLY when their ``[plugins.*]`` table
-    is present — the actual "small core + plugins" boundary the spinout review asks for.
+    (gcp, auth0-sim, llm) carry switches/wiring that are MEANINGLESS without their config (a ``gcp``
+    switch centred on a real GCP project, an ``auth0`` switch backed by a simulator harness, an
+    ``llm`` switch backed by consumer LLM-mode overlays), so they load ONLY when their
+    ``[plugins.*]`` table is present — the actual "small core + plugins" boundary the spinout review
+    asks for.
 
     Order is preserved from before the split (gcp, github, inject, proxy, auth0-sim, llm, claude,
-    vscode, codex when all are present) because it sets axis + doctor-row order (``fy mode``
+    vscode, codex when all are present) because it sets switch + doctor-row order (``fy mode``
     output) AND overlay stacking order (identity/storage → auth0 → llm)."""
     from .. import config as config_mod
     from . import auth0_sim, claude, codex, fakecred, gcp, github, inject, llm, proxy, vscode
@@ -847,8 +857,8 @@ def load_plugins(
     # auth0-sim/llm so its identity/storage overlays are the -f BASE the later ones override.
     if cfg.gcp_metadata_declared():
         plugins.append(gcp.GcpPlugin())
-    plugins.append(github.GithubPlugin())  # CORE: axis (off/app/user) only when [plugins.github]
-    plugins.append(inject.InjectPlugin())  # CORE: contributes axes only per [[inject]] config
+    plugins.append(github.GithubPlugin())  # CORE: switch (off/app/user) only when [plugins.github]
+    plugins.append(inject.InjectPlugin())  # CORE: contributes switches only per [[inject]] config
     plugins.append(proxy.ProxyPlugin())  # CORE: the always-on proxy daemon (Step D)
     if cfg.auth0_sim_declared():  # DECLARED: gated on [plugins.auth0-sim]
         plugins.append(auth0_sim.Auth0SimPlugin())
@@ -856,9 +866,9 @@ def load_plugins(
         plugins.append(llm.LlmPlugin())
     if cfg.fakecred_declared():  # DECLARED: the zero-secret mode-machinery TESTING rig
         plugins.append(fakecred.FakecredPlugin())
-    plugins.append(claude.ClaudePlugin())  # CORE: axis only when [claude].keyless
-    plugins.append(vscode.VscodePlugin())  # CORE: no axis, [vscode]-gated box volume only
-    plugins.append(codex.CodexPlugin())  # CORE: axis only when [codex].keyless
+    plugins.append(claude.ClaudePlugin())  # CORE: switch only when [claude].keyless
+    plugins.append(vscode.VscodePlugin())  # CORE: no switch, [vscode]-gated box volume only
+    plugins.append(codex.CodexPlugin())  # CORE: switch only when [codex].keyless
 
     if discover:
         plugins += _entry_point_plugins()
@@ -883,8 +893,8 @@ def _config_key(cfg: Config) -> str:
 
 def registry(config: Config | None = None) -> Registry:
     """The merged registry for a resolved ``config`` (default: the active/ambient one). A pure
-    function of that config — its plugin set + axes derive from it (registry plan Steps B–D) — so
-    a long-lived ``fy host``/TUI can hold one registry per worktree with no import-time global.
+    function of that config — its plugin set + switches derive from it (registry plan Steps B–D) —
+    so a long-lived ``fy host``/TUI can hold one registry per worktree with no import-time global.
     Cached per config content; the registry carries ``config`` so plugins can self-gate on it."""
     from .. import config as config_mod
 

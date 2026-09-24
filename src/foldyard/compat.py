@@ -16,7 +16,7 @@ schema — unknown keys are tolerated by construction. So an old ``fy`` against 
 ``foldyard.toml`` does not fail: it silently ignores the new keys and does the old thing.
 That is invisible, and a warning is not enough for invisible.
 
-**Why the nudge is declarative rather than a PyPI lookup.** ``fy`` runs on the Mac *and*
+**Why the nudge is declarative rather than a PyPI lookup.** ``fy`` runs on the host *and*
 inside the box, where egress is default-deny through the proxy — a version check would need
 an allowlist hole punched in the zero-egress posture to power a cosmetic message. And the
 repo's opinion of "current" is the more useful one anyway: a consumer pins CI deliberately

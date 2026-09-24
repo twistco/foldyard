@@ -1,6 +1,11 @@
 # ADR-0012 — Distribution via uv tool install; long-lived daemons must not run mutable working-tree source
 
-- **Status:** Accepted (distribution call 2026-06; daemon-immunity mechanism finalised 2026-07-03)
+- **Status:** Accepted (distribution call 2026-06; daemon-immunity mechanism finalised 2026-07-03).
+  **Amended 2026-09-24:** the launch paths are now `fy up` / `fy box up` (which start the
+  supervisor detached, with the VM) and `fy host restart`, which replaces the forced bounce
+  `fy host --restart` gave; `fy host` itself only reports status and starts nothing. The
+  fingerprint check and the bounce are unchanged — see
+  [ADR-0006](./0006-host-side-enforcement-single-supervisor.md)'s amendment.
 - **Sources:** HANDOVER.md (decisions 1/6), docs/history/spinout-readiness-review.md (Blockers 1 & 4),
   spinout-plan D1/D7
 

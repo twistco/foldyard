@@ -8,7 +8,7 @@ A BARE ``[codex]`` (no ``keyless``) is the MANUAL-LOGIN box: no dummy ``auth.jso
 override, no mode axis, and the login + API hosts join ``egress_recommend`` (no injector exists to
 exempt them). Headless caveat, and why the recommend says `codex login` rather than promising the
 browser flow: `codex login` with a ChatGPT account redirects to ``127.0.0.1:1455`` — a loopback
-INSIDE the box, which the Mac's browser can't reach — so the workable in-box path is
+INSIDE the box, which the host's browser can't reach — so the workable in-box path is
 ``codex login --api-key``. A ChatGPT subscription wants ``keyless = "chatgpt"`` instead, which is
 the whole reason that rung exists.
 
@@ -20,7 +20,7 @@ shared proxy's multi-injector rule set with claude / github). Two modes (``confi
   - ``"chatgpt"`` (your ChatGPT subscription) — the box holds a DUMMY ``~/.codex/auth.json`` (a
     far-future-exp JWT so codex there never refreshes); the proxy rewrites ``Authorization`` on
     ``chatgpt.com/backend-api/codex`` with the *current* access token, which the
-    :mod:`~foldyard.plugins.codex_chatgpt_token` minter refreshes host-side from the Mac's real
+    :mod:`~foldyard.plugins.codex_chatgpt_token` minter refreshes host-side from the host's real
     ``~/.codex/auth.json``. The real access/refresh tokens never enter the box; the ``account_id``
     (an identifier, not a secret) IS baked into the dummy so codex emits ``ChatGPT-Account-Id``.
 
@@ -44,7 +44,7 @@ from pathlib import Path
 from .. import config, keyless
 from ..keyless import CODEX_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CODEX_KEYLESS_HOST as _KEYLESS_HOST
-from . import Axis, InjectRule, Plugin, Secret
+from . import InjectRule, Plugin, Secret, Switch
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
 
 # Remove a stale npm-managed Codex so the native installer's ~/.local/bin copy wins on PATH (the
@@ -73,16 +73,16 @@ _INSTALL = (
 class CodexPlugin(Plugin):
     name = "codex"
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         # Only when keyless is configured: a github-shaped on/off injector axis (like claude's).
         # Off (the zero-secret default) → the box holds only a dummy key; on → the proxy injects the
         # real key host-side. Maps to the shared "egress-proxy" daemon (one proxy, many injectors).
         if not config.codex_keyless():
             return []
         return [
-            Axis(
+            Switch(
                 name="codex",
-                rungs=("off", "on"),
+                levels=("off", "on"),
                 blurb={
                     "off": "no Codex credential reaches OpenAI (box holds only a dummy)",
                     "on": "keyless Codex: proxy injects your credential host-side (none in box)",
@@ -96,7 +96,7 @@ class CodexPlugin(Plugin):
         #   api-key — rewrite Authorization on api.openai.com from OPENAI_API_KEY in host.env, via
         #             the SAME static-token wiring [[inject]]/claude use.
         #   chatgpt — rewrite Authorization on chatgpt.com/backend-api/codex with the access token
-        #             the codex_chatgpt_token minter refreshes host-side from the Mac's auth.json
+        #             the codex_chatgpt_token minter refreshes host-side from the host's auth.json
         #             (Bearer prefix added in flight; re-mint on a 401 to force a refresh-check).
         kind = config.codex_keyless()
         if not kind or mode.get("codex", "off") == "off":
@@ -221,7 +221,7 @@ class CodexPlugin(Plugin):
             )
         # ChatGPT keyless: codex needs a structurally-valid ~/.codex/auth.json to operate in chatgpt
         # mode + emit headers. Seed a DUMMY one (far-future-exp JWT so codex never refreshes it;
-        # real account_id read host-side from the Mac's auth.json). Base64 so the JSON survives the
+        # real account_id read host-side from the host's auth.json). Base64 so the JSON survives the
         # monitored-step shell intact. The file is inert without the host proxy: a fake JWT plus an
         # account_id, which is an identifier and not a secret — so seeding it ambiently grants the
         # box nothing that the rung being off should have withheld.
@@ -246,12 +246,12 @@ class CodexPlugin(Plugin):
                         "run": run,
                     }
                 )
-            else:  # no usable auth.json on the Mac → the box can't do chatgpt keyless; fail loudly
+            else:  # no usable auth.json on the host → the box can't do chatgpt keyless; fail loudly
                 steps.append(
                     {
                         "label": "Codex keyless auth.json",
                         "check": "false",
-                        "run": 'echo "✗ no ChatGPT ~/.codex/auth.json on the Mac '
+                        "run": 'echo "✗ no ChatGPT ~/.codex/auth.json on your computer '
                         "(run 'codex login' there first)\"; false",
                     }
                 )

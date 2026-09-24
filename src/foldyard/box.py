@@ -22,7 +22,7 @@ prefix, caches, the foldyard self-install, and `fy claude` (the launcher).
 
 VALIDATION CAVEAT: box CREATION can't be exercised from inside the box (it would recreate the
 running box). The command assembly is golden-tested (engine mocked) + faithful to the recipe;
-`up`/`build` want a Mac / fresh-box run. `shell`/`down`/`ps` are safe everywhere.
+`up`/`build` want a host / fresh-box run. `shell`/`down`/`ps` are safe everywhere.
 """
 
 from __future__ import annotations
@@ -164,7 +164,7 @@ def _warn_stale_proxy_port(engine: str, box: str, env: dict) -> None:
     if baked.strip() and baked.strip() != str(current):
         print(
             f"⚠ dev box {box} was built for proxy port {baked.strip()}, but this project's proxy "
-            f"now serves :{current} (its port band moved). The box's egress — including keyless "
+            f"now serves :{current} (its port range moved). The box's egress — including keyless "
             f"agent auth — will connection-refuse until you recreate it: `fy box down && fy box up`."
         )
 
@@ -190,7 +190,7 @@ def _installed_foldyard(engine: str, box: str, env: dict) -> str | None:
 
 
 def _warn_stale_foldyard(engine: str, box: str, env: dict) -> None:
-    """Nag when a running box's foldyard is not the one the Mac now runs.
+    """Nag when a running box's foldyard is not the one the host now runs.
 
     The bootstrap installs foldyard only on a freshly CREATED box, so a host upgrade leaves the
     two sides on different versions indefinitely while every `fy box up` in between says "already
@@ -209,7 +209,7 @@ def _warn_stale_foldyard(engine: str, box: str, env: dict) -> None:
         return
     was = f"foldyard {installed}" if installed else "no working foldyard"
     print(
-        f"⚠ dev box {box} has {was} installed, but the Mac now runs foldyard {__version__}. The "
+        f"⚠ dev box {box} has {was} installed, but your computer now runs foldyard {__version__}. The "
         "bootstrap that installs it runs only on a freshly created box, so `fy box up` alone "
         "won't move it: `fy box down && fy box up`."
     )
@@ -458,7 +458,7 @@ grep -q "fy_path_prepend" ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'BASHPATH'
 # ephemeral — point HISTFILE into ~/.devbox, an UNCONDITIONAL named volume (devbox_shell) mounted
 # for every box. (It used to live in ~/.claude because that happened to be the only persisted
 # volume — which silently lost history on any box without [claude], and put shell state in an
-# agent's config dir.) Stays in-box: the volume is never bound out to the Mac. `history -a`
+# agent's config dir.) Stays in-box: the volume is never bound out to the host. `history -a`
 # flushes after each command so the multiple sessions sharing this box don't clobber each
 # other's history on exit (default histappend only flushes whole-session on logout).
 grep -q "devbox: persisted bash history" ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'BASHHIST'
@@ -536,7 +536,7 @@ def stage_foldyard_for_box(checkout: str, here: str, src: Path) -> Path | None:
     For a consumer repo that does NOT vendor foldyard (e.g. homelab), the box can't
     ``uv tool install --editable {checkout}/foldyard`` — there's no such dir on the mount, and
     the machine virtiofs-mounts ONLY the repo + worktrees, so the host's foldyard source under
-    ``~/.local/...`` is invisible to podman inside the VM. So when the Mac's foldyard is an
+    ``~/.local/...`` is invisible to podman inside the VM. So when the host's foldyard is an
     EDITABLE install, build a wheel from its source into a gitignored ``.devbox-foldyard/`` under
     the checkout (which IS mounted) and hand the box that wheel path — the proxy-CA staging trick.
     The wheel pins the box to the exact host (WIP) version. Returns the staged wheel, or ``None``
@@ -576,13 +576,13 @@ def stage_foldyard_for_box(checkout: str, here: str, src: Path) -> Path | None:
 
 
 def _foldyard_install_subst(checkout: str, here: str) -> dict[str, str]:
-    """How the box should install foldyard, resolved host-side by how the Mac's foldyard is
+    """How the box should install foldyard, resolved host-side by how the host's foldyard is
     installed (the box image already ships ``uv``). Returns ``{fy_wheel, fy_version}`` placeholders
     the bootstrap's fallback chain reads. NEVER assumes an editable install:
 
     * repo VENDORS foldyard (``{checkout}/foldyard``) → both empty; the bootstrap installs editable
       from the mount (Tangible's live dogfood — picks up WIP source, no wheel rebuild needed);
-    * else host is an EDITABLE dev install → build + stage a wheel (homelab: a Mac dev checkout
+    * else host is an EDITABLE dev install → build + stage a wheel (homelab: a host dev checkout
       driving a repo that doesn't vendor foldyard);
     * else host is a PUBLISHED install → pin the box to the host's version (``foldyard==X``)."""
     if (Path(checkout) / "foldyard" / "pyproject.toml").exists():
@@ -750,7 +750,7 @@ def _foldyard_run(checkout: str, subst: dict[str, str]) -> str:
     version baked in; the in-box ``[ -d …/foldyard ]`` branch covers the vendored-repo case.
 
     Every branch installs foldyard BARE — never the ``[host]`` extra — because the box only ROUTES
-    egress through the Mac's mitmdump proxy, it never runs mitmproxy itself. That keeps the box light
+    egress through the host's mitmdump proxy, it never runs mitmproxy itself. That keeps the box light
     and, crucially, shrinks its bootstrap egress: no cryptography/mitmproxy wheels to pull through the
     proxy just to get `fy` on PATH (mitmproxy is the host's `just install` `[host]` extra)."""
     wheel, version = subst.get("fy_wheel", ""), subst.get("fy_version", "")
@@ -761,7 +761,7 @@ def _foldyard_run(checkout: str, subst: dict[str, str]) -> str:
     # actual failure was the host-side wheel build, reported minutes earlier and scrolled away.
     if subst.get("fy_stage_failed"):
         why = (
-            "the host-side foldyard wheel build FAILED (see the `fy box up` output on the Mac) "
+            "the host-side foldyard wheel build FAILED (see the `fy box up` output on your computer) "
             "— fix that and re-run `fy box up`"
         )
     else:
@@ -867,21 +867,21 @@ def _motd(box: str) -> str:
 
 
 def _capture_keyless() -> None:
-    """Mac-side, before box-up: for each agent whose ``keyless`` is on, make sure the real key/token
+    """Host-side, before box-up: for each agent whose ``keyless`` is on, make sure the real key/token
     is in host.env — prompting once on a TTY (classified by prefix), warning (not blocking) without
     one. No-op when no keyless is configured. The box never sees the secret; only the host.env var
     the proxy's minter reads. See :mod:`foldyard.keyless`."""
-    # Codex ChatGPT mode's credential is the Mac's ~/.codex/auth.json (refreshed host-side), NOT a
+    # Codex ChatGPT mode's credential is the host's ~/.codex/auth.json (refreshed host-side), NOT a
     # host.env var — so it's not prompted for; just confirm it's there (warn, don't block).
     if config.codex_keyless() == "chatgpt":
         path = keyless.codex_auth_json_path()
         if keyless.codex_account_id(path):
             _err(
-                f"✓ keyless Codex (ChatGPT): using {path} on the Mac (refreshed host-side, never in the box)."
+                f"✓ keyless Codex (ChatGPT): using {path} on your computer (refreshed host-side, never in the box)."
             )
         else:
             _err(
-                f"⚠ keyless Codex (ChatGPT) is on but no usable {path} — run `codex login` (ChatGPT) on the Mac first."
+                f"⚠ keyless Codex (ChatGPT) is on but no usable {path} — run `codex login` (ChatGPT) on your computer first."
             )
 
     agents = (
@@ -938,7 +938,7 @@ def _warn_keyless_axis_at_rest() -> None:
     try:
         mode = devmode.read(apply_expiry=True)["mode"]
     except Exception as e:  # pragma: no cover — a corrupt/absent mode file must not block box-up
-        _err(f"⚠ couldn't read the posture to check the agent axes ({e}) — skipping.")
+        _err(f"⚠ couldn't read the mode to check the agent switches ({e}) — skipping.")
         return
     rungs, defaults = devmode.axes(), devmode.axis_defaults()
     for axis, table, kind in declared:
@@ -949,7 +949,7 @@ def _warn_keyless_axis_at_rest() -> None:
         # plugin, and this message must not be the thing that goes stale if its rungs change.
         arm = next((r for r in rungs.get(axis, ()) if r != rest), "on")
         _err(
-            f"⚠ {table}.keyless = {kind!r} is declared but the posture has {axis}={rest} — the box "
+            f"⚠ {table}.keyless = {kind!r} is declared but the mode has {axis}={rest} — the box "
             f"gets only a dummy credential, so the agent cannot reach its API.\n"
             f"  Arm it: `fy mode {axis}={arm}`  (or `fy tui`, where one keypress flips it)."
         )
@@ -970,7 +970,7 @@ def _capture_secrets() -> None:
     try:
         mode = devmode.read(apply_expiry=True)["mode"]
     except Exception as e:  # pragma: no cover — a corrupt/absent mode file must not block box-up
-        _err(f"⚠ couldn't read the posture to check declared secrets ({e}) — skipping.")
+        _err(f"⚠ couldn't read the mode to check declared secrets ({e}) — skipping.")
         return
     keyless.capture_secrets(
         config.host_env_file(),
@@ -995,7 +995,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # if nothing's serving. `fy up` does this too, but a box-only flow (`fy box up` / `fy claude`
     # without a prior `fy up`) never would, leaving the box pointed at a dead :8088 even with axes
     # like penpot/capture marked "on" (a stored posture is NOT a running daemon). Idempotent +
-    # Mac-only (a no-op in the box, or when a supervisor already serves its daemons). Done before the
+    # Host-only (a no-op in the box, or when a supervisor already serves its daemons). Done before the
     # early-return so even an already-up box re-checks, and before the slow build so the proxy + CA
     # come up in parallel.
     from . import supervisor
@@ -1065,7 +1065,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     )
     box_home, claude_in_box = _box_home(engine, img, env)
     # Resolved HOME paths the agent/editor plugins' box_args need (they only get `env`): the box
-    # HOME, where Claude resolves ~/.claude, and the Mac-side transcripts dir to bind in.
+    # HOME, where Claude resolves ~/.claude, and the host-side transcripts dir to bind in.
     env["FY_BOX_HOME"] = box_home
     env["FY_CLAUDE_HOME"] = claude_in_box
     env["FY_TRANSCRIPTS"] = transcripts_dir
@@ -1073,10 +1073,10 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     print(f"▶ starting long-lived dev box {box} (network {net})…")
     if config.claude_enabled():
         print(
-            f"  claude home → {claude_in_box} (in box); transcripts → {transcripts_dir} (on the Mac; survives nuke)"
+            f"  claude home → {claude_in_box} (in box); transcripts → {transcripts_dir} (on your computer; survives nuke)"
         )
     if config.codex_enabled():
-        print(f"  codex sessions → {env['FY_CODEX_TRANSCRIPTS']} (on the Mac; survives nuke)")
+        print(f"  codex sessions → {env['FY_CODEX_TRANSCRIPTS']} (on your computer; survives nuke)")
 
     # Mount the MAIN repo root (a worktree's `.git` points into it) + the WORKTREES ROOT, so every
     # box sees every sibling checkout: an agent can read/edit a worktree copy (the machine already
@@ -1102,7 +1102,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # mounts ONLY repo + worktrees, so a CA under ~/.mitmproxy can't be bind-mounted. AMBIENT and
     # UNCONDITIONAL: the proxy plugin's box_args mounts the CA whenever it EXISTS (the ambient-CA
     # rule — trust pre-positioned regardless of routing), so staging MUST be just as ambient. Gating
-    # staging on proxy_enabled/GH_INJECT (as this once did) leaves MITMPROXY_CA at its Mac default
+    # staging on proxy_enabled/GH_INJECT (as this once did) leaves MITMPROXY_CA at its host default
     # ~/.mitmproxy/… for a proxy-less box; box_args then ambient-mounts that NON-VM-visible host
     # path and `podman run` dies with `statfs …: no such file or directory`. stage_ca_for_box
     # no-ops (returns None) when no CA exists, so calling it always is safe for a truly CA-less box.
@@ -1163,9 +1163,9 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         f"PODMAN_PROJECT={ctx.project}",
         "-e",
         f"COMPOSE_PROJECT_NAME={ctx.project}",
-        # PIN the project's Mac daemon port bases (allocated band, or the env override) into the
+        # PIN the project's host daemon port bases (allocated band, or the env override) into the
         # box: in-box port derivations (`fy mode` daemon probes, FY_PROXY re-derivation) can't
-        # read the Mac's ~/.foldyard/ports.json registry, and both env vars already win over
+        # read the host's ~/.foldyard/ports.json registry, and both env vars already win over
         # allocation (config._daemon_port_base), so the box always agrees with the host that
         # created it.
         "-e",
@@ -1244,7 +1244,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         # Fail closed: never bootstrap (and hand credentials to) a box outside the posture.
         _err(
             f"✗ dev box {box} came up under runtime {got or 'unknown'!r}, not gVisor "
-            f"({sandbox.RUNTIME}) — the machine posture was not applied; removing it. "
+            f"({sandbox.RUNTIME}) — the VM's gVisor setting was not applied; removing it. "
             "`fy up` re-provisions the gVisor socket (machine ensure); then retry."
         )
         subprocess.run([engine, "rm", "-f", box], env=env, stdout=subprocess.DEVNULL)
@@ -1253,7 +1253,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # One-time MONITORED install steps (core foldyard + Claude, plugins, consumer [[box.tools]]),
     # then warm deps in the background. Output streams through so each step's ✓/⏭/✗ is visible.
     # foldyard self-install resolves its source host-side (vendored repo → editable; else a staged
-    # wheel from an editable Mac install; else a PyPI version pin) so `fy` works even in a repo
+    # wheel from an editable host install; else a PyPI version pin) so `fy` works even in a repo
     # that doesn't vendor foldyard (e.g. homelab) — never assumes an editable checkout on the mount.
     subprocess.run(
         [engine, "exec", box, "bash", "-lc", _bootstrap_script(checkout, here, env)], env=env
@@ -1315,9 +1315,9 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
             [engine, "exec", "-it", box, "bash", "-lc", script], env=env
         ).returncode
     if cmd == "down":
-        # Belt-and-suspenders: promote this box's transcripts to the durable Mac store before
+        # Belt-and-suspenders: promote this box's transcripts to the durable host store before
         # we drop the container. The bound-out dir survives `box down`, but archiving here keeps
-        # the Mac's `claude --resume` in sync. Best-effort — never block a teardown. Lazy import
+        # the host's `claude --resume` in sync. Best-effort — never block a teardown. Lazy import
         # avoids a stack↔transcripts cycle.
         from . import transcripts
 
@@ -1351,11 +1351,11 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
 
 def _exec(engine: str, box: str, ctx, env: dict, args: list[str]) -> int:
     """Run a command NON-interactively in the running dev box, at the caller's cwd (the repo is
-    bind-mounted at the same path in the box, so platform/ on the Mac is platform/ in the box).
+    bind-mounted at the same path in the box, so platform/ on the host is platform/ in the box).
     The primitive behind git hooks dispatching into the box: `foldyard box exec '<shell-cmd>'`.
 
     `--skip-if-down` makes a stopped box a clean no-op (exit 0 + note) instead of an error — for
-    hooks that shouldn't block a Mac-side commit when the box is down (CI stays the backstop)."""
+    hooks that shouldn't block a host-side commit when the box is down (CI stays the backstop)."""
     skip_if_down = "--skip-if-down" in args
     rest = [a for a in args if a != "--skip-if-down"]
     if not rest:

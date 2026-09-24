@@ -832,7 +832,7 @@ def test_delete_refused_in_box(fake, monkeypatch):
     assert be.calls == []
 
 
-# ── the host-side wall (lima, [machine].host_wall): the VM under its persistent slice, the
+# ── the host-side wall (lima, [machine] host_firewall): the VM under its persistent slice, the
 # wall PROBED after every start and on every steady-state `fy up`; never loaded by foldyard ──
 
 
@@ -901,7 +901,7 @@ def test_host_wall_start_refuses_before_booting_when_not_set_up(
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == [] and probes == []
     err = capsys.readouterr().err
-    assert "not set up" in err and "fy machine host-wall" in err
+    assert "isn't set up" in err and "fy machine host-firewall" in err
 
 
 def test_host_wall_is_probed_on_every_steady_state_up(host_wall_env, tmp_path, capsys):
@@ -911,7 +911,7 @@ def test_host_wall_is_probed_on_every_steady_state_up(host_wall_env, tmp_path, c
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == []
     assert probes == ["homelab"] and guest.reads == 1
-    assert "host-side wall enforcing" in capsys.readouterr().err
+    assert "host firewall enforcing" in capsys.readouterr().err
 
 
 def test_host_wall_not_enforcing_is_a_hard_stop_that_points_at_the_install(
@@ -926,7 +926,7 @@ def test_host_wall_not_enforcing_is_a_hard_stop_that_points_at_the_install(
     err = capsys.readouterr().err
     assert "NOT enforcing" in err
     assert "loopback ✗ ok" in err and "external ✗ timeout" in err  # which half, in the open
-    assert "fy machine host-wall" in err
+    assert "fy machine host-firewall" in err
 
 
 def test_host_wall_probe_that_could_not_run_is_a_hard_stop(host_wall_env, tmp_path, capsys):
@@ -1005,7 +1005,7 @@ def test_delete_leaves_the_operators_wall_install_and_says_so(host_wall_env, mon
     monkeypatch.setattr(machine, "_stop_host_supervisor", lambda: True)
     assert machine.delete(assume_yes=True) == 0
     assert be.calls == ["stop:homelab", "remove:homelab"]
-    assert "fy machine host-wall --uninstall" in capsys.readouterr().err
+    assert "fy machine host-firewall --uninstall" in capsys.readouterr().err
 
 
 def test_stop_leaves_the_host_wall_alone(host_wall_env, monkeypatch):
@@ -1015,7 +1015,7 @@ def test_stop_leaves_the_host_wall_alone(host_wall_env, monkeypatch):
     assert machine.stop() == 0
 
 
-# ── `fy machine host-wall`: the operator's side — files + commands printed, never run ──────
+# ── `fy machine host-firewall`: the operator's side — files + commands printed, never run ──────
 
 
 @pytest.fixture
@@ -1075,7 +1075,7 @@ def test_host_wall_verb_is_quiet_about_a_slice_already_set_up(host_wall_verb, mo
 def test_host_wall_verb_is_a_no_op_note_when_off(host_wall_verb, monkeypatch, capsys):
     monkeypatch.setattr(machine.config, "machine_host_wall", lambda: False)
     assert machine.host_wall() == 0
-    assert "host_wall is off" in capsys.readouterr().out
+    assert "host firewall is off" in capsys.readouterr().out
 
 
 def test_host_wall_verb_uninstall_never_sets_the_slice_up(host_wall_verb, monkeypatch, capsys):

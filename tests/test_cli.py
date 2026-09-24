@@ -28,6 +28,17 @@ def test_no_args_shows_help():
     assert "mode" in result.output and "doctor" in result.output
 
 
+def test_help_keeps_bracketed_config_tables():
+    """Help text names config tables as `[claude]`/`[proxy]`; under typer's default "rich" markup
+    those parse as style tags and vanish ("Needs `` in foldyard.toml"). Every sub-app must render
+    help as markdown, where brackets are literal."""
+    assert "[claude]" in runner.invoke(cli.app, ["claude", "--help"]).output
+    assert "[proxy]" in runner.invoke(cli.app, ["allow", "--help"]).output
+    for sub in cli.app.registered_groups:
+        assert sub.typer_instance is not None
+        assert sub.typer_instance.rich_markup_mode == "markdown", sub.name
+
+
 def test_mode_no_args_routes_to_show(spy_devmode):
     result = runner.invoke(cli.app, ["mode"])
     assert result.exit_code == 0 and spy_devmode == [["show"]]
@@ -286,7 +297,7 @@ def test_wall_learn_then_review_grants_the_recorded_hosts(tmp_path, monkeypatch)
 
     log = _scratch(tmp_path, monkeypatch)
     try:
-        result = runner.invoke(cli.app, ["allow", "wall", "learn", "--for", "30m"])
+        result = runner.invoke(cli.app, ["allow", "enforce", "learn", "--for", "30m"])
         assert result.exit_code == 0 and "LEARNING until" in result.output
         assert allowlist.learning() is not None and allowlist.default_deny() is False
         listed = runner.invoke(cli.app, ["allow", "list"])
@@ -343,7 +354,7 @@ def test_allow_sync_points_at_refused_hosts_when_nothing_is_recommended(tmp_path
         result = runner.invoke(cli.app, ["allow", "sync"])
         assert result.exit_code == 0, result.output
         assert "nothing pending" in result.output
-        assert "2 hosts the wall refused" in result.output
+        assert "2 hosts the allowlist refused" in result.output
         assert "deb.example.org, pypi.example.org" in result.output
         assert "granted.example.org" not in result.output
     finally:
@@ -356,7 +367,7 @@ def test_allow_learn_without_a_window_says_how_to_start_one(tmp_path, monkeypatc
     _scratch(tmp_path, monkeypatch)
     try:
         result = runner.invoke(cli.app, ["allow", "learn"])
-        assert result.exit_code == 0 and "fy allow wall learn" in result.output
+        assert result.exit_code == 0 and "fy allow enforce learn" in result.output
     finally:
         config.clear_caches()
 
@@ -366,10 +377,27 @@ def test_wall_learn_rejects_a_bad_duration(tmp_path, monkeypatch):
 
     _scratch(tmp_path, monkeypatch)
     try:
-        result = runner.invoke(cli.app, ["allow", "wall", "learn", "--for", "0s"])
+        result = runner.invoke(cli.app, ["allow", "enforce", "learn", "--for", "0s"])
         assert result.exit_code != 0 and allowlist.learning() is None
     finally:
         config.clear_caches()
+
+
+def test_renamed_verbs_keep_their_old_names_as_hidden_aliases(tmp_path, monkeypatch):
+    # `fy allow wall` → `fy allow enforce`, `fy machine host-wall` → `host-firewall`: a script or a
+    # teammate's muscle memory still works, and `--help` shows only the new name.
+    from foldyard import allowlist, config
+
+    _scratch(tmp_path, monkeypatch)
+    try:
+        result = runner.invoke(cli.app, ["allow", "wall", "off"])
+        assert result.exit_code == 0 and allowlist.default_deny() is False
+    finally:
+        config.clear_caches()
+    for sub, old, new in (("allow", "wall", "enforce"), ("machine", "host-wall", "host-firewall")):
+        help_text = runner.invoke(cli.app, [sub, "--help"]).output
+        assert new in help_text and f" {old} " not in help_text
+        assert runner.invoke(cli.app, [sub, old, "--help"]).exit_code == 0
 
 
 # ── `fy --version` ────────────────────────────────────────────────────────────

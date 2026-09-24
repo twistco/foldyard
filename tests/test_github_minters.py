@@ -363,7 +363,7 @@ def test_probe_is_contributed_only_on_the_app_rung(monkeypatch, tmp_path):
     assert p.capability_probes({"github": "off"}) == []
     assert p.capability_probes({"github": "user"}) == []  # gh's own failure is local + immediate
     (probe,) = p.capability_probes({"github": "app"})
-    assert probe.axis == "github" and probe.name == "github-app-identity"
+    assert probe.switch == "github" and probe.name == "github-app-identity"
     # A probe error must degrade the axis, never take the supervisor tick down.
     monkeypatch.setattr(
         gat, "app_reachable", lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))

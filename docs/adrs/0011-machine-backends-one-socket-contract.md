@@ -4,7 +4,7 @@
   lima mock-validated + first real multi-project Mac run 2026-07-05. **Amended by
   [ADR-0027](./0027-always-a-vm-native-backend-retired.md) (2026-09-17): the `native` backend
   is retired** — the socket contract and the two VM backends stand.
-- **Sources:** docs/lima-backend-scope.md, docs/podman-multi-vm-issue-26281.md,
+- **Sources:** docs/lima-backend-scope.md (which now also holds the podman#26281 note),
   src/foldyard/machine_backend.py
 
 ## Context

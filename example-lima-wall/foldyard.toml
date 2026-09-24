@@ -4,9 +4,9 @@
 # the most-isolated posture foldyard offers and the ONE caveat it introduces:
 #
 #   • backend = "lima"      concurrent per-project VM (not the single podman machine)
-#   • [machine].wall = true nftables default-deny INSIDE the VM — the Mac proxy is the ONLY
+#   • [machine] firewall = true nftables default-deny INSIDE the VM — the Mac proxy is the ONLY
 #                           way out (fail-closed: egress that ignores the proxy is REJECTED)
-#   • [proxy] default_deny  an ENFORCED allowlist on top (blocked hosts show in `fy tui`)
+#   • [proxy] enforce  an ENFORCED allowlist on top (blocked hosts show in `fy tui`)
 #   • [claude] keyless      the real token is injected at the Mac proxy, never in the box
 #
 # The stack is deliberately two services (api + worker) so the wall's ONE caveat is visible:
@@ -29,7 +29,7 @@ API_PORT = 8090
 
 [machine]
 backend = "lima"
-wall = true           # ← the in-VM egress wall (lima-only). Comment out for cooperative-only.
+firewall = true           # ← the in-VM egress wall (lima-only). Comment out for cooperative-only.
 name = "fy-wall-example"
 cpus = 2
 # NB memory is MiB and is passed to Lima VERBATIM — any whole number is fine (a rounded-GiB
@@ -40,7 +40,7 @@ disk_gib = 20
 [box]
 image = { dockerfile = "box.Dockerfile", tag = "fy-wall-example-box:latest" }
 
-# Enforced egress allowlist. `default_deny = true` means a host not granted (live via `fy tui` /
+# Enforced egress allowlist. `enforce = true` means a host not granted (live via `fy tui` /
 # `fy allow add`, or by answering the offers below) is REFUSED at the proxy — belt to the wall's
 # braces. There is no `allow` key here on purpose: GRANTS live in the host-side allow-store,
 # outside the mount, because a list in this file is one the box could widen by editing it.
@@ -55,7 +55,7 @@ image = { dockerfile = "box.Dockerfile", tag = "fy-wall-example-box:latest" }
 #     plugin itself and offered alongside these. foldyard knows where its own installer fetches
 #     from; a copy here would only go stale.
 [proxy]
-default_deny = true
+enforce = true
 recommend = [
   { host = "registry-1.docker.io", why = "box + stack images — Docker Hub manifest/blobs" },
   { host = "auth.docker.io", why = "Docker Hub auth token" },

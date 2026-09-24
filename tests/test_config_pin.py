@@ -171,9 +171,9 @@ def test_revert_refuses_when_nothing_was_adopted(checkout):
 def test_adopt_and_revert_refuse_in_the_box(checkout, monkeypatch):
     """Same boundary as `allowlist.grant`: the yard must not adopt its own config."""
     monkeypatch.setattr(config, "in_box", lambda: True)
-    with pytest.raises(SystemExit, match="Mac-only"):
+    with pytest.raises(SystemExit, match="only works on your computer"):
         configpin.adopt(checkout)
-    with pytest.raises(SystemExit, match="Mac-only"):
+    with pytest.raises(SystemExit, match="only works on your computer"):
         configpin.revert(checkout)
 
 
@@ -855,7 +855,7 @@ def test_offer_reads_the_adopted_copy_not_the_tree(monkeypatch, checkout, capsys
 def test_a_learn_seed_only_opens_a_window_from_the_adopted_copy(
     monkeypatch, checkout, tmp_path, capsys
 ):
-    """`default_deny = "learn"` SUSPENDS the wall for a window, so it must ride the pin: an
+    """`enforce = "learn"` SUSPENDS the wall for a window, so it must ride the pin: an
     in-box edit adding it opens nothing until the operator adopts that edit. Then the launch path
     opens the window — before the recommendation offer, so "learning" is the first thing read."""
     from foldyard import allowlist
@@ -863,7 +863,7 @@ def test_a_learn_seed_only_opens_a_window_from_the_adopted_copy(
     monkeypatch.setenv("FOLDYARD_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setattr(config, "in_box", lambda: False)
     configpin.adopt(checkout)  # adopted copy: no seed at all (→ observe, but nothing to open)
-    (checkout.repo_root / "foldyard.toml").write_text(TOML + 'default_deny = "learn"\n')
+    (checkout.repo_root / "foldyard.toml").write_text(TOML + 'enforce = "learn"\n')
     monkeypatch.setattr(
         supervisor.devmode, "worktree_config", lambda wt: configpin.effective(checkout)
     )

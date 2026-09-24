@@ -201,12 +201,15 @@ def _run(
         if rc == 0:
             if refused:
                 hosts = ", ".join(_describe(e) for e in refused)
-                echo(f"• the wall refused {hosts} during the {what}; the build found another way")
+                echo(
+                    f"• the allowlist refused {hosts} during the {what}; the build found another "
+                    "way"
+                )
             break
         if not refused:
             break
         hosts = ", ".join(e["host"] for e in refused)
-        echo(f"✗ the egress wall refused {hosts} during the {what}")
+        echo(f"✗ the allowlist refused {hosts} during the {what}")
         if not interactive:
             for e in refused:
                 echo(f"    fy allow add {e['host']} --build --level once --ttl {ONCE_TTL_SECONDS}")
@@ -273,7 +276,7 @@ def _share(shared: list[dict], prompt: Callable[[str], str], echo: Callable[[str
         echo(f"  ✓ added to foldyard.toml and adopted (the change is yours); {note}")
     else:
         echo(
-            "  ✓ added to foldyard.toml — the checkout already differed from what the host runs,"
-            f" so review and adopt it at the next `fy up`; {note}"
+            "  ✓ added to foldyard.toml — the checkout already differed from what your computer"
+            f" runs, so review and adopt it at the next `fy up`; {note}"
         )
     return True

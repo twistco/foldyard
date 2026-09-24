@@ -191,12 +191,12 @@ def _net_leaf(e: dict, escape) -> str:
     if e.get("blocked"):
         # Refused by the default-deny egress wall — no upstream contacted. Red so it stands out as
         # the row you act on (press the allow key in the TUI to let the host through).
-        return f"[dim]{ts}[/dim] [red]⛔ blocked by the egress wall[/red]"
+        return f"[dim]{ts}[/dim] [red]⛔ refused by the allowlist[/red]"
     if e.get("would_block"):
-        # The wall is observing (`fy allow wall off`, or a learn window): this host went through,
+        # The wall is observing (`fy allow enforce off`, or a learn window): this host went through,
         # but enforcing would refuse it — what `fy allow learn` offers. The UA names the tool.
         ua = f" [dim]{escape(e['ua'][:60])}[/dim]" if e.get("ua") else ""
-        return f"[dim]{ts}[/dim] [yellow]◌ the wall would refuse this[/yellow]{ua}"
+        return f"[dim]{ts}[/dim] [yellow]◌ the allowlist would refuse this[/yellow]{ua}"
     if e.get("passthrough"):
         return f"[dim]{ts}[/dim] [dim]· tls tunnel (passthrough, not decrypted)[/dim]"
     status = e.get("status", 0)
@@ -284,7 +284,7 @@ def _rule_to_json(rule) -> dict:
 
 def _default_deny() -> bool:
     """Enforcement on/off, from the HOST-owned allow-store (``allowlist.default_deny``) — not
-    straight from ``[proxy] default_deny``, which the box could edit to switch its own wall off."""
+    straight from ``[proxy] enforce``, which the box could edit to switch its own wall off."""
     from .. import allowlist  # lazy: stdlib-only, but the registry hot path needn't import it
 
     return allowlist.default_deny()
@@ -469,7 +469,7 @@ class ProxyPlugin(Plugin):
         # listener — the supervisor runs one per worktree on the matching offset port. The address
         # is backend-dependent (config.host_alias): host.containers.internal under podman-machine/
         # native, Lima's guest→host gateway IP under lima (where that alias points at the VM, not
-        # the Mac).
+        # the host).
         return {"FY_PROXY": f"{config.host_alias()}:{config.proxy_port()}"}
 
     def box_args(self, env: dict) -> list[str]:
@@ -506,7 +506,7 @@ class ProxyPlugin(Plugin):
                 f"✗ FY_PROXY set ({proxy}) but no CA at {ca} — `fy host restart` on the host "
                 "once to generate it (or 'fy doctor', which offers the same fix)."
             )
-        # In-stack services bypass the proxy (NO_PROXY): it runs on the Mac and can't resolve a
+        # In-stack services bypass the proxy (NO_PROXY): it runs on the host and can't resolve a
         # stack-network hostname, so a proxied call to one 502s (after hanging). Three sources,
         # and the split is the point — foldyard names NO consumer service:
         #   loopback   always, for every consumer;
@@ -554,7 +554,7 @@ class ProxyPlugin(Plugin):
             return False
         if self._registry.proxy_rules(mode):
             return True
-        for axis, rungs in self._registry.axis_rungs().items():
+        for axis, rungs in self._registry.switch_levels().items():
             for rung in rungs:
                 if rung != mode.get(axis, rungs[0]) and self._registry.proxy_rules(
                     {**mode, axis: rung}

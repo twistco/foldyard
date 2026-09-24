@@ -57,7 +57,7 @@
     <tspan x="433" dy="16">mode you set.</tspan>
   </text>
   <rect class="card" x="670" y="278" width="235" height="127" rx="12"/>
-  <text class="card-h" x="688" y="305">Credential minters</text>
+  <text class="card-h" x="688" y="305">Token services</text>
   <text class="body" x="688" y="327">
     <tspan x="688">GCP metadata emulator · GitHub</tspan>
     <tspan x="688" dy="16">App · header or query-param auth</tspan>
@@ -87,15 +87,15 @@
   <text class="card-h" x="433" y="448">Config you approve</text>
   <text class="body" x="433" y="470">
     <tspan x="433">foldyard.toml is committed, so your</tspan>
-    <tspan x="433" dy="16">team shares it — but the host runs</tspan>
+    <tspan x="433" dy="16">team shares it — but your computer runs</tspan>
     <tspan x="433" dy="16">only the copy you adopted. An edit</tspan>
     <tspan x="433" dy="16">made inside the yard does nothing</tspan>
     <tspan x="433" dy="16">until you accept it.</tspan>
   </text>
   <rect class="card" x="670" y="421" width="235" height="127" rx="12"/>
-  <text class="card-h" x="688" y="448">Egress wall + allowlist</text>
+  <text class="card-h" x="688" y="448">Allowlist + VM firewall</text>
   <text class="body" x="688" y="470">
-    <tspan x="688">Default-deny, held on the host: you</tspan>
+    <tspan x="688">Kept on your computer: you</tspan>
     <tspan x="688" dy="16">grant a hostname live. A firewall</tspan>
     <tspan x="688" dy="16">provisioned inside the VM refuses</tspan>
     <tspan x="688" dy="16">traffic that tries to skip the proxy.</tspan>
@@ -177,7 +177,7 @@
     <tspan x="433" dy="16">assurance, not proof.</tspan>
   </text>
   <rect class="card" x="670" y="895" width="235" height="127" rx="12"/>
-  <text class="card-h" x="688" y="922">Credential-less posture</text>
+  <text class="card-h" x="688" y="922">No credentials in the box</text>
   <text class="body" x="688" y="944">
     <tspan x="688">No SSH agent, no keys, no .netrc</tspan>
     <tspan x="688" dy="16">— and a push to origin must be</tspan>
@@ -186,7 +186,7 @@
     <tspan x="688" dy="16">be down.</tspan>
   </text>
   <rect class="card" x="925" y="895" width="235" height="127" rx="12"/>
-  <text class="card-h" x="943" y="922">Wall enforcing</text>
+  <text class="card-h" x="943" y="922">Firewall enforcing</text>
   <text class="body" x="943" y="944">
     <tspan x="943">Egress that skips the proxy must</tspan>
     <tspan x="943" dy="16">be rejected — and the permitted</tspan>

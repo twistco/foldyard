@@ -3,7 +3,7 @@
 When the consumer declares ``[claude]`` (even empty), this plugin:
   - INSTALLS Claude Code on box-up (a monitored ``box_bootstrap`` step), and
   - mounts Claude's persisted state — its config home (``~/.claude``), the native-installer
-    version store (``~/.local/share/claude``), and the transcripts bind out to the Mac — so
+    version store (``~/.local/share/claude``), and the transcripts bind out to the host — so
     login + history survive box recreation and ``fy nuke``.
 
 Without ``[claude]`` the box is shell-only: no install, no Claude volumes. The launcher itself
@@ -19,7 +19,7 @@ persists in the mounted ``~/.claude`` across box recreation and ``fy nuke``.
 KEYLESS auth (``[claude].keyless``) — no real key/token in the box. When set, this plugin mirrors
 the ``github`` injector: it contributes a ``claude`` mode axis (off/on), an egress-proxy
 :class:`~foldyard.plugins.InjectRule` rewriting Claude's auth header on ``api.anthropic.com`` from a
-``host.env`` var on the Mac (via the shipped ``static_token`` minter — reused through
+``host.env`` var on the host (via the shipped ``static_token`` minter — reused through
 ``inject._spec_to_rule``), and bakes a DUMMY credential into the box so the client emits the header
 the proxy then overwrites. The real key/token never enters the box. Two modes: ``api-key``
 (``x-api-key`` ← ``ANTHROPIC_API_KEY``) and ``oauth`` (``authorization: Bearer`` ←
@@ -39,7 +39,7 @@ from pathlib import Path
 from .. import config, keyless
 from ..keyless import CLAUDE_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CLAUDE_KEYLESS_HOST as _KEYLESS_HOST
-from . import Axis, InjectRule, Plugin, Secret
+from . import InjectRule, Plugin, Secret, Switch
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
 
 # Remove a stale npm/global Claude so the native installer's ~/.local/bin copy wins on PATH (an
@@ -73,16 +73,16 @@ _ONBOARD_PY = (
 class ClaudePlugin(Plugin):
     name = "claude"
 
-    def axes(self) -> list[Axis]:
+    def switches(self) -> list[Switch]:
         # Only when keyless is configured: a github-shaped on/off injector axis. Off (the
         # zero-secret default) → the box holds only a dummy key and can't reach Claude; on → the
         # proxy injects the real key/token host-side. Maps to the shared "egress-proxy" daemon.
         if not config.claude_keyless():
             return []
         return [
-            Axis(
+            Switch(
                 name="claude",
-                rungs=("off", "on"),
+                levels=("off", "on"),
                 blurb={
                     "off": "no Claude credential reaches Anthropic (box holds only a dummy)",
                     "on": "keyless Claude: proxy injects your key/token host-side (none in box)",
@@ -148,7 +148,7 @@ class ClaudePlugin(Plugin):
             f"devbox_claude_native:{box_home}/.local/share/claude",
         ]
         transcripts = env.get("FY_TRANSCRIPTS") or ""
-        if transcripts:  # bound out to the Mac (survives nuke); create the host dir for the mount
+        if transcripts:  # bound out to the host (survives nuke); create the host dir for the mount
             Path(transcripts).mkdir(parents=True, exist_ok=True)
             args += ["-v", f"{transcripts}:{home}/projects"]
         # Keyless: bake the DUMMY credential so the client emits the header the proxy overwrites in

@@ -5,7 +5,7 @@ rootless machine, so a single branch can span every sub-project (platform/data/i
 for cross-cutting changes. `worktree add` creates it (git worktree + the machine's
 worktrees mount + the per-project init hook); `worktree list` shows main + the
 worktrees with their branches; `worktree remove` tears down the worktree's dev box +
-stack, archives its Claude transcripts to the durable Mac store, then drops the git
+stack, archives its Claude transcripts to the durable host store, then drops the git
 worktree and its per-worktree posture/VS Code state (after a confirmation prompt).
 
 Faithful port of the `worktree-add` recipe. The project-specific init step is
@@ -14,7 +14,7 @@ generic — a fresh consumer with no init script just gets the bare git worktree
 `wt <name> <recipe>` dispatcher stays a `just` recipe (it re-invokes `just` with
 WORKTREE=<name>); it's a just-level concern, not a foldyard verb.
 
-Mac-side: touches git + the rootless machine. Stdlib only.
+Host-side: touches git + the rootless machine. Stdlib only.
 """
 
 from __future__ import annotations
@@ -34,13 +34,13 @@ def _err(*a: object) -> None:
 
 def _host_only(verb: str) -> int | None:
     """Worktree add/remove are host-only. The box shares the real ``.git`` (bind-mounted) but
-    its worktrees root is a container-local dir the Mac can't see — so an in-box
+    its worktrees root is a container-local dir the host can't see — so an in-box
     ``git worktree add/remove/prune`` edits SHARED metadata against paths that exist on only
-    one side, orphaning Mac-side checkouts (dir present, metadata gone: ``git worktree
+    one side, orphaning host-side checkouts (dir present, metadata gone: ``git worktree
     remove`` then refuses it forever). None when OK to proceed."""
     if config.in_box():
-        _err(f"✗ run on the host (Mac) — in the box, `worktree {verb}` would edit the shared")
-        _err("  .git against a box-local worktrees dir and orphan the Mac-side checkout.")
+        _err(f"✗ run on your computer — in the box, `worktree {verb}` would edit the shared")
+        _err("  .git against a box-local worktrees dir and orphan the checkout on your computer.")
         return 1
     return None
 
@@ -242,7 +242,7 @@ def _seed_keyless_posture(name: str) -> None:
     egress proxy installs NO token-inject rule on its per-worktree port — so codex/claude in the
     worktree box send the far-future *dummy* token, 401, then try to refresh with the dummy refresh
     token and fail with *"Your access token could not be refreshed."* The real creds are already
-    project-shared host-side (the proxy mints them from the Mac's ``~/.codex/auth.json`` /
+    project-shared host-side (the proxy mints them from the host's ``~/.codex/auth.json`` /
     ``host.env``); the only missing piece is this worktree's posture being ON. So we seed posture —
     NOT creds (copying the rotating ``auth.json`` into the box would spawn a second, unsynchronised
     refresher and corrupt the token).
@@ -269,12 +269,12 @@ def _seed_keyless_posture(name: str) -> None:
         with config.using(wt_cfg):
             devmode.set_mode(updates, reconcile=False)  # box up applies it; nothing's running yet
         print(
-            "▶ seeded keyless posture from main: "
+            "▶ seeded keyless mode from main: "
             + ", ".join(f"{a}={v}" for a, v in updates.items())
             + f"  (its box will inject on `WORKTREE={name} fy box up`)"
         )
     except Exception as e:  # posture seeding is a best-effort convenience, never fatal
-        print(f"  (couldn't seed keyless posture — set it manually with `fy mode`: {e})")
+        print(f"  (couldn't seed keyless mode — set it manually with `fy mode`: {e})")
 
 
 def add(name: str, branch: str = "", base: str = "") -> int:
@@ -411,7 +411,7 @@ def _init_in_yard(main: Path, wt_dir: Path) -> int:
         _err(f"    build it, then re-run:  fy box build && fy worktree init {wt_dir.name}")
         return 0
     wt_root = config.worktrees_root(main)
-    print(f"▶ initialising worktree config in the yard ({image})…")
+    print(f"▶ initialising worktree config in the VM ({image})…")
     cmd = [
         engine,
         "run",
@@ -440,7 +440,7 @@ def _init_in_yard(main: Path, wt_dir: Path) -> int:
 def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
     """Remove a host-sibling worktree and ALL its local state: tear down its dev box and its
     stack (compose down + drop the worktree's volumes; shared caches kept), archive its configured
-    agents' transcripts to the durable Mac store, then ``git worktree remove`` the checkout.
+    agents' transcripts to the durable host store, then ``git worktree remove`` the checkout.
     Interactive confirmation unless ``assume_yes``/``force``. ``--force`` also removes when
     archiving fails or the tree is dirty/locked (passed through to git). Transcripts are archived
     BEFORE git deletes the worktree, since that takes the fragile bound-out transcript dirs with it.
@@ -489,12 +489,12 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
     print(f"  1. stop + remove its dev box container ({project}-devbox) + its shadow volumes")
     print(f"  2. tear down its stack ({project}): compose down + drop its volumes")
     print("       (postgres + GCS/BigQuery emulator data; SHARED pnpm/Playwright caches are kept)")
-    print("  3. archive its configured agent transcripts to the durable Mac store")
+    print("  3. archive its configured agent transcripts to the durable store on your computer")
     if orphaned:
         print("  4. delete the ORPHANED checkout dir (git no longer tracks it) + worktree prune")
     else:
         print("  4. git worktree remove — the checkout directory is deleted")
-    print("  5. delete its local posture + isolated VS Code state")
+    print("  5. delete its local mode + isolated VS Code state")
     if branch:
         print(f"  The branch '{branch}' is KEPT (delete it later with: git branch -D {branch}).")
     if not (assume_yes or force):

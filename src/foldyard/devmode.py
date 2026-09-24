@@ -13,16 +13,16 @@ The stack has two orthogonal credential axes, each a ladder from "zero secrets" 
     user   EMERGENCY: your own GCP                injected (push becomes possible)
            identity inside the box
 
-"Mode" is a desired posture, not a capability: the Mac-side daemons (`fy host`) are
+"Mode" is a desired posture, not a capability: the host-side daemons (`fy host`) are
 the enforcement point — without them running, a mode grants nothing. Which is why the
 state lives in TWO files:
 
   ~/.foldyard/<project>/dev-mode.json
-                                 AUTHORITATIVE. Mac home, NOT the shared repo mount, so
+                                 AUTHORITATIVE. Host home, NOT the shared repo mount, so
                                  nothing inside the VM/box can escalate its own posture
-                                 by editing it. Only `fy mode …` on the Mac writes it.
+                                 by editing it. Only `fy mode …` on the host writes it.
   <repo>/<dev_vm_dir>/.dev-mode.json
-                                 READ-ONLY MIRROR (gitignored), written by the Mac on
+                                 READ-ONLY MIRROR (gitignored), written by the host on
                                  every mode change + supervisor heartbeat so box
                                  sessions can SEE the posture (`fy mode`). Purely
                                  informational — no daemon ever grants based on it.
@@ -31,11 +31,11 @@ state lives in TWO files:
 reader treats a lapsed TTL as `off`, and the supervisor kills the daemon + writes the
 axis back to `off` at expiry. Emergencies that need re-arming never become the default.
 
-Stdlib only (runs on the Mac system python3 and in the box). The TUI (tui.py) and the
+Stdlib only (runs on the host's system python3 and in the box). The TUI (tui.py) and the
 supervisor (supervisor.py) import this module; the `foldyard` CLI (cli.py) routes to
 its main():
 
-  foldyard mode                    the dashboard (Mac: live probes; box: the mirror)
+  foldyard mode                    the dashboard (host: live probes; box: the mirror)
   foldyard mode gcp=user [ttl=1h]  set axes (host only); ttl applies to emergency rungs only
   foldyard mode env                shell `export` lines deriving recipe env from the
                                    mode (only as defaults — explicit env always wins)
@@ -77,14 +77,14 @@ _BACKEND = get_backend(config.machine_backend())
 
 def axes() -> dict[str, tuple[str, ...]]:
     """axis -> its rungs (rung 0 = the zero-secret default), from the active registry."""
-    return registry().axis_rungs()
+    return registry().switch_levels()
 
 
 def axis_defaults() -> dict[str, str]:
     """axis -> its zero-secret resting rung (rung 0; usually but not necessarily "off" — e.g.
     storage's "local", auth0's "sim"), from the active registry. Unset/invalid/expired values
     read as this."""
-    return registry().axis_defaults()
+    return registry().switch_defaults()
 
 
 def mode_blurb() -> dict[tuple[str, str], str]:
@@ -94,12 +94,12 @@ def mode_blurb() -> dict[tuple[str, str], str]:
 
 def axis_daemon() -> dict[str, str | None]:
     """axis -> the daemon name its status maps to (None ⇒ no daemon), from the active registry."""
-    return registry().axis_daemon()
+    return registry().switch_daemon()
 
 
 def emergency() -> dict[str, tuple[str, ...]]:
     """axis -> rungs that carry a TTL + auto-revert, from the active registry."""
-    return registry().emergency_rungs()
+    return registry().emergency_levels()
 
 
 def in_box() -> bool:
@@ -213,7 +213,7 @@ def read(apply_expiry: bool = True) -> dict:
 def write_mirror(
     mode: dict, expires: dict, daemons: dict | None, capabilities: dict | None = None
 ) -> None:
-    """The informational copy on the shared mount, for box sessions. Mac only. ``capabilities``
+    """The informational copy on the shared mount, for box sessions. Host only. ``capabilities``
     is the supervisor's probe results for THIS worktree (axis → {ok, detail, checked}) so an
     in-box ``fy mode`` can render a DEGRADED axis; callers without probe results (``fy mode``
     itself) pass None and the mirror simply carries no capability claim until the next tick."""
@@ -254,9 +254,9 @@ def validate_updates(updates: dict[str, str]) -> None:
     rungs = axes()
     for axis, value in updates.items():
         if axis in RETIRED_AXES:
-            raise SystemExit(f"✗ the {axis!r} axis was removed — {RETIRED_AXES[axis]}")
+            raise SystemExit(f"✗ the {axis!r} switch was removed — {RETIRED_AXES[axis]}")
         if axis not in rungs:
-            raise SystemExit(f"✗ unknown axis {axis!r} (have: {', '.join(rungs)})")
+            raise SystemExit(f"✗ unknown switch {axis!r} (have: {', '.join(rungs)})")
         if value not in rungs[axis]:
             raise SystemExit(f"✗ {axis} mode {value!r} (have: {', '.join(rungs[axis])})")
 
@@ -268,7 +268,7 @@ def set_mode(
     reconcile: bool = True,
     reconcile_sink: Callable[[str], None] | None = None,
 ) -> dict:
-    """Apply axis updates to the authoritative file (+ mirror). Mac only.
+    """Apply axis updates to the authoritative file (+ mirror). Host only.
 
     ``force`` downgrades coherence ERRORS to printed warnings and applies anyway — for callers
     that must never be refused (the supervisor's TTL expiry is a de-escalation; the dependent
@@ -278,8 +278,8 @@ def set_mode(
     so compose output doesn't bleed over the Textual UI; default None → stderr)."""
     if in_box():
         raise SystemExit(
-            "✗ mode changes are Mac-only: the box must not escalate its own posture "
-            "(the authoritative file lives in the Mac home, outside the shared mount)."
+            "✗ mode changes only happen on your computer: the box must not escalate its own mode "
+            "(the authoritative file lives in your home directory, outside the shared mount)."
         )
     validate_updates(updates)
     emergency_rungs = emergency()
@@ -318,7 +318,7 @@ def set_mode(
     if config.mirror_file().exists() or config.active_worktree() in up_worktrees():
         write_mirror(mode, expires, daemon_status(mode))
     new_posture = posture_signature(mode)
-    # set_mode is the single Mac-side choke point every posture change routes through (CLI + TUI +
+    # set_mode is the single host-side choke point every posture change routes through (CLI + TUI +
     # the supervisor's TTL expiry), so it's where the running stack is reconciled to the new
     # posture — whenever the posture SIGNATURE (derived env incl. COMPOSE_PROFILES, plus the
     # overlay -f list) changed: profile toggles (gcp=off→logs adds the metadata emulator) AND
@@ -453,7 +453,7 @@ def degraded_capabilities(mode: dict | None = None) -> list[tuple[str, str]]:
 
 
 def probe(port: int, host: str | None = None) -> bool:
-    # In-box, Mac daemon ports are probed at the backend's guest→host address (config.host_alias:
+    # In-box, host daemon ports are probed at the backend's guest→host address (config.host_alias:
     # host.containers.internal under podman-machine/native, the Lima host gateway IP under lima).
     host = host or (config.host_alias() if in_box() else "127.0.0.1")
     try:
@@ -771,7 +771,7 @@ def worktree_config(wt: str) -> config.Config:
     The TOML is that checkout's **adopted** copy, not its working tree (:func:`configpin.effective`)
     — this is the funnel every host-side consumer of a worktree's config goes through (the
     supervisor's reconcile loop, the TUI, ``fy state``), so pinning it here is what keeps a repo
-    edit from reaching the Mac's credential daemons unattended. In the box, and before anything has
+    edit from reaching the host's credential daemons unattended. In the box, and before anything has
     been adopted, it falls back to the working tree exactly as before."""
     if not wt:
         bound = config.bound_config()
@@ -831,7 +831,7 @@ def _decode(chunk: bytes | str | None) -> str:
 
 
 def _fy(args: list[str], timeout: float = 60, env_extra: dict | None = None) -> tuple[int, str]:
-    """Run a `foldyard` (≡ `fy`) verb from the repo root (Mac only). Returns (rc, combined
+    """Run a `foldyard` (≡ `fy`) verb from the repo root (host only). Returns (rc, combined
     out). `env_extra` overlays the process env (e.g. WORKTREE=<name> to target a worktree).
     The full output is kept — in the command log (Doctor pane) and the durable actions log —
     because the TUI only toasts the last line, and a teardown that misbehaves is otherwise
@@ -867,7 +867,7 @@ def _fy(args: list[str], timeout: float = 60, env_extra: dict | None = None) -> 
 
 
 def create_worktree(name: str, branch: str) -> tuple[int, str]:
-    """Shell out to `fy worktree add` (Mac only — it touches git + the machine).
+    """Shell out to `fy worktree add` (host only — it touches git + the machine).
     Returns (returncode, combined output). `name` is the worktree dir name."""
     if not name:
         return 1, "empty worktree name"
@@ -875,7 +875,7 @@ def create_worktree(name: str, branch: str) -> tuple[int, str]:
 
 
 def remove_worktree(name: str) -> tuple[int, str]:
-    """Shell out to `fy worktree remove <name> --yes` (Mac only): tear down the worktree's dev box
+    """Shell out to `fy worktree remove <name> --yes` (host only): tear down the worktree's dev box
     + stack (compose down + drop its volumes), archive its Claude transcripts, then git-remove the
     checkout. `--yes` skips the CLI's own prompt — the TUI shows its own confirmation first. The
     box+stack teardown is the slow part, so allow a generous timeout. Returns (rc, combined out)."""
@@ -885,7 +885,7 @@ def remove_worktree(name: str) -> tuple[int, str]:
 
 
 def open_code(name: str) -> tuple[int, str]:
-    """Open VS Code on a workspace via `fy code` (Mac only). `main` runs it at the repo
+    """Open VS Code on a workspace via `fy code` (host only). `main` runs it at the repo
     root; a worktree targets it with `WORKTREE=<name> fy code`."""
     env_extra = {"WORKTREE": "" if name == "main" else name}
     return _fy(["code"], timeout=60, env_extra=env_extra)
@@ -898,14 +898,14 @@ def open_browser(name: str) -> tuple[int, str]:
 
 
 def box_up(name: str) -> tuple[int, str]:
-    """Create + start a workspace's dev box via `fy box up` (Mac only). The first run on a
+    """Create + start a workspace's dev box via `fy box up` (host only). The first run on a
     fresh image builds + warms deps, so allow a generous timeout."""
     env_extra = {"WORKTREE": "" if name == "main" else name}
     return _fy(["box", "up"], timeout=600, env_extra=env_extra)
 
 
 def box_down(name: str) -> tuple[int, str]:
-    """Stop + remove a workspace's dev box via `fy box down` (Mac only; login/CLI volumes
+    """Stop + remove a workspace's dev box via `fy box down` (host only; login/CLI volumes
     are kept — that's `fy box down`'s own contract)."""
     env_extra = {"WORKTREE": "" if name == "main" else name}
     return _fy(["box", "down"], timeout=120, env_extra=env_extra)
@@ -918,7 +918,7 @@ def machine_state() -> str:
 
 
 def machine_toggle() -> tuple[int, str]:
-    """Start the machine if stopped, stop it if running (Mac only). Returns (rc, combined
+    """Start the machine if stopped, stop it if running (host only). Returns (rc, combined
     output). No-op with a clear message if the state is unknown. Uses the active backend's
     start/stop commands so the TUI still surfaces their raw output."""
     state = machine_state()
@@ -1119,7 +1119,7 @@ def doctor(deep: bool = False):
 
     status is ok|warn|fail, or 'running' — a placeholder emitted right before a
     networked check so a live UI can show a spinner on that line until the real result
-    replaces it (keyed by name). The box-side checks are the spine's own; the Mac-side
+    replaces it (keyed by name). The box-side checks are the spine's own; the host-side
     "what can this machine grant?" probes are PLUGIN-contributed (each plugin yields its
     own gcloud/gh/PAM/impersonation rows). deep=True adds the live IAM probes. A generator
     so callers render progressively; `list(doctor(...))` still collects everything.
@@ -1159,14 +1159,19 @@ def doctor(deep: bool = False):
         yield from registry().box_doctor_checks(ctx)
         return
 
-    # Mac-side: one generic check, then each plugin's "what can this machine grant?" probes
+    # Host-side: one generic check, then each plugin's "what can this machine grant?" probes
     # (gcloud/ADC/PAM/impersonations from gcp; gh/mitmproxy/CA/host.env/PEM from github).
     # ctx hands the plugins devmode's own _run/_which/_result so their subprocess calls
     # still hit the redacting command log and render identically.
     ctx = DoctorContext(
         deep=deep, run=_run, which=_which, result=_result, probe=probe, mode=read()["mode"]
     )
-    yield _result(_which("uv"), "uv", "installed", "missing — brew install uv (TUI, data tooling)")
+    yield _result(
+        _which("uv"),
+        "uv",
+        "installed",
+        "missing — install uv (TUI, data tooling; `brew install uv` on macOS)",
+    )
     yield _config_pin_check()
     yield _widenings_check()
     yield from _podman_checks()
@@ -1372,7 +1377,7 @@ def _version_window_check():
 
 def _disk_headroom_check():
     """The VM's disk, asked of the engine so the answer is the same from either side of the
-    mount (a host-side ``df`` would measure the Mac's disk instead of the store's).
+    mount (a host-side ``df`` would measure the host's disk instead of the store's).
 
     Yields nothing when the figure can't be read — no machine yet, a docker engine, a stopped
     VM — because "unknown" is not a finding. The threshold is stack's, shared with the ``fy
@@ -1491,8 +1496,8 @@ def _stack_shadow_check():
 
 
 def _podman_checks():
-    """Core (not plugin) Mac-side checks the whole stack rests on: the podman CLI is
-    installed, and its machine is up (or at least ready to start). Mac-only — the box has no
+    """Core (not plugin) host-side checks the whole stack rests on: the podman CLI is
+    installed, and its machine is up (or at least ready to start). Host-only — the box has no
     podman (it IS the machine's guest), and doctor's in_box() branch returns before this. The
     machine check is a WARN (not a fail) when stopped/uninitialised: that's the expected
     pre-`fy up` state, and the TUI's `s` key (or `fy up`) brings it up from there."""
@@ -1501,7 +1506,7 @@ def _podman_checks():
         have_podman,
         "podman CLI",
         "installed",
-        "missing — brew install podman (the dev stack's container engine)",
+        "missing — install podman (your package manager; `brew install podman` on macOS)",
     )
     if not have_podman:
         return  # nothing to inspect without the CLI; the row above already flagged it
@@ -1528,7 +1533,7 @@ def _podman_checks():
 
 
 def _host_wall_check():
-    """The operator's host-wall install (`[machine].host_wall`, lima), PROBED — foldyard can't
+    """The operator's host-wall install (`[machine] host_firewall`, lima), PROBED — foldyard can't
     read the table back without root, and one that is there may hold the ID of a slice that no
     longer exists (a host reboot). Independent of the VM's lifecycle: the row is the same
     whether the VM is up or not, because the install is bound to the user manager, not the VM.
@@ -1538,18 +1543,18 @@ def _host_wall_check():
         return
     from . import hostwall  # stdlib-only, but only this row needs it
 
-    fix = "`fy machine host-wall` prints the files and the install steps"
+    fix = "`fy machine host-firewall` prints the files and the install steps"
     if not hostwall.available():
-        yield _result(False, "host wall", "", "wanted, but this host has no nft / cgroup v2")
+        yield _result(False, "host firewall", "", "wanted, but this host has no nft / cgroup v2")
         return
     if not hostwall.slice_path(PODMAN_MACHINE):
-        yield _result(None, "host wall", "", f"not set up — {fix} (and creates the slice)")
+        yield _result(None, "host firewall", "", f"not set up — {fix} (and creates the slice)")
         return
-    yield ("running", "host wall", "")  # the probe below spawns a child — let a live UI spin
+    yield ("running", "host firewall", "")  # the probe below spawns a child — let a live UI spin
     res = hostwall.probe(PODMAN_MACHINE)
     yield _result(
         res.enforcing,
-        "host wall",
+        "host firewall",
         f"enforcing ({res.detail()})",
         f"NOT enforcing ({res.error or res.detail()}) — {fix}",
     )
@@ -1558,7 +1563,7 @@ def _host_wall_check():
 def doctor_cli(deep: bool) -> int:
     marks = {"ok": "\033[32m✓\033[0m", "warn": "\033[33m○\033[0m", "fail": "\033[31m✗\033[0m"}
     print(
-        f"Doctor — {'box' if in_box() else 'Mac'} setup checks"
+        f"Doctor — setup checks {'in the box' if in_box() else 'on your computer'}"
         + (" (deep: live IAM probes)" if deep else " (fast; `doctor deep` adds live IAM probes)")
     )
     worst = 0
@@ -1600,7 +1605,7 @@ def _box_env_hint(mode: dict, project: str | None = None) -> str | None:
     # NB gcp metadata + the egress proxy env are baked UNCONDITIONALLY now: the box ALWAYS points
     # GCE_METADATA_HOST at the on-network emulator, and Phase A′ ALWAYS routes egress through the
     # proxy (HTTPS_PROXY always set). Their presence no longer tracks the mode — the rung's enforced
-    # entirely Mac-side (the minter up/down, the proxy's host-side rules), reconciled live by
+    # entirely host-side (the minter up/down, the proxy's host-side rules), reconciled live by
     # `fy host`, so changing gcp/github/capture needs NO `fy box up`. (Checking them here mis-fired
     # "gcp metadata out of date" forever, since gcp defaults to off but the host is always baked.)
     # What DOES still need a box rebuild is a keyless injector toggling: it bakes (or drops) a DUMMY
@@ -1633,13 +1638,13 @@ def show() -> int:
         age = int((now() - written).total_seconds()) if written else None
         stale = age is None or age > 15
         print(
-            f"Dev posture (mirror: {state['source']}"
+            f"Dev mode (mirror: {state['source']}"
             + (f", {age}s old" if age is not None else "")
             + ")"
         )
         daemons = state["daemons"] or {}
     else:
-        print(f"Dev posture (authoritative: {state['source']})")
+        print(f"Dev mode (authoritative: {state['source']})")
         stale = False
         daemons = daemon_status(mode)
 
@@ -1709,11 +1714,11 @@ def clock_cli(args: list[str]) -> int:
     ``fy clock`` shows the current skew; ``fy clock ff 2h`` fast-forwards every devmode reader
     (TTL expiry, countdowns, the supervisor's revert+settle) by writing the host-side offset
     file; ``fy clock reset`` returns to real time. Host-only for writes — the box must not skew
-    the host's view of time (the offset lives in the Mac home, like the mode file)."""
+    the host's view of time (the offset lives in the host home, like the mode file)."""
     offset = clock_offset()
     if not args:
         skew = f"+{int(offset)}s" if offset else "none (real time)"
-        print(f"posture clock skew: {skew}   now(): {_iso(now())}")
+        print(f"mode clock skew: {skew}   now(): {_iso(now())}")
         if offset:
             print("  reset with: fy clock reset")
         return 0
@@ -1721,7 +1726,7 @@ def clock_cli(args: list[str]) -> int:
         raise SystemExit("✗ clock changes are host-only (the box must not skew the host clock).")
     if args[0] == "reset":
         config.clock_offset_file().unlink(missing_ok=True)
-        print(f"✓ posture clock reset to real time (now(): {_iso(now())})")
+        print(f"✓ mode clock reset to real time (now(): {_iso(now())})")
         return 0
     if args[0] == "ff" and len(args) == 2:
         text = args[1].strip().lower()
@@ -1738,7 +1743,7 @@ def clock_cli(args: list[str]) -> int:
         path = config.clock_offset_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"{int(offset) + seconds}\n")
-        print(f"✓ posture clock fast-forwarded {text} (total skew +{int(offset) + seconds}s)")
+        print(f"✓ mode clock fast-forwarded {text} (total skew +{int(offset) + seconds}s)")
         print("  the supervisor picks this up within a tick; `fy clock reset` undoes it.")
         return 0
     raise SystemExit(f"usage: foldyard clock [ff <90s|30m|2h>|reset] (got {' '.join(args)!r})")
@@ -1771,8 +1776,8 @@ def _refuse_a_ttl_nothing_carries(updates: dict[str, str]) -> None:
     asked = " ".join(f"{axis}={value}" for axis, value in updates.items())
     ttld = ", ".join(f"{axis}={r}" for axis, rs in rungs.items() for r in rs) or "none here"
     raise SystemExit(
-        f"✗ ttl= would be ignored: {asked} doesn't expire. Only emergency rungs carry a TTL "
-        f"({ttld}); drop the ttl, or mark an [[inject]] axis `emergency = true`."
+        f"✗ ttl= would be ignored: {asked} doesn't expire. Only emergency levels carry a TTL "
+        f"({ttld}); drop the ttl, or mark an [[inject]] switch `emergency = true`."
     )
 
 
@@ -1785,7 +1790,7 @@ def main(argv: list[str]) -> int:
         ttl: int | None = None
         for arg in argv[1:]:
             if "=" not in arg:
-                raise SystemExit(f"✗ expected axis=value or ttl=…, got {arg!r}")
+                raise SystemExit(f"✗ expected switch=value or ttl=…, got {arg!r}")
             key, value = arg.split("=", 1)
             if key == "ttl":
                 ttl = parse_ttl(value)
@@ -1816,7 +1821,7 @@ def main(argv: list[str]) -> int:
             print(f"  {ws['name']:<16} {ws['branch']:<28} {stack:<16} {box}   {ws['path']}")
         return 0
     raise SystemExit(
-        f"usage: foldyard mode [show|set axis=value… [ttl=…]|env|doctor [deep]|clock|"
+        f"usage: foldyard mode [show|set switch=value… [ttl=…]|env|doctor [deep]|clock|"
         f"workspaces] (got {cmd!r})"
     )
 

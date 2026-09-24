@@ -1,52 +1,62 @@
 # foldyard docs — the map
 
-Start with the [package README](../README.md) (what foldyard is and why). Then, by audience:
+Start with the [README](../README.md): what foldyard is and why. Then pick by what you need.
 
-**Using foldyard:**
+## The manual
 
-- [quickstart.md](./quickstart.md) — install → `init` → box → agent → stack, following the
-  config the `init` template writes
+For using foldyard. These pages also ship with the install — `fy docs` prints them offline.
+
+- [glossary.md](./glossary.md) — every term these docs use, in plain words. Read this first if a
+  word is unfamiliar (box, mode, switch, allowlist, adopted config…).
+- [quickstart.md](./quickstart.md) — install, `fy init`, the box, an agent, your stack, and how
+  to upgrade.
 - [configuration.md](./configuration.md) — every `foldyard.toml` key, `foldyard.local.toml`
-  overrides, env precedence, the `~/.foldyard/` state layout
-- [modes.md](./modes.md) — posture axes and rungs, TTLs, keyless agents, host-side enforcement
-- [networking.md](./networking.md) — the egress proxy, capture, allowlisting, and the wall
-- [security.md](./security.md) — the threat model and what `fy verify` proves
-- [compose-overlays.md](./compose-overlays.md) — the `[[overlay]]` posture-overlay config,
-  in depth
-- [linux-support.md](./linux-support.md) — what has been validated on a Linux host and inside
-  WSL2, what has not (the daily `fy up` loop, a real Windows 11 machine), and the outstanding
-  list before "supported"
-- plugins.md — writing your own plugin (coming with the consumer-repo plugin work)
+  overrides, environment variables, the adopted config, and what lives in `~/.foldyard/`.
+- [modes.md](./modes.md) — switching credentials on and off: switches and levels, time limits,
+  keyless agents, and what enforces them on your computer.
+- [networking.md](./networking.md) — the egress proxy, the traffic log, the allowlist, and the
+  VM and host firewalls.
+- [security.md](./security.md) — the threat model, what the boundary does and doesn't defend,
+  and what `fy verify` checks.
+- [compose-overlays.md](./compose-overlays.md) — `[[overlay]]` in depth: extra compose files
+  that apply while a switch is at a given level.
+- [testing-modes.md](./testing-modes.md) — a zero-secret test rig (`fakecred` and a skewable
+  clock) for trying modes, time limits and failure handling live.
 
-**Why it's built this way:**
+## The design record
 
-- [adrs/](./adrs/) — one file per decision, with status and consequences
-- [prior-art.md](./prior-art.md) — the landscape, positioning, and the nono/agent-sandbox
-  analysis
+Why foldyard is built the way it is.
 
-**Developing foldyard** (library internals and test rigs — start at
-[DEVELOPMENT.md](../DEVELOPMENT.md)):
+- [adrs/](./adrs/) — one file per decision, with its status and consequences.
+- [prior-art.md](./prior-art.md) — the landscape of similar tools and where foldyard fits.
+- [prior-art/](./prior-art/) — deep-dives on the closest tools (gondolin, vhrn), read against
+  foldyard, and a side-by-side comparison.
+- [archive/](./archive/) — finished studies and incident records, kept for reference:
+  - [verify-false-pass.md](./archive/verify-false-pass.md) — how `fy verify` once printed ALL
+    PASS while checking nothing, and the control that fixed it.
+  - [mode-state-consolidation.md](./archive/mode-state-consolidation.md) — the inventory of
+    state tiers behind the reconciler (`fy state`).
+  - [firecracker-and-microvm-backends.md](./archive/firecracker-and-microvm-backends.md) — why
+    Firecracker doesn't fit (no filesystem sharing, by design).
+  - [lima-network-forcing-kit/](./archive/lima-network-forcing-kit/) — the runnable proof kit
+    that showed a VM firewall can force all egress through a proxy.
 
-- [nested-virt.md](./nested-virt.md) — validating host-only paths headlessly (the nested-KVM
-  rig)
-- [lima-backend-scope.md](./lima-backend-scope.md) — the machine-backend contract
-  (podman | lima | native)
-- [lima-wall-machine-integration.md](./lima-wall-machine-integration.md) — the wall's design
-  and per-project port bands
-- [lima-network-forcing-kit/](./lima-network-forcing-kit/) — the runnable wall proof kit
-- [podman-multi-vm-issue-26281.md](./podman-multi-vm-issue-26281.md) — why the podman backend
-  runs one VM at a time
-- [firecracker-and-microvm-backends.md](./firecracker-and-microvm-backends.md) — why Firecracker
-  does not fit (no filesystem sharing, by design); the libkrun measurements live in isolation-layers
+## Contributing to foldyard
+
+Start at [DEVELOPMENT.md](../DEVELOPMENT.md): the module map, test tiers, CI and conventions.
+
+- [releasing.md](./releasing.md) — how a release is cut (tag-driven).
+- [linux-support.md](./linux-support.md) — what has been run on a Linux host and inside WSL2,
+  and what hasn't yet.
 - [isolation-layers.md](./isolation-layers.md) — which layer carries the boundary on each host
-  (macOS · Linux · WSL2), with the hypervisor stacks drawn out
-- [verify-false-pass.md](./verify-false-pass.md) — how `fy verify` could print ALL PASS while
-  asserting nothing, and the control that fixed it
-- [testing-modes.md](./testing-modes.md) — the zero-secret `fakecred` rig for exercising the
-  posture machinery live (ships in the wheel)
-- [mode-state-consolidation.md](./mode-state-consolidation.md) — the state-tier inventory and the
-  reconcile SCOPE design, distilled from every mode/lifecycle bug in the history
+  (macOS, Linux, WSL2), with measurements.
+- [lima-backend-scope.md](./lima-backend-scope.md) — the VM-backend contract (lima and podman)
+  and the tricky parts of the Lima backend.
+- [lima-wall-machine-integration.md](./lima-wall-machine-integration.md) — how the box reaches
+  the proxy on the host, and the design of the VM and host firewalls.
+- [nested-virt.md](./nested-virt.md) — a nested-KVM rig for testing the paths that only run on
+  the host.
 
-**Archaeology:** foldyard was extracted from Twist's monorepo as a squash-start
+**History:** foldyard was extracted from Twist's monorepo as a fresh start
 ([ADR-0013](./adrs/0013-in-repo-carve-out-until-extraction.md)). The pre-extraction run-logs,
-plans, design boards and deck stay there; the ADRs are the public record of the "why".
+plans and design boards stay there; the ADRs are the public record of the reasoning.

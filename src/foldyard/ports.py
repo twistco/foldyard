@@ -1,10 +1,10 @@
-"""Cross-project Mac-side daemon port-band allocation.
+"""Cross-project host-side daemon port-band allocation.
 
-Every foldyard project runs its own Mac-side daemons (egress proxy, gcp minter), and every
+Every foldyard project runs its own host-side daemons (egress proxy, gcp minter), and every
 consumer of a daemon's port — the supervisor's listener, the box's ``FY_PROXY`` env, the VM
 wall's nft allow-ranges, the in-box probes — must agree on it *and* it must be stable across
 restarts (it's baked into box env and VM ``environment.d`` at create time). Two projects on
-one Mac therefore need DISJOINT ports: with a single global base, both supervisors held their
+one host therefore need DISJOINT ports: with a single global base, both supervisors held their
 own per-project singleton lock, both bound the same port, and each reaped the other's proxy
 as "orphaned" every tick — an endless fight (the 2026-07 boot-loop).
 
@@ -76,12 +76,12 @@ def project_base(project: str) -> int:
             fh.truncate()
             json.dump(reg, fh, indent=1, sort_keys=True)
             print(
-                f"ℹ allocated Mac daemon ports {cand}-{cand + BAND - 1} to project "
+                f"ℹ allocated daemon ports {cand}-{cand + BAND - 1} on your computer to project "
                 f"'{project}' ({path})",
                 file=sys.stderr,
             )
             return cand
     raise RuntimeError(
-        f"✗ no free daemon port band left in {FIRST_BASE}-{LAST_BASE + BAND - 1} — prune "
+        f"✗ no free daemon port range left in {FIRST_BASE}-{LAST_BASE + BAND - 1} — prune "
         f"stale projects from {path} (or set FY_PROXY_PORT/GCP_MINTER_PORT explicitly)."
     )

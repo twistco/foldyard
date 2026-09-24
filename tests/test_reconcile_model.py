@@ -1,6 +1,6 @@
 """Model-based stateful test of the mode/state control loop (hypothesis RuleBasedStateMachine).
 
-The audited failure history (docs/mode-state-consolidation.md) is SEQUENCES — mode set, TTL
+The audited failure history (docs/archive/mode-state-consolidation.md) is SEQUENCES — mode set, TTL
 lapse, probe flip, box up/down, supervisor restart — landing the tiers in a combination nobody
 enumerated. The conformance suite (test_reconcile_scenarios.py) pins the sequences someone
 already thought of; this machine generates the rest: random interleavings of the real
@@ -57,7 +57,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, rule
 
 from foldyard import config, devmode, supervisor
-from foldyard.plugins import Axis, CapabilityProbe, Plugin, Registry, Requires
+from foldyard.plugins import CapabilityProbe, Plugin, Registry, Requires, Switch
 
 # The synthetic world: an identity ladder (emergency top rung → TTL-bound) + a dependent axis.
 # dep=live requires ident∈{sa,user} — the llm-live-under-gcp shape from the incident history.
@@ -96,23 +96,25 @@ class ModeStateModel(RuleBasedStateMachine):
         class WorldPlugin(Plugin):
             name = "world"
 
-            def axes(self):
+            def switches(self):
                 return [
-                    Axis(
+                    Switch(
                         name="ident",
-                        rungs=("off", "sa", "user"),
+                        levels=("off", "sa", "user"),
                         blurb=dict.fromkeys(("off", "sa", "user"), "-"),
                         emergency=("user",),
                     ),
-                    Axis(
+                    Switch(
                         name="dep",
-                        rungs=("off", "live"),
+                        levels=("off", "live"),
                         blurb={"off": "-", "live": "-"},
-                        # DECLARATIVE (Axis.requires, not a mode_issues hook) so the machine
+                        # DECLARATIVE (Switch.requires, not a mode_issues hook) so the machine
                         # drives the same core evaluator the shipped guards use, end to end
                         # through set_mode's gate and the expiry's settle. `_errors` above
                         # stays the model's independent oracle for the same constraint.
-                        requires=(Requires(when=("live",), axis="ident", accepts=("sa", "user")),),
+                        requires=(
+                            Requires(when=("live",), switch="ident", accepts=("sa", "user")),
+                        ),
                     ),
                 ]
 
@@ -121,7 +123,7 @@ class ModeStateModel(RuleBasedStateMachine):
                     return []
                 return [
                     CapabilityProbe(
-                        axis="ident",
+                        switch="ident",
                         name="fake-ident",
                         check=lambda: (machine.probe_ok, "probed"),
                         interval=0.0,  # always due — the tick cadence is the machine's to drive

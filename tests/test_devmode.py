@@ -1077,15 +1077,15 @@ def test_clock_ff_rejects_malformed_durations_as_usage_error(isolated_state, mon
 def test_settle_coordinated_fallback_when_no_single_downgrade_helps(monkeypatch):
     # Two axes whose ONE error only clears together: no single downgrade reduces the count, so
     # the greedy loop stalls — the coordinated fallback settles everything-at-rest instead.
-    from foldyard.plugins import Axis, Plugin, Registry
+    from foldyard.plugins import Plugin, Registry, Switch
 
     class Tangled(Plugin):
         name = "tangled"
 
-        def axes(self):
+        def switches(self):
             return [
-                Axis(name="a", rungs=("off", "on"), blurb={"off": "-", "on": "-"}),
-                Axis(name="b", rungs=("off", "on"), blurb={"off": "-", "on": "-"}),
+                Switch(name="a", levels=("off", "on"), blurb={"off": "-", "on": "-"}),
+                Switch(name="b", levels=("off", "on"), blurb={"off": "-", "on": "-"}),
             ]
 
         def mode_issues(self, mode):
@@ -1105,13 +1105,13 @@ def test_settle_coordinated_fallback_when_no_single_downgrade_helps(monkeypatch)
 def test_settle_leaves_unfixable_errors_visible(monkeypatch):
     # A plugin erroring even at all-defaults (a misconfiguration, not a combination) must not
     # make settle thrash — nothing helps, so nothing flips and `fy mode` keeps surfacing it.
-    from foldyard.plugins import Axis, Plugin, Registry
+    from foldyard.plugins import Plugin, Registry, Switch
 
     class Broken(Plugin):
         name = "broken"
 
-        def axes(self):
-            return [Axis(name="a", rungs=("off", "on"), blurb={"off": "-", "on": "-"})]
+        def switches(self):
+            return [Switch(name="a", levels=("off", "on"), blurb={"off": "-", "on": "-"})]
 
         def mode_issues(self, mode):
             yield ("error", "always broken")
@@ -1292,7 +1292,7 @@ def test_mode_set_validates_the_updates_before_prompting(isolated_state, monkeyp
     monkeypatch.setattr(
         devmode.getpass, "getpass", lambda _p: pytest.fail("must not prompt for a refused mode")
     )
-    with pytest.raises(SystemExit, match="unknown axis 'gihtub'"):
+    with pytest.raises(SystemExit, match="unknown switch 'gihtub'"):
         devmode.main(["set", "github=app", "gihtub=off"])
     with pytest.raises(SystemExit, match="github mode 'nope'"):
         devmode.main(["set", "github=nope"])
@@ -1500,8 +1500,12 @@ def test_host_wall_doctor_row_enforcing(host_wall_row, monkeypatch):
     checks = {"loopback": "refused", "external": "refused", "band": "ok"}
     monkeypatch.setattr(host_wall_row, "probe", lambda vm: host_wall_row.Probe(True, checks))
     assert list(devmode._host_wall_check()) == [
-        ("running", "host wall", ""),  # the spinner placeholder a live UI replaces by name
-        ("ok", "host wall", "enforcing (loopback ✓ refused, external ✓ refused, band ✓ ok)"),
+        ("running", "host firewall", ""),  # the spinner placeholder a live UI replaces by name
+        (
+            "ok",
+            "host firewall",
+            "enforcing (loopback ✓ refused, external ✓ refused, port range ✓ ok)",
+        ),
     ]
 
 
@@ -1509,11 +1513,11 @@ def test_host_wall_doctor_row_not_enforcing_points_at_the_verb(host_wall_row, mo
     checks = {"loopback": "ok", "external": "timeout", "band": "ok"}
     monkeypatch.setattr(host_wall_row, "probe", lambda vm: host_wall_row.Probe(False, checks))
     status, _name, detail = list(devmode._host_wall_check())[-1]
-    assert status == "fail" and "NOT enforcing" in detail and "fy machine host-wall" in detail
+    assert status == "fail" and "NOT enforcing" in detail and "fy machine host-firewall" in detail
 
 
 def test_host_wall_doctor_row_without_a_slice_is_a_warn(host_wall_row, monkeypatch):
     monkeypatch.setattr(host_wall_row, "slice_path", lambda vm: "")
     monkeypatch.setattr(host_wall_row, "probe", lambda vm: pytest.fail("nothing to probe yet"))
     ((status, _name, detail),) = devmode._host_wall_check()
-    assert status == "warn" and "fy machine host-wall" in detail and "slice" in detail
+    assert status == "warn" and "fy machine host-firewall" in detail and "slice" in detail

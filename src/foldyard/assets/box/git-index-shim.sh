@@ -242,8 +242,8 @@ fy_heal() {
         fi
         printf '%s\n' "$sig" >"$ix.stale" 2>/dev/null || true
     fi
-    echo "foldyard git shim: index-box is stale — HEAD moved (${rec:0:12}… → ${cur:0:12}…, by the" \
-        "host or another session) while it carries staged changes, so it can't be fast-forwarded." \
+    echo "foldyard git shim: index-box is stale — HEAD moved (${rec:0:12}… → ${cur:0:12}…, from your" \
+        "computer or another session) while it carries staged changes, so it can't be fast-forwarded." \
         "'git status' may show phantom staged diffs and commits are blocked meanwhile." \
         "Recover with: 'git checkout-index -a' (materialise anything staged-but-absent from the" \
         "worktree — a mixed reset would otherwise leave it only as an unreferenced blob), then" \

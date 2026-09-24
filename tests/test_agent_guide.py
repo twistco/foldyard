@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 import typer
 
-from foldyard import cli, docs, exposure, init, skills
+from foldyard import cli, config, docs, exposure, init, skills
 
 # Commands are only recognised inside a CODE SPAN. Matching prose too would mean maintaining a
 # stop-list of English words that follow "foldyard" ("foldyard runs…", "the foldyard project"),
@@ -121,9 +121,20 @@ def test_the_init_scaffold_never_teaches_a_key_foldyard_stopped_honouring():
         )
 
 
+def test_the_init_scaffold_never_teaches_a_renamed_key_by_its_old_name():
+    """Old spellings are still honoured (`config.RENAMED_KEYS`), but a new project must start on
+    the new ones — else the alias can never be dropped. Commented-out lines count too."""
+    opts = init.InitOptions(name="demo")
+    text = init.render(opts) + init.render_local(opts)
+    for table, old, _new in config.RENAMED_KEYS:
+        assert not re.search(rf"^#?\s*{old}\s*=", text, re.MULTILINE), (
+            f"the scaffold writes `{old}` ({table}) by its old name"
+        )
+
+
 def test_the_init_scaffold_is_valid_toml_and_declares_the_proxy():
     doc = tomllib.loads(init.render(init.InitOptions(name="demo")))
-    assert doc["proxy"]["default_deny"] == "learn"  # learns, then enforces by itself (test_init)
+    assert doc["proxy"]["enforce"] == "learn"  # learns, then enforces by itself (test_init)
     assert "allow" not in doc["proxy"]  # grants are host-side (`fy allow add`), never config
 
 

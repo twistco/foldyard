@@ -1,5 +1,5 @@
-"""The two walls, live, via `fy up`: `[machine].wall` (nftables default-deny INSIDE the VM,
-provisioned as root at boot) and `[machine].host_wall` (the host-side table matched by the VM's
+"""The two walls, live, via `fy up`: `[machine] firewall` (nftables default-deny INSIDE the VM,
+provisioned as root at boot) and `[machine] host_firewall` (the host-side table matched by the VM's
 own cgroup slice — the tier the guest has no reach into). What they must prove: direct guest
 egress refused by name, DNS still resolving, the host proxy the only way out, the api still
 served through it — and the stale-provisioning refusal: once the VM booted walled, a `fy` verb
@@ -8,7 +8,7 @@ VM. Ported from the rig's scripted run (docs/lima-wall-machine-integration.md §
 
 The host wall is the OPERATOR'S install (ADR-0028: foldyard never elevates on the host), so
 this module plays the operator: the first `fy up` must be REFUSED before it boots anything (the
-slice is not set up), then the fixture runs the commands `fy machine host-wall` printed — the
+slice is not set up), then the fixture runs the commands `fy machine host-firewall` printed — the
 root ones under `sudo -n`, the user-level ones as itself, verbatim: that is the whole contract —
 and `fy up` passes. The table is bound to the persistent user slice the VM runs under; the
 module removes the install and the slice at the end, again from the verb's printed lines.
@@ -48,7 +48,7 @@ from e2e_host import (
     lima_shell,
 )
 
-WALL = {"MACHINE_WALL": "1", "MACHINE_HOST_WALL": "1"}
+WALL = {"MACHINE_FIREWALL": "1", "MACHINE_HOST_FIREWALL": "1"}
 NO_PROXY_ENV: list[str] = [
     f"--env={v}=" for v in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 ]
@@ -103,7 +103,7 @@ def repo(tmp_path_factory):
     # The operator's install: the verb sets up the user slice (its one user-level change, said
     # out loud) and prints the root files + lines. It exits 1 here (not enforcing yet) — its
     # output is the contract, not its exit code.
-    shown = fy(["machine", "host-wall"], r, timeout=120, env_extra=WALL)
+    shown = fy(["machine", "host-firewall"], r, timeout=120, env_extra=WALL)
     for line in _steps(shown.out):
         _run_step(line)
     fy_ok(["up"], r, env_extra=WALL)
@@ -155,7 +155,7 @@ def _run_step(line: str, must: bool = True) -> None:
 def test_fy_up_is_refused_until_the_operator_installs_the_host_wall(repo):
     refused, shown = _OPERATOR["refused"], _OPERATOR["shown"]
     assert refused.rc != 0, f"fy up ran without a host wall set up:\n{refused.out}"
-    assert "not set up" in refused.out and "fy machine host-wall" in refused.out, refused.out
+    assert "not set up" in refused.out and "fy machine host-firewall" in refused.out, refused.out
     assert "starting lima machine" not in refused.out, refused.out  # refused BEFORE booting
     # what the operator was shown: the slice it set up (said once), the table and the unit in
     # full, then exactly the four root steps
@@ -172,10 +172,10 @@ def test_fy_up_is_refused_until_the_operator_installs_the_host_wall(repo):
 
 def test_host_wall_is_enforcing_once_installed(repo):
     # the verb, the probe on `fy up`, and doctor's row all agree — all three PROBE, none reads
-    shown = fy(["machine", "host-wall"], repo, timeout=120, env_extra=WALL)
+    shown = fy(["machine", "host-firewall"], repo, timeout=120, env_extra=WALL)
     assert shown.rc == 0 and "✓ enforcing" in shown.out, shown.out
     doc = fy(["doctor"], repo, timeout=120, env_extra=WALL)
-    rows = [ln for ln in doc.out.splitlines() if "host wall" in ln]
+    rows = [ln for ln in doc.out.splitlines() if "host firewall" in ln]
     assert rows and "enforcing (" in rows[0] and "NOT" not in rows[0], doc.out
 
 

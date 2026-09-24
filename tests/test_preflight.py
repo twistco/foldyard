@@ -55,7 +55,7 @@ def _wire(
         preflight.config, "machine_backend_explicit", lambda: backend if explicit else ""
     )
     monkeypatch.setattr(preflight.config, "machine_wall", lambda: wall)
-    # Pinned, not inherited: `MACHINE_HOST_WALL` in the ambient env (or the repo's own toml)
+    # Pinned, not inherited: `MACHINE_HOST_FIREWALL` in the ambient env (or the repo's own toml)
     # would otherwise bolt the host-wall checks onto every test here.
     monkeypatch.setattr(preflight.config, "machine_host_wall", lambda: host_wall)
     cli = {"podman": "podman", "lima": "limactl"}.get(backend, backend)
@@ -135,14 +135,14 @@ def test_lima_without_proxy_is_fine(monkeypatch):
 def test_wall_on_non_lima_backend_blocks(monkeypatch):
     # The wall provisions nftables into a lima VM; podman-machine/native have nothing to provision.
     _wire(monkeypatch, backend="podman", proxy_enabled=True, wall=True)
-    assert any("[machine].wall" in p and "lima" in p for p in preflight.issues())
+    assert any("[machine] firewall" in p and "lima" in p for p in preflight.issues())
 
 
 def test_wall_without_proxy_routing_blocks(monkeypatch):
     # wall=true + nothing routing through the proxy = an airgapped box (default-deny, no way out).
     _wire(monkeypatch, backend="lima", wall=True)
     problems = preflight.issues()
-    assert any("[machine].wall" in p and "NO way out" in p for p in problems)
+    assert any("[machine] firewall" in p and "NO way out" in p for p in problems)
 
 
 def test_wall_with_lima_and_keyless_is_clean(monkeypatch):
@@ -291,7 +291,7 @@ def test_inherited_lima_without_limactl_aborts_both_launch_verbs(monkeypatch, ca
     assert verb in err and "limactl" in err and 'backend = "podman"' in err
 
 
-# ── [machine].host_wall — the host-side cgroup wall (Linux; nft + cgroup v2) ──────────────
+# ── [machine] host_firewall — the host-side cgroup wall (Linux; nft + cgroup v2) ──────────────
 
 
 def test_host_wall_without_the_guest_wall_blocks(monkeypatch):
@@ -299,7 +299,9 @@ def test_host_wall_without_the_guest_wall_blocks(monkeypatch):
     # expects and nothing else); alone it is a wall with no in-VM counterpart to back-stop.
     _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=False, host_wall=True)
     monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
-    assert any("[machine].host_wall" in p and "wall = true" in p for p in preflight.issues())
+    assert any(
+        "[machine] host_firewall" in p and "firewall = true" in p for p in preflight.issues()
+    )
 
 
 def test_host_wall_on_a_host_that_cannot_enforce_it_blocks(monkeypatch):
@@ -307,7 +309,7 @@ def test_host_wall_on_a_host_that_cannot_enforce_it_blocks(monkeypatch):
     # host without nftables / cgroup v2).
     _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True, host_wall=True)
     monkeypatch.setattr(preflight.hostwall, "available", lambda: False)
-    assert any("[machine].host_wall" in p and "nft" in p for p in preflight.issues())
+    assert any("[machine] host_firewall" in p and "nft" in p for p in preflight.issues())
 
 
 def test_host_wall_on_a_kernel_without_nft_socket_blocks(monkeypatch):
@@ -317,8 +319,8 @@ def test_host_wall_on_a_kernel_without_nft_socket_blocks(monkeypatch):
     _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True, host_wall=True)
     monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
     monkeypatch.setattr(preflight.hostwall, "nft_socket_in_kernel", lambda: False)
-    hits = [p for p in preflight.issues() if "[machine].host_wall" in p]
-    assert hits and "CONFIG_NFT_SOCKET" in hits[0] and "in-VM wall" in hits[0]
+    hits = [p for p in preflight.issues() if "[machine] host_firewall" in p]
+    assert hits and "CONFIG_NFT_SOCKET" in hits[0] and "VM firewall" in hits[0]
 
 
 def test_host_wall_with_an_unknown_kernel_config_is_not_refused(monkeypatch):

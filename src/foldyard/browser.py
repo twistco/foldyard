@@ -15,7 +15,7 @@ def _err(*args: object) -> None:
 def open_app() -> int:
     """Resolve the active worktree's app port and open it in the host browser."""
     if config.in_box():
-        _err("✗ `fy open` must run on the host — the dev box cannot launch the host browser.")
+        _err("✗ `fy open` must run on your computer — the dev box cannot launch your browser.")
         return 1
 
     ctx = stack.resolve(no_machine=True)

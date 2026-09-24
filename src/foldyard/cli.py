@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import typer
 
+# Every Typer here renders help as MARKDOWN: under the default "rich" mode a config table named in
+# help (`[claude]`, `[proxy]`) parses as a style tag and silently disappears.
 app = typer.Typer(
+    rich_markup_mode="markdown",
     name="foldyard",
     help="secretless-by-default, laptop-local isolated dev environment",
     no_args_is_help=True,
@@ -102,7 +105,7 @@ def init(
     disk: int = typer.Option(60, "--disk", help="VM disk in GiB"),
     force: bool = typer.Option(False, "--force", "-f", help="overwrite an existing foldyard.toml"),
 ) -> None:
-    """Scaffold a commented, locked-down foldyard.toml (a lima+wall dev box) — then `fy box up`.
+    """Scaffold a commented, locked-down foldyard.toml (lima, VM firewall on) — then `fy box up`.
 
     The template is the guide: it starts stack-less and safe, with agents + the full feature set
     commented, and the header explains the order to uncomment them. No interactive wizard."""
@@ -185,7 +188,7 @@ def shell() -> None:
 
 @app.command()
 def verify() -> None:
-    """Isolation battery: prove the VM boundary + (in the box) the credential-less posture."""
+    """Isolation battery: prove the VM boundary + (in the box) that it holds no credentials."""
     from . import verify as verify_mod
 
     raise typer.Exit(verify_mod.verify())
@@ -218,7 +221,7 @@ def codex(ctx: typer.Context) -> None:
 @app.command()
 def code() -> None:
     """Open VS Code attached to the running dev box, in an ISOLATED user-data-dir so the
-    box's podman DOCKER_HOST can't leak into your default VS Code singleton (Mac only)."""
+    box's podman DOCKER_HOST can't leak into your default VS Code singleton (your computer only)."""
     from . import vscode
 
     raise typer.Exit(vscode.code())
@@ -236,13 +239,13 @@ def open_browser() -> None:
 def mode(
     spec: list[str] = typer.Argument(
         None,
-        metavar="[axis=value ... | ttl=...]",
-        help="No args: show the posture. Else SET axes (Mac only), e.g. "
-        "`foldyard mode gcp=logs github=user ttl=1h` (ttl: emergency rungs only). "
-        "Axes: gcp=off|logs|sa|user, github=off|app|user.",
+        metavar="[switch=level ... | ttl=...]",
+        help="No args: show the mode. Else SET switches (your computer only), e.g. "
+        "`foldyard mode gcp=logs github=user ttl=1h` (ttl: emergency levels only). "
+        "Switches: gcp=off|logs|sa|user, github=off|app|user.",
     ),
 ) -> None:
-    """Show the dev posture (anywhere), or set it (Mac only)."""
+    """Show the dev mode (anywhere), or set it (your computer only)."""
     from . import devmode
 
     raise typer.Exit(devmode.main(["show"] if not spec else ["set", *spec]))
@@ -250,7 +253,7 @@ def mode(
 
 @app.command()
 def state() -> None:
-    """Every state tier's desired vs observed posture (files, daemons, capability, stack, box)."""
+    """Every state tier's desired vs observed mode (files, daemons, capability, stack, box)."""
     from . import state_view
 
     raise typer.Exit(state_view.main([]))
@@ -261,18 +264,19 @@ def clock(
     spec: list[str] = typer.Argument(
         None,
         metavar="[ff <90s|30m|2h> | reset]",
-        help="No args: show the posture-clock skew. `ff <duration>` fast-forwards TTL "
+        help="No args: show the mode-clock skew. `ff <duration>` fast-forwards TTL "
         "expiry/auto-revert for testing (host only, zero secrets needed); `reset` returns "
         "to real time.",
     ),
 ) -> None:
-    """TESTING: skew the posture clock so TTL machinery can be exercised without waiting."""
+    """TESTING: skew the mode clock so TTL machinery can be exercised without waiting."""
     from . import devmode
 
     raise typer.Exit(devmode.main(["clock", *(spec or [])]))
 
 
 host_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="host",
     help="the project's host supervisor — the credential daemons + the egress proxy the box "
     "rides. `fy up` / `fy box up` start it with the VM and `fy machine stop` stops it with the "
@@ -346,7 +350,9 @@ def docs(
 
 @app.command()
 def doctor(
-    deep: bool = typer.Option(False, "--deep", "-d", help="add live IAM probes (Mac)"),
+    deep: bool = typer.Option(
+        False, "--deep", "-d", help="add live IAM probes (your computer only)"
+    ),
 ) -> None:
     """ "What can this machine grant?" setup checks (ok/warn/fail)."""
     from . import devmode
@@ -356,7 +362,7 @@ def doctor(
 
 @app.command()
 def tui() -> None:
-    """Interactive posture TUI (Mac; Textual)."""
+    """Interactive mode TUI (your computer only; Textual)."""
     from . import term
     from . import tui as tui_mod
 
@@ -368,7 +374,7 @@ def tui() -> None:
 def transcripts(
     dest: str = typer.Argument("", help="archive dir (default ~/.claude/projects)"),
 ) -> None:
-    """Copy the dev box's Claude and configured Codex transcripts to host archives (Mac only)."""
+    """Copy the dev box's Claude and configured Codex transcripts to archives on your computer."""
     from . import transcripts as transcripts_mod
 
     raise typer.Exit(transcripts_mod.transcripts(dest))
@@ -410,8 +416,9 @@ def banner() -> None:
 
 
 machine_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="machine",
-    help="rootless podman-machine lifecycle (Mac; no-op/refused in the box)",
+    help="the project's VM lifecycle (your computer only; no-op/refused in the box)",
     no_args_is_help=True,
 )
 app.add_typer(machine_app)
@@ -471,15 +478,16 @@ def machine_rm(
     raise typer.Exit(machine.delete(assume_yes=yes))
 
 
-@machine_app.command("host-wall")
+@machine_app.command("host-firewall")
+@machine_app.command("host-wall", hidden=True)  # the old name, kept as an alias
 def machine_host_wall(
     uninstall: bool = typer.Option(False, "--uninstall", help="print the removal steps instead"),
 ) -> None:
-    """The host-side wall's install: print the nftables table and the system unit foldyard
-    rendered, the exact root commands that install them, and whether the wall is enforcing now.
-    foldyard never runs them — the operator does, with the files in front of them. Exit 1 when
-    not enforcing. Linux + `[machine].host_wall = true`; an install/uninstall thing, not part of
-    the VM's lifecycle."""
+    """Install the host firewall: print the nftables table and the system unit foldyard rendered,
+    the exact root commands that install them, and whether the firewall is enforcing now.
+    foldyard never runs them — you do, with the files in front of you. Exit 1 when not
+    enforcing. Linux + `[machine] host_firewall = true`; a one-off install, not part of the VM's
+    lifecycle."""
     from . import machine
 
     raise typer.Exit(machine.host_wall(uninstall=uninstall))
@@ -493,6 +501,7 @@ def machine_delete(
 
 
 box_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="box",
     help="the long-lived, per-worktree dev box (engine socket + repo mount)",
     no_args_is_help=True,
@@ -565,8 +574,9 @@ def box_ps() -> None:
 
 
 allow_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="allow",
-    help="the egress allowlist the proxy enforces under [proxy] default_deny (Mac)",
+    help="the egress allowlist the proxy enforces under [proxy] enforce (your computer only)",
     no_args_is_help=True,
 )
 app.add_typer(allow_app)
@@ -588,11 +598,11 @@ def allow_add(
         False, "--build", help="for image builds only (fy box build, the stack build), not the box"
     ),
 ) -> None:
-    """Allow a host through the egress wall.
+    """Allow a host through the allowlist.
 
-    Grants live in the Mac-home allow-store at every level, deliberately NOT in foldyard.toml: repo
-    config travels with the branch and the box can write it, so a committed allowlist would let the
-    yard widen its own wall.
+    Grants live in the allow-store on your computer at every level, deliberately NOT in
+    foldyard.toml: repo config travels with the branch and the box can write it, so a committed
+    allowlist would let the VM widen its own allowlist.
     """
     from . import allowlist
 
@@ -690,7 +700,7 @@ def _point_at_refused_hosts() -> None:
         return
     n, shown = len(refused), ", ".join(refused[:5]) + (", …" if len(refused) > 5 else "")
     print(
-        f"• {n} host{'s' if n != 1 else ''} the wall refused, still unanswered: {shown}\n"
+        f"• {n} host{'s' if n != 1 else ''} the allowlist refused, still unanswered: {shown}\n"
         "  Not recommendations — answer them in the TUI's Network Log, or `fy allow add <host>`."
     )
 
@@ -713,7 +723,8 @@ def _local_hm(iso: str) -> str:
         return iso
 
 
-@allow_app.command("wall")
+@allow_app.command("enforce")
+@allow_app.command("wall", hidden=True)  # the old name, kept as an alias
 def allow_wall(
     state: str = typer.Argument(
         ..., help="on (enforce) | off (observe only) | learn (observe for a while, then enforce)"
@@ -722,14 +733,14 @@ def allow_wall(
         "1h", "--for", help="learn: how long before enforcing again (90s · 30m · 2h; max 8h)"
     ),
 ) -> None:
-    """Turn egress ENFORCEMENT on or off — or `learn`: observe for a bounded window, then enforce.
+    """Turn allowlist ENFORCEMENT on or off — or `learn`: observe for a while, then enforce.
 
-    Host-owned, like the grants: `[proxy] default_deny` only seeds the first answer, because repo
-    config is writable from inside the box and an enforcement switch the yard can flip is no switch.
+    Kept on your computer, like the grants: `[proxy] enforce` only seeds the first answer, because
+    the box can write repo config, and an enforcement switch the box can flip is no switch.
 
-    `learn` lets everything through while the proxy records each host the wall WOULD refuse, and
-    turns enforcement back on by itself when the window ends — unlike `off`, it can't be forgotten
-    open. Use it while a new dependency's egress is unknown, then `fy allow learn` to grant what it
+    `learn` lets everything through while the proxy records each host it WOULD refuse, and turns
+    enforcement back on by itself when the window ends — unlike `off`, it can't be forgotten open.
+    Use it while a new dependency's egress is unknown, then `fy allow learn` to grant what it
     recorded in one reviewed batch.
     """
     from . import allowlist, devmode
@@ -741,15 +752,15 @@ def allow_wall(
             raise typer.BadParameter(str(e), param_hint="--for")
         window = allowlist.start_learning(seconds)
         print(
-            f"✓ egress wall LEARNING until {_local_hm(window['until'])} — nothing is refused, "
-            "every host the wall would refuse is recorded; enforcing after. "
+            f"✓ allowlist LEARNING until {_local_hm(window['until'])} — nothing is refused, "
+            "every host it would refuse is recorded; enforcing after. "
             "Review: `fy allow learn`"
         )
         return
     if state not in ("on", "off"):
         raise typer.BadParameter("expected `on`, `off` or `learn`")
     eff = allowlist.set_wall(state == "on")
-    print(f"✓ egress wall {'ENFORCING' if eff['default_deny'] else 'observing only'}")
+    print(f"✓ allowlist {'ENFORCING' if eff['default_deny'] else 'observing only'}")
 
 
 @allow_app.command("learn")
@@ -760,11 +771,11 @@ def allow_learn(
 ) -> None:
     """Review what the last learn window recorded, and grant it in one go.
 
-    Lists each host the wall would have refused during the window (open or last closed) with how
-    often and WHICH TOOL reached it (the User-Agent the proxy saw), minus anything granted or
+    Lists each host the allowlist would have refused during the window (open or last closed) with
+    how often and WHICH TOOL reached it (the User-Agent the proxy saw), minus anything granted or
     declined since. Then: grant them all, go one by one, or leave them. It also prints the
     `[proxy] recommend` lines that share the result with the team — a repo edit you review and
-    commit, adopted by each operator like any other.
+    commit, adopted on each computer like any other.
     """
     import sys
 
@@ -773,13 +784,13 @@ def allow_learn(
 
     if allowlist.in_box():
         print(
-            "• learn windows and grants are host-side only — run `fy allow learn` on the host. "
-            "From here, a blocked host is one to name to the operator."
+            "• learn windows and grants are host-side only — run `fy allow learn` on your "
+            "computer. From here, a blocked host is one to name to the person running foldyard."
         )
         return
     window = allowlist.last_window()
     if window is None:
-        print("• no learn window yet — `fy allow wall learn [--for 1h]` starts one")
+        print("• no learn window yet — `fy allow enforce learn [--for 1h]` starts one")
         return
     with _config_bound():
         log = proxy._proxy_log()
@@ -789,10 +800,12 @@ def allow_learn(
     span = f"{_local_hm(window['since'])}–{_local_hm(window['until'])}, {state}"
     allowlist.mark_reviewed()  # shown now: the next window starts fresh instead of carrying this
     if not learned:
-        print(f"✓ nothing to grant from the learn window ({span}) — the wall refused nothing new")
+        print(
+            f"✓ nothing to grant from the learn window ({span}) — the allowlist refused nothing new"
+        )
         return
     n = len(learned)
-    print(f"▶ the wall would have refused {n} host{'s' if n != 1 else ''} ({span}):")
+    print(f"▶ the allowlist would have refused {n} host{'s' if n != 1 else ''} ({span}):")
     width = max(len(e["host"]) for e in learned)
     for e in learned:
         print(f"    {e['host']:<{width}}  {e['count']:>4}×  {', '.join(e['uas']) or '(no UA)'}")
@@ -843,8 +856,9 @@ def allow_remove(
 
 
 config_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="config",
-    help="the foldyard.toml this host ADOPTED — what the supervisor actually runs (Mac)",
+    help="the foldyard.toml you ADOPTED — what the supervisor actually runs (your computer only)",
     no_args_is_help=True,
 )
 app.add_typer(config_app)
@@ -878,9 +892,9 @@ def _refuse_in_box() -> None:
 def config_status() -> None:
     """Does this checkout's foldyard.toml match the copy the host adopted?
 
-    The host reconciles its credential daemons from the ADOPTED copy (kept in the Mac home,
+    The host reconciles its credential daemons from the ADOPTED copy (kept in your home,
     outside the repo mount) — repo config is writable from inside the box, so a live-read
-    foldyard.toml would let the yard retarget its own injection and switch off its own capture.
+    foldyard.toml would let the VM retarget its own injection and switch off its own capture.
     """
     _refuse_in_box()
 
@@ -905,7 +919,7 @@ def config_status() -> None:
 def config_diff() -> None:
     """Show what changed in this checkout's foldyard.toml since the host adopted it.
 
-    On a worktree that has never been adopted there is nothing on that axis to diff, so it shows
+    On a worktree that has never been adopted there is nothing of its own to diff, so it shows
     the comparison that does exist: this checkout against the config the host runs for main.
     """
     _refuse_in_box()
@@ -987,8 +1001,9 @@ def config_revert() -> None:
 
 
 worktree_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="worktree",
-    help="host-sibling worktrees sharing the one rootless machine (Mac)",
+    help="host-sibling worktrees sharing the one rootless VM (your computer only)",
     no_args_is_help=True,
 )
 app.add_typer(worktree_app)
@@ -1015,7 +1030,7 @@ def worktree_add(
 def worktree_init(
     name: str = typer.Argument(..., help="worktree dir name (under the worktrees root)"),
 ) -> None:
-    """Re-run the consumer's worktree-init script for a worktree, in the yard.
+    """Re-run the consumer's worktree-init script for a worktree, in the VM.
 
     `worktree add` does this for you; use this when it skipped (no box image built yet) or after
     changing the init script."""
@@ -1047,6 +1062,7 @@ def worktree_list() -> None:
 
 
 skill_app = typer.Typer(
+    rich_markup_mode="markdown",
     name="skill",
     help="Claude Code skills bundled with foldyard (list / install into .claude/skills)",
     no_args_is_help=True,

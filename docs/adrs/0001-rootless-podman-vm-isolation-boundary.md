@@ -1,7 +1,9 @@
 # ADR-0001 — Rootless Podman VM as the isolation boundary; repo-only mounts; escape-test-refused as the credibility gate
 
 - **Status:** Accepted (2026-06-08, spike validated GREEN) — implemented (`src/foldyard/machine.py`,
-  `src/foldyard/verify.py`)
+  `src/foldyard/verify.py`). **Amended 2026-09-24:** the `native` backend kept below as "an
+  explicit opt-in with a stated weaker profile" was retired on 2026-09-17 — foldyard always has
+  a VM — see [ADR-0027](./0027-always-a-vm-native-backend-retired.md).
 - **Sources:** SPIKE.md (the original spike plan + rationale), PROGRESS.md (validation run-log),
   PLAN.md §6 (security model & honesty rules), README.md thesis 3
 

@@ -853,7 +853,7 @@ def test_expiry_without_dependents_reverts_only_the_lapsed_axis(isolated_state):
 def _probe(check, name="p1", axis="gcp", interval=3600.0):
     from foldyard.plugins import CapabilityProbe
 
-    return CapabilityProbe(axis=axis, name=name, check=check, interval=interval)
+    return CapabilityProbe(switch=axis, name=name, check=check, interval=interval)
 
 
 def test_probe_results_cache_until_interval(monkeypatch):

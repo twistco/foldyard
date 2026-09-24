@@ -420,7 +420,7 @@ def test_probe_opens_the_listeners_outside_the_slice_and_reads_the_childs_verdic
     assert seen["targets"]["external"] == "192.0.2.1:9"
     band_port = int(seen["targets"]["band"].rpartition(":")[2])
     assert base <= band_port <= base + hostwall._SPAN  # the first free port of the band
-    assert res.detail() == "loopback ✓ refused, external ✓ refused, band ✓ ok"
+    assert res.detail() == "loopback ✓ refused, external ✓ refused, port range ✓ ok"
 
 
 def test_probe_reports_a_child_that_could_not_run(bands, monkeypatch):

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""SA-token minter — HOST side of the metadata emulator. Runs on the Mac.
+"""SA-token minter — HOST side of the metadata emulator. Runs on the host machine.
 
 Holds the only thing that must never enter the VM: the gcloud credentials. The
 on-network emulator (server.py) resolves which SA a calling container should get, then
 POSTs the SA here; this validates it against an allowlist and mints a short-lived
-impersonated access token with `gcloud`. The long-lived creds stay on the Mac; only a
+impersonated access token with `gcloud`. The long-lived creds stay on the host; only a
 ≤1h token crosses the boundary, and only for an allowlisted SA.
 
 Launched by `fy host` for the active mode; run it directly with
@@ -13,7 +13,7 @@ Launched by `fy host` for the active mode; run it directly with
 Env:
   GCP_SA_ALLOWLIST      comma-separated SA emails this minter may impersonate (REQUIRED —
                         empty ⇒ refuse everything; never impersonate arbitrary SAs)
-  GCP_ALLOW_USER_TOKEN  "1" → mint the Mac identity's OWN token (no impersonation) for a request
+  GCP_ALLOW_USER_TOKEN  "1" → mint the host identity's OWN token (no impersonation) for a request
                         flagged `user_escalatable` (the dev box carries the gcp.userEscalatable
                         label; app containers never do). EMERGENCY mode — only `fy host` sets it,
                         for `gcp=user` (TTL-bound, auto-reverts). The legacy sentinel SA "user" is
@@ -32,7 +32,7 @@ Env:
                         for the TUI's "GCP Tokens" panel. The token itself is NEVER logged —
                         only WHICH identity was minted and the outcome (the security-relevant bit).
 
-Prereq: `gcloud auth login` on the Mac, and the Mac identity must hold
+Prereq: `gcloud auth login` on the host, and the host identity must hold
 serviceAccountTokenCreator on each allowlisted SA (PAM-elevate for the broad ones).
 """
 
@@ -222,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
         # it (gcp=user). Anyone else — i.e. every app container — falls through to SA impersonation.
         user = escalatable and ALLOW_USER
         if escalatable and not ALLOW_USER and sa == "user":
-            return 403, {"error": "user-token mode not enabled on this minter"}, sa, user
+            return 403, {"error": "user-token mode not enabled on this token service"}, sa, user
         if not user:
             if not _SA_RE.match(sa):
                 return 400, {"error": f"not an SA email: {sa!r}"}, sa, user
@@ -245,7 +245,8 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     if not ALLOWLIST:
         raise SystemExit(
-            "minter: set GCP_SA_ALLOWLIST (comma-separated SA emails) — refusing an empty allowlist"
+            "token service: set GCP_SA_ALLOWLIST (comma-separated SA emails) — "
+            "refusing an empty allowlist"
         )
     srv = ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), Handler)
     print(f"[minter] :{LISTEN_PORT} — allowlist: {', '.join(sorted(ALLOWLIST))}", flush=True)
