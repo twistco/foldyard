@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import config, configpin, devmode, stack
 
@@ -250,6 +251,63 @@ def _pinned_settings(settings: dict) -> dict:
     return {**_pin_ports(settings), **_GIT_BRIDGE_PINS, _UPDATE_MODE: "manual"}
 
 
+def _strip_jsonc(text: str) -> tuple[str, bool]:
+    """``text`` with JSONC's two extensions removed — comments and trailing commas — plus whether
+    it had comments. String-aware (a URL's ``//`` stays), and the output keeps every newline so a
+    later parse error still points at the right line. A comma is only dropped straight before a
+    closing bracket AFTER a value, so ``[,]`` and ``{"a": 1,,}`` stay malformed, as in VS Code."""
+    out: list[str] = []
+    had_comments = False
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i : j + 1])
+            i = j + 1
+        elif text.startswith("//", i):
+            had_comments = True
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+        elif text.startswith("/*", i):
+            had_comments = True
+            end = text.find("*/", i + 2)
+            if end < 0:
+                raise json.JSONDecodeError("Unterminated comment", text, i)
+            out.append("\n" * text.count("\n", i, end))
+            i = end + 2
+        else:
+            out.append(c)
+            i += 1
+    stripped = "".join(out)
+    # Second pass over comment-free text, so a comment between the comma and the bracket is moot.
+    kept: list[str] = []
+    in_string = escaped = False
+    for k, c in enumerate(stripped):
+        if in_string:
+            escaped = not escaped and c == "\\"
+            in_string = escaped or c != '"'
+        elif c == '"':
+            in_string = True
+        elif c == ",":
+            after = stripped[k + 1 :].lstrip()
+            before = "".join(kept).rstrip()
+            if after[:1] in ("}", "]") and before[-1:] not in ("", "[", "{", ","):
+                continue
+        kept.append(c)
+    return "".join(kept), had_comments
+
+
+def _loads_jsonc(text: str) -> tuple[Any, bool]:
+    """Parse VS Code's JSONC (its settings and attached-config files): the document, and whether it
+    had comments — which a rewrite through :mod:`json` would drop. Raises :class:`ValueError`
+    (a :class:`json.JSONDecodeError`) on anything else malformed."""
+    stripped, had_comments = _strip_jsonc(text)
+    return json.loads(stripped), had_comments
+
+
 def _local_terminal_zdotdir(udd: Path) -> Path:
     return udd / "foldyard-zdotdir"
 
@@ -271,10 +329,10 @@ def _write_local_terminal_cwd(
     settings: dict[str, object] = {}
     if path.exists() and path.stat().st_size:
         try:
-            loaded = json.loads(path.read_text())
+            loaded, had_comments = _loads_jsonc(path.read_text())
         except json.JSONDecodeError as e:
             _err(f"⚠ couldn't configure local terminal cwd in {path}:")
-            _err("  settings.json is not strict JSON")
+            _err("  settings.json is not valid JSON")
             _err(f"  ({e.msg} at line {e.lineno}, column {e.colno}).")
             _err(f"  Make Terminal: Create New Integrated Terminal (Local) cd to: {host_checkout}")
             return False
@@ -284,6 +342,12 @@ def _write_local_terminal_cwd(
         if not isinstance(loaded, dict):
             _err(f"⚠ couldn't configure local terminal cwd in {path}:")
             _err("  top-level JSON is not an object")
+            return False
+        if had_comments:
+            # Trailing commas are noise a rewrite may drop; comments are the operator's words.
+            _err(f"⚠ couldn't configure local terminal cwd in {path}:")
+            _err("  settings.json has comments, which rewriting it would lose.")
+            _err(f"  Make Terminal: Create New Integrated Terminal (Local) cd to: {host_checkout}")
             return False
         settings = loaded
 
@@ -438,13 +502,13 @@ _UNREADABLE = _Unreadable()
 
 
 def _read_config(path: Path) -> dict | _Unreadable | None:
-    """The attached config currently on disk: ``None`` when there isn't a JSON object there
-    (missing, garbage, or a non-dict document — all "nothing to preserve"), :data:`_UNREADABLE`
-    when there is a file but reading it failed."""
+    """The attached config currently on disk, read as the JSONC VS Code accepts: ``None`` when
+    there isn't a JSON object there (missing, garbage, or a non-dict document — all "nothing to
+    preserve"), :data:`_UNREADABLE` when there is a file but reading it failed."""
     if not path.exists():
         return None
     try:
-        existing = json.loads(path.read_text())
+        existing, _ = _loads_jsonc(path.read_text())
     except OSError:
         return _UNREADABLE
     except ValueError:

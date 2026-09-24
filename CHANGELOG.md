@@ -59,6 +59,10 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Fixed
 
+- **`fy code` accepts VS Code's own JSON flavour.** A trailing comma in the instance's
+  `settings.json` no longer skips the local-terminal setup, and a hand-edited attached-container
+  config with a trailing comma or a comment is kept rather than replaced.
+
 - **`git worktree add` in the box no longer corrupts both checkouts' indexes.** The box's git
   shim let the new worktree's checkout write into the calling checkout's `index-box`: phantom
   `MM` pairs there (a commit would revert the difference; a later `git switch` carried the files

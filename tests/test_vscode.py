@@ -348,8 +348,27 @@ def test_invalid_settings_json_is_not_overwritten(fake, capsys):
     original = "{ // jsonc comment that stdlib json will not parse\n}"
     path.write_text(original)
     assert vscode.code() == 0
+    # Rewriting would drop the comment, so a commented file is left alone and the step said.
     assert path.read_text() == original
-    assert "not strict JSON" in capsys.readouterr().err
+    assert "has comments" in capsys.readouterr().err
+
+
+def test_settings_json_with_trailing_commas_is_configured(fake):
+    # VS Code's settings.json is JSONC: trailing commas are legal there (VS Code writes them itself
+    # when an operator edits by hand), and they carry nothing a rewrite could lose.
+    fake["state"]["running"] = True
+    path = _settings(fake)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{\n  "json.schemaDownload.trustedDomains": {"https://json.schemastore.org/": true,},\n'
+        '  "editor.rulers": [100, 120,],\n  "odd.string": "a,}b",\n}\n'
+    )
+    assert vscode.code() == 0
+    settings = json.loads(path.read_text())
+    assert settings["json.schemaDownload.trustedDomains"] == {"https://json.schemastore.org/": True}
+    assert settings["editor.rulers"] == [100, 120]
+    assert settings["odd.string"] == "a,}b"
+    assert "ZDOTDIR" in settings["terminal.integrated.env.osx"]
 
 
 def test_launch_env_carries_docker_host_only_to_isolated_instance(fake):
@@ -662,6 +681,46 @@ def test_user_owned_config_is_never_clobbered(fake, capsys):
     assert json.loads(path.read_text()) == {"extensions": ["mine.only"]}
     assert "kept your customised" in capsys.readouterr().out
     assert not _execs(fake["calls"], "Marker")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"extensions": ["mine.only",],}',
+        '{\n  // my own list\n  "extensions": ["mine.only"] /* keep */\n}',
+    ],
+)
+def test_a_user_owned_jsonc_config_is_never_clobbered(fake, capsys, text):
+    # The operator edits this file in VS Code, which accepts JSONC — a trailing comma or a comment
+    # there is still THEIR file, not "garbage, safe to replace".
+    fake["state"]["running"] = True
+    path = _cfg_path(fake)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    assert vscode.code() == 0
+    assert path.read_text() == text
+    assert "kept your customised" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('{"a": 1,}', ({"a": 1}, False)),
+        ('{"a": [1, 2,\n],\n}', ({"a": [1, 2]}, False)),
+        ('{"u": "https://x.org/*y*/"}', ({"u": "https://x.org/*y*/"}, False)),
+        ('{"q": "say \\"hi\\", }", }', ({"q": 'say "hi", }'}, False)),
+        ('{"a": 1, // note\n}', ({"a": 1}, True)),
+        ('{"a": /* x */ 1 /* y */,}', ({"a": 1}, True)),
+    ],
+)
+def test_loads_jsonc(text, expected):
+    assert vscode._loads_jsonc(text) == expected
+
+
+@pytest.mark.parametrize("text", ['{"a": 1,,}', "[,]", '{"a": 1 /* unterminated'])
+def test_loads_jsonc_still_rejects_malformed(text):
+    with pytest.raises(ValueError):
+        vscode._loads_jsonc(text)
 
 
 def test_a_foreign_marker_is_someone_elses_file_too(fake, capsys):
