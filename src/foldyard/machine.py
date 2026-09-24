@@ -532,7 +532,8 @@ def point_podman_desktop() -> int:
         lines.insert(0, f"✓ '{name}' is registered for Podman Desktop")
     for line in lines:
         print(line)
-    if podman_desktop.choice() is False:
+    detected = podman_desktop.remote_state() != "absent"
+    if podman_desktop.choice() is False and detected:
         print("  FOLDYARD_PODMAN_DESKTOP=0 is set, so `fy up` won't keep it current across reboots")
         print("  (a pinned ssh port) — unset it to let `fy up` maintain it.")
     elif not podman_desktop.following():

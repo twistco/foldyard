@@ -19,6 +19,8 @@ from foldyard.machine_backend import SshTarget
 
 _URI = "ssh://dain@127.0.0.1:41390/run/user/501/podman/podman.sock"
 _KEY = "/Users/dain/.lima/_config/user"
+# the operator's own default connection — what bare `podman` on the host talks to
+_THEIRS = {"Name": "tangible", "URI": "ssh://core@x", "Identity": "k", "Default": True}
 
 
 @pytest.fixture
@@ -89,6 +91,18 @@ def test_registers_without_taking_the_default(podman):
     assert [c for c in fake.calls if c[2] in ("add", "remove")] == [
         ["system", "connection", "add", "fy-repower", _URI, "--identity", _KEY]
     ]
+
+
+def test_never_becomes_the_default_where_podman_has_no_connection_yet(podman):
+    # podman makes a first connection the default and can't be told otherwise, so adding one
+    # to an empty list would repoint bare `podman` on the host at the VM: refuse, and say so
+    fake = podman()
+    assert podman_desktop.register("fy-repower", _URI, _KEY) == "would-default"
+    assert fake.connections == []
+    (warning,) = podman_desktop.messages("fy-repower", "would-default", "on")
+    assert (
+        warning.startswith("⚠") and "default" in warning and "FOLDYARD_PODMAN_DESKTOP=0" in warning
+    )
 
 
 def test_a_moved_port_replaces_the_connection(podman):
@@ -219,12 +233,12 @@ def test_the_ssh_port_is_pinned_only_on_a_stopped_vm_where_podman_desktop_is(lim
 
 def test_ensure_registers_the_vm_where_podman_desktop_is(lima, podman, settings, capsys):
     lima(port=41390)
-    fake = podman()
+    fake = podman(connections=[_THEIRS])
     machine._follow_in_podman_desktop()
     assert fake.calls == [] and capsys.readouterr().err == ""  # not installed: not a word
     settings.write_text(json.dumps({"podman.system.connections.remote": True}))
     machine._follow_in_podman_desktop()
-    assert [c["Name"] for c in fake.connections] == ["fy-repower"]
+    assert [c["Name"] for c in fake.connections] == ["tangible", "fy-repower"]
     assert "fy-repower" in capsys.readouterr().err
     machine._follow_in_podman_desktop()
     assert capsys.readouterr().err == ""  # the steady state says nothing
@@ -246,12 +260,12 @@ def test_the_verb_registers_on_demand_whatever_is_detected(lima, podman, setting
     from foldyard import cli
 
     lima(port=41390)
-    fake = podman()
+    fake = podman(connections=[_THEIRS])
     settings.write_text("{}")
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
     result = CliRunner().invoke(cli.app, ["machine", "desktop"])
     assert result.exit_code == 0, result.output
-    assert [c["URI"] for c in fake.connections] == [_URI]
+    assert [c["URI"] for c in fake.connections] == [_THEIRS["URI"], _URI]
     assert settings.read_text() == "{}"  # read, never written
     assert "Settings → Preferences" in result.output
     assert "FOLDYARD_PODMAN_DESKTOP" not in result.output  # detected: `fy up` keeps it current
@@ -259,10 +273,16 @@ def test_the_verb_registers_on_demand_whatever_is_detected(lima, podman, setting
     settings.unlink()
     result = CliRunner().invoke(cli.app, ["machine", "desktop"])
     assert result.exit_code == 0 and "FOLDYARD_PODMAN_DESKTOP=1" in result.output
-    # opted out: registered as asked, and told why `fy up` won't keep it current
+    # opted out AND not detected: unsetting =0 wouldn't help, forcing it on would
     monkeypatch.setenv("FOLDYARD_PODMAN_DESKTOP", "0")
     result = CliRunner().invoke(cli.app, ["machine", "desktop"])
+    assert result.exit_code == 0 and "FOLDYARD_PODMAN_DESKTOP=1" in result.output
+    assert "unset" not in result.output
+    # opted out where it IS detected: registered as asked, and told what `fy up` would need
+    settings.write_text("{}")
+    result = CliRunner().invoke(cli.app, ["machine", "desktop"])
     assert result.exit_code == 0 and "FOLDYARD_PODMAN_DESKTOP=0" in result.output
+    assert "unset" in result.output
     monkeypatch.delenv("FOLDYARD_PODMAN_DESKTOP")
     # the box has no Podman Desktop, and a podman-machine VM is shown natively
     monkeypatch.setattr(machine.config, "in_box", lambda: True)

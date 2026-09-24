@@ -90,7 +90,10 @@ def _connections(podman: str) -> list[dict] | None:
 
 def register(name: str, uri: str, identity: str) -> str:
     """Make ``name`` point at ``uri``: ``added`` · ``updated`` · ``unchanged`` · ``no-podman`` ·
-    ``failed``. Restores the previous default if podman promoted the new connection."""
+    ``would-default`` · ``failed``. Restores the previous default if podman promoted the new
+    connection; with NO default to restore (an empty list) it adds nothing — podman makes a first
+    connection the default and can't be told otherwise, which would repoint bare ``podman`` on
+    the host at the VM."""
     podman = _podman()
     if podman is None:
         return "no-podman"
@@ -103,6 +106,8 @@ def register(name: str, uri: str, identity: str) -> str:
     default = next(
         (r.get("Name") for r in rows if r.get("Default") and r.get("Name") != name), None
     )
+    if default is None and mine is None:
+        return "would-default"
     if mine and _run([podman, "system", "connection", "remove", name]).returncode != 0:
         return "failed"
     add = [podman, "system", "connection", "add", name, uri, "--identity", identity]
@@ -155,6 +160,11 @@ def messages(name: str, registered: str, remote: str, *, verbose: bool = False) 
         ],
         "no-podman": [
             f"⚠ no podman CLI on PATH — Podman Desktop lists '{name}' through it; skipped"
+        ],
+        "would-default": [
+            f"⚠ '{name}' not registered for Podman Desktop: podman has no connection yet, so it "
+            "would become the default one bare `podman` uses — add yours first, or export "
+            "FOLDYARD_PODMAN_DESKTOP=0 to stop trying"
         ],
         "failed": [f"⚠ couldn't register '{name}' with `podman system connection` — skipped"],
     }.get(registered, [])
