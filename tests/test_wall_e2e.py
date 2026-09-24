@@ -155,7 +155,8 @@ def _run_step(line: str, must: bool = True) -> None:
 def test_fy_up_is_refused_until_the_operator_installs_the_host_wall(repo):
     refused, shown = _OPERATOR["refused"], _OPERATOR["shown"]
     assert refused.rc != 0, f"fy up ran without a host wall set up:\n{refused.out}"
-    assert "not set up" in refused.out and "fy machine host-firewall" in refused.out, refused.out
+    # The refusal's wording, as machine.py prints it (test_machine.py pins the same phrase).
+    assert "isn't set up" in refused.out and "fy machine host-firewall" in refused.out, refused.out
     assert "starting lima machine" not in refused.out, refused.out  # refused BEFORE booting
     # what the operator was shown: the slice it set up (said once), the table and the unit in
     # full, then exactly the four root steps
