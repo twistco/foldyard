@@ -22,7 +22,7 @@ controls sit on that path; they get conflated constantly, so name the right one 
   it per host (after reviewing your edit at the adoption gate) instead of rediscovering the
   block, and nothing is granted without their yes.
 - **Nothing is blocked, but the operator mentions a "learn window"** — the wall is observing for
-  a while (`fy allow wall learn`): requests pass, and every host that WOULD be refused is recorded
+  a while (`fy allow enforce learn`): requests pass, and every host that WOULD be refused is recorded
   for the operator to review. It enforces again by itself when the window ends, so a host that
   works now may be refused later if the operator doesn't grant it — say which hosts your task
   needed.
@@ -43,7 +43,7 @@ decryption — often a couple of hundred of them, since one `@bundle` reference 
 toolchain. `fy config widenings` prints the real count. (There is no `capture` switch any more:
 decryption is always on.)
 
-Conversely the wall (`[machine] wall = true`) is the enforcing control: traffic that ignores the
+Conversely the wall (`[machine] firewall = true`) is the enforcing control: traffic that ignores the
 proxy environment is *rejected*, not silently allowed. Without it, routing is cooperative — it
 bounds what is **logged**, not what can leave. `fy verify` probes this directly.
 

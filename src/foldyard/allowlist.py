@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Egress allow-store — the live, leveled allowlist behind the Network Log "allow this host" UX.
 
-Companion to :mod:`foldyard.devmode`. When ``[proxy] default_deny`` is on, the egress proxy refuses
+Companion to :mod:`foldyard.devmode`. When ``[proxy] enforce`` is on, the egress proxy refuses
 any host that isn't allowed. A host can be allowed at three levels:
 
   once         a short TTL (default 2 min), then auto-reverts — "let this one through, I'm watching"
@@ -212,15 +212,15 @@ def _save_store(hosts: dict[str, dict]) -> None:
 def default_deny() -> bool:
     """Is the egress wall ENFORCING? Host-owned, like the grants.
 
-    ``[proxy] default_deny`` is only a SEED: it says what the project wants the first time, and
+    ``[proxy] enforce`` is only a SEED: it says what the project wants the first time, and
     from then on the answer lives in the host store. It can't stay authoritative — repo config is
     writable from inside the box, so a committed enforcement switch is one the yard can flip OFF for
     itself, which is strictly worse than the per-host grants we already moved out (that widened the
-    wall by one host; this drops it entirely). Change it with ``fy allow wall on|off``."""
+    wall by one host; this drops it entirely). Change it with ``fy allow enforce on|off``."""
     try:
         raw = _checked_raw()
     except StoreUnreadable as e:
-        # Fail CLOSED: a damaged store must not hand enforcement back to `[proxy] default_deny`,
+        # Fail CLOSED: a damaged store must not hand enforcement back to `[proxy] enforce`,
         # which is repo config the box can write — that would turn "my allow-store broke" into
         # "the yard switched its own wall off".
         _warn(f"egress allow-store unreadable ({e}) — ENFORCING until it's repaired or removed")
@@ -294,7 +294,7 @@ def start_learning(seconds: int = LEARN_DEFAULT_SECONDS) -> dict:
     """Open a learn window: enforcement is suspended until now + ``seconds`` (capped at
     :data:`LEARN_MAX_SECONDS`), the proxy records every host it WOULD have refused, and when the
     window lapses the wall ENFORCES — whatever it was before. That last part is the point: a
-    window cannot be forgotten into an open wall, which ``fy allow wall off`` can. Mac only.
+    window cannot be forgotten into an open wall, which ``fy allow enforce off`` can. Mac only.
     Returns the window."""
     _require_host()
     _require_readable_store()
@@ -343,13 +343,13 @@ def mark_reviewed() -> None:
 
 
 def seed_learning(echo: Callable[[str], None]) -> dict | None:
-    """First launch on a checkout whose ADOPTED config seeds ``[proxy] default_deny = "learn"``:
+    """First launch on a checkout whose ADOPTED config seeds ``[proxy] enforce = "learn"``:
     open the first learn window and say so, loudly. Only when the store has never answered
     (no ``default_deny``, no window past or present) — so it happens once, and an operator's own
-    ``fy allow wall …`` always wins. Returns the window, or None when nothing was started.
+    ``fy allow enforce …`` always wins. Returns the window, or None when nothing was started.
 
     The seed is repo config, but it can only ever buy a BOUNDED open window before enforcing —
-    strictly less than ``default_deny = false``, which the same repo could already write."""
+    strictly less than ``enforce = false``, which the same repo could already write."""
     if in_box() or config.proxy_default_deny_seed() != "learn":
         return None
     try:
@@ -364,7 +364,7 @@ def seed_learning(echo: Callable[[str], None]) -> dict | None:
     echo(
         f"▶ egress wall: LEARNING until {at} (first run) — the box's egress is allowed and every "
         "host the wall would refuse is recorded. Enforcement resumes by itself; review and grant "
-        "what it saw with `fy allow learn` (`fy allow wall on` ends it now)."
+        "what it saw with `fy allow learn` (`fy allow enforce on` ends it now)."
     )
     return window
 

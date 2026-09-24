@@ -11,7 +11,7 @@
 # (foldyard walks up from CWD to the nearest foldyard.toml).
 #
 # NOT the most locked-down config foldyard can write — read it for the STACK tier, not the
-# posture tier. There's no [proxy] and no [machine].wall here, so box egress is direct:
+# posture tier. There's no [proxy] and no [machine] firewall here, so box egress is direct:
 # unrouted, unobserved, unfiltered. That's deliberate and structural, not simplification —
 # the proxy runs on the HOST, and declaring [proxy] makes `fy box up` require a CA only the
 # host-side `fy host` can generate, which would stop this fixture running in CI containers,

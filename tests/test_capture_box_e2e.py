@@ -232,7 +232,7 @@ def _wall_enforcing_with(host: str) -> None:
     bare grant means ``:443``; a bare ``github.com`` used to reach ``github.com:22``).
 
     The daemon spec carries the wall (the live file's switch + ``ALLOW_FILE``), so left unstated the fake
-    upstream is judged by whatever is ambient — the repo's own ``[proxy] default_deny`` seed and
+    upstream is judged by whatever is ambient — the repo's own ``[proxy] enforce`` seed and
     whatever the machine's allow-store happens to hold. That passed on a developer box with grants
     and 403'd every CONNECT in CI, where the seed is `true` and nothing has ever been granted.
 

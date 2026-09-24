@@ -420,7 +420,7 @@ def test_config_declared_require_rides_the_owning_axis():
     # scalar or a list (overlay-`when` ergonomics).
     toml = {
         "require": [
-            {"axis": "demo", "when": "on", "needs": "gcp", "accepts": ["sa", "user"]},
+            {"switch": "demo", "when": "on", "needs": "gcp", "accepts": ["sa", "user"]},
         ]
     }
     reg = Registry([DemoPlugin()], config=_cfg(toml))
@@ -448,7 +448,7 @@ def test_config_require_appends_after_the_plugins_own_rows():
                 )
             ]
 
-    toml = {"require": [{"axis": "a", "when": "on", "needs": "z", "accepts": ["w"]}]}
+    toml = {"require": [{"switch": "a", "when": "on", "needs": "z", "accepts": ["w"]}]}
     reg = Registry([P()], config=_cfg(toml))
     msgs = [msg for _, msg in reg.mode_issues({"a": "on"})]
     assert len(msgs) == 2
@@ -463,20 +463,20 @@ def test_config_require_validation_is_loud():
     with pytest.raises(ValueError, match="unknown axis 'nope'"):
         Registry(
             [DemoPlugin()],
-            config=_cfg({"require": [{"axis": "nope", "when": "on", "needs": "gcp"}]}),
+            config=_cfg({"require": [{"switch": "nope", "when": "on", "needs": "gcp"}]}),
         )
     with pytest.raises(ValueError, match="non-empty subset"):  # `when` outside the owner's rungs
         Registry(
             [DemoPlugin()],
-            config=_cfg({"require": [{"axis": "demo", "when": "boom", "needs": "gcp"}]}),
+            config=_cfg({"require": [{"switch": "demo", "when": "boom", "needs": "gcp"}]}),
         )
     with pytest.raises(ValueError, match="must name a string"):  # `needs` missing
-        Registry([DemoPlugin()], config=_cfg({"require": [{"axis": "demo", "when": "on"}]}))
+        Registry([DemoPlugin()], config=_cfg({"require": [{"switch": "demo", "when": "on"}]}))
     with pytest.raises(ValueError, match="'error' or 'warn'"):  # bad severity, via __post_init__
         Registry(
             [DemoPlugin()],
             config=_cfg(
-                {"require": [{"axis": "demo", "when": "on", "needs": "gcp", "severity": "fatal"}]}
+                {"require": [{"switch": "demo", "when": "on", "needs": "gcp", "severity": "fatal"}]}
             ),
         )
     # Non-dict rows are ignored (like [[overlay]]) — junk shapes don't crash the parse.
@@ -1038,7 +1038,7 @@ def test_llm_requires_sa_identity():
         "plugins": {"llm": {}},
         "require": [
             {
-                "axis": "llm",
+                "switch": "llm",
                 "when": ["record", "live"],
                 "needs": "gcp",
                 "accepts": ["sa", "user"],
@@ -2035,7 +2035,7 @@ def test_pam_summary_ignores_inactive_expired_and_empty():
 # ── inject plugin (the generic config-driven injector) ────────────────────────────────
 
 _PENPOT_SPEC = {
-    "axis": "penpot",
+    "switch": "penpot",
     "host": "truenas.example.ts.net",
     "query_param": "userToken",
     "label": "Penpot MCP injection proxy",
@@ -2102,7 +2102,7 @@ def test_inject_rule_built_for_query_param_token_env(monkeypatch):
 
 
 def test_inject_header_mode_defaults_authorization(monkeypatch):
-    spec = {"axis": "svc", "host": "api.svc.test"}
+    spec = {"switch": "svc", "host": "api.svc.test"}
     rule = _inject_plugin(monkeypatch, [spec]).proxy_rules({"svc": "on"})[0]
     assert rule.header == "Authorization" and rule.query_param == ""  # header is the default mode
     assert rule.value_prefix == ""  # no scheme prefix by default
@@ -2111,7 +2111,7 @@ def test_inject_header_mode_defaults_authorization(monkeypatch):
 def test_inject_value_prefix_flows_through(monkeypatch):
     # A generic [[inject]] can carry value_prefix too (e.g. "Bearer " / "token ") — the proxy
     # prepends it, so the host.env token stays bare. Reaches the daemon's rule as value_prefix.
-    spec = {"axis": "svc", "host": "api.svc.test", "value_prefix": "token "}
+    spec = {"switch": "svc", "host": "api.svc.test", "value_prefix": "token "}
     rule = _inject_plugin(monkeypatch, [spec]).proxy_rules({"svc": "on"})[0]
     assert rule.value_prefix == "token "
     reg = Registry([_inject_plugin(monkeypatch, [spec]), proxy.ProxyPlugin()])
@@ -2120,7 +2120,7 @@ def test_inject_value_prefix_flows_through(monkeypatch):
 
 
 def test_inject_spec_without_a_host_is_dropped(monkeypatch):
-    spec = {"axis": "svc"}  # nothing to inject on
+    spec = {"switch": "svc"}  # nothing to inject on
     assert _inject_plugin(monkeypatch, [spec]).proxy_rules({"svc": "on"}) == []
     # The packaged path (claude/codex, via keyless.inject_spec) still declares its own var, and a
     # spec without one is unusable — that's the tier where naming a var is legitimate.
@@ -2132,7 +2132,7 @@ def test_inject_token_var_is_derived_from_the_axis_not_the_row(monkeypatch):
     # checkout point a rule at another mechanism's host.env secret AND at a host of its choosing —
     # the proxy would hand it over in flight. So the var is derived from the axis and a declared
     # one is ignored: a config rule reaches only the var the operator made for that injector.
-    spec = {"axis": "pen-pot", "host": "api.svc.test", "token_env": "ANTHROPIC_API_KEY"}
+    spec = {"switch": "pen-pot", "host": "api.svc.test", "token_env": "ANTHROPIC_API_KEY"}
     rule = _inject_plugin(monkeypatch, [spec]).proxy_rules({"pen-pot": "on"})[0]
     assert rule.env == ("FY_INJECT_PEN_POT",)  # punctuation folds to _; host.env keys are env names
     assert "ANTHROPIC_API_KEY" not in rule.minter
@@ -2150,7 +2150,7 @@ def test_inject_axes_that_collide_on_the_token_var_are_refused(monkeypatch, firs
     # sharing FY_INJECT_<X> means the second row can aim the first's token at a host of its
     # choosing, which is the hole the derivation closed, one rename away. Distinct axis names, so
     # the registry's own duplicate check never sees it — this is the check that does.
-    specs = [{"axis": first, "host": "a.test"}, {"axis": second, "host": "collector.test"}]
+    specs = [{"switch": first, "host": "a.test"}, {"switch": second, "host": "collector.test"}]
     plugin = _inject_plugin(monkeypatch, specs)
     with pytest.raises(ValueError, match="derive the token var"):
         plugin.axes()

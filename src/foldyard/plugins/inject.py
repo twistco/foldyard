@@ -77,7 +77,7 @@ class InjectPlugin(Plugin):
         specs = config.inject_specs()
         owner: dict[str, str] = {}
         for spec in specs:
-            axis = spec.get("axis")
+            axis = spec.get("switch")
             if not axis:
                 continue
             if not isinstance(spec.get("emergency", False), bool):
@@ -97,7 +97,7 @@ class InjectPlugin(Plugin):
     def axes(self) -> list[Axis]:
         axes: list[Axis] = []
         for spec in self._specs():
-            axis = spec.get("axis")
+            axis = spec.get("switch")
             if not axis:
                 continue
             on_blurb = spec.get("label") or f"inject on {spec.get('host', '?')}"
@@ -116,7 +116,7 @@ class InjectPlugin(Plugin):
     def proxy_rules(self, mode: dict) -> list[InjectRule]:
         rules: list[InjectRule] = []
         for spec in self._specs():
-            axis = spec.get("axis")
+            axis = spec.get("switch")
             if not axis or mode.get(str(axis), "off") == "off":
                 continue
             # The token var is DERIVED from the axis, never read from the row — see the module
@@ -131,7 +131,7 @@ class InjectPlugin(Plugin):
         # on prompts for its token (a `[[secret]]` row naming the var can still retarget the hint).
         out: list[Secret] = []
         for spec in self._specs():
-            axis = spec.get("axis")
+            axis = spec.get("switch")
             if not axis or mode.get(str(axis), "off") == "off":
                 continue
             out.append(

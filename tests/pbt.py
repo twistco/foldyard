@@ -97,7 +97,7 @@ class World:
         if source == "config":
             rows = [
                 {
-                    "axis": axis,
+                    "switch": axis,
                     "when": sorted(trigger),
                     "needs": other,
                     "accepts": sorted(allowed),

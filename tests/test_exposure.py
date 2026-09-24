@@ -55,7 +55,7 @@ def test_a_bundle_ref_is_counted_not_just_echoed(checkout):
 
 
 def test_an_undeclared_passthrough_reports_the_default_it_falls_back_to(checkout):
-    body = rendered(checkout(BASE + "default_deny = true\n"))
+    body = rendered(checkout(BASE + "enforce = true\n"))
     assert "not declared → defaults to @all" in body
     assert "194" in body or "hosts ·" in body  # the count, whatever the bundles currently hold
 
@@ -89,7 +89,7 @@ def test_an_unknown_bundle_ref_is_a_concern_because_it_silently_expands_to_nothi
 
 INJECT = """
 [[inject]]
-axis = "penpot"
+switch = "penpot"
 host = "penpot.example"
 query_param = "userToken"
 path_prefix = "/mcp"
@@ -255,6 +255,24 @@ def test_a_vscode_workspace_file_is_named_as_ignored(checkout):
     assert "[vscode] extensions" in rendered(cfg)
 
 
+def test_an_old_key_spelling_is_honoured_but_named_with_its_new_name(checkout):
+    """Renamed keys are aliases (config.RENAMED_KEYS), so this is a nudge, not a gap — but it has to
+    be SAID, or nobody ever renames them and the alias can never be dropped."""
+    cfg = checkout(
+        BASE + "passthrough = []\n\n[machine]\nwall = true\n",
+        local="[proxy]\ndefault_deny = true\n",
+    )
+    exp = collect(cfg)
+
+    assert exp.renamed == [
+        ("[machine] wall", "[machine] firewall", exposure.SHARED),
+        ("[proxy] default_deny", "[proxy] enforce", exposure.LOCAL),
+    ]
+    assert "`[machine] wall` was renamed to `[machine] firewall`" in exp.concerns
+    assert "[machine] wall → [machine] firewall" in rendered(cfg)
+    assert exposure.doctor_row(exp)[0] is None
+
+
 # ── the doctor row ────────────────────────────────────────────────────────────────────
 
 
@@ -333,7 +351,7 @@ def test_a_pending_recommendation_rides_the_doctor_detail_not_a_warning(checkout
 
 
 def test_recommend_is_absent_from_the_report_when_not_declared(checkout):
-    assert "recommended egress" not in rendered(checkout(BASE + "default_deny = true\n"))
+    assert "recommended egress" not in rendered(checkout(BASE + "enforce = true\n"))
 
 
 def test_a_build_grant_answers_only_a_build_recommendation(checkout):

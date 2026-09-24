@@ -84,7 +84,7 @@ if vm sudo nft list table inet fy_wall >/dev/null 2>&1; then
         info "  walled set is uid-only (no /etc/subuid entry?) — C4 checks the host-network path"
     fi
 else
-    fail "nft table inet fy_wall ABSENT — the wall is NOT enforcing. Is [machine].wall = true?"
+    fail "nft table inet fy_wall ABSENT — the wall is NOT enforcing. Is [machine] firewall = true?"
     info "     It self-heals on machine start: fy down && fy up (or limactl stop/start $MACHINE)"
 fi
 # C1: the VM user's DIRECT (proxy-ignoring) egress must be REJECTED — the fail-closed property.

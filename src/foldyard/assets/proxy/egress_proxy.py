@@ -919,7 +919,7 @@ class Injector:
         self._write_entry(entry)
 
     def _log_would_block(self, key: str | None, request) -> None:
-        """While the wall only OBSERVES (``fy allow wall off``, or a learn window): a row for a
+        """While the wall only OBSERVES (``fy allow enforce off``, or a learn window): a row for a
         host enforcement WOULD have refused — the same policy check as the wall, so the set
         ``fy allow learn`` offers is exactly what enforcing would need, ports included. Nothing
         is refused. Rate-limited per host (:data:`_WOULD_BLOCK_EVERY`). No host → nothing."""

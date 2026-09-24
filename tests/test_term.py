@@ -86,7 +86,7 @@ DIFF = """--- adopted/foldyard.toml
  [proxy]
 -passthrough = ["@all"]
 +passthrough = ["@all", "collector.example"]
- default_deny = true"""
+ enforce = true"""
 
 
 def test_paint_diff_colors_by_line_role():

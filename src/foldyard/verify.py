@@ -132,7 +132,7 @@ def _probe_runs(engine: str, env: dict, probe: str) -> bool:
     Those checks report PASS when their probe command FAILS, and :func:`_engine_run_succeeds`
     cannot tell "the escape was refused" from "the container never started". So a probe image
     that cannot run turns the whole battery green while proving nothing — and that is not an
-    edge case: the probe is pulled from a registry, and ``[machine].wall = true`` (what
+    edge case: the probe is pulled from a registry, and ``[machine] firewall = true`` (what
     ``fy init`` scaffolds) denies egress unless the host supervisor is up, so a cold image cache
     makes the pull fail exactly when the posture is most locked down. Run something trivial
     first; if that cannot run, no absence below is evidence of anything."""
@@ -394,7 +394,7 @@ def _box_posture(rep: _Report, env: dict) -> None:
 
 
 def _wall_posture(rep: _Report) -> None:
-    """[machine].wall on lima: the box's DIRECT (proxy-ignoring) egress must be REJECTED — the
+    """[machine] firewall on lima: the box's DIRECT (proxy-ignoring) egress must be REJECTED — the
     fail-closed property the wall exists for. Two probes, both bypassing HTTPS_PROXY: a raw connect
     to a public IP on 443 (the baseline), AND one on port 53 — the wall now allows :53 only to
     LOCAL resolvers, so a public-IP :53 connect (the exfil-tunnel class) must also fail. Only the
@@ -409,7 +409,7 @@ def _wall_posture(rep: _Report) -> None:
     fuller red-team battery — rootful socket masked, nft-flush denied, host-network egress caught
     — is the host-side `_guest_state` probe on every `fy up` + example-lima-wall/
     test_network.sh; the box can't inspect VM-root state from an unprivileged container.)"""
-    print("▶ egress wall ([machine].wall — direct egress from the box must be refused)")
+    print("▶ egress wall ([machine] firewall — direct egress from the box must be refused)")
 
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
     m = re.search(r"//(?:[^@/]*@)?([^:/]+):(\d+)", proxy)

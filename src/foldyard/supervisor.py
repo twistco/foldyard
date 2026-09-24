@@ -541,7 +541,7 @@ def _offer_recommended() -> None:
     try:
         cfg = devmode.worktree_config(config.active_worktree())
         with config.using(cfg):
-            # A `default_deny = "learn"` seed opens its one learn window here, on the first launch
+            # A `enforce = "learn"` seed opens its one learn window here, on the first launch
             # after adoption — before the offer, so the operator reads "learning" first.
             allowlist.seed_learning(lambda m: print(m, file=sys.stderr, flush=True))
             allowlist.offer_recommendations(

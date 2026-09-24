@@ -476,15 +476,16 @@ def machine_rm(
     raise typer.Exit(machine.delete(assume_yes=yes))
 
 
-@machine_app.command("host-wall")
+@machine_app.command("host-firewall")
+@machine_app.command("host-wall", hidden=True)  # the old name, kept as an alias
 def machine_host_wall(
     uninstall: bool = typer.Option(False, "--uninstall", help="print the removal steps instead"),
 ) -> None:
-    """The host-side wall's install: print the nftables table and the system unit foldyard
-    rendered, the exact root commands that install them, and whether the wall is enforcing now.
-    foldyard never runs them — the operator does, with the files in front of them. Exit 1 when
-    not enforcing. Linux + `[machine].host_wall = true`; an install/uninstall thing, not part of
-    the VM's lifecycle."""
+    """Install the host firewall: print the nftables table and the system unit foldyard rendered,
+    the exact root commands that install them, and whether the firewall is enforcing now.
+    foldyard never runs them — you do, with the files in front of you. Exit 1 when not
+    enforcing. Linux + `[machine] host_firewall = true`; a one-off install, not part of the VM's
+    lifecycle."""
     from . import machine
 
     raise typer.Exit(machine.host_wall(uninstall=uninstall))
@@ -573,7 +574,7 @@ def box_ps() -> None:
 allow_app = typer.Typer(
     rich_markup_mode="markdown",
     name="allow",
-    help="the egress allowlist the proxy enforces under [proxy] default_deny (Mac)",
+    help="the egress allowlist the proxy enforces under [proxy] enforce (Mac)",
     no_args_is_help=True,
 )
 app.add_typer(allow_app)
@@ -720,7 +721,8 @@ def _local_hm(iso: str) -> str:
         return iso
 
 
-@allow_app.command("wall")
+@allow_app.command("enforce")
+@allow_app.command("wall", hidden=True)  # the old name, kept as an alias
 def allow_wall(
     state: str = typer.Argument(
         ..., help="on (enforce) | off (observe only) | learn (observe for a while, then enforce)"
@@ -729,14 +731,14 @@ def allow_wall(
         "1h", "--for", help="learn: how long before enforcing again (90s · 30m · 2h; max 8h)"
     ),
 ) -> None:
-    """Turn egress ENFORCEMENT on or off — or `learn`: observe for a bounded window, then enforce.
+    """Turn allowlist ENFORCEMENT on or off — or `learn`: observe for a while, then enforce.
 
-    Host-owned, like the grants: `[proxy] default_deny` only seeds the first answer, because repo
-    config is writable from inside the box and an enforcement switch the yard can flip is no switch.
+    Kept on your computer, like the grants: `[proxy] enforce` only seeds the first answer, because
+    the box can write repo config, and an enforcement switch the box can flip is no switch.
 
-    `learn` lets everything through while the proxy records each host the wall WOULD refuse, and
-    turns enforcement back on by itself when the window ends — unlike `off`, it can't be forgotten
-    open. Use it while a new dependency's egress is unknown, then `fy allow learn` to grant what it
+    `learn` lets everything through while the proxy records each host it WOULD refuse, and turns
+    enforcement back on by itself when the window ends — unlike `off`, it can't be forgotten open.
+    Use it while a new dependency's egress is unknown, then `fy allow learn` to grant what it
     recorded in one reviewed batch.
     """
     from . import allowlist, devmode
@@ -748,15 +750,15 @@ def allow_wall(
             raise typer.BadParameter(str(e), param_hint="--for")
         window = allowlist.start_learning(seconds)
         print(
-            f"✓ egress wall LEARNING until {_local_hm(window['until'])} — nothing is refused, "
-            "every host the wall would refuse is recorded; enforcing after. "
+            f"✓ allowlist LEARNING until {_local_hm(window['until'])} — nothing is refused, "
+            "every host it would refuse is recorded; enforcing after. "
             "Review: `fy allow learn`"
         )
         return
     if state not in ("on", "off"):
         raise typer.BadParameter("expected `on`, `off` or `learn`")
     eff = allowlist.set_wall(state == "on")
-    print(f"✓ egress wall {'ENFORCING' if eff['default_deny'] else 'observing only'}")
+    print(f"✓ allowlist {'ENFORCING' if eff['default_deny'] else 'observing only'}")
 
 
 @allow_app.command("learn")
@@ -786,7 +788,7 @@ def allow_learn(
         return
     window = allowlist.last_window()
     if window is None:
-        print("• no learn window yet — `fy allow wall learn [--for 1h]` starts one")
+        print("• no learn window yet — `fy allow enforce learn [--for 1h]` starts one")
         return
     with _config_bound():
         log = proxy._proxy_log()

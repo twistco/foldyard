@@ -199,8 +199,8 @@ later with `foldyard machine recreate`.
 [machine]
 backend = "lima"
 vmtype = "vz"
-wall = true
-host_wall = true
+firewall = true
+host_firewall = true
 name = "acme"
 cpus = 4
 memory_mib = 8192
@@ -221,12 +221,12 @@ disk_gib = 60
   would leave the socket unset and drop every engine verb onto the host's own podman, the VM-less
   profile nobody chose (ADR-0011's amendment; the message names the two ways out, install
   `limactl` or name `podman`).
-- **`wall`** — provision the in-VM nftables egress wall, so the box's only way out is the
+- **`firewall`** (formerly `wall`) — provision the in-VM nftables egress wall, so the box's only way out is the
   Mac-side proxy — fail-closed: traffic that ignores the proxy env is rejected, not silently
   allowed. Lima-only (preflight enforces the pairing); requires `[proxy]` to be declared, or
   the box has no way out at all. Default: `false` (`init` writes `true`). Env: `MACHINE_WALL`
   (`1`/`true`/`on`/`yes`).
-- **`host_wall`** — ALSO enforce the wall on the **host**: nftables matching the VM process's
+- **`host_firewall`** (formerly `host_wall`) — ALSO enforce the wall on the **host**: nftables matching the VM process's
   own traffic by its cgroup v2 slice (foldyard starts the VM inside
   `systemd-run --user --scope --slice fy-machine-<vm>.slice --unit fy-machine-<vm>.scope`),
   allowing only DNS, this project's daemon band, and loopback flows whose LISTENER is in the
@@ -234,14 +234,14 @@ disk_gib = 60
   picked this boot; judged on the input hook, so the table names none of them). So a
   guest-kernel exploit that flushes the in-VM wall still leaves through a host that rejects it.
   The rendered table is a function of the VM name, its slice and the bands alone — the same
-  text on every boot. Needs `wall = true`
+  text on every boot. Needs `firewall = true`
   and a host with `nft` + cgroup v2 + a kernel built with nftables' `socket` expression
   (`CONFIG_NFT_SOCKET`; the match is `socket cgroupv2`) — a Linux host; macOS reports it
   unavailable, the stock WSL2 kernel lacks the expression, and preflight refuses either rather
   than silently downgrading (on WSL2 the in-VM wall still applies; a custom kernel is the only
   route to the host wall there). **foldyard never loads the table itself** — it is the
   operator's install ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)):
-  `fy machine host-wall` sets up the user slice the VM runs under (its one user-level change —
+  `fy machine host-firewall` sets up the user slice the VM runs under (its one user-level change —
   `~/.local/share/systemd/user/fy-machine-<vm>.slice`, said once when written) and prints the
   table and a system unit that loads it with your user manager, plus the four root commands
   that install them (`--uninstall` prints the lines that remove all of it); you run those, once
@@ -371,16 +371,16 @@ my-feature = 2
 
 **Presence-gated**: declaring `[proxy]` — even empty — routes the box's egress through the
 Mac-side allowlisting proxy (CA mount + `HTTPS_PROXY`/`NO_PROXY` env in the box). Required
-whenever `[machine] wall = true`. Absent means a clean box: no proxy env at all.
+whenever `[machine] firewall = true`. Absent means a clean box: no proxy env at all.
 
 ```toml
 [proxy]
-default_deny = "learn"
+enforce = "learn"
 # passthrough = ["@all"]
 # no_proxy = ["{project}-postgres", "redis"]
 ```
 
-- **`default_deny`** — the project's STARTING position for enforcement, one of:
+- **`enforce`** (formerly `default_deny`) — the project's STARTING position for enforcement, one of:
   - `true` — the proxy refuses any host that isn't granted (403 at CONNECT) from the first run.
   - `"learn"` — the first launch (`fy up`/`fy box up`) opens a one-hour **learn window**:
     nothing is refused, the proxy records every host it *would* refuse (with the client's
@@ -392,9 +392,9 @@ default_deny = "learn"
 
   Blocked hosts show live in `fy tui`, where you can grant them (once / until-restart /
   permanently) without a restart. A window can be opened again any time with
-  `fy allow wall learn --for 30m` (8 h at most), and `fy allow wall on` ends one early.
+  `fy allow enforce learn --for 30m` (8 h at most), and `fy allow enforce on` ends one early.
 
-  It is a **seed, not the live switch**: once `fy allow wall on|off|learn` has set it (or a learn
+  It is a **seed, not the live switch**: once `fy allow enforce on|off|learn` has set it (or a learn
   window has run), the host-side store is authoritative and this key is ignored. Same reason as the grants below — repo config is
   writable from inside the box, and an enforcement switch the yard can flip off for itself is no
   switch at all.
@@ -431,7 +431,7 @@ default_deny = "learn"
   ```
 
   Seeded with the box-bootstrap hosts by `foldyard init`, which is what makes its
-  `default_deny = true` survivable: the box comes up walled and working after one round of
+  `enforce = true` survivable: the box comes up walled and working after one round of
   consented yeses. `fy config widenings` reports each entry's standing answer (granted / pending /
   declined).
 
@@ -497,14 +497,14 @@ for that token when `host.env` doesn't have it yet.
 
 ```toml
 [[inject]]
-axis = "tracker"                   # → `fy mode tracker=on`; token = host.env's FY_INJECT_TRACKER
+switch = "tracker"                 # → `fy mode tracker=on`; token = host.env's FY_INJECT_TRACKER
 host = "api.tracker.example"       # the host to inject on
 header = "Authorization"           # XOR query_param = "userToken"
 ```
 
 Per entry:
 
-- **`axis`** — the mode-axis name (required for the axis to appear). It also names the token:
+- **`switch`** (formerly `axis`) — the switch name (required for the switch to appear). It also names the token:
   foldyard reads it from `host.env`'s **`FY_INJECT_<AXIS>`** (uppercased, non-alphanumerics folded
   to `_`), and its packaged `static_token` minter passes only that NAME on a command line — the
   value stays host-side. There is deliberately **no `token_env`**: this table is repo config, so a
@@ -609,7 +609,7 @@ it (`"warn"`).
 
 ```toml
 [[require]]
-axis = "llm"                 # required — the OWNING axis (whose rungs activate the rule)
+switch = "llm"               # required — the OWNING switch (whose levels activate the rule)
 when = ["record", "live"]    # required — owning-axis rungs; scalar or list
 needs = "gcp"                # required — the required axis, by name
 accepts = ["sa", "user"]     # rungs of `needs` that satisfy it; FIRST is the suggested fix

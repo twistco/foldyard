@@ -933,7 +933,7 @@ def test_default_deny_off_never_blocks(gh, monkeypatch, tmp_path):
 
 @pytest.fixture
 def observing(gh, monkeypatch, tmp_path):
-    """An Injector with the wall OBSERVING (no DEFAULT_DENY — `fy allow wall off` or a learn
+    """An Injector with the wall OBSERVING (no DEFAULT_DENY — `fy allow enforce off` or a learn
     window) but an ALLOW_FILE present, as the plugin always emits it. (Injector, allow, log)."""
     log = tmp_path / "egress.jsonl"
     allow = tmp_path / "allow-effective.json"

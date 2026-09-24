@@ -66,14 +66,14 @@ FULL_TOML = {
     # ADC only gcp=sa (or its superset, user) grants. Mirrors the real foldyard.toml.
     "require": [
         {
-            "axis": "llm",
+            "switch": "llm",
             "when": ["record", "live"],
             "needs": "gcp",
             "accepts": ["sa", "user"],
             "reason": "the runtime-SA identity",
         },
         {
-            "axis": "storage",
+            "switch": "storage",
             "when": "staging",
             "needs": "gcp",
             "accepts": ["sa", "user"],
@@ -133,9 +133,9 @@ def isolated_allow_store(tmp_path, monkeypatch):
     from "nothing granted, nothing declined".
 
     The same local/CI divergence the fixtures above exist for: a developer's store carries their
-    real grants and their `fy allow wall` answer, CI's carries nothing, so a test that reads the
+    real grants and their `fy allow enforce` answer, CI's carries nothing, so a test that reads the
     ambient store asserts a different wall in each place. (An empty store still falls back to
-    ``[proxy] default_deny`` — the repo seed — so a test whose SUBJECT is the wall must state its
+    ``[proxy] enforce`` — the repo seed — so a test whose SUBJECT is the wall must state its
     posture itself: `allowlist.grant(...)` / `allowlist.set_wall(...)` into this isolated store.)"""
     monkeypatch.setenv("FOLDYARD_ALLOW_STORE", str(tmp_path / "allow-store.json"))
     monkeypatch.setenv("FOLDYARD_ALLOW_FILE", str(tmp_path / "allow-effective.json"))

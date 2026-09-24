@@ -1509,11 +1509,11 @@ def test_host_wall_doctor_row_not_enforcing_points_at_the_verb(host_wall_row, mo
     checks = {"loopback": "ok", "external": "timeout", "band": "ok"}
     monkeypatch.setattr(host_wall_row, "probe", lambda vm: host_wall_row.Probe(False, checks))
     status, _name, detail = list(devmode._host_wall_check())[-1]
-    assert status == "fail" and "NOT enforcing" in detail and "fy machine host-wall" in detail
+    assert status == "fail" and "NOT enforcing" in detail and "fy machine host-firewall" in detail
 
 
 def test_host_wall_doctor_row_without_a_slice_is_a_warn(host_wall_row, monkeypatch):
     monkeypatch.setattr(host_wall_row, "slice_path", lambda vm: "")
     monkeypatch.setattr(host_wall_row, "probe", lambda vm: pytest.fail("nothing to probe yet"))
     ((status, _name, detail),) = devmode._host_wall_check()
-    assert status == "warn" and "fy machine host-wall" in detail and "slice" in detail
+    assert status == "warn" and "fy machine host-firewall" in detail and "slice" in detail

@@ -100,7 +100,7 @@ image = { dockerfile = "box.Dockerfile", tag = "<prefix>-box:latest" }
 not the image — they track the lockfiles on the mount.
 
 **c) The egress allowlist** → a scaffolded project ENFORCES from the start (`fy init` seeds
-`[proxy] default_deny = true`; `fy allow wall off` turns it back to observe-only while you're
+`[proxy] enforce = true`; `fy allow enforce off` turns it back to observe-only while you're
 still discovering a dependency's egress). Collect every host the build/test/run legitimately
 reaches (watch `fy tui`'s Network Log for blocks) and COMMIT them as `[proxy] recommend` entries,
 each with its `why`:

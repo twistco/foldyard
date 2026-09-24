@@ -1,6 +1,6 @@
 # The locked-down example stack: an api + a worker that calls it by service name.
 #
-# Two services on purpose — to demonstrate the wall's one caveat. With [machine].wall = true,
+# Two services on purpose — to demonstrate the wall's one caveat. With [machine] firewall = true,
 # foldyard's wall provisioning sets proxy env (HTTP(S)_PROXY) on the VM's rootless podman
 # service, and podman propagates that into the containers it runs. So WITHOUT the `no_proxy`
 # below, `worker` would resolve `http://api:8090` and try to reach it THROUGH the Mac proxy —

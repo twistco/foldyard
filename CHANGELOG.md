@@ -9,6 +9,25 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Changed
 
+- **Clearer names for the firewall and allowlist settings.** "Wall" meant three different things:
+  the firewall inside the VM, the one on your computer, and the proxy's allowlist switch. Each now
+  has its own name:
+
+  | was | now |
+  | --- | --- |
+  | `[machine] wall` | `[machine] firewall` |
+  | `[machine] host_wall` | `[machine] host_firewall` |
+  | `fy machine host-wall` | `fy machine host-firewall` |
+  | `[proxy] default_deny` | `[proxy] enforce` |
+  | `fy allow wall on\|off\|learn` | `fy allow enforce on\|off\|learn` |
+  | `axis =` in `[[inject]]` / `[[require]]` | `switch =` |
+  | `MACHINE_WALL` / `MACHINE_HOST_WALL` | `MACHINE_FIREWALL` / `MACHINE_HOST_FIREWALL` |
+
+  **Migrating:** nothing breaks. The old names keep working as aliases, and `fy doctor` /
+  `fy config widenings` list any still in use. Rename them in the same commit that raises
+  `[project] min_foldyard_version` to this release: an older `fy` doesn't know the new names, so it
+  would read `firewall = true` as no firewall at all.
+
 - **`fy host` is the supervisor's status, not a foreground run.** The supervisor was already
   started detached by `fy up` / `fy box up` almost every time, so the foreground terminal it was
   documented as living in was one nobody had open — and nothing said whether it was running.

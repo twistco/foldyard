@@ -18,7 +18,7 @@ example/
 ## What it deliberately does NOT lock down
 
 This fixture covers the **stack** tier: compose, ports, overlays, the mode system, worktrees. It
-declares no `[proxy]` and no `[machine].wall`, so the box's egress is direct — unrouted,
+declares no `[proxy]` and no `[machine] firewall`, so the box's egress is direct — unrouted,
 unobserved, unfiltered. That's one notch below what `foldyard init` writes for a new project
 (lima + wall + an *enforcing* proxy allowlist) and two below
 [`../example-lima-wall`](../example-lima-wall/).

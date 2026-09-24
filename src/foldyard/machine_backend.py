@@ -17,7 +17,7 @@ resolves to, not limactl *instead of* one.
   VMs concurrently, so per-project machines coexist — no stop/swap dance, and a project's open
   ``box shell`` / ``code`` session survives while you work in another project — and it is the
   only backend that can be provisioned with the in-VM fail-closed egress wall
-  (``[machine].wall``), which turns cooperative proxy routing into enforcement.
+  (``[machine] firewall``), which turns cooperative proxy routing into enforcement.
 
 * :class:`PodmanBackend` (``[machine].backend = "podman"``): ``podman machine``. The
   zero-EXTRA-dependency floor: the engine CLI you already need is also the lifecycle CLI, so

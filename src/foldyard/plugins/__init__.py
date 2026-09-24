@@ -512,11 +512,11 @@ def _declared_requires() -> dict[str, list[Requires]]:
 
     out: dict[str, list[Requires]] = {}
     for entry in config_mod.requires_declared():
-        owner, needs = entry.get("axis"), entry.get("needs")
+        owner, needs = entry.get("switch"), entry.get("needs")
         if not (isinstance(owner, str) and owner and isinstance(needs, str) and needs):
             raise ValueError(
-                f"[[require]] entry must name a string `axis` (the owning axis) and `needs` "
-                f"(the required axis): {entry!r}"
+                f"[[require]] entry must name a string `switch` (the owning switch) and `needs` "
+                f"(the required switch): {entry!r}"
             )
         out.setdefault(owner, []).append(
             Requires(

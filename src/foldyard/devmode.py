@@ -1528,7 +1528,7 @@ def _podman_checks():
 
 
 def _host_wall_check():
-    """The operator's host-wall install (`[machine].host_wall`, lima), PROBED — foldyard can't
+    """The operator's host-wall install (`[machine] host_firewall`, lima), PROBED — foldyard can't
     read the table back without root, and one that is there may hold the ID of a slice that no
     longer exists (a host reboot). Independent of the VM's lifecycle: the row is the same
     whether the VM is up or not, because the install is bound to the user manager, not the VM.
@@ -1538,7 +1538,7 @@ def _host_wall_check():
         return
     from . import hostwall  # stdlib-only, but only this row needs it
 
-    fix = "`fy machine host-wall` prints the files and the install steps"
+    fix = "`fy machine host-firewall` prints the files and the install steps"
     if not hostwall.available():
         yield _result(False, "host wall", "", "wanted, but this host has no nft / cgroup v2")
         return

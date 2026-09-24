@@ -99,15 +99,15 @@ def _start() -> bool:
     # cgroup scope under a per-VM PERSISTENT slice, so the wall has one predictable,
     # restart-stable thing to match (see _check_host_wall). The slice must already be active:
     # `systemd-run --slice` would otherwise create a transient one — a new cgroup ID the
-    # operator's installed table does not hold. Setting it up is `fy machine host-wall`'s job
+    # operator's installed table does not hold. Setting it up is `fy machine host-firewall`'s job
     # (the one user-level change the wall makes, said out loud there); a launch verb only
     # checks, and refuses BEFORE booting a VM it could not wall.
     prefix: list[str] = []
     if _host_wall_wanted():
         if not hostwall.slice_path(MACHINE):
-            _err("✗ [machine].host_wall = true but the host wall is not set up on this host:")
+            _err("✗ [machine] host_firewall = true but the host wall is not set up on this host:")
             _err(f"  the user slice '{hostwall.slice_unit(MACHINE)}' is not active. Set it up")
-            _err("  (and see the install steps) with:   fy machine host-wall")
+            _err("  (and see the install steps) with:   fy machine host-firewall")
             return False
         prefix = hostwall.scoped_argv_prefix(MACHINE)
     _err(f"▶ starting {BACKEND.name} machine '{MACHINE}'…")
@@ -160,13 +160,13 @@ def _revive() -> bool:
     return False
 
 
-# ── the host-side wall (lima, `[machine].host_wall`): nftables on the HOST, matched by cgroup ──
+# ── the host firewall (lima, `[machine] host_firewall`): nftables on the HOST, by cgroup ──
 #
 # The tier above the guest wall. That one is enforcement the guest applies to itself, so a
 # guest-KERNEL exploit reaching VM-root can flush it; this one matches the VM process's own
 # traffic on the host — where the guest has no reach — and allows only this project's daemon
 # band (hostwall.py has the ruleset and the why). foldyard never loads it: the OPERATOR installs
-# the table once, from files foldyard renders and prints (`fy machine host-wall`; ADR-0028 — no
+# the table once, from files foldyard renders and prints (`fy machine host-firewall`; ADR-0028 — no
 # elevation on the host, nothing to approve blind). What foldyard does is (1) start the VM
 # inside its own transient scope under its own PERSISTENT slice (`_start`), the cgroup the
 # operator's table binds to, and (2) after every start — and on every steady-state `fy up` —
@@ -189,7 +189,9 @@ def _check_host_wall() -> None:
     if not _host_wall_wanted():
         return
     if not hostwall.available():
-        _err("✗ [machine].host_wall = true but this host has no `nft` / cgroup v2 to enforce it.")
+        _err(
+            "✗ [machine] host_firewall = true but this host has no `nft` / cgroup v2 to enforce it."
+        )
         _err("  Install nftables, or drop `host_wall` (the in-VM wall still applies).")
         raise SystemExit(1)
     pids = BACKEND.host_pids(MACHINE)
@@ -210,18 +212,18 @@ def _check_host_wall() -> None:
         _err(f"  probe: {result.detail()}")
     _err("  Not installed, or installed for a slice that no longer exists (a host reboot, a")
     _err("  changed band). foldyard never loads it itself — see the files and the steps:")
-    _err("      fy machine host-wall")
+    _err("      fy machine host-firewall")
     raise SystemExit(1)
 
 
 def host_wall(uninstall: bool = False) -> int:
-    """`fy machine host-wall`: the operator's side of the host wall. Makes the VM's persistent
+    """`fy machine host-firewall`: the operator's side of the host wall. Makes the VM's persistent
     slice exist, renders the root-side files into the project's state dir, prints them and the
     exact commands that install (or, with ``uninstall``, remove) them — and probes whether the
     wall is enforcing right now. Exit 0 when it is, 1 when it is not (so a script can ask).
     foldyard runs none of the printed commands: what root does is in front of the operator."""
     if not _host_wall_wanted():
-        print("host_wall is off for this project ([machine].host_wall; lima backend only).")
+        print("host_wall is off for this project ([machine] host_firewall; lima backend only).")
         return 0
     if not hostwall.available():
         print("✗ this host can't enforce a host wall: it needs `nft` (nftables) and cgroup v2.")
@@ -273,7 +275,9 @@ def _note_host_wall_install() -> None:
     """`rm` deletes the VM, not the operator's wall install: the table is inert while the slice
     is empty and right again for the next VM of this name. Say so, once."""
     if _host_wall_wanted() and hostwall.available():
-        _err("ℹ the host-side wall install is untouched (`fy machine host-wall --uninstall` says")
+        _err(
+            "ℹ the host-side wall install is untouched (`fy machine host-firewall --uninstall` says"
+        )
         _err("  how to remove it).")
 
 

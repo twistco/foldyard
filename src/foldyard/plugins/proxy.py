@@ -193,7 +193,7 @@ def _net_leaf(e: dict, escape) -> str:
         # the row you act on (press the allow key in the TUI to let the host through).
         return f"[dim]{ts}[/dim] [red]⛔ blocked by the egress wall[/red]"
     if e.get("would_block"):
-        # The wall is observing (`fy allow wall off`, or a learn window): this host went through,
+        # The wall is observing (`fy allow enforce off`, or a learn window): this host went through,
         # but enforcing would refuse it — what `fy allow learn` offers. The UA names the tool.
         ua = f" [dim]{escape(e['ua'][:60])}[/dim]" if e.get("ua") else ""
         return f"[dim]{ts}[/dim] [yellow]◌ the wall would refuse this[/yellow]{ua}"
@@ -284,7 +284,7 @@ def _rule_to_json(rule) -> dict:
 
 def _default_deny() -> bool:
     """Enforcement on/off, from the HOST-owned allow-store (``allowlist.default_deny``) — not
-    straight from ``[proxy] default_deny``, which the box could edit to switch its own wall off."""
+    straight from ``[proxy] enforce``, which the box could edit to switch its own wall off."""
     from .. import allowlist  # lazy: stdlib-only, but the registry hot path needn't import it
 
     return allowlist.default_deny()

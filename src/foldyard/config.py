@@ -340,15 +340,68 @@ def _prune_disabled(doc: dict) -> dict:
     return out
 
 
+# Keys that were RENAMED, as (table, old key, new key). The old spelling keeps working: each file
+# is rewritten to the new names as it is read, BEFORE the merge (so a local file on the old name
+# still overrides a shared one on the new). An alias rather than a refusal or an ignore, because
+# ignoring `[machine] wall = true` would switch the VM firewall off without a word, and the host's
+# adopted snapshot keeps the spelling it was adopted with across an upgrade. When a file carries
+# both spellings the new one wins. `renamed_keys` names every old spelling still in use, for the
+# `config widenings` doctor row and `fy config widenings`. `inject`/`require` are arrays of
+# tables: the rename applies to each entry.
+RENAMED_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("machine", "wall", "firewall"),
+    ("machine", "host_wall", "host_firewall"),
+    ("proxy", "default_deny", "enforce"),
+    ("inject", "axis", "switch"),
+    ("require", "axis", "switch"),
+)
+
+
+def _renamed_entry(entry: dict, old: str, new: str) -> dict:
+    if old not in entry:
+        return entry
+    out = {k: v for k, v in entry.items() if k != old}
+    out.setdefault(new, entry[old])
+    return out
+
+
+def _apply_renames(doc: dict) -> dict:
+    """``doc`` with every :data:`RENAMED_KEYS` old spelling moved to its new name."""
+    out = dict(doc)
+    for table, old, new in RENAMED_KEYS:
+        value = out.get(table)
+        if isinstance(value, dict):
+            out[table] = _renamed_entry(value, old, new)
+        elif isinstance(value, list):
+            out[table] = [_renamed_entry(e, old, new) if isinstance(e, dict) else e for e in value]
+    return out
+
+
+def renamed_keys(shared: dict, local: dict) -> list[tuple[str, str, bool]]:
+    """``(old spelling, new spelling, declared in the LOCAL file)`` for every renamed key a
+    checkout's files still use — e.g. ``("[machine] firewall", "[machine] firewall", False)``."""
+    found: list[tuple[str, str, bool]] = []
+    for in_local, doc in ((False, shared), (True, local)):
+        for table, old, new in RENAMED_KEYS:
+            value = doc.get(table)
+            entries = [value] if isinstance(value, dict) else value
+            if not isinstance(entries, list):
+                continue
+            if any(isinstance(e, dict) and old in e for e in entries):
+                label = f"[[{table}]]" if isinstance(value, list) else f"[{table}]"
+                found.append((f"{label} {old}", f"{label} {new}", in_local))
+    return found
+
+
 def merge_config(shared: dict, local: dict) -> dict:
     """Resolve one checkout's ``(foldyard.toml, foldyard.local.toml)`` pair into the document the
-    rest of foldyard reads: deep-merge the local overlay over the shared file, then apply
-    :func:`_prune_disabled`.
+    rest of foldyard reads: move renamed keys to their new names (:data:`RENAMED_KEYS`), deep-merge
+    the local overlay over the shared file, then apply :func:`_prune_disabled`.
 
     THE place the two files become one — the box/ambient parse here, the host's adopted snapshot in
     ``configpin.merged_toml`` — so the box, the supervisor and `fy config widenings` can never
     disagree about what a checkout declares."""
-    return _prune_disabled(_deep_merge(shared, local))
+    return _prune_disabled(_deep_merge(_apply_renames(shared), _apply_renames(local)))
 
 
 def disabled_blocks(shared: dict, local: dict) -> list[tuple[str, bool]]:
@@ -780,23 +833,24 @@ def proxy_recommend() -> list[dict]:
 
 
 def proxy_default_deny_seed() -> str:
-    """``[proxy] default_deny`` as the seed it is: ``"on"`` (true), ``"off"`` (false / absent) or
-    ``"learn"`` — observe for a bounded window on the first launch, then enforce
-    (:func:`foldyard.allowlist.seed_learning`). Anything else keeps the historical truthiness,
-    so a mistyped string reads as ``"on"`` — a typo must not loosen the wall."""
-    raw = _table("proxy").get("default_deny", False)
+    """``[proxy] enforce`` (formerly ``default_deny``) as the seed it is: ``"on"`` (true),
+    ``"off"`` (false / absent) or ``"learn"`` — observe for a bounded window on the first
+    launch, then enforce (:func:`foldyard.allowlist.seed_learning`). Anything else keeps the
+    historical truthiness, so a mistyped string reads as ``"on"`` — a typo must not loosen the
+    allowlist."""
+    raw = _table("proxy").get("enforce", False)
     if isinstance(raw, str) and raw.strip().lower() == "learn":
         return "learn"
     return "on" if raw else "off"
 
 
 def proxy_default_deny() -> bool:
-    """``[proxy] default_deny`` — when true the egress proxy ENFORCES the allowlist: any host
+    """``[proxy] enforce`` — when true the egress proxy ENFORCES the allowlist: any host
     that isn't allowed (by a live grant in the host-side allow-store, or as an injector host) is
     REFUSED (403 at CONNECT / on the request). Absent ⇒ false: observe only, never blocks.
     ``"learn"`` enforces too, until a launch verb opens its first learn window
     (:func:`proxy_default_deny_seed`). This key only SEEDS the answer — enforcement is host-owned
-    from then on (``fy allow wall``, see :func:`foldyard.allowlist.default_deny`), and the
+    from then on (``fy allow enforce``, see :func:`foldyard.allowlist.default_deny`), and the
     per-host grants live exclusively in the store (``fy allow add``): a ``[proxy] allow`` list is
     IGNORED (:data:`foldyard.exposure.IGNORED_KEYS`)."""
     return proxy_default_deny_seed() != "off"
@@ -864,7 +918,7 @@ def machine_backend() -> str:
 
     Lima is the default because it is the only backend that delivers the full boundary: per-project
     VMs that run concurrently (``podman machine`` on macOS allows one at a time — upstream
-    podman#26281), and the in-VM fail-closed egress wall (``[machine].wall``), which podman
+    podman#26281), and the in-VM fail-closed egress wall (``[machine] firewall``), which podman
     machine's CoreOS appliance can't be provisioned with. ``backend = "podman"`` remains supported
     and is the zero-extra-dependency floor. ``foldyard init`` has scaffolded ``lima`` + ``wall``
     since it shipped; this default just stops a hand-written config from silently getting less.
@@ -874,32 +928,45 @@ def machine_backend() -> str:
     return machine_backend_explicit() or "lima"
 
 
+def _env_flag(*names: str) -> bool | None:
+    """The first of ``names`` set in the environment, as a flag (1/true/on/yes ⇒ on); ``None`` when
+    none is set. Several names = a renamed variable whose old spelling still works."""
+    for name in names:
+        env = os.environ.get(name)
+        if env is not None:
+            return env.strip().lower() in ("1", "true", "on", "yes")
+    return None
+
+
 def machine_wall() -> bool:
-    """``[machine].wall`` — provision the in-VM nftables egress wall into the REAL lima machine, so
-    the VM user's (and thus every container's) only way out is the Mac-side egress proxy at
+    """``[machine].firewall`` (formerly ``wall``) — provision the in-VM nftables egress firewall
+    into the REAL lima machine, so
+    the VM user's (and thus every container's) only way out is the host-side egress proxy at
     :data:`LIMA_HOST_GATEWAY` (fail-closed: egress that ignores the proxy env is REJECTED, not
     silently allowed). Only meaningful for ``backend = "lima"`` (podman-machine's immutable CoreOS
     appliance can't be provisioned like this) — preflight enforces the pairing.
-    ``MACHINE_WALL`` env wins (1/true/on/yes ⇒ on)."""
-    env = os.environ.get("MACHINE_WALL")
+    ``MACHINE_FIREWALL`` env wins (1/true/on/yes ⇒ on; ``MACHINE_WALL`` is the old spelling)."""
+    env = _env_flag("MACHINE_FIREWALL", "MACHINE_WALL")
     if env is not None:
-        return env.strip().lower() in ("1", "true", "on", "yes")
-    return bool(_table("machine").get("wall", False))
+        return env
+    return bool(_table("machine").get("firewall", False))
 
 
 def machine_host_wall() -> bool:
-    """``[machine].host_wall`` — ALSO enforce the wall on the HOST, matching the VM process's own
-    traffic by its cgroup scope with host nftables (:mod:`foldyard.hostwall`), so a guest-kernel
-    exploit that flushes the in-VM wall still leaves through a host that rejects everything but
-    this project's daemon band. The tier above ``wall``: needs it (preflight enforces), and a host
+    """``[machine] host_firewall`` (formerly ``host_wall``) — ALSO enforce the firewall on the
+    HOST, matching the VM process's own traffic by its cgroup scope with host nftables
+    (:mod:`foldyard.hostwall`), so a guest-kernel exploit that flushes the VM firewall still
+    leaves through a host that rejects everything but this project's daemon ports. The tier above
+    ``firewall``: needs it (preflight enforces), and a host
     that HAS nftables + cgroup v2 — Linux; asked for on a host that can't deliver it is a hard
     stop, never a silent downgrade. The table is the OPERATOR's install (``fy machine
     host-wall`` prints it and the steps; ADR-0028) — foldyard probes it on every ``fy up``,
-    never loads it. ``MACHINE_HOST_WALL`` env wins (1/true/on/yes ⇒ on)."""
-    env = os.environ.get("MACHINE_HOST_WALL")
+    never loads it. ``MACHINE_HOST_FIREWALL`` env wins (1/true/on/yes ⇒ on; ``MACHINE_HOST_WALL``
+    is the old spelling)."""
+    env = _env_flag("MACHINE_HOST_FIREWALL", "MACHINE_HOST_WALL")
     if env is not None:
-        return env.strip().lower() in ("1", "true", "on", "yes")
-    return bool(_table("machine").get("host_wall", False))
+        return env
+    return bool(_table("machine").get("host_firewall", False))
 
 
 _MACHINE_RUNTIMES = ("", "gvisor")
