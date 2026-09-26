@@ -252,6 +252,33 @@ def _host_matches(host: str | None, patterns: list[str]) -> bool:
     return False
 
 
+_MISMATCH_BODY = (
+    b"refused by the foldyard proxy - the request's Host header names a different host than the"
+    b" one it is sent to\n"
+)
+
+
+def _norm_host(host: str | None) -> str | None:
+    """Hostnames compare case-insensitively and without a trailing root dot."""
+    return host.lower().rstrip(".") if host else host
+
+
+def _destination(request) -> str | None:
+    """The host a request is actually SENT to: the CONNECT target, and inside its tunnel the
+    address mitmproxy dials — never the client's Host header / ``:authority``, which the client
+    writes freely (mitmproxy's ``pretty_host`` prefers it, and warns it can be spoofed). Every
+    decision — the wall, injection, the log — is made on this."""
+    return _norm_host(request.host)
+
+
+def _claim_mismatch(request) -> bool:
+    """Does the request NAME a host (Host header / ``:authority``) other than its destination? A
+    forward-proxy client never has a reason to, so it is refused outright: judged on the claim, a
+    request could pass the wall and carry an injected credential to a host that is neither."""
+    claimed = _norm_host(request.pretty_host)
+    return bool(claimed) and claimed != _destination(request)
+
+
 def _with_query_param(url: str, name: str, value: str) -> str:
     """Return ``url`` with query param ``name`` set to ``value`` (replacing any existing copy).
     Used by the 401 re-issue when injecting a query param rather than a header — the live request
@@ -788,8 +815,16 @@ class Injector:
         credential, on the way out (`request`) or on a 401 re-issue (`response`)."""
         if flow.request.scheme != "https":
             return None
+        # Only where destination, Host header and TLS SNI all agree: a credential goes to the host
+        # the connection really reaches, never to one the client merely names.
+        dest = _destination(flow.request)
+        if _claim_mismatch(flow.request):
+            return None
+        sni = _norm_host(getattr(getattr(flow, "client_conn", None), "sni", None))
+        if sni and sni != dest:
+            return None
         for rule in self.rules:
-            if rule.matches(flow.request.pretty_host, flow.request.path):
+            if rule.matches(dest, flow.request.path):
                 return rule
         return None
 
@@ -882,7 +917,7 @@ class Injector:
         entry = {
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             "method": flow.request.method,
-            "host": flow.request.pretty_host,
+            "host": _destination(flow.request),
             "path": self._logged_path(flow)[:200],
             "status": flow.response.status_code,
             # What THIS request carried — not "its host has an injector": a path outside the
@@ -1039,8 +1074,12 @@ class Injector:
         grant, ``host:port`` (``fy allow add github.com:22``), so the blocked row carries the port
         and the TUI's allow action offers exactly that."""
         self.refresh()
-        host = flow.request.pretty_host
+        host = _destination(flow.request)
         port = flow.request.port
+        if _claim_mismatch(flow.request):
+            flow.response = http.Response.make(403, _MISMATCH_BODY)
+            self._log_blocked(host if port == _HTTPS_PORT else f"{host}:{port}", flow.request)
+            return
         if self._connect_ok(host, port) or (
             self._trusted_build(flow.request) and self._build_granted(host, port, _HTTPS_PORT)
         ):
@@ -1095,7 +1134,7 @@ class Injector:
         if build:
             self._build_clients.add(client.id)
         self._conns[client.id] = {
-            "host": flow.request.pretty_host,
+            "host": _destination(flow.request),
             "port": flow.request.port,
             "blind": None,  # the tunnelled SNI target once tls_clienthello tunnels it
             "build": build,
@@ -1190,17 +1229,20 @@ class Injector:
         # The target host: the SNI if the client sent one, else the CONNECT target address (a
         # client reaching a bare IP sends no SNI). We must identify the injector host either way,
         # so it's NEVER tunnelled — even when addressed by IP — or we couldn't rewrite its header.
-        target = data.client_hello.sni
-        if not target:
-            try:
-                addr = data.context.server.address
-                target = addr[0] if addr else None
-            except AttributeError:
-                target = None
+        sni = _norm_host(data.client_hello.sni)
+        try:
+            addr = data.context.server.address
+            dest = _norm_host(addr[0]) if addr else None
+        except AttributeError:
+            dest = None
+        target = sni or dest
         # An injector host is always decrypted (to rewrite its header), whatever the mode — and a
         # held one (to answer its dummy).
-        if target in self.inject_hosts or target in self.held_hosts:
+        always = self.inject_hosts | self.held_hosts
+        if target in always or dest in always:
             return
+        if sni and dest and sni != dest:
+            return  # names a host it isn't reaching: decrypt, so the request hooks judge it
         client = getattr(getattr(data, "context", None), "client", None)
         conn = self._conns.get(client.id) if client is not None else None
         if client is not None and client.id in self._build_clients:
@@ -1251,8 +1293,14 @@ class Injector:
         # The egress wall for plain HTTP (cleartext never CONNECTs, so http_connect can't catch it):
         # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host
         # grant as CONNECT :22 — here, before it leaves the box. HTTPS is walled at http_connect.
-        host, port = flow.request.pretty_host, flow.request.port
+        host, port = _destination(flow.request), flow.request.port
         default = _HTTPS_PORT if flow.request.scheme == "https" else _HTTP_PORT
+        if _claim_mismatch(flow.request):
+            # Refused whether or not the wall enforces: never a legitimate forward-proxy request.
+            flow.response = http.Response.make(403, _MISMATCH_BODY)
+            flow.metadata["egress_proxy_blocked"] = True
+            self._log_blocked(host if port == default else f"{host}:{port}", flow.request)
+            return
         allowed = self._allowed_plain(host, port, flow.request.scheme) or (
             self._trusted_build(flow.request) and self._build_granted(host, port, default)
         )

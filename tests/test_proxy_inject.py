@@ -33,8 +33,12 @@ class _Req:
         path: str = "/x",
         port: int = 443,
         scheme: str = "https",
+        claimed: str | None = None,
     ) -> None:
-        self.pretty_host = host
+        # `host` is where the request is SENT (the CONNECT target / dialled address); `pretty_host`
+        # is what it CLAIMS (Host header / :authority) — equal unless a test spoofs the claim.
+        self.host = host
+        self.pretty_host = claimed or host
         self.port = port
         self.scheme = scheme
         self.method = method
@@ -66,11 +70,13 @@ class _Flow:
         content: bytes = b"",
         port: int = 443,
         scheme: str = "https",
+        claimed: str | None = None,
+        sni: str | None = None,
     ) -> None:
-        self.request = _Req(host, method, path, port, scheme)
+        self.request = _Req(host, method, path, port, scheme, claimed)
         self.response: _Resp | None = _Resp(status, content)
         self.metadata: dict = {}
-        self.client_conn = types.SimpleNamespace(id="client-1")
+        self.client_conn = types.SimpleNamespace(id="client-1", sni=sni)
 
 
 @pytest.fixture
@@ -474,6 +480,27 @@ class _ClientHello:
         self.client_hello = types.SimpleNamespace(sni=sni)
         self.context = types.SimpleNamespace(client=types.SimpleNamespace(id=client_id))
         self.ignore_connection = False
+
+
+def test_an_sni_that_disagrees_with_the_target_is_decrypted_not_tunnelled(
+    gh, monkeypatch, tmp_path
+):
+    # A passthrough host's SNI on a connection to somewhere else: tunnelling it blind would take the
+    # request hooks (and their destination checks) out of the loop, so it is decrypted instead.
+    monkeypatch.setenv("INJECT_HOST", "")
+    monkeypatch.setenv("INJECT_COMMAND", "")
+    monkeypatch.setenv("CAPTURE_MODE", "full")
+    monkeypatch.setenv("PASSTHROUGH_HOSTS", "trusted.example")
+    monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
+    inj = gh.Injector()
+    data = _ClientHello("trusted.example")
+    data.context.server = types.SimpleNamespace(address=("elsewhere.example", 443))
+    inj.tls_clienthello(data)
+    assert data.ignore_connection is False
+    agree = _ClientHello("trusted.example")
+    agree.context.server = types.SimpleNamespace(address=("trusted.example", 443))
+    inj.tls_clienthello(agree)
+    assert agree.ignore_connection is True
 
 
 def test_passthrough_blind_tunnels_and_logs_an_sni_row(gh, monkeypatch, tmp_path):
@@ -1048,6 +1075,62 @@ def test_default_deny_exempts_the_injector_host(gh, monkeypatch, tmp_path):
     f.response = None
     inj.http_connect(f)
     assert f.response is None  # exempt despite the empty allowlist
+
+
+# ── decisions follow the destination, never the client's claim ───────────────────────────
+# mitmproxy's `pretty_host` prefers the Host header / :authority, which the client writes freely;
+# the connection goes to the CONNECT target. Judged on the claim, a request could pass the wall and
+# carry an injected credential to a host that is neither. Mutations that must turn these red:
+# `_destination` returning `pretty_host`; dropping the `_claim_mismatch` refusals; dropping the SNI
+# check in `_rule_for`.
+
+
+def test_a_connect_is_judged_on_its_target_not_its_host_header(gh, monkeypatch, tmp_path):
+    allow = tmp_path / "allow-effective.json"
+    _write_allow(allow, [])
+    log = tmp_path / "egress.jsonl"
+    monkeypatch.setenv("INJECT_HOST", "api.github.com")
+    monkeypatch.setenv("INJECT_COMMAND", "true")
+    monkeypatch.setenv("DEFAULT_DENY", "1")
+    monkeypatch.setenv("ALLOW_FILE", str(allow))
+    monkeypatch.setenv("PROXY_LOG_FILE", str(log))
+    inj = gh.Injector()
+    f = _Flow("elsewhere.example", claimed="api.github.com")
+    f.response = None
+    inj.http_connect(f)
+    assert f.response is not None and f.response.status_code == 403
+    entry = _last_log(log)
+    assert entry["host"] == "elsewhere.example" and entry["blocked"] is True
+
+
+def test_a_request_naming_another_host_is_refused_and_gets_no_credential(injector):
+    # The wall is off here (observe-everything): the mismatch is refused regardless.
+    inj, log = injector
+    flow = _Flow("elsewhere.example", claimed="api.github.com")
+    flow.request.headers["Authorization"] = "Bearer DUMMY"
+    flow.response = None
+    inj.request(flow)
+    assert flow.response is not None and flow.response.status_code == 403
+    assert flow.request.headers["Authorization"] == "Bearer DUMMY"  # nothing minted onto it
+    assert _last_log(log)["host"] == "elsewhere.example"
+
+
+def test_an_sni_naming_another_host_gets_no_credential(injector):
+    inj, _log = injector
+    flow = _Flow("api.github.com", sni="elsewhere.example")
+    flow.request.headers["Authorization"] = "Bearer DUMMY"
+    inj.request(flow)
+    assert flow.request.headers["Authorization"] == "Bearer DUMMY"
+
+
+def test_host_comparison_ignores_case_and_the_root_dot(injector):
+    inj, _log = injector
+    flow = _Flow("api.github.com", claimed="API.GitHub.com.", sni="api.github.com")
+    flow.request.headers["Authorization"] = "Bearer DUMMY"
+    flow.response = None
+    inj.request(flow)
+    assert flow.response is None
+    assert flow.request.headers["Authorization"] == "token FAKE"
 
 
 def test_default_deny_blocks_plain_http_in_the_request_hook(walled):
