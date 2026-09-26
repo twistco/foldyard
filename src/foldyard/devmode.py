@@ -56,7 +56,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import config, configpin, worktree_registry
+from . import config, configpin, mountwrite, worktree_registry
 from .machine_backend import get_backend
 from .plugins import DoctorContext, registry
 
@@ -220,7 +220,9 @@ def write_mirror(
     payload = {**mode, "expires": expires, "written": _iso(now()), "daemons": daemons or {}}
     if capabilities is not None:
         payload["capabilities"] = capabilities
-    config.mirror_file().write_text(json.dumps(payload, indent=2) + "\n")
+    # On the mount: never through a symlink the box planted there (mountwrite).
+    data = (json.dumps(payload, indent=2) + "\n").encode()
+    mountwrite.write_file(config.mirror_file(), data, within=config.repo_root())
 
 
 def missing_secrets(updates: dict[str, str]) -> list:

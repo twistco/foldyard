@@ -28,7 +28,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from . import config
+from . import config, mountwrite
 
 SYNC_FILE = "index.fy-head"  # next to <gitdir>/index (the box's twin is index-box.head)
 BOX_STAMP = "fy-box-head"  # written by the box git shim when a box command moves HEAD
@@ -115,8 +115,8 @@ def _read(path: Path) -> str:
 
 
 def _record(gitdir: Path, head: str) -> None:
-    try:
-        (gitdir / SYNC_FILE).write_text(head + "\n")
+    try:  # the git dir is on the mount: never through a planted symlink (mountwrite)
+        mountwrite.write(gitdir, SYNC_FILE, (head + "\n").encode())
     except OSError:
         pass
 

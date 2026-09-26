@@ -36,7 +36,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from . import allowlist, config
+from . import allowlist, config, mountwrite
 
 # A retry per hop of a redirect chain; a chain longer than this is worth a human look.
 MAX_ATTEMPTS = 4
@@ -261,7 +261,7 @@ def _share(shared: list[dict], prompt: Callable[[str], str], echo: Callable[[str
     if current != original:
         echo("  ✗ foldyard.toml changed while you answered — here are the lines instead:")
         return False
-    path.write_text(edited)
+    mountwrite.write(cfg.repo_root, "foldyard.toml", edited.encode())  # not via a planted link
     note = "reword each `why` (what was SEEN), then commit"
     if drift.adopted and not drift.changed:
         tree = {**drift.tree, "foldyard.toml": edited.encode()}

@@ -567,8 +567,22 @@ def dev_vm_rel() -> str:
     it needs the unresolved string. ``FOLDYARD_DEV_VM_DIR`` wins, then
     ``[project].dev_vm_dir``, then the repo root (``.``) — the project-agnostic default; a
     self-contained consumer keeps its (transitional) assets there, and sets ``dev_vm_dir``
-    to relocate them (e.g. a project that tucks them under ``infra/...``)."""
-    return os.environ.get("FOLDYARD_DEV_VM_DIR") or _project_table().get("dev_vm_dir") or "."
+    to relocate them (e.g. a project that tucks them under ``infra/...``).
+
+    The ``[project]`` value must stay INSIDE the checkout — a relative path with no ``..`` or
+    ``~``: the host writes there (the posture mirror, the staged proxy CA)."""
+    if env := os.environ.get("FOLDYARD_DEV_VM_DIR"):
+        return env
+    declared = _project_table().get("dev_vm_dir")
+    if not declared:
+        return "."
+    parts = Path(str(declared)).parts
+    if Path(str(declared)).is_absolute() or ".." in parts or str(declared).startswith("~"):
+        raise SystemExit(
+            f"✗ [project].dev_vm_dir {declared!r} must be a path inside the checkout (relative, "
+            "no '..' or '~')"
+        )
+    return str(declared)
 
 
 def dev_vm_dir() -> Path:

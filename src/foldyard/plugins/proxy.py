@@ -28,7 +28,7 @@ from collections.abc import Iterable
 from dataclasses import asdict
 from pathlib import Path
 
-from .. import config
+from .. import config, mountwrite
 from . import DoctorContext, DoctorFix, PanelGroup, PanelTree, Plugin, TuiPanel
 from ._passthrough_bundles import BUNDLES
 
@@ -92,10 +92,16 @@ def stage_ca_for_box(checkout: str, here: str) -> Path | None:
     src = _mitm_ca()
     if not src.exists():
         return None
-    staged = Path(checkout) / here / ".devbox-ca" / "mitmproxy-ca-cert.pem"
-    if src.resolve() != staged.resolve():  # idempotent: skip a redundant self-copy on re-run
-        staged.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, staged)
+    rel = Path(here) / ".devbox-ca" / "mitmproxy-ca-cert.pem"
+    staged = Path(checkout) / rel
+    try:  # the checkout is box-writable: never copy through a symlink planted there
+        mountwrite.write(Path(checkout), rel, src.read_bytes())
+    except (OSError, ValueError) as e:
+        raise SystemExit(
+            f"✗ couldn't stage the proxy CA at {staged}: {e}\n"
+            "  A directory on that path is a symlink or not a directory — the box can write the\n"
+            "  checkout, so foldyard won't write through one. Remove it and retry."
+        ) from None
     os.environ["MITMPROXY_CA"] = str(staged)
     return staged
 
