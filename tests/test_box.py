@@ -1044,6 +1044,16 @@ def gate(monkeypatch, tmp_path):
     return ns
 
 
+# Every keyless KIND: the gate asks only whether keyless is set, never which — pinned here so an
+# api-key yard (a placeholder key, not a token) is never quietly left out.
+_AGENT_KINDS = [
+    ("claude", "api-key"),
+    ("claude", "oauth"),
+    ("codex", "api-key"),
+    ("codex", "chatgpt"),
+]
+
+
 def _launch(agent: str) -> int | None:
     try:
         return getattr(box, agent)([])
@@ -1051,30 +1061,36 @@ def _launch(agent: str) -> int | None:
         return None  # exec'd
 
 
-@pytest.mark.parametrize("agent", ["claude", "codex"])
-def test_launch_is_silent_when_the_mode_is_on(gate, agent, capsys):
+@pytest.mark.parametrize(("agent", "kind"), _AGENT_KINDS)
+def test_launch_is_silent_when_the_mode_is_on(gate, agent, kind, monkeypatch, capsys):
+    monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: kind)
     gate.modes = ["on"]
     _launch(agent)
     assert gate.execed and gate.execed[0] == agent
     assert capsys.readouterr().err == ""
 
 
-@pytest.mark.parametrize("agent", ["claude", "codex"])
-def test_launch_off_without_a_terminal_warns_and_launches(gate, agent, capsys):
+@pytest.mark.parametrize(("agent", "kind"), _AGENT_KINDS)
+def test_launch_off_without_a_terminal_warns_and_launches(gate, agent, kind, monkeypatch, capsys):
     # `fy codex exec …` from a script must never hang on a prompt nobody can answer.
+    monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: kind)
     _launch(agent)
     assert gate.execed and gate.polls == 0
     err = capsys.readouterr().err
     assert "credential mode is off" in err and f"`fy mode {agent}=on`" in err
 
 
-def test_launch_off_at_a_terminal_waits_for_the_host_to_switch_it_on(gate, capsys):
+@pytest.mark.parametrize(("agent", "kind"), _AGENT_KINDS)
+def test_launch_off_at_a_terminal_waits_for_the_host_to_switch_it_on(
+    gate, agent, kind, monkeypatch, capsys
+):
+    monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: kind)
     gate.tty = True
     gate.modes = ["off", "off", "off", "on"]
-    _launch("codex")
+    _launch(agent)
     assert gate.execed and gate.polls >= 2  # it waited, then launched by itself
     err = capsys.readouterr().err
-    assert "Waiting" in err and "codex=on" in err
+    assert "Waiting" in err and f"{agent}=on" in err
 
 
 def test_launch_after_the_flip_waits_for_the_proxy_to_catch_up(gate, capsys):
