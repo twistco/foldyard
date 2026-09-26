@@ -50,6 +50,13 @@ never enters the box (see below), and it is short-lived and scoped — but while
 code in the box can *use* that access. Keep switches off while installing things you don't trust
 yet.
 
+**Worktrees share that window.** A project's worktrees run in one VM, and every box in it holds
+the VM's container socket — so a box can reach its sibling worktrees' boxes, and the token
+services and proxy listener of any worktree. Each worktree keeps its own mode, which stops a
+permission meant for one branch being used on another *by accident*; it is not a wall between
+them. The VM is the boundary: a switch on in one worktree is usable from every box of that
+project. Give work you don't trust its own project (its own VM), not just its own worktree.
+
 ### What code in the box can still reach on your computer
 
 foldyard runs nothing from the repo on your computer: consumer scripts such as

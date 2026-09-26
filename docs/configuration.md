@@ -796,7 +796,9 @@ Per project, `~/.foldyard/<project>/` (env `FOLDYARD_STATE_DIR` relocates it):
 - **`clock-offset`** — test-only clock skew set by `fy clock`; absent normally.
 - **`main/`** — the main checkout's `dev-mode.json` (its mode) and `logs/` (per-daemon JSONL
   logs: proxy, token services).
-- **`worktrees/<name>/`** — the same for each worktree, so each branch holds its own mode.
+- **`worktrees/<name>/`** — the same for each worktree, so each branch holds its own mode
+  (a per-branch setting, not an isolation boundary — see
+  [security.md](./security.md#threat-model)).
 
 (An older install may still have a top-level `dev-mode.json`; the main checkout keeps using it
 until `main/dev-mode.json` exists.)
