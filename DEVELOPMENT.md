@@ -47,6 +47,13 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   orchestration.
 - `state_view.py` — `fy state`: thin renderer over `reconcile.scopes()`; non-zero exit on
   drift.
+- `composeguard.py` — refuses compose paths that would make the HOST-side compose client read
+  outside the checkout (`env_file`, build contexts/Dockerfiles/additional contexts/ssh,
+  `include`/`extends` targets, secrets/configs files): the rendered config (compose's own
+  interpolation) plus a raw scan of what rendering consumes. Asked by every compose call that
+  creates or builds (`stack._escapes`), host-only. Interim — a key list, and racy against a box
+  that swaps a checked file for a symlink; the structural fix runs compose in the VM. Its sibling
+  clamp: `stack._host_passthrough`, the compose client's allowlisted env.
 - `confighash.py` — the stack scope's verdict: the compose provider's own per-service config
   hash vs a fresh render (what `up` compares). podman: a `python -m foldyard.confighash`
   subprocess drives the bundled podman-compose's parser (its internals — degrades to

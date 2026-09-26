@@ -145,7 +145,6 @@ def test_a_vscode_table_is_reported_as_the_attach_that_forwards_host_credentials
     assert "editor attach" not in rendered(cfg)
 
 
-
 def test_compose_env_names_are_reported_as_host_env_the_box_can_read(checkout):
     # The compose client runs on the operator's computer over box-writable compose files, so a
     # name in `[project] compose_env` is a host variable any `${NAME}` there hands to a container.
@@ -158,6 +157,7 @@ def test_compose_env_names_are_reported_as_host_env_the_box_can_read(checkout):
     cfg = checkout(BASE + "passthrough = []\n")
     assert collect(cfg).compose_env is None
     assert "compose_env" not in rendered(cfg)
+
 
 def test_a_shared_agent_prompt_says_it_steers_everyone(checkout):
     cfg = checkout(BASE + 'passthrough = []\n\n[claude]\nsystem_prompt = "one\\ntwo\\n"\n')

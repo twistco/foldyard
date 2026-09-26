@@ -67,13 +67,21 @@ foldyard runs nothing from the repo on your computer: consumer scripts such as
 accept it at the next `fy up` or `fy config adopt`
 ([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)). Nor is the worktrees folder: your
 computer keeps its own list of worktrees, written only by `fy worktree add`, and runs nothing for
-a checkout that isn't on it — `fy worktree list` and `fy doctor` name any that aren't. Two channels
-remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)):
+a checkout that isn't on it — `fy worktree list` and `fy doctor` name any that aren't. Three
+channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)):
 
 - **Git's own hooks run on your computer, and foldyard doesn't manage them.** `lefthook.yml`,
   `.git/hooks/*` and `.git/config` aliases can be written from the box and run on your computer
   the next time you use git in that checkout. foldyard can't close this without owning your
   `.git`, so treat a shared checkout's hooks as code you are choosing to run.
+- **The compose client reads your compose files on your computer.** Your stack runs in the VM,
+  but the compose client that starts it runs on your computer, and the compose files are editable
+  from the box. foldyard gives the client a minimal environment (never `host.env`; add names with
+  `[project] compose_env`, which `fy config widenings` lists) and refuses to act on compose files
+  that name paths outside the checkout — `env_file:`, build contexts, `include:` and the like.
+  That check is a list of known keys, and the client re-opens each path after foldyard checked
+  it, so it narrows this channel rather than closing it; moving the client into the VM is the
+  planned fix.
 - **Repo text that steers the agent.** `[claude].system_prompt` is prepended to every teammate's
   agent, and `[claude.settings]` / `[codex.config]` are passed to the agent CLI (`--settings` /
   `-c`), where a `hooks` or `permissions` entry steers it harder than any prompt. This runs in the

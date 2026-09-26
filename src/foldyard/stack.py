@@ -464,10 +464,78 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
     )
 
 
+# Compose subcommands that create containers or build images — where the client's host-side reads
+# (env_file, build contexts, include/extends files…) end up somewhere the box can see.
+_CREATES = frozenset({"up", "run", "create", "build"})
+
+
+def _render_config(
+    ctx: Context, extra_profiles: list[str] | None = None, deadline: float | None = None
+) -> dict | None:
+    """The normalized ``compose config`` document, or None when it can't be rendered/parsed."""
+    proc = _run(
+        [*ctx.compose, *_profile_flags(ctx, extra_profiles), "config"],
+        env=ctx.env,
+        cwd=str(ctx.main),
+        timeout=_left(deadline),
+    )
+    if proc.returncode != 0:
+        return None
+    import yaml  # a podman-compose dependency; only the stack verbs reach here
+
+    try:
+        doc = yaml.safe_load(proc.stdout) or {}
+    except yaml.YAMLError:
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _escapes(
+    ctx: Context,
+    extra_profiles: list[str] | None = None,
+    *,
+    rendered: dict | None = None,
+    deadline: float | None = None,
+) -> list[str]:
+    """Why the compose client must not act on this stack: paths its compose files name outside
+    the checkout (see :mod:`foldyard.composeguard`). ``[]`` in the box — the client there runs
+    in the VM with nothing of the operator's to read. Fails closed: a config that won't render
+    is a refusal too (compose would fail on it anyway)."""
+    if config.in_box():
+        return []
+    from . import composeguard
+
+    files = [Path(ctx.compose[i + 1]) for i, a in enumerate(ctx.compose[:-1]) if a == "-f"]
+    if not files:
+        return []
+    project_dir = files[0].parent
+    roots = [Path(ctx.env["FOLDYARD_CHECKOUT"]), ctx.main]
+    problems = composeguard.raw_problems(files, project_dir, roots)
+    doc = rendered if rendered is not None else _render_config(ctx, extra_profiles, deadline)
+    if doc is None:
+        problems.append("the compose config didn't render, so its paths couldn't be checked")
+    else:
+        problems += composeguard.rendered_problems(doc, project_dir, roots, cwd=ctx.main)
+    return problems
+
+
+def _refusal(problems: list[str]) -> list[str]:
+    return [
+        "✗ refused: the compose files name paths outside the checkout. The compose client runs "
+        "on your computer, so it would read them there and hand their contents to containers "
+        "the box can see:",
+        *(f"    {p}" for p in problems),
+    ]
+
+
 def _compose(ctx: Context, args: list[str], *, extra_profiles: list[str] | None = None) -> int:
     """Run `<engine> compose -f … [args]` with the resolved env, echoing the command (the
     SPIKE 'thin and echoing' rule). Inherits stdio so exec/logs stay interactive.
     ``extra_profiles`` unions extra profiles into the run (see ``_profile_flags``)."""
+    if args[:1] and args[0] in _CREATES and (problems := _escapes(ctx, extra_profiles)):
+        for line in _refusal(problems):
+            _err(line)
+        return 1
     cmd = list(ctx.compose) + _profile_flags(ctx, extra_profiles) + args
     _err("+ " + " ".join(shlex.quote(c) for c in cmd))
     return subprocess.run(cmd, env=ctx.env, cwd=str(ctx.main)).returncode
@@ -527,7 +595,13 @@ def _podman_build(
     # podman-compose dependency, imported only on the build path so the regular CLI stays light.
     import yaml
 
-    configured_services = (yaml.safe_load(cfg.stdout) or {}).get("services", {})
+    rendered = yaml.safe_load(cfg.stdout) or {}
+    # Checked before any `podman build`: the build packs its context from the host.
+    if problems := _escapes(ctx, extra_profiles, rendered=rendered):
+        for line in _refusal(problems):
+            _err(line)
+        return 1
+    configured_services = rendered.get("services", {})
     requested = set(services or [])
     missing = requested - configured_services.keys()
     if missing:
@@ -1337,6 +1411,8 @@ def recreate_services(
         wanted = [s for s in wanted if s in rendered]
         if not wanted:
             return False, f"{', '.join(unrendered)} not in the rendered config — nothing recreated"
+        if problems := _escapes(ctx, extra, deadline=deadline):
+            return False, _refusal(problems)[0] + " " + "; ".join(problems)
         cmd = [
             *ctx.compose,
             *_profile_flags(ctx, extra),
@@ -1407,6 +1483,10 @@ def _compose_captured(
     compose output over the Textual UI (inherited fds bypass any Python-level stdout/stderr
     redirect — capturing is the only fix), and so the log pane fills LIVE during a slow recreate
     instead of all at once at the end."""
+    if args[:1] and args[0] in _CREATES and (problems := _escapes(ctx, extra_profiles)):
+        for line in _refusal(problems):
+            emit(line)
+        return 1
     cmd = list(ctx.compose) + _profile_flags(ctx, extra_profiles) + args
     emit("+ " + " ".join(shlex.quote(c) for c in cmd))
     return devmode.run_stream(cmd, emit, env=ctx.env, cwd=str(ctx.main))
