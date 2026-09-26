@@ -989,6 +989,170 @@ def test_codex_refuses_outside_box_and_execs_inside(monkeypatch):
     assert captured["argv"][-1] == "resume"  # caller args passed through
 
 
+# ── the launch gate: a keyless agent whose credential mode is off ─────────────────────
+
+
+@pytest.fixture
+def gate(monkeypatch, tmp_path):
+    """An in-box launch of a keyless agent: the mirror present, exec captured, the mode + stdin
+    scripted. Returns the namespace the tests steer (``modes`` is consumed one read at a time)."""
+    import types
+
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    mirror = tmp_path / ".dev-mode.json"
+    mirror.write_text("{}")
+    monkeypatch.setattr(box.config, "mirror_file", lambda: mirror)
+    monkeypatch.setattr(box.shutil, "which", lambda name: f"/usr/bin/{name}")
+    for agent in ("claude", "codex"):
+        monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: "oauth")
+        monkeypatch.setattr(box.config, f"{agent}_system_prompt", lambda: "")
+    monkeypatch.setattr(box.config, "claude_settings", lambda: {})
+    monkeypatch.setattr(box.config, "codex_config", lambda: {})
+    ns = types.SimpleNamespace(
+        modes=["off"], tty=False, enter=False, execed=None, polls=0, stamps=None, clock=[0.0]
+    )
+
+    def mode_of(axis):
+        return ns.modes.pop(0) if len(ns.modes) > 1 else ns.modes[0]
+
+    def fake_select(r, w, x, timeout):
+        ns.polls += 1
+        return (r if ns.enter else [], [], [])
+
+    def fake_exec(file, argv, env):
+        ns.execed = argv
+        raise SystemExit(0)
+
+    def mirror_written():
+        # Default: every read is a fresh supervisor write (the tick is always advancing).
+        if ns.stamps is None:
+            return f"t{ns.polls}-{len(ns.modes)}-{id(object())}"
+        return ns.stamps.pop(0) if len(ns.stamps) > 1 else ns.stamps[0]
+
+    def monotonic():
+        ns.clock[0] += 1.0
+        return ns.clock[0]
+
+    monkeypatch.setattr(box, "_mode_of", mode_of)
+    monkeypatch.setattr(box, "_mirror_written", mirror_written)
+    monkeypatch.setattr(box.time, "monotonic", monotonic)
+    monkeypatch.setattr(box.time, "sleep", lambda s: None)
+    monkeypatch.setattr(box.select, "select", fake_select)
+    monkeypatch.setattr(box.sys.stdin, "isatty", lambda: ns.tty, raising=False)
+    monkeypatch.setattr(box.sys.stdin, "readline", lambda: "\n", raising=False)
+    monkeypatch.setattr(box.os, "execvpe", fake_exec)
+    return ns
+
+
+# Every keyless KIND: the gate asks only whether keyless is set, never which — pinned here so an
+# api-key yard (a placeholder key, not a token) is never quietly left out.
+_AGENT_KINDS = [
+    ("claude", "api-key"),
+    ("claude", "oauth"),
+    ("codex", "api-key"),
+    ("codex", "chatgpt"),
+]
+
+
+def _launch(agent: str) -> int | None:
+    try:
+        return getattr(box, agent)([])
+    except SystemExit:
+        return None  # exec'd
+
+
+@pytest.mark.parametrize(("agent", "kind"), _AGENT_KINDS)
+def test_launch_is_silent_when_the_mode_is_on(gate, agent, kind, monkeypatch, capsys):
+    monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: kind)
+    gate.modes = ["on"]
+    _launch(agent)
+    assert gate.execed and gate.execed[0] == agent
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(("agent", "kind"), _AGENT_KINDS)
+def test_launch_off_without_a_terminal_warns_and_launches(gate, agent, kind, monkeypatch, capsys):
+    # `fy codex exec …` from a script must never hang on a prompt nobody can answer.
+    monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: kind)
+    _launch(agent)
+    assert gate.execed and gate.polls == 0
+    err = capsys.readouterr().err
+    assert "credential mode is off" in err and f"`fy mode {agent}=on`" in err
+
+
+@pytest.mark.parametrize(("agent", "kind"), _AGENT_KINDS)
+def test_launch_off_at_a_terminal_waits_for_the_host_to_switch_it_on(
+    gate, agent, kind, monkeypatch, capsys
+):
+    monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: kind)
+    gate.tty = True
+    gate.modes = ["off", "off", "off", "on"]
+    _launch(agent)
+    assert gate.execed and gate.polls >= 2  # it waited, then launched by itself
+    err = capsys.readouterr().err
+    assert "Waiting" in err and f"{agent}=on" in err
+
+
+def test_launch_after_the_flip_waits_for_the_proxy_to_catch_up(gate, capsys):
+    # `fy mode` writes the mirror at once; the proxy learns on the supervisor's next tick, which
+    # writes the mirror BEFORE the proxy's live settings. So "on" in the mirror isn't "injecting"
+    # yet: wait for two supervisor writes past the flip, so a whole tick has applied it.
+    gate.tty = True
+    gate.modes = ["off", "on"]
+    gate.stamps = ["flip", "flip", "tick1", "tick1", "tick2"]
+    _launch("claude")
+    assert gate.execed and gate.stamps == ["tick2"]  # consumed through the second tick
+
+
+def test_launch_after_the_flip_does_not_hang_on_a_stalled_supervisor(gate):
+    gate.tty = True
+    gate.modes = ["off", "on"]
+    gate.stamps = ["flip"]  # the mirror never advances again
+    _launch("codex")
+    assert gate.execed  # bounded: it launches anyway
+
+
+def test_ctrl_c_while_waiting_for_the_proxy_cancels(gate, monkeypatch):
+    gate.tty = True
+    gate.modes = ["off", "on"]
+
+    def interrupted(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(box.time, "sleep", interrupted)
+    gate.stamps = ["flip"]
+    assert _launch("claude") == 130 and gate.execed is None
+
+
+def test_launch_off_at_a_terminal_enter_launches_anyway(gate):
+    gate.tty, gate.enter = True, True
+    _launch("claude")
+    assert gate.execed and gate.polls == 1
+
+
+def test_launch_off_at_a_terminal_ctrl_c_cancels(gate, monkeypatch):
+    gate.tty = True
+
+    def interrupted(r, w, x, timeout):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(box.select, "select", interrupted)
+    assert _launch("claude") == 130 and gate.execed is None
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex"])
+def test_launch_gate_says_nothing_without_keyless_or_a_mirror(gate, agent, monkeypatch, capsys):
+    # A bare [agent] logs in for real (no mode to wait for); no mirror = the box knows nothing.
+    monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: "")
+    _launch(agent)
+    assert gate.execed and capsys.readouterr().err == ""
+    gate.execed = None
+    monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: "oauth")
+    box.config.mirror_file().unlink()
+    _launch(agent)
+    assert gate.execed and capsys.readouterr().err == ""
+
+
 # ── shell / down / ps ────────────────────────────────────────────────────────────────
 
 

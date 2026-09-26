@@ -203,3 +203,27 @@ def test_a_tunnel_the_change_does_not_touch_stays_open(rig):
     assert not _closed(tunnel)
     tunnel.settimeout(5)
     assert _get(tunnel).endswith(b"ok")
+
+
+def test_a_held_dummy_is_answered_by_the_proxy_and_nothing_else_is(rig):
+    # The keyless at-rest answer on the real mitmproxy: header lookup, a response set from
+    # `requestheaders`, and the upstream never reached for it — while the same tunnel's next
+    # request, without the dummy, still is.
+    body = json.dumps({"error": {"message": "run `fy mode claude=on`"}})
+    _write_live(
+        rig["live"],
+        held=[{"host": HOST, "header": "authorization", "dummy": "Bearer dummy", "body": body,
+               "axis": "claude"}],
+    )  # fmt: skip
+    sock = _tunnel(rig, rig["ca"])  # decrypted: the held host is never tunnelled blind
+    sock.sendall(
+        f"GET /echo HTTP/1.1\r\nHost: {HOST}\r\nAuthorization: Bearer dummy\r\n\r\n".encode()
+    )
+    got = b""
+    while b"fy mode claude=on" not in got:
+        chunk = sock.recv(4096)
+        assert chunk, (got, rig["diag"]())
+        got += chunk
+    assert got.startswith(b"HTTP/1.1 401"), got
+    assert b"application/json" in got.lower()
+    assert _get(sock).endswith(b"ok")  # no dummy: forwarded as ever

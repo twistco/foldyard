@@ -51,6 +51,7 @@ class _Resp:
     def __init__(self, status: int, content: bytes = b"") -> None:
         self.status_code = status
         self.content = content  # the addon reads this for the 4xx/5xx error-body snippet
+        self.headers: dict[str, str] = {}
 
 
 class _Flow:
@@ -387,10 +388,31 @@ async def test_injects_query_param_on_the_target_path(qp_injector):
 
 
 async def test_query_param_not_injected_outside_path_prefix(qp_injector):
-    inj, _ = qp_injector
+    inj, log = qp_injector
     flow = _Flow("truenas.example.ts.net", path="/app/index.html")  # same host, non-/mcp path
     inj.request(flow)
     assert "userToken" not in flow.request.query  # the app traffic on the same host is untouched
+    await inj.response(flow)
+    # `injected` is what THIS request carried, not whether its host has an injector: a 401 here
+    # read "your credential was refused" while the box's own dummy was what went upstream.
+    assert _last_log(log)["injected"] is False
+
+
+async def test_a_failed_mint_is_logged_as_not_injected(gh, monkeypatch, tmp_path):
+    # The minter failed, so the request left with whatever the box sent — the log must say so.
+    boom = tmp_path / "boom.py"
+    boom.write_text("import sys; sys.exit(1)\n")
+    log = tmp_path / "egress.jsonl"
+    monkeypatch.setenv("INJECT_HOST", "api.github.com")
+    monkeypatch.setenv("INJECT_COMMAND", f"{sys.executable} {boom}")
+    monkeypatch.setenv("PROXY_LOG_FILE", str(log))
+    inj = gh.Injector()
+    flow = _Flow("api.github.com")
+    flow.request.headers["Authorization"] = "Bearer DUMMY"
+    inj.request(flow)
+    assert flow.request.headers["Authorization"] == "Bearer DUMMY"
+    await inj.response(flow)
+    assert _last_log(log)["injected"] is False
 
 
 async def test_capture_only_logs_everything_and_injects_nothing(gh, monkeypatch, tmp_path):
@@ -740,6 +762,7 @@ async def test_re_mints_and_re_issues_once_on_401(injector, gh):
     # ...and the egress log records it as a replayed 200.
     entry = _last_log(log)
     assert entry["status"] == 200 and entry["replayed"] is True
+    assert entry["injected"] is True  # by the re-issue alone: the first attempt carried the dummy
 
     # A flow already carrying the retry flag must NOT re-issue again (the loop guard).
     gh.requests.clear()
@@ -1278,14 +1301,13 @@ def test_a_refused_cleartext_build_request_is_attributed_too(walled):
 # ── the live settings file: posture changes without a restart ─────────────────────────
 
 
-def _write_live(path: Path, rules=(), default_deny=False, passthrough=()) -> None:
+def _write_live(path: Path, rules=(), default_deny=False, passthrough=(), held=()) -> None:
     """Write the live file the way the supervisor does: whole, then renamed into place."""
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(
-        json.dumps(
-            {"rules": list(rules), "default_deny": default_deny, "passthrough": list(passthrough)}
-        )
-    )
+    data = {"rules": list(rules), "default_deny": default_deny, "passthrough": list(passthrough)}
+    if held:
+        data["held"] = list(held)
+    tmp.write_text(json.dumps(data))
     tmp.replace(path)
 
 
@@ -1876,3 +1898,152 @@ def test_an_encoded_query_key_is_redacted_too(gh):
         == "/x?auth%5Btoken%5D=‹redacted›&y=1"
     )
     assert redact("/x?auth+token=sk-secret", "auth token") == "/x?auth+token=‹redacted›"
+
+
+# ── a keyless credential at rest: the proxy answers for it ─────────────────────────────────
+# With `claude=off` the box still carries its dummy token (baked whenever keyless is configured),
+# and with no rule the proxy used to forward it — so the only word the user got was Anthropic's
+# "401 OAuth access token is invalid", which names neither the mode nor the fix (2026-09-26). A
+# `held` entry makes the proxy answer a request carrying the DUMMY itself: nothing goes upstream,
+# and the message the agent shows is the one that says what to do.
+
+_HELD_BODY = json.dumps(
+    {
+        "type": "error",
+        "error": {"type": "authentication_error", "message": "run `fy mode claude=on`"},
+    }
+)
+_HELD = {
+    "host": "api.anthropic.com",
+    "header": "authorization",
+    "dummy": "Bearer sk-ant-oat-dummy",
+    "axis": "claude",
+    "body": _HELD_BODY,
+}
+
+
+def _dummy_flow(host: str = "api.anthropic.com", value: str = "Bearer sk-ant-oat-dummy", **kw):
+    flow = _Flow(host, method="POST", path="/v1/messages", **kw)
+    flow.response = None  # nothing upstream has answered yet
+    flow.request.headers["authorization"] = value
+    return flow
+
+
+def test_a_held_credentials_dummy_is_answered_by_the_proxy_not_forwarded(live):
+    _write_live(live.live, held=[_HELD])
+    inj = live.Injector()
+    flow = _dummy_flow()
+    inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 401
+    assert json.loads(flow.response.content) == json.loads(_HELD_BODY)  # the provider's shape
+    assert flow.response.headers["content-type"] == "application/json"
+    row = _last_log(live.log)
+    assert row["host"] == "api.anthropic.com" and row["status"] == 401
+    assert row["held"] == "claude"
+    assert not row.get("blocked")  # not an allowlist refusal: granting the host is not the fix
+
+
+async def test_a_held_answer_is_logged_once(live):
+    # mitmproxy runs `response` for the proxy's own answer too; logging it there would add a
+    # second row that looks like an upstream 401.
+    _write_live(live.live, held=[_HELD])
+    inj = live.Injector()
+    flow = _dummy_flow()
+    inj.requestheaders(flow)
+    await inj.response(flow)
+    assert len(live.log.read_text().splitlines()) == 1
+
+
+def test_only_the_dummy_is_held(live):
+    # Anything else the box sends to that host is none of this mechanism's business: a real
+    # credential (a manual in-box login) goes on to the wall like any other request.
+    _write_live(live.live, held=[_HELD])
+    inj = live.Injector()
+    flow = _dummy_flow(value="Bearer sk-ant-oat01-a-real-login")
+    inj.requestheaders(flow)
+    assert flow.response is None  # observing: forwarded untouched
+
+
+def test_a_held_entry_scoped_to_a_path_only_answers_there(live):
+    held = {**_HELD, "host": "chatgpt.com", "path_prefix": "/backend-api/codex"}
+    _write_live(live.live, held=[held])
+    inj = live.Injector()
+    elsewhere = _dummy_flow(host="chatgpt.com")
+    elsewhere.request.path = "/backend-api/other"
+    inj.requestheaders(elsewhere)
+    assert elsewhere.response is None
+    scoped = _dummy_flow(host="chatgpt.com")
+    scoped.request.path = "/backend-api/codex/responses"
+    inj.requestheaders(scoped)
+    assert scoped.response is not None and scoped.response.status_code == 401
+
+
+def test_a_held_host_is_never_answered_in_the_clear(live):
+    _write_live(live.live, held=[_HELD])
+    inj = live.Injector()
+    flow = _dummy_flow(scheme="http", port=80)
+    inj.requestheaders(flow)
+    assert not (flow.response is not None and flow.response.status_code == 401)
+
+
+def test_the_wall_lets_a_held_host_connect_so_the_proxy_can_answer(live):
+    # Under enforcement an ungranted api.anthropic.com was refused at CONNECT — a 403 telling the
+    # user to grant a host the injector exempts anyway, which is the wrong fix. The CONNECT goes
+    # through and is decrypted, whatever passthrough says, so the dummy can be answered.
+    _write_live(live.live, held=[_HELD], default_deny=True, passthrough=["*.anthropic.com"])
+    inj = live.Injector()
+    connect = _Flow("api.anthropic.com")
+    connect.response = None
+    inj.http_connect(connect)
+    assert connect.response is None
+    hello = _ClientHello("api.anthropic.com")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is False
+    flow = _dummy_flow()
+    inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 401
+
+
+def test_a_held_host_opens_nothing_but_the_answer(live):
+    # The CONNECT exemption is not a grant: anything but the dummy is refused like any ungranted
+    # host, and a port other than 443 is refused at CONNECT.
+    _write_live(live.live, held=[_HELD], default_deny=True)
+    inj = live.Injector()
+    flow = _dummy_flow(value="Bearer something-else")
+    inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 403
+    other_port = _Flow("api.anthropic.com", port=8443)
+    other_port.response = None
+    inj.http_connect(other_port)
+    assert other_port.response is not None and other_port.response.status_code == 403
+
+
+def test_a_reload_keeps_an_open_held_connection(live):
+    _write_live(live.live, held=[_HELD], default_deny=True)
+    inj = live.Injector()
+    connect = _Flow("api.anthropic.com")
+    connect.response = None
+    inj.http_connect(connect)
+    _write_live(live.live, held=[_HELD], default_deny=True, passthrough=["x.example.com"])
+    inj.refresh()
+    assert "client-1" in inj._conns  # not swept
+
+
+def test_an_active_rule_wins_over_a_held_entry(live, tmp_path):
+    # The two are never emitted together for one axis; if they were, injecting is the right answer.
+    minter = _counting_minter(tmp_path, "claude", value="Bearer REAL")
+    rule = {"host": "api.anthropic.com", "command": minter.command, "header": "authorization"}
+    _write_live(live.live, rules=[rule], held=[_HELD])
+    inj = live.Injector()
+    flow = _dummy_flow()
+    inj.requestheaders(flow)
+    assert flow.response is None
+    assert flow.request.headers["authorization"] == "Bearer REAL"
+
+
+def test_malformed_held_entries_are_ignored(live):
+    _write_live(live.live, held=[{"host": "api.anthropic.com"}, "nonsense", _HELD])
+    inj = live.Injector()
+    flow = _dummy_flow()
+    inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 401

@@ -285,6 +285,26 @@ class Secret:
 
 
 @dataclass(frozen=True)
+class HeldCredential:
+    """A keyless credential at REST: the box still sends its dummy (baked whenever keyless is
+    configured, so switching the mode on needs no new box), but no rule injects over it. The
+    egress proxy answers a request carrying ``dummy`` in ``header`` on ``host`` itself — a 401
+    with ``body``, in the provider's own error shape so the agent shows its message — instead of
+    forwarding the dummy upstream to be refused in words that name neither the mode nor the fix.
+
+    Contributed for the INACTIVE levels, the mirror of ``proxy_rules``; never a grant: the host
+    is let through CONNECT only so the answer can be given, and any other request to it meets
+    the allowlist as usual."""
+
+    host: str
+    header: str
+    dummy: str  # the whole header value the box's client sends, scheme prefix included
+    axis: str  # the switch that turns injection on (the log row and the TUI name it)
+    body: str  # the 401 body (JSON) the proxy answers with
+    path_prefix: str = ""
+
+
+@dataclass(frozen=True)
 class CapabilityProbe:
     """A liveness check for the EXTERNAL capability a mode level promises (mode-state
     consolidation proposal B). A mode is a desired mode, not a capability — the PAM grant
@@ -480,6 +500,11 @@ class Plugin:
         """Egress-proxy header-injection rules this plugin's mode implies (ADR-0015).
         The built-in ``proxy`` plugin aggregates these across all plugins and runs ONE mitmdump
         from them; an injector plugin contributes rules here instead of owning a proxy daemon."""
+        return []
+
+    def held_credentials(self, mode: dict) -> list[HeldCredential]:
+        """Dummy credentials the box sends that no rule of this mode injects over, for the proxy
+        to answer with the fix (see :class:`HeldCredential`)."""
         return []
 
     def doctor_fixes(self) -> Iterable[DoctorFix]:
@@ -735,6 +760,12 @@ class Registry:
         out: list[InjectRule] = []
         for plugin in self.plugins:
             out += plugin.proxy_rules(mode)
+        return out
+
+    def held_credentials(self, mode: dict) -> list[HeldCredential]:
+        out: list[HeldCredential] = []
+        for plugin in self.plugins:
+            out += plugin.held_credentials(mode)
         return out
 
     def doctor_fixes(self) -> list[DoctorFix]:

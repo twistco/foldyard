@@ -1322,7 +1322,7 @@ def codex_keyless() -> str:
       - ``"chatgpt"`` — use your ChatGPT SUBSCRIPTION: the box holds a dummy ``~/.codex/auth.json``
         (far-future-exp JWT so it never refreshes), and the proxy injects the *current* access token
         (refreshed host-side from the host's real ``~/.codex/auth.json`` by the
-        :mod:`~foldyard.plugins.codex_chatgpt_token` minter) onto ``chatgpt.com/backend-api/codex``.
+        :mod:`~foldyard.plugins.codex_chatgpt_token` minter) onto Codex's paths on ``chatgpt.com``.
 
     Absent/false/unrecognised ⇒ ``""`` (off — normal login)."""
     raw = _table("codex").get("keyless")

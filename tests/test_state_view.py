@@ -33,7 +33,7 @@ def offline_engine(monkeypatch):
     """Make the engine-backed scopes deterministic: stack/box report 'unknown/down'."""
 
     monkeypatch.setattr(devmode, "ps_labels", lambda *a, **k: None)  # engine unreachable
-    monkeypatch.setattr(devmode, "_box_env_hint", lambda mode: None)
+    monkeypatch.setattr(devmode, "_box_env_hint", lambda: None)
 
 
 def test_state_all_ok_when_fully_offline(isolated_state, offline_engine, capsys):
@@ -76,7 +76,7 @@ def test_state_flags_a_stale_extra_overlay_as_drift(isolated_state, monkeypatch,
     # A stack still carrying a posture overlay the CURRENT mode no longer wants (compose.llm.yml
     # after llm=off) is drift in the other direction — it must not read as healthy.
     devmode.set_mode({"gcp": "sa"})  # desires the identity overlays, NOT the storage one
-    monkeypatch.setattr(devmode, "_box_env_hint", lambda mode: None)
+    monkeypatch.setattr(devmode, "_box_env_hint", lambda: None)
     monkeypatch.setattr(
         devmode, "daemon_status", lambda mode: {"gcp-minter": {"up": True, "port": 41100}}
     )

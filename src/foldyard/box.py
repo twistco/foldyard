@@ -32,10 +32,12 @@ import hashlib
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import subprocess
 import sys
+import time
 from importlib import metadata
 from pathlib import Path
 
@@ -630,6 +632,68 @@ def _claude_argv(prompt: str, settings: dict, args: list[str]) -> list[str]:
     return argv + args
 
 
+_POLL_S = 1.0  # how often the launch gate re-reads the mirror while it waits
+_CATCH_UP_S = 10.0  # most it then waits for the proxy to take the flip (a stalled supervisor)
+
+
+def _mode_of(axis: str) -> str:
+    """This axis's rung as the box sees it (the mirror, lapsed TTLs reading as off)."""
+    from . import devmode
+
+    return devmode.read()["mode"].get(axis, "off")
+
+
+def _mirror_written() -> str | None:
+    """When the mirror was last written — `fy mode` on the host, or a supervisor tick."""
+    from . import devmode
+
+    return devmode.read()["written"]
+
+
+def _await_proxy() -> None:
+    """After the flip: `fy mode` writes the mirror at once, but the proxy only learns on the
+    supervisor's next tick — which writes the mirror BEFORE the proxy's live settings. Two mirror
+    writes past the flip mean a whole tick has applied it. Bounded, so a stalled supervisor delays
+    the launch rather than hanging it."""
+    seen = [_mirror_written()]
+    deadline = time.monotonic() + _CATCH_UP_S
+    while len(seen) < 3 and time.monotonic() < deadline:
+        time.sleep(_POLL_S / 4)
+        stamp = _mirror_written()
+        if stamp != seen[-1]:
+            seen.append(stamp)
+
+
+def _await_credential(axis: str, agent: str, keyless_kind: str) -> bool:
+    """Before a keyless agent launches: if its credential mode is off, say so and name the fix —
+    which only the host can apply, so at a terminal WAIT for it (the supervisor refreshes the
+    mirror within a tick), Enter launching anyway. Without a terminal (`fy codex exec …` from a
+    script), warn and carry on. False = the operator cancelled.
+
+    The front door only: a TTL lapsing mid-session, a bare `claude`/`codex`, or an editor's own
+    agent binary never pass here — the proxy answers the dummy for those. No mirror (nothing
+    published yet) is no claim, so no warning."""
+    if not keyless_kind or not config.mirror_file().exists() or _mode_of(axis) != "off":
+        return True
+    _err(f"⏸ {agent}'s credential mode is off, so {agent} can't reach its API from this box.")
+    _err(f"  Switch it on from your computer, not in the box: `fy mode {axis}=on` (or `fy tui`).")
+    if not sys.stdin.isatty():
+        return True
+    _err("  Waiting for it… (Enter launches anyway, Ctrl-C cancels)")
+    try:
+        while _mode_of(axis) == "off":
+            ready, _, _ = select.select([sys.stdin], [], [], _POLL_S)
+            if ready:
+                sys.stdin.readline()
+                return True
+        _err(f"✓ {axis}=on — launching {agent} once the proxy has it…")
+        _await_proxy()
+    except KeyboardInterrupt:
+        _err("")
+        return False
+    return True
+
+
 def claude(args: list[str] | None = None) -> int:
     """`fy claude` — run Claude Code in the dev box, pre-oriented + skipping permission prompts
     . Refuses outside the box; needs `[claude]` in
@@ -641,6 +705,8 @@ def claude(args: list[str] | None = None) -> int:
     if not shutil.which("claude"):
         _err("✗ claude not on PATH — add a [claude] table to foldyard.toml, then `fy box up`.")
         return 1
+    if not _await_credential("claude", "Claude", config.claude_keyless()):
+        return 130
     argv = _claude_argv(config.claude_system_prompt(), config.claude_settings(), args or [])
     os.execvpe(argv[0], argv, os.environ.copy())
 
@@ -735,6 +801,8 @@ def codex(args: list[str] | None = None) -> int:
     if not shutil.which("codex"):
         _err("✗ codex not on PATH — add a [codex] table to foldyard.toml, then `fy box up`.")
         return 1
+    if not _await_credential("codex", "Codex", config.codex_keyless()):
+        return 130
     argv = _codex_argv(config.codex_system_prompt(), config.codex_config(), args or [])
     os.execvpe(argv[0], argv, os.environ.copy())
 

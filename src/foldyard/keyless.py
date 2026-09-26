@@ -86,9 +86,11 @@ CODEX_KEYLESS: dict[str, dict[str, str]] = {
 # ~/.codex/auth.json, not OPENAI_API_KEY), so it's structurally different from the api-key modes
 # above and handled directly in the codex plugin. The proxy injects Authorization on this host+path;
 # the account_id is baked into the box's dummy auth.json (an identifier, not a secret), and the
-# Bearer access token is minted+refreshed host-side from the host's real auth.json.
+# Bearer access token is minted+refreshed host-side from the host's real auth.json. The paths are
+# the API and the startup "workspace routing discovery" (codex ≥ 0.157), which aborts the session on
+# a 401 — each named exactly, so the session reaches nothing else on chatgpt.com.
 CODEX_CHATGPT_HOST = "chatgpt.com"
-CODEX_CHATGPT_PATH_PREFIX = "/backend-api/codex"
+CODEX_CHATGPT_PATH_PREFIXES = ("/backend-api/codex", "/backend-api/wham/accounts/check")
 _FAR_FUTURE_EXP = 4102444800  # 2100-01-01 — codex refreshes at exp-5min, so this never triggers
 
 
@@ -132,6 +134,12 @@ def _dummy_jwt(exp: int) -> str:
     return f"{seg({'alg': 'none', 'typ': 'JWT'})}.{seg({'exp': exp})}.{signature}"
 
 
+def codex_chatgpt_dummy_token() -> str:
+    """The dummy access (and id) token in the box's ChatGPT auth.json — deterministic, so the
+    proxy can recognise it on the wire while the axis is at rest."""
+    return _dummy_jwt(_FAR_FUTURE_EXP)
+
+
 def dummy_codex_auth_json(account_id: str) -> str:
     """The box's dummy ``~/.codex/auth.json`` for ChatGPT keyless: ``auth_mode: chatgpt`` + a
     far-future-exp dummy access/id token (so codex in the box never refreshes) + a dummy refresh
@@ -143,8 +151,8 @@ def dummy_codex_auth_json(account_id: str) -> str:
             "auth_mode": "chatgpt",
             "OPENAI_API_KEY": None,
             "tokens": {
-                "id_token": _dummy_jwt(_FAR_FUTURE_EXP),
-                "access_token": _dummy_jwt(_FAR_FUTURE_EXP),
+                "id_token": codex_chatgpt_dummy_token(),
+                "access_token": codex_chatgpt_dummy_token(),
                 "refresh_token": "fy-dummy-refresh-token-never-used",
                 "account_id": account_id,
             },
@@ -152,6 +160,23 @@ def dummy_codex_auth_json(account_id: str) -> str:
         },
         indent=2,
     )
+
+
+def at_rest_message(agent: str, axis: str) -> str:
+    """What the proxy tells the box's agent when it sends its dummy with ``axis`` at rest (the
+    :class:`~foldyard.plugins.HeldCredential` answer). The agent prints it as the API's error, so
+    it has to carry the fix — and say where to run it, since the box can't."""
+    return (
+        f"foldyard: {agent}'s credential mode is off (or its time limit ran out), so this box "
+        f"only holds a placeholder token and the proxy did not send this request. Switch it on "
+        f"from your computer, not in the box: `fy mode {axis}=on` (or `fy tui`)."
+    )
+
+
+def held_dummy(taxonomy: dict, kind: str) -> tuple[str, str] | None:
+    """``(header, the whole value the box sends)`` for a keyless ``kind``'s dummy, or ``None``."""
+    spec = taxonomy.get(kind)
+    return (spec["header"], spec["value_prefix"] + spec["dummy"]) if spec else None
 
 
 def inject_spec(taxonomy: dict, host: str, kind: str, label: str) -> dict | None:

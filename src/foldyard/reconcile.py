@@ -332,9 +332,9 @@ class BoxEnvScope(Scope):
     host_only = True
 
     def rows(self, state: dict) -> list[ScopeRow]:
-        desired = "dev box env matches the mode"
+        desired = "dev box env matches the config"
         try:
-            hint = devmode._box_env_hint(state["mode"])
+            hint = devmode._box_env_hint()
         except Exception:
             return [ScopeRow("unknown", self.name, desired, "engine unreachable")]
         if hint:

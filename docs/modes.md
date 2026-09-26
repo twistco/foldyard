@@ -169,7 +169,7 @@ and exits non-zero if any disagree:
                 → DEGRADED — … <the fix>
   ✓ stack       overlays: compose.identity.yml, compose.llm.yml
                 → 14 containers match the rendered config
-  ✓ box         dev box env matches the mode
+  ✓ box         dev box env matches the config
                 → current (or box down)
 ```
 
@@ -209,13 +209,30 @@ never typed in the box, never in the repo, never in scrollback.
 | `[claude] api-key` | `ANTHROPIC_API_KEY` env | `x-api-key` | `api.anthropic.com` | `host.env` |
 | `[claude] oauth` | `CLAUDE_CODE_OAUTH_TOKEN` env | `authorization: Bearer …` | `api.anthropic.com` | `host.env` |
 | `[codex] api-key` | `OPENAI_API_KEY` env | `Authorization: Bearer …` | `api.openai.com` | `host.env` |
-| `[codex] chatgpt` | a dummy `~/.codex/auth.json` | `Authorization: Bearer …` | `chatgpt.com` (codex API path) | your real `auth.json` on your computer, refreshed by the token service |
+| `[codex] chatgpt` | a dummy `~/.codex/auth.json` | `Authorization: Bearer …` | `chatgpt.com` (codex's API + workspace-discovery paths) | your real `auth.json` on your computer, refreshed by the token service |
 
-With the switch `off`, the box holds only the dummy and can't reach the provider at all.
+With the switch `off`, the box holds only the dummy and can't reach the provider at all. The
+proxy doesn't forward the dummy either: it answers the request itself with a 401 whose message
+names the fix (`fy mode claude=on`, run on your computer), so the agent shows that instead of
+the provider's "invalid token". The Network Log marks those rows as held.
 
-One caveat: turning keyless on or off adds or removes the dummy in the box's environment, which
-takes a `fy box up` to apply. The dashboard tells you when the running box is out of date. No
-other mode change needs a box restart.
+`fy claude` and `fy codex` check first: with the agent's switch off they say so before
+launching and, in a terminal, wait for you to switch it on from your computer (Enter launches
+anyway). That covers starting a session; the proxy's answer covers the rest — a time limit
+running out mid-session, or an agent started some other way — and the first such answer per
+switch also raises a notification on your computer.
+
+Codex on a ChatGPT subscription shows the proxy's message only in passing (a failed model-list
+refresh), then stops on its startup workspace discovery, which reports any failure as a fixed
+`workspace routing discovery unauthorized (401)` without the reply's text. While `codex` is
+off, that error means the switch — the Network Log's held row says so, and your computer gets
+a notification the first time it happens. Discovery can also point a workspace at a backend other than
+`chatgpt.com` (the account decides; a personal one stays there); keyless injects only on `chatgpt.com`, so Codex
+can't reach such a backend through the proxy.
+
+One caveat: adding, removing or changing `keyless` in the config adds or removes the dummy in
+the box's environment, which takes a `fy box up` to apply. The dashboard tells you when the
+running box is out of date. Switching the mode itself never needs a box restart.
 
 ## Per-worktree modes
 

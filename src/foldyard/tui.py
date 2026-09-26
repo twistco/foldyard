@@ -980,17 +980,16 @@ class DevModeTui(App):
         ws = self.selected_workspace
         if ws is None:
             return
-        # This workspace's own posture (bound), so the box-vs-mode drift hint compares the right one
+        # This workspace's own config (bound), so the box-vs-config drift hint reads the right one
         with config.using(self._worktree_cfg()):
-            mode = devmode.read()["mode"]
-        hint = devmode._box_env_hint(mode, ws["project"]) if ws["devbox"] else None
+            hint = devmode._box_env_hint(ws["project"]) if ws["devbox"] else None
         prefix = f"[b]{ws['name']}[/b]: "
         wt = "" if ws["name"] == "main" else f"just wt {ws['name']} "
         self.query_one("#ws-hint", Static).update(
             prefix
             + (
                 (hint and f"{hint.replace('fy box up', wt + 'box up')}")
-                or ("devbox env matches the mode" if ws["devbox"] else "no devbox running")
+                or ("devbox env matches the config" if ws["devbox"] else "no devbox running")
             )
         )
 

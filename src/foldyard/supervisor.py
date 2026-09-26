@@ -1085,6 +1085,71 @@ def _report_config_drift(wt: str, cfg: config.Config) -> None:
         )
 
 
+# Where each worktree's egress log was last read to — (inode, byte offset) — so a tick reads only
+# what the proxy appended since. First sight starts at the END: rows from before this supervisor
+# started are history, not news. A new inode (rotated, recreated) restarts at 0.
+_held_cursor: dict[str, tuple[int, int]] = {}
+# (worktree, axis) pairs already pushed — until that axis is next seen not off, so an agent
+# retrying against a held credential is one notification, and a fresh off (TTL lapse) another.
+_held_notified: set[tuple[str, str]] = set()
+
+
+def _new_held_axes(wt: str) -> set[str]:
+    """Axes the proxy answered a held (at-rest keyless dummy) request for since the last tick,
+    from this worktree's egress log. Only whole lines count: the proxy may be mid-write."""
+    path = config.log_dir() / "egress.jsonl"
+    try:
+        ino = path.stat().st_ino
+    except OSError:
+        _held_cursor[wt] = (-1, 0)  # no log yet: whatever appears next is new
+        return set()
+    cursor = _held_cursor.get(wt)
+    try:
+        with path.open("rb") as f:
+            if cursor is None:
+                _held_cursor[wt] = (ino, f.seek(0, os.SEEK_END))
+                return set()
+            offset = cursor[1] if cursor[0] == ino else 0
+            f.seek(offset)
+            chunk = f.read()
+    except OSError:
+        return set()
+    complete = chunk[: chunk.rfind(b"\n") + 1]
+    _held_cursor[wt] = (ino, offset + len(complete))
+    axes: set[str] = set()
+    for line in complete.splitlines():
+        if b'"held"' not in line:
+            continue
+        try:
+            axis = json.loads(line).get("held")
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(axis, str) and axis:
+            axes.add(axis)
+    return axes
+
+
+def _report_held(wt: str, mode: dict) -> None:
+    """Push — once per axis at rest — that the proxy answered an agent's placeholder credential
+    because its mode is off. The in-box reply only reaches an agent that prints it (Codex's
+    ChatGPT discovery never does), and the operator who can flip the mode is on this side."""
+    axes = _new_held_axes(wt)
+    for axis, value in mode.items():
+        if value != "off":
+            _held_notified.discard((wt, axis))
+    where = f" [worktree {wt}]" if wt else ""
+    for axis in sorted(axes):
+        if mode.get(axis, "off") != "off" or (wt, axis) in _held_notified:
+            continue  # on by now (a row from just before the flip), or already said
+        _held_notified.add((wt, axis))
+        fix = f"`fy mode {axis}=on` (or `fy tui`) on your computer"
+        log(f"⏸ {axis}{where}: the proxy answered its placeholder credential (mode off) — {fix}")
+        _notify(
+            f"fy {config.project()}: {axis} credential off{where}",
+            f"{axis.capitalize()} tried to reach its API but its credential mode is off — {fix}",
+        )
+
+
 def _port_listener_pids(port: int) -> list[int]:
     """PIDs LISTENing on TCP ``port`` (host ``lsof``). Best-effort: [] if lsof absent/errors."""
     if not which("lsof"):
@@ -1245,6 +1310,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
             # happened, or "my config change did nothing" becomes the new mystery.
             _report_config_drift(wt, cfg)
             mode = expire_user_modes()
+            _report_held(wt, mode)
             # Fill in host-process env a plugin can derive from committed config (a Pulumi App
             # id, a deterministic SA email — see plugins.Plugin.env_defaults) BEFORE the
             # `requires` gate below reads os.environ, so github=app etc. work with no host.env

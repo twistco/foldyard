@@ -19,7 +19,8 @@ shared proxy's multi-injector rule set with claude / github). Two modes (``confi
     ``host.env`` (``Bearer `` prefix), and bake a DUMMY ``OPENAI_API_KEY`` in the box.
   - ``"chatgpt"`` (your ChatGPT subscription) — the box holds a DUMMY ``~/.codex/auth.json`` (a
     far-future-exp JWT so codex there never refreshes); the proxy rewrites ``Authorization`` on
-    ``chatgpt.com/backend-api/codex`` with the *current* access token, which the
+    ``chatgpt.com/backend-api/codex`` (and codex's startup workspace discovery,
+    ``…/wham/accounts/check``) with the *current* access token, which the
     :mod:`~foldyard.plugins.codex_chatgpt_token` minter refreshes host-side from the host's real
     ``~/.codex/auth.json``. The real access/refresh tokens never enter the box; the ``account_id``
     (an identifier, not a secret) IS baked into the dummy so codex emits ``ChatGPT-Account-Id``.
@@ -37,6 +38,7 @@ the generic uv-only image and on any consumer image whose node came without npm 
 from __future__ import annotations
 
 import base64
+import json
 import shlex
 import sys
 from pathlib import Path
@@ -44,7 +46,7 @@ from pathlib import Path
 from .. import config, keyless
 from ..keyless import CODEX_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CODEX_KEYLESS_HOST as _KEYLESS_HOST
-from . import InjectRule, Plugin, Secret, Switch
+from . import HeldCredential, InjectRule, Plugin, Secret, Switch
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
 
 # Remove a stale npm-managed Codex so the native installer's ~/.local/bin copy wins on PATH (the
@@ -95,7 +97,7 @@ class CodexPlugin(Plugin):
         # Keyless injection (only when configured AND the axis is on; composes in the rule set):
         #   api-key — rewrite Authorization on api.openai.com from OPENAI_API_KEY in host.env, via
         #             the SAME static-token wiring [[inject]]/claude use.
-        #   chatgpt — rewrite Authorization on chatgpt.com/backend-api/codex with the access token
+        #   chatgpt — rewrite Authorization on CODEX_CHATGPT_PATH_PREFIXES with the access token
         #             the codex_chatgpt_token minter refreshes host-side from the host's auth.json
         #             (Bearer prefix added in flight; re-mint on a 401 to force a refresh-check).
         kind = config.codex_keyless()
@@ -106,20 +108,47 @@ class CodexPlugin(Plugin):
             minter = shlex.join(
                 [sys.executable, "-m", "foldyard.plugins.codex_chatgpt_token", auth]
             )
+            # One rule per path, one minter: it serialises its refresh under a lock.
             return [
                 InjectRule(
                     host=keyless.CODEX_CHATGPT_HOST,
                     header="Authorization",
                     minter=minter,
                     value_prefix="Bearer ",
-                    path_prefix=keyless.CODEX_CHATGPT_PATH_PREFIX,
+                    path_prefix=prefix,
                     replay_on_401=True,
                     label="Codex keyless proxy (ChatGPT subscription)",
                 )
+                for prefix in keyless.CODEX_CHATGPT_PATH_PREFIXES
             ]
         spec = keyless.inject_spec(_KEYLESS, _KEYLESS_HOST, kind, f"Codex keyless proxy ({kind})")
         rule = _spec_to_rule(spec) if spec else None
         return [rule] if rule else []
+
+    def held_credentials(self, mode: dict) -> list[HeldCredential]:
+        # As claude's: at rest the box's dummy is answered by the proxy, in OpenAI's error shape.
+        # chatgpt's dummy is the access token in the box's auth.json, on the paths the rule injects
+        # on only (chatgpt.com is also the website).
+        kind = config.codex_keyless()
+        if not kind or mode.get("codex", "off") != "off":
+            return []
+        message = keyless.at_rest_message("Codex", "codex")
+        body = json.dumps({"error": {"message": message, "type": "invalid_request_error"}})
+        if kind == "chatgpt":
+            dummy = "Bearer " + keyless.codex_chatgpt_dummy_token()
+            return [
+                HeldCredential(
+                    keyless.CODEX_CHATGPT_HOST,
+                    "Authorization",
+                    dummy,
+                    "codex",
+                    body,
+                    path_prefix=prefix,
+                )
+                for prefix in keyless.CODEX_CHATGPT_PATH_PREFIXES
+            ]
+        held = keyless.held_dummy(_KEYLESS, kind)
+        return [HeldCredential(_KEYLESS_HOST, *held, "codex", body)] if held else []
 
     def secrets(self, mode: dict) -> list[Secret]:
         # As claude's: asked for when the axis goes on. ChatGPT mode has no entry here — its

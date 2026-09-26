@@ -230,6 +230,13 @@ def _is_build_marker(value: str | None) -> bool:
     return user == _BUILD_TUNNEL_USER
 
 
+def _valid_held(entry: object) -> bool:
+    """A live ``held`` entry the addon can act on: the strings it matches and answers with."""
+    return isinstance(entry, dict) and all(
+        isinstance(entry.get(k), str) and entry[k] for k in ("host", "header", "dummy", "body")
+    )
+
+
 def _host_matches(host: str | None, patterns: list[str]) -> bool:
     """Exact host match, or ``*.suffix`` wildcard (matches SUBDOMAINS, not the bare domain) —
     Claude Code Web's allow-list semantics, so its published list drops in unchanged. Used to
@@ -585,6 +592,9 @@ class Injector:
         self._running = False
         self._warm_threads: list[threading.Thread] = []
         self._set_rules([] if self.live_path else self._load_rules())
+        # Keyless dummies at rest (LIVE_FILE's `held`): answered here with the fix, never forwarded.
+        self.held: list[dict] = []
+        self.held_hosts: set[str] = set()
         # Phase A′: what to do with HTTPS we aren't injecting — "full" (decrypt+log) or
         # "passthrough" (blind-tunnel + SNI-log). Default "full" keeps the pre-A′ behaviour for
         # any caller that doesn't set CAPTURE_MODE.
@@ -696,6 +706,9 @@ class Injector:
             self._would_block_seen = {}
         self._observing_since = observing
         self.default_deny = data.get("default_deny", True) is not False
+        held = data.get("held")
+        self.held = [h for h in held if _valid_held(h)] if isinstance(held, list) else []
+        self.held_hosts = {h["host"] for h in self.held}
         passthrough = data.get("passthrough")
         self.passthrough_hosts = (
             [str(h) for h in passthrough if h] if isinstance(passthrough, list) else []
@@ -780,6 +793,23 @@ class Injector:
                 return rule
         return None
 
+    def _held_for(self, flow: http.HTTPFlow) -> dict | None:
+        """The ``held`` entry this request's credential is the dummy of, or None. HTTPS only (a
+        dummy in the clear is left to the wall), and only the exact dummy: anything else the box
+        sends to that host meets the wall like any other request. Any port — answering sends
+        nothing anywhere; it is the CONNECT exemption that stays 443-only."""
+        request = flow.request
+        if request.scheme != "https":
+            return None
+        for entry in self.held:
+            if (
+                request.pretty_host == entry["host"]
+                and request.path.startswith(entry.get("path_prefix") or "")
+                and request.headers.get(entry["header"]) == entry["dummy"]
+            ):
+                return entry
+        return None
+
     # ── egress allowlist (the default-deny wall) ───────────────────────────────
     def _refresh_allow(self) -> None:
         """Re-read ALLOW_FILE when its mtime changes, so a host-side `allow` grant takes effect
@@ -855,7 +885,9 @@ class Injector:
             "host": flow.request.pretty_host,
             "path": self._logged_path(flow)[:200],
             "status": flow.response.status_code,
-            "injected": flow.request.pretty_host in self.inject_hosts,
+            # What THIS request carried — not "its host has an injector": a path outside the
+            # rule's prefix, or a failed mint, leaves with the box's own dummy.
+            "injected": bool(flow.metadata.get("egress_proxy_injected")),
             "replayed": bool(flow.metadata.get("egress_proxy_retried")),
         }  # fmt: skip
         ua = _user_agent(flow.request)
@@ -926,6 +958,24 @@ class Injector:
                 entry["build"] = True
         self._write_entry(entry)
 
+    def _log_held(self, flow: http.HTTPFlow, axis: str) -> None:
+        """A row for a keyless dummy the proxy answered itself (``held``: the axis at rest) —
+        nothing went upstream. Not ``blocked``: granting the host is not the fix, the mode is."""
+        entry = {
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+            "method": flow.request.method,
+            "host": flow.request.pretty_host,
+            "path": flow.request.path[:200],
+            "status": 401,
+            "injected": False,
+            "replayed": False,
+            "held": axis,
+        }  # fmt: skip
+        ua = _user_agent(flow.request)
+        if ua:
+            entry["ua"] = ua
+        self._write_entry(entry)
+
     def _log_would_block(self, key: str | None, request) -> None:
         """While the wall only OBSERVES (``fy allow enforce off``, or a learn window): a row for a
         host enforcement WOULD have refused — the same policy check as the wall, so the set
@@ -991,7 +1041,7 @@ class Injector:
         self.refresh()
         host = flow.request.pretty_host
         port = flow.request.port
-        if self._allowed_connect(host, port) or (
+        if self._connect_ok(host, port) or (
             self._trusted_build(flow.request) and self._build_granted(host, port, _HTTPS_PORT)
         ):
             self._note_build(flow)
@@ -1058,7 +1108,7 @@ class Injector:
 
     def _tunnel(self, target: str | None, build: bool) -> bool:
         """Would a TLS connection to ``target`` be blind-tunnelled now? (``tls_clienthello``.)"""
-        if target in self.inject_hosts:
+        if target in self.inject_hosts or target in self.held_hosts:
             return False
         return build or self.capture_mode != "full" or _host_matches(target, self.passthrough_hosts)
 
@@ -1067,7 +1117,7 @@ class Injector:
         for client_id, conn in list(self._conns.items()):
             host, port, blind = conn["host"], conn["port"], conn["blind"]
             refused = self.default_deny and not (
-                self._allowed_connect(host, port)
+                self._connect_ok(host, port)
                 or (conn["trusted"] and self._build_granted(host, port, _HTTPS_PORT))
             )
             decrypt_now = blind is not None and not self._tunnel(blind, conn["build"])
@@ -1090,6 +1140,12 @@ class Injector:
             ctx.log.warn(f"egress_proxy: couldn't close the connection to {key} ({why}): {e!r}")
             return
         ctx.log.info(f"egress_proxy: closed the connection to {key} — {why}")
+
+    def _connect_ok(self, host: str | None, port: int) -> bool:
+        """The CONNECT policy plus the ``held`` hosts on :443 — let through so the proxy can
+        decrypt and answer the dummy; every request inside still meets ``_on_request``'s wall."""
+        held = port == _HTTPS_PORT and host in self.held_hosts
+        return held or self._allowed_connect(host, port)
 
     def _allowed_connect(self, host: str | None, port: int) -> bool:
         """The CONNECT policy: the host granted (:meth:`_allowed`) on :443, else ``host:port``
@@ -1141,8 +1197,10 @@ class Injector:
                 target = addr[0] if addr else None
             except AttributeError:
                 target = None
-        if target in self.inject_hosts:
-            return  # an injector host: always decrypt (to rewrite its header), whatever the mode
+        # An injector host is always decrypted (to rewrite its header), whatever the mode — and a
+        # held one (to answer its dummy).
+        if target in self.inject_hosts or target in self.held_hosts:
+            return
         client = getattr(getattr(data, "context", None), "client", None)
         conn = self._conns.get(client.id) if client is not None else None
         if client is not None and client.id in self._build_clients:
@@ -1180,6 +1238,16 @@ class Injector:
             return
         flow.metadata["egress_proxy_judged"] = True
         self.refresh()
+        # A keyless dummy with its axis at rest: answer with the fix before anything else, since
+        # the host is not granted (it needn't be — nothing leaves). A matching rule would inject.
+        held = self._held_for(flow) if self._rule_for(flow) is None else None
+        if held is not None:
+            flow.response = http.Response.make(
+                401, held["body"].encode(), {"content-type": "application/json"}
+            )
+            flow.metadata["egress_proxy_held"] = True
+            self._log_held(flow, str(held.get("axis") or ""))
+            return
         # The egress wall for plain HTTP (cleartext never CONNECTs, so http_connect can't catch it):
         # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host
         # grant as CONNECT :22 — here, before it leaves the box. HTTPS is walled at http_connect.
@@ -1206,6 +1274,7 @@ class Injector:
         value = rule.token()
         if value is not None:
             rule.apply(flow.request, value)
+            flow.metadata["egress_proxy_injected"] = True
             if rule.query_param:  # redact what WAS written, whatever the rules are at log time
                 flow.metadata["egress_proxy_redact"] = rule.query_param
 
@@ -1223,8 +1292,8 @@ class Injector:
             and not flow.metadata.get("egress_proxy_retried")  # at most once — loop guard
         ):
             await self._reissue_401(flow, rule)
-        if flow.metadata.get("egress_proxy_blocked"):
-            return  # our own 403, already logged as blocked — nothing went upstream
+        if flow.metadata.get("egress_proxy_blocked") or flow.metadata.get("egress_proxy_held"):
+            return  # our own answer, already logged — nothing went upstream
         self._log_flow(flow)
 
     async def _reissue_401(self, flow: http.HTTPFlow, rule: _Rule) -> None:
@@ -1285,6 +1354,7 @@ class Injector:
         skip = {"content-encoding", "content-length", "transfer-encoding", "connection"}
         out_headers = {k: v for k, v in r.headers.items() if k.lower() not in skip}
         flow.response = http.Response.make(r.status_code, r.content, out_headers)
+        flow.metadata["egress_proxy_injected"] = True  # the response logged is the fresh token's
 
 
 addons = [Injector()]
