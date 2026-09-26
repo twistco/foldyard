@@ -276,15 +276,17 @@ def clear_caches() -> None:
     _repo_root_ambient.cache_clear()
     _toml_ambient.cache_clear()
     worktree_offset.cache_clear()
-    # stack.main_repo is memoized for the same reason and invalidated by the same events (a test
-    # relocating the repo, a rewritten foldyard.toml). Lazy + doubly guarded: config must not
-    # import stack at module scope (stack imports config); a caller that never loaded stack has
-    # nothing to clear; and tests routinely monkeypatch main_repo to a plain lambda, which has no
-    # cache_clear — clearing a cache must never be what breaks their teardown.
-    stack = sys.modules.get(f"{__package__}.stack")
-    clear = getattr(getattr(stack, "main_repo", None), "cache_clear", None)
-    if clear is not None:
-        clear()
+    # The two main-checkout resolvers (stack.main_repo, devmode's per-checkout one) are memoized
+    # for the same reason and invalidated by the same events (a test relocating the repo, a
+    # rewritten foldyard.toml). Lazy + doubly guarded: config must not import either at module
+    # scope (both import config); a caller that never loaded one has nothing to clear; and tests
+    # routinely monkeypatch main_repo to a plain lambda, which has no cache_clear — clearing a
+    # cache must never be what breaks their teardown.
+    for module, fn in (("stack", "main_repo"), ("devmode", "_main_checkout")):
+        loaded = sys.modules.get(f"{__package__}.{module}")
+        clear = getattr(getattr(loaded, fn, None), "cache_clear", None)
+        if clear is not None:
+            clear()
 
 
 def _deep_merge(base: dict, over: dict) -> dict:

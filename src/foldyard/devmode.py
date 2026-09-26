@@ -53,6 +53,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -695,14 +696,28 @@ def _describe_checkout(item: dict[str, Any], wt: str) -> None:
 
 
 def main_repo() -> Path:
-    if os.environ.get("FOLDYARD_REPO"):
-        return config.repo_root()
-    try:
-        from . import stack
+    """The MAIN checkout of the one ``fy`` is acting on (:func:`config.repo_root`) — git's common
+    dir's parent, so it is main even when that checkout is a worktree, which is what
+    ``FOLDYARD_REPO`` names when a consumer's recipe runs in one. Everything keyed "per project"
+    anchors here — the worktree registry above all: ``fy worktree add`` records a worktree under
+    main, so a lookup from inside the worktree must land on main too. Outside git, the checkout."""
+    return _main_checkout(config.repo_root())
 
-        return stack.main_repo()
-    except Exception:
-        return config.repo_root()
+
+@lru_cache(maxsize=16)
+def _main_checkout(root: Path) -> Path:
+    """Memoized per checkout: hot paths (the supervisor tick, the TUI timer) ask repeatedly."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return root
+    common = out.stdout.strip()
+    return Path(common).parent if out.returncode == 0 and common else root
 
 
 # ── per-worktree reconcile set (the ONE supervisor serves N worktrees) ──────────────────

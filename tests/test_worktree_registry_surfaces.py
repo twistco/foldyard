@@ -72,3 +72,30 @@ def test_supervisor_logs_ignored_worktrees_once_per_change(host, monkeypatch):
     _stray(root, "older")
     supervisor._report_unregistered()
     assert len(logged) == 2 and "older" in logged[1]
+
+
+def test_main_repo_is_the_main_checkout_even_when_foldyard_repo_names_a_worktree(
+    tmp_path, fresh_config
+):
+    # Consumer recipes (and the e2e runner) export FOLDYARD_REPO=<the checkout they run in>. From a
+    # worktree that is the WORKTREE — and the registry, written by `fy worktree add` from main, is
+    # keyed by main. Both sides must agree on main, or a registered worktree reads as unregistered.
+    import subprocess
+
+    main = tmp_path / "repo"
+    main.mkdir()
+    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(main)]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "c"], check=True)
+    feat = tmp_path / "repo-worktrees" / "feat"
+    subprocess.run([*git, "worktree", "add", "-q", str(feat)], check=True)
+
+    fresh_config(FOLDYARD_REPO=feat)
+    assert devmode.main_repo().resolve() == main.resolve()
+    fresh_config(FOLDYARD_REPO=main)
+    assert devmode.main_repo().resolve() == main.resolve()
+
+
+def test_main_repo_outside_git_is_the_checkout_itself(tmp_path, fresh_config):
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert devmode.main_repo() == config.repo_root()
