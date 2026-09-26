@@ -192,6 +192,29 @@ def isolated_config_pin(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_worktree_registry(tmp_path, monkeypatch):
+    """Point the host's worktree registry at a per-test dir: no test reads or writes the real
+    ``~/.foldyard/worktrees/``, and every test starts with NO worktree registered. A test that
+    wants the host to see a worktree registers it (:func:`register_worktree`)."""
+    monkeypatch.setenv("FOLDYARD_WORKTREE_REGISTRY", str(tmp_path / "worktree-registry"))
+
+
+@pytest.fixture
+def register_worktree():
+    """``register_worktree(main, name, path)`` — record a worktree the way `fy worktree add` does
+    (creating a stand-in ``.git`` if the test built a bare dir)."""
+    from foldyard import worktree_registry
+
+    def _register(main, name, path):
+        if not (path / ".git").exists():
+            path.mkdir(parents=True, exist_ok=True)
+            (path / ".git").write_text("gitdir: test\n")
+        worktree_registry.register(main, name, path)
+
+    return _register
+
+
+@pytest.fixture(autouse=True)
 def isolated_podman_desktop(tmp_path, monkeypatch):
     """Point Podman Desktop's settings file at a per-test path that does not exist, so "is Podman
     Desktop installed?" reads NO everywhere — as on a CI runner. The machine follows Podman

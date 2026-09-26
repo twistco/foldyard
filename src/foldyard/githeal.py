@@ -248,16 +248,14 @@ def heal_checkout(repo: Path) -> str | None:
 
 
 def _checkouts() -> list[Path]:
-    """The main checkout + every existing worktree (mirrors devmode.worktree_keys — heal is
-    state-driven, so a checkout whose box is DOWN still gets its last commits' staleness fixed)."""
-    from . import devmode  # lazy: keep import cost off anyone importing githeal alone
+    """The main checkout + every REGISTERED worktree (as devmode.worktree_keys — heal is
+    state-driven, so a checkout whose box is DOWN still gets its last commits' staleness fixed).
+    Never a listing of the box-writable worktrees root: git would run in whatever dir the box
+    put there, symlinks to other checkouts included."""
+    from . import devmode, worktree_registry  # lazy: keep import cost off importing githeal alone
 
     main = devmode.main_repo()
-    out = [main]
-    wt_root = config.worktrees_root(main)
-    if wt_root.is_dir():
-        out += sorted(d for d in wt_root.iterdir() if d.is_dir() and (d / ".git").exists())
-    return out
+    return [main, *(p for _, p in sorted(worktree_registry.checkouts(main).items()))]
 
 
 def sweep(log) -> None:

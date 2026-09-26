@@ -25,7 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config, machine, stack
+from . import config, machine, stack, worktree_registry
 
 
 def _err(*a: object) -> None:
@@ -156,11 +156,15 @@ def _local_state_roots() -> tuple[Path, ...]:
 
 
 def _has_local_state(name: str) -> bool:
-    return any((root / name).exists() for root in _local_state_roots())
+    return worktree_registry.is_recorded(stack.main_repo(), name) or any(
+        (root / name).exists() for root in _local_state_roots()
+    )
 
 
 def _remove_local_state(name: str) -> bool:
-    """Remove the per-worktree posture and VS Code state after git removes the checkout."""
+    """Remove the per-worktree posture and VS Code state — and the host's record of the worktree —
+    after git removes the checkout."""
+    worktree_registry.unregister(stack.main_repo(), name)
     roots = _local_state_roots()
     ok = True
     for root in roots:
@@ -277,11 +281,16 @@ def _seed_keyless_posture(name: str) -> None:
         print(f"  (couldn't seed keyless mode — set it manually with `fy mode`: {e})")
 
 
-def add(name: str, branch: str = "", base: str = "") -> int:
-    """Create a host-sibling worktree under the worktrees root + init its config.
+def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -> int:
+    """Create a host-sibling worktree under the worktrees root, record it in the host's
+    worktree registry, and init its config.
 
     A brand-new branch forks off ``base`` (an explicit ``--from``), else the project's default
-    branch (:func:`_default_base_ref`) — NOT the primary checkout's current HEAD."""
+    branch (:func:`_default_base_ref`) — NOT the primary checkout's current HEAD.
+
+    On a worktree that ALREADY exists (one from before the registry, or made with plain ``git
+    worktree add``) it registers instead, once the operator has confirmed its real path — the one
+    way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`."""
     if (rc := _host_only("add")) is not None:
         return rc
     if name == "main":
@@ -313,9 +322,8 @@ def add(name: str, branch: str = "", base: str = "") -> int:
     wt_root = config.worktrees_root(main)
     branch = branch or f"wt/{name}"
     wt_dir = wt_root / name
-    if wt_dir.exists():
-        _err(f"✗ already exists: {wt_dir}")
-        return 1
+    if wt_dir.exists() or wt_dir.is_symlink():
+        return _register_existing(main, name, wt_dir, assume_yes)
     wt_root.mkdir(parents=True, exist_ok=True)
     # Reproduce the recipe's machine-mount warning: worktree stacks need the rootless
     # machine to mount the worktrees root (no-op in the box / where there's no podman).
@@ -351,6 +359,7 @@ def add(name: str, branch: str = "", base: str = "") -> int:
     if rc != 0:
         _err("✗ git worktree add failed")
         return rc
+    worktree_registry.register(main, name, wt_dir)
 
     _init_in_yard(main, wt_dir)
 
@@ -358,6 +367,40 @@ def add(name: str, branch: str = "", base: str = "") -> int:
 
     print(f"\n✓ worktree ready: {wt_dir}  (branch {branch})")
     print(f"  bring its stack up:  WORKTREE={name} fy up")
+    return 0
+
+
+def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) -> int:
+    """``add`` on a checkout that already exists: record it, after the operator has seen what it
+    really is. Only a real directory that git tracks as a worktree of ``main`` qualifies — a dir
+    the box planted has no worktree metadata, and a symlink would register someone else's
+    checkout."""
+    if wt_dir.is_symlink() or not (wt_dir / ".git").exists():
+        _err(f"✗ already exists, and is not a worktree checkout: {wt_dir}")
+        return 1
+    if not _registered_worktree(main, wt_dir):
+        _err(f"✗ already exists, but git doesn't track it as a worktree of {main}: {wt_dir}")
+        return 1
+    if worktree_registry.checkouts(main).get(name) == Path(os.path.realpath(wt_dir)):
+        print(f"✓ worktree '{name}' is already registered ({wt_dir})")
+        return 0
+    print(f"'{name}' already exists: {os.path.realpath(wt_dir)} (branch {_branch_of(wt_dir)}).")
+    print("  Registering it lets your computer act on it: run its daemons, heal its git index,")
+    print("  and reconcile it once its foldyard.toml is adopted.")
+    if not assume_yes:
+        try:
+            answer = input("Register it? (y/N): ").strip()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "Y"):
+            print("Not registered.")
+            return 1
+    try:
+        worktree_registry.register(main, name, wt_dir)
+    except ValueError as e:
+        _err(f"✗ {e}")
+        return 1
+    print(f"✓ worktree '{name}' registered.  Bring its stack up:  WORKTREE={name} fy up")
     return 0
 
 
@@ -574,12 +617,18 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
 
 
 def list_() -> int:
-    """List main + each worktree with its branch (lightweight; no engine needed)."""
+    """List main + each worktree with its branch (lightweight; no engine needed). On your
+    computer, a checkout the host has no record of is marked, with the verb that registers it."""
     main = stack.main_repo()
     wt_root = config.worktrees_root(main)
+    known = set() if config.in_box() else set(worktree_registry.checkouts(main))
     print(f"  {'main':<18} {_branch_of(main):<28} {main}")
     if wt_root.is_dir():
         for d in sorted(wt_root.iterdir()):
             if d.is_dir() and (d / ".git").exists():
-                print(f"  {d.name:<18} {_branch_of(d):<28} {d}")
+                note = "" if config.in_box() or d.name in known else "  (not registered)"
+                print(f"  {d.name:<18} {_branch_of(d):<28} {d}{note}")
+    if not config.in_box() and (stray := worktree_registry.unregistered(main, wt_root)):
+        print(f"\n  Not registered — your computer runs nothing for: {', '.join(stray)}.")
+        print("  If one is yours: `fy worktree add <name>` (asks before registering).")
     return 0

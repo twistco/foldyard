@@ -187,3 +187,18 @@ def test_the_git_child_environment_carries_no_inherited_secret(monkeypatch):
     githeal._git(githeal.Path("/nonexistent"), "rev-parse", "HEAD")
     assert "GH_PEM_B64" not in seen
     assert seen.get("GIT_CONFIG_GLOBAL") and seen.get("GIT_CONFIG_NOSYSTEM") == "1"
+
+
+def test_the_sweep_visits_only_registered_worktrees(monkeypatch, tmp_path, register_worktree):
+    # The worktrees root is box-writable: a dir (or a symlink to another checkout) planted there
+    # must not become somewhere the supervisor runs git.
+    from foldyard import config, devmode
+
+    main = tmp_path / "repo"
+    (main / ".git").mkdir(parents=True)
+    root = tmp_path / "repo-worktrees"
+    register_worktree(main, "known", root / "known")
+    (root / "planted" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(devmode, "main_repo", lambda: main)
+    monkeypatch.setattr(config, "worktrees_root", lambda _base: root)
+    assert githeal._checkouts() == [main, (root / "known").resolve()]

@@ -1019,11 +1019,17 @@ def worktree_add(
         help="base ref for a NEW branch (default: the repo's main/default branch, "
         "not the primary checkout's current HEAD)",
     ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="register an EXISTING worktree without asking"
+    ),
 ) -> None:
-    """Create a host-sibling worktree + init its per-project config."""
+    """Create a host-sibling worktree + init its per-project config.
+
+    On a worktree that already exists, registers it with your computer instead (after showing its
+    real path), so its daemons run again."""
     from . import worktree
 
-    raise typer.Exit(worktree.add(name, branch, base))
+    raise typer.Exit(worktree.add(name, branch, base, assume_yes=yes))
 
 
 @worktree_app.command("init")

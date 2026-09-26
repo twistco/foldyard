@@ -58,8 +58,10 @@ foldyard runs nothing from the repo on your computer: consumer scripts such as
 **`foldyard.toml` is not live input to your computer**: the supervisor runs from a copy you
 *adopted*, stored outside the repo, so an edit to `[proxy]` or `[[inject]]` does nothing until you
 accept it at the next `fy up` or `fy config adopt`
-([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)). Two channels remain
-([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)):
+([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)). Nor is the worktrees folder: your
+computer keeps its own list of worktrees, written only by `fy worktree add`, and runs nothing for
+a checkout that isn't on it — `fy worktree list` and `fy doctor` name any that aren't. Two channels
+remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)):
 
 - **Git's own hooks run on your computer, and foldyard doesn't manage them.** `lefthook.yml`,
   `.git/hooks/*` and `.git/config` aliases can be written from the box and run on your computer

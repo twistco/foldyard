@@ -42,7 +42,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from shutil import which
 
-from . import allowlist, config, configpin, devmode, githeal, transcripts
+from . import allowlist, config, configpin, devmode, githeal, transcripts, worktree_registry
 
 TICK_SECONDS = 2.0
 RESTART_BACKOFF = 10.0
@@ -1050,6 +1050,31 @@ def _resnapshot_worker(cfg: config.Config, wt: str, axis: str, services: list[st
 _config_drift_seen: dict[str, str] = {}
 
 
+# The unregistered worktree dirs last reported, so the log line fires once per change.
+_unregistered_seen: list[str] = []
+
+
+def _report_unregistered() -> None:
+    """Log — once per change — the worktree checkouts this host has no record of and therefore
+    serves nothing for (:mod:`foldyard.worktree_registry`). Reporting only: that list is exactly
+    the box-writable evidence the registry exists to stop trusting. Best-effort."""
+    try:
+        main = devmode.main_repo()
+        stray = worktree_registry.unregistered(main, config.worktrees_root(main))
+    except OSError as e:  # pragma: no cover — unreadable worktrees root
+        log(f"worktrees: registry check failed: {e}")
+        return
+    if stray == _unregistered_seen:
+        return
+    _unregistered_seen[:] = stray
+    if stray:
+        fixes = ", ".join(f"`fy worktree add {n}`" for n in stray)
+        log(
+            f"⚠ worktrees not registered with this computer — running nothing for them: "
+            f"{', '.join(stray)}. If they are yours: {fixes}."
+        )
+
+
 def _report_config_drift(wt: str, cfg: config.Config) -> None:
     """Say — once per change — that this checkout's ``foldyard.toml`` differs from the copy the
     host adopted, and that the ADOPTED one is still what's running (:mod:`foldyard.configpin`).
@@ -1301,6 +1326,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
     # after the machine itself was deleted. Daemons keep the main fallback (`active_worktrees`)
     # so a box coming up always finds a live proxy + CA.
     up = devmode.up_worktrees()
+    _report_unregistered()
     desired: dict[str, dict] = {}
     capabilities: dict[str, dict] = {}
     for wt in up or [""]:

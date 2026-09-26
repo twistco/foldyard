@@ -500,7 +500,9 @@ def test_current_workspace_falls_back_to_main_when_it_cannot_resolve(monkeypatch
     assert devmode.current_workspace() == "main"
 
 
-def test_worktree_config_keys_on_the_checkout(monkeypatch, tmp_path):
+@pytest.fixture
+def host_checkouts(monkeypatch, tmp_path):
+    """A main checkout + a worktree dir `feat` (with its own `[proxy]` table), on the host."""
     from foldyard import config
 
     main = tmp_path / "repo"
@@ -508,15 +510,51 @@ def test_worktree_config_keys_on_the_checkout(monkeypatch, tmp_path):
     (main / "foldyard.toml").write_text('[project]\nname = "p"\n')
     wt = tmp_path / "repo-worktrees" / "feat"
     wt.mkdir(parents=True)
+    (wt / ".git").write_text("gitdir: x\n")
     (wt / "foldyard.toml").write_text('[project]\nname = "p"\n[proxy]\n')
     monkeypatch.setattr(config, "repo_root", lambda: main)
+    monkeypatch.setattr(devmode, "main_repo", lambda: main)
     monkeypatch.setattr(config, "worktrees_root", lambda _base: tmp_path / "repo-worktrees")
+    monkeypatch.setattr(devmode, "in_box", lambda: False)
+    return main, wt
+
+
+def test_worktree_config_keys_on_the_checkout(host_checkouts, register_worktree):
+    main, wt = host_checkouts
+    register_worktree(main, "feat", wt)
 
     # main → the ACTIVE config (current()); a worktree → resolved from ITS own checkout on disk.
     assert devmode.worktree_config("").worktree == ""
     feat_cfg = devmode.worktree_config("feat")
     assert feat_cfg.worktree == "feat" and feat_cfg.repo_root == wt.resolve()
     assert feat_cfg.has_table("proxy")  # reads the worktree's OWN foldyard.toml
+    assert devmode.worktree_keys() == ["", "feat"]
+
+
+def test_an_unregistered_worktree_dir_is_not_read_or_reconciled(host_checkouts):
+    # A dir with `.git` in the box-writable worktrees root is not evidence the host may act on.
+    _main, _wt = host_checkouts
+    assert devmode.worktree_keys() == [""]
+    assert devmode.worktree_config("feat").toml == {}
+
+
+def test_a_registered_worktree_swapped_for_a_symlink_reads_nothing(
+    host_checkouts, register_worktree, tmp_path
+):
+    # The box replaces a registered checkout with a symlink to ANOTHER checkout on the host; the
+    # host must not reconcile that checkout's (adopted) config for a box-controlled worktree.
+    import shutil
+
+    main, wt = host_checkouts
+    register_worktree(main, "feat", wt)
+    other = tmp_path / "other-project"
+    other.mkdir()
+    (other / ".git").mkdir()
+    (other / "foldyard.toml").write_text('[project]\nname = "other"\n[[inject]]\n')
+    shutil.rmtree(wt)
+    wt.symlink_to(other)
+    assert devmode.worktree_keys() == [""]
+    assert devmode.worktree_config("feat").toml == {}
 
 
 def test_worktree_config_main_ignores_ambient_worktree(monkeypatch, tmp_path):

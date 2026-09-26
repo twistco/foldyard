@@ -890,9 +890,18 @@ def gate(verb: str) -> str:
     if config.in_box():
         return "clean"
     try:
-        from . import devmode
+        from . import devmode, worktree_registry
 
-        cfg = devmode.worktree_config(config.active_worktree())
+        wt = config.active_worktree()
+        if wt and wt not in worktree_registry.checkouts(devmode.main_repo()):
+            # The supervisor won't serve a worktree it has no record of (worktree_registry), so
+            # bringing one up here would only produce a box with no proxy. Say what fixes it.
+            raise SystemExit(
+                f"✗ {verb}: worktree '{wt}' isn't registered with your computer, so it won't run "
+                "anything for it.\n"
+                f"  Check it is yours, then `fy worktree add {wt}` (it asks before registering)."
+            )
+        cfg = devmode.worktree_config(wt)
         status = resolve(
             cfg,
             interactive=sys.stdin.isatty(),

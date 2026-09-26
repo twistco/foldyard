@@ -73,6 +73,10 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   started with the VM, no `stop`): the ONE host-side process per project running the credential
   daemons (singleton lock, per-worktree listeners, replace-on-launch staleness handling, the
   capability-probe loop, TTL expiry + settle).
+- `worktree_registry.py` — the host's own record of a project's worktrees (name → real path,
+  keyed by the main checkout's path). Written only by `fy worktree add`/`remove`; everything
+  host-side that enumerates worktrees (supervisor, git heal, `fy mode`, the TUI) reads it, never a
+  listing of the box-writable worktrees root.
 - `worktree.py` · `transcripts.py` · `tui.py` · `init.py` · `skills.py` · `browser.py` ·
   `vscode.py` · `podman_desktop.py` — worktrees, agent-transcript sync, the Textual TUI,
   `foldyard init`, bundled skills, `fy open`, `fy code`, `fy machine desktop` (an `fy-<machine>`

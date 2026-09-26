@@ -4,11 +4,12 @@ touches a real repo; we assert the right git invocations and the config-driven i
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from foldyard import box, config, machine, stack, worktree
+from foldyard import box, config, machine, stack, worktree, worktree_registry
 
 
 class _Proc:
@@ -77,6 +78,12 @@ def fake_main(tmp_path, monkeypatch):
     def fake_run(cmd, **kw):
         calls.append(cmd)
         g = cmd[:1] == ["git"]
+        if g and "worktree" in cmd and "add" in cmd:  # git creates the checkout, as for real
+            wt_dir = next(Path(a) for a in cmd if a.startswith(str(wt_root)))
+            wt_dir.mkdir(parents=True, exist_ok=True)
+            (wt_dir / ".git").write_text(f"gitdir: {main}/.git/worktrees/{wt_dir.name}\n")
+            state["registered"].add(str(wt_dir))
+            return _Proc(0)
         if g and "worktree" in cmd and "list" in cmd:  # registration probe (orphan detection)
             return _Proc(0, "".join(f"worktree {p}\n" for p in sorted(state["registered"])))
         if g and "show-ref" in cmd:
@@ -206,6 +213,86 @@ def test_add_existing_remote_branch(fake_main):
 def test_add_refuses_existing_dir(fake_main):
     (fake_main["wt_root"] / "dup").mkdir(parents=True)
     assert worktree.add("dup") == 1
+    assert worktree_registry.checkouts(fake_main["main"]) == {}
+
+
+# ── the host's worktree registry: only `add` records a worktree the host may act on ──────────
+
+
+def _existing_git_worktree(fake_main, name="old"):
+    wt = fake_main["wt_root"] / name
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text("gitdir: x\n")
+    fake_main["state"]["registered"].add(str(wt))
+    return wt
+
+
+def test_add_registers_the_new_worktree(fake_main):
+    assert worktree.add("feat") == 0
+    assert worktree_registry.checkouts(fake_main["main"]) == {
+        "feat": (fake_main["wt_root"] / "feat").resolve()
+    }
+
+
+def test_add_on_an_existing_git_worktree_confirms_then_registers(fake_main, monkeypatch, capsys):
+    # A worktree from before the registry (or made with plain `git worktree add`) comes back
+    # under host management through the same verb — after the operator has seen its real path.
+    wt = _existing_git_worktree(fake_main)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    assert worktree.add("old") == 0
+    assert str(wt.resolve()) in capsys.readouterr().out
+    assert worktree_registry.checkouts(fake_main["main"]) == {"old": wt.resolve()}
+    assert not any("worktree" in c and "add" in c for c in fake_main["calls"])  # no git add
+
+
+def test_add_on_an_existing_worktree_declined_registers_nothing(fake_main, monkeypatch):
+    _existing_git_worktree(fake_main)
+    monkeypatch.setattr("builtins.input", lambda *a: "")
+    assert worktree.add("old") == 1
+    assert worktree_registry.checkouts(fake_main["main"]) == {}
+
+
+def test_add_on_an_existing_worktree_with_yes_skips_the_prompt(fake_main, monkeypatch):
+    wt = _existing_git_worktree(fake_main)
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("prompted despite --yes"))
+    assert worktree.add("old", assume_yes=True) == 0
+    assert worktree_registry.checkouts(fake_main["main"]) == {"old": wt.resolve()}
+
+
+def test_add_refuses_to_register_a_dir_git_does_not_track(fake_main):
+    # A checkout-looking dir the box planted: git has no worktree metadata for it.
+    wt = fake_main["wt_root"] / "planted"
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text("gitdir: x\n")
+    assert worktree.add("planted", assume_yes=True) == 1
+    assert worktree_registry.checkouts(fake_main["main"]) == {}
+
+
+def test_add_refuses_to_register_a_symlink(fake_main, tmp_path):
+    other = tmp_path / "someone-elses-checkout"
+    other.mkdir()
+    (other / ".git").mkdir()
+    fake_main["wt_root"].mkdir(parents=True)
+    (fake_main["wt_root"] / "link").symlink_to(other)
+    fake_main["state"]["registered"].add(str(other))
+    assert worktree.add("link", assume_yes=True) == 1
+    assert worktree_registry.checkouts(fake_main["main"]) == {}
+
+
+def test_remove_unregisters(fake_main):
+    assert worktree.add("feat") == 0
+    assert worktree.remove("feat", assume_yes=True) == 0
+    assert worktree_registry.checkouts(fake_main["main"]) == {}
+    assert not worktree_registry.is_recorded(fake_main["main"], "feat")
+
+
+def test_remove_clears_a_record_whose_checkout_is_already_gone(fake_main):
+    import shutil
+
+    assert worktree.add("feat") == 0
+    shutil.rmtree(fake_main["wt_root"] / "feat")  # deleted out-of-band
+    assert worktree.remove("feat", assume_yes=True) == 0
+    assert not worktree_registry.is_recorded(fake_main["main"], "feat")
 
 
 def test_add_refuses_reserved_name_main(fake_main):
@@ -330,6 +417,17 @@ def test_list_prints_main_and_worktrees(fake_main, capsys):
     assert worktree.list_() == 0
     out = capsys.readouterr().out
     assert "main" in out and "alpha" in out
+
+
+def test_list_marks_a_worktree_the_host_has_no_record_of(fake_main, capsys):
+    assert worktree.add("feat") == 0
+    _existing_git_worktree(fake_main, "old")
+    capsys.readouterr()
+    assert worktree.list_() == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "(not registered)" in next(line for line in lines if " old " in line)
+    assert "(not registered)" not in next(line for line in lines if " feat " in line)
+    assert any("fy worktree add <name>" in line for line in lines)
 
 
 # ── remove: transcript-guarded teardown ─────────────────────────────────────────────

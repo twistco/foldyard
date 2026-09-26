@@ -23,7 +23,9 @@ container socket, and no credentials.
 `[ports]`.
 
 **Worktree** — a git worktree made with `fy worktree add`. Each gets its own stack, its own box,
-its own mode and offset ports, all sharing the one VM.
+its own mode and offset ports, all sharing the one VM. Your computer only acts on worktrees it has
+on record: `fy worktree add <name>` on an existing worktree registers it (after showing you its real
+path).
 
 **The supervisor** — foldyard's one background process on your computer per project. It runs
 the proxy and the token services, turns them on and off as the mode changes, and watches that the

@@ -56,7 +56,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import config, configpin
+from . import config, configpin, worktree_registry
 from .machine_backend import get_backend
 from .plugins import DoctorContext, registry
 
@@ -618,8 +618,9 @@ def ps_labels(
 def workspaces() -> list[dict]:
     """main + each worktree, with stack/devbox status from one engine call.
 
-    Each entry: {name, path, project, branch, app_port, containers (compose count, None
-    if the engine is unreachable), devbox (bool)}.
+    Each entry: {name, path, project, registered, branch, app_port, containers (compose count,
+    None if the engine is unreachable), devbox (bool)}. ``registered`` False = a checkout dir the
+    host has no record of (:mod:`foldyard.worktree_registry`): shown, but not read.
 
     Anchored on the PRIMARY checkout (:func:`main_repo`), never ``config.repo_root()`` — the same
     anchor :func:`worktree_keys` uses, and for the same reason. Run from inside a worktree,
@@ -632,33 +633,31 @@ def workspaces() -> list[dict]:
     repo = main_repo()
     wt_root = config.worktrees_root(repo)
     prefix = config.project_prefix()
-    items: list[dict[str, Any]] = [{"name": "main", "path": str(repo), "project": prefix}]
-    if wt_root.is_dir():
-        for d in sorted(wt_root.iterdir()):
-            if d.is_dir() and (d / ".git").exists():
-                items.append({"name": d.name, "path": str(d), "project": f"{prefix}-{d.name}"})
+    items: list[dict[str, Any]] = [
+        {"name": "main", "path": str(repo), "project": prefix, "registered": True}
+    ]
+    if in_box():
+        found = [(d.name, d) for d in sorted(wt_root.iterdir())] if wt_root.is_dir() else []
+        found = [(n, d) for n, d in found if d.is_dir() and (d / ".git").exists()]
+    else:
+        # The host shows what it RECORDED (worktree_registry), at the recorded path; a checkout dir
+        # it doesn't know is listed as such — and nothing (not even `git rev-parse`) runs in it.
+        found = sorted(worktree_registry.checkouts(repo).items())
+        for name in worktree_registry.unregistered(repo, wt_root):
+            items.append(
+                {"name": name, "path": str(wt_root / name), "project": f"{prefix}-{name}",
+                 "registered": False, "branch": "", "app_port": None}
+            )  # fmt: skip
+    for name, d in found:
+        items.append(
+            {"name": name, "path": str(d), "project": f"{prefix}-{name}", "registered": True}
+        )
+    items[1:] = sorted(items[1:], key=lambda i: i["name"])
     rows = ps_labels(timeout=5)
     for item in items:
         wt = "" if item["name"] == "main" else item["name"]
-        try:
-            with config.using(worktree_config(wt)):
-                key = config.app_port_key()
-                base = config.port_bases().get(key) if key else None
-                item["app_port"] = base + config.worktree_offset(wt) if base is not None else None
-        except Exception:
-            # A worktree can temporarily contain an invalid/older foldyard.toml while switching
-            # branches. Keep the card usable; the missing port makes the browser action explain
-            # the config error when invoked rather than taking down the whole TUI refresh.
-            item["app_port"] = None
-        try:
-            item["branch"] = subprocess.run(
-                ["git", "-C", item["path"], "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=3,
-            ).stdout.strip()
-        except Exception:
-            item["branch"] = ""
+        if item["registered"]:
+            _describe_checkout(item, wt)
         if rows is None:
             item["containers"] = None
             item["devbox"] = False
@@ -668,6 +667,29 @@ def workspaces() -> list[dict]:
         )
         item["devbox"] = any(name == f"{item['project']}-devbox" for name, _ in rows)
     return items
+
+
+def _describe_checkout(item: dict[str, Any], wt: str) -> None:
+    """A registered card's app port (from its adopted config) and branch (``git rev-parse``)."""
+    try:
+        with config.using(worktree_config(wt)):
+            key = config.app_port_key()
+            base = config.port_bases().get(key) if key else None
+            item["app_port"] = base + config.worktree_offset(wt) if base is not None else None
+    except Exception:
+        # A worktree can temporarily contain an invalid/older foldyard.toml while switching
+        # branches. Keep the card usable; the missing port makes the browser action explain
+        # the config error when invoked rather than taking down the whole TUI refresh.
+        item["app_port"] = None
+    try:
+        item["branch"] = subprocess.run(
+            ["git", "-C", item["path"], "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        ).stdout.strip()
+    except Exception:
+        item["branch"] = ""
 
 
 def main_repo() -> Path:
@@ -685,14 +707,22 @@ def main_repo() -> Path:
 
 
 def worktree_keys() -> list[str]:
-    """Every checkout that EXISTS, as worktree keys (``""`` = the main checkout, then each worktree
-    dir). The candidate set the supervisor + ``fy mode`` iterate; :func:`active_worktrees` narrows
-    to the ones whose box is up."""
-    keys = [""]
+    """Every checkout the host may act on, as worktree keys (``""`` = the main checkout, then each
+    worktree). The candidate set the supervisor + ``fy mode`` iterate; :func:`active_worktrees`
+    narrows to the ones whose box is up.
+
+    On the host that is the REGISTERED worktrees (:mod:`foldyard.worktree_registry`), never a
+    listing of the worktrees root: that dir is box-writable, so a listing would let the box add
+    checkouts — or symlinks to other checkouts — to what the supervisor reconciles. In the box
+    (no host state, no secrets) the listing stays."""
     # Anchor on the PRIMARY checkout (main_repo), not config.repo_root(): a worktree-relative caller
     # (or a bound worktree config) makes repo_root() the active worktree, so worktrees_root() would
     # resolve to a bogus `<worktree>-worktrees` instead of the real sibling-worktrees dir.
-    wt_root = config.worktrees_root(main_repo())
+    main = main_repo()
+    if not in_box():
+        return ["", *sorted(worktree_registry.checkouts(main))]
+    keys = [""]
+    wt_root = config.worktrees_root(main)
     if wt_root.is_dir():
         for d in sorted(wt_root.iterdir()):
             if d.is_dir() and (d / ".git").exists():
@@ -780,9 +810,17 @@ def worktree_config(wt: str) -> config.Config:
         return configpin.effective(config.resolve(worktree="", repo=main_repo()))
     # Same primary-anchor as worktree_keys(): the sibling path must key off main_repo, not the
     # (possibly worktree) active checkout, or a bound-config caller resolves the wrong dir.
-    return configpin.effective(
-        config.resolve(worktree=wt, repo=config.worktrees_root(main_repo()) / wt)
-    )
+    main = main_repo()
+    if in_box():
+        return configpin.effective(
+            config.resolve(worktree=wt, repo=config.worktrees_root(main) / wt)
+        )
+    path = worktree_registry.checkouts(main).get(wt)
+    if path is None:
+        # Not a worktree the host recorded: read NOTHING from it. Resolving its path would follow a
+        # box-made symlink to another checkout — and hand this worktree that checkout's adoption.
+        return config.Config(repo_root=config.worktrees_root(main) / wt, worktree=wt, toml={})
+    return configpin.effective(config.resolve(worktree=wt, repo=path))
 
 
 def branches() -> list[str]:
@@ -1097,6 +1135,26 @@ def _config_pin_check() -> tuple[str, str, str]:
     )
 
 
+def _worktree_registry_check() -> tuple[str, str, str]:
+    """Doctor row: worktree checkouts the host has NO record of (:mod:`foldyard.worktree_registry`)
+    and therefore runs nothing for — no daemons, no git heal. WARN, naming each and the verb that
+    registers it, so a worktree that went quiet (every one did, once, when the registry landed)
+    says why instead of looking broken."""
+    main = main_repo()
+    try:
+        known = worktree_registry.checkouts(main)
+        stray = worktree_registry.unregistered(main, config.worktrees_root(main))
+    except OSError as e:  # pragma: no cover — unreadable state dir
+        return _result(None, "worktrees", "", f"couldn't read the worktree registry: {e}")
+    fixes = "; ".join(f"`fy worktree add {n}`" for n in stray)
+    return _result(
+        True if not stray else None,
+        "worktrees",
+        f"{len(known)} registered",
+        f"not registered, so your computer runs nothing for them: {', '.join(stray)} — {fixes}",
+    )
+
+
 def _widenings_check() -> tuple[str, str, str]:
     """Doctor row: what the ADOPTED config asks the host to allow (see :mod:`foldyard.exposure`).
     Green rows carry the counts — the point is that ``passthrough = ["@all"]`` silently means ~200
@@ -1173,6 +1231,7 @@ def doctor(deep: bool = False):
         "missing — install uv (TUI, data tooling; `brew install uv` on macOS)",
     )
     yield _config_pin_check()
+    yield _worktree_registry_check()
     yield _widenings_check()
     yield from _podman_checks()
     yield from _host_wall_check()
