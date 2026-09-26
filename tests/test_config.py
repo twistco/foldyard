@@ -39,6 +39,61 @@ def test_project_from_toml(fresh_config, tmp_path):
     assert config.project() == "myproj"
 
 
+_UNSAFE_NAMES = ["../x", "/etc/x", "a/b", "..", ".", ".hidden", "-rf", "a\\b", "x y"]
+
+
+@pytest.mark.parametrize("name", _UNSAFE_NAMES)
+def test_project_name_that_could_escape_the_state_dir_is_refused(fresh_config, tmp_path, name):
+    # `[project].name` is box-writable and becomes `~/.foldyard/<name>/` — where host.env (pasted
+    # credentials), the supervisor lock and the allow-store are written. A separator, a dot-name
+    # or an absolute path would move all of that to a box-chosen host path.
+    (tmp_path / "foldyard.toml").write_text(f"[project]\nname = {name!r}\n".replace("'", '"'))
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_PROJECT=None, FOLDYARD_STATE_DIR=None)
+    with pytest.raises(SystemExit, match=r"\[project\]\.name"):
+        config.state_dir()
+
+
+@pytest.mark.parametrize("name", _UNSAFE_NAMES)
+def test_machine_name_that_could_escape_its_paths_is_refused(fresh_config, tmp_path, name):
+    # `[machine].name` names the VM's own host paths (Lima's instance dir, the hostwall slice and
+    # unit) and is passed as a CLI argument — a leading `-` would be read as a flag.
+    (tmp_path / "foldyard.toml").write_text(
+        f'[project]\nname = "p"\n[machine]\nname = {name!r}\n'.replace("'", '"')
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path, PODMAN_MACHINE=None)
+    with pytest.raises(SystemExit, match=r"\[machine\]\.name"):
+        config.machine_name()
+
+
+def test_project_name_from_env_is_held_to_the_same_rule(fresh_config, tmp_path):
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_PROJECT="../escape")
+    with pytest.raises(SystemExit, match="FOLDYARD_PROJECT"):
+        config.project()
+
+
+@pytest.mark.parametrize("name", ["tangible", "fyex", "My.Proj_2", "a-b"])
+def test_ordinary_names_are_unchanged(fresh_config, tmp_path, name):
+    (tmp_path / "foldyard.toml").write_text(
+        f'[project]\nname = "{name}"\n[machine]\nname = "{name}-vm"\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_PROJECT=None, PODMAN_MACHINE=None)
+    fresh_config(FOLDYARD_STATE_DIR=None)
+    assert config.project() == name
+    assert config.machine_name() == f"{name}-vm"
+    assert config.state_dir() == Path.home() / ".foldyard" / name
+
+
+def test_repo_dir_name_fallback_is_checked_too(fresh_config, tmp_path):
+    # No `[project].name`: the checkout's own directory name is the project. It's one path
+    # component by construction, but a space still can't name a VM or a compose project.
+    repo = tmp_path / "has space"
+    repo.mkdir()
+    (repo / "foldyard.toml").write_text("[project]\n")
+    fresh_config(FOLDYARD_REPO=repo, FOLDYARD_PROJECT=None)
+    with pytest.raises(SystemExit, match="directory name"):
+        config.project()
+
+
 def test_external_network_defaults_off_and_reads_toml(fresh_config, tmp_path):
     # Off unless the consumer opts in — projects whose compose stack owns its own network
     # (the example consumer, any third-party repo) must see no behaviour change.

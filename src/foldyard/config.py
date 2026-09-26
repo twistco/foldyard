@@ -33,6 +33,7 @@ import contextvars
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -473,14 +474,34 @@ def _project_table() -> dict:
     return _table("project")
 
 
+_SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _safe_name(value: object, source: str) -> str:
+    """``value`` if it is one plain path component, else a loud refusal naming ``source``.
+
+    Names reach host PATHS — ``~/.foldyard/<project>/`` (where ``host.env``'s pasted credentials,
+    the supervisor lock and the allow-store live), the VM's own instance dir, slice and unit —
+    and CLI arguments, and ``foldyard.toml`` is box-writable. So: no separator, no dot-name, no
+    leading ``-`` (a flag to ``limactl``), nothing a shell or compose would split."""
+    if isinstance(value, str) and _SAFE_NAME.fullmatch(value):
+        return value
+    raise SystemExit(
+        f"✗ {source} {value!r} is not a plain name — use letters, digits, '.', '_' and '-', "
+        "starting with a letter or digit"
+    )
+
+
 def project() -> str:
     """The project name — prefixes ``~/.foldyard/<project>/``. Resolved the SAME way
     under every python (env → toml → repo dir name) so the host's mode/host/tui all
-    agree on one state dir."""
-    return (
-        os.environ.get("FOLDYARD_PROJECT")
-        or _project_table().get("name")
-        or repo_root().name.lower()
+    agree on one state dir. Held to :func:`_safe_name` whichever source it came from."""
+    if env := os.environ.get("FOLDYARD_PROJECT"):
+        return _safe_name(env, "FOLDYARD_PROJECT")
+    if declared := _project_table().get("name"):
+        return _safe_name(declared, "[project].name")
+    return _safe_name(
+        repo_root().name.lower(), "the checkout's directory name (set [project].name instead)"
     )
 
 
@@ -898,8 +919,12 @@ def worktree_base() -> str | None:
 
 def machine_name() -> str:
     """The rootless podman machine's name. ``PODMAN_MACHINE`` wins, then
-    ``[machine].name``, then the project name."""
-    return os.environ.get("PODMAN_MACHINE") or _table("machine").get("name") or project()
+    ``[machine].name``, then the project name — each held to :func:`_safe_name`."""
+    if env := os.environ.get("PODMAN_MACHINE"):
+        return _safe_name(env, "PODMAN_MACHINE")
+    if declared := _table("machine").get("name"):
+        return _safe_name(declared, "[machine].name")
+    return project()
 
 
 def machine_backend_explicit() -> str:

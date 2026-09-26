@@ -83,7 +83,8 @@ min_foldyard_version = "0.2.0"
 ```
 
 - **`name`** — the project key; names the state dir `~/.foldyard/<name>/`. Default: the repo
-  directory name, lowercased. Env: `FOLDYARD_PROJECT`.
+  directory name, lowercased. Env: `FOLDYARD_PROJECT`. A plain name — letters, digits, `.`, `_`
+  and `-`, starting with a letter or digit; anything else is refused.
 - **`prefix`** — container/volume/network name prefix (a worktree appends `-<name>`). Default:
   `name`. Env: `FOLDYARD_PROJECT_PREFIX`.
 - **`app`** — the compose service `fy shell` targets. Default: `"app"`. Env: `FOLDYARD_APP`.
@@ -236,7 +237,8 @@ disk_gib = 60
     webpack `watchOptions.poll`). Edits made in the box work normally.
   - `fy verify` in the box adds a row checking the kernel it runs on; its VM mount audit reads
     `N/A` there, so run `fy verify` on your computer for that.
-- **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`.
+- **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`. Same rule as
+  `[project].name`.
 - **`cpus`** / **`memory_mib`** / **`disk_gib`** — sizing at first creation. Defaults: `4` /
   `8192` / `60`. Env: `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK`.
 - **`worktrees_root`** — the parent dir of sibling worktree checkouts, mounted into the VM
