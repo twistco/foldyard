@@ -2026,6 +2026,21 @@ def test_a_held_credentials_dummy_is_answered_by_the_proxy_not_forwarded(live):
     assert not row.get("blocked")  # not an allowlist refusal: granting the host is not the fix
 
 
+def test_a_held_answer_is_judged_on_the_destination_not_the_host_header(live):
+    # Merged with the destination fix (the held path came later, keyed on `pretty_host`): a request
+    # SENT elsewhere that merely names the held host is the claim mismatch every other path refuses
+    # (403), not a held answer. Mutation that must turn this red: `_held_for` matching on
+    # `pretty_host`, with the held answer ahead of the mismatch refusal in `_on_request`.
+    _write_live(live.live, held=[_HELD])
+    inj = live.Injector()
+    flow = _dummy_flow("elsewhere.example", claimed="api.anthropic.com")
+    inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 403
+    row = _last_log(live.log)
+    assert row["host"] == "elsewhere.example" and row["blocked"] is True
+    assert "held" not in row
+
+
 async def test_a_held_answer_is_logged_once(live):
     # mitmproxy runs `response` for the proxy's own answer too; logging it there would add a
     # second row that looks like an upstream 401.

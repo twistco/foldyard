@@ -838,7 +838,7 @@ class Injector:
             return None
         for entry in self.held:
             if (
-                request.pretty_host == entry["host"]
+                _destination(request) == entry["host"]
                 and request.path.startswith(entry.get("path_prefix") or "")
                 and request.headers.get(entry["header"]) == entry["dummy"]
             ):
@@ -999,7 +999,7 @@ class Injector:
         entry = {
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             "method": flow.request.method,
-            "host": flow.request.pretty_host,
+            "host": _destination(flow.request),
             "path": flow.request.path[:200],
             "status": 401,
             "injected": False,
@@ -1280,8 +1280,16 @@ class Injector:
             return
         flow.metadata["egress_proxy_judged"] = True
         self.refresh()
-        # A keyless dummy with its axis at rest: answer with the fix before anything else, since
-        # the host is not granted (it needn't be — nothing leaves). A matching rule would inject.
+        host, port = _destination(flow.request), flow.request.port
+        default = _HTTPS_PORT if flow.request.scheme == "https" else _HTTP_PORT
+        if _claim_mismatch(flow.request):
+            # Refused whether or not the wall enforces: never a legitimate forward-proxy request.
+            flow.response = http.Response.make(403, _MISMATCH_BODY)
+            flow.metadata["egress_proxy_blocked"] = True
+            self._log_blocked(host if port == default else f"{host}:{port}", flow.request)
+            return
+        # A keyless dummy with its axis at rest: answer with the fix before the wall, since the
+        # host is not granted (it needn't be — nothing leaves). A matching rule would inject.
         held = self._held_for(flow) if self._rule_for(flow) is None else None
         if held is not None:
             flow.response = http.Response.make(
@@ -1293,14 +1301,6 @@ class Injector:
         # The egress wall for plain HTTP (cleartext never CONNECTs, so http_connect can't catch it):
         # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host
         # grant as CONNECT :22 — here, before it leaves the box. HTTPS is walled at http_connect.
-        host, port = _destination(flow.request), flow.request.port
-        default = _HTTPS_PORT if flow.request.scheme == "https" else _HTTP_PORT
-        if _claim_mismatch(flow.request):
-            # Refused whether or not the wall enforces: never a legitimate forward-proxy request.
-            flow.response = http.Response.make(403, _MISMATCH_BODY)
-            flow.metadata["egress_proxy_blocked"] = True
-            self._log_blocked(host if port == default else f"{host}:{port}", flow.request)
-            return
         allowed = self._allowed_plain(host, port, flow.request.scheme) or (
             self._trusted_build(flow.request) and self._build_granted(host, port, default)
         )
