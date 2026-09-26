@@ -58,8 +58,11 @@ _warned: dict[str, tuple[str, str]] = {}
 #    Set-to-empty reads as unset/false; ``core.hooksPath`` is pointed at a dir with no hooks.
 #  * a STRIPPED environment: git gets PATH + locale, never the supervisor's inherited secrets,
 #    and global/system config is cut out (``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_NOSYSTEM``) so only
-#    the plumbing below runs. All heal ops are index-only (no worktree checkout), so no clean/
-#    smudge filter is invoked in the first place; the ``-c`` list is defence in depth.
+#    the plumbing below runs.
+#
+# Filter drivers are the one thing ``-c`` cannot reach (the attributes pick the driver's name),
+# so the heal never READS THE WORKTREE: no ``--refresh``, and every index it writes is zero-stat
+# so git's racy-clean check has nothing to re-hash. Keep it that way (see ``_install_index``).
 _SAFE_FLAGS = (
     "-c", "core.fsmonitor=",
     "-c", "core.hooksPath=/dev/null",
@@ -177,9 +180,10 @@ def _install_index(repo: Path, gitdir: Path, cur: str, carry: bytes) -> bool:
             r = _git(repo, "update-index", "-z", "--index-info", input_bytes=carry, env=env)
             if r.returncode != 0:
                 return False
-        # Best-effort stat-cache refresh so the next `git status` doesn't re-hash the world;
-        # rc deliberately ignored (carried entries that differ from the worktree "need update").
-        _git(repo, "update-index", "-q", "--refresh", env=env)
+        # No stat-cache refresh here, deliberately: it re-hashes worktree content through the
+        # clean filter, whose driver name the mount's attributes choose (`.git/info/attributes`
+        # included, which no flag can switch off). The entries stay zero-stat — never racily
+        # clean, so writing them reads nothing — and the next `git status` re-hashes once.
         os.replace(tmp, gitdir / "index")
         return True
     finally:

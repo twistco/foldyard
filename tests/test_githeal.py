@@ -136,8 +136,8 @@ def test_sweep_gates_on_index_split_and_never_raises(monkeypatch):
 
 def test_git_neutralises_a_box_planted_fsmonitor_command(rig, tmp_path):
     # `.git/config` is on the box-writable mount, and git runs `core.fsmonitor` as a command when
-    # a heal scans the worktree (`update-index --refresh`, used by `_install_index`). The `-c`
-    # overrides in `_git` must win over the planted key so it never executes on the host.
+    # it scans the worktree (`update-index --refresh`). The heal no longer scans, but the `-c`
+    # overrides in `_git` must still win over the planted key for any call that would.
     canary = tmp_path / "PWNED"
     fsmon = tmp_path / "fsmon.sh"
     fsmon.write_text(f"#!/bin/sh\ntouch {canary}\nexit 1\n")
@@ -153,6 +153,26 @@ def test_git_neutralises_a_box_planted_fsmonitor_command(rig, tmp_path):
     # git itself resolves the key to the override, not the mount's value.
     got = githeal._git(rig.repo, "config", "--get", "core.fsmonitor")
     assert got.stdout.strip() == ""
+
+
+def test_a_heal_never_runs_a_box_planted_filter_driver(rig, tmp_path):
+    # A clean filter can't be neutralised by `-c`: its driver NAME comes from attributes, and
+    # `$GIT_DIR/info/attributes` is read even under `--attr-source`. So the heal must never read
+    # the worktree at all — a stat refresh re-hashes content through the filter. Both attribute
+    # sources are planted; the canary is a shell redirection so it needs no binary on PATH.
+    canary = tmp_path / "PWNED"
+    _box_commit(rig, "box", fileA="a2\n", fileC="c1\n")
+    (rig.repo / ".gitattributes").write_text("* filter=evil\n")
+    (rig.gitdir / "info").mkdir(exist_ok=True)
+    (rig.gitdir / "info" / "attributes").write_text("* filter=evil\n")
+    subprocess.run(
+        ["git", "-C", str(rig.repo), "config", "filter.evil.clean", f"sh -c ': > {canary}; cat'"],
+        check=True,
+    )
+
+    msg = githeal.heal_checkout(rig.repo)
+    assert msg and "fast-forwarded" in msg  # the heal itself still happened
+    assert not canary.exists()  # …without the planted driver running on the host
 
 
 def test_the_git_child_environment_carries_no_inherited_secret(monkeypatch):
