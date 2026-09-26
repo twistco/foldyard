@@ -520,8 +520,11 @@ def host_checkouts(monkeypatch, tmp_path):
 
 
 def test_worktree_config_keys_on_the_checkout(host_checkouts, register_worktree):
+    from foldyard import config, configpin
+
     main, wt = host_checkouts
     register_worktree(main, "feat", wt)
+    configpin.adopt(config.resolve(worktree="feat", repo=wt))
 
     # main → the ACTIVE config (current()); a worktree → resolved from ITS own checkout on disk.
     assert devmode.worktree_config("").worktree == ""
@@ -535,6 +538,13 @@ def test_an_unregistered_worktree_dir_is_not_read_or_reconciled(host_checkouts):
     # A dir with `.git` in the box-writable worktrees root is not evidence the host may act on.
     _main, _wt = host_checkouts
     assert devmode.worktree_keys() == [""]
+    assert devmode.worktree_config("feat").toml == {}
+
+
+def test_a_registered_but_unadopted_worktree_reads_as_empty(host_checkouts, register_worktree):
+    # Registered says the dir is the operator's; it doesn't say its config was reviewed.
+    main, wt = host_checkouts
+    register_worktree(main, "feat", wt)
     assert devmode.worktree_config("feat").toml == {}
 
 
@@ -558,7 +568,7 @@ def test_a_registered_worktree_swapped_for_a_symlink_reads_nothing(
 
 
 def test_worktree_config_main_ignores_ambient_worktree(monkeypatch, tmp_path):
-    from foldyard import config
+    from foldyard import config, configpin
 
     main = tmp_path / "repo"
     main.mkdir()
@@ -570,6 +580,7 @@ def test_worktree_config_main_ignores_ambient_worktree(monkeypatch, tmp_path):
     monkeypatch.setattr(devmode, "main_repo", lambda: main)
     monkeypatch.setattr(config, "repo_root", lambda: feat)
     monkeypatch.setattr(config, "worktrees_root", lambda _base: tmp_path / "repo-worktrees")
+    configpin.adopt(config.resolve(worktree="", repo=main))
 
     cfg = devmode.worktree_config("")
     assert cfg.worktree == ""

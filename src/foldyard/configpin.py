@@ -397,17 +397,6 @@ def size(drift: Drift) -> str:
     return f"{lines} lines across {', '.join(files)}" if files else "no config files at all"
 
 
-def _legacy_pin_dir(cfg: config.Config) -> Path:
-    """Where adoptions lived before they were keyed by checkout path: ``<posture_dir>/config/``.
-
-    Read-only, and read ONLY when the current location holds nothing — see :func:`inspect`. Losing
-    track of an adoption is not a neutral event here: "never adopted" is the one state that adopts
-    the working tree, so a layout change that orphans a pin would silently adopt whatever the tree
-    happens to say. That is what happened when this move landed."""
-    with config.using(cfg):
-        return config.posture_dir() / "config"
-
-
 def _marker(pinned: Path) -> dict | None:
     """The adoption record, or ``None`` when there isn't a usable one.
 
@@ -445,18 +434,17 @@ def inspect(cfg: config.Config) -> Drift:
     file from each.
 
     Nothing here consults the parsed TOML (``cfg.toml``): the snapshot is located by checkout path
-    (:func:`pin_dir`), so a mutable field like ``[project].name`` can't redirect the lookup. The
-    one exception is the legacy fallback, which by definition has to look where the old layout
-    put things; the next :func:`adopt` rewrites it to the current location."""
+    (:func:`pin_dir`), so a mutable field like ``[project].name`` can't redirect the lookup. (An
+    older layout kept adoptions under the state dir that name selects; it is no longer read — a
+    checkout that loses its adoption runs nothing and is asked again, so there is no silent adopt
+    left for that fallback to prevent, and a name-keyed lookup let one checkout claim another
+    project's adoption.)"""
     selected = current_dir(cfg)
     empty: dict[str, bytes | None] = dict.fromkeys(PINNED_FILES)
     files = _read_files(selected) if selected else empty
-    adopted = selected is not None
-    if not adopted:
-        legacy = _read_files(_legacy_pin_dir(cfg))
-        if any(v is not None for v in legacy.values()):
-            files, adopted = legacy, True  # a pre-move adoption is still an adoption
-    return Drift(cfg=cfg, tree=_read_files(cfg.repo_root), pinned=files, adopted=adopted)
+    return Drift(
+        cfg=cfg, tree=_read_files(cfg.repo_root), pinned=files, adopted=selected is not None
+    )
 
 
 # ── a worktree measured against main ──────────────────────────────────────────────────
@@ -560,20 +548,22 @@ def effective(cfg: config.Config) -> config.Config:
     a worktree's config gets (``devmode.worktree_config``), and therefore what the supervisor
     reconciles from.
 
-    Falls back to the working tree in two cases, both deliberate: **in the box**, where there is no
-    host state dir and a box session should see its own checkout; and when **nothing is pinned
-    yet**, so a first run (or a supervisor that predates pinning) keeps working instead of losing
-    every daemon — the ``gate`` on the launch verbs pins it moments later. Never raises: a config
-    read on the reconcile hot path must degrade, not crash."""
+    **In the box** it is the working tree: there is no host state there, and a box session should
+    see its own checkout. On the host, a checkout with **nothing adopted** — never adopted, the
+    adoption declined, or a state dir that can't be read — is an EMPTY config, never the tree:
+    the tree is exactly what the box can write, and "nobody has reviewed it" must not become
+    "the host runs it". The supervisor runs nothing for such a checkout (and says so), and the
+    launch ``gate`` asks for the adoption. Never raises: a config read on the reconcile hot path
+    must degrade, not crash."""
     if config.in_box():
         return cfg
     try:
         drift = inspect(cfg)
-        if not drift.pinned_exists:
-            return cfg
-        return dataclasses.replace(cfg, toml=merged_toml(drift.pinned))
     except (OSError, ValueError):  # pragma: no cover — unreadable state dir
-        return cfg
+        return dataclasses.replace(cfg, toml={})
+    if not drift.pinned_exists:
+        return dataclasses.replace(cfg, toml={})
+    return dataclasses.replace(cfg, toml=merged_toml(drift.pinned))
 
 
 # ── mutating the pin (host only) ──────────────────────────────────────────────────────
@@ -817,10 +807,13 @@ def resolve(
                 "has read. On your computer: `fy config diff`, then `fy config adopt`."
             )
             return "unadopted"
-        answer = prompt("  [a]dopt (default) · [i]gnore for now: ").strip().lower()
-        if answer in ("i", "ignore", "n", "no"):
-            echo("  (ignored — the host reads the working tree until you adopt; asked again.)")
-            return "ignored"
+        answer = prompt("  [a]dopt (default) · [q]uit: ").strip().lower()
+        # EXACT matches only, as for drift below: anything but Enter / a / adopt declines. Declining
+        # is not "ignore" — with nothing adopted there is nothing else to run, so the host runs
+        # NOTHING for this checkout and the launch stops here (see :func:`gate`).
+        if answer not in ("", "a", "adopt"):
+            echo("  (not adopted — your computer runs nothing for this checkout until you adopt.)")
+            return "declined"
         try:
             # Both sides of what was shown: the tree, and — when the review WAS a diff against main
             # — the main pin it was measured against. See :func:`adopt`.
@@ -883,10 +876,11 @@ def gate(verb: str) -> str:
 
     Best-effort about ITS OWN failures: a broken gate must never be what stops the yard starting —
     the supervisor still reconciles from the pin either way, so failing here loses the prompt, not
-    the boundary. One deliberate exception: ``"unadopted"`` (nothing pinned, no terminal to adopt
-    on) is REFUSED rather than waved through, because there the pin is empty — ``effective()``
-    would fall back to the working tree and the host would run a config nobody has read. The fix
-    is one command, and it is in the message."""
+    the boundary. The deliberate exceptions: nothing adopted — ``"unadopted"`` (no terminal to adopt
+    on) or ``"declined"`` (the operator said no) — and a worktree the host has no record of. Each is
+    REFUSED rather than waved through: the host would run nothing for that checkout, so starting
+    its box would only produce one with no proxy. The fix is one command, and it is in the
+    message."""
     if config.in_box():
         return "clean"
     try:
@@ -913,6 +907,12 @@ def gate(verb: str) -> str:
                 f"✗ {verb}: this checkout's foldyard.toml has never been adopted, and there is no "
                 "terminal here to adopt it on.\n"
                 "  Run `fy config adopt` on your computer (`fy config diff` first), then retry."
+            )
+        if status == "declined":
+            raise SystemExit(
+                f"✗ {verb}: not started — nothing is adopted for this checkout.\n"
+                "  When you're ready: `fy config diff`, then `fy config adopt` — or retry and "
+                "adopt at the prompt."
             )
         return status
     except SystemExit:

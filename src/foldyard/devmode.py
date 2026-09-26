@@ -1124,7 +1124,8 @@ def _config_pin_check() -> tuple[str, str, str]:
             None,
             "adopted config",
             "",
-            "nothing adopted yet — `fy up` / `fy host restart` adopts it once",
+            "nothing adopted yet — your computer runs nothing for this checkout; `fy config "
+            "diff`, then `fy config adopt` (`fy up` also asks)",
         )
     return _result(
         True if not drift.changed else None,  # None ⇒ WARN: safe posture, outstanding decision

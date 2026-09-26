@@ -103,10 +103,11 @@ def test_worktree_config_is_the_pinned_one(checkout, monkeypatch):
     assert devmode.worktree_config("").toml["proxy"]["passthrough"] == ["trusted.example"]
 
 
-def test_unadopted_and_in_box_both_fall_back_to_the_working_tree(checkout, monkeypatch):
-    # Nothing adopted yet (first run, or a supervisor predating pinning): keep working. The pin
-    # lives in the Mac home, so the box cannot manufacture this state by deleting it.
-    assert configpin.effective(checkout).toml == checkout.toml
+def test_unadopted_is_empty_on_the_host_and_the_tree_in_the_box(checkout, monkeypatch):
+    # Nothing adopted: the host reads NOTHING — never the working tree, which is exactly what the
+    # box can write. (The supervisor then runs nothing for the checkout and the gate asks.)
+    assert checkout.toml  # the tree does declare things…
+    assert configpin.effective(checkout).toml == {}  # …none of which the host runs unreviewed
 
     # In the box there is no host state at all — a box session reads its own checkout, so a pin
     # (which it can't see anyway) must not shadow it.
@@ -471,49 +472,39 @@ def test_adopting_a_checkout_with_no_config_is_recorded(checkout):
 
 
 def test_an_interrupted_adopt_reads_as_not_adopted(checkout):
-    """The marker is written last, so a crash mid-adopt falls back to the tree and re-adopts next
-    launch, rather than claiming an adoption over half-written files."""
+    """The marker is written last, so a crash mid-adopt reads as nothing adopted — the host runs
+    nothing and the next launch asks again — rather than claiming an adoption over half-written
+    files."""
     configpin.adopt(checkout)
     (configpin.pin_dir(checkout) / configpin.ADOPTED_MARKER).unlink()
 
     assert not configpin.inspect(checkout).pinned_exists
-    assert configpin.effective(checkout).toml == checkout.toml
+    assert configpin.effective(checkout).toml == {}
 
 
-def test_an_adoption_from_the_previous_store_layout_still_counts(checkout):
-    """The incident this exists for: moving where adoptions are kept orphaned the old one, and
-    "no adoption" is the one state that adopts the working tree — so an operator's `ignore` at
-    `fy up` was overridden by a silent adopt at `fy box up` seconds later."""
-    legacy = configpin._legacy_pin_dir(checkout)
-    legacy.mkdir(parents=True, exist_ok=True)
-    (legacy / "foldyard.toml").write_text(TOML)  # adopted under the old layout: no marker
-    (checkout.repo_root / "foldyard.toml").write_text(EDITED)
+def test_a_state_dir_the_tree_names_is_never_read_as_an_adoption(checkout, tmp_path, monkeypatch):
+    """Adoptions once lived under ``<state_dir>/main/config/`` — a dir chosen by the TREE's
+    ``[project].name``. Reading it let a never-adopted checkout name another project and inherit
+    that project's adoption. Only the checkout-path-keyed store counts."""
+    monkeypatch.setenv("FOLDYARD_STATE_DIR", str(tmp_path / "state"))
+    with config.using(checkout):
+        old_layout = config.posture_dir() / "config"
+    old_layout.mkdir(parents=True)
+    (old_layout / "foldyard.toml").write_text(TOML)
 
-    drift = configpin.inspect(checkout)
-    assert drift.pinned_exists and drift.changed  # NOT "never adopted"
-    assert configpin.effective(checkout).toml["proxy"]["passthrough"] == ["trusted.example"]
-
-    prompt, echo, _lines = _prompted("i")
-    assert configpin.resolve(checkout, interactive=True, prompt=prompt, echo=echo) == "ignored"
-
-
-def test_adopting_migrates_a_legacy_pin_to_the_current_location(checkout):
-    legacy = configpin._legacy_pin_dir(checkout)
-    legacy.mkdir(parents=True, exist_ok=True)
-    (legacy / "foldyard.toml").write_text(TOML)
-
-    configpin.adopt(checkout)
-    assert (configpin.pin_dir(checkout) / configpin.ADOPTED_MARKER).is_file()
-    assert not configpin.inspect(checkout).changed
+    assert not configpin.inspect(checkout).pinned_exists
+    assert configpin.effective(checkout).toml == {}
 
 
 def test_a_first_adoption_can_be_declined_on_a_terminal(checkout):
     """Enter is still enough, but it can't pass unseen — that's what let a declined config get
     adopted a moment later."""
-    prompt, echo, lines = _prompted("i")
-    assert configpin.resolve(checkout, interactive=True, prompt=prompt, echo=echo) == "ignored"
+    prompt, echo, lines = _prompted("q")
+    assert configpin.resolve(checkout, interactive=True, prompt=prompt, echo=echo) == "declined"
 
     assert not configpin.inspect(checkout).pinned_exists
+    assert configpin.effective(checkout).toml == {}  # declining never means "run the tree"
+    assert any("runs nothing for this checkout" in line for line in lines)
     assert any("nothing adopted yet" in line for line in lines)
     assert any("lines across foldyard.toml" in line for line in lines)  # what it would adopt
 
@@ -548,8 +539,8 @@ def test_a_first_adoption_flags_config_nothing_consumes(checkout):
             'passthrough = ["trusted.example"]\nallow = ["unpkg.com"]',
         )
     )
-    prompt, echo, lines = _prompted("i")
-    assert configpin.resolve(checkout, interactive=True, prompt=prompt, echo=echo) == "ignored"
+    prompt, echo, lines = _prompted("q")
+    assert configpin.resolve(checkout, interactive=True, prompt=prompt, echo=echo) == "declined"
     note = "\n".join(lines)
     assert "[proxy] allow" in note and "IGNORED" in note
 
@@ -566,8 +557,8 @@ def test_a_first_adoption_without_a_terminal_does_NOT_happen(checkout):
 
 
 def test_the_launch_gate_refuses_an_unadopted_checkout_with_no_terminal(monkeypatch, checkout):
-    """`unadopted` must BLOCK, not warn: with an empty pin, effective() falls back to the working
-    tree, so waving the launch through is the host running a config nobody has read."""
+    """`unadopted` must BLOCK, not warn: the host would run nothing for the checkout, so waving the
+    launch through only produces a box with no proxy."""
     monkeypatch.setattr(configpin.config, "in_box", lambda: False)
     monkeypatch.setattr(configpin.config, "active_worktree", lambda: "")
     from foldyard import devmode
@@ -577,6 +568,49 @@ def test_the_launch_gate_refuses_an_unadopted_checkout_with_no_terminal(monkeypa
     with pytest.raises(SystemExit, match="never been adopted"):
         configpin.gate("fy up")
     assert not configpin.inspect(checkout).pinned_exists
+
+
+@pytest.mark.parametrize(
+    ("answer", "status"),
+    [
+        ("", "pinned"),  # Enter adopts — it's shown in full first
+        ("a", "pinned"),
+        ("adopt", "pinned"),
+        # Anything else declines. There is no "ignore" at first sight: with nothing adopted,
+        # "keep running what the host runs" means running nothing — and it used to mean the tree.
+        ("i", "declined"),
+        ("ignore", "declined"),
+        ("q", "declined"),
+        ("abort", "declined"),
+        ("n", "declined"),
+        ("yes", "declined"),
+    ],
+)
+def test_first_sight_offers_adopt_or_quit_only(checkout, answer, status):
+    prompt, echo, _lines = _prompted(answer)
+    assert configpin.resolve(checkout, interactive=True, prompt=prompt, echo=echo) == status
+    assert configpin.inspect(checkout).pinned_exists is (status == "pinned")
+
+
+def test_the_launch_gate_refuses_a_declined_first_adoption(monkeypatch, checkout):
+    monkeypatch.setattr(configpin.config, "in_box", lambda: False)
+    monkeypatch.setattr(configpin.config, "active_worktree", lambda: "")
+    monkeypatch.setattr(devmode, "worktree_config", lambda _wt: checkout)
+    monkeypatch.setattr(configpin.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_a: "q")
+    with pytest.raises(SystemExit, match="nothing is adopted"):
+        configpin.gate("fy up")
+    assert not configpin.inspect(checkout).pinned_exists
+
+
+def test_the_tick_runs_nothing_for_an_unadopted_checkout_and_says_so(checkout, monkeypatch):
+    logged: list[str] = []
+    monkeypatch.setattr(supervisor, "log", logged.append)
+    assert supervisor._report_config_drift("", checkout) is False
+    assert supervisor._report_config_drift("", checkout) is False
+    assert len(logged) == 1 and "RUNNING NOTHING" in logged[0] and "fy config adopt" in logged[0]
+    configpin.adopt(checkout)
+    assert supervisor._report_config_drift("", checkout) is True
 
 
 # ── a worktree's first adoption, measured against main ────────────────────────────────
@@ -713,8 +747,8 @@ def test_a_worktree_first_adoption_prompt_leads_with_the_diff_from_main(checkout
     configpin.adopt(checkout)
     (worktree.repo_root / "foldyard.toml").write_text(EDITED)
 
-    prompt, echo, lines = _prompted("i")
-    assert configpin.resolve(worktree, interactive=True, prompt=prompt, echo=echo) == "ignored"
+    prompt, echo, lines = _prompted("q")
+    assert configpin.resolve(worktree, interactive=True, prompt=prompt, echo=echo) == "declined"
 
     note = "\n".join(lines)
     assert "nothing adopted yet" in note

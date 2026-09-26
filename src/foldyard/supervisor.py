@@ -1050,6 +1050,9 @@ def _resnapshot_worker(cfg: config.Config, wt: str, axis: str, services: list[st
 _config_drift_seen: dict[str, str] = {}
 
 
+# `_config_drift_seen`'s marker for "nothing adopted" (a digest is never this).
+_UNADOPTED = "unadopted"
+
 # The unregistered worktree dirs last reported, so the log line fires once per change.
 _unregistered_seen: list[str] = []
 
@@ -1075,9 +1078,11 @@ def _report_unregistered() -> None:
         )
 
 
-def _report_config_drift(wt: str, cfg: config.Config) -> None:
+def _report_config_drift(wt: str, cfg: config.Config) -> bool:
     """Say — once per change — that this checkout's ``foldyard.toml`` differs from the copy the
-    host adopted, and that the ADOPTED one is still what's running (:mod:`foldyard.configpin`).
+    host adopted, and that the ADOPTED one is still what's running (:mod:`foldyard.configpin`);
+    or that NOTHING is adopted, so nothing runs for it. Returns whether the checkout is adopted —
+    False (fail closed) when that can't be read, since the tick then reconciles nothing for it.
 
     Reporting, never applying: that's the point of the pin. The macOS notification fires only on
     the clean→drifted edge (a file being rewritten repeatedly is one event to an operator, not
@@ -1087,17 +1092,26 @@ def _report_config_drift(wt: str, cfg: config.Config) -> None:
         drift = configpin.inspect(cfg)
     except OSError as e:  # pragma: no cover — unreadable state dir
         log(f"config: drift check failed: {e}")
-        return
-    current = drift.tree_digest() if drift.changed else ""
+        return False
+    if not drift.pinned_exists:
+        current = _UNADOPTED
+    else:
+        current = drift.tree_digest() if drift.changed else ""
     previous = _config_drift_seen.get(wt)
     if current == previous:
-        return
+        return drift.pinned_exists
     _config_drift_seen[wt] = current
     where = f" [worktree {wt}]" if wt else ""
+    if current == _UNADOPTED:
+        log(
+            f"⚠ config{where}: foldyard.toml has never been adopted on this computer — RUNNING "
+            "NOTHING for this checkout. On your computer: `fy config diff`, then `fy config adopt`."
+        )
+        return False
     if not current:
         if previous:  # drifted → clean: adopted, reverted, or edited back by hand
             log(f"✓ config{where}: the checkout matches the adopted foldyard.toml again")
-        return
+        return True
     log(
         f"⚠ config{where}: foldyard.toml differs from the copy this host adopted ({current}) — "
         "STILL RUNNING THE ADOPTED ONE. Review with `fy config diff`, then `fy config adopt` "
@@ -1108,6 +1122,7 @@ def _report_config_drift(wt: str, cfg: config.Config) -> None:
             f"fy {config.project()}: config drift{where}",
             "foldyard.toml changed — the host keeps running the copy it adopted",
         )
+    return True
 
 
 # Where each worktree's egress log was last read to — (inode, byte offset) — so a tick reads only
@@ -1333,8 +1348,10 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
         cfg = devmode.worktree_config(wt)  # the ADOPTED config for this checkout (configpin)
         with config.using(cfg):
             # Reconciling from the pin means a repo edit is silent by construction — so SAY it
-            # happened, or "my config change did nothing" becomes the new mystery.
-            _report_config_drift(wt, cfg)
+            # happened, or "my config change did nothing" becomes the new mystery. A checkout with
+            # NOTHING adopted gets nothing at all — no daemons, probes or mirror (configpin).
+            if not _report_config_drift(wt, cfg):
+                continue
             mode = expire_user_modes()
             _report_held(wt, mode)
             # Fill in host-process env a plugin can derive from committed config (a Pulumi App

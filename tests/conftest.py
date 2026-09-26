@@ -174,14 +174,6 @@ def isolated_config_pin(tmp_path, monkeypatch):
     monkeypatch.setattr(
         configpin, "pin_dir", lambda cfg: pins / (getattr(cfg, "worktree", "") or "main")
     )
-    # The pre-move location too: it resolves through `config.posture_dir()` → the REAL
-    # ~/.foldyard/<project>/, so a test writing one would both escape tmp_path and leak an
-    # "already adopted" state into every later test (it did, once).
-    monkeypatch.setattr(
-        configpin,
-        "_legacy_pin_dir",
-        lambda cfg: pins / "legacy" / (getattr(cfg, "worktree", "") or "main"),
-    )
     supervisor._config_drift_seen.clear()
     supervisor._held_cursor.clear()
     supervisor._held_notified.clear()

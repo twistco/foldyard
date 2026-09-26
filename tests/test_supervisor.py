@@ -386,6 +386,15 @@ def test_reap_refuses_to_kill_a_foreign_listener(monkeypatch):
     assert killed == []
 
 
+@pytest.fixture(autouse=True)
+def every_checkout_adopted(monkeypatch):
+    """The tick reconciles only ADOPTED checkouts (``_report_config_drift`` answers that, and an
+    unadopted one gets nothing — see test_config_pin.py). These tests are about the tick's own
+    logic on checkouts the operator has adopted, so that answer is fixed at yes here — the same
+    way the launch tests stub ``configpin.gate``."""
+    monkeypatch.setattr(supervisor, "_report_config_drift", lambda wt, cfg: True)
+
+
 def _fake_cfg(wt: str) -> supervisor.config.Config:
     """A real but empty ``config.Config`` for the reconcile tests (the tick binds it and asks the
     registry for the axis→daemon map, so a bare namespace no longer does). The tick also asks

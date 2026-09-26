@@ -732,7 +732,9 @@ redirect the lookup ([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)).
 
 Day to day:
 
-- The first `fy up` / `fy host restart` in a fresh checkout adopts it, and says so.
+- The first `fy up` / `fy host restart` in a fresh checkout shows its config and asks to adopt
+  it: Enter adopts, anything else stops there. Until it is adopted, your computer runs nothing
+  for that checkout — no proxy, no token services — and `fy doctor` says so.
 - After that, an edit does nothing on your computer until adopted. The supervisor logs the change
   once and notifies you, and `fy doctor` shows a warning row.
 - `fy up`, `fy box up`, `fy host restart` and `fy code` ask before starting anything:

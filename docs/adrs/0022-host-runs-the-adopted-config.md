@@ -67,6 +67,13 @@ and fall back to the tree — the pin unlocked by editing the config it pins.
    back on (an empty pin means `effective()` reads the tree), so the launch gate REFUSES rather
    than warning: `fy config adopt` on a terminal is the one-command fix, and it is in the message.
 
+   **Amended (2026-09).** "Nothing adopted" — never adopted, declined, a lost pin, an unreadable
+   state dir — no longer reads the tree anywhere: `effective()` is an EMPTY config, and the
+   supervisor runs nothing for that checkout (a log line and the `adopted config` doctor row say
+   so). First sight offers **adopt** or **quit** only; there is no "ignore" when there is nothing
+   adopted to keep running. With that, a lost pin costs a prompt rather than a silent adopt, so the
+   read of the previous store location is gone.
+
    A first adoption is also **measured against main**. On its own axis there is nothing to diff, so
    the report was a digest and a line count — which is not a review, on the one adoption that most
    needs one. But a worktree is a branch off main, and main is normally adopted already, so the

@@ -28,6 +28,18 @@ from foldyard import devmode, stack, supervisor
 
 pytestmark = pytest.mark.usefixtures("full_config_bound")
 
+# Captured at import, before the autouse stub below replaces it for every test.
+_REAL_REPORT_CONFIG_DRIFT = supervisor._report_config_drift
+
+
+@pytest.fixture(autouse=True)
+def every_checkout_adopted(monkeypatch):
+    """The tick reconciles only ADOPTED checkouts (``_report_config_drift`` answers that, and an
+    unadopted one gets nothing — see test_config_pin.py). These tests are about the tick's own
+    logic on checkouts the operator has adopted, so that answer is fixed at yes here — the same
+    way the launch tests stub ``configpin.gate``."""
+    monkeypatch.setattr(supervisor, "_report_config_drift", lambda wt, cfg: True)
+
 
 @pytest.fixture
 def recorded_stack_reconcile(monkeypatch):
@@ -177,6 +189,19 @@ def test_tick_with_nothing_up_serves_main_daemons_but_writes_no_mirror(tick_worl
 
     assert "gcp-minter" in tick_world["launched"]  # main fallback keeps the daemons alive
     assert not tick_world["state"]["mirror"].exists()  # …but no checkout is dirtied
+
+
+def test_tick_runs_nothing_for_a_checkout_nobody_adopted(tick_world, monkeypatch):
+    # The REAL adoption check, not this module's stub: with nothing adopted the host runs no
+    # daemon for the checkout at all — the posture asks for one, the tree declares it, and still
+    # nothing starts until the operator adopts.
+    monkeypatch.setattr(supervisor, "_report_config_drift", _REAL_REPORT_CONFIG_DRIFT)
+    devmode.set_mode({"gcp": "sa"})
+    tick_world["up"] = []
+
+    supervisor.reconcile_once({}, {})
+
+    assert tick_world["launched"] == []
 
 
 def test_tick_expires_settles_and_drops_the_lapsed_rungs_daemon(tick_world):
