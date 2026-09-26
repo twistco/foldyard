@@ -213,11 +213,18 @@ host's reading of it decides where credentials get injected and what egress goes
 supervisor therefore reconciles from the copy an operator ADOPTED (`configpin`, ADR-0022), and a
 tree edit is inert until adopted. Two rules follow when you touch this area:
 
-- **Host-side config reads go through `devmode.worktree_config()`** (which returns the adopted
-  toml), not `config.resolve(repo=…)` / the ambient parse. Adding a new host-side reader that
-  resolves the tree directly re-opens the channel for every field at once — which is exactly how
-  `[proxy] passthrough` and `[[inject]].host` stayed live after four rounds of per-field fixes
+- **Host-side config reads go through `devmode.worktree_config()`** (a named worktree's adopted
+  toml) **or the ambient `config.X()` readers**, whose parse on the host IS the adopted snapshot
+  (`config._host_toml`; `{}` when nothing is adopted, and `machine.ensure` refuses then — an empty
+  `[machine]` is an unwalled VM). Never `config.resolve(repo=…)` / `config._tree_toml` / a direct
+  `tomllib` read of a checkout file for anything with a host consequence: that re-opens the
+  channel for every field at once — which is exactly how `[proxy] passthrough` and
+  `[[inject]].host` stayed live after four rounds of per-field fixes
   ([ADR-0022](./docs/adrs/0022-host-runs-the-adopted-config.md) — the channel, not the field).
+  The launch gate runs first (`preflight.check_or_abort`) and re-runs the command after an
+  adoption, since import-time constants (`machine.MACHINE`…) read the config before it. In the
+  suite, conftest's `ambient_reads_the_tree` points the seam at the tree (what the tests were
+  written against); `tests/test_ambient_adopted.py` runs the real host read.
 - **Reporting is part of the fix.** Pinning makes an edit silent by construction, so anything that
   ignores repo config must SAY so — the tick's one-per-change log line + edge notification and the
   `adopted config` doctor row exist so "my config change did nothing" is never a mystery.

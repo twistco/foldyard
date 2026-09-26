@@ -201,6 +201,16 @@ def test_offset_precedence_env_then_pin_then_cksum(fake_repo, monkeypatch):
     assert stack._offset("feat") == 7  # explicit env still wins over the pin
 
 
+@pytest.mark.parametrize("pin", ["0", "-3", "90", "5000", "true", '"2"'])
+def test_an_offset_pin_outside_the_worktree_band_is_ignored(fake_repo, monkeypatch, pin):
+    # 0 is main's own ports; past 89 walks into the next port band — another worktree's (or
+    # another project's) host ports, daemon listeners included. Out of range ⇒ the cksum default.
+    monkeypatch.delenv("WT_OFFSET", raising=False)
+    (fake_repo / "foldyard.local.toml").write_text(f"[worktree-offsets]\nfeat = {pin}\n")
+    assert stack._pinned_offset("feat") is None
+    assert 1 <= stack._offset("feat") <= 89
+
+
 def test_shellenv_worktree_inferred_from_cwd(fake_repo, capsys, monkeypatch):
     # No WORKTREE env, but cwd is inside a sibling worktree → infer its name (so `cd`-ing into a
     # worktree means its verbs Just Work without the WORKTREE= prefix).

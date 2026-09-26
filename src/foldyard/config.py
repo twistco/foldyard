@@ -230,10 +230,7 @@ def resolve(worktree: str | None = None, repo: Path | None = None) -> Config:
     on another branch may declare different tables), and ``worktree`` to key its posture state."""
     if repo is not None:
         root = Path(repo).expanduser().resolve()
-        toml = merge_config(
-            _read_toml(root / "foldyard.toml"), _read_toml(root / "foldyard.local.toml")
-        )
-        return Config(repo_root=root, worktree=worktree or "", toml=toml)
+        return Config(repo_root=root, worktree=worktree or "", toml=_tree_toml(root))
     return Config(
         repo_root=_repo_root_ambient(),
         worktree=active_worktree() if worktree is None else worktree,
@@ -442,18 +439,45 @@ def _read_toml(path: Path) -> dict:
         return {}
 
 
-@lru_cache(maxsize=1)
-def _toml_ambient() -> dict:
-    """Parse ``<repo>/foldyard.toml``, then deep-merge ``<repo>/foldyard.local.toml`` (gitignored,
-    per-developer) OVER it — so personal posture (each dev's ``[claude]``/``[codex]`` ``keyless``,
-    a private ``[[inject]]``, …) stays OUT of the shared, committed file and never imposes a
-    credential prompt/warning on colleagues who don't use it — and drop what the merge
-    ``disabled``s (:func:`merge_config`), the other direction of the same idea. Best-effort: a
-    missing or malformed file contributes ``{}``; env vars still win downstream over both."""
-    root = _repo_root_ambient()
+def _tree_toml(root: Path) -> dict:
+    """The checkout's WORKING-TREE config: ``<root>/foldyard.toml``, then ``foldyard.local.toml``
+    (gitignored, per-developer) deep-merged OVER it — so personal posture (each dev's
+    ``[claude]``/``[codex]`` ``keyless``, a private ``[[inject]]``, …) stays OUT of the shared,
+    committed file and never imposes a credential prompt/warning on colleagues who don't use it —
+    minus what the merge ``disabled``s (:func:`merge_config`). Best-effort: a missing or malformed
+    file contributes ``{}``; env vars still win downstream over both."""
     return merge_config(
         _read_toml(root / "foldyard.toml"), _read_toml(root / "foldyard.local.toml")
     )
+
+
+def _host_toml(root: Path) -> dict | None:
+    """What the HOST runs for the checkout at ``root``: its ADOPTED snapshot (:mod:`configpin`,
+    keyed by the checkout's path), or ``None`` when nothing usable is adopted. Never the tree."""
+    from . import configpin  # lazy: configpin imports config
+
+    return configpin.adopted_toml(root)
+
+
+@lru_cache(maxsize=1)
+def _toml_ambient() -> dict:
+    """The AMBIENT config (the env/CWD-resolved checkout, nothing bound). In the box, the working
+    tree (:func:`_tree_toml`). On the host, the ADOPTED snapshot — ``{}`` when nothing is adopted —
+    because the tree is on the mount and every ambient read here has a host consequence: which VM
+    and how it is walled, where state and secrets live, what ``verify`` exempts. Resolving each
+    such field through the pin one at a time is how several stayed live (ADR-0022: the channel,
+    not the field); this is the channel."""
+    root = _repo_root_ambient()
+    if in_box():
+        return _tree_toml(root)
+    return _host_toml(root) or {}
+
+
+def ambient_adopted() -> bool:
+    """Is the ambient checkout's config one the operator adopted? Always True in the box (there is
+    nothing to adopt there). False means the host is reading an empty config — fine for a report,
+    never a basis to provision anything (:func:`foldyard.machine.ensure` refuses)."""
+    return in_box() or _host_toml(_repo_root_ambient()) is not None
 
 
 def _toml() -> dict:

@@ -72,7 +72,9 @@ and fall back to the tree — the pin unlocked by editing the config it pins.
    supervisor runs nothing for that checkout (a log line and the `adopted config` doctor row say
    so). First sight offers **adopt** or **quit** only; there is no "ignore" when there is nothing
    adopted to keep running. With that, a lost pin costs a prompt rather than a silent adopt, so the
-   read of the previous store location is gone.
+   read of the previous store location is gone. The AMBIENT config — every `config.X()` read
+   outside a bound worktree config, `[machine]` included — is the adopted snapshot on the host
+   too, and the launch gate runs before anything else and re-runs the command after an adoption.
 
    A first adoption is also **measured against main**. On its own axis there is nothing to diff, so
    the report was a digest and a line count — which is not a review, on the one adoption that most

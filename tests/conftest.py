@@ -184,6 +184,18 @@ def isolated_config_pin(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def ambient_reads_the_tree(monkeypatch):
+    """On the host the AMBIENT config is the adopted snapshot (``config._host_toml``), and a test
+    starts with nothing adopted — so without this every ambient read in the suite would be empty.
+    The suite was written against the working tree, so that is what the seam returns here (as if
+    each checkout had adopted exactly its tree). ``tests/test_ambient_adopted.py`` runs the real
+    host read."""
+    from foldyard import config
+
+    monkeypatch.setattr(config, "_host_toml", config._tree_toml)
+
+
+@pytest.fixture(autouse=True)
 def isolated_worktree_registry(tmp_path, monkeypatch):
     """Point the host's worktree registry at a per-test dir: no test reads or writes the real
     ``~/.foldyard/worktrees/``, and every test starts with NO worktree registered. A test that

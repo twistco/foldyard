@@ -169,6 +169,17 @@ def merged_toml(files: dict[str, bytes | None]) -> dict:
     return config.merge_config(_parse(files[PINNED_FILES[0]]), _parse(files[PINNED_FILES[1]]))
 
 
+def adopted_toml(root: Path) -> dict | None:
+    """The resolved ADOPTED config of the checkout at ``root``, or ``None`` when nothing usable is
+    adopted (never adopted, an interrupted adoption, an unreadable store). What the host's ambient
+    config read returns (``config._host_toml``) — so it must not itself read the ambient config."""
+    try:
+        selected = current_dir(config.Config(repo_root=root, worktree="", toml={}))
+        return merged_toml(_read_files(selected)) if selected is not None else None
+    except (OSError, ValueError):  # pragma: no cover — unreadable state dir
+        return None
+
+
 @dataclass(frozen=True)
 class Drift:
     """One checkout's working tree vs the copy the host adopted."""
@@ -869,6 +880,25 @@ def resolve(
     return "ignored"
 
 
+# Set on the process a gate re-runs after an adoption (see :func:`_rerun_with_adopted_config`).
+RERUN_ENV = "FOLDYARD_ADOPTION_RERUN"
+
+
+def _rerun_with_adopted_config(verb: str, rerun: bool) -> None:
+    """After an adoption at the gate, start ``verb`` again in a fresh process. The ambient config
+    on the host IS the adoption, but this process read it before the operator adopted: caches,
+    and constants bound at import (``machine.MACHINE``/``BACKEND``, ``devmode.AXES``…), all hold
+    the pre-adoption config. Clearing caches can't reach the constants; a fresh process does. The
+    re-run's own gate finds nothing to do, and ``rerun`` stops it re-running again regardless."""
+    config.clear_caches()
+    if rerun:
+        return
+    print(f"▶ {verb}: continuing with the adopted config…", file=sys.stderr, flush=True)
+    sys.stdout.flush()
+    os.environ[RERUN_ENV] = "1"
+    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+
+
 def gate(verb: str) -> str:
     """The launch-path gate: resolve the ACTIVE checkout's config drift before ``verb`` brings any
     host daemon up. Called by ``supervisor.ensure_background`` (so `fy up` / `fy box up` / `fy
@@ -883,6 +913,7 @@ def gate(verb: str) -> str:
     message."""
     if config.in_box():
         return "clean"
+    rerun = os.environ.pop(RERUN_ENV, None) is not None  # consumed: never inherited by children
     try:
         from . import devmode, worktree_registry
 
@@ -914,6 +945,8 @@ def gate(verb: str) -> str:
                 "  When you're ready: `fy config diff`, then `fy config adopt` — or retry and "
                 "adopt at the prompt."
             )
+        if status in ("pinned", "adopted"):
+            _rerun_with_adopted_config(verb, rerun)
         return status
     except SystemExit:
         raise

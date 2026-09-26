@@ -104,16 +104,17 @@ def _pinned_offset(name: str) -> int | None:
     ``foldyard.local.toml`` (``[worktree-offsets]``). Read from ``main_repo()`` (not cwd) so
     it's identical no matter where ``fy`` runs — the same robustness the cksum default has.
     Lets a worktree sit on a fixed SMALL offset so its app lands on a known host port (e.g. one a
-    third-party service's redirect/callback-URL allowlist already accepts), not the hashed one."""
-    try:
-        import tomllib
+    third-party service's redirect/callback-URL allowlist already accepts), not the hashed one.
 
-        data = tomllib.loads((main_repo() / "foldyard.local.toml").read_text())
-    except (OSError, ValueError, ModuleNotFoundError):
-        return None
+    On your computer it comes from main's ADOPTED config, like every other host read of repo
+    config (``config._host_toml``) — the file is on the mount. And only a value inside the
+    worktree band (1..89) counts: 0 is main's own ports, and past 89 is the next band over."""
+    main = main_repo()
+    data = config._tree_toml(main) if config.in_box() else (config._host_toml(main) or {})
     table = data.get("worktree-offsets")
     val = table.get(name) if isinstance(table, dict) else None
-    return val if isinstance(val, int) else None
+    ok = isinstance(val, int) and not isinstance(val, bool) and 1 <= val <= 89
+    return val if ok else None
 
 
 def _offset(name: str) -> int:

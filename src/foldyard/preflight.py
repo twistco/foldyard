@@ -185,9 +185,16 @@ def issues() -> list[str]:
 
 def check_or_abort(context: str) -> None:
     """Print any blocking issues and ``raise SystemExit(1)``; a no-op in the box or when all clear.
-    ``context`` names the action (e.g. ``"fy up"``) for the header."""
+    ``context`` names the action (e.g. ``"fy up"``) for the header.
+
+    The config-adoption gate runs FIRST — before these checks, before the machine — because on
+    your computer every config read below comes from the adopted copy (:mod:`foldyard.configpin`),
+    and an adoption made at the prompt re-runs the command so all of it sees the new one."""
     if config.in_box():
         return
+    from . import configpin
+
+    configpin.gate(context)
     problems = issues()
     if not problems:
         return

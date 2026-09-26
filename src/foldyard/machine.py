@@ -439,6 +439,13 @@ def ensure(main: Path, wt_root: Path) -> None:
     (:func:`machine_backend.default_unavailable_block`). Progress → stderr."""
     if config.in_box():
         return
+    if not config.ambient_adopted():
+        # The host reads the ADOPTED config, and with nothing adopted that's an empty one — whose
+        # `[machine].firewall` is off. Never provision (or restart) the VM from it.
+        _err("✗ nothing adopted for this checkout, so there is no reviewed [machine] config to")
+        _err("  provision the VM from. `fy up` asks to adopt it; or `fy config diff`, then")
+        _err("  `fy config adopt`.")
+        raise SystemExit(1)
     if not BACKEND.available():
         if not config.machine_backend_explicit():
             _err(default_unavailable_block(BACKEND))

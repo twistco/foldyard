@@ -10,7 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from foldyard import preflight
+from foldyard import configpin, preflight
+
+
+@pytest.fixture(autouse=True)
+def adoption_settled(monkeypatch):
+    """``check_or_abort`` runs the config-adoption gate first; these tests are about the
+    prerequisite checks after it, so the gate answers "clean". Its own behaviour, and that it runs
+    first, are tested in test_config_pin.py / test_ambient_adopted.py."""
+    monkeypatch.setattr(configpin, "gate", lambda _verb: "clean")
 
 
 class _FakeBackend:
