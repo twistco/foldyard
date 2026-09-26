@@ -119,10 +119,16 @@ def _fresh_registry_cache():
 
 
 @pytest.fixture(autouse=True)
-def isolated_port_registry(tmp_path, monkeypatch):
+def isolated_port_registry(tmp_path, monkeypatch, request):
     """Point the cross-project port-band registry (ports.py) at a per-test file, so no test ever
     reads or writes the real ~/.foldyard/ports.json — and every test's project deterministically
-    allocates the FIRST band (proxy base 41000, minter base 41100) in its own empty registry."""
+    allocates the FIRST band (proxy base 41000, minter base 41100) in its own empty registry.
+
+    NOT for the live e2e modules: their CLI subprocesses inherit this env, so the example project
+    was handed the first band — and on a host with real projects that band (its pinned VM ssh
+    port included) belongs to one of them; a restarted example VM then never came up."""
+    if _is_e2e(request):
+        return
     monkeypatch.setenv("FY_PORTS_FILE", str(tmp_path / "fy-ports.json"))
 
 
@@ -196,10 +202,15 @@ def ambient_reads_the_tree(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def isolated_worktree_registry(tmp_path, monkeypatch):
+def isolated_worktree_registry(tmp_path, monkeypatch, request):
     """Point the host's worktree registry at a per-test dir: no test reads or writes the real
     ``~/.foldyard/worktrees/``, and every test starts with NO worktree registered. A test that
-    wants the host to see a worktree registers it (:func:`register_worktree`)."""
+    wants the host to see a worktree registers it (:func:`register_worktree`).
+
+    NOT for the live e2e modules: their CLI subprocesses inherit this env, and a per-TEST dir
+    loses what `fy worktree add` registered in one test before the next test's `fy up`."""
+    if _is_e2e(request):
+        return
     monkeypatch.setenv("FOLDYARD_WORKTREE_REGISTRY", str(tmp_path / "worktree-registry"))
 
 
