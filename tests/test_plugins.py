@@ -2427,10 +2427,14 @@ def test_codex_keyless_at_rest_is_held_by_the_proxy(monkeypatch):
 
     # chatgpt: the dummy is the access token in the box's auth.json, scoped to Codex's API path.
     monkeypatch.setattr(config, "codex_keyless", lambda: "chatgpt")
-    [held] = p.held_credentials({"codex": "off"})
+    held_all = p.held_credentials({"codex": "off"})
     token = json.loads(keyless.dummy_codex_auth_json("acct"))["tokens"]["access_token"]
-    assert held.host == keyless.CODEX_CHATGPT_HOST and held.dummy == f"Bearer {token}"
-    assert held.path_prefix == keyless.CODEX_CHATGPT_PATH_PREFIX
+    assert {(h.host, h.dummy) for h in held_all} == {
+        (keyless.CODEX_CHATGPT_HOST, f"Bearer {token}")
+    }
+    # Every path the rule injects on when on — else the discovery call goes upstream at rest and
+    # codex dies on OpenAI's 401 without ever showing the fix.
+    assert [h.path_prefix for h in held_all] == list(keyless.CODEX_CHATGPT_PATH_PREFIXES)
 
     monkeypatch.setattr(config, "codex_keyless", lambda: "")
     assert p.held_credentials({"codex": "off"}) == []
@@ -2451,6 +2455,21 @@ def test_held_credentials_reach_the_proxy_as_live_data(monkeypatch):
     on = reg.desired_daemons({"claude": "on"})["egress-proxy"]
     assert on["live"]["data"]["held"] == []
     assert (off["cmd"], off["env"]) == (on["cmd"], on["env"])
+
+
+def test_proxy_label_names_each_injector_once(monkeypatch, tmp_path):
+    # Codex-ChatGPT contributes one rule per path; the daemon label names the injector, not paths.
+    mac_auth = tmp_path / "auth.json"
+    mac_auth.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"account_id": "acc-42"}}))
+    monkeypatch.setattr(config, "codex_enabled", lambda: True)
+    monkeypatch.setattr(config, "codex_keyless", lambda: "chatgpt")
+    monkeypatch.setattr(keyless, "codex_auth_json_path", lambda: mac_auth)
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)
+    monkeypatch.setattr(config, "proxy_passthrough", lambda: [])
+    monkeypatch.setattr(config, "proxy_default_deny", lambda: False)
+    reg = Registry([codex.CodexPlugin(), proxy.ProxyPlugin()])
+    spec = reg.desired_daemons({"codex": "on"})["egress-proxy"]
+    assert spec["label"] == "egress proxy (Codex keyless proxy (ChatGPT subscription))"
 
 
 def test_network_panel_names_a_held_request_and_its_fix(monkeypatch, tmp_path):
@@ -2602,8 +2621,16 @@ def test_codex_keyless_chatgpt_rule_and_dummy_auth_json(monkeypatch, tmp_path):
     p = codex.CodexPlugin()
 
     assert p.switches()[0].name == "codex"
-    rule = p.proxy_rules({"codex": "on"})[0]
-    assert rule.host == "chatgpt.com" and rule.path_prefix == "/backend-api/codex"
+    rules = p.proxy_rules({"codex": "on"})
+    # Codex's API path + the startup "workspace routing discovery" call (codex ≥ 0.157), which 401s
+    # on the dummy and aborts the session before any model call — nothing else on chatgpt.com.
+    assert [r.path_prefix for r in rules] == [
+        "/backend-api/codex",
+        "/backend-api/wham/accounts/check",
+    ]
+    assert {(r.minter, r.label) for r in rules} == {(rules[0].minter, rules[0].label)}
+    rule = rules[0]
+    assert rule.host == "chatgpt.com"
     assert rule.header == "Authorization" and rule.value_prefix == "Bearer "
     assert rule.replay_on_401 is True and rule.requires == ()
     assert "foldyard.plugins.codex_chatgpt_token" in rule.minter and str(mac_auth) in rule.minter

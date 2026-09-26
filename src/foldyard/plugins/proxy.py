@@ -409,7 +409,8 @@ class ProxyPlugin(Plugin):
             else [],
         }
         if rules:
-            label = "egress proxy (" + ", ".join(r.label or r.host for r in rules) + ")"
+            names = dict.fromkeys(r.label or r.host for r in rules)  # a rule per path, one name
+            label = "egress proxy (" + ", ".join(names) + ")"
         else:
             label = "egress proxy (decrypt + log; trusted hosts tunnelled)"
         requires = sorted({req for r in rules for req in r.requires})

@@ -209,7 +209,7 @@ never typed in the box, never in the repo, never in scrollback.
 | `[claude] api-key` | `ANTHROPIC_API_KEY` env | `x-api-key` | `api.anthropic.com` | `host.env` |
 | `[claude] oauth` | `CLAUDE_CODE_OAUTH_TOKEN` env | `authorization: Bearer …` | `api.anthropic.com` | `host.env` |
 | `[codex] api-key` | `OPENAI_API_KEY` env | `Authorization: Bearer …` | `api.openai.com` | `host.env` |
-| `[codex] chatgpt` | a dummy `~/.codex/auth.json` | `Authorization: Bearer …` | `chatgpt.com` (codex API path) | your real `auth.json` on your computer, refreshed by the token service |
+| `[codex] chatgpt` | a dummy `~/.codex/auth.json` | `Authorization: Bearer …` | `chatgpt.com` (codex's API + workspace-discovery paths) | your real `auth.json` on your computer, refreshed by the token service |
 
 With the switch `off`, the box holds only the dummy and can't reach the provider at all. The
 proxy doesn't forward the dummy either: it answers the request itself with a 401 whose message

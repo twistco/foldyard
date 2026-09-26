@@ -86,9 +86,11 @@ CODEX_KEYLESS: dict[str, dict[str, str]] = {
 # ~/.codex/auth.json, not OPENAI_API_KEY), so it's structurally different from the api-key modes
 # above and handled directly in the codex plugin. The proxy injects Authorization on this host+path;
 # the account_id is baked into the box's dummy auth.json (an identifier, not a secret), and the
-# Bearer access token is minted+refreshed host-side from the host's real auth.json.
+# Bearer access token is minted+refreshed host-side from the host's real auth.json. The paths are
+# the API and the startup "workspace routing discovery" (codex ≥ 0.157), which aborts the session on
+# a 401 — each named exactly, so the session reaches nothing else on chatgpt.com.
 CODEX_CHATGPT_HOST = "chatgpt.com"
-CODEX_CHATGPT_PATH_PREFIX = "/backend-api/codex"
+CODEX_CHATGPT_PATH_PREFIXES = ("/backend-api/codex", "/backend-api/wham/accounts/check")
 _FAR_FUTURE_EXP = 4102444800  # 2100-01-01 — codex refreshes at exp-5min, so this never triggers
 
 
