@@ -124,7 +124,7 @@ def test_branches_returns_list():
 # ── devmode: the "dev box env out of date" hint ───────────────────────────────────────
 
 
-def _hint_for(monkeypatch, box_env, mode, *, claude_keyless=None, codex_keyless=None):
+def _hint_for(monkeypatch, box_env, *, claude_keyless=None, codex_keyless=None):
     """Drive _box_env_hint with a stubbed engine-inspect (box env) + keyless config."""
     import json as _json
 
@@ -136,31 +136,60 @@ def _hint_for(monkeypatch, box_env, mode, *, claude_keyless=None, codex_keyless=
     monkeypatch.setattr(devmode.config, "engine", lambda: "docker")
     monkeypatch.setattr(devmode.config, "claude_keyless", lambda: claude_keyless)
     monkeypatch.setattr(devmode.config, "codex_keyless", lambda: codex_keyless)
-    full = dict.fromkeys(devmode.axes(), "off")
-    full.update(mode)
-    return devmode._box_env_hint(full, project="tangible-podman")
+    return devmode._box_env_hint(project="tangible-podman")
 
 
 def test_box_env_hint_ignores_always_baked_gcp_and_proxy(monkeypatch):
     # gcp=off (the default) but the box ALWAYS bakes GCE_METADATA_HOST + HTTPS_PROXY — this used to
     # mis-fire "gcp metadata out of date" forever. They no longer track the mode, so: no hint.
     env = {"GCE_METADATA_HOST": "metadata-emulator:80", "HTTPS_PROXY": "http://h:8088"}
-    assert _hint_for(monkeypatch, env, {}) is None
+    assert _hint_for(monkeypatch, env) is None
 
 
 def test_box_env_hint_flags_stale_keyless_then_clears(monkeypatch):
-    # claude keyless on but the box hasn't baked its dummy token yet → stale until `fy box up`.
+    # claude keyless configured but the box hasn't baked its dummy token yet → stale until `fy box up`.
     base = {"GCE_METADATA_HOST": "metadata-emulator:80", "HTTPS_PROXY": "http://h:8088"}
-    hint = _hint_for(monkeypatch, base, {"claude": "on"}, claude_keyless="oauth")
+    hint = _hint_for(monkeypatch, base, claude_keyless="oauth")
     assert hint and "claude keyless" in hint
     baked = {**base, "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-dummy"}
-    assert _hint_for(monkeypatch, baked, {"claude": "on"}, claude_keyless="oauth") is None
+    assert _hint_for(monkeypatch, baked, claude_keyless="oauth") is None
+
+
+def test_box_env_hint_is_silent_for_the_dummy_at_rest(monkeypatch):
+    # The dummy is baked whenever keyless is configured, whatever the mode — so claude=off with a
+    # dummy in the box is the box being right. This used to say "out of date — fy box up", which
+    # changed nothing and pointed away from the real fix (`fy mode claude=on`), 2026-09-26.
+    env = {"HTTPS_PROXY": "http://h:8088", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-dummy"}
+    assert _hint_for(monkeypatch, env, claude_keyless="oauth") is None
+
+
+def test_box_env_hint_flags_a_missing_dummy(monkeypatch):
+    # Keyless configured after the box was created: no dummy, so the client never sends a header
+    # the proxy can rewrite — only a new box fixes that, whatever the mode.
+    env = {"HTTPS_PROXY": "http://h:8088"}
+    hint = _hint_for(monkeypatch, env, claude_keyless="oauth")
+    assert hint and "claude keyless" in hint
+
+
+def test_box_env_hint_flags_a_dummy_keyless_no_longer_wants(monkeypatch):
+    # The other way: keyless dropped (or switched kind) while the box keeps the old dummy, which
+    # would shadow a real in-box login.
+    env = {"HTTPS_PROXY": "http://h:8088", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-dummy"}
+    assert _hint_for(monkeypatch, env, claude_keyless=None)
+    assert _hint_for(monkeypatch, env, claude_keyless="api-key")
+    codex = {"HTTPS_PROXY": "http://h:8088", "OPENAI_API_KEY": "sk-dummy"}
+    assert "codex keyless" in (_hint_for(monkeypatch, codex, codex_keyless=None) or "")
+
+
+def test_box_env_hint_ignores_an_unproxied_box(monkeypatch):
+    # The dummy is baked only for a box routed through the proxy.
+    assert _hint_for(monkeypatch, {}, claude_keyless="oauth") is None
 
 
 def test_box_env_hint_skips_file_based_codex_chatgpt(monkeypatch):
     # codex `chatgpt` keyless lives in ~/.codex/auth.json (a file), not Config.Env — so it can't be
-    # detected here and must never be flagged (no false alarm), even with codex on and no env var.
-    assert _hint_for(monkeypatch, {}, {"codex": "on"}, codex_keyless="chatgpt") is None
+    # detected here and must never be flagged (no false alarm), even with no env var.
+    assert _hint_for(monkeypatch, {"HTTPS_PROXY": "http://h:8088"}, codex_keyless="chatgpt") is None
 
 
 def _mac_doctor(monkeypatch, account_out, recorder=None):

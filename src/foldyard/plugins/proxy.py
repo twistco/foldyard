@@ -25,6 +25,7 @@ import shlex
 import shutil
 import sys
 from collections.abc import Iterable
+from dataclasses import asdict
 from pathlib import Path
 
 from .. import config
@@ -192,6 +193,13 @@ def _net_leaf(e: dict, escape) -> str:
         # Refused by the default-deny egress wall — no upstream contacted. Red so it stands out as
         # the row you act on (press the allow key in the TUI to let the host through).
         return f"[dim]{ts}[/dim] [red]⛔ refused by the allowlist[/red]"
+    if e.get("held"):
+        # The box sent its keyless dummy with the axis at rest: the proxy answered, nothing left.
+        axis = escape(str(e["held"]))
+        return (
+            f"[dim]{ts}[/dim] [yellow]⏸ credential off — the proxy answered; "
+            f"`fy mode {axis}=on`[/yellow]"
+        )
     if e.get("would_block"):
         # The wall is observing (`fy allow enforce off`, or a learn window): this host went through,
         # but enforcing would refuse it — what `fy allow learn` offers. The UA names the tool.
@@ -238,9 +246,11 @@ def _network_panel_tree() -> PanelTree:
         inj = sum(bool(e.get("injected")) for e in evs)
         blocked = sum(bool(e.get("blocked")) for e in evs)
         unlisted = sum(bool(e.get("would_block")) for e in evs)
-        # A blocked request synthesises a 403, so it's already in `errs` — subtract it so the
-        # tallies don't double-count the same row (blocked is the more specific, actionable label).
-        errs = sum(1 for e in evs if e.get("status", 0) >= 400) - blocked
+        held = sum(bool(e.get("held")) for e in evs)
+        # A blocked (403) or held (401) request is the proxy's own answer, so it's already in
+        # `errs` — subtract it so the tallies don't double-count the same row (the specific,
+        # actionable label wins).
+        errs = sum(1 for e in evs if e.get("status", 0) >= 400) - blocked - held
         injected += inj
         header = f"[bold]{escape(host)}[/bold]  [dim]{len(evs)} req[/dim]"
         if inj:
@@ -249,6 +259,8 @@ def _network_panel_tree() -> PanelTree:
             header += f" · [red]⛔ {blocked} blocked[/red]"
         if unlisted:
             header += " · [yellow]◌ not granted[/yellow]"
+        if held:
+            header += f" · [yellow]⏸ {held} held[/yellow]"
         if errs:
             header += f" · [red]{errs} err[/red]"
         children = [_net_leaf(e, escape) for e in reversed(evs)]  # newest first within the host
@@ -391,6 +403,10 @@ class ProxyPlugin(Plugin):
             # from env_defaults): the running proxy never restarts to inherit the supervisor's env,
             # so it gets them here. After exports and host.env, as the supervisor's setdefault.
             "defaults": self._rule_defaults(mode, rules),
+            # Keyless dummies at rest: the addon answers them with the fix instead of forwarding.
+            "held": [asdict(h) for h in self._registry.held_credentials(mode)]
+            if self._registry
+            else [],
         }
         if rules:
             label = "egress proxy (" + ", ".join(r.label or r.host for r in rules) + ")"

@@ -1586,8 +1586,8 @@ def _countdown(iso: str) -> str:
     return f"{left // 60}m{left % 60:02d}s" if left > 0 else "EXPIRED"
 
 
-def _box_env_hint(mode: dict, project: str | None = None) -> str | None:
-    """Does the running dev box's env match the mode? (best effort, via the engine)"""
+def _box_env_hint(project: str | None = None) -> str | None:
+    """Does the running dev box's create-time env match the config? (best effort, via the engine)"""
     box = (project or os.environ.get("PODMAN_PROJECT") or config.project_prefix()) + "-devbox"
     try:
         out = subprocess.run(
@@ -1608,19 +1608,24 @@ def _box_env_hint(mode: dict, project: str | None = None) -> str | None:
     # entirely host-side (the minter up/down, the proxy's host-side rules), reconciled live by
     # `fy host`, so changing gcp/github/capture needs NO `fy box up`. (Checking them here mis-fired
     # "gcp metadata out of date" forever, since gcp defaults to off but the host is always baked.)
-    # What DOES still need a box rebuild is a keyless injector toggling: it bakes (or drops) a DUMMY
-    # credential the client must emit for the proxy to rewrite. Detect that via the env var the
-    # keyless KIND bakes — claude (oauth/api-key) and codex api-key. Codex `chatgpt` is file-based
-    # (~/.codex/auth.json, not Config.Env), so it's intentionally not checked here (no false alarm).
+    # The keyless DUMMY is the same story: baked whenever keyless is CONFIGURED on a proxied box,
+    # whatever the rung (so `fy mode claude=on` lands with no new box). Keying this check to the
+    # rung mis-fired on every at-rest box, pointing at `fy box up` when the fix was the mode
+    # (2026-09-26). What does need a new box is the CONFIG moving under it — keyless added, dropped
+    # or switched kind — so compare the dummies present with the ones the config implies. Codex
+    # `chatgpt` is file-based (~/.codex/auth.json, not Config.Env), so it expects no env dummy.
     from . import keyless
 
+    proxied = bool(env.get("HTTPS_PROXY"))
     mismatches = []
-    for label, kind, taxonomy, axis in (
-        ("claude keyless", config.claude_keyless(), keyless.CLAUDE_KEYLESS, "claude"),
-        ("codex keyless", config.codex_keyless(), keyless.CODEX_KEYLESS, "codex"),
+    for label, kind, taxonomy in (
+        ("claude keyless", config.claude_keyless(), keyless.CLAUDE_KEYLESS),
+        ("codex keyless", config.codex_keyless(), keyless.CODEX_KEYLESS),
     ):
-        spec = taxonomy.get(kind) if kind else None
-        if spec and (mode.get(axis, "off") != "off") != bool(env.get(spec["env"])):
+        spec = taxonomy.get(kind) if kind and proxied else None
+        want = {spec["env"]: spec["dummy"]} if spec else {}
+        have = {s["env"]: s["dummy"] for s in taxonomy.values() if env.get(s["env"]) == s["dummy"]}
+        if want != have:
             mismatches.append(label)
     if mismatches:
         return f"⚠ dev box env out of date ({', '.join(mismatches)}) — apply with: fy box up"
@@ -1691,7 +1696,7 @@ def show() -> int:
     for sev, msg in registry().mode_issues(mode):
         print(f"  {'✗' if sev == 'error' else '⚠'} {msg}")
 
-    hint = _box_env_hint(mode)
+    hint = _box_env_hint()
     if hint:
         print(f"  {hint}")
     if not in_box():

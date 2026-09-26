@@ -37,6 +37,7 @@ the generic uv-only image and on any consumer image whose node came without npm 
 from __future__ import annotations
 
 import base64
+import json
 import shlex
 import sys
 from pathlib import Path
@@ -44,7 +45,7 @@ from pathlib import Path
 from .. import config, keyless
 from ..keyless import CODEX_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CODEX_KEYLESS_HOST as _KEYLESS_HOST
-from . import InjectRule, Plugin, Secret, Switch
+from . import HeldCredential, InjectRule, Plugin, Secret, Switch
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
 
 # Remove a stale npm-managed Codex so the native installer's ~/.local/bin copy wins on PATH (the
@@ -120,6 +121,30 @@ class CodexPlugin(Plugin):
         spec = keyless.inject_spec(_KEYLESS, _KEYLESS_HOST, kind, f"Codex keyless proxy ({kind})")
         rule = _spec_to_rule(spec) if spec else None
         return [rule] if rule else []
+
+    def held_credentials(self, mode: dict) -> list[HeldCredential]:
+        # As claude's: at rest the box's dummy is answered by the proxy, in OpenAI's error shape.
+        # chatgpt's dummy is the access token in the box's auth.json, on Codex's API path only
+        # (chatgpt.com is also the website).
+        kind = config.codex_keyless()
+        if not kind or mode.get("codex", "off") != "off":
+            return []
+        message = keyless.at_rest_message("Codex", "codex")
+        body = json.dumps({"error": {"message": message, "type": "invalid_request_error"}})
+        if kind == "chatgpt":
+            dummy = "Bearer " + keyless.codex_chatgpt_dummy_token()
+            return [
+                HeldCredential(
+                    keyless.CODEX_CHATGPT_HOST,
+                    "Authorization",
+                    dummy,
+                    "codex",
+                    body,
+                    path_prefix=keyless.CODEX_CHATGPT_PATH_PREFIX,
+                )
+            ]
+        held = keyless.held_dummy(_KEYLESS, kind)
+        return [HeldCredential(_KEYLESS_HOST, *held, "codex", body)] if held else []
 
     def secrets(self, mode: dict) -> list[Secret]:
         # As claude's: asked for when the axis goes on. ChatGPT mode has no entry here — its

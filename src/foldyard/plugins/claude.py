@@ -34,12 +34,13 @@ that HOME, ``/home/vscode`` even as root). Stdlib only; loads on the recipe hot 
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 
 from .. import config, keyless
 from ..keyless import CLAUDE_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CLAUDE_KEYLESS_HOST as _KEYLESS_HOST
-from . import InjectRule, Plugin, Secret, Switch
+from . import HeldCredential, InjectRule, Plugin, Secret, Switch
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
 
 # Remove a stale npm/global Claude so the native installer's ~/.local/bin copy wins on PATH (an
@@ -102,6 +103,17 @@ class ClaudePlugin(Plugin):
         spec = keyless.inject_spec(_KEYLESS, _KEYLESS_HOST, kind, f"Claude keyless proxy ({kind})")
         rule = _spec_to_rule(spec) if spec else None
         return [rule] if rule else []
+
+    def held_credentials(self, mode: dict) -> list[HeldCredential]:
+        # At rest the box still sends its dummy (box_args bakes it whenever keyless is configured);
+        # the proxy answers it in Anthropic's error shape, which Claude Code prints as the reason.
+        held = keyless.held_dummy(_KEYLESS, config.claude_keyless() or "")
+        if held is None or mode.get("claude", "off") != "off":
+            return []
+        message = keyless.at_rest_message("Claude", "claude")
+        body = {"type": "error", "error": {"type": "authentication_error", "message": message}}
+        header, dummy = held
+        return [HeldCredential(_KEYLESS_HOST, header, dummy, "claude", json.dumps(body))]
 
     def secrets(self, mode: dict) -> list[Secret]:
         # The moment the axis goes on is when the proxy needs the real credential, so it's asked

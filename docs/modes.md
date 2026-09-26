@@ -169,7 +169,7 @@ and exits non-zero if any disagree:
                 → DEGRADED — … <the fix>
   ✓ stack       overlays: compose.identity.yml, compose.llm.yml
                 → 14 containers match the rendered config
-  ✓ box         dev box env matches the mode
+  ✓ box         dev box env matches the config
                 → current (or box down)
 ```
 
@@ -211,11 +211,14 @@ never typed in the box, never in the repo, never in scrollback.
 | `[codex] api-key` | `OPENAI_API_KEY` env | `Authorization: Bearer …` | `api.openai.com` | `host.env` |
 | `[codex] chatgpt` | a dummy `~/.codex/auth.json` | `Authorization: Bearer …` | `chatgpt.com` (codex API path) | your real `auth.json` on your computer, refreshed by the token service |
 
-With the switch `off`, the box holds only the dummy and can't reach the provider at all.
+With the switch `off`, the box holds only the dummy and can't reach the provider at all. The
+proxy doesn't forward the dummy either: it answers the request itself with a 401 whose message
+names the fix (`fy mode claude=on`, run on your computer), so the agent shows that instead of
+the provider's "invalid token". The Network Log marks those rows as held.
 
-One caveat: turning keyless on or off adds or removes the dummy in the box's environment, which
-takes a `fy box up` to apply. The dashboard tells you when the running box is out of date. No
-other mode change needs a box restart.
+One caveat: adding, removing or changing `keyless` in the config adds or removes the dummy in
+the box's environment, which takes a `fy box up` to apply. The dashboard tells you when the
+running box is out of date. Switching the mode itself never needs a box restart.
 
 ## Per-worktree modes
 

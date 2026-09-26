@@ -2393,6 +2393,82 @@ def test_claude_keyless_api_key_emits_no_value_prefix(monkeypatch):
     assert "value_prefix" not in rule
 
 
+def test_claude_keyless_at_rest_is_held_by_the_proxy(monkeypatch):
+    # Off, the box still sends its dummy (baked whenever keyless is configured). Without this the
+    # proxy forwarded it and the user saw only Anthropic's "401 OAuth access token is invalid".
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
+    p = claude.ClaudePlugin()
+    [held] = p.held_credentials({"claude": "off"})
+    assert held.host == "api.anthropic.com" and held.header == "authorization"
+    assert held.dummy == "Bearer sk-ant-oat-dummy" and held.axis == "claude"
+    body = json.loads(held.body)
+    # Anthropic's own error shape, so Claude Code prints the message as it would its own.
+    assert body["type"] == "error" and body["error"]["type"] == "authentication_error"
+    assert "`fy mode claude=on`" in body["error"]["message"]
+    assert p.held_credentials({"claude": "on"}) == []  # the rule injects instead
+
+    monkeypatch.setattr(config, "claude_keyless", lambda: "api-key")
+    [held] = p.held_credentials({"claude": "off"})
+    assert held.header == "x-api-key" and held.dummy == "sk-ant-dummy"
+
+    monkeypatch.setattr(config, "claude_keyless", lambda: "")
+    assert p.held_credentials({"claude": "off"}) == []  # a bare [claude] logs in for real
+
+
+def test_codex_keyless_at_rest_is_held_by_the_proxy(monkeypatch):
+    monkeypatch.setattr(config, "codex_keyless", lambda: "api-key")
+    p = codex.CodexPlugin()
+    [held] = p.held_credentials({"codex": "off"})
+    assert held.host == "api.openai.com" and held.header == "Authorization"
+    assert held.dummy == "Bearer sk-dummy" and held.axis == "codex"
+    assert "`fy mode codex=on`" in json.loads(held.body)["error"]["message"]  # OpenAI's shape
+    assert p.held_credentials({"codex": "on"}) == []
+
+    # chatgpt: the dummy is the access token in the box's auth.json, scoped to Codex's API path.
+    monkeypatch.setattr(config, "codex_keyless", lambda: "chatgpt")
+    [held] = p.held_credentials({"codex": "off"})
+    token = json.loads(keyless.dummy_codex_auth_json("acct"))["tokens"]["access_token"]
+    assert held.host == keyless.CODEX_CHATGPT_HOST and held.dummy == f"Bearer {token}"
+    assert held.path_prefix == keyless.CODEX_CHATGPT_PATH_PREFIX
+
+    monkeypatch.setattr(config, "codex_keyless", lambda: "")
+    assert p.held_credentials({"codex": "off"}) == []
+
+
+def test_held_credentials_reach_the_proxy_as_live_data(monkeypatch):
+    # Live data, not launch env: a mode flip must never restart the proxy (ADR-0030).
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)
+    monkeypatch.setattr(config, "proxy_passthrough", lambda: [])
+    monkeypatch.setattr(config, "proxy_default_deny", lambda: False)
+    reg = Registry([claude.ClaudePlugin(), proxy.ProxyPlugin()])
+    off = reg.desired_daemons({"claude": "off"})["egress-proxy"]
+    [held] = off["live"]["data"]["held"]
+    assert held["host"] == "api.anthropic.com" and held["dummy"] == "Bearer sk-ant-oat-dummy"
+    assert held["axis"] == "claude" and "body" in held
+    on = reg.desired_daemons({"claude": "on"})["egress-proxy"]
+    assert on["live"]["data"]["held"] == []
+    assert (off["cmd"], off["env"]) == (on["cmd"], on["env"])
+
+
+def test_network_panel_names_a_held_request_and_its_fix(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    row = {
+        "ts": "2026-09-26T10:00:01Z",
+        "method": "POST",
+        "host": "api.anthropic.com",
+        "path": "/v1/messages",
+        "status": 401,
+        "held": "claude",
+    }
+    (tmp_path / "egress.jsonl").write_text(json.dumps(row) + "\n")
+    [group] = proxy._network_panel_tree().groups
+    assert "fy mode claude=on" in group.children[0]
+    assert "held" in group.label and "err" not in group.label  # not tallied as an upstream error
+
+
 def test_a_secret_rotation_changes_nothing_the_supervisor_restarts_for(monkeypatch):
     # A minter used to read its secret from the daemon's environment, frozen at spawn — so a keyless
     # token captured (or rotated) in host.env after launch never reached it (days of "OAuth access
