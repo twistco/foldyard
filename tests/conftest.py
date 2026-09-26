@@ -183,8 +183,12 @@ def isolated_config_pin(tmp_path, monkeypatch):
         lambda cfg: pins / "legacy" / (getattr(cfg, "worktree", "") or "main"),
     )
     supervisor._config_drift_seen.clear()
+    supervisor._held_cursor.clear()
+    supervisor._held_notified.clear()
     yield
     supervisor._config_drift_seen.clear()
+    supervisor._held_cursor.clear()
+    supervisor._held_notified.clear()
 
 
 @pytest.fixture(autouse=True)

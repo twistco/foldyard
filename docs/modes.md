@@ -216,6 +216,18 @@ proxy doesn't forward the dummy either: it answers the request itself with a 401
 names the fix (`fy mode claude=on`, run on your computer), so the agent shows that instead of
 the provider's "invalid token". The Network Log marks those rows as held.
 
+`fy claude` and `fy codex` check first: with the agent's switch off they say so before
+launching and, in a terminal, wait for you to switch it on from your computer (Enter launches
+anyway). That covers starting a session; the proxy's answer covers the rest — a time limit
+running out mid-session, or an agent started some other way.
+
+Codex on a ChatGPT subscription never shows the proxy's message: its startup workspace
+discovery reports any failure as a fixed `workspace routing discovery unauthorized (401)`,
+without the reply's text. While `codex` is off, that error means the switch — the Network
+Log's held row says so. Discovery can also point a workspace at a backend other than
+`chatgpt.com` (the account decides; a personal one stays there); keyless injects only on `chatgpt.com`, so Codex
+can't reach such a backend through the proxy.
+
 One caveat: adding, removing or changing `keyless` in the config adds or removes the dummy in
 the box's environment, which takes a `fy box up` to apply. The dashboard tells you when the
 running box is out of date. Switching the mode itself never needs a box restart.

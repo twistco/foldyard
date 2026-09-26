@@ -32,6 +32,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import subprocess
@@ -630,6 +631,45 @@ def _claude_argv(prompt: str, settings: dict, args: list[str]) -> list[str]:
     return argv + args
 
 
+_POLL_S = 1.0  # how often the launch gate re-reads the mirror while it waits
+
+
+def _mode_of(axis: str) -> str:
+    """This axis's rung as the box sees it (the mirror, lapsed TTLs reading as off)."""
+    from . import devmode
+
+    return devmode.read()["mode"].get(axis, "off")
+
+
+def _await_credential(axis: str, agent: str, keyless_kind: str) -> bool:
+    """Before a keyless agent launches: if its credential mode is off, say so and name the fix —
+    which only the host can apply, so at a terminal WAIT for it (the supervisor refreshes the
+    mirror within a tick), Enter launching anyway. Without a terminal (`fy codex exec …` from a
+    script), warn and carry on. False = the operator cancelled.
+
+    The front door only: a TTL lapsing mid-session, a bare `claude`/`codex`, or an editor's own
+    agent binary never pass here — the proxy answers the dummy for those. No mirror (nothing
+    published yet) is no claim, so no warning."""
+    if not keyless_kind or not config.mirror_file().exists() or _mode_of(axis) != "off":
+        return True
+    _err(f"⏸ {agent}'s credential mode is off, so {agent} can't reach its API from this box.")
+    _err(f"  Switch it on from your computer, not in the box: `fy mode {axis}=on` (or `fy tui`).")
+    if not sys.stdin.isatty():
+        return True
+    _err("  Waiting for it… (Enter launches anyway, Ctrl-C cancels)")
+    try:
+        while _mode_of(axis) == "off":
+            ready, _, _ = select.select([sys.stdin], [], [], _POLL_S)
+            if ready:
+                sys.stdin.readline()
+                return True
+    except KeyboardInterrupt:
+        _err("")
+        return False
+    _err(f"✓ {axis}=on — launching {agent}.")
+    return True
+
+
 def claude(args: list[str] | None = None) -> int:
     """`fy claude` — run Claude Code in the dev box, pre-oriented + skipping permission prompts
     . Refuses outside the box; needs `[claude]` in
@@ -641,6 +681,8 @@ def claude(args: list[str] | None = None) -> int:
     if not shutil.which("claude"):
         _err("✗ claude not on PATH — add a [claude] table to foldyard.toml, then `fy box up`.")
         return 1
+    if not _await_credential("claude", "Claude", config.claude_keyless()):
+        return 130
     argv = _claude_argv(config.claude_system_prompt(), config.claude_settings(), args or [])
     os.execvpe(argv[0], argv, os.environ.copy())
 
@@ -735,6 +777,8 @@ def codex(args: list[str] | None = None) -> int:
     if not shutil.which("codex"):
         _err("✗ codex not on PATH — add a [codex] table to foldyard.toml, then `fy box up`.")
         return 1
+    if not _await_credential("codex", "Codex", config.codex_keyless()):
+        return 130
     argv = _codex_argv(config.codex_system_prompt(), config.codex_config(), args or [])
     os.execvpe(argv[0], argv, os.environ.copy())
 

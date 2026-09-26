@@ -21,6 +21,12 @@ pytestmark = pytest.mark.usefixtures("full_config_bound")
 
 
 @pytest.fixture(autouse=True)
+def _logs_in_tmp(monkeypatch, tmp_path):
+    """Every tick reads the egress log (held-request pushes) — never the developer's real one."""
+    monkeypatch.setenv("FOLDYARD_LOG_DIR", str(tmp_path / "logs"))
+
+
+@pytest.fixture(autouse=True)
 def _no_capability_probes(monkeypatch):
     """reconcile_once probes capabilities via the live registry, but the reconcile tests bind
     SimpleNamespace fake configs the registry can't resolve — default the probe source to "none"
@@ -1730,3 +1736,84 @@ def test_a_derived_default_is_not_inherited_by_the_proxy(monkeypatch, tmp_path):
         "egress-proxy", {"cmd": ["p"], "env": {}, "label": "p", "scrub_host_env": True}
     )
     assert "GH_APP_ID" not in seen[-1] and seen[-1]["OPERATOR_EXPORT"] == "mine"
+
+
+# ── held requests: the proxy answered a keyless dummy while its axis was at rest ─────────────
+
+
+def _held_row(axis: str = "codex") -> str:
+    row = {"ts": "2026-09-26T10:00:00+00:00", "method": "GET", "host": "chatgpt.com"}
+    return json.dumps({**row, "path": "/backend-api/codex/responses", "status": 401, "held": axis})
+
+
+def _held_world(monkeypatch, tmp_path) -> tuple[Path, list[tuple[str, str]]]:
+    monkeypatch.setenv("FOLDYARD_LOG_DIR", str(tmp_path))
+    notified: list[tuple[str, str]] = []
+    monkeypatch.setattr(supervisor, "_notify", lambda t, b: notified.append((t, b)))
+    return tmp_path / "egress.jsonl", notified
+
+
+def test_a_held_request_notifies_once_per_axis_at_rest(monkeypatch, tmp_path):
+    log, notified = _held_world(monkeypatch, tmp_path)
+    log.write_text(_held_row() + "\n")  # from before this supervisor started: history, not news
+    supervisor._report_held("", {"codex": "off"})
+    assert notified == []
+
+    with log.open("a") as f:
+        f.write(_held_row() + "\n" + _held_row() + "\n")
+    supervisor._report_held("", {"codex": "off"})
+    assert len(notified) == 1
+    title, body = notified[0]
+    assert "codex" in title.lower() and "`fy mode codex=on`" in body and "Mac" not in body
+
+    with log.open("a") as f:  # the agent retrying: the same fact, not a new one
+        f.write(_held_row() + "\n")
+    supervisor._report_held("", {"codex": "off"})
+    assert len(notified) == 1
+
+
+def test_a_held_request_notifies_again_after_the_axis_was_on(monkeypatch, tmp_path):
+    log, notified = _held_world(monkeypatch, tmp_path)
+    log.touch()
+    supervisor._report_held("", {"codex": "off"})
+    with log.open("a") as f:
+        f.write(_held_row() + "\n")
+    supervisor._report_held("", {"codex": "off"})
+    supervisor._report_held("", {"codex": "on"})  # switched on (or re-armed)…
+    with log.open("a") as f:  # …and at rest again (the TTL ran out): a fresh off, a fresh push
+        f.write(_held_row() + "\n")
+    supervisor._report_held("", {"codex": "off"})
+    assert len(notified) == 2
+
+
+def test_held_rows_are_per_axis_and_ignore_a_row_logged_before_the_flip_on(monkeypatch, tmp_path):
+    log, notified = _held_world(monkeypatch, tmp_path)
+    log.touch()
+    supervisor._report_held("", {"codex": "off", "claude": "on"})
+    with log.open("a") as f:  # claude's row was logged just before its mode went on
+        f.write(_held_row("claude") + "\n" + _held_row("codex") + "\n")
+    supervisor._report_held("", {"codex": "off", "claude": "on"})
+    assert len(notified) == 1 and "codex" in notified[0][0].lower()
+
+
+def test_held_rows_survive_log_rotation_and_partial_lines(monkeypatch, tmp_path):
+    log, notified = _held_world(monkeypatch, tmp_path)
+    log.write_text("x" * 500 + "\n")
+    supervisor._report_held("", {"codex": "off"})
+    row = _held_row()
+    with log.open("a") as f:  # the proxy mid-write: no newline yet
+        f.write(row[:20])
+    supervisor._report_held("", {"codex": "off"})
+    assert notified == []
+    log.replace(tmp_path / "egress.20260926T100000Z.jsonl")  # rotated: a fresh, SHORTER file
+    log.write_text(row + "\n")
+    supervisor._report_held("", {"codex": "off"})
+    assert len(notified) == 1
+
+
+def test_the_tick_reports_held_requests_per_worktree(monkeypatch, tmp_path):
+    _gate_world(monkeypatch, tmp_path)
+    seen: list[tuple[str, dict]] = []
+    monkeypatch.setattr(supervisor, "_report_held", lambda wt, mode: seen.append((wt, mode)))
+    _tick_with(monkeypatch, tmp_path, {}, {}, {})
+    assert seen == [("", {"gcp": "sa"})]
