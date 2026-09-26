@@ -2174,3 +2174,76 @@ def test_compose_overlays_stacks_plugins_then_env_extra_and_filters_missing(monk
 
     monkeypatch.delenv("FOLDYARD_COMPOSE_EXTRA")
     assert stack._compose_overlays({"gcp": "sa"}, base=tmp_path) == [str(a)]
+
+
+# ── the compose client never sees the host's environment ────────────────────────────────────
+# The compose client runs HOST-side over box-writable compose files: `${VAR}` interpolation and a
+# bare `environment: [VAR]` / build `args: [VAR]` read the client's own environment and hand the
+# values to containers the box inspects. The supervisor merges host.env into its os.environ every
+# tick and renders the tree's compose on a capability heal (`recreate_services`), so a planted
+# `${GH_PEM_B64}` reached a container unattended. Every engine/compose subprocess now starts from
+# an allowlist, never os.environ. Mutation that must turn these red: `resolve()` building its env
+# from `os.environ` again; dropping the host.env subtraction in `_host_passthrough`.
+
+_SECRET = "fy-test-secret-value"
+
+
+@pytest.fixture
+def env_seen(monkeypatch):
+    """The env every subprocess.run call was handed (the engine is faked)."""
+    seen: list[dict] = []
+
+    def fake_run(cmd, **kw):
+        seen.append(dict(kw.get("env") or {}))
+        return _FakeProc()
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    return seen
+
+
+def test_the_compose_env_carries_no_host_secret(fake_repo, monkeypatch):
+    monkeypatch.setenv("GH_PEM_B64", _SECRET)
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", _SECRET)
+    env = stack.resolve().env
+    assert _SECRET not in env.values()
+    # …but the client still runs: the path, the socket and foldyard's own resolved vars are there.
+    assert env["PATH"] == os.environ["PATH"]
+    assert env["PODMAN_PROJECT"] == "tangible-podman"
+    assert env["APP_PORT"] == "3000"
+    assert env["CONTAINER_HOST"] == env["DOCKER_HOST"]
+
+
+def test_a_heal_renders_compose_without_the_supervisors_secrets(
+    fake_repo, env_seen, running_services, monkeypatch
+):
+    monkeypatch.setenv("GH_PEM_B64", _SECRET)  # what load_host_env leaves in the supervisor
+    ok, _summary = stack.recreate_services(["queue-worker"])
+    assert ok is True and env_seen
+    assert all(_SECRET not in env.values() for env in env_seen)
+
+
+def test_host_env_keys_never_pass_even_under_an_allowlisted_name(fake_repo, monkeypatch, tmp_path):
+    host_env = tmp_path / "host.env"
+    host_env.write_text(f"COMPOSE_TOKEN={_SECRET}\n")
+    monkeypatch.setenv("FOLDYARD_HOST_ENV", str(host_env))
+    monkeypatch.setenv("COMPOSE_TOKEN", _SECRET)  # as the supervisor's load leaves it
+    monkeypatch.setenv("COMPOSE_PARALLEL_LIMIT", "4")  # an operator's own compose setting
+    env = stack.resolve().env
+    assert "COMPOSE_TOKEN" not in env
+    assert env["COMPOSE_PARALLEL_LIMIT"] == "4"
+
+
+def test_declared_compose_env_names_pass_through(fake_repo, monkeypatch, tmp_path):
+    # The opt-in for a stack that means to read the operator's env (a registry token for a build
+    # arg): named in the ADOPTED foldyard.toml, so the box can't widen it — even a host.env key.
+    toml = fake_repo / "foldyard.toml"
+    toml.write_text(toml.read_text().replace("[ports]", 'compose_env = ["NPM_TOKEN"]\n\n[ports]'))
+    config.clear_caches()
+    host_env = tmp_path / "host.env"
+    host_env.write_text(f"NPM_TOKEN={_SECRET}\n")
+    monkeypatch.setenv("FOLDYARD_HOST_ENV", str(host_env))
+    monkeypatch.setenv("NPM_TOKEN", _SECRET)
+    monkeypatch.setenv("OTHER_TOKEN", _SECRET)
+    env = stack.resolve().env
+    assert env["NPM_TOKEN"] == _SECRET
+    assert "OTHER_TOKEN" not in env

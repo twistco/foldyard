@@ -126,6 +126,9 @@ class Exposure:
     # declared surface that carries a push path IN. Reported so the neutralisation is a known
     # decision, not a surprise `fy verify` row.
     vscode_origin: str | None = None
+    # (names, origin) for `[project] compose_env`: host variables handed to the compose client,
+    # which runs on the operator's computer over box-writable compose files. None = not declared.
+    compose_env: tuple[list[str], str] | None = None
     wall: bool = False
     host_wall: bool = False  # the same wall enforced on the HOST too (hostwall.py)
     backend: str = ""
@@ -385,6 +388,11 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
             for old, new, in_local in config.renamed_keys(shared, local)
         ],
         vscode_origin=_origin(shared, local, "vscode") if config.vscode_enabled() else None,
+        compose_env=(
+            (config.compose_env(), _origin(shared, local, "project", "compose_env"))
+            if config.compose_env()
+            else None
+        ),
         wall=config.machine_wall(),
         host_wall=config.machine_host_wall(),
         backend=config.machine_backend(),
@@ -486,6 +494,19 @@ def render(exp: Exposure) -> list[str]:
             "CONNECT to :443."
         )
         out.append("    `fy verify` in the box reports what is left, incl. a re-armed workspace.")
+        out.append("")
+
+    if exp.compose_env is not None:
+        names, origin = exp.compose_env
+        out.append(f"  host environment   [project] compose_env{_shared_note(origin)}")
+        out.append(f"    {', '.join(names)}")
+        out.append(
+            "    Passed to the compose client, which runs on your computer: a `${NAME}` in any"
+        )
+        out.append(
+            "    compose file hands the value to a container — readable from the box, which can "
+            "edit them."
+        )
         out.append("")
 
     if exp.ignored:

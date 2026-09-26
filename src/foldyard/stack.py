@@ -375,6 +375,52 @@ def banner() -> int:
     return 0
 
 
+# ── the compose client's environment ────────────────────────────────────────────────
+
+# What the engine and compose clients may inherit from the operator's environment. They run
+# host-side over box-writable compose files, and `${VAR}` / a bare `environment: [VAR]` or build
+# `args: [VAR]` read the CLIENT's environment into a container the box can inspect — so never
+# `os.environ` (in the supervisor that holds host.env). Enough for the clients to run and honour
+# the operator's own client settings; foldyard's resolved vars are added on top.
+_PASSTHROUGH = frozenset(
+    {
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "COLORTERM", "NO_COLOR",
+        "FORCE_COLOR", "LANG", "TZ", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+        "XDG_CACHE_HOME", "DOCKER_CONFIG", "DOCKER_CONTEXT", "REGISTRY_AUTH_FILE",
+        "CONTAINERS_CONF", "CONTAINERS_REGISTRIES_CONF", "CONTAINERS_STORAGE_CONF", "WORKTREE",
+        "WT_OFFSET",
+    }
+)  # fmt: skip
+_PASSTHROUGH_PREFIXES = ("LC_", "COMPOSE_", "PODMAN_", "BUILDAH_", "FOLDYARD_")
+
+
+def _host_env_keys() -> set[str]:
+    """The keys host.env declares — secrets by definition, whatever their name."""
+    try:
+        lines = config.host_env_file().read_text().splitlines()
+    except OSError:
+        return set()
+    return {
+        line.split("=", 1)[0].strip()
+        for line in lines
+        if "=" in line and not line.lstrip().startswith("#")
+    }
+
+
+def _host_passthrough() -> dict[str, str]:
+    """The slice of ``os.environ`` a compose/engine subprocess starts from: the fixed passthrough
+    minus anything host.env declares, plus the names the adopted ``[project].compose_env`` opts
+    into (those pass even from host.env — the operator named them)."""
+    declared = set(config.compose_env())
+    secret = _host_env_keys()
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k in declared
+        or ((k in _PASSTHROUGH or k.startswith(_PASSTHROUGH_PREFIXES)) and k not in secret)
+    }
+
+
 # ── engine verbs (compose passthroughs) ───────────────────────────────────────────────
 
 
@@ -407,7 +453,7 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
         compose += ["-f", str(p if p.is_absolute() else checkout / p)]
     for overlay in _compose_overlays(mode, base=checkout):
         compose += ["-f", overlay]
-    env = {**os.environ, **plain, **exported, **ports, **mode_env}
+    env = {**_host_passthrough(), **plain, **exported, **ports, **mode_env}
     return Context(
         main=main,
         env=env,

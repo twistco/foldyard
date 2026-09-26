@@ -739,6 +739,17 @@ def external_network() -> bool:
     return bool(_project_table().get("external_network"))
 
 
+def compose_env() -> list[str]:
+    """Names of the operator's environment variables the compose client may see, beyond
+    foldyard's own resolved vars and a fixed passthrough (``PATH``, ``HOME``, locale, ``COMPOSE_*``
+    …) — for a stack that means to read one, e.g. a registry token behind a bare build ``args:``
+    entry. The compose files are box-writable and ``${VAR}`` interpolation hands the value to a
+    container the box can inspect, so every name here is a widening (``fy config widenings``).
+    From ``[project].compose_env`` ([])."""
+    raw = _project_table().get("compose_env")
+    return [str(x) for x in raw if x] if isinstance(raw, list) else []
+
+
 def ensure_dirs() -> list[str]:
     """Bind-mount source dirs (relative to the checkout) the compose file expects to
     pre-exist — created empty on ``up``. From ``[project].ensure_dirs`` ([]

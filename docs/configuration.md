@@ -96,6 +96,12 @@ min_foldyard_version = "0.2.0"
   `fy ps`, `fy logs`, `fy shell`, `fy build`, `fy down`, `fy nuke`) then says so and points at
   its `fy box …` counterpart where one exists; `fy up` still starts the VM and the supervisor.
   A declared file missing from the checkout is an error naming the file.
+- **`compose_env`** — names of variables from your own environment the compose client may read,
+  e.g. `["NPM_TOKEN"]` for a build arg. Default: `[]`. The client runs on your computer, and
+  otherwise sees only foldyard's resolved vars (`PODMAN_PROJECT`, the `[ports]` values, …) plus
+  what it needs to run (`PATH`, `HOME`, locale, `COMPOSE_*`/`PODMAN_*` settings) — never
+  `host.env`. Each name is a widening, listed by `fy config widenings`: the compose files are
+  editable from the box, and a `${NAME}` in one hands the value to a container.
 - **`ensure_dirs`** — bind-mount source dirs (checkout-relative) your compose file expects;
   created empty on `up`. Default: `[]`.
 - **`external_network`** — `true` lets foldyard own the `{prefix}_default` network: created on

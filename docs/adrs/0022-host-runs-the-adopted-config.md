@@ -113,6 +113,14 @@ Scope is deliberate. The pin governs **what the host does**. Stack and box wirin
 VM the yard already owns — the audit's triage question is "does this need host privileges?", and
 that half doesn't.
 
+**Amended (0.3.2): that premise is false for compose.** The compose *client* runs on the host, so
+the working tree's compose files are parsed there: `${VAR}` interpolation read the client's
+environment (in the supervisor, `host.env`) and `env_file:`/build contexts read host paths, handing
+both to containers the box can inspect. The client now starts from an allowlisted environment
+(`stack._host_passthrough`; widened only by the adopted `[project] compose_env`) and refuses paths
+that leave the checkout. That is a clamp on a host-side parser, not a VM boundary; the structural
+fix is to run the compose client in the VM, where the premise above becomes true.
+
 ## Consequences
 
 - A config change now takes one keypress at the next `fy up` — real friction, deliberately placed
