@@ -129,3 +129,41 @@ def test_sweep_gates_on_index_split_and_never_raises(monkeypatch):
     )
     githeal.sweep(logged.append)  # must not raise — the reconcile loop depends on it
     assert logged and "sweep failed" in logged[0]
+
+
+# ── the mount's git config never runs on the host (ADR-0023 channel) ──────────────────────
+
+
+def test_git_neutralises_a_box_planted_fsmonitor_command(rig, tmp_path):
+    # `.git/config` is on the box-writable mount, and git runs `core.fsmonitor` as a command when
+    # a heal scans the worktree (`update-index --refresh`, used by `_install_index`). The `-c`
+    # overrides in `_git` must win over the planted key so it never executes on the host.
+    canary = tmp_path / "PWNED"
+    fsmon = tmp_path / "fsmon.sh"
+    fsmon.write_text(f"#!/bin/sh\ntouch {canary}\nexit 1\n")
+    fsmon.chmod(0o755)
+    subprocess.run(["git", "-C", str(rig.repo), "config", "core.fsmonitor", str(fsmon)], check=True)
+    # Dirty the worktree so --refresh actually has something to stat.
+    rig.write("fileA", "changed\n")
+    canary.unlink(missing_ok=True)
+
+    githeal._git(rig.repo, "update-index", "-q", "--refresh")
+    assert not canary.exists()  # the planted fsmonitor command did not run
+
+    # git itself resolves the key to the override, not the mount's value.
+    got = githeal._git(rig.repo, "config", "--get", "core.fsmonitor")
+    assert got.stdout.strip() == ""
+
+
+def test_the_git_child_environment_carries_no_inherited_secret(monkeypatch):
+    monkeypatch.setenv("GH_PEM_B64", "super-secret-value")
+    seen = {}
+
+    def _capture(cmd, **kw):
+        seen.update(kw.get("env") or {})
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(githeal.subprocess, "run", _capture)
+    githeal._git(githeal.Path("/nonexistent"), "rev-parse", "HEAD")
+    assert "GH_PEM_B64" not in seen
+    assert seen.get("GIT_CONFIG_GLOBAL") and seen.get("GIT_CONFIG_NOSYSTEM") == "1"

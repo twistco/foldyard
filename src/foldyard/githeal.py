@@ -46,15 +46,51 @@ ANCESTOR_SCAN = 32  # how far back a lost sync point is searched for (first-run 
 _warned: dict[str, tuple[str, str]] = {}
 
 
+# The repo lives on a mount the box can write, so ``<gitdir>/config`` is attacker-controlled —
+# and git honours keys there that run a command on the reader's machine (``core.fsmonitor``,
+# ``core.hooksPath`` + a hook, ``core.pager``, ``core.sshCommand``, ``diff.external``, filter
+# drivers, aliases…). githeal runs host-side in the supervisor, whose environment holds every
+# host.env secret, so an unhardened git here is host code execution for anything that can write
+# the checkout (ADR-0023, the same channel by a different door). Two defences, together:
+#
+#  * ``-c`` overrides on the command line take precedence over ANY config file (repo, and any
+#    ``include``/``includeIf`` it pulls in), so these keys are neutralised whatever the mount says.
+#    Set-to-empty reads as unset/false; ``core.hooksPath`` is pointed at a dir with no hooks.
+#  * a STRIPPED environment: git gets PATH + locale, never the supervisor's inherited secrets,
+#    and global/system config is cut out (``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_NOSYSTEM``) so only
+#    the plumbing below runs. All heal ops are index-only (no worktree checkout), so no clean/
+#    smudge filter is invoked in the first place; the ``-c`` list is defence in depth.
+_SAFE_FLAGS = (
+    "-c", "core.fsmonitor=",
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "core.pager=cat",
+    "-c", "core.sshCommand=",
+    "-c", "core.editor=false",
+    "-c", "diff.external=",
+    "-c", "protocol.ext.allow=never",
+)  # fmt: skip
+
+# The only host vars git needs; everything else (the supervisor's host.env secrets included) is
+# left out. GIT_* controls are added on top. FY_GIT_SHIM_OFF pins the REAL binary + the SHARED
+# index even where the box shim owns PATH (the in-box test suite); on the host it's inert.
+_ENV_PASSTHROUGH = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SystemRoot")
+
+
 def _git(repo: Path, *args: str, input_bytes: bytes | None = None, env: dict | None = None):
-    """Raw git in ``repo``. FY_GIT_SHIM_OFF pins the REAL binary + the SHARED index even when
-    this code runs where the box shim owns PATH (the in-box test suite) — on the host it's inert."""
+    """Raw git in ``repo`` with the mount's config neutralised and a stripped environment —
+    a box-written ``.git/config`` can never make this run a command on the host."""
+    safe_env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
+    safe_env["GIT_CONFIG_NOSYSTEM"] = "1"
+    safe_env["GIT_CONFIG_GLOBAL"] = os.devnull
+    safe_env["GIT_TERMINAL_PROMPT"] = "0"
+    safe_env["FY_GIT_SHIM_OFF"] = "1"
+    safe_env.update(env or {})
     return subprocess.run(
-        ["git", "-C", str(repo), *args],
+        ["git", *_SAFE_FLAGS, "-C", str(repo), *args],
         capture_output=True,
         input=input_bytes,
         text=input_bytes is None,
-        env={**os.environ, "FY_GIT_SHIM_OFF": "1", **(env or {})},
+        env=safe_env,
     )
 
 
