@@ -207,7 +207,7 @@ def example_with_worktree(tmp_path):
     subprocess.run(["git", "-C", str(main), "worktree", "add", "-b", "feat", str(feat)], check=True)
     env = {"FOLDYARD_WORKTREES_ROOT": str(wt_root)}
     _adopt_on_host(main, env)
-    if os.environ.get("IN_DEVBOX") != "1":
+    if not _IN_BOX:  # not os.environ: the autouse fixture scrubbed IN_DEVBOX (see _IN_BOX)
         # The host acts only on worktrees it recorded (worktree_registry). A worktree made with
         # plain `git worktree add` is registered the way an operator would: `fy worktree add` on
         # the existing checkout. Host-only — in the box there is no registry (and the verb refuses).
