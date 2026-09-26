@@ -207,6 +207,12 @@ def example_with_worktree(tmp_path):
     subprocess.run(["git", "-C", str(main), "worktree", "add", "-b", "feat", str(feat)], check=True)
     env = {"FOLDYARD_WORKTREES_ROOT": str(wt_root)}
     _adopt_on_host(main, env)
+    if os.environ.get("IN_DEVBOX") != "1":
+        # The host acts only on worktrees it recorded (worktree_registry). A worktree made with
+        # plain `git worktree add` is registered the way an operator would: `fy worktree add` on
+        # the existing checkout. Host-only — in the box there is no registry (and the verb refuses).
+        reg = _foldyard(["worktree", "add", "feat", "--yes"], main, env_extra=env)
+        assert reg.returncode == 0, f"registering feat failed:\n{reg.stdout}\n{reg.stderr}"
     _adopt_on_host(feat, {**env, "WORKTREE": "feat"})
     yield main, feat, env
     _foldyard(["down"], feat, timeout=180, env_extra={**env, "WORKTREE": "feat"})
