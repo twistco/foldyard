@@ -9,7 +9,7 @@ The shared, injector-agnostic substrate that header-rewrite plugins (github-app,
     ``NO_PROXY`` for in-stack services), bolted on at box-up via ``box_args``,
   - ``FY_PROXY`` (route box egress through the proxy) — derived whenever ANY injector is active,
   - the per-request JSONL egress log + its **Network Log** TUI panel (shows all proxied
-    traffic across all injectors; the "injected" flag is set by whichever rule injected).
+    traffic across all injectors; "injected" marks a request that actually carried a credential).
 
 An injector contributes only its ``InjectRule`` (+ axis/minter/doctor/verify); it never owns a
 proxy daemon, CA, log, or panel. Built-in for now; the mitmdump *script* (``egress_proxy.py``)

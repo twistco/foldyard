@@ -885,7 +885,9 @@ class Injector:
             "host": flow.request.pretty_host,
             "path": self._logged_path(flow)[:200],
             "status": flow.response.status_code,
-            "injected": flow.request.pretty_host in self.inject_hosts,
+            # What THIS request carried — not "its host has an injector": a path outside the
+            # rule's prefix, or a failed mint, leaves with the box's own dummy.
+            "injected": bool(flow.metadata.get("egress_proxy_injected")),
             "replayed": bool(flow.metadata.get("egress_proxy_retried")),
         }  # fmt: skip
         ua = _user_agent(flow.request)
@@ -1272,6 +1274,7 @@ class Injector:
         value = rule.token()
         if value is not None:
             rule.apply(flow.request, value)
+            flow.metadata["egress_proxy_injected"] = True
             if rule.query_param:  # redact what WAS written, whatever the rules are at log time
                 flow.metadata["egress_proxy_redact"] = rule.query_param
 
@@ -1351,6 +1354,7 @@ class Injector:
         skip = {"content-encoding", "content-length", "transfer-encoding", "connection"}
         out_headers = {k: v for k, v in r.headers.items() if k.lower() not in skip}
         flow.response = http.Response.make(r.status_code, r.content, out_headers)
+        flow.metadata["egress_proxy_injected"] = True  # the response logged is the fresh token's
 
 
 addons = [Injector()]

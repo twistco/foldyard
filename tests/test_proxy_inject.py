@@ -388,10 +388,31 @@ async def test_injects_query_param_on_the_target_path(qp_injector):
 
 
 async def test_query_param_not_injected_outside_path_prefix(qp_injector):
-    inj, _ = qp_injector
+    inj, log = qp_injector
     flow = _Flow("truenas.example.ts.net", path="/app/index.html")  # same host, non-/mcp path
     inj.request(flow)
     assert "userToken" not in flow.request.query  # the app traffic on the same host is untouched
+    await inj.response(flow)
+    # `injected` is what THIS request carried, not whether its host has an injector: a 401 here
+    # read "your credential was refused" while the box's own dummy was what went upstream.
+    assert _last_log(log)["injected"] is False
+
+
+async def test_a_failed_mint_is_logged_as_not_injected(gh, monkeypatch, tmp_path):
+    # The minter failed, so the request left with whatever the box sent — the log must say so.
+    boom = tmp_path / "boom.py"
+    boom.write_text("import sys; sys.exit(1)\n")
+    log = tmp_path / "egress.jsonl"
+    monkeypatch.setenv("INJECT_HOST", "api.github.com")
+    monkeypatch.setenv("INJECT_COMMAND", f"{sys.executable} {boom}")
+    monkeypatch.setenv("PROXY_LOG_FILE", str(log))
+    inj = gh.Injector()
+    flow = _Flow("api.github.com")
+    flow.request.headers["Authorization"] = "Bearer DUMMY"
+    inj.request(flow)
+    assert flow.request.headers["Authorization"] == "Bearer DUMMY"
+    await inj.response(flow)
+    assert _last_log(log)["injected"] is False
 
 
 async def test_capture_only_logs_everything_and_injects_nothing(gh, monkeypatch, tmp_path):
@@ -741,6 +762,7 @@ async def test_re_mints_and_re_issues_once_on_401(injector, gh):
     # ...and the egress log records it as a replayed 200.
     entry = _last_log(log)
     assert entry["status"] == 200 and entry["replayed"] is True
+    assert entry["injected"] is True  # by the re-issue alone: the first attempt carried the dummy
 
     # A flow already carrying the retry flag must NOT re-issue again (the loop guard).
     gh.requests.clear()
