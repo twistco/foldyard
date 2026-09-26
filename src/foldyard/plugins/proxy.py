@@ -445,8 +445,12 @@ class ProxyPlugin(Plugin):
                     mitmdump_path() or "mitmdump",
                     "-s",
                     str(_launch_addon_path()),
+                    # LOOPBACK only. The proxy authenticates no client, and injects this project's
+                    # credentials — on 0.0.0.0 anyone on the operator's network could use it. The
+                    # VM doesn't need more: its user-mode network hands the guest's host gateway
+                    # (Lima 192.168.5.2, gvproxy host.containers.internal) to 127.0.0.1.
                     "--listen-host",
-                    "0.0.0.0",
+                    "127.0.0.1",
                     "--listen-port",
                     str(port),
                     # Silence mitmdump's per-request flow dump (the `GET … << 200 OK` blocks):

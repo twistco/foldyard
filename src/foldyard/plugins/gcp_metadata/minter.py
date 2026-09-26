@@ -248,7 +248,9 @@ def main() -> None:
             "token service: set GCP_SA_ALLOWLIST (comma-separated SA emails) — "
             "refusing an empty allowlist"
         )
-    srv = ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), Handler)
+    # Loopback only: it mints the operator's GCP tokens. The VM reaches it through its user-mode
+    # network's host gateway, which lands on the host's 127.0.0.1; 0.0.0.0 only added the LAN.
+    srv = ThreadingHTTPServer(("127.0.0.1", LISTEN_PORT), Handler)
     print(f"[minter] :{LISTEN_PORT} — allowlist: {', '.join(sorted(ALLOWLIST))}", flush=True)
     srv.serve_forever()
 

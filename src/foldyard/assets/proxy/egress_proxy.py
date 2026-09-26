@@ -15,7 +15,7 @@ somehow leaked still self-expires and can do nothing else.
 
 Run it with mitmdump (`fy host` does this for you; the supervisor passes the project's
 allocated band port — config.proxy_port() — as --listen-port):
-    mitmdump -s egress_proxy.py --listen-host 0.0.0.0 --listen-port 41000
+    mitmdump -s egress_proxy.py --listen-host 127.0.0.1 --listen-port 41000
 
 The same addon doubles as a pure CAPTURE proxy: with INJECT_HOST (or INJECT_COMMAND) empty it
 injects NOTHING — it just logs every proxied request to PROXY_LOG_FILE, so all dev-box egress is
