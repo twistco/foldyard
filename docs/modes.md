@@ -219,12 +219,14 @@ the provider's "invalid token". The Network Log marks those rows as held.
 `fy claude` and `fy codex` check first: with the agent's switch off they say so before
 launching and, in a terminal, wait for you to switch it on from your computer (Enter launches
 anyway). That covers starting a session; the proxy's answer covers the rest — a time limit
-running out mid-session, or an agent started some other way.
+running out mid-session, or an agent started some other way — and the first such answer per
+switch also raises a notification on your computer.
 
-Codex on a ChatGPT subscription never shows the proxy's message: its startup workspace
-discovery reports any failure as a fixed `workspace routing discovery unauthorized (401)`,
-without the reply's text. While `codex` is off, that error means the switch — the Network
-Log's held row says so. Discovery can also point a workspace at a backend other than
+Codex on a ChatGPT subscription shows the proxy's message only in passing (a failed model-list
+refresh), then stops on its startup workspace discovery, which reports any failure as a fixed
+`workspace routing discovery unauthorized (401)` without the reply's text. While `codex` is
+off, that error means the switch — the Network Log's held row says so, and your computer gets
+a notification the first time it happens. Discovery can also point a workspace at a backend other than
 `chatgpt.com` (the account decides; a personal one stays there); keyless injects only on `chatgpt.com`, so Codex
 can't reach such a backend through the proxy.
 

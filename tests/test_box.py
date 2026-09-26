@@ -1008,7 +1008,9 @@ def gate(monkeypatch, tmp_path):
         monkeypatch.setattr(box.config, f"{agent}_system_prompt", lambda: "")
     monkeypatch.setattr(box.config, "claude_settings", lambda: {})
     monkeypatch.setattr(box.config, "codex_config", lambda: {})
-    ns = types.SimpleNamespace(modes=["off"], tty=False, enter=False, execed=None, polls=0)
+    ns = types.SimpleNamespace(
+        modes=["off"], tty=False, enter=False, execed=None, polls=0, stamps=None, clock=[0.0]
+    )
 
     def mode_of(axis):
         return ns.modes.pop(0) if len(ns.modes) > 1 else ns.modes[0]
@@ -1021,7 +1023,20 @@ def gate(monkeypatch, tmp_path):
         ns.execed = argv
         raise SystemExit(0)
 
+    def mirror_written():
+        # Default: every read is a fresh supervisor write (the tick is always advancing).
+        if ns.stamps is None:
+            return f"t{ns.polls}-{len(ns.modes)}-{id(object())}"
+        return ns.stamps.pop(0) if len(ns.stamps) > 1 else ns.stamps[0]
+
+    def monotonic():
+        ns.clock[0] += 1.0
+        return ns.clock[0]
+
     monkeypatch.setattr(box, "_mode_of", mode_of)
+    monkeypatch.setattr(box, "_mirror_written", mirror_written)
+    monkeypatch.setattr(box.time, "monotonic", monotonic)
+    monkeypatch.setattr(box.time, "sleep", lambda s: None)
     monkeypatch.setattr(box.select, "select", fake_select)
     monkeypatch.setattr(box.sys.stdin, "isatty", lambda: ns.tty, raising=False)
     monkeypatch.setattr(box.sys.stdin, "readline", lambda: "\n", raising=False)
@@ -1060,6 +1075,37 @@ def test_launch_off_at_a_terminal_waits_for_the_host_to_switch_it_on(gate, capsy
     assert gate.execed and gate.polls >= 2  # it waited, then launched by itself
     err = capsys.readouterr().err
     assert "Waiting" in err and "codex=on" in err
+
+
+def test_launch_after_the_flip_waits_for_the_proxy_to_catch_up(gate, capsys):
+    # `fy mode` writes the mirror at once; the proxy learns on the supervisor's next tick, which
+    # writes the mirror BEFORE the proxy's live settings. So "on" in the mirror isn't "injecting"
+    # yet: wait for two supervisor writes past the flip, so a whole tick has applied it.
+    gate.tty = True
+    gate.modes = ["off", "on"]
+    gate.stamps = ["flip", "flip", "tick1", "tick1", "tick2"]
+    _launch("claude")
+    assert gate.execed and gate.stamps == ["tick2"]  # consumed through the second tick
+
+
+def test_launch_after_the_flip_does_not_hang_on_a_stalled_supervisor(gate):
+    gate.tty = True
+    gate.modes = ["off", "on"]
+    gate.stamps = ["flip"]  # the mirror never advances again
+    _launch("codex")
+    assert gate.execed  # bounded: it launches anyway
+
+
+def test_ctrl_c_while_waiting_for_the_proxy_cancels(gate, monkeypatch):
+    gate.tty = True
+    gate.modes = ["off", "on"]
+
+    def interrupted(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(box.time, "sleep", interrupted)
+    gate.stamps = ["flip"]
+    assert _launch("claude") == 130 and gate.execed is None
 
 
 def test_launch_off_at_a_terminal_enter_launches_anyway(gate):
