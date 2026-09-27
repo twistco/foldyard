@@ -7,6 +7,29 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ## Unreleased
 
+## 0.3.2 — 2026-09-27
+
+A security release: upgrade now. It also carries the changes listed under **Changed**, some of
+which need a small migration (each says so).
+
+### Security
+
+- **The egress proxy decides on where a request is going, not on its Host header.** A box could
+  name an allowed or credentialed host in the header while connecting elsewhere, passing the
+  allowlist and receiving the injected credential. (GHSA-jrrv-xmc2-3qw6)
+- **The host's git heal no longer runs the checkout's git config or reads its files.** A box could
+  plant `core.fsmonitor` or a filter driver that the supervisor then ran on your computer.
+  (GHSA-j5mq-v7p4-qw2j)
+- **Your computer acts only on config you adopted, and on worktrees it created.** Several
+  commands, VM provisioning and the supervisor read the working tree directly; the proxy and token
+  minter listened on every interface; host writes followed symlinks. **After upgrading:** run
+  `fy up` in each checkout and adopt its config, and `fy worktree add <name>` for each existing
+  worktree (`fy worktree list` names them). (GHSA-rc47-75h7-7jxr)
+- **The compose client no longer sees your environment or files outside the checkout.** It ran on
+  your computer with the full environment (including `host.env` in the supervisor) and followed
+  `env_file:`/build contexts anywhere. **Migrating:** a stack that reads your own environment
+  variables must name them in `[project] compose_env`. (GHSA-7g84-hvrh-474p)
+
 ### Changed
 
 - **Clearer names for the firewall and allowlist settings.** "Wall" meant three different things:
