@@ -243,7 +243,8 @@ def test_a_symlinked_git_dir_is_not_followed(rig, tmp_path):
     # A record for the REAL HEAD there — one a followed symlink would act on.
     (elsewhere / f"index.fy-record.{head}").write_text("")
     assert heal(rig.repo) is None
-    assert not (elsewhere / githeal.SYNC_FILE).exists()
+    assert not (elsewhere / githeal.SYNC_FILE).exists()  # (mountwrite would refuse this anyway)
+    assert (elsewhere / f"index.fy-record.{head}").exists()  # …but nothing there was consumed
 
 
 def test_a_worktree_git_file_pointing_outside_mains_worktrees_is_refused(rig, tmp_path):
