@@ -1,11 +1,13 @@
-"""githeal — the supervisor's host-side twin of the shim's self-heal, against REAL git.
+"""githeal — the box proposes a healed shared index, the host only renames it into place.
 
-Box-side commands run through the ACTUAL shim (test_git_shim.Rig), so the attribution stamp
-these heals key on is produced by the real mechanism, not a hand-rolled simulation.
+Box-side commands run through the ACTUAL shim (test_git_shim.Rig), so the proposals the host
+consumes are produced by the real mechanism. Every host-side heal here runs with process creation
+FORBIDDEN (`heal`): the host runs no git — nor anything else — in the box-writable checkout.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
@@ -21,6 +23,21 @@ def rig(tmp_path):
     return r
 
 
+def heal(repo, main=None):
+    """One host-side heal pass with every way to start a process refused — a spawn fails the
+    test by name, whatever the heal does with the exception."""
+
+    def refuse(*args, **_kw):
+        raise AssertionError(f"the host-side heal started a process: {args[1:2] or args[:1]}")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(subprocess.Popen, "__init__", refuse)
+        for name in ("system", "posix_spawn", "posix_spawnp", "fork", "execv", "execve"):
+            if hasattr(os, name):
+                mp.setattr(os, name, refuse)
+        return githeal.heal_checkout(repo, main)
+
+
 def _box_commit(rig, msg, **files):
     for name, content in files.items():
         rig.write(name, content)
@@ -34,43 +51,53 @@ def _host_status(rig):
     return rig.host("status", "--porcelain").stdout
 
 
+def _pending(rig) -> list[str]:
+    return sorted(p.name for p in rig.gitdir.glob("index.fy-*") if p.name != githeal.SYNC_FILE)
+
+
+def _synced_at(rig, head: str) -> None:
+    """Bring the shared index's sync marker to ``head`` the way it happens for real: a box git
+    call notices the host's own HEAD move and says so, and the host records it."""
+    rig.box("status", "--porcelain")
+    heal(rig.repo)
+    assert (rig.gitdir / githeal.SYNC_FILE).read_text().strip() == head
+
+
 def test_heals_shared_index_after_box_commit(rig):
-    # THE Mac-side fix: a box commit moves shared HEAD, the host's index still describes the
-    # old one → phantom staged-D/?? and MM pairs in every GUI. One heal pass → clean.
+    # A box commit moves shared HEAD, the host's index still describes the old one → phantom
+    # staged-D/?? and MM pairs in every host-side git GUI. The box proposes; one pass installs.
     _box_commit(rig, "box", fileA="a2\n", fileC="c1\n")
     assert "fileA" in _host_status(rig)  # the illusion is really there before the heal
-    msg = githeal.heal_checkout(rig.repo)
+    assert [p for p in _pending(rig) if p.startswith("index.fy-proposed.")]
+    msg = heal(rig.repo)
     assert msg and "fast-forwarded" in msg
     assert _host_status(rig) == ""
     assert (rig.gitdir / githeal.SYNC_FILE).read_text().strip() == rig.head()
-    assert githeal.heal_checkout(rig.repo) is None  # steady state is a quiet no-op
+    assert _pending(rig) == []  # consumed
+    assert heal(rig.repo) is None  # steady state is a quiet no-op
 
 
 def test_host_moved_head_only_resyncs_the_marker(rig):
-    # The host's own git already manages its index — an unattributed HEAD move must never be
-    # touched. In particular `git reset --soft` (index ≠ HEAD BY DESIGN) survives untouched.
-    githeal.heal_checkout(rig.repo)  # marker at C1
+    # The host's own git already manages its index — an unattributed HEAD move must never touch
+    # it. In particular `git reset --soft` (index ≠ HEAD BY DESIGN) survives untouched.
+    _synced_at(rig, rig.head())
     rig.host_commit("host C2", fileA="a2\n")
-    assert githeal.heal_checkout(rig.repo) is None
+    _synced_at(rig, rig.head())
     rig.host("reset", "-q", "--soft", "HEAD~")
-    assert githeal.heal_checkout(rig.repo) is None
+    _synced_at(rig, rig.head())
     assert "M  fileA" in _host_status(rig)  # the soft reset's staged state is intact
-    assert (rig.gitdir / githeal.SYNC_FILE).read_text().strip() == rig.head()
 
 
 def test_staged_host_work_is_carried_forward(rig):
     # Host has a staged modification, a staged deletion, and a staged add; the box commits a
-    # DISJOINT change. The heal replays the host's staged entries on the new HEAD's tree.
-    githeal.heal_checkout(rig.repo)  # marker at C1
-    rig.box("status", "--porcelain")  # seed index-box at C1 — BEFORE the host stages anything
-    # (a first box touch seeds from the shared index, staged state included, by design —
-    # without this the box commit would legitimately absorb the host's staged work)
+    # DISJOINT change. The proposal replays the host's staged entries on the new HEAD's tree.
+    _synced_at(rig, rig.head())  # also seeds index-box at C1 BEFORE the host stages anything
     rig.write("fileB", "b-host\n")
     rig.write("fileE", "e1\n")
     rig.host("add", "--", "fileB", "fileE")
     rig.host("rm", "-q", "--cached", "fileD")
     _box_commit(rig, "box", fileA="a2\n")
-    msg = githeal.heal_checkout(rig.repo)
+    msg = heal(rig.repo)
     assert msg and "carried forward" in msg
     status = _host_status(rig)
     assert "M  fileB" in status and "A  fileE" in status and "D  fileD" in status
@@ -78,39 +105,75 @@ def test_staged_host_work_is_carried_forward(rig):
 
 
 def test_overlapping_staged_work_refuses_once(rig):
-    # Both sides touched fileA — never merge silently: warn once (throttled), leave the index
-    # alone, and stay quiet until the state changes.
-    githeal.heal_checkout(rig.repo)
+    # Both sides touched fileA — never merge silently: say so once, leave the index alone, and
+    # stay quiet until the state changes.
+    _synced_at(rig, rig.head())
     rig.write("fileA", "a-host\n")
     rig.host("add", "--", "fileA")
     _box_commit(rig, "box", fileA="a-box\n")
-    msg = githeal.heal_checkout(rig.repo)
+    msg = heal(rig.repo)
     assert msg and "NOT healing" in msg
-    assert githeal.heal_checkout(rig.repo) is None  # throttled repeat
+    assert heal(rig.repo) is None  # throttled repeat
     assert "fileA" in _host_status(rig)  # untouched, as promised
-    # The documented manual fix clears it and the marker resyncs on the next pass.
+    # The documented manual fix clears it: the refusal goes stale with the index it judged.
     rig.host("reset", "-q")
-    assert githeal.heal_checkout(rig.repo) is None
+    assert heal(rig.repo) is None
+    assert _pending(rig) == []
     assert _host_status(rig) == ""
+
+
+def test_a_proposal_built_on_an_index_the_host_since_changed_is_dropped(rig):
+    # The host stages between the box's proposal and the tick: installing it would lose that
+    # staging. The proposal names the index it was built from; a mismatch drops it, and the box
+    # proposes again (from the index as it now is) on its next git call.
+    _synced_at(rig, rig.head())
+    _box_commit(rig, "box", fileA="a2\n")
+    rig.write("fileB", "b-host\n")
+    rig.host("add", "--", "fileB")
+    assert heal(rig.repo) is None
+    assert _pending(rig) == []  # dropped, not installed
+    assert "M  fileB" in _host_status(rig)
+    rig.box("status", "--porcelain")  # the box's next git call re-proposes
+    msg = heal(rig.repo)
+    assert msg and "carried forward" in msg
+    assert _host_status(rig) == "M  fileB\n"
+
+
+def test_a_proposal_for_a_head_the_host_moved_away_from_is_dropped(rig):
+    # A soft reset moves HEAD without changing the index — the base still matches, but installing
+    # the box's tree now would stage the undone commit. HEAD must still be the proposal's.
+    _box_commit(rig, "box", fileA="a2\n")
+    rig.host("reset", "-q", "--soft", "HEAD~")
+    before = (rig.gitdir / "index").read_bytes()
+    assert heal(rig.repo) is None
+    assert (rig.gitdir / "index").read_bytes() == before
+    assert not [p for p in _pending(rig) if p.startswith("index.fy-proposed.")]
 
 
 def test_skips_in_progress_operations_and_lock(rig):
     _box_commit(rig, "box", fileA="a2\n")
     (rig.gitdir / "MERGE_HEAD").write_text(rig.head() + "\n")
-    assert githeal.heal_checkout(rig.repo) is None
+    assert heal(rig.repo) is None
     (rig.gitdir / "MERGE_HEAD").unlink()
     (rig.gitdir / "index.lock").write_text("")
-    assert githeal.heal_checkout(rig.repo) is None
+    assert heal(rig.repo) is None
     (rig.gitdir / "index.lock").unlink()
-    assert githeal.heal_checkout(rig.repo) is not None  # heals once the coast is clear
+    assert heal(rig.repo) is not None  # heals once the coast is clear
 
 
 def test_non_repo_and_unborn_are_quiet(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
-    assert githeal.heal_checkout(empty) is None
+    assert heal(empty) is None
     subprocess.run(["git", "init", "-q", str(tmp_path / "unborn")], check=True)
-    assert githeal.heal_checkout(tmp_path / "unborn") is None
+    assert heal(tmp_path / "unborn") is None
+
+
+def test_the_shim_proposes_nothing_with_healing_off(rig):
+    rig.write("fileA", "a2\n")
+    rig.box("add", "--", "fileA", env={"FY_GIT_SHIM_NO_HEAL": "1"})
+    assert rig.box("commit", "-qm", "box", env={"FY_GIT_SHIM_NO_HEAL": "1"}).returncode == 0
+    assert _pending(rig) == []
 
 
 def test_sweep_gates_on_index_split_and_never_raises(monkeypatch):
@@ -123,75 +186,99 @@ def test_sweep_gates_on_index_split_and_never_raises(monkeypatch):
     assert logged == []
 
     monkeypatch.setattr(githeal.config, "box_git_index_split", lambda: True)
-    monkeypatch.setattr(githeal, "_checkouts", lambda: [1])
+    monkeypatch.setattr(githeal, "_checkouts", lambda: (githeal.Path("/m"), [githeal.Path("/m")]))
     monkeypatch.setattr(
-        githeal, "heal_checkout", lambda co: (_ for _ in ()).throw(RuntimeError("boom"))
+        githeal, "heal_checkout", lambda co, main: (_ for _ in ()).throw(RuntimeError("boom"))
     )
     githeal.sweep(logged.append)  # must not raise — the reconcile loop depends on it
     assert logged and "sweep failed" in logged[0]
 
 
-# ── the mount's git config never runs on the host (ADR-0023 channel) ──────────────────────
+# ── the host runs nothing, and writes only where it means to ─────────────────────────────
 
 
-def test_git_neutralises_a_box_planted_fsmonitor_command(rig, tmp_path):
-    # `.git/config` is on the box-writable mount, and git runs `core.fsmonitor` as a command when
-    # it scans the worktree (`update-index --refresh`). The heal no longer scans, but the `-c`
-    # overrides in `_git` must still win over the planted key for any call that would.
-    canary = tmp_path / "PWNED"
-    fsmon = tmp_path / "fsmon.sh"
-    fsmon.write_text(f"#!/bin/sh\ntouch {canary}\nexit 1\n")
-    fsmon.chmod(0o755)
-    subprocess.run(["git", "-C", str(rig.repo), "config", "core.fsmonitor", str(fsmon)], check=True)
-    # Dirty the worktree so --refresh actually has something to stat.
-    rig.write("fileA", "changed\n")
-    canary.unlink(missing_ok=True)
-
-    githeal._git(rig.repo, "update-index", "-q", "--refresh")
-    assert not canary.exists()  # the planted fsmonitor command did not run
-
-    # git itself resolves the key to the override, not the mount's value.
-    got = githeal._git(rig.repo, "config", "--get", "core.fsmonitor")
-    assert got.stdout.strip() == ""
-
-
-def test_a_heal_never_runs_a_box_planted_filter_driver(rig, tmp_path):
-    # A clean filter can't be neutralised by `-c`: its driver NAME comes from attributes, and
-    # `$GIT_DIR/info/attributes` is read even under `--attr-source`. So the heal must never read
-    # the worktree at all — a stat refresh re-hashes content through the filter. Both attribute
-    # sources are planted; the canary is a shell redirection so it needs no binary on PATH.
-    canary = tmp_path / "PWNED"
+def test_a_heal_runs_nothing_the_mount_plants(rig, tmp_path):
+    # `.git/config` and the attributes are box-writable: git would run `core.fsmonitor` or a
+    # clean filter as a command. The heal must not merely neutralise them — it runs no git at all
+    # (`heal` refuses any process), and the planted canaries stay unwritten.
     _box_commit(rig, "box", fileA="a2\n", fileC="c1\n")
+    canary = tmp_path / "PWNED"
     (rig.repo / ".gitattributes").write_text("* filter=evil\n")
-    (rig.gitdir / "info").mkdir(exist_ok=True)
-    (rig.gitdir / "info" / "attributes").write_text("* filter=evil\n")
     subprocess.run(
         ["git", "-C", str(rig.repo), "config", "filter.evil.clean", f"sh -c ': > {canary}; cat'"],
         check=True,
     )
+    subprocess.run(
+        ["git", "-C", str(rig.repo), "config", "core.fsmonitor", f"sh -c ': > {canary}'"],
+        check=True,
+    )
+    msg = heal(rig.repo)
+    assert msg and "fast-forwarded" in msg
+    assert not canary.exists()
 
-    msg = githeal.heal_checkout(rig.repo)
-    assert msg and "fast-forwarded" in msg  # the heal itself still happened
-    assert not canary.exists()  # …without the planted driver running on the host
+
+def test_a_symlinked_proposal_is_never_installed(rig, tmp_path):
+    # A proposal is a box-written file in the git dir; one that is a symlink would have the host
+    # install (and later rewrite) a file of the box's choosing outside it.
+    _synced_at(rig, rig.head())
+    _box_commit(rig, "box", fileA="a2\n")
+    prop = next(p for p in rig.gitdir.glob("index.fy-proposed.*"))
+    outside = tmp_path / "outside-index"
+    outside.write_bytes(prop.read_bytes())
+    prop.unlink()
+    prop.symlink_to(outside)
+    before = (rig.gitdir / "index").read_bytes()
+    assert heal(rig.repo) is None
+    assert (rig.gitdir / "index").read_bytes() == before
+    assert not (rig.gitdir / "index").is_symlink()
 
 
-def test_the_git_child_environment_carries_no_inherited_secret(monkeypatch):
-    monkeypatch.setenv("GH_PEM_B64", "super-secret-value")
-    seen = {}
+def test_a_symlinked_git_dir_is_not_followed(rig, tmp_path):
+    # `.git` itself is box-writable: pointed at a directory of the operator's, a heal would read
+    # and write there.
+    elsewhere = tmp_path / "elsewhere"
+    (rig.repo / ".git").rename(elsewhere)
+    (rig.repo / ".git").symlink_to(elsewhere)
+    (elsewhere / ("index.fy-record." + "0" * 40)).write_text("")
+    assert heal(rig.repo) is None
+    assert not (elsewhere / githeal.SYNC_FILE).exists()
 
-    def _capture(cmd, **kw):
-        seen.update(kw.get("env") or {})
-        return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    monkeypatch.setattr(githeal.subprocess, "run", _capture)
-    githeal._git(githeal.Path("/nonexistent"), "rev-parse", "HEAD")
-    assert "GH_PEM_B64" not in seen
-    assert seen.get("GIT_CONFIG_GLOBAL") and seen.get("GIT_CONFIG_NOSYSTEM") == "1"
+def test_a_worktree_git_file_pointing_outside_mains_worktrees_is_refused(rig, tmp_path):
+    # A worktree's `.git` is a box-writable FILE naming its git dir. Only `<main>/.git/worktrees/*`
+    # is ever this project's — anything else (another checkout's git dir) is not healed.
+    wt = tmp_path / "wt"
+    rig.host("worktree", "add", "-q", str(wt), "-b", "side")
+    assert heal(wt, rig.repo) is None  # a real, confined worktree: quiet, no error
+    other = tmp_path / "other"
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    (other / ".git" / ("index.fy-record." + "0" * 40)).write_text("")
+    (wt / ".git").write_text(f"gitdir: {other / '.git'}\n")
+    assert heal(wt, rig.repo) is None
+    assert not (other / ".git" / githeal.SYNC_FILE).exists()
+
+
+def test_a_worktree_heals_in_its_own_git_dir(rig, tmp_path):
+    # The confined path works: a box commit in a worktree is healed in `<main>/.git/worktrees/<n>`.
+    wt = tmp_path / "wt"
+    rig.host("worktree", "add", "-q", str(wt), "-b", "side")
+    wt_rig = Rig.__new__(Rig)
+    wt_rig.__dict__.update(rig.__dict__, repo=wt)
+    _box_commit(wt_rig, "box in wt", fileA="a-wt\n")
+    msg = heal(wt, rig.repo)
+    assert msg and "fast-forwarded" in msg
+    assert wt_rig.host("status", "--porcelain").stdout == ""
+
+
+def test_malformed_proposal_names_are_ignored(rig):
+    (rig.gitdir / "index.fy-proposed.not-hex.x.ff").write_bytes(b"DIRC")
+    assert heal(rig.repo) is None
+    assert (rig.gitdir / "index.fy-proposed.not-hex.x.ff").exists()  # not ours — left alone
 
 
 def test_the_sweep_visits_only_registered_worktrees(monkeypatch, tmp_path, register_worktree):
     # The worktrees root is box-writable: a dir (or a symlink to another checkout) planted there
-    # must not become somewhere the supervisor runs git.
+    # must not become somewhere the supervisor heals.
     from foldyard import config, devmode
 
     main = tmp_path / "repo"
@@ -201,4 +288,4 @@ def test_the_sweep_visits_only_registered_worktrees(monkeypatch, tmp_path, regis
     (root / "planted" / ".git").mkdir(parents=True)
     monkeypatch.setattr(devmode, "main_repo", lambda: main)
     monkeypatch.setattr(config, "worktrees_root", lambda _base: root)
-    assert githeal._checkouts() == [main, (root / "known").resolve()]
+    assert githeal._checkouts() == (main, [main, (root / "known").resolve()])

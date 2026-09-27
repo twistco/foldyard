@@ -74,10 +74,11 @@ def test_the_supervisors_mirror_never_writes_through_a_planted_symlink(
 
 
 def test_the_heal_marker_never_writes_through_a_planted_symlink(tmp_path, victim):
-    gitdir = tmp_path / "gitdir"
-    gitdir.mkdir()
+    main = tmp_path / "repo"
+    gitdir = main / ".git"
+    gitdir.mkdir(parents=True)
     (gitdir / githeal.SYNC_FILE).symlink_to(victim)
-    githeal._record(gitdir, "abc123")
+    githeal._record(main, ".git", "abc123")
     assert victim.read_text() == "ssh-ed25519 AAAA operator\n"
     assert (gitdir / githeal.SYNC_FILE).read_text() == "abc123\n"
 

@@ -4,34 +4,43 @@ The per-kernel index split (the box's git shim) ended the cross-kernel index cor
 left a deterministic illusion on the host: a box-side commit/checkout moves the SHARED HEAD
 while the host's ``.git/index`` still describes the old one, so every host-side ``git status``
 (and GUI) shows the gap as phantom staged deletions/modifications until a manual ``git reset``.
-The supervisor sweeps this module once per tick to fast-forward that pure staleness away —
-safe now precisely because the split made the host the shared index's ONLY writer kernel.
 
-Heal conditions are deliberately strict (no false positives over convenience):
+**The box proposes, the host only renames.** Working out the healed index needs git, and git in
+the checkout reads the checkout's own config — box-writable, and able to name commands
+(``core.fsmonitor``, filter drivers…). So the host runs NO git here, and nothing else: the box's
+shim, whose git is legitimately the box's, builds the healed index from a copy of the shared one
+and leaves it next to it; this module installs it — under ``index.lock``, git's own protocol, on
+the host's own kernel — only if nothing moved since:
 
-* Only when the BOX moved HEAD — attributed via ``<gitdir>/fy-box-head``, which the box shim
-  stamps after any of its commands changes HEAD. "Index still matches the old HEAD" is ALSO
-  the signature of a deliberate host-side ``git reset --soft``, so an unattributed move only
-  resyncs the marker and never touches the index.
-* Staged host work is carried forward entry-by-entry (git's own plumbing), and only when the
-  new HEAD didn't touch those paths — a genuine overlap logs once and leaves everything alone.
-* Never during an in-progress operation (merge/rebase/…), never against ``index.lock``, and
-  the index is only replaced under our own ``index.lock`` (git's protocol, same kernel).
+* the shared index must still be byte-for-byte the one the proposal was built from (its blob hash
+  is in the proposal's name), so host staging since then is never lost — the box re-proposes;
+* HEAD must still be the proposal's HEAD (read as DATA: loose refs / ``packed-refs``), so a
+  ``reset --soft`` since is never undone.
 
-Sync files (derived state, safe to delete): ``<gitdir>/index.fy-head`` — the HEAD the shared
-index's state was last intentional at; ``<gitdir>/fy-box-head`` — written by the box shim.
+The strict conditions of the heal itself (only a BOX HEAD move, staged host work carried only
+when disjoint, overlap refused) are the shim's (``git-index-shim.sh`` ``fy_propose``). The box
+could write ``.git/index`` itself, so a proposal grants it nothing; what this module guarantees
+is the host side: no process, no write outside the checkout's own git dir (reached from the
+trusted main checkout without following a symlink), and nothing installed that wasn't verified.
+
+Files next to the shared index (all derived state, safe to delete):
+``index.fy-head`` — the HEAD the shared index was last intentional at (written here);
+``index.fy-proposed.<head>.<base>.<ff|carry>`` / ``index.fy-record.<head>`` /
+``index.fy-refused.<rec>.<head>.<base>`` — the box's offers (new names, never rewritten: a name
+the host replaces reads as missing from the box for up to ~1 s over virtiofs — ADR-0021).
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
-import subprocess
+import re
+import stat
 from pathlib import Path
 
 from . import config, mountwrite
 
 SYNC_FILE = "index.fy-head"  # next to <gitdir>/index (the box's twin is index-box.head)
-BOX_STAMP = "fy-box-head"  # written by the box git shim when a box command moves HEAD
 IN_PROGRESS = (
     "rebase-merge",
     "rebase-apply",
@@ -39,223 +48,241 @@ IN_PROGRESS = (
     "CHERRY_PICK_HEAD",
     "REVERT_HEAD",
     "BISECT_LOG",
+    "index.lock",
 )
-ANCESTOR_SCAN = 32  # how far back a lost sync point is searched for (first-run / multi-hop)
+MAX_INDEX = 256 << 20  # a proposal bigger than any real index is not read into the supervisor
 
-# Conflict warnings repeat every tick while the state persists — log each (rec, cur) pair once.
+_OID = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
+_PROPOSED = re.compile(rf"index\.fy-proposed\.({_OID})\.({_OID})\.(ff|carry)")
+_RECORD = re.compile(rf"index\.fy-record\.({_OID})")
+_REFUSED = re.compile(rf"index\.fy-refused\.({_OID})\.({_OID})\.({_OID})")
+
+_NOFOLLOW_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+# Refusals repeat every tick while the state persists — log each (rec, head) pair once.
 _warned: dict[str, tuple[str, str]] = {}
 
 
-# The repo lives on a mount the box can write, so ``<gitdir>/config`` is attacker-controlled —
-# and git honours keys there that run a command on the reader's machine (``core.fsmonitor``,
-# ``core.hooksPath`` + a hook, ``core.pager``, ``core.sshCommand``, ``diff.external``, filter
-# drivers, aliases…). githeal runs host-side in the supervisor, whose environment holds every
-# host.env secret, so an unhardened git here is host code execution for anything that can write
-# the checkout (ADR-0023, the same channel by a different door). Two defences, together:
-#
-#  * ``-c`` overrides on the command line take precedence over ANY config file (repo, and any
-#    ``include``/``includeIf`` it pulls in), so these keys are neutralised whatever the mount says.
-#    Set-to-empty reads as unset/false; ``core.hooksPath`` is pointed at a dir with no hooks.
-#  * a STRIPPED environment: git gets PATH + locale, never the supervisor's inherited secrets,
-#    and global/system config is cut out (``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_NOSYSTEM``) so only
-#    the plumbing below runs.
-#
-# Filter drivers are the one thing ``-c`` cannot reach (the attributes pick the driver's name),
-# so the heal never READS THE WORKTREE: no ``--refresh``, and every index it writes is zero-stat
-# so git's racy-clean check has nothing to re-hash. Keep it that way (see ``_install_index``).
-_SAFE_FLAGS = (
-    "-c", "core.fsmonitor=",
-    "-c", "core.hooksPath=/dev/null",
-    "-c", "core.pager=cat",
-    "-c", "core.sshCommand=",
-    "-c", "core.editor=false",
-    "-c", "diff.external=",
-    "-c", "protocol.ext.allow=never",
-)  # fmt: skip
-
-# The only host vars git needs; everything else (the supervisor's host.env secrets included) is
-# left out. GIT_* controls are added on top. FY_GIT_SHIM_OFF pins the REAL binary + the SHARED
-# index even where the box shim owns PATH (the in-box test suite); on the host it's inert.
-_ENV_PASSTHROUGH = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SystemRoot")
-
-
-def _git(repo: Path, *args: str, input_bytes: bytes | None = None, env: dict | None = None):
-    """Raw git in ``repo`` with the mount's config neutralised and a stripped environment —
-    a box-written ``.git/config`` can never make this run a command on the host."""
-    safe_env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
-    safe_env["GIT_CONFIG_NOSYSTEM"] = "1"
-    safe_env["GIT_CONFIG_GLOBAL"] = os.devnull
-    safe_env["GIT_TERMINAL_PROMPT"] = "0"
-    safe_env["FY_GIT_SHIM_OFF"] = "1"
-    safe_env.update(env or {})
-    return subprocess.run(
-        ["git", *_SAFE_FLAGS, "-C", str(repo), *args],
-        capture_output=True,
-        input=input_bytes,
-        text=input_bytes is None,
-        env=safe_env,
-    )
-
-
-def _rev(repo: Path, spec: str) -> str | None:
-    out = _git(repo, "rev-parse", "-q", "--verify", spec)
-    return out.stdout.strip() if out.returncode == 0 else None
-
-
-def _clean_vs(repo: Path, commit: str) -> bool:
-    """True iff the shared index has nothing staged relative to ``commit``'s tree."""
-    return _git(repo, "diff-index", "--cached", "--quiet", commit).returncode == 0
-
-
-def _read(path: Path) -> str:
+def _open_dir(dfd: int, parts: list[str] | tuple[str, ...]) -> int:
+    """``dfd``/parts… as a directory fd, following no symlink on the way (``OSError`` if one is)."""
+    fd = os.dup(dfd)
     try:
-        return path.read_text().strip()
+        for part in parts:
+            sub = os.open(part, _NOFOLLOW_DIR, dir_fd=fd)
+            os.close(fd)
+            fd = sub
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _read_at(dfd: int, rel: str, limit: int = 1 << 16) -> bytes | None:
+    """A regular file below ``dfd`` read without following any symlink, or None."""
+    *dirs, name = rel.split("/")
+    try:
+        d = _open_dir(dfd, dirs)
     except OSError:
-        return ""
+        return None
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=d)
+    except OSError:
+        return None
+    finally:
+        os.close(d)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_size > limit:
+            return None
+        chunks = []
+        while chunk := os.read(fd, 1 << 20):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
-def _record(gitdir: Path, head: str) -> None:
-    try:  # the git dir is on the mount: never through a planted symlink (mountwrite)
-        mountwrite.write(gitdir, SYNC_FILE, (head + "\n").encode())
+def _git_dir(repo: Path, main: Path) -> str | None:
+    """``repo``'s git dir as a path RELATIVE to the trusted ``main`` checkout — ``.git`` for main,
+    ``.git/worktrees/<name>`` for a worktree whose box-writable ``.git`` file names a dir there.
+    None for anything else (another checkout's git dir, a symlink, no repo)."""
+    if Path(repo) == Path(main):
+        return ".git"
+    try:
+        fd = os.open(Path(repo) / ".git", os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        text = os.read(fd, 4096).decode("utf-8", "replace").strip()
+    finally:
+        os.close(fd)
+    if not text.startswith("gitdir:"):
+        return None
+    target = Path(text.removeprefix("gitdir:").strip())
+    target = target if target.is_absolute() else Path(repo) / target
+    parent = os.path.realpath(os.path.normpath(target.parent))
+    name = os.path.normpath(target).rsplit(os.sep, 1)[-1]
+    if parent != os.path.realpath(Path(main) / ".git" / "worktrees") or name in ("", ".", ".."):
+        return None
+    return f".git/worktrees/{name}"
+
+
+def _resolve_head(gfd: int, cfd: int) -> str | None:
+    """HEAD's commit id, read as data: ``HEAD`` in the git dir, refs from the common dir (loose,
+    then ``packed-refs``). None for unborn, unreadable, or a reftable repo (not parsed: no heal)."""
+    if _read_at(cfd, "reftable/tables.list") is not None:
+        return None
+    raw = _read_at(gfd, "HEAD")
+    for _ in range(5):  # symbolic refs chain at most a few hops
+        if raw is None:
+            return None
+        text = raw.decode("utf-8", "replace").strip()
+        if re.fullmatch(_OID, text):
+            return text
+        if not text.startswith("ref: "):
+            return None
+        ref = text.removeprefix("ref: ").strip()
+        if not ref.startswith("refs/") or ".." in ref.split("/"):
+            return None
+        raw = _read_at(cfd, ref)
+        if raw is None:
+            packed = _read_at(cfd, "packed-refs", limit=MAX_INDEX) or b""
+            for line in packed.decode("utf-8", "replace").splitlines():
+                oid, _, name = line.partition(" ")
+                if name == ref and re.fullmatch(_OID, oid):
+                    return oid
+            return None
+    return None
+
+
+def _blob_id(data: bytes, like: str) -> str:
+    """``git hash-object`` of ``data`` in the hash ``like`` is written in (sha1 or sha256)."""
+    algo = hashlib.sha256 if len(like) == 64 else hashlib.sha1
+    return algo(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _unlink(gfd: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=gfd)
     except OSError:
         pass
 
 
-def _matching_ancestor(repo: Path, cur: str) -> str | None:
-    """A recent ancestor of HEAD whose tree the index exactly matches — pure staleness with a
-    lost/multi-hop sync point, never a state anyone deliberately staged (see the shim's twin)."""
-    out = _git(repo, "rev-list", f"-{ANCESTOR_SCAN}", cur)
-    if out.returncode != 0:
-        return None
-    for commit in out.stdout.split():
-        if _clean_vs(repo, commit):
-            return commit
-    return None
-
-
-def _carry_entries(repo: Path, rec: str, cur: str) -> bytes | None:
-    """The ``update-index --index-info`` payload that re-stages the host's staged-vs-``rec``
-    work on top of ``cur``'s tree — or None when any staged path was ALSO changed by the new
-    HEAD (a genuine overlap we refuse to guess about). Handles adds, mods, and staged deletes."""
-    out = _git(repo, "diff-index", "--cached", "--name-only", "-z", rec)
-    if out.returncode != 0:
-        return None
-    paths = [p for p in out.stdout.split("\0") if p]
-    keep: list[str] = []
-    removals: list[str] = []
-    for p in paths:
-        in_index = _rev(repo, f":0:{p}")
-        in_new = _rev(repo, f"{cur}:{p}")
-        if in_index == in_new:
-            continue  # already absorbed into the new HEAD
-        if _rev(repo, f"{rec}:{p}") != in_new:
-            return None  # both sides touched it — never merge silently
-        (removals if in_index is None else keep).append(p)
-    payload = b""
-    if keep:
-        entries = _git(repo, "ls-files", "-z", "-s", "--", *keep)
-        if entries.returncode != 0:
-            return None
-        payload += entries.stdout.encode()
-    for p in removals:  # a staged deletion = the path absent from the index: a zero-mode entry
-        payload += f"0 {'0' * len(cur)}\t{p}\0".encode()
-    return payload
-
-
-def _install_index(repo: Path, gitdir: Path, cur: str, carry: bytes) -> bool:
-    """Build the fast-forwarded index in a temp file and install it under our own
-    ``index.lock`` — git's own single-kernel protocol, so concurrent host git waits/fails
-    politely instead of interleaving. False (retry next tick) if the lock is contended."""
-    lock = gitdir / "index.lock"
+def _install(main: Path, gitrel: str, gfd: int, name: str, base: str) -> bool:
+    """Under ``index.lock``: install proposal ``name`` if the shared index is still ``base``.
+    The bytes installed are the ones read and checked here (a no-follow read of a regular file
+    that looks like an index), written by :mod:`mountwrite` — never a rename of the box's file,
+    which could be swapped for a symlink between the check and the rename."""
     try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        lock = os.open("index.lock", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644, dir_fd=gfd)
     except OSError:
         return False  # someone's mid-write — never fight git for its own lock
-    tmp = gitdir / "index.fy-tmp"
     try:
-        env = {"GIT_INDEX_FILE": str(tmp)}
-        if _git(repo, "read-tree", cur, env=env).returncode != 0:
+        current = _read_at(gfd, "index", limit=MAX_INDEX)
+        if current is None or _blob_id(current, base) != base:
             return False
-        if carry:
-            r = _git(repo, "update-index", "-z", "--index-info", input_bytes=carry, env=env)
-            if r.returncode != 0:
-                return False
-        # No stat-cache refresh here, deliberately: it re-hashes worktree content through the
-        # clean filter, whose driver name the mount's attributes choose (`.git/info/attributes`
-        # included, which no flag can switch off). The entries stay zero-stat — never racily
-        # clean, so writing them reads nothing — and the next `git status` re-hashes once.
-        os.replace(tmp, gitdir / "index")
+        proposal = _read_at(gfd, name, limit=MAX_INDEX)
+        if proposal is None or not proposal.startswith(b"DIRC"):
+            return False
+        mountwrite.write(main, f"{gitrel}/index", proposal)
         return True
     finally:
-        tmp.unlink(missing_ok=True)
-        os.close(fd)
-        lock.unlink(missing_ok=True)
+        os.close(lock)
+        _unlink(gfd, "index.lock")
 
 
-def heal_checkout(repo: Path) -> str | None:
-    """One conditional heal pass over ``repo``'s shared index. Returns a log-worthy message
-    when something was healed or refused, None on the (overwhelmingly common) quiet no-op."""
-    out = _git(repo, "rev-parse", "--absolute-git-dir")
-    if out.returncode != 0:
+def _record(main: Path, gitrel: str, head: str) -> None:
+    try:  # the git dir is on the mount: never through a planted symlink (mountwrite)
+        mountwrite.write(main, f"{gitrel}/{SYNC_FILE}", (head + "\n").encode())
+    except (OSError, ValueError):
+        pass
+
+
+def heal_checkout(repo: Path, main: Path | None = None) -> str | None:
+    """One pass over ``repo``'s shared index: act on what the box offered. ``main`` is the
+    trusted main checkout (``repo`` itself when omitted). Returns a log-worthy message when
+    something was healed or refused, None on the (overwhelmingly common) quiet no-op."""
+    main = Path(main or repo)
+    gitrel = _git_dir(repo, main)
+    if gitrel is None:
         return None
-    gitdir = Path(out.stdout.strip())
-    if any((gitdir / m).exists() for m in IN_PROGRESS) or (gitdir / "index.lock").exists():
+    try:
+        root = os.open(main, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        gfd = _open_dir(root, gitrel.split("/"))
+        cfd = _open_dir(root, [".git"])
+    except OSError:
+        os.close(root)
+        return None
+    try:
+        return _heal(repo, main, gitrel, gfd, cfd)
+    finally:
+        os.close(gfd)
+        os.close(cfd)
+        os.close(root)
+
+
+def _heal(repo: Path, main: Path, gitrel: str, gfd: int, cfd: int) -> str | None:
+    names = os.listdir(gfd)
+    offers = [n for n in names if n.startswith("index.fy-") and n != SYNC_FILE]
+    if not offers:
+        return None
+    if any(n in IN_PROGRESS for n in names):
         return None  # an operation is in flight — its index state is git's, not ours
-    cur = _rev(repo, "HEAD")
-    if cur is None:
-        return None  # unborn
-    rec = _read(gitdir / SYNC_FILE)
-    if rec == cur:
+    head = _resolve_head(gfd, cfd)
+    if head is None:
         return None
-    if rec and _rev(repo, f"{rec}^{{commit}}") is None:
-        rec = ""  # sync point predates a history rewrite — no rec at all
-    box_moved = _read(gitdir / BOX_STAMP) == cur
-    if not box_moved:
-        # The host itself moved HEAD (commit, reset --soft, checkout…) — its own git already
-        # put the index in the state it wanted. Only resync the marker; NEVER touch the index.
-        _record(gitdir, cur)
-        return None
-    if _clean_vs(repo, cur):
-        _record(gitdir, cur)  # index already matches the new HEAD — marker only
-        return None
-    base = rec if rec and _clean_vs(repo, rec) else _matching_ancestor(repo, cur)
-    if base is not None:
-        carry = b""  # pure staleness — the new HEAD's tree IS the whole index
-    elif rec:
-        carried = _carry_entries(repo, rec, cur)
-        if carried is None:
-            if _warned.get(str(gitdir)) != (rec, cur):
-                _warned[str(gitdir)] = (rec, cur)
-                return (
-                    f"NOT healing {repo}: the box moved HEAD ({rec[:12]}… → {cur[:12]}…) but "
+    current = _read_at(gfd, "index", limit=MAX_INDEX)
+
+    def mtime(n: str) -> float:
+        try:
+            return os.stat(n, dir_fd=gfd, follow_symlinks=False).st_mtime
+        except OSError:
+            return 0.0
+
+    message = None
+    for name in sorted(offers, key=mtime, reverse=True):  # newest first
+        if m := _RECORD.fullmatch(name):
+            if m[1] == head:
+                _record(main, gitrel, head)  # the box saw the index intentional at HEAD
+            _unlink(gfd, name)
+        elif m := _PROPOSED.fullmatch(name):
+            rec_head, base, kind = m.groups()
+            if message is None and rec_head == head and _install(main, gitrel, gfd, name, base):
+                _record(main, gitrel, head)
+                current = _read_at(gfd, "index", limit=MAX_INDEX)
+                what = (
+                    "staged work carried forward"
+                    if kind == "carry"
+                    else "stale index fast-forwarded"
+                )
+                message = f"{Path(repo).name}: {what} after a box-side HEAD move (→ {head[:12]}…)"
+            _unlink(gfd, name)  # installed, or built on a state that's gone — the box re-proposes
+        elif m := _REFUSED.fullmatch(name):
+            rec, ref_head, base = m.groups()
+            if ref_head != head or current is None or _blob_id(current, base) != base:
+                _unlink(gfd, name)  # judged an index/HEAD that's gone — the box re-evaluates
+            elif message is None and _warned.get(str(repo)) != (rec, head):
+                _warned[str(repo)] = (rec, head)
+                message = (
+                    f"NOT healing {repo}: the box moved HEAD ({rec[:12]}… → {head[:12]}…) but "
                     "staged host-side changes overlap it — resolve by hand (`git reset` keeps "
                     "all files, then re-stage)"
                 )
-            return None
-        carry = carried
-    else:
-        _record(gitdir, cur)  # staged work, no sync point to diff against — assume intentional
-        return None
-    if not _install_index(repo, gitdir, cur, carry):
-        return None  # contended/failed — state untouched, next tick retries
-    _record(gitdir, cur)
-    what = "staged work carried forward" if carry else "stale index fast-forwarded"
-    # base (when set) is the commit the index actually matched — it may be an ancestor found
-    # independently of a stale/lost rec, so it names the true fast-forward source; rec covers
-    # the carry path (base is None there).
-    src = (base or rec or "?")[:12]
-    return f"{repo.name}: {what} after a box-side HEAD move ({src}… → {cur[:12]}…)"
+    return message
 
 
-def _checkouts() -> list[Path]:
-    """The main checkout + every REGISTERED worktree (as devmode.worktree_keys — heal is
+def _checkouts() -> tuple[Path, list[Path]]:
+    """The main checkout, and it + every REGISTERED worktree (as devmode.worktree_keys — heal is
     state-driven, so a checkout whose box is DOWN still gets its last commits' staleness fixed).
-    Never a listing of the box-writable worktrees root: git would run in whatever dir the box
-    put there, symlinks to other checkouts included."""
+    Never a listing of the box-writable worktrees root."""
     from . import devmode, worktree_registry  # lazy: keep import cost off importing githeal alone
 
     main = devmode.main_repo()
-    return [main, *(p for _, p in sorted(worktree_registry.checkouts(main).items()))]
+    return main, [main, *(p for _, p in sorted(worktree_registry.checkouts(main).items()))]
 
 
 def sweep(log) -> None:
@@ -265,13 +292,13 @@ def sweep(log) -> None:
     try:
         if not config.box_git_index_split():
             return
-        checkouts = _checkouts()
+        main, checkouts = _checkouts()
     except Exception as e:  # a heal hiccup must never wedge the reconcile loop
         log(f"git-heal: sweep failed: {e}")
         return
     for co in checkouts:
         try:
-            msg = heal_checkout(co)
+            msg = heal_checkout(co, main)
             if msg:
                 log(f"git-heal: {msg}")
         except Exception as e:  # one checkout's hiccup must not skip the rest
