@@ -623,6 +623,10 @@ def lima_pids(tmp_path, monkeypatch):
     monkeypatch.setattr(mb.os, "kill", lambda pid, sig: kills.append((pid, sig)))
     monkeypatch.setattr(mb.time, "sleep", lambda s: None)
     monkeypatch.setattr(mb.LimaBackend, "_HOSTAGENT_EXIT_WAIT", 2.0)
+    # `limactl list`'s verdict on the instance — a stopped one unless a test says otherwise
+    monkeypatch.setattr(
+        mb.LimaBackend, "_instance", lambda self, n: {"name": n, "status": "Stopped"}
+    )
 
     def write(ha=None, qemu=None, vz=None):
         if ha:
@@ -695,6 +699,27 @@ def test_lima_stop_forces_a_vm_the_graceful_stop_left_running(lima_pids, monkeyp
 def test_lima_reap_is_a_no_op_without_pid_files(lima_pids):
     _write, _alive, kills = lima_pids
     assert mb.LimaBackend().reap_orphans("acme") == []
+    assert kills == []
+
+
+@pytest.mark.parametrize("status", ["Broken", "Stopped"])
+def test_lima_start_forces_a_broken_instance_stopped_first(lima_pids, monkeypatch, status):
+    # A hung vz VM: its hostagent (which IS the VM on vz) stops answering, and Lima then reports
+    # the instance `Broken` — not Running, so `ensure` takes the START path, not the revive. The
+    # reap rightly leaves a live vz hostagent alone, and `limactl start` refuses a broken
+    # instance ("errors inspecting instance"). Seen live on vz, 2026-09-28: `limactl stop
+    # --force` — Lima ending its own instance — recovered it in 3 s.
+    write, alive, kills = lima_pids
+    write(ha=500, vz=500)
+    alive[500] = [True]
+    monkeypatch.setattr(mb.LimaBackend, "_instance", lambda self, n: {"name": n, "status": status})
+    ran: list[list[str]] = []
+    monkeypatch.setattr(mb, "_run", lambda cmd: ran.append(cmd) or _Proc(0, ""))
+    monkeypatch.setattr(mb.subprocess, "run", lambda cmd, **kw: ran.append(cmd) or _Proc(0, ""))
+    monkeypatch.setattr(mb.LimaBackend, "_wait_for_socket", lambda self, name: True)
+    assert mb.LimaBackend().start("acme") is True
+    forced = [["limactl", "stop", "--force", "acme"]] if status == "Broken" else []
+    assert ran == [*forced, ["limactl", "start", "acme"]]
     assert kills == []
 
 

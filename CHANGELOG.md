@@ -22,8 +22,9 @@ break config or CLI shape, and say so here. How a release is cut:
 - **On macOS, starting a Lima VM no longer treats the running VM as an orphan.** Before a start
   foldyard reaps a Lima hostagent that outlived its VM, and it judged "outlived" by QEMU's pid
   file. The default macOS VM type (`vz`) runs the VM inside the hostagent and writes no such
-  file, so a live VM could be waited on and signalled. A hung VM that ignores a graceful stop is
-  now stopped with Lima's own `limactl stop --force`.
+  file, so a live VM could be waited on and signalled. That reap was also, by accident, what
+  recovered a hung VM. Now a VM that Lima reports `Broken`, or that ignores a graceful stop, is
+  ended with Lima's own `limactl stop --force` before it starts again.
 - **A mode change now updates a running stack on a Lima VM.** The supervisor's posture reconcile
   (and `fy state`'s stack row, a new worktree's init, `fy open`) found the engine only through a
   socket your shell named; Lima registers none, so a running stack read as down and a mode change

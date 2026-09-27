@@ -689,6 +689,15 @@ class LimaBackend(Backend):
     _DRIVER_PIDFILES = ("qemu.pid", "vz.pid")
 
     def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
+        inst = self._instance(name)
+        if inst and str(inst.get("status", "")).lower() == "broken":
+            # Lima's own verdict on a hostagent that stopped answering — a hung VM, on vz the
+            # hostagent IS the VM. Not Running, so `ensure` lands here rather than in the revive,
+            # the reap rightly leaves a live hostagent alone, and `limactl start` refuses a broken
+            # instance. Lima ending its own instance recovers it (seen live on vz: 3 s).
+            _err(f"  (lima reports '{name}' broken — its hostagent stopped answering; forcing it")
+            _err("  stopped before starting)")
+            _run(["limactl", "stop", "--force", name])
         if self.reap_orphans(name):
             _err("  (the hostagent lingered — reaped it)")
         if subprocess.run([*prefix, *self.start_argv(name)]).returncode != 0:
