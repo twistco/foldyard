@@ -15,6 +15,9 @@
   and Linux and WSL2 hosts run the same Lima VM (validated in CI; the repo is shared over 9p
   there rather than virtiofs), so the checkout is always shared between two kernels and the
   split applies on every backend.
+- **Amended 2026-09-27:** the host's heal of the SHARED index runs no git — the box proposes the
+  healed index, the host only renames it into place (Consequences, "The shared index's heal").
+  Cross-kernel visibility measured to support it, and the direction that does NOT hold recorded.
 
 ## Context
 
@@ -102,6 +105,35 @@ Shim mechanics (each point traces to a verified failure mode):
   mode changes; the env-injection objection below applies unchanged. `fy doctor`'s
   `shared git config` row names the signature (`repositoryformatversion`/`bare` missing) with
   the recovery, and `verify` distinguishes "no origin" from "origin unreachable".
+- **The shared index's heal: the box proposes, the host only renames** (2026-09-27). The split
+  makes the host the shared index's only writer, so a box HEAD move leaves `.git/index` describing
+  the old HEAD until something heals it. That heal first ran host-side git on the supervisor tick —
+  and git in the checkout reads the checkout's own config, which the box can write
+  (`core.fsmonitor`, filter drivers named by attributes: host code execution; GHSA-j5mq-v7p4-qw2j,
+  whose 0.3.2 fix only hardened those calls). Now the host runs **no process** for it. The shim,
+  after a box command moves HEAD, builds the healed index from a COPY of the shared one with the
+  box's own git (same decisions as before: pure staleness → the new HEAD's tree; staged host work
+  disjoint from the move → carried; overlapping → refused) and offers it as a new file,
+  `index.fy-proposed.<head>.<base>.<ff|carry>`, where `<base>` is the copy's blob id. The
+  supervisor (`githeal.py`) installs it under `index.lock` only if the shared index is still
+  byte-identical to `<base>` and HEAD (read as data from loose refs / `packed-refs`; a reftable
+  repo is not healed) is still `<head>` — so host staging since the proposal is never lost; the box
+  simply re-proposes on its next index-touching call. It installs the bytes it read and checked
+  (a no-follow read of a regular file, via `mountwrite`), never a rename of the box's file, and
+  reaches the git dir from the trusted main checkout without following a symlink (a worktree's
+  `.git` file contributes only a NAME under `<main>/.git/worktrees/`). The box could write
+  `.git/index` directly anyway, so a proposal grants it nothing new.
+  **The visibility this rests on, measured** (Lima `vz`, virtiofs, 2 MB payloads): a file the VM
+  writes to a temp name and renames into place reaches the host whole — 0 torn, 0 short, never
+  missing between versions, never older than one seen, all versions observed across 14.5k reads;
+  a new file round-trips host→VM→host in 0.6 ms (p95 0.7). The control (the VM overwriting in
+  place) tore 393 times, so the check detects tearing. **The reverse does NOT hold:** a file the
+  HOST replaces reads as *missing* from the VM for 22 ms to ~1 s (the guest's cached entry). So
+  every box offer is a new name and nothing box-side re-reads a name the host rewrites — and the
+  hazard is broader than the heal: host-side git replaces `HEAD`, refs and `packed-refs` the same
+  way, and the shim's one-time seed of `index-box` from `.git/index` can land in that window.
+  `tests/test_mount_visibility_e2e.py` re-checks the direction the heal needs on every host tier
+  (9p on the Linux and WSL2 runners).
 - Stray `index-box` files are derived state — safe to delete anytime (the shim re-seeds).
 - Follow-up: an `fy verify` assertion that in-box `git` resolves to the shim, so a regression
   fails loudly instead of silently re-arming the race.
