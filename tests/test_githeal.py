@@ -237,9 +237,11 @@ def test_a_symlinked_git_dir_is_not_followed(rig, tmp_path):
     # `.git` itself is box-writable: pointed at a directory of the operator's, a heal would read
     # and write there.
     elsewhere = tmp_path / "elsewhere"
+    head = rig.head()
     (rig.repo / ".git").rename(elsewhere)
     (rig.repo / ".git").symlink_to(elsewhere)
-    (elsewhere / ("index.fy-record." + "0" * 40)).write_text("")
+    # A record for the REAL HEAD there — one a followed symlink would act on.
+    (elsewhere / f"index.fy-record.{head}").write_text("")
     assert heal(rig.repo) is None
     assert not (elsewhere / githeal.SYNC_FILE).exists()
 
@@ -250,12 +252,13 @@ def test_a_worktree_git_file_pointing_outside_mains_worktrees_is_refused(rig, tm
     wt = tmp_path / "wt"
     rig.host("worktree", "add", "-q", str(wt), "-b", "side")
     assert heal(wt, rig.repo) is None  # a real, confined worktree: quiet, no error
-    other = tmp_path / "other"
-    subprocess.run(["git", "init", "-q", str(other)], check=True)
-    (other / ".git" / ("index.fy-record." + "0" * 40)).write_text("")
-    (wt / ".git").write_text(f"gitdir: {other / '.git'}\n")
+    (tmp_path / "o").mkdir()
+    other = Rig(tmp_path / "o")  # a real repo with a HEAD, and a record the heal would act on
+    other_head = other.host_commit("other", x="x\n")
+    (other.gitdir / f"index.fy-record.{other_head}").write_text("")
+    (wt / ".git").write_text(f"gitdir: {other.gitdir}\n")
     assert heal(wt, rig.repo) is None
-    assert not (other / ".git" / githeal.SYNC_FILE).exists()
+    assert not (other.gitdir / githeal.SYNC_FILE).exists()
 
 
 def test_a_worktree_heals_in_its_own_git_dir(rig, tmp_path):

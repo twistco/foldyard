@@ -103,8 +103,8 @@ def _read_at(dfd: int, rel: str, limit: int = 1 << 16) -> bytes | None:
 
 def _git_dir(repo: Path, main: Path) -> str | None:
     """``repo``'s git dir as a path RELATIVE to the trusted ``main`` checkout — ``.git`` for main,
-    ``.git/worktrees/<name>`` for a worktree whose box-writable ``.git`` file names a dir there.
-    None for anything else (another checkout's git dir, a symlink, no repo)."""
+    ``.git/worktrees/<name>`` for a worktree, ``<name>`` read from its box-writable ``.git`` file.
+    None when that file is missing, a symlink, or names nothing."""
     if Path(repo) == Path(main):
         return ".git"
     try:
@@ -119,11 +119,11 @@ def _git_dir(repo: Path, main: Path) -> str | None:
         os.close(fd)
     if not text.startswith("gitdir:"):
         return None
-    target = Path(text.removeprefix("gitdir:").strip())
-    target = target if target.is_absolute() else Path(repo) / target
-    parent = os.path.realpath(os.path.normpath(target.parent))
-    name = os.path.normpath(target).rsplit(os.sep, 1)[-1]
-    if parent != os.path.realpath(Path(main) / ".git" / "worktrees") or name in ("", ".", ".."):
+    # Only the NAME is taken from the file: the dir is always `<main>/.git/worktrees/<name>`,
+    # opened from main without following a symlink — so no content of this file can point the
+    # heal anywhere else (a path to another checkout's git dir names nothing that exists here).
+    name = os.path.normpath(text.removeprefix("gitdir:").strip()).rsplit(os.sep, 1)[-1]
+    if name in ("", ".", ".."):
         return None
     return f".git/worktrees/{name}"
 
