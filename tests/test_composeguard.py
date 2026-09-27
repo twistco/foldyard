@@ -147,6 +147,35 @@ def test_an_included_files_own_paths_are_checked(tree):
     assert len(problems) == 1 and "stack/inc.yml" in problems[0]
 
 
+@pytest.mark.parametrize("tag", ["!override", "!reset"])
+def test_composes_merge_tags_are_readable(tree, tag):
+    # The Compose spec's merge tags — a consumer's e2e overlay sets `depends_on: !override []`.
+    # safe_load knows neither, so the raw scan read a valid overlay as unreadable and refused it.
+    repo, _host, write = tree
+    f = write("compose.e2e.yml", f"services:\n  app:\n    depends_on: {tag} []\n")
+    assert composeguard.raw_problems([f], repo, [repo]) == []
+
+
+@pytest.mark.parametrize("tag", ["!override", "!reset"])
+def test_a_path_under_a_merge_tag_is_still_checked(tree, tag):
+    # The tag wraps the value, it doesn't hide it: an included file's env_file never reaches the
+    # render, so the raw scan is the only look it gets.
+    repo, _host, write = tree
+    write(
+        "inc.yml", f"services:\n  x:\n    image: busybox\n    env_file: {tag} ../host/creds.env\n"
+    )
+    f = write("compose.yml", "include:\n  - inc.yml\nservices: {}\n")
+    problems = composeguard.raw_problems([f], repo, [repo])
+    assert len(problems) == 1 and "inc.yml" in problems[0] and "unreadable" not in problems[0]
+
+
+def test_an_unknown_tag_still_fails_closed(tree):
+    repo, _host, write = tree
+    f = write("compose.yml", "services:\n  app:\n    env_file: !planted ../host/creds.env\n")
+    problems = composeguard.raw_problems([f], repo, [repo])
+    assert len(problems) == 1 and "unreadable" in problems[0]
+
+
 def test_an_extended_files_own_paths_are_checked(tree):
     # `config` prints `extends` unresolved, so the extended file's env_file never shows there.
     repo, _host, write = tree

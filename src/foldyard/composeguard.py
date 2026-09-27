@@ -176,6 +176,27 @@ def rendered_problems(
     return check.problems
 
 
+def _load(text: str):
+    """``yaml.safe_load`` plus the Compose spec's merge tags (``!override`` / ``!reset``), read
+    as the value they wrap — so a path under one is still checked. Any other tag stays a
+    YAMLError: fail closed."""
+    import yaml
+
+    class _ComposeLoader(yaml.SafeLoader):
+        pass
+
+    def wrapped(loader, node):
+        if isinstance(node, yaml.MappingNode):
+            return loader.construct_mapping(node, deep=True)
+        if isinstance(node, yaml.SequenceNode):
+            return loader.construct_sequence(node, deep=True)
+        return loader.construct_scalar(node)
+
+    for tag in ("!override", "!reset"):
+        _ComposeLoader.add_constructor(tag, wrapped)
+    return yaml.load(text, Loader=_ComposeLoader)  # a SafeLoader subclass: no arbitrary objects
+
+
 def raw_problems(files: list[Path], project_dir: Path, roots: Iterable[Path]) -> list[str]:
     """What the render can't vouch for, read from the files: the ``-f`` files themselves and the
     project ``.env`` (no symlink out), every ``include:``/``extends:`` target (literal, inside,
@@ -197,7 +218,7 @@ def raw_problems(files: list[Path], project_dir: Path, roots: Iterable[Path]) ->
         seen.add(real)
         label = os.path.relpath(path, project_dir)
         try:
-            doc = yaml.safe_load(path.read_text()) or {}
+            doc = _load(path.read_text()) or {}
         except (OSError, yaml.YAMLError) as e:
             check.problems.append(f"{label}: unreadable ({e})")
             return
