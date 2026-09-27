@@ -548,9 +548,10 @@ def _engine_env() -> dict[str, str]:
         return env
     try:
         from . import machine  # lazy — keep devmode importable without the VM tier
-
-        sock = machine.socket()
     except Exception:
+        return env
+    sock = machine.existing_socket()
+    if sock is None:
         return env
     env["DOCKER_HOST"] = sock
     env["CONTAINER_HOST"] = sock

@@ -144,8 +144,9 @@ def export_vm_socket() -> None:
     (`stack._docker_host`: dev box / pre-exported) and SKIPS `machine.ensure` — the start-after-
     stop, the provisioning record, the host wall — which is exactly the path these tests exist
     to drive. `test_e2e._engine_env` mirrors DOCKER_HOST→CONTAINER_HOST, not the reverse, so
-    the subprocess CLI sees no DOCKER_HOST and resolves the socket itself, and podman (which
-    reads CONTAINER_HOST) reaches the VM for the tests' probes. Idempotent; a preset wins."""
+    the subprocess CLI sees no DOCKER_HOST (and `_foldyard` drops CONTAINER_HOST: an operator's
+    shell has neither) and resolves the socket itself, and podman (which reads CONTAINER_HOST)
+    reaches the VM for the tests' probes. Idempotent; a preset wins."""
     os.environ["CONTAINER_HOST"] = f"unix://{LIMA_SOCK}"  # never a preset endpoint: the
     # engine helpers tag/rmi/inspect, and must do so in the VM's store, not another podman's
 

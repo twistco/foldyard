@@ -17,6 +17,14 @@ break config or CLI shape, and say so here. How a release is cut:
   until then a stale host-side `git status` is fixed by `git reset`, as before the heal existed.
   (Follow-up to GHSA-j5mq-v7p4-qw2j; ADR-0021.)
 
+### Fixed
+
+- **A mode change now updates a running stack on a Lima VM.** The supervisor's posture reconcile
+  (and `fy state`'s stack row, a new worktree's init, `fy open`) found the engine only through a
+  socket your shell named; Lima registers none, so a running stack read as down and a mode change
+  never re-rendered it. They now use the VM's own socket when it exists, without starting it.
+  CI had hidden this by exporting the socket into the commands it ran.
+
 ## 0.3.2 — 2026-09-27
 
 A security release: upgrade now. It also carries the changes listed under **Changed**, some of

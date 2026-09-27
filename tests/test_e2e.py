@@ -93,12 +93,21 @@ def _foldyard(
     args: list[str], repo: Path, timeout: int = 900, env_extra: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess:
     """Invoke the real CLI (`python -m foldyard …`) with the example as the repo root, on the
-    actually-installed engine (overriding conftest's golden-test FOLDYARD_ENGINE pin)."""
+    actually-installed engine (overriding conftest's golden-test FOLDYARD_ENGINE pin).
+
+    On the host the CLI gets no CONTAINER_HOST: that export (`e2e_host.export_vm_socket`, the
+    host-e2e jobs) is for the TESTS' own engine calls, and an operator's shell has none — Lima
+    registers no podman connection either. Inherited, it reached the supervisor `fy up` starts
+    and hid a reconcile that derived no socket of its own; the CLI must find the
+    VM's socket itself. In a box it is the box's own engine selection, kept."""
+    env = _engine_env()
+    if not _IN_BOX:
+        env.pop("CONTAINER_HOST", None)
     return subprocess.run(
         [sys.executable, "-m", "foldyard", *args],
         cwd=str(repo),
         env={
-            **_engine_env(),
+            **env,
             "FOLDYARD_REPO": str(repo),
             "FOLDYARD_ENGINE": _engine(),
             **(env_extra or {}),
