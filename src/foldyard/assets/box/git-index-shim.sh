@@ -263,7 +263,8 @@ fy_heal() {
 #
 # Offers are always NEW names (index.fy-proposed.<head>.<base>.<ff|carry>, index.fy-record.<head>,
 # index.fy-refused.<rec>.<head>.<base>), written in this kernel and renamed into place: a name the
-# HOST replaces reads as missing from here for up to ~1 s over virtiofs (measured; ADR-0021), so
+# HOST replaces reads as missing from here for up to ~1 s over virtiofs (~5 s on podman machine's
+# libkrun; measured, ADR-0021), so
 # nothing here re-reads a file the host rewrites except index.fy-head, where a stale read only
 # delays a heal. Decisions mirror the box's own heal above: already matching → record; pure
 # staleness (the old sync point, or a past HEAD from the reflog) → the new HEAD's tree; staged host
@@ -360,14 +361,29 @@ fy_shared_sync() {
     fi
 }
 
+# Bootstrap: a MISSING index file reads as empty — every tracked file would show as a staged
+# deletion (the exact scare this shim exists to prevent). Seed from the shared index (keeps stat
+# cache + staged state). Host git REPLACES that file, and over virtiofs a replaced name reads as
+# missing from here for up to ~1 s on Lima, ~5 s on podman machine's libkrun (ADR-0021's
+# visibility record) — so a copy that finds nothing is retried for ~6 s, and if the shared
+# index never shows, HEAD's tree seeds it: clean, never
+# empty. An unborn repo has nothing to copy and empty is then correct, so it doesn't wait.
+# Built under a temp name and renamed, so two first calls racing never leave half a copy.
+fy_seed() {
+    local tries=60
+    while ((tries--)); do
+        cp "$gitdir/index" "$ix.seed.$$" 2>/dev/null && mv -f "$ix.seed.$$" "$ix" && return 0
+        pregit rev-parse -q --verify HEAD >/dev/null 2>&1 || return 0
+        sleep 0.1
+    done
+    rm -f "$ix.seed.$$" 2>/dev/null
+    GIT_INDEX_FILE="$ix" pregit read-tree HEAD 2>/dev/null || true
+}
+
 cur= gitdir= ix=
 if gitdir=$(pregit rev-parse --absolute-git-dir 2>/dev/null); then
     ix="$gitdir/index-box"
-    # Bootstrap: a MISSING index file reads as empty — every tracked file would show as a
-    # staged deletion (the exact scare this shim exists to prevent). Seed from the shared
-    # index (keeps stat cache + staged state); a fresh/unborn repo has none to copy — empty
-    # is then correct.
-    [ -f "$ix" ] || { [ -f "$gitdir/index" ] && cp "$gitdir/index" "$ix" 2>/dev/null; } || true
+    [ -f "$ix" ] || fy_seed
     export GIT_INDEX_FILE="$ix" FY_GIT_SHIM_INDEX="$ix"
     cur=$(pregit rev-parse -q --verify HEAD 2>/dev/null) || cur=
     heal_rc=0

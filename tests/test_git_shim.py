@@ -512,3 +512,49 @@ def test_worktree_add_writes_the_NEW_checkout_not_this_ones_index(rig, tmp_path)
     assert r.returncode == 0, r.stderr
     assert not wt.exists()
     assert _status(rig) == ""
+
+
+# ── the first box call's seed: a host REPLACE reads as missing from the VM for up to ~1 s ─────
+# Host git writes `.git/index` by lock → rename, and over virtiofs the VM then sees the name
+# MISSING for 22 ms … ~1 s (measured: ADR-0021's visibility record). The seed used to copy only
+# if the file was there that instant, so a box's first git call in that window ran on NO index:
+# every tracked file a staged deletion — and an index-writing command made that permanent.
+
+
+def _seeded_rig(tmp_path):
+    rig = Rig(tmp_path)
+    rig.host_commit("init", fileA="a1\n", fileB="b1\n")
+    rig.write("fileE", "e1\n")
+    rig.host("add", "--", "fileE")  # host staging the seed should carry into the box
+    return rig
+
+
+def test_the_seed_waits_out_a_shared_index_that_is_briefly_missing(tmp_path):
+    import threading
+
+    rig = _seeded_rig(tmp_path)
+    shared, aside = rig.gitdir / "index", rig.gitdir / "index.aside"
+    shared.rename(aside)  # mid-replace, as the VM sees it
+    # 3 s: past Lima vz's ~1 s window, inside podman machine's libkrun ~5 s one (ADR-0021).
+    threading.Timer(3.0, lambda: aside.rename(shared)).start()
+    t0 = time.monotonic()
+    r = rig.box("status", "--porcelain")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "A  fileE\n"  # the shared index, staging and all — not an empty one
+    assert time.monotonic() - t0 < 6.5
+
+
+def test_with_no_shared_index_at_all_the_seed_is_heads_tree_never_empty(tmp_path):
+    rig = _seeded_rig(tmp_path)
+    (rig.gitdir / "index").unlink()
+    r = rig.box("status", "--porcelain")
+    assert r.returncode == 0, r.stderr
+    assert "D " not in r.stdout and "fileA" not in r.stdout  # HEAD's tree: nothing phantom
+    assert (rig.gitdir / "index-box").is_file()
+
+
+def test_an_unborn_repo_seeds_nothing_and_does_not_wait(tmp_path):
+    rig = Rig(tmp_path)  # no commit: no shared index, and empty IS correct
+    t0 = time.monotonic()
+    assert rig.box("status", "--porcelain").returncode == 0
+    assert time.monotonic() - t0 < 1.5
