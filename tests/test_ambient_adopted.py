@@ -171,6 +171,46 @@ def test_shellenv_refuses_rather_than_emit_a_guessed_env(host_checkout, capsys):
     assert "fy shellenv: nothing adopted" in err
 
 
+@pytest.fixture
+def reaches_the_engine(host_checkout, monkeypatch):
+    """Everything short of the refusal is in place: the checkout is main, and the host inherited
+    an engine — so `machine.ensure` (which refuses an unadopted checkout itself) is skipped."""
+    from foldyard import stack
+
+    monkeypatch.setattr(stack, "main_repo", lambda: host_checkout)
+    monkeypatch.setattr(stack, "pin_filemode", lambda main: None)
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/fy-tests.sock")
+    return stack
+
+
+def test_reclaim_refuses_rather_than_sweep_a_guessed_project(
+    reaches_the_engine, capsys, monkeypatch
+):
+    # `fy reclaim` runs no stack gate, and with an inherited DOCKER_HOST no `machine.ensure`
+    # either: it swept images under a project name guessed from the directory (CodeRabbit, #41).
+    stack = reaches_the_engine
+    swept: list = []
+    monkeypatch.setattr(stack, "reclaim", lambda *a, **k: swept.append(a))
+    with pytest.raises(SystemExit):
+        stack.reclaim_now()
+    assert swept == [] and "nothing adopted" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("no_machine", [False, True])
+def test_every_resolve_refuses_unadopted_on_the_host(reaches_the_engine, no_machine):
+    # The channel, not the verb (ADR-0022): `fy verify`, the box verbs, `fy open`, `fy
+    # transcripts`… all resolve the stack context, and none of them may act on a guess.
+    with pytest.raises(SystemExit):
+        reaches_the_engine.resolve(no_machine=no_machine)
+
+
+def test_a_bound_resolve_is_not_refused(reaches_the_engine):
+    # The supervisor's reconcile binds a worktree's ADOPTED config and resolves under it.
+    bound = config.Config(repo_root=reaches_the_engine.main_repo(), worktree="", toml={})
+    with config.using(bound):
+        assert reaches_the_engine.resolve(no_machine=True).project
+
+
 def _invoke(argv):
     from typer.testing import CliRunner
 

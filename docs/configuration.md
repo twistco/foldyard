@@ -741,8 +741,9 @@ Day to day:
 - The first `fy up` / `fy host restart` in a fresh checkout shows its config and asks to adopt
   it: Enter adopts, anything else stops there. Until it is adopted, your computer runs nothing
   for that checkout — no proxy, no token services — and `fy doctor` says so. Other commands say
-  so up front too; the ones whose answer would be a guess (`fy shellenv`, and the stack
-  commands such as `fy build`, `fy ps` and `fy down`) stop there rather than act on no config.
+  so up front too; the ones whose answer would be a guess (`fy shellenv`, and every command
+  that acts on the stack or the box, such as `fy build`, `fy ps` or `fy reclaim`) stop there
+  rather than act on no config.
 - After that, an edit does nothing on your computer until adopted. The supervisor logs the change
   once and notifies you, and `fy doctor` shows a warning row.
 - `fy up`, `fy box up`, `fy host restart` and `fy code` ask before starting anything:

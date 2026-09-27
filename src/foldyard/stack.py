@@ -180,7 +180,18 @@ def _context(
     no_machine: bool, worktree: str | None = None, read_only: bool = False
 ) -> tuple[Path, dict[str, str], dict[str, str], dict[str, str]]:
     """Returns (main_repo, plain_vars, exported_vars, ports). Plain vs exported mirrors
-    _common.sh exactly so the env it produces is identical."""
+    _common.sh exactly so the env it produces is identical.
+
+    Refused on the host when nothing is adopted: everything here — the project, the ports, the
+    compose files — would be guessed from an EMPTY config, and ``machine.ensure`` (which refuses
+    that itself) is skipped by an inherited DOCKER_HOST and by ``no_machine``. The stack gate and
+    ``shellenv`` say it in their own words first; this is the channel every verb shares."""
+    if config.unadopted_notice() is not None:
+        _err(
+            "✗ nothing adopted for this checkout — not acting on a guessed project "
+            "(`fy config status`)."
+        )
+        raise SystemExit(1)
     main = main_repo()
     wt_root = worktrees_root(main)
     dev_vm_rel = config.dev_vm_rel()
