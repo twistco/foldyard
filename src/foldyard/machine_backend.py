@@ -672,7 +672,21 @@ class LimaBackend(Backend):
     def stop_argv(self, name: str) -> list[str]:
         return ["limactl", "stop", name]
 
+    def stop(self, name: str) -> bool:
+        """Graceful, then Lima's own ``--force`` if the hostagent outlived it. A hung VM (the
+        revive's case: flag ``running``, socket dead) can ignore the graceful stop, and on vz the
+        hostagent IS the VM — so :meth:`reap_orphans` rightly never touches it; ``--force``
+        ends the instance by Lima's own records, never a signal of ours."""
+        ha = self._pid(Path.home() / ".lima" / name / "ha.pid")
+        ok = _run(self.stop_argv(name)).returncode == 0
+        if ha and _alive(ha):
+            ok = _run(["limactl", "stop", "--force", name]).returncode == 0
+        return ok
+
     _HOSTAGENT_EXIT_WAIT = 20.0  # seconds a leaving hostagent gets before it is signalled
+    # The VM's driver (the VMM) by VM type: QEMU runs as its own process; vz runs inside the
+    # hostagent, so `vz.pid` names the hostagent's own pid (checked live, Lima 2.1).
+    _DRIVER_PIDFILES = ("qemu.pid", "vz.pid")
 
     def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
         if self.reap_orphans(name):
@@ -696,10 +710,15 @@ class LimaBackend(Backend):
         the hostagent to go (it is going), and signal it only if it lingers — identified by
         Lima's OWN ``ha.pid``, never by name. A VM whose driver is alive is never touched.
         Called from :meth:`start`, so both of ``ensure``'s paths are covered: the plain start
-        on a "stopped" flag and the revive on a dead socket."""
+        on a "stopped" flag and the revive on a dead socket.
+
+        The driver is whatever pid file the VM type writes (:data:`_DRIVER_PIDFILES`). On ``vz``
+        the VM runs INSIDE the hostagent — ``vz.pid`` is ``ha.pid`` — so there the driver is
+        alive exactly when the hostagent is, and a live one is never an orphan."""
         inst = Path.home() / ".lima" / name
-        ha, qemu = self._pid(inst / "ha.pid"), self._pid(inst / "qemu.pid")
-        if not ha or not _alive(ha) or (qemu and _alive(qemu)):
+        ha = self._pid(inst / "ha.pid")
+        drivers = [self._pid(inst / f) for f in self._DRIVER_PIDFILES]
+        if not ha or not _alive(ha) or any(d and _alive(d) for d in drivers):
             return []
         _err(f"⏳ '{name}': the lima hostagent (pid {ha}) outlived its driver — waiting for it")
         _err("  to leave before starting (it exits on its own once it notices; up to 20s)…")
@@ -753,15 +772,15 @@ class LimaBackend(Backend):
             return None
 
     def host_pids(self, name: str) -> list[int]:
-        """Lima's QEMU driver writes ``qemu.pid`` in the instance dir and the hostagent writes
-        ``ha.pid``; both live in the scope the VM was started in, the VMM first."""
+        """The driver's pid file (:data:`_DRIVER_PIDFILES`) and the hostagent's ``ha.pid``, from
+        the instance dir; both live in the scope the VM was started in, the VMM first. On vz
+        they are one process, listed once."""
         inst = Path.home() / ".lima" / name
-        pids = []
-        for pidfile in ("qemu.pid", "ha.pid"):
-            try:
-                pids.append(int((inst / pidfile).read_text().strip()))
-            except (OSError, ValueError):
-                continue
+        pids: list[int] = []
+        for pidfile in (*self._DRIVER_PIDFILES, "ha.pid"):
+            pid = self._pid(inst / pidfile)
+            if pid and pid not in pids:
+                pids.append(pid)
         return pids
 
     def _wait_for_socket(self, name: str, tries: int = 30, delay: float = 1.0) -> bool:

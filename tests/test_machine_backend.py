@@ -571,6 +571,9 @@ def test_lima_vm_pid_reads_the_drivers_pid_file(monkeypatch, tmp_path):
     assert mb.LimaBackend().vm_pid("acme") == 4343
     (inst / "qemu.pid").write_text("garbage\n")
     assert mb.LimaBackend().host_pids("acme") == [4242]
+    (inst / "qemu.pid").unlink()
+    (inst / "vz.pid").write_text("4242\n")  # vz: the VMM IS the hostagent — listed once
+    assert mb.LimaBackend().host_pids("acme") == [4242]
 
 
 def test_backends_without_a_host_wall_input_report_nothing():
@@ -621,11 +624,13 @@ def lima_pids(tmp_path, monkeypatch):
     monkeypatch.setattr(mb.time, "sleep", lambda s: None)
     monkeypatch.setattr(mb.LimaBackend, "_HOSTAGENT_EXIT_WAIT", 2.0)
 
-    def write(ha=None, qemu=None):
+    def write(ha=None, qemu=None, vz=None):
         if ha:
             (inst / "ha.pid").write_text(f"{ha}\n")
         if qemu:
             (inst / "qemu.pid").write_text(f"{qemu}\n")
+        if vz:
+            (inst / "vz.pid").write_text(f"{vz}\n")
 
     return write, alive, kills
 
@@ -657,6 +662,34 @@ def test_lima_reap_never_touches_a_healthy_vm(lima_pids):
     alive[500] = [True]
     assert mb.LimaBackend().reap_orphans("acme") == []
     assert kills == []
+
+
+def test_lima_reap_never_touches_a_running_vz_vm(lima_pids, capsys):
+    # On macOS Lima runs the VM on Virtualization.framework INSIDE the hostagent: `vz.pid` names
+    # the hostagent's own pid and there is no `qemu.pid`. Reading "no qemu.pid" as "driver dead"
+    # made every live vz VM look like a hostagent that outlived its driver — waited on, then
+    # SIGTERMed. On vz the driver is alive exactly when the hostagent is.
+    write, alive, kills = lima_pids
+    write(ha=500, vz=500)
+    alive[500] = [True]
+    assert mb.LimaBackend().reap_orphans("acme") == []
+    assert kills == [] and "outlived" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("left_running", [True, False])
+def test_lima_stop_forces_a_vm_the_graceful_stop_left_running(lima_pids, monkeypatch, left_running):
+    # A hung vz VM (the revive's case: flag `running`, socket dead) can ignore the graceful stop,
+    # and on vz its hostagent IS the VM — so the reap above rightly never touches it. Lima's own
+    # `stop --force` does, by its own records; only when the graceful one left it running.
+    write, alive, kills = lima_pids
+    write(ha=500, vz=500)
+    alive[500] = [left_running]  # after the graceful stop: still running, or gone
+    ran: list[list[str]] = []
+    monkeypatch.setattr(mb, "_run", lambda cmd: ran.append(cmd) or _Proc(0, ""))
+    assert mb.LimaBackend().stop("acme") is True
+    forced = ["limactl", "stop", "--force", "acme"]
+    assert ran == [["limactl", "stop", "acme"], *([forced] if left_running else [])]
+    assert kills == []  # never a signal of ours: Lima kills its own instance
 
 
 def test_lima_reap_is_a_no_op_without_pid_files(lima_pids):
