@@ -482,6 +482,21 @@ def ambient_adopted() -> bool:
     return in_box() or _host_toml(_repo_root_ambient()) is not None
 
 
+def unadopted_notice() -> str | None:
+    """What to tell the operator when the host is reading NOTHING for a checkout that has a
+    ``foldyard.toml`` — it was never adopted — or None. Without it every un-gated verb reports the
+    empty config's consequences as the config's ("[project].compose is unset", a project named
+    after the directory). Ambient only: a bound config is an adopted one by construction."""
+    if _BOUND.get() is not None or ambient_adopted():
+        return None
+    if not (_repo_root_ambient() / "foldyard.toml").is_file():
+        return None  # nothing to adopt: the empty config IS this checkout's config
+    return (
+        "! this checkout's foldyard.toml isn't adopted — your computer reads no config for it "
+        "until you adopt it.\n  `fy up` shows it and asks (or read it, then `fy config adopt`)."
+    )
+
+
 def _toml() -> dict:
     """The resolved ``foldyard.toml`` (+ local override). Consults a bound :class:`Config`
     context first — so building/reading a registry for a specific consumer or worktree sees

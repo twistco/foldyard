@@ -94,6 +94,33 @@ def _resolve_worktree(
         # and always answers None — which silently disabled the nudge until a wiring test caught
         # it. Anything reaching into click here must come from typer's copy.
         compat.gate_or_abort(ctx.invoked_subcommand)
+        _say_if_unadopted(ctx.invoked_subcommand)
+
+
+# Verbs that don't get the up-front "not adopted" line: the adoption surface itself (`config`
+# says it in its own words), the manual, the scaffolder, the TUI and the supervisor (which report
+# it in their own UI/log), and the launch verbs, whose gate asks or refuses on its own.
+_NO_UNADOPTED_NOTICE = frozenset(
+    {"config", "docs", "init", "doctor", "tui", "host", "up", "code", "claude", "codex"}
+)
+
+
+def _say_if_unadopted(verb: str | None) -> None:
+    """Once per command, on the host: say that this checkout's config isn't adopted, so what
+    follows is foldyard reading NO config — never its consequences passed off as the config's.
+    Best-effort: a hiccup here must never be what stops the command."""
+    if verb is None or verb in _NO_UNADOPTED_NOTICE:
+        return
+    import sys
+
+    from . import config
+
+    try:
+        notice = config.unadopted_notice()
+    except Exception:
+        return
+    if notice:
+        print(notice, file=sys.stderr)
 
 
 @app.command()
