@@ -121,3 +121,72 @@ def test_a_worktree_offset_pin_comes_from_mains_adoption(host_checkout, monkeypa
     _adopt(host_checkout)
     (host_checkout / "foldyard.local.toml").write_text("[worktree-offsets]\nfeat = 9\n")
     assert stack._pinned_offset("feat") == 5
+
+
+# ── an unadopted checkout says so, rather than reporting its empty config as the config ─────────
+# Tangible's `just e2e` on a fresh host printed "[project].compose is unset in foldyard.toml" and a
+# PODMAN_PROJECT guessed from the directory name, while the tree's toml set both: the host read
+# nothing (nothing adopted) and reported what nothing implies. Pinning makes an edit silent by
+# construction, so the silence itself has to be reported (DEVELOPMENT.md: reporting is part of it).
+
+
+def test_an_unadopted_checkout_is_named_as_such(host_checkout, monkeypatch):
+    notice = config.unadopted_notice()
+    assert notice and "isn't adopted" in notice and "`fy config adopt`" in notice
+    _adopt(host_checkout)
+    assert config.unadopted_notice() is None
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    assert config.unadopted_notice() is None
+
+
+def test_no_notice_without_a_tree_config(host_checkout):
+    (host_checkout / "foldyard.toml").unlink()
+    assert config.unadopted_notice() is None  # nothing to adopt: an empty config IS the config
+
+
+def test_a_bound_config_is_never_called_unadopted(host_checkout):
+    # The supervisor/TUI bind a worktree's config, and they only bind ADOPTED ones
+    # (devmode.worktree_config): never report the ambient checkout's state over it.
+    bound = config.Config(repo_root=host_checkout, worktree="", toml={})
+    with config.using(bound):
+        assert config.unadopted_notice() is None
+
+
+@pytest.mark.parametrize("verb", ["build", "ps", "down", "logs"])
+def test_stack_verbs_refuse_rather_than_call_the_stack_undeclared(host_checkout, capsys, verb):
+    from foldyard import stack
+
+    assert stack.stack_declared(verb, None) == 1
+    out, err = capsys.readouterr()
+    assert "unset" not in out + err and "doesn't drive one" not in out + err
+    assert f"fy {verb}: nothing adopted" in err
+
+
+def test_shellenv_refuses_rather_than_emit_a_guessed_env(host_checkout, capsys):
+    from foldyard import stack
+
+    assert stack.shellenv() == 1
+    out, err = capsys.readouterr()
+    assert out.strip() == "exit 1"  # the recipe's eval aborts; no PODMAN_PROJECT, no COMPOSE
+    assert "fy shellenv: nothing adopted" in err
+
+
+def _invoke(argv):
+    from typer.testing import CliRunner
+
+    from foldyard import cli
+
+    return CliRunner().invoke(cli.app, argv)
+
+
+def test_the_cli_says_it_once_up_front(host_checkout):
+    result = _invoke(["shellenv"])
+    assert result.stdout.strip() == "exit 1"
+    assert result.stderr.count("isn't adopted") == 1
+
+
+@pytest.mark.parametrize("argv", [["docs"], ["config", "status"]])
+def test_the_verbs_that_are_about_adoption_stay_quiet(host_checkout, argv):
+    # `fy config` IS the adoption surface (status says it in its own words), `fy docs` is the
+    # manual; `fy up`/`fy code`/`fy claude` run the gate, which asks or refuses on its own.
+    assert "isn't adopted" not in _invoke(argv).stderr

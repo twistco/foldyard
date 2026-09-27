@@ -297,7 +297,21 @@ def _compose_overlays(mode: dict, base: Path) -> list[str]:
     return out
 
 
+def _nothing_adopted(verb: str) -> bool:
+    """Refuse (and say so) when the host reads NO config for this checkout because its
+    ``foldyard.toml`` was never adopted: what ``verb`` would act on is then guessed — a project
+    named after the directory, no compose files — not the config's. The CLI has already printed
+    :func:`config.unadopted_notice` once up front; this is the verb's own line."""
+    if config.unadopted_notice() is None:
+        return False
+    _err(f"✗ fy {verb}: nothing adopted to act on (`fy config status`).")
+    return True
+
+
 def shellenv(no_machine: bool = False) -> int:
+    if _nothing_adopted("shellenv"):
+        print("exit 1")  # the recipe's `eval` runs this → it aborts (reason on stderr)
+        return 1
     # The declared compose files must exist in the checkout the stack is bound to — checked
     # FIRST, before _context() can ensure (provision!) the machine for a stack that can't run,
     # and before COMPOSE is emitted: a raw recipe would otherwise hand the provider a file
@@ -1514,7 +1528,11 @@ def stack_declared(verb: str, box_verb: str | None) -> int | None:
     ``resolve()`` joins the ``-f`` paths onto — an explicit ``WORKTREE`` (or a cwd inside one)
     binds the stack to that sibling checkout, which ``config.repo_root()`` (cwd / FOLDYARD_REPO)
     need not be — so the preflight can't pass on main's file and hand the provider the
-    worktree's. That costs the memoised ``main_repo()`` git call, never the engine."""
+    worktree's. That costs the memoised ``main_repo()`` git call, never the engine.
+    Nothing adopted on the host ⇒ refused, exit 1: "compose is unset" would describe the EMPTY
+    config the host reads until then, not the checkout's."""
+    if _nothing_adopted(verb):
+        return 1
     if not config.has_compose_stack():
         print(
             f"ℹ `fy {verb}` acts on the compose stack, and '{config.project_prefix()}' doesn't "
