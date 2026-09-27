@@ -301,6 +301,23 @@ def test_ensure_reaps_the_orphan_the_stop_left_behind(half_started, tmp_path, ca
     assert "1405" in capsys.readouterr().err
 
 
+def test_a_revive_repins_the_ssh_port_while_the_vm_is_stopped(half_started, monkeypatch, tmp_path):
+    # `ensure` pins the ssh forward before starting a STOPPED VM, but a half-started one still
+    # flags `running` there — and `limactl edit` refuses a running VM — so the revive restarted it
+    # on whatever port it last recorded. A stale one (the band moved; another project's port
+    # taken meanwhile) made `limactl start` wait forever for ssh. Seen live three times.
+    be = half_started()
+    monkeypatch.setattr(machine, "_pin_ssh_port", lambda: be.calls.append(f"pin@{be._state}"))
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == [
+        "pin@running",  # ensure's own pin: skipped by the real one on a running flag
+        "stop:homelab",
+        "reap:homelab",
+        "pin@stopped",
+        "start:homelab",
+    ]
+
+
 def test_ensure_reaps_and_starts_even_when_the_stop_fails(half_started, tmp_path):
     # A stop that errors is NOT a reason to give up — the machine is already unusable, and the
     # reap + start is the recovery. Bailing here would strand exactly the case we're fixing.

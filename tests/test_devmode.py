@@ -1583,3 +1583,52 @@ def test_host_wall_doctor_row_without_a_slice_is_a_warn(host_wall_row, monkeypat
     monkeypatch.setattr(host_wall_row, "probe", lambda vm: pytest.fail("nothing to probe yet"))
     ((status, _name, detail),) = devmode._host_wall_check()
     assert status == "warn" and "fy machine host-firewall" in detail and "slice" in detail
+
+
+# ── doctor: the pinned ssh port — only where it is pinned at all (Podman Desktop followed) ───
+
+
+@pytest.fixture
+def ssh_port_row(monkeypatch):
+    from foldyard import podman_desktop
+
+    class Lima:
+        name = "lima"
+        port: int | None = 41390
+
+        def ssh_port(self, name):
+            return self.port
+
+    be = Lima()
+    monkeypatch.setattr(devmode, "_BACKEND", be)
+    monkeypatch.setattr(devmode.config, "machine_ssh_port", lambda: 41390)
+    monkeypatch.setattr(podman_desktop, "following", lambda: True)
+    return be
+
+
+def test_ssh_port_row_is_silent_when_it_matches_the_band(ssh_port_row):
+    assert list(devmode._ssh_port_check()) == []
+
+
+def test_ssh_port_row_warns_on_a_port_off_the_band(ssh_port_row):
+    # A stale pin (the band moved) is what hung a revived VM's start; `ensure` re-pins a STOPPED
+    # VM, so the fix is a stop and an up.
+    ssh_port_row.port = 41190
+    ((status, name, detail),) = devmode._ssh_port_check()
+    assert status == "warn" and name == "ssh port"
+    assert "41190" in detail and "41390" in detail and "fy machine stop" in detail
+
+
+@pytest.mark.parametrize("why", ["not followed", "not lima", "no port yet"])
+def test_ssh_port_row_is_silent_where_nothing_is_pinned(ssh_port_row, monkeypatch, why):
+    # Without Podman Desktop nothing pins the port: Lima picks one per start, and any is fine.
+    from foldyard import podman_desktop
+
+    ssh_port_row.port = 41190
+    if why == "not followed":
+        monkeypatch.setattr(podman_desktop, "following", lambda: False)
+    elif why == "not lima":
+        ssh_port_row.name = "podman"
+    else:
+        ssh_port_row.port = None
+    assert list(devmode._ssh_port_check()) == []

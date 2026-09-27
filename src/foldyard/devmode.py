@@ -1253,6 +1253,7 @@ def doctor(deep: bool = False):
     yield _worktree_registry_check()
     yield _widenings_check()
     yield from _podman_checks()
+    yield from _ssh_port_check()
     yield from _host_wall_check()
     yield from registry().doctor_checks(ctx)
 
@@ -1608,6 +1609,27 @@ def _podman_checks():
         yield _result(None, label, "", f"{machine} stopped — `fy up` (or press s) starts it")
     else:
         yield _result(None, label, "", f"{machine} not initialised yet — `fy up` creates it")
+
+
+def _ssh_port_check():
+    """The Lima VM's ssh forward vs its band's port, where foldyard pins it at all (Podman
+    Desktop followed — otherwise Lima picks one per start and any is fine). A stale pin (the
+    band moved; a port leaked from elsewhere) makes Podman Desktop's entry point nowhere, and a
+    start on a port that is taken waits forever for ssh. Silent when it matches."""
+    from . import podman_desktop  # stdlib-only, but only this row needs it
+
+    if _BACKEND.name != "lima" or not podman_desktop.following():
+        return
+    have, want = _BACKEND.ssh_port(PODMAN_MACHINE), config.machine_ssh_port()
+    if not have or have == want:
+        return
+    yield _result(
+        None,
+        "ssh port",
+        "",
+        f"{PODMAN_MACHINE}'s ssh forward is :{have}, not its port range's :{want} — "
+        "`fy machine stop` then `fy up` re-pins it",
+    )
 
 
 def _host_wall_check():

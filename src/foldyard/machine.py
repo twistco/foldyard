@@ -155,6 +155,9 @@ def _revive() -> bool:
     reaped = BACKEND.reap_orphans(MACHINE)
     if reaped:
         _err(f"  reaped {len(reaped)} orphaned VM process(es): {', '.join(map(str, reaped))}")
+    # The one moment this VM is stopped: `ensure`'s own pin skipped it on the `running` flag, and a
+    # stale recorded ssh port (the band moved, or it is taken now) hangs the start waiting for ssh.
+    _pin_ssh_port()
     if not _start():
         return False
     # `machine start` returns once the backend is satisfied, but the api socket can take a
