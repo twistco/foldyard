@@ -243,6 +243,7 @@ jobs:
           tests/test_box_e2e.py
           tests/test_host_daemons_e2e.py
           tests/test_machine_e2e.py
+          tests/test_mount_visibility_e2e.py
           tests/test_probes_e2e.py
           tests/test_reclaim_e2e.py
           tests/test_verify_e2e.py
@@ -462,6 +463,7 @@ jobs:
             tests/test_box_e2e.py \
             tests/test_host_daemons_e2e.py \
             tests/test_machine_e2e.py \
+            tests/test_mount_visibility_e2e.py \
             tests/test_probes_e2e.py \
             tests/test_reclaim_e2e.py \
             tests/test_verify_e2e.py \

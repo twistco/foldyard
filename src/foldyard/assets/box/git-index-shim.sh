@@ -174,9 +174,9 @@ fy_index_sig() {
 # virtiofs. write-tree does WRITE tree objects into the ODB; they are unreferenced (gc'd like any
 # other) and identical trees hash the same, so this is idempotent rather than growing. It fails on
 # an unmerged index, which the mid-operation guard already excludes above.
-fy_matches_a_past_head() {
+fy_matches_a_past_head() { # [index file — default: this invocation's own]
     local t
-    t=$(pregit write-tree 2>/dev/null) || return 1
+    t=$(GIT_INDEX_FILE="${1:-$ix}" pregit write-tree 2>/dev/null) || return 1
     [ -n "$t" ] || return 1
     pregit rev-list -g HEAD --format='%T' 2>/dev/null | grep -qxF "$t"
 }
@@ -251,6 +251,115 @@ fy_heal() {
     return 1
 }
 
+# ── the SHARED index's heal: the box proposes, the host only renames ──────────────────────────
+# A box HEAD move leaves the host's .git/index describing the old HEAD (phantom staged diffs in
+# every host-side git). Working out the healed index needs git, and git run in the checkout reads
+# the checkout's config — which the box can write — so the HOST runs no git for this: the box
+# builds the healed index here, from a COPY of the shared one, and offers it as a new file next to
+# it; the host (foldyard githeal.py) installs it under index.lock only if the shared index is still
+# byte-identical to the copy (its blob id is in the name) and HEAD is still the proposal's. So the
+# host's own staging is never lost to a stale proposal; a dropped one is simply re-proposed on the
+# next index-touching call here.
+#
+# Offers are always NEW names (index.fy-proposed.<head>.<base>.<ff|carry>, index.fy-record.<head>,
+# index.fy-refused.<rec>.<head>.<base>), written in this kernel and renamed into place: a name the
+# HOST replaces reads as missing from here for up to ~1 s over virtiofs (measured; ADR-0021), so
+# nothing here re-reads a file the host rewrites except index.fy-head, where a stale read only
+# delays a heal. Decisions mirror the box's own heal above: already matching → record; pure
+# staleness (the old sync point, or a past HEAD from the reflog) → the new HEAD's tree; staged host
+# work disjoint from the move → carried forward; overlapping → refused, for the host to report.
+fy_pending() { # anything for HEAD $1 already waiting for the host?
+    compgen -G "$gitdir/index.fy-proposed.$1.*" >/dev/null ||
+        [ -e "$gitdir/index.fy-record.$1" ] ||
+        compgen -G "$gitdir/index.fy-refused.*.$1.*" >/dev/null
+}
+
+fy_offer_record() { : >"$gitdir/index.fy-record.$1" 2>/dev/null || true; }
+
+# The `update-index --index-info` payload that re-stages the shared index's staged-vs-$1 work on
+# top of $2's tree (index file $3), on stdout — or status 1 when a staged path was ALSO changed by
+# the move (both sides touched it: never merged silently). Adds, modifications and staged deletes.
+fy_carry() {
+    local rec=$1 head=$2 work=$3 p in_index in_new keep=() removals=()
+    while IFS= read -r -d '' p; do
+        in_index=$(GIT_INDEX_FILE="$work" pregit rev-parse -q --verify ":0:$p" 2>/dev/null) || in_index=
+        in_new=$(pregit rev-parse -q --verify "$head:$p" 2>/dev/null) || in_new=
+        [ "$in_index" = "$in_new" ] && continue # already absorbed into the new HEAD
+        [ "$(pregit rev-parse -q --verify "$rec:$p" 2>/dev/null)" = "$in_new" ] || return 1
+        if [ -n "$in_index" ]; then keep+=("$p"); else removals+=("$p"); fi
+    done < <(GIT_INDEX_FILE="$work" pregit diff-index --cached --name-only -z "$rec" 2>/dev/null)
+    if ((${#keep[@]})); then # exactly these names: as globs, `a*` would re-stage `ab`'s old entry
+        (   # literal clashes with any other global pathspec setting, and the caller's env has its own
+            unset GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+            GIT_LITERAL_PATHSPECS=1 GIT_INDEX_FILE="$work" pregit ls-files -z -s -- "${keep[@]}"
+        ) || return 1
+    fi
+    local zeros=${head//?/0} # a staged deletion = a zero-mode entry, oid as wide as HEAD's
+    for p in ${removals[@]+"${removals[@]}"}; do printf '0 %s\t%s\0' "$zeros" "$p"; done
+}
+
+fy_propose() { # $1 = the HEAD to heal the shared index to
+    local head=$1 srec work op
+    [ -n "${FY_GIT_SHIM_NO_HEAL:-}" ] || [ -z "$head" ] && return 0
+    for op in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG index.lock; do
+        [ -e "$gitdir/$op" ] && return 0
+    done
+    srec=$(cat "$gitdir/index.fy-head" 2>/dev/null) || srec=
+    [ "$srec" = "$head" ] && return 0
+    fy_pending "$head" && return 0
+    [ -f "$gitdir/index" ] || return 0 # absent, or mid-replace by the host: next call retries
+    work=$(mktemp "$gitdir/.fy-propose.XXXXXX" 2>/dev/null) || return 0
+    fy_propose_from "$head" "$srec" "$work"
+    rm -f "$work" "$work.carry" 2>/dev/null || true # a proposal was renamed away; the rest goes
+}
+
+fy_propose_from() { # $1 head, $2 the shared index's sync point, $3 a temp file to build in
+    local head=$1 srec=$2 work=$3 base kind
+    cp "$gitdir/index" "$work" 2>/dev/null || return 0
+    base=$(pregit hash-object --no-filters -- "$work" 2>/dev/null) || return 0
+    [ -n "$srec" ] && { pregit rev-parse -q --verify "$srec^{commit}" >/dev/null 2>&1 || srec=; }
+    if GIT_INDEX_FILE="$work" pregit diff-index --cached --quiet "$head" 2>/dev/null; then
+        fy_offer_record "$head" # already matches the new HEAD — the host only moves its marker
+        return 0
+    fi
+    if { [ -n "$srec" ] && GIT_INDEX_FILE="$work" pregit diff-index --cached --quiet "$srec" 2>/dev/null; } ||
+        fy_matches_a_past_head "$work"; then
+        kind=ff
+    elif [ -n "$srec" ]; then
+        if ! fy_carry "$srec" "$head" "$work" >"$work.carry"; then
+            : >"$gitdir/index.fy-refused.$srec.$head.$base" 2>/dev/null || true
+            return 0
+        fi
+        kind=carry
+    else
+        fy_offer_record "$head" # staged work, no sync point to diff against — assume intentional
+        return 0
+    fi
+    # read-tree leaves zero-stat entries: never racily clean, so the host's next status re-hashes
+    # once (its kernel's stat data isn't ours to write anyway).
+    GIT_INDEX_FILE="$work" pregit read-tree "$head" 2>/dev/null || return 0
+    if [ -s "$work.carry" ]; then
+        GIT_INDEX_FILE="$work" pregit update-index -z --index-info <"$work.carry" 2>/dev/null || return 0
+    fi
+    mv -f "$work" "$gitdir/index.fy-proposed.$head.$base.$kind" 2>/dev/null || true
+}
+
+# Before an index-touching command: offer the host what it's missing for the current HEAD. The box
+# moved HEAD (its stamp) → propose (again, if the host dropped the last one); the host moved it →
+# its own git set its index deliberately, so only the marker moves.
+fy_shared_sync() {
+    local srec stamp
+    [ -n "${FY_GIT_SHIM_NO_HEAL:-}" ] || [ -z "$cur" ] && return 0
+    srec=$(cat "$gitdir/index.fy-head" 2>/dev/null) || srec=
+    [ "$srec" = "$cur" ] && return 0
+    stamp=$(cat "$gitdir/fy-box-head" 2>/dev/null) || stamp=
+    if [ "$stamp" = "$cur" ]; then
+        fy_propose "$cur"
+    else
+        fy_pending "$cur" || fy_offer_record "$cur"
+    fi
+}
+
 cur= gitdir= ix=
 if gitdir=$(pregit rev-parse --absolute-git-dir 2>/dev/null); then
     ix="$gitdir/index-box"
@@ -264,7 +373,10 @@ if gitdir=$(pregit rev-parse --absolute-git-dir 2>/dev/null); then
     heal_rc=0
     case " $FY_NO_INDEX_SUBS " in
     *" $sub "*) ;; # index-irrelevant — skip the heal entirely (see the list's comment)
-    *) fy_heal || heal_rc=$? ;;
+    *)
+        fy_heal || heal_rc=$?
+        fy_shared_sync
+        ;;
     esac
     if [ "$sub" = commit ] && [ "$heal_rc" -ne 0 ] && [ -z "${FY_GIT_SHIM_STALE_OK:-}" ]; then
         echo "foldyard git shim: refusing 'git commit' on the stale index above — it would" \
@@ -286,5 +398,6 @@ post=$(pregit rev-parse -q --verify HEAD 2>/dev/null) || post=
 if [ -n "$post" ] && [ "$post" != "$cur" ]; then
     printf '%s\n' "$post" >"$gitdir/fy-box-head" 2>/dev/null || true
     fy_record "$post"
+    fy_propose "$post" # the shared index now describes the old HEAD — offer the host its heal
 fi
 exit "$rc"

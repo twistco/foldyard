@@ -188,6 +188,9 @@ foldyard's surface splits by *where it can be validated*:
      and the VM is recreated from it first, so every restart runs with a repo mounted at
      `/home/<user>/…` — the realistic Linux layout the open home-mount finding in
      [docs/linux-support.md](./docs/linux-support.md) needed exercised.
+   - `test_mount_visibility_e2e.py` — the git heal's premise on THIS host's mount (virtiofs on
+     macOS, 9p on the Linux/WSL2 runners): a file the VM renames into place reaches the host
+     whole, never briefly missing, never older than one already seen (ADR-0021, 2026-09-27).
    - `test_reclaim_e2e.py` — `fy reclaim` on a real store: a removed worktree's tagged images
      (both provider spellings) swept, the main image + base images kept, the next `up` still
      `Using cache` (the three reclaim properties below, live).
