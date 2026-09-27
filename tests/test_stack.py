@@ -261,10 +261,61 @@ def test_shellenv_worktree_missing_aborts(fake_repo, capsys, monkeypatch):
 
 
 def test_shellenv_no_machine_omits_docker_host(fake_repo, capsys, monkeypatch):
+    # Even with a machine whose socket is known (fake_repo's): shellenv's output is eval'd into a
+    # recipe's shell, and every `fy` that shell runs next would read an exported DOCKER_HOST as
+    # preset — someone else's socket — and skip `machine.ensure` (start, provisioning, the wall).
     monkeypatch.delenv("DOCKER_HOST", raising=False)
     rc = stack.shellenv(no_machine=True)
     out = capsys.readouterr().out
     assert rc == 0 and "DOCKER_HOST" not in out and "CONTAINER_HOST" not in out
+
+
+def _never_ensure(monkeypatch):
+    def refuse(*a, **k):
+        raise AssertionError("resolve(no_machine=True) ensured the machine")
+
+    monkeypatch.setattr(machine, "ensure", refuse)
+
+
+def test_resolve_no_machine_reaches_an_existing_machines_socket(fake_repo, monkeypatch):
+    # The supervisor's posture reconcile, the stack scope, worktree init and `fy open` resolve
+    # with no_machine=True and make their OWN engine calls with the env. Lima registers no podman
+    # connection (podman machine does), so without the socket they asked the host's own store:
+    # a running stack read as down and a mode flip never re-rendered it. Derived read-only.
+    monkeypatch.delenv("DOCKER_HOST")
+    monkeypatch.delenv("CONTAINER_HOST", raising=False)
+    _never_ensure(monkeypatch)
+    env = stack.resolve(no_machine=True).env
+    assert env["DOCKER_HOST"] == env["CONTAINER_HOST"] == "unix:///fake.sock"
+
+
+@pytest.mark.parametrize("sock", ["", "unix://", RuntimeError("no machine")])
+def test_resolve_no_machine_without_a_machine_names_no_socket(fake_repo, monkeypatch, sock):
+    # No machine yet: Lima's socket() is "", podman's a bare "unix://" (its inspect failed), or
+    # the backend can't answer at all — never an empty DOCKER_HOST, never a provisioned VM.
+    monkeypatch.delenv("DOCKER_HOST")
+    monkeypatch.delenv("CONTAINER_HOST", raising=False)
+    _never_ensure(monkeypatch)
+
+    def socket():
+        if isinstance(sock, Exception):
+            raise sock
+        return sock
+
+    monkeypatch.setattr(machine, "socket", socket)
+    env = stack.resolve(no_machine=True).env
+    assert "DOCKER_HOST" not in env and "CONTAINER_HOST" not in env
+
+
+def test_resolve_no_machine_in_box_never_asks_the_backend(fake_repo, monkeypatch):
+    # In a box there is no VM to ask — the engine is whatever the box was given, or nothing.
+    monkeypatch.delenv("DOCKER_HOST")
+    monkeypatch.delenv("CONTAINER_HOST", raising=False)
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    _never_ensure(monkeypatch)
+    monkeypatch.setattr(machine, "socket", lambda: pytest.fail("asked the machine backend"))
+    env = stack.resolve(no_machine=True).env
+    assert "DOCKER_HOST" not in env
 
 
 def test_shellenv_emits_mode_env(fake_repo, capsys, monkeypatch):
@@ -2275,16 +2326,30 @@ def test_declared_compose_env_names_pass_through(fake_repo, monkeypatch, tmp_pat
 def test_the_operators_engine_selection_passes_through_without_the_machine(
     fake_repo, monkeypatch, name
 ):
-    # `resolve(no_machine=True)` — the supervisor's posture reconcile, the reconcile stack scope —
-    # derives no socket, so the client reaches the engine only through the one the operator's env
-    # names. Dropping it made `_stack_is_up` read an up stack as down, and a mode flip never
-    # re-rendered it (the Lima host e2e, run 36280198001). Mutation: remove `name` from
+    # With no machine to name a socket, `resolve(no_machine=True)` — the supervisor's posture
+    # reconcile, the reconcile stack scope — reaches the engine only through the one the
+    # operator's env names. Dropping it made `_stack_is_up` read an up stack as down, and a mode
+    # flip never re-rendered it (the Lima host e2e, run 36280198001). Mutation: remove `name` from
     # `_PASSTHROUGH`.
     for var in ("CONTAINER_HOST", "CONTAINER_CONNECTION", "DOCKER_HOST"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(machine, "socket", lambda: "")
     monkeypatch.setenv(name, "unix:///nonexistent/fy-operator.sock")
     env = stack.resolve(no_machine=True).env
     assert env[name] == "unix:///nonexistent/fy-operator.sock"
+
+
+def test_the_reconcile_reads_the_engine_up_built_on(fake_repo, monkeypatch):
+    # With a machine, `resolve(no_machine=True)` names the socket exactly as `up` does: a preset
+    # DOCKER_HOST is the socket as is, anything else yields to the machine's — `up` exported the
+    # machine's over an operator's CONTAINER_HOST, so the reconcile must look where it built.
+    monkeypatch.delenv("DOCKER_HOST")
+    monkeypatch.setenv("CONTAINER_HOST", "unix:///nonexistent/fy-operator.sock")
+    _never_ensure(monkeypatch)
+    assert stack.resolve(no_machine=True).env["CONTAINER_HOST"] == "unix:///fake.sock"
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/fy-preset.sock")
+    env = stack.resolve(no_machine=True).env
+    assert env["DOCKER_HOST"] == env["CONTAINER_HOST"] == "unix:///nonexistent/fy-preset.sock"
 
 
 # ── compose paths outside the checkout are refused before the client acts ───────────────────

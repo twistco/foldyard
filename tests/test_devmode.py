@@ -381,6 +381,19 @@ def test_engine_probe_env_degrades_to_ambient_without_a_machine(monkeypatch):
     assert "DOCKER_HOST" not in env
 
 
+@pytest.mark.parametrize("sock", ["", "unix://"])
+def test_engine_probe_env_never_names_an_empty_socket(monkeypatch, sock):
+    # A backend with no machine answers without raising: Lima with "", podman with a bare
+    # "unix://" (its failed inspect's empty path). Neither is a socket to hand the engine CLI.
+    from foldyard import machine
+
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.delenv("CONTAINER_HOST", raising=False)
+    monkeypatch.setattr(machine, "socket", lambda: sock)
+    env = devmode._engine_env()
+    assert "DOCKER_HOST" not in env and "CONTAINER_HOST" not in env
+
+
 def test_up_worktrees_sanitizes_slashes_to_match_stack_podman_project(monkeypatch):
     # stack._context sanitizes '/' -> '-' when computing PODMAN_PROJECT (a branch-derived
     # worktree name like "feat/x" can't appear in a podman project/container name), so the

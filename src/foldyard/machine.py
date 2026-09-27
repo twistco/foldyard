@@ -74,6 +74,18 @@ def socket() -> str:
     return BACKEND.socket(MACHINE)
 
 
+def existing_socket() -> str | None:
+    """:func:`socket`, READ-ONLY and safe without a machine: None when the backend names no path
+    (Lima: ``""``; podman: a bare ``unix://`` from a failed inspect) or can't answer at all. For
+    callers that must reach an engine already there but never provision one — never
+    :func:`ensure`. Says nothing about liveness (:func:`responsive`)."""
+    try:
+        sock = socket()
+    except Exception:
+        return None
+    return sock if sock.removeprefix("unix://") else None
+
+
 def responsive() -> bool:
     """Is the machine's socket actually served? (:meth:`Backend.responsive` — liveness, as
     opposed to :func:`state`'s lifecycle flag.)"""

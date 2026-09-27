@@ -130,15 +130,20 @@ def _offset(name: str) -> int:
     return int(out.stdout.split()[0]) % 89 + 1
 
 
-def _docker_host(main: Path, wt_root: Path, no_machine: bool) -> str | None:
+def _docker_host(
+    main: Path, wt_root: Path, no_machine: bool, read_only: bool = False
+) -> str | None:
     """Existing DOCKER_HOST wins (dev box / pre-exported). Else, on a host with podman,
-    ensure the machine + derive the socket. --no-machine skips that (recipes that only
-    need the repo/path vars, e.g. worktree-add / machine-recreate)."""
+    ensure the machine + derive the socket. ``no_machine`` never ensures: ``read_only`` then
+    still names an EXISTING machine's socket (``resolve(no_machine=True)``: callers whose own
+    engine calls need it — Lima registers no podman connection to fall back on), otherwise
+    nothing (``shellenv --no-machine``, eval'd into a shell whose next `fy` would read an
+    exported socket as preset and skip ensure; recipes that only need the repo/path vars)."""
     existing = os.environ.get("DOCKER_HOST")
     if existing:
         return existing
     if no_machine:
-        return None
+        return machine.existing_socket() if read_only and not config.in_box() else None
     if which("podman"):
         machine.ensure(main, wt_root)
         return machine.socket()
@@ -172,7 +177,7 @@ def pin_filemode(main: Path) -> None:
 
 
 def _context(
-    no_machine: bool, worktree: str | None = None
+    no_machine: bool, worktree: str | None = None, read_only: bool = False
 ) -> tuple[Path, dict[str, str], dict[str, str], dict[str, str]]:
     """Returns (main_repo, plain_vars, exported_vars, ports). Plain vs exported mirrors
     _common.sh exactly so the env it produces is identical."""
@@ -225,7 +230,7 @@ def _context(
     ports = {k: str(base + off) for k, base in config.port_bases().items()}
     exported["COMPOSE_PROJECT_NAME"] = exported["PODMAN_PROJECT"]
 
-    dh = _docker_host(main, wt_root, no_machine)
+    dh = _docker_host(main, wt_root, no_machine, read_only)
     if dh:
         # The same docker-compat socket of the rootless machine, under both names:
         # podman reads CONTAINER_HOST, docker reads DOCKER_HOST. Setting both lets podman
@@ -382,8 +387,8 @@ def banner() -> int:
 # `args: [VAR]` read the CLIENT's environment into a container the box can inspect — so never
 # `os.environ` (in the supervisor that holds host.env). Enough for the clients to run and honour
 # the operator's own client settings; foldyard's resolved vars are added on top. The engine
-# selection (DOCKER_HOST/CONTAINER_HOST/CONTAINER_CONNECTION) is load-bearing: `resolve(no_machine=
-# True)` derives no socket, so the supervisor's reconcile reaches the engine only through these.
+# selection (DOCKER_HOST/CONTAINER_HOST/CONTAINER_CONNECTION) is load-bearing: the operator's own
+# engine choice must reach the clients (a preset DOCKER_HOST is used as the socket, as is).
 _PASSTHROUGH = frozenset(
     {
         "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "COLORTERM", "NO_COLOR",
@@ -441,7 +446,7 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
     """The fully-resolved stack context for a Python engine verb: the subprocess env (incl.
     mode-derived defaults, with an explicit env var still winning) + the `<engine> compose
     -f …` base command (absolute paths; verbs run with cwd=MAIN_REPO)."""
-    main, plain, exported, ports = _context(no_machine, worktree=worktree)
+    main, plain, exported, ports = _context(no_machine, worktree=worktree, read_only=True)
     mode = devmode.read()["mode"]
     derived = devmode.derive_env(mode)
     mode_env = {k: os.environ.get(k, v) for k, v in derived.items()}  # explicit env wins
