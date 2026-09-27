@@ -117,7 +117,9 @@ Shim mechanics (each point traces to a verified failure mode):
   `index.fy-proposed.<head>.<base>.<ff|carry>`, where `<base>` is the copy's blob id. The
   supervisor (`githeal.py`) installs it under `index.lock` only if the shared index is still
   byte-identical to `<base>` and HEAD (read as data from loose refs / `packed-refs`; a reftable
-  repo is not healed) is still `<head>` — so host staging since the proposal is never lost; the box
+  repo is not healed) is still `<head>` — re-read under the lock and again after the write, which
+  restores the index if HEAD moved, since `index.lock` does not guard refs (a `reset --soft`
+  moves HEAD without it) — so host staging since the proposal is never lost; the box
   simply re-proposes on its next index-touching call. It installs the bytes it read and checked
   (a no-follow read of a regular file, via `mountwrite`), never a rename of the box's file, and
   reaches the git dir from the trusted main checkout without following a symlink (a worktree's

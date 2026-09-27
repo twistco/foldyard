@@ -104,6 +104,25 @@ def test_staged_host_work_is_carried_forward(rig):
     assert "fileA" not in status  # the box's commit is absorbed, not phantom-staged
 
 
+@pytest.mark.parametrize("var", [None, "GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"])
+def test_a_carried_path_is_matched_literally_never_as_a_glob(rig, var):
+    # The carry re-stages the host's staged paths by name. Read as a pathspec, `file*` also
+    # matches `fileA` — whose old entry would then land on the new HEAD's tree: a proposal that
+    # silently stages a revert of the box's commit. The shim inherits the box user's environment,
+    # so a global pathspec setting there must neither re-widen the match nor clash with the
+    # literal matching (git refuses `literal` beside any other global setting: a false refusal).
+    _synced_at(rig, rig.head())
+    rig.write("file*", "star\n")
+    rig.host("add", "--", ":(literal)file*")
+    rig.write("fileA", "a2\n")
+    assert rig.box("add", "--", "fileA").returncode == 0
+    r = rig.box("commit", "-qm", "box", env={var: "1"} if var else None)
+    assert r.returncode == 0, r.stderr
+    msg = heal(rig.repo)
+    assert msg and "carried forward" in msg
+    assert _host_status(rig) == "A  file*\n"
+
+
 def test_overlapping_staged_work_refuses_once(rig):
     # Both sides touched fileA — never merge silently: say so once, leave the index alone, and
     # stay quiet until the state changes.
@@ -148,6 +167,42 @@ def test_a_proposal_for_a_head_the_host_moved_away_from_is_dropped(rig):
     assert heal(rig.repo) is None
     assert (rig.gitdir / "index").read_bytes() == before
     assert not [p for p in _pending(rig) if p.startswith("index.fy-proposed.")]
+
+
+@pytest.mark.parametrize("when", ["before the lock", "during the write"])
+def test_a_head_moved_while_installing_is_never_left_installed(rig, monkeypatch, when):
+    # index.lock guards the index, not refs: a soft reset can land between the pass reading HEAD
+    # and the proposal being written. Checked again under the lock, and once more after the write
+    # (then the index the host had is put back) — never a recorded heal to a HEAD that has gone.
+    before = rig.head()
+    ref = rig.repo / ".git" / rig.host("symbolic-ref", "HEAD").stdout.strip()
+    new = _box_commit(rig, "box", fileA="a2\n")
+    shared = (rig.gitdir / "index").read_bytes()
+    moved, written = [], []
+
+    def soft_reset():  # as `git reset --soft HEAD~`: the ref moves, the index is untouched
+        if not moved:
+            moved.append(True)
+            ref.write_text(before + "\n")
+
+    def write(m, rel, data, _real=githeal.mountwrite.write):
+        _real(m, rel, data)
+        if rel.endswith("/index"):
+            written.append(data)
+            if when == "during the write":
+                soft_reset()
+
+    monkeypatch.setattr(githeal.mountwrite, "write", write)
+    if when == "before the lock":
+        resolve = githeal._resolve_head
+        monkeypatch.setattr(githeal, "_resolve_head", lambda *a: (resolve(*a), soft_reset())[0])
+    assert heal(rig.repo) is None
+    assert moved and rig.head() == before != new
+    assert (rig.gitdir / "index").read_bytes() == shared
+    # Caught under the lock → nothing written at all; caught after → the proposal, then put back.
+    assert len(written) == (0 if when == "before the lock" else 2)
+    sync = rig.gitdir / githeal.SYNC_FILE
+    assert not sync.exists() or sync.read_text().strip() != new
 
 
 def test_skips_in_progress_operations_and_lock(rig):

@@ -288,8 +288,11 @@ fy_carry() {
         [ "$(pregit rev-parse -q --verify "$rec:$p" 2>/dev/null)" = "$in_new" ] || return 1
         if [ -n "$in_index" ]; then keep+=("$p"); else removals+=("$p"); fi
     done < <(GIT_INDEX_FILE="$work" pregit diff-index --cached --name-only -z "$rec" 2>/dev/null)
-    if ((${#keep[@]})); then
-        GIT_INDEX_FILE="$work" pregit ls-files -z -s -- "${keep[@]}" || return 1
+    if ((${#keep[@]})); then # exactly these names: as globs, `a*` would re-stage `ab`'s old entry
+        (   # literal clashes with any other global pathspec setting, and the caller's env has its own
+            unset GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+            GIT_LITERAL_PATHSPECS=1 GIT_INDEX_FILE="$work" pregit ls-files -z -s -- "${keep[@]}"
+        ) || return 1
     fi
     local zeros=${head//?/0} # a staged deletion = a zero-mode entry, oid as wide as HEAD's
     for p in ${removals[@]+"${removals[@]}"}; do printf '0 %s\t%s\0' "$zeros" "$p"; done

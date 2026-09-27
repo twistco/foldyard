@@ -169,11 +169,15 @@ def _unlink(gfd: int, name: str) -> None:
         pass
 
 
-def _install(main: Path, gitrel: str, gfd: int, name: str, base: str) -> bool:
-    """Under ``index.lock``: install proposal ``name`` if the shared index is still ``base``.
-    The bytes installed are the ones read and checked here (a no-follow read of a regular file
-    that looks like an index), written by :mod:`mountwrite` — never a rename of the box's file,
-    which could be swapped for a symlink between the check and the rename."""
+def _install(main: Path, gitrel: str, gfd: int, cfd: int, name: str, base: str, head: str) -> bool:
+    """Under ``index.lock``: install proposal ``name`` if the shared index is still ``base`` and
+    HEAD still ``head``. The bytes installed are the ones read and checked here (a no-follow read
+    of a regular file that looks like an index), written by :mod:`mountwrite` — never a rename of
+    the box's file, which could be swapped for a symlink between the check and the rename.
+
+    The lock guards the index, not refs: a ``reset --soft`` moves HEAD without it. So HEAD is read
+    again under the lock, and once more after the write, which puts the host's index back if HEAD
+    moved meanwhile — the window left is the instant after that read, as for git's own writers."""
     try:
         lock = os.open("index.lock", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644, dir_fd=gfd)
     except OSError:
@@ -185,7 +189,12 @@ def _install(main: Path, gitrel: str, gfd: int, name: str, base: str) -> bool:
         proposal = _read_at(gfd, name, limit=MAX_INDEX)
         if proposal is None or not proposal.startswith(b"DIRC"):
             return False
+        if _resolve_head(gfd, cfd) != head:
+            return False
         mountwrite.write(main, f"{gitrel}/index", proposal)
+        if _resolve_head(gfd, cfd) != head:
+            mountwrite.write(main, f"{gitrel}/index", current)
+            return False
         return True
     finally:
         os.close(lock)
@@ -251,7 +260,11 @@ def _heal(repo: Path, main: Path, gitrel: str, gfd: int, cfd: int) -> str | None
             _unlink(gfd, name)
         elif m := _PROPOSED.fullmatch(name):
             rec_head, base, kind = m.groups()
-            if message is None and rec_head == head and _install(main, gitrel, gfd, name, base):
+            if (
+                message is None
+                and rec_head == head
+                and _install(main, gitrel, gfd, cfd, name, base, head)
+            ):
                 _record(main, gitrel, head)
                 current = _read_at(gfd, "index", limit=MAX_INDEX)
                 what = (
