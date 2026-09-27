@@ -381,12 +381,15 @@ def banner() -> int:
 # host-side over box-writable compose files, and `${VAR}` / a bare `environment: [VAR]` or build
 # `args: [VAR]` read the CLIENT's environment into a container the box can inspect — so never
 # `os.environ` (in the supervisor that holds host.env). Enough for the clients to run and honour
-# the operator's own client settings; foldyard's resolved vars are added on top.
+# the operator's own client settings; foldyard's resolved vars are added on top. The engine
+# selection (DOCKER_HOST/CONTAINER_HOST/CONTAINER_CONNECTION) is load-bearing: `resolve(no_machine=
+# True)` derives no socket, so the supervisor's reconcile reaches the engine only through these.
 _PASSTHROUGH = frozenset(
     {
         "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "COLORTERM", "NO_COLOR",
         "FORCE_COLOR", "LANG", "TZ", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
-        "XDG_CACHE_HOME", "DOCKER_CONFIG", "DOCKER_CONTEXT", "REGISTRY_AUTH_FILE",
+        "XDG_CACHE_HOME", "DOCKER_HOST", "CONTAINER_HOST", "CONTAINER_CONNECTION",
+        "DOCKER_CONFIG", "DOCKER_CONTEXT", "REGISTRY_AUTH_FILE",
         "CONTAINERS_CONF", "CONTAINERS_REGISTRIES_CONF", "CONTAINERS_STORAGE_CONF", "WORKTREE",
         "WT_OFFSET",
     }

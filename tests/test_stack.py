@@ -2271,6 +2271,22 @@ def test_declared_compose_env_names_pass_through(fake_repo, monkeypatch, tmp_pat
     assert "OTHER_TOKEN" not in env
 
 
+@pytest.mark.parametrize("name", ["CONTAINER_HOST", "CONTAINER_CONNECTION", "DOCKER_HOST"])
+def test_the_operators_engine_selection_passes_through_without_the_machine(
+    fake_repo, monkeypatch, name
+):
+    # `resolve(no_machine=True)` — the supervisor's posture reconcile, the reconcile stack scope —
+    # derives no socket, so the client reaches the engine only through the one the operator's env
+    # names. Dropping it made `_stack_is_up` read an up stack as down, and a mode flip never
+    # re-rendered it (the Lima host e2e, run 36280198001). Mutation: remove `name` from
+    # `_PASSTHROUGH`.
+    for var in ("CONTAINER_HOST", "CONTAINER_CONNECTION", "DOCKER_HOST"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv(name, "unix:///nonexistent/fy-operator.sock")
+    env = stack.resolve(no_machine=True).env
+    assert env[name] == "unix:///nonexistent/fy-operator.sock"
+
+
 # ── compose paths outside the checkout are refused before the client acts ───────────────────
 # `env_file:`, build contexts, include/extends files… are read by the HOST-side compose client and
 # end up in containers/images the box can read. composeguard decides; these pin that every path
