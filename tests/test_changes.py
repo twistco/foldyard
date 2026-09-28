@@ -224,6 +224,39 @@ def test_prepare_orders_a_sections_fragments_by_when_they_landed(repo):
     assert body.index("B works") < body.index("Later works")  # not by name: by merge
 
 
+@pytest.mark.parametrize("name", ["z early.md", 'z"early.md'], ids=["space", "git-quoted"])
+def test_prepare_orders_a_fragment_whose_name_git_would_split_or_quote(repo, name):
+    (repo / ".changes" / name).write_text(GOOD.replace("A thing", "Early"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "early")
+    (repo / ".changes" / "a-later.md").write_text(GOOD.replace("A thing", "Later"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "later")
+    _reasons(repo, "0.4.0")
+    changes.prepare("0.4.0", "2026-09-28")
+    body = changes.notes((repo / "CHANGELOG.md").read_text(), "0.4.0")
+    assert body.index("Early works") < body.index("Later works")
+
+
+def test_prepare_orders_a_re_added_fragment_by_its_latest_landing(repo):
+    again = repo / ".changes" / "a-again.md"
+    again.write_text(GOOD.replace("A thing", "Gone"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "first time")
+    _git(repo, "rm", "-q", ".changes/a-again.md")
+    _git(repo, "commit", "-qm", "released or reverted")
+    (repo / ".changes" / "c-between.md").write_text(GOOD.replace("A thing", "Between"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "between")
+    again.write_text(GOOD.replace("A thing", "Again"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "the same name, again")
+    _reasons(repo, "0.4.0")
+    changes.prepare("0.4.0", "2026-09-28")
+    body = changes.notes((repo / "CHANGELOG.md").read_text(), "0.4.0")
+    assert body.index("Between works") < body.index("Again works")
+
+
 @pytest.mark.parametrize(
     ("rec", "extra"),
     [("0.3.2", ""), ("0.3.2", '"0.4.0" = "why"\n'), ("0.4.0", "")],

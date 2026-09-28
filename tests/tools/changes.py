@@ -141,11 +141,13 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
 def _in_merge_order(fragments: list[Fragment]) -> list[Fragment]:
     """Oldest-landed first, so a section reads in merge order: git's own commit order of the
     commits that ADDED each file (not their timestamps — one-second resolution ties). Files one
-    commit added keep git's name order; a fragment not yet committed sorts last."""
+    commit added keep git's name order; a fragment not yet committed sorts last. NUL-separated:
+    a name is data, so neither whitespace nor git's quoting may reshape it. A name added again
+    after a delete keeps its LATEST landing — the one the current file came from."""
     log = _git(
-        "log", "--reverse", "--diff-filter=A", "--name-only", "--format=", "--", str(CHANGES)
+        "log", "--reverse", "--diff-filter=A", "--name-only", "-z", "--format=", "--", str(CHANGES)
     )
-    landed = {Path(line).name: i for i, line in enumerate(log.stdout.split()) if line}
+    landed = {Path(name).name: i for i, name in enumerate(log.stdout.split("\0")) if name}
     return sorted(fragments, key=lambda f: (landed.get(f.path.name, len(landed)), f.path.name))
 
 
