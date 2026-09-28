@@ -103,8 +103,11 @@ def test_stop_stops_the_supervisor_too_and_keeps_the_vm(repo):
 
 
 def test_ensure_recovers_a_vm_whose_hypervisor_died(repo):
-    pid = int((LIMA_DIR / "qemu.pid").read_text().strip())
-    os.kill(pid, signal.SIGKILL)
+    # The VMM by VM type: QEMU (the CI runners) is its own process; vz (macOS) runs the VM INSIDE
+    # Lima's hostagent, so there `vz.pid` names the hostagent and killing it kills the VM.
+    pidfile = next((LIMA_DIR / f for f in ("qemu.pid", "vz.pid") if (LIMA_DIR / f).exists()), None)
+    assert pidfile is not None, f"no driver pid file in {LIMA_DIR}: {sorted(os.listdir(LIMA_DIR))}"
+    os.kill(int(pidfile.read_text().strip()), signal.SIGKILL)
     # Lima's hostagent usually notices the driver exit and tears its half down (flag → Stopped,
     # sockets gone). Give it a moment, but do NOT require it: the case `ensure` exists for is the
     # one where the flag still says running — it must pair the flag with a real probe and restart.

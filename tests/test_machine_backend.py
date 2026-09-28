@@ -571,6 +571,9 @@ def test_lima_vm_pid_reads_the_drivers_pid_file(monkeypatch, tmp_path):
     assert mb.LimaBackend().vm_pid("acme") == 4343
     (inst / "qemu.pid").write_text("garbage\n")
     assert mb.LimaBackend().host_pids("acme") == [4242]
+    (inst / "qemu.pid").unlink()
+    (inst / "vz.pid").write_text("4242\n")  # vz: the VMM IS the hostagent — listed once
+    assert mb.LimaBackend().host_pids("acme") == [4242]
 
 
 def test_backends_without_a_host_wall_input_report_nothing():
@@ -620,12 +623,18 @@ def lima_pids(tmp_path, monkeypatch):
     monkeypatch.setattr(mb.os, "kill", lambda pid, sig: kills.append((pid, sig)))
     monkeypatch.setattr(mb.time, "sleep", lambda s: None)
     monkeypatch.setattr(mb.LimaBackend, "_HOSTAGENT_EXIT_WAIT", 2.0)
+    # `limactl list`'s verdict on the instance — a stopped one unless a test says otherwise
+    monkeypatch.setattr(
+        mb.LimaBackend, "_instance", lambda self, n: {"name": n, "status": "Stopped"}
+    )
 
-    def write(ha=None, qemu=None):
+    def write(ha=None, qemu=None, vz=None):
         if ha:
             (inst / "ha.pid").write_text(f"{ha}\n")
         if qemu:
             (inst / "qemu.pid").write_text(f"{qemu}\n")
+        if vz:
+            (inst / "vz.pid").write_text(f"{vz}\n")
 
     return write, alive, kills
 
@@ -659,9 +668,99 @@ def test_lima_reap_never_touches_a_healthy_vm(lima_pids):
     assert kills == []
 
 
+def test_lima_reap_never_touches_a_running_vz_vm(lima_pids, capsys):
+    # On macOS Lima runs the VM on Virtualization.framework INSIDE the hostagent: `vz.pid` names
+    # the hostagent's own pid and there is no `qemu.pid`. Reading "no qemu.pid" as "driver dead"
+    # made every live vz VM look like a hostagent that outlived its driver — waited on, then
+    # SIGTERMed. On vz the driver is alive exactly when the hostagent is.
+    write, alive, kills = lima_pids
+    write(ha=500, vz=500)
+    alive[500] = [True]
+    assert mb.LimaBackend().reap_orphans("acme") == []
+    assert kills == [] and "outlived" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("left_running", [True, False])
+def test_lima_stop_forces_a_vm_the_graceful_stop_left_running(lima_pids, monkeypatch, left_running):
+    # A hung vz VM (the revive's case: flag `running`, socket dead) can ignore the graceful stop,
+    # and on vz its hostagent IS the VM — so the reap above rightly never touches it. Lima's own
+    # `stop --force` does, by its own records; only when the graceful one left it running.
+    write, alive, kills = lima_pids
+    write(ha=500, vz=500)
+    alive[500] = [left_running]  # after the graceful stop: still running, or gone
+    ran: list[list[str]] = []
+    monkeypatch.setattr(mb, "_run", lambda cmd, **kw: ran.append(cmd) or _Proc(0, ""))
+    assert mb.LimaBackend().stop("acme") is True
+    forced = ["limactl", "stop", "--force", "acme"]
+    assert ran == [["limactl", "stop", "acme"], *([forced] if left_running else [])]
+    assert kills == []  # never a signal of ours: Lima kills its own instance
+
+
+@pytest.mark.parametrize("left_running", [True, False])
+def test_lima_stop_forces_a_driver_whose_hostagent_died(lima_pids, monkeypatch, left_running):
+    # QEMU alive with its hostagent gone is Lima's `Broken`, which the graceful stop refuses
+    # outright ("expected status Running") — so a hostagent-only liveness check left the driver
+    # running. Forced by Lima's own records exactly when something it recorded outlived it.
+    write, alive, kills = lima_pids
+    write(ha=500, qemu=600)
+    alive[600] = [left_running]
+    ran: list[list[str]] = []
+    rc = {"stop": 1, "--force": 0}
+    monkeypatch.setattr(mb, "_run", lambda cmd, **kw: ran.append(cmd) or _Proc(rc[cmd[-2]], ""))
+    assert mb.LimaBackend().stop("acme") is left_running
+    forced = ["limactl", "stop", "--force", "acme"]
+    assert ran == [["limactl", "stop", "acme"], *([forced] if left_running else [])]
+    assert kills == []
+
+
+def test_lima_stop_bounds_the_graceful_stop(lima_pids, monkeypatch):
+    # Lima's graceful stop waits up to 3 min 10 s for the hostagent's exit event, then up to 3 min
+    # for the instance — a hung VM would hold the revive that long before `--force`. Bounded, and
+    # a stop that runs out reads as failed, so the liveness check decides.
+    write, alive, _kills = lima_pids
+    write(ha=500, vz=500)
+    alive[500] = [True]
+    calls: list[tuple[list[str], float | None]] = []
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        calls.append((cmd, timeout))
+        if "--force" not in cmd:
+            raise mb.subprocess.TimeoutExpired(cmd, timeout or 0)
+        return _Proc(0, "")
+
+    monkeypatch.setattr(mb.subprocess, "run", fake_run)
+    assert mb.LimaBackend().stop("acme") is True
+    assert calls == [
+        (["limactl", "stop", "acme"], mb.LimaBackend._GRACEFUL_STOP_WAIT),
+        (["limactl", "stop", "--force", "acme"], None),
+    ]
+    assert mb.LimaBackend._GRACEFUL_STOP_WAIT <= 90
+
+
 def test_lima_reap_is_a_no_op_without_pid_files(lima_pids):
     _write, _alive, kills = lima_pids
     assert mb.LimaBackend().reap_orphans("acme") == []
+    assert kills == []
+
+
+@pytest.mark.parametrize("status", ["Broken", "Stopped"])
+def test_lima_start_forces_a_broken_instance_stopped_first(lima_pids, monkeypatch, status):
+    # A hung vz VM: its hostagent (which IS the VM on vz) stops answering, and Lima then reports
+    # the instance `Broken` — not Running, so `ensure` takes the START path, not the revive. The
+    # reap rightly leaves a live vz hostagent alone, and `limactl start` refuses a broken
+    # instance ("errors inspecting instance"). Seen live on vz, 2026-09-28: `limactl stop
+    # --force` — Lima ending its own instance — recovered it in 3 s.
+    write, alive, kills = lima_pids
+    write(ha=500, vz=500)
+    alive[500] = [True]
+    monkeypatch.setattr(mb.LimaBackend, "_instance", lambda self, n: {"name": n, "status": status})
+    ran: list[list[str]] = []
+    monkeypatch.setattr(mb, "_run", lambda cmd, **kw: ran.append(cmd) or _Proc(0, ""))
+    monkeypatch.setattr(mb.subprocess, "run", lambda cmd, **kw: ran.append(cmd) or _Proc(0, ""))
+    monkeypatch.setattr(mb.LimaBackend, "_wait_for_socket", lambda self, name: True)
+    assert mb.LimaBackend().start("acme") is True
+    forced = [["limactl", "stop", "--force", "acme"]] if status == "Broken" else []
+    assert ran == [*forced, ["limactl", "start", "acme"]]
     assert kills == []
 
 

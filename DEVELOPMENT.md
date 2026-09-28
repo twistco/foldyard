@@ -415,7 +415,13 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   alive after its driver (`qemu.pid`) died is waited for — it exits by itself once it notices,
   but not atomically with flipping the instance to Stopped, and `limactl start` in that window
   refuses with "host agent is running but driver is not" (the WSL2 runner, 2026-09-18) — and
-  signalled only if it lingers. A VM whose driver is alive is never touched.
+  signalled only if it lingers. A VM whose driver is alive is never touched. On `vz` (macOS) the
+  VM runs INSIDE the hostagent — `vz.pid` is `ha.pid` — so a live hostagent is a live VM there;
+  reading "no `qemu.pid`" as "driver dead" once made every live vz VM an orphan to signal.
+  A HUNG vz VM is Lima's `Broken` status (its hostagent stopped answering) — not Running, so
+  `ensure` takes the start path, not the revive: `start` ends a Broken instance with Lima's own
+  `limactl stop --force` first (a SIGSTOPped hostagent + removed socket reproduces it; recovered
+  in 34 s live, 2026-09-28).
 - **Port offsets:** `stack._offset` shells to system `cksum` for exact parity with the
   original shell implementation.
 - **Module-level constants** (`devmode.AXES`/`MODE_BLURB`/`AXIS_DAEMON`/`EMERGENCY`,

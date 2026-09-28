@@ -87,14 +87,17 @@ def socket_alive(uri: str, timeout: float = 2.0) -> bool:
         sock.close()
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+def _run(cmd: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
     """Capture a backend CLI call. A missing binary (e.g. ``state()`` probed on a host with no
     ``podman``/``limactl``) degrades to a non-zero result rather than raising, so read-only
-    callers like the doctor/TUI fast pass stay graceful."""
+    callers like the doctor/TUI fast pass stay graceful. A ``timeout`` that runs out kills the
+    call and reads as rc 124, as ``timeout(1)`` reports it."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except OSError:
         return subprocess.CompletedProcess(cmd, 127, "", "")
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, "", "")
 
 
 @dataclass(frozen=True)
@@ -672,9 +675,38 @@ class LimaBackend(Backend):
     def stop_argv(self, name: str) -> list[str]:
         return ["limactl", "stop", name]
 
+    # Seconds a graceful stop gets before `--force`. Lima's own waits add up to over six minutes
+    # (3 min 10 s for the hostagent's exit event, then 3 min for the instance to read Stopped).
+    _GRACEFUL_STOP_WAIT = 60.0
+
+    def stop(self, name: str) -> bool:
+        """Graceful (bounded by :data:`_GRACEFUL_STOP_WAIT`), then Lima's own ``--force`` if
+        anything it recorded outlived it — the hostagent or the driver. A hung VM (the revive's
+        case: flag ``running``, socket dead) can ignore the graceful stop, and on vz the
+        hostagent IS the VM, so :meth:`reap_orphans` rightly never touches it; a QEMU whose
+        hostagent died is Lima's ``Broken``, which the graceful stop refuses outright.
+        ``--force`` ends either by Lima's own records, never a signal of ours."""
+        pids = self.host_pids(name)
+        ok = _run(self.stop_argv(name), timeout=self._GRACEFUL_STOP_WAIT).returncode == 0
+        if any(_alive(p) for p in pids):
+            ok = _run(["limactl", "stop", "--force", name]).returncode == 0
+        return ok
+
     _HOSTAGENT_EXIT_WAIT = 20.0  # seconds a leaving hostagent gets before it is signalled
+    # The VM's driver (the VMM) by VM type: QEMU runs as its own process; vz runs inside the
+    # hostagent, so `vz.pid` names the hostagent's own pid (checked live, Lima 2.1).
+    _DRIVER_PIDFILES = ("qemu.pid", "vz.pid")
 
     def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
+        inst = self._instance(name)
+        if inst and str(inst.get("status", "")).lower() == "broken":
+            # Lima's own verdict on a hostagent that stopped answering — a hung VM, on vz the
+            # hostagent IS the VM. Not Running, so `ensure` lands here rather than in the revive,
+            # the reap rightly leaves a live hostagent alone, and `limactl start` refuses a broken
+            # instance. Lima ending its own instance recovers it (seen live on vz: 3 s).
+            _err(f"  (lima reports '{name}' broken — its hostagent stopped answering; forcing it")
+            _err("  stopped before starting)")
+            _run(["limactl", "stop", "--force", name])
         if self.reap_orphans(name):
             _err("  (the hostagent lingered — reaped it)")
         if subprocess.run([*prefix, *self.start_argv(name)]).returncode != 0:
@@ -696,10 +728,15 @@ class LimaBackend(Backend):
         the hostagent to go (it is going), and signal it only if it lingers — identified by
         Lima's OWN ``ha.pid``, never by name. A VM whose driver is alive is never touched.
         Called from :meth:`start`, so both of ``ensure``'s paths are covered: the plain start
-        on a "stopped" flag and the revive on a dead socket."""
+        on a "stopped" flag and the revive on a dead socket.
+
+        The driver is whatever pid file the VM type writes (:data:`_DRIVER_PIDFILES`). On ``vz``
+        the VM runs INSIDE the hostagent — ``vz.pid`` is ``ha.pid`` — so there the driver is
+        alive exactly when the hostagent is, and a live one is never an orphan."""
         inst = Path.home() / ".lima" / name
-        ha, qemu = self._pid(inst / "ha.pid"), self._pid(inst / "qemu.pid")
-        if not ha or not _alive(ha) or (qemu and _alive(qemu)):
+        ha = self._pid(inst / "ha.pid")
+        drivers = [self._pid(inst / f) for f in self._DRIVER_PIDFILES]
+        if not ha or not _alive(ha) or any(d and _alive(d) for d in drivers):
             return []
         _err(f"⏳ '{name}': the lima hostagent (pid {ha}) outlived its driver — waiting for it")
         _err("  to leave before starting (it exits on its own once it notices; up to 20s)…")
@@ -753,15 +790,15 @@ class LimaBackend(Backend):
             return None
 
     def host_pids(self, name: str) -> list[int]:
-        """Lima's QEMU driver writes ``qemu.pid`` in the instance dir and the hostagent writes
-        ``ha.pid``; both live in the scope the VM was started in, the VMM first."""
+        """The driver's pid file (:data:`_DRIVER_PIDFILES`) and the hostagent's ``ha.pid``, from
+        the instance dir; both live in the scope the VM was started in, the VMM first. On vz
+        they are one process, listed once."""
         inst = Path.home() / ".lima" / name
-        pids = []
-        for pidfile in ("qemu.pid", "ha.pid"):
-            try:
-                pids.append(int((inst / pidfile).read_text().strip()))
-            except (OSError, ValueError):
-                continue
+        pids: list[int] = []
+        for pidfile in (*self._DRIVER_PIDFILES, "ha.pid"):
+            pid = self._pid(inst / pidfile)
+            if pid and pid not in pids:
+                pids.append(pid)
         return pids
 
     def _wait_for_socket(self, name: str, tries: int = 30, delay: float = 1.0) -> bool:
