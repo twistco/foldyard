@@ -23,6 +23,9 @@ just test -k <pattern>                         # one area
 - New property-based tests are validated **red first** — mutate the code, watch hypothesis find
   the counterexample, revert. Commit before you mutate.
 - Write "host", not "Mac"; the host being macOS is a fact about today's users, not the design.
+- A change a consumer would notice adds its changelog entry as a file in
+  [`.changes/`](./.changes/README.md), never an edit to `CHANGELOG.md` — the release folds them
+  in, and two PRs never conflict over the same lines.
 - Security-relevant findings go to the address in [`SECURITY.md`](./SECURITY.md), not an issue.
 
 By contributing you agree that your contributions are licensed under the Apache License 2.0

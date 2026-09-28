@@ -2,39 +2,9 @@
 
 Notable changes, per release. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/) once past `1.0`. Before that, minor versions may
-break config or CLI shape, and say so here. How a release is cut:
-[docs/releasing.md](./docs/releasing.md).
-
-## Unreleased
-
-### Security
-
-- **Your computer runs no git at all to heal the shared index.** 0.3.2 hardened the supervisor's
-  git calls against a box-written `.git/config`; now there are none. The box's git shim builds the
-  healed index and leaves it next to the shared one, and the supervisor only installs it — under
-  git's own lock, and only if neither the index nor HEAD changed since, so nothing staged on your
-  computer is ever lost. Nothing to migrate: a box on the new shim is picked up by `fy box up`;
-  until then a stale host-side `git status` is fixed by `git reset`, as before the heal existed.
-  (Follow-up to GHSA-j5mq-v7p4-qw2j; ADR-0021.)
-
-### Fixed
-
-- **A VM restarted after a crash no longer hangs waiting for ssh.** `fy up` restarts a VM that
-  says it is running but serves nothing, and that restart kept the ssh port it last recorded.
-  When the port was stale and taken, the start waited forever. The port is now re-pinned while
-  the VM is stopped. Where Podman Desktop is followed, `fy doctor` warns when the VM's ssh
-  port is off its port range.
-- **A mode change now updates a running stack on a Lima VM.** The supervisor's posture reconcile
-  (and `fy state`'s stack row, a new worktree's init, `fy open`) found the engine only through a
-  socket your shell named; Lima registers none, so a running stack read as down and a mode change
-  never re-rendered it. They now use the VM's own socket when it exists, without starting it.
-  CI had hidden this by exporting the socket into the commands it ran.
-- **A checkout whose `foldyard.toml` you haven't adopted says so.** Your computer reads no config
-  for it until you adopt, and commands used to report that empty config as if it were yours:
-  "`[project].compose` is unset", or a project named after the directory. Now every command
-  says the config isn't adopted, and `fy shellenv` and every command that acts on the stack or
-  the box (`fy build`, `fy ps`, `fy down`, `fy reclaim`, `fy verify`, …) stop instead of acting on
-  a guess — also with an inherited `DOCKER_HOST`. `fy up` still asks to adopt.
+break config or CLI shape, and say so here. What is merged but not yet released waits in
+[`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
+release is cut: [docs/releasing.md](./docs/releasing.md).
 
 ## 0.3.2 — 2026-09-27
 
