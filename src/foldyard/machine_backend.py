@@ -87,14 +87,17 @@ def socket_alive(uri: str, timeout: float = 2.0) -> bool:
         sock.close()
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+def _run(cmd: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
     """Capture a backend CLI call. A missing binary (e.g. ``state()`` probed on a host with no
     ``podman``/``limactl``) degrades to a non-zero result rather than raising, so read-only
-    callers like the doctor/TUI fast pass stay graceful."""
+    callers like the doctor/TUI fast pass stay graceful. A ``timeout`` that runs out kills the
+    call and reads as rc 124, as ``timeout(1)`` reports it."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except OSError:
         return subprocess.CompletedProcess(cmd, 127, "", "")
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, "", "")
 
 
 @dataclass(frozen=True)
@@ -672,14 +675,20 @@ class LimaBackend(Backend):
     def stop_argv(self, name: str) -> list[str]:
         return ["limactl", "stop", name]
 
+    # Seconds a graceful stop gets before `--force`. Lima's own waits add up to over six minutes
+    # (3 min 10 s for the hostagent's exit event, then 3 min for the instance to read Stopped).
+    _GRACEFUL_STOP_WAIT = 60.0
+
     def stop(self, name: str) -> bool:
-        """Graceful, then Lima's own ``--force`` if the hostagent outlived it. A hung VM (the
-        revive's case: flag ``running``, socket dead) can ignore the graceful stop, and on vz the
-        hostagent IS the VM — so :meth:`reap_orphans` rightly never touches it; ``--force``
-        ends the instance by Lima's own records, never a signal of ours."""
-        ha = self._pid(Path.home() / ".lima" / name / "ha.pid")
-        ok = _run(self.stop_argv(name)).returncode == 0
-        if ha and _alive(ha):
+        """Graceful (bounded by :data:`_GRACEFUL_STOP_WAIT`), then Lima's own ``--force`` if
+        anything it recorded outlived it — the hostagent or the driver. A hung VM (the revive's
+        case: flag ``running``, socket dead) can ignore the graceful stop, and on vz the
+        hostagent IS the VM, so :meth:`reap_orphans` rightly never touches it; a QEMU whose
+        hostagent died is Lima's ``Broken``, which the graceful stop refuses outright.
+        ``--force`` ends either by Lima's own records, never a signal of ours."""
+        pids = self.host_pids(name)
+        ok = _run(self.stop_argv(name), timeout=self._GRACEFUL_STOP_WAIT).returncode == 0
+        if any(_alive(p) for p in pids):
             ok = _run(["limactl", "stop", "--force", name]).returncode == 0
         return ok
 

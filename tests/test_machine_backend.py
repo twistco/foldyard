@@ -689,11 +689,52 @@ def test_lima_stop_forces_a_vm_the_graceful_stop_left_running(lima_pids, monkeyp
     write(ha=500, vz=500)
     alive[500] = [left_running]  # after the graceful stop: still running, or gone
     ran: list[list[str]] = []
-    monkeypatch.setattr(mb, "_run", lambda cmd: ran.append(cmd) or _Proc(0, ""))
+    monkeypatch.setattr(mb, "_run", lambda cmd, **kw: ran.append(cmd) or _Proc(0, ""))
     assert mb.LimaBackend().stop("acme") is True
     forced = ["limactl", "stop", "--force", "acme"]
     assert ran == [["limactl", "stop", "acme"], *([forced] if left_running else [])]
     assert kills == []  # never a signal of ours: Lima kills its own instance
+
+
+@pytest.mark.parametrize("left_running", [True, False])
+def test_lima_stop_forces_a_driver_whose_hostagent_died(lima_pids, monkeypatch, left_running):
+    # QEMU alive with its hostagent gone is Lima's `Broken`, which the graceful stop refuses
+    # outright ("expected status Running") — so a hostagent-only liveness check left the driver
+    # running. Forced by Lima's own records exactly when something it recorded outlived it.
+    write, alive, kills = lima_pids
+    write(ha=500, qemu=600)
+    alive[600] = [left_running]
+    ran: list[list[str]] = []
+    rc = {"stop": 1, "--force": 0}
+    monkeypatch.setattr(mb, "_run", lambda cmd, **kw: ran.append(cmd) or _Proc(rc[cmd[-2]], ""))
+    assert mb.LimaBackend().stop("acme") is left_running
+    forced = ["limactl", "stop", "--force", "acme"]
+    assert ran == [["limactl", "stop", "acme"], *([forced] if left_running else [])]
+    assert kills == []
+
+
+def test_lima_stop_bounds_the_graceful_stop(lima_pids, monkeypatch):
+    # Lima's graceful stop waits up to 3 min 10 s for the hostagent's exit event, then up to 3 min
+    # for the instance — a hung VM would hold the revive that long before `--force`. Bounded, and
+    # a stop that runs out reads as failed, so the liveness check decides.
+    write, alive, _kills = lima_pids
+    write(ha=500, vz=500)
+    alive[500] = [True]
+    calls: list[tuple[list[str], float | None]] = []
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
+        calls.append((cmd, timeout))
+        if "--force" not in cmd:
+            raise mb.subprocess.TimeoutExpired(cmd, timeout or 0)
+        return _Proc(0, "")
+
+    monkeypatch.setattr(mb.subprocess, "run", fake_run)
+    assert mb.LimaBackend().stop("acme") is True
+    assert calls == [
+        (["limactl", "stop", "acme"], mb.LimaBackend._GRACEFUL_STOP_WAIT),
+        (["limactl", "stop", "--force", "acme"], None),
+    ]
+    assert mb.LimaBackend._GRACEFUL_STOP_WAIT <= 90
 
 
 def test_lima_reap_is_a_no_op_without_pid_files(lima_pids):
@@ -714,7 +755,7 @@ def test_lima_start_forces_a_broken_instance_stopped_first(lima_pids, monkeypatc
     alive[500] = [True]
     monkeypatch.setattr(mb.LimaBackend, "_instance", lambda self, n: {"name": n, "status": status})
     ran: list[list[str]] = []
-    monkeypatch.setattr(mb, "_run", lambda cmd: ran.append(cmd) or _Proc(0, ""))
+    monkeypatch.setattr(mb, "_run", lambda cmd, **kw: ran.append(cmd) or _Proc(0, ""))
     monkeypatch.setattr(mb.subprocess, "run", lambda cmd, **kw: ran.append(cmd) or _Proc(0, ""))
     monkeypatch.setattr(mb.LimaBackend, "_wait_for_socket", lambda self, name: True)
     assert mb.LimaBackend().start("acme") is True
