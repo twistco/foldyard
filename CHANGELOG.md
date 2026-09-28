@@ -19,13 +19,6 @@ break config or CLI shape, and say so here. How a release is cut:
 
 ### Fixed
 
-- **A box's first git command no longer sees every file as a staged deletion.** It copies your
-  computer's git index to start from, and a git command on your computer that had just replaced
-  that file made it look missing from the box for up to a second (up to five on a Podman
-  machine). The box then started from an empty index. It now retries the copy briefly, and if
-  the index still isn't there it starts from the last commit. A commit on your computer hides the
-  branch in the same window, so that no longer passes for a new repository with nothing to copy,
-  and two first git commands racing in the box no longer overwrite each other's staging.
 - **A mode change now updates a running stack on a Lima VM.** The supervisor's posture reconcile
   (and `fy state`'s stack row, a new worktree's init, `fy open`) found the engine only through a
   socket your shell named; Lima registers none, so a running stack read as down and a mode change
