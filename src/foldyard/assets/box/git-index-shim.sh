@@ -113,7 +113,10 @@ FY_NO_INDEX_SUBS=${FY_NO_INDEX_SUBS//$'\n'/ }
 # (and, once exported, the same injected index) as the command itself.
 pregit() { "$real" ${pre[@]+"${pre[@]}"} "$@"; }
 
-fy_record() { printf '%s\n' "$1" >"$ix.head" 2>/dev/null || true; }
+# Side files are best effort, and over the VM mount a create can fail where the name reads absent
+# (a stale entry for a name the host just unlinked). `{ …; } 2>/dev/null`, never `>f 2>/dev/null`:
+# redirections apply left to right, so a failed `>f` reports before the trailing one takes effect.
+fy_record() { { printf '%s\n' "$1" >"$ix.head"; } 2>/dev/null || true; }
 
 # Index IDENTITY — "is this the same index I last judged?", for the stale memo below.
 # Deliberately NOT mtime: `git status` rewrites the index to refresh its stat cache, moving mtime
@@ -240,7 +243,7 @@ fy_heal() {
             fy_record "$cur"
             return 0
         fi
-        printf '%s\n' "$sig" >"$ix.stale" 2>/dev/null || true
+        { printf '%s\n' "$sig" >"$ix.stale"; } 2>/dev/null || true
     fi
     echo "foldyard git shim: index-box is stale — HEAD moved (${rec:0:12}… → ${cur:0:12}…, from your" \
         "computer or another session) while it carries staged changes, so it can't be fast-forwarded." \
@@ -275,7 +278,7 @@ fy_pending() { # anything for HEAD $1 already waiting for the host?
         compgen -G "$gitdir/index.fy-refused.*.$1.*" >/dev/null
 }
 
-fy_offer_record() { : >"$gitdir/index.fy-record.$1" 2>/dev/null || true; }
+fy_offer_record() { { : >"$gitdir/index.fy-record.$1"; } 2>/dev/null || true; }
 
 # The `update-index --index-info` payload that re-stages the shared index's staged-vs-$1 work on
 # top of $2's tree (index file $3), on stdout — or status 1 when a staged path was ALSO changed by
@@ -328,7 +331,7 @@ fy_propose_from() { # $1 head, $2 the shared index's sync point, $3 a temp file 
         kind=ff
     elif [ -n "$srec" ]; then
         if ! fy_carry "$srec" "$head" "$work" >"$work.carry"; then
-            : >"$gitdir/index.fy-refused.$srec.$head.$base" 2>/dev/null || true
+            { : >"$gitdir/index.fy-refused.$srec.$head.$base"; } 2>/dev/null || true
             return 0
         fi
         kind=carry
@@ -434,7 +437,7 @@ rc=$?
 # left behind is deliberate at the new HEAD (a soft reset's kept staging included).
 post=$(pregit rev-parse -q --verify HEAD 2>/dev/null) || post=
 if [ -n "$post" ] && [ "$post" != "$cur" ]; then
-    printf '%s\n' "$post" >"$gitdir/fy-box-head" 2>/dev/null || true
+    { printf '%s\n' "$post" >"$gitdir/fy-box-head"; } 2>/dev/null || true
     fy_record "$post"
     fy_propose "$post" # the shared index now describes the old HEAD — offer the host its heal
 fi

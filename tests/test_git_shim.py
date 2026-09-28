@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -468,6 +469,68 @@ def test_unfixable_verdict_is_memoized_and_invalidated_by_staging(rig):
     # Healing the state clears the memo rather than leaving a lie on disk.
     rig.box("reset", "-q")
     assert rig.box("status", "--porcelain").stderr == ""
+
+
+def _record_offer(rig, plant):
+    rig.box("status", "--porcelain")
+    head = rig.host_commit("host", fileA="a2\n")
+    plant(f"index.fy-record.{head}")
+    return rig.box("status", "--porcelain")
+
+
+def _sync_point(rig, plant):
+    plant("index-box.head")
+    return rig.box("status", "--porcelain")
+
+
+def _box_stamp(rig, plant):
+    plant("fy-box-head")
+    rig.write("fileC", "c1\n")
+    rig.box("add", "fileC")
+    return rig.box("commit", "-qm", "box")
+
+
+def _stale_memo(rig, plant):
+    rig.box("status", "--porcelain")
+    rig.write("fileB", "b-box\n")
+    rig.box("add", "fileB")
+    rig.host_commit("host", fileA="a2\n")
+    plant("index-box.stale")
+    return rig.box("status", "--porcelain")
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [_record_offer, _sync_point, _box_stamp, _stale_memo],
+    ids=["record-offer", "sync-point", "box-stamp", "stale-memo"],
+)
+def test_a_best_effort_write_that_fails_says_nothing(rig, tmp_path, scenario):
+    """Every file the shim writes on the side is best effort — and over the VM mount a create can
+    fail where the name reads absent: on podman machine's libkrun a name the HOST just unlinked
+    (the githeal tick consumes index.fy-record.<head>) is a stale entry for up to ~5 s, so
+    `[ -e ]` says no and `: >name` says ENOENT. Redirections apply left to right, so a trailing
+    `2>/dev/null` never covered the failing one: the error reached the agent's terminal on a
+    command that worked. A dangling symlink is that exact state."""
+
+    def plant(name: str) -> None:
+        (rig.gitdir / name).symlink_to(tmp_path / "gone" / name)
+
+    r = scenario(rig, plant)
+    assert r.returncode == 0, r.stderr
+    assert "No such file or directory" not in r.stderr
+
+
+def test_no_best_effort_write_redirects_its_own_stderr_after_the_fact():
+    """The same rule for the writes no scenario above reaches (index.fy-refused.* needs the blob
+    id of an index copy): ``>file 2>/dev/null`` leaks the failed open, ``{ >file; } 2>/dev/null``
+    doesn't."""
+    leaky = re.compile(r"""(?<![0-9&])>>?\s*("[^"]*"|'[^']*'|[^\s;|&)}]+)\s+2>/dev/null""")
+    hits = [
+        f"{n}: {line.strip()}"
+        for n, line in enumerate(SHIM.read_text().splitlines(), 1)
+        if leaky.search(line) and not line.lstrip().startswith("#")
+    ]
+    assert hits == []
 
 
 def _status(rig, *args: str, cwd: Path | None = None) -> str:
