@@ -264,11 +264,11 @@ fy_heal() {
 # Offers are always NEW names (index.fy-proposed.<head>.<base>.<ff|carry>, index.fy-record.<head>,
 # index.fy-refused.<rec>.<head>.<base>), written in this kernel and renamed into place: a name the
 # HOST replaces reads as missing from here for up to ~1 s over virtiofs (~5 s on podman machine's
-# libkrun; measured, ADR-0021), so
-# nothing here re-reads a file the host rewrites except index.fy-head, where a stale read only
-# delays a heal. Decisions mirror the box's own heal above: already matching → record; pure
-# staleness (the old sync point, or a past HEAD from the reflog) → the new HEAD's tree; staged host
-# work disjoint from the move → carried forward; overlapping → refused, for the host to report.
+# libkrun; measured, ADR-0021), so nothing here re-reads a file the host rewrites except
+# index.fy-head, where a stale read only delays a heal. Decisions mirror the box's own heal above:
+# already matching → record; pure staleness (the old sync point, or a past HEAD from the reflog) →
+# the new HEAD's tree; staged host work disjoint from the move → carried forward; overlapping →
+# refused, for the host to report.
 fy_pending() { # anything for HEAD $1 already waiting for the host?
     compgen -G "$gitdir/index.fy-proposed.$1.*" >/dev/null ||
         [ -e "$gitdir/index.fy-record.$1" ] ||
@@ -365,19 +365,41 @@ fy_shared_sync() {
 # deletion (the exact scare this shim exists to prevent). Seed from the shared index (keeps stat
 # cache + staged state). Host git REPLACES that file, and over virtiofs a replaced name reads as
 # missing from here for up to ~1 s on Lima, ~5 s on podman machine's libkrun (ADR-0021's
-# visibility record) — so a copy that finds nothing is retried for ~6 s, and if the shared
-# index never shows, HEAD's tree seeds it: clean, never
-# empty. An unborn repo has nothing to copy and empty is then correct, so it doesn't wait.
-# Built under a temp name and renamed, so two first calls racing never leave half a copy.
+# visibility record) — so a copy that finds nothing is retried for ~6 s, and if the shared index
+# never shows, HEAD's tree seeds it: clean, never empty. Only an unborn repo has nothing to copy
+# (empty is then correct, so it doesn't wait) — and an unresolvable HEAD alone doesn't say unborn:
+# a host commit replaces the branch ref in the same window as the index. The reflog is appended
+# in place, never replaced, so one with entries says HEAD has had a commit.
 fy_seed() {
-    local tries=60
+    local tries=60 seed="$ix.seed.$$"
     while ((tries--)); do
-        cp "$gitdir/index" "$ix.seed.$$" 2>/dev/null && mv -f "$ix.seed.$$" "$ix" && return 0
-        pregit rev-parse -q --verify HEAD >/dev/null 2>&1 || return 0
+        cp "$gitdir/index" "$seed" 2>/dev/null && {
+            fy_seed_publish "$seed"
+            return 0
+        }
+        pregit rev-parse -q --verify HEAD >/dev/null 2>&1 || [ -s "$gitdir/logs/HEAD" ] || return 0
         sleep 0.1
     done
-    rm -f "$ix.seed.$$" 2>/dev/null
-    GIT_INDEX_FILE="$ix" pregit read-tree HEAD 2>/dev/null || true
+    GIT_INDEX_FILE="$seed" pregit read-tree HEAD 2>/dev/null && fy_seed_publish "$seed"
+    rm -f "$seed" 2>/dev/null || true
+}
+
+# Built under a temp name and renamed in only while index-box is still absent, under git's own
+# lock on it: two first calls can both find none, and while one waits out the window the other may
+# seed AND stage — git takes that same lock to write index-box, so neither can land between the
+# check and the rename.
+fy_seed_publish() { # $1 = the built seed
+    local tries=40
+    while ((tries--)); do
+        if (set -o noclobber && : >"$ix.lock") 2>/dev/null; then
+            [ -f "$ix" ] || mv -f "$1" "$ix" 2>/dev/null
+            rm -f "$ix.lock"
+            break
+        fi
+        [ -f "$ix" ] && break # a git command holds the lock on an index-box already there
+        sleep 0.05
+    done
+    rm -f "$1" 2>/dev/null || true
 }
 
 cur= gitdir= ix=
