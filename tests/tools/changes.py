@@ -152,8 +152,15 @@ def _in_merge_order(fragments: list[Fragment]) -> list[Fragment]:
 
 
 def _dirty(allowed: tuple[str, ...]) -> list[str]:
-    status = _git("status", "--porcelain", "--untracked-files=all").stdout.splitlines()
-    paths = [line[3:].split(" -> ")[-1] for line in status]
+    """NUL-separated, so git never quotes a name; a rename's record is followed by its source,
+    which is a change too."""
+    records = iter(_git("status", "--porcelain", "-z", "--untracked-files=all").stdout.split("\0"))
+    paths = []
+    for record in records:
+        if record:
+            paths.append(record[3:])
+            if {"R", "C"} & set(record[:2]):
+                paths.append(next(records))
     return [p for p in paths if not any(p == a or p.startswith(a + "/") for a in allowed)]
 
 

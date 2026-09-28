@@ -302,6 +302,23 @@ def test_prepare_resumes_a_prepared_untagged_release_by_its_number_only(repo):
     assert (repo / "CHANGELOG.md").read_text() == log  # nothing rolled twice
 
 
+def test_prepare_resumes_a_release_that_folded_a_fragment_git_would_quote(repo):
+    (repo / ".changes" / "my fix.md").write_text(GOOD.replace("A thing", "Spaced"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "spaced")
+    _reasons(repo, "0.4.0")
+    changes.prepare("minor", "2026-09-28")  # deletes `my fix.md`: a release path, not a stray
+    assert changes.prepare("0.4.0", "2026-09-28") == "0.4.0"
+
+
+def test_a_rename_is_dirty_at_both_of_its_paths(repo):
+    (repo / "stray.md").write_text("x\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "stray")
+    _git(repo, "mv", "stray.md", ".changes/stray.md")
+    assert changes._dirty((".changes",)) == ["stray.md"]
+
+
 def test_prepare_refuses_a_version_that_is_already_tagged(repo):
     with pytest.raises(changes.FragmentError, match="already tagged"):
         changes.prepare("0.3.2", "2026-09-28")
