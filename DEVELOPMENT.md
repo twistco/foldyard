@@ -364,6 +364,11 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
 
 ## Conventions & gotchas
 
+- **Changelog entries are files, not edits.** A change a consumer would notice adds
+  `.changes/<slug>.md` (section + bump frontmatter, then the bullet; format in
+  [.changes/README.md](./.changes/README.md)); `just release` folds them into `CHANGELOG.md`.
+  Never add an `## Unreleased` section back — it made every pair of open PRs conflict.
+  `tests/test_changes.py` validates the pending files in `check`.
 - **Three surfaces TEACH, and none of them fails when it lies:** the bundled skills
   (`assets/skills/`, installed into a consumer's `.claude/skills/`), the `fy init` scaffold, and
   the docs `fy docs` ships. `tests/test_agent_guide.py` is the mechanical guard — every ``fy …``

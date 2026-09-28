@@ -1,7 +1,8 @@
 name: release
 
-# Tag → build → publish to PyPI. Lives under foldyard/.github/ in the origin monorepo so that repo
-# never runs it; in the standalone repo it is the .github/workflows/release.yml at the root.
+# Tag → build → publish to PyPI → GitHub Release. Lives under foldyard/.github/ in the origin
+# monorepo so that repo never runs it; in the standalone repo it is the
+# .github/workflows/release.yml at the root.
 #
 # Trusted publishing: PyPI is told to trust THIS workflow in THIS repo (project settings →
 # Publishing → add a GitHub publisher: owner twistco, repo foldyard, workflow release.yml,
@@ -11,6 +12,11 @@ name: release
 on:
   push:
     tags: ["v*"]
+
+# Least privilege by default; the two jobs that need more (publish: id-token, github-release:
+# contents write) say so themselves and run no project code.
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -41,7 +47,7 @@ jobs:
             exit 1
           fi
           if ! grep -qE "^## $tag( |$)" CHANGELOG.md; then
-            echo "✗ CHANGELOG.md has no '## $tag' section — roll Unreleased before tagging"
+            echo "✗ CHANGELOG.md has no '## $tag' section — tag what \`just release\` committed"
             exit 1
           fi
       - run: uv build
@@ -49,6 +55,19 @@ jobs:
         with:
           name: dist
           path: dist/
+          if-no-files-found: error
+      # The GitHub Release's notes: this version's CHANGELOG section, extracted HERE (the job that
+      # already runs project code, read-only) so the job holding contents:write runs none. Its
+      # own artifact: `uv publish` uploads everything in dist/.
+      - name: Release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          mkdir notes
+          python3 tests/tools/changes.py notes "${GITHUB_REF_NAME#v}" > notes/notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: notes/
           if-no-files-found: error
 
   publish:
@@ -65,3 +84,28 @@ jobs:
           name: dist
           path: dist/
       - run: uv publish
+
+  # After PyPI took it, never before: a GitHub Release for a version PyPI refused would advertise
+  # one nobody can install. The wheel and sdist ride along, byte-identical to what PyPI has.
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: notes
+          path: notes/
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "foldyard ${GITHUB_REF_NAME#v}" --notes-file notes/notes.md dist/*
