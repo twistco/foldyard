@@ -27,7 +27,8 @@ Files next to the shared index (all derived state, safe to delete):
 ``index.fy-head`` — the HEAD the shared index was last intentional at (written here);
 ``index.fy-proposed.<head>.<base>.<ff|carry>`` / ``index.fy-record.<head>`` /
 ``index.fy-refused.<rec>.<head>.<base>`` — the box's offers (new names, never rewritten: a name
-the host replaces reads as missing from the box for up to ~1 s over virtiofs — ADR-0021).
+the host replaces reads as missing from the box for up to ~1 s over Lima's virtiofs, ~5 s over
+podman machine's libkrun — ADR-0021).
 """
 
 from __future__ import annotations

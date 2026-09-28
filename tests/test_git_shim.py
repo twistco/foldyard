@@ -512,3 +512,105 @@ def test_worktree_add_writes_the_NEW_checkout_not_this_ones_index(rig, tmp_path)
     assert r.returncode == 0, r.stderr
     assert not wt.exists()
     assert _status(rig) == ""
+
+
+# ── the first box call's seed: a host REPLACE reads as missing from the VM for up to ~1 s ─────
+# Host git writes `.git/index` by lock → rename, and over virtiofs the VM then sees the name
+# MISSING for 22 ms … ~1 s (measured: ADR-0021's visibility record). The seed used to copy only
+# if the file was there that instant, so a box's first git call in that window ran on NO index:
+# every tracked file a staged deletion — and an index-writing command made that permanent.
+
+
+def _seeded_rig(tmp_path):
+    rig = Rig(tmp_path)
+    rig.host_commit("init", fileA="a1\n", fileB="b1\n")
+    rig.write("fileE", "e1\n")
+    rig.host("add", "--", "fileE")  # host staging the seed should carry into the box
+    return rig
+
+
+def test_the_seed_waits_out_a_shared_index_that_is_briefly_missing(tmp_path):
+    import threading
+
+    rig = _seeded_rig(tmp_path)
+    shared, aside = rig.gitdir / "index", rig.gitdir / "index.aside"
+    shared.rename(aside)  # mid-replace, as the VM sees it
+    # 3 s: past Lima vz's ~1 s window, inside podman machine's libkrun ~5 s one (ADR-0021).
+    threading.Timer(3.0, lambda: aside.rename(shared)).start()
+    t0 = time.monotonic()
+    r = rig.box("status", "--porcelain")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "A  fileE\n"  # the shared index, staging and all — not an empty one
+    assert time.monotonic() - t0 < 6.5
+
+
+def test_with_no_shared_index_at_all_the_seed_is_heads_tree_never_empty(tmp_path):
+    rig = _seeded_rig(tmp_path)
+    (rig.gitdir / "index").unlink()
+    r = rig.box("status", "--porcelain")
+    assert r.returncode == 0, r.stderr
+    assert "D " not in r.stdout and "fileA" not in r.stdout  # HEAD's tree: nothing phantom
+    assert (rig.gitdir / "index-box").is_file()
+
+
+def test_an_unborn_repo_seeds_nothing_and_does_not_wait(tmp_path):
+    rig = Rig(tmp_path)  # no commit: no shared index, and empty IS correct
+    t0 = time.monotonic()
+    assert rig.box("status", "--porcelain").returncode == 0
+    assert time.monotonic() - t0 < 1.5
+
+
+def test_the_seed_waits_while_heads_ref_is_briefly_missing_too(tmp_path):
+    # A host commit replaces the branch ref alongside the index, so both read as missing in the
+    # same window: an unresolvable HEAD with a reflog behind it is that window, not an unborn repo.
+    import threading
+
+    rig = _seeded_rig(tmp_path)
+    rig.write("fileF", "f1\n")
+    moved = [(rig.gitdir / "index", rig.gitdir / "index.aside")]
+    moved.append((rig.gitdir / "refs/heads/main", rig.gitdir / "main.aside"))
+    for live, aside in moved:
+        live.rename(aside)
+    restore = threading.Timer(1.5, lambda: [aside.rename(live) for live, aside in moved])
+    restore.start()
+    r = rig.box("add", "--", "fileF")  # index-writing: an empty seed here would stick
+    assert r.returncode == 0, r.stderr
+    restore.join()
+    assert _status(rig) == "A  fileE\nA  fileF\n"
+
+
+@pytest.mark.parametrize("shared_returns", [True, False], ids=["copied", "heads-tree"])
+def test_a_racing_first_call_never_replaces_an_index_box_seeded_meanwhile(tmp_path, shared_returns):
+    # Two first calls both find no index-box; while one waits for the shared index, the other
+    # seeds it and stages. The waiter must not publish its copy (or HEAD's tree) over that.
+    rig = _seeded_rig(tmp_path)
+    rig.write("fileF", "f1\n")
+    shared, aside = rig.gitdir / "index", rig.gitdir / "index.aside"
+    shared.rename(aside)
+    # The waiter's first `sleep` says it is inside the retry loop, past its own absence check.
+    probe, waiting = tmp_path / "probe", tmp_path / "waiting"
+    probe.mkdir()
+    (probe / "sleep").write_text(
+        f'#!/bin/sh\n: >"{waiting}"\nfor d in /usr/bin /bin; do [ -x $d/sleep ] && exec $d/sleep "$@"; done\n'
+    )
+    (probe / "sleep").chmod(0o755)
+    waiter = subprocess.Popen(
+        [str(rig.shim), "status", "--porcelain"],
+        cwd=rig.repo,
+        env={**rig.env, "PATH": f"{probe}:{rig.env['PATH']}"},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    deadline = time.monotonic() + 10
+    while not waiting.exists():
+        assert time.monotonic() < deadline and waiter.poll() is None, "the waiter never waited"
+        time.sleep(0.02)
+    other = {"GIT_INDEX_FILE": str(rig.gitdir / "index-box")}
+    for args in (("read-tree", "HEAD"), ("add", "--", "fileF")):
+        assert rig._run(rig.real, *args, env_extra=other).returncode == 0
+    if shared_returns:
+        aside.rename(shared)
+    _, err = waiter.communicate(timeout=15)
+    assert waiter.returncode == 0, err
+    assert _status(rig) == "A  fileF\n?? fileE\n"  # the other call's staging, not the shared one

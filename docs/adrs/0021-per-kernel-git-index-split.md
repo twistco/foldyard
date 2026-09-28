@@ -130,10 +130,17 @@ Shim mechanics (each point traces to a verified failure mode):
   missing between versions, never older than one seen, all versions observed across 14.5k reads;
   a new file round-trips host→VM→host in 0.6 ms (p95 0.7). The control (the VM overwriting in
   place) tore 393 times, so the check detects tearing. **The reverse does NOT hold:** a file the
-  HOST replaces reads as *missing* from the VM for 22 ms to ~1 s (the guest's cached entry). So
-  every box offer is a new name and nothing box-side re-reads a name the host rewrites — and the
-  hazard is broader than the heal: host-side git replaces `HEAD`, refs and `packed-refs` the same
-  way, and the shim's one-time seed of `index-box` from `.git/index` can land in that window.
+  HOST replaces reads as *missing* from the VM for 22 ms to ~1 s (the guest's cached entry) — and
+  on podman machine's libkrun virtiofs for up to ~5 s: there a replaced name comes back only at
+  the next 5-second cache boundary (measured 2026-09-28: new versions visible at t ≈ 5, 15, 20,
+  30, 35 s; windows 0.2–4.7 s). So every box offer is a new name and nothing box-side re-reads a
+  name the host rewrites — and the hazard is broader than the heal: host-side git replaces
+  `HEAD`, refs and `packed-refs` the same way, and the shim's one-time seed of `index-box` from
+  `.git/index` can land in that window. The seed therefore retries for ~6 s and falls back to
+  HEAD's tree; it treats an unresolvable HEAD as unborn only when the reflog (appended in place,
+  never replaced) is empty too, since a host commit hides the branch ref in the same window; and
+  it publishes under git's own `index-box.lock`, only while `index-box` is still absent, so a
+  racing first call that already seeded and staged is never overwritten.
   `tests/test_mount_visibility_e2e.py` re-checks the direction the heal needs on every host tier
   (9p on the Linux and WSL2 runners).
 - Stray `index-box` files are derived state — safe to delete anytime (the shim re-seeds).
