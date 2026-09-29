@@ -13,3 +13,6 @@ bump: patch
   directory, then restore the changes by their stash id. foldyard only prints them; it never runs
   git in your checkout. The box's new message arrives once the box is recreated
   (`fy box down && fy box up`).
+- **The bundled foldyard skill tells box agents that the stash list is shared with you.** A bare
+  `git stash pop` takes whatever was stashed last, which could be yours, so agents now label
+  their stashes and pop them by entry.

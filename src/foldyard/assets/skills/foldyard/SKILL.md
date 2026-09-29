@@ -61,6 +61,10 @@ leftover autostash, waiting won't end it — tell the human, whose `fy doctor` s
 their computer. If it prints steps to recover a stale index, follow them. Don't route around the
 wrapper: those refusals are what keeps your commit from silently reverting theirs.
 
+The stash is shared too: `git stash list` is one list for the human, every worktree and every
+agent, and a bare `git stash pop` takes whatever went on last, which may be theirs. Label yours
+(`git stash push -m <label>`) and pop that entry by its `stash@{n}` from `git stash list`.
+
 ## When you need something you don't have
 
 **A credential** (a cloud token, an API key): you can't grant it. Name the exact command the human
