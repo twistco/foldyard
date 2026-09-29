@@ -128,7 +128,8 @@ Shim mechanics (each point traces to a verified failure mode):
     so "run it again once it's done" never came true. Both refusals name that exact shape and
     point at `fy doctor`, whose host row prints the recovery (stash it, then remove the
     directory) — read as files, never run. Refused all the same: a rebase in its first moments
-    looks identical, and the row waits 30 s before calling one a leftover.
+    looks identical, and the row waits 30 s — and for the checkout's `index.lock` to be free —
+    before calling one a leftover.
   - **An unborn read of a branch with history is refused** before git runs (its reflog is
     appended in place, never replaced, so it is reliable over the mount): shim and git both read
     "unborn" after a host rebase finished, and every check agreed with the root commit that

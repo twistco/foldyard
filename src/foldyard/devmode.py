@@ -1180,8 +1180,11 @@ def _rebase_leftover_check():
     It blocks the operator's every pull and — through the box's shim — every box commit, and
     ``rebase --abort`` can't clear it, so the shim's refusal points here. The recovery is PRINTED,
     never run (the host runs no git in the checkout): the stash is stored first, so the changes sit
-    in ``git stash list`` before the directory goes, and survive a pop that conflicts. WARN: nothing
-    is unsafe, a human step is outstanding. Silent when there is none."""
+    in ``git stash list`` before the directory goes, then applied by its id — never ``pop``, which
+    takes whatever was stashed last and drops it. The reader's guards (age, ``index.lock``) can't
+    PROVE git has stopped, so the operator is asked to check. One row per checkout, named for it:
+    live UIs key rows by name. WARN: nothing is unsafe, a human step is outstanding. Silent when
+    there is none."""
     import shlex
 
     from . import githeal
@@ -1190,17 +1193,18 @@ def _rebase_leftover_check():
         found = githeal.leftover_autostashes()
     except Exception:  # pragma: no cover — a report must never break the doctor run
         return
-    for lo in found:
+    for name, lo in found:
         repo, state = shlex.quote(str(lo.checkout)), shlex.quote(str(lo.state))
         yield _result(
             None,
-            "leftover autostash",
+            f"leftover autostash ({name})",
             "",
             f"{lo.state} holds only the changes a `git pull --rebase` set aside before it stopped"
             " — not a rebase in progress; your pulls and the box's commits are refused until it"
-            f" goes\n      → `git -C {repo} stash store -m autostash {lo.stash} && rm -r {state}`"
-            f"\n        then `git -C {repo} stash pop` to restore them (git keeps the stash if it"
-            " can't)",
+            " goes\n      → once no git command is running on your computer:"
+            f"\n        `git -C {repo} stash store -m autostash {lo.stash} && rm -r {state}`"
+            f"\n        then `git -C {repo} stash apply {lo.stash}` to restore them — they stay in"
+            " `git stash list` until you drop them",
         )
 
 

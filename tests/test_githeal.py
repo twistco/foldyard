@@ -783,15 +783,20 @@ def _stalled_rebase(rig) -> str:
 def test_the_leftover_git_leaves_is_found_and_the_printed_recovery_restores_it(rig):
     stash = _stalled_rebase(rig)
     assert os.listdir(rig.gitdir / "rebase-merge") == ["autostash"]  # the premise, from git
+    assert not (rig.gitdir / "index.lock").exists()  # the failed reset let go of the index
     found = leftover(rig.repo, now=_LATER)
     assert found == githeal.Leftover(rig.repo, rig.gitdir / "rebase-merge", stash)
     # The recovery doctor prints, run as the operator would: the stash first, then the directory.
     rig.host("checkout", "--", "sub/x")  # as if the failed reset HAD got that far
     rig.host("stash", "store", "-m", "autostash", stash)
     shutil.rmtree(rig.gitdir / "rebase-merge")
+    rig.write("fileB", "someone else's\n")
+    rig.host("stash", "push", "-q", "-m", "not the autostash")  # lands on top in between
     rig.host("rebase", "-q", "up")  # pulls work again
-    rig.host("stash", "pop", "-q")
+    rig.host("stash", "apply", "-q", stash)  # by id: what's on top doesn't matter
     assert (rig.repo / "sub" / "x").read_text() == "x-dirty\n"
+    assert (rig.repo / "fileB").read_text() == "b-up\n"
+    assert rig.host("stash", "list").stdout.count("\n") == 2  # both kept: applying drops nothing
 
 
 @pytest.mark.parametrize("op", ["rebase-merge", "rebase-apply"])
@@ -810,6 +815,21 @@ def test_a_rebase_under_way_is_not_a_leftover(rig, also):
     (d / "autostash").write_text("7" * 40)
     (d / also).write_text("")
     assert leftover(rig.repo, now=_LATER) is None
+
+
+def test_a_leftover_is_not_reported_while_git_holds_the_index(rig):
+    # The reset that follows the autostash holds index.lock for its whole run, however long past
+    # the age guard that is (measured: a 5 s reset, unlocked for ~2 ms of it): git is still going.
+    d = rig.gitdir / "rebase-merge"
+    d.mkdir()
+    (d / "autostash").write_text("7" * 40)
+    (rig.gitdir / "index.lock").write_text("")
+    assert leftover(rig.repo, now=_LATER) is None
+    (rig.gitdir / "index.lock").unlink()
+    (rig.gitdir / "index.lock").symlink_to(rig.gitdir / "nowhere")  # a lock git can't take either
+    assert leftover(rig.repo, now=_LATER) is None
+    (rig.gitdir / "index.lock").unlink()
+    assert leftover(rig.repo, now=_LATER) is not None
 
 
 def test_a_rebase_just_starting_is_not_a_leftover_yet(rig):
@@ -851,18 +871,30 @@ def test_a_worktrees_leftover_is_in_its_own_git_dir(rig, tmp_path):
     (d / "autostash").write_text("7" * 40)
     assert leftover(rig.repo, now=_LATER) is None  # main's own git dir is clean
     assert leftover(wt, rig.repo, now=_LATER) == githeal.Leftover(wt, d, "7" * 40)
+    (rig.gitdir / "index.lock").write_text("")  # main's index is not the worktree's
+    assert leftover(wt, rig.repo, now=_LATER) is not None
+    (d.parent / "index.lock").write_text("")
+    assert leftover(wt, rig.repo, now=_LATER) is None
 
 
-def test_every_registered_checkout_is_asked(monkeypatch, tmp_path):
+def test_every_registered_checkout_is_asked_and_named(monkeypatch, tmp_path, register_worktree):
+    from foldyard import devmode
+
     main, wt = tmp_path / "repo", tmp_path / "wt"
-    monkeypatch.setattr(githeal, "_checkouts", lambda: (main, [main, wt]))
-    found = githeal.Leftover(wt, main / ".git" / "worktrees" / "wt" / "rebase-merge", "7" * 40)
+    (main / ".git").mkdir(parents=True)
+    register_worktree(main, "side", wt)
+    monkeypatch.setattr(devmode, "main_repo", lambda: main)
+    wt = wt.resolve()
     asked = []
 
     def reader(repo, m, now=None):
         asked.append((repo, m))
-        return found if repo == wt else None
+        return githeal.Leftover(repo, Path(repo, "rebase-merge"), "7" * 40)
 
     monkeypatch.setattr(githeal, "leftover_autostash", reader)
-    assert githeal.leftover_autostashes() == [found]
+    # Named as fy names them (the main checkout, a worktree by its registered name): one row each.
+    assert [(n, lo.checkout) for n, lo in githeal.leftover_autostashes()] == [
+        ("main", main),
+        ("side", wt),
+    ]
     assert asked == [(main, main), (wt, main)]
