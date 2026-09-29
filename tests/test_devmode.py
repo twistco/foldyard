@@ -5,8 +5,10 @@ derivation, and the per-mode daemon specs. State I/O is isolated to a tmp dir vi
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -1086,6 +1088,225 @@ def test_git_config_row_warns_when_the_only_loss_is_the_remote(monkeypatch, scra
 def test_git_config_row_is_absent_outside_a_git_repo(monkeypatch, tmp_path):
     # A stack-less scratch dir is not a finding about anyone's .git/config.
     assert _config_row(monkeypatch, tmp_path) == []
+
+
+# ── the box-git-shim doctor rows (ADR-0021: box git IS the shim, its hooks whole) ──────────
+# Every box-side git protection — the per-kernel index split, the ref checks under git's lock,
+# the host-operation guard — lives in the shim at /usr/local/bin/git. Another git first on PATH,
+# or a half-installed hooks dir, switches all of it off without a sound; in-box doctor says so.
+
+_SHIM_ASSET = Path(devmode.__file__).parent / "assets" / "box" / "git-index-shim.sh"
+
+
+def _install_shim(prefix: Path) -> Path:
+    """As the box bootstrap does (``box._git_shim_step``): the shim written to ``<prefix>/bin/git``,
+    then ITS OWN install branch lays ``libexec/foldyard-git-{hooks,bin}`` out beside it — so the
+    rows are judged against the layout the shim really makes, not a test's idea of it."""
+    shim = prefix / "bin" / "git"
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    shim.write_bytes(_SHIM_ASSET.read_bytes())
+    shim.chmod(0o755)
+    env = {"PATH": f"{os.environ['PATH']}:/usr/bin:/bin", "FY_GIT_SHIM_INSTALL_HOOKS": "1"}
+    subprocess.run([str(shim)], env=env, check=True, umask=0o022)
+    return shim
+
+
+@pytest.fixture
+def box_git(monkeypatch, tmp_path):
+    """A box whose git is foldyard's shim, installed the bootstrap's way and owned by "root" (the
+    test's uid). Returns a setter for what PATH resolves `git` to, and the real libexec dir."""
+    monkeypatch.setattr(devmode.config, "box_git_index_split", lambda: True)
+    shim = _install_shim(tmp_path / "usr" / "local")
+    monkeypatch.setattr(devmode, "_ROOT_UID", os.getuid())
+    on_path: dict[str, str | None] = {"git": str(shim)}
+    monkeypatch.setattr(devmode, "_git_on_path", lambda: on_path["git"])
+
+    class Box:
+        libexec = Path(os.path.realpath(tmp_path / "usr" / "local" / "libexec"))
+        hooks = libexec / "foldyard-git-hooks"
+        bindir = libexec / "foldyard-git-bin"
+
+        def __init__(self):
+            self.shim = shim
+
+        def resolve_to(self, path):
+            on_path["git"] = None if path is None else str(path)
+
+        def rows(self):
+            return {name: (status, detail) for status, name, detail in devmode._git_shim_check()}
+
+    return Box()
+
+
+def test_git_shim_rows_ok_on_the_shim_the_bootstrap_installs(box_git):
+    rows = box_git.rows()
+    assert rows["git shim"][0] == "ok" and str(box_git.shim) in rows["git shim"][1]
+    assert rows["git shim hooks"][0] == "ok", rows
+
+
+def test_in_box_doctor_carries_the_git_shim_rows(box_git, monkeypatch):
+    monkeypatch.setattr(devmode, "in_box", lambda: True)
+    monkeypatch.setattr(devmode, "_run", lambda cmd, timeout=8: (0, "ok"))
+    names = [name for status, name, _ in devmode.doctor(deep=False) if status != "running"]
+    assert "git shim" in names and "git shim hooks" in names
+
+
+def test_host_side_doctor_has_no_git_shim_rows(box_git, monkeypatch):
+    # Your computer's git is its own business; the shim is a box fact.
+    monkeypatch.setattr(devmode, "in_box", lambda: False)
+    monkeypatch.setattr(devmode, "_run", lambda cmd, timeout=8: (0, "ok"))
+    names = [name for _, name, _ in devmode.doctor(deep=False)]
+    assert "git shim" not in names and "git shim hooks" not in names
+
+
+def test_another_git_first_on_path_is_a_fail_naming_it_and_the_fix(box_git, tmp_path):
+    # A toolchain's own git, a ~/.local/bin/git, /usr/bin ahead of /usr/local/bin: all of it is a
+    # real git, and all of it runs without the split or the ref checks.
+    other = tmp_path / "usr" / "bin" / "git"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"\x7fELF\x02\x01\x01 a real git binary")
+    other.chmod(0o755)
+    box_git.resolve_to(other)
+    rows = box_git.rows()
+    status, detail = rows["git shim"]
+    assert status == "fail" and str(other) in detail and "not foldyard's shim" in detail
+    assert "PATH" in detail and "fy box down && fy box up" in detail
+    assert "git shim hooks" not in rows  # nothing to judge beside a git that isn't the shim
+
+
+def test_the_shim_is_known_by_its_content_not_its_path(box_git):
+    # A consumer's own wrapper AT the shim's path is still not the shim.
+    box_git.shim.write_text('#!/bin/sh\nexec /usr/bin/git "$@"\n')
+    assert box_git.rows()["git shim"][0] == "fail"
+
+
+def test_no_git_on_path_is_a_fail(box_git):
+    box_git.resolve_to(None)
+    status, detail = box_git.rows()["git shim"]
+    assert status == "fail" and "no git on PATH" in detail
+
+
+def test_a_symlink_to_the_shim_is_the_shim_and_its_hooks_are_found_beside_the_real_file(
+    box_git, tmp_path
+):
+    # The shim finds its hooks from its REAL path (readlink -f "$0"), so doctor must too: a
+    # ~/.local/bin/git symlinked to it is the shim, and the hooks are under /usr/local/libexec.
+    link = tmp_path / "home" / ".local" / "bin" / "git"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(box_git.shim)
+    box_git.resolve_to(link)
+    rows = box_git.rows()
+    assert rows["git shim"][0] == "ok" and rows["git shim hooks"][0] == "ok", rows
+
+
+def test_no_rows_when_the_split_is_off(box_git, monkeypatch):
+    # `[box] git_index_split = false` declares no shim: nothing to hold the box to, and doctor's
+    # precedent for a feature not asked for is no row (the host-wall and ssh-port rows).
+    monkeypatch.setattr(devmode.config, "box_git_index_split", lambda: False)
+    monkeypatch.setattr(devmode, "_git_on_path", lambda: pytest.fail("PATH asked for nothing"))
+    assert list(devmode._git_shim_check()) == []
+
+
+def test_a_missing_hooks_dir_is_a_fail(box_git):
+    for p in box_git.hooks.iterdir():
+        p.unlink()
+    box_git.hooks.rmdir()
+    status, detail = box_git.rows()["git shim hooks"]
+    # Named as missing, not as 28 absent entries (and not matched on "missing" alone: the tmp
+    # path carries this test's name).
+    assert status == "fail" and f"{box_git.hooks} missing" in detail and "lacks" not in detail
+    assert "fy box down && fy box up" in detail
+
+
+def test_a_missing_hook_entry_is_a_fail_and_named(box_git):
+    # Every hook the shim declares is routed through that dir; a missing entry is a repo hook
+    # that silently never runs (pre-commit), or the ref check itself (reference-transaction).
+    (box_git.hooks / "reference-transaction").unlink()
+    status, detail = box_git.rows()["git shim hooks"]
+    assert status == "fail" and "reference-transaction" in detail
+
+
+def test_a_hook_entry_pointing_elsewhere_is_a_fail(box_git):
+    entry = box_git.hooks / "pre-commit"
+    entry.unlink()
+    entry.write_text("#!/bin/sh\n# lefthook\n")
+    status, detail = box_git.rows()["git shim hooks"]
+    assert status == "fail" and "pre-commit" in detail
+
+
+def test_a_missing_git_bin_entry_is_a_fail(box_git):
+    # libexec/foldyard-git-bin/git puts the shim first on a repo hook's PATH (git prepends its
+    # exec-path there): without it lefthook's git reads a ref the host just moved unrefreshed.
+    (box_git.bindir / "git").unlink()
+    status, detail = box_git.rows()["git shim hooks"]
+    assert status == "fail" and "foldyard-git-bin" in detail
+
+
+def test_a_shim_without_a_hooks_list_predates_the_ref_check_and_is_a_fail(box_git):
+    # A box bootstrapped before the ref check has a shim with no hooks dir to route through.
+    box_git.shim.write_text(
+        "#!/usr/bin/env bash\n# foldyard git shim — per-invocation GIT_INDEX_FILE split.\n"
+    )
+    status, detail = box_git.rows()["git shim hooks"]
+    assert status == "fail" and "predates" in detail
+
+
+def test_hooks_not_owned_by_root_is_a_warn_naming_each(box_git, monkeypatch):
+    # Root ownership is what stopped lefthook's hook sync writing into the dir — and THROUGH its
+    # symlinks over the shim itself — when a hook ran as a non-root user. The checks still run
+    # today, so a warn: the exposure, not the loss.
+    monkeypatch.setattr(devmode, "_ROOT_UID", os.getuid() + 1)
+    status, detail = box_git.rows()["git shim hooks"]
+    assert status == "warn" and "not root" in detail, detail
+    for what in ("bin/git", "foldyard-git-hooks", "foldyard-git-bin"):
+        assert what in detail, detail
+
+
+@pytest.mark.parametrize("which", ["hooks", "bindir"])
+def test_a_dir_others_can_write_is_a_warn(box_git, which):
+    d = getattr(box_git, which)
+    d.chmod(0o757)
+    status, detail = box_git.rows()["git shim hooks"]
+    assert status == "warn" and d.name in detail and "writable" in detail, detail
+
+
+def test_a_group_writable_dir_is_a_warn_unless_the_group_is_root(box_git, monkeypatch):
+    box_git.hooks.chmod(0o775)
+    assert box_git.rows()["git shim hooks"][0] == "warn"
+    monkeypatch.setattr(devmode, "_ROOT_GID", box_git.hooks.stat().st_gid)
+    assert box_git.rows()["git shim hooks"][0] == "ok"
+
+
+def test_a_shim_others_can_write_is_a_warn(box_git):
+    # Writes through the hook symlinks land in the shim file itself.
+    box_git.shim.chmod(0o757)
+    status, detail = box_git.rows()["git shim hooks"]
+    assert status == "warn" and "writable" in detail, detail
+
+
+def test_a_hooks_dir_that_is_a_symlink_is_a_warn(box_git, tmp_path):
+    # Ownership judged on a symlink's target says nothing about who can swap the link.
+    moved = tmp_path / "elsewhere"
+    box_git.hooks.rename(moved)
+    box_git.hooks.symlink_to(moved)
+    status, detail = box_git.rows()["git shim hooks"]
+    assert status == "warn" and "symlink" in detail, detail
+
+
+def test_a_broken_install_outranks_an_exposed_one(box_git, monkeypatch):
+    monkeypatch.setattr(devmode, "_ROOT_UID", os.getuid() + 1)
+    (box_git.hooks / "reference-transaction").unlink()
+    status, detail = box_git.rows()["git shim hooks"]
+    assert status == "fail" and "reference-transaction" in detail and "not root" in detail
+
+
+def test_the_packaged_shim_carries_what_doctor_identifies_it_by():
+    # The marker is read from the first 512 bytes, and the hook list from the shim's own text: a
+    # reword of either in the shim must fail here, not in a live box.
+    head = _SHIM_ASSET.read_bytes()[:512].decode()
+    assert devmode._GIT_SHIM_MARK in head
+    names = devmode._shim_hook_names(_SHIM_ASSET.read_text())
+    assert names is not None and "reference-transaction" in names and "pre-commit" in names
 
 
 # ── run_stream (the doctor-fix runner: streams output, returns rc) ─────────────────────

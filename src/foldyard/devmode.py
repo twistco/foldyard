@@ -49,6 +49,7 @@ import math
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 from collections.abc import Callable
@@ -1260,6 +1261,7 @@ def doctor(deep: bool = False):
             "mounted + trusted (ambient — routing follows a declared [proxy])",
             "not mounted (no CA on the host yet — `fy host restart` there)",
         )
+        yield from _git_shim_check()
         yield ("running", "engine socket", "")
         rc, _ = _run([config.engine(), "info", "--format", "ok"], timeout=5)
         yield _result(rc == 0, "engine socket", "reachable", "unreachable — DOCKER_HOST broken?")
@@ -1553,6 +1555,134 @@ def _git_config_check():
         "shared git config",
         f"intact ({len(remotes)} remote{'s' if len(remotes) != 1 else ''}: {', '.join(remotes)})",
         "intact, but no remote — `fy verify` cannot prove the push refusal without an origin",
+    )
+
+
+# ── box git is foldyard's shim (ADR-0021) ─────────────────────────────────────────────────────
+# Every box-side git protection — the per-kernel index split, the ref checks under git's own
+# lock, the host-operation guard — lives in the shim the bootstrap writes to /usr/local/bin/git
+# (`box._git_shim_step`). A consumer image with another git first on PATH, or a hooks dir that
+# didn't install, switches all of it off without a sound. Known by CONTENT (its header — the same
+# test the suite's hermetic PATH uses), never by path alone: a consumer's own wrapper can sit at
+# /usr/local/bin/git too.
+_GIT_SHIM_MARK = "foldyard git shim"
+_HOOK_NAMES = re.compile(r'^FY_HOOK_NAMES="([^"]*)"', re.M)
+# The box runs as root (`box up --user 0`, VS Code's remoteUser), and root writes anything, so
+# "can the box user write it?" is always yes and asks nothing. What ownership buys is that no
+# OTHER uid can: lefthook's hook sync, run as a non-root user, wrote its scripts into the hooks
+# dir — and through its symlinks over the shim itself — until the dir was root-owned. So: owned
+# by root, and writable by no one else (a group-write bit only for root's own group).
+_ROOT_UID = 0
+_ROOT_GID = 0
+_SHIM_RECREATE = "`fy box down && fy box up` on your computer re-runs the bootstrap"
+
+
+def _git_on_path() -> str | None:
+    """`git` as THIS process's PATH resolves it — the PATH the shell that ran `fy doctor` handed
+    down, which is the shell an agent's git resolves in too. A login shell spawned here (`bash -lc
+    'command -v git'`) would answer for the rc files instead: a different shell from the one in
+    front of the operator, and no truer."""
+    from shutil import which
+
+    return which("git")
+
+
+def _shim_hook_names(text: str) -> list[str] | None:
+    """The hooks the shim routes through its hooks dir, from the INSTALLED shim's own list (the
+    shim installs exactly these); ``None`` for a shim with no list — one from before the ref
+    check, which has no hooks dir to route through."""
+    m = _HOOK_NAMES.search(text)
+    return m.group(1).split() if m else None
+
+
+def _only_root_writes(path: Path) -> str | None:
+    """Why ``path`` (not followed) isn't root's alone to change; ``None`` when it is, or when it
+    doesn't exist (whether it should is the caller's question)."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(st.st_mode):  # its target's owner says nothing about who can swap the link
+        return f"{path} is a symlink"
+    if st.st_uid != _ROOT_UID:
+        return f"{path} owned by uid {st.st_uid}, not root"
+    if st.st_mode & stat.S_IWOTH or (st.st_mode & stat.S_IWGRP and st.st_gid != _ROOT_GID):
+        return f"{path} writable by a non-root user"
+    return None
+
+
+def _git_shim_check():
+    """In-box doctor rows for ``[box] git_index_split``: box git IS the shim, and its hooks are
+    whole and root's alone. No rows when the split is off — nothing was asked for (the host-wall
+    and ssh-port rows' precedent).
+
+    fail = git isn't the shim, or its hooks aren't all installed: the index split / the ref
+    checks / the repo's own hooks don't run, so box git can race your computer's git on the shared
+    index or move a branch it just moved. warn = everything installed, but a non-root uid could
+    rewrite it: the checks run today, so the exposure rather than the loss."""
+    if not config.box_git_index_split():
+        return
+    found = _git_on_path()
+    if not found:
+        yield _result(
+            False,
+            "git shim",
+            "",
+            "no git on PATH — box git has no index split and no ref checks; " + _SHIM_RECREATE,
+        )
+        return
+    real = os.path.realpath(found)
+    try:
+        with open(real, "rb") as f:
+            is_shim = _GIT_SHIM_MARK.encode() in f.read(512)
+        text = Path(real).read_text(errors="replace") if is_shim else ""
+    except OSError:
+        is_shim, text = False, ""
+    yield _result(
+        is_shim,
+        "git shim",
+        f"{found} is foldyard's shim (index split + ref checks)",
+        f"{found}{f' → {real}' if real != found else ''} is not foldyard's shim — box git runs "
+        "without the index split or the ref checks. The image puts another git ahead of "
+        "/usr/local/bin on PATH (fix its PATH), or the shim's install failed: " + _SHIM_RECREATE,
+    )
+    if not is_shim:
+        return
+
+    # Where the shim looks for them: beside its REAL path (`${self%/*/*}/libexec`, self = readlink
+    # -f "$0"), so a symlink to it on PATH still finds the one install.
+    shim = Path(real)
+    libexec = shim.parent.parent / "libexec"
+    hooks, bindir = libexec / "foldyard-git-hooks", libexec / "foldyard-git-bin"
+    names = _shim_hook_names(text)
+    broken: list[str] = []
+    if names is None:
+        broken.append(f"the shim at {shim} predates the ref check (no hooks list)")
+    elif not hooks.is_dir():
+        broken.append(f"{hooks} missing")
+    else:
+        # A missing entry is a repo hook that silently never runs, or the ref check itself.
+        stray = [n for n in names if os.path.realpath(hooks / n) != real]
+        if stray:
+            broken.append(f"{hooks} lacks the shim's entry for: {' '.join(stray)}")
+    if names is not None and os.path.realpath(bindir / "git") != real:
+        broken.append(f"{bindir}/git is not the shim")
+    exposed = [p for p in map(_only_root_writes, (shim, hooks, bindir)) if p]
+    if broken:
+        yield _result(
+            False,
+            "git shim hooks",
+            "",
+            f"{'; '.join(broken + exposed)} — the ref checks or the repo's own hooks don't run; "
+            + _SHIM_RECREATE,
+        )
+        return
+    yield _result(
+        True if not exposed else None,
+        "git shim hooks",
+        f"installed, and only root can change them ({libexec})",
+        f"{'; '.join(exposed)} — a non-root process in the box could rewrite them (and, through "
+        "the hook links, the shim itself); " + _SHIM_RECREATE + " to reinstall them as root",
     )
 
 
