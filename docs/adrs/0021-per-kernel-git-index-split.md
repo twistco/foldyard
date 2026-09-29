@@ -18,6 +18,11 @@
 - **Amended 2026-09-27:** the host's heal of the SHARED index runs no git — the box proposes the
   healed index, the host only renames it into place (Consequences, "The shared index's heal").
   Cross-kernel visibility measured to support it, and the direction that does NOT hold recorded.
+- **Amended 2026-09-29:** refs are not safe either — the box can read a branch the host just
+  moved as older or absent, and a box commit then rewound or re-rooted the host's branch. Ref moves
+  are now checked under git's own ref lock, and the shared index's heal is sealed to the box's ref
+  move (Consequences, "Ref moves are checked under git's ref lock" and "The shared index's heal";
+  the live record is the §9 diary behind this amendment).
 
 ## Context
 
@@ -88,11 +93,61 @@ Shim mechanics (each point traces to a verified failure mode):
   sees the box's real staged state); a hook driving git in a *different* repo must scrub git
   env itself (`env -u GIT_INDEX_FILE`) — the same footgun class as stock git's temp-index
   commits. Tools linking libgit2/gitoxide (not spawning the CLI) also bypass; rare in
-  practice.
+  practice. *(2026-09-29: no longer — a repo hook's `git` goes through the shim again; see "Ref
+  moves are checked under git's ref lock".)*
 - **Refs remain shared** (`refs/*`, `packed-refs`) under the same cross-kernel lockfile
   weakness — much rarer (deliberate ops, not polling), failing as a stale `.lock` file rather
   than an emptied index. Host-side GUI auto-fetch off shrinks it; if it ever bites, consider
-  `gc.auto=0` in the shared config with maintenance run host-side.
+  `gc.auto=0` in the shared config with maintenance run host-side. *(2026-09-29: it bit, and not
+  as a stale lock — see the next point.)*
+- **Ref moves are checked under git's ref lock** (2026-09-29). A host git moves a branch by
+  replacing its file, and the box reads a REPLACED name as absent or old (22 ms–~1 s on Lima vz,
+  up to ~5 s on podman machine's libkrun — above). Git reads a missing loose ref as "the packed
+  value, else unborn", and its own under-lock re-read is just as stale, so on a loaded libkrun VM
+  a box commit parented on an old commit or made a ROOT commit, and moved the host's branch there;
+  a box `git reset -q` rewound 7 host commits. What holds now:
+  - **Refresh first.** A create-style lookup always asks the server again, and `link(2)` does one
+    on its target before failing: `ln -dT / <name>` refreshes a name and creates nothing. The shim
+    refreshes HEAD, its branch, `packed-refs` and `config` before and after its heal.
+  - **Judge under the lock.** Git has no config-declared hooks before 2.54, so the shim passes a
+    per-call `-c core.hooksPath=<libexec>/foldyard-git-hooks` — a directory of symlinks to itself,
+    installed beside it by the box bootstrap (`FY_GIT_SHIM_INSTALL_HOOKS=1 git`) — and delegates
+    every hook to the repo's own. In its `reference-transaction` hook, at `prepared`, git holds
+    the ref lock, so the host can't move the ref and a refreshed read is the truth. A move is
+    refused when git read a value that isn't that truth; a move of the checked-out branch is also
+    held to the HEAD the command started from (advanced by its own moves), whatever git sends as
+    the old value — `reset` reads its target, rewrites the index (seconds on a loaded VM), and
+    only then reads the value it replaces, so a host commit in between passed git's own
+    compare-and-swap. A move with no expected value must land on that HEAD or ahead of it.
+  - **Ask again under the lock.** Every check before git runs is a hint: a host `pull --rebase`
+    that started after the shim's "no operation in progress" check had its rebase broken by a box
+    commit. The hook re-asks for a host operation's state (not one the box started, `fy-box-op`).
+  - **An unborn read of a branch with history is refused** before git runs (its reflog is
+    appended in place, never replaced, so it is reliable over the mount): shim and git both read
+    "unborn" after a host rebase finished, and every check agreed with the root commit that
+    followed. An orphan branch has no reflog.
+  - **Discovery.** A HEAD the host just rewrote can hide the repository ("not a git repository"):
+    on a failed discovery the shim refreshes `.git` up the tree and asks once more. A nested
+    repo's `.git` that reads absent makes discovery succeed in the OUTER repo instead: a command
+    that can write, started below the repo git found, re-asks each `.git` on the way up.
+  - **Repo hooks.** A repo hook's `git` (lefthook's two dozen calls a commit) goes through the
+    shim again — a directory holding only `git`, first on the hook's PATH — so it reads through the
+    refresh; in the same repo it takes a light path (refresh, then real git). Git hands the
+    `core.hooksPath` override down to hooks, so a hook's read-only git drops exactly that entry:
+    lefthook's auto-sync asked `rev-parse --git-path hooks`, got the shim's directory and wrote
+    its hooks into it (through the symlinks over the shim itself when writable). The directory is
+    root-owned in the box; handing a hook to the shim's own directory is refused (it looped).
+  - **Attribution.** Only a move this command's own transaction committed counts as the box's
+    (FY_MOVED): "HEAD changed while it ran" claimed a host commit after a refused box commit, and
+    the agent's next commit reverted it.
+
+  Costs: a box commit takes two hook round trips; a refusal is "nothing was changed; run it
+  again", and under a host commit every second most of a slow command's attempts are refused
+  (measured: 2 of 20 box resets landed on a loaded libkrun VM, 0 host commits lost). Git before
+  2.31 has no `reference-transaction` hook: the shim then only refreshes. With git ≥ 2.54 in the
+  box, config-declared hooks (`hook.<name>.event`) could replace the `core.hooksPath` override
+  and everything it has to hide. The shim must stay bash 3.2-compatible: macOS's `/usr/bin/env
+  bash` is 3.2, and the hermetic suite runs it there.
 - **`.git/config` is shared too**, and here foldyard WAS the racer: `shellenv`/`resolve` wrote
   `core.fileMode=false` unconditionally — every recipe and engine verb, from both kernels — and
   `git config` rewrites the file (lock → rename) even for an unchanged value. A lost update left
@@ -143,11 +198,43 @@ Shim mechanics (each point traces to a verified failure mode):
   racing first call that already seeded and staged is never overwritten.
   `tests/test_mount_visibility_e2e.py` re-checks the direction the heal needs on every host tier
   (9p on the Linux and WSL2 runners).
+  **The box installs it itself, sealed to its ref move** (2026-09-29). Waiting for the host's tick
+  left a gap: a host commit between the box's branch move and the heal recorded the box's files
+  as deleted from the stale shared index (an IDE's `git add` polling on the host: 3 reverts in 46
+  box commits on libkrun). The box's own transaction now builds the healed index at `prepared` —
+  from a copy, with the same carry rule — takes `index.lock` (waiting ~1 s for a host git
+  holding it; rebuilding under it if the index changed since the copy) and renames the build in
+  at `committed`; `aborted` drops it, and a git killed in between leaves no lock (the shim's
+  post-command step releases it). A host commit needs that same lock, so it can't land in the
+  gap. The proposal/rename path above stays as the fallback (an operation in progress, a lock
+  held too long). The carry asks git twice whatever the number of staged paths (two `diff-index`
+  calls paired in step) — asked per path, it held git's ref lock ~28 s for 19 host-staged paths
+  on a loaded VM and every host commit failed "HEAD.lock: File exists" meanwhile. It refuses
+  rather than guesses: a sync point git can't read, a conflict entry (a host `stash pop` leaves
+  them with no operation state) and an entry that doesn't pair up (a host file where the box made
+  a directory) all refuse instead of carrying "nothing" — each of which dropped or reverted
+  staged work before. The seal needs a sync point: a shared index that has never had one (a fresh
+  worktree) gets it from the box's first git call, rather than from the host's tick up to ~2 s
+  later — the agent's first commit in every fresh worktree went unsealed until then.
 - Stray `index-box` files are derived state — safe to delete anytime (the shim re-seeds).
 - Follow-up: an `fy verify` assertion that in-box `git` resolves to the shim, so a regression
   fails loudly instead of silently re-arming the race.
 
 ## Rejected alternatives
+
+- **Dropping the VM's file-lookup cache** (2026-09-29; a root loop writing `drop_caches`) — every
+  50 ms it shrinks the stale window to ~0.1 s and makes plain git safe in the measured flows, but
+  `git status` gets 8–9× slower for every container in the VM, and working-tree files still read
+  absent 7.5% of the time. With the shim covering git, it isn't worth that cost.
+- **A time budget for the sealed heal** (2026-09-29) — giving the seal up when it runs long
+  would spare host commits a "HEAD.lock: File exists", but it gives the seal up exactly when the
+  VM is loaded, which is when a host commit lands in the gap and silently reverts the box's
+  files. A refused host commit is retried; a revert isn't noticed. The carry was made cheap
+  instead.
+- **Judging every `HEAD` line as a move of the checked-out branch** (2026-09-29) — it would catch
+  a box whose view and git's disagree about whether HEAD is detached, but git sends no expected
+  value for `checkout --detach <older>`, so detaching to an older commit would be refused every
+  time. The unborn-with-history check covers the case that went wrong.
 
 - **Host-side writer hygiene alone** — discipline, not a guarantee: `status`-shaped index
   writes come from anything that displays repo state, including tools users forget are open.
