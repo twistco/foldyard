@@ -50,6 +50,16 @@ their day (the glossary maps old terms like *posture* and *axis* to current ones
 itself; `fy verify` checks the isolation. A consumer repo usually wraps these in its own `just`
 recipes — check the repo's justfile and CLAUDE.md before reaching for `fy` directly.
 
+## When `git` refuses: "foldyard git shim: …"
+
+The repo is shared with their computer, and over the VM mount your side can briefly read an older
+state of a branch the human just moved. Your `git` is a wrapper that catches that: when a command
+would act on such a read, or their computer is in the middle of a git operation (a rebase, a
+merge), it refuses — and **nothing was changed**. Run the command again; if it names an operation
+in progress, wait for the human to finish it (never abort their rebase from the box). If it prints
+steps to recover a stale index, follow them. Don't route around the wrapper: those refusals are
+what keeps your commit from silently reverting theirs.
+
 ## When you need something you don't have
 
 **A credential** (a cloud token, an API key): you can't grant it. Name the exact command the human

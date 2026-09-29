@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -72,6 +73,11 @@ class Rig:
             "GIT_CONFIG_GLOBAL": str(cfg),
             "GIT_CONFIG_NOSYSTEM": "1",
         }
+        # As the box bootstrap does: the ref check's hooks dir, beside the shim.
+        subprocess.run(
+            [str(self.shim)], env={**self.env, "FY_GIT_SHIM_INSTALL_HOOKS": "1"}, check=True
+        )
+        self.hooks = tmp / "libexec" / "foldyard-git-hooks"
         self.repo = tmp / "repo"
         self.repo.mkdir()
         self.host("init", "-q", ".")
@@ -131,15 +137,15 @@ def rig(tmp_path):
 
 
 def test_split_box_commit_uses_own_index_and_stamps(rig):
-    # A box commit lands in shared refs, writes index-box (not the shared index), and stamps
-    # both sync files — the raw split + the attribution the heals depend on.
-    shared_before = (rig.gitdir / "index").read_bytes()
+    # A box commit lands in shared refs, writes index-box — never git-writing the shared index
+    # (the split) — and stamps both sync files: the attribution the heals depend on. The shared
+    # index is then healed to the new HEAD by the shim itself, under index.lock (githeal's twin).
     rig.write("fileC", "c1\n")
     assert rig.box("add", "fileC").returncode == 0
     assert rig.box("commit", "-qm", "box").returncode == 0
     head = rig.head()
     assert (rig.gitdir / "index-box").exists()
-    assert (rig.gitdir / "index").read_bytes() == shared_before  # shared index untouched
+    assert rig.host("status", "--porcelain").stdout == ""  # healed at once, not on a tick
     assert (rig.gitdir / "index-box.head").read_text().strip() == head
     assert (rig.gitdir / "fy-box-head").read_text().strip() == head
     assert rig.box("status", "--porcelain").stdout == ""  # own commit: no illusion, no heal needed
@@ -182,11 +188,12 @@ def test_box_soft_reset_is_never_healed_away(rig):
 
 
 def test_stale_with_staged_work_warns_and_blocks_commit(rig):
-    # The one unhealable state: host moved HEAD AND the box has genuinely staged work. Status
-    # still runs (warn on stderr), but commit is refused — it would revert the host's commit.
+    # The one unhealable state: host moved HEAD AND the box's staged work touches a path the move
+    # changed (disjoint staged work is carried). Status still runs (warn on stderr), but commit is
+    # refused — it would revert the host's change or silently merge two.
     rig.box("status", "--porcelain")  # sync point at C1
-    rig.write("fileB", "b-box\n")
-    rig.box("add", "fileB")  # genuine box-side staged work
+    rig.write("fileA", "a-box\n")
+    rig.box("add", "fileA")  # genuine box-side staged work, on the path the host's commit changes
     rig.host_commit("host", fileA="a2\n")
     st = rig.box("status", "--porcelain")
     assert st.returncode == 0 and "index-box is stale" in st.stderr
@@ -212,24 +219,26 @@ def test_the_memo_is_keyed_on_index_CONTENT_not_just_size(rig):
     Two adds of the same path is the smallest reproduction of that same-size transition."""
     memo = rig.gitdir / "index-box.stale"
     rig.box("status", "--porcelain")  # sync point at C1
-    rig.write("fileB", "junk1\n")
-    rig.box("add", "fileB")
+    rig.write("fileA", "junk1\n")
+    rig.box("add", "fileA")  # the path the host's commit below changes: unfixable, not carried
     rig.host_commit("host", fileA="a2\n")
     assert "index-box is stale" in rig.box("status", "--porcelain").stderr
-    rig.write("fileB", "junk2\n")
-    rig.box("add", "fileB")  # settles the index at its post-add size, still unfixable → memoized
+    rig.write("fileA", "junk2\n")
+    rig.box("add", "fileA")  # settles the index at its post-add size, still unfixable → memoized
     assert memo.exists()
     size_before = (rig.gitdir / "index-box").stat().st_size
     # Back to the COMMITTED content: the index is now byte-exactly the initial commit's tree, so
     # it is pure staleness with nothing to lose — at a size identical to the memoized one.
-    rig.write("fileB", "b1\n")
-    rig.box("add", "fileB")
+    rig.write("fileA", "a1\n")
+    rig.box("add", "fileA")
     assert (rig.gitdir / "index-box").stat().st_size == size_before, (
         "the reproduction needs a same-size transition — a size change would mask the bug"
     )
     out = rig.box("status", "--porcelain")
     assert "index-box is stale" not in out.stderr, "a healable index must not stay behind the memo"
-    assert out.stdout == ""  # no phantom staged diff
+    # No phantom STAGED diff; fileA's unstaged change is real — the shared worktree holds the
+    # box's last write (a1) over the host's committed a2.
+    assert out.stdout == " M fileA\n"
     assert not memo.exists()  # …and the memo is cleared, not left as a lie on disk
     assert "refusing 'git commit'" not in rig.box("commit", "-qm", "unblocked").stderr
 
@@ -241,7 +250,8 @@ def test_staging_that_matches_an_UNRELATED_BRANCHS_COMMIT_is_not_reset_away(rig)
     `git checkout <branch> -- .`, backing a WIP change out) — and against an all-refs scan any of
     those looked disposable, so the next host-side HEAD move silently `git reset`-ed the staging
     away. The tree must come from a state HEAD has actually BEEN at (its reflog); an unrelated
-    branch's commit is not that, and the stale-index refusal (recoverable) must stand instead.
+    branch's commit is not that, so the staging is treated as real work — carried onto the new
+    HEAD (the move didn't touch it), never dropped.
 
     `feature` is built with plumbing on purpose: committing it the normal way would put it in
     HEAD's reflog, which is exactly the provenance being withheld here."""
@@ -263,16 +273,10 @@ def test_staging_that_matches_an_UNRELATED_BRANCHS_COMMIT_is_not_reset_away(rig)
     assert rig.box("add", "fileB").returncode == 0
     rig.host_commit("host", fileA="a2\n")
     out = rig.box("status", "--porcelain")
-    assert "index-box is stale" in out.stderr, (
-        "an unvisited commit's tree is not proof of staleness"
-    )
     assert "M  fileB" in out.stdout, "the box's deliberate staging must survive the heal"
-    assert rig.box("commit", "-qm", "x").returncode == 1  # …and the guard still blocks the revert
-    # The documented recovery still works, and re-staging on the new HEAD commits the real change.
-    assert rig.box("reset", "-q").returncode == 0
-    rig.box("add", "fileB")
-    assert rig.box("commit", "-qm", "retry").returncode == 0
-    assert "fileB" in rig.host("show", "--stat", "--oneline", "HEAD").stdout
+    assert rig.box("commit", "-qm", "x").returncode == 0
+    changes = rig.host("diff-tree", "--no-commit-id", "-r", "--name-status", "HEAD").stdout
+    assert changes == "M\tfileB\n"  # the real change, on the new HEAD: the host's fileA intact
 
 
 def test_heal_finds_a_sync_point_OLDER_THAN_THE_RECENT_HISTORY(rig):
@@ -305,15 +309,158 @@ def test_heal_finds_a_sync_point_OLDER_THAN_THE_RECENT_HISTORY(rig):
 
 def test_reset_then_commit_recovers_from_stale_staged(rig):
     rig.box("status", "--porcelain")
-    rig.write("fileB", "b-box\n")
-    rig.box("add", "fileB")
+    rig.write("fileA", "a-box\n")
+    rig.box("add", "fileA")  # overlaps the host's commit: unhealable
     rig.host_commit("host", fileA="a2\n")
     assert rig.box("commit", "-qm", "x").returncode == 1
     assert rig.box("reset", "-q").returncode == 0
-    rig.box("add", "fileB")  # re-stage (the file itself was never touched)
+    rig.write("fileA", "a-box2\n")  # the host's commit rewrote the shared file: re-apply, re-stage
+    rig.box("add", "fileA")
     ok = rig.box("commit", "-qm", "retry")
     assert ok.returncode == 0, ok.stderr
     assert rig.box("status", "--porcelain").stdout == ""
+
+
+def test_staged_box_work_is_carried_over_a_host_head_move(rig):
+    """Agents stage, then commit — and the host pulls, rebases or commits meanwhile. The box's own
+    heal refused ANY staged work once the host had moved HEAD (commits blocked until a manual
+    reset), though the host side has carried disjoint staged work since #39. Same rule here: the
+    new HEAD's tree plus the box's staged paths, when the move didn't touch them."""
+    rig.box("status", "--porcelain")
+    rig.write("fileB", "b-box\n")
+    rig.write("fileC", "c-box\n")
+    assert rig.box("add", "fileB", "fileC").returncode == 0  # a modification and a new file
+    host = rig.host_commit("host", fileA="a2\n")
+    assert rig.box("status", "--porcelain").stdout == "M  fileB\nA  fileC\n"
+    # recorded as synced at the new HEAD: the next call doesn't pay for the carry again
+    assert (rig.gitdir / "index-box.head").read_text().strip() == host
+    r = rig.box("commit", "-qm", "box")
+    assert r.returncode == 0, r.stderr
+    assert rig.host("rev-parse", "HEAD~").stdout.strip() == host
+    changes = rig.host("diff-tree", "--no-commit-id", "-r", "--name-status", "HEAD").stdout
+    assert changes == "M\tfileB\nA\tfileC\n"  # the host's fileA is not reverted
+    assert rig.box("status", "--porcelain").stdout == ""
+
+
+def test_a_carry_git_cant_answer_keeps_the_staging(rig, tmp_path):
+    # The carry asks git how the staged paths read in the new HEAD. An answer it didn't get is not
+    # "none of them changed": that installed the new HEAD's bare tree over the box's staging.
+    rig.box("status", "--porcelain")
+    rig.write("fileB", "b-box\n")
+    assert rig.box("add", "fileB").returncode == 0
+    rig.host_commit("host", fileA="a2\n")
+    spy = tmp_path / "failing-git"
+    spy.mkdir()
+    (spy / "git").write_text(
+        "#!/bin/sh\n"
+        'case " $* " in *" diff-index "*" -- "*) exit 128 ;; esac\n'
+        f'exec "{rig.real}" "$@"\n'
+    )
+    (spy / "git").chmod(0o755)
+    rig.box("status", "--porcelain", env={"PATH": f"{rig.shim.parent}:{spy}:{rig.env['PATH']}"})
+    assert rig.box("diff", "--cached", "--name-only").stdout == "fileB\n"
+
+
+def _spy_on_the_carry(rig, tmp_path, script: str) -> dict:
+    """A "real git" that runs ``script`` (shell, $@ = git's args) on the box carry's own git
+    calls — the ones on its work copy of index-box — then execs the real git."""
+    spy = tmp_path / "carry-spy"
+    spy.mkdir()
+    (spy / "git").write_text(
+        "#!/bin/sh\n"
+        f'case "${{GIT_INDEX_FILE:-}}" in *index-box.carry.*) {script} ;; esac\n'
+        f'exec "{rig.real}" "$@"\n'
+    )
+    (spy / "git").chmod(0o755)
+    return {"PATH": f"{rig.shim.parent}:{spy}:{rig.env['PATH']}"}
+
+
+def test_a_box_write_during_the_carry_is_never_silently_lost(rig, tmp_path):
+    # The carry copied index-box, built from the copy, and only then took index-box.lock: another
+    # box git (the agent's `git add` while the editor's server runs `git status`) staging in
+    # between was overwritten by the older copy. Under the lock first, that writer is refused
+    # instead — loudly, its own to retry.
+    rig.box("status", "--porcelain")
+    rig.write("fileB", "b-box\n")
+    assert rig.box("add", "fileB").returncode == 0
+    rig.host_commit("host", fileA="a2\n")
+    rig.write("fileE", "e-box\n")
+    ix, rc = rig.gitdir / "index-box", tmp_path / "concurrent-rc"
+    env = _spy_on_the_carry(
+        rig,
+        tmp_path,
+        f'case " $* " in *" read-tree "*) [ -e "{rc}" ] || {{ env -u GIT_INDEX_FILE '
+        f'GIT_INDEX_FILE="{ix}" "{rig.real}" -C "{rig.repo}" add fileE; echo $? >"{rc}"; }} ;; esac',
+    )
+    rig.box("status", "--porcelain", env=env)
+    if rc.read_text().strip() == "0":  # the other writer succeeded: its staging must survive
+        assert "A  fileE" in rig.box("status", "--porcelain").stdout
+
+
+def test_a_carry_that_fails_for_a_moment_is_tried_again(rig, tmp_path):
+    # Only an overlap is a verdict worth remembering. A git call that fails for a moment was
+    # memoized as "can't be carried forward" on inputs that don't change, so commits stayed
+    # refused until the index happened to change.
+    rig.box("status", "--porcelain")
+    rig.write("fileB", "b-box\n")
+    assert rig.box("add", "fileB").returncode == 0
+    rig.host_commit("host", fileA="a2\n")
+    once = tmp_path / "failed-once"
+    env = _spy_on_the_carry(rig, tmp_path, f'[ -e "{once}" ] || {{ : >"{once}"; exit 128; }}')
+    first = rig.box("status", "--porcelain", env=env)
+    assert "can't be carried forward" not in first.stderr
+    r = rig.box("commit", "-qm", "box")
+    assert r.returncode == 0, r.stderr
+    changes = rig.host("diff-tree", "--no-commit-id", "-r", "--name-status", "HEAD").stdout
+    assert changes == "M\tfileB\n"
+
+
+def test_moving_the_checked_out_branch_back_says_how(rig):
+    # Git sends no expected value for `checkout -B <current> <older>`, so the shim can't tell a
+    # deliberate rewind from one computed off a stale HEAD, and refuses both — with nothing on
+    # your computer having moved, "run it again" can't help. `git reset` sends one and passes.
+    rig.box("status", "--porcelain")
+    first = rig.head()
+    rig.host_commit("second", fileA="a2\n")
+    r = rig.box("checkout", "-q", "-B", "main", first)
+    assert r.returncode != 0 and "git reset --hard" in r.stderr
+    assert rig.box("reset", "-q", "--hard", first).returncode == 0
+    assert rig.head() == first
+
+
+def test_a_staged_deletion_is_carried_too(rig):
+    rig.box("status", "--porcelain")
+    assert rig.box("rm", "-q", "fileB").returncode == 0
+    rig.host_commit("host", fileA="a2\n")
+    r = rig.box("commit", "-qm", "box")
+    assert r.returncode == 0, r.stderr
+    changes = rig.host("diff-tree", "--no-commit-id", "-r", "--name-status", "HEAD").stdout
+    assert changes == "D\tfileB\n"
+
+
+@pytest.mark.parametrize("staged", [False, True], ids=["stale", "carried"])
+def test_the_heal_never_runs_a_ref_writing_git(rig, tmp_path, staged):
+    """The staleness heal ran `git reset`, which rewrites the checked-out branch with the value it
+    READ. Over the VM mount that read can be stale, and the view flips back to fresh when the
+    cache entry expires — mid-command, the host's file reappears and git writes its stale value
+    over it: the rewind the hook exists to refuse, run by the shim itself, without the hook (that
+    flip can't be staged outside the VM). So the heal rebuilds indexes with read-tree/update-index,
+    which touch no ref — pinned by the calls it makes."""
+    rig.box("status", "--porcelain")
+    if staged:
+        rig.write("fileC", "c-box\n")
+        rig.box("add", "fileC")
+    rig.host_commit("host", fileA="a2\n")
+    log, spy = tmp_path / "calls", tmp_path / "spy"
+    spy.mkdir()
+    (spy / "git").write_text(f'#!/bin/sh\necho "$*" >>"{log}"\nexec "{rig.real}" "$@"\n')
+    (spy / "git").chmod(0o755)
+    r = rig.box("status", "--porcelain", env={"PATH": f"{rig.shim.parent}:{spy}:{rig.env['PATH']}"})
+    assert r.returncode == 0 and "index-box is stale" not in r.stderr, r.stderr
+    writers = ("reset", "update-ref", "checkout", "switch", "symbolic-ref", "branch", "commit")
+    calls = [c.split() for c in log.read_text().splitlines()]
+    assert [c for c in calls if c and c[0] in writers] == []
+    assert rig.box("status", "--porcelain").stdout == ("A  fileC\n" if staged else "")
 
 
 def test_upgrade_path_stale_index_box_without_sync_point(rig):
@@ -421,8 +568,8 @@ def test_index_irrelevant_subcommands_skip_the_heal(rig):
     on a 1s timer, on the event loop). They must pass through silently even while stale, WITHOUT
     healing it away behind the user's back."""
     rig.box("status", "--porcelain")
-    rig.write("fileB", "b-box\n")
-    rig.box("add", "fileB")
+    rig.write("fileA", "a-box\n")
+    rig.box("add", "fileA")  # overlaps the host's commit: unhealable
     rig.host_commit("host", fileA="a2\n")
     before = (rig.gitdir / "index-box").read_bytes()
     for sub in ("rev-parse", "rev-list", "for-each-ref", "config", "log"):
@@ -453,8 +600,8 @@ def test_unfixable_verdict_is_memoized_and_invalidated_by_staging(rig):
     healable would stay stuck behind a stale memo."""
     memo = rig.gitdir / "index-box.stale"
     rig.box("status", "--porcelain")
-    rig.write("fileB", "b-box\n")
-    rig.box("add", "fileB")
+    rig.write("fileA", "a-box\n")
+    rig.box("add", "fileA")  # overlaps the host's commit: unhealable
     rig.host_commit("host", fileA="a2\n")
     assert not memo.exists()
     for _ in range(3):  # the warning must survive memoization, not just the first time
@@ -468,6 +615,786 @@ def test_unfixable_verdict_is_memoized_and_invalidated_by_staging(rig):
     # Healing the state clears the memo rather than leaving a lie on disk.
     rig.box("reset", "-q")
     assert rig.box("status", "--porcelain").stderr == ""
+
+
+def _record_offer(rig, plant):
+    rig.box("status", "--porcelain")
+    head = rig.host_commit("host", fileA="a2\n")
+    plant(f"index.fy-record.{head}")
+    return rig.box("status", "--porcelain")
+
+
+def _sync_point(rig, plant):
+    plant("index-box.head")
+    return rig.box("status", "--porcelain")
+
+
+def _box_stamp(rig, plant):
+    plant("fy-box-head")
+    rig.write("fileC", "c1\n")
+    rig.box("add", "fileC")
+    return rig.box("commit", "-qm", "box")
+
+
+def _stale_memo(rig, plant):
+    rig.box("status", "--porcelain")
+    rig.write("fileA", "a-box\n")
+    rig.box("add", "fileA")  # overlaps the host's commit: unhealable
+    rig.host_commit("host", fileA="a2\n")
+    plant("index-box.stale")
+    return rig.box("status", "--porcelain")
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [_record_offer, _sync_point, _box_stamp, _stale_memo],
+    ids=["record-offer", "sync-point", "box-stamp", "stale-memo"],
+)
+def test_a_best_effort_write_that_fails_says_nothing(rig, tmp_path, scenario):
+    """Every file the shim writes on the side is best effort — and over the VM mount a create can
+    fail where the name reads absent: on podman machine's libkrun a name the HOST just unlinked
+    (the githeal tick consumes index.fy-record.<head>) is a stale entry for up to ~5 s, so
+    `[ -e ]` says no and `: >name` says ENOENT. Redirections apply left to right, so a trailing
+    `2>/dev/null` never covered the failing one: the error reached the agent's terminal on a
+    command that worked. A dangling symlink is that exact state."""
+
+    def plant(name: str) -> None:
+        (rig.gitdir / name).symlink_to(tmp_path / "gone" / name)
+
+    r = scenario(rig, plant)
+    assert r.returncode == 0, r.stderr
+    assert "No such file or directory" not in r.stderr
+
+
+def test_no_best_effort_write_redirects_its_own_stderr_after_the_fact():
+    """The same rule for the writes no scenario above reaches (index.fy-refused.* needs the blob
+    id of an index copy), and for reads: ``>file 2>/dev/null`` / ``<file 2>/dev/null`` leak the
+    failed open, ``{ >file; } 2>/dev/null`` doesn't."""
+    leaky = re.compile(r"""(?<![0-9&<])(>>?|<)\s*("[^"]*"|'[^']*'|[^\s;|&)}]+)\s+2>/dev/null""")
+    hits = [
+        f"{n}: {line.strip()}"
+        for n, line in enumerate(SHIM.read_text().splitlines(), 1)
+        if leaky.search(line) and not line.lstrip().startswith("#")
+    ]
+    assert hits == []
+
+
+def _fake_ln(rig, tmp_path: Path, stale: Path | None = None, on: int = 1) -> tuple[dict, Path]:
+    """An `ln` that logs every name the shim refreshes. With ``stale``, the name is moved aside
+    first and put back on the ``on``-th refresh of it: this kernel's view right after a HOST
+    replace over the VM mount — the name reads absent until a fresh lookup finds the host's file
+    (``on`` > 1: the host replaced it again after the earlier refreshes)."""
+    bin_, log, aside = tmp_path / "fake-ln", tmp_path / "ln.log", tmp_path / "aside"
+    bin_.mkdir()
+    target = f"{stale.parent.resolve()}/{stale.name}" if stale else ""
+    if stale:
+        stale.rename(aside)
+    (bin_ / "ln").write_text(
+        "#!/bin/sh\n"
+        'for n; do :; done\necho "$n" >>"' + str(log) + '"\n'
+        'if [ "$(cd "$(dirname "$n")" && pwd -P)/$(basename "$n")" = "' + target + '" ]; then\n'
+        '  echo x >>"' + str(tmp_path / "ln.count") + '"\n'
+        '  [ "$(wc -l <"'
+        + str(tmp_path / "ln.count")
+        + f'")" -ge {on} ] && [ -e "'
+        + str(aside)
+        + '" ] && mv "'
+        + str(aside)
+        + '" "'
+        + target
+        + '"\n'
+        "fi\n"
+        "exit 1\n"
+    )
+    (bin_ / "ln").chmod(0o755)
+    return {"PATH": f"{bin_}:{rig.env['PATH']}"}, log
+
+
+def _stale_during(
+    rig, tmp_path: Path, sub: str, packed: bool, same: bool = False
+) -> tuple[dict, str, str]:
+    """The race the shim's own refreshes can't close: the host moves the branch to a new commit
+    WHILE git runs, after every refresh, and this kernel then reads the loose ref as absent — git
+    falls back to packed-refs (``packed``) or sees an unborn branch. Plays it with a "real git"
+    that, on the user's ``sub`` (the call carrying our hooks, not the heal's own git), swaps the
+    loose ref for its stale view (the host's new value waits aside),
+    and an `ln` whose forced lookup — the hook's — finds the host's file. → (env, the branch as
+    the box last saw it, the host's new value); `_settled` then shows what's really there."""
+    rig.box("status", "--porcelain")
+    if packed:
+        rig.host("pack-refs", "--all")
+    seen = rig.host_commit("host", fileA="a2\n")  # the branch as the box last saw it
+    ref = rig.gitdir / "refs" / "heads" / "main"
+    moved = rig.host("commit-tree", "-p", "HEAD", "-m", "host again", "HEAD^{tree}").stdout.strip()
+    if same:  # the host rewrites the branch's file with the value it already had
+        moved = seen
+    env, _ = _fake_ln(rig, tmp_path)  # logging only: nothing is stale until git runs
+    aside = tmp_path / "aside"
+    stale = tmp_path / "stale-git"
+    stale.mkdir()
+    (stale / "git").write_text(
+        "#!/bin/sh\n"
+        f'case " $* " in *core.hooksPath=*" {sub} "*) [ -e "{tmp_path}/staled" ] || {{\n'
+        f'  : >"{tmp_path}/staled"; rm -f "{ref}"; echo {moved} >"{aside}"; }} ;; esac\n'
+        f'exec "{rig.real}" "$@"\n'
+    )
+    (stale / "git").chmod(0o755)
+    ln = tmp_path / "fake-ln" / "ln"
+    ln.write_text(
+        "#!/bin/sh\n"
+        "for n; do :; done\n"
+        f'[ "$(cd "$(dirname "$n")" && pwd -P)/$(basename "$n")" = "{ref.parent.resolve()}/main" ] &&'
+        f' [ -f "{aside}" ] && mv "{aside}" "{ref}"\n'
+        "exit 1\n"
+    )
+    env["PATH"] = f"{env['PATH'].split(':')[0]}:{stale}:{rig.env['PATH']}"
+    return env, seen, moved
+
+
+def _settled(rig, tmp_path: Path) -> str:
+    """The branch as it really is: the host's file, whether or not a lookup refreshed it."""
+    if (tmp_path / "aside").exists():
+        (tmp_path / "aside").rename(rig.gitdir / "refs" / "heads" / "main")
+    return rig.host("rev-parse", "main").stdout.strip()
+
+
+def test_a_box_commit_sees_the_branch_the_host_just_moved(rig, tmp_path):
+    """Host git moves a branch by replacing its loose ref, and over the VM mount the box then read
+    the name as absent for up to ~5 s — git falls back to packed-refs, so a box commit parented on
+    the PACKED commit and moved the branch there, dropping the host's (measured on podman
+    machine: with nothing packed it made a root commit). The shim refreshes the names a command
+    resolves before running it."""
+    rig.box("status", "--porcelain")
+    rig.host("pack-refs", "--all")
+    moved = rig.host_commit("host", fileA="a2\n")
+    env, _ = _fake_ln(rig, tmp_path, stale=rig.gitdir / "refs" / "heads" / "main")
+    r = rig.box("commit", "-q", "--allow-empty", "-m", "box", env=env)
+    assert r.returncode == 0, r.stderr
+    assert rig.host("rev-parse", "HEAD~").stdout.strip() == moved
+
+
+def test_a_host_move_during_the_heal_is_healed_again_not_committed_as_a_revert(rig, tmp_path):
+    """The heal takes long enough for the host to move HEAD meanwhile. Healed for the old HEAD, the
+    index committed on the new one would silently revert the host's commit — so after the heal the
+    shim looks again (a second refresh finds the move) and heals again."""
+    rig.box("status", "--porcelain")
+    rig.host("pack-refs", "--all")
+    moved = rig.host_commit("host", fileA="a2\n")
+    env, _ = _fake_ln(rig, tmp_path, stale=rig.gitdir / "refs" / "heads" / "main", on=2)
+    r = rig.box("commit", "-q", "--allow-empty", "-m", "box", env=env)
+    assert r.returncode == 0, r.stderr
+    assert rig.host("rev-parse", "HEAD~").stdout.strip() == moved
+    assert rig.host("show", "HEAD:fileA").stdout == "a2\n"  # the host's change, not reverted
+
+
+@pytest.mark.parametrize("packed", [True, False], ids=["stale-parent", "root-commit"])
+@pytest.mark.parametrize("verify", [[], ["--no-verify"]], ids=["hooks", "no-verify"])
+def test_a_commit_git_prepared_on_a_stale_branch_moves_nothing(rig, tmp_path, packed, verify):
+    """Measured on podman machine: a box commit that read the branch in its stale window parented
+    on the packed commit or made a ROOT commit, and moved the branch there — git's under-lock
+    re-read is as stale as its first. The shim's `reference-transaction` hook re-reads it after a
+    forced lookup while git holds the lock, and aborts: the host's commit stays the tip. Hooks
+    `--no-verify` skips don't include this one."""
+    env, _, moved = _stale_during(rig, tmp_path, "commit", packed)
+    r = rig.box("commit", "-q", *verify, "--allow-empty", "-m", "box", env=env)
+    assert r.returncode != 0
+    assert "foldyard git shim: not moving refs/heads/main" in r.stderr
+    assert _settled(rig, tmp_path) == moved
+
+
+def test_a_branch_with_history_that_reads_unborn_never_gets_a_root_commit(rig, tmp_path):
+    """The host's `pull --rebase` finished (HEAD back on the branch, the branch file replaced) and
+    the box read the branch as UNBORN — the shim and git alike, so the heal token (it saw unborn
+    too) and the zero-old check (unborn = unborn) both passed, and a box commit made a ROOT commit
+    that knocked the host's HEAD off its branch (libkrun workflow test 2). A branch whose own
+    reflog has entries isn't unborn: that read is a stale view, refused before git runs."""
+    rig.box("status", "--porcelain")
+    head = rig.head()
+    env, _ = _fake_ln(rig, tmp_path, stale=rig.gitdir / "refs" / "heads" / "main", on=99)
+    rig.write("fileC", "c\n")
+    r = rig.box("commit", "-q", "--allow-empty", "-m", "box", env=env)
+    assert r.returncode != 0 and "foldyard git shim" in r.stderr
+    (tmp_path / "aside").rename(rig.gitdir / "refs" / "heads" / "main")
+    assert rig.head() == head
+    assert rig.host("rev-list", "--max-parents=0", "--all").stdout.split() == [
+        rig.host("rev-list", "--max-parents=0", "HEAD").stdout.strip()
+    ]
+
+
+def test_a_host_operation_that_starts_while_the_box_commits_stops_the_commit(rig):
+    """The shim refuses a box commit while the host is mid-rebase — but it asks BEFORE git runs,
+    and a host `pull --rebase` that started after that moved nothing the check could see: the box
+    commit moved the branch under the rebase, and the host's rebase then failed to finish (its own
+    compare-and-swap: "is at <box's> but expected <its start>"; libkrun workflow test 2, traced:
+    the box's transaction itself saw `rebase-merge`). Asked again under git's ref lock."""
+    rig.box("status", "--porcelain")
+    head = rig.head()
+    hooks = rig.gitdir / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text(f'#!/bin/sh\nmkdir "{rig.gitdir / "rebase-merge"}"\n')
+    (hooks / "pre-commit").chmod(0o755)
+    rig.write("fileC", "c\n")
+    rig.box("add", "fileC")
+    r = rig.box("commit", "-qm", "box")
+    (hooks / "pre-commit").unlink()
+    (rig.gitdir / "rebase-merge").rmdir()
+    assert r.returncode != 0 and "middle of a git operation" in r.stderr
+    assert rig.head() == head
+
+
+@pytest.mark.parametrize("where", ["same-repo", "via-C"])
+def test_a_repo_hooks_tools_see_the_repos_own_hooks_not_ours(rig, where):
+    """Git hands our `-c core.hooksPath` down to repo hooks (GIT_CONFIG_PARAMETERS), so lefthook's
+    auto-sync (`git rev-parse --git-path hooks`) found OUR directory and wrote its hook scripts
+    into it: with a writable install, through the symlinks OVER THE SHIM (lefthook 2.0.15 — the
+    commit's own checks then silently skipped every file); root-owned, "could not replace the
+    hook: permission denied" on every commit. A git call that never moves a ref runs without our
+    override; a ref move keeps it (the check must still see it)."""
+    rig.box("status", "--porcelain")
+    out = rig.gitdir / "hook-saw"
+    hooks = rig.gitdir / "hooks"
+    hooks.mkdir(exist_ok=True)
+    c = f'-C "{rig.repo}" ' if where == "via-C" else ""
+    (hooks / "pre-commit").write_text(
+        "#!/bin/sh\n"
+        f'git {c}rev-parse --path-format=absolute --git-path hooks >"{out}"\n'
+        f'git {c}config core.hooksPath >>"{out}"\n'
+        "exit 0\n"
+    )
+    (hooks / "pre-commit").chmod(0o755)
+    rig.write("fileC", "c\n")
+    rig.box("add", "fileC")
+    r = rig.box("commit", "-qm", "box")
+    assert r.returncode == 0, r.stderr
+    assert out.read_text() == f"{hooks.resolve()}\n"
+
+
+def test_a_repo_hooks_ref_move_still_goes_through_our_hooks(rig):
+    # The other half: a ref-moving git inside a repo hook keeps our override, so its transaction
+    # still runs our under-lock check. Observable in the repo's own reference-transaction hook: run
+    # through our directory, the `git` on its PATH is foldyard-git-bin's; run natively, git's own.
+    rig.box("status", "--porcelain")
+    rig.host("branch", "side")
+    log = rig.gitdir / "rt-git"
+    hooks = rig.gitdir / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text("#!/bin/sh\ngit branch -f side HEAD\n")
+    (hooks / "reference-transaction").write_text(
+        f'#!/bin/sh\ncat >/dev/null\n[ "$1" = prepared ] && command -v git >>"{log}"\nexit 0\n'
+    )
+    for h in ("pre-commit", "reference-transaction"):
+        (hooks / h).chmod(0o755)
+    rig.write("fileC", "c\n")
+    rig.box("add", "fileC")
+    r = rig.box("commit", "-qm", "box")
+    assert r.returncode == 0, r.stderr
+    seen = log.read_text().splitlines()
+    assert len(seen) >= 2  # the hook's `branch -f`, and the commit's own
+    assert all(g.endswith("/foldyard-git-bin/git") for g in seen), seen
+
+
+def test_the_boxs_own_pull_rebase_is_its_own_operation(rig):
+    # `git pull` runs its rebase as git's own child: unless the box marks the pull as its own
+    # operation, the rebase's last move of the branch finds `rebase-merge` and is refused.
+    rig.box("status", "--porcelain")
+    rig.host("branch", "upstream")
+    rig.host("checkout", "-q", "upstream")
+    rig.host_commit("theirs", fileU="u\n")
+    rig.host("checkout", "-q", "main")
+    rig.write("fileC", "c\n")
+    rig.box("add", "fileC")
+    assert rig.box("commit", "-qm", "ours").returncode == 0
+    r = rig.box("pull", "-q", "--rebase", ".", "upstream")
+    assert r.returncode == 0, r.stderr
+    assert rig.host("log", "-2", "--format=%s", "main").stdout.split() == ["ours", "theirs"]
+
+
+def test_an_orphan_branch_still_takes_its_first_commit(rig):
+    rig.box("status", "--porcelain")
+    assert rig.box("checkout", "-q", "--orphan", "fresh").returncode == 0
+    r = rig.box("commit", "-q", "--allow-empty", "-m", "first")
+    assert r.returncode == 0, r.stderr
+    assert rig.host("rev-list", "--count", "fresh").stdout.strip() == "1"
+
+
+def test_any_ref_move_on_a_stale_read_is_refused_not_only_a_commit(rig, tmp_path):
+    env, seen, moved = _stale_during(rig, tmp_path, "reset", packed=True)
+    r = rig.box("reset", "-q", "--soft", seen, env=env)  # from the stale view: packed → seen
+    assert r.returncode != 0 and "not moving refs/heads/main" in r.stderr
+    assert _settled(rig, tmp_path) == moved
+
+
+@pytest.mark.parametrize("args", [[], ["--hard"], ["--soft"]], ids=["mixed", "hard", "soft"])
+def test_a_reset_to_head_on_a_stale_read_rewinds_nothing(rig, tmp_path, args):
+    """`git reset` (to HEAD) gives git no expected old value — its ref update is zero-old, which the
+    hook can't judge in general (`branch -f`, `tag` send the same). But it moves the CHECKED-OUT
+    branch to what git read as HEAD: through the stale view, the packed commit, rewinding every
+    host commit since (measured with Tangible's lefthook: 5 host commits lost). The shim's recovery
+    advice is `git reset`, so this is the common case. A zero-old move of the checked-out branch
+    is held to the HEAD the shim resolved before git ran."""
+    env, _, moved = _stale_during(rig, tmp_path, "reset", packed=True)
+    r = rig.box("reset", "-q", *args, env=env)
+    assert r.returncode != 0 and "not moving refs/heads/main" in r.stderr
+    assert _settled(rig, tmp_path) == moved
+
+
+@pytest.mark.parametrize("sub", ["update-ref", "checkout"])
+def test_a_zero_old_move_of_the_checked_out_branch_is_held_to_the_head_the_shim_saw(
+    rig, tmp_path, sub
+):
+    """Some git versions send no expected value for a move of the checked-out branch (box git 2.47
+    for `reset`; every version for `update-ref <ref> <value>` and `checkout -B`). Such a move
+    landing after the host moved the branch meanwhile is refused; a retry sees the new state."""
+    env, seen, moved = _stale_during(rig, tmp_path, sub, packed=True)
+    args = ["refs/heads/main", seen] if sub == "update-ref" else ["-q", "-B", "main", seen]
+    r = rig.box(sub, *args, env=env)
+    assert r.returncode != 0 and "not moving refs/heads/main" in r.stderr
+    assert _settled(rig, tmp_path) == moved
+
+
+def test_a_zero_old_move_after_the_host_rewrote_the_same_value_is_not_refused(rig, tmp_path):
+    # The host replaces the branch's file with the SAME commit while the box's command runs (a
+    # fresh file: `update-ref` to itself, a GUI's rewrite). Through the stale view it reads as the
+    # older packed commit, so without the forced lookup the move would be refused for nothing.
+    env, seen, _ = _stale_during(rig, tmp_path, "update-ref", packed=True, same=True)
+    target = rig.host("commit-tree", "-p", seen, "-m", "box", f"{seen}^{{tree}}").stdout.strip()
+    r = rig.box("update-ref", "refs/heads/main", target, env=env)
+    assert r.returncode == 0, r.stderr
+    assert _settled(rig, tmp_path) == target
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["update-ref", "refs/heads/main", "HEAD"], ["checkout", "-q", "-B", "main"]],
+    ids=["update-ref", "checkout-B"],
+)
+def test_a_zero_old_move_git_computed_from_a_stale_head_is_refused(rig, tmp_path, args):
+    """The shim read the branch fresh, but git's OWN read of HEAD came later and was stale (the
+    host's file replaced in between, or a name the refresh didn't reach) — and a zero-old move
+    takes its target from that read. The branch hadn't moved since the shim looked, so "is it
+    still what the shim saw" passed and git wrote the old value: box git 2.47's `git reset -q`
+    rewound 7 host commits this way under load (reflog: the tip → an older commit, while the
+    shim's check held). A target that isn't the HEAD the shim saw, nor ahead of it, is refused."""
+    env, seen, _ = _stale_during(rig, tmp_path, args[0], packed=True, same=True)
+    r = rig.box(*args, env=env)
+    assert r.returncode != 0 and "not moving refs/heads/main" in r.stderr
+    assert _settled(rig, tmp_path) == seen
+
+
+@pytest.mark.parametrize("where", ["top", "subdir", "worktree"])
+def test_a_head_the_host_just_rewrote_does_not_hide_the_repository(rig, tmp_path, where):
+    """A host checkout/rebase/stash rewrites HEAD, and over the VM mount the box can read the name
+    as absent — git's discovery then says "not a git repository" (16 agent retries in one 30-s
+    workflow run). Discovery runs before the shim's refresh, so on a failure the shim refreshes
+    `.git` and `.git/HEAD` up the tree from where git starts (honouring -C, and a worktree's
+    gitdir file) and asks once more."""
+    rig.box("status", "--porcelain")
+    args, head = [], rig.gitdir / "HEAD"
+    if where == "subdir":
+        (rig.repo / "sub").mkdir()
+        args = ["-C", "sub"]
+    if where == "worktree":
+        wt = tmp_path / "wt"
+        rig.host("worktree", "add", "-q", str(wt), "-b", "side")
+        args, head = ["-C", str(wt)], rig.gitdir / "worktrees" / "wt" / "HEAD"
+    env, _ = _fake_ln(rig, tmp_path, stale=head)
+    r = rig.box(*args, "status", "--porcelain", env=env)
+    assert r.returncode == 0, r.stderr
+    assert head.exists()
+
+
+@pytest.mark.parametrize("how", ["-C", "cwd"])
+def test_a_nested_repo_that_reads_absent_is_not_mistaken_for_the_outer_one(rig, tmp_path, how):
+    """A nested repo whose `.git` the VM reads as absent for a moment makes git's discovery walk
+    UP — and a box commit landed in the OUTER repo (7 agent commits in the e2e fixture's own repo,
+    session 7's Lima run; the probe repo's directory had been replaced). Discovery that succeeds
+    above where the command started re-asks every `.git` on the way first."""
+    rig.box("status", "--porcelain")
+    outer = rig.head()
+    inner = rig.repo / "inner"
+    inner.mkdir()
+    rig._run(rig.real, "-C", str(inner), "init", "-q")
+    rig._run(rig.real, "-C", str(inner), "commit", "-q", "--allow-empty", "-m", "inner init")
+    env, _ = _fake_ln(rig, tmp_path, stale=inner / ".git")
+    if how == "-C":
+        r = rig.box("-C", "inner", "commit", "-q", "--allow-empty", "-m", "box", env=env)
+    else:
+        r = subprocess.run(
+            [str(rig.shim), "commit", "-q", "--allow-empty", "-m", "box"],
+            cwd=inner,
+            env={**rig.env, **env},
+            capture_output=True,
+            text=True,
+        )
+    assert r.returncode == 0, r.stderr
+    assert rig.head() == outer  # nothing landed in the outer repo
+    assert rig._run(rig.real, "-C", str(inner), "log", "-1", "--format=%s").stdout.strip() == "box"
+
+
+def test_a_command_at_the_repos_top_asks_nothing_more(rig, tmp_path):
+    # The nested-repo check re-asks `.git` names only when git's repo is ABOVE where the command
+    # started: at a repo's top — nearly every call — it costs nothing.
+    rig.box("status", "--porcelain")
+    env, log = _fake_ln(rig, tmp_path)
+    assert rig.box("commit", "-q", "--allow-empty", "-m", "box", env=env).returncode == 0
+    assert f"{rig.gitdir}\n" not in log.read_text()
+
+
+def test_a_zero_old_move_of_another_branch_is_still_not_second_guessed(rig):
+    rig.box("status", "--porcelain")
+    rig.host("branch", "side")
+    first = rig.host("rev-list", "--max-parents=0", "HEAD").stdout.strip()
+    r = rig.box("branch", "-f", "side", first)
+    assert r.returncode == 0, r.stderr
+    assert rig.host("rev-parse", "side").stdout.strip() == first
+
+
+def _host_commit_script(rig, path: str) -> str:
+    """Shell that makes a HOST commit adding ``path`` with the real git, off to the side (a
+    scratch index, no worktree write) — the host committing while a box command runs."""
+    scratch = rig.gitdir / "index-host-scratch"
+    real = f'env -u GIT_INDEX_FILE -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT "{rig.real}" -C "{rig.repo}"'
+    return (
+        f'{real} read-tree --index-output="{scratch}" HEAD && '
+        f"b=$(echo host | {real} hash-object -w --stdin) && "
+        f'GIT_INDEX_FILE="{scratch}" {real} update-index --add --cacheinfo 100644,$b,{path} && '
+        f't=$(GIT_INDEX_FILE="{scratch}" {real} write-tree) && '
+        f'c=$({real} commit-tree -p HEAD -m host "$t") && '
+        f'{real} update-ref refs/heads/main "$c" && rm -f "{scratch}"'
+    )
+
+
+def _index_box_lacks(rig, path: str) -> bool:
+    return f"D  {path}" in rig.box("status", "--porcelain").stdout
+
+
+def test_a_refused_box_commit_that_raced_a_host_commit_records_nothing(rig):
+    """The post-command step took "HEAD changed" to mean "our command moved it": after a REFUSED
+    box commit during which the host committed, it stamped the host's commit as the box's own and
+    recorded index-box as synced there — though index-box still held the old tree. Every host
+    file then read as a staged deletion, and the agent's next commit silently reverted them
+    (lefthook run, libkrun). Only a move this command's own transaction committed counts."""
+    rig.box("status", "--porcelain")
+    hooks = rig.gitdir / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text(
+        f"#!/bin/sh\n{_host_commit_script(rig, 'hostfile')}\nexit 1\n"
+    )
+    (hooks / "pre-commit").chmod(0o755)
+    rig.write("fileC", "c-box\n")
+    rig.box("add", "fileC")
+    assert rig.box("commit", "-qm", "box").returncode != 0
+    (hooks / "pre-commit").unlink()
+    assert not _index_box_lacks(rig, "hostfile")
+    assert rig.box("commit", "-qm", "box again").returncode == 0
+    changes = rig.host("diff-tree", "--no-commit-id", "-r", "--name-status", "HEAD").stdout
+    assert changes == "A\tfileC\n"  # the host's file survives the agent's next commit
+
+
+def test_a_reset_the_host_committed_under_rewinds_nothing(rig, tmp_path):
+    """`git reset` reads its target (HEAD) first, rewrites the index, and only then reads the value
+    it expects to replace — so a host commit in between is the expected value, verified under the
+    lock by git and by the hook alike, and the branch moves back to the target: every host commit
+    in that gap rewound (Tangible's lefthook, libkrun under load: 7 commits, the index work took
+    seconds). No stale read needed — the same race on a single kernel. Played with the repo's own
+    `post-index-change` hook, which runs in exactly that gap (the real command's only: the shim's
+    own git calls carry no hooks override)."""
+    rig.box("status", "--porcelain")
+    hooks = rig.gitdir / "hooks"
+    hooks.mkdir(exist_ok=True)
+    once = tmp_path / "raced"
+    (hooks / "post-index-change").write_text(
+        "#!/bin/sh\n"
+        f'case "$GIT_CONFIG_PARAMETERS" in *[hH]ooks[pP]ath*) [ -e "{once}" ] || {{ : >"{once}"; '
+        f"{_host_commit_script(rig, 'hostfile')}; }} ;; esac\n"
+    )
+    (hooks / "post-index-change").chmod(0o755)
+    r = rig.box("reset", "-q")
+    (hooks / "post-index-change").unlink()
+    assert once.exists()  # the host did commit in the gap
+    assert rig.host("log", "-1", "--format=%s").stdout.strip() == "host"  # …and it is still the tip
+    assert r.returncode != 0 and "not moving refs/heads/main" in r.stderr
+
+
+@pytest.mark.parametrize("detached", [False, True], ids=["on-branch", "detached"])
+def test_a_command_that_moves_the_branch_several_times_is_held_to_its_own_last_move(rig, detached):
+    """Each move of the checked-out branch is held to the HEAD the command started from — and a
+    cherry-pick of two commits (or a `rebase --continue` from a detached HEAD) makes its second
+    move from its FIRST: the command's own committed moves advance what the next one is held to."""
+    rig.box("status", "--porcelain")
+    base = rig.head()
+    rig.host("checkout", "-q", "-b", "side")
+    picks = [rig.host_commit(f"side{i}", **{f"side{i}": f"{i}\n"}) for i in (1, 2)]
+    rig.host("checkout", "-q", "main" if not detached else base)
+    r = rig.box("cherry-pick", *picks)
+    assert r.returncode == 0, r.stderr
+    assert rig.host("log", "-2", "--format=%s", "HEAD").stdout.split() == ["side2", "side1"]
+
+
+def test_a_host_commit_right_after_the_box_commit_is_not_claimed(rig):
+    # Our commit lands, then the host commits before the post-command step reads HEAD: HEAD is
+    # the host's commit, not the one our transaction committed — claiming it would record
+    # index-box (our tree) as synced at the host's HEAD: the host's file a phantom deletion.
+    rig.box("status", "--porcelain")
+    hooks = rig.gitdir / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "post-commit").write_text(f"#!/bin/sh\n{_host_commit_script(rig, 'hostfile')}\n")
+    (hooks / "post-commit").chmod(0o755)
+    rig.write("fileC", "c-box\n")
+    rig.box("add", "fileC")
+    assert rig.box("commit", "-qm", "box").returncode == 0
+    (hooks / "post-commit").unlink()
+    assert rig.host("log", "-1", "--format=%s").stdout.strip() == "host"
+    assert not _index_box_lacks(rig, "hostfile")
+    rig.write("fileD", "d-box\n")
+    rig.box("add", "fileD")
+    assert rig.box("commit", "-qm", "box again").returncode == 0
+    changes = rig.host("diff-tree", "--no-commit-id", "-r", "--name-status", "HEAD").stdout
+    assert changes == "A\tfileD\n"
+
+
+def test_a_box_read_that_raced_a_host_commit_records_nothing(rig, tmp_path):
+    rig.box("status", "--porcelain")
+    spy = tmp_path / "racing-git"
+    spy.mkdir()
+    (spy / "git").write_text(
+        "#!/bin/sh\n"
+        f'case " $* " in *" log "*) {_host_commit_script(rig, "hostfile")} ;; esac\n'
+        f'exec "{rig.real}" "$@"\n'
+    )
+    (spy / "git").chmod(0o755)
+    r = rig.box(
+        "log", "-1", "--oneline", env={"PATH": f"{rig.shim.parent}:{spy}:{rig.env['PATH']}"}
+    )
+    assert r.returncode == 0, r.stderr
+    assert not _index_box_lacks(rig, "hostfile")
+
+
+@pytest.mark.parametrize("form", ["staged", "all"])  # `commit -a`: git's own temporary index
+def test_a_repo_hooks_own_git_reads_through_the_refresh(rig, tmp_path, form):
+    """git puts its exec-path first on a hook's PATH, so a repo hook's `git` (lefthook's) skipped
+    the shim — and its refresh. Mid-commit, with the host moving the branch, lefthook's
+    `git diff --cached --name-only` saw an UNBORN branch and listed every file in the repo:
+    formatters ran on all of them, and `stage_fixed` would have re-staged everything. The hook's
+    `git` is the shim again, which refreshes before handing a git-set GIT_INDEX_FILE through."""
+    env, _, _ = _stale_during(rig, tmp_path, "commit", packed=False)
+    log = tmp_path / "hook.log"
+    hooks = rig.gitdir / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text(f'#!/bin/sh\ngit diff --cached --name-only >"{log}"\n')
+    (hooks / "pre-commit").chmod(0o755)
+    if form == "staged":
+        rig.write("fileC", "c-box\n")
+        rig.box("add", "fileC")
+    else:
+        rig.write("fileB", "b-box\n")
+    args = ["-a"] if form == "all" else []
+    rig.box("commit", "-q", *args, "-m", "box", env=env)  # refused or not: what did its git see?
+    assert log.read_text() == ("fileC\n" if form == "staged" else "fileB\n")
+
+
+@pytest.mark.parametrize("sub", [["commit", "-q", "--allow-empty", "-m", "box"], ["reset", "-q"]])
+def test_a_box_head_move_waits_out_an_operation_the_host_started(rig, sub):
+    """During a host `pull --rebase`, HEAD is detached: a box commit landed on it and was dropped
+    when the rebase finished (the workflow tests, both substrates) — and a box reset mid-rebase
+    would wreck the host's. Not the VM's doing (one kernel has the same race), but the box can
+    see the operation's state and wait: refused, with the reason, until it's done."""
+    rig.box("status", "--porcelain")
+    (rig.gitdir / "rebase-merge").mkdir()  # the host's rebase, in progress
+    r = rig.box(*sub)
+    assert r.returncode != 0 and "in the middle of" in r.stderr
+    (rig.gitdir / "rebase-merge").rmdir()
+    assert rig.box(*sub).returncode == 0
+
+
+def test_an_operation_the_host_just_finished_does_not_hold_the_box_back(rig, tmp_path):
+    # The host's rebase is over, but over the mount its state can read as present for a while:
+    # re-asked (the fake `ln` plays the fresh lookup that finds it gone) before it counts.
+    rig.box("status", "--porcelain")
+    op = rig.gitdir / "rebase-merge"
+    op.mkdir()
+    fake = tmp_path / "fake-ln"
+    fake.mkdir()
+    (fake / "ln").write_text(
+        f'#!/bin/sh\nfor n; do :; done\n[ "$n" = "{op}" ] && rmdir "{op}"\nexit 1\n'
+    )
+    (fake / "ln").chmod(0o755)
+    r = rig.box(
+        "commit", "-q", "--allow-empty", "-m", "box", env={"PATH": f"{fake}:{rig.env['PATH']}"}
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_an_operation_the_box_started_can_be_finished_in_the_box(rig):
+    rig.box("status", "--porcelain")
+    rig.host("switch", "-qc", "side")
+    rig.host_commit("side", fileA="a-side\n")
+    rig.host("switch", "-q", "main")
+    rig.host_commit("main", fileA="a-main\n")
+    rig.box("status", "--porcelain")
+    assert rig.box("merge", "-q", "side").returncode != 0  # a conflict: MERGE_HEAD, the box's own
+    rig.write("fileA", "a-both\n")
+    assert rig.box("add", "fileA").returncode == 0
+    r = rig.box("commit", "-q", "--no-edit")
+    assert r.returncode == 0, r.stderr
+    assert not (rig.gitdir / "MERGE_HEAD").exists()
+    assert not (rig.gitdir / "fy-box-op").exists()  # finished: the marker goes with it
+
+
+def test_a_repo_hooks_git_in_the_same_repo_only_refreshes(rig, tmp_path):
+    """Since a repo hook's git goes through the shim, lefthook's ~25 git calls each ran the shim's
+    whole path — discovery, heal, arming, post-command: 79 real git runs per commit instead of 23,
+    +2 s a lefthook commit. Inside our own command's hooks, in the same repo, the outer command has
+    healed and armed already (the ref check still reaches nested moves through the override git
+    hands down): only the refresh is left to do. Counted as HEAD refreshes per in-hook call."""
+    log = tmp_path / "ln.log"
+    fake = tmp_path / "fake-ln"
+    fake.mkdir()
+    (fake / "ln").write_text(f'#!/bin/sh\nfor n; do :; done\necho "$n" >>"{log}"\nexit 1\n')
+    (fake / "ln").chmod(0o755)
+    hooks = rig.gitdir / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text(
+        f'#!/bin/sh\necho begin >>"{log}"\ngit status --porcelain >/dev/null\necho end >>"{log}"\n'
+    )
+    (hooks / "pre-commit").chmod(0o755)
+    rig.write("fileC", "c1\n")
+    rig.box("add", "fileC")
+    r = rig.box("commit", "-qm", "box", env={"PATH": f"{fake}:{rig.env['PATH']}"})
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    inside = lines[lines.index("begin") + 1 : lines.index("end")]
+    assert sum(1 for n in inside if n.endswith("/HEAD")) == 1, inside
+
+
+@pytest.mark.parametrize("how", ["cd", "-C"])
+def test_a_repo_hooks_git_in_a_nested_repo_still_gets_its_own_index(rig, tmp_path, how):
+    # The light path is for the SAME repo only: a git the hook runs in a repo nested inside the
+    # checkout (a submodule, a scratch clone) must not be handed the outer command's index-box.
+    nested = rig.repo / "nested"
+    rig._run(rig.real, "init", "-q", str(nested))
+    (nested / "n.txt").write_text("n\n")
+    hooks = rig.gitdir / "hooks"
+    hooks.mkdir(exist_ok=True)
+    run = f'cd "{nested}" && git' if how == "cd" else f'git -C "{nested}"'
+    (hooks / "pre-commit").write_text(
+        f'#!/bin/sh\n{run} add n.txt && {run} ls-files >"{tmp_path}/nested.ls"\n'
+    )
+    (hooks / "pre-commit").chmod(0o755)
+    rig.write("fileC", "c1\n")
+    rig.box("add", "fileC")
+    assert rig.box("commit", "-qm", "box").returncode == 0
+    assert (tmp_path / "nested.ls").read_text() == "n.txt\n"
+
+
+def _repo_hooks(where: Path, log: Path) -> None:
+    where.mkdir(parents=True, exist_ok=True)
+    for name in ("pre-commit", "reference-transaction"):
+        stdin = "" if name == "pre-commit" else "; cat"
+        (where / name).write_text(
+            f'#!/bin/sh\n{{ echo "{name} $* in $(pwd -P)"{stdin}; }} >>"{log}"\n'
+        )
+        (where / name).chmod(0o755)
+
+
+@pytest.mark.parametrize("hooks_path", [None, ".husky"], ids=["default", "core.hooksPath"])
+def test_the_repos_own_hooks_still_run_with_their_args_and_input(rig, tmp_path, hooks_path):
+    log = tmp_path / "hooks.log"
+    if hooks_path:
+        rig.host("config", "core.hooksPath", hooks_path)
+    _repo_hooks(rig.repo / hooks_path if hooks_path else rig.gitdir / "hooks", log)
+    r = rig.box("commit", "-q", "--allow-empty", "-m", "box")
+    assert r.returncode == 0, r.stderr
+    ran = log.read_text()
+    assert "pre-commit  in" in ran
+    assert "reference-transaction prepared" in ran and "reference-transaction committed" in ran
+    assert f" {rig.head()} refs/heads/main" in ran  # the transaction's lines, on stdin
+
+
+def test_a_hook_driving_git_in_another_repo_runs_that_repos_hooks(rig, tmp_path):
+    """Our `core.hooksPath` reaches every git a hook starts (git passes `-c` down), so a hook
+    committing in ANOTHER repo would otherwise get THIS repo's hooks."""
+    other = tmp_path / "other"
+    rig._run(rig.real, "init", "-q", str(other))
+    log = tmp_path / "hooks.log"
+    _repo_hooks(other / ".git" / "hooks", log)
+    (rig.gitdir / "hooks").mkdir(exist_ok=True)
+    (rig.gitdir / "hooks" / "pre-commit").write_text(
+        f'#!/bin/sh\nenv -u GIT_INDEX_FILE git -C "{other}" commit -q --allow-empty -m nested\n'
+    )
+    (rig.gitdir / "hooks" / "pre-commit").chmod(0o755)
+    r = rig.box("commit", "-q", "--allow-empty", "-m", "box")
+    assert r.returncode == 0, r.stderr
+    assert f"pre-commit  in {other.resolve()}" in log.read_text()
+
+
+@pytest.mark.spawns("bash")
+def test_the_hook_dispatch_never_hands_a_hook_to_itself(rig):
+    """Structural guard: if "the repo's own hooks" ever resolves to OUR directory (it did, through
+    the override git hands down to a hook's git — a nested repo re-armed from inside a hook), the
+    wrapper would exec itself forever, growing PATH each time. That is "no repo hook": exit 0."""
+    r = subprocess.run(
+        ["bash", str(rig.hooks / "pre-commit")],  # $0 stays the hook's path: its dispatch
+        cwd=rig.repo,
+        env={**rig.env, "FY_ORIG_TOP": str(rig.repo.resolve()), "FY_ORIG_HOOKS": str(rig.hooks)},
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_a_callers_own_hooks_path_is_delegated_to_and_the_check_still_runs(rig, tmp_path):
+    env, _, moved = _stale_during(rig, tmp_path, "commit", packed=False)
+    log = tmp_path / "hooks.log"
+    _repo_hooks(tmp_path / "mine", log)
+    r = rig.box(
+        "-c",
+        f"core.hooksPath={tmp_path / 'mine'}",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "box",
+        env=env,
+    )
+    assert r.returncode != 0 and "not moving refs/heads/main" in r.stderr
+    assert "pre-commit  in" in log.read_text()  # theirs ran — ours ran after it, and refused
+    assert _settled(rig, tmp_path) == moved
+
+
+def test_a_move_with_no_expected_value_is_not_second_guessed(rig):
+    rig.host_commit("two", fileA="a2\n")
+    rig.host("branch", "other", "HEAD~")
+    for args in (("branch", "-f", "other", "HEAD"), ("tag", "t1"), ("branch", "-D", "other")):
+        r = rig.box(*args)
+        assert r.returncode == 0, (args, r.stderr)
+
+
+def test_a_linked_worktree_refreshes_its_own_head_and_the_shared_refs(rig, tmp_path):
+    wt = tmp_path / "wt"
+    rig.host("worktree", "add", "-q", "-b", "wt", str(wt))
+    env, log = _fake_ln(rig, tmp_path)
+    assert rig.box("-C", str(wt), "status", "--porcelain", env=env).returncode == 0
+    common = rig.gitdir.resolve()
+    refreshed = {Path(n).parent.resolve() / Path(n).name for n in log.read_text().split()}
+    assert {
+        common / "worktrees" / "wt" / "HEAD",  # the worktree's own HEAD…
+        common / "packed-refs",  # …and the refs it shares with the main checkout
+        common / "config",
+        common / "refs" / "heads" / "wt",
+    } <= refreshed
+    assert common / "HEAD" not in refreshed  # not the main checkout's
+
+
+def test_the_refresh_never_creates_a_name_that_is_absent(rig):
+    rig.host("pack-refs", "--all")  # the branch is packed-only: its loose name is absent
+    head = (rig.gitdir / "HEAD").read_text()
+    assert rig.box("status", "--porcelain").returncode == 0
+    assert not (rig.gitdir / "refs" / "heads" / "main").exists()
+    assert (rig.gitdir / "HEAD").read_text() == head
+    rig.host("pack-refs", "--all")
+    assert not any(p.name.endswith(".lock") for p in rig.gitdir.rglob("*"))
 
 
 def _status(rig, *args: str, cwd: Path | None = None) -> str:
