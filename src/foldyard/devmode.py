@@ -1561,9 +1561,11 @@ def _shim_hook_names(text: str) -> list[str] | None:
     return m.group(1).split() if m else None
 
 
-def _only_root_writes(path: Path) -> str | None:
+def _only_root_writes(path: Path, *, sticky_ok: bool = False) -> str | None:
     """Why ``path`` (not followed) isn't root's alone to change; ``None`` when it is, or when it
-    doesn't exist (whether it should is the caller's question)."""
+    doesn't exist (whether it should is the caller's question). ``sticky_ok``: a sticky directory
+    others can write still passes — no one else can rename or replace ROOT's entries in it — for
+    a directory whose only names that matter already exist and are checked themselves."""
     try:
         st = os.lstat(path)
     except OSError:
@@ -1572,6 +1574,8 @@ def _only_root_writes(path: Path) -> str | None:
         return f"{path} is a symlink"
     if st.st_uid != _ROOT_UID:
         return f"{path} owned by uid {st.st_uid}, not root"
+    if sticky_ok and st.st_mode & stat.S_ISVTX:
+        return None
     if st.st_mode & stat.S_IWOTH or (st.st_mode & stat.S_IWGRP and st.st_gid != _ROOT_GID):
         return f"{path} writable by a non-root user"
     return None
@@ -1633,7 +1637,24 @@ def _git_shim_check():
             broken.append(f"{hooks} lacks the shim's entry for: {' '.join(stray)}")
     if names is not None and os.path.realpath(bindir / "git") != real:
         broken.append(f"{bindir}/git is not the shim")
-    exposed = [p for p in map(_only_root_writes, (shim, hooks, bindir)) if p]
+    # Root's own entries are only as safe as the directories holding them: whoever can write
+    # `bin` can rename the shim away and put a file of its own at its name, and likewise `libexec`
+    # for the two dirs and the prefix for `libexec` (which the install makes). These three are the
+    # ones the shim's own path arithmetic names (`${self%/*}`, `${self%/*/*}`, `…/libexec`); above
+    # the prefix the path is shared with every program in the image (`/usr/bin/git` hangs off
+    # `/usr` too), so a non-root-writable `/usr` is a compromised image, not an exposed shim.
+    # Sticky is honoured for `libexec` alone: it stops a swap but not an ADDITION, and a new name
+    # is harmless only there (the shim looks up nothing in it but its two dirs). In `bin` a planted
+    # `readlink` runs first on PATH — the shim's first line; in the prefix a planted `sbin` does
+    # the same; a new hook name is one git runs; `foldyard-git-bin` is first on a hook's PATH.
+    exposed = [
+        p
+        for p in (
+            *map(_only_root_writes, (shim, hooks, bindir, shim.parent, libexec.parent)),
+            _only_root_writes(libexec, sticky_ok=True),
+        )
+        if p
+    ]
     if broken:
         yield _result(
             False,
