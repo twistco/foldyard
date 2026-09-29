@@ -11,4 +11,5 @@ bump: patch
   fails when its hooks are missing. It warns when a user other than root could rewrite them. Each
   row names its fix. No rows when `[box] git_index_split = false`. A new box now runs `fy doctor`
   once when it's created, as the last lines of `fy box up`, so it reports this without being
-  asked. (ADR-0021.)
+  asked. (ADR-0021.) Its `egress proxy CA` row now says the box must be recreated too: the CA
+  is mounted when a box is created, so `fy host restart` alone never reached an existing box.
