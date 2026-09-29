@@ -1151,6 +1151,18 @@ def test_in_box_doctor_carries_the_git_shim_rows(box_git, monkeypatch):
     assert "git shim" in names and "git shim hooks" in names
 
 
+@pytest.mark.skipif(Path("/etc/dev-proxy-ca.pem").exists(), reason="a real box's CA is mounted")
+def test_in_box_missing_proxy_ca_says_the_box_needs_recreating(box_git, monkeypatch):
+    # The CA is bind-mounted at box CREATE, and only when it already exists on your computer: a
+    # `fy host restart` makes one, but this box only gets it once it is recreated. The new box's
+    # bootstrap now runs doctor, so a first box meets this row as it comes up.
+    monkeypatch.setattr(devmode, "in_box", lambda: True)
+    monkeypatch.setattr(devmode, "_run", lambda cmd, timeout=8: (0, "ok"))
+    rows = {n: (st, d) for st, n, d in devmode.doctor(deep=False) if st != "running"}
+    status, detail = rows["egress proxy CA"]
+    assert status != "ok" and "fy host restart" in detail and "fy box down && fy box up" in detail
+
+
 def test_host_side_doctor_has_no_git_shim_rows(box_git, monkeypatch):
     # Your computer's git is its own business; the shim is a box fact.
     monkeypatch.setattr(devmode, "in_box", lambda: False)

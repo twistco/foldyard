@@ -1225,7 +1225,8 @@ def doctor(deep: bool = False):
             Path("/etc/dev-proxy-ca.pem").exists() or None,
             "egress proxy CA",
             "mounted + trusted (ambient — routing follows a declared [proxy])",
-            "not mounted (no CA on the host yet — `fy host restart` there)",
+            "not mounted — there was no CA on your computer when this box was created: `fy host "
+            "restart` there, then `fy box down && fy box up` (the CA is mounted at create)",
         )
         yield from _git_shim_check()
         yield ("running", "engine socket", "")
