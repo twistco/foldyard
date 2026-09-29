@@ -1174,6 +1174,36 @@ def _worktree_registry_check() -> tuple[str, str, str]:
     )
 
 
+def _rebase_leftover_check():
+    """Doctor row: a ``git pull --rebase`` (or ``rebase --autostash``) that stopped before it
+    began, leaving its state dir holding only the autostash (:func:`githeal.leftover_autostash`).
+    It blocks the operator's every pull and — through the box's shim — every box commit, and
+    ``rebase --abort`` can't clear it, so the shim's refusal points here. The recovery is PRINTED,
+    never run (the host runs no git in the checkout): the stash is stored first, so the changes sit
+    in ``git stash list`` before the directory goes, and survive a pop that conflicts. WARN: nothing
+    is unsafe, a human step is outstanding. Silent when there is none."""
+    import shlex
+
+    from . import githeal
+
+    try:
+        found = githeal.leftover_autostashes()
+    except Exception:  # pragma: no cover — a report must never break the doctor run
+        return
+    for lo in found:
+        repo, state = shlex.quote(str(lo.checkout)), shlex.quote(str(lo.state))
+        yield _result(
+            None,
+            "leftover autostash",
+            "",
+            f"{lo.state} holds only the changes a `git pull --rebase` set aside before it stopped"
+            " — not a rebase in progress; your pulls and the box's commits are refused until it"
+            f" goes\n      → `git -C {repo} stash store -m autostash {lo.stash} && rm -r {state}`"
+            f"\n        then `git -C {repo} stash pop` to restore them (git keeps the stash if it"
+            " can't)",
+        )
+
+
 def _widenings_check() -> tuple[str, str, str]:
     """Doctor row: what the ADOPTED config asks the host to allow (see :mod:`foldyard.exposure`).
     Green rows carry the counts — the point is that ``passthrough = ["@all"]`` silently means ~200
@@ -1251,6 +1281,7 @@ def doctor(deep: bool = False):
     )
     yield _config_pin_check()
     yield _worktree_registry_check()
+    yield from _rebase_leftover_check()
     yield _widenings_check()
     yield from _podman_checks()
     yield from _ssh_port_check()

@@ -37,6 +37,8 @@ import hashlib
 import os
 import re
 import stat
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import config, mountwrite
@@ -317,3 +319,65 @@ def sweep(log) -> None:
                 log(f"git-heal: {msg}")
         except Exception as e:  # one checkout's hiccup must not skip the rest
             log(f"git-heal: sweep failed: {e}")
+
+
+# ── a `pull --rebase --autostash` that stopped before it began ─────────────────────────────────
+# Git writes the autostash (the stashed changes' commit id) into the rebase's state dir FIRST, then
+# `reset --hard`s the tree; when that reset dies (a lock the box held, a file it can't replace) the
+# dir is left holding nothing else. Not a rebase: `rebase --abort` wants head-name, every later pull
+# refuses the directory, and the box's shim refuses every commit while it's there. Found here as
+# DATA — no git, no process — so `fy doctor` can print the recovery; it never runs it.
+LEFTOVER_AGE = 30.0  # seconds: a rebase in its first moments has the same shape
+
+
+@dataclass(frozen=True)
+class Leftover:
+    checkout: Path
+    state: Path  # the state dir, under the trusted main checkout's git dir
+    stash: str  # the autostash commit id — validated, since doctor prints it into a command
+
+
+def leftover_autostash(
+    repo: Path, main: Path | None = None, now: float | None = None
+) -> Leftover | None:
+    """``repo``'s leftover (``rebase-merge``/``rebase-apply`` holding ONLY ``autostash``, a commit
+    id, for longer than :data:`LEFTOVER_AGE`), or None. "Only" is the discriminator, not "no
+    head-name": the apply backend runs ``git am`` — whose own files come first — before it writes
+    head-name, so a long rebase would read as a leftover. Nothing followed through a symlink."""
+    main = Path(main or repo)
+    gitrel = _git_dir(repo, main)
+    if gitrel is None:
+        return None
+    try:
+        root = os.open(main, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        for op in ("rebase-merge", "rebase-apply"):
+            try:
+                sfd = _open_dir(root, [*gitrel.split("/"), op])
+            except OSError:
+                continue
+            try:
+                if os.listdir(sfd) != ["autostash"]:
+                    continue
+                written = os.stat("autostash", dir_fd=sfd, follow_symlinks=False).st_mtime
+                if (time.time() if now is None else now) - written < LEFTOVER_AGE:
+                    continue
+                data = _read_at(sfd, "autostash", limit=256)
+            except OSError:
+                continue
+            finally:
+                os.close(sfd)
+            stash = (data or b"").decode("ascii", "replace").strip()
+            if re.fullmatch(_OID, stash):
+                return Leftover(Path(repo), Path(main, gitrel, op), stash)
+        return None
+    finally:
+        os.close(root)
+
+
+def leftover_autostashes() -> list[Leftover]:
+    """Every registered checkout's leftover (main + worktrees, as the heal's sweep visits them)."""
+    main, checkouts = _checkouts()
+    return [lo for co in checkouts if (lo := leftover_autostash(co, main)) is not None]

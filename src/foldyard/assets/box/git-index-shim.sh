@@ -103,6 +103,27 @@ fy_ref_file() { # $1 ref, $2 git dir, $3 common dir → where its loose file liv
     esac
 }
 
+# A `pull --rebase --autostash` that stops before its rebase begins (the `reset --hard` after
+# `stash create` failed: a lock held, a file it couldn't replace) leaves its state dir holding
+# ONLY `autostash` — the stashed changes' commit. No rebase to finish, `rebase --abort` can't
+# clear it (no head-name), and every later pull refuses the directory: waiting never ends it. A
+# rebase in its first moments has the same shape (the autostash is its first file), so it is
+# still refused, only named. Asked only once an operation state was found: the common path pays
+# nothing.
+fy_leftover_autostash() { # $1 = an operation's state path → true when `autostash` is all it holds
+    local f
+    for f in "$1"/*; do # an empty dir's glob stays literal: no match, so false
+        [ "$f" = "$1/autostash" ] || return 1
+    done
+}
+fy_said_leftover() { # $1 = the refusal's lead, $2 = the state path → said, when it's the leftover
+    fy_leftover_autostash "$2" || return 1
+    echo "foldyard git shim: $1 — your computer has a leftover ${2##*/}: the changes a 'git pull" \
+        "--rebase' set aside (its autostash), left when it stopped before it began — not a rebase" \
+        "in progress, and it won't clear by itself. Recover it on your computer, not in this box:" \
+        "'fy doctor' there shows how (ADR-0021). Nothing was changed; run this again after." >&2
+}
+
 # `prepared` input: `<old> <new> <ref>` per line. A zero <old> is "no expected value" as often as
 # "must not exist" (branch -f, tag, a symref's log-only line), so only a real <old> is checked
 # against the refreshed truth — except the checked-out branch's move by a box `git commit`, whose
@@ -153,6 +174,7 @@ fy_verify_transaction() {
         if [ -n "$sref" ] && [ ! -e "$gd/fy-box-op" ]; then
             for op in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD; do
                 [ -e "$gd/$op" ] && fy_relookup "$gd/$op" && [ -e "$gd/$op" ] || continue
+                fy_said_leftover "not moving $ref" "$gd/$op" && return 1
                 echo "foldyard git shim: not moving $ref — your computer is in the middle of a git" \
                     "operation ($op) (ADR-0021). Nothing was changed; run it again once it's done." >&2
                 return 1
@@ -991,6 +1013,7 @@ if gitdir=$(pregit rev-parse --absolute-git-dir 2>/dev/null) || gitdir=$(fy_redi
     if op=$(fy_op_in_progress); then
         case $FY_HEAD_SUBS in *" $sub "*)
             if [ ! -e "$gitdir/fy-box-op" ]; then
+                fy_said_leftover "refusing 'git $sub'" "$gitdir/$op" && exit 1
                 echo "foldyard git shim: refusing 'git $sub' — your computer is in the middle of a" \
                     "git operation ($op), and a box $sub now would be lost or break it when it" \
                     "finishes (ADR-0021). Nothing was changed; run it again once it's done." >&2

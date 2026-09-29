@@ -1632,3 +1632,43 @@ def test_ssh_port_row_is_silent_where_nothing_is_pinned(ssh_port_row, monkeypatc
     else:
         ssh_port_row.port = None
     assert list(devmode._ssh_port_check()) == []
+
+
+# ── doctor: a `pull --rebase` that stopped before it began (githeal.leftover_autostash) ─────────
+
+
+def test_rebase_leftover_row_is_silent_without_one(monkeypatch):
+    from foldyard import githeal
+
+    monkeypatch.setattr(githeal, "leftover_autostashes", lambda: [])
+    assert list(devmode._rebase_leftover_check()) == []
+
+
+def test_rebase_leftover_row_prints_the_recovery_it_never_runs(monkeypatch, tmp_path):
+    from foldyard import githeal
+
+    co = tmp_path / "my repo"
+    state = co / ".git" / "rebase-merge"
+    sha = "77f58597570c81b8ea6c8dffcced324fa134dfcf"
+    monkeypatch.setattr(githeal, "leftover_autostashes", lambda: [githeal.Leftover(co, state, sha)])
+    monkeypatch.setattr(devmode, "_run", lambda *a, **k: pytest.fail("doctor ran something"))
+    ((status, name, detail),) = devmode._rebase_leftover_check()
+    assert status == "warn" and name == "leftover autostash"
+    # The stash is kept FIRST, and the directory goes only if that worked; paths quoted.
+    assert f"git -C '{co}' stash store -m autostash {sha} && rm -r '{state}'" in detail
+    assert f"git -C '{co}' stash pop" in detail
+    assert "not a rebase in progress" in detail
+
+
+def test_doctor_asks_for_the_leftover_on_the_host(monkeypatch, tmp_path):
+    # The recovery is the operator's, on their computer: the host-side doctor carries the row.
+    from conftest import GENERIC_TOML, make_config
+    from foldyard import githeal
+    from foldyard.plugins import Registry
+
+    found = githeal.Leftover(tmp_path, tmp_path / ".git" / "rebase-merge", "7" * 40)
+    monkeypatch.setattr(githeal, "leftover_autostashes", lambda: [found])
+    monkeypatch.setattr(devmode, "registry", lambda: Registry([], config=make_config(GENERIC_TOML)))
+    monkeypatch.setattr(devmode, "in_box", lambda: False)
+    monkeypatch.setattr(devmode, "read", lambda apply_expiry=True: {"mode": {}, "written": None})
+    assert "leftover autostash" in [name for _s, name, _d in devmode.doctor(deep=False)]

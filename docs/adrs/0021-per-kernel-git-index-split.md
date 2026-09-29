@@ -122,6 +122,13 @@ Shim mechanics (each point traces to a verified failure mode):
   - **Ask again under the lock.** Every check before git runs is a hint: a host `pull --rebase`
     that started after the shim's "no operation in progress" check had its rebase broken by a box
     commit. The hook re-asks for a host operation's state (not one the box started, `fy-box-op`).
+  - **A leftover autostash is named, and still refused.** A host `pull --rebase --autostash`
+    whose `reset --hard` fails after `stash create` (a lock the box held) leaves `rebase-merge`
+    (or `rebase-apply`) holding only `autostash`: no rebase to finish, `--abort` can't clear it,
+    so "run it again once it's done" never came true. Both refusals name that exact shape and
+    point at `fy doctor`, whose host row prints the recovery (stash it, then remove the
+    directory) — read as files, never run. Refused all the same: a rebase in its first moments
+    looks identical, and the row waits 30 s before calling one a leftover.
   - **An unborn read of a branch with history is refused** before git runs (its reflog is
     appended in place, never replaced, so it is reliable over the mount): shim and git both read
     "unborn" after a host rebase finished, and every check agreed with the root commit that
