@@ -406,25 +406,220 @@ def test_renamed_verbs_keep_their_old_names_as_hidden_aliases(tmp_path, monkeypa
 def test_version_flag_prints_the_installed_version():
     """`fy --version` exists and answers. It is the groundwork for `[project].min_foldyard_version`
     and for doctor's box/host drift row: before this, a running foldyard could not name itself, so
-    "which version is this?" had no answer at all — on the Mac, in the box, or in a bug report."""
+    "which version is this?" had no answer at all — on your computer, in the box, or in a bug
+    report."""
+    import foldyard
+
     result = runner.invoke(cli.app, ["--version"])
     assert result.exit_code == 0
-    assert result.output.strip() == metadata.version("foldyard")
+    assert result.output.strip() == foldyard.__version__
 
 
-def test_version_is_single_sourced_from_the_install_metadata():
+def test_version_is_single_sourced_from_the_project_version():
     """``__version__`` must not be a SECOND hand-maintained copy of ``[project].version``. It was
     one (hardcoded ``0.0.1``) while ``box.py`` separately read ``importlib.metadata`` — two sources
     that drift silently at the first release bump, and the one the box pins itself to is the one
-    nobody edits."""
+    nobody edits. The suite runs from an editable install of this checkout, so the one source is
+    this checkout's ``pyproject.toml`` — whatever the install metadata last recorded."""
+    import tomllib
+
     import foldyard
 
-    assert foldyard.__version__ == metadata.version("foldyard")
+    pyproject = Path(foldyard.__file__).resolve().parents[2] / "pyproject.toml"
+    assert foldyard.__version__ == tomllib.loads(pyproject.read_text())["project"]["version"]
+
+
+# ── `__version__` on an editable install ──────────────────────────────────────
+# An editable install's metadata is written at install time and never again, so a version bump in
+# the checkout left `fy --version` (and the box drift nag, the version window, doctor) naming the
+# OLD number while the new code ran: "dev box has 0.3.2 installed, but your computer now runs
+# foldyard 0.3.1". These drive the real `foldyard.__version__` over a fake distribution.
+
+_NEW = '[project]\nname = "foldyard"\nversion = "0.3.2"\n'
+
+
+def _checkout(tmp_path: Path, pyproject: str | None = _NEW) -> Path:
+    """A foldyard checkout (src layout) — in a directory whose name needs percent-encoding."""
+    root = tmp_path / "work space" / "foldyard"
+    (root / "src" / "foldyard").mkdir(parents=True)
+    if pyproject is not None:
+        (root / "pyproject.toml").write_text(pyproject)
+    return root
+
+
+def _editable(root: Path) -> dict:
+    """PEP 610's record of an editable install from ``root`` (as uv writes it)."""
+    return {"url": root.as_uri(), "dir_info": {"editable": True}}
+
+
+def _installed(monkeypatch, tmp_path: Path, direct_url=None, running_from: Path | None = None):
+    """Install a fake ``foldyard 0.3.1`` dist-info (the stale metadata) and, optionally, point the
+    running package at ``running_from`` (a checkout's ``src/foldyard``)."""
+    import json
+
+    import foldyard
+
+    info = tmp_path / "site" / "foldyard-0.3.1.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: foldyard\nVersion: 0.3.1\n")
+    if direct_url is not None:
+        raw = direct_url if isinstance(direct_url, str) else json.dumps(direct_url)
+        (info / "direct_url.json").write_text(raw)
+    dist = metadata.PathDistribution(info)
+    monkeypatch.setattr(metadata, "distribution", lambda name: dist)
+    if running_from is not None:
+        monkeypatch.setattr(foldyard, "__file__", str(running_from / "__init__.py"))
+    return foldyard
+
+
+def test_editable_install_reports_the_checkouts_version_not_the_stale_metadata(
+    tmp_path, monkeypatch
+):
+    root = _checkout(tmp_path)
+    foldyard = _installed(monkeypatch, tmp_path, _editable(root), root / "src" / "foldyard")
+    assert foldyard.__version__ == "0.3.2"
+
+
+@pytest.mark.parametrize("linked", ["running", "recorded"])
+def test_editable_install_matches_the_running_package_through_a_symlink(
+    tmp_path, monkeypatch, linked
+):
+    """The recorded URL and the running ``__file__`` can name the same directory differently
+    (macOS's ``/tmp`` is ``/private/tmp``); the comparison is on resolved paths, both sides."""
+    root = _checkout(tmp_path)
+    link = tmp_path / "link"
+    link.symlink_to(root)
+    recorded, running = (root, link) if linked == "running" else (link, root)
+    foldyard = _installed(monkeypatch, tmp_path, _editable(recorded), running / "src" / "foldyard")
+    assert foldyard.__version__ == "0.3.2"
+
+
+@pytest.mark.parametrize(
+    "direct_url",
+    [
+        None,  # installed from an index: no PEP 610 record at all
+        "not json",
+        "[]",
+        {"url": "file:///x", "archive_info": {}},  # a wheel/sdist from a local file
+        {"url": "file:///x", "dir_info": {}},  # a non-editable install from a directory
+        {"url": "file:///x", "dir_info": {"editable": "yes"}},
+    ],
+    ids=[
+        "no-record",
+        "malformed",
+        "not-object",
+        "archive",
+        "dir-not-editable",
+        "editable-not-true",
+    ],
+)
+def test_a_non_editable_install_reports_its_metadata(tmp_path, monkeypatch, direct_url):
+    """Only an editable install runs the checkout's code, so only there does the checkout's
+    ``pyproject.toml`` describe what is running — a wheel reports the version it was built as."""
+    root = _checkout(tmp_path)
+    if isinstance(direct_url, dict):
+        direct_url = {**direct_url, "url": root.as_uri()}
+    foldyard = _installed(monkeypatch, tmp_path, direct_url, root / "src" / "foldyard")
+    assert foldyard.__version__ == "0.3.1"
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://example.com/foldyard", "file://elsewhere{path}", "{path}", 7],
+    ids=["https", "remote-host", "bare-path", "not-a-string"],
+)
+def test_an_editable_record_without_a_local_file_url_reports_its_metadata(
+    tmp_path, monkeypatch, url
+):
+    root = _checkout(tmp_path)
+    if isinstance(url, str):
+        url = url.format(path=root.as_posix())
+    direct_url = {"url": url, "dir_info": {"editable": True}}
+    foldyard = _installed(monkeypatch, tmp_path, direct_url, root / "src" / "foldyard")
+    assert foldyard.__version__ == "0.3.1"
+
+
+@pytest.mark.parametrize(
+    "elsewhere",
+    ["other/src/foldyard", "work space/foldyard/build/lib/foldyard"],
+    ids=["another-checkout", "inside-the-checkout"],
+)
+def test_an_editable_record_for_another_checkout_reports_its_metadata(
+    tmp_path, monkeypatch, elsewhere
+):
+    """The record can name a checkout other than the one whose code is running (a second checkout
+    on ``PYTHONPATH`` over an installed editable). That checkout's ``pyproject.toml`` says nothing
+    about this code, so it is not read — nor for a copy of the package that merely sits inside
+    the recorded checkout (a build directory): only its ``src/foldyard`` is that checkout's code."""
+    root = _checkout(tmp_path)
+    other = tmp_path / elsewhere
+    other.mkdir(parents=True)
+    foldyard = _installed(monkeypatch, tmp_path, _editable(root), other)
+    assert foldyard.__version__ == "0.3.1"
+
+
+@pytest.mark.parametrize(
+    "pyproject",
+    [
+        None,
+        "[project\n",
+        b"\xff\xfe",
+        '[project]\nname = "foldyard"\ndynamic = ["version"]\n',
+        '[project]\nname = "foldyard"\nversion = 3\n',
+        '[project]\nname = "foldyard"\nversion = ""\n',
+        'project = "foldyard"\n',
+        "[tool.x]\n",
+    ],
+    ids=[
+        "missing",
+        "malformed",
+        "not-utf8",
+        "dynamic",
+        "not-a-string",
+        "empty",
+        "project-not-a-table",
+        "no-project",
+    ],
+)
+def test_an_editable_checkout_without_a_static_version_reports_its_metadata(
+    tmp_path, monkeypatch, pyproject
+):
+    root = _checkout(tmp_path, None)
+    if isinstance(pyproject, bytes):
+        (root / "pyproject.toml").write_bytes(pyproject)
+    elif pyproject is not None:
+        (root / "pyproject.toml").write_text(pyproject)
+    foldyard = _installed(monkeypatch, tmp_path, _editable(root), root / "src" / "foldyard")
+    assert foldyard.__version__ == "0.3.1"
+
+
+def test_an_unreadable_pyproject_reports_its_metadata(tmp_path, monkeypatch):
+    root = _checkout(tmp_path, None)
+    (root / "pyproject.toml").mkdir()  # reading it raises IsADirectoryError, an OSError
+    foldyard = _installed(monkeypatch, tmp_path, _editable(root), root / "src" / "foldyard")
+    assert foldyard.__version__ == "0.3.1"
+
+
+def test_no_install_metadata_reports_an_unknown_version(monkeypatch):
+    """A bare ``PYTHONPATH`` import of a source tree has no dist-info at all: say so rather than
+    invent a number a version floor might trust — even though a ``pyproject.toml`` may sit right
+    there (only an install's own record says which checkout is running)."""
+    import foldyard
+
+    def missing(name):
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(metadata, "distribution", missing)
+    assert foldyard.__version__ == "0+unknown"
 
 
 def test_importing_foldyard_does_not_read_install_metadata():
     """The recipe hot path imports the package on every `just` recipe, so the version lookup stays
-    LAZY (PEP 562 ``__getattr__``) — attribute access pays for it, plain import does not."""
+    LAZY (PEP 562 ``__getattr__``) — attribute access pays for it, plain import does not. Nothing
+    it needs (metadata, json, tomllib, urllib) is imported at module level."""
+    import ast
+
     src = (Path(cli.__file__).parent / "__init__.py").read_text()
     assert "def __getattr__" in src
-    assert "from importlib import metadata" not in src.split("def __getattr__")[0]
+    top = [n for n in ast.parse(src).body if isinstance(n, ast.Import | ast.ImportFrom)]
+    assert [ast.unparse(n) for n in top] == []
