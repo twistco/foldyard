@@ -1101,6 +1101,16 @@ def _stranded_dependents(
     return sorted(c["name"] for c in known if c["service"] in removed - recreated)
 
 
+def _podman_compose_service(labels: dict) -> str:
+    """The service podman-compose 1.6.0's ``up`` maps a container to (its
+    ``existing_containers``): ``io.podman.compose.service``, falling back — on missing OR empty —
+    to ``com.docker.compose.service``. It writes both; reading its precedence keeps the sweep
+    agreeing with what ``up`` will recreate."""
+    return labels.get("io.podman.compose.service", "") or labels.get(
+        "com.docker.compose.service", ""
+    )
+
+
 def _remove_stranded_dependents(
     ctx: Context,
     rendered: dict | None,
@@ -1143,7 +1153,7 @@ def _remove_stranded_dependents(
         containers = [
             {
                 "name": c["Names"][0],
-                "service": (c.get("Labels") or {}).get("io.podman.compose.service", ""),
+                "service": _podman_compose_service(c.get("Labels") or {}),
                 "hash": (c.get("Labels") or {}).get("io.podman.compose.config-hash", ""),
                 "exited": bool(c.get("Exited")),
             }

@@ -2487,21 +2487,30 @@ def test_a_service_outside_the_render_is_never_stranded():
     assert stack._stranded_dependents(graph, containers, {"app": "new"}) == []
 
 
-def _stranded_stack(monkeypatch, desired: dict | None):
-    """An engine holding a stopped app (stale hash) + a stopped sim that depends on it."""
+def _pc_labels(service: str, config_hash: str) -> dict:
+    """The labels podman-compose 1.6.0 stamps on a container it creates (its
+    ``container_names_by_service`` + ``podman_compose_labels``), trimmed to the ones it reads."""
+    return {
+        "io.podman.compose.project": "tangible-podman",
+        "com.docker.compose.project": "tangible-podman",
+        "io.podman.compose.config-hash": config_hash,
+        "io.podman.compose.service": service,
+        "com.docker.compose.service": service,
+    }
+
+
+def _stranded_stack(monkeypatch, desired: dict | None, drop: tuple[str, ...] = ()):
+    """An engine holding a stopped app (stale hash) + a stopped sim that depends on it; ``drop``
+    removes those labels from the sim."""
     import types
 
     from foldyard import confighash
 
+    labels = {svc: _pc_labels(svc, "old" if svc == "app" else "same") for svc in ("app", "sim")}
+    for label in drop:
+        del labels["sim"][label]
     ps = [
-        {
-            "Names": [f"tangible-podman-{svc}"],
-            "Exited": True,
-            "Labels": {
-                "io.podman.compose.service": svc,
-                "io.podman.compose.config-hash": "old" if svc == "app" else "same",
-            },
-        }
+        {"Names": [f"tangible-podman-{svc}"], "Exited": True, "Labels": labels[svc]}
         for svc in ("app", "sim")
     ]
     calls: list[list[str]] = []
@@ -2530,6 +2539,35 @@ def test_up_removes_stranded_dependents_before_compose_up(fake_repo, monkeypatch
     assert rm[3:] == ["tangible-podman-sim"]
     up_idx = next(i for i, c in enumerate(calls) if "compose" in c and "up" in c)
     assert calls.index(rm) < up_idx
+
+
+@pytest.mark.parametrize(
+    ("labels", "service"),
+    [
+        (_pc_labels("sim", "h"), "sim"),  # what podman-compose writes: both, agreeing
+        ({"io.podman.compose.service": "sim"}, "sim"),
+        ({"com.docker.compose.service": "sim"}, "sim"),
+        ({"io.podman.compose.service": "", "com.docker.compose.service": "sim"}, "sim"),
+        ({"io.podman.compose.service": "sim", "com.docker.compose.service": "other"}, "sim"),
+        ({}, ""),
+    ],
+)
+def test_a_container_maps_to_its_service_as_podman_compose_reads_it(labels, service):
+    # podman-compose 1.6.0's `existing_containers` — what its `up` decides recreation from —
+    # reads io.podman.compose.service, falling back (on missing OR empty) to
+    # com.docker.compose.service. The sweep must see the same service `up` will.
+    assert stack._podman_compose_service(labels) == service
+
+
+def test_up_removes_a_stranded_dependent_carrying_only_the_docker_service_label(
+    fake_repo, monkeypatch
+):
+    calls = _stranded_stack(
+        monkeypatch, {"app": "new", "sim": "same"}, drop=("io.podman.compose.service",)
+    )
+    assert stack.up() == 0
+    rm = next(c for c in calls if c[:3] == ["podman", "rm", "-f"])
+    assert rm[3:] == ["tangible-podman-sim"]
 
 
 def test_up_removes_nothing_when_the_hashes_are_unavailable(fake_repo, monkeypatch):
