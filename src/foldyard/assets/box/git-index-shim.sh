@@ -162,11 +162,21 @@ fy_verify_transaction() {
         ln -dT / "$(fy_ref_file "$ref" "$gd" "$common")" 2>/dev/null
         ln -dT / "$common/packed-refs" 2>/dev/null
         actual=$("$real" rev-parse -q --verify --end-of-options "$ref" 2>/dev/null) || actual=
-        if [ -n "$sref" ] && { [ "$actual" != "$scur" ] || { fy_zero "$old" && [ -n "$scur" ] &&
-            [ "$new" != "$scur" ] && ! "$real" merge-base --is-ancestor "$scur" "$new" 2>/dev/null; }; }; then
+        if [ -n "$sref" ] && [ "$actual" != "$scur" ]; then
             echo "foldyard git shim: not moving $ref — this ran on ${scur:-an unborn branch}," \
-                "but it is ${actual:-absent} now and git would have made it $new: your computer" \
-                "moved it while this ran (ADR-0021). Nothing was changed; run it again." >&2
+                "but it is ${actual:-absent} now: your computer moved it while this ran" \
+                "(ADR-0021). Nothing was changed; run it again." >&2
+            return 1
+        fi
+        # No expected value, and a target that isn't this HEAD or ahead of it: git computed it off
+        # a stale read of HEAD, or it is a deliberate move back (`checkout -B <branch> <older>`) —
+        # indistinguishable here, so refused; `git reset` sends an expected value and gets through.
+        if [ -n "$sref" ] && fy_zero "$old" && [ -n "$scur" ] && [ "$new" != "$scur" ] &&
+            ! "$real" merge-base --is-ancestor "$scur" "$new" 2>/dev/null; then
+            echo "foldyard git shim: not moving $ref back from $scur to $new — git gave no value to" \
+                "check that against. If you meant to move it there, use 'git reset --hard $new'" \
+                "(or --soft/--mixed); if not, your computer just moved it: run it again" \
+                "(ADR-0021). Nothing was changed." >&2
             return 1
         fi
         fy_zero "$old" && continue
@@ -195,7 +205,7 @@ pregit() { "$real" ${pre[@]+"${pre[@]}"} "$@"; }
 
 # The `update-index --index-info` payload that re-stages the shared index's staged-vs-$1 work on
 # top of $2's tree (index file $3), on stdout — or status 1 when a staged path was ALSO changed by
-# the move (both sides touched it: never merged silently), or git couldn't say. Adds,
+# the move (both sides touched it: never merged silently), status 2 when git couldn't say. Adds,
 # modifications and staged deletes. Two git calls whatever the number of paths: the sealed heal
 # runs under git's ref lock, where a call per path kept every host commit out for ~28 s (19 paths,
 # a loaded VM).
@@ -203,7 +213,7 @@ fy_carry() {
     local rec=$1 head=$2 work=$3 out="$3.fyc" meta p i j=0 paths=() imode=() isha=() rsha=() npath=() nsha=()
     { GIT_INDEX_FILE="$work" pregit diff-index --cached --no-renames -z "$rec" >"$out"; } 2>/dev/null || {
         rm -f "$out"
-        return 1
+        return 2
     }
     while IFS= read -r -d '' meta && IFS= read -r -d '' p; do
         set -- ${meta#:} # rec's mode, the index's mode, rec's oid, the index's oid, status
@@ -218,7 +228,7 @@ fy_carry() {
         unset GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
         GIT_LITERAL_PATHSPECS=1 GIT_INDEX_FILE="$work" pregit diff-index --cached --no-renames -z \
             "$head" -- "${paths[@]}"
-    ) >"$out"; } 2>/dev/null || { rm -f "$out"; return 1; }
+    ) >"$out"; } 2>/dev/null || { rm -f "$out"; return 2; }
     while IFS= read -r -d '' meta && IFS= read -r -d '' p; do
         set -- ${meta#:}
         npath+=("$p") nsha+=("$3")
@@ -573,18 +583,24 @@ fy_matches_a_past_head() { # [index file — default: this invocation's own]
 # (adds, modifications, staged deletions). Built on a copy and renamed in under git's own lock on
 # index-box, so a concurrent box git never loses a write to it. Status 1 = a staged path the move
 # also changed (never merged silently), or the lock was busy.
+# Status 1 = an overlap (the verdict fy_heal remembers); 2 = not now (a busy lock, a failed git
+# call) — tried again on the next call. The copy is taken under index-box.lock: taken after the
+# build, another box git staging in between was overwritten by the older copy.
 fy_carry_box() {
-    local work="$ix.carry.$$" rc=1
-    cp "$ix" "$work" 2>/dev/null || return 1
-    if fy_carry "$rec" "$cur" "$work" >"$work.info" &&
-        GIT_INDEX_FILE="$work" pregit read-tree --reset "$cur" 2>/dev/null &&
-        { [ ! -s "$work.info" ] || { GIT_INDEX_FILE="$work" pregit update-index -z --index-info <"$work.info"; } 2>/dev/null; } &&
-        (set -o noclobber && : >"$ix.lock") 2>/dev/null; then
-        mv -f "$work" "$ix" 2>/dev/null && rc=0
-        rm -f "$ix.lock"
-        ((rc == 0)) && fy_record "$cur"
+    local work="$ix.carry.$$" rc=2 crc=0
+    (set -o noclobber && : >"$ix.lock") 2>/dev/null || return 2
+    if cp "$ix" "$work" 2>/dev/null; then
+        fy_carry "$rec" "$cur" "$work" >"$work.info" || crc=$?
+        if ((crc == 1)); then
+            rc=1
+        elif ((crc == 0)) && GIT_INDEX_FILE="$work" pregit read-tree --reset "$cur" 2>/dev/null &&
+            { [ ! -s "$work.info" ] || { GIT_INDEX_FILE="$work" pregit update-index -z --index-info <"$work.info"; } 2>/dev/null; } &&
+            mv -f "$work" "$ix" 2>/dev/null; then
+            rc=0
+        fi
     fi
-    rm -f "$work" "$work.info" 2>/dev/null
+    rm -f "$ix.lock" "$work" "$work.info" 2>/dev/null
+    ((rc == 0)) && fy_record "$cur"
     return "$rc"
 }
 
@@ -643,9 +659,17 @@ fy_heal() {
             pregit read-tree --reset "$cur" 2>/dev/null && fy_record "$cur"
             return 0
         fi
-        if [ -n "$rec" ] && fy_carry_box; then
+        local crc=1
+        [ -n "$rec" ] && { fy_carry_box && crc=0 || crc=$?; }
+        if ((crc == 0)); then
             rm -f "$ix.stale" 2>/dev/null || true
             return 0
+        fi
+        if ((crc == 2)); then # not now: nothing to remember, the next call tries again
+            echo "foldyard git shim: index-box is stale — HEAD moved (${rec:0:12}… → ${cur:0:12}…)" \
+                "and its staged work couldn't be carried forward just now (another git holds its" \
+                "lock). Nothing was changed; run it again." >&2
+            return 1
         fi
         if [ -z "$rec" ]; then
             # First sight of this index with real staged work and no sync point to diff against:
@@ -774,10 +798,13 @@ fy_propose_from() { # $1 head, $2 the shared index's sync point, $3 a temp file 
         fy_matches_a_past_head "$work"; then
         kind=ff
     elif [ -n "$srec" ]; then
-        if ! fy_carry "$srec" "$head" "$work" >"$work.carry"; then
+        local crc=0
+        fy_carry "$srec" "$head" "$work" >"$work.carry" || crc=$?
+        if ((crc == 1)); then
             { : >"$gitdir/index.fy-refused.$srec.$head.$base"; } 2>/dev/null || true
             return 0
         fi
+        ((crc == 0)) || return 0 # git couldn't say: nothing offered, the next call proposes again
         kind=carry
     else
         fy_offer_record "$head" # staged work, no sync point to diff against — assume intentional

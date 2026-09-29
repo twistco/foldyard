@@ -134,6 +134,35 @@ def _fallback_install(rig) -> None:
     (hooks / "post-commit").chmod(0o755)
 
 
+def test_a_proposal_git_couldnt_build_is_not_a_refusal(rig, tmp_path):
+    # The fallback heal's carry: a git call that fails for a moment used to be recorded as a
+    # REFUSAL (the host then reports staged work that "can't be carried"); it offers nothing, and
+    # the box's next git call proposes again.
+    _synced_at(rig, rig.head())
+    rig.write("fileB", "b-host\n")
+    rig.host("add", "--", "fileB")
+    _fallback_install(rig)
+    spy, once = tmp_path / "spy", tmp_path / "failed-once"
+    spy.mkdir()
+    (spy / "git").write_text(
+        "#!/bin/sh\n"
+        f'case "${{GIT_INDEX_FILE:-}}" in *.fy-propose.*) case " $* " in *" diff-index "*"--no-renames"*) [ -e "{once}" ] || {{ : >"{once}"; exit 128; }} ;; esac ;; esac\n'
+        f'exec "{rig.real}" "$@"\n'
+    )
+    (spy / "git").chmod(0o755)
+    _box_commit(
+        rig,
+        "box",
+        installs=True,
+        env={"PATH": f"{rig.shim.parent}:{spy}:{rig.env['PATH']}"},
+        fileC="c1\n",
+    )
+    assert once.exists()
+    assert not list(rig.gitdir.glob("index.fy-refused.*"))
+    rig.box("status", "--porcelain")  # the next call proposes again, and installs
+    assert _host_status(rig) == "M  fileB\n"
+
+
 def _swap_in_under_the_lock(rig, tmp_path, variant: bytes, on: int = 1) -> dict:
     """An `ln` that, on the ``on``-th time the box refreshes .git/index while index.lock exists,
     puts ``variant`` there first — the host's rewrite that landed between the box's copy and its

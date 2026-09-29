@@ -361,6 +361,73 @@ def test_a_carry_git_cant_answer_keeps_the_staging(rig, tmp_path):
     assert rig.box("diff", "--cached", "--name-only").stdout == "fileB\n"
 
 
+def _spy_on_the_carry(rig, tmp_path, script: str) -> dict:
+    """A "real git" that runs ``script`` (shell, $@ = git's args) on the box carry's own git
+    calls — the ones on its work copy of index-box — then execs the real git."""
+    spy = tmp_path / "carry-spy"
+    spy.mkdir()
+    (spy / "git").write_text(
+        "#!/bin/sh\n"
+        f'case "${{GIT_INDEX_FILE:-}}" in *index-box.carry.*) {script} ;; esac\n'
+        f'exec "{rig.real}" "$@"\n'
+    )
+    (spy / "git").chmod(0o755)
+    return {"PATH": f"{rig.shim.parent}:{spy}:{rig.env['PATH']}"}
+
+
+def test_a_box_write_during_the_carry_is_never_silently_lost(rig, tmp_path):
+    # The carry copied index-box, built from the copy, and only then took index-box.lock: another
+    # box git (the agent's `git add` while the editor's server runs `git status`) staging in
+    # between was overwritten by the older copy. Under the lock first, that writer is refused
+    # instead — loudly, its own to retry.
+    rig.box("status", "--porcelain")
+    rig.write("fileB", "b-box\n")
+    assert rig.box("add", "fileB").returncode == 0
+    rig.host_commit("host", fileA="a2\n")
+    rig.write("fileE", "e-box\n")
+    ix, rc = rig.gitdir / "index-box", tmp_path / "concurrent-rc"
+    env = _spy_on_the_carry(
+        rig,
+        tmp_path,
+        f'case " $* " in *" read-tree "*) [ -e "{rc}" ] || {{ env -u GIT_INDEX_FILE '
+        f'GIT_INDEX_FILE="{ix}" "{rig.real}" -C "{rig.repo}" add fileE; echo $? >"{rc}"; }} ;; esac',
+    )
+    rig.box("status", "--porcelain", env=env)
+    if rc.read_text().strip() == "0":  # the other writer succeeded: its staging must survive
+        assert "A  fileE" in rig.box("status", "--porcelain").stdout
+
+
+def test_a_carry_that_fails_for_a_moment_is_tried_again(rig, tmp_path):
+    # Only an overlap is a verdict worth remembering. A git call that fails for a moment was
+    # memoized as "can't be carried forward" on inputs that don't change, so commits stayed
+    # refused until the index happened to change.
+    rig.box("status", "--porcelain")
+    rig.write("fileB", "b-box\n")
+    assert rig.box("add", "fileB").returncode == 0
+    rig.host_commit("host", fileA="a2\n")
+    once = tmp_path / "failed-once"
+    env = _spy_on_the_carry(rig, tmp_path, f'[ -e "{once}" ] || {{ : >"{once}"; exit 128; }}')
+    first = rig.box("status", "--porcelain", env=env)
+    assert "can't be carried forward" not in first.stderr
+    r = rig.box("commit", "-qm", "box")
+    assert r.returncode == 0, r.stderr
+    changes = rig.host("diff-tree", "--no-commit-id", "-r", "--name-status", "HEAD").stdout
+    assert changes == "M\tfileB\n"
+
+
+def test_moving_the_checked_out_branch_back_says_how(rig):
+    # Git sends no expected value for `checkout -B <current> <older>`, so the shim can't tell a
+    # deliberate rewind from one computed off a stale HEAD, and refuses both — with nothing on
+    # your computer having moved, "run it again" can't help. `git reset` sends one and passes.
+    rig.box("status", "--porcelain")
+    first = rig.head()
+    rig.host_commit("second", fileA="a2\n")
+    r = rig.box("checkout", "-q", "-B", "main", first)
+    assert r.returncode != 0 and "git reset --hard" in r.stderr
+    assert rig.box("reset", "-q", "--hard", first).returncode == 0
+    assert rig.head() == first
+
+
 def test_a_staged_deletion_is_carried_too(rig):
     rig.box("status", "--porcelain")
     assert rig.box("rm", "-q", "fileB").returncode == 0
