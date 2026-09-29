@@ -877,7 +877,8 @@ def _git_shim_step() -> tuple[str, str, str] | None:
         "cat > /usr/local/bin/git <<'FY_GIT_SHIM_EOF'\n"
         f"{shim}"
         "FY_GIT_SHIM_EOF\n"
-        "chmod 755 /usr/local/bin/git"
+        "chmod 755 /usr/local/bin/git\n"
+        "FY_GIT_SHIM_INSTALL_HOOKS=1 /usr/local/bin/git"  # the ref check's hooks dir, beside it
     )
     return ("git index shim (shared-checkout split)", "", run)
 
