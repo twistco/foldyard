@@ -552,7 +552,8 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   pulls. `docker login` still works. Default: `true`.
 - **`git_index_split`** — box-side git uses its own `.git/index-box`, so it doesn't race git on
   your computer over the shared index
-  ([ADR-0021](./adrs/0021-per-kernel-git-index-split.md)). Default: `true`.
+  ([ADR-0021](./adrs/0021-per-kernel-git-index-split.md)). Default: `true`. `fy doctor` in the
+  box checks that `git` on PATH is the shim and its hooks are installed.
 
 ## `[claude]` / `[codex]` / `[vscode]`
 

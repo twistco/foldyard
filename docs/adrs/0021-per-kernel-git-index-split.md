@@ -217,8 +217,12 @@ Shim mechanics (each point traces to a verified failure mode):
   worktree) gets it from the box's first git call, rather than from the host's tick up to ~2 s
   later — the agent's first commit in every fresh worktree went unsealed until then.
 - Stray `index-box` files are derived state — safe to delete anytime (the shim re-seeds).
-- Follow-up: an `fy verify` assertion that in-box `git` resolves to the shim, so a regression
-  fails loudly instead of silently re-arming the race.
+- In-box `fy doctor` checks that `git` on PATH resolves to the shim (known by its header, not
+  its path) and that its hooks are all installed and root's alone, so a regression — an image
+  putting another git first on PATH, a failed install — fails loudly instead of silently
+  re-arming the race (2026-09-29). A doctor row rather than the `fy verify` assertion first
+  planned here: the shim protects data and is a setup fact, and verify stays the isolation
+  battery.
 
 ## Rejected alternatives
 
