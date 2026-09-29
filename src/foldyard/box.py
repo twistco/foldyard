@@ -905,10 +905,56 @@ def _git_shim_step() -> tuple[str, str, str] | None:
     return ("git index shim (shared-checkout split)", "", run)
 
 
+# The bootstrap's last word: the in-box `fy doctor`, once per NEW box. Nobody runs doctor in a box
+# without a reason to suspect something, and the git shim rows guard against a change that only
+# happens when a box is created (an image putting another git ahead of the shim on PATH, a hooks
+# dir that didn't install) — so a new box reports its setup as it comes up.
+#
+# REPORT-ONLY. Doctor exits 1 on any fail row; `|| true` keeps that from becoming the bootstrap's
+# status even under a `set -e` a consumer's `[box].bootstrap` left on (a function called in a `||`
+# list runs with errexit ignored), and `_up` ignores the exec's status anyway. stdin is /dev/null,
+# so nothing can prompt. Skipped quietly when the foldyard CLI isn't on PATH: the "foldyard CLI"
+# step failed, and the summary just above already says so.
+#
+# The environment is the box's own (`_up`'s `run -e`): IN_DEVBOX=1 (doctor's in-box branch),
+# DOCKER_HOST/CONTAINER_HOST (the engine rows), WORKTREE. The checkout is found from the cwd, and a
+# step may have `cd`'d away, hence the explicit `cd`. PATH is this `bash -lc`'s — a login shell's,
+# plus the `fy_path_prepend` of `_BASE_SCRIPT` — the same PATH a `fy box shell` builds, which is
+# the one the `git shim` row should judge: it asks this process's PATH, not a fresh shell's.
+# PYTHONUNBUFFERED because the exec has no TTY: block-buffered rows would arrive in one lump at
+# exit, and a run the bound cuts short would lose them all.
+#
+# Bounded as a whole, though each engine/network call inside already is (5 s engine probes, the
+# stack inspect's 15 s, 8 s git, github's 10 s curl — ~60 s worst case against a wedged engine,
+# a second or two normally): a report must never be what holds `fy box up`, whatever a future row
+# forgets. `timeout` isn't in the box contract (git + uv + an engine client), and an old busybox
+# one wants `-t SECS`, so it is used only when `timeout 1 true` works; otherwise the run is
+# unbounded rather than skipped.
+_DOCTOR_BUDGET_S = 90
+
+
+def _doctor_report(checkout: str) -> str:
+    """The in-box `fy doctor` the bootstrap ends with (see the comment above)."""
+    return f"""
+fy_doctor_report() {{
+  command -v foldyard >/dev/null 2>&1 || return 0
+  local bound=
+  timeout 1 true >/dev/null 2>&1 && bound="timeout {_DOCTOR_BUDGET_S}"
+  printf '▶ fy doctor (in the box, report only)…\\n'
+  (cd {shlex.quote(checkout)} && PYTHONUNBUFFERED=1 $bound foldyard doctor </dev/null)
+  [ $? -eq 124 ] && [ -n "$bound" ] \\
+    && printf '(fy doctor stopped after {_DOCTOR_BUDGET_S}s — run `fy doctor` in the box for the rest)\\n'
+  return 0
+}}
+fy_doctor_report || true
+"""
+
+
 def _bootstrap_script(checkout: str, here: str, env: dict) -> str:
     """The full one-time box bootstrap: base scaffolding + the monitored install steps (core
     foldyard + Claude, then each enabled plugin's, then the consumer's ``[[box.tools]]`` and
-    free-form ``[box].bootstrap``), then a failure summary. Each step is reported ✓/⏭/✗."""
+    free-form ``[box].bootstrap``), then a failure summary, then the in-box `fy doctor` as a
+    report. Each step is reported ✓/⏭/✗."""
     subst = _foldyard_install_subst(checkout, here)
     steps: list[tuple[str, str, str]] = []
     if shim := _git_shim_step():  # first, so the rest of the bootstrap's git is already split
@@ -939,6 +985,7 @@ def _bootstrap_script(checkout: str, here: str, env: dict) -> str:
         '[ -n "$_FY_BOOTSTRAP_FAILS" ] '
         '&& printf "⚠ bootstrap: step(s) failed:%s\\n" "$_FY_BOOTSTRAP_FAILS" || true'
     )
+    lines.append(_doctor_report(checkout))  # LAST: it judges what the steps left behind
     return "\n".join(lines)
 
 

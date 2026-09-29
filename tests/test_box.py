@@ -5,6 +5,8 @@ config-driven [box] bits + the plugin box env/mounts — without creating a real
 from __future__ import annotations
 
 import shlex
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -893,6 +895,133 @@ class _StubRegistry:
 
     def box_bootstrap(self, env):
         return self._steps
+
+
+# ── a new box reports its setup: the in-box `fy doctor`, once, last ─────────────────────────
+
+
+def test_bootstrap_ends_with_the_in_box_doctor(monkeypatch):
+    # Nobody runs doctor in a box without a reason to suspect something, and what the git shim
+    # rows guard against (an image putting another git first on PATH) only changes when a box is
+    # created — so a new box reports once, AFTER the steps and their failure summary (the rows
+    # judge what the steps left behind), as the very last thing (its status is the script's).
+    monkeypatch.setattr(
+        box, "_foldyard_install_subst", lambda c, h: {"fy_wheel": "", "fy_version": ""}
+    )
+    monkeypatch.setattr(box.config, "box_tools", lambda: [])
+    monkeypatch.setattr(box.config, "box_bootstrap", lambda: "echo custom")
+    monkeypatch.setattr(box, "registry", lambda: _StubRegistry([]))
+    script = box._bootstrap_script("/repo", "dev-stack", {})
+    assert script.endswith(box._doctor_report("/repo"))
+    assert script.rstrip().splitlines()[-1] == "fy_doctor_report || true"
+    assert script.index("bootstrap: step(s) failed") < script.index("fy_doctor_report()")
+    assert script.index("custom bootstrap") < script.index("fy_doctor_report()")
+    res = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+    assert res.returncode == 0, res.stderr
+
+
+def _run_doctor_report(
+    tmp_path: Path,
+    foldyard_body: str | None,
+    timeout_body: str | None = None,
+    before: str = "",
+    after: str = "",
+) -> tuple[subprocess.CompletedProcess, Path]:
+    """Run the REAL `_doctor_report` snippet under bash with a PATH holding only fakes: a
+    `foldyard` (and optionally a `timeout`) written as ``/bin/sh`` scripts over builtins, so
+    nothing real is reached. The shell starts in `/`, as a bootstrap step that `cd`s away would
+    leave it, and is offered a line on stdin that a prompt would swallow."""
+    bindir, checkout = tmp_path / "bin", tmp_path / "checkout"
+    bindir.mkdir()
+    checkout.mkdir()
+    for name, body in (("foldyard", foldyard_body), ("timeout", timeout_body)):
+        if body is not None:
+            (bindir / name).write_text("#!/bin/sh\n" + body)
+            (bindir / name).chmod(0o755)
+    script = "\n".join([before, "cd /", box._doctor_report(str(checkout)), after])
+    bash = shutil.which("bash")  # resolved here: the child's PATH holds only the fakes
+    assert bash
+    out = subprocess.run(
+        [bash, "-c", script],
+        input="y\n",
+        capture_output=True,
+        text=True,
+        env={"HOME": str(tmp_path), "PATH": str(bindir)},
+    )
+    return out, checkout
+
+
+# A doctor with a fail row: prints where it ran, how, and whatever it could read from stdin.
+_FAILING_DOCTOR = (
+    'echo "args=$*"\n'
+    'echo "pwd=$(pwd)"\n'
+    'echo "unbuffered=$PYTHONUNBUFFERED"\n'
+    'read -r line && echo "stdin=$line"\n'
+    "echo '  ✗ git shim  /usr/bin/git is not foldyard'\"'\"'s shim'\n"
+    "exit 1\n"
+)
+
+
+@pytest.mark.spawns("bash")  # runs the REAL snippet under bash (fakes on PATH, builtins only)
+def test_doctor_report_is_report_only(tmp_path):
+    # Doctor exits 1 on any fail row. Report-only means that never becomes the bootstrap's
+    # outcome — not even under a `set -e` a consumer's `[box].bootstrap` left switched on — and
+    # the lines after it still run.
+    out, checkout = _run_doctor_report(
+        tmp_path, _FAILING_DOCTOR, before="set -e", after="echo after-doctor"
+    )
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.splitlines()
+    assert lines[0].startswith("▶ fy doctor (in the box")  # the lead line, before its rows
+    assert "args=doctor" in lines
+    assert f"pwd={checkout}" in lines  # the checkout, wherever a step left the shell
+    assert "unbuffered=1" in lines  # rows stream as they come, not in one block at exit
+    assert not any(ln.startswith("stdin=") for ln in lines)  # never reads (or prompts on) stdin
+    assert "  ✗ git shim  /usr/bin/git is not foldyard's shim" in lines
+    assert lines[-1] == "after-doctor"
+
+
+@pytest.mark.spawns("bash")  # runs the REAL snippet under bash (builtins only)
+def test_doctor_report_is_silent_without_the_foldyard_cli(tmp_path):
+    # The "foldyard CLI" step can fail, and the summary above already names it: no lead line
+    # for a doctor that can't run, no "command not found".
+    out, _ = _run_doctor_report(tmp_path, None, after="echo after-doctor")
+    assert out.returncode == 0
+    assert out.stdout == "after-doctor\n" and out.stderr == ""
+
+
+@pytest.mark.spawns("bash")  # runs the REAL snippet under bash (fakes on PATH, builtins only)
+def test_doctor_report_is_bounded_by_timeout_when_it_works(tmp_path):
+    # Every engine/network call in the in-box doctor has its own timeout; the whole-run bound is
+    # for whatever a future row forgets. A usable `timeout` (it passes a one-second probe) wraps
+    # the run with the budget.
+    recorder = '[ "$1 $2" = "1 true" ] && exit 0\necho "timeout $*"\nshift\nexec "$@"\n'
+    out, checkout = _run_doctor_report(tmp_path, _FAILING_DOCTOR, timeout_body=recorder)
+    assert out.returncode == 0, out.stderr
+    assert f"timeout {box._DOCTOR_BUDGET_S} foldyard doctor" in out.stdout
+    assert f"pwd={checkout}" in out.stdout and "unbuffered=1" in out.stdout
+    assert "stopped after" not in out.stdout
+
+
+@pytest.mark.spawns("bash")  # runs the REAL snippet under bash (fakes on PATH, builtins only)
+def test_doctor_report_says_when_the_bound_cut_it_short(tmp_path):
+    expired = '[ "$1 $2" = "1 true" ] && exit 0\necho "  ✓ first row"\nexit 124\n'
+    out, _ = _run_doctor_report(tmp_path, _FAILING_DOCTOR, timeout_body=expired)
+    assert out.returncode == 0, out.stderr
+    assert f"stopped after {box._DOCTOR_BUDGET_S}s" in out.stdout
+    assert "`fy doctor` in the box" in out.stdout  # how to see the rest
+
+
+@pytest.mark.spawns("bash")  # runs the REAL snippet under bash (fakes on PATH, builtins only)
+def test_doctor_report_runs_unbounded_when_timeout_is_unusable(tmp_path):
+    # The box contract is git + uv + an engine client: `timeout` may be missing, or an old
+    # busybox one that wants `-t SECS` and refuses `timeout 1 true`. Either way doctor still runs
+    # (the missing case is test_doctor_report_is_report_only: no `timeout` on its PATH at all).
+    refuses = 'echo "usage: timeout -t SECS PROG" >&2\nexit 1\n'
+    out, checkout = _run_doctor_report(tmp_path, _FAILING_DOCTOR, timeout_body=refuses)
+    assert out.returncode == 0, out.stderr
+    assert "args=doctor" in out.stdout and f"pwd={checkout}" in out.stdout
+    assert "usage: timeout" not in out.stderr  # the probe's refusal is not the operator's business
 
 
 # ── fy claude (Item 2: the agent launcher, replacing just claude-yolo) ────────────────────

@@ -547,13 +547,16 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   ```
 
 - **`bootstrap`** — free-form shell run once per fresh box, after the steps above. Default: `""`.
+  The bootstrap then ends with the box's own `fy doctor`, as a report: a failing row doesn't fail
+  `fy box up`.
 - **`clean_docker_config`** — point `DOCKER_CONFIG` at a clean foldyard-owned dir instead of
   `~/.docker`, whose editor-injected credential helper fails as root and breaks even anonymous
   pulls. `docker login` still works. Default: `true`.
 - **`git_index_split`** — box-side git uses its own `.git/index-box`, so it doesn't race git on
   your computer over the shared index
   ([ADR-0021](./adrs/0021-per-kernel-git-index-split.md)). Default: `true`. `fy doctor` in the
-  box checks that `git` on PATH is the shim and its hooks are installed.
+  box checks that `git` on PATH is the shim and its hooks are installed, and a new box runs it
+  once as the last step of `fy box up`.
 
 ## `[claude]` / `[codex]` / `[vscode]`
 

@@ -9,4 +9,6 @@ bump: patch
   git first on `PATH`, or a shim whose hooks didn't install, used to switch all of that off with
   no sign. Two new rows say so. `git shim` fails when `git` isn't the shim, and `git shim hooks`
   fails when its hooks are missing. It warns when a user other than root could rewrite them. Each
-  row names its fix. No rows when `[box] git_index_split = false`. (ADR-0021.)
+  row names its fix. No rows when `[box] git_index_split = false`. A new box now runs `fy doctor`
+  once when it's created, as the last lines of `fy box up`, so it reports this without being
+  asked. (ADR-0021.)

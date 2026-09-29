@@ -230,7 +230,9 @@ Shim mechanics (each point traces to a verified failure mode):
   putting another git first on PATH, a failed install — fails loudly instead of silently
   re-arming the race (2026-09-29). A doctor row rather than the `fy verify` assertion first
   planned here: the shim protects data and is a setup fact, and verify stays the isolation
-  battery.
+  battery. Nobody runs doctor without a reason to suspect something, and the regression lands
+  when a box is created, so the bootstrap ends by running the in-box `fy doctor` once, as a
+  report (`box._doctor_report`).
 
 ## Rejected alternatives
 
