@@ -2438,3 +2438,148 @@ def test_on_docker_the_compose_build_and_up_are_refused(fake_repo, capture_run, 
     config.clear_caches()
     assert stack.up() != 0
     assert not [v for v in _compose_verbs(capture_run) if v in ("build", "--no-build", "-d")]
+
+
+# ── stranded dependents (podman-compose 1.6.0's up/down disagreement) ──────────────────────
+# `up`'s internal `down` removes EVERY dependent of a service it recreates, but `up` only
+# re-creates the dependents that were RUNNING — a stopped one is removed and never re-created,
+# and whatever `--requires` it then fails to create.
+
+_GRAPH = {"app": set(), "sim": {"app"}, "worker": {"sim", "app"}}
+
+
+def _cnt(service: str, *, hash_: str = "same", exited: bool = True) -> dict:
+    return {"name": f"p-{service}", "service": service, "hash": hash_, "exited": exited}
+
+
+def test_a_stopped_dependent_of_a_recreated_service_is_stranded():
+    # The Tangible incident: a stopped stack, app + worker changed, sim unchanged — down
+    # removes the sim as app's dependent, up skips it, the worker's create then fails.
+    containers = [_cnt("app", hash_="old"), _cnt("sim"), _cnt("worker", hash_="old")]
+    desired = {"app": "new", "sim": "same", "worker": "new"}
+    assert stack._stranded_dependents(_GRAPH, containers, desired) == ["p-sim"]
+
+
+def test_stranding_follows_dependents_transitively():
+    graph = {"app": set(), "sim": {"app"}, "worker": {"sim"}}
+    containers = [_cnt("app", hash_="old"), _cnt("sim"), _cnt("worker")]
+    desired = {"app": "new", "sim": "same", "worker": "same"}
+    assert stack._stranded_dependents(graph, containers, desired) == ["p-sim", "p-worker"]
+
+
+def test_a_running_dependent_is_left_to_compose():
+    # podman-compose recreates running dependents itself.
+    containers = [_cnt("app", hash_="old"), _cnt("sim", exited=False), _cnt("worker")]
+    desired = {"app": "new", "sim": "same", "worker": "same"}
+    assert stack._stranded_dependents(_GRAPH, containers, desired) == ["p-worker"]
+
+
+def test_nothing_is_stranded_when_nothing_is_recreated():
+    containers = [_cnt("app"), _cnt("sim"), _cnt("worker")]
+    desired = {"app": "same", "sim": "same", "worker": "same"}
+    assert stack._stranded_dependents(_GRAPH, containers, desired) == []
+
+
+def test_a_service_outside_the_render_is_never_stranded():
+    # An orphan's service isn't in `desired` — compose ignores it, and so do we.
+    containers = [_cnt("app", hash_="old"), _cnt("gone")]
+    graph = {"app": set(), "gone": {"app"}}
+    assert stack._stranded_dependents(graph, containers, {"app": "new"}) == []
+
+
+def _pc_labels(service: str, config_hash: str) -> dict:
+    """The labels podman-compose 1.6.0 stamps on a container it creates (its
+    ``container_names_by_service`` + ``podman_compose_labels``), trimmed to the ones it reads."""
+    return {
+        "io.podman.compose.project": "tangible-podman",
+        "com.docker.compose.project": "tangible-podman",
+        "io.podman.compose.config-hash": config_hash,
+        "io.podman.compose.service": service,
+        "com.docker.compose.service": service,
+    }
+
+
+def _stranded_stack(monkeypatch, desired: dict | None, drop: tuple[str, ...] = ()):
+    """An engine holding a stopped app (stale hash) + a stopped sim that depends on it; ``drop``
+    removes those labels from the sim."""
+    import types
+
+    from foldyard import confighash
+
+    labels = {svc: _pc_labels(svc, "old" if svc == "app" else "same") for svc in ("app", "sim")}
+    for label in drop:
+        del labels["sim"][label]
+    ps = [
+        {"Names": [f"tangible-podman-{svc}"], "Exited": True, "Labels": labels[svc]}
+        for svc in ("app", "sim")
+    ]
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if cmd[1:3] == ["ps", "-a"] and "json" in cmd:
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps(ps), stderr="")
+        return _FakeProc()
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    monkeypatch.setattr(confighash, "desired", lambda *a, **k: (desired, ""))
+    monkeypatch.setattr(
+        stack,
+        "_render_config",
+        lambda *a, **k: {"services": {"app": {}, "sim": {"depends_on": {"app": {}}}}},
+    )
+    monkeypatch.setattr(stack, "_podman_compose_active", lambda ctx: True)
+    return calls
+
+
+def test_up_removes_stranded_dependents_before_compose_up(fake_repo, monkeypatch):
+    calls = _stranded_stack(monkeypatch, {"app": "new", "sim": "same"})
+    assert stack.up() == 0
+    rm = next(c for c in calls if c[:3] == ["podman", "rm", "-f"])
+    assert rm[3:] == ["tangible-podman-sim"]
+    up_idx = next(i for i, c in enumerate(calls) if "compose" in c and "up" in c)
+    assert calls.index(rm) < up_idx
+
+
+@pytest.mark.parametrize(
+    ("labels", "service"),
+    [
+        (_pc_labels("sim", "h"), "sim"),  # what podman-compose writes: both, agreeing
+        ({"io.podman.compose.service": "sim"}, "sim"),
+        ({"com.docker.compose.service": "sim"}, "sim"),
+        ({"io.podman.compose.service": "", "com.docker.compose.service": "sim"}, "sim"),
+        ({"io.podman.compose.service": "sim", "com.docker.compose.service": "other"}, "sim"),
+        ({}, ""),
+    ],
+)
+def test_a_container_maps_to_its_service_as_podman_compose_reads_it(labels, service):
+    # podman-compose 1.6.0's `existing_containers` — what its `up` decides recreation from —
+    # reads io.podman.compose.service, falling back (on missing OR empty) to
+    # com.docker.compose.service. The sweep must see the same service `up` will.
+    assert stack._podman_compose_service(labels) == service
+
+
+def test_up_removes_a_stranded_dependent_carrying_only_the_docker_service_label(
+    fake_repo, monkeypatch
+):
+    calls = _stranded_stack(
+        monkeypatch, {"app": "new", "sim": "same"}, drop=("io.podman.compose.service",)
+    )
+    assert stack.up() == 0
+    rm = next(c for c in calls if c[:3] == ["podman", "rm", "-f"])
+    assert rm[3:] == ["tangible-podman-sim"]
+
+
+def test_up_removes_nothing_when_the_hashes_are_unavailable(fake_repo, monkeypatch):
+    # Fail-safe: no verdict from the provider is no removal.
+    calls = _stranded_stack(monkeypatch, None)
+    assert stack.up() == 0
+    assert not any(c[:2] == ["podman", "rm"] for c in calls)
+
+
+def test_up_renders_the_config_once_for_the_sweep_and_the_guard(fake_repo, capture_run):
+    # The sweep reuses the path guard's render: one for the build, one for sweep + guard —
+    # no extra host-side parse of box-writable compose files per `fy up`.
+    assert stack.up() == 0
+    renders = [c for c in capture_run if "compose" in c and c[-1] == "config"]
+    assert len(renders) == 2

@@ -561,11 +561,22 @@ def _refusal(problems: list[str]) -> list[str]:
     ]
 
 
-def _compose(ctx: Context, args: list[str], *, extra_profiles: list[str] | None = None) -> int:
+def _compose(
+    ctx: Context,
+    args: list[str],
+    *,
+    extra_profiles: list[str] | None = None,
+    rendered: dict | None = None,
+) -> int:
     """Run `<engine> compose -f … [args]` with the resolved env, echoing the command (the
     SPIKE 'thin and echoing' rule). Inherits stdio so exec/logs stay interactive.
-    ``extra_profiles`` unions extra profiles into the run (see ``_profile_flags``)."""
-    if args[:1] and args[0] in _CREATES and (problems := _escapes(ctx, extra_profiles)):
+    ``extra_profiles`` unions extra profiles into the run (see ``_profile_flags``); ``rendered``
+    hands the path guard a render the caller already made."""
+    if (
+        args[:1]
+        and args[0] in _CREATES
+        and (problems := _escapes(ctx, extra_profiles, rendered=rendered))
+    ):
         for line in _refusal(problems):
             _err(line)
         return 1
@@ -887,9 +898,11 @@ def up() -> int:
         # provider acts: sweep containers a different compose provider created, which this one
         # can't see — it would die on name conflicts instead of adopting them.
         _reconcile_foreign_containers(ctx)
+        rendered = _render_config(ctx, extra)
+        _remove_stranded_dependents(ctx, rendered, extra_profiles=extra)
         # Build has already selected the engine-appropriate implementation; compose only starts
         # the resulting images, never re-enters a provider build path.
-        rc = _compose(ctx, ["up", "-d", "--no-build"], extra_profiles=extra)
+        rc = _compose(ctx, ["up", "-d", "--no-build"], extra_profiles=extra, rendered=rendered)
     if rc != 0:
         return rc
     # Containers are on the new images now; the ones the build replaced can go.
@@ -1056,6 +1069,110 @@ def _remove_orphan_containers(
         return  # best-effort: an orphan left running is recoverable, a bad sweep is not
 
 
+def _stranded_dependents(
+    graph: dict[str, set[str]], containers: list[dict], desired: dict[str, str]
+) -> list[str]:
+    """Names of the containers podman-compose 1.6.0's ``up`` would remove and never re-create.
+
+    Its ``up`` recreates services whose config hash changed, plus their RUNNING dependents; the
+    internal ``down`` it runs for that removes ALL their dependents. A stopped dependent is
+    therefore removed but skipped at create (it "existed" and wasn't marked for recreation),
+    and every service that ``--requires`` it then fails to create. ``graph`` is service →
+    direct dependencies; ``containers`` are ``{name, service, hash, exited}``."""
+    dependents: dict[str, set[str]] = {}
+    for service, deps in graph.items():
+        for dep in deps:
+            dependents.setdefault(dep, set()).add(service)
+
+    def downstream(service: str) -> set[str]:
+        seen: set[str] = set()
+        todo = [service]
+        while todo:
+            for d in dependents.get(todo.pop(), set()) - seen:
+                seen.add(d)
+                todo.append(d)
+        return seen
+
+    known = [c for c in containers if c["service"] in desired]
+    running = {c["service"] for c in known if not c["exited"]}
+    changed = {c["service"] for c in known if c["hash"] != desired[c["service"]]}
+    removed = set().union(*(downstream(s) for s in changed)) if changed else set()
+    recreated = changed | (removed & running)
+    return sorted(c["name"] for c in known if c["service"] in removed - recreated)
+
+
+def _podman_compose_service(labels: dict) -> str:
+    """The service podman-compose 1.6.0's ``up`` maps a container to (its
+    ``existing_containers``): ``io.podman.compose.service``, falling back — on missing OR empty —
+    to ``com.docker.compose.service``. It writes both; reading its precedence keeps the sweep
+    agreeing with what ``up`` will recreate."""
+    return labels.get("io.podman.compose.service", "") or labels.get(
+        "com.docker.compose.service", ""
+    )
+
+
+def _remove_stranded_dependents(
+    ctx: Context,
+    rendered: dict | None,
+    emit: Callable[[str], None] | None = None,
+    extra_profiles: list[str] | None = None,
+) -> None:
+    """Remove the containers :func:`_stranded_dependents` finds, BEFORE ``up``, so ``up`` sees
+    them as missing and creates them. Typical trigger: a stopped stack (VM restart) brought up
+    after a posture change. podman-compose only; fail-safe — any probe that can't answer
+    removes nothing. Named volumes are never touched. ``rendered`` is the caller's render,
+    shared with the path guard so the sweep adds no host-side parse of the compose files."""
+    emit = emit or _err
+    if not _podman_compose_active(ctx):
+        return
+    try:
+        from . import confighash
+
+        desired, _ = confighash.desired(ctx, extra_profiles)
+        if not desired or not rendered:
+            return
+        graph: dict[str, set[str]] = {}
+        for name, svc in (rendered.get("services") or {}).items():
+            deps = svc.get("depends_on") or {}
+            links = [str(link).split(":")[0] for link in svc.get("links") or []]
+            graph[name] = {*deps, *links}
+        ps = _run(
+            [
+                config.engine(),
+                "ps",
+                "-a",
+                "--filter",
+                f"label=io.podman.compose.project={ctx.project}",
+                "--format",
+                "json",
+            ],
+            env=ctx.env,
+        )
+        if ps.returncode != 0:
+            return
+        containers = [
+            {
+                "name": c["Names"][0],
+                "service": _podman_compose_service(c.get("Labels") or {}),
+                "hash": (c.get("Labels") or {}).get("io.podman.compose.config-hash", ""),
+                "exited": bool(c.get("Exited")),
+            }
+            for c in json.loads(ps.stdout or "[]")
+        ]
+        stranded = _stranded_dependents(graph, containers, desired)
+        if not stranded:
+            return
+        emit(
+            f"▶ removing {len(stranded)} stopped container(s) compose would drop without "
+            f"re-creating ({', '.join(stranded)}) — recreated on `up`; named volumes are kept…"
+        )
+        cmd = [config.engine(), "rm", "-f", *stranded]
+        emit("+ " + " ".join(cmd))
+        _run(cmd, env=ctx.env)
+    except Exception:
+        return  # best-effort: compose then fails loudly, exactly as it would have anyway
+
+
 def _stack_is_up(ctx: Context, ignore_services: set[str] | frozenset[str] = frozenset()) -> bool:
     """Is this worktree's compose stack already running? (any container with its compose-project
     label). ``ignore_services`` — the plugin-declared posture services the reconcile itself
@@ -1192,7 +1309,9 @@ def reconcile_posture(
             # sweep them first or it dies on name conflicts (e.g. a stack predating the
             # bundled-podman-compose switch).
             _reconcile_foreign_containers(ctx, emit)
-            rc = _compose_captured(ctx, ["up", "-d"], emit, extra_profiles=extra)
+            rendered = _render_config(ctx, extra)
+            _remove_stranded_dependents(ctx, rendered, emit, extra)
+            rc = _compose_captured(ctx, ["up", "-d"], emit, extra_profiles=extra, rendered=rendered)
             if rc != 0:
                 emit(
                     f"✗ reconcile failed (compose exited {rc}) — the stack may still be "
@@ -1509,6 +1628,7 @@ def _compose_captured(
     args: list[str],
     emit: Callable[[str], None],
     extra_profiles: list[str] | None = None,
+    rendered: dict | None = None,
 ) -> int:
     """Like ``_compose`` but never inherits the terminal fds: output is STREAMED line-by-line
     through ``emit`` (stderr merged into stdout, via devmode.run_stream) and the exit code is
@@ -1516,7 +1636,11 @@ def _compose_captured(
     compose output over the Textual UI (inherited fds bypass any Python-level stdout/stderr
     redirect — capturing is the only fix), and so the log pane fills LIVE during a slow recreate
     instead of all at once at the end."""
-    if args[:1] and args[0] in _CREATES and (problems := _escapes(ctx, extra_profiles)):
+    if (
+        args[:1]
+        and args[0] in _CREATES
+        and (problems := _escapes(ctx, extra_profiles, rendered=rendered))
+    ):
         for line in _refusal(problems):
             emit(line)
         return 1
