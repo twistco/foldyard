@@ -1117,12 +1117,16 @@ def box_git(monkeypatch, tmp_path):
     test's uid). Returns a setter for what PATH resolves `git` to, and the real libexec dir."""
     monkeypatch.setattr(devmode.config, "box_git_index_split", lambda: True)
     shim = _install_shim(tmp_path / "usr" / "local")
+    for d in (shim.parent, shim.parent.parent):  # made under the test's umask: pin it
+        d.chmod(0o755)
     monkeypatch.setattr(devmode, "_ROOT_UID", os.getuid())
     on_path: dict[str, str | None] = {"git": str(shim)}
     monkeypatch.setattr(devmode, "_git_on_path", lambda: on_path["git"])
 
     class Box:
         libexec = Path(os.path.realpath(tmp_path / "usr" / "local" / "libexec"))
+        prefix = libexec.parent
+        bin = prefix / "bin"
         hooks = libexec / "foldyard-git-hooks"
         bindir = libexec / "foldyard-git-bin"
 
@@ -1272,6 +1276,8 @@ def test_hooks_not_owned_by_root_is_a_warn_naming_each(box_git, monkeypatch):
     assert status == "warn" and "not root" in detail, detail
     for what in ("bin/git", "foldyard-git-hooks", "foldyard-git-bin"):
         assert what in detail, detail
+    for d in (box_git.bin, box_git.prefix, box_git.libexec):  # and the dirs holding them
+        assert f"{d} owned by uid" in detail, detail
 
 
 @pytest.mark.parametrize("which", ["hooks", "bindir"])
@@ -1294,6 +1300,43 @@ def test_a_shim_others_can_write_is_a_warn(box_git):
     box_git.shim.chmod(0o757)
     status, detail = box_git.rows()["git shim hooks"]
     assert status == "warn" and "writable" in detail, detail
+
+
+@pytest.mark.parametrize("which", ["bin", "prefix", "libexec"])
+def test_a_dir_holding_an_entry_others_can_write_is_a_warn(box_git, which):
+    # Root-owned entries in a directory another uid can write are swappable by that uid: it can
+    # rename them away and put its own in their place (`bin` holds the shim, `libexec` the hooks
+    # and git-bin dirs, the prefix holds `libexec` itself).
+    d = getattr(box_git, which)
+    d.chmod(0o757)
+    status, detail = box_git.rows()["git shim hooks"]
+    assert status == "warn" and f"{d} writable" in detail, detail
+
+
+def test_a_sticky_libexec_others_can_write_is_not_exposed(box_git):
+    # Sticky: another uid can't rename or replace root's entries in it, and a new name there is
+    # one the shim never looks up.
+    box_git.libexec.chmod(0o1777)
+    assert box_git.rows()["git shim hooks"][0] == "ok"
+
+
+def test_a_sticky_libexec_not_owned_by_root_is_still_a_warn(box_git, monkeypatch):
+    # Sticky binds everyone but the directory's OWNER, who can still rename anything in it.
+    box_git.libexec.chmod(0o1755)
+    monkeypatch.setattr(devmode, "_ROOT_UID", os.getuid() + 1)
+    status, detail = box_git.rows()["git shim hooks"]
+    assert status == "warn" and f"{box_git.libexec} owned by uid" in detail, detail
+
+
+@pytest.mark.parametrize("which", ["bin", "prefix", "hooks", "bindir"])
+def test_sticky_does_not_excuse_a_dir_where_a_new_name_is_looked_up(box_git, which):
+    # Sticky stops a swap, not an ADDITION: in `bin` a planted `readlink` runs ahead of the real
+    # one on PATH (the shim's first line), in the prefix a planted `sbin` does the same, a new
+    # hook name in the hooks dir is one git runs, and `foldyard-git-bin` is first on a hook's PATH.
+    d = getattr(box_git, which)
+    d.chmod(0o1777)
+    status, detail = box_git.rows()["git shim hooks"]
+    assert status == "warn" and f"{d} writable" in detail, detail
 
 
 def test_a_hooks_dir_that_is_a_symlink_is_a_warn(box_git, tmp_path):
