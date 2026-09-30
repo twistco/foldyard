@@ -692,7 +692,8 @@ def test_up_threads_staged_wheel_into_install(fake, monkeypatch):
     assert box.main("up") == 0
     install = _find(fake["calls"], has=["exec", "bash", "-lc"])[0]
     script = install[-1]
-    assert f"uv tool install --force {wheel}" in script  # shlex-quoted (no special chars → bare)
+    # shlex-quoted (no special chars → bare), and stripped of the host-only dependencies
+    assert f'uv tool install --force --overrides "$_fy_ov" {wheel}' in script
     assert "run_step" in script  # delivered as a monitored step
 
 
@@ -700,9 +701,65 @@ def test_foldyard_run_forces_every_install_branch():
     # `_foldyard_check` fails the guard on a RETAINED stale foldyard, so every branch must
     # `--force` — a bare install of a spec matching the retained receipt is a no-op.
     script = box._foldyard_run("/w/acme", {"fy_wheel": "", "fy_version": "9.9.9"})
-    assert 'uv tool install --force "foldyard==9.9.9"' in script
-    assert "uv tool install --force --editable /w/acme/foldyard" in script
+    assert 'uv tool install --force --overrides "$_fy_ov" "foldyard==9.9.9"' in script
+    assert 'uv tool install --force --overrides "$_fy_ov" --editable /w/acme/foldyard' in script
     assert "uv tool install " not in script.replace("uv tool install --force", "")
+
+
+def test_every_box_install_branch_strips_the_host_only_deps():
+    # mitmproxy + PyJWT are CORE (a plain `uv tool install foldyard` is the complete host install);
+    # the box routes through the proxy and never mints, so its install removes them. A branch
+    # without the override would pull cryptography + mitmproxy's wheels through the proxy just to
+    # put `fy` on PATH — no failure, only a slower, heavier bootstrap nobody would notice.
+    script = box._foldyard_run("/w/acme", {"fy_wheel": "/w/fy.whl", "fy_version": "9.9.9"})
+    installs = script.count("uv tool install")
+    assert installs == 3
+    assert script.count('--overrides "$_fy_ov"') == installs
+
+
+def test_host_only_deps_are_core_dependencies():
+    # The override removes packages BY NAME: rename or drop one in pyproject and it silently stops
+    # removing anything (or, the other way, a new host-only dependency lands in every box). And the
+    # `host` extra stays declared — empty — so `uv tool install "foldyard[host]"`, the line every
+    # older doc and receipt carries, still installs without uv warning about an unknown extra.
+    import re
+    import tomllib
+
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())["project"]
+    core = {re.split(r"[\[<>=~!; ]", req, maxsplit=1)[0].lower() for req in project["dependencies"]}
+    assert set(box.HOST_ONLY_DEPS) <= core
+    assert project["optional-dependencies"]["host"] == []
+
+
+@pytest.mark.spawns("bash")  # runs the REAL command under bash, `uv`/`mktemp`/`rm` as functions
+@pytest.mark.parametrize("uv_rc", [0, 7])
+def test_box_install_overrides_file_and_status(tmp_path, uv_rc):
+    # What uv is handed (every host-only dep under a marker that never holds — the removal idiom),
+    # that the install's status is the step's (run_step reports ✓/✗ off it), and that the temp file
+    # is gone either way. Builtins only: the suite's PATH carries no mktemp/rm, so they're stubbed.
+    import subprocess
+
+    ov = tmp_path / "ov"
+    stubs = f"""
+mktemp() {{ printf '%s' {shlex.quote(str(ov))}; }}
+rm() {{ printf 'rm %s\n' "$*"; }}
+uv() {{ printf 'uv %s\n' "$*"; while IFS= read -r l; do printf 'ov %s\n' "$l"; done < "$5"; return {uv_rc}; }}
+"""
+    run = box._foldyard_run("/w/acme", {"fy_wheel": "", "fy_version": "9.9.9"})
+    out = subprocess.run(
+        ["bash", "-c", f'{stubs}\neval {shlex.quote(run)}\nprintf "rc=%s\\n" "$?"'],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.splitlines()
+    assert lines[0] == f"uv tool install --force --overrides {ov} foldyard==9.9.9"
+    assert [ln for ln in lines if ln.startswith("ov ")] == [
+        f'ov {name}; sys_platform == "never"' for name in box.HOST_ONLY_DEPS
+    ]
+    assert f"rm -f {ov}" in lines
+    assert lines[-1] == ("rc=0" if uv_rc == 0 else "rc=1")
 
 
 def test_stage_foldyard_builds_wheel(tmp_path, monkeypatch):

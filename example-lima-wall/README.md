@@ -35,7 +35,7 @@ Mac, so foldyard addresses the Mac proxy at Lima's guest→host gateway `192.168
 ## Requirements
 
 A **Mac with Lima** (`brew install lima`) and foldyard installed on the host
-(`just foldyard install` — the `[host]` extra pulls mitmproxy for the proxy). This example can't
+(`just foldyard install` — mitmproxy, for the proxy, comes with it). This example can't
 run in CI or a dev box: it needs a real Lima VM (that's why `../example`, not this one, is the
 nested-KVM/CI dogfood fixture).
 

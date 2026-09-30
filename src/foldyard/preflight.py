@@ -90,7 +90,7 @@ def issues() -> list[str]:
             out.append(
                 "✗ this project routes box egress through the host-side mitmdump proxy, but\n"
                 "    mitmproxy isn't installed on the host — the box's egress (even PyPI at\n"
-                f"    bootstrap) will connection-refuse. Install it (the [host] extra):\n"
+                f"    bootstrap) will connection-refuse. Reinstall foldyard (it's a dependency):\n"
                 f"    {host_install_hint()}"
             )
 

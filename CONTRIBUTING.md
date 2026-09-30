@@ -13,9 +13,9 @@ test tiers (what runs anywhere, what needs an engine, what only runs on a real h
 conventions, and the don't-break list. The short version:
 
 ```bash
-uv tool install --force --editable ".[host]"   # the `fy` on your PATH runs your checkout
-just check                                     # ruff + pyright + ty + the suite — what CI gates on
-just test -k <pattern>                         # one area
+uv tool install --force --editable .   # the `fy` on your PATH runs your checkout
+just check                             # ruff + pyright + ty + the suite — what CI gates on
+just test -k <pattern>                 # one area
 ```
 
 - Design decisions live in [`docs/adrs/`](./docs/adrs/). A change that reverses one needs a new

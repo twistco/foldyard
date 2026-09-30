@@ -118,7 +118,7 @@ def test_missing_cli_on_the_INHERITED_default_backend_blocks_too(monkeypatch):
 def test_proxy_required_but_mitmproxy_missing_blocks(monkeypatch):
     # A [proxy] table (or keyless) means the box routes through the proxy — mitmproxy must exist.
     _wire(monkeypatch, proxy_enabled=True, mitmdump=None)
-    assert any("mitmproxy" in p and "[host] extra" in p for p in preflight.issues())
+    assert any("mitmproxy" in p and "Reinstall foldyard" in p for p in preflight.issues())
 
 
 def test_mitmproxy_not_checked_when_no_proxy_needed(monkeypatch):
@@ -229,7 +229,7 @@ def test_proxy_required_includes_generic_inject_axes(monkeypatch):
             return [object()]  # one active injection rule
 
     monkeypatch.setattr(plugins, "registry", lambda: _Reg())
-    assert any("mitmproxy" in p and "[host] extra" in p for p in preflight.issues())
+    assert any("mitmproxy" in p and "Reinstall foldyard" in p for p in preflight.issues())
 
 
 def test_mitmproxy_missing_names_a_command_a_consumer_has(monkeypatch):
@@ -242,7 +242,7 @@ def test_mitmproxy_missing_names_a_command_a_consumer_has(monkeypatch):
 
     monkeypatch.setattr(proxy, "_foldyard_src", lambda: None)
     (issue,) = [p for p in preflight.issues() if "mitmproxy" in p]
-    assert "uv tool install --force 'foldyard[host]'" in issue
+    assert "uv tool install --force foldyard" in issue
     assert "just" not in issue
 
 

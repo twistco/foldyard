@@ -95,8 +95,8 @@ def test_permissions_malformed_is_fatal_not_a_silent_widening(monkeypatch, bad):
 
 
 def _key():
-    """A throwaway RSA key. cryptography rides in with pyjwt[crypto]; skip if absent (a bare
-    install without the host extra can't mint anyway)."""
+    """A throwaway RSA key. cryptography rides in with pyjwt[crypto]; skip if absent (an install
+    stripped of it — the box's shape — can't mint anyway)."""
     pytest.importorskip("jwt")
     rsa = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.rsa")
     serialization = pytest.importorskip("cryptography.hazmat.primitives.serialization")

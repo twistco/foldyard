@@ -130,12 +130,11 @@ def test_fix_command_on_the_host_is_a_uv_upgrade():
 
 
 def test_upgrade_hint_re_resolves_the_receipt_rather_than_respecifying_it():
-    # `uv tool install --upgrade foldyard` RE-SPECIFIES the requirement as the bare name: the
-    # `[host]` extra is dropped (mitmproxy uninstalled — every box request then connection-refuses
-    # at the proxy) and an editable checkout is swapped for PyPI's. `uv tool upgrade` re-resolves
-    # the receipt as installed, keeping both, and rebuilds an editable install's baked metadata
-    # (the only way its reported version moves). Seen live on 2026-09-18: the gate's old advice
-    # took a working host install to a mitmproxy-less one in a single command.
+    # `uv tool install --upgrade foldyard` RE-SPECIFIES the requirement as the bare name: an
+    # editable checkout is swapped for PyPI's. `uv tool upgrade` re-resolves the receipt as
+    # installed, keeping it, and rebuilds an editable install's baked metadata (the only way its
+    # reported version moves). Seen live on 2026-09-18, when it also dropped the then-`[host]`
+    # extra: the gate's old advice took a working host install to a mitmproxy-less one.
     assert compat.upgrade_hint() == "uv tool upgrade foldyard"
     assert "install" not in compat.upgrade_hint()
 
