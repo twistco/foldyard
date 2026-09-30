@@ -1632,3 +1632,65 @@ def test_ssh_port_row_is_silent_where_nothing_is_pinned(ssh_port_row, monkeypatc
     else:
         ssh_port_row.port = None
     assert list(devmode._ssh_port_check()) == []
+
+
+# ── doctor: a `pull --rebase` that stopped before it began (githeal.leftover_autostash) ─────────
+
+
+def test_rebase_leftover_row_is_silent_without_one(monkeypatch):
+    from foldyard import githeal
+
+    monkeypatch.setattr(githeal, "leftover_autostashes", lambda: [])
+    assert list(devmode._rebase_leftover_check()) == []
+
+
+def test_rebase_leftover_row_prints_the_recovery_it_never_runs(monkeypatch, tmp_path):
+    from foldyard import githeal
+
+    co = tmp_path / "my repo"
+    state = co / ".git" / "rebase-merge"
+    sha = "77f58597570c81b8ea6c8dffcced324fa134dfcf"
+    found = [("main", githeal.Leftover(co, state, sha))]
+    monkeypatch.setattr(githeal, "leftover_autostashes", lambda: found)
+    monkeypatch.setattr(devmode, "_run", lambda *a, **k: pytest.fail("doctor ran something"))
+    ((status, name, detail),) = devmode._rebase_leftover_check()
+    assert status == "warn" and name == "leftover autostash (main)"
+    # The stash is kept FIRST, and the directory goes only if that worked; paths quoted.
+    assert f"git -C '{co}' stash store -m autostash {sha} && rm -r '{state}'" in detail
+    # Restored by its id, never `pop` (the top entry, whoever stashed last), and kept listed.
+    assert f"git -C '{co}' stash apply {sha}" in detail
+    assert "stash pop" not in detail and "git stash list" in detail
+    assert "not a rebase in progress" in detail
+    # The reader's guards narrow the window a live git could be in; the operator closes it.
+    assert "no git command is running" in detail
+
+
+def test_rebase_leftover_rows_are_one_per_checkout(monkeypatch, tmp_path):
+    # Live UIs key a row by its name: two checkouts' leftovers must not collapse into one.
+    from foldyard import githeal
+
+    found = [
+        (n, githeal.Leftover(tmp_path / n, tmp_path / n / "rebase-merge", c * 40))
+        for n, c in (("main", "7"), ("side", "8"))
+    ]
+    monkeypatch.setattr(githeal, "leftover_autostashes", lambda: found)
+    rows = list(devmode._rebase_leftover_check())
+    assert [name for _s, name, _d in rows] == [
+        "leftover autostash (main)",
+        "leftover autostash (side)",
+    ]
+    assert "8" * 40 in rows[1][2] and "7" * 40 not in rows[1][2]
+
+
+def test_doctor_asks_for_the_leftover_on_the_host(monkeypatch, tmp_path):
+    # The recovery is the operator's, on their computer: the host-side doctor carries the row.
+    from conftest import GENERIC_TOML, make_config
+    from foldyard import githeal
+    from foldyard.plugins import Registry
+
+    found = githeal.Leftover(tmp_path, tmp_path / ".git" / "rebase-merge", "7" * 40)
+    monkeypatch.setattr(githeal, "leftover_autostashes", lambda: [("main", found)])
+    monkeypatch.setattr(devmode, "registry", lambda: Registry([], config=make_config(GENERIC_TOML)))
+    monkeypatch.setattr(devmode, "in_box", lambda: False)
+    monkeypatch.setattr(devmode, "read", lambda apply_expiry=True: {"mode": {}, "written": None})
+    assert "leftover autostash (main)" in [name for _s, name, _d in devmode.doctor(deep=False)]

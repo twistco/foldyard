@@ -56,9 +56,14 @@ The repo is shared with their computer, and over the VM mount your side can brie
 state of a branch the human just moved. Your `git` is a wrapper that catches that: when a command
 would act on such a read, or their computer is in the middle of a git operation (a rebase, a
 merge), it refuses — and **nothing was changed**. Run the command again; if it names an operation
-in progress, wait for the human to finish it (never abort their rebase from the box). If it prints
-steps to recover a stale index, follow them. Don't route around the wrapper: those refusals are
-what keeps your commit from silently reverting theirs.
+in progress, wait for the human to finish it (never abort their rebase from the box); if it names a
+leftover autostash, waiting won't end it — tell the human, whose `fy doctor` shows the recovery on
+their computer. If it prints steps to recover a stale index, follow them. Don't route around the
+wrapper: those refusals are what keeps your commit from silently reverting theirs.
+
+The stash is shared too: `git stash list` is one list for the human, every worktree and every
+agent, and a bare `git stash pop` takes whatever went on last, which may be theirs. Label yours
+(`git stash push -m <label>`) and pop that entry by its `stash@{n}` from `git stash list`.
 
 ## When you need something you don't have
 

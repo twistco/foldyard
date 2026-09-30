@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -740,3 +741,160 @@ def test_the_sweep_visits_only_registered_worktrees(monkeypatch, tmp_path, regis
     monkeypatch.setattr(devmode, "main_repo", lambda: main)
     monkeypatch.setattr(config, "worktrees_root", lambda _base: root)
     assert githeal._checkouts() == (main, [main, (root / "known").resolve()])
+
+
+# ── a `pull --rebase --autostash` that stopped before it began ─────────────────────────────────
+
+
+def leftover(repo, main=None, now=None):
+    """The host-side reader, with process creation forbidden as for the heal: files only."""
+
+    def refuse(*args, **_kw):
+        raise AssertionError(f"the leftover check started a process: {args[1:2] or args[:1]}")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(subprocess.Popen, "__init__", refuse)
+        return githeal.leftover_autostash(repo, main, now=now)
+
+
+_LATER = 1e12  # a `now` past any real mtime: the leftover's age guard is not what's under test
+
+
+def _stalled_rebase(rig) -> str:
+    """The REAL shape, made by git itself: a rebase whose `reset --hard` (after `stash create`)
+    can't replace the dirty file — its directory is read-only. Returns the stash commit's id."""
+    rig.host("switch", "-qc", "up")
+    rig.host_commit("upstream", fileB="b-up\n")
+    rig.host("switch", "-q", "main")
+    rig.host_commit("local", fileD="d-local\n")
+    (rig.repo / "sub").mkdir()
+    rig.host_commit("sub", **{"sub/x": "x1\n"})
+    rig.write("sub/x", "x-dirty\n")
+    (rig.repo / "sub").chmod(0o555)
+    try:
+        r = rig._run(rig.real, "rebase", "--autostash", "up")
+    finally:
+        (rig.repo / "sub").chmod(0o755)
+    assert r.returncode != 0 and "could not reset --hard" in r.stderr, r.stderr
+    return (rig.gitdir / "rebase-merge" / "autostash").read_text().strip()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a read-only directory anyway")
+def test_the_leftover_git_leaves_is_found_and_the_printed_recovery_restores_it(rig):
+    stash = _stalled_rebase(rig)
+    assert os.listdir(rig.gitdir / "rebase-merge") == ["autostash"]  # the premise, from git
+    assert not (rig.gitdir / "index.lock").exists()  # the failed reset let go of the index
+    found = leftover(rig.repo, now=_LATER)
+    assert found == githeal.Leftover(rig.repo, rig.gitdir / "rebase-merge", stash)
+    # The recovery doctor prints, run as the operator would: the stash first, then the directory.
+    rig.host("checkout", "--", "sub/x")  # as if the failed reset HAD got that far
+    rig.host("stash", "store", "-m", "autostash", stash)
+    shutil.rmtree(rig.gitdir / "rebase-merge")
+    rig.write("fileB", "someone else's\n")
+    rig.host("stash", "push", "-q", "-m", "not the autostash")  # lands on top in between
+    rig.host("rebase", "-q", "up")  # pulls work again
+    rig.host("stash", "apply", "-q", stash)  # by id: what's on top doesn't matter
+    assert (rig.repo / "sub" / "x").read_text() == "x-dirty\n"
+    assert (rig.repo / "fileB").read_text() == "b-up\n"
+    assert rig.host("stash", "list").stdout.count("\n") == 2  # both kept: applying drops nothing
+
+
+@pytest.mark.parametrize("op", ["rebase-merge", "rebase-apply"])
+def test_a_leftover_is_the_state_dir_holding_only_a_stash_id(rig, op):
+    d = rig.gitdir / op
+    d.mkdir()
+    (d / "autostash").write_text("7" * 40)
+    assert leftover(rig.repo, now=_LATER) == githeal.Leftover(rig.repo, d, "7" * 40)
+
+
+@pytest.mark.parametrize("also", ["interactive", "head-name", "next"])
+def test_a_rebase_under_way_is_not_a_leftover(rig, also):
+    # merge writes `interactive` then `head-name` right after; apply's `git am` writes `next`…
+    d = rig.gitdir / "rebase-merge"
+    d.mkdir()
+    (d / "autostash").write_text("7" * 40)
+    (d / also).write_text("")
+    assert leftover(rig.repo, now=_LATER) is None
+
+
+def test_a_leftover_is_not_reported_while_git_holds_the_index(rig):
+    # The reset that follows the autostash holds index.lock for its whole run, however long past
+    # the age guard that is (measured: a 5 s reset, unlocked for ~2 ms of it): git is still going.
+    d = rig.gitdir / "rebase-merge"
+    d.mkdir()
+    (d / "autostash").write_text("7" * 40)
+    (rig.gitdir / "index.lock").write_text("")
+    assert leftover(rig.repo, now=_LATER) is None
+    (rig.gitdir / "index.lock").unlink()
+    (rig.gitdir / "index.lock").symlink_to(rig.gitdir / "nowhere")  # a lock git can't take either
+    assert leftover(rig.repo, now=_LATER) is None
+    (rig.gitdir / "index.lock").unlink()
+    assert leftover(rig.repo, now=_LATER) is not None
+
+
+def test_a_rebase_just_starting_is_not_a_leftover_yet(rig):
+    # Its first moments have the same shape: only one that has sat there a while is reported.
+    d = rig.gitdir / "rebase-merge"
+    d.mkdir()
+    (d / "autostash").write_text("7" * 40)
+    written = (d / "autostash").stat().st_mtime
+    assert leftover(rig.repo, now=written + 1) is None
+    assert leftover(rig.repo, now=written + githeal.LEFTOVER_AGE + 1) is not None
+
+
+@pytest.mark.parametrize("content", ["not-an-id", "7" * 40 + "; rm -rf ~", ""])
+def test_an_autostash_that_is_not_a_commit_id_is_not_printed(rig, content):
+    # The git dir is box-writable, and doctor prints the id into a command to paste.
+    d = rig.gitdir / "rebase-merge"
+    d.mkdir()
+    (d / "autostash").write_text(content)
+    assert leftover(rig.repo, now=_LATER) is None
+
+
+def test_a_symlinked_state_dir_or_autostash_is_not_followed(rig, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "autostash").write_text("7" * 40)
+    (rig.gitdir / "rebase-merge").symlink_to(elsewhere)
+    assert leftover(rig.repo, now=_LATER) is None
+    (rig.gitdir / "rebase-merge").unlink()
+    (rig.gitdir / "rebase-merge").mkdir()
+    (rig.gitdir / "rebase-merge" / "autostash").symlink_to(elsewhere / "autostash")
+    assert leftover(rig.repo, now=_LATER) is None
+
+
+def test_a_worktrees_leftover_is_in_its_own_git_dir(rig, tmp_path):
+    wt = tmp_path / "wt"
+    rig.host("worktree", "add", "-q", str(wt), "-b", "side")
+    d = rig.gitdir / "worktrees" / "wt" / "rebase-merge"
+    d.mkdir()
+    (d / "autostash").write_text("7" * 40)
+    assert leftover(rig.repo, now=_LATER) is None  # main's own git dir is clean
+    assert leftover(wt, rig.repo, now=_LATER) == githeal.Leftover(wt, d, "7" * 40)
+    (rig.gitdir / "index.lock").write_text("")  # main's index is not the worktree's
+    assert leftover(wt, rig.repo, now=_LATER) is not None
+    (d.parent / "index.lock").write_text("")
+    assert leftover(wt, rig.repo, now=_LATER) is None
+
+
+def test_every_registered_checkout_is_asked_and_named(monkeypatch, tmp_path, register_worktree):
+    from foldyard import devmode
+
+    main, wt = tmp_path / "repo", tmp_path / "wt"
+    (main / ".git").mkdir(parents=True)
+    register_worktree(main, "side", wt)
+    monkeypatch.setattr(devmode, "main_repo", lambda: main)
+    wt = wt.resolve()
+    asked = []
+
+    def reader(repo, m, now=None):
+        asked.append((repo, m))
+        return githeal.Leftover(repo, Path(repo, "rebase-merge"), "7" * 40)
+
+    monkeypatch.setattr(githeal, "leftover_autostash", reader)
+    # Named as fy names them (the main checkout, a worktree by its registered name): one row each.
+    assert [(n, lo.checkout) for n, lo in githeal.leftover_autostashes()] == [
+        ("main", main),
+        ("side", wt),
+    ]
+    assert asked == [(main, main), (wt, main)]
