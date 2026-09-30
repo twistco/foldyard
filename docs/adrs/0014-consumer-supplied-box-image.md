@@ -31,7 +31,8 @@ minimal and mostly *not* a build-time concern:
   env/mounts via `registry().box_args`; a shared on-PATH tools prefix (`devbox_tools` volume at
   `/opt/fy-tools`); and a monitored bootstrap (`run_step`, ✓/⏭/✗ per step + a failure summary)
   that installs the foldyard CLI itself plus each enabled plugin's `box_bootstrap` steps and the
-  consumer's `[[box.tools]]` / `[box].bootstrap`.
+  consumer's `[[box.tools]]` / `[box].bootstrap`, then runs the in-box `fy doctor` once as a
+  report (2026-09-29).
 - The **foldyard self-install never assumes an editable checkout on the mount**
   (`box.py::_foldyard_install_subst` / `_foldyard_run`): a repo that vendors foldyard installs
   editable from the mount; an editable host install stages a wheel into a VM-visible
