@@ -813,14 +813,29 @@ def _step_line(label: str, check: str, run: str) -> str:
     return f"run_step {shlex.quote(label)} {shlex.quote(check)} {shlex.quote(run)}"
 
 
+# foldyard's core dependencies that only the HOST runs: mitmproxy (the egress proxy — the box routes
+# through it, never runs it) and PyJWT (the `github-app` minter, host-side beside the credentials).
+# They are core so a plain `uv tool install foldyard` on the host is complete; the box, whose install
+# foldyard drives itself, removes them with a uv override instead. pyproject's `dependencies` must
+# name each (tests/test_box.py pins it), or the override silently stops removing anything.
+HOST_ONLY_DEPS = ("mitmproxy", "pyjwt")
+
+
+def _box_overrides() -> list[str]:
+    """uv override lines that REMOVE :data:`HOST_ONLY_DEPS` from the box's install: an override
+    whose marker can never hold replaces every requirement on that name, so uv drops the package
+    (and whatever only it pulled in — cryptography, mitmproxy's Rust wheels)."""
+    return [f'{name}; sys_platform == "never"' for name in HOST_ONLY_DEPS]
+
+
 def _foldyard_run(checkout: str, subst: dict[str, str]) -> str:
     """The foldyard self-install command (Item-1 fallback chain) with the host-resolved wheel /
     version baked in; the in-box ``[ -d …/foldyard ]`` branch covers the vendored-repo case.
 
-    Every branch installs foldyard BARE — never the ``[host]`` extra — because the box only ROUTES
-    egress through the host's mitmdump proxy, it never runs mitmproxy itself. That keeps the box light
-    and, crucially, shrinks its bootstrap egress: no cryptography/mitmproxy wheels to pull through the
-    proxy just to get `fy` on PATH (mitmproxy is the host's `just install` `[host]` extra)."""
+    Every branch installs with :func:`_box_overrides` — :data:`HOST_ONLY_DEPS` removed — because
+    the box only ROUTES egress through the host's mitmdump proxy and never mints, so it runs neither.
+    That keeps the box light and, crucially, shrinks its bootstrap egress: no
+    cryptography/mitmproxy wheels to pull through the proxy just to get `fy` on PATH."""
     wheel, version = subst.get("fy_wheel", ""), subst.get("fy_version", "")
     repo = shlex.quote(f"{checkout}/foldyard")
     # Fail closed rather than `uv tool install foldyard` unpinned: an unpinned install would
@@ -839,12 +854,19 @@ def _foldyard_run(checkout: str, subst: dict[str, str]) -> str:
     # `--force` on EVERY branch: the step only runs when `_foldyard_check` found a stale foldyard
     # (or none), and a bare `uv tool install` of a spec matching the retained receipt reports
     # "already installed" and leaves the stale executable in place.
+    # The overrides go through a temp file (uv reads them from a requirements file; its receipt
+    # keeps the parsed entries, not the path, so a later `uv tool upgrade` in the box still drops
+    # them), removed after with the install's own status kept as the step's.
+    install = 'uv tool install --force --overrides "$_fy_ov"'
+    lines = " ".join(shlex.quote(line) for line in _box_overrides())
     return (
+        f"_fy_ov=$(mktemp) && printf '%s\\n' {lines} > \"$_fy_ov\" && "
         f"if [ -n {shlex.quote(wheel)} ] && [ -f {shlex.quote(wheel)} ]; then "
-        f"uv tool install --force {shlex.quote(wheel)}; "
-        f'elif [ -n {shlex.quote(version)} ]; then uv tool install --force "foldyard=={version}"; '
-        f"elif [ -d {repo} ]; then uv tool install --force --editable {repo}; "
-        f"else echo {shlex.quote(f'✗ foldyard: {why}')} >&2; exit 1; fi"
+        f"{install} {shlex.quote(wheel)}; "
+        f'elif [ -n {shlex.quote(version)} ]; then {install} "foldyard=={version}"; '
+        f"elif [ -d {repo} ]; then {install} --editable {repo}; "
+        f"else echo {shlex.quote(f'✗ foldyard: {why}')} >&2; exit 1; fi; "
+        '_fy_rc=$?; rm -f "$_fy_ov"; [ "$_fy_rc" -eq 0 ]'
     )
 
 

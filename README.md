@@ -28,7 +28,7 @@ curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.0/lima-2.2.0-L
 Then:
 
 ```bash
-uv tool install "foldyard[host]"   # puts `foldyard` on your PATH, with `fy` as shorthand
+uv tool install foldyard           # puts `foldyard` on your PATH, with `fy` as shorthand
 
 cd your-repo
 foldyard init                      # writes foldyard.toml: a locked-down box with no stack yet;

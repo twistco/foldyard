@@ -656,22 +656,17 @@ name = "foldyard"
 version = "0.3.2"
 source = { editable = "." }
 dependencies = [
-    { name = "podman-compose" },
-    { name = "textual" },
-    { name = "typer" },
-]
-
-[package.optional-dependencies]
-host = [
     { name = "mitmproxy", version = "11.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "mitmproxy", version = "12.2.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "podman-compose" },
     { name = "pyjwt", extra = ["crypto"] },
+    { name = "textual" },
+    { name = "typer" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "hypothesis" },
-    { name = "pyjwt", extra = ["crypto"] },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -680,16 +675,14 @@ dev = [
     { name = "ty" },
 ]
 e2e = [
-    { name = "mitmproxy", version = "11.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "mitmproxy", version = "12.2.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "requests" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mitmproxy", marker = "extra == 'host'" },
+    { name = "mitmproxy" },
     { name = "podman-compose", specifier = ">=1.6.0" },
-    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'host'", specifier = ">=2.10" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10" },
     { name = "textual", specifier = ">=8.2.7" },
     { name = "typer", specifier = ">=0.26.7" },
 ]
@@ -698,7 +691,6 @@ provides-extras = ["host"]
 [package.metadata.requires-dev]
 dev = [
     { name = "hypothesis", specifier = ">=6.100" },
-    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10" },
     { name = "pyright", specifier = "==1.1.411" },
     { name = "pytest", specifier = ">=9.1" },
     { name = "pytest-asyncio", specifier = ">=1.4" },
@@ -706,10 +698,7 @@ dev = [
     { name = "ruff", specifier = "==0.15.17" },
     { name = "ty", specifier = "==0.0.61" },
 ]
-e2e = [
-    { name = "mitmproxy" },
-    { name = "requests" },
-]
+e2e = [{ name = "requests" }]
 
 [[package]]
 name = "h11"

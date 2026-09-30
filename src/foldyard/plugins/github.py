@@ -459,7 +459,7 @@ class GithubPlugin(Plugin):
             return []
 
         def _check() -> tuple[bool, str]:
-            from . import github_app_token  # lazy: pyjwt is a [host] extra, off the hot path
+            from . import github_app_token  # lazy: pyjwt stays off the hot path
 
             try:
                 return github_app_token.app_reachable(config.proxy_port())

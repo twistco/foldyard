@@ -49,16 +49,18 @@ What has been tested on Linux and inside WSL2, and what hasn't, is tracked in
 ### Install the CLI
 
 ```bash
-uv tool install "foldyard[host]"
+uv tool install foldyard
 ```
 
 This puts `foldyard` on your PATH, with `fy` as shorthand — `fy <verb>` and `foldyard <verb>`
 are the same thing.
 
-Don't leave out the `[host]` extra. It installs mitmproxy, which runs the egress proxy on your
-computer, and the box's only way out is that proxy. `uv tool install` doesn't put a
-dependency's commands on your PATH, so the copy inside foldyard's own install is the only
-`mitmdump` you'll have. If you installed without the extra, `fy doctor` tells you how to fix it.
+The install includes mitmproxy, which runs the egress proxy on your computer: the box's only
+way out is that proxy. `uv tool install` doesn't put a dependency's commands on your PATH, so
+the copy inside foldyard's own install is the only `mitmdump` you'll have. (Older instructions
+said `"foldyard[host]"`; that still works, and the extra is now empty.) The box installs
+foldyard without mitmproxy, since it only routes through the proxy — you don't do anything
+for that, `fy box up` handles it.
 
 ## Step 1 — a locked-down box you can safely poke
 
@@ -186,14 +188,13 @@ fy box down && fy box up      # 5. recreate the box on the new version
 Why each step is the way it is:
 
 - **Use `uv tool upgrade`, not `uv tool install --upgrade`.** The second form re-installs plain
-  `foldyard`: it drops the `[host]` extra (so mitmproxy is removed, the next `fy box up` fails
-  its checks, and the box loses its way out) and swaps an editable checkout for the PyPI
-  release. `upgrade` keeps the install exactly as you made it.
+  `foldyard`, which swaps an editable checkout for the PyPI release. `upgrade` keeps the
+  install exactly as you made it.
 - **If `upgrade` says "Nothing to upgrade"** (a pinned install), or `fy doctor` shows
   `mitmproxy` missing: the doctor row prints the reinstall command for *your* kind of install.
-  Run it exactly as printed. For reference, it is `uv tool install --force 'foldyard[host]'`
-  for a PyPI install, and the same with `--editable '<checkout>[host]'` for an install from a
-  foldyard checkout.
+  Run it exactly as printed. For reference, it is `uv tool install --force foldyard` for a
+  PyPI install, and the same with `--editable <checkout>` for an install from a foldyard
+  checkout.
 - **Installed editable from a foldyard checkout?** `upgrade` rebuilds from whatever that
   checkout holds, so pull *the foldyard checkout* first — not the repo you work in.
 - **Adopt on purpose, after reading the diff.** `fy box up` shows the same diff and asks, but

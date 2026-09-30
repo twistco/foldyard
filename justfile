@@ -1,6 +1,6 @@
 # foldyard — its own dev recipes (install the tool, run the tests).
 #
-#   just install     # uv tool install (per-machine venv; editable, with the [host] extra)
+#   just install     # uv tool install (per-machine venv; editable)
 #   just test [args] # the test suite (unit + headless Textual pilots)
 #
 # These build/test foldyard. The USER-facing verbs (`fy up`/`mode`/`host`/`doctor`/`tui`) are
@@ -16,14 +16,14 @@ default:
     @just --list
 
 # Install/upgrade foldyard as a uv tool: an on-PATH `foldyard`/`fy` with its own per-machine venv
-# (off the shared mount). --editable ⇒ src edits are live; re-run after dep changes. This is the
-# HOST install, so it pulls the `[host]` extra (mitmproxy) — the host runs the :8088 mitmdump proxy
-# the box routes egress through (Phase A′). The box installs foldyard BARE (no mitmproxy) — see box.py.
+# (off the shared mount). --editable ⇒ src edits are live; re-run after dep changes. A plain install
+# is the HOST install: mitmproxy is a core dependency (the host runs the mitmdump proxy the box
+# routes egress through). The box strips it with a uv override instead — see box.HOST_ONLY_DEPS.
 install:
     #!/usr/bin/env bash
     set -euo pipefail
     command -v uv >/dev/null 2>&1 || { echo "✗ uv not found — brew install uv" >&2; exit 1; }
-    uv tool install --force --editable "{{_dir}}[host]"
+    uv tool install --force --editable "{{_dir}}"
     echo "✓ foldyard installed — try: fy mode | fy doctor"
 
 # Run the test suite (devmode/config/cli unit + headless Textual run_test pilots). The
@@ -47,7 +47,7 @@ test *args:
 # CA-trusting client (test_proxy_e2e.py), a REAL dev-box container driven by the proxy plugin's
 # box wiring over the socket (test_proxy_box_e2e.py), AND the `capture` axis end to end through a
 # real box with the MITM CA in its system trust store (test_capture_box_e2e.py) — no real token
-# needed. Pulls the `e2e` group (mitmproxy + requests) on demand; plain `test`/`check` skip them.
+# needed. Pulls the `e2e` group (requests, the client) on demand; plain `test`/`check` skip it.
 test-proxy-e2e *args:
     #!/usr/bin/env bash
     set -euo pipefail

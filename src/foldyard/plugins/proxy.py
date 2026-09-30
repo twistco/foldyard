@@ -61,12 +61,12 @@ def build_proxy_url(token: str | None = None) -> str | None:
 def mitmdump_path() -> str | None:
     """Resolve the ``mitmdump`` executable, or ``None`` if it isn't installed.
 
-    Prefer the copy BESIDE foldyard's own interpreter: the HOST install (`just install` →
-    ``uv tool install …[host]``) puts mitmproxy in foldyard's venv, but ``uv tool install`` does NOT
+    Prefer the copy BESIDE foldyard's own interpreter: mitmproxy is a foldyard dependency, so the
+    host's ``uv tool install foldyard`` puts it in foldyard's venv, but ``uv tool install`` does NOT
     link a *dependency's* console scripts onto PATH — so for a tool install the venv copy is the
     only one that exists. Fall back to PATH (a standalone ``uv tool install mitmproxy`` / system).
-    Returns ``None`` in the BOX, which installs foldyard bare (no ``[host]`` extra) since it never
-    runs the proxy. Single source of truth for the daemon command (below) and the proxy doctor
+    Returns ``None`` in the BOX, whose install strips mitmproxy (``box.HOST_ONLY_DEPS``) since it
+    never runs the proxy. Single source of truth for the daemon command (below) and the proxy doctor
     check, so they can't drift."""
     local = Path(sys.executable).parent / "mitmdump"
     if local.exists():
@@ -116,22 +116,25 @@ def _foldyard_src() -> Path | None:
 
 
 def host_install_cmd() -> list[str]:
-    """Reinstall foldyard WITH the ``[host]`` extra (mitmproxy → foldyard's own venv): the ONE
+    """Reinstall foldyard (mitmproxy + PyJWT are its dependencies → foldyard's own venv): the ONE
     command every "mitmproxy is missing" surface names — the doctor row, preflight, the PyJWT
     error — and the TUI's fix button runs, so the advice and the button can never disagree.
-    Editable from the source dir for a from-source install (a bare ``uv tool install
-    foldyard[host]`` on top of an editable would silently swap it for PyPI's); the bare name is
-    the fallback. Not ``uv tool upgrade``: that re-resolves the receipt as it stands, so it can
-    never ADD an extra. Host-side only — the box never runs the proxy."""
+    Editable from the source dir for a from-source install (a bare ``uv tool install foldyard``
+    on top of an editable would silently swap it for PyPI's); the bare name is the fallback.
+    ``--force`` with a fresh spec, not ``uv tool upgrade``: a host missing them is a foldyard from
+    before they were core (installed without the old ``[host]`` extra) or one installed with the
+    box's overrides (``box.HOST_ONLY_DEPS``) — a fresh spec fixes both, while an upgrade
+    re-resolves the receipt as it stands, overrides included. Host-side only — the box never runs
+    the proxy."""
     src = _foldyard_src()
     cmd = ["uv", "tool", "install", "--force"]
-    return cmd + (["--editable", f"{src}[host]"] if src else ["foldyard[host]"])
+    return cmd + (["--editable", str(src)] if src else ["foldyard"])
 
 
 def host_install_hint() -> str:
-    """:func:`host_install_cmd` as a line a reader can paste — quoted, since zsh globs a bare
-    ``[host]``. (It was `just install` — foldyard's own dev recipe in its origin
-    monorepo's spelling, which no consumer's justfile has.)"""
+    """:func:`host_install_cmd` as a line a reader can paste, shell-quoted (a checkout path may
+    carry spaces). (It was `just install` — foldyard's own dev recipe in its origin monorepo's
+    spelling, which no consumer's justfile has.)"""
     return shlex.join(host_install_cmd())
 
 
@@ -607,7 +610,7 @@ class ProxyPlugin(Plugin):
             mitmdump_path() is not None,
             "mitmproxy",
             "installed",
-            f"missing — reinstall with the [host] extra: {host_install_hint()}",
+            f"missing — reinstall foldyard: {host_install_hint()}",
         )
         ca = _mitm_ca()
         yield ctx.result(

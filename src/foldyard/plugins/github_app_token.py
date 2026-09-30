@@ -116,15 +116,14 @@ def permissions() -> dict:
 def app_jwt(key: str, app_id: str, now: int | None = None) -> str:
     """Sign the App JWT (RS256). PyJWT is imported HERE, not at module load: this module is only
     ever run as a subprocess, but the import cost/failure should belong to the mint, and the
-    dependency lives in the ``[host]`` extra (the box installs foldyard bare)."""
+    dependency is one the box's install strips (``box.HOST_ONLY_DEPS``)."""
     try:
         import jwt
     except ImportError:  # pragma: no cover — depends on the install shape, not on logic
         from .proxy import host_install_hint
 
         raise SystemExit(
-            "github_app_token: PyJWT is missing — reinstall the [host] extra: "
-            + host_install_hint()
+            "github_app_token: PyJWT is missing — reinstall foldyard: " + host_install_hint()
         )
     stamp = int(time.time()) if now is None else now
     return jwt.encode(

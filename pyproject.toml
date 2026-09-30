@@ -41,31 +41,29 @@ dependencies = [
     # installed docker-compose. stack.compose_provider_path() resolves the dependency's script
     # beside foldyard's interpreter (uv does not expose dependency scripts on the user's PATH).
     "podman-compose>=1.6.0",
+    # The egress proxy: the supervisor execs `mitmdump` from foldyard's OWN venv (`uv tool install`
+    # does not link a dependency's console scripts onto PATH — see `proxy.mitmdump_path()`).
+    # foldyard never IMPORTS mitmproxy, so the recipe hot path pays nothing for it. Core rather
+    # than an extra because the HOST is where a bare `uv tool install foldyard` happens, and a
+    # host without it connection-refuses every box request; the BOX, which only routes through
+    # the proxy, is installed programmatically and strips it (and PyJWT) with a uv override —
+    # `box.HOST_ONLY_DEPS`, which must name each of these two.
+    "mitmproxy",
+    # PyJWT signs the GitHub App JWT in `plugins/github_app_token.py` (the `github-app` minter
+    # kind), in the supervisor's process tree on the host. The `[crypto]` extra makes the
+    # cryptography dependency EXPLICIT rather than inherited from mitmproxy. It replaces a
+    # consumer script launched via `uv run --script`, whose PEP 723 block resolved deps from the
+    # network at mint time — see ADR-0023
+    # (docs/adrs/0023-no-host-executed-code-from-the-repo-mount.md). Imported lazily inside the
+    # minter, so the recipe hot path and the registry never pay for it.
+    "pyjwt[crypto]>=2.10",
 ]
 
 [project.optional-dependencies]
-# mitmproxy is a HOST-ONLY dependency — the `[host]` extra, pulled by `just foldyard install`
-# on the Mac (which runs `uv tool install …[host]`). The mitmdump egress proxy runs ONLY on the
-# host (the supervisor / `fy host`); the box merely ROUTES its egress through it and never runs
-# it, so a box's foldyard install (box.py's bootstrap chain) deliberately installs foldyard BARE
-# — no `[host]` — keeping the box light and its bootstrap egress small (no cryptography build to
-# fetch through the proxy). foldyard never IMPORTS mitmproxy — it only execs `mitmdump` — so the
-# recipe hot path pays nothing either way; it's purely about the binary being present host-side.
-# NB `uv tool install` does NOT link a dependency's console scripts onto PATH, so the daemon +
-# doctor resolve `mitmdump` from foldyard's OWN venv beside the interpreter — see
-# `proxy.mitmdump_path()`.
-host = [
-    "mitmproxy",
-    # PyJWT signs the GitHub App JWT in `plugins/github_app_token.py` (the `github-app` minter
-    # kind). HOST-only for the same reason as mitmproxy: minting happens in the supervisor's
-    # process tree on the Mac, never in the box, so the box's bare install skips it (and skips
-    # cryptography's build). The `[crypto]` extra makes that dependency EXPLICIT rather than
-    # inherited from mitmproxy. It replaces a consumer script launched via `uv run --script`,
-    # whose PEP 723 block resolved deps from the network at mint time — see
-    # ADR-0023 (docs/adrs/0023-no-host-executed-code-from-the-repo-mount.md). Imported lazily inside the minter, so the recipe
-    # hot path and the registry never pay for it.
-    "pyjwt[crypto]>=2.10",
-]
+# Kept EMPTY for the install lines already written down (`uv tool install "foldyard[host]"`, the
+# receipts of hosts installed that way): its two dependencies are core now, and uv warns about an
+# extra the package doesn't declare.
+host = []
 
 [project.scripts]
 foldyard = "foldyard.cli:main"
@@ -96,17 +94,12 @@ dev = [
     "ruff==0.15.17",       # linter + formatter
     "pyright==1.1.411",    # type checker (Microsoft)
     "ty==0.0.61",          # type checker (Astral; fast, pre-release)
-    # Also a `[host]` extra dep (the `github-app` minter signs the App JWT with it). Repeated here
-    # so the DEFAULT test/typecheck env covers it: both type-checkers must resolve the minter's
-    # lazy `import jwt`, and the signing path is security-relevant enough to exercise in CI's
-    # `check` job rather than only under the opt-in e2e group.
-    "pyjwt[crypto]>=2.10",
 ]
 # OPT-IN, NOT default: the real egress-proxy e2e (test_proxy_e2e.py) runs an actual mitmdump +
-# the egress_proxy addon + a fake minter + a CA-trusting client. Heavy + needs a network to install,
-# so it's its own group — `just foldyard test-proxy-e2e` pulls it; plain `test`/`check` skip it.
+# the egress_proxy addon + a fake minter + a CA-trusting client — `just foldyard test-proxy-e2e`
+# pulls it; plain `test`/`check` skip it. mitmproxy itself (the real proxy under test) is a CORE
+# dependency, so the dev env carries it like a host install does; this group is only the client.
 e2e = [
-    "mitmproxy",           # the real proxy under test (brings cryptography for the test's certs)
     "requests",            # the "box" client: https-throuegress-proxy + a custom CA bundle
 ]
 
