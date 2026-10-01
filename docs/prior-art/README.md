@@ -63,7 +63,26 @@ is worthless three months later — a set of findings against ours is not.
 7. **The daylight** — what they don't have. This is the "why isn't this a switch-to-it question?"
    section, and writing it honestly is what keeps the positioning claims in
    [../prior-art.md](../prior-art.md) true.
-8. **Could we use it anyway** — as a reference, as a component, as a competitor.
+8. **Composability: could it run inside foldyard, or foldyard inside it?** Answer it as an
+   engineering question, not as a closing remark. Neighbours keep shipping as pluggable
+   runtimes, so "we could steal the idea" and "we could run the thing" are different answers
+   with different costs. Cover:
+   - **Topologies**: where each piece would sit (host, VM, box, beside the box), and which one
+     holds up.
+   - **What it needs from foldyard's substrate**: engine and privileges, kernel features
+     (checked against our guest), rootless podman, and the gVisor posture. Say which of these
+     we already provide.
+   - **Which layer owns what**: egress, credential injection, policy, grants. Two enforcement
+     layers stacked in sequence must not move a real credential into the VM (ADR-0007) or a
+     grant out of the host store (ADR-0022).
+   - **What it would break**: in foldyard's invariants, in the box's real occupants (the
+     coding agent, the VS Code server backend, the build tooling), and in its attribution
+     (egress log, per-worktree listeners).
+   - **What the composition buys** that neither has alone, the cheapest spike that would
+     settle it, and a verdict.
+
+   Then the short reprise: usable as a reference? as a component? as a competitor? (Entries
+   before 2026-10 cover only this reprise, under "Could we use it anyway?".)
 9. **Sources** — repo at commit, every doc read *in full*, every file of ours cross-checked.
 
 ## Maintenance
