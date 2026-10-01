@@ -7,7 +7,9 @@ June sweep was found to have missed [gondolin](./prior-art/gondolin.md) (public 
 2026-02) entirely — that pass added the gondolin deep-dive and re-swept the neighbourhood.
 **Upgraded 2026-09-21** with the [vhrn](./prior-art/vhrn.md) deep-dive, and the per-tool
 deep-dives moved into [prior-art/](./prior-art/) — the competitor library, which carries the
-property-by-property comparison table, the entry template, and the maintenance rules. This file stays
+property-by-property comparison table, the entry template, and the maintenance rules.
+**Upgraded 2026-10-01** with the [OpenShell](./prior-art/openshell.md) deep-dive (NVIDIA's
+agent-sandbox platform), which also added composability to the entry template. This file stays
 the landscape: the whole neighbourhood, one row per tool, and the positioning argument.
 
 ## The verdict
@@ -17,7 +19,7 @@ the landscape: the whole neighbourhood, one row per tool, and the positioning ar
   TTL-bound credential posture. Every component exists separately; nobody ships the
   combination. Notably *nobody* does stack colocation, and nobody does host-enforced
   credential posture for humans working locally.
-- **Closest five:** (1) the hardened-devcontainer ecosystem — blogs and template repos,
+- **Closest six:** (1) the hardened-devcontainer ecosystem — blogs and template repos,
   single container on rootful Docker Desktop, secrets explicitly unhandled, no stack, DIY;
   (2) Citrix Secure Developer Spaces / Gitpod-Ona / Coder — identical value-prop *language*
   ("the laptop holds nothing") but cloud-hosted, enterprise, closed; foldyard is the local,
@@ -32,7 +34,11 @@ the landscape: the whole neighbourhood, one row per tool, and the positioning ar
   operator verbs foldyard grew (scoped persistent egress grants, a status view with
   provenance, a denial log), but the unit is one agent run in one directory — no stack, no
   posture ladder, no worktrees, and no credential injection at all
-  ([deep-dive](./prior-art/vhrn.md)).
+  ([deep-dive](./prior-art/vhrn.md)); (6) **OpenShell** — the vendor-scale *reference*: NVIDIA's
+  gateway-managed agent-sandbox platform, with no network in the workload, per-program egress,
+  L7 rules and address discipline. The unit is one agent sandbox in a fleet; no stack, no posture
+  ladder, no human dev loop, and resolved secrets live beside the workload
+  ([deep-dive](./prior-art/openshell.md)).
 - **2026-07 re-sweep: the placeholder-proxy idea has commoditized.** "Secrets never enter
   the sandbox — a host-side TLS proxy swaps placeholders for real credentials on
   allowlisted egress" went from rare to near-standard in the per-task genre inside a year:
@@ -55,6 +61,17 @@ the landscape: the whole neighbourhood, one row per tool, and the positioning ar
   the one area where a neighbour is ahead of foldyard rather than beside it. The four cheap
   closes (address discipline, grant provenance, proxy containment, a written proxy contract)
   are listed in [prior-art/README.md](./prior-art/README.md#how-foldyard-compares).
+- **2026-10: a vendor set the bar.** NVIDIA's OpenShell (128 contributors from NVIDIA, Red Hat,
+  Canonical and Docker in eight months) makes agent-side rigour a platform default: no network
+  in the workload, every connection attributed to a program, L7 rules, structured denials, and a
+  policy review that shows *consequences* rather than text. It does not move the positioning —
+  it has no stack, no human dev loop, no posture ladder, and its container drivers keep resolved
+  secrets beside the workload, where foldyard keeps them off the VM. What it moves is the
+  checklist a reader brings: foldyard's missing address discipline is now behind all three
+  library neighbours, and "every box occupant gets every injected credential" is the new gap to
+  name honestly. It is also the first neighbour that could *compose* with foldyard — an agent
+  sandbox inside the VM, chained into the host proxy — though not yet usefully
+  ([composability](./prior-art/openshell.md#composability-openshell-inside-foldyard)).
 - **Demand is recurring, not speculative:** worm waves keep landing (Shai-Hulud Sep + Nov
   2025, SANDWORM_MODE Feb 2026, CanisterWorm Mar 2026, TrapDoor + Mini Shai-Hulud May 2026),
   a CISA alert, pnpm v10/Bun changing lifecycle-script defaults, Docker bundling Socket
@@ -69,6 +86,7 @@ the landscape: the whole neighbourhood, one row per tool, and the positioning ar
 | **Docker Sandboxes** | microVM per *agent*, own Docker engine, credential proxy; proprietary, Docker Desktop | Unit is the agent, not the stack; closed; no posture system; isolation by hiding (separate engine) vs our visible shared engine |
 | **Gondolin** (earendil-works, added 2026-07) | per-task Alpine micro-VM (QEMU/libkrun) with the network stack and filesystem implemented as programmable host-side JS: TLS-MITM egress mediation, placeholder secrets substituted in-flight per destination host, FUSE-backed policy filesystem | Closest mechanism neighbour — validates the host-side-injection and host-as-enforcement bets independently. Unit is the agent *task* (one command at a time, VM per turn); no compose stack, no posture ladder, no human operator surface; HTTP/1.x-only egress. Full analysis: [prior-art/gondolin.md](./prior-art/gondolin.md) |
 | **vhrn** (aravind-n, added 2026-09) | agent harness (Claude Code / Codex / Pi) in a container jailed to the current project dir on Apple `container` or Docker; in-container nftables installed before a privilege drop, default-deny egress through a capability-dropped Rust proxy sidecar; five additive host-owned policy layers with per-project scope; no TLS termination | Closest ergonomics neighbour — same user and daily loop as foldyard, and the same operator verbs (`vhrn net allow --project .`, status with provenance, denial log). Unit is one agent *run* in one directory: no stack, no posture ladder, no worktrees, no credential minting or injection (hostname-only policy makes it impossible). **Ahead of foldyard** on address discipline (IANA unicast boundary, DNS-answer pinning, brokered loopback as a separate capability), proxy containment, grant provenance, and a written proxy contract. Full analysis: [prior-art/vhrn.md](./prior-art/vhrn.md) |
+| **OpenShell** (NVIDIA, added 2026-10) | gateway-managed agent sandboxes on Docker / Podman / Kubernetes / libkrun microVM; workload has no network, seccomp-notify brokers every connect to a trusted supervisor (OPA + L7 rules, TLS termination, placeholder credentials, policy DNS, per-program identity); Landlock + seccomp; agent-proposed policy with a prover-backed review | The vendor-scale reference for agent-side rigour — ahead of foldyard on address discipline, per-program attribution and workload controls. Unit is one agent sandbox in a multi-tenant fleet: no stack, no posture ladder, no worktrees or IDE loop; VM opt-in; resolved secrets in a supervisor beside the workload. Composable in principle (agent sandbox inside foldyard's VM). Full analysis: [prior-art/openshell.md](./prior-art/openshell.md) |
 | **matchlock** (added 2026-07; missed by the June sweep) | ephemeral microVMs (Firecracker / Virtualization.framework) for agent runs; nftables/gVisor egress allowlist; transparent proxy injects credentials, guest sees `SANDBOX_SECRET_…` placeholders | MIT, ~600★, active. The placeholder pattern, per-invocation: VM and overlay volumes discarded after each run; no stack, no dev loop |
 | **microsandbox** (added 2026-07; missed — existed since mid-2025) | self-hosted libkrun microVM runtime for agent code execution (~320 ms boot, OCI images, MCP server, SDKs); deny-all egress + domain allowlists; now also ships placeholder substitution | Highest-profile in the genre (6.5k★, YC-backed, cloud beta). Unit is the execution, framing is an SDK/server for agent builders — not a dev environment |
 | **Buildkite Cleanroom** (added 2026-07) | repo-declared policy → warm Firecracker snapshot with deps installed; CoW fork fan-out; deny-by-default egress re-enforced on resume; "secrets never enter the sandbox or its captured artifact" | Closest *policy-philosophy* cousin (repo-declared, deny-by-default, secretless) — but CI/task-shaped ephemeral snapshots, corporate-backed, not a live laptop stack |
@@ -215,6 +233,10 @@ boundary", and "isolation without hiding".
   see [prior-art/vhrn.md](./prior-art/vhrn.md). Its
   `docs/proxy/consumer-contract.md` is the normative proxy spec foldyard should answer with
   one of its own.
+- OpenShell: <https://github.com/NVIDIA/OpenShell> — reviewed at `1ad4e428a` / v0.1.2
+  (2026-10-01); see [prior-art/openshell.md](./prior-art/openshell.md). Its
+  `docs/security/best-practices.mdx` (every control: default, what you can change, risk if
+  relaxed) is the format foldyard's security.md should borrow.
 - nono: <https://github.com/always-further/nono> · networking internals
   <https://nono.sh/docs/cli/features/networking.md> · TLS-intercept design
   <https://github.com/always-further/nono/discussions/650>
