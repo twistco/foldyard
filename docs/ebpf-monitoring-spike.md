@@ -100,15 +100,31 @@ is therefore a **claim made by whoever created the container**, not evidence —
 "treat agent-provided labels as claims" applies to the cgroup name too.
 
 What can be trusted is the `libpod-<id>.scope` component: podman names it from the id it
-generated, which an API client can't choose. Attribution should key on that ancestor (by cgroup
-id or full path), not on the leaf name. Options to evaluate in slice 1, cheapest first:
+generated, which an API client can't choose. Attribution should key on that ancestor, never on the leaf name.
 
-- emit the cgroup id/path with each event and resolve it host- or relay-side against
-  `libpod-<id>.scope` — needs checking which Tetragon field carries it in standalone mode;
-- Tetragon's `enable-cgidmap` fed by its OCI hook (`tetragon-oci-hook`), if rootless podman runs
-  hooks from root-owned `hooks.d` — unverified;
-- a guest-side default of `run.oci.systemd.subgroup=""` — fixes the *missing* case for well-behaved
-  clients only; does nothing against the forge.
+**Decided (same day): mount-namespace inode, resolved against the outermost podman scope.**
+Tetragon's events carry no cgroup id or path (`api/v1/tetragon/tetragon.proto`, `Process`), so
+the first option as first written isn't available. What they can carry, with `enable-process-ns`,
+is the process's namespace inodes, and every podman container gets its own mount namespace. A
+root process in the guest maps inode → container from kernel state
+([ebpf-spike-kit/resolve.py](./ebpf-spike-kit/resolve.py)): walk the Lima user's delegated subtree
+(`user@<uid>.service`) top-down, let the OUTERMOST `libpod-<64 hex>.scope` on each path own
+everything below it, and read each member's `/proc/<pid>/ns/mnt`. Checked live:
+
+| container | how it was made | resolved to |
+| --- | --- | --- |
+| box | `podman exec` payload (Tetragon: no id) | the box ✓ — event inode `4026532977` = the box's |
+| forge | sub-cgroup named `<box id>` | itself ✓ |
+| nest | sub-cgroup named `libpod-<box id>.scope` | itself ✓ — outermost wins |
+| sharepid | `--pid=container:<box>` | itself ✓ — own mount namespace |
+| parent | `--cgroup-parent=fy-forge.slice` (lands under `fy.slice/…`) | itself ✓ |
+| nocg | `--cgroups=disabled` (stays in the caller's cgroup) | **unmapped** — honest, not wrong |
+
+`--cgroups=disabled` is the remaining gap: such a container is visible as an unknown mount
+namespace, never misattributed. Refusing it at the engine socket is enforcement work for later.
+Not taken: Tetragon's `enable-cgidmap` + its OCI hook (unverified on rootless podman, and it
+would make Tetragon's mapping the authority again); a guest default of
+`run.oci.systemd.subgroup=""` (helps well-behaved clients only).
 
 An escape to the Lima user could also create and enter its own `libpod-<anything>.scope` in its
 delegated subtree; that is the same "escape to the VM user" boundary the threat model already
@@ -129,9 +145,9 @@ execs rotates earlier evidence out of the guest. Tetragon's RSS was ~84 MB.
 
 ## What it changes in the plan
 
-- **Slice 1 needs an attribution decision first** (finding 5), and it has to come from the
-  `libpod-<id>.scope` ancestor, never the leaf name or a label. Until then the honest report is
-  "VM user's containers", not "this container".
+- **Attribution is foldyard's, Tetragon is the sensor** (finding 5): `enable-process-ns` on, and
+  the relay resolves each event's mount-namespace inode against the outermost
+  `libpod-<id>.scope`. Tetragon's `docker` field is never read.
 - **The relay is root, started at boot.** The log is `0600 root`, and foldyard's host reaches the
   guest over ssh as the Lima user — the box's uid — so a host-side pull can't read it without
   handing the log to the box too. A root relay can push to the host: the VM firewall exempts
