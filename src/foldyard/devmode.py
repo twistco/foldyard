@@ -1255,6 +1255,7 @@ def doctor(deep: bool = False):
     yield from _podman_checks()
     yield from _ssh_port_check()
     yield from _host_wall_check()
+    yield from _guest_monitor_check()
     yield from registry().doctor_checks(ctx)
 
 
@@ -1657,6 +1658,31 @@ def _host_wall_check():
         "host firewall",
         f"enforcing ({res.detail()})",
         f"NOT enforcing ({res.error or res.detail()}) — {fix}",
+    )
+
+
+def _guest_monitor_check():
+    """The guest monitor (`[machine] monitor = "observe"`, lima), read from the guest's OWN report
+    over ssh as the VM user — never from the host's memory of what it recorded. Silent when the
+    option is off. Never red: the monitor only observes, so "not observing" is a warning."""
+    if _BACKEND.name != "lima" or config.machine_monitor() == "off":
+        return
+    from . import monitor  # only this row needs it
+
+    if _BACKEND.state(PODMAN_MACHINE) != "running":
+        yield _result(None, "guest monitor", "", "the VM isn't running — `fy up` starts it")
+        return
+    yield ("running", "guest monitor", "")  # ssh into the guest — let a live UI spin
+    report = monitor.guest_report(_BACKEND, PODMAN_MACHINE)
+    if report is None:
+        yield _result(None, "guest monitor", "", "can't reach the VM over ssh to read its report")
+        return
+    problem = report.problem(monitor.render(True)[1])
+    yield _result(
+        None if problem else True,
+        "guest monitor",
+        f"observing (Tetragon {monitor.TETRAGON_VERSION}, {monitor.POLICY} loaded)",
+        f"NOT observing — {problem}; `fy machine stop && fy up` re-provisions it",
     )
 
 

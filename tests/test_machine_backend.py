@@ -515,6 +515,31 @@ def test_lima_provision_id_reads_the_marker_from_the_stored_config(monkeypatch, 
     assert mb.LimaBackend().provision_id("nope") == ""  # no config → nothing recorded
 
 
+def test_lima_provision_id_reads_each_marker_separately(monkeypatch, tmp_path):
+    # Two foldyard boot scripts share lima.yaml — the wall/sudo one and the guest monitor's — and
+    # each id is read by its own marker, so recording one never reads as the other.
+    inst = tmp_path / ".lima" / "acme"
+    inst.mkdir(parents=True)
+    (inst / "lima.yaml").write_text(
+        "provision:\n- mode: system\n  script: |\n    #!/bin/bash\n    # fy-provision abc123\n"
+        "- mode: system\n  script: |\n    #!/bin/bash\n    # fy-monitor def456\n"
+    )
+    monkeypatch.setattr(mb.Path, "home", staticmethod(lambda: tmp_path))
+    assert mb.LimaBackend().provision_id("acme") == "abc123"
+    assert mb.LimaBackend().provision_id("acme", "# fy-monitor ") == "def456"
+
+
+def test_lima_set_provision_replaces_only_its_own_markers_entry(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(mb.subprocess, "run", lambda cmd, *a, **k: seen.update(cmd=cmd) or _Proc(0))
+    script = "#!/bin/bash\n# fy-monitor def456\n"
+    assert mb.LimaBackend().set_provision("acme", script, "# fy-monitor ") is True
+    expr = seen["cmd"][seen["cmd"].index("--set") + 1]
+    # the select drops entries carrying THIS marker only — the wall/sudo script is kept
+    assert 'test("# fy-monitor ") | not' in expr
+    assert "fy-provision" not in expr
+
+
 def test_backends_without_a_provisionable_guest_record_nothing():
     for be in (mb.get_backend("podman"),):
         assert be.provision_id("x") == ""

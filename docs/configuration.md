@@ -243,6 +243,21 @@ disk_gib = 60
     webpack `watchOptions.poll`). Edits made in the box work normally.
   - `fy verify` in the box adds a row checking the kernel it runs on; its VM mount audit reads
     `N/A` there, so run `fy verify` on your computer for that.
+- **`monitor`** — `"observe"` runs a guest monitor: a root eBPF collector
+  ([Tetragon](https://tetragon.io/)) in the VM that records what processes start, which
+  connections they open and which selected files they touch, in every container and in the VM
+  itself. It records; it blocks nothing. Default: `"off"`; any other value is an error. Lima only
+  (preflight enforces it). Env: `MACHINE_MONITOR`.
+  - It is installed by a second root boot script, so changing it means `fy machine stop && fy up`.
+    `fy up` downloads a pinned, checksummed Tetragon release on your computer and copies it into
+    the VM; the VM checks the checksum again as root before installing it. Nothing comes from the
+    checkout.
+  - The box's user can't stop it, change its policy or read its log.
+  - `fy doctor` shows whether it is running, and why not if it isn't. If the monitor fails, `fy up`
+    warns and carries on: it only observes.
+  - The events stay in the VM for now (`/var/log/tetragon/`, rotated at 10 MB × 5). Copying them to
+    your computer and labelling each with its container and worktree comes next
+    ([ADR-0031](./adrs/0031-a-root-collector-in-the-guest.md)).
 - **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`. Same rule as
   `[project].name`.
 - **`cpus`** / **`memory_mib`** / **`disk_gib`** — sizing at first creation. Defaults: `4` /
@@ -829,7 +844,7 @@ Per-key overrides are listed with their keys above. The globals:
 | `WORKTREE` | The active worktree; empty = the main checkout. Set in the box; inferred from the working directory on your computer. |
 | `WT_OFFSET` | Worktree port offset, bypassing pins and the hash. |
 | `PODMAN_MACHINE` | The VM name. |
-| `MACHINE_BACKEND` / `MACHINE_VMTYPE` / `MACHINE_FIREWALL` / `MACHINE_HOST_FIREWALL` / `MACHINE_RUNTIME` / `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK` | `[machine]` overrides. |
+| `MACHINE_BACKEND` / `MACHINE_VMTYPE` / `MACHINE_FIREWALL` / `MACHINE_HOST_FIREWALL` / `MACHINE_RUNTIME` / `MACHINE_MONITOR` / `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK` | `[machine]` overrides. |
 | `FY_PROXY_PORT` | The proxy's base port, bypassing the port-range registry. |
 | `GCP_MINTER_PORT` | The gcp token service's base port, likewise. |
 | `FY_HOST_ALIAS` | The address containers use to reach daemons on your computer — for a customised Lima network with a different host gateway. |

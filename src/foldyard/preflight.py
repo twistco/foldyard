@@ -150,6 +150,15 @@ def issues() -> list[str]:
                 "    goes through the proxy on your computer, or drop `firewall`."
             )
 
+    # 7b. The guest monitor is provisioned by the same root boot script mechanism as the wall,
+    #     which only lima offers.
+    if config.machine_monitor() != "off" and backend_name != "lima":
+        out.append(
+            f'✗ [machine] monitor = "{config.machine_monitor()}" needs the lima backend, but\n'
+            f"    backend = '{backend_name}'. Set [machine] backend = \"lima\" (the monitor is a\n"
+            "    root service provisioned into the lima VM at boot), or drop `monitor`."
+        )
+
     # 8. The host-side wall is the tier ABOVE the guest wall (same band, enforced where the guest
     #    has no reach), so it needs `wall` — and a host that can enforce it: nftables + cgroup v2
     #    (Linux). Asked for and undeliverable is a hard stop, never a silent downgrade.

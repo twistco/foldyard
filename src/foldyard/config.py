@@ -1084,6 +1084,28 @@ def machine_runtime() -> str:
     return name
 
 
+_MACHINE_MONITORS = ("off", "observe")
+
+
+def machine_monitor() -> str:
+    """``[machine].monitor`` — the guest monitor (:mod:`foldyard.monitor`, ADR-0031): ``"off"``
+    (the default) or ``"observe"``, a root eBPF collector (Tetragon) provisioned into the lima VM
+    at boot that RECORDS process, connection and selected file activity and enforces nothing.
+    Only the levels foldyard knows how to provision are accepted — never a collector, policy or
+    command from config (ADR-0023). Changing it re-provisions at boot (``fy machine stop && fy
+    up``). ``MACHINE_MONITOR`` env wins."""
+    raw = os.environ.get("MACHINE_MONITOR")
+    if raw is None:
+        raw = _table("machine").get("monitor", "off")
+    level = str(raw or "off").strip().lower()
+    if level not in _MACHINE_MONITORS:
+        raise SystemExit(
+            f'✗ [machine].monitor must be "observe" or "off" (the default), not {level!r} — it '
+            "names a monitoring level foldyard provisions, never a collector or a policy."
+        )
+    return level
+
+
 # Lima's documented guest→host address: the user-mode network's host gateway, which the usernet
 # forwards to the host (the same trick gvproxy plays with host.containers.internal, different
 # constant). Lima also writes it into the guest's /etc/hosts as `host.lima.internal`, but that

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from foldyard import machine, supervisor
+from foldyard.machine_backend import PROVISION_MARKER
 
 
 class FakeBackend:
@@ -40,6 +41,7 @@ class FakeBackend:
         self._stops = True
         # The boot-provisioning id the backend's stored config carries ("" = none recorded).
         self._provision = ""
+        self._monitor = ""  # the guest monitor's recording, under its own marker
         self.calls: list[str] = []
 
     def supports_concurrent(self):
@@ -94,13 +96,19 @@ class FakeBackend:
     def ssh_target(self, name):
         return None  # no VM to ssh into: guestlog skips, sandbox is patched where wanted
 
-    def provision_id(self, name):
-        return self._provision
+    def provision_id(self, name, marker=PROVISION_MARKER):
+        return self._provision if marker == PROVISION_MARKER else self._monitor
 
-    def set_provision(self, name, script):
+    def set_provision(self, name, script, marker=PROVISION_MARKER):
         # the id rides in the script's marker line, as it does in the real lima.yaml
-        self._provision = script.splitlines()[1].split()[-1]
-        self.calls.append(f"provision:{self._provision}")
+        assert script.splitlines()[1].startswith(marker)
+        ident = script.splitlines()[1].split()[-1]
+        if marker == PROVISION_MARKER:
+            self._provision = ident
+            self.calls.append(f"provision:{ident}")
+        else:
+            self._monitor = ident
+            self.calls.append(f"monitor:{ident}")
         return True
 
     # the host-side wall's input: the VM's host processes

@@ -146,6 +146,19 @@ def test_wall_on_non_lima_backend_blocks(monkeypatch):
     assert any("[machine] firewall" in p and "lima" in p for p in preflight.issues())
 
 
+def test_monitor_on_non_lima_backend_blocks(monkeypatch):
+    # The guest monitor is a root boot script, which only lima's guest takes.
+    _wire(monkeypatch, backend="podman", proxy_enabled=True)
+    monkeypatch.setattr(preflight.config, "machine_monitor", lambda: "observe")
+    assert any("[machine] monitor" in p and "lima" in p for p in preflight.issues())
+
+
+def test_monitor_on_lima_is_clean(monkeypatch):
+    _wire(monkeypatch, backend="lima", proxy_enabled=True)
+    monkeypatch.setattr(preflight.config, "machine_monitor", lambda: "observe")
+    assert not any("monitor" in p for p in preflight.issues())
+
+
 def test_wall_without_proxy_routing_blocks(monkeypatch):
     # wall=true + nothing routing through the proxy = an airgapped box (default-deny, no way out).
     _wire(monkeypatch, backend="lima", wall=True)

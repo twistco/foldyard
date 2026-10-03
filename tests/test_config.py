@@ -527,6 +527,28 @@ def test_machine_runtime_rejects_anything_but_the_known_postures(fresh_config, t
         config.machine_runtime()
 
 
+def test_machine_monitor_defaults_off_and_env_wins(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text("[machine]\n")
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_MONITOR=None)
+    assert config.machine_monitor() == "off"
+    (tmp_path / "foldyard.toml").write_text('[machine]\nmonitor = "Observe"\n')
+    fresh_config(MACHINE_MONITOR=None)
+    assert config.machine_monitor() == "observe"
+    fresh_config(MACHINE_MONITOR="off")
+    assert config.machine_monitor() == "off"
+
+
+def test_machine_monitor_rejects_anything_but_the_known_levels(fresh_config, tmp_path):
+    # A level foldyard provisions — never a collector, a policy file or a command (ADR-0023).
+    (tmp_path / "foldyard.toml").write_text('[machine]\nmonitor = "./my-policy.yaml"\n')
+    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_MONITOR=None)
+    with pytest.raises(SystemExit):
+        config.machine_monitor()
+    fresh_config(MACHINE_MONITOR="enforce")  # not yet: enforcement is a later, separate decision
+    with pytest.raises(SystemExit):
+        config.machine_monitor()
+
+
 # ── box_image (consumer dockerfile vs the packaged generic box; ADR-0014) ────────────
 
 

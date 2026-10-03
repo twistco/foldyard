@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, guestlog, hostwall, podman_desktop, sandbox
+from . import config, guestlog, hostwall, monitor, podman_desktop, sandbox
 from .machine_backend import default_unavailable_block, get_backend
 
 MACHINE = config.machine_name()
@@ -420,6 +420,62 @@ def _record_provisioning() -> None:
         raise SystemExit(1)
 
 
+# ── the guest monitor's boot script: a SECOND recording, under its own marker (ADR-0031) ──
+#
+# Recorded beside the wall/sudo script, never inside it: that script's id covers every byte, so
+# folding the monitor in would make every existing VM stale the day it shipped. A VM that never
+# had the monitor on records nothing; one that had it on and turned it off keeps an `off`
+# rendering, which removes the install at boot. Stale-while-running is refused like the wall's
+# (it applies at boot, as root); what the running guest then does with it is a WARNING — the
+# monitor only observes.
+
+
+def _monitor_recording() -> tuple[str, str] | None:
+    """``(script, id)`` the current config wants recorded, or ``None`` when nothing should be."""
+    if BACKEND.name != "lima":
+        return None
+    on = monitor.wanted()
+    if not on and not BACKEND.provision_id(MACHINE, monitor.MARKER):
+        return None
+    return monitor.render(on)
+
+
+def _record_monitor() -> None:
+    want = _monitor_recording()
+    if want is None:
+        return
+    script, ident = want
+    if BACKEND.provision_id(MACHINE, monitor.MARKER) == ident:
+        return
+    level = config.machine_monitor()
+    if state() == "running":
+        _err(f"✗ '{MACHINE}' is running with STALE guest-monitor provisioning ([machine] monitor")
+        _err(f'  = "{level}", or a new monitor release). It applies at boot, as root, so restart:')
+        _err("      fy machine stop && fy up")
+        raise SystemExit(1)
+    _err(f"▶ recording the guest monitor's boot provisioning for '{MACHINE}' ({level})…")
+    if not BACKEND.set_provision(MACHINE, script, monitor.MARKER):
+        _err(f"✗ recording the guest monitor into '{MACHINE}' failed (`limactl edit`).")
+        raise SystemExit(1)
+
+
+def _check_monitor() -> None:
+    """After the guest's own checks: deliver the release if the guest waits for one, and say so
+    when the monitor isn't observing. Never aborts."""
+    if BACKEND.name != "lima" or not monitor.wanted():
+        return
+    want = _monitor_recording()
+    if want is None:
+        return
+    problem = monitor.ensure(BACKEND, MACHINE, want[1])
+    if problem:
+        _err(f"⚠ the guest monitor is NOT observing: {problem}.")
+        _err(f"  Its boot log:   limactl shell {MACHINE} cat /run/fy-monitor/boot.log")
+        _err("  `fy up` carries on — the monitor only observes; `fy doctor` keeps the row red.")
+    else:
+        _err(f"✓ guest monitor: Tetragon {monitor.TETRAGON_VERSION}, {monitor.POLICY} loaded")
+
+
 def _check_guest_provisioning() -> None:
     """After a boot, and on the steady-state path: the guest's own report must match what the
     config wants. One `limactl shell` per `fy up` — correctness over speed: a VM reset behind
@@ -487,6 +543,7 @@ def ensure(main: Path, wt_root: Path) -> None:
     # Boot provisioning (the sudo grant + the wall) is recorded BEFORE the VM boots — it is
     # what runs as root at boot — and a running VM whose recording is stale is refused here.
     _record_provisioning()
+    _record_monitor()
     _pin_ssh_port()
     if state() != "running":
         if not _start():
@@ -504,6 +561,7 @@ def ensure(main: Path, wt_root: Path) -> None:
     # Housekeeping every VM wants (journal cap, API log level): over ssh, best-effort, before the
     # sandbox so its service restarts already see the drop-in.
     guestlog.ensure(BACKEND, MACHINE)
+    _check_monitor()
     # The gVisor posture is user-level in the guest (no root, so not the boot script): provisioned
     # over the backend's ssh once the VM is up and its root-side provisioning is verified.
     if sandbox.wanted():
@@ -707,6 +765,7 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
         print(f"✗ creating {BACKEND.name} machine '{MACHINE}' failed.")
         return 1
     _record_provisioning()  # the fresh VM is stopped: record before its first boot
+    _record_monitor()
     if not _start():  # one-VM-at-a-time aware on non-concurrent backends
         return 1
     _check_host_wall()
