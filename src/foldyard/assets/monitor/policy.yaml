@@ -1,0 +1,52 @@
+# foldyard's guest-monitor policy (ADR-0031), on top of Tetragon's built-in process
+# exec/exit events. Packaged and fixed: never read from config or the checkout. Observe only —
+# no selector carries an action, so nothing here can block. An invalid policy stops Tetragon
+# from starting at all (docs/ebpf-monitoring-spike.md, finding 3): the host-tier e2e loads it.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: fy-observe
+spec:
+  kprobes:
+  # Outbound TCP connection attempts, with the process that made them. A box connection shows
+  # twice: the container process, then pasta (rootless networking) making the real one.
+  - call: tcp_connect
+    syscall: false
+    args:
+    - index: 0
+      type: sock
+  # Access to selected files: credentials, the guest's root config, the monitor's own state.
+  # Paths are as the process sees them (inside a container: the container's own paths).
+  - call: security_file_permission
+    syscall: false
+    return: true
+    args:
+    - index: 0
+      type: file
+    - index: 1
+      type: int
+    returnArg:
+      index: 0
+      type: int
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/shadow
+        - /etc/sudoers
+        - /etc/tetragon
+        - /var/lib/fy-monitor
+        - /root/.ssh
+    - matchArgs:
+      - index: 0
+        operator: Postfix
+        values:
+        - /.ssh/authorized_keys
+        - /.ssh/id_rsa
+        - /.ssh/id_ed25519
+        - /.aws/credentials
+        - /.config/gcloud/credentials.db
+        - /.docker/config.json
+        - /.git-credentials
+        - /.netrc
