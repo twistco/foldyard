@@ -1,0 +1,32 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: fy-spike
+spec:
+  kprobes:
+  # connection attempts (TCP), with process context
+  - call: tcp_connect
+    syscall: false
+    args:
+    - index: 0
+      type: sock
+  # selected file access, attempt + outcome
+  - call: security_file_permission
+    syscall: false
+    return: true
+    args:
+    - index: 0
+      type: file
+    - index: 1
+      type: int
+    returnArg:
+      index: 0
+      type: int
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/passwd
+        - /etc/shadow
+        - /tmp/fy-secret
