@@ -1207,6 +1207,67 @@ def test_a_box_head_move_waits_out_an_operation_the_host_started(rig, sub):
     assert rig.box(*sub).returncode == 0
 
 
+def _leftover_autostash(rig, op: str, *also: str) -> Path:
+    """What a host `pull --rebase --autostash` leaves when it stops before its rebase begins (its
+    `reset --hard` after `stash create` failed — reproduced on git 2.54, both backends): the state
+    dir holding nothing but `autostash`, the stash commit's id. ``also`` adds the files a REAL
+    rebase has by then (merge: `interactive`, `head-name`…; apply: `git am`'s `next`, `last`…)."""
+    d = rig.gitdir / op
+    d.mkdir()
+    (d / "autostash").write_text("77f58597570c81b8ea6c8dffcced324fa134dfcf")
+    for name in also:
+        (d / name).write_text("")
+    return d
+
+
+@pytest.mark.parametrize("hooks", ["armed", "not installed"])
+@pytest.mark.parametrize("op", ["rebase-merge", "rebase-apply"])
+def test_a_leftover_autostash_is_named_not_waited_for(rig, op, hooks):
+    """The leftover blocks the host's every `git pull` ("already a rebase-merge directory") and
+    `rebase --abort` can't clear it (no head-name) — so "run it again once it's done" had an
+    agent retrying forever. Still refused (a rebase that is just STARTING looks the same for a
+    moment), but named, with where the recovery lives: the operator's computer, not the box.
+    Without the ref hook (not installed), the check before git runs is the only one."""
+    if hooks == "not installed":
+        (rig.hooks / "reference-transaction").unlink()
+    rig.box("status", "--porcelain")
+    head = rig.head()
+    _leftover_autostash(rig, op)
+    r = rig.box("commit", "-q", "--allow-empty", "-m", "box")
+    assert r.returncode != 0 and rig.head() == head
+    assert "autostash" in r.stderr and "not a rebase in progress" in r.stderr
+    assert "fy doctor" in r.stderr and "not in this box" in r.stderr
+    assert "once it's done" not in r.stderr
+
+
+@pytest.mark.parametrize(
+    ("op", "also"), [("rebase-merge", "interactive"), ("rebase-apply", "next")]
+)
+def test_a_rebase_under_way_with_an_autostash_is_still_one_in_progress(rig, op, also):
+    # The first file a real rebase writes after its autostash: from then on it IS under way.
+    rig.box("status", "--porcelain")
+    _leftover_autostash(rig, op, also)
+    r = rig.box("commit", "-q", "--allow-empty", "-m", "box")
+    assert r.returncode != 0 and "in the middle of" in r.stderr
+    assert "fy doctor" not in r.stderr
+
+
+def test_a_leftover_autostash_that_appears_mid_commit_is_named_under_the_lock(rig):
+    # The ref check's own refusal (the host's pull started after the shim's first look).
+    rig.box("status", "--porcelain")
+    head = rig.head()
+    d = rig.gitdir / "rebase-merge"
+    hooks = rig.gitdir / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text(
+        f'#!/bin/sh\nmkdir "{d}" && printf %s {"7" * 40} >"{d}/autostash"\n'
+    )
+    (hooks / "pre-commit").chmod(0o755)
+    r = rig.box("commit", "-q", "--allow-empty", "-m", "box")
+    assert r.returncode != 0 and rig.head() == head
+    assert "not a rebase in progress" in r.stderr and "fy doctor" in r.stderr
+
+
 def test_an_operation_the_host_just_finished_does_not_hold_the_box_back(rig, tmp_path):
     # The host's rebase is over, but over the mount its state can read as present for a while:
     # re-asked (the fake `ln` plays the fresh lookup that finds it gone) before it counts.
