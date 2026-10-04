@@ -43,7 +43,7 @@ def test_mnt_inode_reads_the_process_namespace_of_any_event_kind():
     assert relay.mnt_inode({"process_exec": {"process": {}}}) is None  # ns not enabled
 
 
-def _cgroup(root: Path, rel: str, pids: list[int] = ()) -> None:
+def _cgroup(root: Path, rel: str, pids: tuple[int, ...] = ()) -> None:
     d = root / rel
     d.mkdir(parents=True, exist_ok=True)
     (d / "cgroup.procs").write_text("".join(f"{p}\n" for p in pids))
@@ -61,13 +61,13 @@ def tree(tmp_path):
     sub-cgroup), a sibling, a FORGER whose sub-cgroup is named `libpod-<box id>.scope`, and one
     under a client-chosen --cgroup-parent slice."""
     user, proc = tmp_path / "user", tmp_path / "proc"
-    _cgroup(user, f"user.slice/libpod-{BOX}.scope/container", [10, 11])
-    _cgroup(user, f"user.slice/libpod-{SIB}.scope/container", [20])
+    _cgroup(user, f"user.slice/libpod-{BOX}.scope/container", (10, 11))
+    _cgroup(user, f"user.slice/libpod-{SIB}.scope/container", (20,))
     forger = "c" * 64
-    _cgroup(user, f"user.slice/libpod-{forger}.scope/libpod-{BOX}.scope", [30])
+    _cgroup(user, f"user.slice/libpod-{forger}.scope/libpod-{BOX}.scope", (30,))
     other = "d" * 64
-    _cgroup(user, f"fy.slice/fy-forge.slice/libpod-{other}.scope/container", [40])
-    _cgroup(user, "app.slice/podman.service", [50])  # not a container
+    _cgroup(user, f"fy.slice/fy-forge.slice/libpod-{other}.scope/container", (40,))
+    _cgroup(user, "app.slice/podman.service", (50,))  # not a container
     for pid, inode in ((1, 100), (10, 200), (11, 200), (20, 300), (30, 400), (40, 500), (50, 100)):
         _proc(proc, pid, inode)
     return user, proc, forger, other
