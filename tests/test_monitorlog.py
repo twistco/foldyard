@@ -193,6 +193,37 @@ def test_pull_once_stores_records_describes_new_containers_once_and_resumes(pull
     assert cur.pulled == 6.0 and cur.error == "" and cur.last == {BOOT: 3}
 
 
+def test_an_unreachable_engine_is_asked_again_never_recorded_as_gone(pulled, monkeypatch):
+    state, _fetched, asked, tmp = pulled
+    answers = iter([None, {BOX: {"name": "fyex-devbox", "project": "", "service": ""}}])
+    monkeypatch.setattr(
+        monitorlog, "_engine_describe", lambda ids: asked.append(ids) or next(answers)
+    )
+    state["out"] = chunk(f"{DIR}/000000000000.jsonl", 0, line(0, snap({200: [BOX]})))
+    monitorlog.pull_once(_Backend(), "fymon", KEY)
+    store = tmp / "logs" / "monitor.jsonl"
+    assert '"engine"' not in store.read_text()  # nothing recorded for an engine that wasn't asked
+    state["out"] = b""
+    monitorlog.pull_once(_Backend(), "fymon", KEY)  # …and asked again on the next pull
+    assert asked == [[BOX], [BOX]]
+    assert '"fyex-devbox"' in store.read_text()
+
+
+def test_engine_describe_treats_an_empty_listing_as_the_wrong_engine(monkeypatch):
+    from foldyard import devmode
+
+    monkeypatch.setattr(devmode, "_engine_env", lambda: {})
+    ok = subprocess.CompletedProcess([], 0, "", "")
+    monkeypatch.setattr(monitorlog.subprocess, "run", lambda *a, **k: ok)
+    assert monitorlog._engine_describe([BOX]) is None
+    listed = subprocess.CompletedProcess([], 0, f"{SIB}\tfyex-api-1\t{{}}\n", "")
+    monkeypatch.setattr(monitorlog.subprocess, "run", lambda *a, **k: listed)
+    assert monitorlog._engine_describe([BOX, SIB]) == {
+        BOX: None,  # really gone: the engine answered, and doesn't have it
+        SIB: {"name": "fyex-api-1", "project": "", "service": ""},
+    }
+
+
 def test_pull_once_records_a_failure_on_the_cursor(pulled, monkeypatch):
     def boom(target, script):
         raise OSError("ssh: connect to host 127.0.0.1 port 22: Connection refused")

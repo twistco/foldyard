@@ -62,6 +62,7 @@ class Cursor:
     off: int = 0
     last: dict[str, int] = field(default_factory=dict)  # boot -> last seq stored
     described: list[str] = field(default_factory=list)  # container ids already asked about
+    undescribed: list[str] = field(default_factory=list)  # seen, the engine not yet reachable
     pulled: float = 0.0  # last successful pull (host time)
     error: str = ""  # the last pull's failure, "" when it worked
     stored: int = 0
@@ -184,10 +185,15 @@ def _append(records: list[dict]) -> None:
             f.write(json.dumps(rec, separators=(",", ":")) + "\n")
 
 
-def _engine_describe(ids: list[str]) -> dict[str, dict | None]:
+def _engine_describe(ids: list[str]) -> dict[str, dict | None] | None:
     """What the engine says about ``ids``: name + compose project/service — CLAIMS, whatever the
-    creator set. ``None`` for an id the engine no longer has (a short-lived container already
-    gone: the box's own business, in the operator's reading)."""
+    creator set. An id the engine no longer has maps to ``None`` (a short-lived container already
+    gone: the box's own business, in the operator's reading).
+
+    ``None`` overall when the engine couldn't be asked: the call failed, or it listed NO
+    containers while the guest's own snapshot shows ``ids`` running — that is the wrong engine
+    (an unresolved socket answers from the host's own empty store), never "all gone". Recording
+    that as gone would stick: described ids aren't asked about again (seen live, 2026-10-04)."""
     from . import devmode  # import-light module; only the pull needs the engine env
 
     try:
@@ -197,9 +203,9 @@ def _engine_describe(ids: list[str]) -> dict[str, dict | None]:
             capture_output=True, text=True, timeout=15, env=devmode._engine_env(),
         )  # fmt: skip
     except (OSError, subprocess.SubprocessError):
-        return {}
+        return None
     if res.returncode != 0:
-        return {}
+        return None
     known: dict[str, dict] = {}
     for line in res.stdout.splitlines():
         cid, _, rest = line.partition("\t")
@@ -210,6 +216,8 @@ def _engine_describe(ids: list[str]) -> dict[str, dict | None]:
             "project": labels.get("com.docker.compose.project", ""),
             "service": labels.get("com.docker.compose.service", ""),
         }
+    if not known:
+        return None
     return {cid: known.get(cid) for cid in ids}
 
 
@@ -251,13 +259,17 @@ def pull_once(
         t = now()
         # the relay keys its HMAC with the key file's text (the hex string), so the host does too
         records = ingest(cur, key.encode(), chunks, t)
-        new_ids = sorted(
-            {cid for r in records if r.get("k") == "scopes" for ids in r["map"].values()
-             for cid in ids} - set(cur.described)
-        )  # fmt: skip
+        seen = {cid for r in records if r.get("k") == "scopes" for ids in r["map"].values()
+                for cid in ids}  # fmt: skip
+        new_ids = sorted((seen | set(cur.undescribed)) - set(cur.described))
         if new_ids:
-            records.append({"k": "engine", "recv": t, "containers": _engine_describe(new_ids)})
-            cur.described = (cur.described + new_ids)[-2000:]
+            described = _engine_describe(new_ids)
+            if described is None:  # unreachable: ask again on the next pull, snapshot or not
+                cur.undescribed = new_ids[-2000:]
+            else:
+                records.append({"k": "engine", "recv": t, "containers": described})
+                cur.described = (cur.described + new_ids)[-2000:]
+                cur.undescribed = []
         if records:
             _append(records)
         cur.stored += len(records)
