@@ -250,6 +250,12 @@ def main(uid: int) -> None:
 
     take("start")
     while True:
+        # The timer is checked on EVERY pass, not only when the export runs dry: under steady load
+        # the loop never idles, and a relay that only snapshotted when idle shipped none at all —
+        # leaving the host nothing to attribute with (seen live, 2026-10-04).
+        if time.monotonic() - last_snap >= SNAPSHOT_EVERY:
+            take("timer")
+            tried.clear()
         if pending and time.monotonic() - last_snap >= NEW_INODE_MIN_GAP:
             take("new " + " ".join(str(i) for i in sorted(pending)))
             tried.update(pending)  # one look each: an inode no scope owns stays unmapped
@@ -263,9 +269,6 @@ def main(uid: int) -> None:
         if not line:
             save()
             _state(f"running seq {spool.seq}")
-            if time.monotonic() - last_snap >= SNAPSHOT_EVERY:
-                take("timer")
-                tried.clear()
             try:
                 if os.stat(SRC).st_ino != ino:  # rotated: the old fd is drained, follow the new
                     src.close()

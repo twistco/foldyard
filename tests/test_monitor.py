@@ -123,6 +123,18 @@ def test_the_relay_key_is_created_once_private_and_stable(monkeypatch, tmp_path)
     assert monitor.relay_key() != key  # a damaged key is replaced, never used
 
 
+def test_the_policy_never_watches_the_monitors_own_traffic():
+    # The relay writes the spool and the host's pull reads it: a watched spool records the
+    # monitor's own I/O, which it then spools — a feedback loop (~68,000 events in minutes, live).
+    policy = monitor._asset("policy.yaml").read_text()
+    prefixes = re.findall(r"^\s+- (/\S+)$", policy, re.M)
+    assert "/var/lib/fy-monitor/inbox" in prefixes
+    for watched in prefixes:
+        for own in ("/var/lib/fy-monitor/spool/", "/var/lib/fy-monitor/relay.pos",
+                    "/var/log/tetragon/tetragon.log", "/run/fy-monitor/relay"):  # fmt: skip
+            assert not own.startswith(watched), (watched, own)
+
+
 def test_the_policy_never_enforces():
     # observe means observe: no selector may carry an action (Sigkill, Override, NotifyEnforcer…)
     policy = monitor._asset("policy.yaml").read_text()

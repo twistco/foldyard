@@ -36,7 +36,11 @@ spec:
         - /etc/shadow
         - /etc/sudoers
         - /etc/tetragon
-        - /var/lib/fy-monitor
+        - /etc/fy-monitor
+        # the INBOX only — never the spool: the relay writes it and the host's pull reads it, so
+        # watching it records the monitor's own traffic, which it then spools, which is read…
+        # (a feedback loop: ~68,000 events in minutes, seen live 2026-10-04)
+        - /var/lib/fy-monitor/inbox
         - /root/.ssh
     - matchArgs:
       - index: 0
