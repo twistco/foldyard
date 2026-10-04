@@ -22,6 +22,15 @@ from foldyard.machine_backend import PROVISION_MARKER, SshTarget
 fake = test_machine.fake
 lima_env = test_machine.lima_env
 
+KEY = "ab" * 32
+
+
+@pytest.fixture(autouse=True)
+def fixed_relay_key(monkeypatch):
+    """render(True) reads (and on first use creates) the host's relay key; pin it here."""
+    monkeypatch.setattr(monitor, "relay_key", lambda: KEY)
+
+
 # ── the boot script ─────────────────────────────────────────────────────────────────────
 
 
@@ -48,7 +57,7 @@ def test_boot_script_uses_only_limas_template_fields(on):
     # Lima renders every provision script as a Go template at each start: a stray `{{` (in the
     # helper, the policy, a unit) breaks the render and the guest boots without the monitor.
     script, _ = monitor.render(on)
-    assert set(re.findall(r"\{\{.*?\}\}", script)) <= {"{{.User}}"}
+    assert set(re.findall(r"\{\{.*?\}\}", script)) <= {"{{.User}}", "{{.UID}}"}
     assert "LIMA_CIDATA" not in script
 
 
@@ -90,6 +99,30 @@ def test_observe_script_carries_the_pinned_release_and_the_findings():
     assert 'put rejected "checksum mismatch' in script
 
 
+def test_observe_script_installs_the_relay_with_a_root_only_key():
+    script, _ = monitor.render(True)
+    assert "def snapshot(" in script  # relay.py, embedded
+    assert f"printf '%s\\n' '{KEY}' >/etc/fy-monitor/relay.key" in script
+    assert "(umask 077 &&" in script and "install -d -m 0700 /etc/fy-monitor" in script
+    # its one argument is the VM user's uid, from Lima's own template field
+    assert "uid='{{.UID}}'" in script
+    assert "fy-monitor-relay $uid" in script
+    # the off rendering carries no key
+    assert KEY not in monitor.render(False)[0]
+
+
+def test_the_relay_key_is_created_once_private_and_stable(monkeypatch, tmp_path):
+    monkeypatch.undo()  # this test exercises the real relay_key
+    monkeypatch.setattr(monitor.config, "state_dir", lambda: tmp_path)
+    key = monitor.relay_key()
+    path = tmp_path / "monitor-relay.key"
+    assert len(key) == 64 and int(key, 16) >= 0
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    assert monitor.relay_key() == key  # stable: it is in the provisioning id
+    path.write_text("truncated")
+    assert monitor.relay_key() != key  # a damaged key is replaced, never used
+
+
 def test_the_policy_never_enforces():
     # observe means observe: no selector may carry an action (Sigkill, Override, NotifyEnforcer…)
     policy = monitor._asset("policy.yaml").read_text()
@@ -112,7 +145,8 @@ def test_no_recursive_removal_reaches_a_mount(on):
 def test_off_script_removes_the_install():
     script, ident = monitor.render(False)
     assert "MODE='off'" in script
-    assert "systemctl disable --now tetragon.service" in script
+    assert "systemctl disable --now fy-monitor-relay.service tetragon.service" in script
+    assert "rm -rf /etc/fy-monitor" in script  # the relay key goes with it
     assert ident != monitor.render(True)[1]
 
 
@@ -199,6 +233,7 @@ GOOD = {
     "artifact": f"installed {monitor.TETRAGON_VERSION}",
     "policy": f"loaded {monitor.POLICY}",
     "service": "active",
+    "relay": "active",
 }
 
 
@@ -212,6 +247,7 @@ GOOD = {
         ({"artifact": "rejected: checksum mismatch"}, "checksum mismatch"),
         ({"service": "failed"}, "tetragon.service is failed"),
         ({"policy": "loading"}, "policy is loading"),
+        ({"relay": "failed"}, "relay (fy-monitor-relay.service) is failed"),
     ],
 )
 def test_report_problem(change, why):
@@ -234,10 +270,13 @@ class Guest:
             self.state.update(artifact=f"installed {monitor.TETRAGON_VERSION}", policy="loading")
             return subprocess.CompletedProcess([], 0, "", "")
         self.reads += 1
+        # ensure() waits on a real clock with sleep stubbed out: a loop that never converges
+        # would spin until its deadline — fail it here instead of hanging the suite
+        assert self.reads < 50, "monitor.ensure is polling a guest that will never settle"
         if self.reads > 2 and self.state["policy"] == "loading":
             self.state["policy"] = f"loaded {monitor.POLICY}"
         s = self.state
-        out = "\n".join([s["arch"], s["applied"], s["artifact"], s["policy"], s["service"]])
+        out = "\n".join(s[k] for k in ("arch", "applied", "artifact", "policy", "service", "relay"))
         return subprocess.CompletedProcess([], 0, out + "\n", "")
 
 
