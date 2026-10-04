@@ -182,6 +182,17 @@ def test_a_failure_retries_with_backoff_then_skips_and_counts(ran):
     assert st.last == [BOOT, 2] and st.dropped == 2 and st.delivered == 0
 
 
+def test_a_narrow_hook_skips_a_long_unwanted_backlog_in_one_round(ran, monkeypatch):
+    calls, _ = ran
+    monkeypatch.setattr(mh, "BATCH_MAX", 2)  # scans of 8 events
+    records = [snap(0), *[ev(i, inode=999) for i in range(1, 30)], ev(30), snap(31)]
+    events = monitorlog.attribute(records, "fyex")
+    hook = mh.Hook(name="ctr", command=("/bin/c",), who=("container",))
+    st = mh.HookState()
+    mh.deliver(hook, st, events, now=1)
+    assert [[e["seq"] for e in c["body"]["events"]] for c in calls] == [[30]]
+
+
 def test_a_url_hook_posts_json_with_its_headers(monkeypatch):
     sent = {}
 
