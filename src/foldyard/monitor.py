@@ -30,6 +30,7 @@ apply it is a visible warning (``fy up``, ``fy doctor``), never a reason to refu
 from __future__ import annotations
 
 import hashlib
+import secrets
 import shlex
 import subprocess
 import sys
@@ -69,6 +70,26 @@ def _asset(name: str) -> Path:
     return Path(__file__).resolve().parent / "assets" / "monitor" / name
 
 
+def relay_key() -> str:
+    """The key the guest relay signs its spool with and the host verifies it with: 32 random
+    bytes, hex, kept host-side (``<state dir>/monitor-relay.key``, 0600) and created on first use.
+    One per project, like the VM. It travels to the guest inside the recorded boot script, which
+    writes it root-only — so it is also in the provisioning id, and stays put across boots."""
+    path = config.state_dir() / "monitor-relay.key"
+    try:
+        key = path.read_text().strip()
+    except OSError:
+        key = ""
+    if len(key) != 64:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key = secrets.token_hex(32)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(key + "\n")
+        tmp.chmod(0o600)
+        tmp.replace(path)
+    return key
+
+
 def render(on: bool) -> tuple[str, str]:
     """The boot script for ``on`` (observe) or off, and its id — a hash of the rendered content,
     so a new release, policy or script reads as a different recording."""
@@ -77,6 +98,8 @@ def render(on: bool) -> tuple[str, str]:
         .read_text()
         .replace("@@MODE@@", "observe" if on else "off")
         .replace("@@HELPER@@", _asset("fy-monitor.sh").read_text().rstrip("\n"))
+        .replace("@@RELAY@@", _asset("relay.py").read_text().rstrip("\n"))
+        .replace("@@RELAY_KEY@@", relay_key() if on else "")
         .replace("@@POLICY@@", _asset("policy.yaml").read_text().rstrip("\n"))
         .replace("@@VERSION@@", TETRAGON_VERSION)
         .replace("@@SHA_X86_64@@", TETRAGON_SHA256["x86_64"])
@@ -138,6 +161,7 @@ class Report:
     artifact: str = ""
     policy: str = ""
     service: str = ""
+    relay: str = ""
 
     def problem(self, want_id: str) -> str:
         """``""`` when the monitor is observing as recorded, else why not, in one line."""
@@ -151,13 +175,16 @@ class Report:
             return f"tetragon.service is {self.service or 'unknown'}"
         if self.policy != f"loaded {POLICY}":
             return f"the {POLICY} policy is {self.policy or 'unknown'}"
+        if self.relay != "active":
+            return f"the relay (fy-monitor-relay.service) is {self.relay or 'unknown'}"
         return ""
 
 
 _REPORT = (
     "uname -m; for f in applied artifact policy; do "
     'echo "$(cat /run/fy-monitor/$f 2>/dev/null)"; done; '
-    "systemctl is-active tetragon.service 2>/dev/null || true"
+    "systemctl is-active tetragon.service 2>/dev/null || true; "
+    "systemctl is-active fy-monitor-relay.service 2>/dev/null || true"
 )
 
 
@@ -172,7 +199,7 @@ def guest_report(backend: SshBackend, name: str) -> Report | None:
         return None
     if res.returncode != 0:
         return None
-    lines = [*res.stdout.splitlines(), "", "", "", "", ""][:5]
+    lines = [*res.stdout.splitlines(), *[""] * 6][:6]
     return Report(*(line.strip() for line in lines))
 
 
@@ -215,9 +242,11 @@ def ensure(backend: SshBackend, name: str, want_id: str, *, wait: float = 600.0)
     deadline = time.monotonic() + wait
     while True:
         problem = report.problem(want_id)
-        settling = report.artifact.startswith(("awaiting", "installing")) or report.policy in (
-            "loading",
-            "not installed",
+        settling = (
+            report.artifact.startswith(("awaiting", "installing"))
+            or report.policy in ("loading", "not installed")
+            # the relay starts with Tetragon, and restarts every 5 s until its export exists
+            or report.relay in ("activating", "inactive", "")
         )
         if not problem or not settling or time.monotonic() >= deadline:
             return problem

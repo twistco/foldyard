@@ -14,18 +14,23 @@ chmod 0644 /run/fy-monitor/boot.log
 trap 'printf "%s\n" "applied @@ID@@" >/run/fy-monitor/applied; chmod 0644 /run/fy-monitor/applied' EXIT
 MODE='@@MODE@@'
 user='{{.User}}'
+uid='{{.UID}}'
 if [ -z "$user" ]; then
     user="$(awk '/NOPASSWD/ {print $1; exit}' /etc/sudoers.d/90-cloud-init-users 2>/dev/null)"
+fi
+if [ -z "$uid" ] && [ -n "$user" ]; then
+    uid="$(id -u "$user")"
 fi
 
 if [ "$MODE" = "off" ]; then
     # Turned off after having been on: remove what an earlier boot installed. The release stays
     # cached nowhere in the guest; turning it back on re-delivers it.
-    systemctl disable --now tetragon.service fy-monitor-install.path fy-monitor-report.service \
-        fy-monitor-install.service 2>/dev/null
+    systemctl disable --now fy-monitor-relay.service tetragon.service fy-monitor-install.path \
+        fy-monitor-report.service fy-monitor-install.service 2>/dev/null
     rm -f /etc/systemd/system/tetragon.service /etc/systemd/system/fy-monitor-*.service \
         /etc/systemd/system/fy-monitor-install.path /usr/local/libexec/fy-monitor \
-        /usr/local/bin/tetragon /usr/local/bin/tetra
+        /usr/local/libexec/fy-monitor-relay /usr/local/bin/tetragon /usr/local/bin/tetra
+    rm -rf /etc/fy-monitor
     # NOT /var/run/tetragon: Tetragon mounts the cgroup2 hierarchy at /var/run/tetragon/cgroup2,
     # and it is still mounted here (an earlier boot left the unit enabled, so it started before
     # this script ran) — `rm -rf` would descend into it and rmdir every empty system cgroup. It is
@@ -46,6 +51,18 @@ cat >/usr/local/libexec/fy-monitor.tmp <<'__FY_MONITOR_HELPER__'
 __FY_MONITOR_HELPER__
 chmod 0755 /usr/local/libexec/fy-monitor.tmp
 mv -f /usr/local/libexec/fy-monitor.tmp /usr/local/libexec/fy-monitor
+
+# 1b. The relay (assets/monitor/relay.py) and the key it signs the spool with. The key is the
+#     host's (it verifies each spool line with it) and root-only here: the VM user — the box's
+#     uid — reads the spool but can't forge a line of it. Written with the shell's own printf
+#     (a builtin: the key never appears in a process's arguments).
+cat >/usr/local/libexec/fy-monitor-relay.tmp <<'__FY_MONITOR_RELAY__'
+@@RELAY@@
+__FY_MONITOR_RELAY__
+chmod 0755 /usr/local/libexec/fy-monitor-relay.tmp
+mv -f /usr/local/libexec/fy-monitor-relay.tmp /usr/local/libexec/fy-monitor-relay
+install -d -m 0700 /etc/fy-monitor
+(umask 077 && printf '%s\n' '@@RELAY_KEY@@' >/etc/fy-monitor/relay.key)
 
 # 2. Tetragon's configuration and policy: replaced whole on every boot, so nothing an earlier
 #    boot (or anyone else) left in either directory survives.
@@ -118,6 +135,19 @@ After=tetragon.service
 Type=oneshot
 ExecStart=/usr/local/libexec/fy-monitor report
 __FY_UNIT__
+# The relay's one argument is the VM user's uid: podman's scopes live in its delegated subtree.
+printf '%s\n' \
+    '[Unit]' \
+    'Description=foldyard guest monitor: sign and spool events for the host' \
+    'After=tetragon.service' \
+    '' \
+    '[Service]' \
+    "ExecStart=/usr/bin/python3 /usr/local/libexec/fy-monitor-relay $uid" \
+    'Restart=always' \
+    'RestartSec=5' \
+    '' \
+    '[Install]' \
+    'WantedBy=multi-user.target' >/etc/systemd/system/fy-monitor-relay.service
 
 # 4. Apply: start Tetragon if this release is already installed, else wait for the host.
 FY_MONITOR_USER="$user" /usr/local/libexec/fy-monitor boot
