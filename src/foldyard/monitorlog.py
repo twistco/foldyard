@@ -39,7 +39,7 @@ from . import config
 from .sandbox import SshBackend, _ssh_argv
 
 SPOOL = "/var/lib/fy-monitor/spool"
-FETCH_BUDGET = 2_000_000  # bytes per pull; the rest comes on the next one
+FETCH_BUDGET = 8_000_000  # bytes per pull; a full one is followed by another at once
 STORE_BYTES = 32 << 20
 STORE_BACKUPS = 4
 PULL_EVERY = 5.0
@@ -67,6 +67,7 @@ class Cursor:
     stored: int = 0
     gaps: int = 0  # sequence numbers that never arrived
     forged: int = 0  # lines that failed the HMAC
+    behind: bool = False  # the last pull filled its budget: more is waiting
 
     @classmethod
     def load(cls) -> Cursor:
@@ -233,6 +234,7 @@ def pull_once(
         if target is None:
             raise OSError("no ssh route into the VM")
         chunks = parse_fetch(_fetch(target, fetch_script(cur.path, cur.off)))
+        cur.behind = sum(len(data) for _, _, data in chunks) >= FETCH_BUDGET
         t = now()
         # the relay keys its HMAC with the key file's text (the hex string), so the host does too
         records = ingest(cur, key.encode(), chunks, t)
@@ -263,14 +265,18 @@ def run(log: Callable[[str], None], stopping: Callable[[], bool]) -> None:
     said = ""
     while not stopping():
         msg = ""
+        behind = False
         try:
             if monitor.wanted() and machine.state() == "running":
                 pull_once(machine.BACKEND, machine.MACHINE, monitor.relay_key())
+                behind = Cursor.load().behind
         except Exception as e:
             msg = f"guest monitor: pulling events failed: {e}"
         if msg and msg != said:
             log(msg)
         said = msg
+        if behind:
+            continue  # catching up: the guest's spool is bounded, a backlog left there is lost
         for _ in range(int(PULL_EVERY / 0.2)):
             if stopping():
                 return
