@@ -63,6 +63,14 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   the registry's `verify_checks`.
 - `machine.py` / `machine_backend.py` — rootless dev-VM lifecycle behind the pluggable
   backend contract (podman | lima; see `docs/lima-backend-scope.md`).
+- `monitor.py` — the guest monitor (`[machine] monitor = "observe"`, ADR-0031): a root Tetragon
+  in the lima VM, provisioned by a SECOND recorded boot script under its own marker
+  (`# fy-monitor <id>`, beside `# fy-provision <id>`, so it never makes the wall script's id
+  stale); the pinned release is host-downloaded, streamed into a VM-user inbox and installed by a
+  root `.path` unit that re-checks the root-owned copy; the guest reports in `/run/fy-monitor/`.
+  Observe only — a monitor that isn't observing warns, never aborts. Attribution is NOT
+  Tetragon's container id (forgeable — docs/ebpf-monitoring-spike.md): mount-namespace inode vs
+  the outermost `libpod-<id>.scope`, which the relay (next slice) owns.
 - `guestlog.py` — the VM's log budget (`machine ensure`, every VM backend): journald cap as root
   (Lima: rendered into the boot script; podman machine: `sudo -n` over ssh) + the rootless API
   service's log level as a user drop-in over ssh. Best-effort — a warning, never an abort.
@@ -197,6 +205,11 @@ foldyard's surface splits by *where it can be validated*:
    - `test_worktree_e2e.py` — `fy worktree add` (registered, own branch, clean tree), its stack
      up beside main's, `remove`: containers + volumes gone, the bound-out transcript ARCHIVED
      before the tree is deleted, main untouched, the branch kept, local state dropped.
+   - `test_monitor_e2e.py` — `[machine] monitor = "observe"` via `fy up`: the release delivered
+     and installed, the packaged policy LOADED on the shipped kernel (an invalid one stops
+     Tetragon outright), and the box's uid unable to stop it, reach its socket, read its log,
+     write its policy dir or reach its health port; a junk inbox delivery rejected beside the
+     running install; `off` removes it at the next boot.
    - `test_wall_e2e.py` — `[machine] firewall` + `host_firewall` via `fy up`: the fixture IS the
      operator — the first `fy up` refused (nothing installed), then the `sudo` lines `fy machine
      host-firewall` printed run verbatim, then `fy up` passes; the host table on the VM's own slice,
@@ -526,6 +539,14 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   so any change refuses every existing VM as stale until its user runs `fy machine stop && fy up`.
   Don't reword them in a sweep; batch text changes with a change that needs the re-provision
   anyway. (They still say "wall" and "Mac" for that reason.)
+  **The one exception is an opt-in feature's own root work**, which gets its own recorded script
+  under its own marker so it never touches that id: the guest monitor (`assets/monitor/`,
+  `# fy-monitor <id>`, ADR-0031) is the one instance. Its rules: the two scripts never mention
+  each other's marker (`set_provision` drops entries by a regex on the marker, so a mention would
+  delete the other script), it ALWAYS exits 0 (Lima marks the whole boot failed otherwise —
+  report problems in `/run/fy-monitor/` instead), a VM that never turned it on records nothing,
+  and no recursive `rm` reaches `/run` or `/sys` (Tetragon mounts cgroup2 under
+  `/var/run/tetragon`; an `rm -rf` there rmdirs empty system cgroups — seen live).
 - **Under the gVisor posture the box mounts the NARROWED socket, never the runsc socket
   directly.** `box.py` mounts `sandbox.box_socket()` (`podman-runsc-filtered.sock`), not
   `guest_socket()` — the filter (`assets/sandbox/socket_filter.py`, a guest user unit provisioned
