@@ -362,10 +362,11 @@ def test_ensure_unreachable_guest(monkeypatch):
 
 
 @pytest.fixture
-def doctor_env(monkeypatch):
+def doctor_env(monkeypatch, tmp_path):
     be = SimpleNamespace(name="lima", state=lambda name: "running")
     monkeypatch.setattr(devmode, "_BACKEND", be)
     monkeypatch.setattr(devmode.config, "machine_monitor", lambda: "observe")
+    monkeypatch.setattr(devmode.config, "state_dir", lambda: tmp_path)  # the pull cursor's home
     return be
 
 
@@ -379,8 +380,27 @@ def test_doctor_row_observing(doctor_env, monkeypatch):
     report = monitor.Report(**{**GOOD, "applied": f"applied {want}"})
     monkeypatch.setattr(monitor, "guest_report", lambda be, name: report)
     rows = [r for r in devmode._guest_monitor_check() if r[0] != "running"]
-    assert rows == [("ok", "guest monitor", rows[0][2])]
+    assert [r[:2] for r in rows] == [("ok", "guest monitor"), ("warn", "monitor events")]
     assert "observing" in rows[0][2]
+    assert "nothing pulled yet" in rows[1][2]  # no cursor: the supervisor hasn't pulled
+
+
+def test_doctor_events_row_reads_the_pull_cursor(doctor_env, monkeypatch, tmp_path):
+    import time
+
+    from foldyard import monitorlog
+
+    monkeypatch.setattr(monitorlog.config, "state_dir", lambda: tmp_path)
+    cur = monitorlog.Cursor(pulled=time.time() - 3, stored=120, gaps=2)
+    cur.save()
+    [row] = list(devmode._monitor_events_check())
+    assert row[0] == "ok" and "120 stored, 2 lost in transit" in row[2]
+    monitorlog.Cursor(pulled=time.time(), forged=1).save()
+    [row] = list(devmode._monitor_events_check())
+    assert row[0] == "warn" and "failed their signature" in row[2]
+    monitorlog.Cursor(pulled=time.time() - 600).save()
+    [row] = list(devmode._monitor_events_check())
+    assert row[0] == "warn" and "supervisor" in row[2]
 
 
 def test_doctor_row_warns_never_fails(doctor_env, monkeypatch):

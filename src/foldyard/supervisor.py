@@ -42,7 +42,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from shutil import which
 
-from . import allowlist, config, configpin, devmode, githeal, transcripts, worktree_registry
+from . import (
+    allowlist,
+    config,
+    configpin,
+    devmode,
+    githeal,
+    monitorlog,
+    transcripts,
+    worktree_registry,
+)
 
 TICK_SECONDS = 2.0
 RESTART_BACKOFF = 10.0
@@ -1615,6 +1624,10 @@ def main() -> int:
 
     log(f"mode file: {config.mode_file()}   env: {config.host_env_file()}")
     log("supervising — change the mode with `fy mode …` or the TUI; `fy host restart` replaces me.")
+
+    # The guest monitor's events (ADR-0031): pulled from the VM on their own thread, so an ssh
+    # that stalls never holds up this loop's heartbeat. It idles while the monitor is off.
+    monitorlog.start(log, lambda: stopping)
 
     while not stopping:
         reconcile_once(children, nagged)

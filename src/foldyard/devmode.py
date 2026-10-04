@@ -1684,6 +1684,35 @@ def _guest_monitor_check():
         f"observing (Tetragon {monitor.TETRAGON_VERSION}, {monitor.POLICY} loaded)",
         f"NOT observing — {problem}; `fy machine stop && fy up` re-provisions it",
     )
+    yield from _monitor_events_check()
+
+
+def _monitor_events_check():
+    """Whether the guest's events are reaching this computer: the supervisor's pull, read from
+    its cursor (no ssh here). Stale = the supervisor isn't pulling (`fy host restart`)."""
+    import time
+
+    from . import monitorlog
+
+    cur = monitorlog.Cursor.load()
+    age = time.time() - cur.pulled if cur.pulled else None
+    counts = f"{cur.stored} stored, {cur.gaps} lost in transit, {cur.forged} failed the signature"
+    if cur.forged:
+        why = f"{cur.forged} spool lines failed their signature — something altered them in transit"
+    elif cur.error:
+        why = f"the last pull failed: {cur.error}"
+    elif age is None:
+        why = "nothing pulled yet — is the supervisor running? `fy host`"
+    elif age > 60:
+        why = f"last pull {age:.0f}s ago — is the supervisor running? `fy host`"
+    else:
+        why = ""
+    yield _result(
+        None if why else True,
+        "monitor events",
+        f"pulled {age or 0:.0f}s ago ({counts}); `fy monitor` shows them",
+        why,
+    )
 
 
 def doctor_cli(deep: bool) -> int:

@@ -388,6 +388,18 @@ def doctor(
 
 
 @app.command()
+def monitor(
+    limit: int = typer.Option(40, "--limit", "-n", help="how many recent events"),
+    worktree: str = typer.Option("", "--worktree", "-w", help="only this worktree ('main' too)"),
+    as_json: bool = typer.Option(False, "--json", help="one JSON object per event"),
+) -> None:
+    """What the guest monitor recorded: processes, connections, selected files (your computer)."""
+    from . import monitorlog
+
+    raise typer.Exit(monitorlog.show(limit, worktree, as_json))
+
+
+@app.command()
 def tui() -> None:
     """Interactive mode TUI (your computer only; Textual)."""
     from . import term
