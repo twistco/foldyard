@@ -96,6 +96,46 @@ def test_the_health_port_is_out_of_a_containers_reach(repo):
     assert "OPEN" not in probe.stdout, probe.stdout + probe.stderr
 
 
+def test_a_containers_activity_reaches_fy_monitor_attributed_to_it(repo):
+    # Slice 2 end to end: Tetragon → the root relay's signed spool → the supervisor's pull over
+    # ssh → the host-side join. A long-lived container reads a watched file; its event must come
+    # back attributed to THAT container's id (from the kernel, not a name or label).
+    import json
+    import time
+
+    run = engine(
+        "run", "-d", "docker.io/library/alpine", "sh", "-c", "sleep 3; cat /etc/shadow; sleep 300",
+        timeout=120,
+    )  # fmt: skip
+    assert run.returncode == 0, run.stderr
+    cid = run.stdout.strip()
+    try:
+        deadline = time.time() + 180
+        hit = None
+        out = ""
+        while time.time() < deadline and hit is None:
+            out = fy(["monitor", "--json", "-n", "5000"], repo, timeout=120, env_extra=ON).out
+            for raw in out.splitlines():
+                if not raw.startswith("{"):
+                    continue
+                e = json.loads(raw)
+                if e["kind"] == "file" and "/etc/shadow" in e["detail"] and e["who"] == "container":
+                    if e["container"] == cid:
+                        hit = e
+            time.sleep(5)
+        assert hit is not None, f"no attributed /etc/shadow read from {cid[:12]}:\n{out[-3000:]}"
+        doc = fy(["doctor"], repo, timeout=300, env_extra=ON).out
+        assert "monitor events" in doc and "0 failed the signature" in doc, doc
+    finally:
+        engine("rm", "-f", cid, timeout=60)
+
+
+def test_the_box_uid_cannot_write_the_spool_or_read_the_key(repo):
+    assert "Permission denied" in _guest("touch /var/lib/fy-monitor/spool/x 2>&1")
+    assert "Permission denied" in _guest("cat /etc/fy-monitor/relay.key 2>&1")
+    assert "Access denied" in _guest("systemctl stop fy-monitor-relay.service 2>&1")
+
+
 def test_a_junk_delivery_is_rejected_beside_the_running_install(repo):
     # Anything holding the inbox's uid can drop a file there. It must never be installed, and
     # never turn a healthy monitor's report red.

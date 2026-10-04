@@ -1,8 +1,8 @@
 # ADR-0031 — A root collector in the guest: Tetragon observes, foldyard attributes
 
-- **Status:** Proposed (2026-10-04). Slice 1 (the guest service you can see) is implemented
-  behind `[machine] monitor = "observe"`, default off. Export to the host and attribution are the
-  next slice; enforcement is not decided here.
+- **Status:** Proposed (2026-10-04). Implemented behind `[machine] monitor = "observe"`, default
+  off: slice 1 (the guest service you can see) and slice 2 (the relay, the host pull and the
+  host-side join — `fy monitor`). Enforcement is not decided here.
 - **Sources:** the eBPF investigation and implementation plan (2026-10-03, not in the repo); the
   slice-0 spike [docs/ebpf-monitoring-spike.md](https://github.com/twistco/foldyard/blob/main/docs/ebpf-monitoring-spike.md) (a real Lima
   `template:podman` guest: Fedora 44, kernel 6.19.10, podman 5.8.7, Tetragon v1.7.1). Related:
@@ -65,6 +65,33 @@ owns attribution: Tetragon is the sensor, the way the proxy is for HTTP.**
   world-readable and read over ssh as the VM user. `fy up` delivers the release if the guest is
   waiting for one. `fy doctor` shows the row. A monitor that isn't observing is a **warning,
   never an abort**: it observes, so its failure must not take the box away.
+- **The relay signs; the host pulls and joins** (slice 2). A root relay in the guest
+  (`assets/monitor/relay.py`, its own unit) tails Tetragon's export and writes a spool the VM user
+  can read but not write, one line per record: `<seq> <hmac> <json>`. The HMAC is keyed by a
+  per-project secret the host keeps (`<state dir>/monitor-relay.key`) and the boot script writes
+  root-only; the sequence is per boot. Every 5 s the host supervisor pulls what is new over the
+  backend's ssh, as the VM user, and keeps only lines that verify. Whatever sits in between, the
+  VM user's ssh session included, can drop or delay a line (the sequence records the gap), never
+  forge or reorder one.
+  - **Pull, not push.** A push needs a new host listener and, under `[machine] host_firewall`, a
+    new port in the table the operator installed by hand
+    ([0028](./0028-no-elevation-on-the-host-operator-applies.md)): every such operator would
+    re-install it. The pull rides the ssh route foldyard already uses, and the HMAC is what
+    makes the untrusted transport acceptable.
+  - **The relay never joins.** It ships raw events and, separately, kernel snapshots of
+    mount namespace → container: at start, every 60 s, and within a second of a namespace it
+    hasn't seen. The host joins at read time over the stored evidence, so attribution improves
+    with a foldyard upgrade (no VM restart), and stored history can be re-joined after a fix. An
+    event takes the snapshot before it if that still holds its namespace, else the one after;
+    disagreement is `ambiguous`. A namespace number is freed with its container and handed on,
+    so a mapping is never carried past a snapshot that dropped it.
+  - **Long-lived containers are the case that matters.** The box and the stack keep one
+    namespace for hours, and every `podman exec` joins it. A container too short-lived for any
+    snapshot comes out `unattributed`, which reads as the box's own activity: the box is what
+    holds the engine socket.
+  - **Container to worktree is a claim.** Names and compose labels are whatever the creator set,
+    and anything holding the socket can set another worktree's. `fy monitor` says so. Binding
+    containers to foldyard's own record of what it created is later work.
 - **Observe only.** No selector carries an action, and a test pins that. Enforcement (LSM hooks
   only: this kernel has no `override_return`) needs its own decision and its own failure
   semantics.
@@ -79,9 +106,9 @@ owns attribution: Tetragon is the sensor, the way the proxy is for HTTP.**
 - **It is no stronger than the guest kernel.** A guest-kernel or VM-root compromise can blind
   or forge the collector. Events copied to the host survive that; events after it can't be
   trusted. The plan and the docs say so.
-- **The relay comes next.** Tetragon's log is root-only (`0600`), and the host's ssh lands as
-  the box's uid, so the export can't be a host-side pull. It will be a root relay, started at
-  boot, pushing to a host port outside the band the VM firewall opens for the box, with a secret
-  the boot script writes root-only.
+- **Plan change, recorded:** slice 1 planned the relay as a push to a host port outside the
+  box's band. It became a pull with a signed spool (above), for the host firewall's sake.
+- **The spool is bounded** (64 MB in the guest, 32 MB × 5 on the host). A host that doesn't pull
+  for long enough loses the oldest spool, and the sequence says how much.
 - The `--cgroups=disabled` gap and the doubled connection events (the container process, then
   pasta) are known, and recorded in the spike doc.
