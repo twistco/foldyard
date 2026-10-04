@@ -56,6 +56,9 @@ Start at [DEVELOPMENT.md](../DEVELOPMENT.md): the module map, test tiers, CI and
   the proxy on the host, and the design of the VM and host firewalls.
 - [nested-virt.md](./nested-virt.md) — a nested-KVM rig for testing the paths that only run on
   the host.
+- [monitor-pipeline.md](./monitor-pipeline.md) — the guest monitor's host side: the storage
+  measurements (chDB, DuckDB, SQLite, compressed JSONL), retention tiers, filtering at source,
+  the score → decide → review pipeline, and hooks.
 - [ebpf-monitoring-spike.md](./ebpf-monitoring-spike.md) — whether Tetragon runs in the Lima
   guest and can attribute events to containers (2026-10-03), with a kit to re-run it.
 

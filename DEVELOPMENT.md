@@ -80,6 +80,13 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   namespace numbers are reused). `fy monitor` prints it; doctor's `monitor events` row reads the
   pull cursor. The relay only signs and snapshots — attribution lives here so it changes with a
   foldyard upgrade, not a VM restart.
+- `monitorhooks.py` — the operator's hooks over those events: host-only config
+  (`<state dir>/monitor-hooks.toml`, NEVER `foldyard.toml` — a command there is host code
+  execution for the box, a url an exfiltration channel), settled events only, at-least-once with a
+  per-hook cursor, backoff and a bounded give-up, commands run with a minimal environment (never
+  the supervisor's: it holds every host.env secret) on their own supervisor thread. The design
+  they plug into — storage tiers, source filtering, score → decide → review — is
+  [docs/monitor-pipeline.md](./docs/monitor-pipeline.md).
 - `guestlog.py` — the VM's log budget (`machine ensure`, every VM backend): journald cap as root
   (Lima: rendered into the boot script; podman machine: `sudo -n` over ssh) + the rootless API
   service's log level as a user drop-in over ssh. Best-effort — a warning, never an abort.

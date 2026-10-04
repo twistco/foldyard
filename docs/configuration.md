@@ -270,6 +270,27 @@ disk_gib = 60
     - **`unattributed`** is a container that came and went too fast to be seen. That is usually
       the box's own throwaway containers.
     - **`ambiguous`** means the records disagree, and foldyard doesn't guess.
+  - **Hooks** send batches of these events to your own program or endpoint: a scoring script,
+    a notifier, a model. They are configured in `~/.foldyard/<project>/monitor-hooks.toml` on
+    your computer, never in `foldyard.toml`. Anything in the box can write the checkout, so a
+    command there would run the box's code on your computer, and a URL there would send your
+    events wherever it chose.
+
+    ```toml
+    [[hook]]
+    name = "score"
+    command = ["/usr/local/bin/my-scorer", "--json"]   # absolute path, argv, no shell
+    # url = "https://hooks.example.org/fy"             # or POST each batch as JSON
+    kinds = ["exec", "connect", "file"]                # optional filters
+    who = ["container", "unattributed"]
+    ```
+
+    - A command gets each batch as JSON on stdin, with only `PATH`, `HOME`, `LANG`, `FY_PROJECT`
+      and `FY_HOOK` set. Your other environment, including `host.env`'s secrets, is not passed.
+    - Events are sent once their container is settled. A batch is retried until the command exits
+      0 or the URL answers 2xx; after five failures it is skipped and counted.
+    - The design, and the analysis pipeline hooks are meant for:
+      [docs/monitor-pipeline.md](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md).
   - Details: [ADR-0031](./adrs/0031-a-root-collector-in-the-guest.md).
 - **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`. Same rule as
   `[project].name`.
