@@ -39,11 +39,9 @@ installed() { [ -r "$LIB/installed" ] && [ "$(cat "$LIB/installed")" = "$SHA" ];
 
 start_tetragon() {
     systemctl daemon-reload
-    systemctl enable tetragon.service >/dev/null 2>&1
     put policy "loading"
     if systemctl restart tetragon.service; then
         systemctl start --no-block fy-monitor-report.service
-        systemctl enable fy-monitor-relay.service >/dev/null 2>&1
         systemctl restart fy-monitor-relay.service
     else
         put policy "failed: tetragon.service did not start"

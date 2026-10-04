@@ -89,6 +89,15 @@ cat >/etc/tetragon/tetragon.tp.d/fy-observe.yaml <<'__FY_MONITOR_POLICY__'
 @@POLICY@@
 __FY_MONITOR_POLICY__
 
+# 2b. Tetragon and the relay are NEVER enabled units: this script starts them, every boot, once
+#     their config above is current. Enabled, they started early in boot with the PREVIOUS boot's
+#     config — a policy change only took effect minutes later, when this script restarted them
+#     (live, 2026-10-04: an old policy's feedback loop ran ~90 s into a boot that had fixed it).
+#     Early boot is the price: nothing a box can do runs before this script anyway.
+systemctl disable tetragon.service fy-monitor-relay.service >/dev/null 2>&1
+rm -f /etc/systemd/system/multi-user.target.wants/tetragon.service \
+    /etc/systemd/system/multi-user.target.wants/fy-monitor-relay.service
+
 # 3. The units: Tetragon itself (foldyard's own unit, not the release's), the installer the
 #    inbox triggers, and the one-shot that records whether the policy loaded.
 cat >/etc/systemd/system/tetragon.service <<'__FY_UNIT__'
@@ -103,9 +112,6 @@ Environment="PATH=/usr/local/lib/tetragon/:/usr/local/sbin:/usr/local/bin:/usr/s
 ExecStart=/usr/local/bin/tetragon
 Restart=on-failure
 RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
 __FY_UNIT__
 cat >/etc/systemd/system/fy-monitor-install.path <<'__FY_UNIT__'
 [Unit]
@@ -144,10 +150,7 @@ printf '%s\n' \
     '[Service]' \
     "ExecStart=/usr/bin/python3 /usr/local/libexec/fy-monitor-relay $uid" \
     'Restart=always' \
-    'RestartSec=5' \
-    '' \
-    '[Install]' \
-    'WantedBy=multi-user.target' >/etc/systemd/system/fy-monitor-relay.service
+    'RestartSec=5' >/etc/systemd/system/fy-monitor-relay.service
 
 # 4. Apply: start Tetragon if this release is already installed, else wait for the host.
 FY_MONITOR_USER="$user" /usr/local/libexec/fy-monitor boot
