@@ -133,7 +133,7 @@ fy config diff                              # read your foldyard.toml changes…
 fy config adopt                             # …and approve them
 fy box down
 fy up                                       # the wired stack (skip if there is none)
-fy box up                                   # builds box.Dockerfile, starts the new box
+fy box up                                   # builds box.Dockerfile, starts the new box; ends with its fy doctor
 ```
 
 Then, back in the new box:
