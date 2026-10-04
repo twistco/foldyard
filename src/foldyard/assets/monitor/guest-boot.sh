@@ -26,8 +26,11 @@ if [ "$MODE" = "off" ]; then
     rm -f /etc/systemd/system/tetragon.service /etc/systemd/system/fy-monitor-*.service \
         /etc/systemd/system/fy-monitor-install.path /usr/local/libexec/fy-monitor \
         /usr/local/bin/tetragon /usr/local/bin/tetra
-    rm -rf /etc/tetragon /usr/local/lib/tetragon /var/lib/fy-monitor /var/log/tetragon \
-        /var/run/tetragon
+    # NOT /var/run/tetragon: Tetragon mounts the cgroup2 hierarchy at /var/run/tetragon/cgroup2,
+    # and it is still mounted here (an earlier boot left the unit enabled, so it started before
+    # this script ran) — `rm -rf` would descend into it and rmdir every empty system cgroup. It is
+    # on tmpfs; the next shutdown clears it (seen live, 2026-10-04).
+    rm -rf /etc/tetragon /usr/local/lib/tetragon /var/lib/fy-monitor /var/log/tetragon
     systemctl daemon-reload
     printf 'off\n' >/run/fy-monitor/artifact
     printf 'off\n' >/run/fy-monitor/policy

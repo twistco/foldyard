@@ -84,8 +84,17 @@ verb_install() {
     # Verify the ROOT-OWNED copy: the inbox can change after this point and it does not matter.
     if ! echo "$SHA  $STAGE/tetragon.tar.gz" | sha256sum -c --status -; then
         rm -f "$STAGE/tetragon.tar.gz"
-        put artifact "rejected: checksum mismatch (want $VERSION $ARCH)"
+        # Recorded beside, not over, an install that is already running: anything holding the
+        # inbox's uid could otherwise turn a healthy monitor's report red with one bad file.
+        if installed; then
+            put rejected "checksum mismatch at $(date -u +%FT%TZ) (kept $VERSION)"
+        else
+            put artifact "rejected: checksum mismatch (want $VERSION $ARCH)"
+        fi
         return 0
+    fi
+    if installed; then
+        return 0  # the same release again: nothing to do
     fi
     put artifact "installing $VERSION"
     if ! tar -C "$STAGE" -xzf "$STAGE/tetragon.tar.gz"; then
