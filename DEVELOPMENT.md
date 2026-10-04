@@ -70,7 +70,16 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   root `.path` unit that re-checks the root-owned copy; the guest reports in `/run/fy-monitor/`.
   Observe only — a monitor that isn't observing warns, never aborts. Attribution is NOT
   Tetragon's container id (forgeable — docs/ebpf-monitoring-spike.md): mount-namespace inode vs
-  the outermost `libpod-<id>.scope`, which the relay (next slice) owns.
+  the outermost `libpod-<id>.scope`.
+- `monitorlog.py` — the guest monitor's events on the host: the PULL (a supervisor thread; one
+  ssh as the VM user fetches the root relay's spool — `assets/monitor/relay.py` — in BYTES after a
+  cursor, verifies each line's HMAC and per-boot sequence, stores what verifies, records gaps and
+  forgeries, asks the engine once per new container for its name/compose project, recorded as
+  claims) and the JOIN (pure, at read time: an event takes the snapshot before it if that still
+  holds its mount namespace, else the one after; never carried past a snapshot that dropped it —
+  namespace numbers are reused). `fy monitor` prints it; doctor's `monitor events` row reads the
+  pull cursor. The relay only signs and snapshots — attribution lives here so it changes with a
+  foldyard upgrade, not a VM restart.
 - `guestlog.py` — the VM's log budget (`machine ensure`, every VM backend): journald cap as root
   (Lima: rendered into the boot script; podman machine: `sudo -n` over ssh) + the rootless API
   service's log level as a user drop-in over ssh. Best-effort — a warning, never an abort.
@@ -209,7 +218,8 @@ foldyard's surface splits by *where it can be validated*:
      and installed, the packaged policy LOADED on the shipped kernel (an invalid one stops
      Tetragon outright), and the box's uid unable to stop it, reach its socket, read its log,
      write its policy dir or reach its health port; a junk inbox delivery rejected beside the
-     running install; `off` removes it at the next boot.
+     running install; a container's file read reaching `fy monitor` attributed to that
+     container's id through the real relay → pull → join; `off` removes it at the next boot.
    - `test_wall_e2e.py` — `[machine] firewall` + `host_firewall` via `fy up`: the fixture IS the
      operator — the first `fy up` refused (nothing installed), then the `sudo` lines `fy machine
      host-firewall` printed run verbatim, then `fy up` passes; the host table on the VM's own slice,

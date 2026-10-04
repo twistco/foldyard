@@ -255,9 +255,22 @@ disk_gib = 60
   - The box's user can't stop it, change its policy or read its log.
   - `fy doctor` shows whether it is running, and why not if it isn't. If the monitor fails, `fy up`
     warns and carries on: it only observes.
-  - The events stay in the VM for now (`/var/log/tetragon/`, rotated at 10 MB × 5). Copying them to
-    your computer and labelling each with its container and worktree comes next
-    ([ADR-0031](./adrs/0031-a-root-collector-in-the-guest.md)).
+  - `fy monitor` shows what it recorded, each event labelled with its container and worktree.
+    `fy monitor -w <worktree>` narrows to one worktree; `--json` gives one object per line.
+    - The host supervisor copies the events to your computer every few seconds
+      (`~/.foldyard/<project>/logs/monitor.jsonl`, rotated at 32 MB × 5).
+    - Each line is signed in the VM with a key the box's user can't read, so a line that was
+      altered on the way is dropped and counted. One that went missing shows as a gap. `fy
+      doctor`'s `monitor events` row shows both counts.
+  - How to read the labels:
+    - A **container** is identified from the kernel's own records. Its name and worktree are what
+      the engine reports, which is whatever the container's creator set. Anything holding the
+      engine socket can claim to be another worktree's container.
+    - **`vm`** is the VM itself, for example podman, or pasta making a container's connection.
+    - **`unattributed`** is a container that came and went too fast to be seen. That is usually
+      the box's own throwaway containers.
+    - **`ambiguous`** means the records disagree, and foldyard doesn't guess.
+  - Details: [ADR-0031](./adrs/0031-a-root-collector-in-the-guest.md).
 - **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`. Same rule as
   `[project].name`.
 - **`cpus`** / **`memory_mib`** / **`disk_gib`** — sizing at first creation. Defaults: `4` /
