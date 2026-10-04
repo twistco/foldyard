@@ -40,6 +40,7 @@ from e2e_host import (
     Run,
     _adopt_on_host,
     _probe_db,
+    engine,
     ensure_vm,
     example_copy,
     fy,
@@ -242,6 +243,26 @@ def test_the_api_is_still_served_through_the_walled_stack(repo):
     # resolve (502). Clearing the proxy env is what a stack service calling a sibling must do
     # too: the ONE caveat the wall introduces (example-lima-wall/compose.yml, `no_proxy`).
     assert "reachable" in _probe_db(env_args=NO_PROXY_ENV)
+
+
+def test_a_stack_container_trusts_the_proxy(repo):
+    # Under the wall every container egresses through the host proxy, which decrypts every host
+    # not on `passthrough` (ADR-0029) — so a stack service must trust its CA, which the wall's
+    # containers.conf drop-in hands every container. Before it, the api's own HTTPS call to a
+    # decrypted host failed CERTIFICATE_VERIFY_FAILED (found 2026-10-04). example.com is on no
+    # passthrough bundle; pypi.org (tunnelled, real certificate) must still verify too.
+    names = engine(
+        "ps", "--filter", "label=com.docker.compose.service=api", "--format", "{{.Names}}"
+    ).stdout.split()
+    assert names, "the walled stack's api isn't running"
+    code = (
+        "import urllib.request\n"
+        "for h in ('example.com', 'pypi.org'):\n"
+        "    print(h, urllib.request.urlopen(f'https://{h}/', timeout=20).status)\n"
+    )
+    out = engine("exec", names[0], "python", "-c", code, timeout=90)
+    assert out.returncode == 0, f"{out.stdout}\n{out.stderr}"
+    assert out.stdout.split() == ["example.com", "200", "pypi.org", "200"], out.stdout
 
 
 def test_a_verb_without_the_wall_config_is_refused_on_the_walled_vm(repo):

@@ -318,6 +318,9 @@ def _note_host_wall_install() -> None:
 # `fy up`; in-VM diagnosis is `limactl shell <name> cat /run/fy-wall/boot.log`.
 
 _WALL_SCRIPT_PATH = "/usr/local/libexec/fy-machine-wall"
+# Where the boot script drops the embedded proxy CA for the wall's install to pick up (tmpfs,
+# root-owned, rewritten every boot).
+_GUEST_CA_PATH = "/run/fy-wall/proxy-ca.pem"
 
 
 def _wall_asset() -> Path:
@@ -343,20 +346,65 @@ def _provision_want() -> str:
     return f"wall on {_wall_ports()}" if config.machine_wall() else "wall off"
 
 
+def _guest_ca() -> str | None:
+    """The proxy CA to embed in walled provisioning (``proxy.guest_ca_pem``), or ``None`` when
+    there is none or it is not a plain certificate — :func:`_ensure_guest_ca` refuses that
+    before anything is recorded; rendering itself never raises (doctor reads the id too)."""
+    from .plugins import proxy  # lazy: the proxy plugin is only needed for a walled VM
+
+    try:
+        return proxy.guest_ca_pem()
+    except (OSError, ValueError):
+        return None
+
+
+def _ensure_guest_ca() -> None:
+    """Before recording walled provisioning: generate the proxy CA if it doesn't exist yet (the
+    supervisor's first run would, but the recording comes first), and refuse to go on with one
+    that can't be embedded. A CA that still doesn't exist is reported, not fatal: the wall still
+    holds, and stack containers trust the proxy from the next re-provisioning on."""
+    from .plugins import proxy
+
+    proxy.ensure_ca()
+    try:
+        pem = proxy.guest_ca_pem()
+    except (OSError, ValueError) as e:
+        _err(f"✗ the egress proxy's CA can't go into '{MACHINE}''s boot provisioning: {e}.")
+        _err("  It is embedded in a script root runs at boot, so it must be a plain PEM")
+        _err("  certificate from your computer. Check MITMPROXY_CA, or move the file away and")
+        _err("  let foldyard generate a new one.")
+        raise SystemExit(1) from None
+    if pem is None:
+        _err("⚠ no egress proxy CA yet, so containers in the walled VM won't trust the proxy (a")
+        _err("  stack service's HTTPS call to a decrypted host fails). `fy doctor` generates it;")
+        _err("  then `fy machine stop && fy up`.")
+
+
 def _render_provisioning() -> tuple[str, str]:
     """The boot script for the CURRENT config and its id (a hash of the rendered content, so a
-    flipped wall, a moved band or a changed asset all read as a different recording)."""
+    flipped wall, a moved band, a changed asset or a new proxy CA all read as a different
+    recording)."""
+    ca = None
     if config.machine_wall():
         gw = config.LIMA_HOST_GATEWAY
         args = ["install", gw, _wall_ports(), f"http://{gw}:{config.proxy_port_base()}"]
+        ca = _guest_ca()
+        if ca is not None:
+            args.append(_GUEST_CA_PATH)
     else:
         args = ["uninstall"]
+    ca_step = (
+        f"cat >{_GUEST_CA_PATH} <<'__FY_PROXY_CA__'\n{ca}__FY_PROXY_CA__"
+        if ca is not None
+        else ": # no proxy CA (wall off, or none generated yet)"
+    )
     body = (
         _boot_asset()
         .read_text()
         .replace("@@WALL_ASSET@@", _wall_asset().read_text().rstrip("\n"))
         .replace("@@WALL_PATH@@", _WALL_SCRIPT_PATH)
         .replace("@@WALL_ARGS@@", " ".join(shlex.quote(a) for a in args))
+        .replace("@@PROXY_CA_STEP@@", ca_step)
         .replace("@@WANT@@", _provision_want())
         .replace("@@JOURNAL@@", guestlog.journal_snippet(sudo="").strip("\n"))
     )
@@ -404,6 +452,8 @@ def _record_provisioning() -> None:
     recorded; refuse a RUNNING VM whose recording is stale (see the section comment)."""
     if BACKEND.name != "lima":
         return
+    if config.machine_wall():
+        _ensure_guest_ca()
     script, ident = _render_provisioning()
     if BACKEND.provision_id(MACHINE) == ident:
         return

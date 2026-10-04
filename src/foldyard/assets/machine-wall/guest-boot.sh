@@ -48,6 +48,10 @@ __FY_WALL_ASSET__
 chmod 0755 @@WALL_PATH@@.tmp
 mv -f @@WALL_PATH@@.tmp @@WALL_PATH@@
 
+# 2b. The egress proxy's CA (walled only), for the wall's install to hand every container the
+#     VM's podman creates — embedded by the host from your computer's CA, never the mount.
+@@PROXY_CA_STEP@@
+
 # 3. Apply the wall state the host recorded (`[machine].wall` + this project's port band).
 FY_WALL_UID="$uid" @@WALL_PATH@@ @@WALL_ARGS@@
 

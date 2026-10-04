@@ -55,6 +55,7 @@ install)
     GW="${2:?install needs <host_gateway_ip>}"
     PORTS="${3:?install needs \"<tcp_port_ranges>\" (nft set elements)}"
     PROXY_URL="${4:?install needs <proxy_url>}"
+    CA_SRC="${5:-}" # the proxy CA the boot script embedded; absent when none exists yet
     WALL_UID="$(_wall_user)"
     WALL_HOME="$(getent passwd "$WALL_UID" | cut -d: -f6)"
     WALL_NAME="$(getent passwd "$WALL_UID" | cut -d: -f1)"
@@ -180,8 +181,62 @@ export HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL
 export http_proxy=$PROXY_URL https_proxy=$PROXY_URL
 export NO_PROXY=localhost,127.0.0.1,$GW no_proxy=localhost,127.0.0.1,$GW
 EOF
+    # The proxy CA for every container this podman creates. The proxy env above reaches them all
+    # (podman propagates it), and the host proxy decrypts every host not on `passthrough` — so a
+    # container that doesn't trust its CA fails TLS on any other host. A system containers.conf
+    # drop-in mounts the CA + a combined bundle (the guest's roots + the CA) into each container
+    # and sets the env that points the common clients at them; `append` keeps podman's default
+    # env. An image's own ENV, and a create's explicit env (the box's), still win over it.
+    # Root-owned files, so the VM user — the box's uid — can't swap the trust. Distinct paths
+    # from the box's own CA files, which its bootstrap writes. Build RUN steps get the mounts but
+    # not the env (podman applies no default env to builds).
+    rm -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf
+    if [ -n "$CA_SRC" ] && [ -s "$CA_SRC" ]; then
+        install -m 0644 "$CA_SRC" /etc/fy-wall/proxy-ca.pem
+        roots=""
+        for b in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem; do
+            if [ -r "$b" ]; then roots="$b"; break; fi
+        done
+        cat ${roots:+"$roots"} /etc/fy-wall/proxy-ca.pem >/etc/fy-wall/proxy-ca-combined.pem
+        chmod 0644 /etc/fy-wall/proxy-ca-combined.pem
+        labelled=1
+        # SELinux refuses a container's read of an unlabelled bind source (EACCES inside it).
+        if command -v selinuxenabled >/dev/null && selinuxenabled; then
+            chcon -t container_file_t /etc/fy-wall/proxy-ca.pem /etc/fy-wall/proxy-ca-combined.pem \
+                || labelled=0
+        fi
+        if [ "$labelled" = 1 ]; then
+            install -d -m 0755 /etc/containers/containers.conf.d
+            cat >/etc/containers/containers.conf.d/90-fy-proxy-ca.conf.tmp <<'EOF'
+# foldyard: the egress proxy's CA in every container of the walled VM (fy-machine-wall).
+[containers]
+env = [
+  "NODE_EXTRA_CA_CERTS=/etc/fy-proxy-ca.pem",
+  "SSL_CERT_FILE=/etc/fy-proxy-ca-combined.pem",
+  "REQUESTS_CA_BUNDLE=/etc/fy-proxy-ca-combined.pem",
+  "GIT_SSL_CAINFO=/etc/fy-proxy-ca-combined.pem",
+  {append=true},
+]
+volumes = [
+  "/etc/fy-wall/proxy-ca.pem:/etc/fy-proxy-ca.pem:ro",
+  "/etc/fy-wall/proxy-ca-combined.pem:/etc/fy-proxy-ca-combined.pem:ro",
+  {append=true},
+]
+EOF
+            chmod 0644 /etc/containers/containers.conf.d/90-fy-proxy-ca.conf.tmp
+            mv -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf.tmp \
+                /etc/containers/containers.conf.d/90-fy-proxy-ca.conf
+            echo "✓ proxy CA: every container trusts it (containers.conf.d/90-fy-proxy-ca.conf)"
+        else
+            echo "⚠ proxy CA: could not label it for containers (chcon); they won't trust it" >&2
+        fi
+    else
+        echo "⚠ proxy CA: none embedded; containers won't trust the proxy" >&2
+    fi
+
     # Nudge the user manager to re-read environment.d; restart the rootless podman API socket so
-    # in-flight pulls pick the env up. Best-effort: a stopped user manager just reads it on boot.
+    # in-flight pulls pick the env up (and the service reads the CA drop-in). Best-effort: a
+    # stopped user manager just reads it on boot.
     sudo -u "#$WALL_UID" XDG_RUNTIME_DIR="/run/user/$WALL_UID" \
         systemctl --user daemon-reexec 2>/dev/null || true
     sudo -u "#$WALL_UID" XDG_RUNTIME_DIR="/run/user/$WALL_UID" \
@@ -211,9 +266,19 @@ uninstall)
     nft delete table inet fy_wall 2>/dev/null || true
     nft delete table ip6 fy_wall6 2>/dev/null || true
     rm -rf /etc/fy-wall /etc/profile.d/fy-wall-proxy.sh /usr/local/bin/fy-wall-denied
+    rm -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf
     for home in $(getent passwd | awk -F: '$3 >= 1000 {print $6}'); do
         rm -f "$home/.config/environment.d/90-fy-wall-proxy.conf"
     done
+    # A rootless podman service already running keeps the proxy env and the CA defaults it
+    # started with — the first unwalled boot then still dialled the (stopped) proxy. Restart it
+    # as install does. Best-effort, and only for a uid we can name.
+    if WALL_UID="$(_wall_user 2>/dev/null)"; then
+        sudo -u "#$WALL_UID" XDG_RUNTIME_DIR="/run/user/$WALL_UID" \
+            systemctl --user daemon-reexec 2>/dev/null || true
+        sudo -u "#$WALL_UID" XDG_RUNTIME_DIR="/run/user/$WALL_UID" \
+            systemctl --user try-restart podman.service podman.socket 2>/dev/null || true
+    fi
     # podman.socket stays masked — foldyard never needs the rootful socket, and unmasking it
     # silently on uninstall would reopen the container-root→VM-root hole. `systemctl unmask
     # podman.socket` by hand if you truly want it back.

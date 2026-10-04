@@ -139,12 +139,30 @@ kernel still can't get out. foldyard never installs it for you: `fy machine host
 the rules and the `sudo` commands, you run them once, and every `fy up` checks they are in effect
 ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)).
 
+### Stack containers trust the proxy too
+
+With the VM firewall on, podman hands the VM's proxy settings to every container it creates —
+your stack's services, and anything the box starts — so their traffic is decrypted like the box's.
+They trust the proxy's CA the same way, without any change to your compose files: the VM's boot
+setup installs the CA and a podman default that mounts it into every container
+(`/etc/fy-proxy-ca.pem`, plus `/etc/fy-proxy-ca-combined.pem` = the VM's trusted roots and the CA)
+and sets `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_SSL_CAINFO`.
+
+- **Your image wins.** A variable your image or compose file already sets keeps its value.
+- **Clients with their own trust store** (a Java keystore, a browser's NSS database, a binary
+  with bundled roots) ignore those variables. Add the CA to that store in your image, or put the
+  host on `passthrough`.
+- **A new CA needs a restart.** The CA is part of the VM's boot setup, so after it changes run
+  `fy machine stop && fy up`. Without the VM firewall nothing is routed through the proxy, so
+  nothing is needed.
+
 ### Image builds: trusted, still behind the allowlist
 
 With the VM firewall on, image builds (`fy box build`, and the stack build `fy up` runs) also go
 out through the proxy. How that works:
 
-- **Tunnelled, not decrypted.** A build container doesn't have the proxy's CA, so foldyard gives
+- **Tunnelled, not decrypted.** A build step doesn't get the proxy's trust settings (podman
+  applies its default environment to running containers, not to builds), so foldyard gives
   the build a proxy URL with a marker (`fy-build`), and the proxy tunnels those connections. The
   log shows them as `tls tunnel` rows flagged `build`.
 - **The allowlist still applies.** The marker changes what is decrypted, never what is allowed
