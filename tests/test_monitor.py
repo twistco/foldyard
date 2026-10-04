@@ -85,12 +85,26 @@ def test_observe_script_carries_the_pinned_release_and_the_findings():
     assert "rm -rf /etc/tetragon" in script  # nothing left from an earlier boot survives
     # the root installer verifies the ROOT-OWNED copy, and refuses links in the inbox
     assert "sha256sum -c --status" in script and '[ -L "$DELIVERY" ]' in script
+    # a bad delivery beside a RUNNING install is recorded apart, never over the artifact line —
+    # else one junk file from the inbox's uid would turn a healthy monitor's report red
+    assert 'put rejected "checksum mismatch' in script
 
 
 def test_the_policy_never_enforces():
     # observe means observe: no selector may carry an action (Sigkill, Override, NotifyEnforcer…)
     policy = monitor._asset("policy.yaml").read_text()
     assert "matchActions" not in policy and "action:" not in policy.lower()
+
+
+@pytest.mark.parametrize("on", [True, False])
+def test_no_recursive_removal_reaches_a_mount(on):
+    # Tetragon mounts cgroup2 under /var/run/tetragon; a recursive removal there rmdirs empty
+    # system cgroups (it happened on the first live off-run). Nothing under /run, /var/run or
+    # /sys is ours to remove recursively — /run is tmpfs and clears itself.
+    script, _ = monitor.render(on)
+    for line in script.splitlines():
+        if "rm -rf" in line:
+            assert not re.search(r"(^|\s)/(var/)?run/|(^|\s)/sys/", line), line
 
 
 def test_off_script_removes_the_install():
