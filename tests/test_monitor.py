@@ -102,7 +102,9 @@ def test_no_recursive_removal_reaches_a_mount(on):
     # system cgroups (it happened on the first live off-run). Nothing under /run, /var/run or
     # /sys is ours to remove recursively — /run is tmpfs and clears itself.
     script, _ = monitor.render(on)
-    for line in script.splitlines():
+    # one logical command per line: a path on a `\`-continued line is still that rm's argument
+    # (the line this test exists for was exactly that, and a per-line scan missed it)
+    for line in script.replace("\\\n", " ").splitlines():
         if "rm -rf" in line:
             assert not re.search(r"(^|\s)/(var/)?run/|(^|\s)/sys/", line), line
 
