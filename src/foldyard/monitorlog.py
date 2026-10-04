@@ -213,9 +213,22 @@ def _engine_describe(ids: list[str]) -> dict[str, dict | None]:
     return {cid: known.get(cid) for cid in ids}
 
 
+def _fetch_argv(target) -> list[str]:
+    """The backend's ssh argv, MULTIPLEXED over one persistent connection. Every fresh login is
+    itself watched activity in the guest — sshd reads ``authorized_keys``, PAM reads
+    ``/etc/shadow`` — so a new connection per pull made the monitor record its own transport,
+    about 260 events a pull (seen live, 2026-10-04). The master outlives a pull by five minutes;
+    ``%C`` keeps the socket path short and per-target."""
+    argv = _ssh_argv(target)
+    control = Path.home() / ".foldyard" / "cm-%C"
+    control.parent.mkdir(parents=True, exist_ok=True)
+    opts = ["-o", "ControlMaster=auto", "-o", f"ControlPath={control}", "-o", "ControlPersist=300"]
+    return [*argv[:-1], *opts, argv[-1]]
+
+
 def _fetch(target, script: str) -> bytes:
     res = subprocess.run(
-        [*_ssh_argv(target), f"bash -c {shlex.quote(script)}"], capture_output=True, timeout=60
+        [*_fetch_argv(target), f"bash -c {shlex.quote(script)}"], capture_output=True, timeout=60
     )
     if res.returncode != 0:
         raise OSError(res.stderr.decode(errors="replace").strip() or f"exit {res.returncode}")

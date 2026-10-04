@@ -73,6 +73,18 @@ def test_the_fetch_script_only_reads():
         assert verb not in script.replace("2>/dev/null", ""), verb
 
 
+def test_the_pull_reuses_one_ssh_connection(monkeypatch, tmp_path):
+    # a fresh login per pull is itself watched activity in the guest (sshd, PAM): multiplex
+    monkeypatch.setattr(monitorlog.Path, "home", staticmethod(lambda: tmp_path))
+    from foldyard.machine_backend import SshTarget
+
+    argv = monitorlog._fetch_argv(SshTarget(user="u", port=2222, identity="/k"))
+    assert argv[-1] == "u@127.0.0.1"
+    joined = " ".join(argv)
+    assert "ControlMaster=auto" in joined and "ControlPersist=300" in joined
+    assert f"ControlPath={tmp_path}/.foldyard/cm-%C" in joined
+
+
 def test_parse_fetch_takes_exactly_the_promised_bytes_even_multibyte():
     a = line(0, ev(5, binary="/tmp/naïve-Δ"))  # non-ASCII: byte counts, never character counts
     b = line(1, {"k": "start"})

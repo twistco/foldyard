@@ -123,6 +123,20 @@ def test_the_relay_key_is_created_once_private_and_stable(monkeypatch, tmp_path)
     assert monitor.relay_key() != key  # a damaged key is replaced, never used
 
 
+def test_the_collector_is_started_by_the_boot_script_never_by_systemd_at_boot():
+    # An enabled unit starts early in boot with the PREVIOUS boot's config, before Lima runs this
+    # script — so a policy fix only applied minutes into the boot (seen live). Never enabled; any
+    # enablement an older script left is removed.
+    script, _ = monitor.render(True)
+    assert "systemctl enable tetragon" not in script
+    assert "systemctl enable fy-monitor-relay" not in script
+    assert "systemctl disable tetragon.service fy-monitor-relay.service" in script
+    tetragon_unit = script.split("/etc/systemd/system/tetragon.service <<'__FY_UNIT__'")[1]
+    assert "WantedBy" not in tetragon_unit.split("__FY_UNIT__")[0]
+    relay_unit = script.split(">/etc/systemd/system/fy-monitor-relay.service")[0][-600:]
+    assert "WantedBy" not in relay_unit
+
+
 def test_the_policy_never_watches_the_monitors_own_traffic():
     # The relay writes the spool and the host's pull reads it: a watched spool records the
     # monitor's own I/O, which it then spools — a feedback loop (~68,000 events in minutes, live).
