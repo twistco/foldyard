@@ -279,13 +279,20 @@ def deliver(hook: Hook, st: HookState, events: list[monitorlog.Event], now: floa
     pending = after(events, st.last)
     if not pending:
         return ""
-    scan = pending[: BATCH_MAX * 4]  # bound the scan as well as the send
-    wanted = [e for e in scan if hook.matches(e)][:BATCH_MAX]
-    # A full batch ends at its last event (the rest of the scan comes next round); otherwise the
-    # whole scan is covered — the events this hook doesn't want are passed over with it.
-    batch_end = wanted[-1] if len(wanted) == BATCH_MAX else scan[-1]
-    if not wanted:  # nothing this hook wants: just move past it
-        st.last = [batch_end.boot, batch_end.seq]
+    wanted: list[monitorlog.Event] = []
+    batch_end = pending[0]
+    # Pass over what this hook doesn't want in the same round, so a narrow filter never takes
+    # minutes of rounds to skip a backlog (seen on a 72k-event store); send at most one batch.
+    while pending and not wanted:
+        scan = pending[: BATCH_MAX * 4]
+        wanted = [e for e in scan if hook.matches(e)][:BATCH_MAX]
+        # A full batch ends at its last event (the rest comes next round); otherwise the whole
+        # scan is covered — the events this hook doesn't want are passed over with it.
+        batch_end = wanted[-1] if len(wanted) == BATCH_MAX else scan[-1]
+        if not wanted:
+            st.last = [batch_end.boot, batch_end.seq]
+            pending = pending[len(scan) :]
+    if not wanted:
         return ""
     body = payload(hook, wanted)
     why = _run_command(hook, body) if hook.command else _post(hook, body)
