@@ -220,6 +220,9 @@ def _net_leaf(e: dict, escape) -> str:
     status = e.get("status", 0)
     colour = "green" if status < 400 else "red"
     mark = ("inj" if e.get("injected") else "") + ("+replay" if e.get("replayed") else "")
+    if e.get("mint_failed"):
+        # The proxy's own 502 (its error body says why): the credential, not the upstream, failed.
+        mark = "mint failed"
     line = (
         f"[dim]{ts}[/dim] {escape(e.get('method', '')):<6} "
         f"{escape(e.get('path', '')[:80])} [{colour}]{status}[/{colour}]"
@@ -373,6 +376,10 @@ class ProxyPlugin(Plugin):
         # consumer (proxy_enabled) or any active rule keeps the always-on proxy, as Phase A′ needs.
         if not config.proxy_enabled() and not rules:
             return {}
+        # The addon injects the FIRST rule that matches, so two switches claiming one host and path
+        # would leave the credential to rule order: both sides are held back instead
+        # (Registry.injecting_rules). The listener above still runs for them — the box routes here.
+        rules = self._registry.injecting_rules(mode) if self._registry else []
         # Phase A′ — ALWAYS-ON: the proxy runs unconditionally (was: only for an injector), because
         # the box ALWAYS routes through it (derive_env). A dead :8088 would connection-refuse every
         # box request, so the daemon must never be absent while a box exists.

@@ -96,6 +96,15 @@ Two guard rails keep this honest:
   level. `fy mode` checks the whole resulting mode and refuses a combination that can't work. The
   error includes the exact `fy mode a=x b=y` command that fixes it (updates apply together).
   Combinations that work but are probably a mistake print a warning and apply.
+- **One credential per host and path.** Two switches whose levels would both inject on the same
+  host and path (a path prefix under the other's, or either covering the whole host) can't be on
+  together: the proxy would have to pick one credential, and only rule order would decide which.
+  `fy mode` refuses the second and names the first, so turn that one off first (or swap in one
+  command, `fy mode <other>=off <switch>=on`). One switch may still split a host by path, as
+  Codex on a ChatGPT subscription does. If such a pair is on anyway (a state file an older
+  foldyard wrote, or an `[[inject]]` row adopted while both were on), the proxy injects
+  **neither** until one is off. The supervisor logs it and notifies you, and `fy mode`,
+  `fy state` and `fy doctor` show it.
 
 ## DEGRADED — the switch is on, but the credential stopped working
 
@@ -228,6 +237,15 @@ auth scheme (`gh` sends `token x`, most clients `Bearer x`), gets a 401 whose JS
 names the switch and the fix (for a `github` row, `fy mode github=on` on your computer), which
 `gh` prints. Any other request to that host goes on as usual: a public call with no credential,
 or a credential the box got some other way ([configuration](./configuration.md#inject)).
+
+With the switch on, the token service on your computer can still fail (a missing or rejected
+secret, a provider outage). The proxy then doesn't send the request at all: it answers with a
+502 whose `message` names the host and the token service's own reason, so the agent sees
+"foldyard could not mint a credential for …" rather than the provider's 401. If the provider
+instead refuses a token already sent and a fresh one can't be minted, its 401 is replaced by the
+same kind of 502. The reason is the token service's diagnosis (its error output, with anything
+token-shaped redacted). The fix is on your computer — `fy host logs` has the details — and the
+Network Log marks the row `mint failed`.
 
 `fy claude` and `fy codex` check first: with the agent's switch off they say so before
 launching and, in a terminal, wait for you to switch it on from your computer (Enter launches

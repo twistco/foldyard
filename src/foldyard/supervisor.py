@@ -1226,6 +1226,39 @@ def _report_held(wt: str, mode: dict) -> None:
         )
 
 
+# The overlap messages last REPORTED per worktree (empty while there are none), so a standing
+# overlap is one log line and one push, not one every tick.
+_inject_overlaps_seen: dict[str, list[str]] = {}
+
+
+def _report_inject_overlaps(wt: str, mode: dict) -> None:
+    """Say — once per change — that two switches' injection rules claim one host and path, so the
+    proxy injects neither (``Registry.injecting_rules``). ``fy mode`` refuses to create that, but
+    the host can inherit it: a state file an older foldyard wrote, or an ``[[inject]]`` row adopted
+    while both switches were on. Holding both back is silent by construction, so this is what keeps
+    "my credential stopped working" from being a mystery. The notification fires on the edge into
+    an overlap; every distinct overlap gets its own log line."""
+    reg = devmode.registry()
+    current = reg.overlap_issues(mode)
+    previous = _inject_overlaps_seen.get(wt, [])
+    if current == previous:
+        return
+    _inject_overlaps_seen[wt] = current
+    where = f" [worktree {wt}]" if wt else ""
+    if not current:
+        log(f"✓ credentials{where}: no two switches inject on one host and path any more")
+        return
+    for msg in current:
+        log(f"⚠ credentials{where}: {msg}")
+    if not previous:
+        first = reg.inject_overlaps(mode)[0]
+        _notify(
+            f"fy {config.project()}: credentials overlap{where}",
+            f"{' and '.join(first.switches)} both inject on {first.place}, so the proxy injects "
+            "neither until one is off — `fy mode` on your computer says how",
+        )
+
+
 def _port_listener_pids(port: int) -> list[int]:
     """PIDs LISTENing on TCP ``port`` (host ``lsof``). Best-effort: [] if lsof absent/errors."""
     if not which("lsof"):
@@ -1390,6 +1423,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
                 continue
             mode = expire_user_modes()
             _report_held(wt, mode)
+            _report_inject_overlaps(wt, mode)
             # Fill in host-process env a plugin can derive from committed config (a Pulumi App
             # id, a deterministic SA email — see plugins.Plugin.env_defaults) BEFORE the
             # `requires` gate below reads os.environ, so a derivable value needs no host.env

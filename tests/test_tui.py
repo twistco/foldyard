@@ -1622,6 +1622,36 @@ async def test_mode_button_secret_wrong_shape_stays_on_the_modal(monkeypatch, tm
         assert not host_env.exists() and sets == []
 
 
+_REAL_SET_MODE = devmode.set_mode  # captured before the autouse stub replaces it per test
+
+
+async def test_mode_button_refuses_a_switch_overlapping_another_and_says_which(
+    monkeypatch, tmp_path
+):
+    # The buttons go through the real set_mode, so its overlap refusal (ADR-0031 decision 4)
+    # reaches the operator as a toast naming the other switch — and nothing is written.
+    from pbt import clashing_pair
+
+    reg = clashing_pair()
+    state = tmp_path / "dev-mode.json"
+    state.write_text('{"a": "on"}')
+    monkeypatch.setattr(devmode, "registry", lambda: reg)
+    monkeypatch.setattr(config, "mode_file", lambda: state)
+    monkeypatch.setattr(config, "mirror_file", lambda: tmp_path / "mirror.json")
+    monkeypatch.setattr(devmode, "in_box", lambda: False)
+    monkeypatch.setattr(devmode, "missing_secrets", lambda updates: [])
+    monkeypatch.setattr(devmode, "set_mode", _REAL_SET_MODE)
+    toasts: list[str] = []
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        monkeypatch.setattr(app, "notify", lambda msg, **_k: toasts.append(str(msg)))
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#b-on", tui.Button)))
+        await pilot.pause()
+    assert any("a=on and b=on" in t and "`fy mode a=off`" in t for t in toasts)
+    assert state.read_text() == '{"a": "on"}'
+
+
 async def test_mode_button_secret_empty_paste_skips_and_applies(monkeypatch, tmp_path):
     # Mirrors ensure_secret's "empty": an operator who wants to arm now and paste later can.
     host_env = _needs_token(monkeypatch, tmp_path)

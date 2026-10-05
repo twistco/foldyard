@@ -25,6 +25,11 @@ in ``trigger_rungs``, ``other`` must be at a rung in ``allowed_rungs``".
 The constraint shape covers every historical coherence case (llm=live requires gcp∈{sa,user})
 and, because ``trigger_rungs`` may include the default and ``allowed_rungs`` may be empty,
 also generates worlds that error at all-defaults — the settle "leave it visible" path.
+
+The INJECTION world (:func:`inject_worlds`) adds proxy rules as data: ``(axis, rung, host,
+path_prefix)`` places, each read "while ``axis`` is at ``rung`` it injects on ``host`` under
+``path_prefix``". :meth:`World.overlaps` is the oracle for the cross-switch overlap check
+(ADR-0031 decision 4) — direct evaluation of the places, no registry code.
 """
 
 from __future__ import annotations
@@ -34,24 +39,39 @@ from dataclasses import dataclass, replace
 from hypothesis import strategies as st
 
 from foldyard import config as config_mod
-from foldyard.plugins import Plugin, Registry, Requires, Switch
+from foldyard.plugins import InjectRule, Plugin, Registry, Requires, Switch
 
 # A constraint row: (axis, trigger_rungs, other_axis, allowed_rungs, severity) — an issue of
 # `severity` while mode[axis] ∈ trigger_rungs and mode[other_axis] ∉ allowed_rungs.
 Constraint = tuple[str, frozenset[str], str, frozenset[str], str]
+# An injection place: (axis, rung, host, path_prefix) — a proxy rule on `host` under
+# `path_prefix` ("" = the whole host) while `axis` sits at `rung`.
+Place = tuple[str, str, str, str]
 
 
 class SyntheticPlugin(Plugin):
-    """A registry-shaped world from generated data: axes + requires-style mode_issues."""
+    """A registry-shaped world from generated data: axes + requires-style mode_issues, and the
+    proxy rules its places put on the proxy."""
 
     name = "synthetic"
 
-    def __init__(self, axes: list[Switch], constraints: list[Constraint]):
+    def __init__(
+        self, axes: list[Switch], constraints: list[Constraint], places: tuple[Place, ...] = ()
+    ):
         self._axes = axes
         self._constraints = constraints
+        self._places = places
 
     def switches(self) -> list[Switch]:
         return list(self._axes)
+
+    def proxy_rules(self, mode: dict) -> list[InjectRule]:
+        # The minter names the axis, so a test can tell whose rule reached the proxy.
+        return [
+            InjectRule(host=host, header="Authorization", minter=f"mint-{axis}", path_prefix=path)
+            for axis, rung, host, path in self._places
+            if mode.get(axis) == rung
+        ]
 
     def mode_issues(self, mode: dict):
         for axis, trigger, other, allowed, severity in self._constraints:
@@ -69,9 +89,10 @@ class World:
     axes: tuple[Switch, ...]
     constraints: tuple[Constraint, ...]
     mode: dict[str, str]
+    places: tuple[Place, ...] = ()
 
     def _plugin(self) -> SyntheticPlugin:
-        return SyntheticPlugin(list(self.axes), list(self.constraints))
+        return SyntheticPlugin(list(self.axes), list(self.constraints), self.places)
 
     def registry(self, source: str = "hook") -> Registry:
         """The world as a real Registry — the constraints represented as ``source`` says, so
@@ -127,6 +148,24 @@ class World:
         """The oracle's error rows only (what gates set_mode and drives settle)."""
         return [sev for sev in self.severities(mode) if sev == "error"]
 
+    def overlaps(self, mode: dict) -> set[frozenset[str]]:
+        """DIRECT evaluation of the places (the oracle): every pair of DIFFERENT axes whose
+        active places share a host (as the proxy compares hosts: case-insensitive, no root dot)
+        and nested path prefixes ("" nests everything)."""
+        active = [
+            (axis, host.lower().rstrip("."), path)
+            for axis, rung, host, path in self.places
+            if mode.get(axis) == rung
+        ]
+        return {
+            frozenset((a, b))
+            for a, host_a, path_a in active
+            for b, host_b, path_b in active
+            if a != b
+            and host_a == host_b
+            and (path_a.startswith(path_b) or path_b.startswith(path_a))
+        }
+
 
 @st.composite
 def worlds(draw, max_axes: int = 5, max_constraints: int = 6) -> World:
@@ -150,6 +189,51 @@ def worlds(draw, max_axes: int = 5, max_constraints: int = 6) -> World:
         constraints.append((axis.name, trigger, other.name, allowed, severity))
     mode = {ax.name: draw(st.sampled_from(ax.levels)) for ax in axes}
     return World(axes=tuple(axes), constraints=tuple(constraints), mode=mode)
+
+
+def clashing_pair() -> Registry:
+    """The smallest overlap, for example tests: on/off switches ``a`` (all of api.x.test) and
+    ``b`` (its /v1). An explicit generic config, so a module binding FULL_TOML (whose
+    ``[[require]]`` rows name switches this registry lacks) can still build it."""
+    axes = [Switch(name=n, levels=("off", "on"), blurb={"off": "-", "on": "-"}) for n in "ab"]
+    places = (("a", "on", "api.x.test", ""), ("b", "on", "api.x.test", "/v1"))
+    cfg = config_mod.Config(
+        repo_root=config_mod.repo_root(), worktree="", toml={"project": {"name": "generic"}}
+    )
+    return Registry([SyntheticPlugin(axes, [], places)], config=cfg)
+
+
+# Small alphabets on purpose: collisions are the point. The host spellings differ only in case and
+# the root dot (one host to the proxy); "/v10" sits under "/v1" by prefix, as the addon matches.
+_HOSTS = ["api.x.test", "API.x.test", "api.x.test.", "api.y.test"]
+_PATHS = ["", "/v1", "/v1/m", "/v10", "/v2"]
+
+
+@st.composite
+def inject_worlds(draw, max_axes: int = 4, max_places: int = 6) -> World:
+    """A synthetic consumer whose axes put proxy rules on a few hosts — no constraints, so every
+    error row is an overlap. Places sit on NON-default rungs only (a rule at rest is no switch's:
+    the convention ``Plugin.proxy_rules`` documents), and some axes carry an emergency top rung
+    so a TTL lapse is among the operations."""
+    n_axes = draw(st.integers(min_value=1, max_value=max_axes))
+    axes: list[Switch] = []
+    for i in range(n_axes):
+        rungs = tuple(f"r{j}" for j in range(draw(st.integers(min_value=2, max_value=3))))
+        emergency = (rungs[-1],) if draw(st.booleans()) else ()
+        axes.append(
+            Switch(
+                name=f"ax{i}", levels=rungs, blurb=dict.fromkeys(rungs, "-"), emergency=emergency
+            )
+        )
+    places: list[Place] = []
+    for _ in range(draw(st.integers(min_value=0, max_value=max_places))):
+        axis = draw(st.sampled_from(axes))
+        rung = draw(st.sampled_from(axis.levels[1:]))
+        places.append(
+            (axis.name, rung, draw(st.sampled_from(_HOSTS)), draw(st.sampled_from(_PATHS)))
+        )
+    mode = {ax.name: draw(st.sampled_from(ax.levels)) for ax in axes}
+    return World(axes=tuple(axes), constraints=(), mode=mode, places=tuple(places))
 
 
 # ── capability maps (supervisor.capability_edges inputs) ─────────────────────────────────

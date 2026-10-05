@@ -491,7 +491,10 @@ box_env = { GH_TOKEN = "x" }
 There is no `minter` key: a token service that needs more than a static token is a kind built
 into foldyard or an installed plugin, never a command from config
 ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)). Any number of injectors
-can be on at once. Installing `gh` (or any other client) in the box is your box image's job.
+can be on at once, as long as no two of them inject on the same host and path: an `[[inject]]`
+row on `api.anthropic.com` and keyless `claude=on` can't both be on, and `fy mode` refuses the
+second one ([modes](./modes.md#tokens-never-enter-the-box)). Installing `gh` (or any other
+client) in the box is your box image's job.
 
 ## `[[secret]]`
 

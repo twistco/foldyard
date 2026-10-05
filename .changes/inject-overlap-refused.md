@@ -1,0 +1,15 @@
+---
+section: Changed
+bump: minor
+---
+
+- **Two switches can no longer both inject on one host and path.** `fy mode` (and the TUI's mode
+  buttons) refuse a level whose injection rules would overlap another switch's active ones (the
+  same host, with path prefixes where one is under the other or either covers the whole host). The
+  message names the other switch and the `fy mode <switch>=off` to run first. Before, a consumer's
+  `[[inject]]` row on `api.anthropic.com` beside keyless `claude=on` both applied, and the proxy
+  sent whichever credential's rule came first in plugin load order. One switch may still split a
+  host by path, as Codex on a ChatGPT subscription does. If your saved mode already has such a
+  pair on (or you adopt an `[[inject]]` row that creates one), the proxy injects **neither** until
+  one is off, and says so: a supervisor log line and notification, an error row in `fy mode` and
+  `fy state`, and a `credential overlap` row in `fy doctor`.
