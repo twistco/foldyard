@@ -272,6 +272,7 @@ async def test_injects_minted_header_on_the_target_host(injector):
     assert (
         entry["injected"] is True and entry["host"] == "api.github.com" and entry["status"] == 200
     )
+    assert "mint_failed" not in entry
 
 
 async def test_value_prefix_is_prepended_to_the_minted_value(
@@ -404,21 +405,157 @@ async def test_query_param_not_injected_outside_path_prefix(qp_injector):
     assert _last_log(log)["injected"] is False
 
 
-async def test_a_failed_mint_is_logged_as_not_injected(gh, monkeypatch, tmp_path):
-    # The minter failed, so the request left with whatever the box sent — the log must say so.
-    boom = tmp_path / "boom.py"
-    boom.write_text("import sys; sys.exit(1)\n")
+# ── a failed mint is answered by the proxy, with the minter's reason ────────────────────
+# Forwarding the box's dummy after a failed mint got the upstream's own 401 ("Bad credentials"),
+# which names neither the cause nor where it is fixed: a box agent spent an hour blaming the GitHub
+# App installation while the minter's diagnosis sat in the host log.
+
+_MINT_REASON = "github_app_token: $GH_APP_PERMISSIONS may only NARROW the default"
+
+
+@pytest.fixture
+def failing_minter(tmp_path):
+    """A minter that prints a token-shaped decoy on stdout, then fails with a diagnosis on stderr
+    — but only while ``broken`` exists, so a test can break it after a good mint."""
+    broken = tmp_path / "minter.broken"
+    broken.touch()
+    script = tmp_path / "failing_minter.py"
+    script.write_text(
+        "import json, pathlib, sys\n"
+        f"if pathlib.Path({str(broken)!r}).exists():\n"
+        "    print('SECRET-TOKEN-VALUE')\n"
+        f"    print({_MINT_REASON!r}, file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+        "print(json.dumps({'value': 'token FAKE', 'ttl': 3600}))\n"
+    )
+    return types.SimpleNamespace(command=f"{sys.executable} {script}", script=script, broken=broken)
+
+
+@pytest.fixture
+def mint_failing(gh, monkeypatch, tmp_path, failing_minter):
     log = tmp_path / "egress.jsonl"
     monkeypatch.setenv("INJECT_HOST", "api.github.com")
-    monkeypatch.setenv("INJECT_COMMAND", f"{sys.executable} {boom}")
+    monkeypatch.setenv("INJECT_COMMAND", failing_minter.command)
     monkeypatch.setenv("PROXY_LOG_FILE", str(log))
-    inj = gh.Injector()
-    flow = _Flow("api.github.com")
-    flow.request.headers["Authorization"] = "Bearer DUMMY"
-    inj.request(flow)
-    assert flow.request.headers["Authorization"] == "Bearer DUMMY"
-    await inj.response(flow)
-    assert _last_log(log)["injected"] is False
+    return types.SimpleNamespace(inj=gh.Injector(), log=log, minter=failing_minter)
+
+
+def _unsent_flow(host: str = "api.github.com") -> _Flow:
+    flow = _Flow(host)
+    flow.response = None  # nothing upstream has answered: a response set now is the proxy's own
+    flow.request.headers["Authorization"] = "token x"  # the box's dummy
+    return flow
+
+
+async def test_a_failed_mint_is_answered_by_the_proxy_not_forwarded(mint_failing, gh):
+    flow = _unsent_flow()
+    mint_failing.inj.requestheaders(flow)
+
+    # A response set in the request hook is what mitmproxy hands back INSTEAD of dialling upstream.
+    assert flow.response is not None and flow.response.status_code == 502
+    assert flow.response.headers["content-type"] == "application/json"
+    # The whole sentence, pinned: the host it failed for, that nothing went upstream, the minter's
+    # own diagnosis (the point of the answer), and the operator's next step (the host-side log).
+    assert json.loads(flow.response.content)["message"] == (
+        "foldyard could not mint a credential for api.github.com, so this request was not sent: "
+        f"exit 1: {_MINT_REASON} (on your computer, `fy host logs` has the details)"
+    )
+    assert flow.request.headers["Authorization"] == "token x"  # nothing was injected
+
+    await mint_failing.inj.response(flow)
+    assert gh.requests == []  # a 502 is not a 401: no re-issue
+    rows = mint_failing.log.read_text().splitlines()
+    assert len(rows) == 1
+    row = json.loads(rows[0])
+    assert row["status"] == 502 and row["mint_failed"] is True and row["injected"] is False
+    assert _MINT_REASON in row["error_body"]
+
+
+def test_a_mint_failure_answer_carries_neither_the_command_nor_stdout(mint_failing):
+    # The command is a host path, and stdout is where a minter returns the token; the box gets
+    # the diagnosis only. (The host log keeps the command — it's the operator's own machine.)
+    flow = _unsent_flow()
+    mint_failing.inj.requestheaders(flow)
+    assert flow.response is not None
+    body = flow.response.content.decode()
+    assert str(mint_failing.minter.script) not in body
+    assert "SECRET-TOKEN-VALUE" not in body
+
+
+def test_a_mint_failure_answer_redacts_token_shaped_stderr(gh, monkeypatch, tmp_path):
+    boom = tmp_path / "boom.py"
+    boom.write_text(
+        "import sys\n"
+        "print('mint blew up handling ghs_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789', file=sys.stderr)\n"
+        "sys.exit(1)\n"
+    )
+    monkeypatch.setenv("INJECT_HOST", "api.github.com")
+    monkeypatch.setenv("INJECT_COMMAND", f"{sys.executable} {boom}")
+    monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
+    flow = _unsent_flow()
+    gh.Injector().requestheaders(flow)
+    assert flow.response is not None
+    body = flow.response.content.decode()
+    assert "ghs_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789" not in body
+    assert "mint blew up handling" in body
+
+
+def test_a_mint_failure_detail_never_names_the_missing_minters_path(gh):
+    # subprocess.run raises FileNotFoundError naming argv[0] — a host path. (Exercised directly:
+    # the hermetic suite refuses to spawn a missing absolute path at all.)
+    detail = gh.module._mint_failure_detail(
+        FileNotFoundError(2, "No such file or directory", "/opt/host-only/fy-minter")
+    )
+    assert "/opt/host-only" not in detail and "No such file or directory" in detail
+
+
+def test_a_mint_failure_detail_redacts_an_arbitrary_exceptions_text(gh):
+    # The catch-all branch stringifies whatever was raised — e.g. int() of a malformed ttl quotes
+    # the minter's stdout, which is where the token rides.
+    detail = gh.module._mint_failure_detail(
+        ValueError("invalid literal for int() with base 10: 'ghs_AbCdEfGhIjKlMnOpQrStUvWxYz01'")
+    )
+    assert "ghs_AbCdEfGhIjKlMnOpQrStUvWxYz01" not in detail and "ValueError" in detail
+
+
+async def test_a_401_whose_re_mint_fails_is_answered_with_the_reason(mint_failing, gh):
+    # The cached token was refused upstream and no fresh one can be had: the upstream's 401 would
+    # send the box hunting for a credential it never held, so it gets the minter's reason instead.
+    mint_failing.minter.broken.unlink()
+    inj = mint_failing.inj
+    sent = _Flow("api.github.com", status=401)
+    inj.requestheaders(sent)
+    assert sent.request.headers["Authorization"] == "token FAKE"  # a good mint went out
+    mint_failing.minter.broken.touch()
+
+    await inj.response(sent)
+    assert gh.requests == []  # nothing to re-issue with
+    assert sent.response is not None and sent.response.status_code == 502
+    # Unlike a first mint failing, this request WAS sent — with the cached token, which the
+    # upstream refused — so the answer must not claim otherwise.
+    assert json.loads(sent.response.content)["message"] == (
+        "foldyard could not mint a credential for api.github.com after it refused the one this "
+        f"request carried (401): exit 1: {_MINT_REASON}"
+        " (on your computer, `fy host logs` has the details)"
+    )
+    row = _last_log(mint_failing.log)
+    assert row["status"] == 502 and row["mint_failed"] is True
+
+    # …and the refused token is not served to the next request for the rest of its TTL: that one
+    # re-mints (still failing, so it is answered too) rather than going out with the reject.
+    nxt = _unsent_flow()
+    inj.requestheaders(nxt)
+    assert nxt.response is not None and nxt.response.status_code == 502
+    assert nxt.request.headers["Authorization"] == "token x"
+
+
+def test_a_mint_that_recovers_injects_again(mint_failing):
+    # Nothing about a failure sticks: the next request mints afresh and goes upstream.
+    mint_failing.inj.requestheaders(_unsent_flow())
+    mint_failing.minter.broken.unlink()
+    flow = _unsent_flow()
+    mint_failing.inj.requestheaders(flow)
+    assert flow.response is None and flow.request.headers["Authorization"] == "token FAKE"
 
 
 async def test_capture_only_logs_everything_and_injects_nothing(gh, monkeypatch, tmp_path):
@@ -924,14 +1061,15 @@ def test_plain_http_enforces_the_port_policy_too(walled):
     assert _last_log(log)["host"] == "internal.example"
 
 
-def test_the_injector_exemption_never_covers_cleartext(gh, monkeypatch, tmp_path):
+def test_the_injector_exemption_never_covers_cleartext(gh, monkeypatch, tmp_path, fake_minter):
     # The injector host is exempt so the proxy can reach it to MINT — over HTTPS. A cleartext
     # request to it would carry the minted credential in the clear, so :80 is not exempt — and
     # neither is `http://host:443/`: the exemption is by SCHEME, not port.
     allow = tmp_path / "allow-effective.json"
     _write_allow(allow, [])
     monkeypatch.setenv("INJECT_HOST", "api.github.com")
-    monkeypatch.setenv("INJECT_COMMAND", "true")
+    # A minter that works: a failed mint is answered by the proxy too (502), not let through.
+    monkeypatch.setenv("INJECT_COMMAND", fake_minter.command)
     monkeypatch.setenv("DEFAULT_DENY", "1")
     monkeypatch.setenv("ALLOW_FILE", str(allow))
     monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))

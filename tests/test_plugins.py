@@ -2484,6 +2484,26 @@ def test_network_panel_names_a_held_request_and_its_fix(monkeypatch, tmp_path):
     assert "held" in group.label and "err" not in group.label  # not tallied as an upstream error
 
 
+def test_network_panel_marks_a_failed_mint(monkeypatch, tmp_path):
+    # The proxy's own 502: a host-side failure, so it stays an error — but named as the mint, not
+    # left to read as an upstream outage.
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    row = {
+        "ts": "2026-10-05T10:00:01Z",
+        "method": "GET",
+        "host": "api.github.com",
+        "path": "/repos/o/r",
+        "status": 502,
+        "injected": False,
+        "mint_failed": True,
+        "error_body": '{"message": "foldyard could not mint a credential for api.github.com"}',
+    }
+    (tmp_path / "egress.jsonl").write_text(json.dumps(row) + "\n")
+    [group] = proxy._network_panel_tree().groups
+    assert "mint failed" in group.children[0] and "[red]502[/red]" in group.children[0]
+    assert "1 err" in group.label
+
+
 def test_a_secret_rotation_changes_nothing_the_supervisor_restarts_for(monkeypatch):
     # A minter used to read its secret from the daemon's environment, frozen at spawn — so a keyless
     # token captured (or rotated) in host.env after launch never reached it (days of "OAuth access

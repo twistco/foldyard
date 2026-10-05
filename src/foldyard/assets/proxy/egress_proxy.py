@@ -5,7 +5,8 @@ box (we run our OWN proxy instead of depending on claude-sandbox). It runs on th
 where the minter's gcloud ADC + GitHub egress live — as the box's egress proxy. For each
 request to an injected host it OVERWRITES the Authorization header with a token obtained
 by running a host command (the minter, `gh-app-token`), caches the token for the ttl the
-minter reports, and re-mints + re-issues the request once on an upstream 401.
+minter reports, and re-mints + re-issues the request once on an upstream 401. When the minter
+fails, the request is not forwarded: the proxy answers it with a 502 naming the minter's reason.
 
 The security property this buys: the token is added host-side, in flight, so it NEVER
 materialises inside the container (not as env, not as a file) — the evolution of the old
@@ -100,9 +101,9 @@ Without LIVE_FILE:
                     cert (used by the e2e to trust its self-signed upstream). TLS is never
                     disabled.
   PROXY_LOG_FILE    JSONL network log of every proxied response (ts, method, host,
-                    path, status, injected, replayed; passthrough/blocked rows add a flag). Default
-                    ~/.foldyard/logs/egress.jsonl (foldyard's supervisor overrides
-                    this with the per-project ~/.foldyard/<project>/logs path) —
+                    path, status, injected, replayed; passthrough/blocked/mint_failed rows
+                    add a flag). Default ~/.foldyard/logs/egress.jsonl (foldyard's supervisor
+                    overrides this with the per-project ~/.foldyard/<project>/logs path) —
                     OUTSIDE the repo on purpose (the shared mount must not carry an
                     egress log the box can read-write). "" disables. Rotated to dated
                     backups (<name>.<UTC-stamp>.jsonl) past PROXY_LOG_MAX_BYTES.
@@ -464,6 +465,13 @@ def _mint_failure_detail(e: BaseException) -> str:
     stderr is diagnostic *by contract*, but a crashing minter can still echo a half-minted
     credential (or argv/env carrying one) into a traceback, so token-shaped runs are redacted
     before any of it reaches the log — the prose of a diagnosis survives, opaque blobs don't.
+
+    The BOX reads this too (:func:`_mint_failed_body`), so it leaves out what the box must not
+    see: no command (the caller's log line adds that, host-side only), no path an ``OSError``
+    names (argv[0] — a host path), and the catch-all's text redacted like stderr, since it can
+    quote stdout (``int()`` of a malformed ``ttl``). What remains IS the minter's stderr, and the
+    redaction only catches token-SHAPED runs: a short secret a minter prints there reaches the
+    box, so a minter's stderr must stay a diagnosis, never a value.
     """
     if isinstance(e, subprocess.CalledProcessError):
         detail = (e.stderr or "").strip()
@@ -480,7 +488,42 @@ def _mint_failure_detail(e: BaseException) -> str:
         return f"token service stdout was not the expected JSON ({e.msg} at position {e.pos})"
     if isinstance(e, KeyError):
         return f"token service JSON is missing the {e} key (expected 'value' and 'ttl')"
-    return f"{type(e).__name__}: {e}"
+    if isinstance(e, OSError) and e.strerror:
+        return f"{type(e).__name__}: {e.strerror}"  # not str(e): that appends the filename
+    return f"{type(e).__name__}: {_redact_token_runs(str(e))[:500]}"
+
+
+class _MintFailure:
+    """What :meth:`_Rule.token` returns instead of a value when the minter failed: the reason,
+    carried WITH the result rather than left on the rule, where a concurrent mint could overwrite
+    it before the request that failed reads it."""
+
+    __slots__ = ("reason",)
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason  # _mint_failure_detail's text: no command, token-shaped runs redacted
+
+
+def _mint_failed_body(host: str | None, reason: str, *, refused: bool = False) -> bytes:
+    """The proxy's own answer when a rule's mint failed. Forwarded, the box's dummy credential drew
+    the upstream's 401 ("Bad credentials"), which names neither the cause nor where it is fixed,
+    and an agent spent an hour on the wrong one. ``message`` is the key gh and most API clients
+    print; a client that prints the raw body shows it too. Generic across every rule: unlike a held
+    credential's 401 there is no provider shape to mimic, because this is not an auth answer — the
+    fault is host-side, which is the 502's point.
+
+    ``refused`` is the 401 re-issue: that request DID go upstream, with the cached token the
+    upstream then refused, so it must not be told it was never sent — only a first mint failing
+    answers INSTEAD of the request."""
+    if refused:
+        what = f"{host} after it refused the one this request carried (401)"
+    else:
+        what = f"{host}, so this request was not sent"
+    message = (
+        f"foldyard could not mint a credential for {what}: {reason}"
+        " (on your computer, `fy host logs` has the details)"
+    )
+    return json.dumps({"message": message}).encode()
 
 
 class _Rule:
@@ -557,7 +600,9 @@ class _Rule:
         ctx.log.info(f"egress_proxy: minted token for {self.host} (ttl≈{data['ttl']}s)")
         return self._value
 
-    def token(self, *, force: bool = False, warm: bool = False) -> str | None:
+    def token(self, *, force: bool = False, warm: bool = False) -> str | _MintFailure:
+        """The value to inject, or — when the minter failed — a :class:`_MintFailure` naming why,
+        which the request path answers the box with instead of forwarding its dummy."""
         # Held across the mint, so a warm-up and a concurrent request collapse to ONE
         # subprocess: the second caller waits and then sees the fresh cache. The minter has
         # its own 30s timeout, which bounds how long that wait can be.
@@ -575,13 +620,12 @@ class _Rule:
                     # request): degrade ONE host, never all egress. The request path is past the
                     # startup window, so it keeps the loud level.
                     report = ctx.log.warn if warm else ctx.log.error
+                    detail = _mint_failure_detail(e)
                     # Lead with the HOST: that's the axis a reader is trying to identify, and
                     # the command alone makes them map a module path back to a mode by hand.
-                    report(
-                        f"egress_proxy: mint failed for {self.host} — "
-                        f"{_mint_failure_detail(e)} [{self.command}]"
-                    )
-                    return None
+                    report(f"egress_proxy: mint failed for {self.host} — {detail} [{self.command}]")
+                    return _MintFailure(detail)
+            assert self._value is not None  # the branch above mints whenever it is None
             return self._value
 
     def invalidate(self) -> None:
@@ -921,10 +965,12 @@ class Injector:
             "path": self._logged_path(flow)[:200],
             "status": flow.response.status_code,
             # What THIS request carried — not "its host has an injector": a path outside the
-            # rule's prefix, or a failed mint, leaves with the box's own dummy.
+            # rule's prefix leaves with the box's own dummy (a failed mint doesn't leave at all).
             "injected": bool(flow.metadata.get("egress_proxy_injected")),
             "replayed": bool(flow.metadata.get("egress_proxy_retried")),
         }  # fmt: skip
+        if flow.metadata.get("egress_proxy_mint_failed"):
+            entry["mint_failed"] = True  # the proxy's own 502: nothing (more) went upstream
         ua = _user_agent(flow.request)
         if ua:
             entry["ua"] = ua
@@ -1320,11 +1366,25 @@ class Injector:
         if rule is None:
             return  # capture-only, or not a target host/path → log on the way back, rewrite nothing
         value = rule.token()
-        if value is not None:
-            rule.apply(flow.request, value)
-            flow.metadata["egress_proxy_injected"] = True
-            if rule.query_param:  # redact what WAS written, whatever the rules are at log time
-                flow.metadata["egress_proxy_redact"] = rule.query_param
+        if isinstance(value, _MintFailure):
+            self._answer_mint_failure(flow, rule, value)
+            return
+        rule.apply(flow.request, value)
+        flow.metadata["egress_proxy_injected"] = True
+        if rule.query_param:  # redact what WAS written, whatever the rules are at log time
+            flow.metadata["egress_proxy_redact"] = rule.query_param
+
+    def _answer_mint_failure(
+        self, flow: http.HTTPFlow, rule: _Rule, failure: _MintFailure, *, refused: bool = False
+    ) -> None:
+        """Answer in the proxy rather than let the box's dummy go upstream — or, on a 401 re-issue
+        (``refused``), replace the upstream's 401 — with a 502 that names the minter's reason. A
+        response set in a request hook is what mitmproxy hands back INSTEAD of dialling the
+        upstream; ``response`` still fires for it and logs the row (not a 401, so nothing is
+        re-issued)."""
+        body = _mint_failed_body(rule.host, failure.reason, refused=refused)
+        flow.response = http.Response.make(502, body, {"content-type": "application/json"})
+        flow.metadata["egress_proxy_mint_failed"] = True
 
     async def response(self, flow: http.HTTPFlow) -> None:
         # Re-issue once on an upstream 401 BEFORE logging, so the log + the client both see the
@@ -1358,7 +1418,14 @@ class Injector:
             ctx.log.warn(f"egress_proxy: 401 from {rule.host} on a streamed upload — not re-issued")
             return
         value = rule.token(force=True)
-        if value is None:
+        if isinstance(value, _MintFailure):
+            # The upstream refused the cached token and no fresh one can be had. Its 401 would
+            # send the box hunting for a credential it never held; the minter's reason is the
+            # fault, and the operator's to fix — a 502 like a first mint failing gets, worded for
+            # a request that DID go out. The refused token is dropped too, so the next request
+            # re-mints rather than reusing it.
+            rule.invalidate()
+            self._answer_mint_failure(flow, rule, value, refused=True)
             return
         flow.metadata["egress_proxy_retried"] = True
         ctx.log.info(f"egress_proxy: 401 from {rule.host} — re-minted + re-issuing the request")
