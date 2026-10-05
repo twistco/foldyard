@@ -943,6 +943,7 @@ def _scoped_probe(monkeypatch, scopes: list):
         check=check,
         interval=0.0,
         scope=lambda: observed[0],
+        scope_identity="App 1, installation 2",
     )
     monkeypatch.setattr(supervisor.devmode, "capability_probes", lambda mode: [probe])
     lines: list[str] = []
@@ -991,18 +992,48 @@ def test_a_changed_scope_is_one_log_line_and_one_notification(monkeypatch):
     assert "added contents:write" in body
 
 
-def test_an_unread_scope_keeps_the_record_and_says_nothing(monkeypatch):
-    # A failed or unreadable read is "unavailable", never an empty scope: reporting it would
-    # announce every permission removed, then re-added on the next good read.
+def test_an_unread_scope_keeps_the_record_and_says_so_once_per_change(monkeypatch):
+    # A failed or unreadable read is "unavailable", never an empty scope: reporting it as one
+    # would announce every permission removed, then re-added on the next good read. But keeping
+    # the record silently would leave widenings showing an ever-staler reading, with drift
+    # detection off, and nothing saying so. So: one line on the way in, one on the way out.
     from foldyard import credscope
 
-    run, lines, notified = _scoped_probe(monkeypatch, [_gh_scope({"issues": "write"}), None])
+    good = _gh_scope({"issues": "write"})
+    run, lines, notified = _scoped_probe(monkeypatch, [good, None, None, good, None])
     run()
+    record = credscope.last("github", "App 1, installation 2")
+    assert record is not None
+    checked = record["checked"]
     lines.clear()
     run()
-    assert [ln for ln in lines if "scope" in ln] == [] and notified == []
+    run()  # still unreadable: already said
+    assert [ln for ln in lines if "scope" in ln] == [
+        "⚠ github: the probe couldn't read the credential's scope (App 1, installation 2) — "
+        f"the scope shown is from {checked} and may be stale"
+    ]
     record = credscope.last("github", "App 1, installation 2")
     assert record is not None and record["permissions"] == {"issues": "write"}
+    assert record.get("unread")  # …and the reports can say so too
+    lines.clear()
+    run()
+    assert [ln for ln in lines if "scope" in ln] == [
+        "✓ github: the credential's scope is readable again (App 1, installation 2)"
+    ]
+    lines.clear()
+    run()  # a fresh lapse is a fresh change
+    assert len([ln for ln in lines if "couldn't read" in ln]) == 1
+    assert notified == []
+
+
+def test_an_unread_scope_with_nothing_recorded_says_there_is_none_yet(monkeypatch):
+    run, lines, _ = _scoped_probe(monkeypatch, [None, None])
+    run()
+    run()
+    assert [ln for ln in lines if "scope" in ln] == [
+        "⚠ github: the probe couldn't read the credential's scope (App 1, installation 2) — "
+        "none is recorded yet"
+    ]
 
 
 def test_a_scope_that_cannot_be_recorded_never_breaks_the_tick(monkeypatch):

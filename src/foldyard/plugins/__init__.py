@@ -425,6 +425,9 @@ class CapabilityProbe:
     # Read right after each `check`: the scope that check observed, or None when it read none
     # (a failure, an unreadable answer) — never a guess (see CredentialScope).
     scope: Callable[[], CredentialScope | None] | None = None
+    # Which credential ``scope`` reads (its CredentialScope.identity), so a check that read none
+    # can still name the record it leaves standing, and mark it possibly stale.
+    scope_identity: str = ""
 
 
 @dataclass(frozen=True)

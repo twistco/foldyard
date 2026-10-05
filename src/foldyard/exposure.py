@@ -317,7 +317,7 @@ def _scope_lines(switch: str, spec: dict) -> tuple[str, ...]:
     credential carries rather than capping it). From the supervisor's record, OFFLINE — a report
     never calls the provider — and only the record for the credential this row names, so a changed
     ``installation_id`` never shows the previous App's permissions as the new one's."""
-    from . import credscope
+    from . import credscope, devmode
     from .plugins.kinds import scope_identity
 
     identity = scope_identity(spec)
@@ -331,12 +331,26 @@ def _scope_lines(switch: str, spec: dict) -> tuple[str, ...]:
             "scope: not yet probed — the supervisor reads it while the switch is on "
             f"(`fy mode {switch}=on`)",
         )
-    lines = [f"scope (probed {record.get('checked') or '?'}): {credscope.summary(record)}"]
-    elevated = credscope.elevated(record["permissions"])
-    if elevated:
+    now = devmode.now()
+    checked = str(record.get("checked") or "?")
+    age = credscope.ago(checked, now)
+    lines = [f"scope (probed {checked}{', ' + age if age else ''}): {credscope.summary(record)}"]
+    permissions = record["permissions"]
+    unknown = credscope.unrecognised(permissions)
+    known = [name for name in credscope.elevated(permissions) if name not in unknown]
+    if known:
         lines.append(
-            f"⚠ write or admin: {', '.join(elevated)} — what the box can change through this "
+            f"⚠ write or admin: {', '.join(known)} — what the box can change through this "
             "credential"
+        )
+    if unknown:
+        levels = ", ".join(f"{name}:{permissions[name]}" for name in unknown)
+        lines.append(f"⚠ a level foldyard doesn't recognise, treated as write or admin: {levels}")
+    if record.get("unread"):
+        unread = str(record["unread"])
+        lines.append(
+            f"⚠ may be stale: the probe couldn't read the scope at {unread} "
+            f"({credscope.ago(unread, now) or '?'}) and hasn't since; this is the last reading"
         )
     return tuple(lines)
 

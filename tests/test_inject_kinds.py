@@ -397,6 +397,8 @@ def test_github_app_probe_is_contributed_per_active_rule_named_after_its_switch(
         ),
     )
     assert probe.scope is not None and probe.scope() is None  # nothing observed before a check
+    # …but which credential it reads is known up front, so an unread scope names its record.
+    assert probe.scope_identity == "App 4008762, installation 139125083"
     assert probe.check() == (True, "ok")
     # The PEM exactly as the minter would read it, and the var a missing one belongs in.
     assert seen == [("4008762", "139125083", _PEM_B64, "FY_INJECT_GITHUB")]

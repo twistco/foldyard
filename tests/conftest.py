@@ -170,15 +170,18 @@ def isolated_capability_state(tmp_path, monkeypatch):
     clock to real time, so no test reads or writes the real ~/.foldyard capabilities.json — or
     picks up a developer's live `fy clock` skew (FOLDYARD_CLOCK_OFFSET=0 short-circuits the
     offset-file read). Also resets the supervisor's per-process probe cache. The credential scope
-    record (credscope) lives beside it and is isolated the same way."""
+    record (credscope) lives beside it and is isolated the same way, with the supervisor's memory
+    of which scopes it has already reported unreadable."""
     from foldyard import supervisor
 
     monkeypatch.setenv("FOLDYARD_CAPABILITIES_FILE", str(tmp_path / "capabilities.json"))
     monkeypatch.setenv("FOLDYARD_CREDENTIAL_SCOPES_FILE", str(tmp_path / "credential-scopes.json"))
     monkeypatch.setenv("FOLDYARD_CLOCK_OFFSET", "0")
     supervisor._probe_state.clear()
+    supervisor._scope_unread_seen.clear()
     yield
     supervisor._probe_state.clear()
+    supervisor._scope_unread_seen.clear()
 
 
 @pytest.fixture(autouse=True)

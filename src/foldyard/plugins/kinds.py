@@ -299,6 +299,7 @@ class GithubAppKind(_GithubKind):
                 check=_check,
                 interval=300.0,  # a rotated key is rare; the call is cheap but not free
                 scope=lambda: observed[0],
+                scope_identity=identity,
             )
         ]
 

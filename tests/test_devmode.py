@@ -179,16 +179,25 @@ def test_show_gives_an_armed_credential_its_last_probed_scope(isolated_state, ca
     from foldyard import credscope
     from foldyard.plugins import CredentialScope
 
-    scope = CredentialScope(
-        "App 1234567, installation 7654321", {"issues": "write", "actions": "read"}, "all repos"
+    identity = "App 1234567, installation 7654321"
+    scope = CredentialScope(identity, {"issues": "write", "actions": "read"}, "all repos")
+    an_hour_ago = devmode.now() - timedelta(hours=1, minutes=1)
+    credscope.observe("github", scope, devmode._iso(an_hour_ago))
+    assert devmode.scope_summary("github") == (
+        "actions:read, issues:WRITE — all repos (probed 1h ago)"
     )
-    credscope.observe("github", scope, "t")
-    assert devmode.scope_summary("github") == "actions:read, issues:WRITE — all repos"
     devmode.show()
     assert "scope:" not in capsys.readouterr().out  # at rest: `fy config widenings` has it
     devmode.set_mode({"github": "on"})
     devmode.show()
-    assert "scope: actions:read, issues:WRITE — all repos" in capsys.readouterr().out
+    assert "scope: actions:read, issues:WRITE — all repos (probed 1h ago)" in (
+        capsys.readouterr().out
+    )
+    # A probe that can no longer read it leaves the reading standing, and says it may be stale.
+    credscope.mark_unread("github", identity, devmode._iso(devmode.now()))
+    assert devmode.scope_summary("github").endswith(
+        "(probed 1h ago; unreadable since just now, may be stale)"
+    )
     # A switch whose kind reads no scope, or that has no record yet, gets no line.
     assert devmode.scope_summary("github-user") == ""
     assert devmode.scope_summary("gcp") == ""
