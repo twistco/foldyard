@@ -2291,6 +2291,35 @@ def test_injecting_rules_hold_back_both_sides_of_an_overlap():
     assert len(reg.injecting_rules({**both, "b": "off"})) == 2
 
 
+class _Interacting(_Injectors):
+    """``a`` injects on all of api.x.test alone; ``b`` alone injects nothing, but with ``a`` also
+    on it adds api.x.test/v1 — a rule that only exists with BOTH on, so neither switch tried
+    alone accounts for it (CodeRabbit on #54: attribution by isolated emission misses it)."""
+
+    def __init__(self):
+        super().__init__({"a": [], "b": []})
+
+    def proxy_rules(self, mode):
+        rule = lambda path: InjectRule(host="api.x.test", header="Authorization", minter=path)  # noqa: E731
+        out = [rule("")] if mode.get("a") == "on" else []
+        if mode.get("a") == "on" and mode.get("b") == "on":
+            out.append(rule("/v1"))
+        return out
+
+
+def test_an_overlap_only_the_combined_mode_produces_is_still_caught():
+    # The check runs on the rules the proxy would ACTUALLY get, not on each switch's isolated
+    # contribution: two overlapping rules that no single switch accounts for together are an
+    # overlap, refused at `fy mode` and held back by the proxy, whatever produced them.
+    reg = Registry([_Interacting()], config=_cfg({}))
+    both = {"a": "on", "b": "on"}
+    assert reg.inject_overlaps(both) != []
+    assert [sev for sev, _ in reg.mode_issues(both)] == ["error"]
+    assert "api.x.test" in reg.mode_issues(both)[0][1]
+    assert reg.injecting_rules(both) == []
+    assert len(reg.injecting_rules({"a": "on", "b": "off"})) == 1
+
+
 def test_the_proxy_daemon_injects_neither_overlapping_rule(monkeypatch):
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
     plugin = _Injectors({"a": [("api.x.test", "")], "b": [("api.x.test", "/v1")]})

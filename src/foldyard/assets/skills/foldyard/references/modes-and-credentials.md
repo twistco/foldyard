@@ -39,7 +39,8 @@ The box holds a dummy value at most. So:
   human (the fix is on their computer; `fy host logs` there has the details).
 - one host and path gets one credential. If `fy mode` says two switches both inject on it, the
   proxy is injecting neither, so a 401 there is that, not a broken credential: ask the human to
-  turn one off, with the `fy mode <switch>=off` the message gives.
+  turn one off, with the exact `fy mode` command the message gives (a switch's resting level
+  isn't always `off`).
 
 Some services in the stack instead get an identity from a local metadata emulator — same idea:
 the container is handed short-lived capability, not a key.

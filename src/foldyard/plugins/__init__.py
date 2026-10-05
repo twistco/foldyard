@@ -277,10 +277,13 @@ class InjectOverlap:
     The addon injects the FIRST rule that matches, so without this check the credential a request
     carried would be decided by plugin load order. Pairs are in switch declaration order."""
 
-    switches: tuple[str, str]
-    levels: tuple[str, str]
-    defaults: tuple[str, str]  # each switch's resting level: the fix the message offers
+    switches: tuple[str, ...]
+    levels: tuple[str, ...]
+    defaults: tuple[str, ...]  # each switch's resting level: the fix the message offers
     rules: tuple[InjectRule, InjectRule]
+    # True when a rule in the pair is one no single switch accounts for (it appears only with
+    # several on together): ``switches`` is then every active switch, since any could be the cause.
+    combined: bool = False
 
     @property
     def place(self) -> str:
@@ -291,8 +294,20 @@ class InjectOverlap:
 
 def _overlap_message(group: list[InjectOverlap]) -> str:
     """One ``mode_issues`` row for every place a pair of switches both claim."""
-    (a, b), (va, vb), (da, db) = group[0].switches, group[0].levels, group[0].defaults
     places = ", ".join(dict.fromkeys(o.place for o in group))
+    first = group[0]
+    if first.combined:
+        on = ", ".join(f"{s}={v}" for s, v in zip(first.switches, first.levels, strict=True))
+        fixes = " or ".join(
+            f"`fy mode {s}={d}`" for s, d in zip(first.switches, first.defaults, strict=True)
+        )
+        return (
+            f"{places} would get more than one credential with {on or 'every switch at rest'}:"
+            " a rule there appears only with several switches on together, so no single one"
+            " accounts for it, and the proxy injects none of them there."
+            + (f" Turn one off first: {fixes}" if fixes else "")
+        )
+    (a, b), (va, vb), (da, db) = first.switches, first.levels, first.defaults
     return (
         f"{a}={va} and {b}={vb} both inject a credential on {places}, so the proxy injects "
         f"neither while both are on. Turn one off first: `fy mode {b}={db}` or `fy mode {a}={da}`"
@@ -847,13 +862,37 @@ class Registry:
                     for y in rules_b
                     if rules_overlap(x, y)
                 ]
-        return out
+        return out + self._combined_overlaps(mode, defaults, owned)
+
+    def _combined_overlaps(
+        self, mode: dict, defaults: dict[str, str], owned: list[tuple[str, list[InjectRule]]]
+    ) -> list[InjectOverlap]:
+        """Overlaps in the rule set the proxy would ACTUALLY get that the per-switch attribution
+        can't see: a rule no switch emits on its own (it appears only with several on together,
+        or at rest) still claims its host and path. :meth:`switch_rules` asks each switch alone,
+        so such a rule belongs to none of them, and without this a pair involving it reached the
+        proxy with the credential left to rule order. Every active switch is named, since any of
+        them could be what produces it."""
+        attributed = [rule for _, rules in owned for rule in rules]
+        live = self.proxy_rules(mode)
+        stray = [rule for rule in live if rule not in attributed]
+        if not stray:
+            return []
+        active = tuple(name for name, d in defaults.items() if mode.get(name, d) != d)
+        levels = tuple(mode[name] for name in active)
+        rests = tuple(defaults[name] for name in active)
+        return [
+            InjectOverlap(active, levels, rests, (x, y), combined=True)
+            for i, x in enumerate(live)
+            for y in live[i + 1 :]
+            if (x in stray or y in stray) and rules_overlap(x, y)
+        ]
 
     def overlap_issues(self, mode: dict) -> list[str]:
         """:meth:`inject_overlaps` as messages, one per pair of switches naming every place they
         both claim and the way out — the rows ``mode_issues`` refuses on, and what the supervisor
         and ``fy doctor`` report."""
-        pairs: dict[tuple[str, str], list[InjectOverlap]] = {}
+        pairs: dict[tuple[str, ...], list[InjectOverlap]] = {}
         for overlap in self.inject_overlaps(mode):
             pairs.setdefault(overlap.switches, []).append(overlap)
         return [_overlap_message(group) for group in pairs.values()]
