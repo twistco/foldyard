@@ -42,7 +42,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from shutil import which
 
-from . import allowlist, config, configpin, devmode, githeal, transcripts, worktree_registry
+from . import (
+    allowlist,
+    config,
+    configpin,
+    credscope,
+    devmode,
+    githeal,
+    transcripts,
+    worktree_registry,
+)
+from .plugins import CapabilityProbe
 
 TICK_SECONDS = 2.0
 RESTART_BACKOFF = 10.0
@@ -851,6 +861,8 @@ def run_capability_probes(wt: str, mode: dict, warming: Collection[str] = ()) ->
                 ok, detail = probe.check()
             except Exception as e:
                 ok, detail = False, f"probe crashed: {type(e).__name__}: {e}"
+            if probe.scope is not None:
+                _report_scope(probe)
             previous = state["ok"] if state else None
             state = {
                 "ok": ok,
@@ -875,6 +887,29 @@ def run_capability_probes(wt: str, mode: dict, warming: Collection[str] = ()) ->
     for key in [k for k in _probe_state if k[0] == wt and k not in active_keys]:
         del _probe_state[key]
     return results
+
+
+def _report_scope(probe: CapabilityProbe) -> None:
+    """Record the scope ``probe``'s check just read, and say — once per change — that it changed
+    (ADR-0031: foldyard reports a credential's scope rather than capping it, so a permission added
+    on the provider's side, where no foldyard file changes, must still leave a line and a
+    notification). The first observation of a credential is its baseline: logged, not pushed. An
+    unread scope (None) says nothing and keeps the record. Never raises into the tick."""
+    try:
+        scope = probe.scope() if probe.scope else None
+        if scope is None:
+            return
+        event, changes = credscope.observe(probe.switch, scope, devmode._iso(devmode.now()))
+    except Exception as e:  # a scope record must never take the tick down
+        log(f"scope: {probe.switch}: couldn't record the credential's scope ({e})")
+        return
+    if event == "baseline":
+        summary = credscope.summary({"permissions": scope.permissions, "reach": scope.reach})
+        log(f"{probe.switch}: credential scope recorded ({scope.identity}) — {summary}")
+    elif event == "changed":
+        text = "; ".join(changes)
+        log(f"⚠ {probe.switch}: the credential's scope changed ({scope.identity}) — {text}")
+        _notify(f"fy {config.project()}: {probe.switch} scope changed", text)
 
 
 def write_capabilities(capabilities: dict[str, dict]) -> None:

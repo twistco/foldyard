@@ -177,28 +177,54 @@ def installation_token(
     return str(token)
 
 
-def app_reachable(
-    app_id: str, pem_b64: str, skip_port: int | None = None, *, var: str = "FY_INJECT_<SWITCH>"
-) -> tuple[bool, str]:
-    """Can we act as the App right now? Signs a JWT and GETs ``/app`` — the metadata endpoint, which
-    authenticates with the App JWT and mints NOTHING, so a continuous probe doesn't manufacture
-    installation tokens on a timer. ``pem_b64`` is the key exactly as host.env holds it, under
-    ``var`` (named in the detail, so a missing key says where it goes). Returns
-    ``(ok, human detail)``; the detail never carries a credential (it is rendered on the mode
-    dashboards).
+_ACCESS_LEVELS = ("read", "write", "admin")
 
-    This is the capability behind a ``github-app`` switch: App id + private key valid, and GitHub
-    reachable. Everything the switch promises rides on it, and each link can lapse (a rotated key, a
-    deleted App, a paste that only LOOKS like a PEM) while the mode dashboard shows green."""
+
+def _scope(payload: dict) -> dict | None:
+    """The installation's scope from its metadata — ``{"permissions": {name: level},
+    "repository_selection": "all" | "selected"}`` — or None when the payload doesn't carry one
+    this can read. Never a guess: an empty map would read as "grants nothing", which the next good
+    read would then report as a widening."""
+    permissions = payload.get("permissions")
+    if not isinstance(permissions, dict) or not all(
+        isinstance(k, str) and v in _ACCESS_LEVELS for k, v in permissions.items()
+    ):
+        return None
+    return {
+        "permissions": dict(permissions),
+        "repository_selection": str(payload.get("repository_selection") or ""),
+    }
+
+
+def installation_probe(
+    app_id: str,
+    installation_id: str,
+    pem_b64: str,
+    skip_port: int | None = None,
+    *,
+    var: str = "FY_INJECT_<SWITCH>",
+) -> tuple[bool, str, dict | None]:
+    """Can we act as the App right now, and what does its installation grant? Signs a JWT and GETs
+    ``/app/installations/{id}`` — metadata, authenticated with the App JWT, minting NOTHING, so a
+    continuous probe doesn't manufacture installation tokens on a timer. ``pem_b64`` is the key
+    exactly as host.env holds it, under ``var`` (named in the detail, so a missing key says where it
+    goes). Returns ``(ok, human detail, scope)``: the detail never carries a credential (it is
+    rendered on the mode dashboards), and ``scope`` is :func:`_scope`'s, or None when unread.
+
+    This is the capability behind a ``github-app`` switch: App id + private key valid, the
+    installation there, and GitHub reachable. Everything the switch promises rides on it, and each
+    link can lapse (a rotated key, a deleted App, an uninstall, a paste that only LOOKS like a PEM)
+    while the mode dashboard shows green. The scope is the other half (ADR-0031): foldyard doesn't
+    cap what the installation grants, so it reports it, and the supervisor says when it changes."""
     try:
         key = decode_pem(pem_b64, var)
         token = app_jwt(key, app_id)
     except SystemExit as e:
-        return False, str(e.code).replace("github_app_token: ", "")
+        return False, str(e.code).replace("github_app_token: ", ""), None
     except Exception as e:  # a malformed key surfaces from the crypto layer, not as SystemExit
-        return False, f"can't sign with the App key ({type(e).__name__}) — re-capture it"
+        return False, f"can't sign with the App key ({type(e).__name__}) — re-capture it", None
     req = urllib.request.Request(
-        f"{_API}/app",
+        f"{_API}/app/installations/{installation_id}",
         headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
@@ -207,14 +233,35 @@ def app_reachable(
     )
     try:
         with _opener(skip_port).open(req, timeout=10) as resp:
-            slug = json.load(resp).get("slug") or app_id
+            payload = json.load(resp)
     except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return (
+                False,
+                f"installation {installation_id} not found — the App was uninstalled, or the "
+                "row's `installation_id` is wrong",
+                None,
+            )
         detail = e.read(200).decode(errors="replace").strip().replace("\n", " ")
         hint = " — key rotated or App deleted?" if e.code == 401 else ""
-        return False, f"GitHub returned {e.code}{hint} ({detail[:100]})"
-    except OSError as e:
-        return False, f"can't reach {_API} ({e})"
-    return True, f"App '{slug}' authenticates (key valid)"
+        return False, f"GitHub returned {e.code}{hint} ({detail[:100]})", None
+    except (OSError, ValueError) as e:
+        return False, f"can't reach {_API} ({e})", None
+    payload = payload if isinstance(payload, dict) else {}
+    slug = payload.get("app_slug") or app_id
+    scope = _scope(payload)
+    if payload.get("suspended_at"):
+        return False, f"App '{slug}': installation {installation_id} is suspended", scope
+    if scope is None:
+        return True, f"App '{slug}' authenticates (key valid); scope unavailable", None
+    levels = scope["permissions"].values()
+    elevated = sum(1 for level in levels if level != "read")
+    return (
+        True,
+        f"App '{slug}' authenticates (key valid); installation grants {len(levels)} "
+        f"permission{'' if len(levels) == 1 else 's'}, {elevated} at write or admin",
+        scope,
+    )
 
 
 def _flag(args: list[str], name: str) -> str:

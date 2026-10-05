@@ -283,41 +283,108 @@ def test_gh_cli_token_empty_output_is_a_failure_not_an_empty_injection(monkeypat
 _PEM_B64 = base64.b64encode(_FAKE_PEM.encode()).decode()
 
 
-def test_app_reachable_reports_the_app_slug(monkeypatch):
+_INSTALLATION = {
+    "id": 22,
+    "app_slug": "tangible-pr-bot",
+    "repository_selection": "selected",
+    "permissions": {"issues": "write", "pull_requests": "write", "actions": "read"},
+    "suspended_at": None,
+}
+
+
+def test_the_probe_reads_the_installations_scope_with_the_app_jwt(monkeypatch):
     monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
-    stub = _StubOpener({"slug": "tangible-pr-bot"})
+    stub = _StubOpener(_INSTALLATION)
     monkeypatch.setattr(gat, "_opener", lambda skip_port=None: stub)
-    ok, detail = gat.app_reachable("1234567", _PEM_B64)
+    ok, detail, scope = gat.installation_probe("1234567", "22", _PEM_B64)
     assert ok and "tangible-pr-bot" in detail
-    # /app is METADATA — a probe on a timer must not manufacture installation tokens.
+    # The detail is a summary (the dashboards give a switch one line); the scope carries the list.
+    assert "3 permissions" in detail and "2 at write" in detail
+    assert scope == {
+        "permissions": {"issues": "write", "pull_requests": "write", "actions": "read"},
+        "repository_selection": "selected",
+    }
+    # ONE metadata GET, authenticated as the App: a probe on a timer must not manufacture
+    # installation tokens, and the call that proves the key is the one that reads the scope.
     (req,) = stub.seen
-    assert req.full_url.endswith("/app") and req.get_method() == "GET"
+    assert req.full_url.endswith("/app/installations/22") and req.get_method() == "GET"
+    assert req.headers["Authorization"] == "Bearer signed.jwt"
 
 
-def test_app_reachable_names_the_actual_problem():
-    ok, detail = gat.app_reachable("1234567", "")
-    assert not ok and "private key" in detail  # no key
-    ok, detail = gat.app_reachable("1234567", "-----BEGIN RSA PRIV")
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"app_slug": "bot"},  # no permissions at all
+        {"app_slug": "bot", "permissions": ["issues"]},  # not a map
+        {"app_slug": "bot", "permissions": {"issues": 1}},  # not a level
+    ],
+)
+def test_an_unreadable_scope_is_unavailable_not_guessed(monkeypatch, payload):
+    # The App authenticated, so the switch's capability holds; what it grants is unknown, and an
+    # empty map would read as "grants nothing" — a guess the next good read would call a drift.
+    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
+    monkeypatch.setattr(gat, "_opener", lambda skip_port=None: _StubOpener(payload))
+    ok, detail, scope = gat.installation_probe("1", "22", _PEM_B64)
+    assert ok and scope is None and "scope unavailable" in detail
+
+
+def test_a_suspended_installation_degrades_the_switch(monkeypatch):
+    # GitHub refuses to mint for a suspended installation: the switch can't deliver what it says.
+    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
+    payload = {**_INSTALLATION, "suspended_at": "2026-10-01T00:00:00Z"}
+    monkeypatch.setattr(gat, "_opener", lambda skip_port=None: _StubOpener(payload))
+    ok, detail, scope = gat.installation_probe("1", "22", _PEM_B64)
+    assert not ok and "suspended" in detail
+    assert scope is not None  # still what it grants: resuming the installation brings it back
+
+
+def test_the_probe_names_the_actual_problem():
+    ok, detail, scope = gat.installation_probe("1234567", "22", "")
+    assert not ok and "private key" in detail and scope is None  # no key
+    ok, detail, _ = gat.installation_probe("1234567", "22", "-----BEGIN RSA PRIV")
     assert not ok and "base64" in detail  # a truncated raw paste
     # A PEM-shaped-but-unusable key fails at signing, and says so rather than raising.
-    ok, detail = gat.app_reachable("1234567", _PEM_B64)
+    ok, detail, _ = gat.installation_probe("1234567", "22", _PEM_B64)
     assert not ok and "App key" in detail
 
 
-def test_app_reachable_never_leaks_the_jwt_on_failure(monkeypatch):
+def _failing_opener(code: int, body: bytes = b"bad"):
     import email.message
     import urllib.error
-
-    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.SECRET.jwt")
 
     class _Failing:
         def open(self, req, timeout=None):
             raise urllib.error.HTTPError(
-                req.full_url, 401, "Unauthorized", email.message.Message(), io.BytesIO(b"bad")
+                req.full_url, code, "nope", email.message.Message(), io.BytesIO(body)
             )
 
-    monkeypatch.setattr(gat, "_opener", lambda skip_port=None: _Failing())
-    ok, detail = gat.app_reachable("1234567", _PEM_B64)
+    return lambda skip_port=None: _Failing()
+
+
+def test_the_probe_never_leaks_the_jwt_on_failure(monkeypatch):
+    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.SECRET.jwt")
+    monkeypatch.setattr(gat, "_opener", _failing_opener(401))
+    ok, detail, scope = gat.installation_probe("1234567", "22", _PEM_B64)
     # The detail is rendered on the posture dashboards, so it must carry the FIX, not the credential.
-    assert not ok and "401" in detail and "rotated" in detail
+    assert not ok and "401" in detail and "rotated" in detail and scope is None
     assert "SECRET" not in detail
+
+
+def test_an_unknown_installation_says_which_field_to_check(monkeypatch):
+    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
+    monkeypatch.setattr(gat, "_opener", _failing_opener(404, b'{"message": "Not Found"}'))
+    ok, detail, scope = gat.installation_probe("1", "22", _PEM_B64)
+    assert not ok and "installation 22" in detail and "installation_id" in detail
+    assert scope is None
+
+
+def test_an_unreachable_github_is_a_failure_without_a_scope(monkeypatch):
+    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
+
+    class _Down:
+        def open(self, req, timeout=None):
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(gat, "_opener", lambda skip_port=None: _Down())
+    ok, detail, scope = gat.installation_probe("1", "22", _PEM_B64)
+    assert not ok and "can't reach" in detail and scope is None

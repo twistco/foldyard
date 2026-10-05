@@ -1790,6 +1790,16 @@ def capabilities_file() -> Path:
     return Path(env).expanduser() if env else state_dir() / "capabilities.json"
 
 
+def credential_scopes_file() -> Path:
+    """What each credential was last OBSERVED to grant (:mod:`foldyard.credscope`, ADR-0031): kept
+    by the supervisor's probes, read OFFLINE by `fy config widenings` and `fy mode`. Unlike
+    :func:`capabilities_file` it outlives the switch going off — a latent credential's scope is
+    still worth showing. ``FOLDYARD_CREDENTIAL_SCOPES_FILE`` wins, else
+    ``<state_dir>/credential-scopes.json``."""
+    env = os.environ.get("FOLDYARD_CREDENTIAL_SCOPES_FILE")
+    return Path(env).expanduser() if env else state_dir() / "credential-scopes.json"
+
+
 def blocked_daemons_file() -> Path:
     """The supervisor's PROJECT-shared record of the daemons a spawn gate is holding back —
     ``{name: {reason, since}}`` — the gate's own fix (missing host.env key, a foreign listener

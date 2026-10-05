@@ -15,7 +15,15 @@ import shlex
 import pytest
 
 from foldyard import config, devmode
-from foldyard.plugins import DoctorContext, Registry, VerifyContext, inject, kinds, proxy
+from foldyard.plugins import (
+    CredentialScope,
+    DoctorContext,
+    Registry,
+    VerifyContext,
+    inject,
+    kinds,
+    proxy,
+)
 
 _APP = {
     "switch": "github",
@@ -313,22 +321,43 @@ def test_github_app_probe_is_contributed_per_active_rule_named_after_its_switch(
     (probe,) = plugin.capability_probes({"github": "on"})
     assert probe.switch == "github" and probe.name == "github-github-app"
     seen = []
+    scope = {"permissions": {"issues": "write"}, "repository_selection": "selected"}
     monkeypatch.setattr(
         github_app_token,
-        "app_reachable",
-        lambda app_id, pem_b64, skip_port=None, var="": (
-            seen.append((app_id, pem_b64, var)) or (True, "ok")
+        "installation_probe",
+        lambda app_id, installation_id, pem_b64, skip_port=None, var="": (
+            seen.append((app_id, installation_id, pem_b64, var)) or (True, "ok", scope)
         ),
     )
+    assert probe.scope is not None and probe.scope() is None  # nothing observed before a check
     assert probe.check() == (True, "ok")
     # The PEM exactly as the minter would read it, and the var a missing one belongs in.
-    assert seen == [("4008762", _PEM_B64, "FY_INJECT_GITHUB")]
-    # A probe error must degrade the switch, never take the supervisor tick down.
+    assert seen == [("4008762", "139125083", _PEM_B64, "FY_INJECT_GITHUB")]
+    # The scope that check read, as the core's CredentialScope: this App + installation's.
+    assert probe.scope() == CredentialScope(
+        identity="App 4008762, installation 139125083",
+        permissions={"issues": "write"},
+        reach="selected repositories",
+    )
+    # A probe error must degrade the switch, never take the supervisor tick down — and leaves no
+    # scope behind: the next report must not repeat an earlier read as if it were fresh.
     monkeypatch.setattr(
-        github_app_token, "app_reachable", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x"))
+        github_app_token,
+        "installation_probe",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")),
     )
     ok, detail = probe.check()
     assert not ok and "RuntimeError" in detail
+    assert probe.scope() is None
+
+
+def test_only_a_kind_that_reads_its_scope_names_a_scope_identity():
+    # The identity keys the scope record: `fy config widenings` shows a record only for the
+    # credential the ADOPTED row names, never one an earlier installation_id left behind.
+    assert kinds.scope_identity(_APP) == "App 4008762, installation 139125083"
+    assert kinds.scope_identity(_USER) == ""
+    assert kinds.scope_identity({"switch": "svc", "host": "a.test"}) == ""
+    assert kinds.scope_identity({"switch": "svc", "kind": "nonsense"}) == ""
 
 
 def test_the_probe_validates_against_the_registry(monkeypatch):

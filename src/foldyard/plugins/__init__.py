@@ -306,6 +306,18 @@ class HeldCredential:
 
 
 @dataclass(frozen=True)
+class CredentialScope:
+    """What a credential was OBSERVED to grant, read by its probe (ADR-0031 decision 3). foldyard
+    doesn't cap a credential's scope — the provider's settings are the one place it's decided — so
+    it reports it instead: the supervisor keeps the last observation per switch
+    (:mod:`foldyard.credscope`) and says when it changes. Never a value, only names and levels."""
+
+    identity: str  # WHICH credential (e.g. an App + installation): another one is a new baseline
+    permissions: dict[str, str]  # permission name → level ("read" / "write" / "admin")
+    reach: str = ""  # what they apply to, e.g. "selected repositories"
+
+
+@dataclass(frozen=True)
 class CapabilityProbe:
     """A liveness check for the EXTERNAL capability a mode level promises (mode-state
     consolidation proposal B). A mode is a desired mode, not a capability — the PAM grant
@@ -330,6 +342,9 @@ class CapabilityProbe:
     name: str  # unique probe name (also the log/reap key), e.g. "gcp-impersonation"
     check: Callable[[], tuple[bool, str]]  # () -> (ok, human detail); NEVER returns a secret
     interval: float = 120.0  # seconds between runs while the switch is on
+    # Read right after each `check`: the scope that check observed, or None when it read none
+    # (a failure, an unreadable answer) — never a guess (see CredentialScope).
+    scope: Callable[[], CredentialScope | None] | None = None
 
 
 @dataclass(frozen=True)

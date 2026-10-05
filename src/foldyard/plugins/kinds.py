@@ -32,7 +32,7 @@ import sys
 from collections.abc import Iterator
 
 from .. import config
-from . import CapabilityProbe, DoctorContext, InjectRule, Secret
+from . import CapabilityProbe, CredentialScope, DoctorContext, InjectRule, Secret
 
 # Fields every kind takes. `replay_on_401` is generic because whether a 401 is worth a re-mint is a
 # property of the token, which the row may know better than the kind's default.
@@ -101,6 +101,11 @@ class Kind:
 
     def probes(self, spec: dict, var: str) -> list[CapabilityProbe]:
         return []
+
+    def scope_identity(self, spec: dict) -> str:
+        """WHICH credential the row names, for a kind whose probe reads its scope (``""`` = it
+        reads none). Keys the scope record (:mod:`foldyard.credscope`)."""
+        return ""
 
     def doctor_checks(
         self, spec: dict, var: str, active: bool, ctx: DoctorContext
@@ -246,23 +251,39 @@ class GithubAppKind(_GithubKind):
             b64=True,
         )
 
+    def scope_identity(self, spec: dict) -> str:
+        return f"App {spec['app_id']}, installation {spec['installation_id']}"
+
     def probes(self, spec: dict, var: str) -> list[CapabilityProbe]:
         # The continuous version of the PEM doctor rows. The switch promises "we can act as the
         # App"; the key can be rotated, the App uninstalled, a paste can be shaped like a PEM
         # without being one — each of which surfaced as `gh` 401ing inside the box while `fy mode`
-        # showed green. /app (JWT-authenticated metadata) rather than a mint: a timer that
-        # manufactures installation tokens is a worse idea than one that doesn't.
-        app_id = str(spec["app_id"])
+        # showed green. The installation's metadata (JWT-authenticated) rather than a mint: a
+        # timer that manufactures installation tokens is a worse idea than one that doesn't. The
+        # same read carries the installation's permissions — the box's scope, which foldyard
+        # reports rather than caps (ADR-0031) — handed to the supervisor through `scope`.
+        app_id, installation_id = str(spec["app_id"]), str(spec["installation_id"])
+        identity = self.scope_identity(spec)
+        observed: list[CredentialScope | None] = [None]  # what the LAST check read
 
         def _check() -> tuple[bool, str]:
             from . import github_app_token  # lazy: pyjwt stays off the hot path
 
+            observed[0] = None
             try:
-                return github_app_token.app_reachable(
-                    app_id, _secret_value(var), config.proxy_port(), var=var
+                ok, detail, scope = github_app_token.installation_probe(
+                    app_id, installation_id, _secret_value(var), config.proxy_port(), var=var
                 )
             except Exception as e:  # a probe must never take the supervisor tick down
                 return False, f"probe error ({type(e).__name__}: {e})"
+            if scope is not None:
+                selection = scope["repository_selection"]
+                observed[0] = CredentialScope(
+                    identity=identity,
+                    permissions=scope["permissions"],
+                    reach=f"{selection} repositories" if selection else "",
+                )
+            return ok, detail
 
         return [
             CapabilityProbe(
@@ -270,6 +291,7 @@ class GithubAppKind(_GithubKind):
                 name=f"{spec['switch']}-github-app",
                 check=_check,
                 interval=300.0,  # a rotated key is rare; the call is cheap but not free
+                scope=lambda: observed[0],
             )
         ]
 
@@ -343,6 +365,16 @@ class GhCliKind(_GithubKind):
 
 KINDS: dict[str, Kind] = {k.name: k for k in (StaticKind(), GithubAppKind(), GhCliKind())}
 DEFAULT = "static"
+
+
+def scope_identity(spec: dict) -> str:
+    """:meth:`Kind.scope_identity` for a RAW row (a report's read: an unknown kind or a row
+    missing the fields reads as ``""``, never raises)."""
+    kind = KINDS.get(str(spec.get("kind", DEFAULT)))
+    try:
+        return kind.scope_identity(spec) if kind else ""
+    except KeyError:
+        return ""
 
 
 def _secret_value(var: str) -> str:
