@@ -40,7 +40,8 @@ there's nothing to passthrough).
 Config via env (read once at startup). foldyard's supervisor sets LIVE_FILE, which moves the
 rules, the wall switch and the passthrough list out of the env and makes them live:
   LIVE_FILE         a JSON file {"rules": [<rule>, ...], "default_deny": bool, "passthrough":
-                    [<pattern>, ...]}, re-read when it changes (per hook + once a second) with no
+                    [<pattern>, ...]} (plus "held" and "overlaps": where the proxy answers a
+                    request itself), re-read when it changes (per hook + once a second) with no
                     restart. When set, INJECT_*, DEFAULT_DENY and PASSTHROUGH_HOSTS are ignored.
                     Unreadable/malformed ⇒ fail closed (no rules, the wall enforcing, nothing
                     tunnelled). A change that narrows the policy closes the open connections it no
@@ -241,6 +242,29 @@ def _valid_held(entry: object) -> bool:
         and all(isinstance(entry.get(k), str) and entry[k] for k in ("host", "dummy", "body"))
         and any(isinstance(entry.get(k), str) and entry[k] for k in ("header", "query_param"))
     )
+
+
+def _valid_overlap(entry: object) -> bool:
+    """A live ``overlaps`` entry the addon can act on: where (a host, and a path prefix if any)
+    and what to answer there."""
+    return (
+        isinstance(entry, dict)
+        and all(isinstance(entry.get(k), str) and entry[k] for k in ("host", "message"))
+        and isinstance(entry.get("path_prefix", ""), str)
+    )
+
+
+def _overlap_body(message: str) -> bytes:
+    """The proxy's own answer where two switches both claim a host and path, so it injects
+    neither (``overlaps``). Forwarded, the box's dummy drew the provider's 401 ("Bad
+    credentials"): a broken credential, to anyone reading it, while the fix is a mode change on
+    the host. A 502 like a failed mint's — the fault is host-side, not the box's credential —
+    carrying the message ``fy mode`` shows, which names both switches and the command to run."""
+    text = (
+        f"foldyard did not send this request: {message}"
+        " (on your computer: the mode can't be changed from the box)"
+    )
+    return json.dumps({"message": text}).encode()
 
 
 # An HTTP auth scheme (RFC 9110 §11.1's token, in the shape real ones take: `Bearer`, `token`,
@@ -763,6 +787,10 @@ class Injector:
         # Dummies at rest (LIVE_FILE's `held`): answered here with the fix, never forwarded.
         self.held: list[dict] = []
         self.held_hosts: set[str] = set()
+        # Where two switches' rules overlap and so neither injects (LIVE_FILE's `overlaps`):
+        # answered here with the message, never forwarded with the dummy.
+        self.overlaps: list[dict] = []
+        self.overlap_hosts: set[str] = set()
         # Phase A′: what to do with HTTPS we aren't injecting — "full" (decrypt+log) or
         # "passthrough" (blind-tunnel + SNI-log). Default "full" keeps the pre-A′ behaviour for
         # any caller that doesn't set CAPTURE_MODE.
@@ -877,6 +905,13 @@ class Injector:
         held = data.get("held")
         self.held = [h for h in held if _valid_held(h)] if isinstance(held, list) else []
         self.held_hosts = {h["host"] for h in self.held}
+        overlaps = data.get("overlaps")
+        self.overlaps = [
+            {**o, "host": _norm_host(o["host"])}  # compared with the destination, which is normed
+            for o in (overlaps if isinstance(overlaps, list) else [])
+            if _valid_overlap(o)
+        ]
+        self.overlap_hosts = {o["host"] for o in self.overlaps}
         passthrough = data.get("passthrough")
         self.passthrough_hosts = (
             [str(h) for h in passthrough if h] if isinstance(passthrough, list) else []
@@ -954,19 +989,39 @@ class Injector:
         match wins — distinct injectors use distinct hosts, so at most one matches in practice.
         HTTPS only, by scheme: a cleartext request to a target host — even on :443 — gets no
         credential, on the way out (`request`) or on a 401 re-issue (`response`)."""
+        dest = self._injectable(flow)
+        if dest is None:
+            return None
+        for rule in self.rules:
+            if rule.matches(dest, flow.request.path):
+                return rule
+        return None
+
+    @staticmethod
+    def _injectable(flow: http.HTTPFlow) -> str | None:
+        """The destination of a request a rule may inject on, else None: HTTPS only, and only
+        where destination, Host header and TLS SNI all agree — a credential goes to the host the
+        connection really reaches, never to one the client merely names."""
         if flow.request.scheme != "https":
             return None
-        # Only where destination, Host header and TLS SNI all agree: a credential goes to the host
-        # the connection really reaches, never to one the client merely names.
         dest = _destination(flow.request)
         if _claim_mismatch(flow.request):
             return None
         sni = _norm_host(getattr(getattr(flow, "client_conn", None), "sni", None))
         if sni and sni != dest:
             return None
-        for rule in self.rules:
-            if rule.matches(dest, flow.request.path):
-                return rule
+        return dest
+
+    def _overlap_for(self, flow: http.HTTPFlow) -> dict | None:
+        """The ``overlaps`` entry this request falls under, or None — matched exactly as the
+        rules it holds back would have matched it (:meth:`_rule_for`), whatever credential the
+        box sent: those rules would have overwritten it either way."""
+        dest = self._injectable(flow)
+        if dest is None:
+            return None
+        for entry in self.overlaps:
+            if dest == entry["host"] and flow.request.path.startswith(entry.get("path_prefix", "")):
+                return entry
         return None
 
     def _held_for(self, flow: http.HTTPFlow) -> dict | None:
@@ -1071,6 +1126,8 @@ class Injector:
         }  # fmt: skip
         if flow.metadata.get("egress_proxy_mint_failed"):
             entry["mint_failed"] = True  # the proxy's own 502: nothing (more) went upstream
+        if flow.metadata.get("egress_proxy_overlap"):
+            entry["overlap"] = True  # the proxy's own 502 too: nothing went upstream
         ua = _user_agent(flow.request)
         if ua:
             entry["ua"] = ua
@@ -1294,7 +1351,7 @@ class Injector:
 
     def _tunnel(self, target: str | None, build: bool) -> bool:
         """Would a TLS connection to ``target`` be blind-tunnelled now? (``tls_clienthello``.)"""
-        if target in self.inject_hosts or target in self.held_hosts:
+        if target in self.inject_hosts | self.held_hosts | self.overlap_hosts:
             return False
         return build or self.capture_mode != "full" or _host_matches(target, self.passthrough_hosts)
 
@@ -1328,10 +1385,11 @@ class Injector:
         ctx.log.info(f"egress_proxy: closed the connection to {key} — {why}")
 
     def _connect_ok(self, host: str | None, port: int) -> bool:
-        """The CONNECT policy plus the ``held`` hosts on :443 — let through so the proxy can
-        decrypt and answer the dummy; every request inside still meets ``_on_request``'s wall."""
-        held = port == _HTTPS_PORT and host in self.held_hosts
-        return held or self._allowed_connect(host, port)
+        """The CONNECT policy plus the ``held`` and ``overlaps`` hosts on :443 — let through so
+        the proxy can decrypt and answer there; every request inside still meets
+        ``_on_request``'s wall."""
+        answered = self.held_hosts | self.overlap_hosts
+        return (port == _HTTPS_PORT and host in answered) or self._allowed_connect(host, port)
 
     def _allowed_connect(self, host: str | None, port: int) -> bool:
         """The CONNECT policy: the host granted (:meth:`_allowed`) on :443, else ``host:port``
@@ -1384,8 +1442,8 @@ class Injector:
             dest = None
         target = sni or dest
         # An injector host is always decrypted (to rewrite its header), whatever the mode — and a
-        # held one (to answer its dummy).
-        always = self.inject_hosts | self.held_hosts
+        # held or overlap one (to answer there).
+        always = self.inject_hosts | self.held_hosts | self.overlap_hosts
         if target in always or dest in always:
             return
         if sni and dest and sni != dest:
@@ -1439,6 +1497,16 @@ class Injector:
             flow.response = http.Response.make(403, _MISMATCH_BODY)
             flow.metadata["egress_proxy_blocked"] = True
             self._log_blocked(host if port == default else f"{host}:{port}", flow.request)
+            return
+        # Two switches on, both claiming this host and path, so neither injects: answer with the
+        # fix rather than send the dummy to draw a 401. Before the wall, like the held answer
+        # below — nothing leaves — and before it too: the switches here are on, not at rest.
+        overlap = self._overlap_for(flow) if self._rule_for(flow) is None else None
+        if overlap is not None:
+            flow.response = http.Response.make(
+                502, _overlap_body(overlap["message"]), {"content-type": "application/json"}
+            )
+            flow.metadata["egress_proxy_overlap"] = True  # logged by `response`, as a mint failure
             return
         # A dummy with its switch at rest: answer with the fix before the wall, since the
         # host is not granted (it needn't be — nothing leaves). A matching rule would inject.

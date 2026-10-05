@@ -952,10 +952,27 @@ class Registry:
         """:meth:`inject_overlaps` as messages, one per pair of switches naming every place they
         both claim and the way out — the rows ``mode_issues`` refuses on, and what the supervisor
         and ``fy doctor`` report."""
+        return [message for _group, message in self._overlap_groups(mode)]
+
+    def _overlap_groups(self, mode: dict) -> list[tuple[list[InjectOverlap], str]]:
+        """:meth:`inject_overlaps` grouped by pair of switches, each group with its message."""
         pairs: dict[tuple[str, ...], list[InjectOverlap]] = {}
         for overlap in self.inject_overlaps(mode):
             pairs.setdefault(overlap.switches, []).append(overlap)
-        return [_overlap_message(group) for group in pairs.values()]
+        return [(group, _overlap_message(group)) for group in pairs.values()]
+
+    def overlapping_rules(self, mode: dict) -> dict[InjectRule, str]:
+        """Every rule an overlap holds back (:meth:`injecting_rules`), with the message of each
+        overlap it is in — what the proxy answers a request there with, rather than let the box's
+        dummy go upstream and draw the provider's 401, which reads as a broken credential."""
+        out: dict[InjectRule, list[str]] = {}
+        for group, message in self._overlap_groups(mode):
+            for overlap in group:
+                for rule in overlap.rules:
+                    messages = out.setdefault(rule, [])
+                    if message not in messages:
+                        messages.append(message)
+        return {rule: " ".join(messages) for rule, messages in out.items()}
 
     def injecting_rules(self, mode: dict) -> list[InjectRule]:
         """The rules the proxy is handed: :meth:`proxy_rules` less both sides of every overlap.
@@ -963,8 +980,8 @@ class Registry:
         foldyard wrote, or an ``[[inject]]`` row adopted while both switches were on. Failing safe,
         such a host and path gets no credential from either switch until one is off, rather than
         whichever rule the addon reads first. The supervisor reports it; ``fy mode``, ``fy state``
-        and ``fy doctor`` show the error row."""
-        held_back = {rule for overlap in self.inject_overlaps(mode) for rule in overlap.rules}
+        and ``fy doctor`` show the error row; the proxy answers a request there with it."""
+        held_back = self.overlapping_rules(mode)
         return [r for r in self.proxy_rules(mode) if r not in held_back]
 
     def held_credentials(self, mode: dict) -> list[HeldCredential]:

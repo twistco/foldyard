@@ -2165,6 +2165,43 @@ def test_the_proxy_daemon_injects_neither_overlapping_rule(monkeypatch):
     assert [r["host"] for r in alone["live"]["data"]["rules"]] == ["api.x.test"]
 
 
+def test_each_held_back_rule_carries_the_message_that_names_its_overlap():
+    reg = _injectors(a=[("api.x.test", "")], b=[("api.x.test", "/v1")], c=[("api.x.test", "/v1/z")])
+    on = {"a": "on", "b": "on", "c": "on"}
+    held = reg.overlapping_rules(on)
+    assert {(r.host, r.path_prefix) for r in held} == {
+        ("api.x.test", ""),
+        ("api.x.test", "/v1"),
+        ("api.x.test", "/v1/z"),
+    }
+    issues = reg.overlap_issues(on)  # a×b, a×c, b×c
+    # A rule overlapping two switches is named by both messages, in `overlap_issues`' order.
+    whole = next(r for r in held if r.path_prefix == "")
+    assert held[whole] == " ".join(m for m in issues if "a=on" in m)
+    assert reg.overlapping_rules({**on, "a": "off", "c": "off"}) == {}
+    # …and they are exactly what the proxy is not handed.
+    assert reg.injecting_rules(on) == []
+
+
+def test_the_proxy_is_told_where_an_overlap_holds_a_credential_back(monkeypatch):
+    # The box's request there would otherwise go upstream with its dummy and draw the provider's
+    # 401: the addon answers it instead, with the message `fy mode` shows. Live data, so a mode
+    # change never restarts the proxy (ADR-0030).
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)
+    plugin = _Injectors({"a": [("api.x.test", "")], "b": [("api.x.test", "/v1")]})
+    reg = Registry([plugin, proxy.ProxyPlugin()], config=_cfg({}))
+    both = {"a": "on", "b": "on"}
+    spec = reg.desired_daemons(both)["egress-proxy"]
+    [message] = reg.overlap_issues(both)
+    assert spec["live"]["data"]["overlaps"] == [
+        {"host": "api.x.test", "path_prefix": "", "message": message},
+        {"host": "api.x.test", "path_prefix": "/v1", "message": message},
+    ]
+    alone = reg.desired_daemons({"a": "on", "b": "off"})["egress-proxy"]
+    assert alone["live"]["data"]["overlaps"] == []
+    assert (spec["cmd"], spec["env"]) == (alone["cmd"], alone["env"])
+
+
 def test_an_inject_row_on_claudes_host_conflicts_with_keyless_claude():
     # The case that exists before any ADR-0031 work: a consumer's own `[[inject]]` on
     # api.anthropic.com beside `claude=on` keyless. Two credentials on one host, and the addon's
@@ -2506,6 +2543,23 @@ def test_network_panel_marks_a_failed_mint(monkeypatch, tmp_path):
     [group] = proxy._network_panel_tree().groups
     assert "mint failed" in group.children[0] and "[red]502[/red]" in group.children[0]
     assert "1 err" in group.label
+
+
+def test_network_panel_marks_a_request_an_overlap_held_back(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    row = {
+        "ts": "2026-10-05T10:00:01Z",
+        "method": "GET",
+        "host": "api.github.com",
+        "path": "/repos/o/r",
+        "status": 502,
+        "injected": False,
+        "overlap": True,
+        "error_body": '{"message": "foldyard did not send this request: a=on and b=on both …"}',
+    }
+    (tmp_path / "egress.jsonl").write_text(json.dumps(row) + "\n")
+    [group] = proxy._network_panel_tree().groups
+    assert "credential overlap" in group.children[0] and "[red]502[/red]" in group.children[0]
 
 
 def test_a_secret_rotation_changes_nothing_the_supervisor_restarts_for(monkeypatch):

@@ -1697,12 +1697,16 @@ async def test_a_refused_cleartext_build_request_is_attributed_too(walled):
 # ── the live settings file: posture changes without a restart ─────────────────────────
 
 
-def _write_live(path: Path, rules=(), default_deny=False, passthrough=(), held=()) -> None:
+def _write_live(
+    path: Path, rules=(), default_deny=False, passthrough=(), held=(), overlaps=()
+) -> None:
     """Write the live file the way the supervisor does: whole, then renamed into place."""
     tmp = path.with_suffix(".tmp")
     data = {"rules": list(rules), "default_deny": default_deny, "passthrough": list(passthrough)}
     if held:
         data["held"] = list(held)
+    if overlaps:
+        data["overlaps"] = list(overlaps)
     tmp.write_text(json.dumps(data))
     tmp.replace(path)
 
@@ -2566,3 +2570,102 @@ async def test_a_held_entry_needs_a_header_or_a_query_param(live):
     flow = _gh_flow("x")
     await inj.requestheaders(flow)
     assert flow.response is None and inj.held == []
+
+
+# ── a host and path two switches both claim: answered, not sent with the dummy ─────────────
+# Registry.injecting_rules holds both sides of an overlap back (fail safe), so the box's request
+# there used to go upstream with its dummy and draw the provider's 401 "Bad credentials" — the
+# misleading answer the mint-failure 502 exists to avoid. The proxy answers it instead.
+
+_OVERLAP_MESSAGE = (
+    "github=on and github-write=on both inject a credential on api.github.com, so the proxy "
+    "injects neither while both are on. Turn one off first: `fy mode github-write=off` or "
+    "`fy mode github=off`"
+)
+_OVERLAPS = [
+    {"host": "api.github.com", "path_prefix": "", "message": _OVERLAP_MESSAGE},
+    {"host": "API.example.test.", "path_prefix": "/mcp", "message": "x=on and y=on …"},
+]
+
+
+async def test_a_request_an_overlap_holds_back_is_answered_with_it(live):
+    _write_live(live.live, overlaps=_OVERLAPS)
+    inj = live.Injector()
+    flow = _gh_flow("x")
+    await inj.requestheaders(flow)
+
+    assert flow.response is not None and flow.response.status_code == 502
+    assert flow.response.headers["content-type"] == "application/json"
+    assert json.loads(flow.response.content)["message"] == (
+        f"foldyard did not send this request: {_OVERLAP_MESSAGE} (on your computer: the mode"
+        " can't be changed from the box)"
+    )
+    assert flow.request.headers["Authorization"] == "x"  # nothing injected, nothing sent
+    await inj.response(flow)
+    [row] = [json.loads(line) for line in live.log.read_text().splitlines()]
+    assert row["status"] == 502 and row["overlap"] is True and row["injected"] is False
+    assert "github-write=on" in row["error_body"]
+
+
+async def test_an_overlap_is_matched_like_the_rules_it_holds_back(live):
+    # Host (compared as the destination is) and path prefix, decrypted HTTPS only — what the held
+    # rules would have injected on. Whatever the box's credential: a rule overwrites it either way.
+    _write_live(live.live, overlaps=_OVERLAPS)
+    inj = live.Injector()
+    under = _Flow("api.example.test", path="/mcp/stream")
+    under.response = None
+    await inj.requestheaders(under)
+    assert under.response is not None and under.response.status_code == 502
+
+    for flow in (
+        _Flow("api.example.test", path="/app"),  # outside the prefix
+        _Flow("api.github.com", port=80, scheme="http"),  # in the clear
+        _Flow("api.github.com", sni="elsewhere.test"),  # a TLS name it isn't reaching
+    ):
+        flow.response = None
+        await inj.requestheaders(flow)
+        assert flow.response is None, flow.request.__dict__
+
+
+async def test_an_overlap_host_connects_and_is_decrypted_so_it_can_be_answered(live):
+    # Its rules are held back, so the host is no injector's: under enforcement its CONNECT would
+    # be refused with "grant it", and on passthrough it would be tunnelled past the answer.
+    _write_live(live.live, overlaps=_OVERLAPS, default_deny=True, passthrough=["api.github.com"])
+    inj = live.Injector()
+    connect = _Flow("api.github.com")
+    connect.response = None
+    inj.http_connect(connect)
+    assert connect.response is None
+    hello = _ClientHello("api.github.com")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is False
+    flow = _gh_flow("x")
+    await inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 502
+
+    # The exemption is not a grant: outside the overlap's path the wall still refuses.
+    app = _Flow("api.example.test", path="/app")
+    app.response = None
+    await inj.requestheaders(app)
+    assert app.response is not None and app.response.status_code == 403
+
+
+async def test_an_overlap_ends_live(live, tmp_path):
+    minter = _counting_minter(tmp_path, "gh")
+    _write_live(live.live, overlaps=_OVERLAPS)
+    inj = live.Injector()
+    _write_live(live.live, rules=[{"host": "api.github.com", "command": minter.command}])
+    flow = _gh_flow("x")
+    await inj.requestheaders(flow)
+    assert flow.response is None and flow.request.headers["Authorization"] == "token FAKE"
+
+
+async def test_malformed_overlap_entries_are_ignored(live):
+    _write_live(
+        live.live,
+        overlaps=[{"host": "api.github.com"}, {"message": "m"}, "api.github.com", {"host": 3}],
+    )
+    inj = live.Injector()
+    flow = _gh_flow("x")
+    await inj.requestheaders(flow)
+    assert flow.response is None and inj.overlaps == []
