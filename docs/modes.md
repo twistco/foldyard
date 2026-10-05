@@ -90,6 +90,15 @@ Two guard rails keep this honest:
   level. `fy mode` checks the whole resulting mode and refuses a combination that can't work. The
   error includes the exact `fy mode a=x b=y` command that fixes it (updates apply together).
   Combinations that work but are probably a mistake print a warning and apply.
+- **One credential per host and path.** Two switches whose levels would both inject on the same
+  host and path (a path prefix under the other's, or either covering the whole host) can't be on
+  together: the proxy would have to pick one credential, and only rule order would decide which.
+  `fy mode` refuses the second and names the first, so turn that one off first (or swap in one
+  command, `fy mode <other>=off <switch>=on`). One switch may still split a host by path, as
+  Codex on a ChatGPT subscription does. If such a pair is on anyway (a state file an older
+  foldyard wrote, or an `[[inject]]` row adopted while both were on), the proxy injects
+  **neither** until one is off. The supervisor logs it and notifies you, and `fy mode`,
+  `fy state` and `fy doctor` show it.
 
 ## DEGRADED — the switch is on, but the credential stopped working
 

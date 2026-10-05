@@ -413,7 +413,9 @@ header = "Authorization"           # XOR query_param = "userToken"
 There is no `minter` key: a token service that needs more than a static token is a kind built
 into foldyard (`github-app`, `gh-cli`, the Codex refresh) or an installed plugin, never a command
 from config ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)). Any number of
-injectors can be on at once.
+injectors can be on at once, as long as no two of them inject on the same host and path: an
+`[[inject]]` row on `api.anthropic.com` and keyless `claude=on` can't both be on, and `fy mode`
+refuses the second one ([modes](./modes.md#tokens-never-enter-the-box)).
 
 ## `[[secret]]`
 
