@@ -104,7 +104,10 @@ Two guard rails keep this honest:
   Codex on a ChatGPT subscription does. If such a pair is on anyway (a state file an older
   foldyard wrote, or an `[[inject]]` row adopted while both were on), the proxy injects
   **neither** until one is off. The supervisor logs it and notifies you, and `fy mode`,
-  `fy state` and `fy doctor` show it.
+  `fy state` and `fy doctor` show it. A request from the box to that host and path isn't sent:
+  the proxy answers it with a 502 whose JSON `message` is the same text, naming both switches
+  and the `fy mode` command to run on your computer, rather than let the box's placeholder draw
+  the provider's 401. The Network Log marks the row `credential overlap`.
 
 ## DEGRADED — the switch is on, but the credential stopped working
 
@@ -245,7 +248,11 @@ secret, a provider outage). The proxy then doesn't send the request at all: it a
 instead refuses a token already sent and a fresh one can't be minted, its 401 is replaced by the
 same kind of 502. The reason is the token service's diagnosis (its error output, with anything
 token-shaped redacted). The fix is on your computer — `fy host logs` has the details — and the
-Network Log marks the row `mint failed`.
+Network Log marks the row `mint failed`. A failure is remembered for 15 seconds: requests (and a
+client's retries) in that time get the same 502 at once, without running the token service
+again, and `fy host logs` gets one line per attempt. Pasting a missing secret into `host.env`
+takes effect straight away. A slow token service holds up only the requests that need its
+credential; the rest of the box's traffic carries on.
 
 `fy claude` and `fy codex` check first: with the agent's switch off they say so before
 launching and, in a terminal, wait for you to switch it on from your computer (Enter launches

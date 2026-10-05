@@ -37,11 +37,14 @@ The box holds a dummy value at most. So:
   message starts "foldyard could not mint a credential for …" and quotes the host-side reason.
   The request never left (unless the message says the host refused the one it carried — then it
   went once and drew a 401). Either way nothing in the box can fix it: pass the message to the
-  human (the fix is on their computer; `fy host logs` there has the details).
-- one host and path gets one credential. If `fy mode` says two switches both inject on it, the
-  proxy is injecting neither, so a 401 there is that, not a broken credential: ask the human to
-  turn one off, with the exact `fy mode` command the message gives (a switch's resting level
-  isn't always `off`).
+  human (the fix is on their computer; `fy host logs` there has the details). The host repeats
+  the same answer for about 15 seconds without retrying the mint, so retrying in a tight loop
+  changes nothing.
+- one host and path gets one credential. If two switches both inject on it, the proxy injects
+  neither and answers a request there with a 502 whose message starts "foldyard did not send
+  this request:" and names both switches. That isn't a broken credential either: ask the human
+  to turn one off on their computer, with the exact `fy mode` command the message gives (a
+  switch's resting level isn't always `off`).
 
 Some services in the stack instead get an identity from a local metadata emulator — same idea:
 the container is handed short-lived capability, not a key.
