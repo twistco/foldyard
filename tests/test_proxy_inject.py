@@ -617,6 +617,34 @@ async def test_a_hung_mint_holds_up_only_its_own_rule(two_rules, monkeypatch):
     assert runs == [1]  # every request waited on ONE mint
 
 
+async def test_a_forced_mint_never_joins_a_lookup_that_may_return_the_refused_token(gh):
+    # While the warm-up holds a rule's lock, the non-blocking cache check reads "nothing", so a
+    # plain request starts a shared call — which, once it gets the lock, may simply return the
+    # still-cached token without minting. A 401 re-issue (force) that joined it would get back the
+    # very token the upstream just refused. It must mint afresh instead (CodeRabbit on #58).
+    rule = gh.module._Rule({"host": "api.github.com", "command": "never-run"})
+    rule._value, rule._expires_at = "token OLD", time.monotonic() + 3600
+    minted: list[str] = []
+
+    def mint() -> str:
+        minted.append("NEW")
+        rule._value, rule._expires_at = "token NEW", time.monotonic() + 3600
+        return "token NEW"
+
+    rule._mint = mint
+    rule._lock.acquire()  # the warm-up's mint, in progress
+    try:
+        plain = asyncio.ensure_future(rule.atoken())
+        await asyncio.sleep(0.05)
+        forced = asyncio.ensure_future(rule.atoken(force=True))
+        await asyncio.sleep(0.05)
+    finally:
+        rule._lock.release()
+    assert await asyncio.wait_for(plain, 5) == "token OLD"  # a plain lookup may reuse the cache
+    assert await asyncio.wait_for(forced, 5) == "token NEW"  # a forced one never does
+    assert minted == ["NEW"]
+
+
 async def test_a_rule_turned_off_during_its_mint_injects_nothing(live, tmp_path, monkeypatch):
     # The request was judged before the switch went off, but nothing has left yet: the credential
     # must not go out under a posture that no longer allows it.

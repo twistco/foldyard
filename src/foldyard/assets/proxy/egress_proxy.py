@@ -632,6 +632,7 @@ class _Rule:
         # The mint the event loop is waiting on (see `atoken`), shared by every request that
         # arrives while it runs. Touched on the loop only, so it needs no lock.
         self._inflight: asyncio.Future | None = None
+        self._inflight_forced = False  # does the shared call above mint for sure (see atoken)?
 
     @property
     def active(self) -> bool:
@@ -735,18 +736,31 @@ class _Rule:
 
         Requests that arrive while it runs await the SAME mint instead of queueing behind the
         lock, one worker thread each — on a hung minter enough of those would fill the default
-        executor and stall every other rule's mint behind them. A `force` caller joins a mint in
-        flight too: it started after the token being refused was handed out, so its result is
-        already the fresh token `force` asks for. ``shield``: a request that goes away (the
-        client hung up) must not cancel the mint the others are waiting on."""
+        executor and stall every other rule's mint behind them. ``shield``: a request that goes
+        away (the client hung up) must not cancel the mint the others are waiting on.
+
+        A `force` caller joins only a FORCED call. A plain one may not mint at all: started because
+        the warm-up held the lock (:meth:`_cached` reads that as "nothing"), it can return the
+        still-cached token — the very one the upstream just refused. So `force` lets a plain call
+        finish, then forces its own (or joins a forced one started meanwhile)."""
         cached = self._cached(force)
         if cached is not None:
             return cached
-        if self._inflight is None:
-            inflight = asyncio.ensure_future(asyncio.to_thread(self.token, force=force))
-            self._inflight = inflight
-            inflight.add_done_callback(lambda _done: setattr(self, "_inflight", None))
-        return await asyncio.shield(self._inflight)
+        while True:
+            flight = self._inflight
+            if flight is None or flight.done():
+                flight = asyncio.ensure_future(asyncio.to_thread(self.token, force=force))
+                self._inflight, self._inflight_forced = flight, force
+                flight.add_done_callback(lambda done: self._landed(done))
+                return await asyncio.shield(flight)
+            if self._inflight_forced or not force:
+                return await asyncio.shield(flight)
+            await asyncio.shield(flight)  # a plain lookup: let it land, then mint for ourselves
+
+    def _landed(self, flight: asyncio.Future) -> None:
+        """Forget the shared call once it lands — unless a newer one has already replaced it."""
+        if self._inflight is flight:
+            self._inflight, self._inflight_forced = None, False
 
     def invalidate(self) -> None:
         """Forget the cached value, so the next request mints afresh — unless a failure is still
