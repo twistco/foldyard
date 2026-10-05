@@ -1386,6 +1386,29 @@ def test_ensure_ca_generates_only_a_missing_ca(monkeypatch, tmp_path):
     assert len(ran) == 1
 
 
+def test_ensure_ca_refuses_a_missing_file_generation_cannot_name(monkeypatch, tmp_path):
+    # mitmproxy names what it generates (`mitmproxy-ca-cert.pem` in the confdir); it can't be
+    # told another file name. Generating anyway would leave the configured file missing — and
+    # a copy renamed into place would be a CA the proxy (mitmproxy's default confdir) never
+    # signs with. So nothing runs, and the error names the file and the name it would take.
+    ran: list[list[str]] = []
+    monkeypatch.setattr(proxy.subprocess, "run", lambda argv, **kw: ran.append(argv))
+    monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "corp" / "my-ca.pem"))
+    with pytest.raises(ValueError, match=r"my-ca\.pem.*mitmproxy-ca-cert\.pem"):
+        proxy.ensure_ca()
+    assert ran == []
+
+
+def test_ensure_ca_leaves_an_existing_file_of_any_name_alone(monkeypatch, tmp_path):
+    ran: list[list[str]] = []
+    monkeypatch.setattr(proxy.subprocess, "run", lambda argv, **kw: ran.append(argv))
+    ca = tmp_path / "my-ca.pem"
+    ca.write_text(PEM)
+    monkeypatch.setenv("MITMPROXY_CA", str(ca))
+    proxy.ensure_ca()
+    assert ran == []
+
+
 def test_doctor_generate_ca_fix_is_the_shared_argv():
     fixes = {f.label: f.cmd for f in proxy.ProxyPlugin().doctor_fixes()}
     assert fixes["generate CA"] == proxy.generate_ca_argv()

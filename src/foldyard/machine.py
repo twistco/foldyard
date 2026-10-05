@@ -365,7 +365,13 @@ def _ensure_guest_ca() -> None:
     holds, and stack containers trust the proxy from the next re-provisioning on."""
     from .plugins import proxy
 
-    proxy.ensure_ca()
+    try:
+        proxy.ensure_ca()
+    except ValueError as e:
+        _err(f"⚠ {e}, so containers in the walled VM won't trust the proxy (a stack service's")
+        _err("  HTTPS call to a decrypted host fails). Point MITMPROXY_CA at your CA, or unset")
+        _err("  it to use mitmproxy's own; then `fy machine stop && fy up`.")
+        return
     try:
         pem = proxy.guest_ca_pem()
     except (OSError, ValueError) as e:

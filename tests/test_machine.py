@@ -644,6 +644,29 @@ def test_ensure_generates_a_missing_ca_before_recording_walled_provisioning(
     assert PEM in be._provision_script  # the recording carries the CA generated just before it
 
 
+def test_ensure_names_why_a_ca_cannot_be_generated_and_goes_on(
+    lima_env, monkeypatch, tmp_path, capsys
+):
+    # A CA foldyard can't generate (MITMPROXY_CA names a file mitmproxy can't write) is the same
+    # case as no CA yet — the wall still holds, recorded without one — but the warning carries
+    # the reason; `fy doctor`'s generate fix would write the same wrong file, so it isn't offered.
+    be, _guest, set_wall, guest_ok = lima_env
+    be._state = "stopped"
+    set_wall(True)
+    guest_ok()
+
+    def _refuse() -> None:
+        raise ValueError("MITMPROXY_CA names /x/my-ca.pem, which doesn't exist")
+
+    monkeypatch.setattr(proxy, "ensure_ca", _refuse)
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    err = capsys.readouterr().err
+    assert "/x/my-ca.pem" in err
+    assert "fy doctor" not in err
+    assert "BEGIN CERTIFICATE" not in be._provision_script
+    assert be.calls[-1] == "start:homelab"
+
+
 def test_ensure_does_not_generate_a_ca_for_an_unwalled_vm(lima_env, monkeypatch, tmp_path):
     be, _guest, set_wall, guest_ok = lima_env
     be._state = "stopped"

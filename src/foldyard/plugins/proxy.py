@@ -82,6 +82,12 @@ def _mitm_ca() -> Path:
     return Path(os.environ.get("MITMPROXY_CA", Path.home() / ".mitmproxy/mitmproxy-ca-cert.pem"))
 
 
+# mitmproxy's own name for its CA files (``<basename>-ca-cert.pem`` and siblings in the confdir);
+# generation can't be told another file name.
+_CA_BASENAME = "mitmproxy"
+_CA_CERT_NAME = f"{_CA_BASENAME}-ca-cert.pem"
+
+
 def generate_ca_argv() -> list[str]:
     """Generate the proxy CA with no server/port, via mitmproxy's own API (``sys.executable`` is
     foldyard's venv python, which carries mitmproxy). The doctor's "generate CA" fix and
@@ -90,7 +96,7 @@ def generate_ca_argv() -> list[str]:
     gen_ca = (
         "from pathlib import Path; from mitmproxy.certs import CertStore; "
         f"d = Path({str(confdir)!r}); d.mkdir(parents=True, exist_ok=True); "
-        "CertStore.create_store(d, 'mitmproxy', 2048); print('mitm CA written to', d)"
+        f"CertStore.create_store(d, {_CA_BASENAME!r}, 2048); print('mitm CA written to', d)"
     )
     return [sys.executable, "-c", gen_ca]
 
@@ -99,9 +105,21 @@ def ensure_ca() -> None:
     """Generate the proxy CA when it doesn't exist yet. The supervisor's first mitmdump run would
     create the same one, but the walled VM's boot provisioning embeds the CA and is recorded
     before the supervisor starts (:func:`foldyard.machine.ensure`). Best-effort: a failure leaves
-    the CA missing, which the caller reports."""
-    if not _mitm_ca().exists():
-        subprocess.run(generate_ca_argv(), capture_output=True, text=True, check=False)
+    the CA missing, which the caller reports.
+
+    Raises :class:`ValueError` when ``MITMPROXY_CA`` names a missing file mitmproxy can't write:
+    it names what it generates (:data:`_CA_CERT_NAME`), so generating would leave that file
+    missing, and a renamed copy would be a CA the proxy (mitmproxy's default confdir) never
+    signs with."""
+    ca = _mitm_ca()
+    if ca.exists():
+        return
+    if ca.name != _CA_CERT_NAME:
+        raise ValueError(
+            f"MITMPROXY_CA names {ca}, which doesn't exist, and mitmproxy can only generate"
+            f" {_CA_CERT_NAME}"
+        )
+    subprocess.run(generate_ca_argv(), capture_output=True, text=True, check=False)
 
 
 # One or more PEM certificate blocks, base64 alphabet only (see guest_ca_pem).
