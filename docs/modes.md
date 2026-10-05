@@ -219,8 +219,11 @@ the provider's "invalid token". The Network Log marks those rows as held.
 With the switch on, the token service on your computer can still fail (a missing or rejected
 secret, a provider outage). The proxy then doesn't send the request at all: it answers with a
 502 whose `message` names the host and the token service's own reason, so the agent sees
-"foldyard could not mint a credential for …" rather than the provider's 401. The fix is on your
-computer — `fy host logs` has the details — and the Network Log marks the row `mint failed`.
+"foldyard could not mint a credential for …" rather than the provider's 401. If the provider
+instead refuses a token already sent and a fresh one can't be minted, its 401 is replaced by the
+same kind of 502. The reason is the token service's diagnosis (its error output, with anything
+token-shaped redacted). The fix is on your computer — `fy host logs` has the details — and the
+Network Log marks the row `mint failed`.
 
 `fy claude` and `fy codex` check first: with the agent's switch off they say so before
 launching and, in a terminal, wait for you to switch it on from your computer (Enter launches

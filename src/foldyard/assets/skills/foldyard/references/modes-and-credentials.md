@@ -34,8 +34,9 @@ The box holds a dummy value at most. So:
   text: check `fy mode` before debugging the credential.
 - with the switch on but the host unable to mint the token, the proxy answers with a 502 whose
   message starts "foldyard could not mint a credential for …" and quotes the host-side reason.
-  The request never left, and nothing in the box can fix it: pass the message to the human (the
-  fix is on their computer; `fy host logs` there has the details).
+  The request never left (unless the message says the host refused the one it carried — then it
+  went once and drew a 401). Either way nothing in the box can fix it: pass the message to the
+  human (the fix is on their computer; `fy host logs` there has the details).
 
 Some services in the stack instead get an identity from a local metadata emulator — same idea:
 the container is handed short-lived capability, not a key.

@@ -454,10 +454,12 @@ async def test_a_failed_mint_is_answered_by_the_proxy_not_forwarded(mint_failing
     # A response set in the request hook is what mitmproxy hands back INSTEAD of dialling upstream.
     assert flow.response is not None and flow.response.status_code == 502
     assert flow.response.headers["content-type"] == "application/json"
-    message = json.loads(flow.response.content)["message"]
-    assert "api.github.com" in message
-    assert _MINT_REASON in message, "the minter's own diagnosis is the point of the answer"
-    assert "`fy host logs`" in message, "the operator's next step: the host-side log"
+    # The whole sentence, pinned: the host it failed for, that nothing went upstream, the minter's
+    # own diagnosis (the point of the answer), and the operator's next step (the host-side log).
+    assert json.loads(flow.response.content)["message"] == (
+        "foldyard could not mint a credential for api.github.com, so this request was not sent: "
+        f"exit 1: {_MINT_REASON} (on your computer, `fy host logs` has the details)"
+    )
     assert flow.request.headers["Authorization"] == "token x"  # nothing was injected
 
     await mint_failing.inj.response(flow)
@@ -529,7 +531,13 @@ async def test_a_401_whose_re_mint_fails_is_answered_with_the_reason(mint_failin
     await inj.response(sent)
     assert gh.requests == []  # nothing to re-issue with
     assert sent.response is not None and sent.response.status_code == 502
-    assert _MINT_REASON in json.loads(sent.response.content)["message"]
+    # Unlike a first mint failing, this request WAS sent — with the cached token, which the
+    # upstream refused — so the answer must not claim otherwise.
+    assert json.loads(sent.response.content)["message"] == (
+        "foldyard could not mint a credential for api.github.com after it refused the one this "
+        f"request carried (401): exit 1: {_MINT_REASON}"
+        " (on your computer, `fy host logs` has the details)"
+    )
     row = _last_log(mint_failing.log)
     assert row["status"] == 502 and row["mint_failed"] is True
 
