@@ -1081,9 +1081,11 @@ def test_registry_mode_issues_merges_across_plugins():
     assert severities.count("warn") == 1  # auth0=sim × storage=staging (the hook)
 
 
-def test_proxy_running_doctor_check_uses_the_port_probe():
+def test_proxy_running_doctor_check_uses_the_port_probe(monkeypatch):
     # The runtime "egress proxy" check FAILs when the port probe says down (Phase A′ always-routes,
-    # so a down proxy is why box requests hang) and OKs when it's up.
+    # so a down proxy is why box requests hang) and OKs when it's up. Opted in explicitly: the
+    # ambient checkout's toml declares no [proxy].
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)
     down = {
         name: status
         for status, name, _ in proxy.ProxyPlugin().doctor_checks(_ctx(probe=lambda _p: False))
@@ -1622,10 +1624,11 @@ def test_proxy_daemon_carries_the_wall(monkeypatch):
     assert off["env"] == spec["env"] and off["cmd"] == spec["cmd"]  # no restart for a wall toggle
 
 
-def test_a_posture_change_leaves_the_proxy_launch_settings_alone():
+def test_a_posture_change_leaves_the_proxy_launch_settings_alone(monkeypatch):
     # The regression that cut a running apt download: turning an injector off (or on) changed the
     # daemon's env, and the supervisor restarts a daemon whose cmd/env changed. Rules now travel in
     # the live file the addon re-reads, so every posture launches — and keeps — the same process.
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)  # github=off has no listener else
     reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
     off = reg.desired_daemons({"github": "off"})["egress-proxy"]
     on = reg.desired_daemons({"github": "app"})["egress-proxy"]
