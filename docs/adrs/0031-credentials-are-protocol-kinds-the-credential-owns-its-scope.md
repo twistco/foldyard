@@ -1,10 +1,16 @@
 # ADR-0031 — Credentials are protocol kinds plus data; the credential owns its scope
 
-- **Status:** Proposed (2026-10-05). Would amend
+- **Status:** Accepted (2026-10-05). Amends
   [ADR-0023](./0023-no-host-executed-code-from-the-repo-mount.md) (its "`[plugins.github].permissions`
   is capped by the package default" rule is withdrawn) and extends
   [ADR-0024](./0024-declarative-consumer-axes-no-repo-path-plugins.md)'s "data, not classes" from
-  axes to credentials.
+  axes to credentials. The open questions were settled on acceptance (see
+  [Settled](#settled)): no `permissions` narrowing; a clean break, `[plugins.github]` refused with
+  its replacement rows; the agent plugins and GCP left for later. Implemented: decisions 1, 2 and
+  6, and of 5 the `box_env` dummies with their `fy verify` row (`plugins/kinds.py`,
+  `plugins/inject.py`; the github plugin is deleted). Decisions 3 (reporting the installation's
+  permissions, and their drift) and 4 (overlapping rules refused), and the generic held-credential
+  answer of 5, land separately.
 - **Sources:** the 2026-10-05 incident in a consumer's box (below); the host supervisor log of that
   morning. Related: [0007](./0007-credential-injection-at-egress-proxy.md) (credentials are
   attached at the proxy), [0008](./0008-keyless-agent-auth.md) (the dummy-in-the-box pattern),
@@ -60,7 +66,8 @@ this ADR leaves it alone.
 
 1. **A credential is an `[[inject]]` rule with a `kind`.** A kind is a token **protocol**, shipped
    as package code with a fixed shape of data fields: `static` (the default, today's behaviour),
-   `github-app`, `gh-cli`, `codex-chatgpt`. A new service whose token is static needs only config.
+   `github-app` and `gh-cli`. (`codex-chatgpt` stays inside the codex plugin for now — see
+   [Settled](#settled), 3.) A new service whose token is static needs only config.
    A new protocol is a new kind, upstreamed or shipped as an entry-point plugin, as ADR-0023 already
    says. The secret's name stays derived from the switch (`FY_INJECT_<SWITCH>`), so a repo edit
    can't aim a rule at another rule's secret.
@@ -85,8 +92,9 @@ this ADR leaves it alone.
 
 2. **The credential owns its scope; foldyard neither narrows nor caps it.** For `github-app`, the
    App installation's permissions *are* the box's scope. For a different scope, the operator creates
-   a different App and gives it its own switch. `[plugins.github].permissions` goes, into
-   `exposure.IGNORED_KEYS` so a config still carrying it is told so. `repositories` stays as data:
+   a different App and gives it its own switch. `[plugins.github].permissions` goes with the
+   whole table, which joins `exposure.IGNORED_KEYS` and stops the launch (see
+   [Settled](#settled), 2), so a config still carrying it is told so. `repositories` stays as data:
    GitHub refuses a repository outside the installation, so it can only narrow. This puts the scope
    decision somewhere nothing in the checkout can reach, and where widening needs an org owner to
    accept GitHub's own permissions review. That is a stronger anchor than an adopted file, and
@@ -120,8 +128,8 @@ this ADR leaves it alone.
   installation is the whole change. A token that still can't reach an endpoint gets GitHub's own
   403, naming the missing permission, and that permission is on the App's settings page.
 - **A new service no longer needs a plugin.** A static token is a few lines of `[[inject]]`, and a
-  new token protocol is one kind. `plugins/github.py` shrinks to nothing, or to a deprecation shim
-  (see open questions). The kinds stay a closed set of fixed shapes, which is the boundary
+  new token protocol is one kind. `plugins/github.py` is deleted, not kept as a shim (see
+  [Settled](#settled), 2). The kinds stay a closed set of fixed shapes, which is the boundary
   ADR-0023 drew against config-DSL creep: no claim templates, no JSON paths.
 - **`fy verify` claims less, and says so.** Today it reports a "comment-only App token". Under this
   decision foldyard can't know that, because an App with `contents: write` would be a deliberate
@@ -154,18 +162,26 @@ this ADR leaves it alone.
   added on github.com, months later and for another reason, would then reach the box with no
   line anywhere saying so.
 
-## Open questions
+## Settled
 
-1. **Keep optional `permissions` narrowing as data?** It can only narrow below the App (GitHub
-   enforces that), so it's safe. But it's the second-place-to-agree this ADR removes, and a
-   separate App already gives a narrower scope. Leaning no.
-2. **Clean break or a one-release shim?** ADR-0023 removed `[[inject]] minter` outright rather
-   than deprecating it. The equivalent here is that `fy up` refuses a `[plugins.github]` table and
-   prints the `[[inject]]` rows to replace it. The alternative is synthesising those rows for one
-   minor release. Leaning towards the refusal, since the known consumers are few.
-3. **Do the agent plugins' credential halves move to `[[inject]] kind = …` as well,** leaving
-   `claude.py`/`codex.py` as agent ergonomics only? Their held-credential answers are in each
-   provider's error shape, so the shape would become kind data.
-4. **GCP is out of scope.** It emulates the metadata server as a daemon rather than injecting at
-   the proxy, and the same "the credential owns its scope" reasoning would apply to its
-   service-account allowlist. That would be a separate decision.
+The open questions, as the operator decided them on acceptance (2026-10-05):
+
+1. **Optional `permissions` narrowing as data? No.** It could only narrow below the App, so it was
+   safe — but it is the second place that has to agree with the App, which is what this decision
+   removes, and a separate App already gives a narrower scope. A row carrying `permissions` is
+   refused like any field its kind doesn't take.
+2. **Clean break or a one-release shim? A clean break.** As ADR-0023 did with `[[inject]] minter`:
+   a `[plugins.github]` table (adopted, or still in the tree) makes the launch gate refuse, and the
+   refusal prints the `[[inject]]` rows that replace it, computed from the table — a `github-app`
+   row with the old `repo` as `repositories` and `box_env = { GH_TOKEN = "x" }`, and a commented
+   `gh-cli` emergency row for the old `user` level — along with the PEM's new `host.env` name
+   (`FY_INJECT_<SWITCH>`) and why `permissions` has no successor. The table is also an
+   `IGNORED_KEYS` entry, so the doctor row and `fy config widenings` name it. The known consumers
+   are few; a shim would have kept the plugin alive for a release for little.
+3. **The agent plugins' credential halves: not in this change.** `claude.py` and `codex.py` keep
+   their keyless wiring as it is, so the user-facing kinds are `static`, `github-app` and `gh-cli`,
+   and the Codex ChatGPT refresh stays internal to the codex plugin. Moving them is a later step,
+   with their held-credential answers' provider-specific error shapes as kind data.
+4. **GCP stays out of scope.** It emulates the metadata server rather than injecting at the proxy;
+   the same "the credential owns its scope" reasoning about its service-account allowlist would be
+   a separate decision.
