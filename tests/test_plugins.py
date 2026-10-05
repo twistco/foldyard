@@ -2320,6 +2320,34 @@ def test_an_overlap_only_the_combined_mode_produces_is_still_caught():
     assert len(reg.injecting_rules({"a": "on", "b": "off"})) == 1
 
 
+class _Combo(_Injectors):
+    """``a`` injects on all of api.x.test; ``b`` and ``c`` TOGETHER add api.x.test/v1; ``d`` is
+    unrelated (api.z.test)."""
+
+    def __init__(self):
+        super().__init__({"a": [], "b": [], "c": [], "d": []})
+
+    def proxy_rules(self, mode):
+        rule = lambda host, path="": InjectRule(host=host, header="Authorization", minter=path)  # noqa: E731
+        on = {s for s in "abcd" if mode.get(s) == "on"}
+        out = [rule("api.x.test")] if "a" in on else []
+        out += [rule("api.x.test", "/v1")] if {"b", "c"} <= on else []
+        out += [rule("api.z.test")] if "d" in on else []
+        return out
+
+
+def test_a_combined_overlap_offers_only_the_switches_that_would_end_it():
+    # Turning `d` off leaves the overlap where it is, and `fy mode` would refuse that very
+    # suggestion — so the message names only switches whose resting level removes a side of it.
+    reg = Registry([_Combo()], config=_cfg({}))
+    ((_, message),) = reg.mode_issues({"a": "on", "b": "on", "c": "on", "d": "on"})
+    for s in "abc":
+        assert f"`fy mode {s}=off`" in message
+    assert "d=" not in message
+    for s in "abc":  # and each one offered really is accepted
+        assert reg.mode_issues({"a": "on", "b": "on", "c": "on", "d": "on", s: "off"}) == []
+
+
 def test_the_proxy_daemon_injects_neither_overlapping_rule(monkeypatch):
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
     plugin = _Injectors({"a": [("api.x.test", "")], "b": [("api.x.test", "/v1")]})

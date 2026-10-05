@@ -282,7 +282,7 @@ class InjectOverlap:
     defaults: tuple[str, ...]  # each switch's resting level: the fix the message offers
     rules: tuple[InjectRule, InjectRule]
     # True when a rule in the pair is one no single switch accounts for (it appears only with
-    # several on together): ``switches`` is then every active switch, since any could be the cause.
+    # several on together): ``switches`` is then the active switches whose resting level ends it.
     combined: bool = False
 
     @property
@@ -871,22 +871,33 @@ class Registry:
         can't see: a rule no switch emits on its own (it appears only with several on together,
         or at rest) still claims its host and path. :meth:`switch_rules` asks each switch alone,
         so such a rule belongs to none of them, and without this a pair involving it reached the
-        proxy with the credential left to rule order. Every active switch is named, since any of
-        them could be what produces it."""
+        proxy with the credential left to rule order. Each pair names the active switches whose
+        resting level would remove a side of it — the only ones worth offering, since `fy mode`
+        refuses a change that leaves the overlap standing (all of them, if no single one does)."""
         attributed = [rule for _, rules in owned for rule in rules]
         live = self.proxy_rules(mode)
         stray = [rule for rule in live if rule not in attributed]
         if not stray:
             return []
-        active = tuple(name for name, d in defaults.items() if mode.get(name, d) != d)
-        levels = tuple(mode[name] for name in active)
-        rests = tuple(defaults[name] for name in active)
-        return [
-            InjectOverlap(active, levels, rests, (x, y), combined=True)
-            for i, x in enumerate(live)
-            for y in live[i + 1 :]
-            if (x in stray or y in stray) and rules_overlap(x, y)
-        ]
+        active = [name for name, d in defaults.items() if mode.get(name, d) != d]
+        without = {name: self.proxy_rules({**mode, name: defaults[name]}) for name in active}
+        out: list[InjectOverlap] = []
+        for i, x in enumerate(live):
+            for y in live[i + 1 :]:
+                if not ((x in stray or y in stray) and rules_overlap(x, y)):
+                    continue
+                ends = [n for n in active if x not in without[n] or y not in without[n]]
+                names = tuple(ends or active)
+                out.append(
+                    InjectOverlap(
+                        names,
+                        tuple(mode[n] for n in names),
+                        tuple(defaults[n] for n in names),
+                        (x, y),
+                        combined=True,
+                    )
+                )
+        return out
 
     def overlap_issues(self, mode: dict) -> list[str]:
         """:meth:`inject_overlaps` as messages, one per pair of switches naming every place they
