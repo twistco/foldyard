@@ -2,7 +2,7 @@
 """The host supervisor — the ONE host-side process per project that runs the credential daemons.
 
 Reads the authoritative mode file (devmode.py) every couple of seconds and reconciles
-the daemons to it: switching github app↔user restarts the proxy with the other minter,
+the daemons to it: switching an injector on rewrites the proxy's live rule set,
 setting an axis to off stops its daemon, and a lapsed `user` TTL kills the daemon AND
 writes the axis back to off (the structural guarantee that emergencies never linger).
 Each tick also stamps a project-shared liveness heartbeat (so the launch paths can tell a
@@ -42,7 +42,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from shutil import which
 
-from . import allowlist, config, configpin, devmode, githeal, transcripts, worktree_registry
+from . import (
+    allowlist,
+    config,
+    configpin,
+    credscope,
+    devmode,
+    githeal,
+    transcripts,
+    worktree_registry,
+)
+from .plugins import CapabilityProbe
 
 TICK_SECONDS = 2.0
 RESTART_BACKOFF = 10.0
@@ -851,6 +861,8 @@ def run_capability_probes(wt: str, mode: dict, warming: Collection[str] = ()) ->
                 ok, detail = probe.check()
             except Exception as e:
                 ok, detail = False, f"probe crashed: {type(e).__name__}: {e}"
+            if probe.scope is not None:
+                _report_scope(probe)
             previous = state["ok"] if state else None
             state = {
                 "ok": ok,
@@ -875,6 +887,29 @@ def run_capability_probes(wt: str, mode: dict, warming: Collection[str] = ()) ->
     for key in [k for k in _probe_state if k[0] == wt and k not in active_keys]:
         del _probe_state[key]
     return results
+
+
+def _report_scope(probe: CapabilityProbe) -> None:
+    """Record the scope ``probe``'s check just read, and say — once per change — that it changed
+    (ADR-0031: foldyard reports a credential's scope rather than capping it, so a permission added
+    on the provider's side, where no foldyard file changes, must still leave a line and a
+    notification). The first observation of a credential is its baseline: logged, not pushed. An
+    unread scope (None) says nothing and keeps the record. Never raises into the tick."""
+    try:
+        scope = probe.scope() if probe.scope else None
+        if scope is None:
+            return
+        event, changes = credscope.observe(probe.switch, scope, devmode._iso(devmode.now()))
+    except Exception as e:  # a scope record must never take the tick down
+        log(f"scope: {probe.switch}: couldn't record the credential's scope ({e})")
+        return
+    if event == "baseline":
+        summary = credscope.summary({"permissions": scope.permissions, "reach": scope.reach})
+        log(f"{probe.switch}: credential scope recorded ({scope.identity}) — {summary}")
+    elif event == "changed":
+        text = "; ".join(changes)
+        log(f"⚠ {probe.switch}: the credential's scope changed ({scope.identity}) — {text}")
+        _notify(f"fy {config.project()}: {probe.switch} scope changed", text)
 
 
 def write_capabilities(capabilities: dict[str, dict]) -> None:
@@ -1170,9 +1205,10 @@ def _new_held_axes(wt: str) -> set[str]:
 
 
 def _report_held(wt: str, mode: dict) -> None:
-    """Push — once per axis at rest — that the proxy answered an agent's placeholder credential
-    because its mode is off. The in-box reply only reaches an agent that prints it (Codex's
-    ChatGPT discovery never does), and the operator who can flip the mode is on this side."""
+    """Push — once per axis at rest — that the proxy answered a placeholder credential (an agent's,
+    or an ``[[inject]]`` row's ``box_env`` dummy) because its switch is off. The in-box reply only
+    reaches a client that prints it (Codex's ChatGPT discovery never does), and the operator who
+    can flip the switch is on this side."""
     axes = _new_held_axes(wt)
     for axis, value in mode.items():
         if value != "off":
@@ -1186,7 +1222,7 @@ def _report_held(wt: str, mode: dict) -> None:
         log(f"⏸ {axis}{where}: the proxy answered its placeholder credential (mode off) — {fix}")
         _notify(
             f"fy {config.project()}: {axis} credential off{where}",
-            f"{axis.capitalize()} tried to reach its API but its credential mode is off — {fix}",
+            f"The box sent {axis}'s placeholder credential, but {axis} is off — {fix}",
         )
 
 
@@ -1390,7 +1426,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
             _report_inject_overlaps(wt, mode)
             # Fill in host-process env a plugin can derive from committed config (a Pulumi App
             # id, a deterministic SA email — see plugins.Plugin.env_defaults) BEFORE the
-            # `requires` gate below reads os.environ, so github=app etc. work with no host.env
+            # `requires` gate below reads os.environ, so a derivable value needs no host.env
             # entry at all. setdefault: an ambient export or a real host.env secret always wins.
             apply_env_defaults(devmode.env_defaults(mode))
             desired.update(devmode.desired_daemons(mode))

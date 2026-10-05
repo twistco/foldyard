@@ -28,10 +28,11 @@ The box holds a dummy value at most. So:
 - reading the env var gives you a placeholder — that's expected, not a misconfiguration;
 - the access only exists while the switch is on, and only against the host it's scoped to;
 - a fully compromised box can *use* the access during that window but can never *hold* it;
-- with an agent's switch off, the proxy answers that agent's API calls itself with a 401 naming
-  the fix (`fy mode claude=on`, on the host) — nothing reaches the provider. Codex on a ChatGPT
-  subscription then stops on `workspace routing discovery unauthorized (401)`, which hides that
-  text: check `fy mode` before debugging the credential.
+- with a switch off, the proxy answers a request carrying its placeholder itself, with a 401
+  naming the switch and the fix (say `fy mode claude=on`, or `fy mode github=on` behind `gh`;
+  always run on the host) — nothing reaches the provider. Codex on a ChatGPT subscription then
+  stops on `workspace routing discovery unauthorized (401)`, which hides that text: check
+  `fy mode` before debugging the credential.
 - with the switch on but the host unable to mint the token, the proxy answers with a 502 whose
   message starts "foldyard could not mint a credential for …" and quotes the host-side reason.
   The request never left (unless the message says the host refused the one it carried — then it
@@ -55,6 +56,19 @@ authoritative state is in the host's home, outside the mount). So:
 3. If a **secret** is missing rather than a level — the host may need it pasted once. `fy mode`
    asks for it when the switch goes on (and `fy box up` asks as a backstop), storing it on their
    computer at 0600. `fy doctor` on the host names which one.
+4. If the switch is on and the service answers **403**, the credential's own scope is the limit,
+   not foldyard — once you've ruled out a rate limit. Read the 403 first (`gh api -i …`): a
+   rate limit says so in its `message` ("API rate limit exceeded", "secondary rate limit") and
+   carries `x-ratelimit-*` / `retry-after` headers, so wait rather than ask for access. A missing
+   permission says "Resource not accessible by integration", and its
+   `X-Accepted-Github-Permissions` header names the permission. A GitHub App token carries
+   exactly what the App's installation grants (foldyard neither narrows nor caps it), so ask the
+   human to grant that permission on the App (an org owner approves it), or for a separate App
+   with its own switch.
+   Editing `foldyard.toml` can't widen it — there is no permissions key to add. The human can
+   see what the App was last read to grant with `fy config widenings` on their computer (or
+   beside the switch in their `fy mode`); the box can't read that record, so ask rather than
+   guess.
 
 ## Reading the current grant surface
 

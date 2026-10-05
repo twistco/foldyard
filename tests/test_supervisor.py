@@ -411,7 +411,7 @@ class _StopTick(Exception):
 
 def test_reconcile_once_unions_selected_worktree_daemons(monkeypatch, tmp_path):
     cfgs = {"": _fake_cfg(""), "feat": _fake_cfg("feat")}
-    modes = {"": {"github": "off"}, "feat": {"github": "app"}}
+    modes = {"": {"github": "off"}, "feat": {"github": "on"}}
     desired = {
         "": {
             "egress-proxy": {
@@ -848,18 +848,18 @@ def test_expiry_settles_stranded_dependents(isolated_state):
 
 
 def test_expiry_without_dependents_reverts_only_the_lapsed_axis(isolated_state):
-    # github=app is genuinely UNRELATED to gcp (no mode_issues link) — it must survive the
+    # github=on is genuinely UNRELATED to gcp (no mode_issues link) — it must survive the
     # gcp expiry untouched, proving the settle cascade only reaches actual dependents.
     from datetime import timedelta
 
     from foldyard import devmode
 
-    devmode.set_mode({"gcp": "user", "github": "app"}, ttl=60)
+    devmode.set_mode({"gcp": "user", "github": "on"}, ttl=60)
     raw = json.loads(isolated_state["auth"].read_text())
     raw["expires"]["gcp"] = devmode._iso(devmode.now() - timedelta(hours=1))
     isolated_state["auth"].write_text(json.dumps(raw))
     mode = supervisor.expire_user_modes()
-    assert mode["gcp"] == "off" and mode["github"] == "app"  # unrelated raised axis kept
+    assert mode["gcp"] == "off" and mode["github"] == "on"  # unrelated raised axis kept
 
 
 # ── capability probes (consolidation proposal B) ─────────────────────────────────────────
@@ -921,6 +921,101 @@ def test_probe_transitions_are_logged(monkeypatch):
     healthy[0] = True
     supervisor.run_capability_probes("", {"gcp": "sa"})
     assert any("DEGRADED" in ln for ln in lines) and any("recovered" in ln for ln in lines)
+
+
+# ── the credential's scope (ADR-0031 decision 3): recorded, and a change said once ─────────
+
+
+def _scoped_probe(monkeypatch, scopes: list):
+    """A github-shaped probe whose every check observes the next scope in ``scopes`` (always due),
+    with the supervisor's log + notifications captured. Returns (run, lines, notified)."""
+    from foldyard.plugins import CapabilityProbe
+
+    observed: list = [None]
+
+    def check():
+        observed[0] = scopes.pop(0)
+        return True, "ok"
+
+    probe = CapabilityProbe(
+        switch="github",
+        name="github-github-app",
+        check=check,
+        interval=0.0,
+        scope=lambda: observed[0],
+    )
+    monkeypatch.setattr(supervisor.devmode, "capability_probes", lambda mode: [probe])
+    lines: list[str] = []
+    notified: list[tuple[str, str]] = []
+    monkeypatch.setattr(supervisor, "log", lines.append)
+    monkeypatch.setattr(supervisor, "_notify", lambda t, b: notified.append((t, b)))
+    return (lambda: supervisor.run_capability_probes("", {"github": "on"})), lines, notified
+
+
+def _gh_scope(permissions: dict, reach: str = "selected repositories"):
+    from foldyard.plugins import CredentialScope
+
+    return CredentialScope("App 1, installation 2", permissions, reach)
+
+
+def test_the_first_scope_is_a_baseline_logged_and_not_notified(monkeypatch):
+    from foldyard import credscope
+
+    run, lines, notified = _scoped_probe(monkeypatch, [_gh_scope({"issues": "write"})])
+    run()
+    assert notified == []
+    (line,) = [ln for ln in lines if "scope" in ln]
+    assert "github" in line and "issues:WRITE" in line
+    record = credscope.last("github", "App 1, installation 2")
+    assert record is not None and record["permissions"] == {"issues": "write"}
+
+
+def test_a_changed_scope_is_one_log_line_and_one_notification(monkeypatch):
+    run, lines, notified = _scoped_probe(
+        monkeypatch,
+        [
+            _gh_scope({"issues": "write"}),
+            _gh_scope({"issues": "write", "actions": "read", "contents": "write"}),
+            _gh_scope({"issues": "write", "actions": "read", "contents": "write"}),
+        ],
+    )
+    run()
+    lines.clear()
+    run()  # the App gained two permissions on github.com — no foldyard file changed
+    run()  # …and the next probe sees the same: nothing more to say
+    (line,) = [ln for ln in lines if "scope" in ln]
+    assert line.startswith("⚠ github:")
+    assert "added actions:read" in line and "added contents:write" in line
+    ((title, body),) = notified
+    assert "github" in title and "scope" in title
+    assert "added contents:write" in body
+
+
+def test_an_unread_scope_keeps_the_record_and_says_nothing(monkeypatch):
+    # A failed or unreadable read is "unavailable", never an empty scope: reporting it would
+    # announce every permission removed, then re-added on the next good read.
+    from foldyard import credscope
+
+    run, lines, notified = _scoped_probe(monkeypatch, [_gh_scope({"issues": "write"}), None])
+    run()
+    lines.clear()
+    run()
+    assert [ln for ln in lines if "scope" in ln] == [] and notified == []
+    record = credscope.last("github", "App 1, installation 2")
+    assert record is not None and record["permissions"] == {"issues": "write"}
+
+
+def test_a_scope_that_cannot_be_recorded_never_breaks_the_tick(monkeypatch):
+    from foldyard import credscope
+
+    def boom(*_a):
+        raise OSError("read-only state dir")
+
+    run, lines, notified = _scoped_probe(monkeypatch, [_gh_scope({"issues": "write"})])
+    monkeypatch.setattr(credscope, "observe", boom)
+    result = run()
+    assert result["github"]["ok"] is True
+    assert any("read-only state dir" in ln for ln in lines) and notified == []
 
 
 def test_write_capabilities_skips_creating_an_empty_file(tmp_path, monkeypatch):

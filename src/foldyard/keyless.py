@@ -3,7 +3,7 @@
 The prize (ADR-0008): the box runs Claude Code / Codex with a PLACEHOLDER
 credential and the egress proxy rewrites it in flight with the real one, which lives ONLY in
 ``~/.foldyard/<project>/host.env`` on the host — never in the box, never in the repo. The same shape
-as the github injector (``[[inject]]`` + a dummy + the ``static_token`` minter).
+as an ``[[inject]]`` rule (a dummy in the box + the ``static_token`` minter on the host).
 
 This module owns two things, both stdlib-only so the agent plugins can import the taxonomy on the
 registry hot path:

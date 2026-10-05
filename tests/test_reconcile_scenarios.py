@@ -24,7 +24,8 @@ from datetime import timedelta
 
 import pytest
 
-from foldyard import devmode, stack, supervisor
+from conftest import FULL_TOML, make_config
+from foldyard import config, devmode, stack, supervisor
 
 pytestmark = pytest.mark.usefixtures("full_config_bound")
 
@@ -99,14 +100,17 @@ def test_mode_change_reconciles_stack_with_the_posture_signatures(
 
 
 def test_env_only_mode_change_rides_the_same_stack_seam(isolated_state, recorded_stack_reconcile):
-    # github=app flips no compose profile or overlay — only the derived env (GH_INJECT). That
+    # claude=on flips no compose profile or overlay — only the derived env (CLAUDE_INJECT). That
     # env-only diff must still flow through the ONE stack seam as a signature change (the
     # posture-signature fix: comparing profiles alone missed exactly this class).
-    devmode.set_mode({"github": "app"})
+    with config.using(make_config({**FULL_TOML, "claude": {"keyless": "api-key"}})):
+        devmode.set_mode({"claude": "on"})
     (call,) = recorded_stack_reconcile
     assert call["prev"]["overlays"] == call["new"]["overlays"]
     assert call["prev"]["env"].get("COMPOSE_PROFILES") == call["new"]["env"].get("COMPOSE_PROFILES")
-    assert call["new"]["env"]["GH_INJECT"] == "app" and "GH_INJECT" not in call["prev"]["env"]
+    assert (
+        call["new"]["env"]["CLAUDE_INJECT"] == "on" and "CLAUDE_INJECT" not in call["prev"]["env"]
+    )
 
 
 def test_back_to_back_mode_changes_chain_their_posture_signatures(

@@ -14,8 +14,8 @@ credential store, unswitchable host-side) — neutralised in-box by ``_HARDEN_SN
 
 Faithful port of the `devbox` recipe. Project-specific values come from `[box]`
 in foldyard.toml (image · shadow_volumes · caches · warmup · env · sock_in_vm · tools ·
-bootstrap); the credential box env/mounts (the github proxy CA + env, the gcp metadata host +
-SA label) AND the agent/editor volumes + installs (Claude, VS Code) come from the plugins
+bootstrap); the credential box env/mounts (the proxy CA + env, the ``[[inject]]`` dummies, the gcp
+metadata host + SA label) AND the agent/editor volumes + installs (Claude, VS Code) come from the plugins
 (`registry().box_args` + `registry().box_bootstrap`), each gated on its config table — so a
 table-less consumer gets a plain shell box. Core here keeps only the socket, the shared tools
 prefix, caches, the foldyard self-install, and `fy claude` (the launcher).
@@ -1142,8 +1142,8 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
 
     # Declared `[[secret]]` capture runs BEFORE the already-up early-return: a secret is read by
     # the HOST minter at mint time, so it matters whether the posture needs it, not whether the box
-    # was just created. Turning `github=app` on with a box already running must still prompt for the
-    # PEM. Keyless agent creds are captured here too, for the same reason — the REAL token feeds the
+    # was just created. Turning a `github-app` switch on with a box already running must still
+    # prompt for the PEM. Keyless agent creds are captured here too, for the same reason — the REAL token feeds the
     # host proxy's minter, not the container (only the DUMMY is baked at create time — nagged in the
     # already-up branch below). Keeping them below the return "because the dummy is create-time" is
     # how declaring [claude] on a running box got no prompt until `fy box down`, while the proxy
@@ -1240,7 +1240,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # mounts ONLY repo + worktrees, so a CA under ~/.mitmproxy can't be bind-mounted. AMBIENT and
     # UNCONDITIONAL: the proxy plugin's box_args mounts the CA whenever it EXISTS (the ambient-CA
     # rule — trust pre-positioned regardless of routing), so staging MUST be just as ambient. Gating
-    # staging on proxy_enabled/GH_INJECT (as this once did) leaves MITMPROXY_CA at its host default
+    # staging on proxy_enabled/an injector marker (as this once did) leaves MITMPROXY_CA at its host default
     # ~/.mitmproxy/… for a proxy-less box; box_args then ambient-mounts that NON-VM-visible host
     # path and `podman run` dies with `statfs …: no such file or directory`. stage_ca_for_box
     # no-ops (returns None) when no CA exists, so calling it always is safe for a truly CA-less box.
@@ -1248,7 +1248,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
 
     proxy.stage_ca_for_box(checkout, here)
 
-    # Credential box env/mounts from the plugins (github proxy CA+env; gcp metadata+SA label).
+    # Credential box env/mounts from the plugins (proxy CA+env, [[inject]] dummies; gcp metadata).
     try:
         plugin_args = registry().box_args(env)
     except SystemExit as e:

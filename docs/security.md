@@ -44,7 +44,7 @@ What foldyard is built against — not the agent as such, but what comes in with
 - **Build hooks and dev servers.** Anything a `just build` or `next dev` pulls in runs in the
   same VM under the same rules.
 
-**The one overlap window.** If you switch on access (say `fy mode github=app`) and *then* run an
+**The one overlap window.** If you switch on access (say `fy mode github=on`) and *then* run an
 untrusted install step, install-time code and a live credential path overlap. The token still
 never enters the box (see below), and it is short-lived and scoped — but while the switch is on,
 code in the box can *use* that access. Keep switches off while installing things you don't trust
@@ -99,11 +99,11 @@ box can edit the code the supervisor runs.
 
 The resting state is **zero secrets in the VM**: no key files, no token environment variables, no
 `~/.netrc`, no credential helpers — nothing to steal. When you need real access, you switch it on
-(`fy mode gcp=logs github=app`) and three mechanisms keep the grant contained:
+(`fy mode gcp=logs github=on`) and three mechanisms keep the grant contained:
 
 - **Tokens are made on your computer and injected at the proxy.** The box holds only a dummy
-  value; the proxy on your computer replaces it with a real, short-lived, narrowly scoped token
-  as the request passes through. The real token never enters the box — not as an environment
+  value; the proxy on your computer replaces it with a real, short-lived token as the request
+  passes through. The real token never enters the box — not as an environment
   variable, not as a file ([ADR-0007](./adrs/0007-credential-injection-at-egress-proxy.md)). A
   fully compromised box can use the access only while the switch is on, and only against the
   injected host; it never *holds* the credential.
@@ -115,9 +115,18 @@ The resting state is **zero secrets in the VM**: no key files, no token environm
   adopted config ([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)). The supervisor's
   daemons are the only path a credential takes: **no daemon running, no credential flows**
   ([ADR-0006](./adrs/0006-host-side-enforcement-single-supervisor.md)).
-- **Token services are built in, never repo code.** The kinds foldyard ships (`github-app`,
-  `gh-cli`, the Codex refresh flow, `static_token`) or an installed plugin are the only ones that
-  run. There is no config key naming a command to run and no token-service path inside the repo:
+- **The credential owns its scope.** What an injected token can do is decided where the
+  credential is: a GitHub App token carries exactly the App installation's permissions, which only
+  change on github.com with an org owner's approval. foldyard doesn't narrow or cap them, so a
+  shared App hands the box every purpose it serves — use one App per purpose, installed only on
+  the repositories it serves
+  ([ADR-0031](./adrs/0031-credentials-are-protocol-kinds-the-credential-owns-its-scope.md)).
+  It reports them instead: `fy config widenings` shows the permissions last read from the
+  installation, flagging `write` and `admin`, and when a reading changes (no foldyard file
+  changed, so nothing else would say so) the supervisor logs it and sends a notification.
+- **Token services are built in, never repo code.** The `[[inject]]` kinds foldyard ships
+  (`static`, `github-app`, `gh-cli`), the Codex refresh flow, or an installed plugin are the only
+  ones that run. There is no config key naming a command to run and no token-service path inside the repo:
   otherwise any write to the checkout — an agent, a postinstall script, a branch you checked out
   to review — would run as you, next to your credentials. Secrets are declared with `[[secret]]`,
   whose `how` hint foldyard **prints for you to run** and never runs itself
@@ -156,9 +165,13 @@ the box only the VM-boundary checks run. What it checks:
   no `~/.netrc`, and `git ls-remote origin` **fails** — the box can't reach the remote to push.
   (This needs a *private* origin: a public one answers `ls-remote` without credentials.) These
   are built into foldyard's core, so a missing or broken plugin can't weaken them.
-- **Per-switch checks** (from the credential plugins): each checks its own mode. For `github`,
-  the token in the box is never more than the dummy `x` in *any* mode; the real one stays on your
-  computer. Active **emergency levels print a banner**, so an escalation is never invisible.
+- **Dummy checks** (from the credential plugins): each `[[inject]]` row's `box_env` dummies must
+  still hold their dummy value, in *any* mode, and the variables a known client reads a token
+  from (`GH_TOKEN`, `GITHUB_TOKEN`) must be unset or a declared dummy in every box; the real
+  credential stays on your computer. A push over the API is possible exactly when an injected
+  token's own scope allows it (a GitHub App with `contents: write`, say) — `fy config widenings`
+  shows where each credential is delivered and what a GitHub App's was last read to grant. Active **emergency levels print a banner**, so an
+  escalation is never invisible.
 - **Firewall probes** (Lima with `[machine] firewall = true`): direct connections from the box
   that ignore the proxy — to a public IP on port 443 *and* on 53, the DNS-tunnel case — must be
   refused. A reachable proxy is checked first, so a box that is simply offline doesn't pass.
@@ -193,8 +206,8 @@ Each row names *what* failed. What it usually means, and what to do:
   is public (then the row can't tell). For a private origin, `fy state` shows what the mode
   grants and `fy config widenings` where credentials are delivered. A network timeout does *not*
   pass this row; an unreachable remote proves nothing.
-- **Plugin rows** (e.g. the `github` token in the box is more than the dummy) — the box's
-  environment carries a real credential. `fy mode` shows the mode, `fy state` desired against
+- **`… possible real credential in the box`** (e.g. `GH_TOKEN` is more than its dummy) — the
+  box's environment carries a real credential. `fy mode` shows the mode, `fy state` desired against
   observed; a box created under older config is recreated with `fy box down` and `fy box up`.
 - **`box is NOT under gVisor`** — the box was created before `[machine] runtime = "gvisor"` was
   adopted, or through the wrong socket. `fy box down` and `fy box up` recreate it.

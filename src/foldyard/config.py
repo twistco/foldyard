@@ -812,9 +812,10 @@ def port_bases() -> dict[str, int]:
 
 def proxy_enabled() -> bool:
     """True when the consumer opts INTO the egress proxy by declaring a ``[proxy]`` table (even
-    an empty one). The proxy is the substrate github injection + capture ride on, so absent ⇒
+    an empty one). The proxy is the substrate injection + the egress log ride on, so absent ⇒
     the dev box gets no proxy CA mount / ``HTTPS_PROXY``/``NO_PROXY`` env (a generic, stack-less
-    consumer stays clean). An active injector (``GH_INJECT`` in the box env) lights it up too."""
+    consumer stays clean). A DECLARED injector lights it up too, on or off, since the box is routed
+    at create time — the proxy plugin asks the registry (``ProxyPlugin._opted_in``), not this."""
     return _toml().get("proxy") is not None
 
 
@@ -1298,7 +1299,7 @@ def claude_settings() -> dict:
 def claude_keyless() -> str:
     """``[claude].keyless`` — opt the box into KEYLESS Claude auth: NO real key/token in the box,
     the egress proxy injects the real one (held in ``host.env`` on the host) in flight, exactly like
-    the github injector. Returns the mode the box's dummy + the proxy rule are derived from:
+    an ``[[inject]]`` rule. Returns the mode the box's dummy + the proxy rule are derived from:
 
       - ``"api-key"`` (``true`` is an alias) — dummy ``ANTHROPIC_API_KEY``; rewrite ``x-api-key`` on
         ``api.anthropic.com`` from the real key in host.env.
@@ -1406,7 +1407,7 @@ def codex_enabled() -> bool:
 def codex_keyless() -> str:
     """``[codex].keyless`` — opt the box into KEYLESS Codex auth: NO real key in the box, the egress
     proxy injects the real ``OPENAI_API_KEY`` (held in ``host.env`` on the host) in flight, like the
-    Claude/github injectors. Modes:
+    Claude/``[[inject]]`` injectors. Modes:
 
       - ``"api-key"`` (``true`` aliases it) — dummy ``OPENAI_API_KEY``; rewrite ``Authorization``
         with ``Bearer `` + the real key on ``api.openai.com``.
@@ -1479,53 +1480,60 @@ def gcp_sa_labels() -> dict:
     return labels if isinstance(labels, dict) else {}
 
 
-# ── github plugin config (the App identity behind the `github=app` rung) ───────────────
+# ── the retired [plugins.github] table (ADR-0031) ──────────────────────────────────────
 
 
-def _github_table() -> dict:
-    plugins = _toml().get("plugins")
+def _github_table_in(doc: dict) -> dict | None:
+    plugins = doc.get("plugins")
     table = plugins.get("github") if isinstance(plugins, dict) else None
-    return table if isinstance(table, dict) else {}
+    return table if isinstance(table, dict) else None
 
 
-def github_declared() -> bool:
-    """True when the consumer declares ``[plugins.github]`` (even empty — the opt-in for the
-    ``user`` emergency too, which needs no App fields). Mirrors :func:`gcp_metadata_declared`.
-    Gates the WHOLE github surface — axis, doctor rows, box plumbing — per the registry's
-    inert-until-declared contract (``plugins.load_plugins``): an undeclared consumer gets no
-    github mode row in the TUI and no gh/App nags in doctor."""
-    plugins = _toml().get("plugins")
-    return isinstance(plugins, dict) and isinstance(plugins.get("github"), dict)
+def retired_github_table() -> dict | None:
+    """``[plugins.github]`` if this checkout's resolved config still declares it (on the host, the
+    ADOPTED copy — never the working tree), else None.
+
+    The table was REMOVED, not deprecated (ADR-0031, a clean break like ADR-0023's ``[[inject]]
+    minter``): GitHub is two ``[[inject]]`` kinds now, and nothing loads the table any more — so a
+    config still carrying it has had its GitHub access go silently quiet. ``fy up`` refuses it
+    (``preflight``), printing :func:`github_table_replacement`. A table only in the tree isn't
+    looked for: the adopt gate shows it first, and refusing on the tree's say-so would let anything
+    that can write the checkout block the operator's launch."""
+    return _github_table_in(_toml())
 
 
-def github_app_id() -> str:
-    """The PR-bot GitHub App's numeric id. ``GH_APP_ID`` wins, then
-    ``[plugins.github].app_id``, else empty (github=app needs it set)."""
-    return os.environ.get("GH_APP_ID") or str(_github_table().get("app_id") or "")
-
-
-def github_installation_id() -> str:
-    """The App's installation id on the org. ``GH_INSTALLATION_ID`` wins, then
-    ``[plugins.github].installation_id``, else empty."""
-    return os.environ.get("GH_INSTALLATION_ID") or str(_github_table().get("installation_id") or "")
-
-
-def github_repo() -> str:
-    """Bare repo name (not owner/repo) the App is scoped to. ``GH_REPO`` wins, then
-    ``[plugins.github].repo``, else empty."""
-    return os.environ.get("GH_REPO") or str(_github_table().get("repo") or "")
-
-
-def github_permissions() -> str:
-    """``[plugins.github].permissions`` as the JSON the ``github-app`` minter scopes its
-    installation token down to (``GH_APP_PERMISSIONS`` wins). Empty ⇒ the minter's own default
-    (``pull_requests``/``issues`` write — the PR-bot shape). Declaring it here lets a consumer
-    NARROW or retarget the token without touching plugin code."""
-    ambient = os.environ.get("GH_APP_PERMISSIONS")
-    if ambient:
-        return ambient
-    table = _github_table().get("permissions")
-    return json.dumps(table, sort_keys=True) if isinstance(table, dict) and table else ""
+def github_table_replacement(table: dict) -> str:
+    """The ``[[inject]]`` rows that replace a ``[plugins.github]`` table, as TOML to paste —
+    computed from the table's own values so the refusal is one paste from a working config. The
+    App becomes a ``github-app`` row (its ``repo`` the one entry of ``repositories``, and the dummy
+    ``GH_TOKEN`` the box used to get ambiently its ``box_env``); the old ``user`` level a COMMENTED
+    ``gh-cli`` row, since that one is an opt-in emergency. ``permissions`` has no successor: the
+    App installation's permissions are the scope now. A table without an App identity (an
+    emergency-only consumer) gets the App row commented, with placeholders, so pasting the block
+    never yields a row that fails to load."""
+    app_id, installation_id = table.get("app_id"), table.get("installation_id")
+    repo = table.get("repo")
+    app = [
+        "[[inject]]",
+        'switch = "github"               # `fy mode github=on` (was github=app)',
+        'kind = "github-app"',
+        f"app_id = {json.dumps(str(app_id or '<the App' + chr(39) + 's id>'))}",
+        f"installation_id = {json.dumps(str(installation_id or '<its installation id>'))}",
+    ]
+    if repo:
+        app.append(f"repositories = [{json.dumps(str(repo))}]")
+    app.append('box_env = { GH_TOKEN = "x" }')
+    if not (app_id and installation_id):
+        app = [f"# {line}" for line in app]
+    user = [
+        "# The old `user` level — your own gh token, push included; `on` expires by itself:",
+        "# [[inject]]",
+        '# switch = "github-user"         # `fy mode github-user=on` (was github=user)',
+        '# kind = "gh-cli"',
+        "# emergency = true",
+        '# box_env = { GH_TOKEN = "x" }',
+    ]
+    return "\n".join([*app, "", *user]) + "\n"
 
 
 def _overlay_path(raw: object) -> Path | None:
@@ -1780,6 +1788,16 @@ def capabilities_file() -> Path:
     ``<state_dir>/capabilities.json``."""
     env = os.environ.get("FOLDYARD_CAPABILITIES_FILE")
     return Path(env).expanduser() if env else state_dir() / "capabilities.json"
+
+
+def credential_scopes_file() -> Path:
+    """What each credential was last OBSERVED to grant (:mod:`foldyard.credscope`, ADR-0031): kept
+    by the supervisor's probes, read OFFLINE by `fy config widenings` and `fy mode`. Unlike
+    :func:`capabilities_file` it outlives the switch going off — a latent credential's scope is
+    still worth showing. ``FOLDYARD_CREDENTIAL_SCOPES_FILE`` wins, else
+    ``<state_dir>/credential-scopes.json``."""
+    env = os.environ.get("FOLDYARD_CREDENTIAL_SCOPES_FILE")
+    return Path(env).expanduser() if env else state_dir() / "credential-scopes.json"
 
 
 def blocked_daemons_file() -> Path:

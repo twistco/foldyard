@@ -36,11 +36,12 @@ settings.load_profile("ci" if os.environ.get("CI") else "dev")
 # config (Steps B–D), those tests bind a synthetic "full" config — exactly the plan's "build a
 # real registry from a synthetic config".
 
-# A full consumer config: declares the gcp-metadata + github + auth0-sim + llm plugin namespaces
-# and the proxy table, so the active axes are {gcp, storage, github, capture, auth0, llm} (no
-# [[inject]]/[claude].keyless, so no extra axes). The github axis needs its [plugins.github]
-# declaration now (self-gated like claude/codex keyless). gcp-metadata.project is set so the gcp axis
-# self-gate (Step D) passes; an [[overlay]] wired on `storage=staging` is what makes the storage
+# A full consumer config: declares the gcp-metadata + auth0-sim + llm plugin namespaces, the proxy
+# table and GitHub as two `[[inject]]` kinds (ADR-0031), so the active axes are {gcp, storage,
+# github, github-user, auth0, llm} (no [claude].keyless, so no agent axes). `github` is the App
+# (off/on); `github-user` the operator's own token, an emergency switch whose `on` expires — the
+# old `github=app` / `github=user` levels, each now its own switch. gcp-metadata.project is set
+# so the gcp axis self-gate (Step D) passes; an [[overlay]] wired on `storage=staging` is what makes the storage
 # axis appear (config.overlay_when_axes — the gcp plugin's self-gate). The gcp identity overlays
 # are declared here too so the overlay-resolution tests see them (there is no built-in default any
 # more — overlays are config-only). Deliberately NO auth0/llm overlays: the devmode overlay test
@@ -52,10 +53,24 @@ FULL_TOML = {
     "proxy": {},
     "plugins": {
         "gcp-metadata": {"project": "acme-staging"},
-        "github": {},
         "auth0-sim": {},
         "llm": {},
     },
+    "inject": [
+        {
+            "switch": "github",
+            "kind": "github-app",
+            "app_id": "1234567",
+            "installation_id": "7654321",
+            "box_env": {"GH_TOKEN": "x"},
+        },
+        {
+            "switch": "github-user",
+            "kind": "gh-cli",
+            "emergency": True,
+            "box_env": {"GH_TOKEN": "x"},
+        },
+    ],
     "overlay": [
         {"file": "dev-stack/compose.identity.yml", "when": {"gcp": "sa"}},
         {"file": "dev-stack/compose.identity-data.yml", "when": {"gcp": "sa"}},
@@ -98,8 +113,8 @@ def make_config(toml: dict, worktree: str = "") -> config.Config:
 @pytest.fixture
 def full_config_bound():
     """Bind the Tangible-shaped :data:`FULL_TOML` as the active config for the test, so the live
-    registry (and ``devmode.axes()`` / mode round-trips) sees the {gcp, storage, github, capture,
-    auth0, llm} axis set. Modules whose tests assume those axes opt in via ``pytestmark =
+    registry (and ``devmode.axes()`` / mode round-trips) sees the {gcp, storage, github,
+    github-user, auth0, llm} axis set. Modules whose tests assume those axes opt in via ``pytestmark =
     pytest.mark.usefixtures("full_config_bound")``."""
     plugins._clear_registry_cache()
     with config.using(make_config(FULL_TOML)):
@@ -154,10 +169,12 @@ def isolated_capability_state(tmp_path, monkeypatch):
     """Point the supervisor's capability-probe results file at a per-test path and pin the test
     clock to real time, so no test reads or writes the real ~/.foldyard capabilities.json — or
     picks up a developer's live `fy clock` skew (FOLDYARD_CLOCK_OFFSET=0 short-circuits the
-    offset-file read). Also resets the supervisor's per-process probe cache."""
+    offset-file read). Also resets the supervisor's per-process probe cache. The credential scope
+    record (credscope) lives beside it and is isolated the same way."""
     from foldyard import supervisor
 
     monkeypatch.setenv("FOLDYARD_CAPABILITIES_FILE", str(tmp_path / "capabilities.json"))
+    monkeypatch.setenv("FOLDYARD_CREDENTIAL_SCOPES_FILE", str(tmp_path / "credential-scopes.json"))
     monkeypatch.setenv("FOLDYARD_CLOCK_OFFSET", "0")
     supervisor._probe_state.clear()
     yield

@@ -7,6 +7,12 @@
   `_ALLOWED_CONFIG_KEYS`) is superseded by
   [ADR-0026](./0026-vscode-attach-config-is-declarative.md) — the generator is gone and the
   attached config is `[vscode]` data foldyard authors itself; branch 2 below keeps the history.
+  **Amended 2026-10-05:** the rule that "`[plugins.github].permissions` is capped by the package
+  default as a ceiling" is withdrawn by
+  [ADR-0031](./0031-credentials-are-protocol-kinds-the-credential-owns-its-scope.md): the table
+  is gone (GitHub is `[[inject]]` kinds now), the minter asks for no `permissions`, and the App
+  installation's own permissions are the scope. The kinds below are now named by an `[[inject]]`
+  row's `kind`; the rest of this ADR stands.
 - **Sources:** the review of the finalised `github=app` PR-bot minter — "does the consumer-side
   minter hand the box a code-execution path to the Mac?"; five review rounds against the
   implementation. Related: [0007](./0007-credential-injection-at-egress-proxy.md) (where minting

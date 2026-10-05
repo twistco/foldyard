@@ -45,9 +45,9 @@ def test_mode_no_args_routes_to_show(spy_devmode):
 
 
 def test_mode_with_spec_routes_to_set(spy_devmode):
-    result = runner.invoke(cli.app, ["mode", "gcp=logs", "github=app", "ttl=1h"])
+    result = runner.invoke(cli.app, ["mode", "gcp=logs", "github=on", "ttl=1h"])
     assert result.exit_code == 0
-    assert spy_devmode == [["set", "gcp=logs", "github=app", "ttl=1h"]]
+    assert spy_devmode == [["set", "gcp=logs", "github=on", "ttl=1h"]]
 
 
 def test_env_routes(spy_devmode):

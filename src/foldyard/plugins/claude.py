@@ -134,7 +134,7 @@ class ClaudePlugin(Plugin):
     def derive_env(self, mode: dict) -> dict[str, str]:
         # A claude-owned marker so the box's DUMMY key is baked ONLY when the injector is active —
         # NOT merely because [claude] is declared (a non-keyless agent box logs in for real).
-        # Mirrors github's GH_INJECT. Flows into the resolved box env where box_args reads it.
+        # Mirrors codex's CODEX_INJECT. Flows into the resolved box env where box_args reads it.
         if config.claude_keyless() and mode.get("claude", "off") != "off":
             return {"CLAUDE_INJECT": str(mode["claude"])}
         return {}
@@ -165,11 +165,11 @@ class ClaudePlugin(Plugin):
             args += ["-v", f"{transcripts}:{home}/projects"]
         # Keyless: bake the DUMMY credential so the client emits the header the proxy overwrites in
         # flight. AMBIENT with the proxy substrate (FY_PROXY) whenever keyless is CONFIGURED, like
-        # github's dummy GH_TOKEN — NOT keyed to the rung, which is a host-side decision (does the
-        # proxy inject?) while box env is create-time; keying them together made `fy mode claude=on`
-        # land with nothing changed in the box until `fy box down && fy box up`. A BARE [claude] box
-        # still gets no dummy, because `claude_keyless()` is empty there — that box logs in for real
-        # and a dummy would take precedence over the token it obtains.
+        # an [[inject]] row's box_env — NOT keyed to the rung, which is a host-side decision (does
+        # the proxy inject?) while box env is create-time; keying them together made `fy mode
+        # claude=on` land with nothing changed in the box until `fy box down && fy box up`. A BARE
+        # [claude] box still gets no dummy, because `claude_keyless()` is empty there — that box
+        # logs in for real and a dummy would take precedence over the token it obtains.
         if env.get("FY_PROXY") and config.claude_keyless():
             args += keyless.dummy_box_args(_KEYLESS, config.claude_keyless())
         return args

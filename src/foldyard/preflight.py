@@ -23,8 +23,8 @@ from . import config, devmode, hostwall, machine_backend
 def _proxy_required(mode: dict) -> bool:
     """Would this project's box route egress through the host proxy? Must MIRROR the proxy plugin's
     ``derive_env`` routing signal exactly — ``config.proxy_enabled()`` OR any active injection rule
-    (``registry().proxy_rules``, which aggregates github, keyless Claude/Codex, AND generic
-    ``[[inject]]`` axes). An earlier hand-rolled list checked only proxy/keyless/github and MISSED
+    (``registry().proxy_rules``, which aggregates keyless Claude/Codex AND every ``[[inject]]``
+    switch). An earlier hand-rolled list checked only proxy/keyless/github and MISSED
     ``[[inject]]``: an inject-only box then skipped the mitmproxy-missing check (cryptic PyPI
     connect-refuse at bootstrap) and, under ``[machine] firewall``, got wrongly aborted as 'nothing
     routes through the proxy'. When true, a box with no reachable proxy can't reach ANYTHING — so
@@ -80,6 +80,23 @@ def issues() -> list[str]:
                 f"✗ [{table}].keyless = {raw!r} isn't recognised — keyless would be OFF.\n"
                 f"    Use one of: {allowed} (or remove the line)."
             )
+
+    # 3b. `[plugins.github]` was REMOVED (ADR-0031) — a clean break, as `[[inject]] minter` was
+    #     (ADR-0023): nothing loads the table, so letting the launch through would leave the box's
+    #     GitHub access silently gone. Refuse, with the rows that replace it computed from it.
+    old_github = config.retired_github_table()
+    if old_github is not None:
+        rows = config.github_table_replacement(old_github)
+        out.append(
+            "✗ [plugins.github] was removed (ADR-0031): GitHub is `[[inject]]` rows now. Replace\n"
+            "    the table with these (computed from yours), then adopt the change:\n\n"
+            + "".join(f"      {line}\n" if line else "\n" for line in rows.splitlines())
+            + "\n    The App private key's host.env name moves with it: rename GH_PEM_B64 to\n"
+            "    FY_INJECT_GITHUB (same base64 value), and any [[secret]] row naming it.\n"
+            "    `permissions` is gone: the App installation's own permissions are the box's\n"
+            "    scope now — change them on the App (one App per purpose). The switch is now\n"
+            "    `fy mode github=on`."
+        )
 
     # 4. When the box will route through the proxy, the proxy must be able to RUN and be REACHABLE.
     mode = devmode.read()["mode"]

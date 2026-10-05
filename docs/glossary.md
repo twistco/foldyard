@@ -72,14 +72,15 @@ for the proxy and token services, so two projects never share a listener.
 The VM mounts the repo, so whatever is committed is inside. Scan it with gitleaks or TruffleHog
 before you start.
 
-**Mode** — what access is switched on right now, as a set of switches: `fy mode github=app
+**Mode** — what access is switched on right now, as a set of switches: `fy mode github=on
 gcp=logs`. The resting mode is every switch at its default: zero credentials. *Older name:* posture.
 
-**Switch** — one credential mechanism in the mode: `github`, `gcp`, `claude`, or one you
-declare with `[[inject]]`. *Older name:* axis (and `Axis` in the plugin API).
+**Switch** — one credential mechanism in the mode: `gcp`, `claude`, or one you declare with
+`[[inject]]` (a `github` App row, say). *Older name:* axis (and `Axis` in the plugin API).
 
 **Level** — one setting of a switch. A switch has two or more, from its default (almost always
-`off`) up to the most privileged, e.g. `github=off|app|user`. *Older name:* rung.
+`off`) up to the most privileged, e.g. `gcp=off|logs|sa|user`. An `[[inject]]` switch is
+`off|on`. *Older name:* rung.
 
 **Emergency level** — a level that acts as *you* (your own GitHub or GCP identity). It always
 has a TTL — one hour by default, eight at most — and switches itself back off when that runs out.
@@ -87,6 +88,11 @@ has a TTL — one hour by default, eight at most — and switches itself back of
 **Token service** (*minter* in the code) — a small program on your computer that makes a
 short-lived token for a switch that's on (a GitHub App installation token, say). Only the kinds
 built into foldyard or an installed plugin can run; your repo can't add one.
+
+**Kind** (`[[inject]] kind`) — the token protocol an `[[inject]]` row uses: `static` (a token
+from `host.env`), `github-app` (an App installation token) or `gh-cli` (your own `gh` token).
+Each takes a fixed set of fields; the row is its data. The credential's own scope (a GitHub App's
+installation permissions) is what the box gets — foldyard doesn't narrow or cap it.
 
 **Injection** (`[[inject]]`, *injector*) — the proxy adding a credential to requests for one host
 as they pass through. The box never holds the real value.

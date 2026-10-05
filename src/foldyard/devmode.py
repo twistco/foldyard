@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """Dev-posture mode state — the substrate behind `fy mode`, `fy host` and the TUI.
 
-The stack has two orthogonal credential axes, each a ladder from "zero secrets" to
-"emergency, my own identity":
+The stack has orthogonal credential switches, each from "zero secrets" up — a ladder like gcp's,
+or an `[[inject]]` row's plain off/on:
 
-  gcp:     off | logs | sa | user        github:  off | app | user
+  gcp:     off | logs | sa | user        github (an [[inject]] row):  off | on
     off    emulators only — zero secrets   off    no GitHub credential anywhere
-    logs   dev box: read-only Cloud        app    PR/issue comments on the one repo
-           Logging (the box log-reader SA)        (App installation token, injected
-    sa     + apps hit real staging GCP            host-side by the egress proxy)
-           (the app runtime SA)            user   EMERGENCY: your own `gh` token
-    user   EMERGENCY: your own GCP                injected (push becomes possible)
-           identity inside the box
+    logs   dev box: read-only Cloud        on     the App's installation token,
+           Logging (the box log-reader SA)        injected host-side by the egress
+    sa     + apps hit real staging GCP            proxy (scope = the installation)
+           (the app runtime SA)
+    user   EMERGENCY: your own GCP identity inside the box
 
 "Mode" is a desired posture, not a capability: the host-side daemons (`fy host`) are
 the enforcement point — without them running, a mode grants nothing. Which is why the
@@ -249,18 +248,36 @@ RETIRED_AXES = {
         "the proxy always decrypts + logs now, except the trusted `[proxy] passthrough` hosts "
         "(ADR-0029). Nothing to switch on."
     ),
+    "github": (
+        "GitHub is `[[inject]]` rows now (ADR-0031): a `github-app` row is its own off/on switch, "
+        "and the old `user` level is a `gh-cli` row with `emergency = true`. `fy mode` lists the "
+        "switches this project has."
+    ),
+}
+# Levels of a retired switch whose NAME a consumer's `[[inject]]` row has since taken (the
+# github-app row is conventionally `switch = "github"`): the switch is real again, so only the old
+# levels are answered — with what replaced them rather than just the valid list.
+RETIRED_LEVELS = {
+    ("github", level): (
+        "was the github plugin's level (ADR-0031): the App is `github=on`, and your own token is "
+        "a `gh-cli` row's emergency switch (`fy mode` lists it — e.g. github-user=on)"
+    )
+    for level in ("app", "user")
 }
 
 
 def validate_updates(updates: dict[str, str]) -> None:
     """Refuse an unknown axis or rung. Shared by :func:`set_mode` and the doors that do work
-    BEFORE it (the CLI's secret prompt), so a typo never stores a paste and then fails."""
+    BEFORE it (the CLI's secret prompt), so a typo never stores a paste and then fails. A RETIRED
+    name only answers as retired while no current switch has taken it."""
     rungs = axes()
     for axis, value in updates.items():
-        if axis in RETIRED_AXES:
+        if axis not in rungs and axis in RETIRED_AXES:
             raise SystemExit(f"✗ the {axis!r} switch was removed — {RETIRED_AXES[axis]}")
         if axis not in rungs:
             raise SystemExit(f"✗ unknown switch {axis!r} (have: {', '.join(rungs)})")
+        if value not in rungs[axis] and (axis, value) in RETIRED_LEVELS:
+            raise SystemExit(f"✗ {axis}={value} {RETIRED_LEVELS[(axis, value)]}")
         if value not in rungs[axis]:
             raise SystemExit(f"✗ {axis} mode {value!r} (have: {', '.join(rungs[axis])})")
 
@@ -437,6 +454,23 @@ def read_capabilities() -> dict:
     per-worktree mirror carries this worktree's slice (see ``read()``), so callers there should
     prefer ``read()["capabilities"]``. Missing/unreadable = {} (no claim either way)."""
     return _load(config.capabilities_file())
+
+
+def scope_summary(axis: str) -> str:
+    """What ``axis``'s credential was last probed to grant, as one line (:mod:`foldyard.credscope`,
+    ADR-0031), or ``""`` — a switch whose kind reads no scope, one not probed yet, or the box, which
+    can't read the host's record. Offline: the supervisor's record, never the provider."""
+    from . import credscope
+    from .plugins.kinds import scope_identity
+
+    if in_box():
+        return ""
+    for spec in config.inject_specs():
+        if spec.get("switch") == axis:
+            identity = scope_identity(spec)
+            record = credscope.last(axis, identity) if identity else None
+            return credscope.summary(record) if record else ""
+    return ""
 
 
 def degraded_capabilities(mode: dict | None = None) -> list[tuple[str, str]]:
@@ -1291,12 +1325,15 @@ def doctor(deep: bool = False):
         # Everything above reads state the box was HANDED. These probe whether the posture is
         # actually reaching the box — the case the mirror can't see, because a rule whose mint
         # fails host-side still leaves the axis "on" and the proxy daemon "up".
-        ctx = DoctorContext(deep=deep, run=_run, which=_which, result=_result, probe=probe)
+        # The mode is the mirror's (`read` in the box): a plugin probes only what's armed.
+        ctx = DoctorContext(
+            deep=deep, run=_run, which=_which, result=_result, probe=probe, mode=state["mode"]
+        )
         yield from registry().box_doctor_checks(ctx)
         return
 
     # Host-side: one generic check, then each plugin's "what can this machine grant?" probes
-    # (gcloud/ADC/PAM/impersonations from gcp; gh/mitmproxy/CA/host.env/PEM from github).
+    # (gcloud/ADC/PAM/impersonations from gcp; mitmproxy/CA from proxy; a kind's PEM from inject).
     # ctx hands the plugins devmode's own _run/_which/_result so their subprocess calls
     # still hit the redacting command log and render identically.
     ctx = DoctorContext(
@@ -1916,7 +1953,7 @@ def _box_env_hint(project: str | None = None) -> str | None:
     # GCE_METADATA_HOST at the on-network emulator, and Phase A′ ALWAYS routes egress through the
     # proxy (HTTPS_PROXY always set). Their presence no longer tracks the mode — the rung's enforced
     # entirely host-side (the minter up/down, the proxy's host-side rules), reconciled live by
-    # `fy host`, so changing gcp/github/capture needs NO `fy box up`. (Checking them here mis-fired
+    # `fy host`, so changing gcp or an injector needs NO `fy box up`. (Checking them here mis-fired
     # "gcp metadata out of date" forever, since gcp defaults to off but the host is always baked.)
     # The keyless DUMMY is the same story: baked whenever keyless is CONFIGURED on a proxied box,
     # whatever the rung (so `fy mode claude=on` lands with no new box). Keying this check to the
@@ -1997,6 +2034,9 @@ def show() -> int:
             else:
                 line += "   [daemon status unknown]"
         print(line)
+        scope = scope_summary(axis) if value != defaults[axis] else ""
+        if scope:
+            print(f"          scope: {scope}")
 
     if any(mode[axis] in emergency_rungs.get(axis, ()) for axis in axes()):
         print("  ⚠ EMERGENCY user-credential mode is ON — auto-reverts at expiry.")
@@ -2112,7 +2152,7 @@ def main(argv: list[str]) -> int:
             else:
                 updates[key] = value
         if not updates:
-            raise SystemExit("✗ nothing to set (e.g. `fy mode gcp=logs github=user ttl=1h`)")
+            raise SystemExit("✗ nothing to set (e.g. `fy mode gcp=logs github=on ttl=1h`)")
         if ttl is not None:
             _refuse_a_ttl_nothing_carries(updates)
         if not in_box():  # set_mode refuses in-box anyway; don't prompt for a secret first

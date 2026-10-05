@@ -10,7 +10,8 @@ loosen a host-side control, and each is easy to lose track of:
     ``@all`` is one token that resolves to ~200 hosts; nothing anywhere showed that number, so
     "the proxy decrypts" read as "everything is logged" when it never meant that.
   - **injection targets** — the host each mechanism delivers a real credential to. Some are fixed
-    in package code (claude, codex, github), some are config (``[[inject]] host``). The difference
+    in package code (claude, codex), some are config (an ``[[inject]]`` row, its host declared or
+    pinned by its kind). The difference
     matters, so the report states it per row rather than listing them all as equals.
   - **agent steering** (``[claude]/[codex] system_prompt``, and the ``[claude.settings]`` /
     ``[codex.config]`` overrides the launchers pass to the CLI) — repo-controlled input to a
@@ -59,6 +60,12 @@ IGNORED_KEYS: dict[str, str] = {
         "the token var is DERIVED from the switch (FY_INJECT_<SWITCH>) — a declared one is "
         "ignored, so a config rule can't point at another mechanism's secret"
     ),
+    "plugins.github": (
+        'REMOVED (ADR-0031): GitHub is `[[inject]]` rows now — a `kind = "github-app"` row per '
+        'App, and a `kind = "gh-cli"` emergency row for your own token; `fy up` refuses until '
+        "the table is replaced, and prints the rows. Its `permissions` has no successor: the App "
+        "installation's own permissions are the box's scope"
+    ),
     "vscode.workspace_file": (
         "`fy code` always attaches to the checkout folder (ADR-0026) — the generated multi-root "
         "workspace, and the in-box generator that produced it, are no longer run; move the "
@@ -88,6 +95,9 @@ class Target:
     active: bool  # is its axis on right now?
     from_config: bool  # True = the host is repo config; False = fixed in package code
     origin: str = DEFAULT  # which file declares it (SHARED / LOCAL / DEFAULT)
+    # What the credential was last probed to grant, as report lines (see `_scope_lines`); () for a
+    # kind whose probe reads no scope.
+    scope: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -201,9 +211,10 @@ def _targets(
 ) -> list[Target]:
     """Every injection target this config can produce:
 
-    1. the ``[[inject]]`` rows — config-declared hosts, on or off (a declared-but-off injector is a
-       latent widening the operator should see BEFORE arming it),
-    2. the rules the CURRENT mode activates (the packaged plugins: claude, codex, github),
+    1. the ``[[inject]]`` rows — config-declared hosts (or the host a row's kind pins), on or off
+       (a declared-but-off injector is a latent widening the operator should see BEFORE arming
+       it). Every row is its own line: two rows on one host are two credentials, not one,
+    2. the rules the CURRENT mode activates (the packaged plugins: claude, codex),
     3. the rules another rung WOULD activate — asked of the REGISTRY rather than derived from host
        constants here, so a mechanism with an unusual shape reports as it actually behaves (Codex's
        ChatGPT rung injects on ``chatgpt.com/backend-api/codex``, not on the API host, and a report
@@ -211,6 +222,7 @@ def _targets(
     """
     from .plugins import registry
     from .plugins.inject import token_var
+    from .plugins.kinds import DEFAULT, KINDS
 
     reg = registry(cfg)
     out: list[Target] = []
@@ -225,15 +237,23 @@ def _targets(
         )
 
     for spec in config.inject_specs():
-        axis, host = str(spec.get("switch") or ""), str(spec.get("host") or "")
-        if axis and host:
-            add(
-                host + str(spec.get("path_prefix") or ""),
-                f"[[inject]] {axis}  (token: ${token_var(axis)})",
-                mode.get(axis, "off") != "off",
-                True,
-                origin,
+        kind = KINDS.get(str(spec.get("kind", DEFAULT)))
+        axis = str(spec.get("switch") or "")
+        host = str(spec.get("host") or (kind.host if kind else ""))
+        if not (axis and host and kind):
+            continue
+        where = host + str(spec.get("path_prefix") or "")
+        seen.add(where)  # a packaged rule on the same host adds nothing the row didn't say
+        out.append(
+            Target(
+                host=where,
+                source=f"[[inject]] {axis} ({kind.name}; {kind.source(token_var(axis))})",
+                active=mode.get(axis, "off") != "off",
+                from_config=True,
+                origin=origin,
+                scope=_scope_lines(axis, spec),
             )
+        )
     for rule in reg.proxy_rules(mode):  # what the CURRENT posture activates
         add(rule.host + rule.path_prefix, rule.label or "packaged injector", True, False)
     for axis, rungs in reg.switch_levels().items():  # …and what another rung would
@@ -249,6 +269,35 @@ def _targets(
                     _origin(shared, local, axis, "keyless"),
                 )
     return out
+
+
+def _scope_lines(switch: str, spec: dict) -> tuple[str, ...]:
+    """What the row's credential was last probed to grant (ADR-0031: foldyard reports the scope a
+    credential carries rather than capping it). From the supervisor's record, OFFLINE — a report
+    never calls the provider — and only the record for the credential this row names, so a changed
+    ``installation_id`` never shows the previous App's permissions as the new one's."""
+    from . import credscope
+    from .plugins.kinds import scope_identity
+
+    identity = scope_identity(spec)
+    if not identity:
+        return ()
+    if config.in_box():
+        return ("scope: recorded on your computer, where `fy config widenings` shows it",)
+    record = credscope.last(switch, identity)
+    if record is None:
+        return (
+            "scope: not yet probed — the supervisor reads it while the switch is on "
+            f"(`fy mode {switch}=on`)",
+        )
+    lines = [f"scope (probed {record.get('checked') or '?'}): {credscope.summary(record)}"]
+    elevated = credscope.elevated(record["permissions"])
+    if elevated:
+        lines.append(
+            f"⚠ write or admin: {', '.join(elevated)} — what the box can change through this "
+            "credential"
+        )
+    return tuple(lines)
 
 
 def _prompts(shared: dict, local: dict) -> list[tuple[str, int, str]]:
@@ -315,6 +364,16 @@ def _ignored(
                 [str(vscode["workspace_file"])],
                 IGNORED_KEYS["vscode.workspace_file"],
                 _origin(shared, local, "vscode", "workspace_file"),
+            )
+        )
+    github = config.retired_github_table()
+    if github is not None:
+        found.append(
+            (
+                "[plugins.github]",
+                [f"{key} = {value}" for key, value in github.items()],
+                IGNORED_KEYS["plugins.github"],
+                _origin(shared, local, "plugins", "github"),
             )
         )
     inject_origin = _origin(shared, local, "inject")
@@ -443,6 +502,7 @@ def render(exp: Exposure) -> list[str]:
             if t.from_config
             else "      Host fixed in package code, not config."
         )
+        out += [f"      {line}" for line in t.scope]
     out.append("")
 
     if exp.prompts or exp.agent_config:

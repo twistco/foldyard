@@ -390,7 +390,10 @@ async def test_mode_button_targets_the_selected_workspace(monkeypatch):
     monkeypatch.setattr(devmode, "workspaces", _two_workspaces)
     full = {
         "proxy": {},
-        "plugins": {"gcp-metadata": {"project": "a"}, "github": {}, "auth0-sim": {}},
+        "plugins": {"gcp-metadata": {"project": "a"}, "auth0-sim": {}},
+        "inject": [
+            {"switch": "github", "kind": "github-app", "app_id": "1", "installation_id": "2"}
+        ],
     }
     monkeypatch.setattr(
         devmode,
@@ -414,7 +417,7 @@ async def test_mode_button_targets_the_selected_workspace(monkeypatch):
         }
 
     monkeypatch.setattr(devmode, "set_mode", fake_set_mode)
-    # github=app would first ask for the App PEM (see the secret-capture tests below); the subject
+    # github=on would first ask for the App PEM (see the secret-capture tests below); the subject
     # here is the worktree binding of the write, so pretend host.env already has it.
     monkeypatch.setattr(devmode, "missing_secrets", lambda updates: [])
     async with tui.DevModeTui().run_test() as pilot:
@@ -422,9 +425,9 @@ async def test_mode_button_targets_the_selected_workspace(monkeypatch):
         app = cast(tui.DevModeTui, pilot.app)
         app.query_one("#workspaces", tui.WorkspaceList).index = 1  # highlight the 'feat' worktree
         await pilot.pause()
-        btn = app.query_one("#github-app", tui.Button)
+        btn = app.query_one("#github-on", tui.Button)
         app.on_button_pressed(tui.Button.Pressed(btn))
-    assert seen["updates"] == {"github": "app"}
+    assert seen["updates"] == {"github": "on"}
     assert seen["wt"] == "feat"  # wrote feat's posture under feat's binding, not main's
 
 
@@ -543,7 +546,10 @@ async def test_rapid_toggles_on_different_worktrees_both_reconcile(monkeypatch):
     monkeypatch.setattr(devmode, "workspaces", _two_workspaces)
     full = {
         "proxy": {},
-        "plugins": {"gcp-metadata": {"project": "a"}, "github": {}, "auth0-sim": {}},
+        "plugins": {"gcp-metadata": {"project": "a"}, "auth0-sim": {}},
+        "inject": [
+            {"switch": "github", "kind": "github-app", "app_id": "1", "installation_id": "2"}
+        ],
     }
     monkeypatch.setattr(
         devmode,
@@ -578,7 +584,7 @@ async def test_rapid_toggles_on_different_worktrees_both_reconcile(monkeypatch):
         lv = app.query_one("#workspaces", tui.WorkspaceList)
         lv.index = 0  # main
         await pilot.pause()
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-app", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
         lv.index = 1  # feat — immediately, while main's reconcile may still be running
         await pilot.pause()
         app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-off", tui.Button)))
@@ -595,7 +601,7 @@ async def test_mode_grid_rebuilds_for_selected_worktree_axes(monkeypatch):
     )
 
     def axes():
-        out = {"github": ("off", "app")}
+        out = {"github": ("off", "on")}
         if config.active_worktree() == "feat":
             out["gcp"] = ("off", "logs")
         return out
@@ -1157,7 +1163,7 @@ async def test_shared_daemon_status_shown_only_when_active_and_down(monkeypatch)
         app.refresh_mode()
         assert "8088" not in line() and "up" not in line()  # off → no daemon line
 
-        monkeypatch.setattr(devmode, "read", lambda: mode_with(github="app"))
+        monkeypatch.setattr(devmode, "read", lambda: mode_with(github="on"))
         app.refresh_mode()
         assert "8088" not in line()  # on + up → still no per-axis line (footer covers it)
 
@@ -1185,12 +1191,35 @@ async def test_blocked_daemon_shows_the_gates_reason_even_when_the_port_answers(
     async with tui.DevModeTui().run_test() as pilot:
         app = cast(tui.DevModeTui, pilot.app)
         cap = next(r for r in app.query(tui.AxisRow) if r.axis == "github")
-        monkeypatch.setattr(devmode, "read", lambda: mode_with(github="app"))
+        monkeypatch.setattr(devmode, "read", lambda: mode_with(github="on"))
         monkeypatch.setattr(devmode, "daemon_status", lambda mode: blocked)
         app.refresh_mode()
         line = _text(cap.query_one(".axis-status", tui.Static))
         assert "BLOCKED" in line and "another process is listening" in line
         assert "DOWN" not in line
+
+
+async def test_an_armed_credential_shows_its_last_probed_scope(monkeypatch):
+    # The same line `fy mode` prints under the switch (devmode.scope_summary), only while it's on.
+    def mode_with(**over):
+        m = dict(devmode.axis_defaults())
+        m.update(over)
+        return {"mode": m, "expires": {}}
+
+    monkeypatch.setattr(
+        devmode, "scope_summary", lambda axis: "issues:WRITE [all]" if axis == "github" else ""
+    )
+    monkeypatch.setattr(devmode, "daemon_status", lambda mode: {})
+    async with tui.DevModeTui().run_test() as pilot:
+        app = cast(tui.DevModeTui, pilot.app)
+        cap = next(r for r in app.query(tui.AxisRow) if r.axis == "github")
+        monkeypatch.setattr(devmode, "read", lambda: mode_with())
+        app.refresh_mode()
+        assert "scope" not in _text(cap.query_one(".axis-status", tui.Static))
+        monkeypatch.setattr(devmode, "read", lambda: mode_with(github="on"))
+        app.refresh_mode()
+        # verbatim, not markup — a bracket in it must survive
+        assert "scope: issues:WRITE [all]" in _text(cap.query_one(".axis-status", tui.Static))
 
 
 async def test_blocked_reason_is_rendered_verbatim_not_as_markup(monkeypatch):
@@ -1209,7 +1238,7 @@ async def test_blocked_reason_is_rendered_verbatim_not_as_markup(monkeypatch):
     async with tui.DevModeTui().run_test() as pilot:
         app = cast(tui.DevModeTui, pilot.app)
         cap = next(r for r in app.query(tui.AxisRow) if r.axis == "github")
-        monkeypatch.setattr(devmode, "read", lambda: mode_with(github="app"))
+        monkeypatch.setattr(devmode, "read", lambda: mode_with(github="on"))
         monkeypatch.setattr(devmode, "daemon_status", lambda mode: blocked)
         app.refresh_mode()
         assert reason in _text(cap.query_one(".axis-status", tui.Static))
@@ -1491,7 +1520,7 @@ def _unchanged_set_mode(record: list):
 
 
 def _needs_token(monkeypatch, tmp_path):
-    """github=app wants a `ghp_*` token that host.env lacks; every other flip wants nothing."""
+    """github=on wants a `ghp_*` token that host.env lacks; every other flip wants nothing."""
     from foldyard.plugins import Secret
 
     host_env = tmp_path / "host.env"
@@ -1500,7 +1529,7 @@ def _needs_token(monkeypatch, tmp_path):
     monkeypatch.setattr(
         devmode,
         "missing_secrets",
-        lambda updates: [secret] if updates == {"github": "app"} else [],
+        lambda updates: [secret] if updates == {"github": "on"} else [],
     )
     return host_env
 
@@ -1514,7 +1543,7 @@ async def test_mode_button_prompts_for_a_missing_secret_before_applying(monkeypa
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
-        btn = app.query_one("#github-app", tui.Button)
+        btn = app.query_one("#github-on", tui.Button)
         app.on_button_pressed(tui.Button.Pressed(btn))
         await pilot.pause()
         assert isinstance(app.screen, tui.SecretScreen)
@@ -1526,7 +1555,7 @@ async def test_mode_button_prompts_for_a_missing_secret_before_applying(monkeypa
         await pilot.press("enter")
         await pilot.pause()
     assert "GH_TOK=ghp_abc" in host_env.read_text()
-    assert sets == [{"github": "app"}]
+    assert sets == [{"github": "on"}]
 
 
 async def test_mode_button_secret_store_failure_is_reported_not_claimed(monkeypatch, tmp_path):
@@ -1547,7 +1576,7 @@ async def test_mode_button_secret_store_failure_is_reported_not_claimed(monkeypa
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
         monkeypatch.setattr(app, "notify", lambda msg, **_k: toasts.append(str(msg)))
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-app", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
         await pilot.pause()
         for ch in "ghp_abc":
             await pilot.press(ch)
@@ -1565,7 +1594,7 @@ async def test_mode_button_secret_cancel_leaves_the_posture_unchanged(monkeypatc
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-app", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
         await pilot.pause()
         await pilot.press("escape")
         await pilot.pause()
@@ -1582,7 +1611,7 @@ async def test_mode_button_secret_wrong_shape_stays_on_the_modal(monkeypatch, tm
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-app", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
         await pilot.pause()
         for ch in "nope":
             await pilot.press(ch)
@@ -1631,11 +1660,11 @@ async def test_mode_button_secret_empty_paste_skips_and_applies(monkeypatch, tmp
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-app", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
-    assert not host_env.exists() and sets == [{"github": "app"}]
+    assert not host_env.exists() and sets == [{"github": "on"}]
 
 
 async def test_mode_button_with_nothing_missing_applies_directly(monkeypatch, tmp_path):

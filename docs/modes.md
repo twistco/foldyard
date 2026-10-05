@@ -11,8 +11,9 @@ defined in the [glossary](./glossary.md).
 ## The model: switches and levels
 
 **A mode is a set of switches, each at a level.** A **switch** is one credential mechanism
-(`github`, `gcp`, `claude`, or one you declare). A **level** is one setting of that switch, from
-its default up to the most privileged, e.g. `github=off|app|user`.
+(`gcp`, `claude`, or one you declare — `github`, say). A **level** is one setting of that switch,
+from its default up to the most privileged, e.g. `gcp=off|logs|sa|user`, or a declared
+switch's plain `off|on`.
 
 The first level is always the zero-secret default. It is also what an unset, invalid or expired
 value reads as. Credential switches call it `off`. A switch whose default is a choice rather than
@@ -20,8 +21,8 @@ a toggle names it for what it is (a `storage` switch might default to `local`).
 
 ```bash
 fy mode                        # show every switch, its level, token services, TTLs
-fy mode github=app             # set a mode (on your computer only)
-fy mode github=user ttl=30m    # an emergency level: TTL required (default 1h, max 8h)
+fy mode github=on              # set a mode (on your computer only)
+fy mode github-user=on ttl=30m # an emergency level: TTL required (default 1h, max 8h)
 fy tui                         # the same, as a live dashboard with one-key changes
 ```
 
@@ -33,16 +34,21 @@ your computer, by design (see below).
 Switches come from plugins, and a plugin adds nothing until your `foldyard.toml` declares it.
 Built in:
 
-- `github` (`off | app | user`);
-- `[[inject]]` — one switch per entry, for generic header injection
-  ([configuration](./configuration.md#inject));
+- `[[inject]]` — one `off | on` switch per entry. The entry's `kind` says how its credential is
+  made: a static token, a GitHub App installation token (`github-app`), or your own `gh` token
+  (`gh-cli`, always an emergency switch) — [configuration](./configuration.md#inject);
 - `claude` and `codex` — only when you configure keyless auth (below).
 
 Everything else — cloud identity, auth simulators, LLM routing — comes from plugins your project
 opts into. No plugin in the config, no switch on the dashboard. So `fy mode` shows *your*
 project. For example, one project with its own cloud, auth and LLM plugins sees
-`gcp=off|logs|sa|user` and `llm=off|record|live` next to `github`. Those levels come from that
-project's plugins, not from foldyard.
+`gcp=off|logs|sa|user` and `llm=off|record|live` next to its `github` row. Those levels come
+from that project's plugins, not from foldyard.
+
+A GitHub App switch carries whatever the App's installation grants: foldyard asks for no
+narrower scope and caps none. So the place to change what the box can do on GitHub is the App's
+settings on github.com, and a 403 from GitHub names the permission the App is missing. A second
+scope is a second App with its own switch.
 
 ## Enforcement happens on your computer
 
@@ -225,6 +231,13 @@ proxy doesn't forward the dummy either: it answers the request itself with a 401
 names the fix (`fy mode claude=on`, run on your computer), so the agent shows that instead of
 the provider's "invalid token". The Network Log marks those rows as held.
 
+An `[[inject]]` row with a `box_env` dummy gets the same answer while its switch is off: a
+request to the row's host (and `path_prefix`) carrying the dummy, as the bare value or after one
+auth scheme (`gh` sends `token x`, most clients `Bearer x`), gets a 401 whose JSON `message`
+names the switch and the fix (for a `github` row, `fy mode github=on` on your computer), which
+`gh` prints. Any other request to that host goes on as usual: a public call with no credential,
+or a credential the box got some other way ([configuration](./configuration.md#inject)).
+
 With the switch on, the token service on your computer can still fail (a missing or rejected
 secret, a provider outage). The proxy then doesn't send the request at all: it answers with a
 502 whose `message` names the host and the token service's own reason, so the agent sees
@@ -255,7 +268,7 @@ running box is out of date. Switching the mode itself never needs a box restart.
 ## Per-worktree modes
 
 Each worktree has its own mode: its own mode file, its own mirror, its own token-service ports.
-One branch can sit at `github=app` while another stays fully offline. What's shared is identity:
+One branch can sit at `github=on` while another stays fully offline. What's shared is identity:
 one `host.env`, one proxy CA, and one supervisor serving every worktree whose box is up.
 
 ## Modes update the running stack

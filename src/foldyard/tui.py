@@ -7,7 +7,7 @@ credential posture OF THE SELECTED WORKSPACE — posture is per-worktree now
 daemon status, and the plugin panels for that worktree, and the mode buttons write THAT
 worktree's posture (its dev box may still lag until its next `devbox up`, which the Mode
 tab calls out). The one supervisor's combined log stays global. Then PLUGIN-contributed panels (e.g.
-github's egress Network Log — `registry().tui_panels()`, rendered generically from each
+the proxy's egress Network Log — `registry().tui_panels()`, rendered generically from each
 plugin's TuiPanel/PanelData so the TUI names no credential mechanism), and the setup
 doctor ("what can I even grant from here" — gcloud/ADC/gh/host.env checks; runs the deep
 live-IAM probes on startup, and offers a one-click repair button per FAILING check that a
@@ -559,7 +559,7 @@ class DevModeTui(App):
         self._start_theme = start_theme
         # Plugin-contributed tabs (data-only TuiPanels) — snapshot once; the panels are
         # static, only their data changes (refreshed on a timer). The TUI names no specific
-        # credential mechanism: github's Network Log arrives via this hook like any other.
+        # credential mechanism: the proxy's Network Log arrives via this hook like any other.
         self._panels = registry().tui_panels()
         # Plugin-contributed one-click doctor repairs (DoctorFix). A button per fix is mounted in
         # the Doctor tab and shown only while its check FAILS — again named by no plugin here.
@@ -1032,6 +1032,8 @@ class DevModeTui(App):
             blurb = devmode.mode_blurb()
             emergency_rungs = devmode.emergency()
             degraded = devmode.degraded_capabilities(mode)
+            # What an armed credential was last probed to grant — `fy mode`'s scope line.
+            scopes = {a: devmode.scope_summary(a) for a in mode if mode[a] != defaults.get(a)}
         self._sync_mode_rows(rungs, emergency_rungs)
         focused = self.focused
         for row in self.query(AxisRow):
@@ -1077,6 +1079,8 @@ class DevModeTui(App):
                     status += f"\n{dn} :{daemon['port']} ○ BLOCKED — {escape(daemon['blocked'])}"
                 elif daemon and current != defaults[row.axis] and not daemon["up"]:
                     status += f"\n{dn} :{daemon['port']} ○ DOWN — `fy host restart` (or `fy up`)"
+                if scopes.get(row.axis):
+                    status += f"\nscope: {escape(scopes[row.axis])}"
             row.query_one(".axis-status", Static).update(status)
         # The banner stacks every posture-level alarm: the emergency rung (as before) and any
         # probed-and-failing capability (the supervisor's published claim — same source as

@@ -5,7 +5,9 @@ These replaced consumer scripts under the repo's `dev_vm_dir` that the host exec
 write to the checkout — an in-box agent, a package postinstall, a branch under review — code
 execution as the operator, in the process tree holding every credential, and `uv run --script`
 resolved PEP 723 dependencies from the network at mint time. See
-ADR-0023; here we pin the replacement's behaviour.
+ADR-0023; here we pin the replacement's behaviour. Since ADR-0031 they are `[[inject]]` KINDS:
+the App identity arrives on argv from the row, the PEM by the NAME of the switch's derived var, and
+the token carries whatever the App installation grants — foldyard neither narrows nor caps it.
 
 No network: the HTTP call is driven through a stub opener, so these always run.
 """
@@ -32,11 +34,7 @@ _FAKE_PEM = "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVA
 def _clean_env(monkeypatch):
     """No ambient GH_*/proxy vars leaking in from the developer's shell or the CI runner."""
     for var in (
-        "GH_PEM_B64",
-        "GH_APP_ID",
-        "GH_INSTALLATION_ID",
-        "GH_REPO",
-        "GH_APP_PERMISSIONS",
+        "FY_INJECT_GITHUB",
         "http_proxy",
         "https_proxy",
         "HTTP_PROXY",
@@ -48,47 +46,35 @@ def _clean_env(monkeypatch):
 # ── the PEM source ladder ─────────────────────────────────────────────────────────────
 
 
-def test_pem_comes_from_host_env_base64(monkeypatch):
+def test_pem_comes_from_the_named_var_base64(monkeypatch):
     # ONE source: host.env is single-line KEY=VALUE (supervisor.load_host_env), so base64 is the
-    # only shape a PEM can take there — and it's what the capture prompt writes. A second source
-    # (a host file) bought nothing — a host file is exactly as trusted as host.env — and cost a
-    # branch in every place that asks whether the key is present.
-    monkeypatch.setenv("GH_PEM_B64", base64.b64encode(_FAKE_PEM.encode()).decode())
-    assert gat.pem() == _FAKE_PEM
+    # only shape a PEM can take there — and it's what the capture prompt writes. The var is named on
+    # argv by the rule (FY_INJECT_<SWITCH>), and it's the only host.env name the addon lets this
+    # minter read.
+    monkeypatch.setenv("FY_INJECT_GITHUB", base64.b64encode(_FAKE_PEM.encode()).decode())
+    assert gat.pem("FY_INJECT_GITHUB") == _FAKE_PEM
 
 
-def test_pem_absent_names_the_capture_path(monkeypatch):
+def test_pem_absent_names_the_var_and_the_capture_path(monkeypatch):
     # The error is the operator's next action, not a stack trace: the prompt captures it.
     with pytest.raises(SystemExit) as e:
-        gat.pem()
-    assert "fy box up" in str(e.value) and "GH_PEM_B64" in str(e.value)
+        gat.pem("FY_INJECT_GITHUB")
+    assert "fy mode" in str(e.value) and "FY_INJECT_GITHUB" in str(e.value)
 
 
 def test_pem_b64_garbage_fails_loudly_rather_than_signing_junk(monkeypatch):
-    monkeypatch.setenv("GH_PEM_B64", "-----BEGIN RSA PRIV")  # a truncated raw paste, not base64
+    monkeypatch.setenv("FY_INJECT_GITHUB", "-----BEGIN RSA PRIV")  # a truncated raw paste
     with pytest.raises(SystemExit) as e:
-        gat.pem()
+        gat.pem("FY_INJECT_GITHUB")
     assert "not valid base64" in str(e.value)
 
 
-# ── permissions (the token's down-scoping) ────────────────────────────────────────────
-
-
-def test_permissions_default_is_the_comment_only_pair():
-    assert gat.permissions() == {"pull_requests": "write", "issues": "write"}
-
-
-def test_permissions_override_narrows(monkeypatch):
-    monkeypatch.setenv("GH_APP_PERMISSIONS", '{"issues": "read"}')
-    assert gat.permissions() == {"issues": "read"}
-
-
-@pytest.mark.parametrize("bad", ["{not json", '["a"]', "42"])
-def test_permissions_malformed_is_fatal_not_a_silent_widening(monkeypatch, bad):
-    # A consumer who MEANT to narrow the token must never get the wider default from a typo.
-    monkeypatch.setenv("GH_APP_PERMISSIONS", bad)
-    with pytest.raises(SystemExit):
-        gat.permissions()
+def test_the_permission_ceiling_is_gone():
+    # ADR-0031: the App installation's permissions ARE the scope. A second place that had to agree
+    # with the App (the package default as a ceiling, a consumer map under it) is what turned a
+    # granted `actions: read` into a morning of 401s.
+    for name in ("permissions", "_DEFAULT_PERMISSIONS", "_LEVELS"):
+        assert not hasattr(gat, name)
 
 
 # ── the App JWT ───────────────────────────────────────────────────────────────────────
@@ -182,57 +168,68 @@ class _StubOpener:
         return io.BytesIO(json.dumps(self.payload).encode())
 
 
-def test_installation_token_posts_a_downscoped_body(monkeypatch):
+def test_installation_token_asks_for_the_installations_own_scope(monkeypatch):
     stub = _StubOpener({"token": "ghs_realtoken"})
     monkeypatch.setattr(gat, "_opener", lambda skip_port=None: stub)
     monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
-    token = gat.installation_token("1", "22", "Tangible", _FAKE_PEM)
+    token = gat.installation_token("1", "22", [], _FAKE_PEM)
     assert token == "ghs_realtoken"
     (req,) = stub.seen
     assert req.full_url.endswith("/app/installations/22/access_tokens")
-    body = json.loads(req.data)
-    # Re-scoped to the ONE repo + comment permissions, belt-and-braces against App-permission drift.
-    assert body == {
-        "repositories": ["Tangible"],
-        "permissions": {"pull_requests": "write", "issues": "write"},
-    }
+    # No `permissions` key: GitHub then issues the installation's full scope — the one place the
+    # operator changes it (the App's settings) is the one place that decides it.
+    assert json.loads(req.data) == {}
     assert req.headers["Authorization"] == "Bearer signed.jwt"
+
+
+def test_installation_token_narrows_to_the_declared_repositories(monkeypatch):
+    # `repositories` can only narrow (GitHub refuses one outside the installation), so it stays.
+    stub = _StubOpener({"token": "ghs_x"})
+    monkeypatch.setattr(gat, "_opener", lambda skip_port=None: stub)
+    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
+    gat.installation_token("1", "22", ["Tangible", "docs"], _FAKE_PEM)
+    assert json.loads(stub.seen[0].data) == {"repositories": ["Tangible", "docs"]}
 
 
 def test_installation_token_without_a_token_in_the_response_fails(monkeypatch):
     monkeypatch.setattr(gat, "_opener", lambda skip_port=None: _StubOpener({"message": "nope"}))
     monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
     with pytest.raises(SystemExit) as e:
-        gat.installation_token("1", "22", "Tangible", _FAKE_PEM)
+        gat.installation_token("1", "22", ["Tangible"], _FAKE_PEM)
     assert "no token" in str(e.value)
 
 
-def test_main_prints_the_value_ttl_contract(monkeypatch, capsys):
-    monkeypatch.setenv("GH_APP_ID", "1")
-    monkeypatch.setenv("GH_INSTALLATION_ID", "22")
-    monkeypatch.setenv("GH_REPO", "Tangible")
-    monkeypatch.setenv("GH_PEM_B64", base64.b64encode(_FAKE_PEM.encode()).decode())
-    monkeypatch.setattr(gat, "installation_token", lambda *a: "ghs_x")
-    assert gat.main([]) == 0
+_ARGV = ["--app-id", "1", "--installation-id", "22", "--pem-env", "FY_INJECT_GITHUB"]
+
+
+def test_main_reads_the_identity_from_argv_and_prints_the_value_ttl_contract(monkeypatch, capsys):
+    monkeypatch.setenv("FY_INJECT_GITHUB", base64.b64encode(_FAKE_PEM.encode()).decode())
+    seen = []
+    monkeypatch.setattr(gat, "installation_token", lambda *a: seen.append(a) or "ghs_x")
+    argv = [*_ARGV, "--repository", "Tangible", "--repository", "docs", "--own-proxy-port", "41000"]
+    assert gat.main(argv) == 0
+    assert seen == [("1", "22", ["Tangible", "docs"], _FAKE_PEM, 41000)]
     out = json.loads(capsys.readouterr().out)
     # The proxy re-mints `ttl` seconds after each mint, so it must be SHORTER than GitHub's 1 h.
     assert out == {"value": "Bearer ghs_x", "ttl": 3300}
 
 
-def test_main_missing_identity_exits_nonzero_without_minting(monkeypatch, capsys):
+@pytest.mark.parametrize("drop", ["--app-id", "--installation-id", "--pem-env"])
+def test_main_missing_identity_exits_nonzero_without_minting(monkeypatch, capsys, drop):
     # Non-zero ⇒ the addon logs a mint failure and keeps any cached token, degrading THIS host only.
     monkeypatch.setattr(
         gat, "installation_token", lambda *a: pytest.fail("must not mint without the identity")
     )
-    assert gat.main([]) == 1
-    assert "GH_APP_ID" in capsys.readouterr().err
+    i = _ARGV.index(drop)
+    assert gat.main(_ARGV[:i] + _ARGV[i + 2 :]) == 1
+    assert drop in capsys.readouterr().err
 
 
-def test_module_runs_as_a_subprocess_and_reports_a_missing_identity():
+def test_module_runs_as_a_subprocess_and_reports_a_missing_key():
     # The real invocation shape the daemon uses (`python -m …`), proving the module is importable
     # with no package-level import of pyjwt and that a SystemExit(str) becomes exit 1 + stderr.
     out = subprocess.run(
-        [sys.executable, "-m", "foldyard.plugins.github_app_token", "--own-proxy-port", "41000"],
+        [sys.executable, "-m", "foldyard.plugins.github_app_token", *_ARGV],
         capture_output=True,
         text=True,
         timeout=60,
@@ -240,10 +237,10 @@ def test_module_runs_as_a_subprocess_and_reports_a_missing_identity():
         cwd=str(__import__("pathlib").Path(__file__).resolve().parent.parent),
     )
     assert out.returncode == 1
-    assert "GH_APP_ID" in out.stderr
+    assert "FY_INJECT_GITHUB" in out.stderr
 
 
-# ── the gh-cli kind (the github=user emergency) ────────────────────────────────────────
+# ── the gh-cli kind (the operator's own token, an emergency switch) ───────────────────
 
 
 def _fake_gh(monkeypatch, *, stdout="", stderr="", rc=0, missing=False):
@@ -281,108 +278,113 @@ def test_gh_cli_token_empty_output_is_a_failure_not_an_empty_injection(monkeypat
     assert "gh auth login" in capsys.readouterr().err
 
 
-# ── the minter env allowlist (the addon withholds the rest of host.env) ────────────────
+# ── the capability probe (can we still act as the App RIGHT NOW?) ───────────────────────
+
+_PEM_B64 = base64.b64encode(_FAKE_PEM.encode()).decode()
 
 
-def test_app_rule_declares_exactly_the_env_its_minter_reads():
-    from foldyard import config
-    from foldyard.plugins import github
-
-    (rule,) = github.GithubPlugin().proxy_rules({"github": "app"})
-    assert set(rule.env) == {
-        "GH_APP_ID",
-        "GH_INSTALLATION_ID",
-        "GH_REPO",
-        "GH_PEM_B64",
-        "GH_APP_PERMISSIONS",
-    }
-    # `requires` (the daemon spawn gate) stays narrower than `env` (what the minter may read) —
-    # they answer different questions and conflating them either kills all egress or over-shares.
-    assert set(rule.requires) < set(rule.env)
-    # The gh-cli kind needs nothing from host.env: `gh` holds its own credential.
-    (user,) = github.GithubPlugin().proxy_rules({"github": "user"})
-    assert user.env == ()
-    del config
+_INSTALLATION = {
+    "id": 22,
+    "app_slug": "tangible-pr-bot",
+    "repository_selection": "selected",
+    "permissions": {"issues": "write", "pull_requests": "write", "actions": "read"},
+    "suspended_at": None,
+}
 
 
-# ── the capability probe (does github=app still work RIGHT NOW?) ───────────────────────
-
-
-def test_app_reachable_reports_the_app_slug(monkeypatch):
-    monkeypatch.setenv("GH_APP_ID", "1234567")
-    monkeypatch.setenv("GH_PEM_B64", base64.b64encode(_FAKE_PEM.encode()).decode())
+def test_the_probe_reads_the_installations_scope_with_the_app_jwt(monkeypatch):
     monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
-    stub = _StubOpener({"slug": "tangible-pr-bot"})
+    stub = _StubOpener(_INSTALLATION)
     monkeypatch.setattr(gat, "_opener", lambda skip_port=None: stub)
-    ok, detail = gat.app_reachable()
+    ok, detail, scope = gat.installation_probe("1234567", "22", _PEM_B64)
     assert ok and "tangible-pr-bot" in detail
-    # /app is METADATA — a probe on a timer must not manufacture installation tokens.
+    # The detail is a summary (the dashboards give a switch one line); the scope carries the list.
+    assert "3 permissions" in detail and "2 at write" in detail
+    assert scope == {
+        "permissions": {"issues": "write", "pull_requests": "write", "actions": "read"},
+        "repository_selection": "selected",
+    }
+    # ONE metadata GET, authenticated as the App: a probe on a timer must not manufacture
+    # installation tokens, and the call that proves the key is the one that reads the scope.
     (req,) = stub.seen
-    assert req.full_url.endswith("/app") and req.get_method() == "GET"
+    assert req.full_url.endswith("/app/installations/22") and req.get_method() == "GET"
+    assert req.headers["Authorization"] == "Bearer signed.jwt"
 
 
-def test_app_reachable_names_the_actual_problem(monkeypatch):
-    ok, detail = gat.app_reachable()
-    assert not ok and "GH_APP_ID" in detail  # no identity
-    monkeypatch.setenv("GH_APP_ID", "1234567")
-    ok, detail = gat.app_reachable()
-    assert not ok and "GH_PEM_B64" in detail  # no key
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"app_slug": "bot"},  # no permissions at all
+        {"app_slug": "bot", "permissions": ["issues"]},  # not a map
+        {"app_slug": "bot", "permissions": {"issues": 1}},  # not a level
+    ],
+)
+def test_an_unreadable_scope_is_unavailable_not_guessed(monkeypatch, payload):
+    # The App authenticated, so the switch's capability holds; what it grants is unknown, and an
+    # empty map would read as "grants nothing" — a guess the next good read would call a drift.
+    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
+    monkeypatch.setattr(gat, "_opener", lambda skip_port=None: _StubOpener(payload))
+    ok, detail, scope = gat.installation_probe("1", "22", _PEM_B64)
+    assert ok and scope is None and "scope unavailable" in detail
+
+
+def test_a_suspended_installation_degrades_the_switch(monkeypatch):
+    # GitHub refuses to mint for a suspended installation: the switch can't deliver what it says.
+    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
+    payload = {**_INSTALLATION, "suspended_at": "2026-10-01T00:00:00Z"}
+    monkeypatch.setattr(gat, "_opener", lambda skip_port=None: _StubOpener(payload))
+    ok, detail, scope = gat.installation_probe("1", "22", _PEM_B64)
+    assert not ok and "suspended" in detail
+    assert scope is not None  # still what it grants: resuming the installation brings it back
+
+
+def test_the_probe_names_the_actual_problem():
+    ok, detail, scope = gat.installation_probe("1234567", "22", "")
+    assert not ok and "private key" in detail and scope is None  # no key
+    ok, detail, _ = gat.installation_probe("1234567", "22", "-----BEGIN RSA PRIV")
+    assert not ok and "base64" in detail  # a truncated raw paste
     # A PEM-shaped-but-unusable key fails at signing, and says so rather than raising.
-    monkeypatch.setenv("GH_PEM_B64", base64.b64encode(_FAKE_PEM.encode()).decode())
-    ok, detail = gat.app_reachable()
+    ok, detail, _ = gat.installation_probe("1234567", "22", _PEM_B64)
     assert not ok and "App key" in detail
 
 
-def test_app_reachable_never_leaks_the_jwt_on_failure(monkeypatch):
+def _failing_opener(code: int, body: bytes = b"bad"):
     import email.message
     import urllib.error
-
-    monkeypatch.setenv("GH_APP_ID", "1234567")
-    monkeypatch.setenv("GH_PEM_B64", base64.b64encode(_FAKE_PEM.encode()).decode())
-    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.SECRET.jwt")
 
     class _Failing:
         def open(self, req, timeout=None):
             raise urllib.error.HTTPError(
-                req.full_url, 401, "Unauthorized", email.message.Message(), io.BytesIO(b"bad")
+                req.full_url, code, "nope", email.message.Message(), io.BytesIO(body)
             )
 
-    monkeypatch.setattr(gat, "_opener", lambda skip_port=None: _Failing())
-    ok, detail = gat.app_reachable()
+    return lambda skip_port=None: _Failing()
+
+
+def test_the_probe_never_leaks_the_jwt_on_failure(monkeypatch):
+    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.SECRET.jwt")
+    monkeypatch.setattr(gat, "_opener", _failing_opener(401))
+    ok, detail, scope = gat.installation_probe("1234567", "22", _PEM_B64)
     # The detail is rendered on the posture dashboards, so it must carry the FIX, not the credential.
-    assert not ok and "401" in detail and "rotated" in detail
+    assert not ok and "401" in detail and "rotated" in detail and scope is None
     assert "SECRET" not in detail
 
 
-def test_probe_is_contributed_only_on_the_app_rung(monkeypatch, tmp_path):
-    from foldyard import config
-    from foldyard.plugins import github
-
-    monkeypatch.setattr(config, "host_env_file", lambda: tmp_path / "host.env")
-    p = github.GithubPlugin()
-    assert p.capability_probes({"github": "off"}) == []
-    assert p.capability_probes({"github": "user"}) == []  # gh's own failure is local + immediate
-    (probe,) = p.capability_probes({"github": "app"})
-    assert probe.switch == "github" and probe.name == "github-app-identity"
-    # A probe error must degrade the axis, never take the supervisor tick down.
-    monkeypatch.setattr(
-        gat, "app_reachable", lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))
-    )
-    ok, detail = probe.check()
-    assert not ok and "RuntimeError" in detail
+def test_an_unknown_installation_says_which_field_to_check(monkeypatch):
+    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
+    monkeypatch.setattr(gat, "_opener", _failing_opener(404, b'{"message": "Not Found"}'))
+    ok, detail, scope = gat.installation_probe("1", "22", _PEM_B64)
+    assert not ok and "installation 22" in detail and "installation_id" in detail
+    assert scope is None
 
 
-def test_permissions_override_may_narrow_but_never_widen(monkeypatch):
-    # GH_APP_PERMISSIONS comes from [plugins.github].permissions — REPO config, which anything able
-    # to write the checkout can edit. GitHub caps a token at what the App installation holds, but
-    # WITHIN that cap a widened map is real escalation (a contents:write App would hand the box a
-    # push), so the default is also the ceiling here.
-    monkeypatch.setenv("GH_APP_PERMISSIONS", '{"contents": "write"}')
-    with pytest.raises(SystemExit, match="may only NARROW"):
-        gat.permissions()
-    monkeypatch.setenv("GH_APP_PERMISSIONS", '{"issues": "admin"}')
-    with pytest.raises(SystemExit, match="exceeds the default"):
-        gat.permissions()
-    # Narrowing stays fine — that's what the knob is for.
-    monkeypatch.setenv("GH_APP_PERMISSIONS", '{"issues": "read", "pull_requests": "write"}')
-    assert gat.permissions() == {"issues": "read", "pull_requests": "write"}
+def test_an_unreachable_github_is_a_failure_without_a_scope(monkeypatch):
+    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
+
+    class _Down:
+        def open(self, req, timeout=None):
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(gat, "_opener", lambda skip_port=None: _Down())
+    ok, detail, scope = gat.installation_probe("1", "22", _PEM_B64)
+    assert not ok and "can't reach" in detail and scope is None

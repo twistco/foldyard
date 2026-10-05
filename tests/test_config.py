@@ -187,14 +187,14 @@ def test_disable_works_at_depth_and_the_marker_never_survives(fresh_config, tmp_
     # marker itself is stripped from blocks that STAY — nothing downstream should ever meet it.
     (tmp_path / "foldyard.toml").write_text(
         '[project]\nname = "p"\n'
-        '[plugins.github]\napp_id = "1"\n'
+        '[plugins.auth0-sim]\nharness = "x"\n'
         '[plugins.gcp-metadata]\nproject = "proj"\n'
     )
     (tmp_path / "foldyard.local.toml").write_text(
-        "[plugins.github]\ndisabled = true\n[plugins.gcp-metadata]\ndisabled = false\n"
+        "[plugins.auth0-sim]\ndisabled = true\n[plugins.gcp-metadata]\ndisabled = false\n"
     )
     fresh_config(FOLDYARD_REPO=tmp_path)
-    assert config.github_declared() is False
+    assert config.auth0_sim_declared() is False
     assert config.gcp_metadata_declared() is True  # explicitly kept
     assert "disabled" not in config._toml()["plugins"]["gcp-metadata"]
 
@@ -810,19 +810,72 @@ def test_secret_specs_absent_or_malformed_is_empty(fresh_config, tmp_path):
     assert config.secret_specs() == []
 
 
-def test_github_permissions_json_from_toml_or_env(fresh_config, tmp_path, monkeypatch):
-    (tmp_path / "foldyard.toml").write_text('[plugins.github]\npermissions = { issues = "read" }\n')
-    fresh_config(FOLDYARD_REPO=tmp_path)
-    monkeypatch.delenv("GH_APP_PERMISSIONS", raising=False)
-    assert config.github_permissions() == '{"issues": "read"}'
-    monkeypatch.setenv("GH_APP_PERMISSIONS", '{"contents": "read"}')
-    assert config.github_permissions() == '{"contents": "read"}'  # env wins, as everywhere
+# ── the retired [plugins.github] table (ADR-0031: a clean break, refused at launch) ─────────
+
+_OLD_GITHUB = (
+    '[plugins.github]\napp_id = "4008762"\ninstallation_id = "139125083"\nrepo = "Tangible"\n'
+    'permissions = { pull_requests = "write", actions = "read" }\n'
+)
 
 
-def test_github_permissions_absent_is_empty_so_the_minter_defaults(fresh_config, tmp_path):
-    (tmp_path / "foldyard.toml").write_text('[plugins.github]\napp_id = "1"\n')
+def test_a_retired_github_table_is_found_in_the_resolved_config(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text(_OLD_GITHUB)
     fresh_config(FOLDYARD_REPO=tmp_path)
-    assert config.github_permissions() == ""
+    table = config.retired_github_table()
+    assert table is not None and table["app_id"] == "4008762"
+    (tmp_path / "foldyard.toml").write_text('[plugins.gcp-metadata]\nproject = "p"\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.retired_github_table() is None
+
+
+def test_a_retired_github_table_only_in_the_tree_is_not_read_on_the_host(fresh_config, tmp_path):
+    # The refusal reads the ADOPTED copy only. A tree read would let anything that can write the
+    # checkout block the operator's `fy up` (a host consequence, however narrow — CLAUDE.md's
+    # "repo config is never live input to the host"), and it buys nothing: the adopt gate runs
+    # first, so a table in the tree is shown in `fy config diff` and refused once adopted.
+    (tmp_path / "foldyard.toml").write_text(_OLD_GITHUB)
+    with config.using(config.Config(repo_root=tmp_path, worktree="", toml={})):
+        assert config.retired_github_table() is None
+
+
+def test_the_replacement_rows_are_computed_from_the_old_table():
+    import tomllib
+
+    table = {"app_id": "4008762", "installation_id": 139125083, "repo": "Tangible"}
+    rows = config.github_table_replacement(table)
+    parsed = tomllib.loads(rows)["inject"]
+    # One live row — the App, its own off/on switch, with the dummy the box used to get ambiently —
+    # and the old `user` level as a commented gh-cli row (an emergency switch, opted into).
+    assert parsed == [
+        {
+            "switch": "github",
+            "kind": "github-app",
+            "app_id": "4008762",
+            "installation_id": "139125083",
+            "repositories": ["Tangible"],
+            "box_env": {"GH_TOKEN": "x"},
+        }
+    ]
+    lines = [line for line in rows.splitlines() if not line.startswith("# The old")]  # prose
+    uncommented = "\n".join(line.removeprefix("# ") for line in lines)
+    user = tomllib.loads(uncommented)["inject"][1]
+    assert user == {
+        "switch": "github-user",
+        "kind": "gh-cli",
+        "emergency": True,
+        "box_env": {"GH_TOKEN": "x"},
+    }
+    assert "permissions" not in rows  # gone: the installation's permissions are the scope
+
+
+def test_an_identity_less_table_gets_placeholder_rows_never_a_broken_live_one():
+    # A bare `[plugins.github]` (a user-emergency-only consumer) has no App to name: the App row is
+    # offered commented, with placeholders, so pasting the block never yields a row that fails.
+    import tomllib
+
+    rows = config.github_table_replacement({})
+    assert tomllib.loads(rows) == {}
+    assert "<the App's id>" in rows and 'kind = "gh-cli"' in rows
 
 
 def test_inject_specs_absent_is_empty(fresh_config, tmp_path):
@@ -937,29 +990,6 @@ def test_gcp_project_and_sa_labels_from_toml(fresh_config, tmp_path):
     fresh_config(FOLDYARD_REPO=tmp_path, GCP_PROJECT=None)
     assert config.gcp_project() == "acme-staging"
     assert config.gcp_sa_labels() == {"app": "app-runtime", "box": "log-reader"}
-
-
-def test_github_app_identity_from_toml(fresh_config, tmp_path):
-    (tmp_path / "foldyard.toml").write_text(
-        '[plugins.github]\napp_id = "1234567"\ninstallation_id = "12345678"\nrepo = "Tangible"\n'
-    )
-    fresh_config(FOLDYARD_REPO=tmp_path, GH_APP_ID=None, GH_INSTALLATION_ID=None, GH_REPO=None)
-    assert config.github_app_id() == "1234567"
-    assert config.github_installation_id() == "12345678"
-    assert config.github_repo() == "Tangible"
-
-
-def test_github_app_identity_env_wins_over_toml(fresh_config, tmp_path):
-    (tmp_path / "foldyard.toml").write_text(
-        '[plugins.github]\napp_id = "1234567"\ninstallation_id = "12345678"\nrepo = "Tangible"\n'
-    )
-    fresh_config(FOLDYARD_REPO=tmp_path, GH_APP_ID="9999999")
-    assert config.github_app_id() == "9999999"
-
-
-def test_github_app_identity_absent_is_empty(fresh_config, tmp_path):
-    fresh_config(FOLDYARD_REPO=tmp_path, GH_APP_ID=None, GH_INSTALLATION_ID=None, GH_REPO=None)
-    assert config.github_app_id() == config.github_installation_id() == config.github_repo() == ""
 
 
 # ── machine_host_wall ([machine] host_firewall — the host-side cgroup wall, Linux) ─────────

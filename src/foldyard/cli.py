@@ -268,8 +268,8 @@ def mode(
         None,
         metavar="[switch=level ... | ttl=...]",
         help="No args: show the mode. Else SET switches (your computer only), e.g. "
-        "`foldyard mode gcp=logs github=user ttl=1h` (ttl: emergency levels only). "
-        "Switches: gcp=off|logs|sa|user, github=off|app|user.",
+        "`foldyard mode gcp=logs github=on ttl=1h` (ttl: emergency levels only). "
+        "Which switches exist is per project: `fy mode` lists them.",
     ),
 ) -> None:
     """Show the dev mode (anywhere), or set it (your computer only)."""

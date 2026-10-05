@@ -48,6 +48,7 @@ def _wire(
     host_wall=False,
     explicit=True,
     engine_on_path=True,
+    github_table: dict | None = None,
 ):
     """Set every input preflight reads to a known value. `tables` maps a table name to its dict
     (for the raw `keyless` typo check); defaults to empty tables. `engine_on_path` is the
@@ -78,6 +79,7 @@ def _wire(
     monkeypatch.setattr(preflight.config, "_table", lambda name: tables.get(name, {}))
     monkeypatch.setattr(preflight.config, "in_box", lambda: in_box)
     monkeypatch.setattr(preflight.devmode, "read", lambda: {"mode": {"github": github}})
+    monkeypatch.setattr(preflight.config, "retired_github_table", lambda: github_table)
     # Default the nested-project check to a marker-less root so it short-circuits — the AMBIENT
     # root is itself nested (foldyard/foldyard.toml inside the monorepo checkout). The nested
     # tests below patch repo_root to their own tmp sandboxes.
@@ -345,3 +347,26 @@ def test_host_wall_with_wall_lima_proxy_and_nft_is_clean(monkeypatch):
     monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
     monkeypatch.setattr(preflight.hostwall, "nft_socket_in_kernel", lambda: True)
     assert not any("host_wall" in p for p in preflight.issues())
+
+
+# ── [plugins.github] was removed (ADR-0031): a clean break, refused with its replacement ─────
+
+
+def test_a_retired_github_table_refuses_the_launch_and_prints_its_replacement(monkeypatch):
+    # The table no longer does anything — nothing loads it — so letting `fy up` through would
+    # leave a consumer's GitHub access silently gone. The refusal carries the rows to paste,
+    # computed from the table it found, and the two things that moved with it.
+    table = {"app_id": "4008762", "installation_id": "139125083", "repo": "Tangible"}
+    _wire(monkeypatch, github_table=table)
+    (problem,) = preflight.issues()
+    assert "[plugins.github]" in problem and "ADR-0031" in problem
+    assert 'kind = "github-app"' in problem and 'app_id = "4008762"' in problem
+    assert 'repositories = ["Tangible"]' in problem and 'kind = "gh-cli"' in problem
+    assert "GH_PEM_B64" in problem and "FY_INJECT_GITHUB" in problem  # the key's new name
+    assert "permissions" in problem  # …and why there's no map to carry over
+    assert "fy mode github=on" in problem
+
+
+def test_no_github_table_no_refusal(monkeypatch):
+    _wire(monkeypatch, github_table=None)
+    assert preflight.issues() == []

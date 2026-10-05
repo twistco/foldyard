@@ -97,7 +97,7 @@ reachable by container name — *and* zero credentials. → [prior-art.md](./doc
 
 **Secretless by default, credentials on demand.** The yard starts with no `~/.ssh`, no tokens,
 no credential helpers: nothing to steal and no keys to push with. When you need real access you
-switch it on (`fy mode gcp=logs github=app`). Token services on your computer — outside anything
+switch it on (`fy mode gcp=logs github=on`). Token services on your computer — outside anything
 the yard can reach — make short-lived, scoped tokens, and the egress proxy adds them to requests
 on the way out. The upstream API gets the token; the yard never does. Emergency levels that act
 as *you* expire on a timer and switch themselves off. If no token service is running, no
@@ -141,8 +141,8 @@ instead of them.
   modes with time limits, run by a supervisor on your computer · an egress proxy that adds
   credentials, logs traffic and enforces the allowlist, backed by the VM firewall · `fy doctor`
   · a TUI.
-- **Plugins** — token services (a GCP metadata emulator, GitHub App tokens, generic header- or
-  query-parameter-authenticated APIs) · editor attach (VS Code) · agents (Claude Code and Codex,
+- **Plugins** — token services (a GCP metadata emulator; `[[inject]]` credentials from config
+  alone — static header- or query-parameter tokens, GitHub App installation tokens) · editor attach (VS Code) · agents (Claude Code and Codex,
   keyless: the box holds a dummy key and the proxy swaps in your real one).
 
 Each project gets its own rootless VM, named after the project. The default backend is **Lima**:

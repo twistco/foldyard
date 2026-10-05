@@ -110,6 +110,93 @@ def test_a_declared_but_off_injector_is_still_reported(checkout):
     assert armed.active is True
 
 
+GITHUB = """
+[[inject]]
+switch = "github"
+kind = "github-app"
+app_id = "1"
+installation_id = "2"
+
+[[inject]]
+switch = "github-user"
+kind = "gh-cli"
+emergency = true
+"""
+
+
+def test_a_kinds_pinned_host_is_reported_and_two_rows_on_one_host_both_show(checkout):
+    """A `github-app` row names no host (the kind pins api.github.com) — it's still a target, and
+    the emergency `gh-cli` row on the same host is a second, different credential, not a duplicate."""
+    targets = collect(checkout(BASE + "passthrough = []\n" + GITHUB)).targets
+    app, user = (
+        next(t for t in targets if f"[[inject]] {s} " in t.source)
+        for s in ("github", "github-user")
+    )
+
+    assert app.host == user.host == "api.github.com"
+    assert app.from_config and user.from_config
+    assert "github-app" in app.source and "$FY_INJECT_GITHUB" in app.source
+    assert "gh-cli" in user.source and "your own gh token" in user.source
+
+
+def _record_scope(identity: str, permissions: dict, reach: str = "selected repositories"):
+    from foldyard import credscope
+    from foldyard.plugins import CredentialScope
+
+    credscope.observe(
+        "github", CredentialScope(identity, permissions, reach), "2026-10-05T12:03:00+00:00"
+    )
+
+
+def test_a_github_app_row_reports_the_last_probed_scope_and_flags_write(checkout, monkeypatch):
+    """ADR-0031: the App installation's permissions ARE the box's scope, so the inventory shows
+    them — from the supervisor's record, offline (a report never calls GitHub)."""
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("network"))
+    _record_scope("App 1, installation 2", {"issues": "write", "actions": "read"})
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    app = next(t for t in collect(cfg).targets if "[[inject]] github " in t.source)
+    assert app.scope == (
+        "scope (probed 2026-10-05T12:03:00+00:00): actions:read, issues:WRITE — selected "
+        "repositories",
+        "⚠ write or admin: issues — what the box can change through this credential",
+    )
+    body = rendered(cfg)
+    assert "issues:WRITE" in body and "⚠ write or admin: issues" in body
+    # A kind that reads no scope reports none.
+    user = next(t for t in collect(cfg).targets if "github-user" in t.source)
+    assert user.scope == ()
+
+
+def test_an_unprobed_github_app_says_so_and_how_it_gets_probed(checkout):
+    # Including when the only record is ANOTHER installation's: an adopted `installation_id`
+    # change must not show the previous App's permissions as this one's.
+    _record_scope("App 1, installation 999", {"contents": "write"})
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    app = next(t for t in collect(cfg).targets if "[[inject]] github " in t.source)
+    (line,) = app.scope
+    assert "not yet probed" in line and "`fy mode github=on`" in line
+    assert "contents" not in rendered(cfg)
+
+
+def test_in_the_box_the_scope_points_at_the_computer_that_holds_it(checkout, monkeypatch):
+    # The record is host state the box can't read: "not yet probed" there would be a false claim.
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    app = next(t for t in collect(cfg).targets if "[[inject]] github " in t.source)
+    assert app.scope == ("scope: recorded on your computer, where `fy config widenings` shows it",)
+
+
+def test_a_read_only_scope_raises_no_flag(checkout):
+    _record_scope("App 1, installation 2", {"actions": "read"}, reach="all repositories")
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    app = next(t for t in collect(cfg).targets if "[[inject]] github " in t.source)
+    assert app.scope == (
+        "scope (probed 2026-10-05T12:03:00+00:00): actions:read — all repositories",
+    )
+
+
 def test_packaged_targets_come_from_the_registry_not_from_guessed_constants(checkout):
     """Codex's ChatGPT rung injects on chatgpt.com/backend-api/codex, not the API host. A report
     that hardcoded hosts would name the wrong destination — so it asks the plugins."""
@@ -243,6 +330,24 @@ def test_a_stale_proxy_allow_list_is_named_with_the_verb_that_replaced_it(checko
 
     body = rendered(cfg)
     assert "nothing consumes them" in body and "github.com, pypi.org" in body
+
+
+def test_a_retired_github_table_is_named_as_ignored_with_where_github_went(checkout):
+    """[plugins.github] was removed (ADR-0031). `fy up` refuses it, but `fy doctor` and `fy config
+    widenings` are where an operator looks when GitHub access went quiet, so they name it too —
+    with its `permissions` map, which reads as a control and is now the App installation's."""
+    cfg = checkout(
+        BASE + "passthrough = []\n\n[plugins.github]\n"
+        'app_id = "1"\npermissions = { contents = "write" }\n'
+    )
+    exp = collect(cfg)
+
+    key, values, fix, origin = exp.ignored[0]
+    assert key == "[plugins.github]" and origin == exposure.SHARED
+    assert values == ["app_id = 1", "permissions = {'contents': 'write'}"]
+    assert "[[inject]]" in fix and "github-app" in fix and "installation" in fix
+    assert exp.concerns == ["`[plugins.github]` is IGNORED (2 entries)"]
+    assert exposure.doctor_row(exp)[0] is None  # WARN
 
 
 def test_a_declared_inject_token_env_is_named_as_ignored(checkout):

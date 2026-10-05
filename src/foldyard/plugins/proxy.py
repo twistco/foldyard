@@ -140,7 +140,7 @@ def host_install_hint() -> str:
 
 # Where the proxy CA is mounted inside the box; its presence is also how `verify` (in-box)
 # tells a proxy mode from off. One constant so the mount target and the posture probe (the
-# github plugin reads `proxy.BOX_CA`) can never drift apart.
+# box's own `verify` reads `proxy.BOX_CA`) can never drift apart.
 BOX_CA = Path("/etc/dev-proxy-ca.pem")
 
 # The COMBINED trust bundle the box-up snippet builds (system roots + the mitm CA). Phase A′
@@ -203,7 +203,8 @@ def _net_leaf(e: dict, escape) -> str:
         # the row you act on (press the allow key in the TUI to let the host through).
         return f"[dim]{ts}[/dim] [red]⛔ refused by the allowlist[/red]"
     if e.get("held"):
-        # The box sent its keyless dummy with the axis at rest: the proxy answered, nothing left.
+        # The box sent a dummy (an agent's keyless one, or an [[inject]] row's box_env) with its
+        # switch at rest: the proxy answered, nothing left.
         axis = escape(str(e["held"]))
         return (
             f"[dim]{ts}[/dim] [yellow]⏸ credential off — the proxy answered; "
@@ -362,18 +363,26 @@ class ProxyPlugin(Plugin):
         one — `_registry` is bound in Registry.__init__)."""
         return self._registry.proxy_rules(mode) if self._registry else []
 
+    def _opted_in(self, mode: dict) -> bool:
+        """The one gate for routing, the listener and its doctor row: a ``[proxy]`` table, an
+        active rule, or an injector merely DECLARED. The last matters because the box is routed at
+        create time: an injector that was off then must still find the route, its dummy and a
+        listener when it is switched on later (no box recreate)."""
+        if config.proxy_enabled() or self._rules(mode):
+            return True
+        return bool(self._registry) and self._registry.declares_injection()
+
     def _rule_defaults(self, mode: dict, rules: list) -> dict[str, str]:
         names = {key for r in rules for key in r.env}
         derived = self._registry.env_defaults(mode) if self._registry else {}
         return {k: v for k, v in derived.items() if k in names}
 
     def daemons(self, mode: dict) -> dict[str, dict]:
-        rules = self._rules(mode)
-        # Same opt-in gate as axes()/derive_env(): a generic/stack-less consumer that declares no
-        # `[proxy]` and has no active injector gets NO listener — else desired_daemons() would still
-        # expose :8088 and Doctor / the mode dashboard would flag it perpetually DOWN. An opted-in
-        # consumer (proxy_enabled) or any active rule keeps the always-on proxy, as Phase A′ needs.
-        if not config.proxy_enabled() and not rules:
+        # Same opt-in gate as derive_env(): a generic/stack-less consumer that declares no `[proxy]`
+        # and no injector gets NO listener — else desired_daemons() would still expose :8088 and
+        # Doctor / the mode dashboard would flag it perpetually DOWN. An opted-in consumer, or one
+        # declaring any injector (on or off), keeps the always-on proxy, as Phase A′ needs.
+        if not self._opted_in(mode):
             return {}
         # The addon injects the FIRST rule that matches, so two switches claiming one host and path
         # would leave the credential to rule order: both sides are held back instead
@@ -415,11 +424,12 @@ class ProxyPlugin(Plugin):
             # The open learn window's start: a new window resets the addon's per-host would-block
             # rate limit, or a host seen just before it would get no row inside it.
             "observing_since": _observing_since(),
-            # Derived, non-secret identity a rule's minter reads (github=app's GH_APP_ID & co.,
-            # from env_defaults): the running proxy never restarts to inherit the supervisor's env,
-            # so it gets them here. After exports and host.env, as the supervisor's setdefault.
+            # Derived, non-secret identity a rule's minter reads (from a plugin's env_defaults):
+            # the running proxy never restarts to inherit the supervisor's env, so it gets them
+            # here. After exports and host.env, as the supervisor's setdefault.
             "defaults": self._rule_defaults(mode, rules),
-            # Keyless dummies at rest: the addon answers them with the fix instead of forwarding.
+            # Dummies at rest (keyless agents, `[[inject]]` box_env): the addon answers them with
+            # the fix instead of forwarding.
             "held": [asdict(h) for h in self._registry.held_credentials(mode)]
             if self._registry
             else [],
@@ -497,10 +507,9 @@ class ProxyPlugin(Plugin):
         #
         # Gated on the consumer OPTING IN (`[proxy]` table) — without it, a generic/stack-less
         # project gets a clean box (no FY_PROXY ⇒ box_args adds no HTTPS_PROXY/NO_PROXY env). ANY
-        # active injector (github=app/user, a `[[inject]]` axis, or claude keyless) needs the proxy,
-        # so an active rule lights routing up too — not just github (the rule set is the general
-        # signal; github is one case of it).
-        if not config.proxy_enabled() and not self._rules(mode):
+        # active injector (an `[[inject]]` switch, or claude/codex keyless) needs the proxy, so
+        # an active rule lights routing up too (the rule set is the general signal).
+        if not self._opted_in(mode):
             return {}
         # Per-worktree port (config.proxy_port) so each worktree's box routes to ITS OWN proxy
         # listener — the supervisor runs one per worktree on the matching offset port. The address
@@ -530,7 +539,8 @@ class ProxyPlugin(Plugin):
         #     Routing requires the CA (decrypted/MITM'd flows are mitm-signed), so no CA with
         #     routing is a hard error — `machine up`'s `foldyard host` generates it on first run.
         #
-        # The dummy GH_TOKEN is the INJECTOR's concern (github contributes it), not the proxy's.
+        # A dummy credential is the INJECTOR's concern ([[inject]] box_env, keyless), not the
+        # proxy's.
         proxy = env.get("FY_PROXY")
         ca = _mitm_ca()
         args: list[str] = []
@@ -609,10 +619,9 @@ class ProxyPlugin(Plugin):
         if not config.proxy_enabled() and not self._ever_rules(ctx.mode):
             return
         # Proxy-FRAMEWORK setup, host-side (the proxy daemon + CA live on the host): is mitmdump
-        # installed, and has its CA been generated? These were the github plugin's, but they're
-        # proxy concerns — github is just one injector that rides the proxy. Resolve mitmdump the
-        # same way the daemon does (foldyard's own venv OR PATH), not via ctx.which (PATH-only),
-        # since installing foldyard lands mitmdump in its own venv, off PATH.
+        # installed, and has its CA been generated? Proxy concerns, whichever injector rides it.
+        # Resolve mitmdump the same way the daemon does (foldyard's own venv OR PATH), not via
+        # ctx.which (PATH-only), since installing foldyard lands mitmdump in its own venv, off PATH.
         yield ctx.result(
             mitmdump_path() is not None,
             "mitmproxy",
@@ -629,9 +638,10 @@ class ProxyPlugin(Plugin):
         # RUNTIME: is the always-on egress proxy actually listening? Phase A′ ALWAYS-routes the box
         # through it, so a down proxy means EVERY box request connection-refuses — this is the check
         # that tells you why "requests in the box aren't working". Only a finding when the
-        # supervisor is asked to run it (the same gate as daemons(): opted in, or a rule active
-        # NOW) — a declared-but-off injector has no listener to be down. Probe handles box→host.
-        if not config.proxy_enabled() and not self._rules(ctx.mode):
+        # supervisor is asked to run it (the same gate as daemons(): opted in, an active rule, or
+        # a declared injector) — a project with none of those has no listener to be down. Probe
+        # handles box→host.
+        if not self._opted_in(ctx.mode):
             return
         log = config.supervisor_log_file()
         port = config.proxy_port()  # this worktree's listener port (project band base + offset)

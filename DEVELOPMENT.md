@@ -102,6 +102,10 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   a count, injection targets (armed and latent, asked of the registry so an odd shape like Codex's
   ChatGPT rung reports its real host), agent prompts attributed to the shared vs the gitignored
   file, and `IGNORED_KEYS` — config that reads as a control and is no longer honoured.
+- `credscope.py` — what each credential was last OBSERVED to grant (ADR-0031: reported, never
+  capped): a kind's probe reads it (`CapabilityProbe.scope`), the supervisor records it per switch
+  and credential identity and logs + notifies a change; `fy config widenings`, `fy mode` and the
+  TUI read the record offline.
 - `allowlist.py` · `ports.py` · `preflight.py` · `keyless.py` — the egress allow-store behind
   `fy allow` + the TUI's host grants (all levels host-side), cross-project port-band allocation,
   hard-prerequisite checks before `up`, and the keyless-agent credential taxonomy + host-side
@@ -113,12 +117,16 @@ loading; cross-axis coherence is declared as `Requires` DATA on two tiers — in
 wiring-dependent ones (docs/configuration.md), merged at Registry construction; the
 `mode_issues` hook is the escape hatch for logic the data can't express, e.g. combination
 warnings)
-plus the built-ins: `gcp.py` + `gcp_metadata/`, `github.py` + its two MINTER KINDS
-(`github_app_token.py` = the App installation token + the `github=app` capability probe,
-`gh_cli_token.py` = `gh auth token` for the `user` emergency; packaged because the mint path runs
-host-side beside the credentials — [ADR-0023](./docs/adrs/0023-no-host-executed-code-from-the-repo-mount.md)), `proxy.py` +
-`inject.py` +
-`static_token.py` + `_passthrough_bundles.py` (the egress proxy + injector rules), `claude.py`,
+plus the built-ins: `gcp.py` + `gcp_metadata/`, `proxy.py` + `_passthrough_bundles.py` (the
+egress proxy), `inject.py` (each `[[inject]]` row → one switch + one rule; `box_env` dummies and
+their verify rows) + `kinds.py` (the credential KINDS a row names — a token protocol with a fixed
+field shape, [ADR-0031](./docs/adrs/0031-credentials-are-protocol-kinds-the-credential-owns-its-scope.md)):
+`static` → `static_token.py`, `github-app` → `github_app_token.py` (the App installation token,
+asking for no `permissions` — the installation's are the scope — + the kind's capability probe),
+`gh-cli` → `gh_cli_token.py` (`gh auth token`, emergency-only); minters are packaged because the
+mint path runs host-side beside the credentials —
+[ADR-0023](./docs/adrs/0023-no-host-executed-code-from-the-repo-mount.md). There is no github
+plugin: a `[plugins.github]` table is refused at launch with its replacement rows. `claude.py`,
 `codex.py` + `codex_chatgpt_token.py`, `vscode.py`, and the Tangible-bound declared pair
 `auth0_sim.py` + `llm.py` (both slated for DELETION, not migration — see
 [ADR-0024](./docs/adrs/0024-declarative-consumer-axes-no-repo-path-plugins.md): they turned out to

@@ -602,7 +602,7 @@ def test_up_ensures_host_supervisor(fake):
 
 
 def test_up_proxy_ca_missing_blocks(fake, monkeypatch, tmp_path):
-    fake["ctx"].env["FY_PROXY"] = "h:8088"  # github mode on
+    fake["ctx"].env["FY_PROXY"] = "h:8088"  # proxy routing on
     monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "nope.pem"))
     assert box.main("up") == 1  # CA hard-fail surfaces as a clean non-zero
     assert not _find(fake["calls"], has=["run", "-d", "sleep"])
@@ -627,12 +627,11 @@ def test_up_stages_and_mounts_ambient_ca(fake, monkeypatch, tmp_path):
 
 def test_up_stages_ambient_ca_even_with_proxy_off(fake, monkeypatch, tmp_path):
     # Regression: the box_args CA mount is AMBIENT (mounts whenever the CA exists), so staging must
-    # be ambient too — even with NO [proxy] table and no GH_INJECT. A Mac that happens to carry a
+    # be ambient too — even with NO [proxy] table and no injector. A host that happens to carry a
     # ~/.mitmproxy CA must still get the STAGED (VM-visible) path mounted, never the raw host path
     # (the machine mounts only the repo, so a ~/.mitmproxy mount source dies `statfs …: no such
     # file or directory` inside the VM — the homelab `fy box up` failure).
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
-    fake["ctx"].env.pop("GH_INJECT", None)
     src = tmp_path / "mitm" / "mitmproxy-ca-cert.pem"
     src.parent.mkdir()
     src.write_text("CERT")
@@ -1643,7 +1642,7 @@ def test_declared_secrets_and_keyless_creds_are_captured_even_when_the_box_is_al
 ):
     # Both captures feed HOST-side minters that read host.env at mint time, so what matters is
     # whether the posture needs the value — not whether the box was just created. Turning
-    # `github=app` on with a box already running must still prompt for the PEM, and declaring
+    # a `github-app` switch on with a box already running must still prompt for the PEM, and declaring
     # [claude] keyless with a box already running must still prompt for the token (the regression
     # this pins: no prompt until `fy box down`, and the box 401'd for days). Only the DUMMY
     # credential baked into the container still needs a recreate — that's a nag, not a skip.

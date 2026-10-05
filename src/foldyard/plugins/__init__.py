@@ -2,9 +2,10 @@
 machinery into pluggable mode switches (ADR-0015).
 
 Vocabulary: the **mode** is the set of every switch's current level (`fy mode gcp=logs`). A
-**switch** (:class:`Switch`) is one credential mechanism's setting — ``gcp``, ``github``,
-``claude`` — and its **levels** run from the zero-secret default (``off``) up to emergency
-(``user``). Older code and docs call these "axes" and "rungs", and the whole mode a "posture".
+**switch** (:class:`Switch`) is one credential mechanism's setting — ``gcp``, ``claude``, an
+``[[inject]]`` row's own switch — and its **levels** run from the zero-secret default (``off``) up
+to emergency (``user``). Older code and docs call these "axes" and "rungs", and the whole mode a
+"posture".
 
 A plugin contributes, for its credential mechanism:
   - one or more **switches** (name, levels, per-level blurb, the daemon its status maps to,
@@ -20,7 +21,7 @@ A plugin contributes, for its credential mechanism:
 
 The substrate (devmode/supervisor/tui) calls the merged ``Registry``, never a specific
 plugin — so a consumer adds a credential mechanism by *shipping a plugin*, not by editing
-the core. Built-ins (gcp, github) are loaded directly (always available, no dist metadata
+the core. Built-ins (gcp, inject, …) are loaded directly (always available, no dist metadata
 needed, work when run from source); third-party plugins register on the
 ``foldyard.plugins`` entry-point group and are discovered here. Stdlib only — this loads
 on the recipe hot path (``foldyard env``/``shellenv`` derive env via the registry).
@@ -240,7 +241,7 @@ class InjectRule:
     environment, which carries every switch's secret from ``host.env``.
     ``label`` names the proxy in daemon status. Many rules coexist: the proxy serializes them into
     the rule set of ``egress_proxy.py``'s live file (one proxy, N hosts, each its own minter +
-    cache — so github + claude + codex + any ``[[inject]]`` can all be live at once)."""
+    cache — so claude + codex + any number of ``[[inject]]`` rows can all be live at once)."""
 
     host: str  # the host pattern to inject on (e.g. "api.github.com")
     header: str  # the header to inject (e.g. "Authorization"); ignored when query_param is set
@@ -317,7 +318,7 @@ class Secret:
     consumer as ``[[secret]]`` (``config.secret_specs``); the config tier wins on ``var`` so a
     consumer can retarget the hint without touching plugin code."""
 
-    var: str  # the host.env key the minter reads (e.g. "GH_PEM_B64")
+    var: str  # the host.env key the minter reads (e.g. "FY_INJECT_GITHUB")
     label: str  # human name shown at the prompt (e.g. "GitHub App private key (PEM)")
     how: str = ""  # "where do I get this?" — printed at the prompt, never run
     pattern: str = ""  # GLOB (fnmatch) the (decoded) value must match, else nothing is stored
@@ -340,11 +341,28 @@ class HeldCredential:
     the allowlist as usual."""
 
     host: str
-    header: str
-    dummy: str  # the whole header value the box's client sends, scheme prefix included
+    header: str  # where the dummy travels ("" with query_param)
+    dummy: str  # the whole value the box's client sends (scheme prefix included, unless any_scheme)
     axis: str  # the switch that turns injection on (the log row and the TUI name it)
     body: str  # the 401 body (JSON) the proxy answers with
     path_prefix: str = ""
+    query_param: str = ""  # the dummy travels in this URL query parameter instead of a header
+    # The dummy may also follow ONE auth-scheme word (`token x`, `Bearer x`): for a dummy handed to
+    # a client the mechanism doesn't control, like an `[[inject]]` row's `box_env`. Never a
+    # substring match — a longer value is a different credential.
+    any_scheme: bool = False
+
+
+@dataclass(frozen=True)
+class CredentialScope:
+    """What a credential was OBSERVED to grant, read by its probe (ADR-0031 decision 3). foldyard
+    doesn't cap a credential's scope — the provider's settings are the one place it's decided — so
+    it reports it instead: the supervisor keeps the last observation per switch
+    (:mod:`foldyard.credscope`) and says when it changes. Never a value, only names and levels."""
+
+    identity: str  # WHICH credential (e.g. an App + installation): another one is a new baseline
+    permissions: dict[str, str]  # permission name → level ("read" / "write" / "admin")
+    reach: str = ""  # what they apply to, e.g. "selected repositories"
 
 
 @dataclass(frozen=True)
@@ -372,6 +390,9 @@ class CapabilityProbe:
     name: str  # unique probe name (also the log/reap key), e.g. "gcp-impersonation"
     check: Callable[[], tuple[bool, str]]  # () -> (ok, human detail); NEVER returns a secret
     interval: float = 120.0  # seconds between runs while the switch is on
+    # Read right after each `check`: the scope that check observed, or None when it read none
+    # (a failure, an unreadable answer) — never a guess (see CredentialScope).
+    scope: Callable[[], CredentialScope | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -669,6 +690,19 @@ class Registry:
     def switch_defaults(self) -> dict[str, str]:
         """switch -> its zero-secret resting level (levels[0]) — what unset/expired reads as."""
         return {name: ax.default for name, ax in self._switches.items()}
+
+    def declares_injection(self) -> bool:
+        """Whether any switch, at any level off its rest, would put a rule on the proxy — an
+        injector is DECLARED, whatever the mode says now. The box is routed at create time, so
+        the proxy's opt-in has to follow this rather than the current mode: a box made while an
+        injector was off must still reach the proxy (and carry its dummy) once it is switched on."""
+        defaults = self.switch_defaults()
+        return any(
+            self.proxy_rules({**defaults, name: level})
+            for name, ax in self._switches.items()
+            for level in ax.levels
+            if level != defaults[name]
+        )
 
     def blurbs(self) -> dict[tuple[str, str], str]:
         return {(n, r): t for n, ax in self._switches.items() for r, t in ax.blurb.items()}
@@ -973,7 +1007,7 @@ def load_plugins(
     plugins, then any ``extra`` (tests inject here).
 
     The CORE is the project-agnostic spine + the batteries-included agent/editor/injector surface
-    (github, inject, proxy, claude, vscode, codex) — each already contributes nothing until its own
+    (inject, proxy, claude, vscode, codex) — each already contributes nothing until its own
     config is declared, so a plain ``foldyard init`` repo gets them inert. The DECLARED plugins
     (gcp, auth0-sim, llm) carry switches/wiring that are MEANINGLESS without their config (a ``gcp``
     switch centred on a real GCP project, an ``auth0`` switch backed by a simulator harness, an
@@ -981,11 +1015,12 @@ def load_plugins(
     ``[plugins.*]`` table is present — the actual "small core + plugins" boundary the spinout review
     asks for.
 
-    Order is preserved from before the split (gcp, github, inject, proxy, auth0-sim, llm, claude,
-    vscode, codex when all are present) because it sets switch + doctor-row order (``fy mode``
-    output) AND overlay stacking order (identity/storage → auth0 → llm)."""
+    Order is preserved from before the split (gcp, inject, proxy, auth0-sim, llm, claude, vscode,
+    codex when all are present) because it sets switch + doctor-row order (``fy mode`` output) AND
+    overlay stacking order (identity/storage → auth0 → llm). There is no github plugin: GitHub is
+    two ``[[inject]]`` kinds (``github-app``, ``gh-cli``) plus data (ADR-0031)."""
     from .. import config as config_mod
-    from . import auth0_sim, claude, codex, fakecred, gcp, github, inject, llm, proxy, vscode
+    from . import auth0_sim, claude, codex, fakecred, gcp, inject, llm, proxy, vscode
 
     cfg = config if config is not None else config_mod.current()
 
@@ -994,7 +1029,6 @@ def load_plugins(
     # auth0-sim/llm so its identity/storage overlays are the -f BASE the later ones override.
     if cfg.gcp_metadata_declared():
         plugins.append(gcp.GcpPlugin())
-    plugins.append(github.GithubPlugin())  # CORE: switch (off/app/user) only when [plugins.github]
     plugins.append(inject.InjectPlugin())  # CORE: contributes switches only per [[inject]] config
     plugins.append(proxy.ProxyPlugin())  # CORE: the always-on proxy daemon (Step D)
     if cfg.auth0_sim_declared():  # DECLARED: gated on [plugins.auth0-sim]
