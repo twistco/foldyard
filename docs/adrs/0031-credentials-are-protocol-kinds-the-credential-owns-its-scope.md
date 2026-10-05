@@ -6,11 +6,10 @@
   [ADR-0024](./0024-declarative-consumer-axes-no-repo-path-plugins.md)'s "data, not classes" from
   axes to credentials. The open questions were settled on acceptance (see
   [Settled](#settled)): no `permissions` narrowing; a clean break, `[plugins.github]` refused with
-  its replacement rows; the agent plugins and GCP left for later. Implemented: decisions 1, 2 and
-  6, and of 5 the `box_env` dummies with their `fy verify` row (`plugins/kinds.py`,
-  `plugins/inject.py`; the github plugin is deleted). Decisions 3 (reporting the installation's
-  permissions, and their drift) and 4 (overlapping rules refused), and the generic held-credential
-  answer of 5, land separately.
+  its replacement rows; the agent plugins and GCP left for later. Implemented: decisions 1, 2, 3
+  and 6, and of 5 the `box_env` dummies with their `fy verify` row and the held-credential answer
+  (`plugins/kinds.py`, `plugins/inject.py`, `credscope.py`; the github plugin is deleted).
+  Decision 4 (overlapping rules refused) lands separately.
 - **Sources:** the 2026-10-05 incident in a consumer's box (below); the host supervisor log of that
   morning. Related: [0007](./0007-credential-injection-at-egress-proxy.md) (credentials are
   attached at the proxy), [0008](./0008-keyless-agent-auth.md) (the dummy-in-the-box pattern),

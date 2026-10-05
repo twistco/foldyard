@@ -76,6 +76,7 @@ from .. import config
 from . import (
     CapabilityProbe,
     DoctorContext,
+    HeldCredential,
     InjectRule,
     Plugin,
     Secret,
@@ -219,6 +220,37 @@ class InjectPlugin(Plugin):
                 rules.append(rule)
         return rules
 
+    def held_credentials(self, mode: dict) -> list[HeldCredential]:
+        # A resting row's dummies are still in the box (box_env is ambient), so its client still
+        # sends them. Forwarded, they'd be refused upstream in words that name neither the switch
+        # nor the fix; the proxy answers them instead (ADR-0031 decision 5), wherever the row's rule
+        # would inject. Everyday switches first: where two resting rows share a host and a dummy
+        # the first match answers, and it should name the switch to turn on, not the emergency one.
+        resting = [
+            s for s in self._specs() if s["box_env"] and mode.get(str(s["switch"]), "off") == "off"
+        ]
+        out: list[HeldCredential] = []
+        for spec in sorted(resting, key=lambda s: bool(s.get("emergency"))):
+            switch = str(spec["switch"])
+            rule = _kind(spec).rule(spec, token_var(switch))
+            if rule is None:
+                continue
+            body = _kind(spec).held_body(_at_rest_message(switch, bool(spec.get("emergency"))))
+            for dummy in dict.fromkeys(spec["box_env"].values()):
+                out.append(
+                    HeldCredential(
+                        host=rule.host,
+                        header="" if rule.query_param else rule.header,
+                        dummy=dummy,
+                        axis=switch,
+                        body=body,
+                        path_prefix=rule.path_prefix,
+                        query_param=rule.query_param,
+                        any_scheme=True,  # the box's client, not the row, decides the scheme
+                    )
+                )
+        return out
+
     def secrets(self, mode: dict) -> list[Secret]:
         # The var is derived, so nothing else would ever ask for it: declared here, a switch going
         # on prompts for its secret (a `[[secret]]` row naming the var can still retarget the hint).
@@ -349,6 +381,17 @@ def _box_env(raw: object, where: str) -> dict[str, str]:
         if not isinstance(value, str):
             raise ValueError(f"{where}: box_env {name} must be a string, got {value!r}")
     return {str(name): str(value) for name, value in raw.items()}
+
+
+def _at_rest_message(switch: str, emergency: bool) -> str:
+    """What the proxy tells the box's client when it sends a resting row's dummy. The client prints
+    it as the API's error, so it carries the fix — and where to run it, since the box can't."""
+    lapsed = " (or its time limit ran out)" if emergency else ""
+    return (
+        f"foldyard: `{switch}` is off{lapsed}, so this box only holds a placeholder for this "
+        "credential and the proxy did not send the request. Switch it on from your computer, not "
+        f"in the box: `fy mode {switch}=on` (or `fy tui`)."
+    )
 
 
 def token_var(axis: str) -> str:

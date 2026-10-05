@@ -419,7 +419,13 @@ Every kind takes:
   recreate; a dummy grants nothing. `fy verify` checks each still holds its dummy (anything else
   is a possible real credential in the box). A name foldyard sets in the box itself (`FY_*`,
   `FOLDYARD_*`, the proxy and CA variables, `CONTAINER_HOST`, `DOCKER_HOST`, …) is refused, and
-  two rows can't give one name different dummies.
+  two rows can't give one name different dummies. While the switch is off, the proxy answers a
+  request that carries the dummy where the row would inject (its host, `path_prefix`, and header
+  or `query_param`) with a 401 whose JSON `message` names the switch and the command that turns
+  it on, instead of sending the dummy upstream. In a header the dummy may stand alone or follow
+  one auth scheme (`token x`, `Bearer x`), whichever the client writes. Requests without the
+  dummy go on as usual, so a public call to the same API still works. The Network Log marks the
+  answered requests as held, and the first one raises a notification on your computer.
 - **`replay_on_401`** — re-mint and replay once on a 401. Default: `false` for `static`, `true`
   for the GitHub kinds.
 - **`label`** — shown in daemon status.

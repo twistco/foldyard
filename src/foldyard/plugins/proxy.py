@@ -203,7 +203,8 @@ def _net_leaf(e: dict, escape) -> str:
         # the row you act on (press the allow key in the TUI to let the host through).
         return f"[dim]{ts}[/dim] [red]⛔ refused by the allowlist[/red]"
     if e.get("held"):
-        # The box sent its keyless dummy with the axis at rest: the proxy answered, nothing left.
+        # The box sent a dummy (an agent's keyless one, or an [[inject]] row's box_env) with its
+        # switch at rest: the proxy answered, nothing left.
         axis = escape(str(e["held"]))
         return (
             f"[dim]{ts}[/dim] [yellow]⏸ credential off — the proxy answered; "
@@ -412,7 +413,8 @@ class ProxyPlugin(Plugin):
             # the running proxy never restarts to inherit the supervisor's env, so it gets them
             # here. After exports and host.env, as the supervisor's setdefault.
             "defaults": self._rule_defaults(mode, rules),
-            # Keyless dummies at rest: the addon answers them with the fix instead of forwarding.
+            # Dummies at rest (keyless agents, `[[inject]]` box_env): the addon answers them with
+            # the fix instead of forwarding.
             "held": [asdict(h) for h in self._registry.held_credentials(mode)]
             if self._registry
             else [],

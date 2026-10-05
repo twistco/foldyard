@@ -231,10 +231,31 @@ def _is_build_marker(value: str | None) -> bool:
 
 
 def _valid_held(entry: object) -> bool:
-    """A live ``held`` entry the addon can act on: the strings it matches and answers with."""
-    return isinstance(entry, dict) and all(
-        isinstance(entry.get(k), str) and entry[k] for k in ("host", "header", "dummy", "body")
+    """A live ``held`` entry the addon can act on: the strings it matches and answers with, and
+    where the dummy travels (a header, or a ``query_param``)."""
+    return (
+        isinstance(entry, dict)
+        and all(isinstance(entry.get(k), str) and entry[k] for k in ("host", "dummy", "body"))
+        and any(isinstance(entry.get(k), str) and entry[k] for k in ("header", "query_param"))
     )
+
+
+# An HTTP auth scheme (RFC 9110 §11.1's token, in the shape real ones take: `Bearer`, `token`,
+# `Basic`, `Bot`…) — what a client may put before a credential it was handed bare.
+_AUTH_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9._~+-]*$")
+
+
+def _carries_dummy(value: str | None, dummy: str, any_scheme: bool) -> bool:
+    """Whether a credential value IS the dummy. Exact by default (an agent's entry carries its own
+    scheme). ``any_scheme`` also takes the dummy after ONE auth-scheme word — an ``[[inject]]``
+    row's dummy reaches the header through whatever client the box runs (`gh` writes
+    ``token x``, most others ``Bearer x``) — but never as part of a longer value."""
+    if value is None:
+        return False
+    if value == dummy:
+        return True
+    scheme, sep, rest = value.strip().partition(" ")
+    return any_scheme and bool(sep) and bool(_AUTH_SCHEME.match(scheme)) and rest.strip() == dummy
 
 
 def _host_matches(host: str | None, patterns: list[str]) -> bool:
@@ -619,7 +640,7 @@ class Injector:
         self._running = False
         self._warm_threads: list[threading.Thread] = []
         self._set_rules([] if self.live_path else self._load_rules())
-        # Keyless dummies at rest (LIVE_FILE's `held`): answered here with the fix, never forwarded.
+        # Dummies at rest (LIVE_FILE's `held`): answered here with the fix, never forwarded.
         self.held: list[dict] = []
         self.held_hosts: set[str] = set()
         # Phase A′: what to do with HTTPS we aren't injecting — "full" (decrypt+log) or
@@ -830,18 +851,21 @@ class Injector:
 
     def _held_for(self, flow: http.HTTPFlow) -> dict | None:
         """The ``held`` entry this request's credential is the dummy of, or None. HTTPS only (a
-        dummy in the clear is left to the wall), and only the exact dummy: anything else the box
-        sends to that host meets the wall like any other request. Any port — answering sends
-        nothing anywhere; it is the CONNECT exemption that stays 443-only."""
+        dummy in the clear is left to the wall), and only the dummy (see :func:`_carries_dummy`):
+        anything else the box sends to that host — a real credential, or none at all — meets the
+        wall like any other request. Any port — answering sends nothing anywhere; it is the
+        CONNECT exemption that stays 443-only."""
         request = flow.request
         if request.scheme != "https":
             return None
         for entry in self.held:
-            if (
-                _destination(request) == entry["host"]
-                and request.path.startswith(entry.get("path_prefix") or "")
-                and request.headers.get(entry["header"]) == entry["dummy"]
+            if _destination(request) != entry["host"] or not request.path.startswith(
+                entry.get("path_prefix") or ""
             ):
+                continue
+            param = entry.get("query_param")
+            value = request.query.get(param) if param else request.headers.get(entry["header"])
+            if _carries_dummy(value, entry["dummy"], entry.get("any_scheme") is True):
                 return entry
         return None
 
@@ -994,7 +1018,7 @@ class Injector:
         self._write_entry(entry)
 
     def _log_held(self, flow: http.HTTPFlow, axis: str) -> None:
-        """A row for a keyless dummy the proxy answered itself (``held``: the axis at rest) —
+        """A row for a dummy the proxy answered itself (``held``: the axis at rest) —
         nothing went upstream. Not ``blocked``: granting the host is not the fix, the mode is."""
         entry = {
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -1288,7 +1312,7 @@ class Injector:
             flow.metadata["egress_proxy_blocked"] = True
             self._log_blocked(host if port == default else f"{host}:{port}", flow.request)
             return
-        # A keyless dummy with its axis at rest: answer with the fix before the wall, since the
+        # A dummy with its switch at rest: answer with the fix before the wall, since the
         # host is not granted (it needn't be — nothing leaves). A matching rule would inject.
         held = self._held_for(flow) if self._rule_for(flow) is None else None
         if held is not None:

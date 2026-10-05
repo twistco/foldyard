@@ -10,6 +10,7 @@ are tested in test_github_minters.py; the generic static rows in test_plugins.py
 from __future__ import annotations
 
 import base64
+import json
 import shlex
 
 import pytest
@@ -303,6 +304,72 @@ def test_every_box_is_watched_for_the_credential_vars_a_known_kind_reads(monkeyp
     assert ("fail", "GH_TOKEN isn't unset — possible real credential in the box") in rows
     assert ("pass", "GITHUB_TOKEN unset (no credential in the box)") in rows
     assert [s for s, _ in _verify(monkeypatch, [], {})] == ["pass", "pass"]
+
+
+# ── box_env at rest: the proxy answers the dummy with the fix (ADR-0031 decision 5) ─────────
+
+
+def test_a_resting_rows_dummy_is_held_with_the_switch_that_turns_it_on(monkeypatch):
+    plugin = _plugin(monkeypatch, [{**_APP, "box_env": {"GH_TOKEN": "x"}}])
+    (held,) = plugin.held_credentials({"github": "off"})
+    assert (held.host, held.header, held.dummy, held.axis) == (
+        "api.github.com",
+        "Authorization",
+        "x",
+        "github",
+    )
+    # `gh` sends `token x`, other clients `Bearer x`: the row can't know which, so any one scheme.
+    assert held.any_scheme is True and held.query_param == "" and held.path_prefix == ""
+    # GitHub's own error shape, which `gh` and most clients print — the fix, and where to run it.
+    message = json.loads(held.body)["message"]
+    assert "`github` is off" in message and "`fy mode github=on`" in message
+    assert "your computer" in message and "Mac" not in message
+    # On, the rule injects instead.
+    assert plugin.held_credentials({"github": "on"}) == []
+
+
+def test_a_row_without_box_env_holds_nothing(monkeypatch):
+    # No dummy in the box, nothing to recognise: a request there is the box's own business.
+    assert _plugin(monkeypatch, [_APP]).held_credentials({"github": "off"}) == []
+
+
+def test_a_static_rows_held_entry_follows_its_rule(monkeypatch):
+    spec = {
+        "switch": "penpot",
+        "host": "penpot.example",
+        "query_param": "userToken",
+        "path_prefix": "/mcp",
+        "box_env": {"PENPOT_TOKEN": "dummy", "PENPOT_ALT": "dummy"},
+    }
+    (held,) = _plugin(monkeypatch, [spec]).held_credentials({})
+    # Where the rule would inject is where the dummy is looked for — and one entry per value.
+    assert (held.query_param, held.path_prefix, held.dummy) == ("userToken", "/mcp", "dummy")
+
+
+def test_an_emergency_switch_is_named_only_after_the_everyday_one(monkeypatch):
+    # The same dummy on the same host for both rows (they must agree on it): the first match
+    # answers, and it should point at the everyday switch, not at your own token.
+    specs = [{**_USER, "box_env": {"GH_TOKEN": "x"}}, {**_APP, "box_env": {"GH_TOKEN": "x"}}]
+    held = _plugin(monkeypatch, specs).held_credentials({})
+    assert [h.axis for h in held] == ["github", "github-user"]
+    # Its message says it may have timed out, since that's how an emergency switch goes off.
+    assert "time limit" in json.loads(held[1].body)["message"]
+
+
+def test_held_inject_rows_reach_the_proxy_as_live_data_not_launch_env(monkeypatch):
+    # ADR-0030: flipping the switch rewrites the live file; the proxy's cmd/env never change.
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)
+    monkeypatch.setattr(config, "proxy_passthrough", lambda: [])
+    monkeypatch.setattr(config, "proxy_default_deny", lambda: False)
+    reg = Registry(
+        [_plugin(monkeypatch, [{**_APP, "box_env": {"GH_TOKEN": "x"}}]), proxy.ProxyPlugin()]
+    )
+    off = reg.desired_daemons({"github": "off"})["egress-proxy"]
+    (held,) = off["live"]["data"]["held"]
+    assert held["axis"] == "github" and held["any_scheme"] is True
+    on = reg.desired_daemons({"github": "on"})["egress-proxy"]
+    assert on["live"]["data"]["held"] == []
+    assert (off["cmd"], off["env"]) == (on["cmd"], on["env"])
 
 
 # ── the github-app capability probe + doctor rows ─────────────────────────────────────

@@ -298,11 +298,16 @@ class HeldCredential:
     the allowlist as usual."""
 
     host: str
-    header: str
-    dummy: str  # the whole header value the box's client sends, scheme prefix included
+    header: str  # where the dummy travels ("" with query_param)
+    dummy: str  # the whole value the box's client sends (scheme prefix included, unless any_scheme)
     axis: str  # the switch that turns injection on (the log row and the TUI name it)
     body: str  # the 401 body (JSON) the proxy answers with
     path_prefix: str = ""
+    query_param: str = ""  # the dummy travels in this URL query parameter instead of a header
+    # The dummy may also follow ONE auth-scheme word (`token x`, `Bearer x`): for a dummy handed to
+    # a client the mechanism doesn't control, like an `[[inject]]` row's `box_env`. Never a
+    # substring match — a longer value is a different credential.
+    any_scheme: bool = False
 
 
 @dataclass(frozen=True)

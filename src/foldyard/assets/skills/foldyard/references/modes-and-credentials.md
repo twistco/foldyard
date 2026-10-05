@@ -28,10 +28,11 @@ The box holds a dummy value at most. So:
 - reading the env var gives you a placeholder — that's expected, not a misconfiguration;
 - the access only exists while the switch is on, and only against the host it's scoped to;
 - a fully compromised box can *use* the access during that window but can never *hold* it;
-- with an agent's switch off, the proxy answers that agent's API calls itself with a 401 naming
-  the fix (`fy mode claude=on`, on the host) — nothing reaches the provider. Codex on a ChatGPT
-  subscription then stops on `workspace routing discovery unauthorized (401)`, which hides that
-  text: check `fy mode` before debugging the credential.
+- with a switch off, the proxy answers a request carrying its placeholder itself, with a 401
+  naming the switch and the fix (say `fy mode claude=on`, or `fy mode github=on` behind `gh`;
+  always run on the host) — nothing reaches the provider. Codex on a ChatGPT subscription then
+  stops on `workspace routing discovery unauthorized (401)`, which hides that text: check
+  `fy mode` before debugging the credential.
 
 Some services in the stack instead get an identity from a local metadata emulator — same idea:
 the container is handed short-lived capability, not a key.

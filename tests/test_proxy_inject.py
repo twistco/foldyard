@@ -2146,3 +2146,110 @@ def test_malformed_held_entries_are_ignored(live):
     flow = _dummy_flow()
     inj.requestheaders(flow)
     assert flow.response is not None and flow.response.status_code == 401
+
+
+# ── an `[[inject]]` row at rest: the same answer, for whatever client the box runs ──────────
+# A row's `box_env` dummy reaches the header through a client the row doesn't control: `gh` sends
+# `Authorization: token x`, most others `Bearer x`, some the bare value. So an inject row's held
+# entry is `any_scheme`: the dummy alone, or after ONE auth-scheme word — never inside a longer
+# value, and never a request that carries no credential at all.
+
+_GH_HELD = {
+    "host": "api.github.com",
+    "header": "Authorization",
+    "dummy": "x",
+    "axis": "github",
+    "body": json.dumps({"message": "`github` is off: run `fy mode github=on` on your computer"}),
+    "any_scheme": True,
+}
+
+
+def _gh_flow(value: str | None, path: str = "/repos/o/r/pulls"):
+    flow = _Flow("api.github.com", path=path)
+    flow.response = None
+    if value is not None:
+        flow.request.headers["Authorization"] = value
+    return flow
+
+
+@pytest.mark.parametrize("value", ["token x", "Bearer x", "bearer x", "x", "token  x "])
+def test_an_inject_rows_dummy_is_held_whatever_scheme_the_client_puts_before_it(live, value):
+    _write_live(live.live, held=[_GH_HELD])
+    inj = live.Injector()
+    flow = _gh_flow(value)
+    inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 401
+    assert "fy mode github=on" in json.loads(flow.response.content)["message"]
+    row = _last_log(live.log)
+    assert row["held"] == "github" and row["status"] == 401  # the Network Log's ⏸ mark
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,  # a public, unauthenticated call: none of this mechanism's business
+        "token ghp_a-real-token",  # a credential the box got some other way meets the wall
+        "Bearer xy",  # the dummy as a PREFIX is a different value
+        "token x y",  # …and inside a longer one
+        "Basic eA==",  # base64 of the dummy is still not the dummy
+        "to ken x",  # two words before it: not a scheme
+    ],
+)
+def test_anything_but_the_dummy_goes_on_untouched(live, value):
+    _write_live(live.live, held=[_GH_HELD])
+    inj = live.Injector()
+    flow = _gh_flow(value)
+    inj.requestheaders(flow)
+    assert flow.response is None  # observing: forwarded upstream as before
+    assert not live.log.exists() or "held" not in live.log.read_text()
+
+
+def test_an_exact_held_entry_still_needs_the_exact_value(live):
+    # The agents' entries say exactly what their client sends and stay exact: no scheme is added
+    # or stripped. (Mutation that turns this red: ignoring `any_scheme` in `_carries_dummy`.)
+    api_key = {**_HELD, "header": "x-api-key", "dummy": "sk-ant-dummy"}
+    _write_live(live.live, held=[api_key])
+    inj = live.Injector()
+    flow = _dummy_flow(value="Bearer sk-ant-dummy")
+    flow.request.headers["x-api-key"] = "Bearer sk-ant-dummy"
+    inj.requestheaders(flow)
+    assert flow.response is None
+
+
+def test_a_query_param_rows_dummy_is_held_from_the_query(live):
+    held = {
+        "host": "penpot.example",
+        "header": "",
+        "query_param": "userToken",
+        "dummy": "x",
+        "axis": "penpot",
+        "body": json.dumps({"message": "`penpot` is off"}),
+        "path_prefix": "/mcp",
+    }
+    _write_live(live.live, held=[held])
+    inj = live.Injector()
+    flow = _Flow("penpot.example", path="/mcp/stream?userToken=x")
+    flow.response = None
+    flow.request.query["userToken"] = "x"
+    inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 401
+    assert _last_log(live.log)["held"] == "penpot"
+    other = _Flow("penpot.example", path="/mcp/stream?userToken=real")
+    other.response = None
+    other.request.query["userToken"] = "real"
+    inj.requestheaders(other)
+    assert other.response is None
+    app = _Flow("penpot.example", path="/view?userToken=x")  # outside the row's path
+    app.response = None
+    app.request.query["userToken"] = "x"
+    inj.requestheaders(app)
+    assert app.response is None
+
+
+def test_a_held_entry_needs_a_header_or_a_query_param(live):
+    nowhere = {**_GH_HELD, "header": ""}
+    _write_live(live.live, held=[nowhere])
+    inj = live.Injector()
+    flow = _gh_flow("x")
+    inj.requestheaders(flow)
+    assert flow.response is None and inj.held == []

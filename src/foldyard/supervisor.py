@@ -1205,9 +1205,10 @@ def _new_held_axes(wt: str) -> set[str]:
 
 
 def _report_held(wt: str, mode: dict) -> None:
-    """Push — once per axis at rest — that the proxy answered an agent's placeholder credential
-    because its mode is off. The in-box reply only reaches an agent that prints it (Codex's
-    ChatGPT discovery never does), and the operator who can flip the mode is on this side."""
+    """Push — once per axis at rest — that the proxy answered a placeholder credential (an agent's,
+    or an ``[[inject]]`` row's ``box_env`` dummy) because its switch is off. The in-box reply only
+    reaches a client that prints it (Codex's ChatGPT discovery never does), and the operator who
+    can flip the switch is on this side."""
     axes = _new_held_axes(wt)
     for axis, value in mode.items():
         if value != "off":
@@ -1221,7 +1222,7 @@ def _report_held(wt: str, mode: dict) -> None:
         log(f"⏸ {axis}{where}: the proxy answered its placeholder credential (mode off) — {fix}")
         _notify(
             f"fy {config.project()}: {axis} credential off{where}",
-            f"{axis.capitalize()} tried to reach its API but its credential mode is off — {fix}",
+            f"The box sent {axis}'s placeholder credential, but {axis} is off — {fix}",
         )
 
 

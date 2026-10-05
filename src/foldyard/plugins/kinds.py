@@ -25,6 +25,7 @@ are only ever imported lazily, inside a probe.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -106,6 +107,12 @@ class Kind:
         """WHICH credential the row names, for a kind whose probe reads its scope (``""`` = it
         reads none). Keys the scope record (:mod:`foldyard.credscope`)."""
         return ""
+
+    def held_body(self, message: str) -> str:
+        """The 401 body the proxy answers a resting row's dummy with. ``{"message": …}`` is
+        GitHub's error shape, which most clients print; a kind whose provider has its own shape
+        overrides this so its client shows the message."""
+        return json.dumps({"message": message})
 
     def doctor_checks(
         self, spec: dict, var: str, active: bool, ctx: DoctorContext

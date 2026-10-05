@@ -222,6 +222,13 @@ proxy doesn't forward the dummy either: it answers the request itself with a 401
 names the fix (`fy mode claude=on`, run on your computer), so the agent shows that instead of
 the provider's "invalid token". The Network Log marks those rows as held.
 
+An `[[inject]]` row with a `box_env` dummy gets the same answer while its switch is off: a
+request to the row's host (and `path_prefix`) carrying the dummy, as the bare value or after one
+auth scheme (`gh` sends `token x`, most clients `Bearer x`), gets a 401 whose JSON `message`
+names the switch and the fix (for a `github` row, `fy mode github=on` on your computer), which
+`gh` prints. Any other request to that host goes on as usual: a public call with no credential,
+or a credential the box got some other way ([configuration](./configuration.md#inject)).
+
 `fy claude` and `fy codex` check first: with the agent's switch off they say so before
 launching and, in a terminal, wait for you to switch it on from your computer (Enter launches
 anyway). That covers starting a session; the proxy's answer covers the rest — a time limit
