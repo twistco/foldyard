@@ -414,7 +414,7 @@ def render_local(opts: InitOptions) -> str:
         "# as if it had never been written; the team keeps it, you don't get it. The case it exists",
         "# for: the repo commits [codex], you don't have a Codex subscription, and you'd rather not",
         "# have the CLI installed on box-up, be asked for a credential, or carry a dead codex row in",
-        "# `fy mode`. Works at any depth ([plugins.github] too), and `disabled = false` here puts a",
+        "# `fy mode`. Works at any depth ([plugins.<name>] too), and `disabled = false` here puts a",
         "# block back that the SHARED file disabled. `fy config widenings` lists what you've removed.",
         "# [codex]",
         "# disabled = true",

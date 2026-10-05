@@ -46,6 +46,7 @@ def test_set_mode_round_trip(isolated_state):
         "gcp": "logs",
         "storage": "local",
         "github": "off",
+        "github-user": "off",
         "auth0": "sim",
         "llm": "off",
     }
@@ -54,23 +55,23 @@ def test_set_mode_round_trip(isolated_state):
 
 def test_set_mode_writes_mirror_when_box_up(isolated_state, monkeypatch):
     monkeypatch.setattr(devmode, "up_worktrees", lambda: [""])
-    devmode.set_mode({"github": "app"})
+    devmode.set_mode({"github": "on"})
     data = json.loads(isolated_state["mirror"].read_text())
-    assert data["github"] == "app" and "written" in data
+    assert data["github"] == "on" and "written" in data
 
 
 def test_set_mode_refreshes_an_existing_mirror_even_with_box_down(isolated_state, monkeypatch):
     monkeypatch.setattr(devmode, "up_worktrees", lambda: [])
     isolated_state["mirror"].write_text("{}\n")
-    devmode.set_mode({"github": "app"})
-    assert json.loads(isolated_state["mirror"].read_text())["github"] == "app"
+    devmode.set_mode({"github": "on"})
+    assert json.loads(isolated_state["mirror"].read_text())["github"] == "on"
 
 
 def test_set_mode_does_not_create_a_mirror_when_box_down(isolated_state, monkeypatch):
     # `fy mode` against a fully-down project must not re-dirty a clean checkout with
     # .dev-mode.json — the supervisor seeds the mirror within a tick of a box coming up.
     monkeypatch.setattr(devmode, "up_worktrees", lambda: [])
-    devmode.set_mode({"github": "app"})
+    devmode.set_mode({"github": "on"})
     assert not isolated_state["mirror"].exists()
 
 
@@ -89,6 +90,7 @@ def test_read_defaults_when_files_missing(isolated_state):
         "gcp": "off",
         "storage": "local",
         "github": "off",
+        "github-user": "off",
         "auth0": "sim",
         "llm": "off",
     }
@@ -641,7 +643,7 @@ def test_derive_env_offline_routes_when_proxy_opted_in(monkeypatch):
 
 
 def test_derive_env_github_app_sets_proxy():
-    assert "FY_PROXY" in devmode.derive_env({"gcp": "off", "github": "app"})
+    assert "FY_PROXY" in devmode.derive_env({"gcp": "off", "github": "on"})
 
 
 def test_derive_env_gcp_logs():
@@ -697,22 +699,23 @@ def test_desired_daemons_offline_runs_only_the_always_on_proxy():
 
 
 def test_gh_proxy_app_spec():
-    # The egress-proxy daemon is now built by the `proxy` plugin from github's injection rule.
+    # The egress-proxy daemon is built by the `proxy` plugin from the `github-app` row's rule.
     from foldyard import config
 
-    spec = devmode.desired_daemons({"gcp": "off", "github": "app"})["egress-proxy"]
+    spec = devmode.desired_daemons({"gcp": "off", "github": "on"})["egress-proxy"]
     cmd = spec["live"]["data"]["rules"][0]["command"]
     # A PACKAGE module under foldyard's own interpreter — never a path inside the repo mount (that
     # was host-side execution of agent-writable code; see ADR-0023).
     assert "-m foldyard.plugins.github_app_token" in cmd
     assert f"--own-proxy-port {config.proxy_port()}" in cmd
     assert "PROXY_LOG_FILE" in spec["env"]
-    assert "GH_APP_ID" in spec["requires"]
+    # The App identity rides argv; nothing about one credential may gate the whole listener.
+    assert "--app-id 1234567" in cmd and spec["requires"] == []
     assert spec["port"] == config.proxy_port()  # the project band's proxy base (main: no offset)
 
 
 def test_gh_proxy_user_spec_needs_no_app_keys():
-    spec = devmode.desired_daemons({"gcp": "off", "github": "user"})["egress-proxy"]
+    spec = devmode.desired_daemons({"gcp": "off", "github-user": "on"})["egress-proxy"]
     assert spec["live"]["data"]["rules"][0]["command"].endswith("-m foldyard.plugins.gh_cli_token")
     assert spec["requires"] == []
 
@@ -767,10 +770,37 @@ def test_doctor_passes_the_current_mode_to_plugin_checks(monkeypatch):
     monkeypatch.setattr(devmode, "registry", lambda: reg)
     monkeypatch.setattr(devmode, "in_box", lambda: False)
     monkeypatch.setattr(
-        devmode, "read", lambda apply_expiry=True: {"mode": {"github": "app"}, "written": None}
+        devmode, "read", lambda apply_expiry=True: {"mode": {"github": "on"}, "written": None}
     )
     list(devmode.doctor(deep=False))
-    assert seen == [{"github": "app"}]
+    assert seen == [{"github": "on"}]
+
+
+def test_in_box_doctor_hands_plugins_the_mirrors_mode(box_git, monkeypatch):
+    # The box-side end-to-end checks (is the token really reaching requests?) only probe an ARMED
+    # switch — so they get the mode the box can see, the mirror's. The github plugin used to read
+    # that file itself; every kind now asks through the context.
+    from conftest import GENERIC_TOML, make_config
+    from foldyard.plugins import Plugin, Registry
+
+    seen = []
+
+    class Recorder(Plugin):
+        name = "recorder"
+
+        def box_doctor_checks(self, ctx):
+            seen.append(ctx.mode)
+            return ()
+
+    reg = Registry([Recorder()], config=make_config(GENERIC_TOML))
+    monkeypatch.setattr(devmode, "registry", lambda: reg)
+    monkeypatch.setattr(devmode, "in_box", lambda: True)
+    monkeypatch.setattr(devmode, "_run", lambda cmd, timeout=8: (0, "ok"))
+    monkeypatch.setattr(
+        devmode, "read", lambda apply_expiry=True: {"mode": {"github": "on"}, "written": None}
+    )
+    list(devmode.doctor(deep=False))
+    assert seen == [{"github": "on"}]
 
 
 # ── the shadow-volume doctor check (in-tree dep dirs the box + host would share) ───────
@@ -1569,12 +1599,12 @@ _PEM_B64 = __import__("base64").b64encode(_PEM.encode()).decode()
 def test_missing_secrets_names_what_the_prospective_posture_lacks(isolated_state):
     # The secret is consumed by the POSTURE (the supervisor's proxy reloads host.env every tick),
     # not the box — so the question is asked of the mode the operator is about to set, before it
-    # is written. github=app needs the App PEM; nothing else in the full config declares one.
-    assert [s.var for s in devmode.missing_secrets({"github": "app"})] == ["GH_PEM_B64"]
+    # is written. github=on needs the App PEM; nothing else in the full config declares one.
+    assert [s.var for s in devmode.missing_secrets({"github": "on"})] == ["FY_INJECT_GITHUB"]
     assert devmode.missing_secrets({"github": "off"}) == []
     assert devmode.missing_secrets({"gcp": "logs"}) == []
-    isolated_state["host_env"].write_text(f"GH_PEM_B64={_PEM_B64}\n")
-    assert devmode.missing_secrets({"github": "app"}) == []
+    isolated_state["host_env"].write_text(f"FY_INJECT_GITHUB={_PEM_B64}\n")
+    assert devmode.missing_secrets({"github": "on"}) == []
 
 
 def test_mode_set_prompts_for_the_secret_before_writing(isolated_state, monkeypatch, capsys):
@@ -1589,10 +1619,10 @@ def test_mode_set_prompts_for_the_secret_before_writing(isolated_state, monkeypa
 
     monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(devmode.getpass, "getpass", fake_getpass)
-    assert devmode.main(["set", "github=app"]) == 0
+    assert devmode.main(["set", "github=on"]) == 0
     assert seen["mode_at_prompt"] == "off"
-    assert f"GH_PEM_B64={_PEM_B64}" in isolated_state["host_env"].read_text()
-    assert devmode.read()["mode"]["github"] == "app"
+    assert f"FY_INJECT_GITHUB={_PEM_B64}" in isolated_state["host_env"].read_text()
+    assert devmode.read()["mode"]["github"] == "on"
     assert "stored GitHub App private key" in capsys.readouterr().err
 
 
@@ -1606,7 +1636,7 @@ def test_mode_set_interrupted_at_the_prompt_leaves_the_posture_unchanged(
 
     monkeypatch.setattr(devmode.getpass, "getpass", ctrl_c)
     with pytest.raises(KeyboardInterrupt):
-        devmode.main(["set", "github=app"])
+        devmode.main(["set", "github=on"])
     assert devmode.read()["mode"]["github"] == "off"
     assert not isolated_state["host_env"].exists()
 
@@ -1618,20 +1648,20 @@ def test_mode_set_without_a_tty_warns_and_still_applies(isolated_state, monkeypa
     monkeypatch.setattr(
         devmode.getpass, "getpass", lambda _p: pytest.fail("must not prompt without a TTY")
     )
-    assert devmode.main(["set", "github=app"]) == 0
-    assert devmode.read()["mode"]["github"] == "app"
-    assert "GitHub App private key (PEM) isn't in" in capsys.readouterr().err
+    assert devmode.main(["set", "github=on"]) == 0
+    assert devmode.read()["mode"]["github"] == "on"
+    assert "GitHub App private key (PEM) for `github` isn't in" in capsys.readouterr().err
 
 
 def test_mode_set_validates_the_updates_before_prompting(isolated_state, monkeypatch):
     # An unknown axis or rung is refused by set_mode — but that check must land BEFORE the prompt,
-    # or a typo'd `fy mode github=app gihtub=off` stores the paste in host.env and then fails.
+    # or a typo'd `fy mode github=on gihtub=off` stores the paste in host.env and then fails.
     monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(
         devmode.getpass, "getpass", lambda _p: pytest.fail("must not prompt for a refused mode")
     )
     with pytest.raises(SystemExit, match="unknown switch 'gihtub'"):
-        devmode.main(["set", "github=app", "gihtub=off"])
+        devmode.main(["set", "github=on", "gihtub=off"])
     with pytest.raises(SystemExit, match="github mode 'nope'"):
         devmode.main(["set", "github=nope"])
     assert not isolated_state["host_env"].exists()
@@ -1644,8 +1674,8 @@ def test_mode_set_refuses_a_ttl_that_nothing_would_carry(isolated_state, monkeyp
     monkeypatch.setattr(
         devmode.getpass, "getpass", lambda _p: pytest.fail("must not prompt for a refused mode")
     )
-    with pytest.raises(SystemExit, match=r"ttl=.*github=app.*gcp=user"):
-        devmode.main(["set", "github=app", "ttl=30m"])
+    with pytest.raises(SystemExit, match=r"ttl=.*github=on.*gcp=user"):
+        devmode.main(["set", "github=on", "ttl=30m"])
     assert devmode.read()["mode"]["github"] == "off"
     # one emergency rung in the same command carries it
     monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: False)
@@ -1654,11 +1684,11 @@ def test_mode_set_refuses_a_ttl_that_nothing_would_carry(isolated_state, monkeyp
 
 
 def test_mode_set_with_the_secret_present_does_not_prompt(isolated_state, monkeypatch):
-    isolated_state["host_env"].write_text(f"GH_PEM_B64={_PEM_B64}\n")
+    isolated_state["host_env"].write_text(f"FY_INJECT_GITHUB={_PEM_B64}\n")
     monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(devmode.getpass, "getpass", lambda _p: pytest.fail("already present"))
-    assert devmode.main(["set", "github=app"]) == 0
-    assert devmode.read()["mode"]["github"] == "app"
+    assert devmode.main(["set", "github=on"]) == 0
+    assert devmode.read()["mode"]["github"] == "on"
 
 
 # ── ps_labels: the version-proof `{{json .Labels}}` probe ────────────────────────────────

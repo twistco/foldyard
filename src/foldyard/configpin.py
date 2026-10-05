@@ -7,7 +7,7 @@ Yet the host supervisor used to re-read it from the working tree on EVERY reconc
 its daemon specs from it, and restart the affected daemon on any change — so a repo edit reached
 the host's credential daemons within ~2 seconds, unattended. That is the same class the host-exec
 audit closed field by field (``[proxy] allow``, ``default_deny``, ``[[inject]] token_env``,
-``[engine].cli``, ``[plugins.github].permissions`` — see
+``[engine].cli``, the since-removed ``[plugins.github].permissions`` — see
 ``ADR-0023``), but at the level of the CHANNEL rather than any one
 key: while the file is live input, every field added to it re-opens the hole by default.
 

@@ -2,7 +2,7 @@
 """The host supervisor — the ONE host-side process per project that runs the credential daemons.
 
 Reads the authoritative mode file (devmode.py) every couple of seconds and reconciles
-the daemons to it: switching github app↔user restarts the proxy with the other minter,
+the daemons to it: switching an injector on rewrites the proxy's live rule set,
 setting an axis to off stops its daemon, and a lapsed `user` TTL kills the daemon AND
 writes the axis back to off (the structural guarantee that emergencies never linger).
 Each tick also stamps a project-shared liveness heartbeat (so the launch paths can tell a
@@ -1356,7 +1356,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
             _report_held(wt, mode)
             # Fill in host-process env a plugin can derive from committed config (a Pulumi App
             # id, a deterministic SA email — see plugins.Plugin.env_defaults) BEFORE the
-            # `requires` gate below reads os.environ, so github=app etc. work with no host.env
+            # `requires` gate below reads os.environ, so a derivable value needs no host.env
             # entry at all. setdefault: an ambient export or a real host.env secret always wins.
             apply_env_defaults(devmode.env_defaults(mode))
             desired.update(devmode.desired_daemons(mode))

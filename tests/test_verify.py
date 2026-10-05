@@ -1,6 +1,6 @@
 """verify.py — the isolation battery. The engine + git are mocked (golden-ish): we assert
 the right probes run and that PASS/FAIL + the exit code follow the probe results, without a
-real engine. Mode-aware GitHub posture is unit-tested directly."""
+real engine. The injectors' box-dummy rows are unit-tested in test_inject_kinds.py."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def secure_engine(monkeypatch, tmp_path):
 
 
 def _enter_box(monkeypatch, tmp_path):
-    """Flip to in-box with a clean HOME + no gh + github=off, so only the probe results vary."""
+    """Flip to in-box with a clean HOME + no gh + no token env, so only the probe results vary."""
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     monkeypatch.setattr(verify.config, "in_box", lambda: True)
@@ -99,7 +99,7 @@ def _enter_box(monkeypatch, tmp_path):
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(verify, "which", lambda c: None)
-    # No proxy CA mounted ⇒ the github plugin's verify hook reports github=off.
+    # No proxy CA mounted.
     monkeypatch.setattr(proxy, "BOX_CA", tmp_path / "no-ca.pem")
     # The wall section is a different subject with its own tests below, and it needs a live proxy
     # + network. Left unpinned it resolves the REPO's OWN foldyard.toml — so this repo declaring
@@ -499,19 +499,20 @@ def test_ssh_only_known_hosts_passes(secure_engine, monkeypatch, tmp_path, capsy
 
 
 # ── plugin-contributed posture flows through verify ──────────────────────────────────────
-# The github mode-aware row logic is unit-tested in test_plugins.py (github._verify_rows /
-# _box_github_mode); here we prove the registry's rows reach the report + the exit code.
+# The box-dummy row logic is unit-tested in test_inject_kinds.py; here we prove the registry's
+# rows reach the report + the exit code.
 
 
 def test_box_posture_real_token_fails(secure_engine, monkeypatch, tmp_path):
-    """A real GH_TOKEN in an off-mode box is caught by the github plugin's verify hook."""
+    """A real GH_TOKEN is caught in ANY box, declared or not — the inject plugin watches the vars
+    every known kind's client reads (what the github plugin's verify row used to do)."""
     _enter_box(monkeypatch, tmp_path)
-    monkeypatch.setenv("GH_TOKEN", "ghp_realtoken")  # not the dummy 'x', github=off
+    monkeypatch.setenv("GH_TOKEN", "ghp_realtoken")  # no [[inject]] row declares a dummy for it
     assert verify.verify() == 1
 
 
 def test_plugin_posture_info_row_prints_without_failing(monkeypatch, tmp_path, capsys):
-    """An 'info' row (e.g. the github=user banner) is printed, not counted as a fail."""
+    """An 'info' row (e.g. an emergency-mode banner) is printed, not counted as a fail."""
 
     class _InfoPlugin:
         def verify_checks(self, ctx):

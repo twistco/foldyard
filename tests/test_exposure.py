@@ -110,6 +110,35 @@ def test_a_declared_but_off_injector_is_still_reported(checkout):
     assert armed.active is True
 
 
+GITHUB = """
+[[inject]]
+switch = "github"
+kind = "github-app"
+app_id = "1"
+installation_id = "2"
+
+[[inject]]
+switch = "github-user"
+kind = "gh-cli"
+emergency = true
+"""
+
+
+def test_a_kinds_pinned_host_is_reported_and_two_rows_on_one_host_both_show(checkout):
+    """A `github-app` row names no host (the kind pins api.github.com) — it's still a target, and
+    the emergency `gh-cli` row on the same host is a second, different credential, not a duplicate."""
+    targets = collect(checkout(BASE + "passthrough = []\n" + GITHUB)).targets
+    app, user = (
+        next(t for t in targets if f"[[inject]] {s} " in t.source)
+        for s in ("github", "github-user")
+    )
+
+    assert app.host == user.host == "api.github.com"
+    assert app.from_config and user.from_config
+    assert "github-app" in app.source and "$FY_INJECT_GITHUB" in app.source
+    assert "gh-cli" in user.source and "your own gh token" in user.source
+
+
 def test_packaged_targets_come_from_the_registry_not_from_guessed_constants(checkout):
     """Codex's ChatGPT rung injects on chatgpt.com/backend-api/codex, not the API host. A report
     that hardcoded hosts would name the wrong destination — so it asks the plugins."""

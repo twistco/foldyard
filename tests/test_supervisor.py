@@ -411,7 +411,7 @@ class _StopTick(Exception):
 
 def test_reconcile_once_unions_selected_worktree_daemons(monkeypatch, tmp_path):
     cfgs = {"": _fake_cfg(""), "feat": _fake_cfg("feat")}
-    modes = {"": {"github": "off"}, "feat": {"github": "app"}}
+    modes = {"": {"github": "off"}, "feat": {"github": "on"}}
     desired = {
         "": {
             "egress-proxy": {
@@ -848,18 +848,18 @@ def test_expiry_settles_stranded_dependents(isolated_state):
 
 
 def test_expiry_without_dependents_reverts_only_the_lapsed_axis(isolated_state):
-    # github=app is genuinely UNRELATED to gcp (no mode_issues link) — it must survive the
+    # github=on is genuinely UNRELATED to gcp (no mode_issues link) — it must survive the
     # gcp expiry untouched, proving the settle cascade only reaches actual dependents.
     from datetime import timedelta
 
     from foldyard import devmode
 
-    devmode.set_mode({"gcp": "user", "github": "app"}, ttl=60)
+    devmode.set_mode({"gcp": "user", "github": "on"}, ttl=60)
     raw = json.loads(isolated_state["auth"].read_text())
     raw["expires"]["gcp"] = devmode._iso(devmode.now() - timedelta(hours=1))
     isolated_state["auth"].write_text(json.dumps(raw))
     mode = supervisor.expire_user_modes()
-    assert mode["gcp"] == "off" and mode["github"] == "app"  # unrelated raised axis kept
+    assert mode["gcp"] == "off" and mode["github"] == "on"  # unrelated raised axis kept
 
 
 # ── capability probes (consolidation proposal B) ─────────────────────────────────────────

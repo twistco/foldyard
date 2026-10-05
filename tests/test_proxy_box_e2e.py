@@ -226,7 +226,7 @@ def _log_entries(log: Path) -> list[dict]:
 
 class _TestInjector(Plugin):
     """A consumer-style injector contributing ONE rule against our fake upstream — exactly how a
-    real injector (github) feeds the proxy framework, so ``ProxyPlugin`` builds the daemon + box
+    real injector (an [[inject]] row) feeds the proxy framework, so ``ProxyPlugin`` builds the daemon + box
     args for real. (The framework is what's under test; the minter + host are fakes.)"""
 
     name = "test-injector"

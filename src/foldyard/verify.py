@@ -3,16 +3,17 @@
 Faithful port of the `verify` recipe. Proves the VM boundary over the engine socket
 (rootless, the `--privileged --pid=host` escape refused, the VM's own mount table — PID 1's —
 free of host home/paths) and — INSIDE the box only — the credential-less dev-box posture (no
-SSH key material, mode-aware GitHub posture, git push refused). Each check prints PASS/FAIL;
+SSH key material, the injectors' box dummies, git push refused). Each check prints PASS/FAIL;
 returns non-zero on any FAIL (CI-usable). One ADVISORY section rides along at the end —
 unhealthy containers in the stack — printed as WARN so it can never move the isolation verdict.
 
 Behaviour-preserving: same checks, same messages, same exit semantics as the recipe. The
 engine probes run with the resolved stack env (so `CONTAINER_HOST`/`DOCKER_HOST` reach the
-machine socket). MECHANISM-specific posture (e.g. github's mode-aware dummy-token/gh-CLI
-checks) is contributed by the plugins via `registry().verify_checks` (ADR-0015); the
-credential-AGNOSTIC backstops (no ssh keys, no netrc, git push refused) stay in core here so
-the credibility check can never be weakened by a plugin being absent or broken.
+machine socket). MECHANISM-specific posture (e.g. each ``[[inject]]`` row's box dummies — no
+real credential where a dummy belongs) is contributed by the plugins via
+`registry().verify_checks` (ADR-0015); the credential-AGNOSTIC backstops (no ssh keys, no
+netrc, git push refused) stay in core here so the credibility check can never be weakened by a
+plugin being absent or broken.
 """
 
 from __future__ import annotations
@@ -262,7 +263,7 @@ def _vm_boundary(
 
 def _plugin_posture(rep: _Report, env: dict) -> None:
     """Mechanism-specific posture from the plugins (ADR-0015): each contributes mode-aware
-    assertions for its own credential mechanism (e.g. github's dummy-token / gh-CLI posture).
+    assertions for its own credential mechanism (e.g. the ``[[inject]]`` dummies' rows).
     The credential-AGNOSTIC backstops around this call — no ssh keys, no netrc, git push
     refused — stay in core and must never depend on a plugin being present."""
     ctx = VerifyContext(in_box=True, env=env, which=lambda c: which(c) is not None)

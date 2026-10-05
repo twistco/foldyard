@@ -23,8 +23,8 @@ from . import config, devmode, hostwall, machine_backend
 def _proxy_required(mode: dict) -> bool:
     """Would this project's box route egress through the host proxy? Must MIRROR the proxy plugin's
     ``derive_env`` routing signal exactly — ``config.proxy_enabled()`` OR any active injection rule
-    (``registry().proxy_rules``, which aggregates github, keyless Claude/Codex, AND generic
-    ``[[inject]]`` axes). An earlier hand-rolled list checked only proxy/keyless/github and MISSED
+    (``registry().proxy_rules``, which aggregates keyless Claude/Codex AND every ``[[inject]]``
+    switch). An earlier hand-rolled list checked only proxy/keyless/github and MISSED
     ``[[inject]]``: an inject-only box then skipped the mitmproxy-missing check (cryptic PyPI
     connect-refuse at bootstrap) and, under ``[machine] firewall``, got wrongly aborted as 'nothing
     routes through the proxy'. When true, a box with no reachable proxy can't reach ANYTHING — so

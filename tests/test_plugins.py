@@ -1,9 +1,10 @@
-"""plugins/ — the plugin framework + the built-in gcp/github plugins.
+"""plugins/ — the plugin framework + the built-in gcp/inject plugins.
 
 Covers: axis validation, the registry's merge of axes/daemons/env/doctor across plugins,
 duplicate-axis rejection, third-party discovery (a fake plugin via load_plugins(extra=…)
-AND via the `foldyard.plugins` entry-point group), and the gcp/github plugin internals
-(SA naming, minter paths, PAM-grant parsing relocated here from the devmode tests)."""
+AND via the `foldyard.plugins` entry-point group), and the gcp/inject plugin internals
+(SA naming, minter paths, PAM-grant parsing relocated here from the devmode tests). The `[[inject]]`
+KINDS (github-app, gh-cli) have their own module, test_inject_kinds.py."""
 
 from __future__ import annotations
 
@@ -28,8 +29,8 @@ from foldyard.plugins import (
     claude,
     codex,
     gcp,
-    github,
     inject,
+    kinds,
     proxy,
     static_token,
     vscode,
@@ -126,6 +127,13 @@ class DemoPlugin(Plugin):
 # ── Registry merging ──────────────────────────────────────────────────────────────────
 
 
+# GitHub is config (ADR-0031): the App on `github`, the operator's own token on an emergency
+# `github-user` switch — the old `github=app` / `github=user` levels.
+_GITHUB_ROWS: list[dict] = [
+    {"switch": "github", "kind": "github-app", "app_id": "1234567", "installation_id": "7"},
+    {"switch": "github-user", "kind": "gh-cli", "emergency": True},
+]
+
 # A synthetic "full" consumer config that declares the gcp-metadata + auth0-sim namespaces (so the
 # DECLARED plugins load — registry plan Step C) and gcp's project (so the gcp axis self-gate passes
 # — Step D). Passed to Registry/load_plugins to exercise the Tangible-shaped registry from a config,
@@ -134,10 +142,10 @@ _FULL_TOML = {
     "proxy": {},
     "plugins": {
         "gcp-metadata": {"project": "acme-staging"},
-        "github": {},
         "auth0-sim": {},
         "llm": {},
     },
+    "inject": _GITHUB_ROWS,
     # Posture overlays are config-only now ([[overlay]] with a `when`); wiring one onto `storage`
     # is what makes the storage axis appear (config.overlay_when_axes — the gcp plugin's self-gate).
     "overlay": [
@@ -157,17 +165,42 @@ def _cfg(toml: dict) -> config.Config:
     return config.Config(repo_root=config.repo_root(), worktree="", toml=toml)
 
 
-def test_builtins_provide_gcp_and_github():
-    reg = Registry([gcp.GcpPlugin(), github.GithubPlugin()], config=_cfg(_FULL_TOML))
+class _Github(inject.InjectPlugin):
+    """The inject plugin over _FULL_TOML's two GitHub rows, whatever the ambient config — only the
+    rows' READ is bound, so they still go through the kind validation (`_specs`)."""
+
+    def _specs(self) -> list[dict]:
+        with config.using(_cfg({"inject": _GITHUB_ROWS})):
+            return super()._specs()
+
+
+def test_builtins_provide_gcp_and_the_github_rows():
+    reg = Registry([gcp.GcpPlugin(), inject.InjectPlugin()], config=_cfg(_FULL_TOML))
     # gcp contributes BOTH its axes: gcp (identity-only — the llm rung is gone) and storage
     # (present because _FULL_TOML wires an [[overlay]] onto storage=staging, the axis's opt-in).
-    assert set(reg.switches()) == {"gcp", "storage", "github"}
+    # The GitHub rows are inject's: one off/on switch each, the gh-cli one an emergency.
+    assert set(reg.switches()) == {"gcp", "storage", "github", "github-user"}
     assert reg.switch_levels()["gcp"] == ("off", "logs", "sa", "user")
     assert reg.switch_levels()["storage"] == ("local", "staging")
-    assert reg.switch_defaults() == {"gcp": "off", "storage": "local", "github": "off"}
-    assert reg.switch_daemon() == {"gcp": "gcp-minter", "storage": None, "github": "egress-proxy"}
-    assert reg.emergency_levels() == {"gcp": ("user",), "storage": (), "github": ("user",)}
-    assert reg.blurbs()[("github", "app")].startswith("PR/issue")
+    assert reg.switch_defaults() == {
+        "gcp": "off",
+        "storage": "local",
+        "github": "off",
+        "github-user": "off",
+    }
+    assert reg.switch_daemon() == {
+        "gcp": "gcp-minter",
+        "storage": None,
+        "github": "egress-proxy",
+        "github-user": "egress-proxy",
+    }
+    assert reg.emergency_levels() == {
+        "gcp": ("user",),
+        "storage": (),
+        "github": (),
+        "github-user": ("on",),
+    }
+    assert reg.blurbs()[("github", "on")].startswith("GitHub App token")
 
 
 def test_duplicate_axis_is_rejected():
@@ -202,7 +235,7 @@ def test_load_plugins_appends_extra():
     loaded = plugins.load_plugins(config=_cfg(_FULL_TOML), extra=[DemoPlugin()], discover=False)
     assert any(isinstance(p, DemoPlugin) for p in loaded)
     # built-ins still come first (axis/doctor order is deliberate)
-    assert [p.name for p in loaded[:2]] == ["gcp", "github"]
+    assert [p.name for p in loaded[:2]] == ["gcp", "inject"]
 
 
 def test_entry_point_discovery(monkeypatch):
@@ -227,7 +260,6 @@ def test_broken_entry_point_is_ignored(monkeypatch):
     # auth0-sim namespaces declared) all eight built-ins load, in their deliberate order.
     assert [p.name for p in plugins.load_plugins(config=_cfg(_FULL_TOML), discover=True)] == [
         "gcp",
-        "github",
         "inject",
         "proxy",
         "auth0-sim",
@@ -242,7 +274,7 @@ def test_load_plugins_core_only_for_a_generic_consumer():
     # The spinout boundary (registry plan Step C + Test strategy): a consumer that declares none of
     # the credential tables gets only the SMALL CORE — the declared gcp/auth0-sim plugins are absent.
     names = [p.name for p in plugins.load_plugins(config=_cfg(_GENERIC_TOML), discover=False)]
-    assert names == ["github", "inject", "proxy", "claude", "vscode", "codex"]
+    assert names == ["inject", "proxy", "claude", "vscode", "codex"]
     assert "gcp" not in names and "auth0-sim" not in names
 
 
@@ -263,9 +295,9 @@ def test_devmode_accessors_track_the_registry(full_config_bound):
 
 def test_devmode_accessors_are_core_only_for_a_generic_consumer():
     # The regression guard for the spinout boundary: under a generic config (no credential tables)
-    # devmode sees NO axes at all — no gcp/storage/auth0/llm/capture, and no github either now
-    # (its axis self-gates on [plugins.github], the last always-on exception; a consumer that
-    # never declared github used to get a TUI mode row + gh doctor rows forever).
+    # devmode sees NO axes at all — no gcp/storage/auth0/llm/capture, and no github either (it is
+    # an [[inject]] row now; a consumer that never declared github used to get a TUI mode row +
+    # gh doctor rows forever).
     with config.using(_cfg(_GENERIC_TOML)):
         plugins._clear_registry_cache()
         active = set(devmode.axes())
@@ -513,221 +545,7 @@ def test_gcp_minter_daemon_points_at_the_mint_log(monkeypatch, tmp_path):
     assert str(gcp._minter_log()) == env["GCP_MINTER_LOG_FILE"]  # daemon + panel can't drift
 
 
-# ── github plugin internals ───────────────────────────────────────────────────────────
-
-
-def test_github_minter_path_app_vs_user():
-    # Both rungs run a PACKAGE module under foldyard's own interpreter, like inject/codex already
-    # do. They used to be repo scripts launched via `uv run --script`: the host executed a file
-    # inside the mount on every mint (≈hourly), so anything that could write the checkout got code
-    # execution as the operator, and PEP 723 resolved deps from the network at mint time. Both holes
-    # close by the code being installed — ADR-0023.
-    import shlex
-    import sys
-
-    app, user = shlex.split(github._minter("app")), shlex.split(github._minter("user"))
-    assert app[:3] == [sys.executable, "-m", "foldyard.plugins.github_app_token"]
-    assert app[3] == "--own-proxy-port" and app[4] == str(config.proxy_port())
-    assert user == [sys.executable, "-m", "foldyard.plugins.gh_cli_token"]
-    # The regression worth pinning: never go back to launching a consumer SCRIPT (a file in the
-    # mount) — no `uv run --script`, no dev-stack minter path. (A path check against dev_vm_dir
-    # can't express this: run-from-source puts the interpreter under the repo too.)
-    both = github._minter("app") + github._minter("user")
-    assert "run --script" not in both
-    assert "gh-app-token" not in both and "gh-user-token" not in both
-
-
-def test_github_axis_gated_on_the_declared_table(monkeypatch):
-    # The registry contract (plugins.load_plugins): CORE plugins are inert until their own config
-    # is declared — claude/codex gate on [claude]/[codex].keyless, inject on [[inject]]. github
-    # was the one exception ("always-on axis"), so every consumer got a TUI github mode row and
-    # gh doctor rows it never asked for. The opt-in is [plugins.github] — any table, even empty
-    # (the user emergency needs no App fields).
-    monkeypatch.setattr(config, "github_declared", lambda: False)
-    assert github.GithubPlugin().switches() == []
-    monkeypatch.setattr(config, "github_declared", lambda: True)
-    (axis,) = github.GithubPlugin().switches()
-    assert axis.name == "github" and axis.levels == ("off", "app", "user")
-
-
-def test_github_box_plumbing_absent_for_an_undeclared_consumer(monkeypatch):
-    # The ambient in-box plumbing (dummy GH_TOKEN=x, the gh CLI bootstrap) exists so the github
-    # axis can flip live — pointless for a consumer with no github axis, and the gh install was
-    # a bootstrap step (and failure mode) every proxied box paid for.
-    monkeypatch.setattr(config, "github_declared", lambda: False)
-    p = github.GithubPlugin()
-    assert p.box_args({"FY_PROXY": "h:8088"}) == []
-    assert p.box_bootstrap({"FY_PROXY": "h:8088"}) == []
-
-
-def test_github_box_bootstrap_installs_gh_with_the_proxy_substrate(monkeypatch):
-    # gh rides the same ambient gate as the dummy token (FY_PROXY, plus the declared table); the
-    # check skips when a consumer image bakes it. A proxy-less consumer's box gets nothing. The
-    # install must be IMAGE-AGNOSTIC (a static release binary into /opt/fy-tools, the house
-    # bootstrap pattern) — the packaged box is Fedora, so the old `apt-get` run failed on every
-    # default box ("apt-get: command not found").
-    monkeypatch.setattr(config, "github_declared", lambda: True)
-    p = github.GithubPlugin()
-    assert p.box_bootstrap({}) == []
-    steps = p.box_bootstrap({"FY_PROXY": "h:8088"})
-    assert steps[0]["check"] == "command -v gh"
-    assert "apt-get" not in steps[0]["run"] and "dnf" not in steps[0]["run"]
-    assert "github.com/cli/cli/releases" in steps[0]["run"]
-    assert "/opt/fy-tools/bin/gh" in steps[0]["run"]
-
-
-def test_github_env_defaults_only_for_app_rung(monkeypatch):
-    monkeypatch.setattr(config, "github_app_id", lambda: "1234567")
-    monkeypatch.setattr(config, "github_installation_id", lambda: "12345678")
-    monkeypatch.setattr(config, "github_repo", lambda: "Tangible")
-    monkeypatch.setattr(config, "github_permissions", lambda: "")
-    # The GSM pair is NOT derived any more: the packaged minter reads the PEM from host.env and
-    # never talks to a vault, so those names are only the capture HINT's text now.
-    assert github.GithubPlugin().env_defaults({"github": "app"}) == {
-        "GH_APP_ID": "1234567",
-        "GH_INSTALLATION_ID": "12345678",
-        "GH_REPO": "Tangible",
-    }
-    # A declared `[plugins.github].permissions` rides along so a consumer can NARROW the token.
-    monkeypatch.setattr(config, "github_permissions", lambda: '{"issues": "read"}')
-    assert github.GithubPlugin().env_defaults({"github": "app"})["GH_APP_PERMISSIONS"] == (
-        '{"issues": "read"}'
-    )
-    # The gh-cli rung needs none of these; off contributes nothing either.
-    assert github.GithubPlugin().env_defaults({"github": "user"}) == {}
-    assert github.GithubPlugin().env_defaults({"github": "off"}) == {}
-
-
-def test_github_env_defaults_omits_unresolved_keys(monkeypatch):
-    # An unconfigured value (e.g. no [plugins.github].permissions) resolves to "" — never emitted,
-    # so setdefault never overwrites an empty string over something meaningful.
-    monkeypatch.setattr(config, "github_app_id", lambda: "1234567")
-    monkeypatch.setattr(config, "github_installation_id", lambda: "12345678")
-    monkeypatch.setattr(config, "github_repo", lambda: "Tangible")
-    monkeypatch.setattr(config, "github_permissions", lambda: "")
-    assert github.GithubPlugin().env_defaults({"github": "app"}) == {
-        "GH_APP_ID": "1234567",
-        "GH_INSTALLATION_ID": "12345678",
-        "GH_REPO": "Tangible",
-    }
-
-
-def test_github_app_rule_never_requires_the_pem():
-    # `requires` is the supervisor's spawn gate for the WHOLE proxy daemon, and under Phase A'
-    # always-route a proxy that refuses to launch connection-refuses EVERY box request. So a
-    # missing credential must degrade one host (the addon logs the mint failure), never all egress:
-    # the PEM is deliberately absent from `requires`, and presence is surfaced by the doctor row +
-    # the `secrets` capture prompt instead.
-    (rule,) = github.GithubPlugin().proxy_rules({"github": "app"})
-    assert rule.requires == ("GH_APP_ID", "GH_INSTALLATION_ID", "GH_REPO")
-    assert not any("PEM" in r for r in rule.requires)
-    # …while the minter's OWN env (what it may read) does carry the key.
-    assert "GH_PEM_B64" in rule.env
-    # The user emergency injects your own gh token — no minter env at all.
-    (rule,) = github.GithubPlugin().proxy_rules({"github": "user"})
-    assert rule.requires == ()
-
-
-def _pem_rows(monkeypatch, tmp_path, *, host_env_body: str | None = None, deep: bool = False):
-    """github's PEM doctor rows for a given host.env content. No gcloud anywhere: the check is
-    PRESENCE (+ an offline shape check), so it works in the box, needs no --deep, and can't be
-    broken by a lapsed PAM grant."""
-    host_env = tmp_path / "host.env"
-    if host_env_body is not None:
-        host_env.write_text(host_env_body)
-    monkeypatch.setattr(config, "host_env_file", lambda: host_env)
-    monkeypatch.delenv("GH_PEM_B64", raising=False)
-    # These tests model an App consumer: the table is declared (the whole-hook gate) and an
-    # identity value resolves (the App-intent gate for the app rows — see
-    # test_github_doctor_gh_rows_only_for_a_declared_table_without_app_config).
-    monkeypatch.setattr(config, "github_declared", lambda: True)
-    monkeypatch.setattr(config, "github_app_id", lambda: "1234567")
-    ctx = DoctorContext(
-        deep=deep,
-        run=lambda cmd, timeout=None: pytest.fail(f"the PEM check must not shell out: {cmd}"),
-        which=lambda tool: False,
-        result=devmode._result,
-        probe=lambda _port: False,
-    )
-    return [row for row in github.GithubPlugin().doctor_checks(ctx) if "PEM" in row[1]]
-
-
-def test_github_doctor_silent_for_an_undeclared_consumer(monkeypatch, tmp_path):
-    # A consumer with no [plugins.github] gets NO github doctor rows at all — not the app-key/PEM
-    # nags (the old bug, two ✗ rows forever) and not the gh CLI/login rows either: with the axis
-    # gated on the same declaration there is no rung the gh checks could ever serve.
-    host_env = tmp_path / "host.env"
-    monkeypatch.setattr(config, "host_env_file", lambda: host_env)
-    monkeypatch.setattr(config, "github_declared", lambda: False)
-    for var in ("GH_PEM_B64", "GH_APP_ID", "GH_INSTALLATION_ID", "GH_REPO"):
-        monkeypatch.delenv(var, raising=False)
-    ctx = DoctorContext(
-        deep=False,
-        run=lambda cmd, timeout=None: (1, ""),
-        which=lambda tool: False,
-        result=devmode._result,
-        probe=lambda _port: False,
-    )
-    assert list(github.GithubPlugin().doctor_checks(ctx)) == []
-
-
-def test_github_doctor_gh_rows_only_for_a_declared_table_without_app_config(monkeypatch, tmp_path):
-    # A bare `[plugins.github]` table (a user-emergency-only consumer): the gh CLI/login rows
-    # appear, but the App rows still need App INTENT — a resolved identity value or a captured
-    # PEM — so declaring the table alone never buys an eternal "github=app keys missing" nag.
-    host_env = tmp_path / "host.env"
-    monkeypatch.setattr(config, "host_env_file", lambda: host_env)
-    monkeypatch.setattr(config, "github_declared", lambda: True)
-    for var in ("GH_PEM_B64", "GH_APP_ID", "GH_INSTALLATION_ID", "GH_REPO"):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(config, "github_app_id", lambda: "")
-    monkeypatch.setattr(config, "github_installation_id", lambda: "")
-    monkeypatch.setattr(config, "github_repo", lambda: "")
-    ctx = DoctorContext(
-        deep=False,
-        run=lambda cmd, timeout=None: (1, ""),
-        which=lambda tool: False,
-        result=devmode._result,
-        probe=lambda _port: False,
-    )
-    rows = list(github.GithubPlugin().doctor_checks(ctx))
-    assert [r for r in rows if r[1] == "gh CLI"]
-    assert not [r for r in rows if "github=app" in r[1]]
-
-
-_PEM_BODY = "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n"
-
-
-def test_github_pem_doctor_reports_absence_with_the_hint(monkeypatch, tmp_path):
-    rows = _pem_rows(monkeypatch, tmp_path, host_env_body="")
-    assert [status for status, *_ in rows] == ["fail"]
-    # The fix text is the consumer's `how` hint — printed for the operator to run, never executed.
-    assert "fy box up" in rows[0][2]
-
-
-def test_github_pem_doctor_accepts_a_captured_key_and_flags_a_broken_one(monkeypatch, tmp_path):
-    import base64
-
-    good = base64.b64encode(_PEM_BODY.encode()).decode()
-    rows = _pem_rows(monkeypatch, tmp_path, host_env_body=f"GH_PEM_B64={good}\n")
-    assert [status for status, *_ in rows] == ["ok", "ok"]  # present + shape
-    # A truncated/half-pasted key is caught OFFLINE rather than as an opaque 401 at mint time.
-    rows = _pem_rows(monkeypatch, tmp_path, host_env_body="GH_PEM_B64=-----BEGIN RSA PRIV\n")
-    assert [status for status, *_ in rows] == ["ok", "fail"]
-
-
 # ── declared secrets (plugins.Secret: presence, not provenance) ────────────────────────
-
-
-def test_github_declares_its_pem_secret_only_on_the_app_rung(monkeypatch, tmp_path):
-    monkeypatch.setattr(config, "host_env_file", lambda: tmp_path / "host.env")
-    monkeypatch.delenv("GH_PEM_B64", raising=False)
-    p = github.GithubPlugin()
-    assert p.secrets({"github": "off"}) == []  # an inactive mechanism prompts for nothing
-    assert p.secrets({"github": "user"}) == []  # the gh-cli kind needs no stored secret
-    (secret,) = p.secrets({"github": "app"})
-    assert secret.var == "GH_PEM_B64" and secret.b64 is True
-    assert "PRIVATE KEY" in secret.pattern
 
 
 def test_keyless_agents_declare_their_credential_only_when_on(monkeypatch):
@@ -762,26 +580,6 @@ def test_keyless_prefix_agrees_with_the_classifier(taxonomy):
         assert who is not None and who[0] == spec["env"]
 
 
-def test_github_pem_hint_defaults_generic_and_yields_to_the_consumer(
-    fresh_config, monkeypatch, tmp_path
-):
-    # The hint is a STRING foldyard prints, never a command it runs — the plugin's default names the
-    # App settings (every consumer has them), and a consumer whose key lives in a vault retargets it
-    # with a `[[secret]]` row. Nothing here makes any vault CLI a dependency of github=app (that
-    # coupling put a PAM-elevatable identity in front of posting a PR comment).
-    fresh_config(FOLDYARD_REPO=tmp_path)
-    (secret,) = github.GithubPlugin().secrets({"github": "app"})
-    assert "App settings" in secret.how and "base64" in secret.how
-    # The capture prompt gets the override from Registry.secrets; the doctor rows read plugins
-    # directly, so they apply it themselves — one hint, wherever the operator looks.
-    (tmp_path / "foldyard.toml").write_text(
-        '[[secret]]\nvar = "GH_PEM_B64"\nhow = "vault read -field=pem secret/gh | base64"\n'
-    )
-    fresh_config(FOLDYARD_REPO=tmp_path)
-    rows = _pem_rows(monkeypatch, tmp_path, host_env_body="")
-    assert "vault read -field=pem secret/gh" in rows[0][2]
-
-
 def test_registry_secrets_merges_plugins_with_declared_rows(fresh_config, tmp_path):
     (tmp_path / "foldyard.toml").write_text(
         "[[secret]]\n"
@@ -803,17 +601,18 @@ def test_declared_secret_overrides_a_plugins_own(fresh_config, tmp_path):
     # A consumer retargets a plugin's hint (different vault, different wording) by declaring the
     # same var — never by editing plugin code.
     (tmp_path / "foldyard.toml").write_text(
-        '[[secret]]\nvar = "GH_PEM_B64"\nlabel = "our PEM"\nhow = "ask ops"\nbase64 = true\n'
+        '[[secret]]\nvar = "FY_INJECT_GITHUB"\nlabel = "our PEM"\nhow = "ask ops"\nbase64 = true\n'
     )
     fresh_config(FOLDYARD_REPO=tmp_path)
-    reg = Registry([github.GithubPlugin()])
-    secrets = {s.var: s for s in reg.secrets({"github": "app"})}
-    assert list(secrets) == ["GH_PEM_B64"]  # merged, not duplicated
-    assert secrets["GH_PEM_B64"].how == "ask ops" and secrets["GH_PEM_B64"].label == "our PEM"
+    reg = Registry([_Github()])
+    secrets = {s.var: s for s in reg.secrets({"github": "on"})}
+    assert list(secrets) == ["FY_INJECT_GITHUB"]  # merged, not duplicated
+    pem = secrets["FY_INJECT_GITHUB"]
+    assert pem.how == "ask ops" and pem.label == "our PEM"
     # …and the fields it DIDN'T name are inherited, not blanked: retargeting a hint must not
-    # silently drop the plugin's shape check (which is what re-declaring `pattern` by hand would
-    # do the day the plugin tightens it).
-    assert secrets["GH_PEM_B64"].pattern == github._PEM_PATTERN
+    # silently drop the kind's shape check (which is what re-declaring `pattern` by hand would
+    # do the day the kind tightens it).
+    assert pem.pattern == kinds.PEM_PATTERN
 
 
 @pytest.mark.parametrize(
@@ -835,25 +634,27 @@ def test_declared_secret_var_must_be_an_env_name(fresh_config, tmp_path, row):
         Registry([]).secrets({})
 
 
-# ── doctor checks + one-click fixes (proxy owns mitmproxy/CA; github owns gh) ──────────
+# ── doctor checks + one-click fixes (proxy owns mitmproxy/CA; a kind owns its credential's) ──
 
 
-def test_proxy_owns_mitmproxy_and_ca_doctor_checks_not_github(monkeypatch):
-    monkeypatch.setattr(config, "github_declared", lambda: True)  # a github consumer
-    monkeypatch.setattr(config, "proxy_enabled", lambda: True)  # …that opted into the proxy
+def test_proxy_owns_mitmproxy_and_ca_doctor_checks_not_an_injector(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)  # a consumer that opted in
+    monkeypatch.setattr(config, "host_env_file", lambda: tmp_path / "host.env")
     ctx = _ctx()
     proxy_checks = [name for _, name, _ in proxy.ProxyPlugin().doctor_checks(ctx)]
-    github_checks = [name for _, name, _ in github.GithubPlugin().doctor_checks(ctx)]
-    # the proxy framework owns these now — github is just one injector that rides it
+    inject_checks = [name for _, name, _ in _Github().doctor_checks(ctx)]
+    # the proxy framework owns these — an injector is just a rule that rides it
     assert "mitmproxy" in proxy_checks and "mitm CA" in proxy_checks
-    assert "mitmproxy" not in github_checks and "mitm CA" not in github_checks
-    assert "gh CLI" in github_checks  # github keeps its own credential-mechanism checks
+    assert "mitmproxy" not in inject_checks and "mitm CA" not in inject_checks
+    # …and each kind keeps its own credential's rows
+    assert "github PEM" in inject_checks and "github-user gh CLI" in inject_checks
 
 
 def _proxy_doctor_names(monkeypatch, *, proxy_declared: bool, github_declared: bool, mode: dict):
     monkeypatch.setattr(config, "proxy_enabled", lambda: proxy_declared)
-    monkeypatch.setattr(config, "github_declared", lambda: github_declared)
-    reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
+    rows = _GITHUB_ROWS if github_declared else []
+    monkeypatch.setattr(config, "inject_specs", lambda: rows)
+    reg = Registry([inject.InjectPlugin(), proxy.ProxyPlugin()])
     ctx = DoctorContext(
         deep=False,
         run=devmode._run,
@@ -878,9 +679,9 @@ def test_proxy_doctor_silent_for_a_consumer_the_proxy_never_serves(monkeypatch):
 
 
 def test_proxy_doctor_prerequisites_for_a_latent_injector_but_no_listener_row(monkeypatch):
-    # No [proxy], but github is declared: `github=app` WOULD need the proxy, so the operator should
-    # see the mitmproxy/CA prerequisites before arming it — while the listener row stays out,
-    # because with github off the supervisor runs no proxy daemon (desired_daemons is empty).
+    # No [proxy], but a github row is declared: `github=on` WOULD need the proxy, so the operator
+    # should see the mitmproxy/CA prerequisites before arming it — while the listener row stays
+    # out, because with github off the supervisor runs no proxy daemon (desired_daemons is empty).
     names = _proxy_doctor_names(
         monkeypatch, proxy_declared=False, github_declared=True, mode={"github": "off"}
     )
@@ -890,7 +691,7 @@ def test_proxy_doctor_prerequisites_for_a_latent_injector_but_no_listener_row(mo
 
 def test_proxy_doctor_listener_row_once_an_injector_is_active(monkeypatch):
     names = _proxy_doctor_names(
-        monkeypatch, proxy_declared=False, github_declared=True, mode={"github": "app"}
+        monkeypatch, proxy_declared=False, github_declared=True, mode={"github": "on"}
     )
     assert "egress proxy" in names
 
@@ -902,52 +703,6 @@ def test_proxy_doctor_all_rows_for_an_opted_in_consumer(monkeypatch):
         monkeypatch, proxy_declared=True, github_declared=False, mode={"github": "off"}
     )
     assert names == ["mitmproxy", "mitm CA", "egress proxy"]
-
-
-def _injection_rows(monkeypatch, *, mode: str = "app", headers: str = "", rc: int = 0):
-    """github's BOX-side injection rows against a canned `curl -D -` response."""
-    monkeypatch.setattr(github, "_box_github_mode", lambda _env: mode)
-    ctx = DoctorContext(
-        deep=False,
-        run=lambda cmd, timeout=None: (rc, headers),
-        which=lambda _tool: True,
-        result=devmode._result,
-        probe=lambda _port: False,
-    )
-    return [row for row in github.GithubPlugin().box_doctor_checks(ctx) if row[0] != "running"]
-
-
-def test_box_doctor_detects_that_injection_is_not_actually_happening(monkeypatch):
-    """
-    The gap this check exists to close.
-
-    When the host-side mint broke, every state-reading signal stayed green — `fy mode` showed
-    `github app`, the proxy daemon showed up, `fy doctor` was ALL PASS — because each is a true
-    statement about host-side configuration. The wire told a different story: 401s from `gh`.
-    GitHub's anonymous rate limit (60/h) vs an authenticated one is the cheapest witness.
-    """
-    (status, name, detail) = _injection_rows(monkeypatch, headers="x-ratelimit-limit: 60\r\n")[0]
-    assert name == "github injection"
-    assert status == "fail"
-    assert "NOT injected" in detail
-    assert "fy host" in detail, "a failing check has to say what to do about it"
-
-
-def test_box_doctor_passes_when_the_app_token_is_reaching_requests(monkeypatch):
-    rows = _injection_rows(monkeypatch, headers="HTTP/2 200\r\nx-ratelimit-limit: 5000\r\n")
-    assert [(s, n) for s, n, _ in rows] == [("ok", "github injection")]
-
-
-def test_box_doctor_skips_the_injection_probe_when_github_is_off(monkeypatch):
-    """No network call in a mode that injects nothing — doctor stays fast and offline."""
-    assert _injection_rows(monkeypatch, mode="off") == []
-    assert _injection_rows(monkeypatch, mode="user") == []
-
-
-def test_box_doctor_reports_unreachable_rather_than_guessing(monkeypatch):
-    (status, _, detail) = _injection_rows(monkeypatch, rc=6, headers="")[0]
-    assert status == "fail"
-    assert "couldn't reach" in detail
 
 
 def test_dump_doctor_checks_and_fixes(monkeypatch, tmp_path):
@@ -1095,17 +850,18 @@ def test_proxy_running_doctor_check_uses_the_port_probe():
     assert down["egress proxy"] == "fail" and up["egress proxy"] == "ok"
 
 
-def test_doctor_fixes_match_their_checks_and_are_runnable(monkeypatch):
-    monkeypatch.setattr(config, "github_declared", lambda: True)  # a github consumer's fixes
-    reg = Registry([gcp.GcpPlugin(), github.GithubPlugin(), proxy.ProxyPlugin()])
+def test_doctor_fixes_match_their_checks_and_are_runnable():
+    reg = Registry([gcp.GcpPlugin(), _Github(), proxy.ProxyPlugin()])
     fixes = {f.check: f for f in reg.doctor_fixes()}
-    # each fix repairs a real check name, and the commands are the non-interactive ones
-    assert set(fixes) == {"gh CLI", "mitmproxy", "mitm CA"}
+    # each fix repairs a real check name, and the commands are the non-interactive ones. No
+    # `brew install gh` any more: the gh-cli kind runs `gh` on the operator's computer, and how
+    # that's installed is theirs (ADR-0031) — a macOS-only button on every host was the wrong
+    # answer anyway.
+    assert set(fixes) == {"mitmproxy", "mitm CA"}
     assert fixes["mitmproxy"].cmd[:3] == ["uv", "tool", "install"]
     assert "--editable" in fixes["mitmproxy"].cmd  # reinstall foldyard (mitmproxy is a core dep)
     # the button runs exactly what the doctor row / preflight TELL a reader to run
     assert fixes["mitmproxy"].cmd == proxy.host_install_cmd()
-    assert fixes["gh CLI"].cmd == ["brew", "install", "gh"]
     # the CA fix shells the venv python at mitmproxy's CertStore — no server, no port
     assert fixes["mitm CA"].cmd[1] == "-c" and "CertStore.create_store" in fixes["mitm CA"].cmd[2]
 
@@ -1143,27 +899,8 @@ def test_mitmproxy_doctor_row_names_the_reinstall(monkeypatch):
 
 
 # ── box_args (the box env/mounts hooks, ADR-0015) ────────────────────────────────────
-# github contributes only the dummy GH_TOKEN; the CA mount + proxy env are the proxy plugin's.
-
-
-def test_github_box_args_no_proxy_is_empty(monkeypatch):
-    # A proxy-less consumer's box stays clean — no dummy to ride a proxy that isn't there.
-    monkeypatch.setattr(config, "github_declared", lambda: True)
-    assert github.GithubPlugin().box_args({"PODMAN_PROJECT": "p"}) == []
-
-
-def test_github_box_args_proxy_adds_only_the_dummy_token(monkeypatch):
-    # The dummy GH_TOKEN=x is AMBIENT with the proxy substrate (FY_PROXY), NOT gated on a github
-    # rung — pre-positioned like the ambient CA so `fy mode github=app` flips live with no box
-    # recreate (it does need the declared [plugins.github] table, like every github hook now).
-    # It grants nothing: the host proxy's inject rule is the sole access gate, and the real
-    # token never enters the box.
-    monkeypatch.setattr(config, "github_declared", lambda: True)
-    assert github.GithubPlugin().box_args({"FY_PROXY": "h:8088"}) == ["-e", "GH_TOKEN=x"]
-    assert github.GithubPlugin().box_args({"FY_PROXY": "h:8088", "GH_INJECT": "app"}) == [
-        "-e",
-        "GH_TOKEN=x",
-    ]
+# an [[inject]] row contributes only its box_env dummies (test_inject_kinds.py); the CA mount +
+# proxy env are the proxy plugin's.
 
 
 def test_proxy_box_args_mounts_ca_and_proxy_env(monkeypatch, tmp_path):
@@ -1184,7 +921,7 @@ def test_proxy_box_args_mounts_ca_and_proxy_env(monkeypatch, tmp_path):
     assert (
         "SSL_CERT_FILE=/etc/dev-proxy-ca-combined.pem" in args
     )  # OpenSSL/uv/curl trust the proxy CA
-    assert "GH_TOKEN=x" not in args  # the dummy token is github's box_args, not the proxy's
+    assert "GH_TOKEN=x" not in args  # a dummy token is an injector row's box_env, not the proxy's
 
 
 def _no_proxy_value(args: list[str]) -> str:
@@ -1408,25 +1145,16 @@ def test_registry_box_args_merges(monkeypatch, tmp_path):
     monkeypatch.setenv("MITMPROXY_CA", str(ca))
     monkeypatch.setenv("DEVBOX_LOG_SA", "box@p.iam.gserviceaccount.com")
     monkeypatch.setattr(config, "gcp_project", lambda: "p")  # gcp configured → its label merges in
-    monkeypatch.setattr(config, "github_declared", lambda: True)  # github configured → dummy token
-    reg = Registry([gcp.GcpPlugin(), github.GithubPlugin(), proxy.ProxyPlugin()])
-    args = reg.box_args({"FY_PROXY": "h:8088", "GH_INJECT": "app", "PODMAN_PROJECT": "p"})
-    # gcp label (gcp) + dummy token (github, via GH_INJECT) + CA mount (proxy), all merged
+    rows = [{**_GITHUB_ROWS[0], "box_env": {"GH_TOKEN": "x"}}]
+    monkeypatch.setattr(config, "inject_specs", lambda: rows)  # a github row → its dummy token
+    reg = Registry([gcp.GcpPlugin(), inject.InjectPlugin(), proxy.ProxyPlugin()])
+    args = reg.box_args({"FY_PROXY": "h:8088", "PODMAN_PROJECT": "p"})
+    # gcp label (gcp) + dummy token (the github row's box_env) + CA mount (proxy), all merged
     assert "--label" in args and "GH_TOKEN=x" in args
     assert f"{ca}:/etc/dev-proxy-ca.pem:ro" in args
 
 
 # ── proxy_rules + the proxy plugin (the egress-proxy framework, ADR-0015) ──────
-
-
-def test_github_proxy_rule_app_vs_user():
-    app = github.GithubPlugin().proxy_rules({"github": "app"})
-    assert len(app) == 1 and app[0].host == "api.github.com" and app[0].header == "Authorization"
-    assert "-m foldyard.plugins.github_app_token" in app[0].minter and app[0].replay_on_401
-    assert "GH_APP_ID" in app[0].requires
-    user = github.GithubPlugin().proxy_rules({"github": "user"})
-    assert user[0].minter.endswith("-m foldyard.plugins.gh_cli_token") and user[0].requires == ()
-    assert github.GithubPlugin().proxy_rules({"github": "off"}) == []
 
 
 def test_proxy_and_gcp_daemons_are_per_worktree(monkeypatch):
@@ -1484,9 +1212,13 @@ def test_axis_daemon_names_are_per_worktree():
     cfg = config.Config(
         repo_root=config.repo_root(),
         worktree="feat",
-        toml={"proxy": {}, "plugins": {"gcp-metadata": {"project": "acme"}, "github": {}}},
+        toml={
+            "proxy": {},
+            "plugins": {"gcp-metadata": {"project": "acme"}},
+            "inject": _GITHUB_ROWS,
+        },
     )
-    reg = Registry([gcp.GcpPlugin(), github.GithubPlugin(), proxy.ProxyPlugin()], config=cfg)
+    reg = Registry([gcp.GcpPlugin(), inject.InjectPlugin(), proxy.ProxyPlugin()], config=cfg)
     assert reg.switch_daemon()["gcp"] == "gcp-minter@feat"
     assert reg.switch_daemon()["github"] == "egress-proxy@feat"
 
@@ -1503,8 +1235,8 @@ def test_main_worktree_daemons_keep_bare_names_and_base_ports():
 
 
 def test_registry_proxy_rules_merges_only_injectors():
-    reg = Registry([gcp.GcpPlugin(), github.GithubPlugin(), proxy.ProxyPlugin()])
-    rules = reg.proxy_rules({"github": "app"})
+    reg = Registry([gcp.GcpPlugin(), _Github(), proxy.ProxyPlugin()])
+    rules = reg.proxy_rules({"github": "on"})
     assert len(rules) == 1 and rules[0].host == "api.github.com"  # gcp + proxy add none
 
 
@@ -1514,22 +1246,22 @@ def _live_rules(spec: dict) -> dict[str, dict]:
 
 
 def test_proxy_daemon_built_from_the_github_rule():
-    reg = Registry([gcp.GcpPlugin(), github.GithubPlugin(), proxy.ProxyPlugin()])
-    spec = reg.desired_daemons({"github": "app"})["egress-proxy"]  # proxy owns the daemon now
+    reg = Registry([gcp.GcpPlugin(), _Github(), proxy.ProxyPlugin()])
+    spec = reg.desired_daemons({"github": "on"})["egress-proxy"]  # proxy owns the daemon now
     rule = _live_rules(spec)["api.github.com"]
     assert "-m foldyard.plugins.github_app_token" in rule["command"]
     assert rule["header"] == "Authorization"
-    assert rule["retry_401"] is True  # github sets replay_on_401=True
+    assert rule["retry_401"] is True  # the github-app kind defaults replay_on_401 on
     assert spec["env"]["CAPTURE_MODE"] == "full"  # always (ADR-0029)
-    # The App identity trio only — the PEM is deliberately not gate-able (see
-    # test_github_app_rule_never_requires_the_pem: a proxy that won't launch kills ALL box egress).
-    assert spec["requires"] == ["GH_APP_ID", "GH_INSTALLATION_ID", "GH_REPO"]
+    # Nothing gates the listener: the identity rides argv and the PEM degrades only this host (a
+    # proxy that won't launch kills ALL box egress).
+    assert spec["requires"] == []
     # cmd[0] is resolved (foldyard's venv copy or PATH) so it may be an absolute path — the
-    # basename is what's invariant. See proxy.mitmdump_path / the github[extra] packaging.
+    # basename is what's invariant. See proxy.mitmdump_path.
     assert "App token" in spec["label"] and os.path.basename(spec["cmd"][0]) == "mitmdump"
     # Large bodies stream through rather than buffering whole in the proxy's memory.
     assert "stream_large_bodies=1m" in spec["cmd"]
-    user = reg.desired_daemons({"github": "user"})["egress-proxy"]
+    user = reg.desired_daemons({"github-user": "on"})["egress-proxy"]
     assert _live_rules(user)["api.github.com"]["command"].endswith(
         "-m foldyard.plugins.gh_cli_token"
     )
@@ -1539,29 +1271,29 @@ def test_proxy_daemon_built_from_the_github_rule():
 def test_proxy_routing_is_gated_on_opt_in_or_an_active_injector(monkeypatch):
     # Phase A′ always-route, but only when the consumer OPTED IN ([proxy] table) or an injector is
     # active (github != off). A bare project with no [proxy] and github off gets NO FY_PROXY, so
-    # box_args adds no HTTPS_PROXY/NO_PROXY — a clean box. github still sets only its GH_INJECT.
-    reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
+    # box_args adds no HTTPS_PROXY/NO_PROXY — a clean box.
+    reg = Registry([_Github(), proxy.ProxyPlugin()])
 
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
-    assert "FY_PROXY" in reg.derive_env({"github": "app"})  # injector active → routed
+    assert "FY_PROXY" in reg.derive_env({"github": "on"})  # injector active → routed
     assert reg.derive_env({"github": "off"}) == {}  # bare + no opt-in → clean
 
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)  # [proxy] declared → always routed
     assert "FY_PROXY" in reg.derive_env({"github": "off"})
-
-    assert github.GithubPlugin().derive_env({"github": "app"}) == {"GH_INJECT": "app"}
-    assert github.GithubPlugin().derive_env({"github": "off"}) == {}
+    # …and the injector itself derives nothing: no GH_INJECT-style marker (what lights routing up
+    # is the rule set, which the proxy asks the registry for).
+    assert _Github().derive_env({"github": "on"}) == {}
 
 
 def test_proxy_daemon_gated_on_opt_in_or_injector(monkeypatch):
     # daemons() is gated the SAME as derive_env(): a consumer with no [proxy] and no active injector
     # gets NO egress-proxy listener — else desired_daemons() would expose :8088 and Doctor / the mode
     # dashboard would flag it perpetually DOWN for a project that never routes through it.
-    reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
+    reg = Registry([_Github(), proxy.ProxyPlugin()])
 
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
     assert reg.desired_daemons({"github": "off"}) == {}  # bare + no opt-in
-    assert "egress-proxy" in reg.desired_daemons({"github": "app"})  # injector active → listener
+    assert "egress-proxy" in reg.desired_daemons({"github": "on"})  # injector active → listener
 
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)  # [proxy] declared → always on
     assert "egress-proxy" in reg.desired_daemons({"github": "off"})
@@ -1573,7 +1305,7 @@ def test_proxy_is_always_on_and_always_decrypts(monkeypatch):
     # — there is no capture axis to ask (ADR-0029); with no injector there are no rules. (A consumer
     # that never opts in gets no daemon at all — test_proxy_daemon_gated_on_opt_in_or_injector.)
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
-    reg = Registry([gcp.GcpPlugin(), github.GithubPlugin(), proxy.ProxyPlugin()])
+    reg = Registry([gcp.GcpPlugin(), _Github(), proxy.ProxyPlugin()])
     assert "capture" not in reg.switch_levels()
     spec = reg.desired_daemons({"github": "off"})["egress-proxy"]
     assert spec["live"]["data"]["rules"] == []
@@ -1626,9 +1358,9 @@ def test_a_posture_change_leaves_the_proxy_launch_settings_alone():
     # The regression that cut a running apt download: turning an injector off (or on) changed the
     # daemon's env, and the supervisor restarts a daemon whose cmd/env changed. Rules now travel in
     # the live file the addon re-reads, so every posture launches — and keeps — the same process.
-    reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
+    reg = Registry([_Github(), proxy.ProxyPlugin()])
     off = reg.desired_daemons({"github": "off"})["egress-proxy"]
-    on = reg.desired_daemons({"github": "app"})["egress-proxy"]
+    on = reg.desired_daemons({"github": "on"})["egress-proxy"]
     assert (off["cmd"], off["env"]) == (on["cmd"], on["env"])
     assert off["live"]["path"] == on["live"]["path"]
     assert off["live"]["data"] != on["live"]["data"]
@@ -1640,15 +1372,15 @@ def test_a_posture_change_leaves_the_proxy_launch_settings_alone():
 def test_the_proxy_runs_without_host_env_in_its_environment():
     # The supervisor holds every axis's host.env secret in its environment; the proxy asks for it
     # to be stripped, and reads the names its rules declare from host.env itself.
-    reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
-    assert reg.desired_daemons({"github": "app"})["egress-proxy"]["scrub_host_env"] is True
+    reg = Registry([_Github(), proxy.ProxyPlugin()])
+    assert reg.desired_daemons({"github": "on"})["egress-proxy"]["scrub_host_env"] is True
 
 
 def test_proxy_decrypts_everything_else_beside_a_github_injector():
-    # github=app: the api.github.com rewrite rides the same always-decrypting daemon — an injector
+    # github=on: the api.github.com rewrite rides the same always-decrypting daemon — an injector
     # adds its rule without changing what happens to the rest of the box's egress.
-    reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
-    spec = reg.desired_daemons({"github": "app"})["egress-proxy"]
+    reg = Registry([_Github(), proxy.ProxyPlugin()])
+    spec = reg.desired_daemons({"github": "on"})["egress-proxy"]
     assert "-m foldyard.plugins.github_app_token" in _live_rules(spec)["api.github.com"]["command"]
     assert spec["env"]["CAPTURE_MODE"] == "full"
 
@@ -1671,8 +1403,8 @@ def test_proxy_serializes_multiple_injectors_into_a_rule_set():
                 )
             ]
 
-    reg = Registry([github.GithubPlugin(), _SecondInjector(), proxy.ProxyPlugin()])
-    by_host = _live_rules(reg.desired_daemons({"github": "app"})["egress-proxy"])
+    reg = Registry([_Github(), _SecondInjector(), proxy.ProxyPlugin()])
+    by_host = _live_rules(reg.desired_daemons({"github": "on"})["egress-proxy"])
     assert set(by_host) == {"api.github.com", "api.other.com"}  # both injectors present
     other = by_host["api.other.com"]
     assert other["command"] == "/m" and other["header"] == "authorization"
@@ -1680,16 +1412,11 @@ def test_proxy_serializes_multiple_injectors_into_a_rule_set():
     # github's app-token minter has no value_prefix → that key is omitted (compact serialization).
     assert "value_prefix" not in by_host["api.github.com"]
     # requires is the UNION across injectors (so the supervisor checks every minter's host.env keys).
-    requires = reg.desired_daemons({"github": "app"})["egress-proxy"]["requires"]
-    assert "OTHER_TOKEN" in requires and "GH_APP_ID" in requires
+    requires = reg.desired_daemons({"github": "on"})["egress-proxy"]["requires"]
+    assert requires == ["OTHER_TOKEN"]  # the github-app rule gates nothing
 
 
 # ── tui_panels (the TUI-panel hook, ADR-0015) — GCP Tokens (gcp) + Network Log (proxy) ────
-
-
-def test_github_contributes_no_tui_panel():
-    # github rides the proxy's Network Log (it's one injector); it owns no panel of its own.
-    assert github.GithubPlugin().tui_panels() == []
 
 
 def test_gcp_contributes_the_gcp_tokens_panel():
@@ -1886,92 +1613,13 @@ def _statuses(rows):
     return [status for status, _ in rows]
 
 
-def test_github_verify_off_clean_passes():
-    rows = list(github._verify_rows("off", gh_present=False, gh_token="", github_token=""))
-    assert "fail" not in _statuses(rows)
-
-
-def test_github_verify_off_token_fails():
-    rows = list(github._verify_rows("off", False, "ghp_real", ""))
-    assert "fail" in _statuses(rows)
-
-
-def test_github_verify_off_ambient_plumbing_passes():
-    # The dummy 'x' + the gh CLI are ambient box plumbing (baked with the proxy substrate so the
-    # axis flips live) and grant no access while the host injects nothing — NOT a posture fail.
-    # The tested invariant is no-real-token (+ the core's push-refused backstop).
-    rows = list(github._verify_rows("off", True, "x", ""))
-    assert "fail" not in _statuses(rows)
-
-
-def test_github_verify_off_real_looking_token_still_fails_with_plumbing():
-    rows = list(github._verify_rows("off", True, "ghp_real", ""))
-    assert "fail" in _statuses(rows)
-
-
-def test_github_verify_proxy_dummy_token_passes():
-    rows = list(github._verify_rows("app", True, "x", ""))
-    assert "fail" not in _statuses(rows)
-
-
-def test_github_verify_proxy_real_token_fails():
-    rows = list(github._verify_rows("user", True, "ghp_real", ""))
-    assert "fail" in _statuses(rows)
-
-
-def test_github_verify_user_mode_emits_emergency_info():
-    assert "info" in _statuses(github._verify_rows("user", True, "x", ""))  # EMERGENCY banner
-
-
-def test_box_github_mode_no_ca_is_off(monkeypatch, tmp_path):
-    monkeypatch.setattr(proxy, "BOX_CA", tmp_path / "nope.pem")
-    assert github._box_github_mode({}) == "off"
-
-
-def test_box_github_mode_ca_present_reads_mirror(monkeypatch, tmp_path):
-    ca = tmp_path / "ca.pem"
-    ca.write_text("c")
-    monkeypatch.setattr(proxy, "BOX_CA", ca)
-    monkeypatch.setattr(config, "github_declared", lambda: True)
-    checkout = tmp_path / "co"
-    mirror_dir = checkout / config.dev_vm_rel()
-    mirror_dir.mkdir(parents=True)
-    (mirror_dir / ".dev-mode.json").write_text('{"github": "user"}')
-    assert github._box_github_mode({"FOLDYARD_CHECKOUT": str(checkout)}) == "user"
-
-
-def test_box_github_mode_ca_present_no_mirror_defaults_app(monkeypatch, tmp_path):
-    ca = tmp_path / "ca.pem"
-    ca.write_text("c")
-    monkeypatch.setattr(proxy, "BOX_CA", ca)
-    monkeypatch.setattr(config, "github_declared", lambda: True)
-    assert github._box_github_mode({"FOLDYARD_CHECKOUT": str(tmp_path / "empty")}) == "app"
-
-
-def test_box_github_mode_undeclared_is_off_whatever_mounted_the_ca(monkeypatch, tmp_path):
-    # The CA is ambient proxy substrate (capture, claude keyless, …), so its presence must not
-    # read as github intent for a consumer with no [plugins.github] — the old "CA present, mode
-    # unknown → assume app" fallback made verify assert app-mode invariants (dummy-token rows)
-    # in boxes that never had github at all.
-    ca = tmp_path / "ca.pem"
-    ca.write_text("c")
-    monkeypatch.setattr(proxy, "BOX_CA", ca)
-    monkeypatch.setattr(config, "github_declared", lambda: False)
-    assert github._box_github_mode({"FOLDYARD_CHECKOUT": str(tmp_path / "empty")}) == "off"
-
-
-def test_github_verify_skipped_outside_box(monkeypatch, tmp_path):
-    monkeypatch.setattr(proxy, "BOX_CA", tmp_path / "nope.pem")
-    assert list(github.GithubPlugin().verify_checks(_vctx(in_box=False))) == []
-
-
 def test_registry_verify_checks_merges_in_box(monkeypatch, tmp_path):
-    monkeypatch.setattr(proxy, "BOX_CA", tmp_path / "nope.pem")  # github=off
+    monkeypatch.setattr(proxy, "BOX_CA", tmp_path / "nope.pem")
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    reg = Registry([gcp.GcpPlugin(), github.GithubPlugin()])
+    reg = Registry([gcp.GcpPlugin(), _Github()])
     rows = list(reg.verify_checks(_vctx(in_box=True, gh=False)))
-    assert rows  # github contributes; gcp is a no-op
+    assert rows  # inject contributes; gcp is a no-op
     assert "fail" not in _statuses(rows)
     assert all(status in ("pass", "fail", "info") for status in _statuses(rows))
 
@@ -2056,7 +1704,7 @@ def test_inject_axis_from_config(monkeypatch):
 
 
 def test_inject_emergency_key_makes_on_a_ttld_rung(monkeypatch):
-    # `emergency = true` gives an [[inject]] axis github=user's lifecycle: `on` expires (default
+    # `emergency = true` gives an [[inject]] axis an emergency lifecycle: `on` expires (default
     # TTL, or `ttl=`) and the supervisor switches it off — for a credential with write access
     ax = _inject_plugin(monkeypatch, [{**_PENPOT_SPEC, "emergency": True}]).switches()[0]
     assert ax.emergency == ("on",)
@@ -2210,12 +1858,9 @@ _IMAGE_TIED = (
 def test_box_bootstrap_steps_stay_image_agnostic(monkeypatch):
     monkeypatch.setattr(config, "claude_enabled", lambda: True)
     monkeypatch.setattr(config, "codex_enabled", lambda: True)
-    monkeypatch.setattr(config, "github_declared", lambda: True)
     env = {**_BOX_ENV, "FY_PROXY": "1", "CLAUDE_INJECT": "on"}
     steps = [
-        s
-        for p in (claude.ClaudePlugin(), codex.CodexPlugin(), github.GithubPlugin())
-        for s in p.box_bootstrap(dict(env))
+        s for p in (claude.ClaudePlugin(), codex.CodexPlugin()) for s in p.box_bootstrap(dict(env))
     ]
     assert len(steps) >= 3  # the guard is worthless if the plugins went inert on us
     for step in steps:
@@ -2327,7 +1972,7 @@ def test_claude_keyless_api_key_axis_rule_and_dummy(monkeypatch):
     monkeypatch.setattr(config, "claude_keyless", lambda: "api-key")
     p = claude.ClaudePlugin()
 
-    # The on/off injector axis, mapping to the shared egress-proxy daemon (like github/inject).
+    # The on/off injector axis, mapping to the shared egress-proxy daemon (like an [[inject]] row).
     axes = p.switches()
     assert len(axes) == 1 and axes[0].name == "claude"
     assert axes[0].levels == ("off", "on") and axes[0].daemon == "egress-proxy"
@@ -2341,7 +1986,7 @@ def test_claude_keyless_api_key_axis_rule_and_dummy(monkeypatch):
     assert "foldyard.plugins.static_token" in rule.minter and "ANTHROPIC_API_KEY" in rule.minter
     assert p.derive_env({"claude": "on"}) == {"CLAUDE_INJECT": "on"}
 
-    # The dummy is AMBIENT with the proxy substrate, like github's GH_TOKEN — not gated on the rung,
+    # The dummy is AMBIENT with the proxy substrate, like an [[inject]] box_env — not gated on the rung,
     # which is host-side while box env is create-time (that pairing made the flip need a recreate).
     assert not any("ANTHROPIC_API_KEY" in a for a in p.box_args(dict(_BOX_ENV)))  # no substrate
     args = p.box_args({**_BOX_ENV, "FY_PROXY": "1"})  # rung OFF
@@ -2794,7 +2439,9 @@ def test_image_pull_hosts_are_tunnelled_by_the_default_passthrough():
 
 def test_the_live_file_carries_the_rules_derived_defaults(monkeypatch):
     # Only the names a rule reads, and only derived (non-secret) values — env_defaults.
-    reg = Registry([github.GithubPlugin(), proxy.ProxyPlugin()])
-    monkeypatch.setattr(reg, "env_defaults", lambda mode: {"GH_APP_ID": "123", "UNRELATED": "x"})
-    live = reg.desired_daemons({"github": "app"})["egress-proxy"]["live"]["data"]
-    assert live["defaults"] == {"GH_APP_ID": "123"}
+    reg = Registry([_Github(), proxy.ProxyPlugin()])
+    monkeypatch.setattr(
+        reg, "env_defaults", lambda mode: {"FY_INJECT_GITHUB": "123", "UNRELATED": "x"}
+    )
+    live = reg.desired_daemons({"github": "on"})["egress-proxy"]["live"]["data"]
+    assert live["defaults"] == {"FY_INJECT_GITHUB": "123"}

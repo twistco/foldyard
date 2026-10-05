@@ -1,6 +1,6 @@
 """Opt-in LIVE capture e2e — the always-decrypting proxy end to end through a REAL dev box.
 
-Where ``test_proxy_box_e2e.py`` drives the INJECTION path (a github rule rewriting a header), this
+Where ``test_proxy_box_e2e.py`` drives the INJECTION path (a rule rewriting a header), this
 drives the CAPTURE path: the proxy run with NO injector (logging-only) plus a real box brought up
 with the REAL proxy wiring (always decrypt, ADR-0029), proving the whole "MITM-log all egress" flow Daniel asked
 about:
@@ -16,8 +16,8 @@ MITM CA system-wide (the fix for "curl/wget showed nothing"); (b) capture does N
 upstream echoes the box's ORIGINAL header, and the egress log records the request with
 ``injected=False``; (c) the host-grouped Network Log panel (the real ``proxy._network_panel_tree``,
 reading via ``config.tail_jsonl``) shows the request under its host with zero injected; and (d)
-capture sets the proxy env WITHOUT leaking the github dummy ``GH_TOKEN`` into the box (the
-GH_INJECT-marker fix). The daemon spec + box args come from the REAL ``ProxyPlugin``; only the
+capture sets the proxy env with only a ``github-app`` row's ambient ``box_env`` dummy ``GH_TOKEN``
+in the box, never a real token. The daemon spec + box args come from the REAL ``ProxyPlugin``; only the
 upstream is a fake.
 
 ADAPTED TOPOLOGY: identical to ``test_proxy_box_e2e.py`` — the proxy + upstream run in THIS process
@@ -53,8 +53,17 @@ from foldyard import allowlist, config
 from foldyard import box as boxmod
 from foldyard.plugins import Registry
 from foldyard.plugins import proxy as proxy_mod
-from foldyard.plugins.github import GithubPlugin
+from foldyard.plugins.inject import InjectPlugin
 from foldyard.plugins.proxy import BOX_CA, ProxyPlugin
+
+# GitHub as config (ADR-0031): the App row a capture-only consumer may carry, switch off.
+_GITHUB_ROW = {
+    "switch": "github",
+    "kind": "github-app",
+    "app_id": "1",
+    "installation_id": "2",
+    "box_env": {"GH_TOKEN": "x"},
+}
 
 ADDON = Path(__file__).resolve().parents[1] / "src/foldyard/assets/proxy/egress_proxy.py"
 # VM-visible scratch for the CA the box mounts (bind sources resolve on the podman MACHINE, so the
@@ -300,14 +309,14 @@ def capture_box(tmp_path, monkeypatch):
     # ── the capture daemon, from the REAL ProxyPlugin with NO injector ──────────────────────
     # Opt the consumer into the proxy ([proxy] declared) so the always-on daemon exists with no
     # injector — capture rides an opted-in proxy, exactly as a real stack-carrying consumer.
-    # [plugins.github] declared too: the ambient dummy-token wiring asserted below is a
-    # github-consumer property now (undeclared consumers get no GH_TOKEN at all).
+    # A `github-app` row declared too, its switch off: the ambient dummy asserted below is its
+    # `box_env` (a consumer that declares none gets no GH_TOKEN at all).
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
-    monkeypatch.setattr(config, "github_declared", lambda: True)
+    monkeypatch.setattr(config, "inject_specs", lambda: [_GITHUB_ROW])
     _wall_enforcing_with(
         f"{ip}:{uport}"
     )  # before the spec is built — it reads the wall + ALLOW_FILE
-    reg = Registry([GithubPlugin(), ProxyPlugin()])
+    reg = Registry([InjectPlugin(), ProxyPlugin()])
     spec = reg.desired_daemons({"github": "off"})["egress-proxy"]
     live = spec["live"]["data"]
     assert live["default_deny"] is True  # the wall is up; the upstream is granted through it
@@ -344,7 +353,7 @@ def capture_box(tmp_path, monkeypatch):
 
         # ── the box run args, from the REAL registry().box_args (the surface under test) ───────
         # FY_PROXY → our reachable self-ip:port (adapted topology). github=off, but the DUMMY
-        # GH_TOKEN=x is ambient with the proxy substrate (pre-positioned so the axis flips live);
+        # GH_TOKEN=x is ambient with the proxy substrate (pre-positioned so the switch flips live);
         # it's inert — the host proxy injects nothing under off. MITMPROXY_CA points box_args at
         # the VM-visible CA.
         monkeypatch.setenv("MITMPROXY_CA", str(vm_ca))
@@ -413,7 +422,7 @@ def test_capture_routes_egress_without_leaking_a_real_github_token(capture_box):
     proxied = box.exec("printenv", "HTTPS_PROXY")
     assert proxied.returncode == 0 and f"{ip}:" in proxied.stdout, "HTTPS_PROXY not set in the box"
     # … and with github=off the box holds at most the AMBIENT dummy 'x' (pre-positioned with the
-    # proxy substrate so the github axis flips live) — never a real credential. The dummy is inert:
+    # proxy substrate so the github switch flips live) — never a real credential. The dummy is inert:
     # no host-side inject rule exists under off, so api.github.com sees the literal 'x' and 401s.
     tok = box.exec("printenv", "GH_TOKEN")
     assert tok.returncode == 0 and tok.stdout.strip() == "x", (
@@ -461,7 +470,7 @@ def av_box(tmp_path, monkeypatch):
     _wall_enforcing_with(
         f"{ip}:{uport}"
     )  # before the specs are built — they read the wall + ALLOW_FILE
-    reg = Registry([GithubPlugin(), ProxyPlugin()])
+    reg = Registry([InjectPlugin(), ProxyPlugin()])
     spec = reg.desired_daemons({"github": "off"})["egress-proxy"]
     assert spec["env"]["CAPTURE_MODE"] == "full"
     assert spec["env"]["PROXY_LOG_FILE"] == str(log)

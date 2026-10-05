@@ -10,7 +10,8 @@ loosen a host-side control, and each is easy to lose track of:
     ``@all`` is one token that resolves to ~200 hosts; nothing anywhere showed that number, so
     "the proxy decrypts" read as "everything is logged" when it never meant that.
   - **injection targets** — the host each mechanism delivers a real credential to. Some are fixed
-    in package code (claude, codex, github), some are config (``[[inject]] host``). The difference
+    in package code (claude, codex), some are config (an ``[[inject]]`` row, its host declared or
+    pinned by its kind). The difference
     matters, so the report states it per row rather than listing them all as equals.
   - **agent steering** (``[claude]/[codex] system_prompt``, and the ``[claude.settings]`` /
     ``[codex.config]`` overrides the launchers pass to the CLI) — repo-controlled input to a
@@ -201,9 +202,10 @@ def _targets(
 ) -> list[Target]:
     """Every injection target this config can produce:
 
-    1. the ``[[inject]]`` rows — config-declared hosts, on or off (a declared-but-off injector is a
-       latent widening the operator should see BEFORE arming it),
-    2. the rules the CURRENT mode activates (the packaged plugins: claude, codex, github),
+    1. the ``[[inject]]`` rows — config-declared hosts (or the host a row's kind pins), on or off
+       (a declared-but-off injector is a latent widening the operator should see BEFORE arming
+       it). Every row is its own line: two rows on one host are two credentials, not one,
+    2. the rules the CURRENT mode activates (the packaged plugins: claude, codex),
     3. the rules another rung WOULD activate — asked of the REGISTRY rather than derived from host
        constants here, so a mechanism with an unusual shape reports as it actually behaves (Codex's
        ChatGPT rung injects on ``chatgpt.com/backend-api/codex``, not on the API host, and a report
@@ -211,6 +213,7 @@ def _targets(
     """
     from .plugins import registry
     from .plugins.inject import token_var
+    from .plugins.kinds import DEFAULT, KINDS
 
     reg = registry(cfg)
     out: list[Target] = []
@@ -225,15 +228,22 @@ def _targets(
         )
 
     for spec in config.inject_specs():
-        axis, host = str(spec.get("switch") or ""), str(spec.get("host") or "")
-        if axis and host:
-            add(
-                host + str(spec.get("path_prefix") or ""),
-                f"[[inject]] {axis}  (token: ${token_var(axis)})",
-                mode.get(axis, "off") != "off",
-                True,
-                origin,
+        kind = KINDS.get(str(spec.get("kind", DEFAULT)))
+        axis = str(spec.get("switch") or "")
+        host = str(spec.get("host") or (kind.host if kind else ""))
+        if not (axis and host and kind):
+            continue
+        where = host + str(spec.get("path_prefix") or "")
+        seen.add(where)  # a packaged rule on the same host adds nothing the row didn't say
+        out.append(
+            Target(
+                host=where,
+                source=f"[[inject]] {axis} ({kind.name}; {kind.source(token_var(axis))})",
+                active=mode.get(axis, "off") != "off",
+                from_config=True,
+                origin=origin,
             )
+        )
     for rule in reg.proxy_rules(mode):  # what the CURRENT posture activates
         add(rule.host + rule.path_prefix, rule.label or "packaged injector", True, False)
     for axis, rungs in reg.switch_levels().items():  # …and what another rung would

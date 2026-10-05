@@ -140,7 +140,7 @@ def host_install_hint() -> str:
 
 # Where the proxy CA is mounted inside the box; its presence is also how `verify` (in-box)
 # tells a proxy mode from off. One constant so the mount target and the posture probe (the
-# github plugin reads `proxy.BOX_CA`) can never drift apart.
+# box's own `verify` reads `proxy.BOX_CA`) can never drift apart.
 BOX_CA = Path("/etc/dev-proxy-ca.pem")
 
 # The COMBINED trust bundle the box-up snippet builds (system roots + the mitm CA). Phase A′
@@ -408,9 +408,9 @@ class ProxyPlugin(Plugin):
             # The open learn window's start: a new window resets the addon's per-host would-block
             # rate limit, or a host seen just before it would get no row inside it.
             "observing_since": _observing_since(),
-            # Derived, non-secret identity a rule's minter reads (github=app's GH_APP_ID & co.,
-            # from env_defaults): the running proxy never restarts to inherit the supervisor's env,
-            # so it gets them here. After exports and host.env, as the supervisor's setdefault.
+            # Derived, non-secret identity a rule's minter reads (from a plugin's env_defaults):
+            # the running proxy never restarts to inherit the supervisor's env, so it gets them
+            # here. After exports and host.env, as the supervisor's setdefault.
             "defaults": self._rule_defaults(mode, rules),
             # Keyless dummies at rest: the addon answers them with the fix instead of forwarding.
             "held": [asdict(h) for h in self._registry.held_credentials(mode)]
@@ -490,9 +490,8 @@ class ProxyPlugin(Plugin):
         #
         # Gated on the consumer OPTING IN (`[proxy]` table) — without it, a generic/stack-less
         # project gets a clean box (no FY_PROXY ⇒ box_args adds no HTTPS_PROXY/NO_PROXY env). ANY
-        # active injector (github=app/user, a `[[inject]]` axis, or claude keyless) needs the proxy,
-        # so an active rule lights routing up too — not just github (the rule set is the general
-        # signal; github is one case of it).
+        # active injector (an `[[inject]]` switch, or claude/codex keyless) needs the proxy, so
+        # an active rule lights routing up too (the rule set is the general signal).
         if not config.proxy_enabled() and not self._rules(mode):
             return {}
         # Per-worktree port (config.proxy_port) so each worktree's box routes to ITS OWN proxy
@@ -523,7 +522,8 @@ class ProxyPlugin(Plugin):
         #     Routing requires the CA (decrypted/MITM'd flows are mitm-signed), so no CA with
         #     routing is a hard error — `machine up`'s `foldyard host` generates it on first run.
         #
-        # The dummy GH_TOKEN is the INJECTOR's concern (github contributes it), not the proxy's.
+        # A dummy credential is the INJECTOR's concern ([[inject]] box_env, keyless), not the
+        # proxy's.
         proxy = env.get("FY_PROXY")
         ca = _mitm_ca()
         args: list[str] = []
@@ -602,10 +602,9 @@ class ProxyPlugin(Plugin):
         if not config.proxy_enabled() and not self._ever_rules(ctx.mode):
             return
         # Proxy-FRAMEWORK setup, host-side (the proxy daemon + CA live on the host): is mitmdump
-        # installed, and has its CA been generated? These were the github plugin's, but they're
-        # proxy concerns — github is just one injector that rides the proxy. Resolve mitmdump the
-        # same way the daemon does (foldyard's own venv OR PATH), not via ctx.which (PATH-only),
-        # since installing foldyard lands mitmdump in its own venv, off PATH.
+        # installed, and has its CA been generated? Proxy concerns, whichever injector rides it.
+        # Resolve mitmdump the same way the daemon does (foldyard's own venv OR PATH), not via
+        # ctx.which (PATH-only), since installing foldyard lands mitmdump in its own venv, off PATH.
         yield ctx.result(
             mitmdump_path() is not None,
             "mitmproxy",

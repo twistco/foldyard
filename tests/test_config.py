@@ -187,14 +187,14 @@ def test_disable_works_at_depth_and_the_marker_never_survives(fresh_config, tmp_
     # marker itself is stripped from blocks that STAY — nothing downstream should ever meet it.
     (tmp_path / "foldyard.toml").write_text(
         '[project]\nname = "p"\n'
-        '[plugins.github]\napp_id = "1"\n'
+        '[plugins.auth0-sim]\nharness = "x"\n'
         '[plugins.gcp-metadata]\nproject = "proj"\n'
     )
     (tmp_path / "foldyard.local.toml").write_text(
-        "[plugins.github]\ndisabled = true\n[plugins.gcp-metadata]\ndisabled = false\n"
+        "[plugins.auth0-sim]\ndisabled = true\n[plugins.gcp-metadata]\ndisabled = false\n"
     )
     fresh_config(FOLDYARD_REPO=tmp_path)
-    assert config.github_declared() is False
+    assert config.auth0_sim_declared() is False
     assert config.gcp_metadata_declared() is True  # explicitly kept
     assert "disabled" not in config._toml()["plugins"]["gcp-metadata"]
 
@@ -810,21 +810,6 @@ def test_secret_specs_absent_or_malformed_is_empty(fresh_config, tmp_path):
     assert config.secret_specs() == []
 
 
-def test_github_permissions_json_from_toml_or_env(fresh_config, tmp_path, monkeypatch):
-    (tmp_path / "foldyard.toml").write_text('[plugins.github]\npermissions = { issues = "read" }\n')
-    fresh_config(FOLDYARD_REPO=tmp_path)
-    monkeypatch.delenv("GH_APP_PERMISSIONS", raising=False)
-    assert config.github_permissions() == '{"issues": "read"}'
-    monkeypatch.setenv("GH_APP_PERMISSIONS", '{"contents": "read"}')
-    assert config.github_permissions() == '{"contents": "read"}'  # env wins, as everywhere
-
-
-def test_github_permissions_absent_is_empty_so_the_minter_defaults(fresh_config, tmp_path):
-    (tmp_path / "foldyard.toml").write_text('[plugins.github]\napp_id = "1"\n')
-    fresh_config(FOLDYARD_REPO=tmp_path)
-    assert config.github_permissions() == ""
-
-
 def test_inject_specs_absent_is_empty(fresh_config, tmp_path):
     (tmp_path / "foldyard.toml").write_text('[project]\nname = "x"\n')
     fresh_config(FOLDYARD_REPO=tmp_path)
@@ -937,29 +922,6 @@ def test_gcp_project_and_sa_labels_from_toml(fresh_config, tmp_path):
     fresh_config(FOLDYARD_REPO=tmp_path, GCP_PROJECT=None)
     assert config.gcp_project() == "acme-staging"
     assert config.gcp_sa_labels() == {"app": "app-runtime", "box": "log-reader"}
-
-
-def test_github_app_identity_from_toml(fresh_config, tmp_path):
-    (tmp_path / "foldyard.toml").write_text(
-        '[plugins.github]\napp_id = "1234567"\ninstallation_id = "12345678"\nrepo = "Tangible"\n'
-    )
-    fresh_config(FOLDYARD_REPO=tmp_path, GH_APP_ID=None, GH_INSTALLATION_ID=None, GH_REPO=None)
-    assert config.github_app_id() == "1234567"
-    assert config.github_installation_id() == "12345678"
-    assert config.github_repo() == "Tangible"
-
-
-def test_github_app_identity_env_wins_over_toml(fresh_config, tmp_path):
-    (tmp_path / "foldyard.toml").write_text(
-        '[plugins.github]\napp_id = "1234567"\ninstallation_id = "12345678"\nrepo = "Tangible"\n'
-    )
-    fresh_config(FOLDYARD_REPO=tmp_path, GH_APP_ID="9999999")
-    assert config.github_app_id() == "9999999"
-
-
-def test_github_app_identity_absent_is_empty(fresh_config, tmp_path):
-    fresh_config(FOLDYARD_REPO=tmp_path, GH_APP_ID=None, GH_INSTALLATION_ID=None, GH_REPO=None)
-    assert config.github_app_id() == config.github_installation_id() == config.github_repo() == ""
 
 
 # ── machine_host_wall ([machine] host_firewall — the host-side cgroup wall, Linux) ─────────

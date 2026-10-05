@@ -812,9 +812,10 @@ def port_bases() -> dict[str, int]:
 
 def proxy_enabled() -> bool:
     """True when the consumer opts INTO the egress proxy by declaring a ``[proxy]`` table (even
-    an empty one). The proxy is the substrate github injection + capture ride on, so absent ⇒
+    an empty one). The proxy is the substrate injection + the egress log ride on, so absent ⇒
     the dev box gets no proxy CA mount / ``HTTPS_PROXY``/``NO_PROXY`` env (a generic, stack-less
-    consumer stays clean). An active injector (``GH_INJECT`` in the box env) lights it up too."""
+    consumer stays clean). An active injection rule lights it up too — the proxy plugin asks the
+    registry's ``proxy_rules`` (``ProxyPlugin.derive_env``), not this."""
     return _toml().get("proxy") is not None
 
 
@@ -1298,7 +1299,7 @@ def claude_settings() -> dict:
 def claude_keyless() -> str:
     """``[claude].keyless`` — opt the box into KEYLESS Claude auth: NO real key/token in the box,
     the egress proxy injects the real one (held in ``host.env`` on the host) in flight, exactly like
-    the github injector. Returns the mode the box's dummy + the proxy rule are derived from:
+    an ``[[inject]]`` rule. Returns the mode the box's dummy + the proxy rule are derived from:
 
       - ``"api-key"`` (``true`` is an alias) — dummy ``ANTHROPIC_API_KEY``; rewrite ``x-api-key`` on
         ``api.anthropic.com`` from the real key in host.env.
@@ -1406,7 +1407,7 @@ def codex_enabled() -> bool:
 def codex_keyless() -> str:
     """``[codex].keyless`` — opt the box into KEYLESS Codex auth: NO real key in the box, the egress
     proxy injects the real ``OPENAI_API_KEY`` (held in ``host.env`` on the host) in flight, like the
-    Claude/github injectors. Modes:
+    Claude/``[[inject]]`` injectors. Modes:
 
       - ``"api-key"`` (``true`` aliases it) — dummy ``OPENAI_API_KEY``; rewrite ``Authorization``
         with ``Bearer `` + the real key on ``api.openai.com``.
@@ -1477,55 +1478,6 @@ def gcp_sa_labels() -> dict:
     from ``[plugins.gcp-metadata].sa_labels`` ({} if absent)."""
     labels = _gcp_table().get("sa_labels")
     return labels if isinstance(labels, dict) else {}
-
-
-# ── github plugin config (the App identity behind the `github=app` rung) ───────────────
-
-
-def _github_table() -> dict:
-    plugins = _toml().get("plugins")
-    table = plugins.get("github") if isinstance(plugins, dict) else None
-    return table if isinstance(table, dict) else {}
-
-
-def github_declared() -> bool:
-    """True when the consumer declares ``[plugins.github]`` (even empty — the opt-in for the
-    ``user`` emergency too, which needs no App fields). Mirrors :func:`gcp_metadata_declared`.
-    Gates the WHOLE github surface — axis, doctor rows, box plumbing — per the registry's
-    inert-until-declared contract (``plugins.load_plugins``): an undeclared consumer gets no
-    github mode row in the TUI and no gh/App nags in doctor."""
-    plugins = _toml().get("plugins")
-    return isinstance(plugins, dict) and isinstance(plugins.get("github"), dict)
-
-
-def github_app_id() -> str:
-    """The PR-bot GitHub App's numeric id. ``GH_APP_ID`` wins, then
-    ``[plugins.github].app_id``, else empty (github=app needs it set)."""
-    return os.environ.get("GH_APP_ID") or str(_github_table().get("app_id") or "")
-
-
-def github_installation_id() -> str:
-    """The App's installation id on the org. ``GH_INSTALLATION_ID`` wins, then
-    ``[plugins.github].installation_id``, else empty."""
-    return os.environ.get("GH_INSTALLATION_ID") or str(_github_table().get("installation_id") or "")
-
-
-def github_repo() -> str:
-    """Bare repo name (not owner/repo) the App is scoped to. ``GH_REPO`` wins, then
-    ``[plugins.github].repo``, else empty."""
-    return os.environ.get("GH_REPO") or str(_github_table().get("repo") or "")
-
-
-def github_permissions() -> str:
-    """``[plugins.github].permissions`` as the JSON the ``github-app`` minter scopes its
-    installation token down to (``GH_APP_PERMISSIONS`` wins). Empty ⇒ the minter's own default
-    (``pull_requests``/``issues`` write — the PR-bot shape). Declaring it here lets a consumer
-    NARROW or retarget the token without touching plugin code."""
-    ambient = os.environ.get("GH_APP_PERMISSIONS")
-    if ambient:
-        return ambient
-    table = _github_table().get("permissions")
-    return json.dumps(table, sort_keys=True) if isinstance(table, dict) and table else ""
 
 
 def _overlay_path(raw: object) -> Path | None:

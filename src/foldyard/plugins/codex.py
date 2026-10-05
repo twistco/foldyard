@@ -13,7 +13,8 @@ INSIDE the box, which the host's browser can't reach — so the workable in-box 
 the whole reason that rung exists.
 
 KEYLESS auth — no real credential in the box; the egress proxy injects it in flight (composes in the
-shared proxy's multi-injector rule set with claude / github). Two modes (``config.codex_keyless``):
+shared proxy's multi-injector rule set with claude / ``[[inject]]``). Two modes
+(``config.codex_keyless``):
 
   - ``"api-key"`` — rewrite ``Authorization`` on ``api.openai.com`` from ``OPENAI_API_KEY`` in
     ``host.env`` (``Bearer `` prefix), and bake a DUMMY ``OPENAI_API_KEY`` in the box.
@@ -27,7 +28,7 @@ shared proxy's multi-injector rule set with claude / github). Two modes (``confi
 
 Facts verified against the Codex source (openai/codex): the CLI installs from OpenAI's NATIVE
 installer (``chatgpt.com/codex/install.sh`` → a static musl binary), never npm — the house
-pattern every bootstrap step follows (see :mod:`~foldyard.plugins.github`), because the box
+pattern every bootstrap step follows (see :mod:`~foldyard.plugins.claude`), because the box
 contract promises git + uv + an engine client and nothing else, so an ``npm i -g`` step ✗'d on
 the generic uv-only image and on any consumer image whose node came without npm (Debian's
 ``nodejs`` package does). Creds live in ``$CODEX_HOME`` (default ``~/.codex``) as ``auth.json``
@@ -167,7 +168,7 @@ class CodexPlugin(Plugin):
         ]
 
     def derive_env(self, mode: dict) -> dict[str, str]:
-        # A codex-owned marker recording the rung in the box env, like github's GH_INJECT. Nothing
+        # A codex-owned marker recording the rung in the box env, like claude's. Nothing
         # box-side READS it any more (the dummies are ambient — see box_args/box_bootstrap), so a
         # codex flip changes no box-side state and needs no recreate; it stays as the visible
         # answer to "which rung was this box created under?".
@@ -194,7 +195,7 @@ class CodexPlugin(Plugin):
             args += ["-v", f"{transcripts}:{codex_home}/sessions"]
         # Keyless: bake the DUMMY OPENAI_API_KEY so the client emits the Authorization header the
         # proxy overwrites in flight. AMBIENT with the proxy substrate (FY_PROXY) whenever keyless
-        # is CONFIGURED — not gated on the rung, exactly like github's dummy GH_TOKEN. The rung is a
+        # is CONFIGURED — not gated on the rung, exactly like an [[inject]] box_env. The rung is a
         # host-side decision (does the proxy inject?), and gating box-side state on it made
         # `fy mode codex=on` a lie until you recreated the box: the flip landed, nothing in the box
         # changed, and codex asked you to log in. A non-keyless [codex] box (a real login in
