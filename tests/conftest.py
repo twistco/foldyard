@@ -165,6 +165,16 @@ def isolated_capability_state(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_proxy_ca(tmp_path, monkeypatch):
+    """Point the proxy CA at a MISSING file of mitmproxy's default name under the test's tmp dir.
+    ``proxy.ensure_ca()`` generates a CA when its file is missing, through the allowlisted
+    interpreter, so without this a test wrote a real CA private key into the operator's (or a CI
+    runner's) ~/.mitmproxy — and a test on a machine that already had one saw it, which is how a
+    test passed locally and failed on CI. A test that wants a CA writes one and re-points this."""
+    monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "mitmproxy" / "mitmproxy-ca-cert.pem"))
+
+
+@pytest.fixture(autouse=True)
 def isolated_config_pin(tmp_path, monkeypatch):
     """Point the ADOPTED-config snapshot (configpin) at a per-test dir, so no test reads or writes
     the real ``~/.foldyard/<project>/*/config/`` — and every test starts from "nothing adopted
