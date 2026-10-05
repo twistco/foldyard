@@ -828,15 +828,14 @@ def test_a_retired_github_table_is_found_in_the_resolved_config(fresh_config, tm
     assert config.retired_github_table() is None
 
 
-def test_a_retired_github_table_still_in_the_tree_is_found_though_the_host_runs_another(
-    fresh_config, tmp_path
-):
-    # On the host the resolved config is the ADOPTED copy; a tree that still carries the table is
-    # one adoption away from being run, so the refusal says so now rather than at the next adopt.
-    # Only ever a refusal: nothing the tree says here is acted upon.
+def test_a_retired_github_table_only_in_the_tree_is_not_read_on_the_host(fresh_config, tmp_path):
+    # The refusal reads the ADOPTED copy only. A tree read would let anything that can write the
+    # checkout block the operator's `fy up` (a host consequence, however narrow — CLAUDE.md's
+    # "repo config is never live input to the host"), and it buys nothing: the adopt gate runs
+    # first, so a table in the tree is shown in `fy config diff` and refused once adopted.
     (tmp_path / "foldyard.toml").write_text(_OLD_GITHUB)
     with config.using(config.Config(repo_root=tmp_path, worktree="", toml={})):
-        assert config.retired_github_table() is not None
+        assert config.retired_github_table() is None
 
 
 def test_the_replacement_rows_are_computed_from_the_old_table():

@@ -1490,17 +1490,16 @@ def _github_table_in(doc: dict) -> dict | None:
 
 
 def retired_github_table() -> dict | None:
-    """``[plugins.github]`` if this checkout still declares it, else None — in the resolved config
-    (on the host, the ADOPTED copy) or, failing that, in its working tree.
+    """``[plugins.github]`` if this checkout's resolved config still declares it (on the host, the
+    ADOPTED copy — never the working tree), else None.
 
     The table was REMOVED, not deprecated (ADR-0031, a clean break like ADR-0023's ``[[inject]]
     minter``): GitHub is two ``[[inject]]`` kinds now, and nothing loads the table any more — so a
     config still carrying it has had its GitHub access go silently quiet. ``fy up`` refuses it
-    (``preflight``), printing :func:`github_table_replacement`. The tree is read too because a
-    table still there is one adoption away from being run; that read is safe on the host only
-    because the answer can do nothing but REFUSE — nothing the tree says here is acted upon."""
-    found = _github_table_in(_toml())
-    return found if found is not None else _github_table_in(_tree_toml(repo_root()))
+    (``preflight``), printing :func:`github_table_replacement`. A table only in the tree isn't
+    looked for: the adopt gate shows it first, and refusing on the tree's say-so would let anything
+    that can write the checkout block the operator's launch."""
+    return _github_table_in(_toml())
 
 
 def github_table_replacement(table: dict) -> str:
