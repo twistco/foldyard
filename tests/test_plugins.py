@@ -1269,12 +1269,15 @@ def test_proxy_daemon_built_from_the_github_rule():
     assert user["requires"] == []
 
 
-def test_proxy_routing_is_gated_on_opt_in_or_a_declared_injector(monkeypatch):
+def test_proxy_routing_is_gated_on_opt_in_or_a_declared_injector(monkeypatch, tmp_path):
     # Phase A′ always-route, but only when the consumer OPTED IN ([proxy] table) or declares an
     # injector — ON OR OFF. A box is routed at CREATE time, so a declared injector whose switch was
     # off then must still have the route (and its box_env dummy), or switching it on later can't
     # reach the running box (CodeRabbit on #52). A project with no [proxy] and no injector at all
     # gets NO FY_PROXY, so box_args adds no HTTPS_PROXY/NO_PROXY — a clean box.
+    ca = tmp_path / "ca.pem"  # box_args needs a CA to route; never the operator's own
+    ca.write_text("CERT")
+    monkeypatch.setenv("MITMPROXY_CA", str(ca))
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
     assert Registry([proxy.ProxyPlugin()]).derive_env({}) == {}  # nothing declared → clean
 
