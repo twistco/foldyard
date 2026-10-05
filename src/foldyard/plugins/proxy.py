@@ -76,23 +76,32 @@ def mitmdump_path() -> str | None:
     return shutil.which("mitmdump")
 
 
-def _mitm_ca() -> Path:
-    """The proxy CA path — ``$MITMPROXY_CA`` or mitmproxy's default. One helper so the doctor
-    check, the 'generate CA' fix, and box_args (above) all point at the same file."""
-    return Path(os.environ.get("MITMPROXY_CA", Path.home() / ".mitmproxy/mitmproxy-ca-cert.pem"))
-
-
 # mitmproxy's own name for its CA files (``<basename>-ca-cert.pem`` and siblings in the confdir);
 # generation can't be told another file name.
 _CA_BASENAME = "mitmproxy"
 _CA_CERT_NAME = f"{_CA_BASENAME}-ca-cert.pem"
 
 
+def _proxy_confdir() -> Path:
+    """The confdir the proxy SIGNS with: mitmproxy's default, since foldyard launches mitmdump
+    without ``--set confdir``. ``MITMPROXY_CA`` doesn't move it — it only says where foldyard
+    reads the public cert (and staging re-points it at a key-less copy under the checkout, so it
+    could never be the confdir). The one place a CA is generated."""
+    return Path.home() / ".mitmproxy"
+
+
+def _mitm_ca() -> Path:
+    """The proxy CA path — ``$MITMPROXY_CA`` or mitmproxy's default. One helper so the doctor
+    check, the 'generate CA' fix, and box_args (above) all point at the same file."""
+    return Path(os.environ.get("MITMPROXY_CA", _proxy_confdir() / _CA_CERT_NAME))
+
+
 def generate_ca_argv() -> list[str]:
     """Generate the proxy CA with no server/port, via mitmproxy's own API (``sys.executable`` is
     foldyard's venv python, which carries mitmproxy). The doctor's "generate CA" fix and
-    :func:`ensure_ca` run this same call; the confdir is the CA's dir."""
-    confdir = _mitm_ca().parent
+    :func:`ensure_ca` run this same call. It writes the proxy's own confdir, never beside a
+    ``MITMPROXY_CA`` that names a copy elsewhere: a CA there is one mitmdump never signs with."""
+    confdir = _proxy_confdir()
     gen_ca = (
         "from pathlib import Path; from mitmproxy.certs import CertStore; "
         f"d = Path({str(confdir)!r}); d.mkdir(parents=True, exist_ok=True); "
@@ -107,17 +116,18 @@ def ensure_ca() -> None:
     before the supervisor starts (:func:`foldyard.machine.ensure`). Best-effort: a failure leaves
     the CA missing, which the caller reports.
 
-    Raises :class:`ValueError` when ``MITMPROXY_CA`` names a missing file mitmproxy can't write:
-    it names what it generates (:data:`_CA_CERT_NAME`), so generating would leave that file
-    missing, and a renamed copy would be a CA the proxy (mitmproxy's default confdir) never
-    signs with."""
+    Raises :class:`ValueError` when ``MITMPROXY_CA`` names a missing file other than the proxy's
+    own CA (:func:`_proxy_confdir`): mitmdump signs with that one whatever ``MITMPROXY_CA`` says,
+    so a CA generated or renamed anywhere else would be one the proxy never signs with — the
+    walled VM would trust it and stack HTTPS would still fail."""
     ca = _mitm_ca()
     if ca.exists():
         return
-    if ca.name != _CA_CERT_NAME:
+    own = _proxy_confdir() / _CA_CERT_NAME
+    if ca != own:
         raise ValueError(
-            f"MITMPROXY_CA names {ca}, which doesn't exist, and mitmproxy can only generate"
-            f" {_CA_CERT_NAME}"
+            f"MITMPROXY_CA names {ca}, which doesn't exist, and foldyard only generates the"
+            f" proxy's own CA ({own}), the one mitmdump signs with"
         )
     subprocess.run(generate_ca_argv(), capture_output=True, text=True, check=False)
 

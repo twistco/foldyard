@@ -142,4 +142,5 @@ def test_the_proxy_ca_is_never_the_operators():
 
     ca = proxy._mitm_ca()
     assert not ca.is_relative_to(Path.home() / ".mitmproxy")
+    assert proxy._proxy_confdir() == ca.parent  # generation writes the test's tmp dir too
     assert ca.name == "mitmproxy-ca-cert.pem" and not ca.exists()

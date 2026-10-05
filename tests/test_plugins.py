@@ -1377,6 +1377,7 @@ def test_guest_ca_pem_never_reads_the_staged_copy(monkeypatch, tmp_path):
 def test_ensure_ca_generates_only_a_missing_ca(monkeypatch, tmp_path):
     ran: list[list[str]] = []
     monkeypatch.setattr(proxy.subprocess, "run", lambda argv, **kw: ran.append(argv))
+    monkeypatch.setattr(proxy, "_proxy_confdir", lambda: tmp_path / "mitm")
     monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "mitm" / "mitmproxy-ca-cert.pem"))
     proxy.ensure_ca()
     assert ran == [proxy.generate_ca_argv()]  # the same call the doctor's "generate CA" makes
@@ -1397,6 +1398,31 @@ def test_ensure_ca_refuses_a_missing_file_generation_cannot_name(monkeypatch, tm
     with pytest.raises(ValueError, match=r"my-ca\.pem.*mitmproxy-ca-cert\.pem"):
         proxy.ensure_ca()
     assert ran == []
+
+
+def test_ensure_ca_refuses_a_missing_ca_outside_the_proxys_own_confdir(monkeypatch, tmp_path):
+    # mitmdump runs with mitmproxy's default confdir, so that is the CA it signs with whatever
+    # MITMPROXY_CA says. Generating a CA anywhere else — even under mitmproxy's own file name —
+    # would hand the walled VM a CA the proxy never signs with: stack HTTPS still fails, now
+    # with a CA that looks right. So only the proxy's own CA is ever generated.
+    ran: list[list[str]] = []
+    monkeypatch.setattr(proxy.subprocess, "run", lambda argv, **kw: ran.append(argv))
+    monkeypatch.setattr(proxy, "_proxy_confdir", lambda: tmp_path / "own")
+    monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "corp" / "mitmproxy-ca-cert.pem"))
+    with pytest.raises(ValueError, match=r"corp/mitmproxy-ca-cert\.pem.*own/mitmproxy-ca-cert"):
+        proxy.ensure_ca()
+    assert ran == []
+
+
+def test_generating_the_ca_writes_the_proxys_own_confdir_whatever_mitmproxy_ca_says(
+    monkeypatch, tmp_path
+):
+    # The doctor's "generate CA" fix runs this argv too, so it must write where mitmdump signs
+    # from — not beside a MITMPROXY_CA that names a copy elsewhere (e.g. the staged one).
+    monkeypatch.setattr(proxy, "_proxy_confdir", lambda: tmp_path / "own")
+    monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "elsewhere" / "mitmproxy-ca-cert.pem"))
+    script = proxy.generate_ca_argv()[-1]
+    assert repr(str(tmp_path / "own")) in script and "elsewhere" not in script
 
 
 def test_ensure_ca_leaves_an_existing_file_of_any_name_alone(monkeypatch, tmp_path):
