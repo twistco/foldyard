@@ -724,7 +724,11 @@ def test_ensure_refuses_a_running_machine_whose_provisioning_is_stale(lima_env, 
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == []
     assert guest.reads == 0
-    assert "fy machine stop" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "fy machine stop" in err
+    # The walled boot setup now embeds the proxy CA too, so a changed CA is one of the reasons
+    # the message must name — or "nothing I changed is on that list" sends the operator digging.
+    assert "the proxy CA" in err
 
 
 def test_ensure_steady_state_only_reads_the_guest(lima_env, tmp_path):

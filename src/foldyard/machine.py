@@ -465,7 +465,8 @@ def _record_provisioning() -> None:
         return
     if state() == "running":
         _err(f"✗ '{MACHINE}' is running with STALE boot provisioning — the sudo grant, the VM")
-        _err("  firewall or its port range changed (or the VM predates boot provisioning).")
+        _err("  firewall, its port range or the proxy CA changed (or the VM predates boot")
+        _err("  provisioning).")
         _err("  It applies at boot, as root, from the recorded config, so restart:")
         _err("      fy machine stop && fy up")
         raise SystemExit(1)
