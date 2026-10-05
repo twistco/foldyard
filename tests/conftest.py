@@ -235,6 +235,11 @@ def ambient_reads_the_tree(monkeypatch):
     from foldyard import config
 
     monkeypatch.setattr(config, "_host_toml", config._tree_toml)
+    # The ambient resolution is memoized, and modules that bind config at import (machine.MACHINE
+    # …) fill that cache at COLLECTION, before this patch — from the operator's REAL adopted
+    # snapshot for this checkout path. Without clearing it a test read that instead of the tree:
+    # green where the developer had adopted the checkout, red in a fresh worktree of it.
+    config.clear_caches()
 
 
 @pytest.fixture(autouse=True)
