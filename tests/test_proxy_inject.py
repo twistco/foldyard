@@ -647,6 +647,7 @@ async def test_a_failed_mint_is_remembered_not_re_run_per_request(mint_failing, 
     inj = mint_failing.inj
     first, again = _unsent_flow(), _unsent_flow()
     await inj.requestheaders(first)
+    assert first.response is not None
     assert _mint_runs(mint_failing.minter) == 1
     gh.logs.clear()
 
