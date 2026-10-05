@@ -329,6 +329,15 @@ def test_set_mode_refuses_a_level_whose_rules_overlap_another_switch(isolated_st
     }
 
 
+def test_an_inherited_overlap_is_cleared_by_turning_either_switch_off(isolated_state, monkeypatch):
+    # State that already overlaps (an older foldyard's, or a row adopted while both were on) must
+    # not lock the operator in: the fix the refusal names — one switch off — is itself accepted.
+    _two_injectors(monkeypatch)
+    for off in ("a", "b"):
+        isolated_state["auth"].write_text(json.dumps({"a": "on", "b": "on"}))
+        assert devmode.set_mode({off: "off"}, reconcile=False)["mode"][off] == "off"
+
+
 def test_settle_leaves_an_overlap_to_the_operator(isolated_state, monkeypatch):
     # A TTL lapse can't create an overlap (it only turns things off), so the expiry cascade has
     # no business resolving one it happens to find: choosing which switch to drop would pick a
