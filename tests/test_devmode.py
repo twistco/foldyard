@@ -740,13 +740,14 @@ def test_worktree_config_main_ignores_bound_worktree(monkeypatch, tmp_path):
 # ── env derivation ────────────────────────────────────────────────────────────────────
 
 
-def test_derive_env_clean_when_proxy_not_opted_in(monkeypatch):
-    # Gated: with no [proxy] table declared and github off, NOTHING routes — a generic consumer's
-    # box stays clean (no FY_PROXY ⇒ no HTTPS_PROXY/NO_PROXY env baked in).
+def test_derive_env_routes_a_declared_injector_even_while_off(monkeypatch):
+    # No [proxy] table, but the config declares injectors (github rows): the box is routed from
+    # create time even with them off, so switching one on later needs no box recreate. (A project
+    # declaring no injector and no [proxy] stays clean — test_plugins' gate tests pin that.)
     from foldyard import config
 
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
-    assert devmode.derive_env({"gcp": "off", "github": "off"}) == {}
+    assert "FY_PROXY" in devmode.derive_env({"gcp": "off", "github": "off"})
 
 
 def test_derive_env_offline_routes_when_proxy_opted_in(monkeypatch):

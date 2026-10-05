@@ -814,8 +814,8 @@ def proxy_enabled() -> bool:
     """True when the consumer opts INTO the egress proxy by declaring a ``[proxy]`` table (even
     an empty one). The proxy is the substrate injection + the egress log ride on, so absent ⇒
     the dev box gets no proxy CA mount / ``HTTPS_PROXY``/``NO_PROXY`` env (a generic, stack-less
-    consumer stays clean). An active injection rule lights it up too — the proxy plugin asks the
-    registry's ``proxy_rules`` (``ProxyPlugin.derive_env``), not this."""
+    consumer stays clean). A DECLARED injector lights it up too, on or off, since the box is routed
+    at create time — the proxy plugin asks the registry (``ProxyPlugin._opted_in``), not this."""
     return _toml().get("proxy") is not None
 
 

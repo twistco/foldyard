@@ -678,15 +678,14 @@ def test_proxy_doctor_silent_for_a_consumer_the_proxy_never_serves(monkeypatch):
     assert names == []
 
 
-def test_proxy_doctor_prerequisites_for_a_latent_injector_but_no_listener_row(monkeypatch):
-    # No [proxy], but a github row is declared: `github=on` WOULD need the proxy, so the operator
-    # should see the mitmproxy/CA prerequisites before arming it — while the listener row stays
-    # out, because with github off the supervisor runs no proxy daemon (desired_daemons is empty).
+def test_proxy_doctor_all_rows_for_a_declared_injector_even_while_off(monkeypatch):
+    # No [proxy], but a github row is declared: the box is routed through the proxy from create
+    # time even with github off (so switching it on needs no recreate), so the supervisor runs the
+    # listener and the doctor checks it — along with the mitmproxy/CA prerequisites.
     names = _proxy_doctor_names(
         monkeypatch, proxy_declared=False, github_declared=True, mode={"github": "off"}
     )
-    assert "mitmproxy" in names and "mitm CA" in names
-    assert "egress proxy" not in names
+    assert {"mitmproxy", "mitm CA", "egress proxy"} <= set(names)
 
 
 def test_proxy_doctor_listener_row_once_an_injector_is_active(monkeypatch):
@@ -1270,15 +1269,28 @@ def test_proxy_daemon_built_from_the_github_rule():
     assert user["requires"] == []
 
 
-def test_proxy_routing_is_gated_on_opt_in_or_an_active_injector(monkeypatch):
-    # Phase A′ always-route, but only when the consumer OPTED IN ([proxy] table) or an injector is
-    # active (github != off). A bare project with no [proxy] and github off gets NO FY_PROXY, so
-    # box_args adds no HTTPS_PROXY/NO_PROXY — a clean box.
-    reg = Registry([_Github(), proxy.ProxyPlugin()])
-
+def test_proxy_routing_is_gated_on_opt_in_or_a_declared_injector(monkeypatch):
+    # Phase A′ always-route, but only when the consumer OPTED IN ([proxy] table) or declares an
+    # injector — ON OR OFF. A box is routed at CREATE time, so a declared injector whose switch was
+    # off then must still have the route (and its box_env dummy), or switching it on later can't
+    # reach the running box (CodeRabbit on #52). A project with no [proxy] and no injector at all
+    # gets NO FY_PROXY, so box_args adds no HTTPS_PROXY/NO_PROXY — a clean box.
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
-    assert "FY_PROXY" in reg.derive_env({"github": "on"})  # injector active → routed
-    assert reg.derive_env({"github": "off"}) == {}  # bare + no opt-in → clean
+    assert Registry([proxy.ProxyPlugin()]).derive_env({}) == {}  # nothing declared → clean
+
+    reg = Registry([_Github(), proxy.ProxyPlugin()])
+    assert "FY_PROXY" in reg.derive_env({"github": "on"})
+    off = reg.derive_env({"github": "off"})
+    assert "FY_PROXY" in off  # declared but off → still routed
+    rows = [{**_GITHUB_ROWS[0], "box_env": {"GH_TOKEN": "x"}}]
+
+    class _WithDummy(inject.InjectPlugin):
+        def _specs(self) -> list[dict]:
+            with config.using(_cfg({"inject": rows})):
+                return super()._specs()
+
+    dummied = Registry([_WithDummy(), proxy.ProxyPlugin()])
+    assert "GH_TOKEN=x" in dummied.box_args(dummied.derive_env({"github": "off"}))  # …and its dummy
 
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)  # [proxy] declared → always routed
     assert "FY_PROXY" in reg.derive_env({"github": "off"})
@@ -1287,15 +1299,17 @@ def test_proxy_routing_is_gated_on_opt_in_or_an_active_injector(monkeypatch):
     assert _Github().derive_env({"github": "on"}) == {}
 
 
-def test_proxy_daemon_gated_on_opt_in_or_injector(monkeypatch):
-    # daemons() is gated the SAME as derive_env(): a consumer with no [proxy] and no active injector
-    # gets NO egress-proxy listener — else desired_daemons() would expose :8088 and Doctor / the mode
-    # dashboard would flag it perpetually DOWN for a project that never routes through it.
-    reg = Registry([_Github(), proxy.ProxyPlugin()])
-
+def test_proxy_daemon_gated_on_opt_in_or_a_declared_injector(monkeypatch):
+    # daemons() is gated the SAME as derive_env(): a box routed at create time must find a listener
+    # whatever the switch says since — a dead :8088 connection-refuses every box request. With no
+    # [proxy] and no injector there is no listener, so Doctor / the mode dashboard never flag one
+    # DOWN for a project that never routes through it.
     monkeypatch.setattr(config, "proxy_enabled", lambda: False)
-    assert reg.desired_daemons({"github": "off"}) == {}  # bare + no opt-in
-    assert "egress-proxy" in reg.desired_daemons({"github": "on"})  # injector active → listener
+    assert Registry([proxy.ProxyPlugin()]).desired_daemons({}) == {}  # nothing declared
+
+    reg = Registry([_Github(), proxy.ProxyPlugin()])
+    assert "egress-proxy" in reg.desired_daemons({"github": "off"})  # declared, off → listener
+    assert "egress-proxy" in reg.desired_daemons({"github": "on"})
 
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)  # [proxy] declared → always on
     assert "egress-proxy" in reg.desired_daemons({"github": "off"})
@@ -2328,7 +2342,8 @@ def test_claude_keyless_routes_through_proxy(monkeypatch):
     monkeypatch.setattr(config, "proxy_default_deny", lambda: False)
     reg = Registry([claude.ClaudePlugin(), proxy.ProxyPlugin()])
     assert "FY_PROXY" in reg.derive_env({"claude": "on"})  # injector active → routed (no [proxy])
-    assert reg.derive_env({"claude": "off"}) == {}  # off + no opt-in → clean box
+    # Off but DECLARED → still routed, so `fy mode claude=on` reaches a box made while it was off.
+    assert "FY_PROXY" in reg.derive_env({"claude": "off"})
     rules = _live_rules(reg.desired_daemons({"claude": "on"})["egress-proxy"])
     assert rules["api.anthropic.com"]["header"] == "x-api-key"
 

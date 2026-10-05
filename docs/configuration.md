@@ -306,7 +306,9 @@ my-feature = 2
 
 **Presence-gated.** Declaring `[proxy]`, even empty, routes the box's internet traffic through
 the proxy on your computer (the box gets its CA and `HTTPS_PROXY`/`NO_PROXY`). Required when
-`[machine] firewall = true`. Absent: no proxy settings in the box at all.
+`[machine] firewall = true`. Declaring a credential (an `[[inject]]` row, or keyless Claude or
+Codex) routes the box the same way, even while its switch is off, so switching it on later
+reaches a box that already exists. Neither: no proxy settings in the box at all.
 
 ```toml
 [proxy]

@@ -691,6 +691,19 @@ class Registry:
         """switch -> its zero-secret resting level (levels[0]) — what unset/expired reads as."""
         return {name: ax.default for name, ax in self._switches.items()}
 
+    def declares_injection(self) -> bool:
+        """Whether any switch, at any level off its rest, would put a rule on the proxy — an
+        injector is DECLARED, whatever the mode says now. The box is routed at create time, so
+        the proxy's opt-in has to follow this rather than the current mode: a box made while an
+        injector was off must still reach the proxy (and carry its dummy) once it is switched on."""
+        defaults = self.switch_defaults()
+        return any(
+            self.proxy_rules({**defaults, name: level})
+            for name, ax in self._switches.items()
+            for level in ax.levels
+            if level != defaults[name]
+        )
+
     def blurbs(self) -> dict[tuple[str, str], str]:
         return {(n, r): t for n, ax in self._switches.items() for r, t in ax.blurb.items()}
 

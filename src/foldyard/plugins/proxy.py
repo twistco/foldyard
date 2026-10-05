@@ -363,18 +363,26 @@ class ProxyPlugin(Plugin):
         one — `_registry` is bound in Registry.__init__)."""
         return self._registry.proxy_rules(mode) if self._registry else []
 
+    def _opted_in(self, mode: dict) -> bool:
+        """The one gate for routing, the listener and its doctor row: a ``[proxy]`` table, an
+        active rule, or an injector merely DECLARED. The last matters because the box is routed at
+        create time: an injector that was off then must still find the route, its dummy and a
+        listener when it is switched on later (no box recreate)."""
+        if config.proxy_enabled() or self._rules(mode):
+            return True
+        return bool(self._registry) and self._registry.declares_injection()
+
     def _rule_defaults(self, mode: dict, rules: list) -> dict[str, str]:
         names = {key for r in rules for key in r.env}
         derived = self._registry.env_defaults(mode) if self._registry else {}
         return {k: v for k, v in derived.items() if k in names}
 
     def daemons(self, mode: dict) -> dict[str, dict]:
-        rules = self._rules(mode)
-        # Same opt-in gate as axes()/derive_env(): a generic/stack-less consumer that declares no
-        # `[proxy]` and has no active injector gets NO listener — else desired_daemons() would still
-        # expose :8088 and Doctor / the mode dashboard would flag it perpetually DOWN. An opted-in
-        # consumer (proxy_enabled) or any active rule keeps the always-on proxy, as Phase A′ needs.
-        if not config.proxy_enabled() and not rules:
+        # Same opt-in gate as derive_env(): a generic/stack-less consumer that declares no `[proxy]`
+        # and no injector gets NO listener — else desired_daemons() would still expose :8088 and
+        # Doctor / the mode dashboard would flag it perpetually DOWN. An opted-in consumer, or one
+        # declaring any injector (on or off), keeps the always-on proxy, as Phase A′ needs.
+        if not self._opted_in(mode):
             return {}
         # The addon injects the FIRST rule that matches, so two switches claiming one host and path
         # would leave the credential to rule order: both sides are held back instead
@@ -501,7 +509,7 @@ class ProxyPlugin(Plugin):
         # project gets a clean box (no FY_PROXY ⇒ box_args adds no HTTPS_PROXY/NO_PROXY env). ANY
         # active injector (an `[[inject]]` switch, or claude/codex keyless) needs the proxy, so
         # an active rule lights routing up too (the rule set is the general signal).
-        if not config.proxy_enabled() and not self._rules(mode):
+        if not self._opted_in(mode):
             return {}
         # Per-worktree port (config.proxy_port) so each worktree's box routes to ITS OWN proxy
         # listener — the supervisor runs one per worktree on the matching offset port. The address
@@ -630,9 +638,10 @@ class ProxyPlugin(Plugin):
         # RUNTIME: is the always-on egress proxy actually listening? Phase A′ ALWAYS-routes the box
         # through it, so a down proxy means EVERY box request connection-refuses — this is the check
         # that tells you why "requests in the box aren't working". Only a finding when the
-        # supervisor is asked to run it (the same gate as daemons(): opted in, or a rule active
-        # NOW) — a declared-but-off injector has no listener to be down. Probe handles box→host.
-        if not config.proxy_enabled() and not self._rules(ctx.mode):
+        # supervisor is asked to run it (the same gate as daemons(): opted in, an active rule, or
+        # a declared injector) — a project with none of those has no listener to be down. Probe
+        # handles box→host.
+        if not self._opted_in(ctx.mode):
             return
         log = config.supervisor_log_file()
         port = config.proxy_port()  # this worktree's listener port (project band base + offset)
