@@ -1063,6 +1063,121 @@ def test_stage_ca_noop_without_ca(monkeypatch, tmp_path):
     assert proxy.stage_ca_for_box(str(tmp_path / "repo"), "dev-stack") is None
 
 
+PEM = "-----BEGIN CERTIFICATE-----\nMIIBfake+/=\nQUJD\n-----END CERTIFICATE-----\n"
+
+
+def test_guest_ca_pem_is_the_certificate_text(monkeypatch, tmp_path):
+    # What the walled VM's boot provisioning embeds: the CA as plain PEM (CRLF normalised).
+    ca = tmp_path / "mitm" / "mitmproxy-ca-cert.pem"
+    ca.parent.mkdir()
+    ca.write_text(PEM.replace("\n", "\r\n"))
+    monkeypatch.setenv("MITMPROXY_CA", str(ca))
+    assert proxy.guest_ca_pem() == PEM
+
+
+def test_guest_ca_pem_is_none_without_a_ca(monkeypatch, tmp_path):
+    monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "nope.pem"))
+    assert proxy.guest_ca_pem() is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        PEM + "__FY_PROXY_CA__\nrm -rf /\n",  # the heredoc terminator, then a root command
+        PEM.replace("QUJD", "QU$(id)JD"),  # anything outside the base64 alphabet
+        "-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----\n",  # never a key
+        "",
+    ],
+)
+def test_guest_ca_pem_refuses_anything_but_certificates(monkeypatch, tmp_path, text):
+    # The PEM lands in a script ROOT runs at every boot, inside a quoted heredoc. Only certificate
+    # blocks of the base64 alphabet go in, so nothing in the file can end the heredoc early.
+    ca = tmp_path / "ca.pem"
+    ca.write_text(text)
+    monkeypatch.setenv("MITMPROXY_CA", str(ca))
+    with pytest.raises(ValueError, match="certificate"):
+        proxy.guest_ca_pem()
+
+
+def test_guest_ca_pem_never_reads_the_staged_copy(monkeypatch, tmp_path):
+    # stage_ca_for_box re-points MITMPROXY_CA at a copy under the CHECKOUT, which the box can
+    # write. The guest's root-owned trust must come from your computer's own CA, never that copy.
+    src = tmp_path / "mitm" / "mitmproxy-ca-cert.pem"
+    src.parent.mkdir()
+    src.write_text(PEM)
+    monkeypatch.setenv("MITMPROXY_CA", str(src))
+    (tmp_path / "repo").mkdir()
+    proxy.stage_ca_for_box(str(tmp_path / "repo"), ".")
+    with pytest.raises(ValueError, match="staged"):
+        proxy.guest_ca_pem()
+
+
+def test_ensure_ca_generates_only_a_missing_ca(monkeypatch, tmp_path):
+    ran: list[list[str]] = []
+    monkeypatch.setattr(proxy.subprocess, "run", lambda argv, **kw: ran.append(argv))
+    monkeypatch.setattr(proxy, "_proxy_confdir", lambda: tmp_path / "mitm")
+    monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "mitm" / "mitmproxy-ca-cert.pem"))
+    proxy.ensure_ca()
+    assert ran == [proxy.generate_ca_argv()]  # the same call the doctor's "generate CA" makes
+    (tmp_path / "mitm").mkdir()
+    (tmp_path / "mitm" / "mitmproxy-ca-cert.pem").write_text(PEM)
+    proxy.ensure_ca()
+    assert len(ran) == 1
+
+
+def test_ensure_ca_refuses_a_missing_file_generation_cannot_name(monkeypatch, tmp_path):
+    # mitmproxy names what it generates (`mitmproxy-ca-cert.pem` in the confdir); it can't be
+    # told another file name. Generating anyway would leave the configured file missing — and
+    # a copy renamed into place would be a CA the proxy (mitmproxy's default confdir) never
+    # signs with. So nothing runs, and the error names the file and the name it would take.
+    ran: list[list[str]] = []
+    monkeypatch.setattr(proxy.subprocess, "run", lambda argv, **kw: ran.append(argv))
+    monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "corp" / "my-ca.pem"))
+    with pytest.raises(ValueError, match=r"my-ca\.pem.*mitmproxy-ca-cert\.pem"):
+        proxy.ensure_ca()
+    assert ran == []
+
+
+def test_ensure_ca_refuses_a_missing_ca_outside_the_proxys_own_confdir(monkeypatch, tmp_path):
+    # mitmdump runs with mitmproxy's default confdir, so that is the CA it signs with whatever
+    # MITMPROXY_CA says. Generating a CA anywhere else — even under mitmproxy's own file name —
+    # would hand the walled VM a CA the proxy never signs with: stack HTTPS still fails, now
+    # with a CA that looks right. So only the proxy's own CA is ever generated.
+    ran: list[list[str]] = []
+    monkeypatch.setattr(proxy.subprocess, "run", lambda argv, **kw: ran.append(argv))
+    monkeypatch.setattr(proxy, "_proxy_confdir", lambda: tmp_path / "own")
+    monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "corp" / "mitmproxy-ca-cert.pem"))
+    with pytest.raises(ValueError, match=r"corp/mitmproxy-ca-cert\.pem.*own/mitmproxy-ca-cert"):
+        proxy.ensure_ca()
+    assert ran == []
+
+
+def test_generating_the_ca_writes_the_proxys_own_confdir_whatever_mitmproxy_ca_says(
+    monkeypatch, tmp_path
+):
+    # The doctor's "generate CA" fix runs this argv too, so it must write where mitmdump signs
+    # from — not beside a MITMPROXY_CA that names a copy elsewhere (e.g. the staged one).
+    monkeypatch.setattr(proxy, "_proxy_confdir", lambda: tmp_path / "own")
+    monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "elsewhere" / "mitmproxy-ca-cert.pem"))
+    script = proxy.generate_ca_argv()[-1]
+    assert repr(str(tmp_path / "own")) in script and "elsewhere" not in script
+
+
+def test_ensure_ca_leaves_an_existing_file_of_any_name_alone(monkeypatch, tmp_path):
+    ran: list[list[str]] = []
+    monkeypatch.setattr(proxy.subprocess, "run", lambda argv, **kw: ran.append(argv))
+    ca = tmp_path / "my-ca.pem"
+    ca.write_text(PEM)
+    monkeypatch.setenv("MITMPROXY_CA", str(ca))
+    proxy.ensure_ca()
+    assert ran == []
+
+
+def test_doctor_generate_ca_fix_is_the_shared_argv():
+    fixes = {f.label: f.cmd for f in proxy.ProxyPlugin().doctor_fixes()}
+    assert fixes["generate CA"] == proxy.generate_ca_argv()
+
+
 def test_gcp_box_args_empty_without_project(monkeypatch):
     # Gated on `[plugins.gcp-metadata].project` — a generic consumer that hasn't configured gcp
     # gets NO box wiring (no malformed `…@.iam…` label, no emulator host its stack lacks).

@@ -21,8 +21,10 @@ Stdlib only on the registry hot path (rich is imported lazily, only when the TUI
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
+import subprocess
 import sys
 from collections.abc import Iterable
 from dataclasses import asdict
@@ -74,10 +76,86 @@ def mitmdump_path() -> str | None:
     return shutil.which("mitmdump")
 
 
+# mitmproxy's own name for its CA files (``<basename>-ca-cert.pem`` and siblings in the confdir);
+# generation can't be told another file name.
+_CA_BASENAME = "mitmproxy"
+_CA_CERT_NAME = f"{_CA_BASENAME}-ca-cert.pem"
+
+
+def _proxy_confdir() -> Path:
+    """The confdir the proxy SIGNS with: mitmproxy's default, since foldyard launches mitmdump
+    without ``--set confdir``. ``MITMPROXY_CA`` doesn't move it — it only says where foldyard
+    reads the public cert (and staging re-points it at a key-less copy under the checkout, so it
+    could never be the confdir). The one place a CA is generated."""
+    return Path.home() / ".mitmproxy"
+
+
 def _mitm_ca() -> Path:
     """The proxy CA path — ``$MITMPROXY_CA`` or mitmproxy's default. One helper so the doctor
     check, the 'generate CA' fix, and box_args (above) all point at the same file."""
-    return Path(os.environ.get("MITMPROXY_CA", Path.home() / ".mitmproxy/mitmproxy-ca-cert.pem"))
+    return Path(os.environ.get("MITMPROXY_CA", _proxy_confdir() / _CA_CERT_NAME))
+
+
+def generate_ca_argv() -> list[str]:
+    """Generate the proxy CA with no server/port, via mitmproxy's own API (``sys.executable`` is
+    foldyard's venv python, which carries mitmproxy). The doctor's "generate CA" fix and
+    :func:`ensure_ca` run this same call. It writes the proxy's own confdir, never beside a
+    ``MITMPROXY_CA`` that names a copy elsewhere: a CA there is one mitmdump never signs with."""
+    confdir = _proxy_confdir()
+    gen_ca = (
+        "from pathlib import Path; from mitmproxy.certs import CertStore; "
+        f"d = Path({str(confdir)!r}); d.mkdir(parents=True, exist_ok=True); "
+        f"CertStore.create_store(d, {_CA_BASENAME!r}, 2048); print('mitm CA written to', d)"
+    )
+    return [sys.executable, "-c", gen_ca]
+
+
+def ensure_ca() -> None:
+    """Generate the proxy CA when it doesn't exist yet. The supervisor's first mitmdump run would
+    create the same one, but the walled VM's boot provisioning embeds the CA and is recorded
+    before the supervisor starts (:func:`foldyard.machine.ensure`). Best-effort: a failure leaves
+    the CA missing, which the caller reports.
+
+    Raises :class:`ValueError` when ``MITMPROXY_CA`` names a missing file other than the proxy's
+    own CA (:func:`_proxy_confdir`): mitmdump signs with that one whatever ``MITMPROXY_CA`` says,
+    so a CA generated or renamed anywhere else would be one the proxy never signs with — the
+    walled VM would trust it and stack HTTPS would still fail."""
+    ca = _mitm_ca()
+    if ca.exists():
+        return
+    own = _proxy_confdir() / _CA_CERT_NAME
+    if ca != own:
+        raise ValueError(
+            f"MITMPROXY_CA names {ca}, which doesn't exist, and foldyard only generates the"
+            f" proxy's own CA ({own}), the one mitmdump signs with"
+        )
+    subprocess.run(generate_ca_argv(), capture_output=True, text=True, check=False)
+
+
+# One or more PEM certificate blocks, base64 alphabet only (see guest_ca_pem).
+_PEM_CERTS = re.compile(
+    r"(?:-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+?-----END CERTIFICATE-----\n)+"
+)
+
+
+def guest_ca_pem() -> str | None:
+    """The proxy CA as the walled VM's boot provisioning embeds it, or ``None`` when no CA exists.
+
+    The text lands in a script ROOT runs at every boot, inside a quoted heredoc, so only
+    certificate blocks of the base64 alphabet are accepted — nothing in the file can end the
+    heredoc early or carry a key. Raises :class:`ValueError` for anything else, and for
+    foldyard's own staged copy under the checkout (:func:`stage_ca_for_box`), which the box can
+    write: the guest's root-owned trust comes from your computer's CA, never from the mount."""
+    src = _mitm_ca()
+    if src.parent.name == ".devbox-ca":
+        raise ValueError(f"{src} is the staged copy under the checkout, not your computer's CA")
+    if not src.exists():
+        return None
+    text = src.read_bytes().decode("ascii", errors="replace").replace("\r\n", "\n")
+    text = text.strip() + "\n"
+    if not _PEM_CERTS.fullmatch(text):
+        raise ValueError(f"{src} is not a plain PEM certificate")
+    return text
 
 
 def stage_ca_for_box(checkout: str, here: str) -> Path | None:
@@ -656,17 +734,9 @@ class ProxyPlugin(Plugin):
     def doctor_fixes(self) -> Iterable[DoctorFix]:
         # One-click repairs for the two checks above. Both NON-INTERACTIVE (run in a TUI worker).
         # The reinstall is the same command the doctor row prints (host_install_cmd).
-        # Generate the CA with no server/port via mitmproxy's own API (sys.executable is foldyard's
-        # venv python — it carries mitmproxy). Confdir = the CA's dir.
-        confdir = _mitm_ca().parent
-        gen_ca = (
-            "from pathlib import Path; from mitmproxy.certs import CertStore; "
-            f"d = Path({str(confdir)!r}); d.mkdir(parents=True, exist_ok=True); "
-            "CertStore.create_store(d, 'mitmproxy', 2048); print('mitm CA written to', d)"
-        )
         return [
             DoctorFix(check="mitmproxy", label="reinstall foldyard", cmd=host_install_cmd()),
-            DoctorFix(check="mitm CA", label="generate CA", cmd=[sys.executable, "-c", gen_ca]),
+            DoctorFix(check="mitm CA", label="generate CA", cmd=generate_ca_argv()),
         ]
 
     def tui_panels(self) -> list[TuiPanel]:

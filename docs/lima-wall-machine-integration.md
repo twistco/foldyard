@@ -220,7 +220,10 @@ so every guest packet leaves the host as that process. Code: `src/foldyard/hostw
 
 **One caveat stays with you, not foldyard:** stack containers inherit the VM's proxy env, so
 service→service HTTP inside the stack needs a per-service `no_proxy` (the `example-lima-wall`
-`worker` shows the fix; `test_network.sh` §E asserts it).
+`worker` shows the fix; `test_network.sh` §E asserts it). Their HTTPS to the outside needs nothing:
+the boot setup gives every container the proxy's CA through a root-owned podman default
+(`/etc/containers/containers.conf.d/90-fy-proxy-ca.conf`; [networking](./networking.md#stack-containers-trust-the-proxy-too)),
+asserted live by `test_wall_e2e.py::test_a_stack_container_trusts_the_proxy`.
 
 ## The rejected alternative: run the proxy inside the VM
 

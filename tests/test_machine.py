@@ -6,14 +6,18 @@ Backend internals (podman/Lima command shapes) live in test_machine_backend.py."
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
 
 from foldyard import machine, supervisor
+from foldyard.plugins import proxy
 
 
 class FakeBackend:
@@ -100,6 +104,7 @@ class FakeBackend:
     def set_provision(self, name, script):
         # the id rides in the script's marker line, as it does in the real lima.yaml
         self._provision = script.splitlines()[1].split()[-1]
+        self._provision_script = script
         self.calls.append(f"provision:{self._provision}")
         return True
 
@@ -352,7 +357,19 @@ def test_ensure_fails_loudly_when_the_restart_does_not_revive_the_socket(
     assert "still dead" in err and "machine rm homelab" in err
 
 
-def test_ensure_checks_the_guest_provisioning_after_a_revive(half_started, monkeypatch, tmp_path):
+@pytest.fixture
+def no_proxy_ca(monkeypatch, tmp_path):
+    """Never the operator's ~/.mitmproxy: no CA unless a test writes one, and nothing generated.
+    Walled provisioning embeds the CA and `ensure` generates a missing one first — unisolated, a
+    test's outcome would hang on the machine's home (a CA there or not) and a fresh runner's
+    first walled `ensure` would write a real CA key into it."""
+    monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "mitm" / "mitmproxy-ca-cert.pem"))
+    monkeypatch.setattr(proxy, "ensure_ca", lambda: None)
+
+
+def test_ensure_checks_the_guest_provisioning_after_a_revive(
+    half_started, no_proxy_ca, monkeypatch, tmp_path
+):
     # A revived VM is a booted-from-cold VM: the boot provisioning (sudo grant dropped, wall)
     # re-ran as root at that boot, and ensure must read the guest's report of it as on any start.
     be = half_started(name="lima", cli="limactl", concurrent=True)
@@ -454,7 +471,7 @@ def test_delete_stops_the_supervisor_after_removing_the_vm(fake, monkeypatch, tm
 
 
 @pytest.fixture
-def lima_env(fake, monkeypatch, tmp_path):
+def lima_env(fake, no_proxy_ca, monkeypatch, tmp_path):
     """A running lima machine whose guest-state probe is a seam. Returns ``(backend, guest,
     set_wall, guest_ok)``: ``guest`` is what `_guest_state` answers (state text, wall active,
     rootful socket masked) and counts reads; ``guest_ok()`` makes it report the CURRENT desired
@@ -573,6 +590,108 @@ def test_provision_id_changes_with_the_port_band(lima_env, monkeypatch):
     assert "42000-42089, 42100-42189" in machine.guest_provision_script()
 
 
+PEM = "-----BEGIN CERTIFICATE-----\nMIIBfake+/=\nQUJD\n-----END CERTIFICATE-----\n"
+
+
+def _write_ca(text: str = PEM) -> Path:
+    ca = Path(os.environ["MITMPROXY_CA"])
+    ca.parent.mkdir(parents=True, exist_ok=True)
+    ca.write_text(text)
+    return ca
+
+
+def test_provision_script_embeds_the_proxy_ca_when_walled(lima_env):
+    # Under the wall the VM's podman hands every container the proxy env, and the proxy decrypts
+    # every non-passthrough host — so every container must trust its CA, or a stack service's
+    # HTTPS call fails verification. The CA rides the boot provisioning: root writes it, so the
+    # box (the VM user's uid) can't swap it, and the wall script points podman's defaults at it.
+    _, _, set_wall, _ = lima_env
+    set_wall(True)
+    _write_ca()
+    script = machine.guest_provision_script()
+    assert f"<<'__FY_PROXY_CA__'\n{PEM}__FY_PROXY_CA__\n" in script
+    assert "http://192.168.5.2:41000 /run/fy-wall/proxy-ca.pem" in script  # install's 5th arg
+
+
+def test_provision_script_carries_no_ca_when_unwalled_or_absent(lima_env):
+    _, _, set_wall, _ = lima_env
+    set_wall(True)
+    assert "__FY_PROXY_CA__" not in machine.guest_provision_script()  # walled, no CA yet
+    assert "/run/fy-wall/proxy-ca.pem" not in machine.guest_provision_script()
+    _write_ca()
+    set_wall(False)
+    assert "BEGIN CERTIFICATE" not in machine.guest_provision_script()
+
+
+def test_provision_id_changes_with_the_proxy_ca(lima_env):
+    _, _, set_wall, _ = lima_env
+    set_wall(True)
+    _write_ca()
+    before = machine.provision_id()
+    _write_ca(PEM.replace("QUJD", "REVG"))
+    assert machine.provision_id() != before
+
+
+def test_ensure_generates_a_missing_ca_before_recording_walled_provisioning(
+    lima_env, monkeypatch, tmp_path
+):
+    be, _guest, set_wall, guest_ok = lima_env
+    be._exists, be._state = False, "stopped"
+    set_wall(True)
+    guest_ok()
+    monkeypatch.setattr(proxy, "ensure_ca", lambda: _write_ca())
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert PEM in be._provision_script  # the recording carries the CA generated just before it
+
+
+def test_ensure_names_why_a_ca_cannot_be_generated_and_goes_on(
+    lima_env, monkeypatch, tmp_path, capsys
+):
+    # A CA foldyard can't generate (MITMPROXY_CA names a file mitmproxy can't write) is the same
+    # case as no CA yet — the wall still holds, recorded without one — but the warning carries
+    # the reason; `fy doctor`'s generate fix would write the same wrong file, so it isn't offered.
+    be, _guest, set_wall, guest_ok = lima_env
+    be._state = "stopped"
+    set_wall(True)
+    guest_ok()
+
+    def _refuse() -> None:
+        raise ValueError("MITMPROXY_CA names /x/my-ca.pem, which doesn't exist")
+
+    monkeypatch.setattr(proxy, "ensure_ca", _refuse)
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    err = capsys.readouterr().err
+    assert "/x/my-ca.pem" in err
+    assert "fy doctor" not in err
+    assert "BEGIN CERTIFICATE" not in be._provision_script
+    assert be.calls[-1] == "start:homelab"
+
+
+def test_ensure_does_not_generate_a_ca_for_an_unwalled_vm(lima_env, monkeypatch, tmp_path):
+    be, _guest, set_wall, guest_ok = lima_env
+    be._state = "stopped"
+    set_wall(False)
+    guest_ok()
+    calls: list[int] = []
+    monkeypatch.setattr(proxy, "ensure_ca", lambda: calls.append(1))
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert calls == []
+
+
+def test_ensure_refuses_to_embed_a_ca_that_is_not_a_plain_certificate(lima_env, tmp_path, capsys):
+    # Fail closed: the CA goes into a script root runs at boot. Nothing is recorded or booted.
+    be, _guest, set_wall, guest_ok = lima_env
+    be._state = "stopped"
+    be._provision = "stale"
+    set_wall(True)
+    guest_ok()
+    _write_ca(PEM + "__FY_PROXY_CA__\nrm -rf /\n")
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == []
+    assert "certificate" in capsys.readouterr().err
+
+
 def test_ensure_records_provisioning_before_the_first_boot(lima_env, tmp_path):
     be, guest, set_wall, guest_ok = lima_env
     be._exists = False
@@ -605,7 +724,11 @@ def test_ensure_refuses_a_running_machine_whose_provisioning_is_stale(lima_env, 
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == []
     assert guest.reads == 0
-    assert "fy machine stop" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "fy machine stop" in err
+    # The walled boot setup now embeds the proxy CA too, so a changed CA is one of the reasons
+    # the message must name — or "nothing I changed is on that list" sends the operator digging.
+    assert "the proxy CA" in err
 
 
 def test_ensure_steady_state_only_reads_the_guest(lima_env, tmp_path):
@@ -691,6 +814,89 @@ def test_wall_asset_script_shape():
     ):
         assert needle in text, f"machine-wall.sh missing {needle!r}"
     assert "transproxy" not in text  # no in-VM proxy — the Mac proxy stays the only chokepoint
+
+
+def _wall_section(verb: str) -> str:
+    text = machine._wall_asset().read_text()
+    start = text.index(f"\n{verb})\n")
+    return text[start : text.index("\n    ;;\n", start)]
+
+
+def test_wall_install_gives_every_container_the_proxy_ca():
+    # podman propagates the walled VM's proxy env into every container, and the proxy decrypts
+    # every non-passthrough host — so the CA has to reach every container too: a system
+    # containers.conf drop-in (root-owned, so the box's uid can't drop it) mounting the CA and
+    # setting the trust env. An image's own ENV, and a create's explicit env, still win.
+    install = _wall_section("install")
+    assert 'CA_SRC="${5:-}"' in install
+    conf_path = "/etc/containers/containers.conf.d/90-fy-proxy-ca.conf"
+    assert conf_path in install
+    # SELinux-enforcing guests refuse a bind of an unlabelled file (EACCES inside the container).
+    assert "chcon -t container_file_t" in install
+    # The drop-in lands only once both files exist (a dangling bind would fail EVERY create), via
+    # a rename, and before the user's podman is restarted to read it.
+    conf_write = install.index(f"{conf_path}.tmp")
+    assert install.index("proxy-ca-combined.pem") < conf_write
+    assert conf_write < install.index("try-restart podman.service")
+    conf = install[conf_write:].split("<<'EOF'\n", 1)[1].split("\nEOF\n", 1)[0]
+    parsed = tomllib.loads(conf)["containers"]
+    assert parsed["env"] == [
+        "NODE_EXTRA_CA_CERTS=/etc/fy-proxy-ca.pem",
+        "SSL_CERT_FILE=/etc/fy-proxy-ca-combined.pem",
+        "REQUESTS_CA_BUNDLE=/etc/fy-proxy-ca-combined.pem",
+        "GIT_SSL_CAINFO=/etc/fy-proxy-ca-combined.pem",
+        {"append": True},  # keep podman's default env (PATH, TERM) and any other drop-in's
+    ]
+    assert parsed["volumes"] == [
+        "/etc/fy-wall/proxy-ca.pem:/etc/fy-proxy-ca.pem:ro",
+        "/etc/fy-wall/proxy-ca-combined.pem:/etc/fy-proxy-ca-combined.pem:ro",
+        {"append": True},
+    ]
+    # Never the box's own CA paths: its bootstrap WRITES /etc/dev-proxy-ca-combined.pem, which a
+    # read-only bind at the same path would break.
+    assert "dev-proxy-ca" not in machine._wall_asset().read_text()
+
+
+@pytest.mark.spawns("bash")  # sources the REAL script under bash; every command is a stub
+def test_wall_uninstall_drops_the_ca_defaults_and_restarts_the_users_podman(tmp_path):
+    # Removing the env files is not enough: a rootless podman service already running keeps the
+    # proxy env (and the CA defaults) it started with, so the first unwalled boot still dialled
+    # the stopped proxy (observed live, 2026-10-04). Install restarts it; so must uninstall.
+    # Every external command is a function that records its call, and PATH is an empty dir — so a
+    # command left unstubbed fails the run instead of touching this machine.
+    stubs = "".join(
+        f"{cmd}() {{ printf '{cmd} %s\\n' \"$*\"; }}\n"
+        for cmd in ("systemctl", "rm", "nft", "getent", "awk", "sudo")
+    )
+    script = shlex.quote(str(machine._wall_asset()))
+    out = subprocess.run(
+        [shutil.which("bash") or "bash", "-c", f"{stubs}source {script} uninstall"],
+        capture_output=True,
+        text=True,
+        env={"PATH": str(tmp_path), "FY_WALL_UID": "501"},
+    )
+    assert out.returncode == 0, out.stderr
+    calls = out.stdout.splitlines()
+    assert "rm -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf" in calls
+    restart = (
+        "sudo -u #501 XDG_RUNTIME_DIR=/run/user/501 "
+        "systemctl --user try-restart podman.service podman.socket"
+    )
+    assert restart in calls
+    assert calls.index("rm -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf") < (
+        calls.index(restart)
+    )
+
+
+def test_walled_provision_script_with_a_ca_is_valid_bash(lima_env):
+    if shutil.which("bash") is None:
+        pytest.skip("no bash on this host")
+    _, _, set_wall, _ = lima_env
+    set_wall(True)
+    _write_ca()
+    script = machine.guest_provision_script()
+    res = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+    assert res.returncode == 0, res.stderr
 
 
 def _dir_creations_outside_system_paths(text: str) -> list[str]:

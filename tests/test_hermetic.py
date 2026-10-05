@@ -128,3 +128,19 @@ def test_the_marker_permits_a_program_under_a_named_shell():
     # …and it names THAT shell, not shells in general.
     with pytest.raises(HostToolSpawned, match="would run a program under"):
         subprocess.run(["sh", "-c", "echo ok"], capture_output=True)
+
+
+def test_the_proxy_ca_is_never_the_operators():
+    # Code that reaches `proxy.ensure_ca()` GENERATES a CA when its file is missing, through the
+    # interpreter the allowlist lets run — so a test on a machine with no CA wrote a real CA
+    # private key into the operator's (or a CI runner's) ~/.mitmproxy, and a test on a machine
+    # WITH one saw it: behaviour that depended on whose home the suite ran in. Every test gets a
+    # missing CA of the default name under its own tmp dir; a test that wants a CA writes one.
+    from pathlib import Path
+
+    from foldyard.plugins import proxy
+
+    ca = proxy._mitm_ca()
+    assert not ca.is_relative_to(Path.home() / ".mitmproxy")
+    assert proxy._proxy_confdir() == ca.parent  # generation writes the test's tmp dir too
+    assert ca.name == "mitmproxy-ca-cert.pem" and not ca.exists()
