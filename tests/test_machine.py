@@ -357,7 +357,19 @@ def test_ensure_fails_loudly_when_the_restart_does_not_revive_the_socket(
     assert "still dead" in err and "machine rm homelab" in err
 
 
-def test_ensure_checks_the_guest_provisioning_after_a_revive(half_started, monkeypatch, tmp_path):
+@pytest.fixture
+def no_proxy_ca(monkeypatch, tmp_path):
+    """Never the operator's ~/.mitmproxy: no CA unless a test writes one, and nothing generated.
+    Walled provisioning embeds the CA and `ensure` generates a missing one first — unisolated, a
+    test's outcome would hang on the machine's home (a CA there or not) and a fresh runner's
+    first walled `ensure` would write a real CA key into it."""
+    monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "mitm" / "mitmproxy-ca-cert.pem"))
+    monkeypatch.setattr(proxy, "ensure_ca", lambda: None)
+
+
+def test_ensure_checks_the_guest_provisioning_after_a_revive(
+    half_started, no_proxy_ca, monkeypatch, tmp_path
+):
     # A revived VM is a booted-from-cold VM: the boot provisioning (sudo grant dropped, wall)
     # re-ran as root at that boot, and ensure must read the guest's report of it as on any start.
     be = half_started(name="lima", cli="limactl", concurrent=True)
@@ -459,7 +471,7 @@ def test_delete_stops_the_supervisor_after_removing_the_vm(fake, monkeypatch, tm
 
 
 @pytest.fixture
-def lima_env(fake, monkeypatch, tmp_path):
+def lima_env(fake, no_proxy_ca, monkeypatch, tmp_path):
     """A running lima machine whose guest-state probe is a seam. Returns ``(backend, guest,
     set_wall, guest_ok)``: ``guest`` is what `_guest_state` answers (state text, wall active,
     rootful socket masked) and counts reads; ``guest_ok()`` makes it report the CURRENT desired
@@ -471,9 +483,6 @@ def lima_env(fake, monkeypatch, tmp_path):
     monkeypatch.setattr(machine.config, "state_dir", lambda: tmp_path / "state")
     monkeypatch.delenv("FY_PROXY_PORT", raising=False)
     monkeypatch.delenv("GCP_MINTER_PORT", raising=False)
-    # Never the operator's ~/.mitmproxy: no CA unless a test writes one, and nothing generated.
-    monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "mitm" / "mitmproxy-ca-cert.pem"))
-    monkeypatch.setattr(proxy, "ensure_ca", lambda: None)
 
     class Guest:
         state = ""
