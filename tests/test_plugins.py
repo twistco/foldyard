@@ -2177,6 +2177,146 @@ def test_static_token_minter_fails_on_unset_var(monkeypatch, capsys):
     assert "host.env" in capsys.readouterr().err
 
 
+# ── injection overlap: one host and path, one switch (ADR-0031 decision 4) ────────────────
+
+
+class _Injectors(Plugin):
+    """On/off switches whose ``on`` injects on the given (host, path prefix) places — the shape
+    ``[[inject]]``, claude and codex all reduce to, without any of their config."""
+
+    name = "injectors"
+
+    def __init__(self, places: dict[str, list[tuple[str, str]]]):
+        self.places = places
+
+    def switches(self):
+        return [
+            Switch(name=s, levels=("off", "on"), blurb={"off": "", "on": ""}, daemon="egress-proxy")
+            for s in self.places
+        ]
+
+    def proxy_rules(self, mode):
+        return [
+            InjectRule(host=host, header="Authorization", minter=f"mint-{s}", path_prefix=path)
+            for s, places in self.places.items()
+            if mode.get(s, "off") == "on"
+            for host, path in places
+        ]
+
+
+def _injectors(**places) -> Registry:
+    return Registry([_Injectors(places)], config=_cfg({}))
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "overlap"),
+    [
+        (("api.x.test", ""), ("api.x.test", ""), True),
+        (("api.x.test", ""), ("api.x.test", "/v1"), True),  # the whole host covers every path
+        (("api.x.test", "/v1"), ("api.x.test", "/v1/messages"), True),
+        (("api.x.test", "/v1"), ("api.x.test", "/v10"), True),  # the addon matches by startswith
+        (("API.X.test.", "/v1"), ("api.x.test", "/v1"), True),  # hosts compare as the addon's do
+        (("api.x.test", "/v1"), ("api.x.test", "/v2"), False),
+        (("api.x.test", ""), ("api.y.test", ""), False),
+    ],
+)
+def test_rules_overlap_is_same_host_and_nested_paths(a, b, overlap):
+    def rule(place):
+        return InjectRule(host=place[0], header="Authorization", minter="m", path_prefix=place[1])
+
+    assert plugins.rules_overlap(rule(a), rule(b)) is overlap
+    assert plugins.rules_overlap(rule(b), rule(a)) is overlap
+
+
+def test_two_switches_on_one_host_and_path_are_refused_by_name():
+    # The github switch's off/app/user levels were exclusive by construction; independent
+    # switches aren't, so the registry says so — an error row (set_mode refuses it) naming both
+    # switches, where they collide, and the way out.
+    reg = _injectors(anthropic=[("api.anthropic.com", "")], claude=[("api.anthropic.com", "/v1")])
+    ((sev, msg),) = reg.mode_issues({"anthropic": "on", "claude": "on"})
+    assert sev == "error"
+    assert "anthropic=on" in msg and "claude=on" in msg and "api.anthropic.com/v1" in msg
+    assert "`fy mode claude=off`" in msg and "`fy mode anthropic=off`" in msg
+    assert "neither" in msg  # what the proxy does meanwhile, if the state gets there anyway
+    assert reg.mode_issues({"anthropic": "on", "claude": "off"}) == []
+    assert reg.mode_issues({"anthropic": "off", "claude": "on"}) == []
+
+
+def test_one_switchs_own_rules_never_overlap():
+    # codex's ChatGPT level emits a rule per path on ONE host, nested or not, from one switch:
+    # a mechanism may split its own host however it likes.
+    reg = _injectors(codex=[("chatgpt.test", "/backend-api"), ("chatgpt.test", "/backend-api/x")])
+    assert reg.inject_overlaps({"codex": "on"}) == []
+    assert reg.mode_issues({"codex": "on"}) == []
+
+
+def test_distinct_paths_or_hosts_coexist():
+    reg = _injectors(a=[("api.x.test", "/v1")], b=[("api.x.test", "/v2")], c=[("api.y.test", "")])
+    assert reg.inject_overlaps({"a": "on", "b": "on", "c": "on"}) == []
+
+
+def test_one_row_per_pair_of_switches_listing_every_place():
+    reg = _injectors(
+        a=[("api.x.test", "/v1"), ("api.x.test", "/v2")],
+        b=[("api.x.test", "")],
+        c=[("api.x.test", "/v2/z")],
+    )
+    issues = reg.mode_issues({"a": "on", "b": "on", "c": "on"})
+    assert [sev for sev, _ in issues] == ["error"] * 3  # a×b, a×c, b×c
+    ab = next(msg for _, msg in issues if "a=on and b=on" in msg)
+    assert "api.x.test/v1" in ab and "api.x.test/v2" in ab
+
+
+def test_switch_rules_attributes_each_rule_to_the_switch_that_emits_it():
+    reg = _injectors(a=[("api.x.test", "")], b=[("api.y.test", ""), ("api.z.test", "")])
+    owned = reg.switch_rules({"a": "on", "b": "on"})
+    assert {s: [r.host for r in rules] for s, rules in owned.items()} == {
+        "a": ["api.x.test"],
+        "b": ["api.y.test", "api.z.test"],
+    }
+    assert reg.switch_rules({"a": "off", "b": "off"}) == {}
+
+
+def test_injecting_rules_hold_back_both_sides_of_an_overlap():
+    # Defence in depth: should the state reach an overlap anyway (an older foldyard's state file,
+    # a config adopted while both were on), the proxy injects NEITHER rule — which credential a
+    # request carries is never left to rule order. Everything else keeps injecting.
+    reg = _injectors(a=[("api.x.test", "")], b=[("api.x.test", "/v1")], c=[("api.y.test", "")])
+    both = {"a": "on", "b": "on", "c": "on"}
+    assert [r.host for r in reg.injecting_rules(both)] == ["api.y.test"]
+    assert len(reg.proxy_rules(both)) == 3  # the raw set is unchanged: widenings still report it
+    assert len(reg.injecting_rules({**both, "b": "off"})) == 2
+
+
+def test_the_proxy_daemon_injects_neither_overlapping_rule(monkeypatch):
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)
+    plugin = _Injectors({"a": [("api.x.test", "")], "b": [("api.x.test", "/v1")]})
+    reg = Registry([plugin, proxy.ProxyPlugin()], config=_cfg({}))
+    spec = reg.desired_daemons({"a": "on", "b": "on"})["egress-proxy"]
+    assert spec["live"]["data"]["rules"] == []
+    alone = reg.desired_daemons({"a": "on", "b": "off"})["egress-proxy"]
+    assert [r["host"] for r in alone["live"]["data"]["rules"]] == ["api.x.test"]
+
+
+def test_an_inject_row_on_claudes_host_conflicts_with_keyless_claude():
+    # The case that exists before any ADR-0031 work: a consumer's own `[[inject]]` on
+    # api.anthropic.com beside `claude=on` keyless. Two credentials on one host, and the addon's
+    # first match would have picked one by plugin load order.
+    toml = {
+        "claude": {"keyless": "api-key"},
+        "inject": [{"switch": "anthropic", "host": "api.anthropic.com", "header": "x-api-key"}],
+    }
+    cfg = _cfg(toml)
+    with config.using(cfg):
+        reg = Registry([inject.InjectPlugin(), claude.ClaudePlugin()], config=cfg)
+        both = {"anthropic": "on", "claude": "on"}
+        issues = reg.mode_issues(both)
+        assert [sev for sev, _ in issues] == ["error"]
+        assert "anthropic=on and claude=on" in issues[0][1]
+        assert reg.injecting_rules(both) == []
+        assert reg.mode_issues({"anthropic": "on", "claude": "off"}) == []
+
+
 # ── claude / vscode plugins (config-gated agent/editor surface) ───────────────────────────
 
 _BOX_ENV = {

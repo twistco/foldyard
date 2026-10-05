@@ -256,6 +256,49 @@ class InjectRule:
     # host.env and the prefix is added in flight. "" → inject the minted value unchanged.
 
 
+def _rule_host(rule: InjectRule) -> str:
+    """A rule's host as the proxy compares it: case-insensitive, without a trailing root dot."""
+    return rule.host.lower().rstrip(".")
+
+
+def rules_overlap(a: InjectRule, b: InjectRule) -> bool:
+    """Could one request match both rules? The same host, and path prefixes that nest: either is
+    empty (the whole host) or one starts with the other. The addon matches a prefix with
+    ``startswith``, so ``/v1`` nests ``/v10`` as well as ``/v1/messages``."""
+    if _rule_host(a) != _rule_host(b):
+        return False
+    return a.path_prefix.startswith(b.path_prefix) or b.path_prefix.startswith(a.path_prefix)
+
+
+@dataclass(frozen=True)
+class InjectOverlap:
+    """A rule from each of two ACTIVE switches that one request could match
+    (:func:`rules_overlap`) — two credentials claiming one host and path (ADR-0031 decision 4).
+    The addon injects the FIRST rule that matches, so without this check the credential a request
+    carried would be decided by plugin load order. Pairs are in switch declaration order."""
+
+    switches: tuple[str, str]
+    levels: tuple[str, str]
+    defaults: tuple[str, str]  # each switch's resting level: the fix the message offers
+    rules: tuple[InjectRule, InjectRule]
+
+    @property
+    def place(self) -> str:
+        """Where both apply: the host, under the longer of the two path prefixes."""
+        a, b = self.rules
+        return _rule_host(a) + max(a.path_prefix, b.path_prefix, key=len)
+
+
+def _overlap_message(group: list[InjectOverlap]) -> str:
+    """One ``mode_issues`` row for every place a pair of switches both claim."""
+    (a, b), (va, vb), (da, db) = group[0].switches, group[0].levels, group[0].defaults
+    places = ", ".join(dict.fromkeys(o.place for o in group))
+    return (
+        f"{a}={va} and {b}={vb} both inject a credential on {places}, so the proxy injects "
+        f"neither while both are on. Turn one off first: `fy mode {b}={db}` or `fy mode {a}={da}`"
+    )
+
+
 @dataclass(frozen=True)
 class Secret:
     """One host-side secret a mode needs present before its minter can work — the DECLARATIVE
@@ -499,7 +542,10 @@ class Plugin:
     def proxy_rules(self, mode: dict) -> list[InjectRule]:
         """Egress-proxy header-injection rules this plugin's mode implies (ADR-0015).
         The built-in ``proxy`` plugin aggregates these across all plugins and runs ONE mitmdump
-        from them; an injector plugin contributes rules here instead of owning a proxy daemon."""
+        from them; an injector plugin contributes rules here instead of owning a proxy daemon.
+        Emit rules for ACTIVE levels only, each from the level of the switch it belongs to: the
+        registry attributes a rule to the switch whose level produces it
+        (:meth:`Registry.switch_rules`), and refuses two switches whose rules overlap."""
         return []
 
     def held_credentials(self, mode: dict) -> list[HeldCredential]:
@@ -676,11 +722,13 @@ class Registry:
             out += plugin.compose_overlays(mode)
         return out
 
-    def mode_issues(self, mode: dict) -> list[tuple[str, str]]:
+    def mode_issues(self, mode: dict, *, overlaps: bool = True) -> list[tuple[str, str]]:
         """Every coherence issue for a prospective mode: first the switches' declarative
-        :class:`Requires` rows (switch declaration order), then every plugin's ``mode_issues``
-        hook (load order). ``set_mode`` refuses on any ``"error"``; ``"warn"`` rows are
-        printed and applied."""
+        :class:`Requires` rows (switch declaration order), then an error per pair of switches
+        whose injection rules overlap (:meth:`inject_overlaps`), then every plugin's
+        ``mode_issues`` hook (load order). ``set_mode`` refuses on any ``"error"``; ``"warn"``
+        rows are printed and applied. ``overlaps=False`` leaves the overlap rows out, for the
+        expiry cascade (see ``devmode.settle_incoherent``)."""
         out: list[tuple[str, str]] = []
         for name, ax in self._switches.items():
             value = mode.get(name, ax.default)
@@ -690,6 +738,8 @@ class Registry:
                 # nothing — its requirement is unmet either way (see Requires).
                 if value in req.when and mode.get(req.switch) not in req.accepts:
                     out.append((req.severity, req.render(name, value, ax.default)))
+        if overlaps:
+            out += [("error", msg) for msg in self.overlap_issues(mode)]
         for plugin in self.plugins:
             out += list(plugin.mode_issues(mode))
         return out
@@ -761,6 +811,62 @@ class Registry:
         for plugin in self.plugins:
             out += plugin.proxy_rules(mode)
         return out
+
+    def switch_rules(self, mode: dict) -> dict[str, list[InjectRule]]:
+        """Each switch off its default → the injection rules it puts on the proxy: what the
+        registry emits with that switch at its level and every other at rest, less what it emits
+        with everything at rest (no switch's). Asked of the registry rather than read off a field,
+        so any plugin's rules are attributed as they behave, and one plugin owning many switches
+        (``[[inject]]``) needs nothing extra."""
+        defaults = self.switch_defaults()
+        at_rest = self.proxy_rules(defaults)
+        out: dict[str, list[InjectRule]] = {}
+        for name, default in defaults.items():
+            level = mode.get(name, default)
+            if level == default:
+                continue
+            rules = [r for r in self.proxy_rules({**defaults, name: level}) if r not in at_rest]
+            if rules:
+                out[name] = rules
+        return out
+
+    def inject_overlaps(self, mode: dict) -> list[InjectOverlap]:
+        """Every pair of rules from two DIFFERENT active switches that one request could match
+        (ADR-0031 decision 4). A switch's own rules never count: codex's ChatGPT level splits one
+        host by path, and any mechanism may. ``mode_issues`` turns these into errors, so
+        ``fy mode`` refuses the level that would create one; :meth:`injecting_rules` holds both
+        sides back, for a state that has one anyway."""
+        defaults = self.switch_defaults()
+        owned = list(self.switch_rules(mode).items())
+        out: list[InjectOverlap] = []
+        for i, (a, rules_a) in enumerate(owned):
+            for b, rules_b in owned[i + 1 :]:
+                out += [
+                    InjectOverlap((a, b), (mode[a], mode[b]), (defaults[a], defaults[b]), (x, y))
+                    for x in rules_a
+                    for y in rules_b
+                    if rules_overlap(x, y)
+                ]
+        return out
+
+    def overlap_issues(self, mode: dict) -> list[str]:
+        """:meth:`inject_overlaps` as messages, one per pair of switches naming every place they
+        both claim and the way out — the rows ``mode_issues`` refuses on, and what the supervisor
+        and ``fy doctor`` report."""
+        pairs: dict[tuple[str, str], list[InjectOverlap]] = {}
+        for overlap in self.inject_overlaps(mode):
+            pairs.setdefault(overlap.switches, []).append(overlap)
+        return [_overlap_message(group) for group in pairs.values()]
+
+    def injecting_rules(self, mode: dict) -> list[InjectRule]:
+        """The rules the proxy is handed: :meth:`proxy_rules` less both sides of every overlap.
+        ``fy mode`` refuses an overlap, but the host can still inherit one: a state file an older
+        foldyard wrote, or an ``[[inject]]`` row adopted while both switches were on. Failing safe,
+        such a host and path gets no credential from either switch until one is off, rather than
+        whichever rule the addon reads first. The supervisor reports it; ``fy mode``, ``fy state``
+        and ``fy doctor`` show the error row."""
+        held_back = {rule for overlap in self.inject_overlaps(mode) for rule in overlap.rules}
+        return [r for r in self.proxy_rules(mode) if r not in held_back]
 
     def held_credentials(self, mode: dict) -> list[HeldCredential]:
         out: list[HeldCredential] = []

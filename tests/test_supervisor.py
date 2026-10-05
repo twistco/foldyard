@@ -1826,3 +1826,48 @@ def test_the_tick_reports_held_requests_per_worktree(monkeypatch, tmp_path):
     monkeypatch.setattr(supervisor, "_report_held", lambda wt, mode: seen.append((wt, mode)))
     _tick_with(monkeypatch, tmp_path, {}, {}, {})
     assert seen == [("", {"gcp": "sa"})]
+
+
+# ── overlapping injection rules: reported, never left to rule order (ADR-0031 decision 4) ────
+
+
+def _overlap_world(monkeypatch) -> tuple[list[str], list[tuple[str, str]]]:
+    from pbt import clashing_pair
+
+    monkeypatch.setattr(supervisor.devmode, "registry", clashing_pair)
+    logged: list[str] = []
+    notified: list[tuple[str, str]] = []
+    monkeypatch.setattr(supervisor, "log", logged.append)
+    monkeypatch.setattr(supervisor, "_notify", lambda t, b: notified.append((t, b)))
+    return logged, notified
+
+
+def test_an_overlap_is_logged_once_per_change_and_notified_on_the_edge(monkeypatch):
+    # The supervisor can't refuse a state it inherits (an older foldyard's file, a config adopted
+    # while both were on): the proxy injects neither rule, and the operator is TOLD — once per
+    # change in the log, one push when it starts — never every tick.
+    logged, notified = _overlap_world(monkeypatch)
+    both = {"a": "on", "b": "on"}
+    supervisor._report_inject_overlaps("", both)
+    supervisor._report_inject_overlaps("", both)
+    assert len(logged) == 1 and "a=on and b=on" in logged[0] and "neither" in logged[0]
+    assert len(notified) == 1 and "a and b both inject on api.x.test/v1" in notified[0][1]
+
+    supervisor._report_inject_overlaps("", {"a": "on", "b": "off"})  # resolved
+    assert len(logged) == 2 and logged[1].startswith("✓")
+    supervisor._report_inject_overlaps("", {"a": "on", "b": "off"})
+    assert len(logged) == 2 and len(notified) == 1
+
+    supervisor._report_inject_overlaps("feat", both)  # per worktree, named
+    assert "[worktree feat]" in logged[-1] and "worktree feat" in notified[-1][0]
+    assert len(notified) == 2
+
+
+def test_the_tick_reports_overlaps_per_worktree(monkeypatch, tmp_path):
+    _gate_world(monkeypatch, tmp_path)
+    seen: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        supervisor, "_report_inject_overlaps", lambda wt, mode: seen.append((wt, mode))
+    )
+    _tick_with(monkeypatch, tmp_path, {}, {}, {})
+    assert seen == [("", {"gcp": "sa"})]

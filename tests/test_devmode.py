@@ -302,6 +302,55 @@ def test_set_mode_refused_in_box(isolated_state, monkeypatch):
         devmode.set_mode({"gcp": "logs"})
 
 
+# ── two switches injecting on one host and path (ADR-0031 decision 4) ─────────────────────
+
+
+def _two_injectors(monkeypatch):
+    from pbt import clashing_pair
+
+    monkeypatch.setattr(devmode, "registry", clashing_pair)
+
+
+def test_set_mode_refuses_a_level_whose_rules_overlap_another_switch(isolated_state, monkeypatch):
+    # Turning `b` on while `a` already injects on the same host and path is refused, by name,
+    # with the way through — and nothing is written: `a` stays on, no switch is turned off for
+    # the operator.
+    _two_injectors(monkeypatch)
+    devmode.set_mode({"a": "on"}, reconcile=False)
+    with pytest.raises(SystemExit) as refused:
+        devmode.set_mode({"b": "on"}, reconcile=False)
+    assert "a=on and b=on" in str(refused.value) and "api.x.test/v1" in str(refused.value)
+    assert "`fy mode a=off`" in str(refused.value)
+    assert devmode.read()["mode"] == {"a": "on", "b": "off"}
+    # The swap in one atomic command is coherent, like any other de-escalation pair.
+    assert devmode.set_mode({"a": "off", "b": "on"}, reconcile=False)["mode"] == {
+        "a": "off",
+        "b": "on",
+    }
+
+
+def test_settle_leaves_an_overlap_to_the_operator(isolated_state, monkeypatch):
+    # A TTL lapse can't create an overlap (it only turns things off), so the expiry cascade has
+    # no business resolving one it happens to find: choosing which switch to drop would pick a
+    # survivor by declaration order — the very accident the check exists to remove. The proxy
+    # injects neither meanwhile, and `fy mode` keeps saying so.
+    _two_injectors(monkeypatch)
+    assert devmode.settle_incoherent({"a": "on", "b": "on"}) == {}
+
+
+def test_show_and_doctor_report_a_standing_overlap(isolated_state, monkeypatch, capsys):
+    # State that reached an overlap anyway (written by an older foldyard, or an [[inject]] row
+    # adopted while both were on) is reported where an operator looks: `fy mode` and `fy doctor`.
+    _two_injectors(monkeypatch)
+    isolated_state["auth"].write_text(json.dumps({"a": "on", "b": "on"}))
+    devmode.show()
+    assert "a=on and b=on" in capsys.readouterr().out
+    status, _name, detail = devmode._inject_overlap_check(devmode.read()["mode"])
+    assert status == "fail" and "a=on and b=on" in detail and "neither" in detail
+    isolated_state["auth"].write_text(json.dumps({"a": "on", "b": "off"}))
+    assert devmode._inject_overlap_check(devmode.read()["mode"])[0] == "ok"
+
+
 def test_box_reads_mirror_not_auth(isolated_state, monkeypatch):
     devmode.write_mirror({"gcp": "logs", "github": "off"}, {}, {})
     monkeypatch.setattr(devmode, "in_box", lambda: True)

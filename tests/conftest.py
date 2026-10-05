@@ -183,10 +183,12 @@ def isolated_config_pin(tmp_path, monkeypatch):
     supervisor._config_drift_seen.clear()
     supervisor._held_cursor.clear()
     supervisor._held_notified.clear()
+    supervisor._inject_overlaps_seen.clear()
     yield
     supervisor._config_drift_seen.clear()
     supervisor._held_cursor.clear()
     supervisor._held_notified.clear()
+    supervisor._inject_overlaps_seen.clear()
 
 
 @pytest.fixture(autouse=True)
