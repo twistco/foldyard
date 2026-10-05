@@ -149,6 +149,14 @@ setup installs the CA and a podman default that mounts it into every container
 and sets `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_SSL_CAINFO`.
 
 - **Your image wins.** A variable your image or compose file already sets keeps its value.
+- **An image that trusts a private CA of its own** (a corporate root baked into its system store)
+  keeps it only where the connection goes through the proxy decrypted: the proxy presents its
+  own certificate there. A connection that bypasses decryption (a `passthrough` host, or TLS
+  between your stack's services) reaches the private CA's certificate directly, and
+  `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_SSL_CAINFO` *replace* the store a client reads
+  (`NODE_EXTRA_CA_CERTS` adds to it). Set those variables in the image or compose file to a
+  bundle holding both your CA and `/etc/fy-proxy-ca.pem`, built at container start, and yours
+  win.
 - **Clients with their own trust store** (a Java keystore, a browser's NSS database, a binary
   with bundled roots) ignore those variables. Add the CA to that store in your image, or put the
   host on `passthrough`.
