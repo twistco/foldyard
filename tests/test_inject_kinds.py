@@ -493,7 +493,7 @@ def test_pem_doctor_names_the_consumers_hint_where_there_is_one(monkeypatch, tmp
 def test_gh_cli_doctor_names_the_cli_with_no_install_button(monkeypatch, tmp_path):
     rows = _doctor(monkeypatch, tmp_path, [_USER])
     assert [(s, n) for s, n, _ in rows] == [("fail", "github-user gh CLI")]
-    assert "cli.github.com" in rows[0][2]
+    assert rows[0][2] == "missing — install gh (https://cli.github.com) on your computer"
     assert list(_plugin(monkeypatch, [_USER]).doctor_fixes()) == []
 
 

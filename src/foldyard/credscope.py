@@ -71,7 +71,11 @@ def observe(switch: str, scope: CredentialScope, checked: str) -> tuple[str, lis
     """Record ``scope`` as observed at ``checked``, returning ``(event, changes)``: ``"baseline"``
     (the first observation of this credential — nothing to compare), ``"same"``, or
     ``"changed"`` with :func:`changes`' list. Atomic replace, so a concurrent reader never sees a
-    torn file. Raises ``OSError`` on a failed write (the caller logs it)."""
+    torn file. Raises ``OSError`` on a failed write (the caller logs it).
+
+    The read-modify-write is unlocked because there is ONE writer: the file is per project
+    (``state_dir``), the project's supervisor is a singleton (its lock), and its tick runs the
+    probes one after another. Running probes concurrently would need a lock here first."""
     data = _read()
     by_identity = data.get(switch)
     if not isinstance(by_identity, dict):

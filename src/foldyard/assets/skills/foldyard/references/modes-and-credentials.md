@@ -49,9 +49,14 @@ authoritative state is in the host's home, outside the mount). So:
    asks for it when the switch goes on (and `fy box up` asks as a backstop), storing it on their
    computer at 0600. `fy doctor` on the host names which one.
 4. If the switch is on and the service answers **403**, the credential's own scope is the limit,
-   not foldyard. A GitHub App token carries exactly what the App's installation grants (foldyard
-   neither narrows nor caps it), and GitHub's 403 names the missing permission: ask the human to
-   grant it on the App (an org owner approves it), or for a separate App with its own switch.
+   not foldyard — once you've ruled out a rate limit. Read the 403 first (`gh api -i …`): a
+   rate limit says so in its `message` ("API rate limit exceeded", "secondary rate limit") and
+   carries `x-ratelimit-*` / `retry-after` headers, so wait rather than ask for access. A missing
+   permission says "Resource not accessible by integration", and its
+   `X-Accepted-Github-Permissions` header names the permission. A GitHub App token carries
+   exactly what the App's installation grants (foldyard neither narrows nor caps it), so ask the
+   human to grant that permission on the App (an org owner approves it), or for a separate App
+   with its own switch.
    Editing `foldyard.toml` can't widen it — there is no permissions key to add. The human can
    see what the App was last read to grant with `fy config widenings` on their computer (or
    beside the switch in their `fy mode`); the box can't read that record, so ask rather than
