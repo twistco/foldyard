@@ -98,6 +98,10 @@ class Target:
     # What the credential was last probed to grant, as report lines (see `_scope_lines`); () for a
     # kind whose probe reads no scope.
     scope: tuple[str, ...] = ()
+    # Why an ACTIVE target's credential isn't injected right now, one line per overlap: another
+    # switch's rule claims the same host and path, so the proxy holds both back
+    # (`Registry.injecting_rules`). Still listed — the declaration widens again once one is off.
+    held_back: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -225,16 +229,23 @@ def _targets(
     from .plugins.kinds import DEFAULT, KINDS
 
     reg = registry(cfg)
+    owned = reg.switch_rules(mode)
+    held = _held_back(reg.inject_overlaps(mode))
     out: list[Target] = []
     seen: set[str] = set()
 
-    def add(where: str, source: str, active: bool, cfg_host: bool, org: str = DEFAULT) -> None:
+    def add(
+        where: str,
+        source: str,
+        active: bool,
+        cfg_host: bool,
+        org: str = DEFAULT,
+        held_back: tuple[str, ...] = (),
+    ) -> None:
         if where in seen:
             return
         seen.add(where)
-        out.append(
-            Target(host=where, source=source, active=active, from_config=cfg_host, origin=org)
-        )
+        out.append(Target(where, source, active, cfg_host, origin=org, held_back=held_back))
 
     for spec in config.inject_specs():
         kind = KINDS.get(str(spec.get("kind", DEFAULT)))
@@ -252,10 +263,14 @@ def _targets(
                 from_config=True,
                 origin=origin,
                 scope=_scope_lines(axis, spec),
+                held_back=tuple(
+                    line for rule in owned.get(axis, []) for line in held.get(rule, ())
+                ),
             )
         )
     for rule in reg.proxy_rules(mode):  # what the CURRENT posture activates
-        add(rule.host + rule.path_prefix, rule.label or "packaged injector", True, False)
+        where, label = rule.host + rule.path_prefix, rule.label or "packaged injector"
+        add(where, label, True, False, held_back=held.get(rule, ()))
     for axis, rungs in reg.switch_levels().items():  # …and what another rung would
         if not rungs or mode.get(axis, rungs[0]) != rungs[0]:
             continue  # already armed — its rules came from the pass above
@@ -269,6 +284,32 @@ def _targets(
                     _origin(shared, local, axis, "keyless"),
                 )
     return out
+
+
+def _held_back(overlaps: list) -> dict:
+    """Each rule the proxy holds back (``Registry.injecting_rules``) → why, one line per overlap it
+    is in, in the words and with the commands ``fy mode``'s error row uses."""
+    from .plugins import overlap_fix
+
+    out: dict = {}
+    for overlap in overlaps:
+        fix = overlap_fix(overlap)
+        for i, rule in enumerate(overlap.rules):
+            if overlap.combined:
+                on = ", ".join(
+                    f"{s}={v}" for s, v in zip(overlap.switches, overlap.levels, strict=True)
+                )
+                line = (
+                    f"⚠ HELD BACK: {overlap.place} would get more than one credential with "
+                    f"{on or 'every switch at rest'}, so the proxy injects none of them there."
+                )
+            else:  # a plain pair: rules[i] is switches[i]'s (`Registry.inject_overlaps`)
+                line = (
+                    f"⚠ HELD BACK: overlaps `{overlap.switches[1 - i]}` on {overlap.place}, so "
+                    "the proxy injects neither credential there."
+                )
+            out.setdefault(rule, []).append(f"{line} {fix}" if fix else line)
+    return {rule: tuple(lines) for rule, lines in out.items()}
 
 
 def _scope_lines(switch: str, spec: dict) -> tuple[str, ...]:
@@ -495,8 +536,9 @@ def render(exp: Exposure) -> list[str]:
     if not exp.targets:
         out.append("    none — no injector is declared or active.")
     for t in exp.targets:
-        state = "ON" if t.active else "off"
+        state = ("ON · HELD BACK" if t.held_back else "ON") if t.active else "off"
         out.append(f"    {t.host}   ← {t.source}  [{state}]{_shared_note(t.origin)}")
+        out += [f"      {line}" for line in t.held_back]
         out.append(
             "      Host is REPO CONFIG: adopting a change here re-points the credential."
             if t.from_config
@@ -604,8 +646,12 @@ def doctor_row(exp: Exposure) -> tuple[bool | None, str, str]:
     passthrough host or an injector is legitimate; it belongs in the report, not in a nag that
     never goes away."""
     detail = f"{exp.hosts} hosts exempt from capture"
-    targets = [t for t in exp.targets if t.active]
+    targets = [t for t in exp.targets if t.active and not t.held_back]
     detail += f", {len(targets)} injector target{'' if len(targets) == 1 else 's'} live"
+    held = sum(1 for t in exp.targets if t.active and t.held_back)
+    if held:
+        # The `credential overlap` row fails with the fix; this one only keeps its count honest.
+        detail += f", {held} held back by an overlap"
     pending = sum(1 for _h, _w, status in exp.recommended if status == "pending")
     if pending:
         # A pending recommendation is an outstanding OFFER, not a misconfiguration — it rides the

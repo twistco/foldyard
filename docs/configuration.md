@@ -854,7 +854,8 @@ Day to day:
   `fy config revert`. They run on your computer only — the box can't adopt its own config.
 - `fy config widenings` lists what the adopted config lets through: how many hosts
   `passthrough` leaves undecrypted (`@all` is about 200), where each switch delivers its
-  credential (including ones not switched on), which agent prompts are shared vs personal, and
+  credential (including ones not switched on, and marking `HELD BACK` a switch that is on but
+  overlaps another, so the proxy injects neither), which agent prompts are shared vs personal, and
   keys that are renamed or no longer honoured. A `fy doctor` row summarises it.
 - Each worktree has its own adopted copy, since a branch may declare different plugins.
   Switching branches counts as a change and gets asked about.

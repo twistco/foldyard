@@ -13,4 +13,5 @@ bump: minor
   would actually get, so a rule that only appears with several switches on together is caught too. If your saved mode already has such a
   pair on (or you adopt an `[[inject]]` row that creates one), the proxy injects **neither** until
   one is off, and says so: a supervisor log line and notification, an error row in `fy mode` and
-  `fy state`, and a `credential overlap` row in `fy doctor`.
+  `fy state`, a `credential overlap` row in `fy doctor`, and both rows marked `HELD BACK` in
+  `fy config widenings`, with the commands that end it.

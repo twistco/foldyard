@@ -139,6 +139,65 @@ def test_a_kinds_pinned_host_is_reported_and_two_rows_on_one_host_both_show(chec
     assert "gh-cli" in user.source and "your own gh token" in user.source
 
 
+def test_two_switches_overlapping_are_listed_but_marked_held_back(checkout):
+    """Both on, both on api.github.com: the proxy is handed neither (`Registry.injecting_rules`),
+    so `[ON]` alone would contradict `fy mode`'s error row. Each row stays listed — the declaration
+    is still a widening the moment one switch goes off — and says why it isn't injected now."""
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    targets = collect(cfg, {"github": "on", "github-user": "on"}).targets
+    app, user = (
+        next(t for t in targets if f"[[inject]] {s} " in t.source)
+        for s in ("github", "github-user")
+    )
+
+    hint = "Turn one off first: `fy mode github-user=off` or `fy mode github=off`"
+    assert app.active and user.active
+    assert app.held_back == (
+        f"⚠ HELD BACK: overlaps `github-user` on api.github.com, so the proxy injects neither "
+        f"credential there. {hint}",
+    )
+    assert user.held_back == (
+        f"⚠ HELD BACK: overlaps `github` on api.github.com, so the proxy injects neither "
+        f"credential there. {hint}",
+    )
+    body = rendered(cfg, {"github": "on", "github-user": "on"})
+    assert body.count("[ON · HELD BACK]") == 2 and "[ON]" not in body
+    # One switch on: nothing overlaps, nothing is held back.
+    alone = collect(cfg, {"github": "on"}).targets
+    assert all(t.held_back == () for t in alone)
+
+
+def test_a_combined_overlap_is_held_back_with_the_command_that_ends_it():
+    # A rule only several switches produce together belongs to none of them, so the line names the
+    # combination and the way out, as `fy mode`'s error row does — never a guessed "other switch".
+    from foldyard.plugins import InjectOverlap, InjectRule
+
+    x = InjectRule(host="api.x.test", header="Authorization", minter="1")
+    y = InjectRule(host="api.x.test", header="Authorization", minter="2", path_prefix="/v1")
+    overlap = InjectOverlap(
+        ("b", "c"), ("on", "on"), ("off", "off"), (x, y), combined=True, fix="together"
+    )
+    held = exposure._held_back([overlap])
+    assert (
+        held[x]
+        == held[y]
+        == (
+            "⚠ HELD BACK: api.x.test/v1 would get more than one credential with b=on, c=on, so the "
+            "proxy injects none of them there. No one of them ends it alone; turn them off together: "
+            "`fy mode b=off c=off`",
+        )
+    )
+
+
+def test_the_doctor_row_does_not_count_a_held_back_target_as_live(checkout):
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    ok, _name, detail = exposure.doctor_row(collect(cfg, {"github": "on", "github-user": "on"}))
+    # Not a WARN of its own: the `credential overlap` row already fails, with the fix.
+    assert ok is True
+    assert "0 injector targets live" in detail
+    assert "2 held back by an overlap" in detail
+
+
 def _record_scope(identity: str, permissions: dict, reach: str = "selected repositories"):
     from foldyard import credscope
     from foldyard.plugins import CredentialScope
