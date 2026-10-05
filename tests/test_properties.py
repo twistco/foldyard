@@ -21,8 +21,8 @@ import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-from foldyard import devmode, ports, supervisor
-from pbt import capability_maps, worlds
+from foldyard import config, devmode, ports, supervisor
+from pbt import capability_maps, inject_worlds, worlds
 
 # ── supervisor.capability_edges — the probe-diff semantics ───────────────────────────────
 # Validated red against: dropping the first-observation-failing branch (prev_ok is None), and
@@ -259,3 +259,109 @@ def test_settle_is_idempotent(world, source):
     # tick, so a non-idempotent settle would flap axes down tick after tick.
     flips = _settle(world, world.mode, source)
     assert _settle(world, {**world.mode, **flips}, source) == {}
+
+
+# ── the injection-overlap check over GENERATED proxy rules (ADR-0031 decision 4) ─────────
+# Two switches' active rules may never inject on one host and path. `fy mode` refuses a level
+# that would (an error row from Registry.mode_issues), and a state that gets there anyway — an
+# older foldyard's state file, a config adopted while both were on — injects NEITHER side
+# (Registry.injecting_rules, what the proxy daemon is handed). The worlds (tests/pbt.py
+# inject_worlds) put rules on a few deliberately colliding hosts and paths; the oracle is
+# World.overlaps, which reads the generated places directly. Validated red against (committed
+# first, each reverted by its exact inverse edit): dropping the overlap rows from
+# Registry.mode_issues (the sequence property shrinks to `fy mode ax0=r1 ax1=r1`, two whole-host
+# places on api.x.test, applied); comparing hosts case-sensitively (all three shrink to the same
+# pair spelled api.x.test / API.x.test); and holding back only the first rule of an overlap (the
+# proxy property shrinks to two whole-host places, one still injected).
+
+
+def _owner(rule) -> str:
+    return rule.minter.removeprefix("mint-")  # pbt's SyntheticPlugin names the axis in the minter
+
+
+def _place_clashes(world, mode: dict, rule) -> bool:
+    """The oracle for one rule: another axis's active place on its host, with a nested path."""
+    host = rule.host.lower().rstrip(".")
+    return any(
+        axis != _owner(rule)
+        and mode.get(axis) == rung
+        and other.lower().rstrip(".") == host
+        and (path.startswith(rule.path_prefix) or rule.path_prefix.startswith(path))
+        for axis, rung, other, path in world.places
+    )
+
+
+@given(world=inject_worlds())
+def test_inject_overlaps_match_the_oracle(world):
+    reg = world.registry()
+    expected = world.overlaps(world.mode)
+    assert {frozenset(o.switches) for o in reg.inject_overlaps(world.mode)} == expected
+    # One error row per clashing PAIR of switches (however many places they share), naming both
+    # at their levels — and nothing else: these worlds declare no other coherence constraint.
+    errors = [msg for sev, msg in reg.mode_issues(world.mode) if sev == "error"]
+    assert len(errors) == len(expected) == len(reg.mode_issues(world.mode))
+    for pair in expected:
+        a, b = sorted(pair)
+        assert any(f"{a}={world.mode[a]}" in m and f"{b}={world.mode[b]}" in m for m in errors)
+
+
+@given(world=inject_worlds())
+def test_the_proxy_never_injects_two_switches_on_one_host_and_path(world):
+    reg = world.registry()
+    injected = reg.injecting_rules(world.mode)
+    # Exactly the clashing rules are held back: a rule with no rival still injects, so the
+    # defence never takes out more than the overlap it defends against.
+    for rule in reg.proxy_rules(world.mode):
+        assert (rule in injected) is not _place_clashes(world, world.mode, rule)
+
+
+def _host_state(monkeypatch, tmp_path, reg) -> None:
+    """Host-side state files under ``tmp_path`` (reset per EXAMPLE — the fixture is per test), the
+    world's registry, and no stack to reconcile: what set_mode and the TTL expiry need to run for
+    real."""
+    monkeypatch.setattr(config, "mode_file", lambda: tmp_path / "dev-mode.json")
+    monkeypatch.setattr(config, "mirror_file", lambda: tmp_path / "mirror.json")
+    monkeypatch.setattr(config, "host_env_file", lambda: tmp_path / "host.env")
+    monkeypatch.setattr(devmode, "in_box", lambda: False)
+    monkeypatch.setattr(devmode, "up_worktrees", lambda: [])
+    monkeypatch.setattr(devmode, "reconcile_stack", lambda *a, **k: True)
+    monkeypatch.setattr(devmode, "registry", lambda: reg)
+    monkeypatch.setattr(supervisor, "log", lambda _m: None)
+    monkeypatch.setenv("FOLDYARD_CLOCK_OFFSET", "0")
+    config.mode_file().unlink(missing_ok=True)
+
+
+@given(world=inject_worlds(), data=st.data())
+def test_no_operation_sequence_reaches_overlapping_rules(world, data, tmp_path, monkeypatch):
+    _host_state(monkeypatch, tmp_path, world.registry())
+    offset = 0
+    for _ in range(data.draw(st.integers(min_value=1, max_value=8), label="steps")):
+        live = devmode.read()["mode"]
+        if data.draw(st.integers(min_value=0, max_value=4), label="op") == 0:
+            # A TTL lapse: every emergency rung back to rest — and nothing else, since an overlap
+            # is not something an expiry strands (settle must not pick a survivor by order).
+            offset += devmode.MAX_TTL + 1
+            monkeypatch.setenv("FOLDYARD_CLOCK_OFFSET", str(offset))
+            supervisor.expire_user_modes()
+            expected = {
+                ax.name: ax.default if live[ax.name] in ax.emergency else live[ax.name]
+                for ax in world.axes
+            }
+            assert devmode.read()["mode"] == expected
+        else:
+            # `fy mode a=x [b=y]` (the TUI's buttons go through the same set_mode).
+            names = data.draw(
+                st.lists(st.sampled_from([ax.name for ax in world.axes]), min_size=1, max_size=2),
+                label="switches",
+            )
+            levels = {ax.name: ax.levels for ax in world.axes}
+            updates = {n: data.draw(st.sampled_from(levels[n]), label=n) for n in names}
+            if world.overlaps({**live, **updates}):
+                with pytest.raises(SystemExit, match="inject"):
+                    devmode.set_mode(updates, reconcile=False)
+                assert devmode.read()["mode"] == live  # refused atomically: nothing written
+            else:
+                # …and ONLY then: the gate isn't over-eager (a refuse-everything check would
+                # satisfy the invariant below on its own).
+                devmode.set_mode(updates, reconcile=False)
+        assert not world.overlaps(devmode.read()["mode"])

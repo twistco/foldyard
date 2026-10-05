@@ -380,10 +380,15 @@ def settle_incoherent(mode: dict) -> dict[str, str]:
     that WORKS offline. Plugin-agnostic on purpose: it needs no structured dependency
     declaration, just the existing ``mode_issues`` gate, so any future axis participates for
     free. Returns only the extra flips (not the whole mode); {} when already coherent or when no
-    single downgrade helps (then ``fy mode`` keeps surfacing the error, as before)."""
+    single downgrade helps (then ``fy mode`` keeps surfacing the error, as before).
+
+    Two switches whose injection rules overlap are left alone. An expiry only turns switches off,
+    so it never creates an overlap, and resolving one it finds would mean picking which credential
+    survives by declaration order, the same accident the overlap check exists to remove. The proxy
+    injects neither side meanwhile (``Registry.injecting_rules``) and the operator decides."""
 
     def _errors(m: dict) -> list[str]:
-        return [msg for sev, msg in registry().mode_issues(m) if sev == "error"]
+        return [msg for sev, msg in registry().mode_issues(m, overlaps=False) if sev == "error"]
 
     flips: dict[str, str] = {}
     current = dict(mode)
@@ -1226,6 +1231,23 @@ def _widenings_check() -> tuple[str, str, str]:
     return _result(ok, name, detail, detail)
 
 
+def _inject_overlap_check(mode: dict) -> tuple[str, str, str]:
+    """Doctor row: no two switches inject on one host and path (``Registry.inject_overlaps``).
+    ``fy mode`` refuses to create an overlap, so a failing row means the state arrived some other
+    way (an older foldyard's state file, an ``[[inject]]`` row adopted while both were on); the
+    proxy injects neither side until one is off."""
+    try:
+        rows = registry().overlap_issues(mode)
+    except Exception as e:  # pragma: no cover — a report must never break the doctor run
+        return _result(None, "credential overlap", "", f"couldn't compare the rules: {e}")
+    return _result(
+        not rows,
+        "credential overlap",
+        "no two switches inject on one host and path",
+        "; ".join(rows),
+    )
+
+
 def doctor(deep: bool = False):
     """Setup checks, yielded one at a time as (status, name, detail).
 
@@ -1290,6 +1312,7 @@ def doctor(deep: bool = False):
     yield _worktree_registry_check()
     yield from _rebase_leftover_check()
     yield _widenings_check()
+    yield _inject_overlap_check(ctx.mode)
     yield from _podman_checks()
     yield from _ssh_port_check()
     yield from _host_wall_check()
