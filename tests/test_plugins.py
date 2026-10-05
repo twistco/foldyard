@@ -1956,6 +1956,90 @@ def test_injecting_rules_hold_back_both_sides_of_an_overlap():
     assert len(reg.injecting_rules({**both, "b": "off"})) == 2
 
 
+class _Interacting(_Injectors):
+    """``a`` injects on all of api.x.test alone; ``b`` alone injects nothing, but with ``a`` also
+    on it adds api.x.test/v1 — a rule that only exists with BOTH on, so neither switch tried
+    alone accounts for it (CodeRabbit on #54: attribution by isolated emission misses it)."""
+
+    def __init__(self):
+        super().__init__({"a": [], "b": []})
+
+    def proxy_rules(self, mode):
+        rule = lambda path: InjectRule(host="api.x.test", header="Authorization", minter=path)  # noqa: E731
+        out = [rule("")] if mode.get("a") == "on" else []
+        if mode.get("a") == "on" and mode.get("b") == "on":
+            out.append(rule("/v1"))
+        return out
+
+
+def test_an_overlap_only_the_combined_mode_produces_is_still_caught():
+    # The check runs on the rules the proxy would ACTUALLY get, not on each switch's isolated
+    # contribution: two overlapping rules that no single switch accounts for together are an
+    # overlap, refused at `fy mode` and held back by the proxy, whatever produced them.
+    reg = Registry([_Interacting()], config=_cfg({}))
+    both = {"a": "on", "b": "on"}
+    assert reg.inject_overlaps(both) != []
+    assert [sev for sev, _ in reg.mode_issues(both)] == ["error"]
+    assert "api.x.test" in reg.mode_issues(both)[0][1]
+    assert reg.injecting_rules(both) == []
+    assert len(reg.injecting_rules({"a": "on", "b": "off"})) == 1
+
+
+class _Combo(_Injectors):
+    """``a`` injects on all of api.x.test; ``b`` and ``c`` TOGETHER add api.x.test/v1; ``d`` is
+    unrelated (api.z.test)."""
+
+    def __init__(self):
+        super().__init__({"a": [], "b": [], "c": [], "d": []})
+
+    def proxy_rules(self, mode):
+        rule = lambda host, path="": InjectRule(host=host, header="Authorization", minter=path)  # noqa: E731
+        on = {s for s in "abcd" if mode.get(s) == "on"}
+        out = [rule("api.x.test")] if "a" in on else []
+        out += [rule("api.x.test", "/v1")] if {"b", "c"} <= on else []
+        out += [rule("api.z.test")] if "d" in on else []
+        return out
+
+
+def test_a_combined_overlap_offers_only_the_switches_that_would_end_it():
+    # Turning `d` off leaves the overlap where it is, and `fy mode` would refuse that very
+    # suggestion — so the message names only switches whose resting level removes a side of it.
+    reg = Registry([_Combo()], config=_cfg({}))
+    ((_, message),) = reg.mode_issues({"a": "on", "b": "on", "c": "on", "d": "on"})
+    for s in "abc":
+        assert f"`fy mode {s}=off`" in message
+    assert "d=" not in message
+    for s in "abc":  # and each one offered really is accepted
+        assert reg.mode_issues({"a": "on", "b": "on", "c": "on", "d": "on", s: "off"}) == []
+
+
+class _Majority(_Injectors):
+    """Both rules on api.x.test appear whenever ANY TWO of ``b``, ``c``, ``d`` are on — so resting
+    one of three leaves both standing, and no single switch ends the overlap."""
+
+    def __init__(self):
+        super().__init__({"b": [], "c": [], "d": []})
+
+    def proxy_rules(self, mode):
+        if sum(mode.get(s) == "on" for s in "bcd") < 2:
+            return []
+        return [
+            InjectRule(host="api.x.test", header="Authorization", minter="1"),
+            InjectRule(host="api.x.test", header="Authorization", minter="2", path_prefix="/v1"),
+        ]
+
+
+def test_a_combined_overlap_no_single_switch_ends_offers_one_command_for_them_together():
+    # Each `fy mode s=off` alone would be refused, so none is offered: one command resting them
+    # together is, and only because it is checked to end the overlap.
+    reg = Registry([_Majority()], config=_cfg({}))
+    on = {"b": "on", "c": "on", "d": "on"}
+    ((_, message),) = reg.mode_issues(on)
+    assert "`fy mode b=off c=off d=off`" in message
+    assert "`fy mode b=off`" not in message
+    assert reg.mode_issues({"b": "off", "c": "off", "d": "off"}) == []
+
+
 def test_the_proxy_daemon_injects_neither_overlapping_rule(monkeypatch):
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
     plugin = _Injectors({"a": [("api.x.test", "")], "b": [("api.x.test", "/v1")]})

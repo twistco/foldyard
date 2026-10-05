@@ -278,10 +278,17 @@ class InjectOverlap:
     The addon injects the FIRST rule that matches, so without this check the credential a request
     carried would be decided by plugin load order. Pairs are in switch declaration order."""
 
-    switches: tuple[str, str]
-    levels: tuple[str, str]
-    defaults: tuple[str, str]  # each switch's resting level: the fix the message offers
+    switches: tuple[str, ...]
+    levels: tuple[str, ...]
+    defaults: tuple[str, ...]  # each switch's resting level: the fix the message offers
     rules: tuple[InjectRule, InjectRule]
+    # True when a rule in the pair is one no single switch accounts for (it appears only with
+    # several on together): ``switches`` is then the active switches whose resting level ends it.
+    combined: bool = False
+    # How a combined pair is ended, as checked against the registry: "each" (resting any one of
+    # ``switches`` does), "together" (only resting all of them at once does — one command), or
+    # "none" (no change of the active switches ends it; no command is offered).
+    fix: str = "each"
 
     @property
     def place(self) -> str:
@@ -292,8 +299,24 @@ class InjectOverlap:
 
 def _overlap_message(group: list[InjectOverlap]) -> str:
     """One ``mode_issues`` row for every place a pair of switches both claim."""
-    (a, b), (va, vb), (da, db) = group[0].switches, group[0].levels, group[0].defaults
     places = ", ".join(dict.fromkeys(o.place for o in group))
+    first = group[0]
+    if first.combined:
+        pairs = list(zip(first.switches, first.levels, first.defaults, strict=True))
+        on = ", ".join(f"{s}={v}" for s, v, _ in pairs)
+        if first.fix == "each" and pairs:
+            way = " Turn one off first: " + " or ".join(f"`fy mode {s}={d}`" for s, _, d in pairs)
+        elif first.fix == "together":
+            rest = " ".join(f"{s}={d}" for s, _, d in pairs)
+            way = f" No one of them ends it alone; turn them off together: `fy mode {rest}`"
+        else:
+            way = ""
+        return (
+            f"{places} would get more than one credential with {on or 'every switch at rest'}:"
+            " a rule there appears only with several switches on together, so no single one"
+            " accounts for it, and the proxy injects none of them there." + way
+        )
+    (a, b), (va, vb), (da, db) = first.switches, first.levels, first.defaults
     return (
         f"{a}={va} and {b}={vb} both inject a credential on {places}, so the proxy injects "
         f"neither while both are on. Turn one off first: `fy mode {b}={db}` or `fy mode {a}={da}`"
@@ -881,13 +904,55 @@ class Registry:
                     for y in rules_b
                     if rules_overlap(x, y)
                 ]
+        return out + self._combined_overlaps(mode, defaults, owned)
+
+    def _combined_overlaps(
+        self, mode: dict, defaults: dict[str, str], owned: list[tuple[str, list[InjectRule]]]
+    ) -> list[InjectOverlap]:
+        """Overlaps in the rule set the proxy would ACTUALLY get that the per-switch attribution
+        can't see: a rule no switch emits on its own (it appears only with several on together,
+        or at rest) still claims its host and path. :meth:`switch_rules` asks each switch alone,
+        so such a rule belongs to none of them, and without this a pair involving it reached the
+        proxy with the credential left to rule order. Each pair names the active switches whose
+        resting level would remove a side of it — the only ones worth offering, since `fy mode`
+        refuses a change that leaves the overlap standing. When no single one does, resting all
+        of them together is offered as ONE command if that is checked to end it, else nothing."""
+        attributed = [rule for _, rules in owned for rule in rules]
+        live = self.proxy_rules(mode)
+        stray = [rule for rule in live if rule not in attributed]
+        if not stray:
+            return []
+        active = [name for name, d in defaults.items() if mode.get(name, d) != d]
+        without = {name: self.proxy_rules({**mode, name: defaults[name]}) for name in active}
+        out: list[InjectOverlap] = []
+        for i, x in enumerate(live):
+            for y in live[i + 1 :]:
+                if not ((x in stray or y in stray) and rules_overlap(x, y)):
+                    continue
+                ends = [n for n in active if x not in without[n] or y not in without[n]]
+                if ends:
+                    names, fix = tuple(ends), "each"
+                else:
+                    rested = self.proxy_rules({**mode, **{n: defaults[n] for n in active}})
+                    together = x not in rested or y not in rested
+                    names, fix = tuple(active), ("together" if together and active else "none")
+                out.append(
+                    InjectOverlap(
+                        names,
+                        tuple(mode[n] for n in names),
+                        tuple(defaults[n] for n in names),
+                        (x, y),
+                        combined=True,
+                        fix=fix,
+                    )
+                )
         return out
 
     def overlap_issues(self, mode: dict) -> list[str]:
         """:meth:`inject_overlaps` as messages, one per pair of switches naming every place they
         both claim and the way out — the rows ``mode_issues`` refuses on, and what the supervisor
         and ``fy doctor`` report."""
-        pairs: dict[tuple[str, str], list[InjectOverlap]] = {}
+        pairs: dict[tuple[str, ...], list[InjectOverlap]] = {}
         for overlap in self.inject_overlaps(mode):
             pairs.setdefault(overlap.switches, []).append(overlap)
         return [_overlap_message(group) for group in pairs.values()]
