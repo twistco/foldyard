@@ -216,6 +216,12 @@ proxy doesn't forward the dummy either: it answers the request itself with a 401
 names the fix (`fy mode claude=on`, run on your computer), so the agent shows that instead of
 the provider's "invalid token". The Network Log marks those rows as held.
 
+With the switch on, the token service on your computer can still fail (a missing or rejected
+secret, a provider outage). The proxy then doesn't send the request at all: it answers with a
+502 whose `message` names the host and the token service's own reason, so the agent sees
+"foldyard could not mint a credential for …" rather than the provider's 401. The fix is on your
+computer — `fy host logs` has the details — and the Network Log marks the row `mint failed`.
+
 `fy claude` and `fy codex` check first: with the agent's switch off they say so before
 launching and, in a terminal, wait for you to switch it on from your computer (Enter launches
 anyway). That covers starting a session; the proxy's answer covers the rest — a time limit

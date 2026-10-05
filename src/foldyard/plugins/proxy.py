@@ -219,6 +219,9 @@ def _net_leaf(e: dict, escape) -> str:
     status = e.get("status", 0)
     colour = "green" if status < 400 else "red"
     mark = ("inj" if e.get("injected") else "") + ("+replay" if e.get("replayed") else "")
+    if e.get("mint_failed"):
+        # The proxy's own 502 (its error body says why): the credential, not the upstream, failed.
+        mark = "mint failed"
     line = (
         f"[dim]{ts}[/dim] {escape(e.get('method', '')):<6} "
         f"{escape(e.get('path', '')[:80])} [{colour}]{status}[/{colour}]"
