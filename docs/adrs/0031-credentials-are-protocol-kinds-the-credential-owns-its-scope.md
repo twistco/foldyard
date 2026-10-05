@@ -9,7 +9,7 @@
   its replacement rows; the agent plugins and GCP left for later. Implemented: decisions 1, 2, 3
   and 6, and of 5 the `box_env` dummies with their `fy verify` row and the held-credential answer
   (`plugins/kinds.py`, `plugins/inject.py`, `credscope.py`; the github plugin is deleted).
-  Decision 4 (overlapping rules refused) lands separately.
+  Decision 4 (overlapping rules refused) landed in #54 (`Registry.inject_overlaps`).
 - **Sources:** the 2026-10-05 incident in a consumer's box (below); the host supervisor log of that
   morning. Related: [0007](./0007-credential-injection-at-egress-proxy.md) (credentials are
   attached at the proxy), [0008](./0008-keyless-agent-auth.md) (the dummy-in-the-box pattern),
