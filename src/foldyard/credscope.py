@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
+from typing import Any, TypeGuard
 
 from . import config
 from .plugins import CredentialScope
@@ -41,7 +41,7 @@ def _read() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _valid(record: object) -> bool:
+def _valid(record: object) -> TypeGuard[dict]:
     return isinstance(record, dict) and isinstance(record.get("permissions"), dict)
 
 
