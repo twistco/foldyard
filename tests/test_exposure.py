@@ -274,6 +274,24 @@ def test_a_stale_proxy_allow_list_is_named_with_the_verb_that_replaced_it(checko
     assert "nothing consumes them" in body and "github.com, pypi.org" in body
 
 
+def test_a_retired_github_table_is_named_as_ignored_with_where_github_went(checkout):
+    """[plugins.github] was removed (ADR-0031). `fy up` refuses it, but `fy doctor` and `fy config
+    widenings` are where an operator looks when GitHub access went quiet, so they name it too —
+    with its `permissions` map, which reads as a control and is now the App installation's."""
+    cfg = checkout(
+        BASE + "passthrough = []\n\n[plugins.github]\n"
+        'app_id = "1"\npermissions = { contents = "write" }\n'
+    )
+    exp = collect(cfg)
+
+    key, values, fix, origin = exp.ignored[0]
+    assert key == "[plugins.github]" and origin == exposure.SHARED
+    assert values == ["app_id = 1", "permissions = {'contents': 'write'}"]
+    assert "[[inject]]" in fix and "github-app" in fix and "installation" in fix
+    assert exp.concerns == ["`[plugins.github]` is IGNORED (2 entries)"]
+    assert exposure.doctor_row(exp)[0] is None  # WARN
+
+
 def test_a_declared_inject_token_env_is_named_as_ignored(checkout):
     """Derived from the axis since the audit's fourth round — a config that still declares one is
     pointing at a host.env var nothing reads."""

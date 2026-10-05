@@ -60,6 +60,12 @@ IGNORED_KEYS: dict[str, str] = {
         "the token var is DERIVED from the switch (FY_INJECT_<SWITCH>) — a declared one is "
         "ignored, so a config rule can't point at another mechanism's secret"
     ),
+    "plugins.github": (
+        'REMOVED (ADR-0031): GitHub is `[[inject]]` rows now — a `kind = "github-app"` row per '
+        'App, and a `kind = "gh-cli"` emergency row for your own token; `fy up` refuses until '
+        "the table is replaced, and prints the rows. Its `permissions` has no successor: the App "
+        "installation's own permissions are the box's scope"
+    ),
     "vscode.workspace_file": (
         "`fy code` always attaches to the checkout folder (ADR-0026) — the generated multi-root "
         "workspace, and the in-box generator that produced it, are no longer run; move the "
@@ -325,6 +331,16 @@ def _ignored(
                 [str(vscode["workspace_file"])],
                 IGNORED_KEYS["vscode.workspace_file"],
                 _origin(shared, local, "vscode", "workspace_file"),
+            )
+        )
+    github = config.retired_github_table()
+    if github is not None:
+        found.append(
+            (
+                "[plugins.github]",
+                [f"{key} = {value}" for key, value in github.items()],
+                IGNORED_KEYS["plugins.github"],
+                _origin(shared, local, "plugins", "github"),
             )
         )
     inject_origin = _origin(shared, local, "inject")

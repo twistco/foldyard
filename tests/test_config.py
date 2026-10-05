@@ -810,6 +810,75 @@ def test_secret_specs_absent_or_malformed_is_empty(fresh_config, tmp_path):
     assert config.secret_specs() == []
 
 
+# ── the retired [plugins.github] table (ADR-0031: a clean break, refused at launch) ─────────
+
+_OLD_GITHUB = (
+    '[plugins.github]\napp_id = "4008762"\ninstallation_id = "139125083"\nrepo = "Tangible"\n'
+    'permissions = { pull_requests = "write", actions = "read" }\n'
+)
+
+
+def test_a_retired_github_table_is_found_in_the_resolved_config(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text(_OLD_GITHUB)
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    table = config.retired_github_table()
+    assert table is not None and table["app_id"] == "4008762"
+    (tmp_path / "foldyard.toml").write_text('[plugins.gcp-metadata]\nproject = "p"\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.retired_github_table() is None
+
+
+def test_a_retired_github_table_still_in_the_tree_is_found_though_the_host_runs_another(
+    fresh_config, tmp_path
+):
+    # On the host the resolved config is the ADOPTED copy; a tree that still carries the table is
+    # one adoption away from being run, so the refusal says so now rather than at the next adopt.
+    # Only ever a refusal: nothing the tree says here is acted upon.
+    (tmp_path / "foldyard.toml").write_text(_OLD_GITHUB)
+    with config.using(config.Config(repo_root=tmp_path, worktree="", toml={})):
+        assert config.retired_github_table() is not None
+
+
+def test_the_replacement_rows_are_computed_from_the_old_table():
+    import tomllib
+
+    table = {"app_id": "4008762", "installation_id": 139125083, "repo": "Tangible"}
+    rows = config.github_table_replacement(table)
+    parsed = tomllib.loads(rows)["inject"]
+    # One live row — the App, its own off/on switch, with the dummy the box used to get ambiently —
+    # and the old `user` level as a commented gh-cli row (an emergency switch, opted into).
+    assert parsed == [
+        {
+            "switch": "github",
+            "kind": "github-app",
+            "app_id": "4008762",
+            "installation_id": "139125083",
+            "repositories": ["Tangible"],
+            "box_env": {"GH_TOKEN": "x"},
+        }
+    ]
+    lines = [line for line in rows.splitlines() if not line.startswith("# The old")]  # prose
+    uncommented = "\n".join(line.removeprefix("# ") for line in lines)
+    user = tomllib.loads(uncommented)["inject"][1]
+    assert user == {
+        "switch": "github-user",
+        "kind": "gh-cli",
+        "emergency": True,
+        "box_env": {"GH_TOKEN": "x"},
+    }
+    assert "permissions" not in rows  # gone: the installation's permissions are the scope
+
+
+def test_an_identity_less_table_gets_placeholder_rows_never_a_broken_live_one():
+    # A bare `[plugins.github]` (a user-emergency-only consumer) has no App to name: the App row is
+    # offered commented, with placeholders, so pasting the block never yields a row that fails.
+    import tomllib
+
+    rows = config.github_table_replacement({})
+    assert tomllib.loads(rows) == {}
+    assert "<the App's id>" in rows and 'kind = "gh-cli"' in rows
+
+
 def test_inject_specs_absent_is_empty(fresh_config, tmp_path):
     (tmp_path / "foldyard.toml").write_text('[project]\nname = "x"\n')
     fresh_config(FOLDYARD_REPO=tmp_path)

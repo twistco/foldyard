@@ -1480,6 +1480,63 @@ def gcp_sa_labels() -> dict:
     return labels if isinstance(labels, dict) else {}
 
 
+# ── the retired [plugins.github] table (ADR-0031) ──────────────────────────────────────
+
+
+def _github_table_in(doc: dict) -> dict | None:
+    plugins = doc.get("plugins")
+    table = plugins.get("github") if isinstance(plugins, dict) else None
+    return table if isinstance(table, dict) else None
+
+
+def retired_github_table() -> dict | None:
+    """``[plugins.github]`` if this checkout still declares it, else None — in the resolved config
+    (on the host, the ADOPTED copy) or, failing that, in its working tree.
+
+    The table was REMOVED, not deprecated (ADR-0031, a clean break like ADR-0023's ``[[inject]]
+    minter``): GitHub is two ``[[inject]]`` kinds now, and nothing loads the table any more — so a
+    config still carrying it has had its GitHub access go silently quiet. ``fy up`` refuses it
+    (``preflight``), printing :func:`github_table_replacement`. The tree is read too because a
+    table still there is one adoption away from being run; that read is safe on the host only
+    because the answer can do nothing but REFUSE — nothing the tree says here is acted upon."""
+    found = _github_table_in(_toml())
+    return found if found is not None else _github_table_in(_tree_toml(repo_root()))
+
+
+def github_table_replacement(table: dict) -> str:
+    """The ``[[inject]]`` rows that replace a ``[plugins.github]`` table, as TOML to paste —
+    computed from the table's own values so the refusal is one paste from a working config. The
+    App becomes a ``github-app`` row (its ``repo`` the one entry of ``repositories``, and the dummy
+    ``GH_TOKEN`` the box used to get ambiently its ``box_env``); the old ``user`` level a COMMENTED
+    ``gh-cli`` row, since that one is an opt-in emergency. ``permissions`` has no successor: the
+    App installation's permissions are the scope now. A table without an App identity (an
+    emergency-only consumer) gets the App row commented, with placeholders, so pasting the block
+    never yields a row that fails to load."""
+    app_id, installation_id = table.get("app_id"), table.get("installation_id")
+    repo = table.get("repo")
+    app = [
+        "[[inject]]",
+        'switch = "github"               # `fy mode github=on` (was github=app)',
+        'kind = "github-app"',
+        f"app_id = {json.dumps(str(app_id or '<the App' + chr(39) + 's id>'))}",
+        f"installation_id = {json.dumps(str(installation_id or '<its installation id>'))}",
+    ]
+    if repo:
+        app.append(f"repositories = [{json.dumps(str(repo))}]")
+    app.append('box_env = { GH_TOKEN = "x" }')
+    if not (app_id and installation_id):
+        app = [f"# {line}" for line in app]
+    user = [
+        "# The old `user` level — your own gh token, push included; `on` expires by itself:",
+        "# [[inject]]",
+        '# switch = "github-user"         # `fy mode github-user=on` (was github=user)',
+        '# kind = "gh-cli"',
+        "# emergency = true",
+        '# box_env = { GH_TOKEN = "x" }',
+    ]
+    return "\n".join([*app, "", *user]) + "\n"
+
+
 def _overlay_path(raw: object) -> Path | None:
     """A configured compose-override value → an absolute Path (checkout-relative resolves
     against the repo root), or None when unset/empty."""

@@ -248,18 +248,36 @@ RETIRED_AXES = {
         "the proxy always decrypts + logs now, except the trusted `[proxy] passthrough` hosts "
         "(ADR-0029). Nothing to switch on."
     ),
+    "github": (
+        "GitHub is `[[inject]]` rows now (ADR-0031): a `github-app` row is its own off/on switch, "
+        "and the old `user` level is a `gh-cli` row with `emergency = true`. `fy mode` lists the "
+        "switches this project has."
+    ),
+}
+# Levels of a retired switch whose NAME a consumer's `[[inject]]` row has since taken (the
+# github-app row is conventionally `switch = "github"`): the switch is real again, so only the old
+# levels are answered — with what replaced them rather than just the valid list.
+RETIRED_LEVELS = {
+    ("github", level): (
+        "was the github plugin's level (ADR-0031): the App is `github=on`, and your own token is "
+        "a `gh-cli` row's emergency switch (`fy mode` lists it — e.g. github-user=on)"
+    )
+    for level in ("app", "user")
 }
 
 
 def validate_updates(updates: dict[str, str]) -> None:
     """Refuse an unknown axis or rung. Shared by :func:`set_mode` and the doors that do work
-    BEFORE it (the CLI's secret prompt), so a typo never stores a paste and then fails."""
+    BEFORE it (the CLI's secret prompt), so a typo never stores a paste and then fails. A RETIRED
+    name only answers as retired while no current switch has taken it."""
     rungs = axes()
     for axis, value in updates.items():
-        if axis in RETIRED_AXES:
+        if axis not in rungs and axis in RETIRED_AXES:
             raise SystemExit(f"✗ the {axis!r} switch was removed — {RETIRED_AXES[axis]}")
         if axis not in rungs:
             raise SystemExit(f"✗ unknown switch {axis!r} (have: {', '.join(rungs)})")
+        if value not in rungs[axis] and (axis, value) in RETIRED_LEVELS:
+            raise SystemExit(f"✗ {axis}={value} {RETIRED_LEVELS[(axis, value)]}")
         if value not in rungs[axis]:
             raise SystemExit(f"✗ {axis} mode {value!r} (have: {', '.join(rungs[axis])})")
 

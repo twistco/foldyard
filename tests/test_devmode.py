@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from foldyard import devmode
+from foldyard import config, devmode, supervisor
 
 # The substrate tests assume the Tangible-shaped axes (gcp/github/capture/dump); bind a full
 # resolved config so the live registry provides them (per-consumer-registry-plan.md test strategy).
@@ -81,6 +81,45 @@ def test_a_retired_axis_is_refused_with_its_replacement(isolated_state):
     with pytest.raises(SystemExit, match="always decrypts"):
         devmode.set_mode({"capture": "on"})
     assert "capture" not in devmode.read()["mode"]
+
+
+def test_the_retired_github_levels_get_where_github_went(isolated_state):
+    # `github=app` / `github=user` were the github plugin's levels (ADR-0031). Under a config
+    # with no `github` switch the name is retired outright…
+    from conftest import GENERIC_TOML, make_config
+
+    with config.using(make_config(GENERIC_TOML)):
+        with pytest.raises(SystemExit, match=r"\[\[inject\]\].*gh-cli"):
+            devmode.set_mode({"github": "app"})
+    # …and where a `github-app` row took the name, the switch is real and only the OLD levels are
+    # refused — with the level that replaced them, not just the valid list.
+    with pytest.raises(SystemExit, match=r"github=on.*github-user"):
+        devmode.set_mode({"github": "user"})
+    devmode.set_mode({"github": "on"})
+    assert devmode.read()["mode"]["github"] == "on"
+
+
+def test_a_stale_github_level_left_in_the_state_reads_as_at_rest(isolated_state):
+    # The host's dev-mode.json outlives the upgrade: it may still say `github: app` (or `user`,
+    # with an expiry). Every reader must take that as the switch's resting level — never crash the
+    # supervisor's tick or the TUI, never read as armed — and the next write drops the stale key.
+    stale = devmode._iso(devmode.now() - timedelta(minutes=5))
+    isolated_state["auth"].write_text(
+        json.dumps({"github": "user", "gcp": "logs", "expires": {"github": stale}})
+    )
+    assert devmode.read()["mode"]["github"] == "off"
+    assert devmode.read()["mode"]["gcp"] == "logs"  # the rest of the posture survives
+    assert supervisor.expire_user_modes()["github"] == "off"  # the tick takes it in its stride
+    assert devmode.degraded_capabilities() == []
+    devmode.set_mode({"gcp": "off"})
+    written = json.loads(isolated_state["auth"].read_text())
+    assert written["github"] == "off" and "github" not in written["expires"]
+
+    from conftest import GENERIC_TOML, make_config
+
+    with config.using(make_config(GENERIC_TOML)):  # …and with no github switch at all
+        isolated_state["auth"].write_text(json.dumps({"github": "app"}))
+        assert "github" not in devmode.read()["mode"]
 
 
 def test_read_defaults_when_files_missing(isolated_state):
