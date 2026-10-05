@@ -102,6 +102,10 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   a count, injection targets (armed and latent, asked of the registry so an odd shape like Codex's
   ChatGPT rung reports its real host), agent prompts attributed to the shared vs the gitignored
   file, and `IGNORED_KEYS` — config that reads as a control and is no longer honoured.
+- `credscope.py` — what each credential was last OBSERVED to grant (ADR-0031: reported, never
+  capped): a kind's probe reads it (`CapabilityProbe.scope`), the supervisor records it per switch
+  and credential identity and logs + notifies a change; `fy config widenings`, `fy mode` and the
+  TUI read the record offline.
 - `allowlist.py` · `ports.py` · `preflight.py` · `keyless.py` — the egress allow-store behind
   `fy allow` + the TUI's host grants (all levels host-side), cross-project port-band allocation,
   hard-prerequisite checks before `up`, and the keyless-agent credential taxonomy + host-side

@@ -173,6 +173,27 @@ def test_show_renders_a_degraded_axis_from_the_host_state_file(isolated_state, m
     assert "DEGRADED" in out and "gcp-elevate" in out
 
 
+def test_show_gives_an_armed_credential_its_last_probed_scope(isolated_state, capsys):
+    # ADR-0031: the App installation's permissions are the box's scope, so the switch's line says
+    # what they were last seen to be — from the supervisor's record, never a call to GitHub.
+    from foldyard import credscope
+    from foldyard.plugins import CredentialScope
+
+    scope = CredentialScope(
+        "App 1234567, installation 7654321", {"issues": "write", "actions": "read"}, "all repos"
+    )
+    credscope.observe("github", scope, "t")
+    assert devmode.scope_summary("github") == "actions:read, issues:WRITE — all repos"
+    devmode.show()
+    assert "scope:" not in capsys.readouterr().out  # at rest: `fy config widenings` has it
+    devmode.set_mode({"github": "on"})
+    devmode.show()
+    assert "scope: actions:read, issues:WRITE — all repos" in capsys.readouterr().out
+    # A switch whose kind reads no scope, or that has no record yet, gets no line.
+    assert devmode.scope_summary("github-user") == ""
+    assert devmode.scope_summary("gcp") == ""
+
+
 def test_show_renders_degraded_in_the_box_from_the_mirror(isolated_state, monkeypatch, capsys):
     devmode.set_mode({"gcp": "sa"})
     state = devmode.read()

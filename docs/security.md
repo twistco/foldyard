@@ -121,6 +121,9 @@ The resting state is **zero secrets in the VM**: no key files, no token environm
   shared App hands the box every purpose it serves — use one App per purpose, installed only on
   the repositories it serves
   ([ADR-0031](./adrs/0031-credentials-are-protocol-kinds-the-credential-owns-its-scope.md)).
+  It reports them instead: `fy config widenings` shows the permissions last read from the
+  installation, flagging `write` and `admin`, and when a reading changes (no foldyard file
+  changed, so nothing else would say so) the supervisor logs it and sends a notification.
 - **Token services are built in, never repo code.** The `[[inject]]` kinds foldyard ships
   (`static`, `github-app`, `gh-cli`), the Codex refresh flow, or an installed plugin are the only
   ones that run. There is no config key naming a command to run and no token-service path inside the repo:
@@ -167,7 +170,7 @@ the box only the VM-boundary checks run. What it checks:
   from (`GH_TOKEN`, `GITHUB_TOKEN`) must be unset or a declared dummy in every box; the real
   credential stays on your computer. A push over the API is possible exactly when an injected
   token's own scope allows it (a GitHub App with `contents: write`, say) — `fy config widenings`
-  shows where each credential is delivered. Active **emergency levels print a banner**, so an
+  shows where each credential is delivered and what a GitHub App's was last read to grant. Active **emergency levels print a banner**, so an
   escalation is never invisible.
 - **Firewall probes** (Lima with `[machine] firewall = true`): direct connections from the box
   that ignore the proxy — to a public IP on port 443 *and* on 53, the DNS-tunnel case — must be

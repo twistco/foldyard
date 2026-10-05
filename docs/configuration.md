@@ -460,6 +460,17 @@ switch — one App per purpose, installed only on the repositories it serves, si
 hands the box the other purpose's permissions too. A token that can't reach an endpoint gets
 GitHub's own 403, which names the permission the App is missing.
 
+foldyard **reports** the scope instead of capping it. While the switch is on, its capability
+probe (every 5 minutes, authenticated as the App, minting nothing) reads the installation's
+permissions and which repositories it covers. `fy config widenings` shows the last reading under
+the row, with any `write` or `admin` permission flagged, or "not yet probed" until the switch has
+been on; `fy mode` and `fy tui` show it beside the switch while it's on. Both read the record on
+your computer (`credential-scopes.json` in foldyard's state directory) and never call GitHub. When
+a reading differs from the last one, for example after someone accepted a new permission on
+github.com, the supervisor logs one line naming what was added, removed or changed level
+(`fy host logs`) and sends one desktop notification. The first reading of an App is a baseline,
+not a change. An uninstalled or suspended installation shows the switch as degraded.
+
 **`kind = "gh-cli"`** — your own `gh` token (`gh auth token` on your computer), push included. It
 takes no fields of its own and must be `emergency = true`:
 

@@ -1199,6 +1199,29 @@ async def test_blocked_daemon_shows_the_gates_reason_even_when_the_port_answers(
         assert "DOWN" not in line
 
 
+async def test_an_armed_credential_shows_its_last_probed_scope(monkeypatch):
+    # The same line `fy mode` prints under the switch (devmode.scope_summary), only while it's on.
+    def mode_with(**over):
+        m = dict(devmode.axis_defaults())
+        m.update(over)
+        return {"mode": m, "expires": {}}
+
+    monkeypatch.setattr(
+        devmode, "scope_summary", lambda axis: "issues:WRITE [all]" if axis == "github" else ""
+    )
+    monkeypatch.setattr(devmode, "daemon_status", lambda mode: {})
+    async with tui.DevModeTui().run_test() as pilot:
+        app = cast(tui.DevModeTui, pilot.app)
+        cap = next(r for r in app.query(tui.AxisRow) if r.axis == "github")
+        monkeypatch.setattr(devmode, "read", lambda: mode_with())
+        app.refresh_mode()
+        assert "scope" not in _text(cap.query_one(".axis-status", tui.Static))
+        monkeypatch.setattr(devmode, "read", lambda: mode_with(github="on"))
+        app.refresh_mode()
+        # verbatim, not markup — a bracket in it must survive
+        assert "scope: issues:WRITE [all]" in _text(cap.query_one(".axis-status", tui.Static))
+
+
 async def test_blocked_reason_is_rendered_verbatim_not_as_markup(monkeypatch):
     # The gate's reason is free text — an OSError's str carries `[Errno N]`, and a bracketed
     # fragment Rich would take for a tag must survive on both surfaces (the axis line and the

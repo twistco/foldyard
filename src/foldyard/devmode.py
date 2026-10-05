@@ -451,6 +451,23 @@ def read_capabilities() -> dict:
     return _load(config.capabilities_file())
 
 
+def scope_summary(axis: str) -> str:
+    """What ``axis``'s credential was last probed to grant, as one line (:mod:`foldyard.credscope`,
+    ADR-0031), or ``""`` — a switch whose kind reads no scope, one not probed yet, or the box, which
+    can't read the host's record. Offline: the supervisor's record, never the provider."""
+    from . import credscope
+    from .plugins.kinds import scope_identity
+
+    if in_box():
+        return ""
+    for spec in config.inject_specs():
+        if spec.get("switch") == axis:
+            identity = scope_identity(spec)
+            record = credscope.last(axis, identity) if identity else None
+            return credscope.summary(record) if record else ""
+    return ""
+
+
 def degraded_capabilities(mode: dict | None = None) -> list[tuple[str, str]]:
     """``(axis, detail)`` for every ACTIVE (non-default) axis whose probed capability is
     failing — the claim ``fy mode`` renders as ⚠ DEGRADED, packaged for verbs like ``fy up``
@@ -1994,6 +2011,9 @@ def show() -> int:
             else:
                 line += "   [daemon status unknown]"
         print(line)
+        scope = scope_summary(axis) if value != defaults[axis] else ""
+        if scope:
+            print(f"          scope: {scope}")
 
     if any(mode[axis] in emergency_rungs.get(axis, ()) for axis in axes()):
         print("  ⚠ EMERGENCY user-credential mode is ON — auto-reverts at expiry.")

@@ -139,6 +139,64 @@ def test_a_kinds_pinned_host_is_reported_and_two_rows_on_one_host_both_show(chec
     assert "gh-cli" in user.source and "your own gh token" in user.source
 
 
+def _record_scope(identity: str, permissions: dict, reach: str = "selected repositories"):
+    from foldyard import credscope
+    from foldyard.plugins import CredentialScope
+
+    credscope.observe(
+        "github", CredentialScope(identity, permissions, reach), "2026-10-05T12:03:00+00:00"
+    )
+
+
+def test_a_github_app_row_reports_the_last_probed_scope_and_flags_write(checkout, monkeypatch):
+    """ADR-0031: the App installation's permissions ARE the box's scope, so the inventory shows
+    them — from the supervisor's record, offline (a report never calls GitHub)."""
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("network"))
+    _record_scope("App 1, installation 2", {"issues": "write", "actions": "read"})
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    app = next(t for t in collect(cfg).targets if "[[inject]] github " in t.source)
+    assert app.scope == (
+        "scope (probed 2026-10-05T12:03:00+00:00): actions:read, issues:WRITE — selected "
+        "repositories",
+        "⚠ write or admin: issues — what the box can change through this credential",
+    )
+    body = rendered(cfg)
+    assert "issues:WRITE" in body and "⚠ write or admin: issues" in body
+    # A kind that reads no scope reports none.
+    user = next(t for t in collect(cfg).targets if "github-user" in t.source)
+    assert user.scope == ()
+
+
+def test_an_unprobed_github_app_says_so_and_how_it_gets_probed(checkout):
+    # Including when the only record is ANOTHER installation's: an adopted `installation_id`
+    # change must not show the previous App's permissions as this one's.
+    _record_scope("App 1, installation 999", {"contents": "write"})
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    app = next(t for t in collect(cfg).targets if "[[inject]] github " in t.source)
+    (line,) = app.scope
+    assert "not yet probed" in line and "`fy mode github=on`" in line
+    assert "contents" not in rendered(cfg)
+
+
+def test_in_the_box_the_scope_points_at_the_computer_that_holds_it(checkout, monkeypatch):
+    # The record is host state the box can't read: "not yet probed" there would be a false claim.
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    app = next(t for t in collect(cfg).targets if "[[inject]] github " in t.source)
+    assert app.scope == ("scope: recorded on your computer, where `fy config widenings` shows it",)
+
+
+def test_a_read_only_scope_raises_no_flag(checkout):
+    _record_scope("App 1, installation 2", {"actions": "read"}, reach="all repositories")
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    app = next(t for t in collect(cfg).targets if "[[inject]] github " in t.source)
+    assert app.scope == (
+        "scope (probed 2026-10-05T12:03:00+00:00): actions:read — all repositories",
+    )
+
+
 def test_packaged_targets_come_from_the_registry_not_from_guessed_constants(checkout):
     """Codex's ChatGPT rung injects on chatgpt.com/backend-api/codex, not the API host. A report
     that hardcoded hosts would name the wrong destination — so it asks the plugins."""

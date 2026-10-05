@@ -1032,6 +1032,8 @@ class DevModeTui(App):
             blurb = devmode.mode_blurb()
             emergency_rungs = devmode.emergency()
             degraded = devmode.degraded_capabilities(mode)
+            # What an armed credential was last probed to grant — `fy mode`'s scope line.
+            scopes = {a: devmode.scope_summary(a) for a in mode if mode[a] != defaults.get(a)}
         self._sync_mode_rows(rungs, emergency_rungs)
         focused = self.focused
         for row in self.query(AxisRow):
@@ -1077,6 +1079,8 @@ class DevModeTui(App):
                     status += f"\n{dn} :{daemon['port']} ○ BLOCKED — {escape(daemon['blocked'])}"
                 elif daemon and current != defaults[row.axis] and not daemon["up"]:
                     status += f"\n{dn} :{daemon['port']} ○ DOWN — `fy host restart` (or `fy up`)"
+                if scopes.get(row.axis):
+                    status += f"\nscope: {escape(scopes[row.axis])}"
             row.query_one(".axis-status", Static).update(status)
         # The banner stacks every posture-level alarm: the emergency rung (as before) and any
         # probed-and-failing capability (the supervisor's published claim — same source as

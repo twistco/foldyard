@@ -51,7 +51,10 @@ authoritative state is in the host's home, outside the mount). So:
    not foldyard. A GitHub App token carries exactly what the App's installation grants (foldyard
    neither narrows nor caps it), and GitHub's 403 names the missing permission: ask the human to
    grant it on the App (an org owner approves it), or for a separate App with its own switch.
-   Editing `foldyard.toml` can't widen it — there is no permissions key to add.
+   Editing `foldyard.toml` can't widen it — there is no permissions key to add. The human can
+   see what the App was last read to grant with `fy config widenings` on their computer (or
+   beside the switch in their `fy mode`); the box can't read that record, so ask rather than
+   guess.
 
 ## Reading the current grant surface
 

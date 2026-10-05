@@ -95,6 +95,9 @@ class Target:
     active: bool  # is its axis on right now?
     from_config: bool  # True = the host is repo config; False = fixed in package code
     origin: str = DEFAULT  # which file declares it (SHARED / LOCAL / DEFAULT)
+    # What the credential was last probed to grant, as report lines (see `_scope_lines`); () for a
+    # kind whose probe reads no scope.
+    scope: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -248,6 +251,7 @@ def _targets(
                 active=mode.get(axis, "off") != "off",
                 from_config=True,
                 origin=origin,
+                scope=_scope_lines(axis, spec),
             )
         )
     for rule in reg.proxy_rules(mode):  # what the CURRENT posture activates
@@ -265,6 +269,35 @@ def _targets(
                     _origin(shared, local, axis, "keyless"),
                 )
     return out
+
+
+def _scope_lines(switch: str, spec: dict) -> tuple[str, ...]:
+    """What the row's credential was last probed to grant (ADR-0031: foldyard reports the scope a
+    credential carries rather than capping it). From the supervisor's record, OFFLINE — a report
+    never calls the provider — and only the record for the credential this row names, so a changed
+    ``installation_id`` never shows the previous App's permissions as the new one's."""
+    from . import credscope
+    from .plugins.kinds import scope_identity
+
+    identity = scope_identity(spec)
+    if not identity:
+        return ()
+    if config.in_box():
+        return ("scope: recorded on your computer, where `fy config widenings` shows it",)
+    record = credscope.last(switch, identity)
+    if record is None:
+        return (
+            "scope: not yet probed — the supervisor reads it while the switch is on "
+            f"(`fy mode {switch}=on`)",
+        )
+    lines = [f"scope (probed {record.get('checked') or '?'}): {credscope.summary(record)}"]
+    elevated = credscope.elevated(record["permissions"])
+    if elevated:
+        lines.append(
+            f"⚠ write or admin: {', '.join(elevated)} — what the box can change through this "
+            "credential"
+        )
+    return tuple(lines)
 
 
 def _prompts(shared: dict, local: dict) -> list[tuple[str, int, str]]:
@@ -469,6 +502,7 @@ def render(exp: Exposure) -> list[str]:
             if t.from_config
             else "      Host fixed in package code, not config."
         )
+        out += [f"      {line}" for line in t.scope]
     out.append("")
 
     if exp.prompts or exp.agent_config:
