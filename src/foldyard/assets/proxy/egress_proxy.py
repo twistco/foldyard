@@ -6,7 +6,9 @@ where the minter's gcloud ADC + GitHub egress live — as the box's egress proxy
 request to an injected host it OVERWRITES the Authorization header with a token obtained
 by running a host command (the minter, `gh-app-token`), caches the token for the ttl the
 minter reports, and re-mints + re-issues the request once on an upstream 401. When the minter
-fails, the request is not forwarded: the proxy answers it with a 502 naming the minter's reason.
+fails, the request is not forwarded: the proxy answers it with a 502 naming the minter's reason,
+and keeps answering so for a few seconds rather than re-run a minter that just failed. A mint
+never runs on mitmproxy's event loop, so a slow one holds up only the requests that need it.
 
 The security property this buys: the token is added host-side, in flight, so it NEVER
 materialises inside the container (not as env, not as a file) — the evolution of the old
@@ -514,6 +516,17 @@ def _mint_failure_detail(e: BaseException) -> str:
     return f"{type(e).__name__}: {_redact_token_runs(str(e))[:500]}"
 
 
+# How long a failed mint answers for its rule before the minter is run again. Clients retry a 5xx
+# (the Anthropic SDK and Claude Code back off from about half a second), so without it every retry
+# of every request re-ran a minter that had just failed: up to its 30 s timeout each time, each
+# logged at ERROR. Long enough to absorb a burst of retries and the parallel requests an agent
+# makes; short enough that a fix foldyard can't see (an App installation accepted, the network
+# back) is picked up within a client's own retries. The usual fix needs no wait at all: a secret
+# pasted into host.env re-creates the rule (`Injector._refresh_live`), and a new rule remembers
+# nothing.
+_MINT_FAILURE_MEMORY = 15.0
+
+
 class _MintFailure:
     """What :meth:`_Rule.token` returns instead of a value when the minter failed: the reason,
     carried WITH the result rather than left on the rule, where a concurrent mint could overwrite
@@ -588,6 +601,13 @@ class _Rule:
         self._lock = threading.Lock()
         self._value: str | None = None
         self._expires_at: float = 0.0
+        # The last mint's failure and when it happened, answered for _MINT_FAILURE_MEMORY instead
+        # of running the minter again; a successful mint clears it. Behind the same lock.
+        self._failure: _MintFailure | None = None
+        self._failed_at: float = 0.0
+        # The mint the event loop is waiting on (see `atoken`), shared by every request that
+        # arrives while it runs. Touched on the loop only, so it needs no lock.
+        self._inflight: asyncio.Future | None = None
 
     @property
     def active(self) -> bool:
@@ -623,34 +643,90 @@ class _Rule:
 
     def token(self, *, force: bool = False, warm: bool = False) -> str | _MintFailure:
         """The value to inject, or — when the minter failed — a :class:`_MintFailure` naming why,
-        which the request path answers the box with instead of forwarding its dummy."""
+        which the request path answers the box with instead of forwarding its dummy. A failure is
+        remembered for :data:`_MINT_FAILURE_MEMORY` and answered from memory meanwhile, ``force``
+        included (see :meth:`_settled`)."""
         # Held across the mint, so a warm-up and a concurrent request collapse to ONE
         # subprocess: the second caller waits and then sees the fresh cache. The minter has
         # its own 30s timeout, which bounds how long that wait can be.
         with self._lock:
-            if force or self._value is None or time.monotonic() >= self._expires_at:
-                try:
-                    return self._mint()
-                except Exception as e:
-                    # WARN on the startup warm-up (`warm`), ERROR on the request path. Not
-                    # cosmetic: mitmproxy's ErrorCheck addon EXITS the process when anything logs
-                    # at ERROR during startup, so one rule whose credential is missing from
-                    # host.env would kill the whole proxy — which the supervisor respawns, forever
-                    # — cutting egress for every host whose credential was fine. Same invariant
-                    # `requires` protects (a proxy that won't launch connection-refuses every box
-                    # request): degrade ONE host, never all egress. The request path is past the
-                    # startup window, so it keeps the loud level.
-                    report = ctx.log.warn if warm else ctx.log.error
-                    detail = _mint_failure_detail(e)
-                    # Lead with the HOST: that's the axis a reader is trying to identify, and
-                    # the command alone makes them map a module path back to a mode by hand.
-                    report(f"egress_proxy: mint failed for {self.host} — {detail} [{self.command}]")
-                    return _MintFailure(detail)
-            assert self._value is not None  # the branch above mints whenever it is None
+            settled = self._settled(force)
+            if settled is not None:
+                return settled
+            try:
+                value = self._mint()
+            except Exception as e:
+                # WARN on the startup warm-up (`warm`), ERROR on the request path. Not
+                # cosmetic: mitmproxy's ErrorCheck addon EXITS the process when anything logs
+                # at ERROR during startup, so one rule whose credential is missing from
+                # host.env would kill the whole proxy — which the supervisor respawns, forever
+                # — cutting egress for every host whose credential was fine. Same invariant
+                # `requires` protects (a proxy that won't launch connection-refuses every box
+                # request): degrade ONE host, never all egress. The request path is past the
+                # startup window, so it keeps the loud level. Logged here, per minter RUN — a
+                # failure answered from memory logs nothing, so a retrying client can't flood it.
+                report = ctx.log.warn if warm else ctx.log.error
+                detail = _mint_failure_detail(e)
+                # Lead with the HOST: that's the axis a reader is trying to identify, and
+                # the command alone makes them map a module path back to a mode by hand.
+                report(f"egress_proxy: mint failed for {self.host} — {detail} [{self.command}]")
+                self._failure, self._failed_at = _MintFailure(detail), time.monotonic()
+                return self._failure
+            self._failure = None
+            return value
+
+    def _settled(self, force: bool) -> str | _MintFailure | None:
+        """What :meth:`token` answers without running the minter — a live cached value (unless
+        ``force``), else a failure still inside its window — or None. The caller holds the lock.
+
+        ``force`` (a 401 re-issue: the upstream refused the cached value) skips the value but
+        NOT a remembered failure. The two say different things: a cached value can be wrong
+        without the cache knowing, which is what the 401 reveals; a failure is the minter's own
+        answer from seconds ago, and a 401 says nothing new about it. Re-running it there would
+        undo the memory exactly when it matters — a revoked token draws a 401 for every request
+        still in flight with it, one minter run each."""
+        now = time.monotonic()
+        if not force and self._value is not None and now < self._expires_at:
             return self._value
+        if self._failure is not None and now - self._failed_at < _MINT_FAILURE_MEMORY:
+            return self._failure
+        return None
+
+    def _cached(self, force: bool) -> str | _MintFailure | None:
+        """:meth:`_settled` without waiting for the lock: a mint holding it (the warm-up's)
+        means None — wait for that mint off the loop."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return self._settled(force)
+        finally:
+            self._lock.release()
+
+    async def atoken(self, *, force: bool = False) -> str | _MintFailure:
+        """:meth:`token` for the event loop, which must never wait on a minter: mitmproxy runs
+        every connection's hooks on that one loop, so a mint run there (up to its 30 s timeout)
+        froze ALL proxied traffic, not just this host's — and clients retry a 502, once per
+        retry. A cached answer is returned at once; otherwise the mint runs on a worker thread
+        and the request awaits it, while other requests carry on.
+
+        Requests that arrive while it runs await the SAME mint instead of queueing behind the
+        lock, one worker thread each — on a hung minter enough of those would fill the default
+        executor and stall every other rule's mint behind them. A `force` caller joins a mint in
+        flight too: it started after the token being refused was handed out, so its result is
+        already the fresh token `force` asks for. ``shield``: a request that goes away (the
+        client hung up) must not cancel the mint the others are waiting on."""
+        cached = self._cached(force)
+        if cached is not None:
+            return cached
+        if self._inflight is None:
+            inflight = asyncio.ensure_future(asyncio.to_thread(self.token, force=force))
+            self._inflight = inflight
+            inflight.add_done_callback(lambda _done: setattr(self, "_inflight", None))
+        return await asyncio.shield(self._inflight)
 
     def invalidate(self) -> None:
-        """Forget the cached value, so the next request mints afresh."""
+        """Forget the cached value, so the next request mints afresh — unless a failure is still
+        remembered: that is the minter's answer, not the refused token's, and stands its window."""
         with self._lock:
             self._value = None
             self._expires_at = 0.0
@@ -1116,12 +1192,13 @@ class Injector:
 
     # ── mitmproxy hooks ──────────────────────────────────────────────────────────
     def running(self) -> None:
-        """Pre-mint every rule's token at proxy start, OFF the request path. ``request`` calls
-        ``rule.token()`` synchronously on the event loop, so a slow first mint (e.g. ``uv run
-        --script`` resolving a minter's PEP 723 env on a cold cache) would stall ALL proxied
-        egress for its duration. Fire-and-forget daemon threads: a warm failure just logs (at WARN
-        — ``warm=True``; an ERROR here makes mitmproxy exit, see ``token``) and the request path
-        re-mints as before. Handles kept on ``self`` so tests can join."""
+        """Pre-mint every rule's token at proxy start, so the first request to each host finds it
+        cached instead of waiting for a slow first mint (e.g. ``uv run --script`` resolving a
+        minter's PEP 723 env on a cold cache). The request path no longer mints on the event
+        loop (:meth:`_Rule.atoken`), so this saves that one request's wait, not all egress.
+        Fire-and-forget daemon threads: a warm failure just logs (at WARN — ``warm=True``; an
+        ERROR here makes mitmproxy exit, see ``token``). Handles kept on ``self`` so tests can
+        join."""
         self._running = True
         self._warm(list(self.rules))
         if self.live_path is not None:
@@ -1331,21 +1408,26 @@ class Injector:
             if conn is not None:
                 conn["blind"] = target
 
-    def requestheaders(self, flow: http.HTTPFlow) -> None:
+    async def requestheaders(self, flow: http.HTTPFlow) -> None:
         """Where a request is judged and its credential written: the headers are in, the body
         isn't. With ``stream_large_bodies`` set, a body past the threshold goes upstream as it
         arrives and ``request`` fires only once it's gone — too late for a header. A long Claude
         conversation (>1 MiB) reached Anthropic with the box's dummy token that way (401 "OAuth
         access token is invalid", 2026-09-23). Refusing here also means a refused request never
-        streams its body anywhere."""
-        self._on_request(flow)
+        streams its body anywhere.
 
-    def request(self, flow: http.HTTPFlow) -> None:
+        Async so a mint can be awaited (:meth:`_Rule.atoken`) rather than run on the event loop.
+        mitmproxy runs each hook as its own task and holds THIS flow until it completes — the
+        streaming decision included, which it reads after the hook — so nothing about the flow
+        changes, and every other connection keeps moving meanwhile."""
+        await self._on_request(flow)
+
+    async def request(self, flow: http.HTTPFlow) -> None:
         """Fires after ``requestheaders`` (after a buffered body, or after a streamed one has gone
         upstream). The work happened there; this only covers a caller that skips that hook."""
-        self._on_request(flow)
+        await self._on_request(flow)
 
-    def _on_request(self, flow: http.HTTPFlow) -> None:
+    async def _on_request(self, flow: http.HTTPFlow) -> None:
         if flow.metadata.get("egress_proxy_judged"):
             return
         flow.metadata["egress_proxy_judged"] = True
@@ -1389,7 +1471,15 @@ class Injector:
         rule = self._rule_for(flow)
         if rule is None:
             return  # capture-only, or not a target host/path → log on the way back, rewrite nothing
-        value = rule.token()
+        value = await rule.atoken()
+        # The mint can take seconds, and the settings may have changed meanwhile. Nothing has left
+        # yet, so a request whose rule is gone (its switch turned off) is judged again under the
+        # posture it will actually leave under, rather than carry a credential that is now off.
+        self.refresh()
+        if self._rule_for(flow) is not rule:
+            del flow.metadata["egress_proxy_judged"]
+            await self._on_request(flow)
+            return
         if isinstance(value, _MintFailure):
             self._answer_mint_failure(flow, rule, value)
             return
@@ -1441,7 +1531,10 @@ class Injector:
             rule.invalidate()
             ctx.log.warn(f"egress_proxy: 401 from {rule.host} on a streamed upload — not re-issued")
             return
-        value = rule.token(force=True)
+        value = await rule.atoken(force=True)
+        self.refresh()
+        if self._rule_for(flow) is not rule:
+            return  # its switch went off during the mint: hand the 401 back, send nothing more
         if isinstance(value, _MintFailure):
             # The upstream refused the cached token and no fresh one can be had. Its 401 would
             # send the box hunting for a credential it never held; the minter's reason is the

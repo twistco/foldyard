@@ -12,10 +12,14 @@ isn't in the checkout.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import sys
+import threading
+import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -265,7 +269,7 @@ async def test_injects_minted_header_on_the_target_host(injector):
     inj, log = injector
     flow = _Flow("api.github.com")
     flow.request.headers["Authorization"] = "Bearer DUMMY"  # the box only ever sends a dummy
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.request.headers["Authorization"] == "token FAKE"  # overwritten host-side
     await inj.response(flow)
     entry = _last_log(log)
@@ -291,7 +295,7 @@ async def test_value_prefix_is_prepended_to_the_minted_value(
 
     flow = _Flow("api.anthropic.com")
     flow.request.headers["authorization"] = "Bearer sk-ant-oat-dummy"  # the box's dummy
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.request.headers["authorization"] == "Bearer token FAKE"  # bare token + scheme
 
     # The 401 re-issue must carry the SAME prefixed value (not a bare or double-prefixed token).
@@ -331,18 +335,18 @@ async def test_inject_rules_multi_injector_each_host_uses_its_own_minter(gh, mon
 
     gh_flow = _Flow("api.github.com")
     gh_flow.request.headers["Authorization"] = "dummy"
-    inj.request(gh_flow)
+    await inj.request(gh_flow)
     assert gh_flow.request.headers["Authorization"] == "GH"  # github's minter, no prefix
 
     ant_flow = _Flow("api.anthropic.com")
     ant_flow.request.headers["authorization"] = "Bearer dummy"
-    inj.request(ant_flow)
+    await inj.request(ant_flow)
     assert ant_flow.request.headers["authorization"] == "Bearer ANT"  # anthropic's minter + Bearer
 
     # A host in NEITHER rule is left untouched (capture-only for it).
     other = _Flow("example.com")
     other.request.headers["Authorization"] = "keep"
-    inj.request(other)
+    await inj.request(other)
     assert other.request.headers["Authorization"] == "keep"
 
 
@@ -386,7 +390,7 @@ def qp_injector(gh, monkeypatch, fake_minter, tmp_path):
 async def test_injects_query_param_on_the_target_path(qp_injector):
     inj, log = qp_injector
     flow = _Flow("truenas.example.ts.net", path="/mcp/stream")
-    inj.request(flow)
+    await inj.request(flow)
     # The token lands in the query string, NOT a header (the box's MCP config carries no secret).
     assert flow.request.query["userToken"] == "token FAKE"
     assert "Authorization" not in flow.request.headers
@@ -397,7 +401,7 @@ async def test_injects_query_param_on_the_target_path(qp_injector):
 async def test_query_param_not_injected_outside_path_prefix(qp_injector):
     inj, log = qp_injector
     flow = _Flow("truenas.example.ts.net", path="/app/index.html")  # same host, non-/mcp path
-    inj.request(flow)
+    await inj.request(flow)
     assert "userToken" not in flow.request.query  # the app traffic on the same host is untouched
     await inj.response(flow)
     # `injected` is what THIS request carried, not whether its host has an injector: a 401 here
@@ -419,16 +423,21 @@ def failing_minter(tmp_path):
     — but only while ``broken`` exists, so a test can break it after a good mint."""
     broken = tmp_path / "minter.broken"
     broken.touch()
+    calls = tmp_path / "failing_minter.calls"
     script = tmp_path / "failing_minter.py"
     script.write_text(
         "import json, pathlib, sys\n"
+        f"p = pathlib.Path({str(calls)!r})\n"
+        "p.write_text(str((int(p.read_text()) if p.exists() else 0) + 1))\n"
         f"if pathlib.Path({str(broken)!r}).exists():\n"
         "    print('SECRET-TOKEN-VALUE')\n"
         f"    print({_MINT_REASON!r}, file=sys.stderr)\n"
         "    sys.exit(1)\n"
         "print(json.dumps({'value': 'token FAKE', 'ttl': 3600}))\n"
     )
-    return types.SimpleNamespace(command=f"{sys.executable} {script}", script=script, broken=broken)
+    return types.SimpleNamespace(
+        command=f"{sys.executable} {script}", script=script, broken=broken, calls=calls
+    )
 
 
 @pytest.fixture
@@ -449,7 +458,7 @@ def _unsent_flow(host: str = "api.github.com") -> _Flow:
 
 async def test_a_failed_mint_is_answered_by_the_proxy_not_forwarded(mint_failing, gh):
     flow = _unsent_flow()
-    mint_failing.inj.requestheaders(flow)
+    await mint_failing.inj.requestheaders(flow)
 
     # A response set in the request hook is what mitmproxy hands back INSTEAD of dialling upstream.
     assert flow.response is not None and flow.response.status_code == 502
@@ -471,18 +480,18 @@ async def test_a_failed_mint_is_answered_by_the_proxy_not_forwarded(mint_failing
     assert _MINT_REASON in row["error_body"]
 
 
-def test_a_mint_failure_answer_carries_neither_the_command_nor_stdout(mint_failing):
+async def test_a_mint_failure_answer_carries_neither_the_command_nor_stdout(mint_failing):
     # The command is a host path, and stdout is where a minter returns the token; the box gets
     # the diagnosis only. (The host log keeps the command — it's the operator's own machine.)
     flow = _unsent_flow()
-    mint_failing.inj.requestheaders(flow)
+    await mint_failing.inj.requestheaders(flow)
     assert flow.response is not None
     body = flow.response.content.decode()
     assert str(mint_failing.minter.script) not in body
     assert "SECRET-TOKEN-VALUE" not in body
 
 
-def test_a_mint_failure_answer_redacts_token_shaped_stderr(gh, monkeypatch, tmp_path):
+async def test_a_mint_failure_answer_redacts_token_shaped_stderr(gh, monkeypatch, tmp_path):
     boom = tmp_path / "boom.py"
     boom.write_text(
         "import sys\n"
@@ -493,7 +502,7 @@ def test_a_mint_failure_answer_redacts_token_shaped_stderr(gh, monkeypatch, tmp_
     monkeypatch.setenv("INJECT_COMMAND", f"{sys.executable} {boom}")
     monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
     flow = _unsent_flow()
-    gh.Injector().requestheaders(flow)
+    await gh.Injector().requestheaders(flow)
     assert flow.response is not None
     body = flow.response.content.decode()
     assert "ghs_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789" not in body
@@ -524,7 +533,7 @@ async def test_a_401_whose_re_mint_fails_is_answered_with_the_reason(mint_failin
     mint_failing.minter.broken.unlink()
     inj = mint_failing.inj
     sent = _Flow("api.github.com", status=401)
-    inj.requestheaders(sent)
+    await inj.requestheaders(sent)
     assert sent.request.headers["Authorization"] == "token FAKE"  # a good mint went out
     mint_failing.minter.broken.touch()
 
@@ -542,20 +551,174 @@ async def test_a_401_whose_re_mint_fails_is_answered_with_the_reason(mint_failin
     assert row["status"] == 502 and row["mint_failed"] is True
 
     # …and the refused token is not served to the next request for the rest of its TTL: that one
-    # re-mints (still failing, so it is answered too) rather than going out with the reject.
+    # is answered with the failure too (remembered, not re-run) rather than going out with the
+    # reject.
     nxt = _unsent_flow()
-    inj.requestheaders(nxt)
+    await inj.requestheaders(nxt)
     assert nxt.response is not None and nxt.response.status_code == 502
     assert nxt.request.headers["Authorization"] == "token x"
 
 
-def test_a_mint_that_recovers_injects_again(mint_failing):
-    # Nothing about a failure sticks: the next request mints afresh and goes upstream.
-    mint_failing.inj.requestheaders(_unsent_flow())
+# ── a slow or failing mint holds up only its own rule ──────────────────────────────────────
+# The request path used to mint on mitmproxy's event loop, holding it for the minter's whole run
+# (up to its 30 s timeout) — and clients retry a 502, so a hung minter froze ALL of the box's
+# proxied traffic, its agent's own API calls included, once per retry.
+
+
+def _hold(rule, monkeypatch, value: str = "token HELD"):
+    """Make ``rule``'s minter block until the returned Event is set; its runs are counted."""
+    release = threading.Event()
+    runs: list[int] = []
+
+    def mint() -> str:
+        runs.append(1)
+        assert release.wait(10), "the held mint was never released"
+        rule._value, rule._expires_at = value, time.monotonic() + 3600
+        return value
+
+    monkeypatch.setattr(rule, "_mint", mint)
+    return release, runs
+
+
+@pytest.fixture
+def two_rules(gh, monkeypatch, tmp_path, fake_minter):
+    """An Injector with two rules: api.github.com (to be held) and api.anthropic.com."""
+    rules = [
+        {"host": "api.github.com", "command": "never-run"},
+        {"host": "api.anthropic.com", "command": fake_minter.command},
+    ]
+    monkeypatch.setenv("INJECT_RULES", json.dumps(rules))
+    monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
+    return gh.Injector()
+
+
+async def test_a_hung_mint_holds_up_only_its_own_rule(two_rules, monkeypatch):
+    inj = two_rules
+    # A small worker pool, so requests waiting on the hung mint one THREAD each would fill it and
+    # starve the other rule's mint: they must share the one mint instead.
+    pool = ThreadPoolExecutor(max_workers=2)
+    asyncio.get_running_loop().set_default_executor(pool)
+    release, runs = _hold(inj.rules[0], monkeypatch)
+    waiting = [_Flow("api.github.com") for _ in range(3)]
+    pending = [asyncio.ensure_future(inj.requestheaders(f)) for f in waiting]
+    await asyncio.sleep(0.05)
+
+    # Another rule's request (which has to mint too), and a request no rule touches, go through.
+    other, plain = _Flow("api.anthropic.com"), _Flow("example.org")
+    try:
+        await asyncio.wait_for(inj.requestheaders(other), 5)
+        await asyncio.wait_for(inj.requestheaders(plain), 5)
+        assert other.request.headers["Authorization"] == "token FAKE"
+        assert not any(p.done() for p in pending)
+    finally:
+        release.set()
+    await asyncio.wait_for(asyncio.gather(*pending), 5)
+    assert [f.request.headers["Authorization"] for f in waiting] == ["token HELD"] * 3
+    assert runs == [1]  # every request waited on ONE mint
+
+
+async def test_a_rule_turned_off_during_its_mint_injects_nothing(live, tmp_path, monkeypatch):
+    # The request was judged before the switch went off, but nothing has left yet: the credential
+    # must not go out under a posture that no longer allows it.
+    minter = _counting_minter(tmp_path, "gh")
+    _write_live(live.live, rules=[{"host": "api.github.com", "command": minter.command}])
+    inj = live.Injector()
+    release, _runs = _hold(inj.rules[0], monkeypatch)
+    flow = _Flow("api.github.com")
+    flow.request.headers["Authorization"] = "token x"
+    pending = asyncio.ensure_future(inj.requestheaders(flow))
+    await asyncio.sleep(0.05)
+
+    _write_live(live.live, rules=[])
+    release.set()
+    await asyncio.wait_for(pending, 5)
+    assert flow.request.headers["Authorization"] == "token x"
+    assert not flow.metadata.get("egress_proxy_injected")
+
+
+# ── a failed mint is remembered for a moment ────────────────────────────────────────────
+
+
+def _mint_runs(minter) -> int:
+    return int(minter.calls.read_text()) if minter.calls.exists() else 0
+
+
+async def test_a_failed_mint_is_remembered_not_re_run_per_request(mint_failing, gh):
+    inj = mint_failing.inj
+    first, again = _unsent_flow(), _unsent_flow()
+    await inj.requestheaders(first)
+    assert _mint_runs(mint_failing.minter) == 1
+    gh.logs.clear()
+
+    await inj.requestheaders(again)
+    # The same answer, from memory: the minter is not run again and nothing more is logged — a
+    # client retrying its 502 would otherwise re-run (and re-log) a broken minter every time.
+    assert again.response is not None and again.response.status_code == 502
+    assert again.response.content == first.response.content
+    assert _mint_runs(mint_failing.minter) == 1
+    assert not [msg for _lvl, msg in gh.logs if "mint failed" in msg]
+
+
+async def test_after_the_window_the_mint_is_tried_again(mint_failing, gh, monkeypatch):
+    inj = mint_failing.inj
+    await inj.requestheaders(_unsent_flow())
     mint_failing.minter.broken.unlink()
+    monkeypatch.setattr(gh.module, "_MINT_FAILURE_MEMORY", 0.0)
+
     flow = _unsent_flow()
-    mint_failing.inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is None and flow.request.headers["Authorization"] == "token FAKE"
+    assert _mint_runs(mint_failing.minter) == 2
+
+
+async def test_a_successful_mint_clears_the_memory(mint_failing, gh, monkeypatch):
+    inj = mint_failing.inj
+    await inj.requestheaders(_unsent_flow())
+    mint_failing.minter.broken.unlink()
+    monkeypatch.setattr(gh.module, "_MINT_FAILURE_MEMORY", 0.0)
+    await inj.requestheaders(_unsent_flow())  # mints, succeeds
+    monkeypatch.setattr(gh.module, "_MINT_FAILURE_MEMORY", 3600.0)
+    inj.rules[0].invalidate()  # the next request has to mint again…
+
+    flow = _unsent_flow()
+    await inj.requestheaders(flow)
+    # …and isn't answered with the failure that came before the success.
+    assert flow.response is None and flow.request.headers["Authorization"] == "token FAKE"
+    assert _mint_runs(mint_failing.minter) == 3
+
+
+async def test_dropping_a_refused_token_keeps_the_failure_remembered(mint_failing):
+    # `invalidate` is what the 401 paths call to drop a token the upstream refused. It forgets the
+    # VALUE; a failure is the minter's own recent answer, and forgetting it would bring back a
+    # minter run per retried request.
+    inj = mint_failing.inj
+    await inj.requestheaders(_unsent_flow())
+    inj.rules[0].invalidate()
+    flow = _unsent_flow()
+    await inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 502
+    assert _mint_runs(mint_failing.minter) == 1
+
+
+async def test_a_401_re_mint_is_answered_from_a_remembered_failure(mint_failing, gh):
+    # A token went out, then the minter broke and a later request recorded the failure. The first
+    # request's 401 then needs a fresh token: the minter answered seconds ago, so it isn't re-run —
+    # a revoked token draws one 401 per request still in flight with it, which would otherwise be
+    # one minter run each.
+    inj = mint_failing.inj
+    mint_failing.minter.broken.unlink()
+    sent = _Flow("api.github.com", status=401)
+    await inj.requestheaders(sent)
+    mint_failing.minter.broken.touch()
+    inj.rules[0].invalidate()
+    await inj.requestheaders(_unsent_flow())  # fails: remembered
+    assert _mint_runs(mint_failing.minter) == 2
+
+    await inj.response(sent)
+    assert gh.requests == []
+    assert sent.response is not None and sent.response.status_code == 502
+    assert "after it refused the one this request carried" in sent.response.content.decode()
+    assert _mint_runs(mint_failing.minter) == 2
 
 
 async def test_capture_only_logs_everything_and_injects_nothing(gh, monkeypatch, tmp_path):
@@ -569,7 +732,7 @@ async def test_capture_only_logs_everything_and_injects_nothing(gh, monkeypatch,
     assert inj.injecting is False
     flow = _Flow("api.github.com")
     flow.request.headers["Authorization"] = "Bearer DUMMY"
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.request.headers["Authorization"] == "Bearer DUMMY"  # untouched — no minting
     await inj.response(flow)
     entry = _last_log(log)
@@ -755,20 +918,20 @@ async def test_leaves_other_hosts_untouched(injector):
     inj, log = injector
     flow = _Flow("example.com")
     flow.request.headers["Authorization"] = "keep me"
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.request.headers["Authorization"] == "keep me"  # not the target → no rewrite
     await inj.response(flow)
     assert _last_log(log)["injected"] is False
 
 
-def test_caches_the_token_within_ttl(injector, fake_minter):
+async def test_caches_the_token_within_ttl(injector, fake_minter):
     inj, _ = injector
-    inj.request(_Flow("api.github.com"))
-    inj.request(_Flow("api.github.com"))
+    await inj.request(_Flow("api.github.com"))
+    await inj.request(_Flow("api.github.com"))
     assert fake_minter.calls.read_text() == "1"  # minted once, reused (ttl=3600)
 
 
-def test_running_pre_mints_off_the_request_path(injector, fake_minter):
+async def test_running_pre_mints_off_the_request_path(injector, fake_minter):
     # The `running` hook warms every rule's token in background threads, so a slow first mint
     # (e.g. `uv run --script` resolving a PEP 723 env cold) never stalls the event loop — and
     # the first real request reuses the warmed token instead of minting again.
@@ -777,11 +940,11 @@ def test_running_pre_mints_off_the_request_path(injector, fake_minter):
     for t in inj._warm_threads:
         t.join(timeout=10)
     assert fake_minter.calls.read_text() == "1"  # warmed at startup
-    inj.request(_Flow("api.github.com"))
+    await inj.request(_Flow("api.github.com"))
     assert fake_minter.calls.read_text() == "1"  # request path reused the warm token
 
 
-def test_warm_up_mint_failure_stays_below_error(gh, monkeypatch, tmp_path, fake_minter):
+async def test_warm_up_mint_failure_stays_below_error(gh, monkeypatch, tmp_path, fake_minter):
     """A minter that fails during the startup warm-up must NOT log at ERROR — and must not take
     the healthy rules down with it.
 
@@ -812,20 +975,30 @@ def test_warm_up_mint_failure_stays_below_error(gh, monkeypatch, tmp_path, fake_
     assert {level for level, _ in warm} == {"warn"}, f"ERROR during startup exits mitmproxy: {warm}"
 
     # The healthy rule warmed straight through the broken one: its token is cached, so the first
-    # real request is served from that cache instead of paying a mint on the event loop.
+    # real request is served from that cache instead of waiting for a mint.
     assert fake_minter.calls.read_text() == "1"
     ok = _Flow("api.anthropic.com")
-    inj.request(ok)
+    await inj.request(ok)
     assert ok.request.headers["Authorization"] == "token FAKE"
     assert fake_minter.calls.read_text() == "1"
 
-    # The request path is not the startup window, so a failure there stays a loud ERROR.
+    # The warm-up's failure is remembered: the first requests are answered with it, the minter
+    # isn't re-run for them, and nothing more is logged — at ERROR or otherwise.
     gh.logs.clear()
-    inj.request(_Flow("api.github.com"))
+    early = _Flow("api.github.com")
+    early.response = None
+    await inj.request(early)
+    assert early.response is not None and early.response.status_code == 502
+    assert not [msg for _lvl, msg in gh.logs if "mint failed" in msg]
+
+    # The request path is not the startup window, so a failure there, once the memory has run
+    # out, stays a loud ERROR.
+    monkeypatch.setattr(gh.module, "_MINT_FAILURE_MEMORY", 0.0)
+    await inj.request(_Flow("api.github.com"))
     assert {level for level, msg in gh.logs if "mint failed" in msg} == {"error"}
 
 
-def test_mint_failure_log_carries_the_minters_own_reason(tmp_path, monkeypatch, gh):
+async def test_mint_failure_log_carries_the_minters_own_reason(tmp_path, monkeypatch, gh):
     """
     A mint failure must name the host and quote the minter's stderr.
 
@@ -849,7 +1022,7 @@ def test_mint_failure_log_carries_the_minters_own_reason(tmp_path, monkeypatch, 
     monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
     inj = gh.Injector()
 
-    inj.request(_Flow("api.github.com"))
+    await inj.request(_Flow("api.github.com"))
 
     failures = [msg for level, msg in gh.logs if "mint failed" in msg]
     assert len(failures) == 1
@@ -861,7 +1034,7 @@ def test_mint_failure_log_carries_the_minters_own_reason(tmp_path, monkeypatch, 
     assert "SECRET-TOKEN-VALUE" not in message
 
 
-def test_mint_failure_log_redacts_token_shaped_stderr(tmp_path, monkeypatch, gh):
+async def test_mint_failure_log_redacts_token_shaped_stderr(tmp_path, monkeypatch, gh):
     """
     stderr is diagnostic by contract, but a CRASHING minter doesn't honour contracts: a
     traceback can echo argv/env — or the half-minted credential itself — into stderr. The
@@ -881,7 +1054,7 @@ def test_mint_failure_log_redacts_token_shaped_stderr(tmp_path, monkeypatch, gh)
     monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
     inj = gh.Injector()
 
-    inj.request(_Flow("api.github.com"))
+    await inj.request(_Flow("api.github.com"))
 
     failures = [msg for level, msg in gh.logs if "mint failed" in msg]
     assert len(failures) == 1
@@ -891,7 +1064,7 @@ def test_mint_failure_log_redacts_token_shaped_stderr(tmp_path, monkeypatch, gh)
     assert "exit 1" in message, "exit-status context must survive redaction"
 
 
-def test_mint_failure_never_logs_minter_stdout(tmp_path, monkeypatch, gh):
+async def test_mint_failure_never_logs_minter_stdout(tmp_path, monkeypatch, gh):
     """Malformed minter output is reported by SHAPE — its stdout may be a half-written token."""
     leaky = tmp_path / "leaky.py"
     leaky.write_text("print('ghs_averyrealtokenvalue')\n")  # exit 0, but not the {value,ttl} JSON
@@ -902,7 +1075,7 @@ def test_mint_failure_never_logs_minter_stdout(tmp_path, monkeypatch, gh):
     monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
     inj = gh.Injector()
 
-    inj.request(_Flow("api.github.com"))
+    await inj.request(_Flow("api.github.com"))
 
     failures = [msg for level, msg in gh.logs if "mint failed" in msg]
     assert len(failures) == 1
@@ -1030,7 +1203,7 @@ def test_the_injector_host_exemption_is_443_only(gh, monkeypatch, tmp_path):
     assert f.response is not None and f.response.status_code == 403
 
 
-def test_plain_http_enforces_the_port_policy_too(walled):
+async def test_plain_http_enforces_the_port_policy_too(walled):
     # `GET http://host:8080/` through the proxy is as much a tunnel past a host grant as a CONNECT
     # to :22 — so the request hook applies the same policy: a bare grant covers :80 (apt,
     # redirects) and :443 (a decrypted request), any other port needs `host:port`.
@@ -1044,24 +1217,26 @@ def test_plain_http_enforces_the_port_policy_too(walled):
     ):
         f = _Flow(host, port=port, scheme=scheme)
         f.response = None
-        inj.request(f)
+        await inj.request(f)
         assert f.response is None, (host, port)
     clear443 = _Flow("deb.debian.org", port=443, scheme="http")  # cleartext on :443 is not :443
-    inj.request(clear443)
+    await inj.request(clear443)
     assert clear443.response is not None and clear443.response.status_code == 403
     assert _last_log(log)["host"] == "deb.debian.org:443"
 
     odd = _Flow("deb.debian.org", port=8080, scheme="http")
-    inj.request(odd)
+    await inj.request(odd)
     assert odd.response is not None and odd.response.status_code == 403
     assert _last_log(log)["host"] == "deb.debian.org:8080"
     default = _Flow("internal.example", port=80, scheme="http")  # a port grant is not a host grant
-    inj.request(default)
+    await inj.request(default)
     assert default.response is not None and default.response.status_code == 403
     assert _last_log(log)["host"] == "internal.example"
 
 
-def test_the_injector_exemption_never_covers_cleartext(gh, monkeypatch, tmp_path, fake_minter):
+async def test_the_injector_exemption_never_covers_cleartext(
+    gh, monkeypatch, tmp_path, fake_minter
+):
     # The injector host is exempt so the proxy can reach it to MINT — over HTTPS. A cleartext
     # request to it would carry the minted credential in the clear, so :80 is not exempt — and
     # neither is `http://host:443/`: the exemption is by SCHEME, not port.
@@ -1076,15 +1251,15 @@ def test_the_injector_exemption_never_covers_cleartext(gh, monkeypatch, tmp_path
     inj = gh.Injector()
     for port in (80, 443):
         plain = _Flow("api.github.com", port=port, scheme="http")
-        inj.request(plain)
+        await inj.request(plain)
         assert plain.response is not None and plain.response.status_code == 403, port
     tls = _Flow("api.github.com", port=443)
     tls.response = None
-    inj.request(tls)
+    await inj.request(tls)
     assert tls.response is None
 
 
-def test_no_credential_is_injected_or_reissued_on_cleartext(gh, monkeypatch, tmp_path):
+async def test_no_credential_is_injected_or_reissued_on_cleartext(gh, monkeypatch, tmp_path):
     # With the host GRANTED for cleartext (so the wall lets it through) a cleartext request to
     # the target host must still get no token — not on the way out, not on a 401 re-issue — even
     # on :443 (which, in the clear, needs its own `host:443` grant to pass the wall at all).
@@ -1099,7 +1274,7 @@ def test_no_credential_is_injected_or_reissued_on_cleartext(gh, monkeypatch, tmp
     for port in (80, 443):
         f = _Flow("api.github.com", port=port, scheme="http")
         f.response = None
-        inj.request(f)
+        await inj.request(f)
         assert f.response is None, port  # granted → not blocked…
         assert inj._rule_for(f) is None  # …but no rule applies: nothing injected
     tls = _Flow("api.github.com")
@@ -1181,12 +1356,12 @@ def test_would_block_rows_are_rate_limited_per_host(observing):
     assert [r["host"] for r in _rows(log)] == ["pypi.org", "files.pythonhosted.org"]
 
 
-def test_observing_records_cleartext_but_not_decrypted_https_twice(observing):
+async def test_observing_records_cleartext_but_not_decrypted_https_twice(observing):
     # Cleartext never CONNECTs, so request() records it; a decrypted HTTPS request was already
     # recorded at its CONNECT and must not be recorded again per request.
     inj, _, log = observing
-    inj.request(_Flow("deb.debian.org", port=80, scheme="http"))
-    inj.request(_Flow("example.org"))  # https, not granted — CONNECT's job
+    await inj.request(_Flow("deb.debian.org", port=80, scheme="http"))
+    await inj.request(_Flow("example.org"))  # https, not granted — CONNECT's job
     assert [r["host"] for r in _rows(log)] == ["deb.debian.org"]
 
 
@@ -1241,41 +1416,41 @@ def test_a_connect_is_judged_on_its_target_not_its_host_header(gh, monkeypatch, 
     assert entry["host"] == "elsewhere.example" and entry["blocked"] is True
 
 
-def test_a_request_naming_another_host_is_refused_and_gets_no_credential(injector):
+async def test_a_request_naming_another_host_is_refused_and_gets_no_credential(injector):
     # The wall is off here (observe-everything): the mismatch is refused regardless.
     inj, log = injector
     flow = _Flow("elsewhere.example", claimed="api.github.com")
     flow.request.headers["Authorization"] = "Bearer DUMMY"
     flow.response = None
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.response is not None and flow.response.status_code == 403
     assert flow.request.headers["Authorization"] == "Bearer DUMMY"  # nothing minted onto it
     assert _last_log(log)["host"] == "elsewhere.example"
 
 
-def test_an_sni_naming_another_host_gets_no_credential(injector):
+async def test_an_sni_naming_another_host_gets_no_credential(injector):
     inj, _log = injector
     flow = _Flow("api.github.com", sni="elsewhere.example")
     flow.request.headers["Authorization"] = "Bearer DUMMY"
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.request.headers["Authorization"] == "Bearer DUMMY"
 
 
-def test_host_comparison_ignores_case_and_the_root_dot(injector):
+async def test_host_comparison_ignores_case_and_the_root_dot(injector):
     inj, _log = injector
     flow = _Flow("api.github.com", claimed="API.GitHub.com.", sni="api.github.com")
     flow.request.headers["Authorization"] = "Bearer DUMMY"
     flow.response = None
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.response is None
     assert flow.request.headers["Authorization"] == "token FAKE"
 
 
-def test_default_deny_blocks_plain_http_in_the_request_hook(walled):
+async def test_default_deny_blocks_plain_http_in_the_request_hook(walled):
     # Cleartext HTTP never CONNECTs, so http_connect can't catch it — the wall also guards `request`.
     inj, _allow, log = walled
     f = _Flow("plain.example.com")
-    inj.request(f)
+    await inj.request(f)
     assert f.response is not None and f.response.status_code == 403
     assert f.metadata.get("egress_proxy_blocked") is True  # so `response` won't re-log it as a 403
     entry = _last_log(log)
@@ -1287,7 +1462,7 @@ async def test_a_refused_plain_http_request_is_logged_once(walled):
     # second row that reads as the upstream refusing a request that never left the box
     inj, _allow, log = walled
     f = _Flow("plain.example.com")
-    inj.request(f)
+    await inj.request(f)
     await inj.response(f)
     assert [r["host"] for r in _rows(log)] == ["plain.example.com"]
     assert _last_log(log)["blocked"] is True
@@ -1497,24 +1672,24 @@ def test_a_disconnected_builds_mark_is_forgotten(walled):
     assert hello.ignore_connection is False
 
 
-def test_the_marker_header_is_not_forwarded_on_cleartext(walled):
+async def test_the_marker_header_is_not_forwarded_on_cleartext(walled):
     # A cleartext request carries the Proxy-Authorization to the proxy, which would otherwise
     # pass it upstream. It says nothing secret, but it isn't the upstream's business.
     inj, allow, _log = walled
     _write_allow(allow, ["deb.debian.org"])
     flow = _marked(_Flow("deb.debian.org", port=80, scheme="http"))
     flow.response = None
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.response is None  # granted, not refused
     assert "Proxy-Authorization" not in flow.request.headers
 
 
-def test_a_refused_cleartext_build_request_is_attributed_too(walled):
+async def test_a_refused_cleartext_build_request_is_attributed_too(walled):
     # apt fetches over plain HTTP: its refusal must reach the build gate like a CONNECT's.
     inj, _allow, log = walled
     flow = _marked(_Flow("deb.example.org", port=80, scheme="http"))
     flow.response = None
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.response is not None and flow.response.status_code == 403
     assert _last_log(log)["build"] is True
 
@@ -1572,43 +1747,43 @@ def _counting_minter(tmp_path: Path, name: str, value: str = "token FAKE", env_k
     return types.SimpleNamespace(command=f"{sys.executable} {script}", calls=calls)
 
 
-def test_the_live_file_configures_the_rules_over_the_legacy_env(live, tmp_path):
+async def test_the_live_file_configures_the_rules_over_the_legacy_env(live, tmp_path):
     minter = _counting_minter(tmp_path, "gh")
     _write_live(live.live, rules=[{"host": "api.github.com", "command": minter.command}])
     inj = live.Injector()
     flow = _Flow("api.github.com")
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.request.headers["Authorization"] == "token FAKE"
     assert inj.inject_hosts == {"api.github.com"}  # legacy.example.com never appears
 
 
-def test_a_rule_added_live_injects_without_a_new_process(live, tmp_path):
+async def test_a_rule_added_live_injects_without_a_new_process(live, tmp_path):
     gh_minter = _counting_minter(tmp_path, "gh")
     sanity = _counting_minter(tmp_path, "sanity", value="Bearer S")
     gh_rule = {"host": "api.github.com", "command": gh_minter.command}
     _write_live(live.live, rules=[gh_rule])
     inj = live.Injector()
-    inj.request(_Flow("api.github.com"))
+    await inj.request(_Flow("api.github.com"))
 
     _write_live(live.live, rules=[gh_rule, {"host": "api.sanity.io", "command": sanity.command}])
     added = _Flow("api.sanity.io")
-    inj.request(added)
+    await inj.request(added)
     assert added.request.headers["Authorization"] == "Bearer S"
-    inj.request(_Flow("api.github.com"))
+    await inj.request(_Flow("api.github.com"))
     # The unchanged rule kept its cached token across the reload: the whole point is that a
     # posture change costs the rules that DIDN'T change nothing.
     assert gh_minter.calls.read_text() == "1"
 
 
-def test_a_rule_removed_live_stops_injecting_at_once(live, tmp_path):
+async def test_a_rule_removed_live_stops_injecting_at_once(live, tmp_path):
     minter = _counting_minter(tmp_path, "gh")
     _write_live(live.live, rules=[{"host": "api.github.com", "command": minter.command}])
     inj = live.Injector()
-    inj.request(_Flow("api.github.com"))
+    await inj.request(_Flow("api.github.com"))
     _write_live(live.live, rules=[])
     flow = _Flow("api.github.com")
     flow.request.headers["Authorization"] = "token DUMMY"
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.request.headers["Authorization"] == "token DUMMY"  # revoked on the next request
 
 
@@ -1651,7 +1826,7 @@ def test_a_missing_or_malformed_live_file_fails_closed(live):
     assert g.response is not None and g.response.status_code == 403
 
 
-def test_a_rules_secret_is_read_from_host_env_by_name(live, tmp_path, monkeypatch):
+async def test_a_rules_secret_is_read_from_host_env_by_name(live, tmp_path, monkeypatch):
     # The proxy's own environment no longer carries host.env (the supervisor strips it), so the
     # addon reads the names its rules declare, and only those, from the file.
     monkeypatch.delenv("SANITY_TOKEN", raising=False)
@@ -1661,11 +1836,11 @@ def test_a_rules_secret_is_read_from_host_env_by_name(live, tmp_path, monkeypatc
     _write_live(live.live, rules=[rule])
     inj = live.Injector()
     flow = _Flow("api.sanity.io")
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.request.headers["Authorization"] == "from-host-env"
 
 
-def test_an_operator_exported_secret_wins_over_host_env(live, tmp_path, monkeypatch):
+async def test_an_operator_exported_secret_wins_over_host_env(live, tmp_path, monkeypatch):
     monkeypatch.setenv("SANITY_TOKEN", "exported")
     live.host_env.write_text("SANITY_TOKEN=from-host-env\n")
     minter = _counting_minter(tmp_path, "sanity", env_key="SANITY_TOKEN")
@@ -1674,11 +1849,11 @@ def test_an_operator_exported_secret_wins_over_host_env(live, tmp_path, monkeypa
         rules=[{"host": "api.sanity.io", "command": minter.command, "env": ["SANITY_TOKEN"]}],
     )
     flow = _Flow("api.sanity.io")
-    live.Injector().request(flow)
+    await live.Injector().request(flow)
     assert flow.request.headers["Authorization"] == "exported"
 
 
-def test_a_rotated_secret_drops_the_cached_token(live, tmp_path, monkeypatch):
+async def test_a_rotated_secret_drops_the_cached_token(live, tmp_path, monkeypatch):
     # Before: a rotation changed the daemon's env stamp and the restart dropped every cache. Now
     # the reload notices the value changed and rebuilds just that rule.
     monkeypatch.delenv("SANITY_TOKEN", raising=False)
@@ -1689,12 +1864,12 @@ def test_a_rotated_secret_drops_the_cached_token(live, tmp_path, monkeypatch):
         rules=[{"host": "api.sanity.io", "command": minter.command, "env": ["SANITY_TOKEN"]}],
     )
     inj = live.Injector()
-    inj.request(_Flow("api.sanity.io"))
+    await inj.request(_Flow("api.sanity.io"))
     tmp = live.host_env.with_suffix(".tmp")
     tmp.write_text("SANITY_TOKEN=two\n")
     tmp.replace(live.host_env)
     flow = _Flow("api.sanity.io")
-    inj.request(flow)
+    await inj.request(flow)
     assert flow.request.headers["Authorization"] == "two"
     assert minter.calls.read_text() == "2"
 
@@ -1860,7 +2035,7 @@ def test_a_close_that_fails_is_reported_not_raised(live, closer):
 # ── injection happens on the HEADERS, before a streamed body goes upstream ─────────────
 
 
-def test_injection_happens_at_requestheaders(injector):
+async def test_injection_happens_at_requestheaders(injector):
     # With stream_large_bodies set, mitmproxy forwards a big request's headers + body as they
     # arrive and fires `request` only after the body has gone — too late to rewrite a header.
     # A long Claude conversation (>1 MiB) reached Anthropic with the box's dummy token: 401
@@ -1868,18 +2043,18 @@ def test_injection_happens_at_requestheaders(injector):
     inj, _ = injector
     flow = _Flow("api.github.com")
     flow.request.headers["Authorization"] = "token DUMMY"
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.request.headers["Authorization"] == "token FAKE"
 
 
-def test_the_request_hook_after_requestheaders_does_nothing_twice(walled):
+async def test_the_request_hook_after_requestheaders_does_nothing_twice(walled):
     # Both hooks fire for a buffered request; the work (and its log row) happens once.
     inj, _allow, log = walled
     flow = _Flow("plain.example.com", port=80, scheme="http")
     flow.response = None
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is not None and flow.response.status_code == 403
-    inj.request(flow)
+    await inj.request(flow)
     assert sum(1 for line in log.read_text().splitlines() if '"blocked": true' in line) == 1
 
 
@@ -1890,12 +2065,12 @@ async def test_a_streamed_401_still_drops_the_rejected_token(injector, fake_mint
     # The body is gone so the request can't be re-issued, but the token the upstream just refused
     # must not be served to the next request for the rest of its TTL.
     inj, _ = injector
-    inj.request(_Flow("api.github.com"))
+    await inj.request(_Flow("api.github.com"))
     assert fake_minter.calls.read_text() == "1"
     flow = _Flow("api.github.com", status=401)
     flow.request.raw_content = None
     await inj.response(flow)
-    inj.request(_Flow("api.github.com"))
+    await inj.request(_Flow("api.github.com"))
     assert fake_minter.calls.read_text() == "2"  # re-minted, not the cached reject
 
 
@@ -2025,15 +2200,15 @@ def test_an_expired_or_revoked_secret_unlocks_nothing(gh, build_walled):
     assert _refused(_connect(inj, "cdn.example.com", password="s3cret"))
 
 
-def test_a_cleartext_build_request_uses_build_grants_too(gh, build_walled):
+async def test_a_cleartext_build_request_uses_build_grants_too(gh, build_walled):
     inj = gh.Injector()
     ok = _marked(_Flow("cdn.example.com", port=80, scheme="http"), password="s3cret")
     ok.response = None
-    inj.request(ok)
+    await inj.request(ok)
     assert ok.response is None and "Proxy-Authorization" not in ok.request.headers
     bare = _Flow("cdn.example.com", port=80, scheme="http")
     bare.response = None
-    inj.request(bare)
+    await inj.request(bare)
     assert bare.response is not None and bare.response.status_code == 403
 
 
@@ -2059,7 +2234,7 @@ def test_a_revoked_build_grant_closes_the_builds_tunnel(gh, build_walled, closer
 # ── CodeRabbit, second pass: derived defaults, redaction by what was injected ────────────
 
 
-def test_a_rules_derived_default_reaches_the_running_proxy(live, tmp_path, monkeypatch):
+async def test_a_rules_derived_default_reaches_the_running_proxy(live, tmp_path, monkeypatch):
     # A plugin may derive a rule's non-secret input from committed config (env_defaults — the old
     # github plugin's GH_APP_ID was one). The proxy used to get them by restarting on the mode
     # change; it no longer restarts, so the live file carries them.
@@ -2079,11 +2254,11 @@ def test_a_rules_derived_default_reaches_the_running_proxy(live, tmp_path, monke
     )
     tmp.replace(live.live)
     flow = _Flow("api.github.com")
-    live.Injector().request(flow)
+    await live.Injector().request(flow)
     assert flow.request.headers["Authorization"] == "123"
 
 
-def test_a_derived_default_never_beats_host_env_or_an_export(live, tmp_path, monkeypatch):
+async def test_a_derived_default_never_beats_host_env_or_an_export(live, tmp_path, monkeypatch):
     monkeypatch.delenv("GH_APP_ID", raising=False)
     live.host_env.write_text("GH_APP_ID=from-host-env\n")
     minter = _counting_minter(tmp_path, "gh", env_key="GH_APP_ID")
@@ -2092,7 +2267,7 @@ def test_a_derived_default_never_beats_host_env_or_an_export(live, tmp_path, mon
     tmp.write_text(json.dumps({"rules": [rule], "defaults": {"GH_APP_ID": "derived"}}))
     tmp.replace(live.live)
     flow = _Flow("api.github.com")
-    live.Injector().request(flow)
+    await live.Injector().request(flow)
     assert flow.request.headers["Authorization"] == "from-host-env"
 
 
@@ -2104,7 +2279,7 @@ async def test_redaction_follows_what_was_injected_not_the_current_rules(live, t
     _write_live(live.live, rules=[rule])
     inj = live.Injector()
     flow = _Flow("svc.example.com", path="/mcp?x=1")
-    inj.request(flow)
+    await inj.request(flow)
     flow.request.path = "/mcp?x=1&userToken=sk-live-secret"  # what mitmproxy's query write does
     _write_live(live.live, rules=[])  # the rule goes away while the request is in flight
     inj.refresh()  # the addon's one-second poll lands before the response does
@@ -2151,11 +2326,11 @@ def _dummy_flow(host: str = "api.anthropic.com", value: str = "Bearer sk-ant-oat
     return flow
 
 
-def test_a_held_credentials_dummy_is_answered_by_the_proxy_not_forwarded(live):
+async def test_a_held_credentials_dummy_is_answered_by_the_proxy_not_forwarded(live):
     _write_live(live.live, held=[_HELD])
     inj = live.Injector()
     flow = _dummy_flow()
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is not None and flow.response.status_code == 401
     assert json.loads(flow.response.content) == json.loads(_HELD_BODY)  # the provider's shape
     assert flow.response.headers["content-type"] == "application/json"
@@ -2165,7 +2340,7 @@ def test_a_held_credentials_dummy_is_answered_by_the_proxy_not_forwarded(live):
     assert not row.get("blocked")  # not an allowlist refusal: granting the host is not the fix
 
 
-def test_a_held_answer_is_judged_on_the_destination_not_the_host_header(live):
+async def test_a_held_answer_is_judged_on_the_destination_not_the_host_header(live):
     # Merged with the destination fix (the held path came later, keyed on `pretty_host`): a request
     # SENT elsewhere that merely names the held host is the claim mismatch every other path refuses
     # (403), not a held answer. Mutation that must turn this red: `_held_for` matching on
@@ -2173,7 +2348,7 @@ def test_a_held_answer_is_judged_on_the_destination_not_the_host_header(live):
     _write_live(live.live, held=[_HELD])
     inj = live.Injector()
     flow = _dummy_flow("elsewhere.example", claimed="api.anthropic.com")
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is not None and flow.response.status_code == 403
     row = _last_log(live.log)
     assert row["host"] == "elsewhere.example" and row["blocked"] is True
@@ -2186,44 +2361,44 @@ async def test_a_held_answer_is_logged_once(live):
     _write_live(live.live, held=[_HELD])
     inj = live.Injector()
     flow = _dummy_flow()
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     await inj.response(flow)
     assert len(live.log.read_text().splitlines()) == 1
 
 
-def test_only_the_dummy_is_held(live):
+async def test_only_the_dummy_is_held(live):
     # Anything else the box sends to that host is none of this mechanism's business: a real
     # credential (a manual in-box login) goes on to the wall like any other request.
     _write_live(live.live, held=[_HELD])
     inj = live.Injector()
     flow = _dummy_flow(value="Bearer sk-ant-oat01-a-real-login")
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is None  # observing: forwarded untouched
 
 
-def test_a_held_entry_scoped_to_a_path_only_answers_there(live):
+async def test_a_held_entry_scoped_to_a_path_only_answers_there(live):
     held = {**_HELD, "host": "chatgpt.com", "path_prefix": "/backend-api/codex"}
     _write_live(live.live, held=[held])
     inj = live.Injector()
     elsewhere = _dummy_flow(host="chatgpt.com")
     elsewhere.request.path = "/backend-api/other"
-    inj.requestheaders(elsewhere)
+    await inj.requestheaders(elsewhere)
     assert elsewhere.response is None
     scoped = _dummy_flow(host="chatgpt.com")
     scoped.request.path = "/backend-api/codex/responses"
-    inj.requestheaders(scoped)
+    await inj.requestheaders(scoped)
     assert scoped.response is not None and scoped.response.status_code == 401
 
 
-def test_a_held_host_is_never_answered_in_the_clear(live):
+async def test_a_held_host_is_never_answered_in_the_clear(live):
     _write_live(live.live, held=[_HELD])
     inj = live.Injector()
     flow = _dummy_flow(scheme="http", port=80)
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert not (flow.response is not None and flow.response.status_code == 401)
 
 
-def test_the_wall_lets_a_held_host_connect_so_the_proxy_can_answer(live):
+async def test_the_wall_lets_a_held_host_connect_so_the_proxy_can_answer(live):
     # Under enforcement an ungranted api.anthropic.com was refused at CONNECT — a 403 telling the
     # user to grant a host the injector exempts anyway, which is the wrong fix. The CONNECT goes
     # through and is decrypted, whatever passthrough says, so the dummy can be answered.
@@ -2237,17 +2412,17 @@ def test_the_wall_lets_a_held_host_connect_so_the_proxy_can_answer(live):
     inj.tls_clienthello(hello)
     assert hello.ignore_connection is False
     flow = _dummy_flow()
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is not None and flow.response.status_code == 401
 
 
-def test_a_held_host_opens_nothing_but_the_answer(live):
+async def test_a_held_host_opens_nothing_but_the_answer(live):
     # The CONNECT exemption is not a grant: anything but the dummy is refused like any ungranted
     # host, and a port other than 443 is refused at CONNECT.
     _write_live(live.live, held=[_HELD], default_deny=True)
     inj = live.Injector()
     flow = _dummy_flow(value="Bearer something-else")
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is not None and flow.response.status_code == 403
     other_port = _Flow("api.anthropic.com", port=8443)
     other_port.response = None
@@ -2266,23 +2441,23 @@ def test_a_reload_keeps_an_open_held_connection(live):
     assert "client-1" in inj._conns  # not swept
 
 
-def test_an_active_rule_wins_over_a_held_entry(live, tmp_path):
+async def test_an_active_rule_wins_over_a_held_entry(live, tmp_path):
     # The two are never emitted together for one axis; if they were, injecting is the right answer.
     minter = _counting_minter(tmp_path, "claude", value="Bearer REAL")
     rule = {"host": "api.anthropic.com", "command": minter.command, "header": "authorization"}
     _write_live(live.live, rules=[rule], held=[_HELD])
     inj = live.Injector()
     flow = _dummy_flow()
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is None
     assert flow.request.headers["authorization"] == "Bearer REAL"
 
 
-def test_malformed_held_entries_are_ignored(live):
+async def test_malformed_held_entries_are_ignored(live):
     _write_live(live.live, held=[{"host": "api.anthropic.com"}, "nonsense", _HELD])
     inj = live.Injector()
     flow = _dummy_flow()
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is not None and flow.response.status_code == 401
 
 
@@ -2311,11 +2486,11 @@ def _gh_flow(value: str | None, path: str = "/repos/o/r/pulls"):
 
 
 @pytest.mark.parametrize("value", ["token x", "Bearer x", "bearer x", "x", "token  x "])
-def test_an_inject_rows_dummy_is_held_whatever_scheme_the_client_puts_before_it(live, value):
+async def test_an_inject_rows_dummy_is_held_whatever_scheme_the_client_puts_before_it(live, value):
     _write_live(live.live, held=[_GH_HELD])
     inj = live.Injector()
     flow = _gh_flow(value)
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is not None and flow.response.status_code == 401
     assert "fy mode github=on" in json.loads(flow.response.content)["message"]
     row = _last_log(live.log)
@@ -2333,16 +2508,16 @@ def test_an_inject_rows_dummy_is_held_whatever_scheme_the_client_puts_before_it(
         "to ken x",  # two words before it: not a scheme
     ],
 )
-def test_anything_but_the_dummy_goes_on_untouched(live, value):
+async def test_anything_but_the_dummy_goes_on_untouched(live, value):
     _write_live(live.live, held=[_GH_HELD])
     inj = live.Injector()
     flow = _gh_flow(value)
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is None  # observing: forwarded upstream as before
     assert not live.log.exists() or "held" not in live.log.read_text()
 
 
-def test_an_exact_held_entry_still_needs_the_exact_value(live):
+async def test_an_exact_held_entry_still_needs_the_exact_value(live):
     # The agents' entries say exactly what their client sends and stay exact: no scheme is added
     # or stripped. (Mutation that turns this red: ignoring `any_scheme` in `_carries_dummy`.)
     api_key = {**_HELD, "header": "x-api-key", "dummy": "sk-ant-dummy"}
@@ -2350,11 +2525,11 @@ def test_an_exact_held_entry_still_needs_the_exact_value(live):
     inj = live.Injector()
     flow = _dummy_flow(value="Bearer sk-ant-dummy")
     flow.request.headers["x-api-key"] = "Bearer sk-ant-dummy"
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is None
 
 
-def test_a_query_param_rows_dummy_is_held_from_the_query(live):
+async def test_a_query_param_rows_dummy_is_held_from_the_query(live):
     held = {
         "host": "penpot.example",
         "header": "",
@@ -2369,25 +2544,25 @@ def test_a_query_param_rows_dummy_is_held_from_the_query(live):
     flow = _Flow("penpot.example", path="/mcp/stream?userToken=x")
     flow.response = None
     flow.request.query["userToken"] = "x"
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is not None and flow.response.status_code == 401
     assert _last_log(live.log)["held"] == "penpot"
     other = _Flow("penpot.example", path="/mcp/stream?userToken=real")
     other.response = None
     other.request.query["userToken"] = "real"
-    inj.requestheaders(other)
+    await inj.requestheaders(other)
     assert other.response is None
     app = _Flow("penpot.example", path="/view?userToken=x")  # outside the row's path
     app.response = None
     app.request.query["userToken"] = "x"
-    inj.requestheaders(app)
+    await inj.requestheaders(app)
     assert app.response is None
 
 
-def test_a_held_entry_needs_a_header_or_a_query_param(live):
+async def test_a_held_entry_needs_a_header_or_a_query_param(live):
     nowhere = {**_GH_HELD, "header": ""}
     _write_live(live.live, held=[nowhere])
     inj = live.Injector()
     flow = _gh_flow("x")
-    inj.requestheaders(flow)
+    await inj.requestheaders(flow)
     assert flow.response is None and inj.held == []
