@@ -2348,6 +2348,33 @@ def test_a_combined_overlap_offers_only_the_switches_that_would_end_it():
         assert reg.mode_issues({"a": "on", "b": "on", "c": "on", "d": "on", s: "off"}) == []
 
 
+class _Majority(_Injectors):
+    """Both rules on api.x.test appear whenever ANY TWO of ``b``, ``c``, ``d`` are on — so resting
+    one of three leaves both standing, and no single switch ends the overlap."""
+
+    def __init__(self):
+        super().__init__({"b": [], "c": [], "d": []})
+
+    def proxy_rules(self, mode):
+        if sum(mode.get(s) == "on" for s in "bcd") < 2:
+            return []
+        return [
+            InjectRule(host="api.x.test", header="Authorization", minter="1"),
+            InjectRule(host="api.x.test", header="Authorization", minter="2", path_prefix="/v1"),
+        ]
+
+
+def test_a_combined_overlap_no_single_switch_ends_offers_one_command_for_them_together():
+    # Each `fy mode s=off` alone would be refused, so none is offered: one command resting them
+    # together is, and only because it is checked to end the overlap.
+    reg = Registry([_Majority()], config=_cfg({}))
+    on = {"b": "on", "c": "on", "d": "on"}
+    ((_, message),) = reg.mode_issues(on)
+    assert "`fy mode b=off c=off d=off`" in message
+    assert "`fy mode b=off`" not in message
+    assert reg.mode_issues({"b": "off", "c": "off", "d": "off"}) == []
+
+
 def test_the_proxy_daemon_injects_neither_overlapping_rule(monkeypatch):
     monkeypatch.setattr(config, "proxy_enabled", lambda: True)
     plugin = _Injectors({"a": [("api.x.test", "")], "b": [("api.x.test", "/v1")]})
