@@ -90,7 +90,7 @@ foldyard up                            # back to rest; "feature":"off"
 Where each piece of that is declared:
 
 - the **switches** come from the fakecred plugin — loading it is just `[plugins.fakecred]` in
-  `foldyard.toml`; real credential plugins (gcp, github, …) contribute theirs the same way.
+  `foldyard.toml`; real credential plugins (gcp, …) and `[[inject]]` rows contribute theirs the same way.
 - the **overlay** is pure config: `[[overlay]] when = { fakedep = "on" }` layers
   `compose.feature.yml` ([../docs/compose-overlays.md](../docs/compose-overlays.md)).
 - the **refusal** is a declarative requirement evaluated by the registry. *This* one ships

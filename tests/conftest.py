@@ -40,8 +40,8 @@ settings.load_profile("ci" if os.environ.get("CI") else "dev")
 # table and GitHub as two `[[inject]]` kinds (ADR-0031), so the active axes are {gcp, storage,
 # github, github-user, auth0, llm} (no [claude].keyless, so no agent axes). `github` is the App
 # (off/on); `github-user` the operator's own token, an emergency switch whose `on` expires — the
-# old `github=app` / `github=user` levels, each now its own switch. gcp-metadata.project is set so the gcp axis
-# self-gate (Step D) passes; an [[overlay]] wired on `storage=staging` is what makes the storage
+# old `github=app` / `github=user` levels, each now its own switch. gcp-metadata.project is set
+# so the gcp axis self-gate (Step D) passes; an [[overlay]] wired on `storage=staging` is what makes the storage
 # axis appear (config.overlay_when_axes — the gcp plugin's self-gate). The gcp identity overlays
 # are declared here too so the overlay-resolution tests see them (there is no built-in default any
 # more — overlays are config-only). Deliberately NO auth0/llm overlays: the devmode overlay test

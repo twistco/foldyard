@@ -47,6 +47,11 @@ authoritative state is in the host's home, outside the mount). So:
 3. If a **secret** is missing rather than a level — the host may need it pasted once. `fy mode`
    asks for it when the switch goes on (and `fy box up` asks as a backstop), storing it on their
    computer at 0600. `fy doctor` on the host names which one.
+4. If the switch is on and the service answers **403**, the credential's own scope is the limit,
+   not foldyard. A GitHub App token carries exactly what the App's installation grants (foldyard
+   neither narrows nor caps it), and GitHub's 403 names the missing permission: ask the human to
+   grant it on the App (an org owner approves it), or for a separate App with its own switch.
+   Editing `foldyard.toml` can't widen it — there is no permissions key to add.
 
 ## Reading the current grant surface
 

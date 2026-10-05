@@ -43,7 +43,7 @@ disabled = true
 ```
 
 For you, that means no Codex CLI installed at box-up, no credential prompt, and no codex row in
-`fy mode` or `fy state`. It works at any depth (`[plugins.github]`), on single entries of an
+`fy mode` or `fy state`. It works at any depth (`[plugins.gcp-metadata]`), on single entries of an
 array of tables (park one `[[inject]]` rule), and in either file: a project can ship a block
 disabled and a developer can opt in with `disabled = false`. Only a real TOML boolean counts.
 The marker is removed after the merge and never reaches the rest of foldyard.
@@ -384,36 +384,97 @@ enforce = "learn"
 
 ## `[[inject]]`
 
-A credential injector from config alone. Each entry becomes one on/off switch
-(`fy mode <switch>=on`) and one proxy rule that adds a token to requests for one host. The token
-lives only in `host.env` on your computer; turning the switch on prompts for it if missing.
+A credential from config alone. Each entry becomes one on/off switch (`fy mode <switch>=on`) and
+one proxy rule that adds a credential to requests for one host, minted on your computer. The
+secret lives only in `host.env` there; turning the switch on prompts for it if missing.
 
 ```toml
 [[inject]]
 switch = "tracker"                 # → `fy mode tracker=on`; token = host.env's FY_INJECT_TRACKER
 host = "api.tracker.example"       # the host to inject on
 header = "Authorization"           # XOR query_param = "userToken"
+box_env = { TRACKER_TOKEN = "x" }  # the dummy the client in the box needs to send the header
 ```
 
-- **`switch`** — the switch name (required). It also names the token: `host.env`'s
+A row's **`kind`** names the token protocol — how the credential is made — and decides which
+other fields the row takes ([ADR-0031](./adrs/0031-credentials-are-protocol-kinds-the-credential-owns-its-scope.md)).
+A kind is code that ships with foldyard; the row is only its data. A field the kind doesn't take,
+or a kind that doesn't exist, stops foldyard loading the config with a message naming what is
+allowed.
+
+Every kind takes:
+
+- **`switch`** — the switch name (required). It also names the secret: `host.env`'s
   **`FY_INJECT_<SWITCH>`** (uppercased, non-alphanumerics become `_`). You can't choose another
   variable, so a repo edit can't point a rule at another mechanism's secret.
-- **`host`** — the host to inject on (required).
-- **`header`** XOR **`query_param`** — where the token goes. Neither: the `Authorization` header.
-- **`value_prefix`** — prefix for the injected value, e.g. `"Bearer "`.
-- **`path_prefix`** — only inject on paths under this prefix.
-- **`replay_on_401`** — re-read the token and replay once on a 401. Default: `false`.
-- **`ttl`** — how often (seconds) the token is re-read. Not the switch's lifetime — that's
-  `emergency`.
+- **`kind`** — `static` (the default), `github-app` or `gh-cli`.
+- **`host`** — the host to inject on. Required for `static`; the GitHub kinds fix it to
+  `api.github.com` and refuse any other value, so a minted token is never aimed elsewhere.
 - **`emergency`** — `true` makes `on` an emergency level: it expires (`fy mode <switch>=on
   ttl=30m`; default 1 h, max 8 h) and switches itself off. For tokens you never want left on
   (write access, a shared account).
+- **`box_env`** — dummies baked into the box's environment, `{ NAME = "dummy" }`: what a client
+  needs to see before it sends the header the proxy then overwrites. They're baked whenever the box
+  routes through the proxy, whatever the switch's level, so turning the switch on needs no box
+  recreate; a dummy grants nothing. `fy verify` checks each still holds its dummy (anything else
+  is a possible real credential in the box). A name foldyard sets in the box itself (`FY_*`,
+  `FOLDYARD_*`, the proxy and CA variables, `CONTAINER_HOST`, `DOCKER_HOST`, …) is refused, and
+  two rows can't give one name different dummies.
+- **`replay_on_401`** — re-mint and replay once on a 401. Default: `false` for `static`, `true`
+  for the GitHub kinds.
 - **`label`** — shown in daemon status.
 
+**`kind = "static"`** — a long-lived token from `host.env`, echoed as-is:
+
+- **`header`** XOR **`query_param`** — where the token goes. Neither: the `Authorization` header.
+- **`value_prefix`** — prefix for the injected value, e.g. `"Bearer "`.
+- **`path_prefix`** — only inject on paths under this prefix.
+- **`ttl`** — how often (seconds) the token is re-read. Not the switch's lifetime — that's
+  `emergency`.
+
+**`kind = "github-app"`** — a GitHub App installation token, minted on your computer from the
+App's private key and good for an hour:
+
+```toml
+[[inject]]
+switch = "github"                  # `fy mode github=on`; the PEM is host.env's FY_INJECT_GITHUB
+kind = "github-app"
+app_id = "4008762"
+installation_id = "139125083"
+repositories = ["Tangible"]        # optional: a subset of the installation's repositories
+box_env = { GH_TOKEN = "x" }       # so `gh` in the box sends a header to overwrite
+```
+
+- **`app_id`** / **`installation_id`** — the App's id and its installation's id (required;
+  numbers, as a string or a TOML integer).
+- **`repositories`** — bare repository names (not `owner/repo`) to narrow the token to. It can
+  only narrow: GitHub refuses a repository the installation doesn't cover.
+- The secret is the App's private key, base64 in `FY_INJECT_<SWITCH>` (`host.env` is
+  single-line): `base64 < key.pem | tr -d '\n'`. `fy mode <switch>=on` prompts for it, and
+  `fy doctor` checks it's there and shaped like a key.
+
+**The App's installation permissions are the token's scope** — foldyard asks for none and caps
+none. To change what the box can do on GitHub, change the App on github.com (an org owner
+approves it there). For a different scope, create a different App and give it its own row and
+switch — one App per purpose, installed only on the repositories it serves, since a shared App
+hands the box the other purpose's permissions too. A token that can't reach an endpoint gets
+GitHub's own 403, which names the permission the App is missing.
+
+**`kind = "gh-cli"`** — your own `gh` token (`gh auth token` on your computer), push included. It
+takes no fields of its own and must be `emergency = true`:
+
+```toml
+[[inject]]
+switch = "github-user"             # `fy mode github-user=on ttl=30m`
+kind = "gh-cli"
+emergency = true
+box_env = { GH_TOKEN = "x" }
+```
+
 There is no `minter` key: a token service that needs more than a static token is a kind built
-into foldyard (`github-app`, `gh-cli`, the Codex refresh) or an installed plugin, never a command
-from config ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)). Any number of
-injectors can be on at once.
+into foldyard or an installed plugin, never a command from config
+([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)). Any number of injectors
+can be on at once. Installing `gh` (or any other client) in the box is your box image's job.
 
 ## `[[secret]]`
 
@@ -428,12 +489,12 @@ terminal foldyard warns and carries on — a missing secret breaks that one host
 
 ```toml
 [[secret]]
-var     = "GH_PEM_B64"                       # the host.env key (required)
-label   = "GitHub App private key (PEM)"     # shown at the prompt
-how     = "gcloud secrets versions access <resource> --impersonate-service-account=<sa> | base64"
-pattern = "*-----BEGIN *PRIVATE KEY-----?*-----END *PRIVATE KEY-----*"   # glob the value must match
-base64  = true                               # store encoded — host.env is single-line
-when    = { github = "app" }                 # mode gate, same semantics as `[[overlay]]`
+var     = "SENTRY_AUTH_TOKEN"                # the host.env key (required)
+label   = "Sentry auth token"                # shown at the prompt
+how     = "op read op://dev/sentry/token"    # where to get it — printed, never run
+pattern = "sntrys_*"                         # glob the value must match
+base64  = false                              # store encoded? (host.env is single-line)
+when    = { sentry = "on" }                  # mode gate, same semantics as `[[overlay]]`
 ```
 
 - **`var`** — the `host.env` key. Required; missing is an error at startup.
@@ -448,9 +509,15 @@ when    = { github = "app" }                 # mode gate, same semantics as `[[o
 - **`when`** — mode gate: `switch = level` or `switch = [levels]`, AND across keys. When
   overriding a plugin's secret, repeat its gate.
 
-Plugins declare their own secrets (e.g. `github=app`'s PEM). A `[[secret]]` with the same `var`
-overrides only the fields it names, so retargeting the hint at your own vault is one `how = …`
-line.
+Plugins and `[[inject]]` kinds declare their own secrets (e.g. a `github-app` row's PEM, as
+`FY_INJECT_<SWITCH>`). A `[[secret]]` with the same `var` overrides only the fields it names, so
+retargeting the hint at your own vault is one `how = …` line:
+
+```toml
+[[secret]]
+var = "FY_INJECT_GITHUB"
+how = "gcloud secrets versions access <resource> --impersonate-service-account=<sa> | base64"
+```
 
 ## `[[overlay]]`
 
@@ -692,15 +759,12 @@ sa_labels = { app = "app-runtime", box = "log-reader" }
     it. Env: `GCP_PROJECT`.
   - **`sa_labels`** — service-account names by role, e.g.
     `{ app = "app-runtime", box = "log-reader" }`. Default: `{}`.
-- **`[plugins.github]`** — enables the `github` switch (`off`/`app`/`user`) and everything with
-  it (gh doctor rows, the box's dummy `GH_TOKEN`, the gh bootstrap). An empty table is enough for
-  `github=user`. The fields are identifiers, not secrets; the App's private key is a
-  `[[secret]]`.
-  - **`app_id`** / **`installation_id`** / **`repo`** — the App id, its installation id, and the
-    bare repo name (not `owner/repo`) the `github=app` token is scoped to. Env: `GH_APP_ID`,
-    `GH_INSTALLATION_ID`, `GH_REPO`.
-  - **`permissions`** — narrows the installation token, e.g. `{ issues = "read" }`. Default:
-    `{ pull_requests = "write", issues = "write" }`. Env: `GH_APP_PERMISSIONS` (JSON).
+- **`[plugins.github]`** — **removed**: GitHub is `[[inject]]` rows now (`kind = "github-app"`,
+  `kind = "gh-cli"`, above). A config still carrying the table stops `fy up` and `fy box up`, which
+  print the rows to replace it with, computed from it. The App's private key moves from
+  `GH_PEM_B64` to the switch's `FY_INJECT_<SWITCH>` in `host.env`, and `permissions` has no
+  successor: the App installation's permissions are the scope
+  ([ADR-0031](./adrs/0031-credentials-are-protocol-kinds-the-credential-owns-its-scope.md)).
 - **`[plugins.fakecred]`** — a zero-secret testing switch pair and fake token service, for
   exercising modes, TTLs and daemons without real credentials; see
   [testing-modes.md](./testing-modes.md). Env: `FAKECRED_PORT` (the fake service's port).

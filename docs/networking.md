@@ -53,7 +53,7 @@ row per connection (the hostname, no path).
 
 Entries are exact hosts, `*.suffix` globs, or `@bundle` names (`@anthropic`, `@vcs`, `@node`, …).
 The default is `@all`, every bundle: decrypt unexpected traffic, leave the trusted toolchain fast
-and quiet. A host whose credential the proxy injects (say `api.github.com` with `github=app`) is
+and quiet. A host whose credential the proxy injects (say `api.github.com` with `github=on`) is
 always decrypted, whatever the list says, so its auth header can be replaced.
 
 Decryption can't be switched off ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)): it costs

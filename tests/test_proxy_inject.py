@@ -1922,8 +1922,9 @@ def test_a_revoked_build_grant_closes_the_builds_tunnel(gh, build_walled, closer
 
 
 def test_a_rules_derived_default_reaches_the_running_proxy(live, tmp_path, monkeypatch):
-    # github=app derives GH_APP_ID & co. from committed config (env_defaults). The proxy used to get
-    # them by restarting on the mode change; it no longer restarts, so the live file carries them.
+    # A plugin may derive a rule's non-secret input from committed config (env_defaults — the old
+    # github plugin's GH_APP_ID was one). The proxy used to get them by restarting on the mode
+    # change; it no longer restarts, so the live file carries them.
     monkeypatch.delenv("GH_APP_ID", raising=False)
     minter = _counting_minter(tmp_path, "gh", env_key="GH_APP_ID")
     rule = {"host": "api.github.com", "command": minter.command, "env": ["GH_APP_ID"]}
