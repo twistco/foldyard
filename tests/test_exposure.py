@@ -189,6 +189,27 @@ def test_a_combined_overlap_is_held_back_with_the_command_that_ends_it():
     )
 
 
+def test_a_packaged_rule_overlapping_an_inject_row_is_listed_too(checkout):
+    # An [[inject]] row and keyless Claude both on api.anthropic.com: the proxy holds back BOTH, so
+    # both must be listed. Location-based de-duplication (which keeps a row's own rule from showing
+    # twice) dropped Claude's — a second credential, not the row's — and the doctor counted one.
+    cfg = checkout(
+        BASE
+        + "passthrough = []\n"
+        + '[claude]\nkeyless = "api-key"\n\n'
+        + '[[inject]]\nswitch = "anth"\nhost = "api.anthropic.com"\nheader = "x-api-key"\n'
+    )
+    mode = {"anth": "on", "claude": "on"}
+    on_host = [t for t in collect(cfg, mode).targets if t.host == "api.anthropic.com" and t.active]
+    assert len(on_host) == 2
+    assert all(t.held_back for t in on_host)
+    _ok, _name, detail = exposure.doctor_row(collect(cfg, mode))
+    assert "2 held back by an overlap" in detail
+    # One credential alone is still listed once: a row's own rule never shows twice.
+    alone = [t for t in collect(cfg, {"anth": "on"}).targets if t.host == "api.anthropic.com"]
+    assert len([t for t in alone if t.active]) == 1
+
+
 def test_the_doctor_row_does_not_count_a_held_back_target_as_live(checkout):
     cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
     ok, _name, detail = exposure.doctor_row(collect(cfg, {"github": "on", "github-user": "on"}))

@@ -241,8 +241,11 @@ def _targets(
         cfg_host: bool,
         org: str = DEFAULT,
         held_back: tuple[str, ...] = (),
+        distinct: bool = False,
     ) -> None:
-        if where in seen:
+        # `distinct`: a rule the mode activates is a credential of its own even where another sits
+        # on the same host and path (that is exactly an overlap), so it's never folded by place.
+        if where in seen and not distinct:
             return
         seen.add(where)
         out.append(Target(where, source, active, cfg_host, origin=org, held_back=held_back))
@@ -254,7 +257,7 @@ def _targets(
         if not (axis and host and kind):
             continue
         where = host + str(spec.get("path_prefix") or "")
-        seen.add(where)  # a packaged rule on the same host adds nothing the row didn't say
+        seen.add(where)  # a LATENT packaged rule on the same place adds nothing the row didn't say
         out.append(
             Target(
                 host=where,
@@ -268,9 +271,15 @@ def _targets(
                 ),
             )
         )
+    # The rows' own active rules are in proxy_rules too; they were listed above, under the row.
+    listed = {
+        rule for spec in config.inject_specs() for rule in owned.get(str(spec.get("switch")), [])
+    }
     for rule in reg.proxy_rules(mode):  # what the CURRENT posture activates
+        if rule in listed:
+            continue
         where, label = rule.host + rule.path_prefix, rule.label or "packaged injector"
-        add(where, label, True, False, held_back=held.get(rule, ()))
+        add(where, label, True, False, held_back=held.get(rule, ()), distinct=True)
     for axis, rungs in reg.switch_levels().items():  # …and what another rung would
         if not rungs or mode.get(axis, rungs[0]) != rungs[0]:
             continue  # already armed — its rules came from the pass above
