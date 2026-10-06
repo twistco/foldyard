@@ -1149,6 +1149,26 @@ def test_wall_uninstall_drops_the_walled_users_proxy_env_whatever_its_uid(tmp_pa
     assert calls.index(gone) < calls.index(restart)
 
 
+@pytest.mark.spawns("bash")  # sources the REAL script under bash; every command is a stub
+def test_wall_uninstall_reaches_a_home_with_a_space_in_it(tmp_path):
+    # A home path is one path whatever it holds: split on whitespace, `/home/dain guest` became
+    # `/home/dain` and `guest`, and the walled user's proxy file survived (CodeRabbit 4195767531).
+    script = shlex.quote(str(machine._wall_asset()))
+    stubs = (
+        'getent() { if [ "$#" -eq 1 ]; then echo "root:x:0:0::/root:/bin/bash"; '
+        'else echo "dain:x:501:1000:Dain D:/home/dain guest:/bin/bash"; fi; }\n'
+        'awk() { echo "/home/other user"; }\n'  # the uid >= 1000 sweep
+        "rm() { printf 'rm'; printf ' [%s]' \"$@\"; printf '\\n'; }\n"
+    )
+    calls = _stubbed_bash(
+        tmp_path,
+        f"{stubs}source {script} uninstall",
+        ("systemctl", "nft", "sudo", "install", "update-ca-trust"),
+    )
+    for home in ("/home/dain guest", "/home/other user"):
+        assert f"rm [-f] [{home}/.config/environment.d/90-fy-wall-proxy.conf]" in calls, calls
+
+
 def test_the_combined_bundle_starts_from_the_guests_real_roots():
     # Fedora 44 has no /etc/pki/tls/certs/ca-bundle.crt: the bundle was the proxy CA ALONE, so an
     # SSL_CERT_FILE/REQUESTS_CA_BUNDLE client (uv, pip, requests) failed every PASSTHROUGH host,

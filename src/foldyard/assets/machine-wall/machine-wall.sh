@@ -406,18 +406,24 @@ uninstall)
     rm -f /etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf
     rm -rf /usr/local/libexec/fy-oci
     _guest_trust "" || echo "⚠ proxy CA: still in the guest's own store" >&2
-    homes="$(getent passwd | awk -F: '$3 >= 1000 {print $6}')"
-    # …and the walled user's own, whatever its uid: Lima's guest user takes the host's (501 on
-    # macOS), which the sweep above misses — its proxy file survived and kept podman on the proxy.
+    # Every uid >= 1000 home, and the walled user's own whatever its uid: Lima's guest user takes
+    # the host's (501 on macOS), which that sweep misses — its proxy file survived and kept podman
+    # on the proxy. One home per LINE, read whole: a path may hold spaces.
     WALL_UID="$(_wall_user 2>/dev/null)" || WALL_UID=""
+    wall_home=""
     if [ -n "$WALL_UID" ]; then
         entry="$(getent passwd "$WALL_UID" || true)"
-        entry="${entry%:*}"
-        homes="$homes ${entry##*:}"
+        entry="${entry%:*}"      # drop the shell; no passwd field can hold a ':'
+        wall_home="${entry##*:}" # …so the home is everything after the last one left
     fi
-    for home in $homes; do
-        rm -f "$home/.config/environment.d/90-fy-wall-proxy.conf"
-    done
+    while IFS= read -r home; do
+        if [ -n "$home" ]; then
+            rm -f "$home/.config/environment.d/90-fy-wall-proxy.conf"
+        fi
+    done <<EOF
+$(getent passwd | awk -F: '$3 >= 1000 {print $6}')
+$wall_home
+EOF
     # A rootless podman service already running keeps the proxy env and the CA defaults it
     # started with — the first unwalled boot then still dialled the (stopped) proxy. Restart it
     # as install does. Best-effort, and only for a uid we can name.
