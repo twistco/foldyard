@@ -14,6 +14,10 @@ from hypothesis import HealthCheck, settings
 
 from foldyard import config, devmode, plugins
 
+# The env the session started with, before any fixture: what a live module must still see
+# (tests/test_isolation_e2e.py).
+SESSION_ENV = dict(os.environ)
+
 # ── hypothesis profiles (property-based tests) ──────────────────────────────────────────
 # CI must be deterministic (`just foldyard check` never flakes): derandomize replays the same
 # example set every run, and no example database means no cross-run state on the runner. Local
@@ -139,16 +143,17 @@ def isolated_port_registry(tmp_path, monkeypatch, request):
     reads or writes the real ~/.foldyard/ports.json — and every test's project deterministically
     allocates the FIRST band (proxy base 41000, minter base 41100) in its own empty registry.
 
-    NOT for the live e2e modules: their CLI subprocesses inherit this env, so the example project
-    was handed the first band — and on a host with real projects that band (its pinned VM ssh
-    port included) belongs to one of them; a restarted example VM then never came up."""
-    if _is_e2e(request):
+    NOT for the live modules that drive the real CLI (:func:`_runs_the_real_cli`): their CLI
+    subprocesses inherit this env, so the example project was handed the first band — and on a
+    host with real projects that band (its pinned VM ssh port included) belongs to one of them; a
+    restarted example VM then never came up."""
+    if _runs_the_real_cli(request.module):
         return
     monkeypatch.setenv("FY_PORTS_FILE", str(tmp_path / "fy-ports.json"))
 
 
 @pytest.fixture(autouse=True)
-def isolated_allow_store(tmp_path, monkeypatch):
+def isolated_allow_store(tmp_path, monkeypatch, request):
     """Point the egress allow-store + the effective file the proxy reads at per-test paths, so no
     test reads or writes the real ~/.foldyard/<project>/allow-store.json — and every test starts
     from "nothing granted, nothing declined".
@@ -157,7 +162,13 @@ def isolated_allow_store(tmp_path, monkeypatch):
     real grants and their `fy allow enforce` answer, CI's carries nothing, so a test that reads the
     ambient store asserts a different wall in each place. (An empty store still falls back to
     ``[proxy] enforce`` — the repo seed — so a test whose SUBJECT is the wall must state its
-    posture itself: `allowlist.grant(...)` / `allowlist.set_wall(...)` into this isolated store.)"""
+    posture itself: `allowlist.grant(...)` / `allowlist.set_wall(...)` into this isolated store.)
+
+    NOT for the live modules that drive the real CLI: `fy allow` in one test and the proxy the
+    supervisor launched in another would read two stores. The in-process proxy e2es keep it —
+    test_proxy_box_e2e grants into it and turns its wall on."""
+    if _runs_the_real_cli(request.module):
+        return
     monkeypatch.setenv("FOLDYARD_ALLOW_STORE", str(tmp_path / "allow-store.json"))
     monkeypatch.setenv("FOLDYARD_ALLOW_FILE", str(tmp_path / "allow-effective.json"))
     # The build gate's per-build secrets (hashes): a build test must never write the real one.
@@ -165,18 +176,25 @@ def isolated_allow_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def isolated_capability_state(tmp_path, monkeypatch):
+def isolated_capability_state(tmp_path, monkeypatch, request):
     """Point the supervisor's capability-probe results file at a per-test path and pin the test
     clock to real time, so no test reads or writes the real ~/.foldyard capabilities.json — or
     picks up a developer's live `fy clock` skew (FOLDYARD_CLOCK_OFFSET=0 short-circuits the
     offset-file read). Also resets the supervisor's per-process probe cache. The credential scope
     record (credscope) lives beside it and is isolated the same way, with the supervisor's memory
-    of which scopes it has already reported unreadable."""
+    of which scopes it has already reported unreadable.
+
+    The env NOT for the live modules that drive the real CLI: the supervisor their first `fy up`
+    starts would write one test's file for the rest of the module. (The caches are this process's
+    own, so they are reset for them too.)"""
     from foldyard import supervisor
 
-    monkeypatch.setenv("FOLDYARD_CAPABILITIES_FILE", str(tmp_path / "capabilities.json"))
-    monkeypatch.setenv("FOLDYARD_CREDENTIAL_SCOPES_FILE", str(tmp_path / "credential-scopes.json"))
-    monkeypatch.setenv("FOLDYARD_CLOCK_OFFSET", "0")
+    if not _runs_the_real_cli(request.module):
+        monkeypatch.setenv("FOLDYARD_CAPABILITIES_FILE", str(tmp_path / "capabilities.json"))
+        monkeypatch.setenv(
+            "FOLDYARD_CREDENTIAL_SCOPES_FILE", str(tmp_path / "credential-scopes.json")
+        )
+        monkeypatch.setenv("FOLDYARD_CLOCK_OFFSET", "0")
     supervisor._probe_state.clear()
     supervisor._scope_unread_seen.clear()
     yield
@@ -185,13 +203,19 @@ def isolated_capability_state(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def isolated_proxy_ca(tmp_path, monkeypatch):
+def isolated_proxy_ca(tmp_path, monkeypatch, request):
     """Point the proxy CA, and the confdir it's generated in, at a MISSING file of mitmproxy's
     default name under the test's tmp dir.
     ``proxy.ensure_ca()`` generates a CA when its file is missing, through the allowlisted
     interpreter, so without this a test wrote a real CA private key into the operator's (or a CI
     runner's) ~/.mitmproxy — and a test on a machine that already had one saw it, which is how a
-    test passed locally and failed on CI. A test that wants a CA writes one and re-points this."""
+    test passed locally and failed on CI. A test that wants a CA writes one and re-points this.
+
+    NOT for the live modules that drive the real CLI: inherited, ``MITMPROXY_CA`` names a per-test
+    file the proxy never signs with — the mismatch ``ensure_ca`` refuses, and the walled VM embeds
+    the CA its proxy really uses."""
+    if _runs_the_real_cli(request.module):
+        return
     from foldyard.plugins import proxy
 
     monkeypatch.setattr(proxy, "_proxy_confdir", lambda: tmp_path / "mitmproxy")
@@ -207,7 +231,10 @@ def isolated_config_pin(tmp_path, monkeypatch):
 
     Also clears the supervisor's per-process drift-report memory, like ``isolated_capability_state``
     does for the probe cache: it's keyed by worktree, so one test's drift would silence the next
-    test's report."""
+    test's report.
+
+    Kept for the live modules: it reaches no subprocess (their CLI adopts into the real pin dir),
+    and an in-process read with nothing adopted here falls back to the same tree they adopted."""
     from foldyard import configpin, supervisor
 
     pins = tmp_path / "config-pin"
@@ -258,9 +285,10 @@ def isolated_worktree_registry(tmp_path, monkeypatch, request):
     ``~/.foldyard/worktrees/``, and every test starts with NO worktree registered. A test that
     wants the host to see a worktree registers it (:func:`register_worktree`).
 
-    NOT for the live e2e modules: their CLI subprocesses inherit this env, and a per-TEST dir
-    loses what `fy worktree add` registered in one test before the next test's `fy up`."""
-    if _is_e2e(request):
+    NOT for the live modules that drive the real CLI: their CLI subprocesses inherit this env, and
+    a per-TEST dir loses what `fy worktree add` registered in one test before the next test's
+    `fy up`."""
+    if _runs_the_real_cli(request.module):
         return
     monkeypatch.setenv("FOLDYARD_WORKTREE_REGISTRY", str(tmp_path / "worktree-registry"))
 
@@ -317,7 +345,12 @@ def scrubbed_box_session_env(monkeypatch):
 
     ``FOLDYARD_PODMAN_DESKTOP`` because an operator's explicit ``=1`` would win over the
     isolated "not installed" answer (``isolated_podman_desktop``) and have every
-    ``machine.ensure`` test pin a VM's ssh port and register a connection."""
+    ``machine.ensure`` test pin a VM's ssh port and register a connection.
+
+    Kept for the live modules: these describe the SHELL the suite was started from (a box session,
+    a worktree), not host state, and a live CLI run from a worktree's shell must still act on the
+    example copy's main checkout. What a live test needs back it re-adds by name — test_e2e's
+    runner restores IN_DEVBOX from the value it read at import."""
     for var in (
         "FOLDYARD_PODMAN_DESKTOP",
         "IN_DEVBOX",
@@ -373,6 +406,25 @@ SHELLS = ("bash", "sh")
 
 def _is_e2e(request: pytest.FixtureRequest) -> bool:
     return request.node.fspath.basename.endswith("_e2e.py")
+
+
+# Where test_e2e's CLI runner lives, and the host-tier substrate that re-exports it.
+CLI_RUNNERS = ("test_e2e", "e2e_host")
+
+
+def _runs_the_real_cli(module: object) -> bool:
+    """Whether ``module`` is a live module that drives the REAL CLI as a subprocess — test_e2e,
+    or any ``*_e2e.py`` built on its runner (every host-tier module imports from e2e_host). Its CLI
+    subprocesses, and the supervisor the first `fy up` leaves running for the rest of the session,
+    inherit the test's env, so the per-test state fixtures above withhold theirs here: the live
+    test reads the host's real state, as the operator's `fy` does.
+
+    Narrower than :func:`_is_e2e` on purpose: the in-process proxy/box e2es build their own wiring
+    in tmp and keep every isolation (test_proxy_box_e2e grants into the per-test allow store)."""
+    name = getattr(module, "__name__", "").rpartition(".")[2]
+    return name.endswith("_e2e") and any(
+        getattr(value, "__module__", None) in CLI_RUNNERS for value in vars(module).values()
+    )
 
 
 def _is_box_git_shim(path: str) -> bool:
@@ -530,10 +582,15 @@ def no_host_tool_spawn(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def deterministic_engine(monkeypatch):
+def deterministic_engine(monkeypatch, request):
     """Pin the container engine so golden command tests assert one engine regardless of
     whether the host (CI / box / Mac) has podman or docker on PATH. Engine-detection
-    tests override this by deleting FOLDYARD_ENGINE themselves (via fresh_config)."""
+    tests override this by deleting FOLDYARD_ENGINE themselves (via fresh_config).
+
+    NOT for the live modules that drive the real CLI: they run the engine actually installed
+    (test_e2e's runner names it; anything else the CLI spawns must agree)."""
+    if _runs_the_real_cli(request.module):
+        return
     monkeypatch.setenv("FOLDYARD_ENGINE", "podman")
 
 
