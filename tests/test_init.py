@@ -31,6 +31,18 @@ def test_render_default_is_a_locked_down_stackless_lima_wall_box():
     assert doc["proxy"]["enforce"] == "learn"
 
 
+def test_render_shows_the_passthrough_default_it_would_get_and_how_to_widen_it():
+    # The scaffold teaches the knob by showing the value an undeclared key falls back to, so the
+    # commented line must BE that default — and say how to get every bundle back.
+    from foldyard import config
+
+    body = init.render(init.InitOptions(name="x"))
+    line = next(ln for ln in body.splitlines() if ln.startswith("# passthrough = "))
+    shown = tomllib.loads(line.lstrip("# ").split("#", 1)[0])["passthrough"]
+    assert shown == list(config.DEFAULT_PASSTHROUGH)
+    assert '["@all"]' in body  # the way back to tunnelling the whole toolchain
+
+
 def test_render_agents_and_features_are_present_but_commented():
     # The kitchen sink: agents + the rest ship as guidance, not active tables, so a first
     # `fy box up` is a plain safe box until the user opts in.

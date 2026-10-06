@@ -4,8 +4,9 @@ These are the *trusted, expected* dev-toolchain hosts. The proxy TLS-PASSES
 THROUGH them (real certs end-to-end, SNI/host-level log only — we already know what they are and
 don't need request-level scrutiny) and MITM-DECRYPTS everything NOT listed (the surprising egress
 worth inspecting). A project references them by `@bundle` in `foldyard.toml`
-(``[proxy] passthrough = ["@anthropic", "@vcs", "my-api.internal"]``); `@all` = every bundle, and
-is the default when the key is absent.
+(``[proxy] passthrough = ["@anthropic", "@vcs", "my-api.internal"]``); `@all` = every bundle. An
+absent key means only ``config.DEFAULT_PASSTHROUGH`` (`@jvm` + `@linux`): what still breaks under
+decryption once the box, containers, build steps and the VM's pulls trust the proxy CA.
 
 Seeded from Claude Code Web's "Trusted network access" default-allowed domains. Wildcard
 semantics match: ``*.foo.com`` matches any SUBDOMAIN of foo.com (not foo.com itself) — list the
@@ -52,8 +53,8 @@ BUNDLES: dict[str, tuple[str, ...]] = {
         "hub.docker.com",
         "www.docker.com",
         # Docker Hub serves blobs from either CDN. A pull is the guest podman's own traffic; the
-        # walled guest's store trusts the proxy CA, so these are here for bulk speed — and for a
-        # VM provisioned without a CA, where a decrypted blob host fails x509 "unknown authority".
+        # walled guest's store trusts the proxy CA, so `@containers` is no longer in the default.
+        # Name it to tunnel pulls again (a VM provisioned without a CA fails x509 otherwise).
         "production.cloudflare.docker.com",
         "production.cloudfront.docker.com",
         "download.docker.com",
@@ -187,6 +188,8 @@ BUNDLES: dict[str, tuple[str, ...]] = {
         "www.swift.org",
     ),
     "linux": (
+        "deb.debian.org",
+        "security.debian.org",
         "archive.ubuntu.com",
         "security.ubuntu.com",
         "ubuntu.com",

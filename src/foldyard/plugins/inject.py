@@ -110,6 +110,7 @@ _FOLDYARD_BOX_ENV = frozenset(
         "REQUESTS_CA_BUNDLE",
         "GIT_SSL_CAINFO",
         "SSL_CERT_FILE",
+        "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE",
         "NODE_EXTRA_CA_CERTS",
         # the gcp metadata emulator
         "GCE_METADATA_HOST",

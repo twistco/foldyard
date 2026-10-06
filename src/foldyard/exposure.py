@@ -113,7 +113,7 @@ class Exposure:
     bundle_refs: list[str] = field(default_factory=list)  # @refs that resolved
     unknown_refs: list[str] = field(default_factory=list)  # @refs that matched no bundle
     literals: list[str] = field(default_factory=list)  # hosts/globs declared in this file
-    declared: bool = True  # was `passthrough` declared at all (vs defaulted to @all)?
+    declared: bool = True  # was `passthrough` declared at all (vs defaulted)?
     hosts: int = 0  # resolved passthrough patterns
     wildcards: int = 0  # …of which `*.suffix` globs
     passthrough_origin: str = DEFAULT
@@ -537,7 +537,11 @@ def render(exp: Exposure) -> list[str]:
     out = [f"Repo-declared widenings — what foldyard.toml asks the HOST to allow   {where}", ""]
 
     out.append(f"  capture exemptions   [proxy] passthrough{_shared_note(exp.passthrough_origin)}")
-    source = " ".join(exp.bundle_refs) if exp.declared else "not declared → defaults to @all"
+    source = (
+        " ".join(exp.bundle_refs)
+        if exp.declared
+        else f"not declared → defaults to {' '.join(config.DEFAULT_PASSTHROUGH)}"
+    )
     out.append(
         f"    {source} → {_plural(exp.hosts, 'host', 'hosts')} · "
         f"{_plural(exp.wildcards, 'wildcard suffix', 'wildcard suffixes')}"

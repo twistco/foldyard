@@ -922,6 +922,9 @@ def test_proxy_box_args_mounts_ca_and_proxy_env(monkeypatch, tmp_path):
     assert (
         "SSL_CERT_FILE=/etc/dev-proxy-ca-combined.pem" in args
     )  # OpenSSL/uv/curl trust the proxy CA
+    # gcloud's own transports read neither: `gsutil` failed every decrypted Google host without
+    # it, retrying for minutes (live, 2026-10-06), once `@cloud` left the passthrough default.
+    assert "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE=/etc/dev-proxy-ca-combined.pem" in args
     assert "GH_TOKEN=x" not in args  # a dummy token is an injector row's box_env, not the proxy's
 
 
@@ -1023,7 +1026,11 @@ def test_proxy_box_args_ambient_ca_without_routing(monkeypatch, tmp_path):
     assert "NODE_EXTRA_CA_CERTS=/etc/dev-proxy-ca.pem" in args
     assert not any("HTTPS_PROXY" in a for a in args)  # no routing
     assert not any(  # bundle-replacing vars are routing-only, never ambient
-        "REQUESTS_CA_BUNDLE" in a or "GIT_SSL_CAINFO" in a or "SSL_CERT_FILE" in a for a in args
+        "REQUESTS_CA_BUNDLE" in a
+        or "GIT_SSL_CAINFO" in a
+        or "SSL_CERT_FILE" in a
+        or "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE" in a
+        for a in args
     )
 
 
@@ -1444,7 +1451,8 @@ def test_proxy_is_always_on_and_always_decrypts(monkeypatch):
     spec = reg.desired_daemons({"github": "off"})["egress-proxy"]
     assert spec["live"]["data"]["rules"] == []
     assert spec["env"]["CAPTURE_MODE"] == "full"
-    assert spec["live"]["data"]["passthrough"]  # the @all default: the toolchain stays tunnelled
+    # the default: only what can't be decrypted (Java's store, GnuTLS apt mirrors) is tunnelled
+    assert spec["live"]["data"]["passthrough"] == proxy._resolve_passthrough(["@jvm", "@linux"])
     assert spec["env"]["PROXY_LOG_FILE"].endswith("egress.jsonl") and spec["requires"] == []
 
 
@@ -2844,12 +2852,12 @@ def test_the_live_file_names_the_open_learn_window(monkeypatch):
     assert live["observing_since"] == window["since"]
 
 
-def test_image_pull_hosts_are_tunnelled_by_the_default_passthrough():
+def test_image_pull_hosts_are_one_bundle_away_from_tunnelled():
     # A pull is podman's own traffic in the guest, through the VM-wide proxy env. The walled
-    # guest's store now trusts the proxy CA, so a decrypted registry verifies; before that, one
-    # failed x509 "unknown authority" (the Lima host e2e, 2026-09-23: Docker Hub served a blob
-    # from production.cloudfront.docker.com). The registry hosts stay on the default `@all` list
-    # for a VM provisioned without a CA, and until the passthrough default is decided.
+    # guest's store trusts the proxy CA, so a decrypted registry verifies and the registries left
+    # the passthrough default; before that, one failed x509 "unknown authority" (the Lima host
+    # e2e, 2026-09-23: Docker Hub served a blob from production.cloudfront.docker.com). A VM
+    # provisioned without a CA still needs them tunnelled, so `@containers` must hold them all.
     import inspect
 
     from foldyard import init as init_mod
@@ -2863,12 +2871,21 @@ def test_image_pull_hosts_are_tunnelled_by_the_default_passthrough():
         "ghcr.io",
         "pkg-containers.githubusercontent.com",
     }
-    tunnelled = proxy._resolve_passthrough(["@all"])
+    tunnelled = proxy._resolve_passthrough(["@containers"])
     assert pull_hosts <= set(tunnelled), pull_hosts - set(tunnelled)
     # …and the scaffold RECOMMENDS all of them: tunnelling decides decryption, not the wall. Docker
     # Hub serves blobs from either CDN, so an enforcing wall missing one refuses the pull.
     for host in pull_hosts:
         assert f'host = "{host}"' in scaffold, host
+
+
+def test_the_default_tunnels_the_apt_mirrors_the_common_base_images_use():
+    # `@linux` is in the default because apt over HTTPS (GnuTLS) reads only the image's own store,
+    # so it can't verify a decrypted mirror. Debian's mirrors are the ones most images fetch from
+    # (`python:*-slim`, `debian:*`, the scaffold's `[[box.tools]]` packages), not only Ubuntu's.
+    tunnelled = set(proxy._resolve_passthrough(list(config.DEFAULT_PASSTHROUGH)))
+    mirrors = {"deb.debian.org", "security.debian.org", "archive.ubuntu.com", "security.ubuntu.com"}
+    assert mirrors <= tunnelled, mirrors - tunnelled
 
 
 def test_the_live_file_carries_the_rules_derived_defaults(monkeypatch):

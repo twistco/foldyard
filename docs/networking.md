@@ -16,8 +16,12 @@ the box trusts, both set when the box is created:
 
 - the proxy's CA is added to the box's **system trust store** (curl, wget and apt all verify
   against it), and `NODE_EXTRA_CA_CERTS` adds it to Node's roots;
-- `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO` and `SSL_CERT_FILE` point at a **combined** bundle
-  (system roots + the proxy CA), so both decrypted and passed-through connections verify.
+- `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO`, `SSL_CERT_FILE` and `CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE`
+  (gcloud's own transports: `gsutil`, `bq`) point at a **combined** bundle (system roots + the
+  proxy CA), so both decrypted and passed-through connections verify.
+- A browser's own store (Chromium/Playwright's NSS database) ignores all of these: import the CA
+  once (`certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n foldyard-proxy -i /etc/dev-proxy-ca.pem`)
+  or the page fails with `ERR_CERT_AUTHORITY_INVALID`.
 
 How strong "routes" is depends on your setup. Only the lima backend with `[machine] firewall =
 true` **enforces** that all traffic goes through the proxy. Without the VM firewall, routing is
@@ -51,10 +55,17 @@ The proxy decrypts and logs every request — method, host, path, status — *ex
 `[proxy] passthrough` list. Those are tunnelled with their real certificates and logged as one
 row per connection (the hostname, no path).
 
-Entries are exact hosts, `*.suffix` globs, or `@bundle` names (`@anthropic`, `@vcs`, `@node`, …).
-The default is `@all`, every bundle: decrypt unexpected traffic, leave the trusted toolchain fast
-and quiet. A host whose credential the proxy injects (say `api.github.com` with `github=on`) is
-always decrypted, whatever the list says, so its auth header can be replaced.
+Entries are exact hosts, `*.suffix` globs, or `@bundle` names (`@anthropic`, `@vcs`, `@node`, …;
+`@all` is every bundle). The default is `["@jvm", "@linux"]`: only what still breaks under
+decryption — Java's own trust store (Maven, Gradle) and `apt` over HTTPS, which reads only the
+image's store. Everything else is decrypted and logged: the box, your stack's containers, image
+build steps and the VM's image pulls all trust the proxy's CA, and decrypting a toolchain install
+measured within a few per cent of tunnelling it. (One exception: a build started on your computer
+is tunnelled whatever the list says, and logged as `tls tunnel` rows — see
+[Image builds](#image-builds-trusted-still-behind-the-allowlist) below. A build started inside the box is decrypted like the box.)
+Set `passthrough = ["@all"]` to tunnel the whole toolchain as before, or add only the bundle a tool
+needs. A host whose credential the proxy injects (say `api.github.com` with `github=on`) is always
+decrypted, whatever the list says, so its auth header can be replaced.
 
 Decryption can't be switched off ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)): it costs
 about 3 ms per new connection and caps one checkout's decrypted throughput around 600 MB/s,

@@ -247,6 +247,23 @@ def test_renamed_keys_are_honoured_under_their_old_names(fresh_config, tmp_path)
     assert "axis" not in config.inject_specs()[0]
 
 
+def test_an_undeclared_passthrough_tunnels_only_what_cannot_be_decrypted(fresh_config, tmp_path):
+    # Build steps, the guest's pulls and every container now trust the proxy CA, and decrypting a
+    # toolchain install measured within noise of tunnelling it (2026-10-06). So the default keeps
+    # only what still breaks under decryption: Java's own trust store, and GnuTLS `apt` mirrors.
+    (tmp_path / "foldyard.toml").write_text('[project]\nname = "p"\n[proxy]\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.proxy_passthrough() == ["@jvm", "@linux"]
+    config.proxy_passthrough().append("@all")  # a caller's copy, never the default itself
+    assert config.proxy_passthrough() == ["@jvm", "@linux"]
+
+
+def test_an_explicit_passthrough_is_kept_as_written(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text('[proxy]\npassthrough = ["@all"]\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.proxy_passthrough() == ["@all"]
+
+
 def test_a_local_old_spelling_overrides_a_shared_new_one(fresh_config, tmp_path):
     # Renames apply per FILE, before the merge — so the override order is unchanged by spelling.
     (tmp_path / "foldyard.toml").write_text('[project]\nname = "p"\n[machine]\nfirewall = true\n')

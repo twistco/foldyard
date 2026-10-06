@@ -56,8 +56,8 @@ def test_a_bundle_ref_is_counted_not_just_echoed(checkout):
 
 def test_an_undeclared_passthrough_reports_the_default_it_falls_back_to(checkout):
     body = rendered(checkout(BASE + "enforce = true\n"))
-    assert "not declared → defaults to @all" in body
-    assert "194" in body or "hosts ·" in body  # the count, whatever the bundles currently hold
+    assert "not declared → defaults to @jvm @linux" in body
+    assert "hosts ·" in body  # the count, whatever the bundles currently hold
 
 
 def test_an_empty_passthrough_says_everything_is_decrypted(checkout):

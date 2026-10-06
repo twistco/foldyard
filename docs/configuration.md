@@ -313,7 +313,7 @@ reaches a box that already exists. Neither: no proxy settings in the box at all.
 ```toml
 [proxy]
 enforce = "learn"
-# passthrough = ["@all"]
+# passthrough = ["@jvm", "@linux"]   # the default
 # no_proxy = ["{project}-postgres", "redis"]
 ```
 
@@ -362,8 +362,10 @@ enforce = "learn"
 - **`passthrough`** — trusted hosts the proxy tunnels *without* decrypting; everything else is
   decrypted and logged, always ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)). Entries
   are exact hosts, `*.suffix` globs, or `@bundle` names (`@all` = every built-in toolchain
-  bundle). Default: `["@all"]`; `[]` decrypts everything. Also the escape hatch for a host that
-  breaks under decryption (pinned certificate, client certificate, own trust roots). Like every
+  bundle). Default: `["@jvm", "@linux"]`, what still fails decrypted (Java's own trust store,
+  `apt` over HTTPS); `["@all"]` tunnels the whole toolchain; `[]` decrypts everything. Also the
+  escape hatch for a host that breaks under decryption (pinned certificate, client certificate,
+  own trust roots): a certificate error naming the proxy's CA (`mitmproxy`) is the sign. Like every
   host-side key it takes effect when adopted. `fy config widenings` shows how many hosts your
   list resolves to and flags a mistyped `@bundle` (which expands to nothing).
 - **`no_proxy`** — your stack's own hostnames the box must reach **directly**. The proxy runs on

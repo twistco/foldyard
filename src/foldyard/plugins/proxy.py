@@ -684,6 +684,10 @@ class ProxyPlugin(Plugin):
             # bundle; same routing gating.
             "-e",
             f"SSL_CERT_FILE={BOX_CA_BUNDLE}",
+            # gcloud's own transports (httplib2: `gsutil`, `bq`) read none of the above; this is
+            # its documented property, as env. `gcloud storage` (requests) needed nothing extra.
+            "-e",
+            f"CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE={BOX_CA_BUNDLE}",
         ]
 
     def _ever_rules(self, mode: dict) -> bool:
