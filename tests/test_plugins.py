@@ -2879,6 +2879,15 @@ def test_image_pull_hosts_are_one_bundle_away_from_tunnelled():
         assert f'host = "{host}"' in scaffold, host
 
 
+def test_the_default_tunnels_the_apt_mirrors_the_common_base_images_use():
+    # `@linux` is in the default because apt over HTTPS (GnuTLS) reads only the image's own store,
+    # so it can't verify a decrypted mirror. Debian's mirrors are the ones most images fetch from
+    # (`python:*-slim`, `debian:*`, the scaffold's `[[box.tools]]` packages), not only Ubuntu's.
+    tunnelled = set(proxy._resolve_passthrough(list(config.DEFAULT_PASSTHROUGH)))
+    mirrors = {"deb.debian.org", "security.debian.org", "archive.ubuntu.com", "security.ubuntu.com"}
+    assert mirrors <= tunnelled, mirrors - tunnelled
+
+
 def test_the_live_file_carries_the_rules_derived_defaults(monkeypatch):
     # Only the names a rule reads, and only derived (non-secret) values — env_defaults.
     reg = Registry([_Github(), proxy.ProxyPlugin()])

@@ -188,6 +188,8 @@ BUNDLES: dict[str, tuple[str, ...]] = {
         "www.swift.org",
     ),
     "linux": (
+        "deb.debian.org",
+        "security.debian.org",
         "archive.ubuntu.com",
         "security.ubuntu.com",
         "ubuntu.com",
