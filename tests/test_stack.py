@@ -628,9 +628,17 @@ def running_services(monkeypatch):
     monkeypatch.setattr(
         stack,
         "_rendered_services",
-        lambda ctx, extra_profiles=None, deadline=None: running | {"postgres"},
+        lambda ctx, extra_profiles=None, deadline=None: running | {"postgres", "app"},
     )
     return running
+
+
+@pytest.fixture
+def crashed_services(monkeypatch):
+    """What the engine reports as having crashed (exited non-zero on its own) — mutate the set."""
+    crashed: set[str] = set()
+    monkeypatch.setattr(stack, "_crashed_services", lambda ctx, deadline=None: crashed)
+    return crashed
 
 
 def test_recreate_services_never_claims_a_service_the_render_leaves_out(
@@ -687,6 +695,32 @@ def test_recreate_services_leaves_services_that_are_not_running_alone(
     assert last[-1] == "queue-worker" and "asset-tape-extract" not in last
 
 
+def test_recreate_services_brings_back_a_service_that_crashed_for_want_of_the_credential(
+    fake_repo, capture_run, running_services, crashed_services
+):
+    # Seen live: `app` fetches its secrets once at boot, exited 1 with the gcp chain lapsed, and
+    # the heal that followed `just gcp-elevate` skipped it as "not running" — the operator had to
+    # `fy up` by hand. A container that exited non-zero on its own was started and wanted; the
+    # heal is what it was waiting for. It still never starts a service that never ran.
+    crashed_services.add("app")
+    ok, summary = stack.recreate_services(["queue-worker", "app", "asset-tape-extract"])
+    assert ok is True
+    assert summary == (
+        "recreated queue-worker, app (had crashed); not running, left alone: asset-tape-extract"
+    )
+    last = _composes(capture_run)[-1]
+    assert last[-3:] == ["--no-deps", "queue-worker", "app"]
+
+
+def test_recreate_services_brings_back_a_crashed_service_with_nothing_running(
+    fake_repo, capture_run, running_services, crashed_services
+):
+    running_services.clear()
+    crashed_services.add("app")
+    assert stack.recreate_services(["app"]) == (True, "recreated app (had crashed)")
+    assert _composes(capture_run)[-1][-1] == "app"
+
+
 def test_recreate_services_with_nothing_running_runs_no_compose(
     fake_repo, capture_run, running_services
 ):
@@ -737,13 +771,34 @@ def test_recreate_services_spans_running_extra_profiles(
 ):
     # Resnapshot services are typically profile-gated workers (`data`); a provider that drops a
     # service outside the requested profiles would otherwise make the heal a silent no-op.
-    monkeypatch.setattr(stack, "_running_extra_profiles", lambda ctx, deadline=None: ["data"])
+    monkeypatch.setattr(
+        stack, "_running_extra_profiles", lambda ctx, deadline=None, also=(): ["data"]
+    )
     ok, _ = stack.recreate_services(["queue-worker"])
     last = _composes(capture_run)[-1]
     assert ok is True
     assert last[last.index("--profile") + 1] == "data" and last.index("--profile") < last.index(
         "up"
     )
+
+
+def test_recreate_services_spans_the_profiles_of_the_crashed_services_it_brings_back(
+    fake_repo, capture_run, monkeypatch, running_services, crashed_services
+):
+    # A profile-gated worker that crashed while nothing else in its profile runs: discovery from
+    # RUNNING services alone leaves the profile out, so the render drops the very service the
+    # heal is reviving. Only the crashed services it brings back are spanned — not every crash.
+    crashed_services.update({"app", "unlisted"})
+    seen: list[set[str]] = []
+
+    def extras(ctx, deadline=None, also=()):
+        seen.append(set(also))
+        return ["data"]
+
+    monkeypatch.setattr(stack, "_running_extra_profiles", extras)
+    ok, _ = stack.recreate_services(["queue-worker", "app"])
+    assert ok is True
+    assert seen == [{"app"}]
 
 
 def test_recreate_services_reports_failure_instead_of_raising(fake_repo, monkeypatch):
@@ -2139,6 +2194,66 @@ def test_compose_ps_services_reads_podman_compose_rows():
     assert stack._compose_ps_services(json.dumps(rows)) == {"queue-worker", "graph-api"}
 
 
+def test_compose_ps_crashed_is_a_non_zero_exit_that_no_stop_signal_explains():
+    # Crashed = exited on its own with a failure. Exit 0 finished; 130/137/143 are what Ctrl-C,
+    # `stop`'s SIGTERM and its SIGKILL escalation leave — someone stopped it, so a heal must not
+    # bring it back. Both providers' row shapes: docker compose's `Service`, podman's label.
+    rows = [
+        {"Service": "app", "State": "exited", "ExitCode": 1},
+        {"Labels": {"com.docker.compose.service": "worker"}, "State": "exited", "ExitCode": 2},
+        {"Service": "done", "State": "exited", "ExitCode": 0},
+        {"Service": "stopped", "State": "exited", "ExitCode": 143},
+        {"Service": "killed", "State": "exited", "ExitCode": 137},
+        {"Service": "interrupted", "State": "exited", "ExitCode": 130},
+        {"Service": "up", "State": "running", "ExitCode": 0},
+        {"Service": "never-started", "State": "created", "ExitCode": 0},
+        {"Service": "odd", "State": "exited"},
+    ]
+    assert stack._compose_ps_crashed(json.dumps(rows)) == {"app", "worker"}
+    ndjson = "\n".join(json.dumps(r) for r in rows[:3])
+    assert stack._compose_ps_crashed(ndjson) == {"app", "worker"}
+    assert stack._compose_ps_crashed("") == set()
+    assert stack._compose_ps_crashed("Error: something odd\n") == set()
+
+
+def test_crashed_services_lists_stopped_containers_on_either_provider(fake_repo, monkeypatch):
+    # docker compose's `ps` shows only running containers without `-a`; the bundled
+    # podman-compose's IS `podman ps -a` already and its parser refuses `-a`.
+    import types
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        out = '[{"Service": "app", "State": "exited", "ExitCode": 1}]'
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+    monkeypatch.setattr(stack, "_run", fake_run)
+    ctx = stack.resolve(no_machine=True)
+    monkeypatch.setattr(stack, "_podman_compose_active", lambda ctx: False)
+    assert stack._crashed_services(ctx) == {"app"}
+    assert calls[-1][-4:] == ["ps", "-a", "--format", "json"]
+    monkeypatch.setattr(stack, "_podman_compose_active", lambda ctx: True)
+    assert stack._crashed_services(ctx) == {"app"}
+    assert calls[-1][-3:] == ["ps", "--format", "json"]
+
+
+def test_crashed_services_fails_safe_to_none_crashed(fake_repo, monkeypatch):
+    # A probe that can't answer revives nothing: the heal then refreshes what runs, as before.
+    import types
+
+    monkeypatch.setattr(
+        stack, "_run", lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout="", stderr="")
+    )
+    assert stack._crashed_services(stack.resolve(no_machine=True)) == set()
+
+    def _boom(cmd, **kw):
+        raise OSError("engine gone")
+
+    monkeypatch.setattr(stack, "_run", _boom)
+    assert stack._crashed_services(stack.resolve(no_machine=True)) == set()
+
+
 def test_compose_ps_services_cannot_read_garbage_as_nothing_running():
     # An empty set means "the engine says nothing runs"; output that parses to no row at all
     # says nothing, and must not skip a heal as if it did.
@@ -2213,6 +2328,26 @@ def test_running_extra_profiles_discovers_from_compose(fake_repo, monkeypatch):
     assert stack._running_extra_profiles(ctx) == ["data", "e2e"]
     overlay.write_text("services: [broken")  # unreadable -f file → best-effort []
     assert stack._running_extra_profiles(ctx) == []
+
+
+def test_running_extra_profiles_also_spans_the_services_named(fake_repo, monkeypatch):
+    # The heal revives a CRASHED service too, and a crashed one isn't running: naming it enables
+    # its profile even when nothing else in that profile runs.
+    base = fake_repo / "compose.base.yml"
+    base.write_text("services:\n  app: {image: a}\n  queue-worker: {image: q, profiles: [data]}\n")
+    ctx = stack.Context(
+        main=fake_repo,
+        env={},
+        compose=["podman", "compose", "-f", str(base)],
+        app="app",
+        project="p",
+        worktree="",
+    )
+    monkeypatch.setattr(stack, "_running_services", lambda ctx, deadline=None: {"app"})
+    assert stack._running_extra_profiles(ctx) == []
+    assert stack._running_extra_profiles(ctx, also={"queue-worker"}) == ["data"]
+    monkeypatch.setattr(stack, "_running_services", lambda ctx, deadline=None: set())
+    assert stack._running_extra_profiles(ctx, also={"queue-worker"}) == ["data"]
 
 
 def test_up_unions_running_extra_profiles(fake_repo, capture_run, monkeypatch):

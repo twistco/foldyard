@@ -23,7 +23,7 @@ import shlex
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -1466,7 +1466,27 @@ def _running_services(ctx: Context, deadline: float | None = None) -> set[str] |
     return _compose_ps_services(out.stdout) if out.returncode == 0 else None
 
 
-def _running_extra_profiles(ctx: Context, deadline: float | None = None) -> list[str]:
+def _crashed_services(ctx: Context, deadline: float | None = None) -> set[str]:
+    """The project's compose services whose container CRASHED (:func:`_compose_ps_crashed`).
+    docker compose's ``ps`` lists only running containers without ``-a``; the bundled
+    podman-compose's is ``podman ps -a`` already, and its parser refuses ``-a``. Fail-safe: an
+    empty set on any error — the heal then refreshes only what runs, never reviving a guess."""
+    flags = [] if _podman_compose_active(ctx) else ["-a"]
+    try:
+        out = _run(
+            [*ctx.compose, "ps", *flags, "--format", "json"],
+            env=ctx.env,
+            cwd=str(ctx.main),
+            timeout=_left(deadline),
+        )
+    except Exception:
+        return set()
+    return _compose_ps_crashed(out.stdout) if out.returncode == 0 else set()
+
+
+def _running_extra_profiles(
+    ctx: Context, deadline: float | None = None, also: Iterable[str] = ()
+) -> list[str]:
     """Compose profiles OUTSIDE the posture-derived active set that currently have RUNNING
     services — e.g. the ``data`` workers ``just data-up`` started (that profile belongs to the
     developer, not the mode system). The posture reconcile and ``up`` union these into their
@@ -1477,9 +1497,10 @@ def _running_extra_profiles(ctx: Context, deadline: float | None = None) -> list
     themselves (:func:`_service_profiles`), not ``config --profiles``: the bundled podman-compose
     has no such flag, so discovery always came back empty there (#33). Fully generic, no profile
     names baked in. Best-effort: [] on any error (the reconcile then covers just the derived set,
-    as before). ``deadline`` bounds the probe (the heal's)."""
+    as before). ``deadline`` bounds the probe (the heal's); ``also`` names services to span as if
+    running — the crashed ones the heal brings back."""
     try:
-        running = _running_services(ctx, deadline)
+        running = (_running_services(ctx, deadline) or set()) | set(also)
         if not running:
             return []
         profiles = _service_profiles(ctx)
@@ -1531,10 +1552,13 @@ def recreate_services(
     so a heal re-reads credentials AND converges any drift. ``--no-build`` (a heal never builds),
     ``--no-deps`` (only the named services), and the running extra profiles spanned the way the
     posture reconcile spans them, so a profile-gated worker isn't dropped from the render. Only
-    services that are RUNNING are named: a heal refreshes what runs and never starts anything —
-    ``up`` would create a named service that never ran (under docker compose, enabling its
-    inactive profile too) without the dependencies ``--no-deps`` skips. An engine that can't say
-    what runs recreates nothing (fail-safe). The summary says what was recreated and what not.
+    services that are RUNNING, or that CRASHED, are named: a heal refreshes what runs and never
+    starts anything — ``up`` would create a named service that never ran (under docker compose,
+    enabling its inactive profile too) without the dependencies ``--no-deps`` skips. A crashed
+    container was started and wanted, and is typically down for want of the very credential
+    that just healed (a boot-time secret fetch that failed and exited); one somebody stopped
+    is left alone (:func:`_compose_ps_crashed`). An engine that can't say what runs recreates
+    nothing (fail-safe). The summary says what was recreated and what not.
     Headless by design (it runs on a supervisor worker thread): output is captured, and
     ``timeout`` is ONE deadline over every compose call here — the probes as well as the ``up`` —
     so a hung engine can't pin the in-flight guard forever, and it NEVER raises — the
@@ -1549,11 +1573,12 @@ def recreate_services(
         running = _running_services(ctx, deadline)
         if running is None:
             return False, "couldn't list running services — nothing recreated"
-        wanted = [s for s in services if s in running]
-        idle = [s for s in services if s not in running]
+        crashed = _crashed_services(ctx, deadline) - running
+        wanted = [s for s in services if s in running or s in crashed]
+        idle = [s for s in services if s not in wanted]
         if not wanted:
             return True, f"none of {', '.join(services)} running — nothing to recreate"
-        extra = _running_extra_profiles(ctx, deadline)
+        extra = _running_extra_profiles(ctx, deadline, also=[s for s in wanted if s in crashed])
         # A named service the render leaves out is silently skipped by podman-compose (exit 0),
         # so only claim what the render has — the rest is reported, never "recreated".
         rendered = _rendered_services(ctx, extra, deadline)
@@ -1575,7 +1600,8 @@ def recreate_services(
         if proc.returncode != 0:
             lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
             return False, (lines[-1] if lines else f"compose exited {proc.returncode}")
-        return (not unrendered), f"recreated {', '.join(wanted)}" + (
+        named = [f"{s} (had crashed)" if s in crashed else s for s in wanted]
+        return (not unrendered), f"recreated {', '.join(named)}" + (
             f"; not running, left alone: {', '.join(idle)}" if idle else ""
         ) + (
             f"; not in the rendered config, NOT recreated: {', '.join(unrendered)}"
@@ -1595,9 +1621,43 @@ def _compose_ps_services(stdout: str) -> set[str] | None:
     the profile-gated workers (#33). Tolerant of all three shapes. None when non-empty output
     yields no row at all: that says nothing about what runs, and an empty set would claim
     nothing does."""
+    rows = _compose_ps_rows(stdout)
+    if rows is None:
+        return None
+    return {
+        service
+        for row in rows
+        if row.get("State", "running") == "running" and (service := _compose_ps_service(row))
+    }
+
+
+# The exit codes a STOP leaves (128 + signal): Ctrl-C's SIGINT, `stop`'s SIGTERM and the SIGKILL
+# it escalates to. A container that exited with one of these was stopped, not crashed.
+_STOP_EXIT_CODES = frozenset({130, 137, 143})
+
+
+def _compose_ps_crashed(stdout: str) -> set[str]:
+    """Services whose container CRASHED, out of ``compose ps -a --format json`` (either shape
+    :func:`_compose_ps_services` reads): exited with a non-zero code that no stop signal
+    explains. Exit 0 finished; a stopped one was stopped by somebody; ``created`` never started.
+    An unreadable row or output is not a crash."""
+    return {
+        service
+        for row in _compose_ps_rows(stdout) or []
+        if row.get("State") == "exited"
+        and isinstance(code := row.get("ExitCode"), int)
+        and code != 0
+        and code not in _STOP_EXIT_CODES
+        and (service := _compose_ps_service(row))
+    }
+
+
+def _compose_ps_rows(stdout: str) -> list[dict] | None:
+    """The row objects of ``compose ps --format json``: NDJSON or a single JSON array. None when
+    non-empty output yields no row at all."""
     text = stdout.strip()
     if not text:
-        return set()
+        return []
     try:
         parsed = json.loads(text)
         rows = parsed if isinstance(parsed, list) else [parsed]
@@ -1610,17 +1670,15 @@ def _compose_ps_services(stdout: str) -> set[str] | None:
                 continue
         if not rows:
             return None
-    services: set[str] = set()
-    for row in rows:
-        if not isinstance(row, dict) or row.get("State", "running") != "running":
-            continue
-        labels = row.get("Labels")
-        service = row.get("Service") or (
-            labels.get("com.docker.compose.service") if isinstance(labels, dict) else None
-        )
-        if service:
-            services.add(service)
-    return services
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _compose_ps_service(row: dict) -> str | None:
+    """A ``compose ps`` row's service: docker compose's ``Service``, else the compose label."""
+    labels = row.get("Labels")
+    return row.get("Service") or (
+        labels.get("com.docker.compose.service") if isinstance(labels, dict) else None
+    )
 
 
 def _compose_captured(

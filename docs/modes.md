@@ -142,7 +142,9 @@ supervisor also reacts when a switch goes DEGRADED or recovers:
   `[resnapshot_on_capability]`.** Some services read credentials once at startup and keep them;
   they only pick up a recovered credential by starting again. They are recreated from the
   current mode rather than restarted, so one still on an older mode's settings catches up as
-  well. So your only job is the fix the notification names; the recreate is automatic.
+  well. A listed service that crashed while the credential was failing — say it exited because
+  its startup fetch failed — comes back too; one you stopped stays stopped. So your only job is
+  the fix the notification names; the recreate is automatic.
 
 Neither reaction grants, blocks or changes the mode.
 
