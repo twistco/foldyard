@@ -38,12 +38,12 @@ from ._passthrough_bundles import BUNDLES
 # per-project band + per-worktree offset; there is deliberately no module-level constant (it
 # would freeze the env at import and bypass the band allocation).
 
-# The proxy-URL user an image BUILD reaches the proxy as. A build container has no proxy CA, so a
-# decrypted host fails its TLS verify; the addon blind-tunnels a CONNECT that carries this user
-# (the client turns the URL's userinfo into a Basic Proxy-Authorization header) — still walled at
-# CONNECT. It is a marker, not a credential: the box can present it too, and gains only an
-# undecrypted tunnel to a host the wall already lets it reach. Duplicated in the addon (which
-# can't import foldyard); a test pins the two equal.
+# The proxy-URL user an image BUILD reaches the proxy as, with that build's secret as the password
+# (the client turns the URL's userinfo into a Basic Proxy-Authorization header). A build container
+# has no proxy CA, so a decrypted host fails its TLS verify; the addon blind-tunnels a CONNECT that
+# carries this user AND a live secret — still walled at CONNECT. The user alone is public and
+# unlocks nothing: the box could present it too. Duplicated in the addon (which can't import
+# foldyard); a test pins the two equal.
 BUILD_TUNNEL_USER = "fy-build"
 
 
@@ -51,13 +51,13 @@ def build_proxy_url(token: str | None = None) -> str | None:
     """The proxy URL an image build should use, or ``None`` when builds don't route through the
     proxy (no in-VM wall ⇒ they egress directly, as they always have). The MAIN proxy port, like
     the wall's own VM-level proxy env: building isn't per-worktree. ``token`` — the build's secret
-    from the build gate — goes in the password; it is what unlocks build-scoped grants. Without
-    it the build still tunnels, on runtime grants only."""
+    from the build gate — makes it a trusted build: tunnelled, and allowed its build-scoped grants.
+    Without one (a build the box starts) the URL is the plain proxy: that build is the box, and is
+    decrypted like any box request."""
     if not config.machine_wall():
         return None
-    user = BUILD_TUNNEL_USER
-    password = token or user
-    return f"http://{user}:{password}@{config.LIMA_HOST_GATEWAY}:{config.proxy_port_base()}"
+    where = f"{config.LIMA_HOST_GATEWAY}:{config.proxy_port_base()}"
+    return f"http://{BUILD_TUNNEL_USER}:{token}@{where}" if token else f"http://{where}"
 
 
 def mitmdump_path() -> str | None:

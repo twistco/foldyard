@@ -95,9 +95,9 @@ belongs in the middle — but *one* middle, not a switch between two.
   with a marker user (`http://fy-build:fy-build@…`; proxy build-args need no `ARG` line and are
   not persisted into the image), and the addon blind-tunnels a CONNECT carrying it, logging a
   `passthrough` row flagged `build`. **The wall still applies** — the marker is checked only
-  after the CONNECT is granted. It is a marker, not a credential: the box can present it too, and
-  gains only an undecrypted tunnel to a host it could already reach. That is a visibility
-  concession, which ADR-0009 already classes as not enforcement. The stack's own image builds
+  after the CONNECT is granted. It was a marker, not a credential: the box could present it too,
+  and gained only an undecrypted tunnel to a host it could already reach — a visibility
+  concession, which ADR-0009 classes as not enforcement (narrowed 2026-10, below). The stack's own image builds
   (`fy up`/`fy build`, the native podman path) carry the marker too; the running stack's
   containers take the VM's unmarked proxy env and stay decrypted — and until 2026-10 had no CA,
   so their HTTPS to a decrypted host failed verification. The walled VM's boot provisioning now
@@ -108,6 +108,17 @@ belongs in the middle — but *one* middle, not a switch between two.
   narrower and the public marker unlocks none of them. The residual: during a build, the box could
   inspect the build container through the engine socket and read that build's secret — a window of
   one build, where a fixed marker would be permanent.
+- **The tunnel needs the build's secret too** (amended 2026-10-06). The bare marker still let the
+  box choose its own visibility: `fy-build:<anything>@` in its proxy URL turned a decrypted request,
+  logged with path and User-Agent, into a hostname-only tunnel row (shown live, 2026-10-04 — the
+  allowlist held; what was fetched went unseen). The proxy now tunnels a connection, and flags its
+  rows `build` (what the gate offers the operator), only when it presents a live per-build secret;
+  the `fy-build` user without one is an ordinary box request. The concession narrows to the same
+  one-build window as the grants. **A build the box starts is the box**: it gets the plain proxy
+  URL and is decrypted like any box request, so its RUN steps reach `passthrough` hosts but fail
+  verification against any other HTTPS host (a build step has no CA). Such an image builds from
+  the host, or the host goes on `passthrough`. Rejected: minting a secret for an in-box build — the
+  box would hold a working marker again.
 - **Image pulls rely on `passthrough`.** A pull is the guest podman's own traffic, through the
   VM-wide proxy env: no build marker, no proxy CA. A decrypted registry blob host fails it with
   x509 "unknown authority" (the Lima host e2e, when Docker Hub served a blob from

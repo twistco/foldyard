@@ -7,21 +7,25 @@ refused: a CDN redirects inside the build's tunnel, where the proxy can't see th
 (`cdn.playwright.dev` → `storage.googleapis.com`, seen live). Naming the real host used to mean
 reading the egress log by hand.
 
-So the gate reads the refusals the proxy attributed to the build (the build marker flags them)
+So the gate reads the refusals the proxy attributed to the build (its secret flags them)
 and, on the host with a terminal, offers each one — once / session / permanent / no — then
 retries. A retry is cheap for a build (the layer cache replays everything before the failing
 step), and a redirect chain reveals one hop per attempt, so it loops, bounded. Whatever is
 granted comes back as `[proxy] recommend` lines, so the team is offered the same hosts at their
 own `fy up` — the operator's consent, shared, never a grant written into the repo.
 
-Grants made here are BUILD-SCOPED: the proxy applies them only to a connection that proves it is
-a build the host started, so the runtime wall stays narrower. The proof is a secret minted per
-build (the password in the build's proxy URL; build-args are never persisted into the image),
-recorded host-side only as a hash and revoked when the build ends. The fixed `fy-build` marker
-alone — which anyone can read, the box included — still gets a build tunnelled, but no build grant.
+Being a build is proved, not claimed: the proxy tunnels a connection, attributes its refusals to
+the build and applies the BUILD-SCOPED grants (so the runtime wall stays narrower) only when it
+presents a secret minted for that build (the password in the build's proxy URL; build-args are
+never persisted into the image), recorded host-side only as a hash and revoked when the build
+ends. The fixed `fy-build` user alone — which anyone can read, the box included — earns none of
+it: the box used to present it to turn a decrypted request into a hostname-only tunnel row. What
+remains is one build's window (ADR-0029): the box can read a running build's secret through the
+engine socket.
 
 In the box the gate stays out of the way: grants are host-side and the log is outside the mount.
-An in-box build gets the bare marker, so it tunnels and uses runtime grants only.
+An in-box build IS the box, so it gets the plain proxy URL: decrypted like any box request (a host
+off `passthrough` fails its TLS, since a build step has no proxy CA), on runtime grants only.
 """
 
 from __future__ import annotations
@@ -174,7 +178,7 @@ def run(
     from .plugins import proxy
 
     if config.in_box() or proxy.build_proxy_url() is None:
-        # No host-side log to read, or builds don't cross the wall. In the box: the bare marker.
+        # No host-side log to read, or builds don't cross the wall. In the box: the plain proxy.
         return build(proxy.build_proxy_url())
     token = _issue_token()
     try:

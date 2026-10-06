@@ -171,10 +171,17 @@ out through the proxy. How that works:
 
 - **Tunnelled, not decrypted.** A build step doesn't get the proxy's trust settings (podman
   applies its default environment to running containers, not to builds), so foldyard gives
-  the build a proxy URL with a marker (`fy-build`), and the proxy tunnels those connections. The
-  log shows them as `tls tunnel` rows flagged `build`.
-- **The allowlist still applies.** The marker changes what is decrypted, never what is allowed
-  ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)).
+  the build a proxy URL carrying a secret it creates for that build (user `fy-build`, the secret
+  as the password), and the proxy tunnels those connections. The log shows them as `tls tunnel`
+  rows flagged `build`.
+- **The allowlist still applies.** Being a build changes what is decrypted, never what the
+  runtime allowlist allows ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)).
+- **Only a build started on your computer is one.** The `fy-build` user without a live secret
+  counts for nothing, so a program in the box can't use it to hide what it fetches. A build you
+  start *inside* the box (`fy up` there) is the box as far as the proxy is concerned: decrypted
+  like any box request. A host on `passthrough` is unaffected; any other HTTPS host fails a build
+  step's certificate check, since a build step doesn't trust the proxy's CA. Run that build from
+  your computer, or put the host on `passthrough`.
 
 When the allowlist refuses a build, the tool's error names the URL it *asked* for, which is often
 not the host that was refused: a CDN can redirect inside the tunnel (Playwright's
@@ -195,8 +202,8 @@ refused hosts itself:
 **Build grants are for builds only.** The box can't use them, so the box's allowlist stays as
 narrow as before. A build proves it is one with a secret foldyard creates for that build (the
 password in its proxy URL, stored on your computer only as a hash, revoked when the build ends).
-The public `fy-build` marker alone still gets a build tunnelled, but unlocks no build grant, so
-neither the box nor a build started inside it can use one. `fy allow add <host> --build` makes
+The public `fy-build` user alone unlocks no build grant, so neither the box nor a build started
+inside it can use one. `fy allow add <host> --build` makes
 the same kind of grant by hand, and `fy allow list` shows build grants separately.
 
 `when = "build"` recommendations aren't offered at `fy up` (every launch would ask about a host
