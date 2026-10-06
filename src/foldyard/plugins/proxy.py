@@ -574,8 +574,11 @@ class ProxyPlugin(Plugin):
                     # in the proxy's memory first. mitmproxy buffers by default, so a decrypted
                     # 2 GB image layer or model download was held in RAM before the box saw a
                     # byte; streaming also doubled decrypted throughput (~270 → ~590 MB/s on
-                    # loopback, 2026-09-22). Error bodies (the log's snippet) and 401 re-issues
-                    # stay small, so nothing the addon reads is lost.
+                    # loopback, 2026-09-22). Since the addon streams every 2xx/3xx response
+                    # from its first byte (egress_proxy._relays_as_it_arrives — a model reply's
+                    # events must not wait for 1 MiB), this bounds what is left: request bodies
+                    # (kept whole below it for the 401 re-issue) and error responses (the log's
+                    # snippet). Nothing the addon reads is lost.
                     "--set",
                     "stream_large_bodies=1m",
                 ],
