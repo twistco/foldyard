@@ -622,6 +622,14 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
 - **`warmup`** — background steps after box-up: `[{ dir, run }]`, each run in `<checkout>/<dir>`.
   Default: `[]`.
 - **`env`** — extra static env in the box; `~` expands to the box's `HOME`. Default: `{}`.
+  It also overrides the clock settings the box takes from your computer: `TZ`, your timezone,
+  and `LC_TIME`, your time locale, which decides a 12- or 24-hour clock. Set `TZ = "UTC"` here
+  to keep the box on UTC. `LC_TIME` is passed only when the image has that locale (`locale -a`),
+  because a missing one does nothing and makes perl warn on every run, and never under an
+  `LC_ALL` (the image's or this table's), which would override it. Debian images add it with
+  the `locales` package and `localedef -i en_GB -f UTF-8 en_GB.UTF-8`. `date` and `ls -l` need
+  `tzdata` in the image; the packaged box has it, and Claude Code doesn't need it. Both are read
+  when the box is created, so `fy box down && fy box up` picks up a change.
 - **`[[box.tools]]`** — one-time tool installs, run as bootstrap steps reported ✓/✗:
   `{ name, install, check? }`. `check` is a shell test that skips the install when it succeeds;
   default `command -v <name>`.

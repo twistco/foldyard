@@ -80,6 +80,10 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   started with the VM, no `stop`): the ONE host-side process per project running the credential
   daemons (singleton lock, per-worktree listeners, replace-on-launch staleness handling, the
   capability-probe loop, TTL expiry + settle).
+- `hostclock.py` — your computer's timezone (`TZ`: the `/etc/localtime` link's name after
+  `zoneinfo/`, else `/etc/timezone`) and time locale (`LC_TIME`), each pattern-checked, which
+  `fy box up` passes to the BOX only (`box._clock_env`; the stack stays on UTC). Host facts, not
+  repo config; `[box].env` overrides either.
 - `worktree_registry.py` — the host's own record of a project's worktrees (name → real path,
   keyed by the main checkout's path). Written only by `fy worktree add`/`remove`; everything
   host-side that enumerates worktrees (supervisor, git heal, `fy mode`, the TUI) reads it, never a

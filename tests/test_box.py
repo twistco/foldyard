@@ -88,6 +88,10 @@ def fake(tmp_path, monkeypatch):
     # No ambient proxy CA by default: point MITMPROXY_CA at a missing file so the golden-sequence
     # tests don't pick up the real ~/.mitmproxy CA a dev machine may have. Opt in per test.
     monkeypatch.setenv("MITMPROXY_CA", str(tmp_path / "no-such-ca.pem"))
+    # Your computer's clock settings are stubbed absent (never the real /etc/localtime or the
+    # operator's LANG); the timezone tests opt in.
+    monkeypatch.setattr(box.hostclock, "zone", lambda: None)
+    monkeypatch.setattr(box.hostclock, "time_locale", lambda: None)
 
     # box up ensures the host supervisor (always-on egress proxy) is running; stub it so the golden
     # sequences don't probe/spawn the real Mac daemons, and record that box up asked for it.
@@ -114,6 +118,8 @@ def fake(tmp_path, monkeypatch):
         # None → whatever the host runs (no drift); "" → nothing answers.
         "box_foldyard": None,
         "oci_runtime": "crun",  # what `inspect {{.OCIRuntime}}` reports after create
+        "image_locales": [],  # what `locale -a` lists in the image (the create-time probe)
+        "image_lc_all": "",  # the image's own LC_ALL, as the same probe reads it
     }
 
     envs: list[dict | None] = []
@@ -142,7 +148,9 @@ def fake(tmp_path, monkeypatch):
         if cmd[1] == "network" and cmd[2] == "inspect":
             return _Proc(0 if state["net_exists"] else 1)
         if cmd[1:3] == ["run", "--rm"]:
-            return _Proc(0, "/home/vscode /home/vscode/.claude")
+            listed = "".join(f"\n{name}" for name in state["image_locales"])
+            lc_all = f"\nlc_all={state['image_lc_all']}"
+            return _Proc(0, "/home/vscode /home/vscode/.claude" + lc_all + listed)
         if cmd[1] == "exec" and cmd[-1] == "foldyard --version":
             v = state["box_foldyard"]
             v = foldyard.__version__ if v is None else v
@@ -310,6 +318,87 @@ def test_up_assembles_run(fake):
     assert "--label" in run and "gcp.serviceAccount=box@p.iam.gserviceaccount.com" in run
     # clean DOCKER_CONFIG (default on) — sidesteps the editor-attach credsStore helper
     assert "DOCKER_CONFIG=/home/vscode/.docker-fy" in run
+
+
+def _env_values(run: list[str]) -> list[str]:
+    """Every ``-e`` value, in order."""
+    return [run[i + 1] for i, tok in enumerate(run) if tok == "-e"]
+
+
+def _clock(monkeypatch, zone=None, locale=None):
+    monkeypatch.setattr(box.hostclock, "zone", lambda: zone)
+    monkeypatch.setattr(box.hostclock, "time_locale", lambda: locale)
+
+
+def test_up_passes_your_computers_timezone_before_the_box_env(fake, monkeypatch):
+    _clock(monkeypatch, zone="Europe/London")
+    assert box.main("up") == 0
+    values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert "TZ=Europe/London" in values
+    # Before `[box].env`: the consumer's table is where an override lives.
+    assert values.index("TZ=Europe/London") < values.index("UV_LINK_MODE=copy")
+
+
+def test_up_passes_no_timezone_when_your_computer_names_none(fake):
+    assert box.main("up") == 0
+    values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert not [v for v in values if v.startswith(("TZ=", "LC_TIME="))]
+
+
+def test_up_box_env_overrides_the_timezone_and_time_locale(fake, monkeypatch):
+    # One value per key, the consumer's: a duplicate `-e` would leave the winner to the engine.
+    _clock(monkeypatch, zone="Europe/London", locale="en_GB.UTF-8")
+    fake["state"]["image_locales"] = ["C.utf8", "en_GB.utf8"]
+    monkeypatch.setattr(config, "box_env", lambda: {"TZ": "UTC", "LC_TIME": "C.UTF-8"})
+    assert box.main("up") == 0
+    values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert [v for v in values if v.startswith("TZ=")] == ["TZ=UTC"]
+    assert [v for v in values if v.startswith("LC_TIME=")] == ["LC_TIME=C.UTF-8"]
+
+
+def test_up_passes_the_time_locale_when_the_image_has_it(fake, monkeypatch):
+    _clock(monkeypatch, locale="en_GB.UTF-8")
+    fake["state"]["image_locales"] = ["C", "C.utf8", "POSIX", "en_GB.utf8"]
+    assert box.main("up") == 0
+    values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert "LC_TIME=en_GB.UTF-8" in values
+    assert values.index("LC_TIME=en_GB.UTF-8") < values.index("UV_LINK_MODE=copy")
+
+
+def test_up_skips_a_time_locale_the_image_lacks(fake, monkeypatch):
+    # A locale the image can't load falls back to C anyway, and perl warns on every run.
+    _clock(monkeypatch, zone="Europe/London", locale="en_GB.UTF-8")
+    fake["state"]["image_locales"] = ["C", "C.utf8", "POSIX"]
+    assert box.main("up") == 0
+    values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert "TZ=Europe/London" in values
+    assert not [v for v in values if v.startswith("LC_TIME=")]
+
+
+def test_up_skips_the_time_locale_when_lc_all_would_override_it(fake, monkeypatch):
+    # LC_ALL beats LC_TIME (glibc, and Claude Code's own LC_ALL || LC_TIME || LANG): under an
+    # image's or `[box].env`'s LC_ALL, a passed LC_TIME would be silently ignored.
+    _clock(monkeypatch, zone="Europe/London", locale="en_GB.UTF-8")
+    fake["state"]["image_locales"] = ["C.utf8", "en_GB.utf8"]
+    fake["state"]["image_lc_all"] = "C.UTF-8"
+    assert box.main("up") == 0
+    values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert "TZ=Europe/London" in values
+    assert not [v for v in values if v.startswith("LC_TIME=")]
+
+    fake["calls"].clear()
+    fake["state"]["image_lc_all"] = ""
+    monkeypatch.setattr(config, "box_env", lambda: {"LC_ALL": "C.UTF-8"})
+    assert box.main("up") == 0
+    values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert not [v for v in values if v.startswith("LC_TIME=")]
+
+
+def test_up_lists_the_images_locales_in_its_home_probe(fake):
+    # One probe container, not two: the locales ride the HOME probe.
+    assert box.main("up") == 0
+    probes = [c for c in fake["calls"] if c[1:3] == ["run", "--rm"]]
+    assert len(probes) == 1 and "locale -a" in probes[0][-1]
 
 
 def _gvisor(fake, monkeypatch):
