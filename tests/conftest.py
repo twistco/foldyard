@@ -293,6 +293,22 @@ def isolated_worktree_registry(tmp_path, monkeypatch, request):
     monkeypatch.setenv("FOLDYARD_WORKTREE_REGISTRY", str(tmp_path / "worktree-registry"))
 
 
+@pytest.fixture(autouse=True)
+def isolated_worktrees_root(tmp_path, monkeypatch, request):
+    """Point the worktrees root at a per-test dir that does not exist. Left to resolve, it is the
+    REAL ``<main checkout>-worktrees`` beside the repo the suite runs from — so a checkout standing
+    inside it (``~/workspace/foldyard-worktrees/<name>``) had ``current_workspace()`` infer a
+    worktree from the CWD, and ``workspaces()`` listed whatever else lives there: 16 TUI tests
+    failed in that one place and passed from a copy anywhere else. A test about worktrees builds
+    its own root (setenv, or monkeypatching ``config.worktrees_root``).
+
+    NOT for the live modules that drive the real CLI: the VM mounts the worktrees root, so a
+    per-test one would change its provisioning under every test."""
+    if _runs_the_real_cli(request.module):
+        return
+    monkeypatch.setenv("FOLDYARD_WORKTREES_ROOT", str(tmp_path / "worktrees"))
+
+
 @pytest.fixture
 def register_worktree():
     """``register_worktree(main, name, path)`` — record a worktree the way `fy worktree add` does

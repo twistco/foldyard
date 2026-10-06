@@ -7,7 +7,23 @@ from __future__ import annotations
 
 import types
 
-from foldyard import config
+from foldyard import config, devmode
+
+
+def test_a_checkout_inside_its_own_worktrees_root_still_opens_on_main(tmp_path, monkeypatch):
+    # 16 TUI tests failed for a checkout under ~/workspace/foldyard-worktrees/ and passed from a
+    # copy anywhere else: the worktrees root was the REAL one beside the repo's main checkout, so
+    # `current_workspace()` inferred a worktree from the CWD and the TUI opened on an unregistered
+    # card with no mode grid. The stand-in below is that layout; the suite must not see it.
+    main = tmp_path / "repo"
+    probe = tmp_path / "repo-worktrees" / "probe"
+    for checkout in (main, probe):
+        checkout.mkdir(parents=True)
+        (checkout / ".git").write_text("gitdir: test\n")
+    monkeypatch.setattr(devmode, "main_repo", lambda: main)
+    monkeypatch.chdir(probe)
+    assert devmode.current_workspace() == "main"
+    assert [w["name"] for w in devmode.workspaces()] == ["main"]
 
 
 def test_the_ambient_config_is_the_tree_from_the_first_read():
