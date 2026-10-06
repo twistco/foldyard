@@ -60,9 +60,12 @@ Entries are exact hosts, `*.suffix` globs, or `@bundle` names (`@anthropic`, `@v
 decryption — Java's own trust store (Maven, Gradle) and `apt` over HTTPS, which reads only the
 image's store. Everything else is decrypted and logged: the box, your stack's containers, image
 build steps and the VM's image pulls all trust the proxy's CA, and decrypting a toolchain install
-measured within a few per cent of tunnelling it. Set `passthrough = ["@all"]` to tunnel the whole
-toolchain as before, or add only the bundle a tool needs. A host whose credential the proxy injects (say `api.github.com` with `github=on`) is
-always decrypted, whatever the list says, so its auth header can be replaced.
+measured within a few per cent of tunnelling it. (One exception: a build started on your computer
+is tunnelled whatever the list says, and logged as `tls tunnel` rows — see
+[Image builds](#image-builds-trusted-still-behind-the-allowlist) below. A build started inside the box is decrypted like the box.)
+Set `passthrough = ["@all"]` to tunnel the whole toolchain as before, or add only the bundle a tool
+needs. A host whose credential the proxy injects (say `api.github.com` with `github=on`) is always
+decrypted, whatever the list says, so its auth header can be replaced.
 
 Decryption can't be switched off ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)): it costs
 about 3 ms per new connection and caps one checkout's decrypted throughput around 600 MB/s,
