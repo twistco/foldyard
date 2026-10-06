@@ -1647,7 +1647,7 @@ def test_mint_subprocess_really_cannot_see_undeclared_secrets(gh, monkeypatch, t
     assert rule.token() == "GH_APP_ID"
 
 
-# ── trusted builds: the build marker blind-tunnels, still walled ──────────────────────
+# ── trusted builds: a build the host started blind-tunnels, still walled ──────────────
 
 
 def _marked(flow: _Flow, user: str = "fy-build", password: str | None = None) -> _Flow:
@@ -1661,6 +1661,25 @@ def _marked(flow: _Flow, user: str = "fy-build", password: str | None = None) ->
     return flow
 
 
+_SECRET = "s3cret"  # a build's live secret, as the gate records it (hashed) for that one build
+
+
+def _build(flow: _Flow) -> _Flow:
+    """Mark a flow as a build the host started: the marker user with that build's live secret."""
+    return _marked(flow, password=_SECRET)
+
+
+@pytest.fixture
+def building(walled, monkeypatch, tmp_path):
+    """``walled`` while the host runs a build: its secret is live in BUILD_TOKENS_FILE. A fresh
+    Injector, since the token file's path is read at construction."""
+    inj, allow, log = walled
+    tokens = tmp_path / "build-tokens.json"
+    _write_tokens(tokens, _SECRET)
+    monkeypatch.setenv("BUILD_TOKENS_FILE", str(tokens))
+    return type(inj)(), allow, log
+
+
 def test_build_marker_matches_the_plugins(gh):
     # The addon runs standalone under mitmdump (it can't import foldyard), so the marker is
     # duplicated — pinned equal here so the two can't drift apart.
@@ -1669,12 +1688,12 @@ def test_build_marker_matches_the_plugins(gh):
     assert gh.module._BUILD_TUNNEL_USER == proxy.BUILD_TUNNEL_USER
 
 
-def test_a_marked_connect_is_blind_tunnelled_and_logged_as_a_build(walled):
+def test_a_builds_connect_is_blind_tunnelled_and_logged_as_a_build(building):
     # An image build has no proxy CA, so a decrypted host fails its TLS verify. Its CONNECT
-    # carries the build marker; the addon then tunnels that connection instead of decrypting.
-    inj, allow, log = walled
+    # carries the marker and its secret; the addon then tunnels that connection, not decrypts it.
+    inj, allow, log = building
     _write_allow(allow, ["cdn.playwright.dev"])
-    connect = _marked(_Flow("cdn.playwright.dev"))
+    connect = _build(_Flow("cdn.playwright.dev"))
     connect.response = None
     inj.http_connect(connect)
     assert connect.response is None  # allowed
@@ -1686,10 +1705,10 @@ def test_a_marked_connect_is_blind_tunnelled_and_logged_as_a_build(walled):
     assert row["passthrough"] is True and row["build"] is True
 
 
-def test_the_build_marker_never_opens_the_wall(walled):
-    # The marker decides DECRYPTION only. A marked CONNECT to an ungranted host is refused.
-    inj, _allow, log = walled
-    connect = _marked(_Flow("evil.example.com"))
+def test_a_build_never_opens_the_runtime_wall(building):
+    # Being a build decides DECRYPTION (and build grants) only: an ungranted host is refused.
+    inj, _allow, log = building
+    connect = _build(_Flow("evil.example.com"))
     connect.request.headers["user-agent"] = "node"
     connect.response = None
     inj.http_connect(connect)
@@ -1707,6 +1726,39 @@ def test_an_unmarked_refusal_is_not_attributed_to_a_build(walled):
     assert "build" not in _last_log(log)
 
 
+def test_the_bare_marker_is_decrypted_like_any_box_request(building):
+    # The marker user is public: the box can put it in its own proxy URL, with any password.
+    # Without a build's live secret it used to turn a decrypted, path-logged request into a
+    # hostname-only tunnel row (seen live, 2026-10-04); now it is just another box request.
+    inj, allow, log = building
+    _write_allow(allow, ["example.com"])
+    for i, password in enumerate((None, "guessed", "")):
+        connect = _marked(_Flow("example.com"), password=password)
+        connect.client_conn = types.SimpleNamespace(id=f"c{i}", sni=None)
+        connect.response = None
+        inj.http_connect(connect)
+        assert connect.response is None  # allowed, as for any box request
+        hello = _ClientHello("example.com", client_id=f"c{i}")
+        inj.tls_clienthello(hello)
+        assert hello.ignore_connection is False, password
+    rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    assert not any(r.get("passthrough") for r in rows)
+
+
+async def test_the_bare_marker_does_not_attribute_a_refusal_to_a_build(building):
+    # The gate offers the operator what a BUILD was refused. A row the box could flag as a build
+    # would put its own hosts in front of the operator, mid-build, as "allow … for builds?".
+    inj, _allow, log = building
+    connect = _marked(_Flow("evil.example.com"))
+    connect.response = None
+    inj.http_connect(connect)
+    assert connect.response is not None and "build" not in _last_log(log)
+    plain = _marked(_Flow("deb.example.org", port=80, scheme="http"))
+    plain.response = None
+    await inj.request(plain)
+    assert plain.response is not None and "build" not in _last_log(log)
+
+
 def test_an_unmarked_connection_is_still_decrypted(walled):
     inj, allow, _log = walled
     _write_allow(allow, ["cdn.playwright.dev"])
@@ -1718,11 +1770,11 @@ def test_an_unmarked_connection_is_still_decrypted(walled):
     assert hello.ignore_connection is False
 
 
-def test_the_marker_is_per_connection(walled):
+def test_the_marker_is_per_connection(building):
     # Another client's connection to the same host is not tunnelled because a build's was.
-    inj, allow, _log = walled
+    inj, allow, _log = building
     _write_allow(allow, ["cdn.playwright.dev"])
-    connect = _marked(_Flow("cdn.playwright.dev"))
+    connect = _build(_Flow("cdn.playwright.dev"))
     connect.response = None
     inj.http_connect(connect)
     other = _ClientHello("cdn.playwright.dev", client_id="client-2")
@@ -1730,10 +1782,10 @@ def test_the_marker_is_per_connection(walled):
     assert other.ignore_connection is False
 
 
-def test_another_user_in_the_proxy_url_is_no_marker(walled):
-    inj, allow, _log = walled
+def test_another_user_in_the_proxy_url_is_no_marker(building):
+    inj, allow, _log = building
     _write_allow(allow, ["cdn.playwright.dev"])
-    connect = _marked(_Flow("cdn.playwright.dev"), user="someone")
+    connect = _marked(_Flow("cdn.playwright.dev"), user="someone", password=_SECRET)
     connect.response = None
     inj.http_connect(connect)
     hello = _ClientHello("cdn.playwright.dev")
@@ -1746,8 +1798,10 @@ def test_a_marked_connect_to_an_injector_host_is_still_decrypted(gh, monkeypatch
     monkeypatch.setenv("INJECT_HOST", "api.github.com")
     monkeypatch.setenv("INJECT_COMMAND", "true")
     monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
+    _write_tokens(tmp_path / "build-tokens.json", _SECRET)
+    monkeypatch.setenv("BUILD_TOKENS_FILE", str(tmp_path / "build-tokens.json"))
     inj = gh.Injector()
-    connect = _marked(_Flow("api.github.com"))
+    connect = _build(_Flow("api.github.com"))
     connect.response = None
     inj.http_connect(connect)
     hello = _ClientHello("api.github.com")
@@ -1755,10 +1809,10 @@ def test_a_marked_connect_to_an_injector_host_is_still_decrypted(gh, monkeypatch
     assert hello.ignore_connection is False
 
 
-def test_a_disconnected_builds_mark_is_forgotten(walled):
-    inj, allow, _log = walled
+def test_a_disconnected_builds_mark_is_forgotten(building):
+    inj, allow, _log = building
     _write_allow(allow, ["cdn.playwright.dev"])
-    connect = _marked(_Flow("cdn.playwright.dev"))
+    connect = _build(_Flow("cdn.playwright.dev"))
     connect.response = None
     inj.http_connect(connect)
     inj.client_disconnected(connect.client_conn)
@@ -1767,22 +1821,25 @@ def test_a_disconnected_builds_mark_is_forgotten(walled):
     assert hello.ignore_connection is False
 
 
-async def test_the_marker_header_is_not_forwarded_on_cleartext(walled):
+async def test_the_marker_header_is_not_forwarded_on_cleartext(building):
     # A cleartext request carries the Proxy-Authorization to the proxy, which would otherwise
-    # pass it upstream. It says nothing secret, but it isn't the upstream's business.
-    inj, allow, _log = walled
+    # pass it upstream: a build's secret, or a bare marker that isn't the upstream's business.
+    inj, allow, _log = building
     _write_allow(allow, ["deb.debian.org"])
-    flow = _marked(_Flow("deb.debian.org", port=80, scheme="http"))
-    flow.response = None
-    await inj.request(flow)
-    assert flow.response is None  # granted, not refused
-    assert "Proxy-Authorization" not in flow.request.headers
+    for flow in (
+        _build(_Flow("deb.debian.org", port=80, scheme="http")),
+        _marked(_Flow("deb.debian.org", port=80, scheme="http")),
+    ):
+        flow.response = None
+        await inj.request(flow)
+        assert flow.response is None  # granted, not refused
+        assert "Proxy-Authorization" not in flow.request.headers
 
 
-async def test_a_refused_cleartext_build_request_is_attributed_too(walled):
+async def test_a_refused_cleartext_build_request_is_attributed_too(building):
     # apt fetches over plain HTTP: its refusal must reach the build gate like a CONNECT's.
-    inj, _allow, log = walled
-    flow = _marked(_Flow("deb.example.org", port=80, scheme="http"))
+    inj, _allow, log = building
+    flow = _build(_Flow("deb.example.org", port=80, scheme="http"))
     flow.response = None
     await inj.request(flow)
     assert flow.response is not None and flow.response.status_code == 403
@@ -2030,7 +2087,7 @@ def _open(inj, closer: _Closer, host: str, client_id: str, *, marked: bool = Fal
     connect = _Flow(host)
     connect.client_conn = types.SimpleNamespace(id=client_id)
     if marked:
-        _marked(connect)
+        _build(connect)
     connect.response = None
     inj.http_connect(connect)
     assert connect.response is None, f"{host} refused at CONNECT"
@@ -2103,7 +2160,11 @@ def test_widening_closes_nothing(live, closer):
     assert closer.closed == []
 
 
-def test_a_build_tunnel_survives_a_passthrough_change_while_still_allowed(live, closer):
+def test_a_build_tunnel_survives_a_passthrough_change_while_still_allowed(
+    live, closer, monkeypatch, tmp_path
+):
+    _write_tokens(tmp_path / "build-tokens.json", _SECRET)
+    monkeypatch.setenv("BUILD_TOKENS_FILE", str(tmp_path / "build-tokens.json"))
     inj = live.Injector()
     assert _open(inj, closer, "cdn.example.com", "b1", marked=True) is True
     _write_live(live.live, passthrough=["other.example.com"])
@@ -2254,7 +2315,7 @@ def build_walled(walled, monkeypatch, tmp_path):
     """The walled Injector with a build-only grant for cdn.example.com and a live build secret."""
     _inj, allow, log = walled  # a fresh Injector per test reads the files below
     tokens = tmp_path / "build-tokens.json"
-    _write_tokens(tokens, "s3cret")
+    _write_tokens(tokens, _SECRET)
     monkeypatch.setenv("BUILD_TOKENS_FILE", str(tokens))
     allow.write_text(
         json.dumps({"default_deny": True, "allow": [], "build_allow": ["cdn.example.com"]})
@@ -2328,6 +2389,34 @@ def test_a_revoked_build_grant_closes_the_builds_tunnel(gh, build_walled, closer
     os.utime(build_walled.allow, (inj._allow_mtime + 10, inj._allow_mtime + 10))
     inj.refresh()
     assert closer.closed == ["b1"]
+
+
+def test_a_box_connection_is_closed_when_only_a_build_grant_still_covers_it(
+    gh, build_walled, closer
+):
+    # The sweep re-judges a box connection on runtime grants alone: a build grant covering the
+    # same host keeps only a build's tunnel open.
+    import os
+
+    build_walled.allow.write_text(
+        json.dumps(
+            {"default_deny": True, "allow": ["cdn.example.com"], "build_allow": ["cdn.example.com"]}
+        )
+    )
+    inj = gh.Injector()
+    closer.track("box1")
+    flow = _Flow("cdn.example.com")
+    flow.client_conn = types.SimpleNamespace(id="box1")
+    _marked(flow)  # the bare marker: still the box
+    flow.response = None
+    inj.http_connect(flow)
+    assert flow.response is None
+    build_walled.allow.write_text(
+        json.dumps({"default_deny": True, "allow": [], "build_allow": ["cdn.example.com"]})
+    )
+    os.utime(build_walled.allow, (inj._allow_mtime + 10, inj._allow_mtime + 10))
+    inj.refresh()
+    assert closer.closed == ["box1"]
 
 
 # ── CodeRabbit, second pass: derived defaults, redaction by what was injected ────────────

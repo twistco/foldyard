@@ -100,9 +100,9 @@ belongs in the middle — but *one* middle, not a switch between two.
   with a marker user (`http://fy-build:fy-build@…`; proxy build-args need no `ARG` line and are
   not persisted into the image), and the addon blind-tunnels a CONNECT carrying it, logging a
   `passthrough` row flagged `build`. **The wall still applies** — the marker is checked only
-  after the CONNECT is granted. It is a marker, not a credential: the box can present it too, and
-  gains only an undecrypted tunnel to a host it could already reach. That is a visibility
-  concession, which ADR-0009 already classes as not enforcement. The stack's own image builds
+  after the CONNECT is granted. It was a marker, not a credential: the box could present it too,
+  and gained only an undecrypted tunnel to a host it could already reach — a visibility
+  concession, which ADR-0009 classes as not enforcement (narrowed 2026-10, below). The stack's own image builds
   (`fy up`/`fy build`, the native podman path) carry the marker too; the running stack's
   containers take the VM's unmarked proxy env and stay decrypted — and until 2026-10 had no CA,
   so their HTTPS to a decrypted host failed verification. The walled VM's boot provisioning now
@@ -113,11 +113,43 @@ belongs in the middle — but *one* middle, not a switch between two.
   narrower and the public marker unlocks none of them. The residual: during a build, the box could
   inspect the build container through the engine socket and read that build's secret — a window of
   one build, where a fixed marker would be permanent.
-- **Image pulls rely on `passthrough`.** A pull is the guest podman's own traffic, through the
-  VM-wide proxy env: no build marker, no proxy CA. A decrypted registry blob host fails it with
-  x509 "unknown authority" (the Lima host e2e, when Docker Hub served a blob from
-  `production.cloudfront.docker.com`, which `@containers` lacked). The registry hosts must stay in
-  the default bundles; `test_image_pull_hosts_are_tunnelled_by_the_default_passthrough` pins them.
+- **The tunnel needs the build's secret too** (amended 2026-10-06). The bare marker still let the
+  box choose its own visibility: `fy-build:<anything>@` in its proxy URL turned a decrypted request,
+  logged with path and User-Agent, into a hostname-only tunnel row (shown live, 2026-10-04 — the
+  allowlist held; what was fetched went unseen). The proxy now tunnels a connection, and flags its
+  rows `build` (what the gate offers the operator), only when it presents a live per-build secret;
+  the `fy-build` user without one is an ordinary box request. The concession narrows to the same
+  one-build window as the grants. **A build the box starts is the box**: it gets the plain proxy
+  URL and is decrypted like any box request. Rejected: minting a secret for an in-box build — the
+  box would hold a working marker again.
+- **Build steps trust the CA** (amended 2026-10-06). Decrypted, an in-box build's RUN steps had
+  no CA: podman gives a build the containers.conf drop-in's mounts but not its env (the spike on
+  podman 5.8.7), so `apk`, `curl`, `pip`, `uv` and `npm` failed against every host off
+  `passthrough` (seen live on foldyard-example). The walled boot provisioning now fronts crun with
+  a root-owned wrapper (the drop-in keeps the runtime's NAME and changes its path, so podman's
+  per-runtime behaviour is unchanged): on a create whose spec mounts the CA it adds the four
+  variables the spec doesn't set, so an image's ENV, a Dockerfile `ENV` and a create's own env
+  still win. It reaches every create — a RUN step from the host or the box, a docker-compat
+  create — and nothing lands in an image, since the spec is the runtime's, not a layer. Weighed
+  and rejected: binding the combined bundle over the distro store (a RUN step that installs
+  `ca-certificates` fails renaming over a mount point, and an image's own private CA is
+  replaced); `podman build --env` (persisted into the image config); a Dockerfile `ARG` or
+  `--mount` (a consumer edit). Not covered: GnuTLS clients (Debian `apt` over HTTPS, `wget`),
+  which read only the image's store, Java and NSS stores, and the gVisor posture's runtime,
+  which the wrapper doesn't front. The same change fixed the combined bundle on Fedora 44, which
+  has no `/etc/pki/tls/certs/ca-bundle.crt`: it held the proxy CA alone, so an `SSL_CERT_FILE`
+  client failed every `passthrough` host.
+- **Image pulls relied on `passthrough`** (until 2026-10). A pull is the guest podman's own
+  traffic, through the VM-wide proxy env: no build marker, and then no proxy CA. A decrypted
+  registry blob host failed it with x509 "unknown authority" (the Lima host e2e, when Docker Hub
+  served a blob from `production.cloudfront.docker.com`, which `@containers` lacked), so the
+  registry hosts had to stay in the default bundles;
+  `test_image_pull_hosts_are_tunnelled_by_the_default_passthrough` pins them. **Amended
+  2026-10-06:** the walled boot provisioning now also puts the CA in the guest's own trust store
+  (root, at boot, one fixed anchor so a rotated CA replaces the old one; taken out on an unwalled
+  boot), which podman verifies pulls against. A decrypted registry now verifies, so the registry
+  hosts stay in the default for bulk speed and for a VM provisioned without a CA — no longer for
+  correctness. Whether the default should shrink is a separate, measured decision.
 - **The egress log grows**: a request row per request rather than a row per connection, and full
   paths — query strings included — on the host. The log stays outside the mount and rotation
   bounds it (5 MiB × 6 by default). A token carried in a URL now lands there; the `query_param`

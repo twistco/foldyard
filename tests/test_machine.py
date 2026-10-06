@@ -6,12 +6,14 @@ Backend internals (podman/Lima command shapes) live in test_machine_backend.py."
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import tomllib
+import types
 from pathlib import Path
 
 import pytest
@@ -886,6 +888,298 @@ def test_wall_uninstall_drops_the_ca_defaults_and_restarts_the_users_podman(tmp_
     assert calls.index("rm -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf") < (
         calls.index(restart)
     )
+
+
+def _stubbed_bash(tmp_path: Path, body: str, stubs: tuple[str, ...]) -> list[str]:
+    """Run ``body`` under the real bash with every command in ``stubs`` a function that records
+    its call, and PATH an empty dir — so a command left unstubbed fails the run instead of
+    touching this machine. Returns the recorded calls; stderr goes to the last element."""
+    defs = "".join(f"{cmd}() {{ printf '{cmd} %s\\n' \"$*\"; }}\n" for cmd in stubs)
+    out = subprocess.run(
+        [shutil.which("bash") or "bash", "-c", defs + body],
+        capture_output=True,
+        text=True,
+        env={"PATH": str(tmp_path), "FY_WALL_UID": "501"},
+    )
+    assert out.returncode == 0, out.stderr
+    return [*out.stdout.splitlines(), out.stderr]
+
+
+def _guest_trust_fn() -> str:
+    text = machine._wall_asset().read_text()
+    start = text.index("\n_guest_trust() {\n")
+    return text[start : text.index("\n}\n", start) + 3]
+
+
+_FEDORA_ANCHOR = "/etc/pki/ca-trust/source/anchors/fy-proxy-ca.pem"
+_DEBIAN_ANCHOR = "/usr/local/share/ca-certificates/fy-proxy-ca.crt"
+
+
+@pytest.mark.spawns("bash")  # the REAL function under bash; every command is a stub
+@pytest.mark.parametrize(
+    ("tool", "anchor", "update"),
+    [
+        ("update-ca-trust", _FEDORA_ANCHOR, "update-ca-trust extract"),
+        ("update-ca-certificates", _DEBIAN_ANCHOR, "update-ca-certificates --fresh"),
+    ],
+)
+def test_the_guests_own_store_trusts_the_proxy_ca(tmp_path, tool, anchor, update):
+    # An image PULL is the guest podman's own traffic through the VM-wide proxy env; podman
+    # verifies it against the guest's system store, so a registry host the proxy decrypts failed
+    # x509 "unknown authority" (the Lima host e2e, 2026-09-23). Root puts the CA there at boot.
+    calls = _stubbed_bash(
+        tmp_path,
+        _guest_trust_fn() + "_guest_trust /run/fy-wall/proxy-ca.pem",
+        ("rm", "install", tool),
+    )
+    assert calls[:3] == [
+        f"rm -f {anchor}",
+        f"install -m 0644 /run/fy-wall/proxy-ca.pem {anchor}",
+        update,
+    ]
+
+
+@pytest.mark.spawns("bash")
+def test_without_a_ca_the_guests_store_keeps_none_of_ours(tmp_path):
+    # One fixed name: a rotated CA replaces the old one (the install above removes it first), and
+    # an unwalled boot, or a walled one without a CA, leaves the guest trusting none of ours.
+    calls = _stubbed_bash(
+        tmp_path, _guest_trust_fn() + '_guest_trust ""', ("rm", "install", "update-ca-trust")
+    )
+    assert calls[:2] == [f"rm -f {_FEDORA_ANCHOR}", "update-ca-trust extract"]
+    assert not any(c.startswith("install") for c in calls)
+
+
+@pytest.mark.spawns("bash")
+def test_a_guest_without_a_trust_tool_is_warned_about_not_failed(tmp_path):
+    calls = _stubbed_bash(
+        tmp_path, _guest_trust_fn() + "_guest_trust /run/fy-wall/proxy-ca.pem", ("rm", "install")
+    )
+    assert calls[:-1] == []  # nothing touched
+    assert "pulls won't trust" in calls[-1]
+
+
+def test_wall_install_trusts_the_ca_before_bundling_it_and_restarting_podman():
+    # The store is updated BEFORE the combined bundle is cut from the guest's roots (else a
+    # rotated-out CA rides into every container's bundle) and before the user's podman restarts
+    # (Go reads the system pool once per process). A walled boot without a CA takes ours out.
+    install = _wall_section("install")
+    trust = install.index('_guest_trust "$CA_SRC" ')
+    # A missing or empty CA file is no CA (as before): never installed, which would end the
+    # whole install under `set -e` and leave the VM unwalled-and-refused.
+    assert install.index('[ -s "$CA_SRC" ] || CA_SRC=""') < trust
+    assert trust < install.index("/etc/fy-wall/proxy-ca-combined.pem")
+    assert trust < install.index("try-restart podman.service")
+    assert '|| echo "⚠ proxy CA' in install[trust:].splitlines()[0]  # never fails the wall
+
+
+@pytest.mark.spawns("bash")  # sources the REAL script under bash; every command is a stub
+def test_wall_uninstall_takes_the_ca_out_of_the_guests_store(tmp_path):
+    script = shlex.quote(str(machine._wall_asset()))
+    stubs = ("systemctl", "rm", "nft", "getent", "awk", "sudo", "install", "update-ca-trust")
+    calls = _stubbed_bash(tmp_path, f"source {script} uninstall", stubs)
+    restart = (
+        "sudo -u #501 XDG_RUNTIME_DIR=/run/user/501 "
+        "systemctl --user try-restart podman.service podman.socket"
+    )
+    assert calls.index(f"rm -f {_FEDORA_ANCHOR}") < calls.index("update-ca-trust extract")
+    assert calls.index("update-ca-trust extract") < calls.index(restart)
+
+
+_OCI = "/usr/local/libexec/fy-oci"
+_RUNTIME_CONF = "/etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf"
+_CA_MOUNTS = [
+    {"destination": "/etc/fy-proxy-ca.pem", "source": "/etc/fy-wall/proxy-ca.pem"},
+    {
+        "destination": "/etc/fy-proxy-ca-combined.pem",
+        "source": "/etc/fy-wall/proxy-ca-combined.pem",
+    },
+]
+_CA_ENV = [
+    "NODE_EXTRA_CA_CERTS=/etc/fy-proxy-ca.pem",
+    "SSL_CERT_FILE=/etc/fy-proxy-ca-combined.pem",
+    "REQUESTS_CA_BUNDLE=/etc/fy-proxy-ca-combined.pem",
+    "GIT_SSL_CAINFO=/etc/fy-proxy-ca-combined.pem",
+]
+
+
+def _wall_heredoc(tag: str) -> str:
+    text = machine._wall_asset().read_text()
+    start = text.index(f"<<'{tag}'\n") + len(f"<<'{tag}'\n")
+    return text[start : text.index(f"\n{tag}\n", start) + 1]
+
+
+def _ca_env() -> types.ModuleType:
+    """The guest's spec patcher (embedded in the wall script), loaded in-process."""
+    mod = types.ModuleType("fy_ca_env")
+    exec(compile(_wall_heredoc("__FY_CA_ENV__"), "ca-env.py", "exec"), mod.__dict__)
+    return mod
+
+
+def _spec(tmp_path: Path, env: list[str], mounts=_CA_MOUNTS, mode: int = 0o600) -> Path:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir(exist_ok=True)
+    spec = bundle / "config.json"
+    spec.write_text(json.dumps({"ociVersion": "1.0", "process": {"env": env}, "mounts": mounts}))
+    spec.chmod(mode)
+    return spec
+
+
+@pytest.mark.parametrize("form", ["--bundle", "--bundle=", "-b"])
+def test_a_build_steps_spec_gets_the_ca_env_it_mounts(tmp_path, form):
+    # A build's RUN step gets the CA drop-in's MOUNTS but not its env (podman applies no default
+    # env to a build), so `curl`/`apk`/pip/npm in a RUN step failed verification against every
+    # decrypted host (seen live, 2026-10-06). The runtime wrapper adds the env at create.
+    spec = _spec(tmp_path, ["PATH=/usr/bin", "HTTPS_PROXY=http://gw:1"])
+    where = str(spec.parent)
+    args = [f"--bundle={where}"] if form == "--bundle=" else [form, where]
+    _ca_env().main(["create", *args, "--pid-file", "/x/pid", "buildah-1"])
+    doc = json.loads(spec.read_text())
+    assert doc["process"]["env"] == ["PATH=/usr/bin", "HTTPS_PROXY=http://gw:1", *_CA_ENV]
+    assert doc["mounts"] == _CA_MOUNTS and doc["ociVersion"] == "1.0"  # nothing else touched
+    assert spec.stat().st_mode & 0o777 == 0o600
+
+
+def test_an_images_own_ca_env_wins_over_the_wrappers(tmp_path):
+    # An image's ENV (or a create's explicit env, the box's) is already in the spec: kept, so an
+    # image with its own private CA can point its clients at its own bundle.
+    spec = _spec(tmp_path, ["SSL_CERT_FILE=/mine.pem"])
+    _ca_env().main(["create", "--bundle", str(spec.parent), "c1"])
+    env = json.loads(spec.read_text())["process"]["env"]
+    assert env[0] == "SSL_CERT_FILE=/mine.pem"
+    assert "SSL_CERT_FILE=/etc/fy-proxy-ca-combined.pem" not in env
+    assert "NODE_EXTRA_CA_CERTS=/etc/fy-proxy-ca.pem" in env
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["no CA mount", "not a create", "unreadable spec", "no process"],
+)
+def test_the_wrapper_leaves_any_other_spec_alone(tmp_path, case):
+    # Pointing SSL_CERT_FILE at a file the container doesn't have would break every TLS client in
+    # it; anything unexpected leaves the spec exactly as the engine wrote it, and never raises.
+    spec = _spec(tmp_path, ["PATH=/usr/bin"], mounts=[] if case == "no CA mount" else _CA_MOUNTS)
+    if case == "unreadable spec":
+        spec.write_text("{not json")
+    if case == "no process":
+        spec.write_text(json.dumps({"mounts": _CA_MOUNTS, "process": None}))
+    before = spec.read_bytes()
+    argv = ["state", "c1"] if case == "not a create" else ["create", "--bundle", str(spec.parent)]
+    _ca_env().main(argv)
+    assert spec.read_bytes() == before
+
+
+@pytest.mark.spawns("bash")  # the REAL wrapper under bash, with python3 and crun as recorders
+def test_the_runtime_wrapper_only_patches_a_create_and_always_runs_crun(tmp_path):
+    log = tmp_path / "calls.log"
+    for name in ("py", "crun"):
+        stub = tmp_path / name
+        stub.write_text(f"#!/bin/bash\nprintf '{name} %s\\n' \"$*\" >>{log}\n")
+        stub.chmod(0o755)
+    wrapper = tmp_path / "wrapper"
+    wrapper.write_text(
+        _wall_heredoc("__FY_OCI__")
+        .replace("/usr/bin/python3", str(tmp_path / "py"))
+        .replace("__FY_CRUN__", str(tmp_path / "crun"))
+    )
+    bash = shutil.which("bash") or "bash"
+    for argv in (["state", "c1"], ["--root", "/r", "create", "--bundle", "/b", "c1"]):
+        out = subprocess.run(
+            [bash, str(wrapper), *argv], capture_output=True, text=True, env={"PATH": ""}
+        )
+        assert out.returncode == 0, out.stderr
+    assert log.read_text().splitlines() == [
+        "crun state c1",
+        f"py -I {_OCI}/ca-env.py --root /r create --bundle /b c1",
+        "crun --root /r create --bundle /b c1",
+    ]
+
+
+def test_wall_install_points_podmans_crun_at_the_wrapper():
+    # The runtime keeps its NAME (podman's per-runtime behaviour is keyed on it) and only its
+    # path changes, with the real crun as the fallback. Written after the CA drop-in, only when
+    # the CA files are in place, and before the user's podman restarts to read it.
+    text = machine._wall_asset().read_text()
+    fn = text[text.index("\n_oci_wrapper() {\n") :]
+    conf = fn[fn.index(f"{_RUNTIME_CONF}.tmp") :].split("<<EOF\n", 1)[1]
+    conf = conf.split("\nEOF\n", 1)[0].replace("$crun", "/usr/bin/crun")
+    assert tomllib.loads(conf) == {
+        "engine": {"runtimes": {"crun": [f"{_OCI}/crun", "/usr/bin/crun"]}}
+    }
+    install = _wall_section("install")
+    wrapper_call = install.index("_oci_wrapper\n")
+    assert install.index("90-fy-proxy-ca.conf.tmp") < wrapper_call
+    assert wrapper_call < install.index("try-restart podman.service")
+    labelled = install.index('if [ "$labelled" = 1 ]; then')
+    assert labelled < wrapper_call < install.index("could not label it for containers")
+    # A boot without a CA (or the wall off, below) leaves no wrapper behind.
+    assert install.index(f"rm -f {_RUNTIME_CONF}") < install.index('_guest_trust "$CA_SRC"')
+
+
+@pytest.mark.spawns("bash")  # sources the REAL script under bash; every command is a stub
+def test_wall_uninstall_takes_the_runtime_wrapper_out(tmp_path):
+    # With the wall off nothing decrypts, so nothing may still point crun at the wrapper. The
+    # drop-in goes BEFORE the restart that makes podman read its config again.
+    script = shlex.quote(str(machine._wall_asset()))
+    stubs = ("systemctl", "rm", "nft", "getent", "awk", "sudo", "install", "update-ca-trust")
+    calls = _stubbed_bash(tmp_path, f"source {script} uninstall", stubs)
+    restart = (
+        "sudo -u #501 XDG_RUNTIME_DIR=/run/user/501 "
+        "systemctl --user try-restart podman.service podman.socket"
+    )
+    assert calls.index(f"rm -f {_RUNTIME_CONF}") < calls.index(restart)
+    assert f"rm -rf {_OCI}" in calls
+
+
+@pytest.mark.spawns("bash")  # sources the REAL script under bash; every command is a stub
+def test_wall_uninstall_drops_the_walled_users_proxy_env_whatever_its_uid(tmp_path):
+    # Lima's guest user takes the host's uid — 501 on macOS, under the uid >= 1000 sweep — so
+    # its environment.d proxy file survived the wall going off, and the user manager kept
+    # handing podman a proxy that was no longer there (seen live, 2026-10-06).
+    script = shlex.quote(str(machine._wall_asset()))
+    getent = (
+        'getent() { if [ "$#" -eq 1 ]; then echo "root:x:0:0::/root:/bin/bash"; '
+        'else echo "dain:x:501:1000::/home/dain.guest:/bin/bash"; fi; }\n'
+        "awk() { :; }\n"  # the uid >= 1000 sweep finds no one here
+    )
+    stubs = ("systemctl", "rm", "nft", "sudo", "install", "update-ca-trust")
+    calls = _stubbed_bash(tmp_path, f"{getent}source {script} uninstall", stubs)
+    gone = "rm -f /home/dain.guest/.config/environment.d/90-fy-wall-proxy.conf"
+    restart = "sudo -u #501 XDG_RUNTIME_DIR=/run/user/501 systemctl --user daemon-reexec"
+    assert calls.index(gone) < calls.index(restart)
+
+
+@pytest.mark.spawns("bash")  # sources the REAL script under bash; every command is a stub
+def test_wall_uninstall_reaches_a_home_with_a_space_in_it(tmp_path):
+    # A home path is one path whatever it holds: split on whitespace, `/home/dain guest` became
+    # `/home/dain` and `guest`, and the walled user's proxy file survived (CodeRabbit 4195767531).
+    script = shlex.quote(str(machine._wall_asset()))
+    stubs = (
+        'getent() { if [ "$#" -eq 1 ]; then echo "root:x:0:0::/root:/bin/bash"; '
+        'else echo "dain:x:501:1000:Dain D:/home/dain guest:/bin/bash"; fi; }\n'
+        'awk() { echo "/home/other user"; }\n'  # the uid >= 1000 sweep
+        "rm() { printf 'rm'; printf ' [%s]' \"$@\"; printf '\\n'; }\n"
+    )
+    calls = _stubbed_bash(
+        tmp_path,
+        f"{stubs}source {script} uninstall",
+        ("systemctl", "nft", "sudo", "install", "update-ca-trust"),
+    )
+    for home in ("/home/dain guest", "/home/other user"):
+        assert f"rm [-f] [{home}/.config/environment.d/90-fy-wall-proxy.conf]" in calls, calls
+
+
+def test_the_combined_bundle_starts_from_the_guests_real_roots():
+    # Fedora 44 has no /etc/pki/tls/certs/ca-bundle.crt: the bundle was the proxy CA ALONE, so an
+    # SSL_CERT_FILE/REQUESTS_CA_BUNDLE client (uv, pip, requests) failed every PASSTHROUGH host,
+    # whose certificate is the real one (seen live, 2026-10-06).
+    install = _wall_section("install")
+    loop = [
+        t
+        for t in install[install.index("for b in ") :].split("; do", 1)[0].split()[3:]
+        if t != "\\"
+    ]
+    assert loop[0] == "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
 
 
 def test_walled_provision_script_with_a_ca_is_valid_bash(lima_env):

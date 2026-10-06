@@ -350,12 +350,17 @@ def test_the_shared_lines_are_build_recommendations(env):
     assert 'when = "build"' in _checkout_toml(env).read_text()
 
 
-def test_in_the_box_a_build_gets_the_marker_but_no_secret(env, monkeypatch):
-    # It still tunnels (the build has no CA), but it can't use build-only grants.
+def test_in_the_box_a_build_gets_the_plain_proxy_and_no_secret(env, monkeypatch):
+    # A build the box starts is the box: it reaches the proxy like any box request (decrypted
+    # unless on `passthrough`), so it carries neither a secret nor the marker it can't back.
+    from urllib.parse import urlsplit
+
     monkeypatch.setattr(config, "in_box", lambda: True)
     build = _Build(env["log"], [(0, [])])
     buildgate.run(build, what="box image", interactive=True, prompt=lambda q: "")
-    assert build.urls[0] is not None and "fy-build:fy-build@" in build.urls[0]
+    url = urlsplit(build.urls[0] or "")
+    assert url.hostname == config.LIMA_HOST_GATEWAY and url.port == config.proxy_port_base()
+    assert url.username is None and url.password is None
     assert _tokens(env) == {}
 
 

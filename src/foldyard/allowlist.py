@@ -517,7 +517,8 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
     """The hosts the wall REFUSED an image build since ``since``, still not granted:
     ``{host, count, uas, paths, more_paths}`` in first-seen order (the ``learned_hosts`` shape, so
     :func:`recommend_why` reads it). Only rows the proxy attributed to a build (its ``build`` flag,
-    from the build marker) count — a box session refused in the same minute is not the build's.
+    set only for a live build secret) count — a box session refused in the same minute is not the
+    build's, even one presenting the public marker.
     A build is tunnelled, so there are never paths. Box-originated text, handled as in
     :func:`learned_hosts`."""
     granted = live_hosts() + build_hosts()  # either answers a build

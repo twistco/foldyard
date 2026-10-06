@@ -693,8 +693,9 @@ def _podman_build(
             cmd += ["--target", build["target"]]
         if platform_for(svc):
             cmd += ["--platform", platform_for(svc)]
-        # A walled build reaches the proxy as a TRUSTED BUILD (tunnelled, not decrypted — it has
-        # no proxy CA), before the service's own args so a service's proxy arg wins.
+        # A walled build from the host reaches the proxy as a TRUSTED BUILD (tunnelled, not
+        # decrypted — it has no proxy CA); one the box starts, as the box (buildgate). Before the
+        # service's own args so a service's proxy arg wins.
         if build_proxy:
             for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                 cmd += ["--build-arg", f"{key}={build_proxy}"]

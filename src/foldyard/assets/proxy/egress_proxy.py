@@ -211,7 +211,9 @@ _REFUSED_BODY = (
 
 # The proxy-URL user an image BUILD reaches us as (foldyard's `plugins/proxy.BUILD_TUNNEL_USER`,
 # duplicated because this addon runs standalone; a test pins the two equal). A build has no proxy
-# CA, so a connection carrying it is blind-tunnelled rather than decrypted — after the wall.
+# CA, so a connection carrying it WITH a live build secret as the password is blind-tunnelled
+# rather than decrypted — after the wall. The user alone is public: the box can present it, so it
+# earns nothing (see `_trusted_build`).
 _BUILD_TUNNEL_USER = "fy-build"
 
 
@@ -854,15 +856,16 @@ class Injector:
         # host key → monotonic time of its last would-block row (see _WOULD_BLOCK_EVERY).
         self._would_block_seen: dict[str, float] = {}
         # The live build secrets' hashes → expiry (BUILD_TOKENS_FILE, written by the host's build
-        # gate): a connection presenting one is a build the host started, and may use the
-        # build-scoped grants (ALLOW_FILE's `build_allow`). The bare marker never can.
+        # gate): a connection presenting one is a build the host started — tunnelled, attributed
+        # to the build in the log, and allowed the build-scoped grants (ALLOW_FILE's
+        # `build_allow`). The bare marker is none of those.
         tokens = os.environ.get("BUILD_TOKENS_FILE", "")
         self.tokens_path = Path(tokens) if tokens else None
         self._tokens_stamp: tuple | None = None
         self._tokens: dict[str, float] = {}
         self._build_patterns: list[str] = []
-        # Client connections whose CONNECT carried the build marker and passed the wall: their TLS
-        # is tunnelled, not decrypted (see _BUILD_TUNNEL_USER). Dropped on disconnect.
+        # Client connections whose CONNECT carried a live build secret and passed the wall: their
+        # TLS is tunnelled, not decrypted (see _BUILD_TUNNEL_USER). Dropped on disconnect.
         self._build_clients: set[str] = set()
         # Every connection a CONNECT let through, by client id: what `_sweep` re-judges when the
         # policy narrows (see `refresh`). Dropped on disconnect.
@@ -1216,8 +1219,9 @@ class Injector:
         """A row for a host REFUSED by the default-deny wall — no upstream is ever contacted, so
         there's no method/path/real status (we synthesise a 403). The Network Log panel keys off
         ``blocked`` to paint it red and offer an 'allow' action. With the refused ``request``,
-        the row also carries its User-Agent and, when it carried the build marker, ``build`` —
-        what `fy box build`/`fy up` read back to offer the host. No host → nothing to log."""
+        the row also carries its User-Agent and, when it carried a live build secret, ``build`` —
+        what `fy box build`/`fy up` read back to offer the host (never the bare marker, or the box
+        could put its own hosts in that offer). No host → nothing to log."""
         if not host:
             return
         entry = {
@@ -1234,7 +1238,7 @@ class Injector:
             ua = _user_agent(request)
             if ua:
                 entry["ua"] = ua
-            if _is_build_marker(request.headers.get("Proxy-Authorization")):
+            if self._trusted_build(request):
                 entry["build"] = True
         self._write_entry(entry)
 
@@ -1372,19 +1376,19 @@ class Injector:
 
     def _note_build(self, flow: http.HTTPFlow) -> None:
         """Remember a CONNECT that got through (granted, or let through while observing): for
-        ``_sweep``, and — when it carried the build marker — so ``tls_clienthello`` tunnels it."""
+        ``_sweep``, and — when it carried a live build secret — so ``tls_clienthello`` tunnels it.
+        The bare marker is an ordinary box connection: decrypted unless on ``passthrough``."""
         client = getattr(flow, "client_conn", None)
         if client is None:
             return
-        build = _is_build_marker(flow.request.headers.get("Proxy-Authorization"))
+        build = self._trusted_build(flow.request)
         if build:
             self._build_clients.add(client.id)
         self._conns[client.id] = {
             "host": _destination(flow.request),
             "port": flow.request.port,
             "blind": None,  # the tunnelled SNI target once tls_clienthello tunnels it
-            "build": build,
-            "trusted": self._trusted_build(flow.request),  # may use build-scoped grants
+            "build": build,  # tunnelled, and may use build-scoped grants
         }
 
     def client_disconnected(self, client) -> None:
@@ -1403,7 +1407,7 @@ class Injector:
             host, port, blind = conn["host"], conn["port"], conn["blind"]
             refused = self.default_deny and not (
                 self._connect_ok(host, port)
-                or (conn["trusted"] and self._build_granted(host, port, _HTTPS_PORT))
+                or (conn["build"] and self._build_granted(host, port, _HTTPS_PORT))
             )
             decrypt_now = blind is not None and not self._tunnel(blind, conn["build"])
             if not (refused or decrypt_now):

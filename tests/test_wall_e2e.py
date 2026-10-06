@@ -211,7 +211,7 @@ def test_dns_still_resolves_in_the_guest(repo):
 
 def test_the_proxy_is_the_way_out(repo):
     # A toolchain host on the default passthrough list is tunnelled: TLS verifies end to end
-    # against the REAL certificate, as image pulls from the guest need (ADR-0029).
+    # against the REAL certificate.
     tunnelled = lima_shell(
         "curl",
         "-sS",
@@ -224,17 +224,16 @@ def test_the_proxy_is_the_way_out(repo):
         "https://pypi.org/simple/",
     )
     assert tunnelled.stdout.strip() == "200", f"{tunnelled.stdout!r} {tunnelled.stderr!r}"
-    # Any other host is decrypted (ADR-0029), and the guest holds no proxy CA — so it is reached
-    # through the proxy but presents the proxy's certificate: verification fails, the relay works.
+    # Any other host is decrypted (ADR-0029), and the guest's own store trusts the proxy CA (the
+    # wall's boot install) — what podman's pulls verify against, so a decrypted registry no longer
+    # fails them. It verifies, against the PROXY's certificate.
     decrypted = lima_shell(
-        "curl", "-sS", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}", "https://example.com"
-    )
-    assert "certificate" in decrypted.stderr, f"{decrypted.stdout!r} {decrypted.stderr!r}"
-    relayed = lima_shell(
-        "curl", "-sS", "-k", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}",
+        "curl", "-sS", "-v", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}",
         "https://example.com",
     )  # fmt: skip
-    assert relayed.stdout.strip() == "200", f"{relayed.stdout!r} {relayed.stderr!r}"
+    assert decrypted.stdout.strip() == "200", f"{decrypted.stdout!r} {decrypted.stderr!r}"
+    issuer = [ln for ln in decrypted.stderr.splitlines() if "issuer:" in ln]
+    assert issuer and "mitmproxy" in issuer[0], decrypted.stderr
 
 
 def test_the_api_is_still_served_through_the_walled_stack(repo):
@@ -263,6 +262,37 @@ def test_a_stack_container_trusts_the_proxy(repo):
     out = engine("exec", names[0], "python", "-c", code, timeout=90)
     assert out.returncode == 0, f"{out.stdout}\n{out.stderr}"
     assert out.stdout.split() == ["example.com", "200", "pypi.org", "200"], out.stdout
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        # Alpine: apk fetches over HTTPS from a host on no passthrough bundle, then curl.
+        "FROM docker.io/library/alpine:3.20\nRUN apk add --no-cache curl\n",
+        # Debian: installing ca-certificates rewrites the system store in the step itself —
+        # nothing may be mounted over it.
+        "FROM docker.io/library/debian:bookworm-slim\n"
+        "RUN apt-get update -qq && apt-get install -y -qq curl ca-certificates\n",
+    ],
+    ids=["alpine", "debian"],
+)
+def test_a_build_step_trusts_the_proxy(repo, tmp_path, steps):
+    # A build with no build secret — what a build started inside the box sends — is decrypted
+    # like any box request, so its RUN steps need the CA: podman gives them the CA drop-in's
+    # mounts but not its env, and the runtime wrapper adds it. Before it, apk failed verifying
+    # dl-cdn.alpinelinux.org and curl example.com (seen live, 2026-10-06).
+    (tmp_path / "Containerfile").write_text(
+        steps + "RUN curl -sS -o /dev/null -w 'HTTP=%{http_code}\\n' https://example.com\n"
+    )
+    out = engine("build", "--no-cache", "-t", "fy-e2e-build-ca", str(tmp_path), timeout=600)
+    try:
+        assert out.returncode == 0, f"{out.stdout[-3000:]}\n{out.stderr[-3000:]}"
+        assert "HTTP=200" in out.stdout + out.stderr
+        # Nothing of foldyard's lands in the image: the env exists only while a step runs.
+        env = engine("image", "inspect", "fy-e2e-build-ca", "--format", "{{json .Config.Env}}")
+        assert "fy-proxy-ca" not in env.stdout, env.stdout
+    finally:
+        engine("rmi", "-f", "fy-e2e-build-ca")
 
 
 def test_a_verb_without_the_wall_config_is_refused_on_the_walled_vm(repo):
