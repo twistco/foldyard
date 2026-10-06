@@ -23,6 +23,7 @@ The egress_proxy addon is still consumer-side; skip cleanly if it isn't in the c
 
 from __future__ import annotations
 
+import contextlib
 import http.server
 import os
 import shutil
@@ -166,17 +167,27 @@ class _Proxy:
         )
 
 
+_MINTER = "import json; print(json.dumps({'value': 'token FAKE', 'ttl': 3600}))\n"
+
+
 @pytest.fixture
 def proxy(tmp_path):
     """Stand up the upstream + a real mitmdump running egress_proxy.py with a fake minter, and
     tear both down. Yields a _Proxy handle (ports, the CA path, the egress log path)."""
+    with _running_proxy(tmp_path, _MINTER) as handle:
+        yield handle
+
+
+@contextlib.contextmanager
+def _running_proxy(tmp_path: Path, minter_code: str, env: dict[str, str] | None = None):
+    """The upstream + a real mitmdump whose one rule (on HOST) mints with ``minter_code``."""
     uport, pport = _free_port(), _free_port()
     cert, key = tmp_path / "up.crt", tmp_path / "up.key"
     _self_signed(cert, key)
     httpd = _make_upstream(uport, cert, key)
 
     minter = tmp_path / "minter.py"
-    minter.write_text("import json; print(json.dumps({'value': 'token FAKE', 'ttl': 3600}))\n")
+    minter.write_text(minter_code)
     log = tmp_path / "egress.jsonl"
     confdir = tmp_path / "mitm"
     mitm_log = tmp_path / "mitmdump.log"
@@ -201,6 +212,7 @@ def proxy(tmp_path):
             # just pinned to the test's CA instead of the system store (api.github.com in prod).
             "INJECT_RETRY_CA_BUNDLE": str(cert),
             "PROXY_LOG_FILE": str(log),
+            **(env or {}),
         },
         stdout=mitm_log.open("w"),
         stderr=subprocess.STDOUT,
@@ -324,3 +336,35 @@ def test_proxy_re_issues_on_401_and_returns_200(proxy):
         "a replayed 200 in the egress log",
         proxy.log.read_text() if proxy.log.exists() else "",
     )
+
+
+def test_a_hung_mint_holds_up_only_the_requests_that_need_it(tmp_path):
+    # mitmproxy runs every connection's hooks on one event loop. A mint run there froze all the
+    # box's proxied traffic for as long as the minter took (up to its 30 s timeout) — the agent's
+    # own API calls, package installs, git. Here the rule covers /slow only and its minter hangs
+    # until released; a request outside the rule, on its own connection, must not wait for it.
+    release = tmp_path / "release"
+    hung = (
+        "import json, pathlib, time\n"
+        f"r = pathlib.Path({str(release)!r})\n"
+        "for _ in range(250):\n"
+        "    if r.exists():\n"
+        "        break\n"
+        "    time.sleep(0.1)\n"
+        "print(json.dumps({'value': 'token SLOW', 'ttl': 3600}))\n"
+    )
+    with _running_proxy(tmp_path, hung, {"INJECT_PATH_PREFIX": "/slow"}) as proxy:
+        slow: dict = {}
+        waiter = threading.Thread(target=lambda: slow.update(r=proxy.get("/slow", timeout=40)))
+        waiter.start()
+        time.sleep(0.5)  # the /slow request is now waiting on its mint
+
+        started = time.monotonic()
+        other = proxy.get("/echo", auth="Bearer MINE", timeout=40)
+        took = time.monotonic() - started
+        release.touch()
+        waiter.join(timeout=40)
+
+        assert other.status_code == 200 and other.text == "Bearer MINE"
+        assert took < 5, f"the unruled request waited {took:.1f}s on another rule's mint"
+        assert slow["r"].status_code == 200 and slow["r"].text == "token SLOW"

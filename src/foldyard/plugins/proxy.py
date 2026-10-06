@@ -301,6 +301,9 @@ def _net_leaf(e: dict, escape) -> str:
     if e.get("mint_failed"):
         # The proxy's own 502 (its error body says why): the credential, not the upstream, failed.
         mark = "mint failed"
+    if e.get("overlap"):
+        # The proxy's own 502 too: two switches claim this host and path, so neither injects.
+        mark = "credential overlap"
     line = (
         f"[dim]{ts}[/dim] {escape(e.get('method', '')):<6} "
         f"{escape(e.get('path', '')[:80])} [{colour}]{status}[/{colour}]"
@@ -509,6 +512,15 @@ class ProxyPlugin(Plugin):
             # Dummies at rest (keyless agents, `[[inject]]` box_env): the addon answers them with
             # the fix instead of forwarding.
             "held": [asdict(h) for h in self._registry.held_credentials(mode)]
+            if self._registry
+            else [],
+            # Where an overlap holds two switches' rules back (`rules` above lacks them): the
+            # addon answers a request there with the message `fy mode` shows, instead of letting
+            # the dummy go upstream to draw a 401 that reads as a broken credential.
+            "overlaps": [
+                {"host": rule.host, "path_prefix": rule.path_prefix, "message": message}
+                for rule, message in self._registry.overlapping_rules(mode).items()
+            ]
             if self._registry
             else [],
         }

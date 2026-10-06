@@ -6,7 +6,9 @@ where the minter's gcloud ADC + GitHub egress live — as the box's egress proxy
 request to an injected host it OVERWRITES the Authorization header with a token obtained
 by running a host command (the minter, `gh-app-token`), caches the token for the ttl the
 minter reports, and re-mints + re-issues the request once on an upstream 401. When the minter
-fails, the request is not forwarded: the proxy answers it with a 502 naming the minter's reason.
+fails, the request is not forwarded: the proxy answers it with a 502 naming the minter's reason,
+and keeps answering so for a few seconds rather than re-run a minter that just failed. A mint
+never runs on mitmproxy's event loop, so a slow one holds up only the requests that need it.
 
 The security property this buys: the token is added host-side, in flight, so it NEVER
 materialises inside the container (not as env, not as a file) — the evolution of the old
@@ -38,7 +40,8 @@ there's nothing to passthrough).
 Config via env (read once at startup). foldyard's supervisor sets LIVE_FILE, which moves the
 rules, the wall switch and the passthrough list out of the env and makes them live:
   LIVE_FILE         a JSON file {"rules": [<rule>, ...], "default_deny": bool, "passthrough":
-                    [<pattern>, ...]}, re-read when it changes (per hook + once a second) with no
+                    [<pattern>, ...]} (plus "held" and "overlaps": where the proxy answers a
+                    request itself), re-read when it changes (per hook + once a second) with no
                     restart. When set, INJECT_*, DEFAULT_DENY and PASSTHROUGH_HOSTS are ignored.
                     Unreadable/malformed ⇒ fail closed (no rules, the wall enforcing, nothing
                     tunnelled). A change that narrows the policy closes the open connections it no
@@ -239,6 +242,29 @@ def _valid_held(entry: object) -> bool:
         and all(isinstance(entry.get(k), str) and entry[k] for k in ("host", "dummy", "body"))
         and any(isinstance(entry.get(k), str) and entry[k] for k in ("header", "query_param"))
     )
+
+
+def _valid_overlap(entry: object) -> bool:
+    """A live ``overlaps`` entry the addon can act on: where (a host, and a path prefix if any)
+    and what to answer there."""
+    return (
+        isinstance(entry, dict)
+        and all(isinstance(entry.get(k), str) and entry[k] for k in ("host", "message"))
+        and isinstance(entry.get("path_prefix", ""), str)
+    )
+
+
+def _overlap_body(message: str) -> bytes:
+    """The proxy's own answer where two switches both claim a host and path, so it injects
+    neither (``overlaps``). Forwarded, the box's dummy drew the provider's 401 ("Bad
+    credentials"): a broken credential, to anyone reading it, while the fix is a mode change on
+    the host. A 502 like a failed mint's — the fault is host-side, not the box's credential —
+    carrying the message ``fy mode`` shows, which names both switches and the command to run."""
+    text = (
+        f"foldyard did not send this request: {message}"
+        " (on your computer: the mode can't be changed from the box)"
+    )
+    return json.dumps({"message": text}).encode()
 
 
 # An HTTP auth scheme (RFC 9110 §11.1's token, in the shape real ones take: `Bearer`, `token`,
@@ -514,6 +540,17 @@ def _mint_failure_detail(e: BaseException) -> str:
     return f"{type(e).__name__}: {_redact_token_runs(str(e))[:500]}"
 
 
+# How long a failed mint answers for its rule before the minter is run again. Clients retry a 5xx
+# (the Anthropic SDK and Claude Code back off from about half a second), so without it every retry
+# of every request re-ran a minter that had just failed: up to its 30 s timeout each time, each
+# logged at ERROR. Long enough to absorb a burst of retries and the parallel requests an agent
+# makes; short enough that a fix foldyard can't see (an App installation accepted, the network
+# back) is picked up within a client's own retries. The usual fix needs no wait at all: a secret
+# pasted into host.env re-creates the rule (`Injector._refresh_live`), and a new rule remembers
+# nothing.
+_MINT_FAILURE_MEMORY = 15.0
+
+
 class _MintFailure:
     """What :meth:`_Rule.token` returns instead of a value when the minter failed: the reason,
     carried WITH the result rather than left on the rule, where a concurrent mint could overwrite
@@ -588,6 +625,14 @@ class _Rule:
         self._lock = threading.Lock()
         self._value: str | None = None
         self._expires_at: float = 0.0
+        # The last mint's failure and when it happened, answered for _MINT_FAILURE_MEMORY instead
+        # of running the minter again; a successful mint clears it. Behind the same lock.
+        self._failure: _MintFailure | None = None
+        self._failed_at: float = 0.0
+        # The mint the event loop is waiting on (see `atoken`), shared by every request that
+        # arrives while it runs. Touched on the loop only, so it needs no lock.
+        self._inflight: asyncio.Future | None = None
+        self._inflight_forced = False  # does the shared call above mint for sure (see atoken)?
 
     @property
     def active(self) -> bool:
@@ -623,34 +668,103 @@ class _Rule:
 
     def token(self, *, force: bool = False, warm: bool = False) -> str | _MintFailure:
         """The value to inject, or — when the minter failed — a :class:`_MintFailure` naming why,
-        which the request path answers the box with instead of forwarding its dummy."""
+        which the request path answers the box with instead of forwarding its dummy. A failure is
+        remembered for :data:`_MINT_FAILURE_MEMORY` and answered from memory meanwhile, ``force``
+        included (see :meth:`_settled`)."""
         # Held across the mint, so a warm-up and a concurrent request collapse to ONE
         # subprocess: the second caller waits and then sees the fresh cache. The minter has
         # its own 30s timeout, which bounds how long that wait can be.
         with self._lock:
-            if force or self._value is None or time.monotonic() >= self._expires_at:
-                try:
-                    return self._mint()
-                except Exception as e:
-                    # WARN on the startup warm-up (`warm`), ERROR on the request path. Not
-                    # cosmetic: mitmproxy's ErrorCheck addon EXITS the process when anything logs
-                    # at ERROR during startup, so one rule whose credential is missing from
-                    # host.env would kill the whole proxy — which the supervisor respawns, forever
-                    # — cutting egress for every host whose credential was fine. Same invariant
-                    # `requires` protects (a proxy that won't launch connection-refuses every box
-                    # request): degrade ONE host, never all egress. The request path is past the
-                    # startup window, so it keeps the loud level.
-                    report = ctx.log.warn if warm else ctx.log.error
-                    detail = _mint_failure_detail(e)
-                    # Lead with the HOST: that's the axis a reader is trying to identify, and
-                    # the command alone makes them map a module path back to a mode by hand.
-                    report(f"egress_proxy: mint failed for {self.host} — {detail} [{self.command}]")
-                    return _MintFailure(detail)
-            assert self._value is not None  # the branch above mints whenever it is None
+            settled = self._settled(force)
+            if settled is not None:
+                return settled
+            try:
+                value = self._mint()
+            except Exception as e:
+                # WARN on the startup warm-up (`warm`), ERROR on the request path. Not
+                # cosmetic: mitmproxy's ErrorCheck addon EXITS the process when anything logs
+                # at ERROR during startup, so one rule whose credential is missing from
+                # host.env would kill the whole proxy — which the supervisor respawns, forever
+                # — cutting egress for every host whose credential was fine. Same invariant
+                # `requires` protects (a proxy that won't launch connection-refuses every box
+                # request): degrade ONE host, never all egress. The request path is past the
+                # startup window, so it keeps the loud level. Logged here, per minter RUN — a
+                # failure answered from memory logs nothing, so a retrying client can't flood it.
+                report = ctx.log.warn if warm else ctx.log.error
+                detail = _mint_failure_detail(e)
+                # Lead with the HOST: that's the axis a reader is trying to identify, and
+                # the command alone makes them map a module path back to a mode by hand.
+                report(f"egress_proxy: mint failed for {self.host} — {detail} [{self.command}]")
+                self._failure, self._failed_at = _MintFailure(detail), time.monotonic()
+                return self._failure
+            self._failure = None
+            return value
+
+    def _settled(self, force: bool) -> str | _MintFailure | None:
+        """What :meth:`token` answers without running the minter — a live cached value (unless
+        ``force``), else a failure still inside its window — or None. The caller holds the lock.
+
+        ``force`` (a 401 re-issue: the upstream refused the cached value) skips the value but
+        NOT a remembered failure. The two say different things: a cached value can be wrong
+        without the cache knowing, which is what the 401 reveals; a failure is the minter's own
+        answer from seconds ago, and a 401 says nothing new about it. Re-running it there would
+        undo the memory exactly when it matters — a revoked token draws a 401 for every request
+        still in flight with it, one minter run each."""
+        now = time.monotonic()
+        if not force and self._value is not None and now < self._expires_at:
             return self._value
+        if self._failure is not None and now - self._failed_at < _MINT_FAILURE_MEMORY:
+            return self._failure
+        return None
+
+    def _cached(self, force: bool) -> str | _MintFailure | None:
+        """:meth:`_settled` without waiting for the lock: a mint holding it (the warm-up's)
+        means None — wait for that mint off the loop."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return self._settled(force)
+        finally:
+            self._lock.release()
+
+    async def atoken(self, *, force: bool = False) -> str | _MintFailure:
+        """:meth:`token` for the event loop, which must never wait on a minter: mitmproxy runs
+        every connection's hooks on that one loop, so a mint run there (up to its 30 s timeout)
+        froze ALL proxied traffic, not just this host's — and clients retry a 502, once per
+        retry. A cached answer is returned at once; otherwise the mint runs on a worker thread
+        and the request awaits it, while other requests carry on.
+
+        Requests that arrive while it runs await the SAME mint instead of queueing behind the
+        lock, one worker thread each — on a hung minter enough of those would fill the default
+        executor and stall every other rule's mint behind them. ``shield``: a request that goes
+        away (the client hung up) must not cancel the mint the others are waiting on.
+
+        A `force` caller joins only a FORCED call. A plain one may not mint at all: started because
+        the warm-up held the lock (:meth:`_cached` reads that as "nothing"), it can return the
+        still-cached token — the very one the upstream just refused. So `force` lets a plain call
+        finish, then forces its own (or joins a forced one started meanwhile)."""
+        cached = self._cached(force)
+        if cached is not None:
+            return cached
+        while True:
+            flight = self._inflight
+            if flight is None or flight.done():
+                flight = asyncio.ensure_future(asyncio.to_thread(self.token, force=force))
+                self._inflight, self._inflight_forced = flight, force
+                flight.add_done_callback(lambda done: self._landed(done))
+                return await asyncio.shield(flight)
+            if self._inflight_forced or not force:
+                return await asyncio.shield(flight)
+            await asyncio.shield(flight)  # a plain lookup: let it land, then mint for ourselves
+
+    def _landed(self, flight: asyncio.Future) -> None:
+        """Forget the shared call once it lands — unless a newer one has already replaced it."""
+        if self._inflight is flight:
+            self._inflight, self._inflight_forced = None, False
 
     def invalidate(self) -> None:
-        """Forget the cached value, so the next request mints afresh."""
+        """Forget the cached value, so the next request mints afresh — unless a failure is still
+        remembered: that is the minter's answer, not the refused token's, and stands its window."""
         with self._lock:
             self._value = None
             self._expires_at = 0.0
@@ -687,6 +801,10 @@ class Injector:
         # Dummies at rest (LIVE_FILE's `held`): answered here with the fix, never forwarded.
         self.held: list[dict] = []
         self.held_hosts: set[str] = set()
+        # Where two switches' rules overlap and so neither injects (LIVE_FILE's `overlaps`):
+        # answered here with the message, never forwarded with the dummy.
+        self.overlaps: list[dict] = []
+        self.overlap_hosts: set[str] = set()
         # Phase A′: what to do with HTTPS we aren't injecting — "full" (decrypt+log) or
         # "passthrough" (blind-tunnel + SNI-log). Default "full" keeps the pre-A′ behaviour for
         # any caller that doesn't set CAPTURE_MODE.
@@ -801,6 +919,13 @@ class Injector:
         held = data.get("held")
         self.held = [h for h in held if _valid_held(h)] if isinstance(held, list) else []
         self.held_hosts = {h["host"] for h in self.held}
+        overlaps = data.get("overlaps")
+        self.overlaps = [
+            {**o, "host": _norm_host(o["host"])}  # compared with the destination, which is normed
+            for o in (overlaps if isinstance(overlaps, list) else [])
+            if _valid_overlap(o)
+        ]
+        self.overlap_hosts = {o["host"] for o in self.overlaps}
         passthrough = data.get("passthrough")
         self.passthrough_hosts = (
             [str(h) for h in passthrough if h] if isinstance(passthrough, list) else []
@@ -878,19 +1003,39 @@ class Injector:
         match wins — distinct injectors use distinct hosts, so at most one matches in practice.
         HTTPS only, by scheme: a cleartext request to a target host — even on :443 — gets no
         credential, on the way out (`request`) or on a 401 re-issue (`response`)."""
+        dest = self._injectable(flow)
+        if dest is None:
+            return None
+        for rule in self.rules:
+            if rule.matches(dest, flow.request.path):
+                return rule
+        return None
+
+    @staticmethod
+    def _injectable(flow: http.HTTPFlow) -> str | None:
+        """The destination of a request a rule may inject on, else None: HTTPS only, and only
+        where destination, Host header and TLS SNI all agree — a credential goes to the host the
+        connection really reaches, never to one the client merely names."""
         if flow.request.scheme != "https":
             return None
-        # Only where destination, Host header and TLS SNI all agree: a credential goes to the host
-        # the connection really reaches, never to one the client merely names.
         dest = _destination(flow.request)
         if _claim_mismatch(flow.request):
             return None
         sni = _norm_host(getattr(getattr(flow, "client_conn", None), "sni", None))
         if sni and sni != dest:
             return None
-        for rule in self.rules:
-            if rule.matches(dest, flow.request.path):
-                return rule
+        return dest
+
+    def _overlap_for(self, flow: http.HTTPFlow) -> dict | None:
+        """The ``overlaps`` entry this request falls under, or None — matched exactly as the
+        rules it holds back would have matched it (:meth:`_rule_for`), whatever credential the
+        box sent: those rules would have overwritten it either way."""
+        dest = self._injectable(flow)
+        if dest is None:
+            return None
+        for entry in self.overlaps:
+            if dest == entry["host"] and flow.request.path.startswith(entry.get("path_prefix", "")):
+                return entry
         return None
 
     def _held_for(self, flow: http.HTTPFlow) -> dict | None:
@@ -995,6 +1140,8 @@ class Injector:
         }  # fmt: skip
         if flow.metadata.get("egress_proxy_mint_failed"):
             entry["mint_failed"] = True  # the proxy's own 502: nothing (more) went upstream
+        if flow.metadata.get("egress_proxy_overlap"):
+            entry["overlap"] = True  # the proxy's own 502 too: nothing went upstream
         ua = _user_agent(flow.request)
         if ua:
             entry["ua"] = ua
@@ -1116,12 +1263,13 @@ class Injector:
 
     # ── mitmproxy hooks ──────────────────────────────────────────────────────────
     def running(self) -> None:
-        """Pre-mint every rule's token at proxy start, OFF the request path. ``request`` calls
-        ``rule.token()`` synchronously on the event loop, so a slow first mint (e.g. ``uv run
-        --script`` resolving a minter's PEP 723 env on a cold cache) would stall ALL proxied
-        egress for its duration. Fire-and-forget daemon threads: a warm failure just logs (at WARN
-        — ``warm=True``; an ERROR here makes mitmproxy exit, see ``token``) and the request path
-        re-mints as before. Handles kept on ``self`` so tests can join."""
+        """Pre-mint every rule's token at proxy start, so the first request to each host finds it
+        cached instead of waiting for a slow first mint (e.g. ``uv run --script`` resolving a
+        minter's PEP 723 env on a cold cache). The request path no longer mints on the event
+        loop (:meth:`_Rule.atoken`), so this saves that one request's wait, not all egress.
+        Fire-and-forget daemon threads: a warm failure just logs (at WARN — ``warm=True``; an
+        ERROR here makes mitmproxy exit, see ``token``). Handles kept on ``self`` so tests can
+        join."""
         self._running = True
         self._warm(list(self.rules))
         if self.live_path is not None:
@@ -1217,7 +1365,7 @@ class Injector:
 
     def _tunnel(self, target: str | None, build: bool) -> bool:
         """Would a TLS connection to ``target`` be blind-tunnelled now? (``tls_clienthello``.)"""
-        if target in self.inject_hosts or target in self.held_hosts:
+        if target in self.inject_hosts | self.held_hosts | self.overlap_hosts:
             return False
         return build or self.capture_mode != "full" or _host_matches(target, self.passthrough_hosts)
 
@@ -1251,10 +1399,11 @@ class Injector:
         ctx.log.info(f"egress_proxy: closed the connection to {key} — {why}")
 
     def _connect_ok(self, host: str | None, port: int) -> bool:
-        """The CONNECT policy plus the ``held`` hosts on :443 — let through so the proxy can
-        decrypt and answer the dummy; every request inside still meets ``_on_request``'s wall."""
-        held = port == _HTTPS_PORT and host in self.held_hosts
-        return held or self._allowed_connect(host, port)
+        """The CONNECT policy plus the ``held`` and ``overlaps`` hosts on :443 — let through so
+        the proxy can decrypt and answer there; every request inside still meets
+        ``_on_request``'s wall."""
+        answered = self.held_hosts | self.overlap_hosts
+        return (port == _HTTPS_PORT and host in answered) or self._allowed_connect(host, port)
 
     def _allowed_connect(self, host: str | None, port: int) -> bool:
         """The CONNECT policy: the host granted (:meth:`_allowed`) on :443, else ``host:port``
@@ -1307,8 +1456,8 @@ class Injector:
             dest = None
         target = sni or dest
         # An injector host is always decrypted (to rewrite its header), whatever the mode — and a
-        # held one (to answer its dummy).
-        always = self.inject_hosts | self.held_hosts
+        # held or overlap one (to answer there).
+        always = self.inject_hosts | self.held_hosts | self.overlap_hosts
         if target in always or dest in always:
             return
         if sni and dest and sni != dest:
@@ -1331,21 +1480,26 @@ class Injector:
             if conn is not None:
                 conn["blind"] = target
 
-    def requestheaders(self, flow: http.HTTPFlow) -> None:
+    async def requestheaders(self, flow: http.HTTPFlow) -> None:
         """Where a request is judged and its credential written: the headers are in, the body
         isn't. With ``stream_large_bodies`` set, a body past the threshold goes upstream as it
         arrives and ``request`` fires only once it's gone — too late for a header. A long Claude
         conversation (>1 MiB) reached Anthropic with the box's dummy token that way (401 "OAuth
         access token is invalid", 2026-09-23). Refusing here also means a refused request never
-        streams its body anywhere."""
-        self._on_request(flow)
+        streams its body anywhere.
 
-    def request(self, flow: http.HTTPFlow) -> None:
+        Async so a mint can be awaited (:meth:`_Rule.atoken`) rather than run on the event loop.
+        mitmproxy runs each hook as its own task and holds THIS flow until it completes — the
+        streaming decision included, which it reads after the hook — so nothing about the flow
+        changes, and every other connection keeps moving meanwhile."""
+        await self._on_request(flow)
+
+    async def request(self, flow: http.HTTPFlow) -> None:
         """Fires after ``requestheaders`` (after a buffered body, or after a streamed one has gone
         upstream). The work happened there; this only covers a caller that skips that hook."""
-        self._on_request(flow)
+        await self._on_request(flow)
 
-    def _on_request(self, flow: http.HTTPFlow) -> None:
+    async def _on_request(self, flow: http.HTTPFlow) -> None:
         if flow.metadata.get("egress_proxy_judged"):
             return
         flow.metadata["egress_proxy_judged"] = True
@@ -1357,6 +1511,16 @@ class Injector:
             flow.response = http.Response.make(403, _MISMATCH_BODY)
             flow.metadata["egress_proxy_blocked"] = True
             self._log_blocked(host if port == default else f"{host}:{port}", flow.request)
+            return
+        # Two switches on, both claiming this host and path, so neither injects: answer with the
+        # fix rather than send the dummy to draw a 401. Before the wall, like the held answer
+        # below — nothing leaves — and before it too: the switches here are on, not at rest.
+        overlap = self._overlap_for(flow) if self._rule_for(flow) is None else None
+        if overlap is not None:
+            flow.response = http.Response.make(
+                502, _overlap_body(overlap["message"]), {"content-type": "application/json"}
+            )
+            flow.metadata["egress_proxy_overlap"] = True  # logged by `response`, as a mint failure
             return
         # A dummy with its switch at rest: answer with the fix before the wall, since the
         # host is not granted (it needn't be — nothing leaves). A matching rule would inject.
@@ -1389,7 +1553,15 @@ class Injector:
         rule = self._rule_for(flow)
         if rule is None:
             return  # capture-only, or not a target host/path → log on the way back, rewrite nothing
-        value = rule.token()
+        value = await rule.atoken()
+        # The mint can take seconds, and the settings may have changed meanwhile. Nothing has left
+        # yet, so a request whose rule is gone (its switch turned off) is judged again under the
+        # posture it will actually leave under, rather than carry a credential that is now off.
+        self.refresh()
+        if self._rule_for(flow) is not rule:
+            del flow.metadata["egress_proxy_judged"]
+            await self._on_request(flow)
+            return
         if isinstance(value, _MintFailure):
             self._answer_mint_failure(flow, rule, value)
             return
@@ -1441,7 +1613,10 @@ class Injector:
             rule.invalidate()
             ctx.log.warn(f"egress_proxy: 401 from {rule.host} on a streamed upload — not re-issued")
             return
-        value = rule.token(force=True)
+        value = await rule.atoken(force=True)
+        self.refresh()
+        if self._rule_for(flow) is not rule:
+            return  # its switch went off during the mint: hand the 401 back, send nothing more
         if isinstance(value, _MintFailure):
             # The upstream refused the cached token and no fresh one can be had. Its 401 would
             # send the box hunting for a credential it never held; the minter's reason is the

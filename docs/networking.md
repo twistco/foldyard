@@ -211,6 +211,14 @@ refused.
 - **Every request in the box suddenly refuses to connect.** The box routes through the proxy, so
   a dead proxy means no traffic out. `fy doctor` has an "egress proxy" check for this, and `fy up`
   restarting the supervisor is the usual fix.
+- **A request gets a 502 from foldyard rather than from the service.** The proxy answers a
+  request itself, without sending it, when the credential it should carry can't be had: the
+  token service on your computer failed (`mint failed` in the Network Log; the message quotes
+  its reason, and the same answer is repeated for 15 seconds rather than re-running it), or two
+  switches both claim that host and path (`credential overlap`; the message names the
+  `fy mode` command that ends it). Both are fixed on your computer, never in the box
+  ([modes.md](./modes.md)). Only that credential's requests are affected; a slow token service
+  doesn't hold up the box's other traffic.
 - **A build or tool needs a host you haven't allowed.** Watch the TUI's blocked rows and grant from
   there (`a`), or run `fy allow add <host> --level permanent`. Grants live on your computer, never
   in repo config, so the box can't widen its own allowlist.
