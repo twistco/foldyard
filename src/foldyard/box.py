@@ -41,7 +41,7 @@ import time
 from importlib import metadata
 from pathlib import Path
 
-from . import config, keyless, machine, sandbox, stack
+from . import config, hostclock, keyless, machine, sandbox, stack
 from .plugins import registry
 
 _BOX_FINGERPRINT_LABEL = "io.foldyard.box-fingerprint"
@@ -313,10 +313,12 @@ def _build_img(engine: str, main: Path, env: dict) -> int:
     return buildgate.run(build, what="box image build")
 
 
-def _box_home(engine: str, img: str, env: dict) -> tuple[str, str]:
+def _probe_image(engine: str, img: str, env: dict) -> tuple[str, str, list[str]]:
     """Where the image puts HOME + where claude resolves its config (CLAUDE_CONFIG_DIR or
-    ~/.claude). The image bakes HOME=/home/vscode (its `vscode` user) and `--user 0` KEEPS
-    that ENV, so even as root ~/.claude is /home/vscode/.claude — mount THERE, not /root."""
+    ~/.claude), and the locales it can load (``locale -a``). The image bakes HOME=/home/vscode
+    (its `vscode` user) and `--user 0` KEEPS that ENV, so even as root ~/.claude is
+    /home/vscode/.claude — mount THERE, not /root. The locales ride the same throwaway container
+    (no second start): ``_clock_env`` passes your time locale only when the image has it."""
     out = subprocess.run(
         [
             engine,
@@ -325,16 +327,34 @@ def _box_home(engine: str, img: str, env: dict) -> tuple[str, str]:
             img,
             "sh",
             "-c",
-            'printf "%s %s" "$HOME" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"',
+            'printf "%s %s\\n" "$HOME" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; locale -a 2>/dev/null',
         ],
         env=env,
         capture_output=True,
         text=True,
     )
-    parts = out.stdout.split()
+    first, *locales = out.stdout.splitlines() or [""]
+    parts = first.split()
     home = parts[0] if len(parts) >= 1 and parts[0] else "/home/vscode"
     claude = parts[1] if len(parts) >= 2 and parts[1] else f"{home}/.claude"
-    return home, claude
+    return home, claude, [line.strip() for line in locales if line.strip()]
+
+
+def _clock_env(image_locales: list[str]) -> list[str]:
+    """``-e`` args that make the box show times as your computer does: its timezone (``TZ``)
+    and its time locale (``LC_TIME`` — the 12/24-hour clock), each only when known. The locale
+    goes only to an image that has it: a missing one falls back to C anyway, and perl warns about
+    it on every run. A key ``[box].env`` sets is left to it — the opt-out (``TZ = "UTC"``): one
+    value per key, so the winner is never the engine's pick between two ``-e``. The box only —
+    the stack's containers stay on UTC. The readers and their validation: ``hostclock``."""
+    declared = config.box_env()
+    args: list[str] = []
+    if "TZ" not in declared and (tz := hostclock.zone()):
+        args += ["-e", f"TZ={tz}"]
+    locale = hostclock.time_locale()
+    if "LC_TIME" not in declared and locale and hostclock.locale_available(locale, image_locales):
+        args += ["-e", f"LC_TIME={locale}"]
+    return args
 
 
 # The base bootstrap scaffolding (runs once per fresh box). The native Claude installer (now the
@@ -1201,7 +1221,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     transcripts_dir = (
         os.environ.get("DEVBOX_TRANSCRIPTS") or f"{checkout}/{here}/.devbox-claude/projects"
     )
-    box_home, claude_in_box = _box_home(engine, img, env)
+    box_home, claude_in_box, image_locales = _probe_image(engine, img, env)
     # Resolved HOME paths the agent/editor plugins' box_args need (they only get `env`): the box
     # HOME, where Claude resolves ~/.claude, and the host-side transcripts dir to bind in.
     env["FY_BOX_HOME"] = box_home
@@ -1288,6 +1308,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         # compose pulls) — docker/compose read this foldyard-owned config instead of ~/.docker.
         # Seeded `{}` by the bootstrap; `docker login` writes here and still works.
         env_args += ["-e", f"DOCKER_CONFIG={box_home}/.docker-fy"]
+    env_args += _clock_env(image_locales)  # before [box].env, which may override it
     for key, value in config.box_env().items():
         env_args += ["-e", f"{key}={value.replace('~', box_home)}"]
     env_args += [
