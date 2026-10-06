@@ -406,13 +406,22 @@ uninstall)
     rm -f /etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf
     rm -rf /usr/local/libexec/fy-oci
     _guest_trust "" || echo "⚠ proxy CA: still in the guest's own store" >&2
-    for home in $(getent passwd | awk -F: '$3 >= 1000 {print $6}'); do
+    homes="$(getent passwd | awk -F: '$3 >= 1000 {print $6}')"
+    # …and the walled user's own, whatever its uid: Lima's guest user takes the host's (501 on
+    # macOS), which the sweep above misses — its proxy file survived and kept podman on the proxy.
+    WALL_UID="$(_wall_user 2>/dev/null)" || WALL_UID=""
+    if [ -n "$WALL_UID" ]; then
+        entry="$(getent passwd "$WALL_UID" || true)"
+        entry="${entry%:*}"
+        homes="$homes ${entry##*:}"
+    fi
+    for home in $homes; do
         rm -f "$home/.config/environment.d/90-fy-wall-proxy.conf"
     done
     # A rootless podman service already running keeps the proxy env and the CA defaults it
     # started with — the first unwalled boot then still dialled the (stopped) proxy. Restart it
     # as install does. Best-effort, and only for a uid we can name.
-    if WALL_UID="$(_wall_user 2>/dev/null)"; then
+    if [ -n "$WALL_UID" ]; then
         sudo -u "#$WALL_UID" XDG_RUNTIME_DIR="/run/user/$WALL_UID" \
             systemctl --user daemon-reexec 2>/dev/null || true
         sudo -u "#$WALL_UID" XDG_RUNTIME_DIR="/run/user/$WALL_UID" \

@@ -1131,6 +1131,24 @@ def test_wall_uninstall_takes_the_runtime_wrapper_out(tmp_path):
     assert f"rm -rf {_OCI}" in calls
 
 
+@pytest.mark.spawns("bash")  # sources the REAL script under bash; every command is a stub
+def test_wall_uninstall_drops_the_walled_users_proxy_env_whatever_its_uid(tmp_path):
+    # Lima's guest user takes the host's uid — 501 on macOS, under the uid >= 1000 sweep — so
+    # its environment.d proxy file survived the wall going off, and the user manager kept
+    # handing podman a proxy that was no longer there (seen live, 2026-10-06).
+    script = shlex.quote(str(machine._wall_asset()))
+    getent = (
+        'getent() { if [ "$#" -eq 1 ]; then echo "root:x:0:0::/root:/bin/bash"; '
+        'else echo "dain:x:501:1000::/home/dain.guest:/bin/bash"; fi; }\n'
+        "awk() { :; }\n"  # the uid >= 1000 sweep finds no one here
+    )
+    stubs = ("systemctl", "rm", "nft", "sudo", "install", "update-ca-trust")
+    calls = _stubbed_bash(tmp_path, f"{getent}source {script} uninstall", stubs)
+    gone = "rm -f /home/dain.guest/.config/environment.d/90-fy-wall-proxy.conf"
+    restart = "sudo -u #501 XDG_RUNTIME_DIR=/run/user/501 systemctl --user daemon-reexec"
+    assert calls.index(gone) < calls.index(restart)
+
+
 def test_the_combined_bundle_starts_from_the_guests_real_roots():
     # Fedora 44 has no /etc/pki/tls/certs/ca-bundle.crt: the bundle was the proxy CA ALONE, so an
     # SSL_CERT_FILE/REQUESTS_CA_BUNDLE client (uv, pip, requests) failed every PASSTHROUGH host,
