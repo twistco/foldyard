@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import http.server
+import itertools
 import os
 import shutil
 import socket
@@ -448,4 +449,11 @@ def test_an_event_stream_reaches_the_box_as_it_is_sent(tmp_path, setting):
     assert spread > sent_over / 2, (
         f"events sent over {sent_over:.1f}s arrived within {spread:.2f}s of each other "
         f"(at {', '.join(f'{t:.2f}s' for t in arrivals)}): the proxy held the stream back"
+    )
+    # …and each event on its own: a proxy holding only the FIRST event until the next one arrives
+    # still spreads the rest out, so the overall spread alone would pass a delayed first token.
+    gaps = [b - a for a, b in itertools.pairwise(arrivals)]
+    assert min(gaps) > _SSE_GAP / 2, (
+        f"events sent {_SSE_GAP:.1f}s apart arrived {', '.join(f'{g:.2f}s' for g in gaps)} apart: "
+        "the proxy held an event back until the next one"
     )
