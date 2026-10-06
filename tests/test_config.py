@@ -571,6 +571,80 @@ def test_box_image_falls_back_to_packaged_generic(fresh_config, tmp_path):
     assert img["tag"] == "p-devbox:latest"
 
 
+# ── box_env ([box].env: the project's environment, never foldyard's wiring) ───────────
+
+
+def _box_env_toml(tmp_path, fresh_config, entries: str) -> None:
+    (tmp_path / "foldyard.toml").write_text(
+        f'[project]\nname = "p"\n[box]\nenv = {{ {entries} }}\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path)
+
+
+def test_box_env_keeps_the_projects_own_environment(fresh_config, tmp_path):
+    # Tool settings, the clock overrides #64 documents, and names foldyard reads nowhere: all the
+    # project's. `~` is left for the box to expand.
+    _box_env_toml(
+        tmp_path,
+        fresh_config,
+        'UV_LINK_MODE = "copy", npm_config_store_dir = "~/.pnpm-store", TZ = "UTC", '
+        'LC_TIME = "C.UTF-8", NODE_USE_ENV_PROXY = "1", NEXT_TELEMETRY_DISABLED = "1"',
+    )
+    assert config.box_env() == {
+        "UV_LINK_MODE": "copy",
+        "npm_config_store_dir": "~/.pnpm-store",
+        "TZ": "UTC",
+        "LC_TIME": "C.UTF-8",
+        "NODE_USE_ENV_PROXY": "1",
+        "NEXT_TELEMETRY_DISABLED": "1",
+    }
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "HTTPS_PROXY",
+        "https_proxy",  # curl reads the lower-case spelling too
+        "NO_PROXY",
+        "DOCKER_HOST",
+        "CONTAINER_HOST",
+        "DOCKER_CONFIG",
+        "SSL_CERT_FILE",
+        "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE",
+        "GCE_METADATA_HOST",
+        "CLAUDE_CONFIG_DIR",
+        "IN_DEVBOX",
+        "PATH",
+        "FY_GIT_SHIM_OFF",
+        "FOLDYARD_CHECKOUT",
+    ],
+)
+def test_box_env_refuses_a_name_foldyard_sets_in_the_box(fresh_config, tmp_path, name):
+    # The box's `-e` order lets `[box].env` silently win over the plugins' wiring (proxy, CA,
+    # engine socket) and silently lose to foldyard's identity block. Either way the table would
+    # not mean what it says, so a name foldyard owns is refused, as `[[inject]].box_env` does.
+    _box_env_toml(tmp_path, fresh_config, f'UV_LINK_MODE = "copy", {name} = "x"')
+    with pytest.raises(SystemExit, match=rf"\b{name}\b"):
+        config.box_env()
+
+
+def test_box_env_names_every_refused_name_and_the_setting_to_use_instead(fresh_config, tmp_path):
+    _box_env_toml(
+        tmp_path,
+        fresh_config,
+        'DOCKER_CONFIG = "/x", UV_LINK_MODE = "copy", FY_GIT_SHIM_OFF = "1", HTTPS_PROXY = ""',
+    )
+    with pytest.raises(SystemExit) as exc:
+        config.box_env()
+    msg = str(exc.value)
+    headline = msg.splitlines()[0]  # all of them up front, not one per run
+    assert all(n in headline for n in ("DOCKER_CONFIG", "FY_GIT_SHIM_OFF", "HTTPS_PROXY"))
+    assert "UV_LINK_MODE" not in msg  # only the refused names
+    assert "clean_docker_config" in msg  # DOCKER_CONFIG's own switch
+    assert "git_index_split" in msg  # FY_GIT_SHIM_OFF's
+    assert "fy allow add" in msg  # what someone rerouting the proxy is usually after
+
+
 # ── tail_jsonl (the bounded log tailer the TUI panels share) ──────────────────────────
 
 

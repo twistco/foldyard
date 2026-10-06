@@ -1217,11 +1217,107 @@ def box_warmup() -> list[dict]:
     return out
 
 
+# What foldyard itself bakes into the box (box._up, the proxy/gcp/agent plugins' box_args).
+# Neither `[box].env` nor an `[[inject]]` row's `box_env` may set one: rerouting the proxy, the
+# engine socket or the CA bundle from config meant for the project's own environment would be a
+# box-wiring knob hiding in the wrong table. Compared upper-cased, so `https_proxy` is as refused
+# as `HTTPS_PROXY`. tests/test_box.py checks the list against a box with every plugin on.
+FOLDYARD_BOX_ENV = frozenset(
+    {
+        # the engine + the box's own identity
+        "CONTAINER_HOST",
+        "DOCKER_HOST",
+        "DOCKER_CONFIG",
+        "IN_DEVBOX",
+        "IS_SANDBOX",
+        "WORKTREE",
+        "PODMAN_PROJECT",
+        "COMPOSE_PROJECT_NAME",
+        # proxy routing + the CA trust that makes it work
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "REQUESTS_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "SSL_CERT_FILE",
+        "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE",
+        "NODE_EXTRA_CA_CERTS",
+        # the gcp metadata emulator
+        "GCE_METADATA_HOST",
+        "GCE_METADATA_IP",
+        "GCE_METADATA_ROOT",
+        "GCP_MINTER_PORT",
+        # the agents' homes, and the keyless dummies foldyard bakes for them
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+        # the shell basics
+        "PATH",
+        "HOME",
+        "SHELL",
+        "USER",
+    }
+)
+FOLDYARD_BOX_PREFIXES = ("FY_", "FOLDYARD_")
+
+# Where a refused `[box].env` name has a setting of its own — what the override was usually after.
+_PROXY_INSTEAD = (
+    "the box's egress goes through foldyard's proxy; to reach a host it refuses, grant it on "
+    "your computer: `fy allow add <host>`"
+)
+_CA_INSTEAD = (
+    "the box already trusts the proxy's CA beside the system roots; a private CA belongs in the "
+    "box image's system trust store, which that bundle includes"
+)
+_BOX_ENV_INSTEAD = {
+    "DOCKER_CONFIG": "`[box] clean_docker_config = false` keeps the image's own docker config",
+    "FY_GIT_SHIM_OFF": "`[box] git_index_split = false` turns the box's git shim off",
+    "NO_PROXY": "`[proxy] no_proxy` lists the in-stack names that skip the proxy",
+    "HTTPS_PROXY": _PROXY_INSTEAD,
+    "HTTP_PROXY": _PROXY_INSTEAD,
+    "ALL_PROXY": _PROXY_INSTEAD,
+    "SSL_CERT_FILE": _CA_INSTEAD,
+    "REQUESTS_CA_BUNDLE": _CA_INSTEAD,
+    "GIT_SSL_CAINFO": _CA_INSTEAD,
+    "NODE_EXTRA_CA_CERTS": _CA_INSTEAD,
+}
+
+
+def foldyard_owned(name: str) -> bool:
+    """True for an env name foldyard sets in the box itself (:data:`FOLDYARD_BOX_ENV`, or an
+    ``FY_``/``FOLDYARD_`` name), in any case."""
+    upper = name.upper()
+    return upper in FOLDYARD_BOX_ENV or upper.startswith(FOLDYARD_BOX_PREFIXES)
+
+
 def box_env() -> dict[str, str]:
-    """Extra static env baked into the box (e.g. tool-cache pinning). ``~`` in a value is
-    left for the box to expand against its HOME. From ``[box].env`` ({})."""
+    """The project's own environment in the box (e.g. tool-cache pinning). ``~`` in a value is
+    left for the box to expand against its HOME. From ``[box].env`` ({}).
+
+    A name foldyard sets in the box itself is refused (:func:`foldyard_owned`): the box's ``-e``
+    order would let it silently override the proxy, CA and engine wiring, or silently lose to
+    foldyard's identity block. ``TZ``/``LC_TIME`` are the project's to set (they override the
+    clock foldyard copies from your computer)."""
     raw = _box_table().get("env")
-    return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    env = {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    if refused := [name for name in env if foldyard_owned(name)]:
+        lines = [
+            f"✗ [box].env sets {'names' if len(refused) > 1 else 'a name'} foldyard sets in the "
+            f"box itself: {', '.join(refused)}",
+            "  [box].env is your project's environment. These wire the box to foldyard (its proxy,",
+            "  CA trust, engine socket and identity), so an override would quietly undo that.",
+        ]
+        lines += [
+            f"  {name}: {_BOX_ENV_INSTEAD[name.upper()]}."
+            for name in refused
+            if name.upper() in _BOX_ENV_INSTEAD
+        ]
+        lines.append("  Remove them from [box].env.")
+        raise SystemExit("\n".join(lines))
+    return env
 
 
 def box_tools() -> list[dict]:
