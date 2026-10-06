@@ -51,8 +51,9 @@ BUNDLES: dict[str, tuple[str, ...]] = {
         "index.docker.io",
         "hub.docker.com",
         "www.docker.com",
-        # Docker Hub serves blobs from either CDN; a pull is the guest podman's own traffic, which
-        # trusts no proxy CA, so a decrypted blob host fails it (x509 "unknown authority").
+        # Docker Hub serves blobs from either CDN. A pull is the guest podman's own traffic; the
+        # walled guest's store trusts the proxy CA, so these are here for bulk speed — and for a
+        # VM provisioned without a CA, where a decrypted blob host fails x509 "unknown authority".
         "production.cloudflare.docker.com",
         "production.cloudfront.docker.com",
         "download.docker.com",

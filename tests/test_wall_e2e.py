@@ -211,7 +211,7 @@ def test_dns_still_resolves_in_the_guest(repo):
 
 def test_the_proxy_is_the_way_out(repo):
     # A toolchain host on the default passthrough list is tunnelled: TLS verifies end to end
-    # against the REAL certificate, as image pulls from the guest need (ADR-0029).
+    # against the REAL certificate.
     tunnelled = lima_shell(
         "curl",
         "-sS",
@@ -224,17 +224,16 @@ def test_the_proxy_is_the_way_out(repo):
         "https://pypi.org/simple/",
     )
     assert tunnelled.stdout.strip() == "200", f"{tunnelled.stdout!r} {tunnelled.stderr!r}"
-    # Any other host is decrypted (ADR-0029), and the guest holds no proxy CA — so it is reached
-    # through the proxy but presents the proxy's certificate: verification fails, the relay works.
+    # Any other host is decrypted (ADR-0029), and the guest's own store trusts the proxy CA (the
+    # wall's boot install) — what podman's pulls verify against, so a decrypted registry no longer
+    # fails them. It verifies, against the PROXY's certificate.
     decrypted = lima_shell(
-        "curl", "-sS", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}", "https://example.com"
-    )
-    assert "certificate" in decrypted.stderr, f"{decrypted.stdout!r} {decrypted.stderr!r}"
-    relayed = lima_shell(
-        "curl", "-sS", "-k", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}",
+        "curl", "-sS", "-v", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}",
         "https://example.com",
     )  # fmt: skip
-    assert relayed.stdout.strip() == "200", f"{relayed.stdout!r} {relayed.stderr!r}"
+    assert decrypted.stdout.strip() == "200", f"{decrypted.stdout!r} {decrypted.stderr!r}"
+    issuer = [ln for ln in decrypted.stderr.splitlines() if "issuer:" in ln]
+    assert issuer and "mitmproxy" in issuer[0], decrypted.stderr
 
 
 def test_the_api_is_still_served_through_the_walled_stack(repo):

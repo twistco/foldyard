@@ -888,6 +888,102 @@ def test_wall_uninstall_drops_the_ca_defaults_and_restarts_the_users_podman(tmp_
     )
 
 
+def _stubbed_bash(tmp_path: Path, body: str, stubs: tuple[str, ...]) -> list[str]:
+    """Run ``body`` under the real bash with every command in ``stubs`` a function that records
+    its call, and PATH an empty dir — so a command left unstubbed fails the run instead of
+    touching this machine. Returns the recorded calls; stderr goes to the last element."""
+    defs = "".join(f"{cmd}() {{ printf '{cmd} %s\\n' \"$*\"; }}\n" for cmd in stubs)
+    out = subprocess.run(
+        [shutil.which("bash") or "bash", "-c", defs + body],
+        capture_output=True,
+        text=True,
+        env={"PATH": str(tmp_path), "FY_WALL_UID": "501"},
+    )
+    assert out.returncode == 0, out.stderr
+    return [*out.stdout.splitlines(), out.stderr]
+
+
+def _guest_trust_fn() -> str:
+    text = machine._wall_asset().read_text()
+    start = text.index("\n_guest_trust() {\n")
+    return text[start : text.index("\n}\n", start) + 3]
+
+
+_FEDORA_ANCHOR = "/etc/pki/ca-trust/source/anchors/fy-proxy-ca.pem"
+_DEBIAN_ANCHOR = "/usr/local/share/ca-certificates/fy-proxy-ca.crt"
+
+
+@pytest.mark.spawns("bash")  # the REAL function under bash; every command is a stub
+@pytest.mark.parametrize(
+    ("tool", "anchor", "update"),
+    [
+        ("update-ca-trust", _FEDORA_ANCHOR, "update-ca-trust extract"),
+        ("update-ca-certificates", _DEBIAN_ANCHOR, "update-ca-certificates --fresh"),
+    ],
+)
+def test_the_guests_own_store_trusts_the_proxy_ca(tmp_path, tool, anchor, update):
+    # An image PULL is the guest podman's own traffic through the VM-wide proxy env; podman
+    # verifies it against the guest's system store, so a registry host the proxy decrypts failed
+    # x509 "unknown authority" (the Lima host e2e, 2026-09-23). Root puts the CA there at boot.
+    calls = _stubbed_bash(
+        tmp_path,
+        _guest_trust_fn() + "_guest_trust /run/fy-wall/proxy-ca.pem",
+        ("rm", "install", tool),
+    )
+    assert calls[:3] == [
+        f"rm -f {anchor}",
+        f"install -m 0644 /run/fy-wall/proxy-ca.pem {anchor}",
+        update,
+    ]
+
+
+@pytest.mark.spawns("bash")
+def test_without_a_ca_the_guests_store_keeps_none_of_ours(tmp_path):
+    # One fixed name: a rotated CA replaces the old one (the install above removes it first), and
+    # an unwalled boot, or a walled one without a CA, leaves the guest trusting none of ours.
+    calls = _stubbed_bash(
+        tmp_path, _guest_trust_fn() + '_guest_trust ""', ("rm", "install", "update-ca-trust")
+    )
+    assert calls[:2] == [f"rm -f {_FEDORA_ANCHOR}", "update-ca-trust extract"]
+    assert not any(c.startswith("install") for c in calls)
+
+
+@pytest.mark.spawns("bash")
+def test_a_guest_without_a_trust_tool_is_warned_about_not_failed(tmp_path):
+    calls = _stubbed_bash(
+        tmp_path, _guest_trust_fn() + "_guest_trust /run/fy-wall/proxy-ca.pem", ("rm", "install")
+    )
+    assert calls[:-1] == []  # nothing touched
+    assert "pulls won't trust" in calls[-1]
+
+
+def test_wall_install_trusts_the_ca_before_bundling_it_and_restarting_podman():
+    # The store is updated BEFORE the combined bundle is cut from the guest's roots (else a
+    # rotated-out CA rides into every container's bundle) and before the user's podman restarts
+    # (Go reads the system pool once per process). A walled boot without a CA takes ours out.
+    install = _wall_section("install")
+    trust = install.index('_guest_trust "$CA_SRC" ')
+    # A missing or empty CA file is no CA (as before): never installed, which would end the
+    # whole install under `set -e` and leave the VM unwalled-and-refused.
+    assert install.index('[ -s "$CA_SRC" ] || CA_SRC=""') < trust
+    assert trust < install.index("/etc/fy-wall/proxy-ca-combined.pem")
+    assert trust < install.index("try-restart podman.service")
+    assert '|| echo "⚠ proxy CA' in install[trust:].splitlines()[0]  # never fails the wall
+
+
+@pytest.mark.spawns("bash")  # sources the REAL script under bash; every command is a stub
+def test_wall_uninstall_takes_the_ca_out_of_the_guests_store(tmp_path):
+    script = shlex.quote(str(machine._wall_asset()))
+    stubs = ("systemctl", "rm", "nft", "getent", "awk", "sudo", "install", "update-ca-trust")
+    calls = _stubbed_bash(tmp_path, f"source {script} uninstall", stubs)
+    restart = (
+        "sudo -u #501 XDG_RUNTIME_DIR=/run/user/501 "
+        "systemctl --user try-restart podman.service podman.socket"
+    )
+    assert calls.index(f"rm -f {_FEDORA_ANCHOR}") < calls.index("update-ca-trust extract")
+    assert calls.index("update-ca-trust extract") < calls.index(restart)
+
+
 def test_walled_provision_script_with_a_ca_is_valid_bash(lima_env):
     if shutil.which("bash") is None:
         pytest.skip("no bash on this host")

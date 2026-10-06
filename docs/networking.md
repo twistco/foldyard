@@ -160,9 +160,12 @@ and sets `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_S
 - **Clients with their own trust store** (a Java keystore, a browser's NSS database, a binary
   with bundled roots) ignore those variables. Add the CA to that store in your image, or put the
   host on `passthrough`.
+- **Image pulls trust it too.** The same boot setup adds the CA to the VM's own trust store,
+  which podman checks image pulls against, so a registry the proxy decrypts still works. Turning
+  the VM firewall off takes it out again.
 - **A new CA needs a restart.** The CA is part of the VM's boot setup, so after it changes run
-  `fy machine stop && fy up`. Without the VM firewall nothing is routed through the proxy, so
-  nothing is needed.
+  `fy machine stop && fy up`. The old CA is replaced, not kept beside the new one. Without the VM
+  firewall nothing is routed through the proxy, so nothing is needed.
 
 ### Image builds: trusted, still behind the allowlist
 

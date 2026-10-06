@@ -50,6 +50,32 @@ _wall_user() {
     fi
 }
 
+# The guest's OWN trust store: what the VM user's podman verifies image PULLS against (Go reads
+# the system bundle), so a registry host the proxy decrypts no longer fails "unknown authority".
+# With the CA it goes in; without one (no CA yet, or the wall off) ours comes out. One fixed file
+# name, so a rotated CA replaces the old one rather than joining it. Fedora (Lima's podman
+# template) has update-ca-trust; a Debian-family guest, update-ca-certificates.
+_guest_trust() {
+    local ca="${1:-}" anchor update
+    if command -v update-ca-trust >/dev/null; then
+        anchor=/etc/pki/ca-trust/source/anchors/fy-proxy-ca.pem
+        update=(update-ca-trust extract)
+    elif command -v update-ca-certificates >/dev/null; then
+        anchor=/usr/local/share/ca-certificates/fy-proxy-ca.crt
+        update=(update-ca-certificates --fresh)
+    else
+        if [ -n "$ca" ]; then
+            echo "⚠ proxy CA: no update-ca-trust in this guest; its podman's pulls won't trust it" >&2
+        fi
+        return 0
+    fi
+    rm -f "$anchor" || return 1
+    if [ -n "$ca" ]; then
+        install -m 0644 "$ca" "$anchor" || return 1
+    fi
+    "${update[@]}"
+}
+
 case "$CMD" in
 install)
     GW="${2:?install needs <host_gateway_ip>}"
@@ -191,7 +217,11 @@ EOF
     # from the box's own CA files, which its bootstrap writes. Build RUN steps get the mounts but
     # not the env (podman applies no default env to builds).
     rm -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf
-    if [ -n "$CA_SRC" ] && [ -s "$CA_SRC" ]; then
+    [ -s "$CA_SRC" ] || CA_SRC=""
+    # The guest's own store first: the combined bundle below is cut from its roots, which must no
+    # longer hold a rotated-out CA (they hold this one twice after it — harmless).
+    _guest_trust "$CA_SRC" || echo "⚠ proxy CA: the guest's own store wasn't updated" >&2
+    if [ -n "$CA_SRC" ]; then
         install -m 0644 "$CA_SRC" /etc/fy-wall/proxy-ca.pem
         roots=""
         for b in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem; do
@@ -267,6 +297,7 @@ uninstall)
     nft delete table ip6 fy_wall6 2>/dev/null || true
     rm -rf /etc/fy-wall /etc/profile.d/fy-wall-proxy.sh /usr/local/bin/fy-wall-denied
     rm -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf
+    _guest_trust "" || echo "⚠ proxy CA: still in the guest's own store" >&2
     for home in $(getent passwd | awk -F: '$3 >= 1000 {print $6}'); do
         rm -f "$home/.config/environment.d/90-fy-wall-proxy.conf"
     done

@@ -110,6 +110,10 @@ never `flush ruleset`, because netavark/pasta keep their own nft state):
   `profile.d`, so image pulls and build `RUN` steps — which also leave as the firewalled uid — go
   through the host proxy. `NO_PROXY` includes the gateway, so a container's direct calls to
   host-side daemons (e.g. an emulator → `GCP_MINTER_URL`) don't get tunnelled through the proxy.
+- The proxy CA, embedded in the boot script by the host: in the guest's own trust store (what
+  podman verifies pulls against; `update-ca-trust`, one fixed anchor name so a rotated CA replaces
+  the old one, taken out again when the firewall is off), and in every container via a root-owned
+  `containers.conf.d` drop-in.
 - A systemd `fy-wall.service` (oneshot nft load) keeps it across restarts.
 
 **Set up at boot, as root; the host never runs `sudo` in the guest.** `machine.ensure` /

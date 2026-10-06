@@ -119,11 +119,17 @@ belongs in the middle — but *one* middle, not a switch between two.
   verification against any other HTTPS host (a build step has no CA). Such an image builds from
   the host, or the host goes on `passthrough`. Rejected: minting a secret for an in-box build — the
   box would hold a working marker again.
-- **Image pulls rely on `passthrough`.** A pull is the guest podman's own traffic, through the
-  VM-wide proxy env: no build marker, no proxy CA. A decrypted registry blob host fails it with
-  x509 "unknown authority" (the Lima host e2e, when Docker Hub served a blob from
-  `production.cloudfront.docker.com`, which `@containers` lacked). The registry hosts must stay in
-  the default bundles; `test_image_pull_hosts_are_tunnelled_by_the_default_passthrough` pins them.
+- **Image pulls relied on `passthrough`** (until 2026-10). A pull is the guest podman's own
+  traffic, through the VM-wide proxy env: no build marker, and then no proxy CA. A decrypted
+  registry blob host failed it with x509 "unknown authority" (the Lima host e2e, when Docker Hub
+  served a blob from `production.cloudfront.docker.com`, which `@containers` lacked), so the
+  registry hosts had to stay in the default bundles;
+  `test_image_pull_hosts_are_tunnelled_by_the_default_passthrough` pins them. **Amended
+  2026-10-06:** the walled boot provisioning now also puts the CA in the guest's own trust store
+  (root, at boot, one fixed anchor so a rotated CA replaces the old one; taken out on an unwalled
+  boot), which podman verifies pulls against. A decrypted registry now verifies, so the registry
+  hosts stay in the default for bulk speed and for a VM provisioned without a CA — no longer for
+  correctness. Whether the default should shrink is a separate, measured decision.
 - **The egress log grows**: a request row per request rather than a row per connection, and full
   paths — query strings included — on the host. The log stays outside the mount and rotation
   bounds it (5 MiB × 6 by default). A token carried in a URL now lands there; the `query_param`
