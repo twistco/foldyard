@@ -23,6 +23,7 @@ from pathlib import Path
 # An IANA name: slash-separated components of letters, digits, `_`, `+`, `-` (`Etc/GMT+1`).
 _ZONE = re.compile(r"[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*")
 # A POSIX locale name: language[_territory][.codeset][@modifier] (`en_GB.UTF-8`, `es_419.UTF-8`).
+# `C`, `C.UTF-8` and `POSIX` don't fit it: they carry nothing over, and every image has them.
 _LOCALE = re.compile(
     r"[A-Za-z]{2,3}"  # language
     r"(?:_[A-Za-z]{2}|_[0-9]{3})?"  # territory
@@ -57,8 +58,6 @@ def time_locale(environ: Mapping[str, str] | None = None) -> str | None:
     (nothing to carry over) or a value outside the locale-name pattern."""
     env = os.environ if environ is None else environ
     name = env.get("LC_ALL") or env.get("LC_TIME") or env.get("LANG") or ""
-    if name in ("C", "POSIX") or name.startswith("C."):
-        return None
     return name if _LOCALE.fullmatch(name) else None
 
 
