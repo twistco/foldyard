@@ -438,7 +438,11 @@ def test_an_event_stream_reaches_the_box_as_it_is_sent(tmp_path, setting):
         arrivals = _event_arrivals(
             f"https://{HOST}:{proxy.uport}/sse", {"https": f"http://{HOST}:{proxy.pport}"}, verify
         )
+        host_log = proxy.mitm_log.read_text()
     assert len(arrivals) == _SSE_EVENTS
+    # Every success now streams, so mitmproxy's per-response notice would be a line per request in
+    # the host log; the addon drops it (the egress log already records the request).
+    assert "Streaming response from" not in host_log
     sent_over = (_SSE_EVENTS - 1) * _SSE_GAP
     spread = arrivals[-1] - arrivals[0]
     assert spread > sent_over / 2, (
