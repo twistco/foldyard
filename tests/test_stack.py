@@ -771,13 +771,34 @@ def test_recreate_services_spans_running_extra_profiles(
 ):
     # Resnapshot services are typically profile-gated workers (`data`); a provider that drops a
     # service outside the requested profiles would otherwise make the heal a silent no-op.
-    monkeypatch.setattr(stack, "_running_extra_profiles", lambda ctx, deadline=None: ["data"])
+    monkeypatch.setattr(
+        stack, "_running_extra_profiles", lambda ctx, deadline=None, also=(): ["data"]
+    )
     ok, _ = stack.recreate_services(["queue-worker"])
     last = _composes(capture_run)[-1]
     assert ok is True
     assert last[last.index("--profile") + 1] == "data" and last.index("--profile") < last.index(
         "up"
     )
+
+
+def test_recreate_services_spans_the_profiles_of_the_crashed_services_it_brings_back(
+    fake_repo, capture_run, monkeypatch, running_services, crashed_services
+):
+    # A profile-gated worker that crashed while nothing else in its profile runs: discovery from
+    # RUNNING services alone leaves the profile out, so the render drops the very service the
+    # heal is reviving. Only the crashed services it brings back are spanned — not every crash.
+    crashed_services.update({"app", "unlisted"})
+    seen: list[set[str]] = []
+
+    def extras(ctx, deadline=None, also=()):
+        seen.append(set(also))
+        return ["data"]
+
+    monkeypatch.setattr(stack, "_running_extra_profiles", extras)
+    ok, _ = stack.recreate_services(["queue-worker", "app"])
+    assert ok is True
+    assert seen == [{"app"}]
 
 
 def test_recreate_services_reports_failure_instead_of_raising(fake_repo, monkeypatch):
@@ -2307,6 +2328,26 @@ def test_running_extra_profiles_discovers_from_compose(fake_repo, monkeypatch):
     assert stack._running_extra_profiles(ctx) == ["data", "e2e"]
     overlay.write_text("services: [broken")  # unreadable -f file → best-effort []
     assert stack._running_extra_profiles(ctx) == []
+
+
+def test_running_extra_profiles_also_spans_the_services_named(fake_repo, monkeypatch):
+    # The heal revives a CRASHED service too, and a crashed one isn't running: naming it enables
+    # its profile even when nothing else in that profile runs.
+    base = fake_repo / "compose.base.yml"
+    base.write_text("services:\n  app: {image: a}\n  queue-worker: {image: q, profiles: [data]}\n")
+    ctx = stack.Context(
+        main=fake_repo,
+        env={},
+        compose=["podman", "compose", "-f", str(base)],
+        app="app",
+        project="p",
+        worktree="",
+    )
+    monkeypatch.setattr(stack, "_running_services", lambda ctx, deadline=None: {"app"})
+    assert stack._running_extra_profiles(ctx) == []
+    assert stack._running_extra_profiles(ctx, also={"queue-worker"}) == ["data"]
+    monkeypatch.setattr(stack, "_running_services", lambda ctx, deadline=None: set())
+    assert stack._running_extra_profiles(ctx, also={"queue-worker"}) == ["data"]
 
 
 def test_up_unions_running_extra_profiles(fake_repo, capture_run, monkeypatch):

@@ -23,7 +23,7 @@ import shlex
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -1484,7 +1484,9 @@ def _crashed_services(ctx: Context, deadline: float | None = None) -> set[str]:
     return _compose_ps_crashed(out.stdout) if out.returncode == 0 else set()
 
 
-def _running_extra_profiles(ctx: Context, deadline: float | None = None) -> list[str]:
+def _running_extra_profiles(
+    ctx: Context, deadline: float | None = None, also: Iterable[str] = ()
+) -> list[str]:
     """Compose profiles OUTSIDE the posture-derived active set that currently have RUNNING
     services — e.g. the ``data`` workers ``just data-up`` started (that profile belongs to the
     developer, not the mode system). The posture reconcile and ``up`` union these into their
@@ -1495,9 +1497,10 @@ def _running_extra_profiles(ctx: Context, deadline: float | None = None) -> list
     themselves (:func:`_service_profiles`), not ``config --profiles``: the bundled podman-compose
     has no such flag, so discovery always came back empty there (#33). Fully generic, no profile
     names baked in. Best-effort: [] on any error (the reconcile then covers just the derived set,
-    as before). ``deadline`` bounds the probe (the heal's)."""
+    as before). ``deadline`` bounds the probe (the heal's); ``also`` names services to span as if
+    running — the crashed ones the heal brings back."""
     try:
-        running = _running_services(ctx, deadline)
+        running = (_running_services(ctx, deadline) or set()) | set(also)
         if not running:
             return []
         profiles = _service_profiles(ctx)
@@ -1575,7 +1578,7 @@ def recreate_services(
         idle = [s for s in services if s not in wanted]
         if not wanted:
             return True, f"none of {', '.join(services)} running — nothing to recreate"
-        extra = _running_extra_profiles(ctx, deadline)
+        extra = _running_extra_profiles(ctx, deadline, also=[s for s in wanted if s in crashed])
         # A named service the render leaves out is silently skipped by podman-compose (exit 0),
         # so only claim what the render has — the rest is reported, never "recreated".
         rendered = _rendered_services(ctx, extra, deadline)
