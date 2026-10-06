@@ -7,6 +7,7 @@ Pure file I/O and data — no network, no supervisor (its reporting is in test_s
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -113,3 +114,73 @@ def test_the_summary_is_sorted_and_shouts_the_elevated_levels():
         "actions:read, metadata:read, pull_requests:WRITE — selected repositories"
     )
     assert credscope.summary({"permissions": {}, "reach": ""}) == "no permissions"
+
+
+def test_a_level_foldyard_does_not_know_is_flagged_as_possibly_elevated():
+    # GitHub may add a level; unknown must not read as safe, so it is flagged with write/admin,
+    # named as unrecognised, and shown as it reads (in capitals, as every flagged level is).
+    permissions = {"actions": "read", "issues": "write", "workflows": "maintain"}
+    assert credscope.elevated(permissions) == ["issues", "workflows"]
+    assert credscope.unrecognised(permissions) == ["workflows"]
+    assert credscope.summary({"permissions": permissions}) == (
+        "actions:read, issues:WRITE, workflows:MAINTAIN"
+    )
+
+
+def test_a_new_level_drifts_like_any_other():
+    credscope.observe("github", _scope({"workflows": "maintain"}), "t1")
+    assert credscope.observe("github", _scope({"workflows": "admin"}), "t2") == (
+        "changed",
+        ["workflows maintain → admin"],
+    )
+
+
+def test_an_unreadable_probe_marks_the_record_stale_until_the_next_good_read():
+    credscope.observe("github", _scope({"issues": "write"}), "t1")
+    assert credscope.mark_unread("github", _APP, "t2") == {
+        "permissions": {"issues": "write"},
+        "reach": "selected repositories",
+        "checked": "t1",
+        "unread": "t2",
+    }
+    # The FIRST failed read is kept: "unreadable since" means since then.
+    marked = credscope.mark_unread("github", _APP, "t3")
+    assert marked is not None and marked["unread"] == "t2"
+    record = credscope.last("github", _APP)
+    assert record is not None and record["unread"] == "t2"
+    # A good read replaces the record, and the mark with it.
+    assert credscope.observe("github", _scope({"issues": "write"}), "t4") == ("same", [])
+    record = credscope.last("github", _APP)
+    assert record is not None and "unread" not in record and record["checked"] == "t4"
+
+
+def test_marking_a_credential_never_read_writes_nothing():
+    # Nothing is shown for it, so nothing can be stale: no record is invented.
+    assert credscope.mark_unread("github", _APP, "t1") is None
+    assert credscope.last("github", _APP) is None
+
+
+@pytest.mark.parametrize(
+    ("checked", "expected"),
+    [
+        ("2026-10-05T12:02:30+00:00", "just now"),
+        ("2026-10-05T11:20:00+00:00", "43m ago"),
+        ("2026-10-05T09:03:00+00:00", "3h ago"),
+        ("2026-10-01T12:03:00+00:00", "4d ago"),
+        ("2026-10-05T12:10:00+00:00", "just now"),  # a skewed clock, not a negative age
+        ("t1", ""),  # unparseable: no age rather than a wrong one
+    ],
+)
+def test_ago_is_coarse_because_it_answers_is_this_stale(checked, expected):
+    now = datetime(2026, 10, 5, 12, 3, tzinfo=UTC)
+    assert credscope.ago(checked, now) == expected
+
+
+def test_freshness_says_when_it_was_read_and_whether_reads_have_failed_since():
+    now = datetime(2026, 10, 5, 14, 3, tzinfo=UTC)
+    record = {"permissions": {}, "checked": "2026-10-05T12:03:00+00:00"}
+    assert credscope.freshness(record, now) == "probed 2h ago"
+    record["unread"] = "2026-10-05T13:03:00+00:00"
+    assert credscope.freshness(record, now) == (
+        "probed 2h ago; unreadable since 1h ago, may be stale"
+    )

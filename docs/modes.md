@@ -103,11 +103,12 @@ Two guard rails keep this honest:
   command, `fy mode <other>=off <switch>=on`). One switch may still split a host by path, as
   Codex on a ChatGPT subscription does. If such a pair is on anyway (a state file an older
   foldyard wrote, or an `[[inject]]` row adopted while both were on), the proxy injects
-  **neither** until one is off. The supervisor logs it and notifies you, and `fy mode`,
-  `fy state` and `fy doctor` show it. A request from the box to that host and path isn't sent:
-  the proxy answers it with a 502 whose JSON `message` is the same text, naming both switches
-  and the `fy mode` command to run on your computer, rather than let the box's placeholder draw
-  the provider's 401. The Network Log marks the row `credential overlap`.
+  **neither** until one is off. The supervisor logs it and notifies you, `fy mode`,
+  `fy state` and `fy doctor` show it, and `fy config widenings` marks both rows `HELD BACK`.
+  A request from the box to that host and path isn't sent: the proxy answers it with a 502
+  whose JSON `message` is the same text, naming both switches and the `fy mode` command to run
+  on your computer, rather than let the box's placeholder draw the provider's 401. The Network
+  Log marks the row `credential overlap`.
 
 ## DEGRADED — the switch is on, but the credential stopped working
 

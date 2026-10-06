@@ -98,6 +98,10 @@ class Target:
     # What the credential was last probed to grant, as report lines (see `_scope_lines`); () for a
     # kind whose probe reads no scope.
     scope: tuple[str, ...] = ()
+    # Why an ACTIVE target's credential isn't injected right now, one line per overlap: another
+    # switch's rule claims the same host and path, so the proxy holds both back
+    # (`Registry.injecting_rules`). Still listed — the declaration widens again once one is off.
+    held_back: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -225,16 +229,26 @@ def _targets(
     from .plugins.kinds import DEFAULT, KINDS
 
     reg = registry(cfg)
+    owned = reg.switch_rules(mode)
+    held = _held_back(reg.inject_overlaps(mode))
     out: list[Target] = []
     seen: set[str] = set()
 
-    def add(where: str, source: str, active: bool, cfg_host: bool, org: str = DEFAULT) -> None:
-        if where in seen:
+    def add(
+        where: str,
+        source: str,
+        active: bool,
+        cfg_host: bool,
+        org: str = DEFAULT,
+        held_back: tuple[str, ...] = (),
+        distinct: bool = False,
+    ) -> None:
+        # `distinct`: a rule the mode activates is a credential of its own even where another sits
+        # on the same host and path (that is exactly an overlap), so it's never folded by place.
+        if where in seen and not distinct:
             return
         seen.add(where)
-        out.append(
-            Target(host=where, source=source, active=active, from_config=cfg_host, origin=org)
-        )
+        out.append(Target(where, source, active, cfg_host, origin=org, held_back=held_back))
 
     for spec in config.inject_specs():
         kind = KINDS.get(str(spec.get("kind", DEFAULT)))
@@ -243,7 +257,7 @@ def _targets(
         if not (axis and host and kind):
             continue
         where = host + str(spec.get("path_prefix") or "")
-        seen.add(where)  # a packaged rule on the same host adds nothing the row didn't say
+        seen.add(where)  # a LATENT packaged rule on the same place adds nothing the row didn't say
         out.append(
             Target(
                 host=where,
@@ -252,10 +266,20 @@ def _targets(
                 from_config=True,
                 origin=origin,
                 scope=_scope_lines(axis, spec),
+                held_back=tuple(
+                    line for rule in owned.get(axis, []) for line in held.get(rule, ())
+                ),
             )
         )
+    # The rows' own active rules are in proxy_rules too; they were listed above, under the row.
+    listed = {
+        rule for spec in config.inject_specs() for rule in owned.get(str(spec.get("switch")), [])
+    }
     for rule in reg.proxy_rules(mode):  # what the CURRENT posture activates
-        add(rule.host + rule.path_prefix, rule.label or "packaged injector", True, False)
+        if rule in listed:
+            continue
+        where, label = rule.host + rule.path_prefix, rule.label or "packaged injector"
+        add(where, label, True, False, held_back=held.get(rule, ()), distinct=True)
     for axis, rungs in reg.switch_levels().items():  # …and what another rung would
         if not rungs or mode.get(axis, rungs[0]) != rungs[0]:
             continue  # already armed — its rules came from the pass above
@@ -271,12 +295,38 @@ def _targets(
     return out
 
 
+def _held_back(overlaps: list) -> dict:
+    """Each rule the proxy holds back (``Registry.injecting_rules``) → why, one line per overlap it
+    is in, in the words and with the commands ``fy mode``'s error row uses."""
+    from .plugins import overlap_fix
+
+    out: dict = {}
+    for overlap in overlaps:
+        fix = overlap_fix(overlap)
+        for i, rule in enumerate(overlap.rules):
+            if overlap.combined:
+                on = ", ".join(
+                    f"{s}={v}" for s, v in zip(overlap.switches, overlap.levels, strict=True)
+                )
+                line = (
+                    f"⚠ HELD BACK: {overlap.place} would get more than one credential with "
+                    f"{on or 'every switch at rest'}, so the proxy injects none of them there."
+                )
+            else:  # a plain pair: rules[i] is switches[i]'s (`Registry.inject_overlaps`)
+                line = (
+                    f"⚠ HELD BACK: overlaps `{overlap.switches[1 - i]}` on {overlap.place}, so "
+                    "the proxy injects neither credential there."
+                )
+            out.setdefault(rule, []).append(f"{line} {fix}" if fix else line)
+    return {rule: tuple(lines) for rule, lines in out.items()}
+
+
 def _scope_lines(switch: str, spec: dict) -> tuple[str, ...]:
     """What the row's credential was last probed to grant (ADR-0031: foldyard reports the scope a
     credential carries rather than capping it). From the supervisor's record, OFFLINE — a report
     never calls the provider — and only the record for the credential this row names, so a changed
     ``installation_id`` never shows the previous App's permissions as the new one's."""
-    from . import credscope
+    from . import credscope, devmode
     from .plugins.kinds import scope_identity
 
     identity = scope_identity(spec)
@@ -290,12 +340,26 @@ def _scope_lines(switch: str, spec: dict) -> tuple[str, ...]:
             "scope: not yet probed — the supervisor reads it while the switch is on "
             f"(`fy mode {switch}=on`)",
         )
-    lines = [f"scope (probed {record.get('checked') or '?'}): {credscope.summary(record)}"]
-    elevated = credscope.elevated(record["permissions"])
-    if elevated:
+    now = devmode.now()
+    checked = str(record.get("checked") or "?")
+    age = credscope.ago(checked, now)
+    lines = [f"scope (probed {checked}{', ' + age if age else ''}): {credscope.summary(record)}"]
+    permissions = record["permissions"]
+    unknown = credscope.unrecognised(permissions)
+    known = [name for name in credscope.elevated(permissions) if name not in unknown]
+    if known:
         lines.append(
-            f"⚠ write or admin: {', '.join(elevated)} — what the box can change through this "
+            f"⚠ write or admin: {', '.join(known)} — what the box can change through this "
             "credential"
+        )
+    if unknown:
+        levels = ", ".join(f"{name}:{permissions[name]}" for name in unknown)
+        lines.append(f"⚠ a level foldyard doesn't recognise, treated as write or admin: {levels}")
+    if record.get("unread"):
+        unread = str(record["unread"])
+        lines.append(
+            f"⚠ may be stale: the probe couldn't read the scope at {unread} "
+            f"({credscope.ago(unread, now) or '?'}) and hasn't since; this is the last reading"
         )
     return tuple(lines)
 
@@ -495,8 +559,9 @@ def render(exp: Exposure) -> list[str]:
     if not exp.targets:
         out.append("    none — no injector is declared or active.")
     for t in exp.targets:
-        state = "ON" if t.active else "off"
+        state = ("ON · HELD BACK" if t.held_back else "ON") if t.active else "off"
         out.append(f"    {t.host}   ← {t.source}  [{state}]{_shared_note(t.origin)}")
+        out += [f"      {line}" for line in t.held_back]
         out.append(
             "      Host is REPO CONFIG: adopting a change here re-points the credential."
             if t.from_config
@@ -604,8 +669,12 @@ def doctor_row(exp: Exposure) -> tuple[bool | None, str, str]:
     passthrough host or an injector is legitimate; it belongs in the report, not in a nag that
     never goes away."""
     detail = f"{exp.hosts} hosts exempt from capture"
-    targets = [t for t in exp.targets if t.active]
+    targets = [t for t in exp.targets if t.active and not t.held_back]
     detail += f", {len(targets)} injector target{'' if len(targets) == 1 else 's'} live"
+    held = sum(1 for t in exp.targets if t.active and t.held_back)
+    if held:
+        # The `credential overlap` row fails with the fix; this one only keeps its count honest.
+        detail += f", {held} held back by an overlap"
     pending = sum(1 for _h, _w, status in exp.recommended if status == "pending")
     if pending:
         # A pending recommendation is an outstanding OFFER, not a misconfiguration — it rides the

@@ -889,20 +889,31 @@ def run_capability_probes(wt: str, mode: dict, warming: Collection[str] = ()) ->
     return results
 
 
+# (switch, credential identity) pairs whose scope the probe last FAILED to read, so a standing
+# lapse is one log line, not one every probe interval.
+_scope_unread_seen: set[tuple[str, str]] = set()
+
+
 def _report_scope(probe: CapabilityProbe) -> None:
     """Record the scope ``probe``'s check just read, and say — once per change — that it changed
     (ADR-0031: foldyard reports a credential's scope rather than capping it, so a permission added
     on the provider's side, where no foldyard file changes, must still leave a line and a
     notification). The first observation of a credential is its baseline: logged, not pushed. An
-    unread scope (None) says nothing and keeps the record. Never raises into the tick."""
+    unread scope (None) keeps the record — an empty one would read as every permission removed —
+    and says so once (:func:`_report_unread_scope`). Never raises into the tick."""
+    key = (probe.switch, probe.scope_identity)
     try:
         scope = probe.scope() if probe.scope else None
         if scope is None:
+            _report_unread_scope(probe)
             return
         event, changes = credscope.observe(probe.switch, scope, devmode._iso(devmode.now()))
     except Exception as e:  # a scope record must never take the tick down
         log(f"scope: {probe.switch}: couldn't record the credential's scope ({e})")
         return
+    if key in _scope_unread_seen:
+        _scope_unread_seen.discard(key)
+        log(f"✓ {probe.switch}: the credential's scope is readable again ({scope.identity})")
     if event == "baseline":
         summary = credscope.summary({"permissions": scope.permissions, "reach": scope.reach})
         log(f"{probe.switch}: credential scope recorded ({scope.identity}) — {summary}")
@@ -910,6 +921,29 @@ def _report_scope(probe: CapabilityProbe) -> None:
         text = "; ".join(changes)
         log(f"⚠ {probe.switch}: the credential's scope changed ({scope.identity}) — {text}")
         _notify(f"fy {config.project()}: {probe.switch} scope changed", text)
+
+
+def _report_unread_scope(probe: CapabilityProbe) -> None:
+    """Say — once per lapse — that ``probe`` couldn't read its credential's scope, so what
+    ``fy config widenings``/``fy mode`` show is the last good reading and may be stale; and mark
+    the record so they say so too. Without this an unreadable answer froze the record silently,
+    drift detection with it. Raises ``OSError`` from the mark (the caller logs it)."""
+    key = (probe.switch, probe.scope_identity)
+    if key in _scope_unread_seen:
+        return
+    record = (
+        credscope.mark_unread(probe.switch, probe.scope_identity, devmode._iso(devmode.now()))
+        if probe.scope_identity
+        else None
+    )
+    _scope_unread_seen.add(key)
+    which = f" ({probe.scope_identity})" if probe.scope_identity else ""
+    shown = (
+        f"the scope shown is from {record['checked']} and may be stale"
+        if record
+        else "none is recorded yet"
+    )
+    log(f"⚠ {probe.switch}: the probe couldn't read the credential's scope{which} — {shown}")
 
 
 def write_capabilities(capabilities: dict[str, dict]) -> None:

@@ -144,3 +144,13 @@ def test_the_proxy_ca_is_never_the_operators():
     assert not ca.is_relative_to(Path.home() / ".mitmproxy")
     assert proxy._proxy_confdir() == ca.parent  # generation writes the test's tmp dir too
     assert ca.name == "mitmproxy-ca-cert.pem" and not ca.exists()
+
+
+def test_the_ambient_config_is_the_working_tree_never_the_operators_adopted_copy():
+    # Modules that bind config at import fill the memoized ambient read during COLLECTION, before
+    # conftest points the host read at the tree — from the operator's real adopted snapshot. A
+    # test then saw whatever this checkout path had adopted: green on a developer's adopted
+    # checkout, red in a fresh worktree of it. Every test must start from the tree.
+    from foldyard import config
+
+    assert config._toml() == config._tree_toml(config.repo_root())

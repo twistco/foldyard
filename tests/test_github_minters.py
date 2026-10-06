@@ -317,6 +317,7 @@ def test_the_probe_reads_the_installations_scope_with_the_app_jwt(monkeypatch):
         {"app_slug": "bot"},  # no permissions at all
         {"app_slug": "bot", "permissions": ["issues"]},  # not a map
         {"app_slug": "bot", "permissions": {"issues": 1}},  # not a level
+        {"app_slug": "bot", "permissions": {"issues": "read", "checks": None}},  # one isn't
     ],
 )
 def test_an_unreadable_scope_is_unavailable_not_guessed(monkeypatch, payload):
@@ -326,6 +327,20 @@ def test_an_unreadable_scope_is_unavailable_not_guessed(monkeypatch, payload):
     monkeypatch.setattr(gat, "_opener", lambda skip_port=None: _StubOpener(payload))
     ok, detail, scope = gat.installation_probe("1", "22", _PEM_B64)
     assert ok and scope is None and "scope unavailable" in detail
+
+
+def test_a_level_github_adds_later_is_kept_as_it_reads_not_dropped_with_the_rest(monkeypatch):
+    # GitHub's levels are read/write/admin today. A new one must not make the whole map
+    # "unavailable": the supervisor would keep the old record for good and stop seeing drift,
+    # including a real widening beside the new level. So it is recorded as it reads, and the
+    # detail counts it with the levels that can change things: unknown is not read as safe.
+    monkeypatch.setattr(gat, "app_jwt", lambda key, app_id, now=None: "signed.jwt")
+    payload = {**_INSTALLATION, "permissions": {"issues": "read", "workflows": "maintain"}}
+    monkeypatch.setattr(gat, "_opener", lambda skip_port=None: _StubOpener(payload))
+    ok, detail, scope = gat.installation_probe("1", "22", _PEM_B64)
+    assert ok and scope is not None
+    assert scope["permissions"] == {"issues": "read", "workflows": "maintain"}
+    assert "2 permissions, 1 at write, admin or a level foldyard doesn't know" in detail
 
 
 def test_a_suspended_installation_degrades_the_switch(monkeypatch):

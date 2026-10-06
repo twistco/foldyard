@@ -122,8 +122,10 @@ The resting state is **zero secrets in the VM**: no key files, no token environm
   the repositories it serves
   ([ADR-0031](./adrs/0031-credentials-are-protocol-kinds-the-credential-owns-its-scope.md)).
   It reports them instead: `fy config widenings` shows the permissions last read from the
-  installation, flagging `write` and `admin`, and when a reading changes (no foldyard file
-  changed, so nothing else would say so) the supervisor logs it and sends a notification.
+  installation and when, flagging `write`, `admin` and any level foldyard doesn't recognise, and
+  when a reading changes (no foldyard file changed, so nothing else would say so) the supervisor
+  logs it and sends a notification. A probe that can't read the scope leaves the last reading
+  marked as possibly stale and logs that once, so a frozen record can't pass for a current one.
 - **Token services are built in, never repo code.** The `[[inject]]` kinds foldyard ships
   (`static`, `github-app`, `gh-cli`), the Codex refresh flow, or an installed plugin are the only
   ones that run. There is no config key naming a command to run and no token-service path inside the repo:

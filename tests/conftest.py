@@ -170,15 +170,18 @@ def isolated_capability_state(tmp_path, monkeypatch):
     clock to real time, so no test reads or writes the real ~/.foldyard capabilities.json — or
     picks up a developer's live `fy clock` skew (FOLDYARD_CLOCK_OFFSET=0 short-circuits the
     offset-file read). Also resets the supervisor's per-process probe cache. The credential scope
-    record (credscope) lives beside it and is isolated the same way."""
+    record (credscope) lives beside it and is isolated the same way, with the supervisor's memory
+    of which scopes it has already reported unreadable."""
     from foldyard import supervisor
 
     monkeypatch.setenv("FOLDYARD_CAPABILITIES_FILE", str(tmp_path / "capabilities.json"))
     monkeypatch.setenv("FOLDYARD_CREDENTIAL_SCOPES_FILE", str(tmp_path / "credential-scopes.json"))
     monkeypatch.setenv("FOLDYARD_CLOCK_OFFSET", "0")
     supervisor._probe_state.clear()
+    supervisor._scope_unread_seen.clear()
     yield
     supervisor._probe_state.clear()
+    supervisor._scope_unread_seen.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -232,6 +235,11 @@ def ambient_reads_the_tree(monkeypatch):
     from foldyard import config
 
     monkeypatch.setattr(config, "_host_toml", config._tree_toml)
+    # The ambient resolution is memoized, and modules that bind config at import (machine.MACHINE
+    # …) fill that cache at COLLECTION, before this patch — from the operator's REAL adopted
+    # snapshot for this checkout path. Without clearing it a test read that instead of the tree:
+    # green where the developer had adopted the checkout, red in a fresh worktree of it.
+    config.clear_caches()
 
 
 @pytest.fixture(autouse=True)

@@ -457,9 +457,10 @@ def read_capabilities() -> dict:
 
 
 def scope_summary(axis: str) -> str:
-    """What ``axis``'s credential was last probed to grant, as one line (:mod:`foldyard.credscope`,
-    ADR-0031), or ``""`` — a switch whose kind reads no scope, one not probed yet, or the box, which
-    can't read the host's record. Offline: the supervisor's record, never the provider."""
+    """What ``axis``'s credential was last probed to grant, and how long ago, as one line
+    (:mod:`foldyard.credscope`, ADR-0031), or ``""`` — a switch whose kind reads no scope, one not
+    probed yet, or the box, which can't read the host's record. Offline: the supervisor's record,
+    never the provider."""
     from . import credscope
     from .plugins.kinds import scope_identity
 
@@ -469,7 +470,9 @@ def scope_summary(axis: str) -> str:
         if spec.get("switch") == axis:
             identity = scope_identity(spec)
             record = credscope.last(axis, identity) if identity else None
-            return credscope.summary(record) if record else ""
+            if record is None:
+                return ""
+            return f"{credscope.summary(record)} ({credscope.freshness(record, now())})"
     return ""
 
 

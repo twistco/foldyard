@@ -177,17 +177,16 @@ def installation_token(
     return str(token)
 
 
-_ACCESS_LEVELS = ("read", "write", "admin")
-
-
 def _scope(payload: dict) -> dict | None:
     """The installation's scope from its metadata — ``{"permissions": {name: level},
     "repository_selection": "all" | "selected"}`` — or None when the payload doesn't carry one
     this can read. Never a guess: an empty map would read as "grants nothing", which the next good
-    read would then report as a widening."""
+    read would then report as a widening. A level is any string: one GitHub adds later is kept as
+    it reads (and flagged, by :func:`foldyard.credscope.elevated`), because refusing the whole map
+    over it would leave the record frozen and drift unreported, a real widening included."""
     permissions = payload.get("permissions")
     if not isinstance(permissions, dict) or not all(
-        isinstance(k, str) and v in _ACCESS_LEVELS for k, v in permissions.items()
+        isinstance(k, str) and isinstance(v, str) for k, v in permissions.items()
     ):
         return None
     return {
@@ -256,10 +255,12 @@ def installation_probe(
         return True, f"App '{slug}' authenticates (key valid); scope unavailable", None
     levels = scope["permissions"].values()
     elevated = sum(1 for level in levels if level != "read")
+    unknown = any(level not in ("read", "write", "admin") for level in levels)
+    at = "write, admin or a level foldyard doesn't know" if unknown else "write or admin"
     return (
         True,
         f"App '{slug}' authenticates (key valid); installation grants {len(levels)} "
-        f"permission{'' if len(levels) == 1 else 's'}, {elevated} at write or admin",
+        f"permission{'' if len(levels) == 1 else 's'}, {elevated} at {at}",
         scope,
     )
 

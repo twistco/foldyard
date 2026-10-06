@@ -139,6 +139,86 @@ def test_a_kinds_pinned_host_is_reported_and_two_rows_on_one_host_both_show(chec
     assert "gh-cli" in user.source and "your own gh token" in user.source
 
 
+def test_two_switches_overlapping_are_listed_but_marked_held_back(checkout):
+    """Both on, both on api.github.com: the proxy is handed neither (`Registry.injecting_rules`),
+    so `[ON]` alone would contradict `fy mode`'s error row. Each row stays listed — the declaration
+    is still a widening the moment one switch goes off — and says why it isn't injected now."""
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    targets = collect(cfg, {"github": "on", "github-user": "on"}).targets
+    app, user = (
+        next(t for t in targets if f"[[inject]] {s} " in t.source)
+        for s in ("github", "github-user")
+    )
+
+    hint = "Turn one off first: `fy mode github-user=off` or `fy mode github=off`"
+    assert app.active and user.active
+    assert app.held_back == (
+        f"⚠ HELD BACK: overlaps `github-user` on api.github.com, so the proxy injects neither "
+        f"credential there. {hint}",
+    )
+    assert user.held_back == (
+        f"⚠ HELD BACK: overlaps `github` on api.github.com, so the proxy injects neither "
+        f"credential there. {hint}",
+    )
+    body = rendered(cfg, {"github": "on", "github-user": "on"})
+    assert body.count("[ON · HELD BACK]") == 2 and "[ON]" not in body
+    # One switch on: nothing overlaps, nothing is held back.
+    alone = collect(cfg, {"github": "on"}).targets
+    assert all(t.held_back == () for t in alone)
+
+
+def test_a_combined_overlap_is_held_back_with_the_command_that_ends_it():
+    # A rule only several switches produce together belongs to none of them, so the line names the
+    # combination and the way out, as `fy mode`'s error row does — never a guessed "other switch".
+    from foldyard.plugins import InjectOverlap, InjectRule
+
+    x = InjectRule(host="api.x.test", header="Authorization", minter="1")
+    y = InjectRule(host="api.x.test", header="Authorization", minter="2", path_prefix="/v1")
+    overlap = InjectOverlap(
+        ("b", "c"), ("on", "on"), ("off", "off"), (x, y), combined=True, fix="together"
+    )
+    held = exposure._held_back([overlap])
+    assert (
+        held[x]
+        == held[y]
+        == (
+            "⚠ HELD BACK: api.x.test/v1 would get more than one credential with b=on, c=on, so the "
+            "proxy injects none of them there. No one of them ends it alone; turn them off together: "
+            "`fy mode b=off c=off`",
+        )
+    )
+
+
+def test_a_packaged_rule_overlapping_an_inject_row_is_listed_too(checkout):
+    # An [[inject]] row and keyless Claude both on api.anthropic.com: the proxy holds back BOTH, so
+    # both must be listed. Location-based de-duplication (which keeps a row's own rule from showing
+    # twice) dropped Claude's — a second credential, not the row's — and the doctor counted one.
+    cfg = checkout(
+        BASE
+        + "passthrough = []\n"
+        + '[claude]\nkeyless = "api-key"\n\n'
+        + '[[inject]]\nswitch = "anth"\nhost = "api.anthropic.com"\nheader = "x-api-key"\n'
+    )
+    mode = {"anth": "on", "claude": "on"}
+    on_host = [t for t in collect(cfg, mode).targets if t.host == "api.anthropic.com" and t.active]
+    assert len(on_host) == 2
+    assert all(t.held_back for t in on_host)
+    _ok, _name, detail = exposure.doctor_row(collect(cfg, mode))
+    assert "2 held back by an overlap" in detail
+    # One credential alone is still listed once: a row's own rule never shows twice.
+    alone = [t for t in collect(cfg, {"anth": "on"}).targets if t.host == "api.anthropic.com"]
+    assert len([t for t in alone if t.active]) == 1
+
+
+def test_the_doctor_row_does_not_count_a_held_back_target_as_live(checkout):
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    ok, _name, detail = exposure.doctor_row(collect(cfg, {"github": "on", "github-user": "on"}))
+    # Not a WARN of its own: the `credential overlap` row already fails, with the fix.
+    assert ok is True
+    assert "0 injector targets live" in detail
+    assert "2 held back by an overlap" in detail
+
+
 def _record_scope(identity: str, permissions: dict, reach: str = "selected repositories"):
     from foldyard import credscope
     from foldyard.plugins import CredentialScope
@@ -146,6 +226,16 @@ def _record_scope(identity: str, permissions: dict, reach: str = "selected repos
     credscope.observe(
         "github", CredentialScope(identity, permissions, reach), "2026-10-05T12:03:00+00:00"
     )
+
+
+@pytest.fixture(autouse=True)
+def two_hours_after_the_probe(monkeypatch):
+    """The report's clock, two hours after `_record_scope`'s reading, so ages are deterministic."""
+    from datetime import UTC, datetime
+
+    from foldyard import devmode
+
+    monkeypatch.setattr(devmode, "now", lambda: datetime(2026, 10, 5, 14, 3, tzinfo=UTC))
 
 
 def test_a_github_app_row_reports_the_last_probed_scope_and_flags_write(checkout, monkeypatch):
@@ -158,7 +248,7 @@ def test_a_github_app_row_reports_the_last_probed_scope_and_flags_write(checkout
     cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
     app = next(t for t in collect(cfg).targets if "[[inject]] github " in t.source)
     assert app.scope == (
-        "scope (probed 2026-10-05T12:03:00+00:00): actions:read, issues:WRITE — selected "
+        "scope (probed 2026-10-05T12:03:00+00:00, 2h ago): actions:read, issues:WRITE — selected "
         "repositories",
         "⚠ write or admin: issues — what the box can change through this credential",
     )
@@ -167,6 +257,31 @@ def test_a_github_app_row_reports_the_last_probed_scope_and_flags_write(checkout
     # A kind that reads no scope reports none.
     user = next(t for t in collect(cfg).targets if "github-user" in t.source)
     assert user.scope == ()
+
+
+def test_a_level_foldyard_does_not_know_is_flagged_on_its_own_line(checkout):
+    # Unknown must not read as safe: it is named, as it reads, as possibly elevated.
+    _record_scope("App 1, installation 2", {"issues": "write", "workflows": "maintain"})
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    app = next(t for t in collect(cfg).targets if "[[inject]] github " in t.source)
+    assert app.scope[1:] == (
+        "⚠ write or admin: issues — what the box can change through this credential",
+        "⚠ a level foldyard doesn't recognise, treated as write or admin: workflows:maintain",
+    )
+
+
+def test_a_scope_the_probe_can_no_longer_read_is_shown_as_possibly_stale(checkout):
+    from foldyard import credscope
+
+    _record_scope("App 1, installation 2", {"actions": "read"})
+    credscope.mark_unread("github", "App 1, installation 2", "2026-10-05T13:03:00+00:00")
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    app = next(t for t in collect(cfg).targets if "[[inject]] github " in t.source)
+    assert app.scope == (
+        "scope (probed 2026-10-05T12:03:00+00:00, 2h ago): actions:read — selected repositories",
+        "⚠ may be stale: the probe couldn't read the scope at 2026-10-05T13:03:00+00:00 (1h ago) "
+        "and hasn't since; this is the last reading",
+    )
 
 
 def test_an_unprobed_github_app_says_so_and_how_it_gets_probed(checkout):
@@ -193,7 +308,7 @@ def test_a_read_only_scope_raises_no_flag(checkout):
     cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
     app = next(t for t in collect(cfg).targets if "[[inject]] github " in t.source)
     assert app.scope == (
-        "scope (probed 2026-10-05T12:03:00+00:00): actions:read — all repositories",
+        "scope (probed 2026-10-05T12:03:00+00:00, 2h ago): actions:read — all repositories",
     )
 
 

@@ -297,29 +297,38 @@ class InjectOverlap:
         return _rule_host(a) + max(a.path_prefix, b.path_prefix, key=len)
 
 
+def overlap_fix(overlap: InjectOverlap) -> str:
+    """The way out of ``overlap`` as a sentence of ``fy mode`` commands, or ``""`` when no change
+    of the active switches ends it. Shared by ``mode_issues`` and ``fy config widenings``."""
+    pairs = list(zip(overlap.switches, overlap.levels, overlap.defaults, strict=True))
+    if not overlap.combined:
+        (a, _, da), (b, _, db) = pairs
+        return f"Turn one off first: `fy mode {b}={db}` or `fy mode {a}={da}`"
+    if overlap.fix == "each" and pairs:
+        return "Turn one off first: " + " or ".join(f"`fy mode {s}={d}`" for s, _, d in pairs)
+    if overlap.fix == "together":
+        rest = " ".join(f"{s}={d}" for s, _, d in pairs)
+        return f"No one of them ends it alone; turn them off together: `fy mode {rest}`"
+    return ""
+
+
 def _overlap_message(group: list[InjectOverlap]) -> str:
     """One ``mode_issues`` row for every place a pair of switches both claim."""
     places = ", ".join(dict.fromkeys(o.place for o in group))
     first = group[0]
+    way = overlap_fix(first)
     if first.combined:
-        pairs = list(zip(first.switches, first.levels, first.defaults, strict=True))
-        on = ", ".join(f"{s}={v}" for s, v, _ in pairs)
-        if first.fix == "each" and pairs:
-            way = " Turn one off first: " + " or ".join(f"`fy mode {s}={d}`" for s, _, d in pairs)
-        elif first.fix == "together":
-            rest = " ".join(f"{s}={d}" for s, _, d in pairs)
-            way = f" No one of them ends it alone; turn them off together: `fy mode {rest}`"
-        else:
-            way = ""
+        on = ", ".join(f"{s}={v}" for s, v in zip(first.switches, first.levels, strict=True))
         return (
             f"{places} would get more than one credential with {on or 'every switch at rest'}:"
             " a rule there appears only with several switches on together, so no single one"
-            " accounts for it, and the proxy injects none of them there." + way
+            " accounts for it, and the proxy injects none of them there."
+            + (" " + way if way else "")
         )
-    (a, b), (va, vb), (da, db) = first.switches, first.levels, first.defaults
+    (a, b), (va, vb) = first.switches, first.levels
     return (
         f"{a}={va} and {b}={vb} both inject a credential on {places}, so the proxy injects "
-        f"neither while both are on. Turn one off first: `fy mode {b}={db}` or `fy mode {a}={da}`"
+        f"neither while both are on. {way}"
     )
 
 
@@ -416,6 +425,9 @@ class CapabilityProbe:
     # Read right after each `check`: the scope that check observed, or None when it read none
     # (a failure, an unreadable answer) — never a guess (see CredentialScope).
     scope: Callable[[], CredentialScope | None] | None = None
+    # Which credential ``scope`` reads (its CredentialScope.identity), so a check that read none
+    # can still name the record it leaves standing, and mark it possibly stale.
+    scope_identity: str = ""
 
 
 @dataclass(frozen=True)
