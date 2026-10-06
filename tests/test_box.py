@@ -119,6 +119,7 @@ def fake(tmp_path, monkeypatch):
         "box_foldyard": None,
         "oci_runtime": "crun",  # what `inspect {{.OCIRuntime}}` reports after create
         "image_locales": [],  # what `locale -a` lists in the image (the create-time probe)
+        "image_lc_all": "",  # the image's own LC_ALL, as the same probe reads it
     }
 
     envs: list[dict | None] = []
@@ -148,7 +149,8 @@ def fake(tmp_path, monkeypatch):
             return _Proc(0 if state["net_exists"] else 1)
         if cmd[1:3] == ["run", "--rm"]:
             listed = "".join(f"\n{name}" for name in state["image_locales"])
-            return _Proc(0, "/home/vscode /home/vscode/.claude" + listed)
+            lc_all = f"\nlc_all={state['image_lc_all']}"
+            return _Proc(0, "/home/vscode /home/vscode/.claude" + lc_all + listed)
         if cmd[1] == "exec" and cmd[-1] == "foldyard --version":
             v = state["box_foldyard"]
             v = foldyard.__version__ if v is None else v
@@ -370,6 +372,25 @@ def test_up_skips_a_time_locale_the_image_lacks(fake, monkeypatch):
     assert box.main("up") == 0
     values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
     assert "TZ=Europe/London" in values
+    assert not [v for v in values if v.startswith("LC_TIME=")]
+
+
+def test_up_skips_the_time_locale_when_lc_all_would_override_it(fake, monkeypatch):
+    # LC_ALL beats LC_TIME (glibc, and Claude Code's own LC_ALL || LC_TIME || LANG): under an
+    # image's or `[box].env`'s LC_ALL, a passed LC_TIME would be silently ignored.
+    _clock(monkeypatch, zone="Europe/London", locale="en_GB.UTF-8")
+    fake["state"]["image_locales"] = ["C.utf8", "en_GB.utf8"]
+    fake["state"]["image_lc_all"] = "C.UTF-8"
+    assert box.main("up") == 0
+    values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert "TZ=Europe/London" in values
+    assert not [v for v in values if v.startswith("LC_TIME=")]
+
+    fake["calls"].clear()
+    fake["state"]["image_lc_all"] = ""
+    monkeypatch.setattr(config, "box_env", lambda: {"LC_ALL": "C.UTF-8"})
+    assert box.main("up") == 0
+    values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
     assert not [v for v in values if v.startswith("LC_TIME=")]
 
 
