@@ -2845,11 +2845,11 @@ def test_the_live_file_names_the_open_learn_window(monkeypatch):
 
 
 def test_image_pull_hosts_are_tunnelled_by_the_default_passthrough():
-    # A pull is podman's own traffic in the guest, through the VM-wide proxy env: it carries no
-    # build marker and trusts no proxy CA, so a decrypted registry blob host fails the pull with
-    # x509 "unknown authority" (the Lima host e2e, 2026-09-23: Docker Hub served a blob from
-    # production.cloudfront.docker.com). Every registry host `fy init` recommends for image builds
-    # must therefore be on the default `@all` list.
+    # A pull is podman's own traffic in the guest, through the VM-wide proxy env. The walled
+    # guest's store now trusts the proxy CA, so a decrypted registry verifies; before that, one
+    # failed x509 "unknown authority" (the Lima host e2e, 2026-09-23: Docker Hub served a blob
+    # from production.cloudfront.docker.com). The registry hosts stay on the default `@all` list
+    # for a VM provisioned without a CA, and until the passthrough default is decided.
     import inspect
 
     from foldyard import init as init_mod
