@@ -157,9 +157,17 @@ and sets `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_S
   (`NODE_EXTRA_CA_CERTS` adds to it). Set those variables in the image or compose file to a
   bundle holding both your CA and `/etc/fy-proxy-ca.pem`, built at container start, and yours
   win.
+- **Build steps too.** podman gives a build's `RUN` step the CA files but not those variables,
+  so the VM's boot setup puts a small wrapper in front of the container runtime that adds them
+  when a container (a build step included) has the CA mounted and doesn't set them itself. A
+  `RUN` step's `curl`, `apk`, `pip`, `uv`, `npm` and `git` then work against a decrypted host,
+  and installing `ca-certificates` in a step still works (nothing is mounted over the system
+  store). Nothing is written into the image: the variables exist only while the step runs. An
+  `ENV` in your Dockerfile wins, as it does for running containers.
 - **Clients with their own trust store** (a Java keystore, a browser's NSS database, a binary
-  with bundled roots) ignore those variables. Add the CA to that store in your image, or put the
-  host on `passthrough`.
+  with bundled roots) ignore those variables, and so does a GnuTLS client (Debian's `apt` over
+  HTTPS, `wget`), which reads only the image's system store. Add the CA to that store in your
+  image, or put the host on `passthrough`.
 - **Image pulls trust it too.** The same boot setup adds the CA to the VM's own trust store,
   which podman checks image pulls against, so a registry the proxy decrypts still works. Turning
   the VM firewall off takes it out again.
@@ -172,19 +180,17 @@ and sets `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_S
 With the VM firewall on, image builds (`fy box build`, and the stack build `fy up` runs) also go
 out through the proxy. How that works:
 
-- **Tunnelled, not decrypted.** A build step doesn't get the proxy's trust settings (podman
-  applies its default environment to running containers, not to builds), so foldyard gives
-  the build a proxy URL carrying a secret it creates for that build (user `fy-build`, the secret
-  as the password), and the proxy tunnels those connections. The log shows them as `tls tunnel`
-  rows flagged `build`.
+- **Tunnelled, not decrypted, when started on your computer.** foldyard gives the build a
+  proxy URL carrying a secret it creates for that build (user `fy-build`, the secret as the
+  password), and the proxy tunnels those connections. The log shows them as `tls tunnel` rows
+  flagged `build`.
 - **The allowlist still applies.** Being a build changes what is decrypted, never what the
   runtime allowlist allows ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)).
 - **Only a build started on your computer is one.** The `fy-build` user without a live secret
   counts for nothing, so a program in the box can't use it to hide what it fetches. A build you
-  start *inside* the box (`fy up` there) is the box as far as the proxy is concerned: decrypted
-  like any box request. A host on `passthrough` is unaffected; any other HTTPS host fails a build
-  step's certificate check, since a build step doesn't trust the proxy's CA. Run that build from
-  your computer, or put the host on `passthrough`.
+  start *inside* the box (`fy up` there, or `podman build`) is the box as far as the proxy is
+  concerned: decrypted and logged like any box request. Its steps trust the proxy's CA (below),
+  so it works the same either way.
 
 When the allowlist refuses a build, the tool's error names the URL it *asked* for, which is often
 not the host that was refused: a CDN can redirect inside the tunnel (Playwright's

@@ -24,8 +24,8 @@ remains is one build's window (ADR-0029): the box can read a running build's sec
 engine socket.
 
 In the box the gate stays out of the way: grants are host-side and the log is outside the mount.
-An in-box build IS the box, so it gets the plain proxy URL: decrypted like any box request (a host
-off `passthrough` fails its TLS, since a build step has no proxy CA), on runtime grants only.
+An in-box build IS the box, so it gets the plain proxy URL: decrypted like any box request (its
+steps trust the proxy CA through the walled VM's runtime wrapper), on runtime grants only.
 """
 
 from __future__ import annotations

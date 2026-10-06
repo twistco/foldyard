@@ -113,7 +113,9 @@ never `flush ruleset`, because netavark/pasta keep their own nft state):
 - The proxy CA, embedded in the boot script by the host: in the guest's own trust store (what
   podman verifies pulls against; `update-ca-trust`, one fixed anchor name so a rotated CA replaces
   the old one, taken out again when the firewall is off), and in every container via a root-owned
-  `containers.conf.d` drop-in.
+  `containers.conf.d` drop-in. Build `RUN` steps get the drop-in's mounts but not its env, so a
+  second drop-in points podman's `crun` at a root-owned wrapper that adds the env to a create
+  whose spec mounts the CA (`/usr/local/libexec/fy-oci/`).
 - A systemd `fy-wall.service` (oneshot nft load) keeps it across restarts.
 
 **Set up at boot, as root; the host never runs `sudo` in the guest.** `machine.ensure` /

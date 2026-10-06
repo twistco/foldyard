@@ -115,10 +115,25 @@ belongs in the middle — but *one* middle, not a switch between two.
   rows `build` (what the gate offers the operator), only when it presents a live per-build secret;
   the `fy-build` user without one is an ordinary box request. The concession narrows to the same
   one-build window as the grants. **A build the box starts is the box**: it gets the plain proxy
-  URL and is decrypted like any box request, so its RUN steps reach `passthrough` hosts but fail
-  verification against any other HTTPS host (a build step has no CA). Such an image builds from
-  the host, or the host goes on `passthrough`. Rejected: minting a secret for an in-box build — the
+  URL and is decrypted like any box request. Rejected: minting a secret for an in-box build — the
   box would hold a working marker again.
+- **Build steps trust the CA** (amended 2026-10-06). Decrypted, an in-box build's RUN steps had
+  no CA: podman gives a build the containers.conf drop-in's mounts but not its env (the spike on
+  podman 5.8.7), so `apk`, `curl`, `pip`, `uv` and `npm` failed against every host off
+  `passthrough` (seen live on foldyard-example). The walled boot provisioning now fronts crun with
+  a root-owned wrapper (the drop-in keeps the runtime's NAME and changes its path, so podman's
+  per-runtime behaviour is unchanged): on a create whose spec mounts the CA it adds the four
+  variables the spec doesn't set, so an image's ENV, a Dockerfile `ENV` and a create's own env
+  still win. It reaches every create — a RUN step from the host or the box, a docker-compat
+  create — and nothing lands in an image, since the spec is the runtime's, not a layer. Weighed
+  and rejected: binding the combined bundle over the distro store (a RUN step that installs
+  `ca-certificates` fails renaming over a mount point, and an image's own private CA is
+  replaced); `podman build --env` (persisted into the image config); a Dockerfile `ARG` or
+  `--mount` (a consumer edit). Not covered: GnuTLS clients (Debian `apt` over HTTPS, `wget`),
+  which read only the image's store, Java and NSS stores, and the gVisor posture's runtime,
+  which the wrapper doesn't front. The same change fixed the combined bundle on Fedora 44, which
+  has no `/etc/pki/tls/certs/ca-bundle.crt`: it held the proxy CA alone, so an `SSL_CERT_FILE`
+  client failed every `passthrough` host.
 - **Image pulls relied on `passthrough`** (until 2026-10). A pull is the guest podman's own
   traffic, through the VM-wide proxy env: no build marker, and then no proxy CA. A decrypted
   registry blob host failed it with x509 "unknown authority" (the Lima host e2e, when Docker Hub

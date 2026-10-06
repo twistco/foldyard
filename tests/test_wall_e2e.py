@@ -264,6 +264,37 @@ def test_a_stack_container_trusts_the_proxy(repo):
     assert out.stdout.split() == ["example.com", "200", "pypi.org", "200"], out.stdout
 
 
+@pytest.mark.parametrize(
+    "steps",
+    [
+        # Alpine: apk fetches over HTTPS from a host on no passthrough bundle, then curl.
+        "FROM docker.io/library/alpine:3.20\nRUN apk add --no-cache curl\n",
+        # Debian: installing ca-certificates rewrites the system store in the step itself —
+        # nothing may be mounted over it.
+        "FROM docker.io/library/debian:bookworm-slim\n"
+        "RUN apt-get update -qq && apt-get install -y -qq curl ca-certificates\n",
+    ],
+    ids=["alpine", "debian"],
+)
+def test_a_build_step_trusts_the_proxy(repo, tmp_path, steps):
+    # A build with no build secret — what a build started inside the box sends — is decrypted
+    # like any box request, so its RUN steps need the CA: podman gives them the CA drop-in's
+    # mounts but not its env, and the runtime wrapper adds it. Before it, apk failed verifying
+    # dl-cdn.alpinelinux.org and curl example.com (seen live, 2026-10-06).
+    (tmp_path / "Containerfile").write_text(
+        steps + "RUN curl -sS -o /dev/null -w 'HTTP=%{http_code}\\n' https://example.com\n"
+    )
+    out = engine("build", "--no-cache", "-t", "fy-e2e-build-ca", str(tmp_path), timeout=600)
+    try:
+        assert out.returncode == 0, f"{out.stdout[-3000:]}\n{out.stderr[-3000:]}"
+        assert "HTTP=200" in out.stdout + out.stderr
+        # Nothing of foldyard's lands in the image: the env exists only while a step runs.
+        env = engine("image", "inspect", "fy-e2e-build-ca", "--format", "{{json .Config.Env}}")
+        assert "fy-proxy-ca" not in env.stdout, env.stdout
+    finally:
+        engine("rmi", "-f", "fy-e2e-build-ca")
+
+
 def test_a_verb_without_the_wall_config_is_refused_on_the_walled_vm(repo):
     # No MACHINE_WALL here: the config now wants un-walled provisioning, the running guest reports
     # the walled one — refused with the restart advice, never silently served.

@@ -76,6 +76,107 @@ _guest_trust() {
     "${update[@]}"
 }
 
+# Build RUN steps: podman applies the CA drop-in's MOUNTS to a build's RUN step but not its env,
+# and a build has no other way in that isn't a line in the consumer's Dockerfile or baked into the
+# image. So crun is fronted by a wrapper: a drop-in points podman's `crun` at it (the NAME stays
+# `crun`, so podman's per-runtime behaviour is unchanged, and the real crun is the fallback), and
+# on a create whose spec mounts the CA the helper adds the four variables the spec doesn't already
+# set — an image's own ENV, a Dockerfile ENV and a create's explicit env still win, exactly as for
+# the drop-in. Every create passes through it (a build's RUN step from the host or the box, a
+# docker-compat create); nothing lands in an image, since the spec is the runtime's, not a layer.
+# Anything unexpected leaves the spec as the engine wrote it, and crun runs regardless.
+_oci_wrapper() {
+    local crun
+    crun="$(command -v crun || true)"
+    if [ -z "$crun" ] || [ ! -x /usr/bin/python3 ]; then
+        echo "⚠ proxy CA: no crun or python3 in this guest; build steps won't trust it" >&2
+        return 0
+    fi
+    install -d -m 0755 /usr/local/libexec/fy-oci
+    cat >/usr/local/libexec/fy-oci/ca-env.py <<'__FY_CA_ENV__'
+"""foldyard (fy-machine-wall): add the proxy CA's env to a container spec that mounts the CA.
+
+Called by the crun wrapper beside it with crun's own argv. Only a create (or run) names a bundle;
+anything else, or anything unexpected, leaves the spec untouched."""
+
+import json
+import os
+import sys
+
+CA = "/etc/fy-proxy-ca.pem"
+BUNDLE = "/etc/fy-proxy-ca-combined.pem"
+ENV = (
+    ("NODE_EXTRA_CA_CERTS", CA),
+    ("SSL_CERT_FILE", BUNDLE),
+    ("REQUESTS_CA_BUNDLE", BUNDLE),
+    ("GIT_SSL_CAINFO", BUNDLE),
+)
+
+
+def bundle_of(argv):
+    for i, arg in enumerate(argv):
+        if arg in ("--bundle", "-b") and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--bundle="):
+            return arg[len("--bundle=") :]
+    return None
+
+
+def patch(path):
+    with open(path) as fh:
+        spec = json.load(fh)
+    if not any(m.get("destination") == BUNDLE for m in spec.get("mounts") or []):
+        return
+    process = spec["process"]
+    env = process.get("env") or []
+    have = set(e.split("=", 1)[0] for e in env)
+    add = [name + "=" + value for name, value in ENV if name not in have]
+    if not add:
+        return
+    process["env"] = env + add
+    tmp = path + ".fy-tmp"
+    with open(tmp, "w") as fh:
+        json.dump(spec, fh)
+    os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+    os.replace(tmp, path)
+
+
+def main(argv):
+    bundle = bundle_of(argv)
+    if bundle:
+        try:
+            patch(os.path.join(bundle, "config.json"))
+        except Exception:
+            pass  # never in the container's way: the spec stays as the engine wrote it
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+__FY_CA_ENV__
+    sed "s|__FY_CRUN__|$crun|" >/usr/local/libexec/fy-oci/crun <<'__FY_OCI__'
+#!/bin/sh
+# foldyard (fy-machine-wall): crun, with the proxy CA's env added to a create whose spec mounts
+# the CA (ca-env.py). Only a create names a bundle; every other call goes straight to crun.
+case " $* " in
+*" --bundle "* | *" --bundle="* | *" -b "*)
+    /usr/bin/python3 -I /usr/local/libexec/fy-oci/ca-env.py "$@" || :
+    ;;
+esac
+exec __FY_CRUN__ "$@"
+__FY_OCI__
+    chmod 0644 /usr/local/libexec/fy-oci/ca-env.py
+    chmod 0755 /usr/local/libexec/fy-oci/crun
+    cat >/etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf.tmp <<EOF
+# foldyard: crun behind the proxy-CA env wrapper, for build steps (fy-machine-wall).
+[engine.runtimes]
+crun = ["/usr/local/libexec/fy-oci/crun", "$crun"]
+EOF
+    chmod 0644 /etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf.tmp
+    mv -f /etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf.tmp \
+        /etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf
+    echo "✓ proxy CA: build steps trust it too (containers.conf.d/91-fy-proxy-ca-runtime.conf)"
+}
+
 case "$CMD" in
 install)
     GW="${2:?install needs <host_gateway_ip>}"
@@ -215,8 +316,10 @@ EOF
     # env. An image's own ENV, and a create's explicit env (the box's), still win over it.
     # Root-owned files, so the VM user — the box's uid — can't swap the trust. Distinct paths
     # from the box's own CA files, which its bootstrap writes. Build RUN steps get the mounts but
-    # not the env (podman applies no default env to builds).
+    # not the env (podman applies no default env to builds) — _oci_wrapper adds it.
     rm -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf
+    rm -f /etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf
+    rm -rf /usr/local/libexec/fy-oci
     [ -s "$CA_SRC" ] || CA_SRC=""
     # The guest's own store first: the combined bundle below is cut from its roots, which must no
     # longer hold a rotated-out CA (they hold this one twice after it — harmless).
@@ -224,7 +327,9 @@ EOF
     if [ -n "$CA_SRC" ]; then
         install -m 0644 "$CA_SRC" /etc/fy-wall/proxy-ca.pem
         roots=""
-        for b in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem; do
+        # Fedora 44 has only the extracted bundle; older Fedora + Debian-family the others.
+        for b in /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/pki/tls/certs/ca-bundle.crt \
+            /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem; do
             if [ -r "$b" ]; then roots="$b"; break; fi
         done
         cat ${roots:+"$roots"} /etc/fy-wall/proxy-ca.pem >/etc/fy-wall/proxy-ca-combined.pem
@@ -257,6 +362,7 @@ EOF
             mv -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf.tmp \
                 /etc/containers/containers.conf.d/90-fy-proxy-ca.conf
             echo "✓ proxy CA: every container trusts it (containers.conf.d/90-fy-proxy-ca.conf)"
+            _oci_wrapper
         else
             echo "⚠ proxy CA: could not label it for containers (chcon); they won't trust it" >&2
         fi
@@ -297,6 +403,8 @@ uninstall)
     nft delete table ip6 fy_wall6 2>/dev/null || true
     rm -rf /etc/fy-wall /etc/profile.d/fy-wall-proxy.sh /usr/local/bin/fy-wall-denied
     rm -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf
+    rm -f /etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf
+    rm -rf /usr/local/libexec/fy-oci
     _guest_trust "" || echo "⚠ proxy CA: still in the guest's own store" >&2
     for home in $(getent passwd | awk -F: '$3 >= 1000 {print $6}'); do
         rm -f "$home/.config/environment.d/90-fy-wall-proxy.conf"
