@@ -819,15 +819,22 @@ def proxy_enabled() -> bool:
     return _toml().get("proxy") is not None
 
 
+# What an undeclared `[proxy] passthrough` tunnels: only what still breaks under decryption once
+# the box, every container, build steps and the guest's pulls trust the proxy CA — Java's own
+# trust store (`@jvm`) and GnuTLS `apt` over HTTPS (`@linux`). Decrypting the rest of the
+# toolchain measured within noise of tunnelling it (live, 2026-10-06).
+DEFAULT_PASSTHROUGH = ("@jvm", "@linux")
+
+
 def proxy_passthrough() -> list[str]:
     """``[proxy] passthrough`` — the TRUSTED hosts the egress proxy TLS-passes-through (does NOT
     MITM-decrypt); everything else is decrypted + full-logged. Entries are exact hosts,
     ``*.suffix`` globs, or ``@bundle`` refs (``@all`` = every built-in bundle), expanded by the
-    proxy plugin. Absent ⇒ ``["@all"]`` (trust the whole default toolchain); an explicit empty
-    list ⇒ decrypt everything."""
+    proxy plugin. Absent ⇒ :data:`DEFAULT_PASSTHROUGH`; an explicit empty list ⇒ decrypt
+    everything."""
     raw = _table("proxy").get("passthrough")
     if raw is None:
-        return ["@all"]
+        return list(DEFAULT_PASSTHROUGH)
     return [str(x) for x in raw] if isinstance(raw, list) else []
 
 

@@ -238,6 +238,7 @@ def test_box_env_is_baked_with_the_proxy_substrate_whatever_the_level(monkeypatc
         ({"https_proxy": "http://evil:1"}, "foldyard sets"),
         ({"CONTAINER_HOST": "tcp://x"}, "foldyard sets"),
         ({"SSL_CERT_FILE": "/x"}, "foldyard sets"),
+        ({"CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE": "/x"}, "foldyard sets"),
         ({"IN_DEVBOX": "0"}, "foldyard sets"),
     ],
 )

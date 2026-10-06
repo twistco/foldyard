@@ -41,8 +41,8 @@ when you ask. (`fy docs glossary` defines each.)
 
 The proxy always decrypts and logs requests so the human can *see* what the VM talks to. That
 doesn't block anything, and hosts on the project's `passthrough` list are forwarded without
-decryption — often a couple of hundred of them, since one `@bundle` reference expands to a whole
-toolchain. `fy config widenings` prints the real count.
+decryption — one `@bundle` reference expands to a whole toolchain, so a project that lists
+`@all` exempts a couple of hundred. `fy config widenings` prints the real count.
 
 The VM firewall (`[machine] firewall = true`) is what makes routing enforced: traffic that ignores
 the proxy environment is *rejected*, not silently let out. Without it, routing is cooperative — it

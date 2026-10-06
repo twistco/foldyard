@@ -150,6 +150,22 @@ belongs in the middle — but *one* middle, not a switch between two.
   boot), which podman verifies pulls against. A decrypted registry now verifies, so the registry
   hosts stay in the default for bulk speed and for a VM provisioned without a CA — no longer for
   correctness. Whether the default should shrink is a separate, measured decision.
+- **The default narrows to `["@jvm", "@linux"]`** (amended 2026-10-06). Once the box, every
+  container, build steps and the guest's pulls trust the CA, the speed argument was the one left
+  for `@all`, and it rested on a loopback figure. Measured on foldyard-example (macOS vz, a
+  ~620 Mbit/s link, P = `@all`, D = everything decrypted, medians of 3): `npm ci` (518 packages)
+  7.5 s vs 7.5 s; `uv` torch + numpy + pandas (~700 MB) 41.5 vs 44.0; `cargo fetch` (285 crates)
+  2.9 vs 3.7 (runs 2.2–4.5); `podman pull` 3.9 vs 3.9; Playwright's browser 11.9 vs 11.4; two torch
+  installs at once 81.8 vs 81.0; a shallow linux clone 29.1 vs 29.6; `go install` 18.3 vs 17.6.
+  The proxy's CPU roughly triples (5 → 15 s for the torch install) and the log gains a row per
+  request (~116 KB per `npm ci`) — neither binds. Everything that ran decrypted worked except
+  Java (PKIX: its own trust store) and, in the image, GnuTLS `apt` over HTTPS — hence `@jvm` and
+  `@linux`. Streamed replies, held until 1 MiB before #61, now arrive at once (first event 0.4–0.6
+  s decrypted), so `@anthropic` needn't be tunnelled either; Claude Code's native installer and
+  `claude update` (`claude.ai`, `downloads.claude.ai`), the npm route, `rustup` and gcloud all
+  worked decrypted, gcloud's own transports once the box exports
+  `CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE`. A browser's NSS store still needs the CA imported. A
+  consumer who declared `passthrough` keeps it; `["@all"]` restores the old default.
 - **The egress log grows**: a request row per request rather than a row per connection, and full
   paths — query strings included — on the host. The log stays outside the mount and rotation
   bounds it (5 MiB × 6 by default). A token carried in a URL now lands there; the `query_param`
