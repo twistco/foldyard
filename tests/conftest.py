@@ -231,15 +231,25 @@ def ambient_reads_the_tree(monkeypatch):
     starts with nothing adopted — so without this every ambient read in the suite would be empty.
     The suite was written against the working tree, so that is what the seam returns here (as if
     each checkout had adopted exactly its tree). ``tests/test_ambient_adopted.py`` runs the real
-    host read."""
+    host read.
+
+    The ambient resolution is memoized, and the first one happens at COLLECTION — devmode's
+    import-time constants — through the real host read, before any fixture: a test run alone in an
+    unadopted checkout read ``{}``. So it is dropped on both sides of the swap, the root with the
+    parse read from it: the test's first read goes through the seam, from the checkout the suite
+    runs in, and nothing a test resolved (a scratch repo it pointed ``FOLDYARD_REPO`` at) outlives it.
+
+    Kept for the live modules: it changes no env (their CLI subprocesses read the real adoption,
+    which they make of the example copy's tree), and their in-process probes read that same tree."""
     from foldyard import config
 
     monkeypatch.setattr(config, "_host_toml", config._tree_toml)
-    # The ambient resolution is memoized, and modules that bind config at import (machine.MACHINE
-    # …) fill that cache at COLLECTION, before this patch — from the operator's REAL adopted
-    # snapshot for this checkout path. Without clearing it a test read that instead of the tree:
-    # green where the developer had adopted the checkout, red in a fresh worktree of it.
     config.clear_caches()
+    yield
+    # Only the ambient pair here: a test's own monkeypatches (worktree_offset, main_repo as a plain
+    # lambda) are still applied at this teardown, and those have no cache to clear.
+    config._repo_root_ambient.cache_clear()
+    config._toml_ambient.cache_clear()
 
 
 @pytest.fixture(autouse=True)
