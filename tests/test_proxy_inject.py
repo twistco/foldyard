@@ -60,6 +60,7 @@ class _Resp:
         self.status_code = status
         self.content = content  # the addon reads this for the 4xx/5xx error-body snippet
         self.headers: dict[str, str] = {}
+        self.stream = False  # mitmproxy's default: buffer the body whole before relaying it
 
 
 class _Flow:
@@ -1151,6 +1152,71 @@ async def test_a_401_on_a_streamed_upload_is_handed_back_not_re_issued(injector,
     assert not flow.metadata.get("egress_proxy_retried")
     assert flow.response is not None and flow.response.status_code == 401
     assert _last_log(log)["status"] == 401
+
+
+# ── responses are relayed as they arrive, except the ones the addon reads ─────────────────
+# mitmproxy buffers a response body whole unless `flow.response.stream` is set by the time its
+# headers are judged, and `stream_large_bodies` only flips that once 1 MiB has piled up — so a
+# streamed model reply (`text/event-stream`, length unknown) reached the box all at once at its end.
+# The addon reads a response body for two things only, both on an error: the 401 re-issue (which
+# REPLACES the response, so its headers must not have gone yet) and the log's error snippet.
+
+
+@pytest.mark.parametrize("status", [200, 204, 206, 301, 304])
+@pytest.mark.parametrize("host", ["api.github.com", "example.com"])  # injected, merely decrypted
+def test_a_response_the_addon_never_reads_is_relayed_as_it_arrives(injector, host, status):
+    inj, _ = injector
+    flow = _Flow(host, status=status)
+    inj.responseheaders(flow)
+    assert flow.response is not None and flow.response.stream is True
+
+
+@pytest.mark.parametrize("status", [101, 401, 403, 429, 500, 502])
+@pytest.mark.parametrize("host", ["api.github.com", "example.com"])
+def test_a_response_the_addon_reads_stays_buffered(injector, host, status):
+    # A 401 on an injected host is re-issued and replaced before the client sees a byte, and any
+    # error's body feeds the log's snippet; a 1xx carries no body to stream.
+    inj, _ = injector
+    flow = _Flow(host, status=status)
+    inj.responseheaders(flow)
+    assert flow.response is not None and flow.response.stream is False
+
+
+async def test_a_401_judged_at_its_headers_is_still_re_issued(injector, gh):
+    # The whole path in order: headers judged, then the body, then the response hook's re-issue.
+    inj, log = injector
+    flow = _Flow("api.github.com", status=401)
+    inj.responseheaders(flow)
+    await inj.response(flow)
+    assert len(gh.requests) == 1
+    assert flow.response is not None and flow.response.status_code == 200
+    assert _last_log(log)["replayed"] is True
+
+
+async def test_an_error_body_still_reaches_the_log(injector):
+    # A >= 400 stays buffered, so the snippet the log carries is still there to read.
+    inj, log = injector
+    flow = _Flow("example.com", status=429, content=b'{"error": "rate limited"}')
+    inj.responseheaders(flow)
+    await inj.response(flow)
+    assert _last_log(log)["error_body"] == '{"error": "rate limited"}'
+
+
+def test_drop_streaming_notice_but_keeps_the_rest(gh):
+    """mitmproxy logs ``Streaming response from {host}.`` at INFO for every streamed response —
+    now every success, so one line per request into the host log, which egress.jsonl already
+    records. ``_DropStreamingNotice`` swallows that line and nothing else."""
+    import logging
+
+    filt = gh.module._DropStreamingNotice()
+
+    def keeps(msg: str) -> bool:
+        rec = logging.LogRecord("mitmproxy.proxy.server", logging.INFO, __file__, 0, msg, (), None)
+        return filt.filter(rec)
+
+    assert not keeps("Streaming response from api.anthropic.com.")
+    assert keeps("Streaming request to api.anthropic.com.")  # still rare: an upload past 1 MiB
+    assert keeps("error establishing server connection: timed out")
 
 
 # ── the default-deny egress wall (DEFAULT_DENY + ALLOW_FILE) ──────────────────────────────

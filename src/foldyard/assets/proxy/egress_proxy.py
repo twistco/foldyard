@@ -184,8 +184,20 @@ class _DropWebsocketPingPong(logging.Filter):
         return not record.getMessage().startswith(self._NOISE_PREFIXES)
 
 
+class _DropStreamingNotice(logging.Filter):
+    """Suppress mitmproxy's ``Streaming response from {host}.`` line. It marked the rare body past
+    ``stream_large_bodies``; now that every success is relayed as it arrives (see
+    :func:`_relays_as_it_arrives`), it is one INFO line per request — the egress log's job, in the
+    host log. Logged on the same ``mitmproxy.proxy.server`` logger (``proxy/layers/http``'s
+    ``start_response_stream``). Its request twin stays: an upload past 1 MiB is still rare."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith("Streaming response from ")
+
+
 logging.getLogger("mitmproxy.proxy.server").addFilter(_DropConnectChatter())
 logging.getLogger("mitmproxy.proxy.server").addFilter(_DropWebsocketPingPong())
+logging.getLogger("mitmproxy.proxy.server").addFilter(_DropStreamingNotice())
 
 
 _HTTPS_PORT = 443  # the one port a bare host grant covers at CONNECT
@@ -385,6 +397,22 @@ def _user_agent(request) -> str:
         return str(request.headers.get("user-agent", ""))[:_UA_MAX]
     except Exception:
         return ""
+
+
+def _relays_as_it_arrives(status: int) -> bool:
+    """Whether a response's body goes to the box as the upstream sends it, rather than whole once it
+    has ended. mitmproxy buffers by default, and ``stream_large_bodies`` only switches a body of
+    unknown length over once 1 MiB has piled up — so a streamed model reply (``text/event-stream``,
+    chunked) reached the box all at once at its end: no first token, and no keep-alive ``ping``
+    event to hold the client's idle timeout off, until the reply was over.
+
+    The addon reads a response body for two things, both on an error: the 401 re-issue, which
+    REPLACES the response in the ``response`` hook (its headers must not have gone to the client
+    yet), and the network log's error snippet (``status >= 400``). Every other response with a body
+    is relayed as it arrives — by status, not content type, so NDJSON, gRPC and long downloads are
+    covered too and nothing has to name a streaming format. Not a posture: the same for every
+    flow, whatever the rules, so it never reaches the proxy's launch env (ADR-0030)."""
+    return 200 <= status < 400
 
 
 def _error_snippet(response) -> str:
@@ -1479,6 +1507,13 @@ class Injector:
             self._log_passthrough(target)
             if conn is not None:
                 conn["blind"] = target
+
+    def responseheaders(self, flow: http.HTTPFlow) -> None:
+        """Decide, once the upstream's headers are in, whether to relay the body as it arrives
+        (:func:`_relays_as_it_arrives`). mitmproxy reads ``response.stream`` right after this hook;
+        a response the proxy answered itself (a refusal, a held or failed mint) never reaches it."""
+        if flow.response is not None and _relays_as_it_arrives(flow.response.status_code):
+            flow.response.stream = True
 
     async def requestheaders(self, flow: http.HTTPFlow) -> None:
         """Where a request is judged and its credential written: the headers are in, the body

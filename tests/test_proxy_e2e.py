@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import http.server
+import itertools
 import os
 import shutil
 import socket
@@ -100,6 +101,9 @@ def _make_upstream(port: int, cert: Path, key: Path) -> http.server.ThreadingHTT
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             auth = self.headers.get("Authorization", "<none>")
+            if self.path == "/sse":
+                self._sse()
+                return
             if self.path == "/flap" and not state["flapped"]:
                 state["flapped"] = True
                 self.send_response(401)
@@ -122,6 +126,23 @@ def _make_upstream(port: int, cert: Path, key: Path) -> http.server.ThreadingHTT
             self.end_headers()
             self.wfile.write(auth.encode())
 
+        def _sse(self):
+            # A model reply's shape: chunked `text/event-stream`, one event at a time with the
+            # generation time between them — no Content-Length, so the size is never known ahead.
+            self.protocol_version = "HTTP/1.1"  # chunked framing is an HTTP/1.1 thing
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for i in range(_SSE_EVENTS):
+                if i:
+                    time.sleep(_SSE_GAP)
+                event = f"event: tick\ndata: {i}\n\n".encode()
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(event), event))
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            self.close_connection = True
+
         def log_message(self, format, *args):  # match the base signature; keep output clean
             pass
 
@@ -131,6 +152,10 @@ def _make_upstream(port: int, cert: Path, key: Path) -> http.server.ThreadingHTT
     httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd
+
+
+_SSE_EVENTS = 4  # /sse sends this many events…
+_SSE_GAP = 0.8  # …this many seconds apart
 
 
 def _wait(predicate, timeout: float, what: str, diag: str = "") -> None:
@@ -368,3 +393,67 @@ def test_a_hung_mint_holds_up_only_the_requests_that_need_it(tmp_path):
         assert other.status_code == 200 and other.text == "Bearer MINE"
         assert took < 5, f"the unruled request waited {took:.1f}s on another rule's mint"
         assert slow["r"].status_code == 200 and slow["r"].text == "token SLOW"
+
+
+def _event_arrivals(url: str, proxies: dict[str, str], verify: str) -> list[float]:
+    """GET an event stream and return when each event reached the client (seconds since the
+    request was sent), reading the body as it arrives — as an SDK consuming a model reply does."""
+    import requests
+
+    s = requests.Session()
+    s.trust_env = False
+    started = time.monotonic()
+    with s.get(url, proxies=proxies, verify=verify, stream=True, timeout=20) as r:
+        assert r.status_code == 200, r.text
+        return [
+            time.monotonic() - started
+            for line in r.iter_lines(chunk_size=1)
+            if line.startswith(b"data:")
+        ]
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "injected",  # the rule covers the path: the credential is written in flight
+        "decrypted",  # decrypted and logged, nothing injected (the rule is on another path)
+        "passthrough",  # blind-tunnelled: the proxy never sees the HTTP at all
+    ],
+)
+def test_an_event_stream_reaches_the_box_as_it_is_sent(tmp_path, setting):
+    # A streamed model reply (Claude, Codex: `text/event-stream`, chunked) must reach the box event
+    # by event. mitmproxy buffers a body whole unless told to stream it, and `stream_large_bodies`
+    # only switches on once 1 MiB has piled up — a reply of unknown length is held until then or
+    # until it ends. The box then sees no first token until the reply is over, and no keep-alive
+    # `ping` event either, so a long reply trips the client's idle timeout. Timed by the SPREAD of
+    # arrivals, not the first one: held back, every event lands together; relayed, they keep the
+    # upstream's spacing, whatever the proxy's own setup cost for the first request.
+    env = {
+        "injected": {},
+        "decrypted": {"INJECT_PATH_PREFIX": "/elsewhere"},
+        "passthrough": {"INJECT_HOST": "", "PASSTHROUGH_HOSTS": HOST},
+    }[setting]
+    with _running_proxy(tmp_path, _MINTER, env) as proxy:
+        # A tunnelled host is verified against its OWN certificate, end to end.
+        verify = str(tmp_path / "up.crt") if setting == "passthrough" else str(proxy.ca)
+        arrivals = _event_arrivals(
+            f"https://{HOST}:{proxy.uport}/sse", {"https": f"http://{HOST}:{proxy.pport}"}, verify
+        )
+        host_log = proxy.mitm_log.read_text()
+    assert len(arrivals) == _SSE_EVENTS
+    # Every success now streams, so mitmproxy's per-response notice would be a line per request in
+    # the host log; the addon drops it (the egress log already records the request).
+    assert "Streaming response from" not in host_log
+    sent_over = (_SSE_EVENTS - 1) * _SSE_GAP
+    spread = arrivals[-1] - arrivals[0]
+    assert spread > sent_over / 2, (
+        f"events sent over {sent_over:.1f}s arrived within {spread:.2f}s of each other "
+        f"(at {', '.join(f'{t:.2f}s' for t in arrivals)}): the proxy held the stream back"
+    )
+    # …and each event on its own: a proxy holding only the FIRST event until the next one arrives
+    # still spreads the rest out, so the overall spread alone would pass a delayed first token.
+    gaps = [b - a for a, b in itertools.pairwise(arrivals)]
+    assert min(gaps) > _SSE_GAP / 2, (
+        f"events sent {_SSE_GAP:.1f}s apart arrived {', '.join(f'{g:.2f}s' for g in gaps)} apart: "
+        "the proxy held an event back until the next one"
+    )

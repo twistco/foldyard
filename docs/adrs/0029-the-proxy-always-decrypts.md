@@ -78,6 +78,11 @@ belongs in the middle — but *one* middle, not a switch between two.
    certificate, needs a client certificate, or ships its own trust roots.
 4. **Large bodies stream** (`--set stream_large_bodies=1m`). The 401 re-issue skips a request whose
    body was streamed (there is nothing left to re-send) and hands the 401 back to the client.
+   *Amended 2026-10-06:* the threshold left a body of **unknown** length buffered until 1 MiB had
+   piled up, so a streamed model reply (`text/event-stream`, chunked) reached the box all at once
+   when it ended. The addon now streams every 2xx/3xx response from its first byte (its
+   `responseheaders` hook); the threshold still governs request bodies and error responses, the
+   two things the addon reads.
 5. The addon keeps `CAPTURE_MODE=passthrough` as a standalone option (it is documented env for
    anyone running the script directly); foldyard no longer asks for it.
 
