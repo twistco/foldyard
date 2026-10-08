@@ -2047,6 +2047,22 @@ def test_a_rule_added_live_is_warmed_below_error(live, tmp_path):
     assert any("reloaded" in msg for _lvl, msg in live.logs)  # the change is reported
 
 
+def test_reloads_do_not_pile_up_warm_up_threads(live, tmp_path):
+    # Every reload that brings a new or changed rule warms it on a thread of its own. The proxy
+    # lives as long as the VM, through every posture change: a finished warm-up must not be kept
+    # for the rest of its life, or each mode switch adds one that is never freed.
+    minter = _counting_minter(tmp_path, "gh")
+    inj = live.Injector()
+    inj.running()
+    for i in range(20):
+        rule = {"host": "api.github.com", "command": minter.command, "path_prefix": f"/v{i}"}
+        _write_live(live.live, rules=[rule])
+        assert inj.refresh() is True
+        for t in list(inj._warm_threads):
+            t.join(timeout=10)
+    assert len(inj._warm_threads) <= 1  # the last reload's, finished; none of the 19 before it
+
+
 # ── narrowing closes what the new policy wouldn't allow ───────────────────────────────
 
 
@@ -2180,6 +2196,22 @@ def test_a_disconnected_connection_is_not_closed_again(live, closer):
     _write_live(live.live, passthrough=[])
     inj.refresh()
     assert closer.closed == []
+
+
+def test_what_is_kept_per_connection_goes_with_the_connection(live, closer, monkeypatch, tmp_path):
+    # One proxy carries every box's egress for as long as the VM runs: what it keeps per
+    # connection (the sweep's table, a build's tunnel mark) must leave when the connection does,
+    # or it grows with every connection ever made.
+    _write_tokens(tmp_path / "build-tokens.json", _SECRET)
+    monkeypatch.setenv("BUILD_TOKENS_FILE", str(tmp_path / "build-tokens.json"))
+    _write_live(live.live, passthrough=["files.example.com"])
+    inj = live.Injector()
+    for i in range(50):
+        _open(inj, closer, "files.example.com", f"c{i}", marked=i % 2 == 0)
+    assert (len(inj._conns), len(inj._build_clients)) == (50, 25)
+    for i in range(50):
+        inj.client_disconnected(types.SimpleNamespace(id=f"c{i}"))
+    assert (inj._conns, inj._build_clients) == ({}, set())
 
 
 def test_a_close_that_fails_is_reported_not_raised(live, closer):

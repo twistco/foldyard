@@ -979,7 +979,9 @@ class Injector:
             )
             for r in rules
         ]
-        self._warm_threads += threads
+        # Only the warm-ups still running are kept (for the tests to join): this runs on every
+        # reload that brings a new rule, for as long as the proxy lives.
+        self._warm_threads = [t for t in self._warm_threads if t.is_alive()] + threads
         for t in threads:
             t.start()
 
