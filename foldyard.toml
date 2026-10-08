@@ -26,7 +26,7 @@ prefix = "foldyard"
 # and be none. The recommendation is where contributors should actually be; raise the floor
 # to meet it once everyone has moved.
 min_foldyard_version = "0.2.0"
-recommended_foldyard_version = "0.3.2"
+recommended_foldyard_version = "0.4.0"
 # A compose stack to drive alongside the box — uncomment when you have one (step 3), add
 # its host ports under [ports] below, and extend [claude].system_prompt with the stack
 # paragraph parked beside it (an agent that knows the box but not the stack is half-lost).
@@ -46,6 +46,7 @@ recommended_foldyard_version = "0.3.2"
 "0.3.0" = "the `native` backend is gone (always a VM); gVisor as a machine posture; the host-side wall on Linux; `fy reclaim`; engine probes work on podman 4.9 (Ubuntu 24.04)"
 "0.3.1" = "the host wall is the operator's install (`fy machine host-wall`, never sudo); the floor's upgrade advice no longer drops the [host] extra; quickstart → Upgrading"
 "0.3.2" = "security release (four advisories) — adopt each checkout's config with `fy up`, register existing worktrees with `fy worktree add`"
+"0.4.0" = "credentials are `[[inject]]` kinds; the proxy decrypts the toolchain too and the stack, guest pulls and build steps trust its CA; `[box].env` refuses foldyard's own names — `fy machine stop && fy up` once after upgrading"
 
 [machine]
 # A rootless VM that mounts ONLY this repo. Default here is the Lima backend + an in-VM

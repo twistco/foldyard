@@ -6,6 +6,312 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.4.0 — 2026-10-08
+
+Every VM needs one `fy machine stop && fy up` after upgrading: the VM's boot script changed, and
+until it restarts foldyard refuses a running Lima VM (the default backend) as stale. Three changes can need a config edit,
+each spelled out under **Changed**: `[plugins.github]` becomes `[[inject]]` rows (its App key
+moves to `FY_INJECT_GITHUB` in `host.env`), `[proxy] passthrough` now defaults to
+`["@jvm", "@linux"]` instead of `["@all"]`, and `[box].env` refuses the names foldyard sets in the
+box.
+
+### Security
+
+- **Your computer runs no git at all to heal the shared index.** 0.3.2 hardened the supervisor's
+  git calls against a box-written `.git/config`; now there are none. The box's git shim builds the
+  healed index and leaves it next to the shared one, and the supervisor only installs it — under
+  git's own lock, and only if neither the index nor HEAD changed since, so nothing staged on your
+  computer is ever lost. Nothing to migrate: a box on the new shim is picked up by `fy box up`;
+  until then a stale host-side `git status` is fixed by `git reset`, as before the heal existed.
+  (Follow-up to GHSA-j5mq-v7p4-qw2j; ADR-0021.)
+- **A program in the box can no longer hide what it fetches behind the image-build marker.** With
+  the VM firewall on, image builds reach the proxy as user `fy-build`, and the proxy tunnels them
+  instead of decrypting them. Anyone could use that user, so the box could too: putting
+  `fy-build:<anything>@` in its own proxy URL turned a logged request (path, tool) into a
+  hostname-only row. The allowlist still applied. Now only a build carrying the secret foldyard
+  creates for it on your computer is tunnelled; a build started *inside* the box (`fy up` there)
+  is decrypted and logged like any box request, and works because build steps now trust the
+  proxy's CA.
+
+### Removed
+
+- **`[plugins.github]` is gone: GitHub is `[[inject]]` rows now, and `fy up` refuses the old
+  table until it's replaced.** The refusal prints the rows to paste, computed from your table: a
+  `kind = "github-app"` row (your `app_id`, `installation_id`, `repo` as `repositories`, and
+  `box_env = { GH_TOKEN = "x" }`) and, commented out, a `kind = "gh-cli"` emergency row for the old
+  `user` level. Three things move with it. The App's private key is read from the switch's
+  `FY_INJECT_<SWITCH>` in `host.env` (`FY_INJECT_GITHUB` for `switch = "github"`) — rename
+  `GH_PEM_B64`, same value, and any `[[secret]]` row naming it. `fy mode github=app` is
+  `fy mode github=on`, and the old `github=user` is the gh-cli row's own switch. And
+  `permissions` has no successor: the token now carries **the App installation's own
+  permissions** — foldyard no longer narrows it to `pull_requests`/`issues` or refuses a map that
+  widens it, which is what turned a consumer's granted `actions: read` into a morning of 401s
+  (ADR-0031).
+  To change what the box can do on GitHub, change the App; for a second scope, a second App with
+  its own row. foldyard no longer installs `gh` in the box: put it in your box image.
+
+### Changed
+
+- **`uv tool install foldyard` is now the complete install on your computer — no `[host]` extra
+  needed.** mitmproxy (the egress proxy) and PyJWT (the GitHub App minter) are ordinary
+  dependencies now, so the install you get by default is the one that works, and an upgrade
+  can no longer quietly leave the proxy out. The box, which only routes through the proxy, is
+  installed by `fy box up` with both removed, as before. `"foldyard[host]"` still installs (the
+  extra is kept, empty), so existing instructions and installs keep working.
+- **Two switches can no longer both inject on one host and path.** `fy mode` (and the TUI's mode
+  buttons) refuse a level whose injection rules would overlap another switch's active ones (the
+  same host, with path prefixes where one is under the other or either covers the whole host). The
+  message names the other switch and the exact `fy mode` command to run first. Before, a consumer's
+  `[[inject]]` row on `api.anthropic.com` beside keyless `claude=on` both applied, and the proxy
+  sent whichever credential's rule came first in plugin load order. One switch may still split a
+  host by path, as Codex on a ChatGPT subscription does. The check runs on the rules the proxy
+  would actually get, so a rule that only appears with several switches on together is caught too. If your saved mode already has such a
+  pair on (or you adopt an `[[inject]]` row that creates one), the proxy injects **neither** until
+  one is off, and says so: a supervisor log line and notification, an error row in `fy mode` and
+  `fy state`, a `credential overlap` row in `fy doctor`, and both rows marked `HELD BACK` in
+  `fy config widenings`, with the commands that end it.
+- **A declared credential routes the box through the proxy, even while its switch is off.** An
+  `[[inject]]` row, or keyless Claude or Codex, without a `[proxy]` table used to leave a box
+  created with that switch off with no proxy route and no placeholder, so switching it on later
+  couldn't reach the box until `fy box down && fy box up`. The box now gets the route and its
+  `box_env` placeholders whenever a credential is declared, and the proxy listener runs for it.
+- **The proxy now decrypts the toolchain too: `[proxy] passthrough` defaults to
+  `["@jvm", "@linux"]` instead of `["@all"]`.** With the VM firewall on, the box, your stack's
+  containers, image build steps and the VM's image pulls all trust the proxy's CA, and decrypting
+  a toolchain install measured within a few per cent of tunnelling it, so `npm`, `pip`/`uv`,
+  `cargo`, `go`, `git`, image pulls, the Claude Code installer and gcloud are now logged request by
+  request. Only Java's own trust store (`@jvm`) and `apt` over HTTPS (`@linux`) stay tunnelled. A
+  project that sets `passthrough` itself is unaffected. **To get the old behaviour back**, set
+  `passthrough = ["@all"]` (or add just the bundle a tool needs, e.g. `"@vcs"`), then adopt it at
+  the next `fy up`. The sign that a tool can't work decrypted is a certificate error naming the
+  proxy's CA (`mitmproxy`, e.g. Java's "PKIX path building failed" or Chromium's
+  `ERR_CERT_AUTHORITY_INVALID`). The box also sets `CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE`, so
+  `gsutil` and `bq` trust the proxy like `gcloud` does.
+- **`[box].env` is your project's environment, and refuses the names foldyard sets in the box.**
+  `fy box up` now stops before starting anything when `[box].env` sets a name foldyard owns: `FY_*`,
+  `FOLDYARD_*`, the proxy and CA variables (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, …), the
+  engine socket (`CONTAINER_HOST`, `DOCKER_HOST`, `DOCKER_CONFIG`), the agents' homes and the
+  shell basics such as `PATH`. Before, such a name silently replaced the proxy, CA or engine
+  wiring, or was silently ignored, and the adoption diff showed it as one harmless-looking line.
+  The message names the setting to use instead where there is one (`[box] clean_docker_config`,
+  `[box] git_index_split`, `[proxy] no_proxy`, `fy allow add`). `TZ` and `LC_TIME` stay yours to
+  set. A key that isn't a plain environment-variable name is refused too: a quoted
+  `"HTTPS_PROXY=x"` would otherwise have set `HTTPS_PROXY`. An `[[inject]]` row's `box_env`
+  already refused the same names.
+
+### Added
+
+- **`fy doctor` in the box checks that box git is foldyard's git shim.** Every box-side git
+  protection, from the separate index to the checks that stop the box moving a branch your
+  computer just moved, lives in the shim at `/usr/local/bin/git`. A box image that puts another
+  git first on `PATH`, or a shim whose hooks didn't install, used to switch all of that off with
+  no sign. Two new rows say so. `git shim` fails when `git` isn't the shim, and `git shim hooks`
+  fails when its hooks are missing. It warns when a user other than root could rewrite them. Each
+  row names its fix. No rows when `[box] git_index_split = false`. A new box now runs `fy doctor`
+  once when it's created, as the last lines of `fy box up`, so it reports this without being
+  asked. (ADR-0021.) Its `egress proxy CA` row now says the box must be recreated too: the CA
+  is mounted when a box is created, so `fy host restart` alone never reached an existing box.
+- **foldyard shows what a GitHub App installation grants, and tells you when that changes.**
+  foldyard no longer caps a `github-app` token's scope (the installation's permissions are the
+  box's scope), so it reports them instead. While the switch is on, its probe reads the
+  installation's permissions and which repositories it covers, as the App, minting nothing.
+  `fy config widenings` shows the last reading under the row and how old it is, flagging any
+  `write` or `admin` permission, and any level foldyard doesn't recognise as if it were one
+  ("not yet probed" until the switch has been on), and `fy mode` and `fy tui` show it beside the
+  switch. All of them read a record on your computer and never call GitHub. When a reading
+  differs from the last one, for example after an org owner accepted a new permission on
+  github.com, the supervisor logs one line naming what was added, removed or changed level and
+  sends one desktop notification; the first reading is a baseline. When a probe can't read the
+  scope, the last reading stays, marked as possibly stale in those reports, and the supervisor
+  logs that once. An uninstalled or suspended installation now shows the switch as DEGRADED,
+  naming `installation_id`.
+- **With an `[[inject]]` switch off, a request carrying its `box_env` dummy gets an answer naming
+  the fix instead of the provider's "Bad credentials".** The proxy answers it itself with a 401
+  whose JSON `message` says the switch is off and to run `fy mode <switch>=on` on your computer,
+  which `gh` and most clients print. It matches where the row's rule would inject (host,
+  `path_prefix`, header or `query_param`), and in a header the dummy may stand alone or follow one
+  auth scheme (`gh` sends `token x`, others `Bearer x`). Anything else goes on as before: a
+  public call with no credential, or a credential the box got some other way. The Network Log
+  marks these rows as held and the first one raises a notification, as for Claude and Codex.
+- **An `[[inject]]` row names its token protocol with `kind`, and can bake dummies into the box
+  with `box_env`.** `static` (the default — every existing row) is unchanged; `github-app` mints a
+  GitHub App installation token from `app_id`/`installation_id` (and optional `repositories`);
+  `gh-cli` injects your own `gh` token and must be `emergency = true`. The GitHub kinds are pinned
+  to `api.github.com`. Each kind takes a fixed set of fields, so a typo or a field the kind doesn't
+  take now stops foldyard loading the config, naming what is allowed — check your rows if `fy`
+  refuses one. `box_env = { NAME = "dummy" }` is what a client in the box needs before it sends the
+  header the proxy overwrites; it's baked whenever the box routes through the proxy, so turning the
+  switch on needs no box recreate, and `fy verify` fails a box where it holds anything else. A
+  `github-app` row brings the old plugin's checks with it: the key's presence and shape in
+  `fy doctor`, the "can we still act as the App?" probe on `fy mode`, and the in-box check that the
+  token really reaches requests.
+- **The dev box shows times in your computer's timezone and time format.** Claude Code in the box
+  showed UTC timestamps, even though the box's clock was right. `fy box up` now passes your
+  timezone as `TZ` (read from `/etc/localtime`) and your time locale as `LC_TIME`, which decides
+  a 12- or 24-hour clock. `LC_TIME` is passed only when the box image has that locale and no
+  `LC_ALL` would override it. A `TZ` or
+  `LC_TIME` in `[box].env` still wins, so `TZ = "UTC"` keeps the old behaviour. Stack containers
+  stay on UTC. An existing box picks this up when it's recreated (`fy box down && fy box up`).
+
+### Fixed
+
+- **A box's first git command no longer sees every file as a staged deletion.** It copies your
+  computer's git index to start from, and a git command on your computer that had just replaced
+  that file made it look missing from the box for up to a second (up to five on a Podman
+  machine). The box then started from an empty index. It now retries the copy briefly, and if
+  the index still isn't there it starts from the last commit. A commit on your computer hides the
+  branch in the same window, so that no longer passes for a new repository with nothing to copy,
+  and two first git commands racing in the box no longer overwrite each other's staging.
+- **On macOS, starting a Lima VM no longer treats the running VM as an orphan.** Before a start
+  foldyard reaps a Lima hostagent that outlived its VM, and it judged "outlived" by QEMU's pid
+  file. The default macOS VM type (`vz`) runs the VM inside the hostagent and writes no such
+  file, so a live VM could be waited on and signalled. That reap was also, by accident, what
+  recovered a hung VM. Now a VM that Lima reports `Broken`, or that a graceful stop leaves
+  running, is ended with Lima's own `limactl stop --force` before it starts again. The graceful
+  stop gets a minute first, where Lima would wait over six.
+- **A mode change now updates a running stack on a Lima VM.** The supervisor's posture reconcile
+  (and `fy state`'s stack row, a new worktree's init, `fy open`) found the engine only through a
+  socket your shell named; Lima registers none, so a running stack read as down and a mode change
+  never re-rendered it. They now use the VM's own socket when it exists, without starting it.
+  CI had hidden this by exporting the socket into the commands it ran.
+- **A VM restarted after a crash no longer hangs waiting for ssh.** `fy up` restarts a VM that
+  says it is running but serves nothing, and that restart kept the ssh port it last recorded.
+  When the port was stale and taken, the start waited forever. The port is now re-pinned while
+  the VM is stopped. Where Podman Desktop is followed, `fy doctor` warns when the VM's ssh
+  port is off its port range.
+- **A checkout whose `foldyard.toml` you haven't adopted says so.** Your computer reads no config
+  for it until you adopt, and commands used to report that empty config as if it were yours:
+  "`[project].compose` is unset", or a project named after the directory. Now every command
+  says the config isn't adopted, and `fy shellenv` and every command that acts on the stack or
+  the box (`fy build`, `fy ps`, `fy down`, `fy reclaim`, `fy verify`, …) stop instead of acting on
+  a guess — also with an inherited `DOCKER_HOST`. `fy up` still asks to adopt.
+- **A box git command that works no longer prints "No such file or directory".** The box's git
+  wrapper leaves small notes for your computer next to the git index, and a note it can't write
+  is meant to be skipped silently. On a Podman machine a note your computer had just cleared up
+  can't be written again for a few seconds, and the error from that attempt still reached the
+  terminal, so a clean `git status` looked like a failure.
+- **Git in the box no longer loses, rewinds or reverts commits made on your computer.** Over the
+  VM mount the box can briefly read a branch your computer just moved as older, or as having no
+  commits — for up to ~5 s on a Podman machine, up to ~1 s on Lima. In that window a box commit
+  could land on an old commit or start a new history, a box `git reset` could move your branch
+  back over your latest commits, and a commit on your computer right after the box's could record
+  the box's new files as deleted. The box's git wrapper now checks every branch move while git
+  holds the branch's lock, and updates your computer's staging area as part of the box's own
+  commit. When the two sides collide it refuses with "foldyard git shim: … Nothing was changed;
+  run it again" instead.
+- **Git hooks run in the box as they do on your computer.** A repo hook's own `git` (lefthook
+  runs a couple of dozen per commit) now goes through the box's git wrapper. Before, in the
+  moments after your computer committed, it could see every file in the repo as staged, and
+  formatters ran on all of them. lefthook no longer tries to install its hooks into foldyard's
+  own directory either, which printed "could not replace the hook: permission denied" on some
+  box commits.
+- **A box commit no longer moves your branch under a rebase or merge your computer has
+  started**, including one that began after the box first checked, which made your `git pull
+  --rebase` fail to finish. The box refuses until your operation is done.
+- **`fy up` on a stopped stack after a config change no longer loses containers.** The bundled
+  podman-compose removes every dependent of a service it recreates, but only re-creates the
+  dependents that were running — so a stopped one vanished, and anything that depends on it
+  failed with "is not a valid container, cannot be used as a dependency". foldyard now removes
+  those containers itself before `up` (and before a mode reconcile), so compose creates them
+  like any missing container. Named volumes are kept.
+- **An install from a foldyard checkout reports the version it is actually running.** An
+  editable install (`uv tool install --editable`) recorded its version once, when it was
+  installed, while the code kept following the checkout — so after pulling a new release,
+  `fy --version` and `fy doctor` still named the old number, the version window judged the old
+  number, and `fy box up` warned that the box had a newer foldyard than your computer when both
+  ran the same code. foldyard now reads the version from that checkout's `pyproject.toml`, so a
+  pull is enough; no reinstall is needed just to correct the number.
+- **A `git pull --rebase` that stopped before it began now says so, and how to recover.** When
+  git can't start the rebase after it has set your uncommitted changes aside (its "autostash"),
+  it leaves `.git/rebase-merge` holding just those changes. It isn't a rebase in progress, so
+  `git rebase --abort` can't clear it, every later `git pull` refuses to start, and the box
+  refused every commit with "run it again once it's done", which never came. The box now names
+  it and points you at `fy doctor`, which shows the commands to run on your computer (one row per
+  checkout, worktrees included): they keep your changes in `git stash list` first, then remove the
+  directory, then restore the changes by their stash id. foldyard only prints them; it never runs
+  git in your checkout. The box's new message arrives once the box is recreated
+  (`fy box down && fy box up`).
+- **The bundled foldyard skill tells box agents that the stash list is shared with you.** A bare
+  `git stash pop` takes whatever was stashed last, which could be yours, so agents now label
+  their stashes and pop them by entry.
+- **When foldyard can't mint a credential, the box is told why instead of getting the
+  upstream's 401.** A failed token mint used to forward the request with the box's placeholder
+  credential, so the agent saw the provider's own "Bad credentials" and guessed at causes — while
+  the real reason (e.g. a GitHub App permission the minter refused) sat in the host log. The
+  egress proxy now answers such a request itself with a `502` whose JSON `message` names the host
+  and the minter's reason and points at `fy host logs`, without sending the request; a 401 whose
+  re-mint fails is replaced by the same kind of 502, worded for a request that did go out. The
+  Network Log marks the row `mint failed`. The reason is the minter's diagnosis from its stderr,
+  with token-shaped runs redacted; its command and its stdout (where a token comes back) never
+  reach the box.
+- **With the VM firewall on, your stack's containers can reach HTTPS hosts outside `passthrough`.**
+  The firewalled VM sends every container's traffic through the proxy, which decrypts every host
+  not on `passthrough`, but only the dev box trusted the proxy's CA — so a service calling, say, a
+  third-party API failed with a certificate error. The VM's boot setup now installs the CA and a
+  podman default that mounts it into every container and sets `NODE_EXTRA_CA_CERTS`,
+  `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_SSL_CAINFO` (a value your image already sets
+  wins). It changes the VM's boot setup, so an existing firewalled VM asks for
+  `fy machine stop && fy up` once.
+- **Turning the VM firewall off no longer leaves podman pointed at the proxy until the next
+  restart.** The first boot without it kept the old proxy settings, so image pulls failed with
+  "connection refused" until the VM was restarted again.
+- **A slow or failing credential mint no longer freezes the box's other traffic.** The egress
+  proxy ran each token mint on the one event loop every connection shares, so a token service
+  that hung held up all of the box's proxied requests (its agent's own API calls, package
+  installs, git) for up to 30 seconds, and again on every retry of the failing request, since
+  clients retry a 502. A mint now runs off that loop: only the requests that need that
+  credential wait for it, and the ones arriving meanwhile share the one mint. A failed mint is
+  remembered for 15 seconds, so retries get the same `mint failed` 502 at once instead of
+  re-running the token service, and the host log gets one line per attempt rather than one per
+  retried request. A secret pasted into `host.env` is picked up straight away, without waiting
+  for the 15 seconds to pass.
+- **A request two switches both claim is answered with the overlap, not the provider's 401.**
+  When two switches that inject on the same host and path are on together, the proxy injects
+  neither, which is the safe choice, but the box's request still went out with its placeholder
+  credential and came back as the provider's "Bad credentials", which looks like a broken
+  token. The proxy now answers such a request itself, without sending it, with a `502` whose
+  JSON `message` is the same text `fy mode` shows: both switches, and the `fy mode` command to
+  run on your computer to turn one off. It matches exactly where the held-back rules would have
+  injected (host and path prefix, decrypted HTTPS only), and the Network Log marks the row
+  `credential overlap`.
+- **A service that crashed while a credential was failing now comes back when it recovers.**
+  `[resnapshot_on_capability]` only recreated services that were still running, so one that
+  fetches its secrets at startup and exited because that fetch failed stayed down after the fix
+  (for example `just gcp-elevate`), even though the notification said the switch had recovered.
+  It took a manual `fy up`. A listed service whose container exited with an error is now
+  recreated as well. One that was stopped (exit 0, or by Ctrl-C or `stop`) or never started is
+  still left alone. List such services under the switch, as before.
+- **Streamed replies reach the box as they are sent, not all at once at the end.** The egress
+  proxy held back every decrypted response of unknown length until 1 MiB had piled up or the
+  upstream finished, so a Claude or Codex reply streamed over `text/event-stream` arrived in one
+  piece when it was complete: no first token until then, and no keep-alive event either, so a long
+  reply could trip the client's idle timeout. It now relays every successful response as it
+  arrives, injected or not; on loopback the first of four events 0.8 s apart went from 2.4 s to
+  0.01 s, the same as a direct connection. Error responses are still read whole, so a 401 is still
+  re-issued with a fresh credential and the Network Log keeps its error snippet. `passthrough`
+  hosts were never affected.
+- **With the VM firewall on, image build steps trust the proxy's CA.** A `RUN` step got the CA
+  files but not the variables that point clients at them, so a build started inside the box
+  (`fy up` there) failed `apk`, `curl`, `pip`, `uv` or `npm` against any host outside
+  `passthrough`. The VM's boot setup now adds those variables to a build step, as it already did
+  for running containers: an `ENV` in your Dockerfile still wins, and nothing is written into the
+  image. GnuTLS clients (Debian's `apt` over HTTPS, `wget`) and Java still need the host on
+  `passthrough` or the CA in the image.
+- **The CA bundle containers get includes the usual public roots again on Fedora 44 VMs.** It
+  held only the proxy's CA, so a client reading `SSL_CERT_FILE` or `REQUESTS_CA_BUNDLE` (`uv`,
+  `pip`, `requests`) failed every `passthrough` host. Both land in the same one-time
+  `fy machine stop && fy up` as the other CA changes.
+- **With the VM firewall on, image pulls work from a registry the proxy decrypts.** A pull is the
+  VM's own podman, not a container, so the CA that containers now get didn't reach it: a registry
+  off `passthrough` failed with x509 "unknown authority". The VM's boot setup now also adds the
+  proxy's CA to the VM's own trust store, replaces it when the CA changes, and takes it out when
+  the firewall is turned off. It shares the one-time `fy machine stop && fy up` that giving
+  containers the CA already asks for.
+- **Turning the VM firewall off now really takes podman off the proxy.** The firewall's proxy
+  settings for the VM's user were removed only for users with an id of 1000 or more, and the VM's
+  user takes your computer's (501 on macOS), so the first boot without the firewall still sent
+  image pulls to a proxy that was no longer running.
+
 ## 0.3.2 — 2026-09-27
 
 A security release: upgrade now. It also carries the changes listed under **Changed**, some of
