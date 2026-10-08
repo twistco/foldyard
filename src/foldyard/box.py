@@ -1441,6 +1441,14 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         from . import preflight
 
         preflight.check_or_abort("fy box up")
+        # After the gate (it reads the adopted config), before _ctx() can start the VM: a
+        # `[box].env` that sets a name foldyard owns is refused before anything is started,
+        # removed or built.
+        try:
+            config.box_env()
+        except SystemExit as e:
+            _err(str(e))
+            return 1
     if cmd in ("down", "ps") and not stack.engine_reachable("stop" if cmd == "down" else "show"):
         # Read/teardown verbs must never provision the VM _ctx() would ensure. A `box down`
         # with no machine still clears the posture mirror below on the up path; with the VM

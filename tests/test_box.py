@@ -339,6 +339,44 @@ def test_up_passes_your_computers_timezone_before_the_box_env(fake, monkeypatch)
     assert values.index("TZ=Europe/London") < values.index("UV_LINK_MODE=copy")
 
 
+def test_up_refuses_a_box_env_name_foldyard_owns_before_touching_the_box(fake, capsys, monkeypatch):
+    # The refusal comes first: the VM isn't started, an old box isn't removed, nothing is built,
+    # and the supervisor isn't launched for a box that will never be created.
+    def refused():
+        raise SystemExit("✗ [box].env sets a name foldyard sets in the box itself: HTTPS_PROXY")
+
+    monkeypatch.setattr(config, "box_env", refused)
+    monkeypatch.setattr(box, "_ctx", lambda: pytest.fail("resolved the context (may start the VM)"))
+    fake["state"]["exists"] = True
+    assert box.main("up") == 1
+    assert "HTTPS_PROXY" in capsys.readouterr().err
+    assert fake["calls"] == []
+    assert fake["hosted"] == []
+
+
+def test_every_name_foldyard_sets_in_the_box_is_one_box_env_refuses(fake, monkeypatch, tmp_path):
+    # The reserved list is hand-kept, so this keeps it honest: a box with the proxy routed, the CA,
+    # gcp and both agents on. Every `-e` it carries is foldyard's (refused in `[box].env`), or the
+    # consumer's own declaration, or a default the consumer may restate.
+    fake["ctx"].env["FY_PROXY"] = "h:8088"
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)
+    ca = tmp_path / "mitm" / "mitmproxy-ca-cert.pem"
+    ca.parent.mkdir()
+    ca.write_text("CERT")
+    monkeypatch.setenv("MITMPROXY_CA", str(ca))
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    monkeypatch.setattr(config, "codex_enabled", lambda: True)
+    monkeypatch.setattr(box, "_capture_keyless", lambda: None)  # never the real ~/.codex
+    _clock(monkeypatch, zone="Europe/London", locale="en_GB.UTF-8")
+    fake["state"]["image_locales"] = ["en_GB.utf8"]
+    assert box.main("up") == 0
+    names = {v.split("=", 1)[0] for v in _env_values(_find(fake["calls"], has=["run", "-d"])[0])}
+    consumers = set(config.box_env()) | set(config.port_bases())
+    restatable = {"TZ", "LC_TIME", "DO_NOT_TRACK", "NEXT_TELEMETRY_DISABLED"}
+    assert {"HTTPS_PROXY", "SSL_CERT_FILE", "CLAUDE_CONFIG_DIR", "CODEX_HOME"} <= names  # all on
+    assert {n for n in names - consumers - restatable if not config.foldyard_owned(n)} == set()
+
+
 def test_up_passes_no_timezone_when_your_computer_names_none(fake):
     assert box.main("up") == 0
     values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])

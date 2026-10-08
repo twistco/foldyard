@@ -85,58 +85,6 @@ from . import (
 )
 from .kinds import DEFAULT, KINDS, RETIRED_FIELDS, Kind
 
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-# What foldyard itself bakes into the box (box._up, the proxy/gcp/agent plugins' box_args). A
-# `box_env` dummy may not overwrite one: rerouting the proxy, the engine socket or the CA bundle
-# from a credential row would be a box-wiring knob hiding in a field meant for "x". Compared
-# upper-cased, so `https_proxy` is as refused as `HTTPS_PROXY`.
-_FOLDYARD_BOX_ENV = frozenset(
-    {
-        # the engine + the box's own identity
-        "CONTAINER_HOST",
-        "DOCKER_HOST",
-        "DOCKER_CONFIG",
-        "IN_DEVBOX",
-        "IS_SANDBOX",
-        "WORKTREE",
-        "PODMAN_PROJECT",
-        "COMPOSE_PROJECT_NAME",
-        # proxy routing + the CA trust that makes it work
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "REQUESTS_CA_BUNDLE",
-        "GIT_SSL_CAINFO",
-        "SSL_CERT_FILE",
-        "CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE",
-        "NODE_EXTRA_CA_CERTS",
-        # the gcp metadata emulator
-        "GCE_METADATA_HOST",
-        "GCE_METADATA_IP",
-        "GCE_METADATA_ROOT",
-        "GCP_MINTER_PORT",
-        # the agents' homes, and the keyless dummies foldyard bakes for them
-        "CLAUDE_CONFIG_DIR",
-        "CODEX_HOME",
-        "ANTHROPIC_API_KEY",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "OPENAI_API_KEY",
-        # the shell basics
-        "PATH",
-        "HOME",
-        "SHELL",
-        "USER",
-    }
-)
-_FOLDYARD_BOX_PREFIXES = ("FY_", "FOLDYARD_")
-
-
-def _foldyard_owned(name: str) -> bool:
-    upper = name.upper()
-    return upper in _FOLDYARD_BOX_ENV or upper.startswith(_FOLDYARD_BOX_PREFIXES)
-
 
 def _kind(spec: dict) -> Kind:
     return KINDS[str(spec.get("kind", DEFAULT))]
@@ -369,12 +317,12 @@ def _box_env(raw: object, where: str) -> dict[str, str]:
     if not isinstance(raw, dict):
         raise ValueError(f'{where}: `box_env` must be a table of NAME = "dummy", got {raw!r}')
     for name, value in raw.items():
-        if not _ENV_NAME.match(str(name)):
+        if not config.env_name(str(name)):
             raise ValueError(
                 f"{where}: box_env {name!r} isn't an environment-variable name "
                 "([A-Za-z_][A-Za-z0-9_]*)"
             )
-        if _foldyard_owned(str(name)):
+        if config.foldyard_owned(str(name)):
             raise ValueError(
                 f"{where}: box_env {name!r} is one foldyard sets in the box itself — a dummy may "
                 "not overwrite it"
