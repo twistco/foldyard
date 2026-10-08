@@ -626,7 +626,7 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   `[[inject]]` row's `box_env`: `FY_*`, `FOLDYARD_*`, the proxy and CA variables, the engine
   socket (`CONTAINER_HOST`, `DOCKER_HOST`, `DOCKER_CONFIG`), the agents' homes, `PATH` and the
   like. An override would quietly undo the box's wiring, and the refusal names the setting to use
-  instead where there is one. It does override the clock settings the box takes from your
+  instead where there is one. A key must be a plain name (`[A-Za-z_][A-Za-z0-9_]*`). It does override the clock settings the box takes from your
   computer: `TZ`, your timezone, and `LC_TIME`, your time locale, which decides a 12- or 24-hour
   clock. Set `TZ = "UTC"` here to keep the box on UTC. `LC_TIME` is passed only when the image has that locale (`locale -a`),
   because a missing one does nothing and makes perl warn on every run, and never under an

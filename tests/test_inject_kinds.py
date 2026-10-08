@@ -230,6 +230,7 @@ def test_box_env_is_baked_with_the_proxy_substrate_whatever_the_level(monkeypatc
     ("box_env", "match"),
     [
         ({"GH-TOKEN": "x"}, "environment-variable name"),
+        ({"GH_TOKEN\n": "x"}, "environment-variable name"),  # `$` alone lets the newline through
         ({"GH_TOKEN": 1}, "string"),
         ("GH_TOKEN=x", "table"),
         ({"FY_PROXY": "x"}, "foldyard sets"),

@@ -628,6 +628,23 @@ def test_box_env_refuses_a_name_foldyard_sets_in_the_box(fresh_config, tmp_path,
         config.box_env()
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        r'"HTTPS_PROXY=ignored"',  # `-e HTTPS_PROXY=ignored=x`: the engine splits at the first `=`
+        r'"UV_LINK_MODE\n"',  # `$` alone would let a trailing newline through
+        r'"TWO WORDS"',
+        '""',
+    ],
+)
+def test_box_env_refuses_a_key_that_isnt_an_environment_name(fresh_config, tmp_path, key):
+    # A quoted TOML key can hold anything, and `box.py` emits `-e {key}={value}` — so a key is
+    # checked as a NAME before it's checked against foldyard's, or `=` smuggles one past.
+    _box_env_toml(tmp_path, fresh_config, f'UV_LINK_MODE = "copy", {key} = "x"')
+    with pytest.raises(SystemExit, match="isn't an environment-variable name"):
+        config.box_env()
+
+
 def test_box_env_names_every_refused_name_and_the_setting_to_use_instead(fresh_config, tmp_path):
     _box_env_toml(
         tmp_path,

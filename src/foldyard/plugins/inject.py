@@ -85,8 +85,6 @@ from . import (
 )
 from .kinds import DEFAULT, KINDS, RETIRED_FIELDS, Kind
 
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
 
 def _kind(spec: dict) -> Kind:
     return KINDS[str(spec.get("kind", DEFAULT))]
@@ -319,7 +317,7 @@ def _box_env(raw: object, where: str) -> dict[str, str]:
     if not isinstance(raw, dict):
         raise ValueError(f'{where}: `box_env` must be a table of NAME = "dummy", got {raw!r}')
     for name, value in raw.items():
-        if not _ENV_NAME.match(str(name)):
+        if not config.env_name(str(name)):
             raise ValueError(
                 f"{where}: box_env {name!r} isn't an environment-variable name "
                 "([A-Za-z_][A-Za-z0-9_]*)"

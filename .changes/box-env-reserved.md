@@ -11,4 +11,6 @@ bump: minor
   wiring, or was silently ignored, and the adoption diff showed it as one harmless-looking line.
   The message names the setting to use instead where there is one (`[box] clean_docker_config`,
   `[box] git_index_split`, `[proxy] no_proxy`, `fy allow add`). `TZ` and `LC_TIME` stay yours to
-  set. An `[[inject]]` row's `box_env` already refused the same names.
+  set. A key that isn't a plain environment-variable name is refused too: a quoted
+  `"HTTPS_PROXY=x"` would otherwise have set `HTTPS_PROXY`. An `[[inject]]` row's `box_env`
+  already refused the same names.

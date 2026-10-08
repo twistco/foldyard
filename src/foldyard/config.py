@@ -1286,6 +1286,16 @@ _BOX_ENV_INSTEAD = {
 }
 
 
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def env_name(name: str) -> bool:
+    """True for a plain environment-variable name. Checked BEFORE :func:`foldyard_owned`: the box
+    emits ``-e {name}={value}`` and the engine splits at the first ``=``, so a quoted TOML key like
+    ``"HTTPS_PROXY=x"`` would set ``HTTPS_PROXY`` without ever reading as it."""
+    return _ENV_NAME.fullmatch(name) is not None
+
+
 def foldyard_owned(name: str) -> bool:
     """True for an env name foldyard sets in the box itself (:data:`FOLDYARD_BOX_ENV`, or an
     ``FY_``/``FOLDYARD_`` name), in any case."""
@@ -1303,6 +1313,11 @@ def box_env() -> dict[str, str]:
     clock foldyard copies from your computer)."""
     raw = _box_table().get("env")
     env = {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    if malformed := [name for name in env if not env_name(name)]:
+        raise SystemExit(
+            f"✗ [box].env: {', '.join(map(repr, malformed))} isn't an environment-variable name "
+            "([A-Za-z_][A-Za-z0-9_]*).\n  Rename or remove it in [box].env."
+        )
     if refused := [name for name in env if foldyard_owned(name)]:
         lines = [
             f"✗ [box].env sets {'names' if len(refused) > 1 else 'a name'} foldyard sets in the "
