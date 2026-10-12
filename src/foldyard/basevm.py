@@ -225,6 +225,14 @@ def _not_ours(backend: LimaBackend) -> bool:
     return read_stamp() is None and backend.exists(NAME)
 
 
+def _discard_half_baked(backend: LimaBackend) -> int:
+    """A failed bake's instance has no stamp, so left behind it would read as someone else's VM
+    (bake + rm refuse those). Remove it now, while it is still known to be ours."""
+    if backend.exists(NAME) and not backend.remove(NAME):
+        _err(f"  …and removing the half-made '{NAME}' failed: `limactl delete --force {NAME}`.")
+    return 1
+
+
 def bake(backend: LimaBackend | None = None) -> int:
     """Create (or re-create) the base VM: from the template, nothing mounted, booted once so the
     template's provisioning runs, the packaged box image built in it, stopped, stamped. Direct
@@ -246,18 +254,21 @@ def bake(backend: LimaBackend | None = None) -> int:
     if backend.exists(NAME):
         _err(f"▶ replacing the base VM '{NAME}'…")
         backend.stop(NAME)
-        backend.remove(NAME)
+        if not backend.remove(NAME):
+            # Keep the stamp: it is what marks the instance as ours, so a retry can remove it.
+            _err(f"✗ couldn't remove the old base VM '{NAME}' — see the output above.")
+            return 1
     _clear_stamp()
 
     resources = {"cpus": str(CPUS), "memory": str(MEMORY_MIB), "disk": str(DISK_GIB)}
     _err(f"▶ baking the base VM '{NAME}' (downloads the VM image if Lima hasn't cached it)…")
     if not backend.create_template(NAME, resources, [], inputs["vmtype"]):
         _err("✗ creating the base VM failed — see the output above.")
-        return 1
+        return _discard_half_baked(backend)
     if not backend.start(NAME):
         _err("✗ the base VM didn't start — see the output above.")
         backend.stop(NAME)
-        return 1
+        return _discard_half_baked(backend)
 
     sock = backend.socket(NAME)
     env = dict(os.environ, CONTAINER_HOST=sock, DOCKER_HOST=sock)
@@ -294,7 +305,9 @@ def rm(backend: LimaBackend | None = None) -> int:
         return 1
     if backend.exists(NAME):
         backend.stop(NAME)
-        backend.remove(NAME)
+        if not backend.remove(NAME):
+            _err(f"✗ couldn't remove the base VM '{NAME}' — see the output above; retry.")
+            return 1  # the stamp stays, so the retry still knows it's ours
     _clear_stamp()
     print(f"✓ base VM '{NAME}' removed (VMs cloned from it are unaffected).")
     return 0

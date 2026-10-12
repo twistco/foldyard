@@ -58,7 +58,7 @@ class _FakeLima(mb.LimaBackend):
     def preferred_vmtype(self):
         return "vz"
 
-    def remove(self, name):
+    def remove(self, name) -> bool:
         self.removed.append(name)
         self.instances.pop(name, None)
         return True
@@ -295,18 +295,25 @@ def test_create_says_how_to_make_the_next_one_fast(monkeypatch, fresh_config, ca
 
 
 class _BakeLima(_FakeLima):
-    def __init__(self, instances=None, *, start_ok=True):
+    def __init__(self, instances=None, *, start_ok=True, create_ok=True, remove_ok=True):
         super().__init__(instances)
         self.log: list[str] = []
         self.start_ok = start_ok
+        self.create_ok = create_ok
+        self.remove_ok = remove_ok
+
+    def remove(self, name) -> bool:
+        if not self.remove_ok:
+            return False
+        return super().remove(name)
 
     def available(self):
         return True
 
     def create_template(self, name, resources, volumes, vmtype):
         self.log.append(f"create {name} mounts={volumes} disk={resources['disk']} {vmtype}")
-        self.instances[name] = "stopped"
-        return True
+        self.instances[name] = "stopped"  # a failed create can still leave the instance dir
+        return self.create_ok
 
     def start(self, name, prefix=()):
         self.log.append(f"start {name}")
@@ -375,6 +382,23 @@ def test_a_failed_bake_leaves_no_stamp(baking):
     assert basevm.read_stamp() is None
 
 
+@pytest.mark.parametrize("failure", ["create_ok", "start_ok"])
+def test_a_failed_bake_removes_its_half_made_base(baking, failure):
+    # Left behind with no stamp, it would read as someone else's VM: bake and rm would both refuse
+    # it, and only a hand `limactl delete` would recover from foldyard's own failure.
+    backend = _BakeLima(**{failure: False})
+    assert basevm.bake(backend) == 1
+    assert backend.removed == [basevm.NAME] and not backend.exists(basevm.NAME)
+
+
+def test_rebake_keeps_the_old_stamp_when_the_old_base_wont_go(baking):
+    basevm.write_stamp(_stamp())
+    backend = _BakeLima({basevm.NAME: "stopped"}, remove_ok=False)
+    assert basevm.bake(backend) == 1
+    assert basevm.read_stamp() == _stamp()  # still ours: a retry can remove it
+    assert not any(line.startswith("create") for line in backend.log)
+
+
 def test_a_failed_box_build_still_stamps_the_vm_half(baking, monkeypatch, capsys):
     # The VM is the part that saves the dnf + boot; the box image is a bonus a stale fingerprint
     # already handles. A build failure is reported, and the base still stands.
@@ -401,6 +425,14 @@ def test_rm_deletes_the_base_and_its_stamp(wired, monkeypatch):
     monkeypatch.setattr(_FakeLima, "stop", lambda self, name: True, raising=False)
     assert basevm.rm(wired) == 0
     assert wired.removed == [basevm.NAME] and basevm.read_stamp() is None
+
+
+def test_rm_keeps_the_stamp_when_the_base_wont_go(wired, monkeypatch):
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(_FakeLima, "stop", lambda self, name: True, raising=False)
+    monkeypatch.setattr(_FakeLima, "remove", lambda self, name: False)
+    assert basevm.rm(wired) == 1
+    assert basevm.read_stamp() is not None  # still ours: `fy machine base rm` can retry
 
 
 def test_rm_leaves_an_unstamped_instance_alone(monkeypatch, capsys):
