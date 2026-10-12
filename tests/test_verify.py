@@ -46,6 +46,8 @@ def secure_engine(monkeypatch, tmp_path):
     def fake_run(cmd, **kw):
         calls.append(cmd)
         if cmd[0] == "git" and "rev-parse" in cmd:  # does HEAD name a commit?
+            if results["has_commits"] is None:
+                raise verify.subprocess.TimeoutExpired(cmd, kw.get("timeout") or 0)
             return _Proc(0 if results["has_commits"] else 1)
         if cmd[0] == "git":
             results["git_env"] = kw.get("env")
@@ -362,6 +364,20 @@ def test_the_push_probe_works_before_the_first_commit(secure_engine, monkeypatch
     results["has_commits"] = False
     verify.verify()
     assert results["git_cmd"][-1] == f"{verify._EMPTY_TREE}:{verify._PUSH_PROBE}"
+
+
+def test_a_stuck_head_probe_leaves_the_push_refusal_unproven(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # Box-side git runs through the index shim, which can stall: a timed-out HEAD lookup says
+    # nothing about the checkout, so it must not fall back to the empty tree — or pass.
+    _enter_box(monkeypatch, tmp_path)
+    _, results = secure_engine
+    results["has_commits"] = None
+    assert verify.verify() != 0
+    out = capsys.readouterr().out
+    assert "UNPROVEN" in out and "git push refused" not in out
+    assert "git_cmd" not in results  # never pushed
 
 
 def test_git_auth_failure_does_prove_the_push_refusal(secure_engine, monkeypatch, tmp_path, capsys):

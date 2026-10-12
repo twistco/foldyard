@@ -373,15 +373,23 @@ def _box_posture(rep: _Report, env: dict) -> None:
         **os.environ,
         "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=6",
         "GIT_TERMINAL_PROMPT": "0",
+        # GIT_ASKPASS deliberately NOT blanked: an empty one disables every askpass helper
+        # (core.askPass included), which is a route a credential reaches the box's git by — the
+        # probe must see it. A helper that hangs hits the timeout: UNREACHABLE, a FAIL.
     }
-    has_head = (
-        subprocess.run(
-            ["git", "-C", checkout, "rev-parse", "--verify", "-q", "HEAD^{commit}"],
-            env=git_env,
-            capture_output=True,
-        ).returncode
-        == 0
-    )
+    try:
+        has_head = (
+            subprocess.run(
+                ["git", "-C", checkout, "rev-parse", "--verify", "-q", "HEAD^{commit}"],
+                env=git_env,
+                capture_output=True,
+                timeout=12,  # box-side git goes through the index shim, which can stall
+            ).returncode
+            == 0
+        )
+    except subprocess.TimeoutExpired:
+        rep.bad("push refusal UNPROVEN — reading the checkout's HEAD timed out, nothing was probed")
+        return
     source = "HEAD" if has_head else _EMPTY_TREE
     try:
         got = subprocess.run(
