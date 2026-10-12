@@ -47,7 +47,8 @@ from pathlib import Path
 from . import config
 from .machine_backend import LimaBackend, _run
 
-NAME = "foldyard-base"
+# `FY_BASE_VM_NAME` is a test seam (the host-tier e2e bakes its own, never the operator's).
+NAME = os.environ.get("FY_BASE_VM_NAME") or "foldyard-base"
 # The base's own size. Small, because a clone can GROW its disk but never shrink it: a project
 # asking for less than this is created from the template instead.
 DISK_GIB = 10
