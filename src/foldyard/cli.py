@@ -18,10 +18,24 @@ options, and `CliRunner` testability.
 from __future__ import annotations
 
 import typer
+from typer.core import TyperGroup
+
+
+class _RootGroup(TyperGroup):
+    """Keeps the command line for the root callback. Click hands the root callback only the verb
+    name, having already set the rest aside for the subcommand — so `fy machine base --help` and
+    `fy machine stop` look the same there. The callback needs the difference (see
+    :func:`_command_path`)."""
+
+    def invoke(self, ctx):
+        ctx.meta["fy.argv"] = [*getattr(ctx, "_protected_args", []), *ctx.args]
+        return super().invoke(ctx)
+
 
 # Every Typer here renders help as MARKDOWN: under the default "rich" mode a config table named in
 # help (`[claude]`, `[proxy]`) parses as a style tag and silently disappears.
 app = typer.Typer(
+    cls=_RootGroup,
     rich_markup_mode="markdown",
     name="foldyard",
     help="secretless-by-default, laptop-local isolated dev environment",
@@ -43,6 +57,37 @@ def _version(show: bool) -> None:
         raise typer.Exit()
 
 
+# Verbs that need no project — they read nothing from one, write nothing for one, and are what a
+# person runs BEFORE there is one (`uvx foldyard prereq` in an empty directory, a workshop's first
+# step). A prefix matches its subcommands. `skill install` is absent on purpose: it writes into
+# the repo. Help (`--help`, a bare group) is project-free for every verb.
+_PROJECT_FREE = (("prereq",), ("docs",), ("init",), ("machine", "base"), ("skill", "list"))
+
+_NOT_A_PROJECT = (
+    "✗ not in a foldyard project — no foldyard.toml here or in any directory above.\n"
+    "  `fy init` makes this directory one; `fy prereq` checks your computer;\n"
+    "  `fy --help` lists the verbs."
+)
+
+
+def _command_path(ctx: typer.Context) -> tuple[tuple[str, ...], bool]:
+    """``(the verb's path, is this a help request)`` from the command line the root group kept.
+    Help = a ``--help`` before any ``--``, or a path that stops at a group Typer answers with its
+    help — not one that runs its own callback bare (`fy host` is its status)."""
+    argv = ctx.meta.get("fy.argv", [])
+    before_dashdash = argv[: argv.index("--")] if "--" in argv else argv
+    node = ctx.command
+    path: list[str] = []
+    for token in argv:
+        sub = getattr(node, "commands", {}).get(token)
+        if sub is None:
+            break
+        path.append(token)
+        node = sub
+    shows_help = hasattr(node, "commands") and not getattr(node, "invoke_without_command", False)
+    return tuple(path), "--help" in before_dashdash or shows_help
+
+
 @app.callback()
 def _resolve_worktree(
     ctx: typer.Context,
@@ -55,39 +100,49 @@ def _resolve_worktree(
         help="print the installed foldyard version and exit",
     ),
 ) -> None:
-    """Pin the active worktree ONCE, up front, so posture (config) and the stack agree on WHICH
-    checkout a command targets.
+    """Refuse a project verb outside a project, then pin the active worktree ONCE, up front, so
+    posture (config) and the stack agree on WHICH checkout a command targets.
+
+    Outside a project (no foldyard.toml here or above, no ``FOLDYARD_REPO``, not in a box) a
+    project verb used to run anyway, as a made-up project named after the directory — writing a
+    mode file and allocating a port band for it. Help and :data:`_PROJECT_FREE` verbs run
+    anywhere and say nothing else.
 
     The stack infers the worktree from CWD (git common-dir + the worktrees root) when ``WORKTREE``
     isn't set; ``config.active_worktree`` reads ``WORKTREE`` only. Without this, a host ``fy mode``
     run from inside a worktree would write MAIN's posture while the stack acts on the worktree — the
     "changing mode changes both" footgun. Resolve it here (host only — the box already exports
     ``WORKTREE``) and export it into the process env so config + every child ``foldyard`` agree.
-    Best-effort: a non-git dir (e.g. ``init`` scaffolding) just leaves it unset."""
+    Best-effort: a non-git dir leaves it unset, silently."""
     import os
+    import sys
 
     from . import compat, config
 
+    path, is_help = _command_path(ctx)
+    project_free = is_help or any(path[: len(free)] == free for free in _PROJECT_FREE)
+    if not (project_free or config.in_box() or config.in_project()):
+        print(_NOT_A_PROJECT, file=sys.stderr)
+        raise typer.Exit(1)
     try:
         if not (config.in_box() or os.environ.get("WORKTREE")):
             try:
                 from . import stack
 
-                os.environ["WORKTREE"] = stack._active_worktree(
-                    stack.worktrees_root(stack.main_repo())
-                )
+                main = stack.find_main_repo()
+                if main is not None:
+                    os.environ["WORKTREE"] = stack._active_worktree(stack.worktrees_root(main))
             except (Exception, SystemExit):
-                # not a git repo / no worktrees root → leave WORKTREE unset (resolves to main).
-                # SystemExit too: stack.main_repo() raises it (not an Exception) from a non-git
-                # dir, and this best-effort pin must never abort the command it's fronting (e.g.
-                # `fy init` scaffolding).
+                # no worktrees root → leave WORKTREE unset (resolves to main). SystemExit too:
+                # this best-effort pin must never abort the command it's fronting.
                 pass
     finally:
-        # AFTER the worktree pin, and reached on EVERY path through this callback — the
-        # in-box and WORKTREE-already-set cases short-circuit the pin, and those are exactly
-        # where a mismatched foldyard does the most damage. `--version` is eager and has already
-        # exited by now, deliberately: asking a binary to name itself has to keep working when
-        # the answer is what you are being told to change.
+        # AFTER the worktree pin, and reached on EVERY path through it — the in-box and
+        # WORKTREE-already-set cases short-circuit the pin, and those are exactly where a
+        # mismatched foldyard does the most damage. `--version` is eager and has already exited by
+        # now, deliberately: asking a binary to name itself has to keep working when the answer
+        # is what you are being told to change. Outside a project there is no window to read, so
+        # the gate passes; inside one it holds for help and the project-free verbs too.
         #
         # The verb comes from the declared `ctx` and NOT click.get_current_context(): typer
         # vendors its own click, so the top-level click package reads a different context stack
@@ -114,6 +169,9 @@ def _say_if_unadopted(verb: str | None) -> None:
     import sys
 
     from . import config
+
+    if not config.in_project():  # nothing here to adopt (help, or a project-free verb)
+        return
 
     try:
         notice = config.unadopted_notice()

@@ -260,6 +260,17 @@ def _repo_root_ambient() -> Path:
     return (_git_toplevel(cur) or cur).resolve()
 
 
+def in_project() -> bool:
+    """Is there a foldyard project to act on? A bound :class:`Config`, an explicit
+    ``FOLDYARD_REPO``, or a ``foldyard.toml`` in CWD or above. NOT the git/CWD fallbacks
+    :func:`repo_root` keeps for code that already knows it's in one: a project verb run anywhere
+    else would act on a made-up project named after the directory, writing state for it."""
+    if _BOUND.get() is not None or os.environ.get("FOLDYARD_REPO"):
+        return True
+    cur = Path.cwd().resolve()
+    return any((d / "foldyard.toml").is_file() for d in (cur, *cur.parents))
+
+
 def repo_root() -> Path:
     """The consumer repo root. ``FOLDYARD_REPO`` wins (the recipes set it to
     ``justfile_directory()``); otherwise walk up from CWD to the ``foldyard.toml``
