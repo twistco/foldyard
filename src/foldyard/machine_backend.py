@@ -335,6 +335,7 @@ class PodmanBackend(Backend):
         vols: list[str] = []
         for src, dst in volumes:
             vols += ["--volume", f"{src}:{dst}"]  # --volume REPLACES podman's default mounts
+        _err("  (one-time, a few minutes: downloads the VM image + provisions disk)")
         return subprocess.run(["podman", "machine", "init", name, *flags, *vols]).returncode == 0
 
     def start_argv(self, name: str) -> list[str]:
@@ -618,9 +619,13 @@ class LimaBackend(Backend):
         guessing a list that grows with every external plugin."""
         from . import config
 
-        return config.machine_vmtype() or next(
-            (v for v in self.VMTYPE_PREFERENCE if v in self.available_vmtypes()), ""
-        )
+        return config.machine_vmtype() or self.preferred_vmtype()
+
+    def preferred_vmtype(self) -> str:
+        """The best of :data:`VMTYPE_PREFERENCE` this host registers, ignoring any project's
+        ``[machine].vmtype`` — what the project-less base VM (:mod:`foldyard.basevm`) is baked
+        with. ``""`` when the host offers neither."""
+        return next((v for v in self.VMTYPE_PREFERENCE if v in self.available_vmtypes()), "")
 
     def _set_expr(self, resources: dict, volumes: list[tuple[str, str]], vmtype: str = "") -> str:
         """A yq-style override expression for ``limactl create --set`` that pins sizing and
@@ -647,23 +652,49 @@ class LimaBackend(Backend):
         return f'{expr} | .vmType = "{vmtype}"' if vmtype else expr
 
     def create(self, name: str, resources: dict, volumes: list[tuple[str, str]]) -> bool:
-        """Create (stopped) from the podman template, overriding sizing + mounts + the
-        vmType via ``--set``. Keeps the template's podman provisioning + socket forward;
-        ``--tty=false`` skips the interactive review.
+        """Create (stopped): a CLONE of the baked base VM when one fits (:mod:`foldyard.basevm` —
+        seconds, no image download, no dnf), else from the podman template. The clone gets the
+        same ``--set`` the template path would (sizing, ONLY foldyard's mounts, the vmType), so
+        what follows — the boot provisioning, the wall, the checks — cannot tell them apart. A
+        clone that fails falls back to the template rather than failing the create.
 
         The vmType is PINNED here rather than inherited from Lima's `runtime.GOOS` default,
         and printed, because it is the hypervisor the whole boundary rests on and it cannot be
         changed afterwards without recreating the VM."""
+        from . import basevm
+
         vmtype = self.resolve_vmtype()
         if vmtype:
             _err(f"▶ hypervisor (vmType): {vmtype}")
+        source, why = basevm.clone_source(self, vmtype=vmtype, disk_gib=int(resources["disk"]))
+        if source:
+            _err(f"▶ cloning the base VM '{source}' ({basevm.describe_clone()})…")
+            if basevm.clone(self, name, self._set_expr(resources, volumes, vmtype)):
+                return True
+            _err("⚠ cloning the base VM failed — creating from the template instead.")
+        elif why:
+            _err(f"  (no clone: {why})")
+        _err("  (one-time, a few minutes: downloads the VM image + provisions disk;")
+        _err("  `fy machine base bake` once makes every later project's VM a clone instead)")
+        return self.create_template(name, resources, volumes, vmtype)
+
+    # The template a VM is created from — and what the base VM's stamp hashes, so the two can't
+    # disagree about which template is meant.
+    TEMPLATE = "template://podman"
+
+    def create_template(
+        self, name: str, resources: dict, volumes: list[tuple[str, str]], vmtype: str
+    ) -> bool:
+        """Create (stopped) from the podman template, overriding sizing + mounts + the vmType via
+        ``--set``. Keeps the template's podman provisioning + socket forward; ``--tty=false``
+        skips the interactive review."""
         cmd = [
             "limactl",
             "create",
             "--tty=false",
             "--name",
             name,
-            "template://podman",
+            self.TEMPLATE,
             "--set",
             self._set_expr(resources, volumes, vmtype),
         ]

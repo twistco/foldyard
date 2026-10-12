@@ -1165,12 +1165,14 @@ def box_image() -> dict:
         img = dict(img)
         img.setdefault("tag", f"{project_prefix()}-devbox:latest")
         return img
+    return packaged_box_image(f"{project_prefix()}-devbox:latest")
+
+
+def packaged_box_image(tag: str) -> dict:
+    """foldyard's packaged generic box under ``tag`` — project-free, so the base VM
+    (:mod:`foldyard.basevm`) can build the very image a project's ``box up`` would."""
     box_dir = Path(__file__).resolve().parent / "assets" / "box"
-    return {
-        "dockerfile": str(box_dir / "Dockerfile"),
-        "context": str(box_dir),
-        "tag": f"{project_prefix()}-devbox:latest",
-    }
+    return {"dockerfile": str(box_dir / "Dockerfile"), "context": str(box_dir), "tag": tag}
 
 
 def box_sock_in_vm() -> str:

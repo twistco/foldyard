@@ -10,6 +10,8 @@ For using foldyard. These pages also ship with the install — `fy docs` prints 
   word is unfamiliar (box, mode, switch, allowlist, adopted config…).
 - [quickstart.md](./quickstart.md) — install, `fy init`, the box, an agent, your stack, and how
   to upgrade.
+- [base-vm.md](./base-vm.md) — `fy prereq --fetch` and the base VM: new projects' VMs
+  as clones, and the big downloads done before a workshop.
 - [configuration.md](./configuration.md) — every `foldyard.toml` key, `foldyard.local.toml`
   overrides, environment variables, the adopted config, and what lives in `~/.foldyard/`.
 - [modes.md](./modes.md) — switching credentials on and off: switches and levels, time limits,

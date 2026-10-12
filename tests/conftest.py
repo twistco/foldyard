@@ -153,6 +153,18 @@ def isolated_port_registry(tmp_path, monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def isolated_base_vm_stamp(tmp_path, monkeypatch, request):
+    """Point the base VM's stamp (basevm.py) at a per-test file, so no test reads the operator's
+    real ~/.foldyard/base-vm.json and clones from their baked base. The live modules that drive
+    the real CLI get cloning switched OFF instead (no per-test path may reach them —
+    test_isolation_e2e.py): their VMs come from the template, as before the base existed."""
+    if _runs_the_real_cli(request.module):
+        monkeypatch.setenv("FOLDYARD_BASE_VM", "0")
+        return
+    monkeypatch.setenv("FY_BASE_VM_STAMP", str(tmp_path / "fy-base-vm.json"))
+
+
+@pytest.fixture(autouse=True)
 def isolated_allow_store(tmp_path, monkeypatch, request):
     """Point the egress allow-store + the effective file the proxy reads at per-test paths, so no
     test reads or writes the real ~/.foldyard/<project>/allow-store.json — and every test starts

@@ -529,7 +529,6 @@ def ensure(main: Path, wt_root: Path) -> None:
     if not exists():
         _err(f"▶ {BACKEND.name} machine '{MACHINE}' not found — initialising (rootless; mounts")
         _err(f"  ONLY {main} and {wt_root})…")
-        _err("  (one-time, a few minutes: downloads the VM image + provisions disk)")
         if not BACKEND.create(MACHINE, _resources(), _volumes(main, wt_root)):
             _err(
                 f"✗ creating {BACKEND.name} machine '{MACHINE}' failed — see the output above. "

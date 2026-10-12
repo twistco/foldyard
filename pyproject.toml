@@ -192,6 +192,7 @@ packages = ["src/foldyard"]
 # keeps the two apart: a shipped page may only link to other shipped pages.
 [tool.hatch.build.targets.wheel.force-include]
 "docs/quickstart.md" = "foldyard/assets/docs/quickstart.md"
+"docs/base-vm.md" = "foldyard/assets/docs/base-vm.md"
 "docs/glossary.md" = "foldyard/assets/docs/glossary.md"
 "docs/configuration.md" = "foldyard/assets/docs/configuration.md"
 "docs/modes.md" = "foldyard/assets/docs/modes.md"

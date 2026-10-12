@@ -110,6 +110,7 @@ def fake(tmp_path, monkeypatch):
         "exists": False,
         "img": False,
         "image_fingerprint": None,
+        "base_image_fingerprint": None,  # the base VM's box image (box.BASE_BOX_TAG), if any
         "box_fingerprint": "expected-fingerprint",
         "net_exists": True,
         "baked_proxy_port": None,  # set to a string to simulate a box's baked FY_PROXY_PORT
@@ -142,6 +143,9 @@ def fake(tmp_path, monkeypatch):
                 baked["FY_PROXY_PORT"] = state["baked_proxy_port"]
             lines = "".join(f"{k}={v}\n" for k, v in baked.items())
             return _Proc(0, lines + "PATH=/usr/bin\n" if baked else "")
+        if cmd[1] == "image" and box.BASE_BOX_TAG in cmd:
+            value = state["base_image_fingerprint"]
+            return _Proc(0 if value else 1, f"{value}\n" if value else "")
         if cmd[1] == "image":
             value = state["image_fingerprint"]
             return _Proc(0 if state["img"] else 1, f"{value}\n" if value else "")
@@ -548,6 +552,45 @@ def test_up_reuses_current_cached_image(fake):
     fake["state"].update(img=True, image_fingerprint="expected-fingerprint")
     assert box.main("up") == 0
     assert not _find(fake["calls"], has=["build", "-t", "img:tag"])
+
+
+def test_up_takes_the_base_vms_box_image_instead_of_building(fake):
+    # A VM cloned from the base carries the packaged box image under BASE_BOX_TAG. When it is
+    # exactly what this project would build (same fingerprint), re-tag it — no download, no build.
+    fake["state"].update(img=False, base_image_fingerprint="expected-fingerprint")
+    assert box.main("up") == 0
+    assert _find(fake["calls"], has=["tag", box.BASE_BOX_TAG, "img:tag"])
+    assert not _find(fake["calls"], has=["build", "-t", "img:tag"])
+
+
+def test_up_builds_when_the_base_image_is_a_different_box(fake):
+    fake["state"].update(img=False, base_image_fingerprint="some-other-box")
+    assert box.main("up") == 0
+    assert not _find(fake["calls"], has=["tag", box.BASE_BOX_TAG, "img:tag"])
+    assert _find(fake["calls"], has=["build", "-t", "img:tag"])
+
+
+def test_packaged_fingerprint_is_what_a_boxless_project_expects(monkeypatch, tmp_path):
+    # The base's image is only re-tagged when its fingerprint matches, so the base's and a
+    # project's computation of the packaged box's fingerprint must agree — tag aside.
+    monkeypatch.setattr(config, "_box_table", lambda: {})
+    assert box._box_image_fingerprint(tmp_path) == box.packaged_fingerprint()
+
+
+def test_build_packaged_image_is_the_projects_build_shape(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return _Proc(0)
+
+    monkeypatch.setattr(box.subprocess, "run", fake_run)
+    box.build_packaged_image("podman", {}, box.BASE_BOX_TAG)
+    cmd = seen["cmd"]
+    assert cmd[:4] == ["podman", "build", "--format", "docker"]
+    assert f"{box._BOX_FINGERPRINT_LABEL}={box.packaged_fingerprint()}" in cmd
+    assert cmd[cmd.index("-t") + 1] == box.BASE_BOX_TAG
+    assert not any("PROXY" in c for c in cmd)  # direct: the base is unwalled and project-less
 
 
 def test_up_rebuilds_stale_cached_image(fake):
