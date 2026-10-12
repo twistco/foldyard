@@ -140,9 +140,15 @@ def _probe_runs(engine: str, env: dict, probe: str) -> bool:
     return _engine_run_succeeds(engine, env, [probe, "true"])
 
 
-# `git ls-remote` failing proves "no credential reaches origin" ONLY if it failed for credential
-# reasons. A box with no egress fails it too, which would certify the product's headline claim
-# ("git push is impossible from inside") from a network outage.
+# The push probe: a DRY-RUN push to origin. A read (`ls-remote`) proves nothing — a public origin
+# answers it with no credential — but the push handshake needs write access on any repo, and
+# --dry-run sends nothing. Its failure proves "no credential reaches origin" ONLY if it failed for
+# credential reasons: a box with no egress fails it too, which would certify the product's
+# headline claim ("git push is impossible from inside") from a network outage.
+_PUSH_PROBE = "refs/heads/fy-verify-push-probe"
+# Before the first commit there is no HEAD to push, and git refuses that locally without asking
+# origin; any object id reaches the auth handshake, so the empty tree's stands in.
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # git could not even START the SSH transport: no client in the box. With no keys and no agent
 # (asserted beside it) that absence is the refusal — no credential can travel a transport that
 # does not exist — not an "unreachable for network reasons" that leaves the claim unproven.
@@ -359,13 +365,27 @@ def _box_posture(rep: _Report, env: dict) -> None:
         rep.bad("~/.netrc present")
 
     checkout = env.get("FOLDYARD_CHECKOUT") or str(stack.main_repo())
+    # The box's OWN env, as every other check here reads it: the claim is about what a process in
+    # the box can do, and that process has the box's proxy + CA bundle. `env` is the compose
+    # client's (stack._host_passthrough — no proxy since 4925b8b), so git with it went direct and
+    # a walled box reported every origin UNREACHABLE instead of proving the refusal.
     git_env = {
-        **env,
+        **os.environ,
         "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=6",
+        "GIT_TERMINAL_PROMPT": "0",
     }
+    has_head = (
+        subprocess.run(
+            ["git", "-C", checkout, "rev-parse", "--verify", "-q", "HEAD^{commit}"],
+            env=git_env,
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+    source = "HEAD" if has_head else _EMPTY_TREE
     try:
         got = subprocess.run(
-            ["git", "-C", checkout, "ls-remote", "origin"],
+            ["git", "-C", checkout, "push", "--dry-run", "origin", f"{source}:{_PUSH_PROBE}"],
             env=git_env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -376,7 +396,7 @@ def _box_posture(rep: _Report, env: dict) -> None:
     except subprocess.TimeoutExpired:
         reachable, why = False, "timed out"
     if reachable:
-        rep.bad("git remote REACHABLE — the box can push (credential leaked?)")
+        rep.bad("a dry-run push to origin was ACCEPTED — the box can push (credential leaked?)")
     elif _GIT_AUTH_DENIED.search(why):
         rep.ok("git push refused (no credential reaches origin)")
     elif _GIT_NO_SSH.search(why):

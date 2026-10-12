@@ -5,6 +5,7 @@ real engine. The injectors' box-dummy rows are unit-tested in test_inject_kinds.
 from __future__ import annotations
 
 import pathlib
+from typing import Any
 
 import pytest
 
@@ -25,7 +26,7 @@ def secure_engine(monkeypatch, tmp_path):
     real git/machine runs. Returns (recorded calls, a mutable results dict to make a probe
     report insecurely)."""
     calls: list[list[str]] = []
-    results = {
+    results: dict[str, Any] = {
         "rootless": True,
         "escape_rc": 1,  # --privileged --pid=host refused
         # The VM's mount table = PID 1's, read via --pid=host (the container's own `mount`
@@ -33,6 +34,7 @@ def secure_engine(monkeypatch, tmp_path):
         "pid1_mounts": "proc /proc proc rw 0 0\ntmpfs /tmp tmpfs rw 0 0\n",
         "mount_rc": 0,
         "probe_rc": 0,  # the positive control: the probe image CAN run
+        "has_commits": True,
         "git_rc": 1,  # origin unreachable…
         "git_stderr": "git@github.com: Permission denied (publickey).",  # …for CREDENTIAL reasons
         "ps": "",  # no stack containers ⇒ the advisory health section skips
@@ -43,7 +45,11 @@ def secure_engine(monkeypatch, tmp_path):
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
+        if cmd[0] == "git" and "rev-parse" in cmd:  # does HEAD name a commit?
+            return _Proc(0 if results["has_commits"] else 1)
         if cmd[0] == "git":
+            results["git_env"] = kw.get("env")
+            results["git_cmd"] = cmd
             return _Proc(results["git_rc"], stderr=results["git_stderr"])
         if cmd[1] == "ps":
             return _Proc(results["ps_rc"], results["ps"])
@@ -316,6 +322,48 @@ def test_git_missing_origin_is_named_not_blamed_on_the_network(
     assert "no `origin` remote" in out and "UNPROVEN" in out and "fy doctor" in out
 
 
+def test_the_push_probe_runs_git_as_the_box_does(secure_engine, monkeypatch, tmp_path):
+    # Git in the box reaches origin the way any box process does: through the proxy the box's
+    # env names, trusting the box's CA bundle. The probe took the COMPOSE client's env instead,
+    # which since 4925b8b is an allowlist with no proxy in it — so in a walled box git went
+    # direct, the VM firewall refused it, and every walled box with an origin reported "git
+    # remote UNREACHABLE … push refusal UNPROVEN" (found live 2026-10-12).
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.setenv("HTTPS_PROXY", "http://192.168.5.2:41000")
+    monkeypatch.setenv("NO_PROXY", "localhost")
+    monkeypatch.setenv("GIT_SSL_CAINFO", "/etc/dev-proxy-ca-combined.pem")
+    _, results = secure_engine
+    verify.verify()
+    env = results["git_env"]
+    assert env["HTTPS_PROXY"] == "http://192.168.5.2:41000"
+    assert env["NO_PROXY"] == "localhost"
+    assert env["GIT_SSL_CAINFO"] == "/etc/dev-proxy-ca-combined.pem"
+    assert "BatchMode=yes" in env["GIT_SSH_COMMAND"]  # never prompts…
+    assert env["GIT_TERMINAL_PROMPT"] == "0"  # …over either transport
+
+
+def test_the_push_probe_is_a_dry_run_push_not_a_read(secure_engine, monkeypatch, tmp_path):
+    # `ls-remote` is a READ: a public origin answers it with no credential, so the probe read
+    # "the box can push" on every public repo, and a read-only credential would too. The push
+    # handshake needs WRITE access even on a public repo, and --dry-run sends nothing.
+    _enter_box(monkeypatch, tmp_path)
+    _, results = secure_engine
+    verify.verify()
+    cmd = results["git_cmd"]
+    assert cmd[cmd.index("push") :] == ["push", "--dry-run", "origin", f"HEAD:{verify._PUSH_PROBE}"]
+    assert "ls-remote" not in cmd
+
+
+def test_the_push_probe_works_before_the_first_commit(secure_engine, monkeypatch, tmp_path):
+    # No commit, no HEAD to push: git refuses locally without ever asking origin. Any object id
+    # gets as far as the auth handshake, so offer the empty tree's.
+    _enter_box(monkeypatch, tmp_path)
+    _, results = secure_engine
+    results["has_commits"] = False
+    verify.verify()
+    assert results["git_cmd"][-1] == f"{verify._EMPTY_TREE}:{verify._PUSH_PROBE}"
+
+
 def test_git_auth_failure_does_prove_the_push_refusal(secure_engine, monkeypatch, tmp_path, capsys):
     _enter_box(monkeypatch, tmp_path)
     _, results = secure_engine
@@ -420,7 +468,7 @@ def test_git_remote_reachable_is_fail(secure_engine, monkeypatch, tmp_path, caps
     results["git_rc"] = 0  # origin reachable → the box could push
     _enter_box(monkeypatch, tmp_path)
     assert verify.verify() == 1
-    assert "git remote REACHABLE" in capsys.readouterr().out  # ...and for THAT reason
+    assert "push to origin was ACCEPTED" in capsys.readouterr().out  # ...and for THAT reason
 
 
 def test_ssh_private_key_is_fail(secure_engine, monkeypatch, tmp_path, capsys):
