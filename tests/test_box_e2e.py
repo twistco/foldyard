@@ -8,9 +8,11 @@ inside (no SSH key material, `git push` refused) — then `fy box down`.
 Host tier (tests/e2e_host.py). The box bind-mounts the checkout at its host path, and a VM's mount
 set is init-only, so the module RECREATES the VM from its own example copy first (`fy machine
 recreate --yes`) — the one module that needs the VM to mount its copy; the others' stacks ship
-their build context over the socket. The example's origin is set to a PRIVATE (nonexistent)
-remote: a public one answers `ls-remote` without credentials and reads as pushable
-(docs/archive/verify-false-pass.md, 2026-09-13). Lima 2.2.0, Fedora 44 guest.
+their build context over the socket. The example's origin is this PUBLIC repo, on purpose: the
+push probe used to be `ls-remote`, which a public origin answers with no credential (so this
+fixture had to name a nonexistent private one — docs/archive/verify-false-pass.md, 2026-09-13).
+It is a dry-run push now, refused without write access on any repo; a public origin is the case
+that proves it. Lima 2.2.0, Fedora 44 guest.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ BOX = f"{PROJECT}-devbox"
 def repo(tmp_path_factory):
     r = example_copy(tmp_path_factory.mktemp("box"))
     subprocess.run(
-        ["git", "remote", "add", "origin", "https://github.com/twistco/fy-e2e-private-fixture.git"],
+        ["git", "remote", "add", "origin", "https://github.com/twistco/foldyard.git"],
         cwd=str(r),
         check=True,
     )

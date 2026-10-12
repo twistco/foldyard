@@ -164,8 +164,9 @@ the box only the VM-boundary checks run. What it checks:
   your computer beyond the repo and worktrees mounts, matched exactly.
 - **Credential checks** (inside the box): no SSH agent forwarded, no git-credential bridge to your
   computer (`GIT_ASKPASS`), no editor-attach bridge sockets in `/tmp`, no `~/.ssh` private keys,
-  no `~/.netrc`, and `git ls-remote origin` **fails** — the box can't reach the remote to push.
-  (This needs a *private* origin: a public one answers `ls-remote` without credentials.) These
+  no `~/.netrc`, and a dry-run push to `origin` (`git push --dry-run`, which sends nothing) is
+  **refused** for lack of a credential — the push handshake needs write access, so this holds for a
+  public origin too. These
   are built into foldyard's core, so a missing or broken plugin can't weaken them.
 - **Dummy checks** (from the credential plugins): each `[[inject]]` row's `box_env` dummies must
   still hold their dummy value, in *any* mode, and the variables a known client reads a token
@@ -204,10 +205,14 @@ Each row names *what* failed. What it usually means, and what to do:
 - **`~/.ssh key material` / `~/.netrc present`** — a credential is in the box. foldyard doesn't
   put it there: find the mount or `[box]`/bootstrap step that copies it in, remove it, then
   `fy box down` and `fy box up`.
-- **`git remote REACHABLE — the box can push`** — the box authenticated to `origin`, or `origin`
-  is public (then the row can't tell). For a private origin, `fy state` shows what the mode
-  grants and `fy config widenings` where credentials are delivered. A network timeout does *not*
-  pass this row; an unreachable remote proves nothing.
+- **`a dry-run push to origin was ACCEPTED — the box can push`** — a credential with write access
+  to `origin` reached it from the box. `fy state` shows what the mode grants and
+  `fy config widenings` where credentials are delivered. A network timeout does *not* pass this
+  row; an unreachable remote proves nothing.
+- **`git remote UNREACHABLE for non-credential reasons`** — the push never got as far as asking
+  for a credential: no egress, or a blocked host. Under the VM firewall git goes through the
+  proxy like everything else in the box, so a refused `github.com` is the allowlist's
+  (`fy allow add github.com`).
 - **`… possible real credential in the box`** (e.g. `GH_TOKEN` is more than its dummy) — the
   box's environment carries a real credential. `fy mode` shows the mode, `fy state` desired against
   observed; a box created under older config is recreated with `fy box down` and `fy box up`.

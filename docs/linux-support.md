@@ -76,7 +76,8 @@ the VM user the proxy environment, so a bare `curl` from `limactl shell` goes th
 
 The first rig run found two `fy verify` bugs, both fixed: a false FAIL (a Fedora guest's btrfs
 `subvol=/root` mount option matched the in-box home; the audit now reads only the mountpoint),
-and the need for a *private* origin (a public one answers `git ls-remote` without credentials).
+and the need for a *private* origin (a public one answered the then `git ls-remote` probe
+without credentials; the probe is a `git push --dry-run` now, which a public origin refuses too).
 
 #### 4. podman 4.9 labels
 
