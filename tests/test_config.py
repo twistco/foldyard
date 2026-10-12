@@ -617,6 +617,8 @@ def test_box_env_keeps_the_projects_own_environment(fresh_config, tmp_path):
         "PATH",
         "FY_GIT_SHIM_OFF",
         "FOLDYARD_CHECKOUT",
+        "CQ_API_KEY",  # the cq key stays host-side; the proxy adds it
+        "CQ_ADDR",
     ],
 )
 def test_box_env_refuses_a_name_foldyard_sets_in_the_box(fresh_config, tmp_path, name):

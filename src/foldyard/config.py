@@ -1254,6 +1254,10 @@ FOLDYARD_BOX_ENV = frozenset(
         "ANTHROPIC_API_KEY",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "OPENAI_API_KEY",
+        # cq (plugins/cq.py): the hosted address, its local store, and the key that stays host-side
+        "CQ_ADDR",
+        "CQ_API_KEY",
+        "CQ_LOCAL_DB_PATH",
         # the shell basics
         "PATH",
         "HOME",
@@ -1283,6 +1287,8 @@ _BOX_ENV_INSTEAD = {
     "REQUESTS_CA_BUNDLE": _CA_INSTEAD,
     "GIT_SSL_CAINFO": _CA_INSTEAD,
     "NODE_EXTRA_CA_CERTS": _CA_INSTEAD,
+    "CQ_API_KEY": "the cq key stays on your computer and the proxy adds it: `[claude] cq = true` "
+    "or `[codex] cq = true`, then `fy mode cq=on`",
 }
 
 
@@ -1431,6 +1437,25 @@ def claude_keyless() -> str:
     if raw == "oauth":
         return "oauth"
     return ""
+
+
+def claude_cq() -> bool:
+    """``[claude].cq = true`` — connect Claude Code in the box to cq, the shared agent-knowledge
+    commons, on the HOSTED service (cq.exchange): the pinned ``cq`` CLI, its MCP server, skill and
+    ``/cq:reflect``, plus foldyard's session hooks (see :mod:`foldyard.plugins.cq`). Only a real
+    boolean ``true`` turns it on, and only under a declared ``[claude]``."""
+    return claude_enabled() and _table("claude").get("cq") is True
+
+
+def codex_cq() -> bool:
+    """``[codex].cq = true`` — the Codex twin of :func:`claude_cq`."""
+    return codex_enabled() and _table("codex").get("cq") is True
+
+
+def cq_agents() -> tuple[str, ...]:
+    """The agents cq is wired into, in a fixed order (``()`` = cq off). Baked into the box as
+    ``FY_CQ_AGENTS`` at create time, so it is also the drift signal for a running box."""
+    return tuple(a for a, on in (("claude", claude_cq()), ("codex", codex_cq())) if on)
 
 
 def _transcript_sync_seconds(table: str) -> float:

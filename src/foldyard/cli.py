@@ -68,6 +68,10 @@ def _resolve_worktree(
 
     from . import compat, config
 
+    if ctx.invoked_subcommand == "_cq-hook":
+        # An agent's hook, not an operator's command: it reads no config, and its contract is to
+        # exit 0 whatever happens — a version refusal here would be an error under every event.
+        return
     try:
         if not (config.in_box() or os.environ.get("WORKTREE")):
             try:
@@ -405,6 +409,20 @@ def transcripts(
     from . import transcripts as transcripts_mod
 
     raise typer.Exit(transcripts_mod.transcripts(dest))
+
+
+@app.command("_cq-hook", hidden=True)
+def cq_hook(
+    agent: str = typer.Argument(..., help="claude | codex"),
+    event: str = typer.Argument(..., help="session-start | post-tool-use-failure | session-end"),
+) -> None:
+    """The cq session hooks' handler, run by Claude/Codex in the dev box (internal; wired by
+    `[claude]`/`[codex]` `cq = true`). Reads the event on stdin; never fails the agent."""
+    import sys
+
+    from . import cqhook
+
+    raise typer.Exit(cqhook.run(agent, event, sys.stdin, sys.stdout))
 
 
 @app.command(hidden=True)

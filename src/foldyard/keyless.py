@@ -94,6 +94,34 @@ CODEX_CHATGPT_PATH_PREFIXES = ("/backend-api/codex", "/backend-api/wham/accounts
 _FAR_FUTURE_EXP = 4102444800  # 2100-01-01 — codex refreshes at exp-5min, so this never triggers
 
 
+# cq (mozilla-ai/cq), the shared agent-knowledge commons, on its HOSTED service. Split origin,
+# read off the live discovery document (`GET https://cq.exchange/.well-known/cq-node.json` →
+# `api_base_url: https://api.cq.exchange/api/v1`, 2026-10-12): the address the client is given
+# serves only that document, and every API call — the only requests that carry the key — goes to
+# CQ_API_HOST. Fixed here rather than configurable on purpose: the host is where the proxy injects
+# the operator's key, and an injection target is never repo config's to choose.
+#
+# Unlike the agents there is NO DUMMY in the box. cq sends `Authorization: Bearer <key>` only when
+# it holds a key, and the hosted API answers a request with a WRONG key 401 even on reads, while a
+# request with none reads the public commons fine. So the box holds nothing; with the `cq` axis on
+# the proxy ADDS the header (it sets it, present or not), and at rest cq runs anonymously: queries
+# work, and a write the server refuses falls back to cq's local store, which its MCP server drains
+# to the remote at the next session start once the key flows.
+CQ_ADDR = "https://cq.exchange"
+CQ_DISCOVERY_HOST = "cq.exchange"
+CQ_API_HOST = "api.cq.exchange"
+CQ_KEYLESS: dict[str, dict[str, str]] = {
+    "api-key": {
+        "env": "CQ_API_KEY",
+        "header": "Authorization",
+        "value_prefix": "Bearer ",
+        "how": "sign in at https://cq.exchange and create an API key, or on your computer run "
+        "`cq auth login github` then `cq auth key create --name foldyard --ttl 90d`",
+        "prefix": "cqa.",
+    },
+}
+
+
 def codex_auth_json_path() -> Path:
     """The host's Codex credential file the ChatGPT minter reads/refreshes:
     ``$CODEX_HOME``/auth.json (default ``~/.codex/auth.json``). The same path codex itself uses,

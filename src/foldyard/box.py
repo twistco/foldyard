@@ -38,6 +38,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from importlib import metadata
 from pathlib import Path
 
@@ -641,15 +642,18 @@ def _in_box() -> bool:
     return os.environ.get("IN_DEVBOX") == "1"
 
 
-def _claude_argv(prompt: str, settings: dict, args: list[str]) -> list[str]:
+def _claude_argv(
+    prompt: str, settings: dict, args: list[str], plugin_dirs: tuple[str, ...] = ()
+) -> list[str]:
     """The `claude` argv: skip permission prompts (the box's rootless isolation IS the safety
     boundary) + the inline orientation prompt (when set) + the `[claude.settings]` overrides (when
-    any), then the caller's extra args.
+    any) + the session-only plugins foldyard rendered (cq's, when wired), then the caller's args.
 
     `--settings` takes a file path OR a literal JSON string, and Claude MERGES what it finds into
     the settings hierarchy — so the table overrides per key rather than replacing the box's
     `~/.claude/settings.json`. It goes in BEFORE the caller's args so an explicit
-    `fy claude --settings …` still wins."""
+    `fy claude --settings …` still wins. `--plugin-dir` loads a plugin for this session only, so
+    nothing is installed into the persisted `~/.claude`."""
     argv = ["claude", "--verbose", "--dangerously-skip-permissions"]
     if prompt.strip():
         argv += ["--append-system-prompt", prompt]
@@ -657,7 +661,110 @@ def _claude_argv(prompt: str, settings: dict, args: list[str]) -> list[str]:
         # default=str: TOML has date/time types JSON doesn't, and a settings value that can't be
         # encoded must not take down the launcher.
         argv += ["--settings", json.dumps(settings, default=str)]
+    for plugin_dir in plugin_dirs:
+        argv += ["--plugin-dir", plugin_dir]
     return argv + args
+
+
+# ── cq's end-of-session hook: offer /cq:reflect once the agent exits ──────────────────────────
+# The agents' SessionEnd hooks (cqhook.record_session) name the session that ended; the launcher,
+# which still owns the terminal, asks whether to resume it with cq's reflect prompt. Only for an
+# interactive session in a box created with cq wired into that agent.
+
+_CLAUDE_HEADLESS = frozenset({"-p", "--print"})
+_CODEX_HEADLESS = frozenset({"exec", "e", "review"})
+
+
+def _cq_wired(agent: str) -> bool:
+    """Was cq wired into ``agent`` when this box was CREATED? (``FY_CQ_AGENTS``, baked by the cq
+    plugin — the box's own record, not the tree's config, which may have moved on since.)"""
+    return agent in os.environ.get("FY_CQ_AGENTS", "").split(",")
+
+
+def _reflect_offerable(args: list[str], headless: frozenset[str]) -> bool:
+    """A human at a terminal, in an interactive session (not `claude -p` / `codex exec`)."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    return not any(a in headless for a in args)
+
+
+def _run_foreground(argv: list[str], env: dict) -> int:
+    """Run the agent as a child that owns the terminal, the launcher waiting rather than exec'ing.
+    Ctrl-C belongs to the agent (it interrupts a turn, it doesn't end the session), so the launcher
+    catches SIGINT with a no-op HANDLER while it waits — not SIG_IGN, which the child would
+    inherit across exec; a handler resets to the default there."""
+    import signal
+
+    previous = signal.signal(signal.SIGINT, lambda *_: None)
+    try:
+        try:
+            proc = subprocess.Popen(argv, env=env)
+        except OSError as exc:
+            _err(f"✗ couldn't start {argv[0]}: {exc}")
+            return 127
+        rc = proc.wait()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    return 128 - rc if rc < 0 else rc
+
+
+def _confirm(question: str) -> bool:
+    sys.stderr.write(question)
+    sys.stderr.flush()
+    try:
+        answer = sys.stdin.readline()
+    except (OSError, KeyboardInterrupt):
+        return False
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def _with_reflect(agent: str, argv: list[str], resume: Callable[[str], list[str] | None]) -> int:
+    """Run ``argv``; if its SessionEnd hook named a session, offer to resume it with cq's reflect
+    prompt (``resume(session_id)`` builds that argv). Returns the agent's own exit status — the
+    reflect run is an epilogue, never the session's verdict."""
+    import tempfile
+
+    from . import cqhook
+
+    fd, name = tempfile.mkstemp(prefix=f"fy-cq-{agent.lower()}-", suffix=".session")
+    os.close(fd)
+    session_file = Path(name)
+    env = os.environ.copy()
+    env[cqhook.SESSION_FILE_ENV] = name
+    try:
+        rc = _run_foreground(argv, env)
+        session = cqhook.read_session(session_file)
+    finally:
+        for path in (session_file, session_file.with_name(session_file.name + ".tmp")):
+            path.unlink(missing_ok=True)
+    if not session or not _confirm(
+        f"cq: reflect on this {agent} session and propose what it learned? [y/N] "
+    ):
+        return rc
+    again = resume(session)
+    if again is None:
+        _err("✗ cq's reflect prompt isn't available (`cq prompt reflect` failed) — skipped.")
+        return rc
+    del env[cqhook.SESSION_FILE_ENV]  # one offer per launch: the reflect session's end asks nothing
+    _run_foreground(again, env)
+    return rc
+
+
+def _cq_reflect_prompt() -> str | None:
+    """cq's ``/cq:reflect`` instructions, from the box's own CLI, as a first message for an agent
+    with no cq slash command (Codex)."""
+    try:
+        out = subprocess.run(
+            ["cq", "prompt", "reflect"], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    return (
+        "Run cq's session reflection (/cq:reflect) on this session, following these "
+        f"instructions:\n\n{out.stdout}"
+    )
 
 
 _POLL_S = 1.0  # how often the launch gate re-reads the mirror while it waits
@@ -735,7 +842,20 @@ def claude(args: list[str] | None = None) -> int:
         return 1
     if not _await_credential("claude", "Claude", config.claude_keyless()):
         return 130
-    argv = _claude_argv(config.claude_system_prompt(), config.claude_settings(), args or [])
+    from .plugins import cq as cq_plugin
+
+    prompt, settings, args = config.claude_system_prompt(), config.claude_settings(), args or []
+    cq_dir = cq_plugin.CLAUDE_PLUGIN_DIR
+    plugin_dirs = (cq_dir,) if _cq_wired("claude") and Path(cq_dir).is_dir() else ()
+    argv = _claude_argv(prompt, settings, args, plugin_dirs)
+    if plugin_dirs and _reflect_offerable(args, _CLAUDE_HEADLESS):
+        return _with_reflect(
+            "Claude",
+            argv,
+            lambda sid: _claude_argv(
+                prompt, settings, ["--resume", sid, "/cq:reflect"], plugin_dirs
+            ),
+        )
     os.execvpe(argv[0], argv, os.environ.copy())
 
 
@@ -831,7 +951,15 @@ def codex(args: list[str] | None = None) -> int:
         return 1
     if not _await_credential("codex", "Codex", config.codex_keyless()):
         return 130
-    argv = _codex_argv(config.codex_system_prompt(), config.codex_config(), args or [])
+    prompt, overrides, args = config.codex_system_prompt(), config.codex_config(), args or []
+    argv = _codex_argv(prompt, overrides, args)
+    if _cq_wired("codex") and shutil.which("cq") and _reflect_offerable(args, _CODEX_HEADLESS):
+
+        def resume(sid: str) -> list[str] | None:
+            reflect = _cq_reflect_prompt()
+            return _codex_argv(prompt, overrides, ["resume", sid, reflect]) if reflect else None
+
+        return _with_reflect("Codex", argv, resume)
     os.execvpe(argv[0], argv, os.environ.copy())
 
 
@@ -1208,6 +1336,14 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
             print(
                 "⚠ [codex] is declared but this box was created without it (no Codex install, "
                 "~/.codex volume or keyless seed). Recreate to add them: `fy box down && fy box up`."
+            )
+        # And for cq: the agents it's wired into are create-time too (FY_CQ_AGENTS, cq.py box_args
+        # — env, the data volume, the rendered plugin/system config), so a changed set needs a box.
+        cq_agents = ",".join(config.cq_agents())
+        if (_baked_env(engine, box, env, "FY_CQ_AGENTS") or "") != cq_agents:
+            print(
+                "⚠ cq (`cq = true` under [claude]/[codex]) is set differently from when this box "
+                "was created. Recreate to apply it: `fy box down && fy box up`."
             )
         _warn_stale_foldyard(engine, box, env)
         if not ensure_harden(engine, box, env):  # a box from before the hygiene gets it here

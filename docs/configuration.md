@@ -698,6 +698,8 @@ tui = { raw_output_mode = false }
     merges it over the box's `~/.claude/settings.json` per key. Any `settings.json` key works
     (`model`, `env`, `permissions`, `statusLine`, …). Default: `{}`. `fy claude --settings …`
     wins.
+  - **`cq`** — `true` connects Claude to [cq](#cq--true--the-shared-knowledge-commons), the
+    shared agent-knowledge commons. Default: `false`.
 - **`[codex]`** — installs the OpenAI Codex CLI at box-up (native installer, no node) and
   mounts its `~/.codex`.
   - **`keyless`** — `"api-key"` (or `true`) injects the real `OPENAI_API_KEY` as a bearer on
@@ -713,6 +715,8 @@ tui = { raw_output_mode = false }
     becomes one `-c key=value`, nested tables flattened to dotted paths, so one knob is
     overridden without replacing its table. Default: `{}`. Later `-c` wins: `[codex.config]`
     beats `system_prompt` on `developer_instructions`, and `fy codex -c …` beats both.
+  - **`cq`** — `true` connects Codex to [cq](#cq--true--the-shared-knowledge-commons). Default:
+    `false`.
 - **`transcript_sync_seconds`** (both tables) — while the box is up, the supervisor copies that
   agent's transcripts into their archive on your computer (`~/.claude/projects` /
   `~/.codex/sessions`) at this interval, so a crashed box or a `git clean -fdx` loses nothing.
@@ -725,6 +729,60 @@ tui = { raw_output_mode = false }
   [claude]
   transcript_sync_seconds = 30
   ```
+
+### `cq = true` — the shared knowledge commons
+
+[cq](https://github.com/mozilla-ai/cq) is a shared store of what agents have learned the hard way
+— an API's undocumented behaviour, the workaround a library needs — so the next agent queries it
+instead of rediscovering it. foldyard connects the box to Mozilla.ai's hosted service,
+[cq.exchange](https://cq.exchange): your private namespace plus the public commons.
+
+```toml
+[claude]
+cq = true
+
+[codex]
+cq = true
+```
+
+What the box gets:
+
+- **The `cq` CLI**, a pinned release checked against its published SHA-256, kept with cq's local
+  store in a volume that survives box recreation.
+- **For Claude**, cq's MCP server, its skill and the `/cq:reflect` and `/cq:status` commands, as a
+  plugin `fy claude` loads for the session only. Nothing is installed into your `~/.claude`.
+- **For Codex**, the same MCP server and skill, as box-owned system config under `/etc/codex`.
+  Your `~/.codex` is not touched. If the box image already ships `/etc/codex/config.toml` or
+  `hooks.json`, foldyard leaves them alone and the step fails with that reason.
+- **Session hooks.** At session start the agent is told how to use cq: query before starting a
+  task or retrying after an error, and propose what it learns, with your approval. On Claude, a
+  failed tool call also prompts a cq query before the retry (once per distinct failure, at most
+  five times a session). Codex has no failed-tool hook, so it gets the session-start part only.
+- **At the end of a session**, when you leave `fy claude` or `fy codex`, it asks whether to
+  reflect on the session you just left. Yes resumes that session with cq's reflect prompt, which
+  lists what could be shared and asks you to approve each item. Running `claude` or `codex`
+  directly, or without a terminal (`claude -p`, `codex exec`), skips the question.
+
+**The API key stays on your computer.** A `cq` mode switch decides whether the proxy adds your
+cq.exchange key (`CQ_API_KEY` in `host.env`) to the box's requests to `api.cq.exchange`. The box
+never holds the key, or even a placeholder for it.
+
+- `cq=off` (the default): cq works anonymously. Queries of the public commons work. A knowledge
+  unit the agent proposes is kept in cq's local store in the box.
+- `cq=on`: cq uses your key. Your private namespace is reachable, and the local store's queued
+  knowledge units upload at the next session start.
+
+To get a key, sign in at cq.exchange and create one, or run `cq auth login github` and then
+`cq auth key create --name foldyard --ttl 90d` on your computer. `fy mode cq=on` asks for it the
+first time.
+
+**Egress.** The box downloads the CLI from `github.com` and `release-assets.githubusercontent.com`
+at box-up. cq then reads `cq.exchange`, which tells it where the API is, and calls
+`api.cq.exchange`. With `cq=on` the proxy reaches the API host itself; with `cq=off` the API host
+needs a grant like any other host. All four are offered when you start the box.
+
+Changing `cq` needs a new box, and `fy box up` tells you when the running one doesn't match:
+`fy box down && fy box up`.
 
 Both tables deep-merge, so `foldyard.local.toml` can set one key (your model) without
 redeclaring the team's. `fy config widenings` lists their keys under **agent steering**.
