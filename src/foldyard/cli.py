@@ -101,7 +101,7 @@ def _resolve_worktree(
 # says it in its own words), the manual, the scaffolder, the TUI and the supervisor (which report
 # it in their own UI/log), and the launch verbs, whose gate asks or refuses on its own.
 _NO_UNADOPTED_NOTICE = frozenset(
-    {"config", "docs", "init", "doctor", "tui", "host", "up", "code", "claude", "codex"}
+    {"config", "docs", "init", "prereq", "doctor", "tui", "host", "up", "code", "claude", "codex"}
 )
 
 
@@ -141,6 +141,23 @@ def init(
     raise typer.Exit(
         init_mod.init(path=path, name=name, cpus=cpus, memory=memory, disk=disk, force=force)
     )
+
+
+@app.command()
+def prereq(
+    fetch: bool = typer.Option(
+        False,
+        "--fetch",
+        help="also do the big downloads now: bake the base VM new projects are cloned from",
+    ),
+) -> None:
+    """Check what this computer needs for foldyard (Lima, podman, a hypervisor, KVM on Linux,
+    disk, memory…) and print the command that installs each missing piece. Checks only — you run
+    the installs. Needs no project: `uvx foldyard prereq` works before foldyard is installed.
+    Exit 1 while anything required is missing."""
+    from . import prereq as prereq_mod
+
+    raise typer.Exit(prereq_mod.run(fetch=fetch))
 
 
 @app.command()
@@ -518,6 +535,57 @@ def machine_host_wall(
     from . import machine
 
     raise typer.Exit(machine.host_wall(uninstall=uninstall))
+
+
+base_app = typer.Typer(
+    rich_markup_mode="markdown",
+    name="base",
+    help=(
+        "the base VM a new project's VM is cloned from — one per computer, project-less "
+        "(`fy docs base-vm`)"
+    ),
+    invoke_without_command=True,
+)
+machine_app.add_typer(base_app)
+
+
+@base_app.callback()
+def _base_default(ctx: typer.Context) -> None:
+    """With no subcommand: the base VM's status."""
+    if ctx.invoked_subcommand is None:
+        base_status()
+
+
+@base_app.command("status")
+def base_status() -> None:
+    """Whether a base VM is baked, how old it is, and whether it is still current."""
+    from . import basevm
+
+    st = basevm.status()
+    glyph = {"ok": "✓", "warn": "⚠", "optional": "ℹ"}[st.level]
+    print(f"{glyph} base VM '{basevm.NAME}': {st.detail}")
+    if st.fix:
+        print(f"  → {st.fix}")
+    raise typer.Exit(0)
+
+
+@base_app.command("bake")
+def base_bake() -> None:
+    """(Re)create the base VM: Lima's podman template, nothing mounted, booted once, foldyard's
+    generic box image built in it, stopped. Every project VM created afterwards is a clone of it
+    (seconds, no download). Existing project VMs are never touched."""
+    from . import basevm
+
+    raise typer.Exit(basevm.bake())
+
+
+@base_app.command("rm")
+def base_rm() -> None:
+    """Delete the base VM. VMs already cloned from it are independent and unaffected; new ones
+    are created from the template again."""
+    from . import basevm
+
+    raise typer.Exit(basevm.rm())
 
 
 @machine_app.command("delete", hidden=True)  # alias: limactl users reach for `delete`
