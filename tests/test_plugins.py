@@ -1677,7 +1677,26 @@ def test_network_panel_marks_blocked_rows_and_tallies_them(monkeypatch, tmp_path
     group = data.groups[0]
     assert "⛔ 1 blocked" in group.label
     assert "err" not in group.label  # the 403 is the blocked tally, not also a generic error
-    assert "⛔ refused by the allowlist" in group.children[0] and "[red]" in group.children[0]
+    assert "⛔ blocked — not on the allowlist" in group.children[0] and "[red]" in group.children[0]
+
+
+def test_network_panel_blocked_rows_name_what_was_asked(monkeypatch, tmp_path):
+    # A refused row says WHAT was refused: a CONNECT names its target (HTTPS is refused before TLS,
+    # so there is no path), plain HTTP its method + path. A Host-header mismatch is not the
+    # allowlist's doing and must not read as one.
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    base = {"ts": "2026-10-14T10:00:01Z", "status": 403, "blocked": True}
+    rows = [
+        {**base, "host": "github.com:22", "method": "CONNECT", "path": ""},
+        {**base, "host": "plain.example", "method": "GET", "path": "/pkg/[x].tgz"},
+        {**base, "host": "other.example", "method": "GET", "path": "/", "mismatch": True},
+    ]
+    (tmp_path / "egress.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    leaves = {g.key: g.children[0] for g in proxy._network_panel_tree().groups}
+    assert "CONNECT github.com:22" in leaves["github.com:22"]
+    assert "GET" in leaves["plain.example"] and "/pkg/\\[x].tgz" in leaves["plain.example"]
+    assert "Host header" in leaves["other.example"]
+    assert "allowlist" not in leaves["other.example"]
 
 
 def test_network_panel_marks_would_block_rows_with_their_tool(monkeypatch, tmp_path):

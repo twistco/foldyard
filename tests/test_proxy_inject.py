@@ -1228,13 +1228,15 @@ def test_default_deny_blocks_a_disallowed_https_connect_and_passes_allowed(walle
     inj, allow, log = walled
     _write_allow(allow, ["good.example.com", "*.trusted.dev"])
 
-    blocked = _Flow("evil.example.com")
+    blocked = _Flow("evil.example.com", method="CONNECT", path="")
     inj.http_connect(blocked)
     assert blocked.response is not None and blocked.response.status_code == 403
     entry = _last_log(log)
     assert (
         entry["host"] == "evil.example.com" and entry["blocked"] is True and entry["status"] == 403
     )
+    # The row says what was asked: a CONNECT, refused before TLS, so no path was ever seen.
+    assert entry["method"] == "CONNECT" and entry["path"] == "" and "mismatch" not in entry
 
     for ok in ("good.example.com", "api.trusted.dev"):
         f = _Flow(ok)
@@ -1509,6 +1511,7 @@ def test_a_connect_is_judged_on_its_target_not_its_host_header(gh, monkeypatch, 
     assert f.response is not None and f.response.status_code == 403
     entry = _last_log(log)
     assert entry["host"] == "elsewhere.example" and entry["blocked"] is True
+    assert entry["mismatch"] is True  # not the allowlist: the TUI must not offer a grant for it
 
 
 async def test_a_request_naming_another_host_is_refused_and_gets_no_credential(injector):
@@ -1544,12 +1547,13 @@ async def test_host_comparison_ignores_case_and_the_root_dot(injector):
 async def test_default_deny_blocks_plain_http_in_the_request_hook(walled):
     # Cleartext HTTP never CONNECTs, so http_connect can't catch it — the wall also guards `request`.
     inj, _allow, log = walled
-    f = _Flow("plain.example.com")
+    f = _Flow("plain.example.com", method="POST", path="/upload?id=7", port=80, scheme="http")
     await inj.request(f)
     assert f.response is not None and f.response.status_code == 403
     assert f.metadata.get("egress_proxy_blocked") is True  # so `response` won't re-log it as a 403
     entry = _last_log(log)
     assert entry["host"] == "plain.example.com" and entry["blocked"] is True
+    assert entry["method"] == "POST" and entry["path"] == "/upload?id=7"  # cleartext: all of it
 
 
 async def test_a_refused_plain_http_request_is_logged_once(walled):

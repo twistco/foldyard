@@ -579,6 +579,30 @@ def test_a_port_keyed_host_borrows_no_paths_from_the_bare_host(env):
     assert ssh["paths"] == [] and allowlist.recommend_why(ssh) == "observed: git/2.45 — edit me"
 
 
+def test_a_refused_request_is_not_a_fetched_path(env):
+    # A blocked row now carries its method + path, but the request never left the box: it is not
+    # what the tool FETCHED there, so it must not show up as a sampled path.
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    ts = "2026-09-22T10:01:00+00:00"
+    rows = [
+        _row("plain.example", ts, "curl/8"),
+        {"ts": ts, "host": "plain.example", "method": "GET", "path": "/x", "status": 403,
+         "blocked": True},
+    ]  # fmt: skip
+    (entry,) = allowlist.learned_hosts(rows, window)
+    assert entry["paths"] == []
+
+
+def test_a_host_header_mismatch_is_not_offered_as_a_grant(env):
+    # Refused for naming another host, not by the allowlist: granting the host wouldn't help.
+    ts = "2026-09-22T10:01:00+00:00"
+    rows = [
+        {"ts": ts, "host": "spoofed.example", "status": 403, "blocked": True, "mismatch": True},
+        {"ts": ts, "host": "real.example", "status": 403, "blocked": True},
+    ]
+    assert allowlist.refused_hosts(rows) == ["real.example"]
+
+
 def test_a_path_cannot_break_the_printed_toml(env):
     why = allowlist.recommend_why(
         {"uas": ["npm/1"], "paths": ['/a"}, { host = "evil.com'], "more_paths": 0}

@@ -1217,13 +1217,16 @@ class Injector:
             entry["build"] = True
         self._write_entry(entry)
 
-    def _log_blocked(self, host: str | None, request=None) -> None:
-        """A row for a host REFUSED by the default-deny wall — no upstream is ever contacted, so
-        there's no method/path/real status (we synthesise a 403). The Network Log panel keys off
-        ``blocked`` to paint it red and offer an 'allow' action. With the refused ``request``,
-        the row also carries its User-Agent and, when it carried a live build secret, ``build`` —
-        what `fy box build`/`fy up` read back to offer the host (never the bare marker, or the box
-        could put its own hosts in that offer). No host → nothing to log."""
+    def _log_blocked(self, host: str | None, request=None, *, mismatch: bool = False) -> None:
+        """A row for a request the proxy REFUSED — no upstream is ever contacted, so there's no
+        real status (we synthesise a 403). The Network Log panel keys off ``blocked`` to paint it
+        red and offer an 'allow' action. With the refused ``request``, the row carries what was
+        asked — its method, and its path unless it was a ``CONNECT`` (HTTPS is refused before TLS,
+        so its path is never seen) — its User-Agent and, when it carried a live build secret,
+        ``build``: what `fy box build`/`fy up` read back to offer the host (never the bare marker,
+        or the box could put its own hosts in that offer). ``mismatch``: refused for naming another
+        host in its Host header, not by the allowlist — granting the host is not the fix. No host
+        → nothing to log."""
         if not host:
             return
         entry = {
@@ -1236,7 +1239,12 @@ class Injector:
             "replayed": False,
             "blocked": True,
         }  # fmt: skip
+        if mismatch:
+            entry["mismatch"] = True
         if request is not None:
+            entry["method"] = str(request.method)
+            if request.method != "CONNECT":
+                entry["path"] = str(request.path)[:200]
             ua = _user_agent(request)
             if ua:
                 entry["ua"] = ua
@@ -1330,7 +1338,8 @@ class Injector:
         port = flow.request.port
         if _claim_mismatch(flow.request):
             flow.response = http.Response.make(403, _MISMATCH_BODY)
-            self._log_blocked(host if port == _HTTPS_PORT else f"{host}:{port}", flow.request)
+            key = host if port == _HTTPS_PORT else f"{host}:{port}"
+            self._log_blocked(key, flow.request, mismatch=True)
             return
         if self._connect_ok(host, port) or (
             self._trusted_build(flow.request) and self._build_granted(host, port, _HTTPS_PORT)
@@ -1551,7 +1560,8 @@ class Injector:
             # Refused whether or not the wall enforces: never a legitimate forward-proxy request.
             flow.response = http.Response.make(403, _MISMATCH_BODY)
             flow.metadata["egress_proxy_blocked"] = True
-            self._log_blocked(host if port == default else f"{host}:{port}", flow.request)
+            key = host if port == default else f"{host}:{port}"
+            self._log_blocked(key, flow.request, mismatch=True)
             return
         # Two switches on, both claiming this host and path, so neither injects: answer with the
         # fix rather than send the dummy to draw a 401. Before the wall, like the held answer

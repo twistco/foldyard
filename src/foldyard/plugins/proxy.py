@@ -277,9 +277,15 @@ def _net_leaf(e: dict, escape) -> str:
     host + time — so it renders as a dim `tls` tunnel marker instead of a request line."""
     ts = escape(e.get("ts", "")[11:19])
     if e.get("blocked"):
-        # Refused by the default-deny egress wall — no upstream contacted. Red so it stands out as
-        # the row you act on (press the allow key in the TUI to let the host through).
-        return f"[dim]{ts}[/dim] [red]⛔ refused by the allowlist[/red]"
+        # Refused by the proxy — no upstream contacted. Red so it stands out as the row you act on
+        # (press the allow key in the TUI to let the host through). What was asked: a CONNECT's
+        # target is its host[:port] (HTTPS is refused before TLS, so no path); plain HTTP has its
+        # path. Rows from before the method was logged show neither.
+        method = escape(e.get("method", ""))
+        target = escape((e.get("host", "") if method == "CONNECT" else e.get("path", ""))[:80])
+        asked = f"{method:<6} {target} " if method else ""
+        why = "its Host header names another host" if e.get("mismatch") else "not on the allowlist"
+        return f"[dim]{ts}[/dim] {asked}[red]403 ⛔ blocked — {why}[/red]"
     if e.get("held"):
         # The box sent a dummy (an agent's keyless one, or an [[inject]] row's box_env) with its
         # switch at rest: the proxy answered, nothing left.
