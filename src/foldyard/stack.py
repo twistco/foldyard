@@ -69,14 +69,21 @@ def main_repo() -> Path:
     function of CWD, which no foldyard process ever changes (no ``os.chdir`` in the package), so
     one resolution per process is correct. Tests that relocate the repo clear it via
     ``config.clear_caches()``."""
+    found = find_main_repo()
+    if found is None:
+        _err("✗ not a git repository")
+        raise SystemExit(1)
+    return found
+
+
+def find_main_repo() -> Path | None:
+    """:func:`main_repo` for a caller that only wants to know: ``None`` outside a git repo, and
+    nothing printed (the CLI's up-front worktree pin runs before every verb, `--help` included)."""
     out = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"])
     if out.returncode == 0 and out.stdout.strip():
         return Path(out.stdout.strip()).parent
     out = _run(["git", "rev-parse", "--show-toplevel"])
-    if out.returncode != 0:
-        _err("✗ not a git repository")
-        raise SystemExit(1)
-    return Path(out.stdout.strip())
+    return Path(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip() else None
 
 
 def worktrees_root(main: Path) -> Path:
