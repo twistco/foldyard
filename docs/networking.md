@@ -94,7 +94,8 @@ Three separate controls, often confused:
 ### The allowlist
 
 When enforcement is on, the proxy refuses any host that isn't granted. `fy allow enforce
-on|off|learn` is the switch.
+on|off|learn` is the switch. `[proxy] enforce` in `foldyard.toml` only sets the answer for the
+first run, before your computer has one of its own.
 
 A refused HTTPS request still shows what was asked. The proxy answers the box's `CONNECT` itself,
 decrypts the tunnel, and returns the `403` to the request inside, so the Network Log names its
@@ -106,8 +107,7 @@ any connection to a host nothing grants, whichever part of it asks. Three cases 
   read;
 - an image build: it doesn't trust the proxy's CA, so it is refused before TLS;
 - a client in the box that doesn't trust the proxy's CA (a pinned certificate, its own CA
-  bundle): its TLS handshake fails, with a certificate error rather than the readable `403`. `[proxy] enforce` in `foldyard.toml` only sets the answer for the
-first run, before your computer has one of its own.
+  bundle): its TLS handshake fails, with a certificate error rather than the readable `403`.
 
 **Learn first, then enforce.** `fy init` sets `enforce = "learn"`. The first `fy box up` / `fy up`
 opens a one-hour window where:

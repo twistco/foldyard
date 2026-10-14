@@ -4,9 +4,10 @@ The proxy answers a refused host's CONNECT itself and decrypts the tunnel, so th
 request inside and the egress log names its method and path. That is only safe if no upstream
 connection is ever opened for it, and three of mitmproxy's own mechanisms decide that: its eager
 dial on CONNECT (skipped when the CONNECT already has a response), the server-first TLS handshake
-it asks for on the ClientHello (turned off for that connection), and the `server_connect` hook
-the addon refuses an ungranted dial in, whatever layer asks. The unit tier drives stub flows and
-cannot see a socket open; this counts the connections a refused :443 listener accepts.
+it asks for on the ClientHello (still attempted — no addon can turn it off), and the
+`server_connect` hook the addon refuses an ungranted dial in, whatever layer asks — that
+handshake's included. The unit tier drives stub flows and cannot see a socket open; this counts
+the connections a refused :443 listener accepts.
 
 OPT-IN like test_proxy_e2e.py: FOLDYARD_E2E=1 and mitmdump installed (`just test-proxy-e2e`).
 The refused listener needs :443 on a second loopback address — skipped where it can't be bound
@@ -174,6 +175,7 @@ def test_tls_to_the_answered_tunnel_completes_without_an_upstream(wall):
     # (and fail, or dial). Here it completes against the proxy's own certificate for the host.
     proxy, counter = wall
     ctx = ssl.create_default_context(cafile=str(proxy.ca))
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     with socket.create_connection((HOST, proxy.pport), timeout=10) as raw:
         raw.sendall(f"CONNECT {REFUSED}:443 HTTP/1.1\r\nHost: {REFUSED}:443\r\n\r\n".encode())
         assert raw.recv(4096).startswith(b"HTTP/1.1 200")
