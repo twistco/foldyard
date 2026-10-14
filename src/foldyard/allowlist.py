@@ -469,8 +469,8 @@ def learned_hosts(rows: list[dict], window: dict) -> list[dict]:
             continue
         if not row.get("would_block"):
             # A decrypted request row (method + path): what the tool fetched, joined below by
-            # host. Tunnel, blocked and would-block rows carry no path.
-            if row.get("method") and isinstance(key, str):
+            # host. Tunnel and would-block rows carry no path; a blocked row's never left the box.
+            if row.get("method") and not row.get("blocked") and isinstance(key, str):
                 sample = _printable(_sample_path(row.get("path")))
                 if sample and sample not in fetched.setdefault(key, []):
                     fetched[key].append(sample)
@@ -504,6 +504,8 @@ def refused_hosts(rows: list[dict]) -> list[str]:
     for row in rows:
         key = row.get("host")
         if not (row.get("blocked") or row.get("would_block")) or not isinstance(key, str):
+            continue
+        if row.get("mismatch"):  # refused for its Host header: a grant would not let it through
             continue
         if not valid_host(key) or key.startswith("*.") or key in out:
             continue
