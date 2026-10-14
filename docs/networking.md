@@ -94,7 +94,19 @@ Three separate controls, often confused:
 ### The allowlist
 
 When enforcement is on, the proxy refuses any host that isn't granted. `fy allow enforce
-on|off|learn` is the switch. `[proxy] enforce` in `foldyard.toml` only sets the answer for the
+on|off|learn` is the switch.
+
+A refused HTTPS request still shows what was asked. The proxy answers the box's `CONNECT` itself,
+decrypts the tunnel, and returns the `403` to the request inside, so the Network Log names its
+method, path and User-Agent. No connection to the refused host is ever opened: the proxy refuses
+any connection to a host nothing grants, whichever part of it asks. Three cases still see only
+`CONNECT host:port`, with no path:
+
+- another port than `:443` (`github.com:22`): the tunnel isn't HTTPS, so there is no request to
+  read;
+- an image build: it doesn't trust the proxy's CA, so it is refused before TLS;
+- a client in the box that doesn't trust the proxy's CA (a pinned certificate, its own CA
+  bundle): its TLS handshake fails, with a certificate error rather than the readable `403`. `[proxy] enforce` in `foldyard.toml` only sets the answer for the
 first run, before your computer has one of its own.
 
 **Learn first, then enforce.** `fy init` sets `enforce = "learn"`. The first `fy box up` / `fy up`

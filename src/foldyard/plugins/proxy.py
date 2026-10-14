@@ -278,9 +278,11 @@ def _net_leaf(e: dict, escape) -> str:
     ts = escape(e.get("ts", "")[11:19])
     if e.get("blocked"):
         # Refused by the proxy — no upstream contacted. Red so it stands out as the row you act on
-        # (press the allow key in the TUI to let the host through). What was asked: a CONNECT's
-        # target is its host[:port] (HTTPS is refused before TLS, so no path); plain HTTP has its
-        # path. Rows from before the method was logged show neither.
+        # (press the allow key in the TUI to let the host through). What was asked: a request's
+        # path (HTTPS on :443 is decrypted to refuse it, so it has one too); a CONNECT's target is
+        # its host[:port] — another port, a build, or a client that never sent a request through
+        # the tunnel (it doesn't trust our CA). Rows from before the method was logged show
+        # neither.
         method = escape(e.get("method", ""))
         target = escape((e.get("host", "") if method == "CONNECT" else e.get("path", ""))[:80])
         asked = f"{method:<6} {target} " if method else ""

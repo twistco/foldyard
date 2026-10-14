@@ -318,7 +318,7 @@ enforce = "learn"
 ```
 
 - **`enforce`** — where the allowlist *starts*:
-  - `true` — refuse any host not granted (403 at CONNECT) from the first run.
+  - `true` — refuse any host not granted (a 403, and no connection to it) from the first run.
   - `"learn"` — the first `fy up`/`fy box up` opens a one-hour learn window: nothing is refused,
     every host that *would* be is recorded with the client's User-Agent, and enforcement turns
     on by itself when the window ends. `fy allow learn` then grants what it recorded in one

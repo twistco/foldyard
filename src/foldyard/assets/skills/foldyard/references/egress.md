@@ -22,6 +22,10 @@ when you ask. (`fy docs glossary` defines each.)
   one-line `why`: that commits the recommendation for the whole team — everyone is *offered* it
   per host on their own computer (after reviewing your edit at the adoption gate) instead of
   rediscovering the block, and nothing is granted without their yes.
+- **A certificate error on one host only** (unknown CA, `certificate verify failed`) from a client
+  that keeps its own trust store — the same refusal, before the `403` could reach it: the proxy
+  doesn't open a connection to an ungranted host, so a client that doesn't trust the proxy's CA
+  fails the handshake instead. Check the host is granted before debugging certificates.
 - **Nothing is blocked, but the human mentions a "learn window"** — the allowlist is observing
   for a while (`fy allow enforce learn`): requests pass, and every host that *would* be refused is
   recorded for them to review (`fy allow learn`). It enforces again by itself when the window
