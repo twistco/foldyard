@@ -953,7 +953,7 @@ def proxy_default_deny_seed() -> str:
 def proxy_default_deny() -> bool:
     """``[proxy] enforce`` — when true the egress proxy ENFORCES the allowlist: any host
     that isn't allowed (by a live grant in the host-side allow-store, or as an injector host) is
-    REFUSED (403 at CONNECT / on the request). Absent ⇒ false: observe only, never blocks.
+    REFUSED (a 403, never a connection to it). Absent ⇒ false: observe only, never blocks.
     ``"learn"`` enforces too, until a launch verb opens its first learn window
     (:func:`proxy_default_deny_seed`). This key only SEEDS the answer — enforcement is host-owned
     from then on (``fy allow enforce``, see :func:`foldyard.allowlist.default_deny`), and the

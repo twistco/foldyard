@@ -217,11 +217,11 @@
   <text class="mono" x="688" y="872">enforce = true</text>
   <text class="body" x="688" y="894">
     <tspan x="688">A host that isn't granted gets 403</tspan>
-    <tspan x="688" dy="15">at CONNECT. Grants (once · session ·</tspan>
-    <tspan x="688" dy="15">permanent) live in the host-side</tspan>
-    <tspan x="688" dy="15">allow-store — never in foldyard.toml,</tspan>
-    <tspan x="688" dy="15">which the box can write. A repo may</tspan>
-    <tspan x="688" dy="15">recommend; you say yes.</tspan>
+    <tspan x="688" dy="15">and is never dialled. Grants live in</tspan>
+    <tspan x="688" dy="15">the host-side allow-store — never in</tspan>
+    <tspan x="688" dy="15">foldyard.toml, which the box can</tspan>
+    <tspan x="688" dy="15">write. A repo may recommend; you</tspan>
+    <tspan x="688" dy="15">say yes.</tspan>
   </text>
   <rect class="card" x="925" y="828" width="235" height="150" rx="12"/>
   <text class="card-h" x="943" y="855">Fail-closed</text>
