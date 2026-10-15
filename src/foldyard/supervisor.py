@@ -25,6 +25,7 @@ lines; the process env wins on conflict). Stdlib only; host only.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import enum
 import fcntl
@@ -37,7 +38,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from datetime import UTC, datetime
 from pathlib import Path
 from shutil import which
@@ -599,6 +600,7 @@ def ensure_background() -> int | None:
     (minter allowlists etc.) instead of leaving last week's supervisor in charge."""
     if devmode.in_box() or not which("podman"):
         return None
+    _mark_launch()
     # Settle any foldyard.toml drift FIRST, on the caller's terminal (`fy up`/`fy box up` run this
     # in the foreground): the supervisor reconciles from the ADOPTED copy, so this is the operator's
     # adopt/revert/ignore moment. Before the "already running" short-circuit below, so a live
@@ -624,6 +626,108 @@ def ensure_background() -> int | None:
         if _running_pid() is not None:
             return None  # we launched one recently; it may still be binding its ports
     return _spawn()
+
+
+# How long a launch waits for the supervisor's jobs (await_ready). Generous: a first tick asks the
+# engine which boxes are up and runs due capability probes before it spawns anything.
+READY_WAIT = 45.0
+
+
+def _read_ready() -> dict | None:
+    try:
+        record = json.loads(config.supervisor_ready_file().read_text())
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def readiness(record: dict | None, holder: int | None, needed: set[str]) -> tuple[str, list[str]]:
+    """Judge a published readiness record for a launch that needs the ``needed`` worktrees served:
+    ``("ready", [])``, ``("wait", why)`` or ``("fail", what)`` — failing on a blocked or failing
+    job, whose reason is the fix. Only the CURRENT lock holder's record counts (a replaced
+    supervisor's says nothing about its successor), and only while it is fresh."""
+    if holder is None:
+        return "wait", ["no supervisor holds this project's lock yet"]
+    if not record or record.get("pid") != holder:
+        return "wait", [f"the supervisor (pid {holder}) hasn't finished its first tick"]
+    stamp = devmode._parse(str(record.get("at") or ""))
+    age = (devmode.now() - stamp).total_seconds() if stamp else None
+    if age is None or age > HEARTBEAT_STALE_SECONDS:
+        when = "never" if age is None else f"{int(age)}s ago"
+        return "wait", [f"the supervisor's last tick was {when} — it isn't ticking"]
+    missing = sorted(needed - set(record.get("worktrees") or []))
+    if missing:
+        names = ", ".join(wt or "main" for wt in missing)
+        return "wait", [f"the supervisor hasn't picked up {names} yet"]
+    jobs = [
+        job
+        for job in (record.get("jobs") or {}).values()
+        if isinstance(job, dict) and (job.get("worktree") is None or job.get("worktree") in needed)
+    ]
+    broken = [j for j in jobs if j.get("state") in ("blocked", "failing")]
+    if broken:
+        return "fail", [
+            f"{j.get('label')}: {j['state'].upper()} — {j.get('detail')}" for j in broken
+        ]
+    pending = [j for j in jobs if j.get("state") != "up"]
+    if pending:
+        return "wait", [f"{j.get('label')}: {j.get('detail') or j.get('state')}" for j in pending]
+    return "ready", []
+
+
+def await_ready() -> bool:
+    """Wait for the host supervisor to run every job this launch needs — the current worktree's
+    and main's (whose proxy every image build goes through) — before anything uses one. False,
+    having said why on stderr, when a job is blocked or failing (its reason is the fix) or nothing
+    is ready within :data:`READY_WAIT`: refusing here is what keeps that from surfacing later as a
+    build's "connection refused". True at once in the box and where there's no host supervisor
+    (:func:`ensure_background` launched none). Run it after any secret capture, which can unblock
+    a daemon."""
+    if devmode.in_box() or not which("podman"):
+        return True
+    needed = {config.active_worktree(), ""}
+    started = time.monotonic()
+    told = False
+    while True:
+        holder = _holder_info()[0] if _supervisor_running() else None
+        verdict, lines = readiness(_read_ready(), holder, needed)
+        if verdict == "ready":
+            return True
+        waited = time.monotonic() - started
+        if verdict == "fail" or waited >= READY_WAIT:
+            head = (
+                "✗ the host supervisor can't run what this launch needs:"
+                if verdict == "fail"
+                else f"✗ the host supervisor wasn't ready within {int(READY_WAIT)}s:"
+            )
+            print(head, file=sys.stderr)
+            for line in lines:
+                print(f"    {line}", file=sys.stderr)
+            print(
+                "  `fy host` shows its status, `fy host logs` why; `fy host restart` starts it "
+                "afresh.",
+                file=sys.stderr,
+            )
+            return False
+        if not told and waited >= 1.0:
+            print(f"▶ waiting for the host supervisor: {lines[0]}…", file=sys.stderr)
+            told = True
+        time.sleep(0.25)
+
+
+def _mark_launch() -> None:
+    """Tell the supervisor which worktree this process is bringing up, before its box exists
+    (``devmode.launching_worktrees``): it then serves that worktree's daemons, and main's proxy
+    every build goes through, from its next tick. The marker lives as long as this process — the
+    supervisor sweeps a dead launcher's, and a clean exit removes its own. Best-effort: without it
+    a launch is served once its box is up, as before, and :func:`await_ready` says so."""
+    marker = config.launches_dir() / f"{os.getpid()}.json"
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({"worktree": config.active_worktree()}) + "\n")
+    except OSError:
+        return
+    atexit.register(marker.unlink, missing_ok=True)
 
 
 def _spawn() -> int | None:
@@ -1445,9 +1549,11 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
     # so a box coming up always finds a live proxy + CA.
     up = devmode.up_worktrees()
     _report_unregistered()
+    active = devmode.active_worktrees(up)  # + any worktree a launch is bringing up, and main
     desired: dict[str, dict] = {}
+    owner: dict[str, str] = {}  # daemon name → the worktree it serves (the readiness record's)
     capabilities: dict[str, dict] = {}
-    for wt in up or [""]:
+    for wt in active:
         cfg = devmode.worktree_config(wt)  # the ADOPTED config for this checkout (configpin)
         with config.using(cfg):
             # Reconciling from the pin means a repo edit is silent by construction — so SAY it
@@ -1463,7 +1569,9 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
             # `requires` gate below reads os.environ, so a derivable value needs no host.env
             # entry at all. setdefault: an ambient export or a real host.env secret always wins.
             apply_env_defaults(devmode.env_defaults(mode))
-            desired.update(devmode.desired_daemons(mode))
+            wanted = devmode.desired_daemons(mode)
+            desired.update(wanted)
+            owner.update(dict.fromkeys(wanted, wt))
             # Promote this checkout's agent transcripts into their durable host archive on the
             # configured interval (`[claude]/[codex] transcript_sync_seconds`; off by default).
             # Inside the bound block so it reads the ADOPTED config, and inside the `up` loop
@@ -1513,6 +1621,16 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
         if reason:
             blocked_now[name] = reason
     _publish_blocked(blocked_now, {name: spec["label"] for name, spec in desired.items()})
+    jobs = {}
+    for name, spec in desired.items():
+        state, detail = _daemon_job(spec, children.get(name), blocked_now.get(name))
+        jobs[name] = {
+            "label": spec["label"],
+            "worktree": owner.get(name, ""),
+            "state": state,
+            "detail": detail,
+        }
+    _publish_ready(active, jobs)
 
 
 def _sync_live(name: str, spec: dict, *, running: bool) -> bool:
@@ -1649,6 +1767,50 @@ def _publish_blocked(blocked_now: dict[str, str], labels: dict[str, str]) -> Non
         tmp.unlink(missing_ok=True)
 
 
+def _daemon_job(
+    spec: dict, child: Child | None, blocked: str | None, probe: Callable[[int], bool] | None = None
+) -> tuple[str, str]:
+    """One desired daemon's ``(state, detail)`` for the readiness record: ``blocked`` (a spawn
+    gate's reason), ``failing`` (it died young and waits out its backoff — a crash loop),
+    ``starting`` (launched, its port not answering yet) or ``up``."""
+    if blocked:
+        return "blocked", blocked
+    if child is not None and not child.alive():
+        return (
+            "failing",
+            f"exited (rc {child.proc.returncode}) within {int(RESTART_BACKOFF)}s of starting — "
+            "`fy host logs` shows why",
+        )
+    if child is None:
+        return "starting", "not launched yet"
+    port = spec.get("port")
+    if port and not (probe or devmode.probe)(port):
+        return "starting", f"not answering on :{port} yet"
+    return "up", ""
+
+
+def _publish_ready(worktrees: list[str], jobs: dict[str, dict]) -> None:
+    """Write this tick's readiness record (``config.supervisor_ready_file``) — what a launch waits
+    on (:func:`await_ready`). Every job the supervisor runs reports here: today its daemons; a job
+    that isn't a daemon (a pull thread, say) adds its own ``{label, worktree, state, detail}`` row
+    (``worktree`` None: the whole project's)."""
+    path = config.supervisor_ready_file()
+    record = {
+        "pid": os.getpid(),
+        "at": devmode._iso(devmode.now()),
+        "worktrees": worktrees,
+        "jobs": jobs,
+    }
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(record, indent=2) + "\n")
+        os.replace(tmp, path)
+    except OSError as e:
+        log(f"readiness: write failed: {e}")
+        tmp.unlink(missing_ok=True)
+
+
 def main() -> int:
     """The supervisor process itself (`fy host run`, hidden) — what :func:`_spawn` launches."""
     if devmode.in_box():
@@ -1734,6 +1896,7 @@ def main() -> int:
     for child in children.values():
         child.stop()
     _publish_blocked({}, {})  # nothing is gated by a supervisor that isn't running
+    config.supervisor_ready_file().unlink(missing_ok=True)  # …and nothing it ran is ready
     # Refresh every UP worktree's mirror so each box sees its daemons are now down (a down
     # box has no reader — don't recreate its mirror on the way out).
     for wt in devmode.up_worktrees():

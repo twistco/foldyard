@@ -843,14 +843,47 @@ def up_worktrees() -> list[str]:
     return [wt for wt, p in proj.items() if f"{p}-devbox" in names]
 
 
-def active_worktrees() -> list[str]:
-    """The set the one supervisor reconciles DAEMONS for: every worktree whose dev box is up
-    (a posture change must never START a heavy stack, so only up boxes count —
-    ADR-0016 guardrail), falling back to ``[""]`` (main) when none is or the
+def launching_worktrees() -> set[str]:
+    """Registered worktrees a host launch is bringing up right now (``config.launches_dir``: one
+    marker per launching process, written by ``supervisor.ensure_background``). A marker lives as
+    long as its process: a dead launcher's is swept here, so a crashed `fy box up` serves nothing.
+    The registry bounds it — a marker never adds a checkout the host doesn't know."""
+    out: set[str] = set()
+    try:
+        markers = list(config.launches_dir().glob("*.json"))
+    except OSError:
+        return out
+    known = set(worktree_keys()) if markers else set()
+    for marker in markers:
+        try:
+            pid = int(marker.stem)
+            os.kill(pid, 0)
+        except PermissionError:
+            pass  # alive, someone else's
+        except (ValueError, OSError):
+            marker.unlink(missing_ok=True)
+            continue
+        data = _load(marker)
+        wt = data.get("worktree") if isinstance(data, dict) else None
+        if isinstance(wt, str) and wt in known:
+            out.add(wt)
+    return out
+
+
+def active_worktrees(up: list[str] | None = None) -> list[str]:
+    """The set the one supervisor reconciles DAEMONS for: every worktree whose dev box is ``up``
+    (:func:`up_worktrees` unless given; a posture change must never START a heavy stack, so only
+    up boxes count — ADR-0016 guardrail) plus any a host launch is bringing up
+    (:func:`launching_worktrees`) together with main, whose proxy port every image build goes
+    through (``proxy.build_proxy_url``). Falls back to ``[""]`` (main) when that's empty or the
     engine is unreachable, so a box coming up always finds a live proxy + its CA. The fallback
     is daemon-only: mirror writes key on :func:`up_worktrees`, so an idle supervisor never
     keeps re-dropping ``.dev-mode.json`` into a checkout nothing is reading."""
-    return up_worktrees() or [""]
+    up = up_worktrees() if up is None else up
+    launching = launching_worktrees()
+    if launching:
+        launching.add("")
+    return list(dict.fromkeys([*up, *sorted(launching)])) or [""]
 
 
 def worktree_config(wt: str) -> config.Config:

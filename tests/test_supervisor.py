@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import types
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1602,6 +1603,160 @@ def test_blocked_file_is_not_created_while_nothing_is_blocked(monkeypatch, tmp_p
     monkeypatch.setattr(supervisor, "_blocked", {})
     _tick_with(monkeypatch, tmp_path, {"gcp-minter": _spec()}, {}, {})
     assert not (tmp_path / "blocked-daemons.json").exists()
+
+
+# ── readiness: a launch waits for the jobs it needs, and refuses loudly when one can't run ─────
+# `fy box up` once started a fresh supervisor and baked its [box].packages layer in the same
+# second; apt reached the proxy port before mitmdump had bound it ("connection refused"), and the
+# build gate saw no refusal to explain. Each tick now publishes every job's state, and the launch
+# paths wait on it (`await_ready`).
+
+
+def test_daemon_job_states():
+    spec = {"port": 8188}
+    assert supervisor._daemon_job(spec, None, "needs GCP_KEY", probe=lambda _p: True) == (
+        "blocked",
+        "needs GCP_KEY",
+    )
+    assert supervisor._daemon_job(spec, None, None, probe=lambda _p: False)[0] == "starting"
+    alive = _fake_child(alive=True)
+    assert supervisor._daemon_job(spec, alive, None, probe=lambda _p: False)[0] == "starting"
+    assert supervisor._daemon_job(spec, alive, None, probe=lambda _p: True) == ("up", "")
+    assert supervisor._daemon_job({"port": None}, alive, None, probe=lambda _p: False)[0] == "up"
+    state, detail = supervisor._daemon_job(
+        spec, _fake_child(alive=False), None, probe=lambda _p: True
+    )
+    assert state == "failing" and "rc 1" in detail and "fy host logs" in detail
+
+
+def test_tick_publishes_readiness_per_job_with_its_worktree(monkeypatch, tmp_path):
+    _gate_world(monkeypatch, tmp_path)
+    monkeypatch.setattr(supervisor, "_blocked", {})
+    monkeypatch.setattr(supervisor, "_notify", lambda t, b: None)
+    monkeypatch.delenv("GCP_KEY", raising=False)
+    desired = {
+        "egress-proxy": _spec(label="egress proxy", port=41000),
+        "gcp-minter": _spec(requires=["GCP_KEY"]),
+    }
+    _tick_with(monkeypatch, tmp_path, desired, {}, {})
+
+    record = json.loads(supervisor.config.supervisor_ready_file().read_text())
+    assert record["pid"] == os.getpid() and record["worktrees"] == [""] and record["at"]
+    proxy, minter = record["jobs"]["egress-proxy"], record["jobs"]["gcp-minter"]
+    assert (proxy["state"], proxy["worktree"], proxy["label"]) == ("starting", "", "egress proxy")
+    assert minter["state"] == "blocked" and "GCP_KEY" in minter["detail"]
+
+
+def _record(pid=4242, worktrees=("",), jobs=None, age=0.0):
+    at = supervisor.devmode.now() - timedelta(seconds=age)
+    return {
+        "pid": pid,
+        "at": supervisor.devmode._iso(at),
+        "worktrees": list(worktrees),
+        "jobs": jobs or {},
+    }
+
+
+def _job(state, wt="", label="egress proxy", detail=""):
+    return {"state": state, "worktree": wt, "label": label, "detail": detail}
+
+
+def test_readiness_waits_for_the_current_holders_first_tick():
+    assert supervisor.readiness(None, 4242, {""})[0] == "wait"  # nothing published yet
+    assert supervisor.readiness(_record(), None, {""})[0] == "wait"  # nobody holds the lock
+    # The record of the supervisor this launch just replaced says nothing about its successor.
+    assert supervisor.readiness(_record(pid=1111), 4242, {""})[0] == "wait"
+    verdict, lines = supervisor.readiness(_record(age=60), 4242, {""})
+    assert verdict == "wait" and "60s" in lines[0]  # a wedged holder: not ticking
+
+
+def test_readiness_waits_until_the_launching_worktree_is_served():
+    verdict, lines = supervisor.readiness(_record(worktrees=[""]), 4242, {"", "feat"})
+    assert verdict == "wait" and "feat" in lines[0]
+
+
+def test_readiness_waits_for_a_starting_job_and_names_it():
+    jobs = {"egress-proxy": _job("starting", detail="not answering on :41000 yet")}
+    verdict, lines = supervisor.readiness(_record(jobs=jobs), 4242, {""})
+    assert verdict == "wait" and "egress proxy" in lines[0] and ":41000" in lines[0]
+
+
+def test_readiness_fails_on_a_blocked_or_failing_job_with_its_reason():
+    jobs = {
+        "egress-proxy": _job("failing", detail="exited (rc 1)"),
+        "gcp-minter": _job("blocked", label="GCP minter", detail="needs GCP_KEY"),
+        "other": _job("starting", label="still coming"),
+    }
+    verdict, lines = supervisor.readiness(_record(jobs=jobs), 4242, {""})
+    assert verdict == "fail"
+    text = "\n".join(lines)
+    assert "GCP minter" in text and "needs GCP_KEY" in text and "exited (rc 1)" in text
+    assert "still coming" not in text  # the verdict names what's broken, not what's pending
+
+
+def test_readiness_ignores_jobs_of_a_worktree_this_launch_does_not_need():
+    jobs = {
+        "egress-proxy": _job("up"),
+        "egress-proxy@other": _job("blocked", wt="other", detail="can't bind :41010"),
+    }
+    record = _record(worktrees=["", "other"], jobs=jobs)
+    assert supervisor.readiness(record, 4242, {""}) == ("ready", [])
+
+
+def _ready_world(monkeypatch, records, *, holder=4242):
+    """await_ready over a scripted sequence of published records (the last one repeats)."""
+    feed = list(records)
+    monkeypatch.setattr(supervisor.devmode, "in_box", lambda: False)
+    monkeypatch.setattr(supervisor, "which", lambda _x: "/usr/bin/podman")
+    monkeypatch.setattr(supervisor.config, "active_worktree", lambda: "")
+    monkeypatch.setattr(supervisor, "_supervisor_running", lambda: holder is not None)
+    monkeypatch.setattr(supervisor, "_holder_info", lambda: (holder, "fp"))
+    monkeypatch.setattr(
+        supervisor, "_read_ready", lambda: feed.pop(0) if len(feed) > 1 else feed[0]
+    )
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _s: None)
+
+
+def test_await_ready_returns_once_every_needed_job_is_up(monkeypatch, capsys):
+    starting = _record(jobs={"egress-proxy": _job("starting", detail="not answering yet")})
+    up = _record(jobs={"egress-proxy": _job("up")})
+    _ready_world(monkeypatch, [None, starting, up])
+    assert supervisor.await_ready() is True
+    assert "✗" not in capsys.readouterr().err
+
+
+def test_await_ready_refuses_loudly_on_a_blocked_job(monkeypatch, capsys):
+    jobs = {"gcp-minter": _job("blocked", label="GCP minter", detail="needs GCP_KEY")}
+    _ready_world(monkeypatch, [_record(jobs=jobs)])
+    assert supervisor.await_ready() is False
+    err = capsys.readouterr().err
+    assert "✗" in err and "GCP minter" in err and "needs GCP_KEY" in err and "fy host logs" in err
+
+
+def test_await_ready_gives_up_after_the_wait_naming_what_is_pending(monkeypatch, capsys):
+    jobs = {"egress-proxy": _job("starting", detail="not answering on :41000 yet")}
+    _ready_world(monkeypatch, [_record(jobs=jobs)])
+    monkeypatch.setattr(supervisor, "READY_WAIT", 0.0)
+    assert supervisor.await_ready() is False
+    err = capsys.readouterr().err
+    assert "✗" in err and ":41000" in err and "fy host logs" in err
+
+
+def test_await_ready_is_a_noop_where_there_is_no_host_supervisor(monkeypatch):
+    monkeypatch.setattr(supervisor, "_read_ready", lambda: pytest.fail("read the record"))
+    monkeypatch.setattr(supervisor.devmode, "in_box", lambda: True)
+    assert supervisor.await_ready() is True
+    monkeypatch.setattr(supervisor.devmode, "in_box", lambda: False)
+    monkeypatch.setattr(supervisor, "which", lambda _x: None)
+    assert supervisor.await_ready() is True
+
+
+def test_ensure_background_marks_the_launching_worktree(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    monkeypatch.setattr(supervisor.config, "active_worktree", lambda: "feat")
+    supervisor.ensure_background()
+    marker = supervisor.config.launches_dir() / f"{os.getpid()}.json"
+    assert json.loads(marker.read_text()) == {"worktree": "feat"}
 
 
 # ── the operator's verbs: status · restart · logs ─────────────────────────────────────────────

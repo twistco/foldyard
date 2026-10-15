@@ -571,6 +571,46 @@ def test_no_up_boxes_still_serves_main_daemons_but_reports_none_up(monkeypatch):
     assert devmode.active_worktrees() == [""]
 
 
+# A host launch (`fy up` / `fy box up` / `fy box build`) marks the worktree it brings up BEFORE
+# that worktree's box exists, so its daemons — and main's proxy, which every build goes through —
+# are served while it builds, not only from the tick after its box appears.
+
+
+def _launch(launches, pid: int, wt: str) -> None:
+    launches.mkdir(parents=True, exist_ok=True)
+    (launches / f"{pid}.json").write_text(json.dumps({"worktree": wt}))
+
+
+def test_a_launching_worktree_is_served_with_main_before_its_box_is_up(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path))
+    monkeypatch.setattr(devmode, "worktree_keys", lambda: ["", "feat", "other"])
+    _launch(tmp_path, os.getpid(), "other")
+    # feat's box is up, main's isn't: main's proxy port — the one builds use — had no listener.
+    assert devmode.active_worktrees(["feat"]) == ["feat", "", "other"]
+
+
+def test_a_dead_launchers_marker_is_ignored_and_swept(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path))
+    monkeypatch.setattr(devmode, "worktree_keys", lambda: ["", "feat"])
+    _launch(tmp_path, 999999, "feat")
+
+    def kill(pid, _sig):
+        if pid == 999999:
+            raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(devmode.os, "kill", kill)
+    assert devmode.active_worktrees([]) == [""]
+    assert not (tmp_path / "999999.json").exists()
+
+
+def test_a_marker_for_an_unregistered_worktree_is_not_served(monkeypatch, tmp_path):
+    # The registry is the host's own record of its worktrees; a marker can't widen it.
+    monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path))
+    monkeypatch.setattr(devmode, "worktree_keys", lambda: ["", "feat"])
+    _launch(tmp_path, os.getpid(), "stray")
+    assert devmode.active_worktrees(["feat"]) == ["feat"]
+
+
 def _worktree_layout(tmp_path):
     """A primary checkout + one sibling worktree on disk, as `git worktree add` leaves them."""
     main = tmp_path / "repo"

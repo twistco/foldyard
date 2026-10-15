@@ -868,6 +868,8 @@ def up() -> int:
     from . import supervisor
 
     supervisor.ensure_background()
+    if not supervisor.await_ready():  # its jobs run before anything (a build) uses them
+        return 1
     # Gated AFTER the machine + supervisor, unlike the other stack verbs: a box-only consumer's
     # `fy up` is how both come up (the note below then points at `fy box up`).
     if (rc := stack_declared("up", "fy box up")) is not None:
@@ -882,8 +884,6 @@ def up() -> int:
         ctx.env["FOLDYARD_CHECKOUT"],
         ctx.env.get("HERE") or config.dev_vm_rel(),
     )
-    # The supervisor is already coming up in parallel with the slow build, so the proxy + its CA
-    # exist by the time a box is created.
     # Span every profile that already has RUNNING services (e.g. the data workers from
     # `just data-up`), so an `up` after a posture change re-renders THEIR config too instead
     # of leaving them on the old identity/env. No extras → plain COMPOSE_PROFILES behaviour.
