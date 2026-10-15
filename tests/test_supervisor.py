@@ -1723,6 +1723,16 @@ def test_readiness_fails_on_a_blocked_or_failing_job_with_its_reason():
     assert "still coming" not in text  # the verdict names what's broken, not what's pending
 
 
+def test_readiness_names_whose_job_stops_a_worktree_launch():
+    # A worktree's launch also needs main (every build goes through main's proxy), so a job of
+    # main's can stop it — the line must say it's main's, or the fix reads as the worktree's.
+    jobs = {"gcp-minter": _job("blocked", label="GCP minter", detail="needs GCP_KEY")}
+    verdict, lines = supervisor.readiness(
+        _record(worktrees=["", "feat"], jobs=jobs), 4242, {"", "feat"}
+    )
+    assert verdict == "fail" and lines == ["GCP minter (main): BLOCKED — needs GCP_KEY"]
+
+
 def test_readiness_ignores_jobs_of_a_worktree_this_launch_does_not_need():
     jobs = {
         "egress-proxy": _job("up"),

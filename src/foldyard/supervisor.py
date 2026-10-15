@@ -680,14 +680,19 @@ def readiness(record: dict | None, holder: int | None, needed: set[str]) -> tupl
         for job in (record.get("jobs") or {}).values()
         if isinstance(job, dict) and (job.get("worktree") is None or job.get("worktree") in needed)
     ]
+
+    def name(job: dict) -> str:  # whose job it is, when the launch needs more than one worktree's
+        wt = job.get("worktree")
+        if wt is None or len(needed) == 1:
+            return str(job.get("label"))
+        return f"{job.get('label')} ({wt or 'main'})"
+
     broken = [j for j in jobs if j.get("state") in ("blocked", "failing")]
     if broken:
-        return "fail", [
-            f"{j.get('label')}: {j['state'].upper()} — {j.get('detail')}" for j in broken
-        ]
+        return "fail", [f"{name(j)}: {j['state'].upper()} — {j.get('detail')}" for j in broken]
     pending = [j for j in jobs if j.get("state") != "up"]
     if pending:
-        return "wait", [f"{j.get('label')}: {j.get('detail') or j.get('state')}" for j in pending]
+        return "wait", [f"{name(j)}: {j.get('detail') or j.get('state')}" for j in pending]
     return "ready", []
 
 
