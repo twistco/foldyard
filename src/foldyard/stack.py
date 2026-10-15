@@ -1821,7 +1821,9 @@ def logs(svc: list[str]) -> int:
         return rc
     if not engine_reachable("follow"):
         return 0
-    return _compose(resolve(), ["logs", "-f", "-n", "50", *svc])
+    # `--tail`, not `-n`: docker compose reads `-n` as --tail, but podman-compose reads it as
+    # its value-less --names, which made the 50 a service name.
+    return _compose(resolve(), ["logs", "-f", "--tail", "50", *svc])
 
 
 def shell() -> int:
