@@ -14,3 +14,7 @@ bump: patch
   worktrees whose box was already up, so with one worktree's box running and main's not, a second
   worktree's `fy box up` built with no proxy listening on main's port, which every image build
   goes through. A launch now tells the supervisor which worktree it is bringing up.
+- **A launch replaces a supervisor started from another checkout of the same project.** A
+  supervisor serves the checkout it was started from: its worktree registry and its adopted
+  config. A second clone's `fy up` used to reuse it, and its worktrees were never served. A launch
+  from an unregistered worktree now stops at once and names the fix (`fy worktree add <name>`).

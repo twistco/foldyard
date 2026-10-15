@@ -658,6 +658,35 @@ def test_holder_stale_reason(monkeypatch, tmp_path):
     assert reason and "wedged" in reason
 
 
+def test_acquire_singleton_stamps_the_checkout_it_serves(monkeypatch, tmp_path):
+    monkeypatch.setattr(supervisor.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(supervisor.devmode, "main_repo", lambda: Path("/work/acme"))
+    assert supervisor.acquire_singleton() is True
+    held = supervisor._lock_fd
+    assert held is not None
+    try:
+        assert supervisor._holder_checkout() == "/work/acme"
+        assert supervisor._holder_info() == (os.getpid(), supervisor._code_fingerprint())
+    finally:
+        os.close(held)
+        supervisor._lock_fd = None
+
+
+def test_a_holder_serving_another_checkout_is_stale(monkeypatch, tmp_path):
+    # A supervisor serves the checkout it was launched from: its registry is that checkout's, so a
+    # launch from another checkout of the same project (a second clone; each e2e test's own copy
+    # of the example) is never served — and its readiness wait could only time out.
+    monkeypatch.setattr(supervisor.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(supervisor, "_heartbeat_age", lambda: 2.0)
+    monkeypatch.setattr(supervisor.devmode, "main_repo", lambda: Path("/work/acme-two"))
+    lock = tmp_path / "host-supervisor.lock"
+    lock.write_text(f"4242 {supervisor._code_fingerprint()}\n/work/acme\n")
+    reason = supervisor._holder_stale_reason()
+    assert reason and "/work/acme" in reason and "/work/acme-two" in reason
+    lock.write_text(f"4242 {supervisor._code_fingerprint()}\n/work/acme-two\n")
+    assert supervisor._holder_stale_reason() is None
+
+
 def test_ensure_background_replaces_a_stale_holder(monkeypatch, tmp_path):
     # The lock is held by a supervisor with a STALE fingerprint → ensure_background bounces it
     # (stubbed: the "holder" releases on SIGTERM) and spawns a fresh one.
@@ -1740,6 +1769,17 @@ def test_await_ready_gives_up_after_the_wait_naming_what_is_pending(monkeypatch,
     assert supervisor.await_ready() is False
     err = capsys.readouterr().err
     assert "✗" in err and ":41000" in err and "fy host logs" in err
+
+
+def test_await_ready_refuses_an_unregistered_worktree_at_once(monkeypatch, capsys):
+    # The supervisor runs nothing for a worktree the host never recorded — waiting can't help.
+    _ready_world(monkeypatch, [_record()])
+    monkeypatch.setattr(supervisor.config, "active_worktree", lambda: "feat")
+    monkeypatch.setattr(supervisor.devmode, "worktree_keys", lambda: [""])
+    monkeypatch.setattr(supervisor, "_read_ready", lambda: pytest.fail("waited on the record"))
+    assert supervisor.await_ready() is False
+    err = capsys.readouterr().err
+    assert "feat" in err and "not registered" in err and "fy worktree add feat" in err
 
 
 def test_await_ready_is_a_noop_where_there_is_no_host_supervisor(monkeypatch):

@@ -237,9 +237,10 @@ def acquire_singleton() -> bool:
         os.close(fd)
         return False  # another supervisor holds it
     _lock_fd = fd  # keep open → the lock is held until this process exits
-    try:  # stamp holder metadata (pid + code fingerprint) for the staleness probe
+    try:  # stamp holder metadata (pid + code fingerprint, then its checkout) for staleness probes
         os.ftruncate(fd, 0)
-        os.pwrite(fd, f"{os.getpid()} {_code_fingerprint()}\n".encode(), 0)
+        meta = f"{os.getpid()} {_code_fingerprint()}\n{devmode.main_repo()}\n"
+        os.pwrite(fd, meta.encode(), 0)
     except OSError:
         pass  # metadata is advisory; the lock itself is what matters
     return True
@@ -249,11 +250,21 @@ def _holder_info() -> tuple[int | None, str | None]:
     """(pid, fingerprint) the current lock holder stamped at its startup — (None, None) when the
     file is empty/unreadable (a pre-metadata supervisor, or one that never wrote it)."""
     try:
-        parts = _lockfile().read_text().split()
+        parts = _lockfile().read_text().partition("\n")[0].split()
     except OSError:
         return None, None
     pid = int(parts[0]) if parts and parts[0].isdigit() else None
     return pid, (parts[1] if len(parts) > 1 else None)
+
+
+def _holder_checkout() -> str | None:
+    """The main checkout the current lock holder serves (its second metadata line) — None when it
+    didn't say (a supervisor from before the line existed)."""
+    try:
+        line = _lockfile().read_text().split("\n")[1].strip()
+    except (OSError, IndexError):
+        return None
+    return line or None
 
 
 def _holder_pids() -> list[int]:
@@ -312,6 +323,11 @@ def _holder_stale_reason() -> str | None:
         return "it predates the supervisor health metadata (restarting once upgrades it)"
     if fingerprint != _code_fingerprint():
         return "the installed foldyard code changed since it started"
+    # It serves the checkout it was launched from — its worktree registry, its adopted config — so
+    # a launch from another checkout of the same project would never be served.
+    serves = _holder_checkout()
+    if serves is not None and serves != (here := str(devmode.main_repo())):
+        return f"it serves {serves}, not {here}"
     age = _heartbeat_age()
     if age is not None and age > HEARTBEAT_STALE_SECONDS:
         return f"its heartbeat is {int(age)}s old — the reconcile loop looks wedged"
@@ -685,7 +701,15 @@ def await_ready() -> bool:
     a daemon."""
     if devmode.in_box() or not which("podman"):
         return True
-    needed = {config.active_worktree(), ""}
+    wt = config.active_worktree()
+    if wt and wt not in devmode.worktree_keys():
+        print(
+            f"✗ worktree {wt} is not registered with this computer, so the host supervisor runs "
+            f"nothing for it. If it's yours: `fy worktree add {wt}`.",
+            file=sys.stderr,
+        )
+        return False
+    needed = {wt, ""}
     started = time.monotonic()
     told = False
     while True:
