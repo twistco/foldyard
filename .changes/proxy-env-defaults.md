@@ -22,6 +22,11 @@ bump: minor
   one per service. It's advisory: a value you need, such as a private CA bundle, can stay. Empty
   values aren't flagged, since blanking the proxy is how a stack-only service stays off it. If
   your project wired any of these by hand before foldyard provided them, you can drop them now.
+  A second row, `stack container env`, reads what each running container actually has, so it
+  also catches an image's own `ENV` (an `SSL_CERT_FILE` of its own) and a container created
+  before the VM provided these settings, which keeps the proxy but lacks the CA until you
+  recreate it (`fy down`, then `fy up`). Containers that blank the proxy aren't flagged there
+  either.
 - **The networking guide says when stack containers trust the proxy, and how to fix Turbopack.**
   Only the VM firewall gives containers the proxy's CA, so a container you point at the proxy
   yourself needs it on. `next build` fetching Google Fonts ignores `NODE_EXTRA_CA_CERTS`;

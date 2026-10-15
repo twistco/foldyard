@@ -51,11 +51,11 @@ import socket
 import stat
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import config, configpin, mountwrite, worktree_registry
 from .machine_backend import get_backend
@@ -1303,6 +1303,7 @@ def doctor(deep: bool = False):
     yield from _shadow_volume_check()
     yield from _stack_shadow_check()
     yield from _stack_env_override_check()
+    yield from _stack_container_env_check()
     yield from _disk_headroom_check()
 
     if in_box():
@@ -1455,18 +1456,17 @@ def active_project() -> str:
     return f"{prefix}-{worktree}" if worktree else prefix
 
 
-def _stack_mounts(project: str) -> list[tuple[str, list[tuple[str, str]], set[str]]]:
-    """``(service, [(host_src, container_dest)], {masked_dests})`` for each RUNNING container of
-    ``project``, from one ``ps`` + one batched ``inspect``.
+def _stack_containers(project: str) -> list[tuple[str, dict]]:
+    """``(name, inspect spec)`` for each RUNNING container of ``project`` but the devbox, from one
+    ``ps`` + one batched ``inspect``; ``[]`` when the engine can't say. Bounded (5s + 15s), and
+    shared by the doctor rows that ask the running stack (:func:`_stack_mounts`,
+    :func:`_stack_container_env_check`).
 
     Scoped to the project label, which is what makes this worktree-correct: a worktree's stack is
     its own compose project (``<prefix>-<name>``) mounting its OWN checkout, so main's containers
-    are invisible here and vice versa — otherwise every worktree would report main's paths.
-
-    Only READ-WRITE binds count as exposure: a ``:ro`` mount of the checkout can't be clobbered by
-    the container (Tangible's auth0-simulator mounts its harness read-only and rsyncs out of it,
-    which is exactly right and must not be flagged). The devbox is skipped — it is the OTHER
-    check's subject, and reporting it twice would just teach people to skim the rows."""
+    are invisible here and vice versa — otherwise every worktree would report main's paths. The
+    devbox is skipped — it is the box rows' subject, and reporting it twice would just teach
+    people to skim the rows."""
     engine, env = config.engine(), _engine_env()
     try:
         out = subprocess.run(
@@ -1499,16 +1499,30 @@ def _stack_mounts(project: str) -> list[tuple[str, list[tuple[str, str]], set[st
     except (OSError, ValueError, subprocess.SubprocessError):
         return []  # engine unreachable / unparsable — doctor's own engine row covers that
     result = []
-    for i, spec in enumerate(specs):
+    for i, spec in enumerate(specs if isinstance(specs, list) else []):
+        if not isinstance(spec, dict):
+            continue
         # Name each row from the SPEC, not from the `ps` list by position: `inspect` promises
         # nothing about order or about echoing back every argument, and a silent off-by-one here
-        # would pin one service's dependency dirs on another's name — a finding that sends the
-        # reader to the wrong container. Docker prefixes it with a slash, podman doesn't. The
-        # positional fallback keeps an engine that omits Name behaving as before, and the devbox
-        # filter is re-applied because it can no longer be guaranteed by the `ps` list alone.
+        # would pin one service's findings on another's name — a finding that sends the reader to
+        # the wrong container. Docker prefixes it with a slash, podman doesn't. The positional
+        # fallback keeps an engine that omits Name behaving as before, and the devbox filter is
+        # re-applied because it can no longer be guaranteed by the `ps` list alone.
         name = str(spec.get("Name") or "").lstrip("/") or (names[i] if i < len(names) else "")
-        if not name or name.endswith("-devbox"):
-            continue
+        if name and not name.endswith("-devbox"):
+            result.append((name, spec))
+    return result
+
+
+def _stack_mounts(project: str) -> list[tuple[str, list[tuple[str, str]], set[str]]]:
+    """``(service, [(host_src, container_dest)], {masked_dests})`` for each running container of
+    ``project`` (:func:`_stack_containers`).
+
+    Only READ-WRITE binds count as exposure: a ``:ro`` mount of the checkout can't be clobbered by
+    the container (Tangible's auth0-simulator mounts its harness read-only and rsyncs out of it,
+    which is exactly right and must not be flagged)."""
+    result = []
+    for name, spec in _stack_containers(project):
         binds, masked = [], set()
         for m in spec.get("Mounts") or []:
             dest = (m.get("Destination") or "").rstrip("/")
@@ -1827,20 +1841,18 @@ def _stack_shadow_check():
 
 # What the walled VM provides in EVERY container it creates (machine-wall.sh): the proxy env
 # podman propagates from the VM user's environment, the CA drop-in's trust env, and the npm
-# drop-in's proxy settings. NO_PROXY isn't here: it's the consumer's to extend. Pinned against the
-# script by tests/test_devmode.py.
-STACK_PROVIDED_ENV = (
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "NODE_EXTRA_CA_CERTS",
-    "SSL_CERT_FILE",
-    "REQUESTS_CA_BUNDLE",
-    "GIT_SSL_CAINFO",
-    "npm_config_https_proxy",
-    "npm_config_proxy",
-)
+# drop-in's proxy settings. NO_PROXY isn't here: it's the consumer's to extend. The proxy and npm
+# values are `config.wall_proxy_url()`, which the wall script is given; the CA paths are fixed in
+# the script, so they're pinned against it by tests/test_devmode.py, like the names.
+_STACK_PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+STACK_CA_ENV = {
+    "NODE_EXTRA_CA_CERTS": "/etc/fy-proxy-ca.pem",
+    "SSL_CERT_FILE": "/etc/fy-proxy-ca-combined.pem",
+    "REQUESTS_CA_BUNDLE": "/etc/fy-proxy-ca-combined.pem",
+    "GIT_SSL_CAINFO": "/etc/fy-proxy-ca-combined.pem",
+}
+_STACK_NPM_ENV = ("npm_config_https_proxy", "npm_config_proxy")
+STACK_PROVIDED_ENV = (*_STACK_PROXY_ENV, *STACK_CA_ENV, *_STACK_NPM_ENV)
 # npm reads its settings case-insensitively, so `NPM_CONFIG_HTTPS_PROXY` overrides the same thing.
 _NPM_PROVIDED = {n.lower() for n in STACK_PROVIDED_ENV if n.startswith("npm_config_")}
 _STAGED_CA_DIR = ".devbox-ca"  # proxy.stage_ca_for_box: the box's copy, under the checkout
@@ -1944,6 +1956,157 @@ def _stack_env_override_check():
         " provides in every container; yours takes precedence"
         "\n      → remove it unless you need a different value (e.g. a private CA) —"
         " `fy docs networking`\n" + lines,
+    )
+
+
+def stack_expected_env(proxy_url: str) -> dict[str, str]:
+    """What the walled VM gives every container, name → value (:data:`STACK_PROVIDED_ENV`), for
+    the proxy URL it was given (``config.wall_proxy_url()``)."""
+    return {
+        **dict.fromkeys(_STACK_PROXY_ENV, proxy_url),
+        **STACK_CA_ENV,
+        **dict.fromkeys(_STACK_NPM_ENV, proxy_url),
+    }
+
+
+class EnvFinding(NamedTuple):
+    """One thing a running container's environment does differently from what foldyard provides.
+    ``kind`` is ``ca`` (a CA variable with another value), ``proxy`` (a proxy or npm variable with
+    another address) or ``missing`` (a container that uses the proxy lacks this one; ``value`` and
+    ``expected`` stay empty)."""
+
+    kind: str
+    name: str
+    value: str = ""
+    expected: str = ""
+
+
+def _env_dict(env: Iterable[str]) -> dict[str, str]:
+    """``KEY=VAL`` entries as a dict, the last of a repeated key winning; entries without a name
+    are dropped."""
+    out: dict[str, str] = {}
+    for entry in env:
+        key, _, value = str(entry).partition("=")
+        if key:
+            out[key] = value
+    return out
+
+
+def stack_container_env_findings(
+    envs: Mapping[str, Iterable[str]], expected: Mapping[str, str]
+) -> dict[str, list[EnvFinding]]:
+    """``{container: [findings]}`` for each running container whose EFFECTIVE environment
+    (``inspect`` → ``Config.Env``, ``KEY=VAL`` entries) differs from what the walled VM provides
+    (``expected``, :func:`stack_expected_env`). Effective, so it doesn't matter what set a value: an
+    image's ``ENV``, compose, or the VM's defaults. Containers without findings are left out.
+
+    - A provided name set to a different NON-EMPTY value: ``ca`` for a CA variable, ``proxy`` for
+      a proxy or npm one (npm reads its settings in any case, so ``NPM_CONFIG_PROXY`` counts). A
+      trailing slash on a proxy URL is the same proxy.
+    - A container that uses the proxy (a non-empty ``HTTPS_PROXY`` or ``https_proxy``) with a CA
+      or npm variable ABSENT: ``missing``. podman applies the VM's defaults when it creates a
+      container, so one created before they existed has none until it is recreated.
+
+    An empty value is deliberate and never a finding: blanking the proxy env is how a service that
+    only talks to the stack keeps off the proxy, and such a container needs no CA either."""
+    npm_names = {n.lower(): n for n in _STACK_NPM_ENV}
+    found: dict[str, list[EnvFinding]] = {}
+    for container, raw in envs.items():
+        env = _env_dict(raw)
+        hits: list[EnvFinding] = []
+        for name, value in env.items():
+            provided = name if name in expected else npm_names.get(name.lower())
+            if provided is None or provided not in expected or value == "":
+                continue
+            want = expected[provided]
+            if provided in STACK_CA_ENV:
+                if value != want:
+                    hits.append(EnvFinding("ca", name, value, want))
+            elif value.rstrip("/") != want.rstrip("/"):
+                hits.append(EnvFinding("proxy", name, value, want))
+        if env.get("HTTPS_PROXY") or env.get("https_proxy"):
+            present = {k.lower() if k.lower() in npm_names else k for k in env}
+            hits += [
+                EnvFinding("missing", name)
+                for name in (*STACK_CA_ENV, *_STACK_NPM_ENV)
+                if name in expected and name not in present
+            ]
+        if hits:
+            order = {"proxy": 0, "ca": 1, "missing": 2}
+            found[container] = sorted(hits, key=lambda f: order[f.kind])
+    return found
+
+
+def _container_env_lines(found: Mapping[str, list[EnvFinding]]) -> list[str]:
+    """One line per finding, and one per container for everything it lacks."""
+    lines = []
+    for container, hits in sorted(found.items()):
+        for f in hits:
+            if f.kind == "proxy":
+                why = "a stale or foreign proxy"
+            elif f.kind == "ca" and f.name == "NODE_EXTRA_CA_CERTS":
+                why = "Node adds it instead of foldyard's: it must hold the proxy's CA"
+            elif f.kind == "ca":
+                why = "replaces foldyard's trust: it must hold the proxy's CA"
+            else:
+                continue
+            lines.append(f"{container}: {f.name}={f.value}, not foldyard's {f.expected} ({why})")
+        if missing := [f.name for f in hits if f.kind == "missing"]:
+            lines.append(
+                f"{container}: uses the proxy without {', '.join(missing)}"
+                " (created before the VM provided them)"
+            )
+    return lines
+
+
+def _stack_container_env_check():
+    """ADVISORY: what the stack's RUNNING containers ended up with, against what the walled VM
+    provides. The compose row (:func:`_stack_env_override_check`) reads declarations; this one
+    reads the effective environment, so it also sees an image's own ``ENV`` and a container
+    created before the VM's defaults existed. Same guards as the compose row, silent when nothing
+    runs or the engine can't say, bounded by :func:`_stack_containers`. A warn, never a fail."""
+    if not config.machine_wall() or not config.has_compose_stack():
+        return
+    if config.unadopted_notice() is not None:
+        return  # the `adopted config` row says it
+    containers = _stack_containers(active_project())
+    if not containers:
+        return
+    envs = {}
+    for name, spec in containers:
+        cfg = spec.get("Config")
+        env = cfg.get("Env") if isinstance(cfg, dict) else None
+        envs[name] = [str(e) for e in env] if isinstance(env, list) else []
+    found = stack_container_env_findings(envs, stack_expected_env(config.wall_proxy_url()))
+    n = len(envs)
+    if not found:
+        yield _result(
+            True,
+            "stack container env",
+            f"{n} running container{'' if n == 1 else 's'} clean"
+            " (foldyard's proxy and CA, or off the proxy)",
+            "",
+        )
+        return
+    kinds = {f.kind for hits in found.values() for f in hits}
+    fixes = []
+    if "missing" in kinds:
+        fixes.append("recreate containers made before the VM's defaults: `fy down && fy up`")
+    if kinds & {"ca", "proxy"}:
+        fixes.append(
+            "unless you need a different value (a CA bundle holding the proxy's CA), drop it from"
+            " compose, or set foldyard's in compose over an image's"
+        )
+    n = len(found)
+    yield _result(
+        None,
+        "stack container env",
+        "",
+        f"{n} running container{'' if n == 1 else 's'} differ{'s' if n == 1 else ''} from the"
+        " proxy and CA settings foldyard provides"
+        + "".join(f"\n      → {fix}" for fix in fixes)
+        + " — `fy docs networking`\n"
+        + "\n".join(f"          {line}" for line in _container_env_lines(found)),
     )
 
 

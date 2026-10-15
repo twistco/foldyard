@@ -1286,9 +1286,12 @@ def test_rendered_compose_never_provisions_the_vm(monkeypatch):
     assert seen == {"no_machine": True}
 
 
-def test_doctor_runs_the_stack_env_check_on_either_side(monkeypatch):
+def test_doctor_runs_both_stack_env_checks_on_either_side(monkeypatch):
     monkeypatch.setattr(
         devmode, "_stack_env_override_check", lambda: iter([("ok", "stack env overrides", "x")])
+    )
+    monkeypatch.setattr(
+        devmode, "_stack_container_env_check", lambda: iter([("ok", "stack container env", "y")])
     )
     for check in (
         "_version_window_check",
@@ -1301,6 +1304,303 @@ def test_doctor_runs_the_stack_env_check_on_either_side(monkeypatch):
     monkeypatch.setattr(devmode, "in_box", lambda: True)
     rows = devmode.doctor()
     assert next(rows) == ("ok", "stack env overrides", "x")
+    assert next(rows) == ("ok", "stack container env", "y")
+
+
+# ── the container-env doctor row (what the RUNNING containers ended up with) ─────────────
+
+_PROXY = "http://192.168.5.2:42200"
+_CA = "/etc/fy-proxy-ca.pem"
+_BUNDLE = "/etc/fy-proxy-ca-combined.pem"
+
+
+def _expected() -> dict[str, str]:
+    return devmode.stack_expected_env(_PROXY)
+
+
+def _provided(**over: str | None) -> list[str]:
+    """A container env as the walled VM gives it, with ``over`` changing (or, as None, dropping)
+    single names — plus some of the container's own, which the row must ignore."""
+    env = dict(_expected())
+    for name, value in over.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
+    return ["PATH=/usr/bin", "NO_PROXY=localhost,kong", *(f"{k}={v}" for k, v in env.items())]
+
+
+def _F(kind: str, name: str, value: str = "", expected: str = "") -> devmode.EnvFinding:
+    return devmode.EnvFinding(kind, name, value, expected)
+
+
+def test_stack_expected_env_covers_every_provided_name():
+    assert _expected() == {
+        "HTTP_PROXY": _PROXY,
+        "HTTPS_PROXY": _PROXY,
+        "http_proxy": _PROXY,
+        "https_proxy": _PROXY,
+        "NODE_EXTRA_CA_CERTS": _CA,
+        "SSL_CERT_FILE": _BUNDLE,
+        "REQUESTS_CA_BUNDLE": _BUNDLE,
+        "GIT_SSL_CAINFO": _BUNDLE,
+        "npm_config_https_proxy": _PROXY,
+        "npm_config_proxy": _PROXY,
+    }
+    assert set(_expected()) == set(devmode.STACK_PROVIDED_ENV)
+
+
+def test_stack_ca_env_is_what_the_wall_script_sets():
+    # The CA paths are hand-kept beside the script that mounts and names them, twice there: the
+    # containers.conf drop-in for running containers, and the runtime wrapper for build steps.
+    import re
+
+    from foldyard import machine
+
+    text = machine._wall_asset().read_text()
+    dropin = text[text.index("90-fy-proxy-ca.conf.tmp <<'EOF'\n") :].split("\nEOF\n", 1)[0]
+    assert dict(re.findall(r'"([A-Z_]+)=(/[^"]+)"', dropin)) == devmode.STACK_CA_ENV
+    wrapper = text[text.index("<<'__FY_CA_ENV__'\n") :].split("\n__FY_CA_ENV__\n", 1)[0]
+    paths = dict(re.findall(r'^(CA|BUNDLE) = "([^"]+)"$', wrapper, flags=re.M))
+    pairs = re.findall(r'\("([A-Z_]+)", (CA|BUNDLE)\)', wrapper)
+    assert {name: paths[ref] for name, ref in pairs} == devmode.STACK_CA_ENV
+
+
+def test_container_env_findings_are_empty_when_values_match_foldyards():
+    # Restating foldyard's own value (compose, or an image) is fine here; a trailing slash on a
+    # proxy URL is the same proxy.
+    envs = {
+        "app": _provided(),
+        "api": _provided(HTTPS_PROXY=_PROXY + "/", NPM_CONFIG_PROXY=_PROXY),
+    }
+    assert devmode.stack_container_env_findings(envs, _expected()) == {}
+
+
+def test_container_env_findings_name_a_ca_variable_set_elsewhere():
+    envs = {
+        "app": _provided(SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"),
+        "web": _provided(NODE_EXTRA_CA_CERTS="/certs/corp.pem", GIT_SSL_CAINFO="/g.pem"),
+    }
+    assert devmode.stack_container_env_findings(envs, _expected()) == {
+        "app": [_F("ca", "SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt", _BUNDLE)],
+        "web": [
+            _F("ca", "NODE_EXTRA_CA_CERTS", "/certs/corp.pem", _CA),
+            _F("ca", "GIT_SSL_CAINFO", "/g.pem", _BUNDLE),
+        ],
+    }
+
+
+def test_container_env_findings_name_a_stale_or_foreign_proxy():
+    stale = "http://192.168.5.2:8088"
+    envs = {
+        "app": _provided(HTTPS_PROXY=stale, https_proxy=stale),
+        # npm reads its settings in any case, so an image's upper-case spelling is the same setting
+        "worker": _provided(NPM_CONFIG_HTTPS_PROXY="http://corp-proxy:3128"),
+    }
+    assert devmode.stack_container_env_findings(envs, _expected()) == {
+        "app": [
+            _F("proxy", "HTTPS_PROXY", stale, _PROXY),
+            _F("proxy", "https_proxy", stale, _PROXY),
+        ],
+        "worker": [_F("proxy", "NPM_CONFIG_HTTPS_PROXY", "http://corp-proxy:3128", _PROXY)],
+    }
+
+
+def test_container_env_findings_name_what_a_proxied_container_lacks():
+    # Created before the VM's defaults existed: podman's proxy env, but no CA env (or, created
+    # before the npm drop-in, no npm pair). Only a recreate gives it them.
+    no_ca = dict.fromkeys(devmode.STACK_CA_ENV)
+    envs = {
+        "old": _provided(**no_ca, npm_config_https_proxy=None, npm_config_proxy=None),
+        "older-npm": _provided(npm_config_https_proxy=None, npm_config_proxy=None),
+        # lower-case alone routes it too
+        "lower": _provided(HTTPS_PROXY=None, SSL_CERT_FILE=None),
+    }
+    assert devmode.stack_container_env_findings(envs, _expected()) == {
+        "old": [
+            _F("missing", "NODE_EXTRA_CA_CERTS"),
+            _F("missing", "SSL_CERT_FILE"),
+            _F("missing", "REQUESTS_CA_BUNDLE"),
+            _F("missing", "GIT_SSL_CAINFO"),
+            _F("missing", "npm_config_https_proxy"),
+            _F("missing", "npm_config_proxy"),
+        ],
+        "older-npm": [_F("missing", "npm_config_https_proxy"), _F("missing", "npm_config_proxy")],
+        "lower": [_F("missing", "SSL_CERT_FILE")],
+    }
+
+
+def test_container_env_findings_count_an_upper_case_npm_setting_as_present():
+    envs = {"app": _provided(npm_config_https_proxy=None, NPM_CONFIG_HTTPS_PROXY=_PROXY)}
+    assert devmode.stack_container_env_findings(envs, _expected()) == {}
+
+
+def test_container_env_findings_leave_a_container_off_the_proxy_alone():
+    # repower's mail/supabase containers, verbatim: created before the CA defaults, and they blank
+    # the proxy env, so they don't use the proxy and the missing CA env doesn't matter.
+    blanked = [
+        "HTTP_PROXY=",
+        "NO_PROXY=*",
+        "https_proxy=",
+        "HTTPS_PROXY=",
+        "http_proxy=",
+        "no_proxy=*",
+        "PATH=/usr/bin",
+    ]
+    no_proxy_at_all = ["PATH=/usr/bin"]  # podman's `http_proxy: false`: nothing propagated
+    envs = {"mail": blanked, "db": no_proxy_at_all}
+    assert devmode.stack_container_env_findings(envs, _expected()) == {}
+
+
+def test_container_env_findings_treat_an_empty_value_as_deliberate():
+    # An empty CA or npm variable was set on purpose (and isn't "created before the defaults":
+    # the key exists). Neither a different value nor a missing one.
+    envs = {"app": _provided(SSL_CERT_FILE="", npm_config_proxy="", HTTP_PROXY="")}
+    assert devmode.stack_container_env_findings(envs, _expected()) == {}
+
+
+def test_container_env_findings_survive_odd_entries_and_keep_the_last_duplicate():
+    env = [*_provided(), "JUNK", "=", "SSL_CERT_FILE=/first.pem", f"SSL_CERT_FILE={_BUNDLE}"]
+    assert devmode.stack_container_env_findings({"app": env}, _expected()) == {}
+
+
+def test_container_env_findings_combine_kinds_in_one_container():
+    envs = {"app": _provided(HTTPS_PROXY="http://x:1", SSL_CERT_FILE="/x.pem", GIT_SSL_CAINFO=None)}
+    assert devmode.stack_container_env_findings(envs, _expected()) == {
+        "app": [
+            _F("proxy", "HTTPS_PROXY", "http://x:1", _PROXY),
+            _F("ca", "SSL_CERT_FILE", "/x.pem", _BUNDLE),
+            _F("missing", "GIT_SSL_CAINFO"),
+        ]
+    }
+
+
+def _container_env_config(
+    monkeypatch, envs, *, firewall=True, compose=True, unadopted=None, seen=None
+):
+    monkeypatch.setattr(devmode.config, "machine_wall", lambda: firewall)
+    monkeypatch.setattr(devmode.config, "has_compose_stack", lambda: compose)
+    monkeypatch.setattr(devmode.config, "unadopted_notice", lambda: unadopted)
+    monkeypatch.setattr(devmode.config, "wall_proxy_url", lambda: _PROXY)
+
+    def containers(project):
+        if seen is not None:
+            seen.append(project)
+        return [(name, {"Config": {"Env": env}}) for name, env in envs.items()]
+
+    monkeypatch.setattr(devmode, "_stack_containers", containers)
+
+
+def test_container_env_check_warns_per_container_with_values_and_the_fix(monkeypatch):
+    no_ca = dict.fromkeys(devmode.STACK_CA_ENV)
+    envs = {
+        "acme_app_1": _provided(SSL_CERT_FILE="/etc/ssl/mine.pem"),
+        "acme_web_1": _provided(NODE_EXTRA_CA_CERTS="/corp.pem"),
+        "acme_worker_1": _provided(HTTPS_PROXY="http://192.168.5.2:8088"),
+        "acme_old_1": _provided(**no_ca),
+        "acme_db_1": ["HTTPS_PROXY=", "https_proxy="],
+    }
+    _container_env_config(monkeypatch, envs)
+    [(status, name, detail)] = list(devmode._stack_container_env_check())
+    assert (status, name) == ("warn", "stack container env")
+    assert "4 running containers" in detail
+    assert (
+        f"acme_app_1: SSL_CERT_FILE=/etc/ssl/mine.pem, not foldyard's {_BUNDLE}"
+        " (replaces foldyard's trust" in detail
+    )
+    assert f"acme_web_1: NODE_EXTRA_CA_CERTS=/corp.pem, not foldyard's {_CA}" in detail
+    assert "(Node adds it instead of foldyard's" in detail
+    assert (
+        f"acme_worker_1: HTTPS_PROXY=http://192.168.5.2:8088, not foldyard's {_PROXY}"
+        " (a stale or foreign proxy)" in detail
+    )
+    assert (
+        "acme_old_1: uses the proxy without NODE_EXTRA_CA_CERTS, SSL_CERT_FILE,"
+        " REQUESTS_CA_BUNDLE, GIT_SSL_CAINFO" in detail
+    )
+    assert "acme_db_1" not in detail
+    # one fix per kind, each on its own line, the docs pointer once at the end of them
+    fixes = [line for line in detail.split("\n") if line.startswith("      → ")]
+    assert len(fixes) == 2
+    assert "`fy down && fy up`" in fixes[0] and "proxy's CA" in fixes[1]
+    assert fixes[1].endswith("— `fy docs networking`")
+
+
+def test_container_env_check_fix_names_only_what_applies(monkeypatch):
+    _container_env_config(monkeypatch, {"a": _provided(SSL_CERT_FILE=None)})
+    [(_, _, detail)] = list(devmode._stack_container_env_check())
+    assert "`fy down && fy up`" in detail and "proxy's CA" not in detail.split("\n")[1]
+    _container_env_config(monkeypatch, {"a": _provided(SSL_CERT_FILE="/x")})
+    [(_, _, detail)] = list(devmode._stack_container_env_check())
+    assert "`fy down && fy up`" not in detail and "`fy docs networking`" in detail
+
+
+def test_container_env_check_is_ok_when_every_container_matches(monkeypatch):
+    seen: list = []
+    envs = {"acme_app_1": _provided(), "acme_db_1": ["HTTPS_PROXY="]}
+    _container_env_config(monkeypatch, envs, seen=seen)
+    monkeypatch.setattr(devmode, "active_project", lambda: "acme-feature")
+    [(status, name, detail)] = list(devmode._stack_container_env_check())
+    assert (status, name) == ("ok", "stack container env")
+    assert "2 running containers" in detail
+    assert seen == ["acme-feature"]  # the ACTIVE checkout's stack, as the shadow row reads it
+
+
+def test_container_env_check_tolerates_a_spec_without_env(monkeypatch):
+    _container_env_config(monkeypatch, {})
+    monkeypatch.setattr(
+        devmode,
+        "_stack_containers",
+        lambda project: [("a", {}), ("b", {"Config": None}), ("c", {"Config": {"Env": None}})],
+    )
+    assert [r[:2] for r in devmode._stack_container_env_check()] == [("ok", "stack container env")]
+
+
+@pytest.mark.parametrize(
+    ("firewall", "compose", "unadopted", "envs"),
+    [
+        (False, True, None, {"a": ["HTTPS_PROXY=http://x"]}),  # no firewall: nothing provided
+        (True, False, None, {"a": ["HTTPS_PROXY=http://x"]}),  # no stack declared
+        (True, True, "unadopted", {"a": ["HTTPS_PROXY=http://x"]}),  # the adopted-config row's
+        (True, True, None, {}),  # nothing running (or the engine couldn't say)
+    ],
+)
+def test_container_env_check_says_nothing_when_it_has_nothing_to_judge(
+    monkeypatch, firewall, compose, unadopted, envs
+):
+    _container_env_config(
+        monkeypatch, envs, firewall=firewall, compose=compose, unadopted=unadopted
+    )
+    assert list(devmode._stack_container_env_check()) == []
+
+
+def test_container_env_check_stays_silent_when_the_engine_is_unreachable(tmp_path, monkeypatch):
+    # The real container helper, against an engine that fails: no row, never an exception.
+    monkeypatch.setattr(devmode.config, "machine_wall", lambda: True)
+    monkeypatch.setattr(devmode.config, "has_compose_stack", lambda: True)
+    monkeypatch.setattr(devmode.config, "unadopted_notice", lambda: None)
+    monkeypatch.setattr(devmode, "_engine_env", dict)
+
+    def unreachable(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 5)
+
+    monkeypatch.setattr(devmode.subprocess, "run", unreachable)
+    assert list(devmode._stack_container_env_check()) == []
+
+
+def test_stack_containers_reads_env_from_the_shared_inspect(monkeypatch):
+    # The env row and the shadow row read the same ps + inspect, devbox excluded.
+    _stub_engine(
+        monkeypatch,
+        ["proj_app_1", "proj-devbox"],
+        [
+            {"Name": "proj_app_1", "Config": {"Env": ["A=1"]}},
+            {"Name": "proj-devbox", "Config": {"Env": ["B=2"]}},
+        ],
+    )
+    assert devmode._stack_containers("proj") == [
+        ("proj_app_1", {"Name": "proj_app_1", "Config": {"Env": ["A=1"]}})
+    ]
 
 
 # ── the engine-disk doctor row (shares `fy up`'s reclaim threshold) ────────────────────

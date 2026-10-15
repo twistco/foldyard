@@ -190,11 +190,24 @@ trusts the proxy's CA.
 - **Your settings win, even stale ones.** A variable your image or compose file already sets keeps
   its value, so don't restate what foldyard provides: a proxy address copied into a compose file
   stops working when the port band moves, and a mount of `.devbox-ca` (the copy of the CA
-  foldyard puts in the checkout for the box) isn't needed by stack containers. `fy doctor`'s
-  `stack env overrides` row names each one a compose file sets; it reads the rendered compose
-  config, not images, so check an image's own `ENV` yourself. An empty value isn't an override:
-  blanking the proxy variables is how a service that only talks to the rest of the stack stays off
-  the proxy (blank `npm_config_https_proxy` and `npm_config_proxy` too if it runs npm).
+  foldyard puts in the checkout for the box) isn't needed by stack containers. An empty value
+  isn't an override: blanking the proxy variables is how a service that only talks to the rest of
+  the stack stays off the proxy (blank `npm_config_https_proxy` and `npm_config_proxy` too if it
+  runs npm). `fy doctor` has two rows for this, both advisory:
+  - `stack env overrides` reads the rendered compose config and names each of these a service
+    sets, even to foldyard's own value, since a restated value goes stale when the port band
+    moves.
+  - `stack container env` reads what each running container actually has, whatever set it. It
+    names a CA variable an image sets for itself (an `SSL_CERT_FILE` of its own), a different proxy
+    address, and a container that uses the proxy but lacks the CA or npm settings. podman adds
+    foldyard's settings when it creates a container, so one created before the VM had them (or
+    before a foldyard upgrade added one) lacks them until it's recreated: `fy down`, then `fy up`
+    (named volumes are kept). A container that blanks the proxy variables isn't flagged.
+
+  To undo an image's `ENV`, set foldyard's value in the service's compose `environment` (an image
+  can't be told to drop it). The container row is then clean, and the compose row notes the
+  restated value. That's expected; a restated CA path stays right, while a restated proxy address
+  needs updating if the port band moves.
 - **An image that trusts a private CA of its own** (a corporate root baked into its system store)
   keeps it only where the connection goes through the proxy decrypted: the proxy presents its
   own certificate there. A connection that bypasses decryption (a `passthrough` host, or TLS

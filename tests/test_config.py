@@ -489,6 +489,13 @@ def test_host_alias_env_escape_hatch_wins(fresh_config, tmp_path):
     assert config.host_alias() == "10.9.8.7"
 
 
+def test_wall_proxy_url_is_the_gateway_and_the_projects_main_proxy_port(fresh_config, tmp_path):
+    # What the walled VM's podman hands every container as HTTP(S)_PROXY: the wall script's
+    # argument and the doctor's expected value, one function so the two can't disagree.
+    fresh_config(FOLDYARD_REPO=tmp_path, FY_PROXY_PORT="41000")
+    assert config.wall_proxy_url() == "http://192.168.5.2:41000"
+
+
 # ── machine_wall ([machine] firewall — lima in-VM egress enforcement) ──────────────────────
 
 

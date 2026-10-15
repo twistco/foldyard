@@ -1110,6 +1110,14 @@ def machine_runtime() -> str:
 LIMA_HOST_GATEWAY = "192.168.5.2"
 
 
+def wall_proxy_url() -> str:
+    """The proxy URL the walled VM's podman hands every container it creates (``HTTP_PROXY`` and
+    friends, and npm's pair): the host gateway and THIS PROJECT's main proxy port. VM-level, so
+    not per-worktree. One function for both sides: ``machine`` passes it to the wall script, and
+    ``fy doctor``'s ``stack container env`` row expects it in running containers."""
+    return f"http://{LIMA_HOST_GATEWAY}:{proxy_port_base()}"
+
+
 def host_alias() -> str:
     """The address a CONTAINER in the machine uses to reach the host-side foldyard daemons (egress
     proxy, gcp minter). Backend-dependent: under podman-machine, gvproxy publishes the host as
