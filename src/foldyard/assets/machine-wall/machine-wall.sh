@@ -85,6 +85,11 @@ _guest_trust() {
 # the drop-in. Every create passes through it (a build's RUN step from the host or the box, a
 # docker-compat create); nothing lands in an image, since the spec is the runtime's, not a layer.
 # Anything unexpected leaves the spec as the engine wrote it, and crun runs regardless.
+# npm's proxy settings (92-fy-proxy-npm.conf) are deliberately NOT added here: a build's proxy is
+# its own URL (the build tunnel's per-build secret), handed in as predefined build args, so the
+# drop-in's value would be the wrong one, and copying the secret-bearing URL into more variables
+# is a proxy concern this CA helper shouldn't grow. A RUN step that needs npm's spelling writes
+# `npm_config_https_proxy=$HTTPS_PROXY` itself.
 _oci_wrapper() {
     local crun
     crun="$(command -v crun || true)"
@@ -308,6 +313,31 @@ export HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL
 export http_proxy=$PROXY_URL https_proxy=$PROXY_URL
 export NO_PROXY=localhost,127.0.0.1,$GW no_proxy=localhost,127.0.0.1,$GW
 EOF
+    # npm's own proxy settings for every container this podman creates. podman hands each one the
+    # proxy env above, but a postinstall script that fetches with its own client (node-fetch:
+    # supabase's CLI download) reads only npm_config_https_proxy, so it went direct and the wall
+    # refused it. Proxy env, not the CA's, so a sibling drop-in that doesn't wait for a CA. As
+    # with the CA's, an image's own ENV and a create's explicit env (the box's) win.
+    # NOT NODE_USE_ENV_PROXY, though the box gets it: the NO_PROXY podman propagates covers only
+    # loopback and $GW, and Node's fetch (undici) ignoring HTTP_PROXY is the only reason a Node
+    # service in a stack reaches another by service name (Supabase Studio -> http://kong:8000).
+    # Set here, those calls would go to the proxy, which can't resolve a stack name. An app
+    # container that wants it sets it itself, with a NO_PROXY listing the stack's services in
+    # BOTH cases (podman injects a lowercase no_proxy, which undici prefers).
+    rm -f /etc/containers/containers.conf.d/92-fy-proxy-npm.conf
+    install -d -m 0755 /etc/containers/containers.conf.d
+    cat >/etc/containers/containers.conf.d/92-fy-proxy-npm.conf.tmp <<EOF
+# foldyard: npm's proxy settings in every container of the walled VM (fy-machine-wall).
+[containers]
+env = [
+  "npm_config_https_proxy=$PROXY_URL",
+  "npm_config_proxy=$PROXY_URL",
+  {append=true},
+]
+EOF
+    chmod 0644 /etc/containers/containers.conf.d/92-fy-proxy-npm.conf.tmp
+    mv -f /etc/containers/containers.conf.d/92-fy-proxy-npm.conf.tmp \
+        /etc/containers/containers.conf.d/92-fy-proxy-npm.conf
     # The proxy CA for every container this podman creates. The proxy env above reaches them all
     # (podman propagates it), and the host proxy decrypts every host not on `passthrough` — so a
     # container that doesn't trust its CA fails TLS on any other host. A system containers.conf
@@ -404,6 +434,7 @@ uninstall)
     rm -rf /etc/fy-wall /etc/profile.d/fy-wall-proxy.sh /usr/local/bin/fy-wall-denied
     rm -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf
     rm -f /etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf
+    rm -f /etc/containers/containers.conf.d/92-fy-proxy-npm.conf
     rm -rf /usr/local/libexec/fy-oci
     _guest_trust "" || echo "⚠ proxy CA: still in the guest's own store" >&2
     # Every uid >= 1000 home, and the walled user's own whatever its uid: Lima's guest user takes

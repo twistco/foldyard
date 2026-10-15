@@ -859,6 +859,62 @@ def test_wall_install_gives_every_container_the_proxy_ca():
     assert "dev-proxy-ca" not in machine._wall_asset().read_text()
 
 
+_NPM_CONF = "/etc/containers/containers.conf.d/92-fy-proxy-npm.conf"
+
+
+def _npm_conf(proxy_url: str = "http://192.168.5.2:41000") -> dict:
+    install = _wall_section("install")
+    conf = install[install.index(f"{_NPM_CONF}.tmp") :].split("<<EOF\n", 1)[1]
+    return tomllib.loads(conf.split("\nEOF\n", 1)[0].replace("$PROXY_URL", proxy_url))
+
+
+def test_wall_install_gives_every_container_npms_proxy_settings():
+    # podman hands every container the VM's HTTPS_PROXY, but a postinstall script fetching with
+    # its own client (node-fetch: supabase's CLI download) reads only npm's setting — so it went
+    # direct and the wall refused it. A sibling drop-in, since it's proxy env, not the CA's: it
+    # doesn't wait for a CA, like the proxy env podman propagates.
+    assert _npm_conf("http://gw:1") == {
+        "containers": {
+            "env": [
+                "npm_config_https_proxy=http://gw:1",
+                "npm_config_proxy=http://gw:1",
+                {"append": True},  # keep podman's default env and the CA drop-in's
+            ]
+        }
+    }
+    install = _wall_section("install")
+    write = install.index(f"{_NPM_CONF}.tmp")
+    # Removed first (a re-install rewrites it), written by rename, outside the CA's branch, and
+    # before the user's podman restarts to read it.
+    assert install.index(f"rm -f {_NPM_CONF}") < write
+    assert write < install.index('if [ -n "$CA_SRC" ]; then')
+    assert write < install.index("try-restart podman.service")
+
+
+def test_wall_install_leaves_node_use_env_proxy_to_the_app_container():
+    # NOT set in stack containers: podman's NO_PROXY covers only loopback and the gateway, and
+    # undici ignoring HTTP_PROXY is what lets a Node service reach another by service name
+    # (Supabase Studio → http://kong:8000). Set globally it would send those calls to the proxy,
+    # which can't resolve the name. The reason sits beside the drop-in for the next reader.
+    text = machine._wall_asset().read_text()
+    assert "NODE_USE_ENV_PROXY=" not in text
+    install = _wall_section("install")
+    comment = install[: install.index(f"{_NPM_CONF}.tmp")].rsplit("\n\n", 1)[1]
+    assert "NODE_USE_ENV_PROXY" in comment and "no_proxy" in comment
+
+
+@pytest.mark.spawns("bash")  # sources the REAL script under bash; every command is a stub
+def test_wall_uninstall_drops_npms_proxy_settings(tmp_path):
+    script = shlex.quote(str(machine._wall_asset()))
+    stubs = ("systemctl", "rm", "nft", "getent", "awk", "sudo", "install", "update-ca-trust")
+    calls = _stubbed_bash(tmp_path, f"source {script} uninstall", stubs)
+    restart = (
+        "sudo -u #501 XDG_RUNTIME_DIR=/run/user/501 "
+        "systemctl --user try-restart podman.service podman.socket"
+    )
+    assert calls.index(f"rm -f {_NPM_CONF}") < calls.index(restart)
+
+
 @pytest.mark.spawns("bash")  # sources the REAL script under bash; every command is a stub
 def test_wall_uninstall_drops_the_ca_defaults_and_restarts_the_users_podman(tmp_path):
     # Removing the env files is not enough: a rootless podman service already running keeps the
