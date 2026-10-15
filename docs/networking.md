@@ -191,9 +191,10 @@ trusts the proxy's CA.
   its value, so don't restate what foldyard provides: a proxy address copied into a compose file
   stops working when the port band moves, and a mount of `.devbox-ca` (the copy of the CA
   foldyard puts in the checkout for the box) isn't needed by stack containers. `fy doctor`'s
-  `stack env overrides` row names each one. An empty value isn't an override: blanking the proxy
-  variables is how a service that only talks to the rest of the stack stays off the proxy (blank
-  `npm_config_https_proxy` and `npm_config_proxy` too if it runs npm).
+  `stack env overrides` row names each one a compose file sets; it reads the rendered compose
+  config, not images, so check an image's own `ENV` yourself. An empty value isn't an override:
+  blanking the proxy variables is how a service that only talks to the rest of the stack stays off
+  the proxy (blank `npm_config_https_proxy` and `npm_config_proxy` too if it runs npm).
 - **An image that trusts a private CA of its own** (a corporate root baked into its system store)
   keeps it only where the connection goes through the proxy decrypted: the proxy presents its
   own certificate there. A connection that bypasses decryption (a `passthrough` host, or TLS
@@ -237,7 +238,10 @@ Node needs more than the standard proxy variables, and every Node project runs i
 
 - **`fetch()` ignores `HTTPS_PROXY`.** Node's built-in `fetch()` (undici) goes direct unless
   `NODE_USE_ENV_PROXY=1` is set. Under the VM firewall a direct request is refused, and the error
-  is an `ECONNREFUSED` against a raw IP address, with nothing naming a proxy.
+  is an `ECONNREFUSED` against a raw IP address, with nothing naming a proxy. The variable needs
+  Node 24.0 or 22.21 and later; older Node ignores it, so `fetch()` still goes direct. There,
+  upgrade Node, or have the app route undici through the proxy itself
+  (`setGlobalDispatcher(new EnvHttpProxyAgent())` from the `undici` package).
 - **Install scripts bring their own HTTP client.** One that fetches with node-fetch (supabase's
   postinstall downloading its CLI) reads only npm's `npm_config_https_proxy`.
 

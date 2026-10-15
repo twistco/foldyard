@@ -190,6 +190,8 @@ def _node_proxy_args(proxy_url: str) -> list[str]:
     ``NODE_USE_ENV_PROXY`` is set — it then goes direct, and the VM firewall refuses it with an
     ``ECONNREFUSED`` against a raw IP that names no proxy — and a postinstall script fetching with
     node-fetch (supabase's CLI download) reads only npm's own ``npm_config_https_proxy``.
+    ``NODE_USE_ENV_PROXY`` needs Node 24.0 / 22.21 or later; older Node ignores it (harmless, but
+    its ``fetch()`` still goes direct — docs/networking.md, "Node and npm", says what to do).
 
     Defaults, not wiring (unlike ``HTTPS_PROXY``, which ``[box].env`` refuses): a name the
     consumer's ``[box].env`` sets is left to it, the ``TZ`` rule — one value per key, so the winner
