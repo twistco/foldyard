@@ -1365,6 +1365,34 @@ def box_tools() -> list[dict]:
     return out
 
 
+# A package name as the image's package manager reads it, plus the version pins they take
+# (`nodejs=20.*` for apt, `python3-3.12*` for dnf, `curl@edge` for apk). No whitespace or shell
+# metacharacters: the list is rendered into the layer's RUN line (quoted as well, belt and braces).
+_PACKAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+_:=~@*-]*")
+
+
+def box_packages() -> list[str]:
+    """System packages baked into a cached layer on top of the box image (``box._packages_layer``)
+    instead of reinstalled by every fresh box's bootstrap. Sorted and deduplicated, so reordering
+    the list rebuilds nothing. From ``[box].packages`` ([]); a name that isn't a package name is
+    refused, so a typo is a message rather than a failed build."""
+    raw = _box_table().get("packages")
+    if raw is None:
+        return []
+    names = [x for x in raw if isinstance(x, str)] if isinstance(raw, list) else []
+    if not isinstance(raw, list) or len(names) != len(raw):
+        raise SystemExit(
+            '✗ [box].packages must be a list of package names, e.g. packages = ["nodejs", "just"].'
+        )
+    if bad := [name for name in names if not _PACKAGE.fullmatch(name)]:
+        raise SystemExit(
+            f"✗ [box].packages: {', '.join(map(repr, bad))} isn't a package name "
+            "(letters, digits and . + _ : = ~ @ * -, starting with a letter or digit).\n"
+            "  Fix or remove it in [box].packages."
+        )
+    return sorted(set(names))
+
+
 def box_bootstrap() -> str:
     """Free-form shell the consumer wants run once per fresh box, after the structured steps —
     an escape hatch for setup that doesn't fit ``[[box.tools]]``. From ``[box].bootstrap`` ("")."""

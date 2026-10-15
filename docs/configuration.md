@@ -601,6 +601,7 @@ so a stack-less project can `fy box up` with no Dockerfile.
 ```toml
 [box]
 image = { dockerfile = "box.Dockerfile", tag = "acme-box:latest" }
+packages = ["postgresql-client", "just"]
 shadow_volumes = ["web/node_modules"]
 caches = [{ volume = "shared-pnpm", path = ".local/share/pnpm" }]
 warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
@@ -610,6 +611,15 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   `dockerfile` is repo-root-relative; `context` defaults to the repo root; `tag` to
   `<prefix>-devbox:latest`; `target` picks a multi-stage stage. The image needs an engine client
   and git; foldyard adds its own pieces (socket, CLI, proxy CA) at box-up.
+- **`packages`** — system packages for the box, baked into a cached image layer on top of
+  `image` (tagged `<tag>-packages`). It is built once and reused, so a recreated box doesn't
+  reinstall them through the egress wall, and it is rebuilt when the list changes, when the
+  base image is rebuilt, or by `fy box build`. The layer uses whichever package manager the
+  image has (`apt-get`, `apk`, `dnf`, `microdnf`, `yum`, `zypper`, `pacman`) and fails the
+  build if it has none; the names are that manager's, for the image you chose (the packaged box
+  is Debian). Order doesn't matter. A box already running from the bare image keeps it until
+  `fy box down && fy box up`. Packages are frozen at build time, so run `fy box build` to pick
+  up the distro's updates. Default: `[]`.
 - **`sock_in_vm`** — the rootless podman socket inside the VM, mounted as the box's
   `/var/run/docker.sock`. Default: the backend's own. Env: `PODMAN_SOCK_IN_VM`. Rarely needed.
 - **`shadow_volumes`** — in-tree dirs (checkout-relative) covered by per-box named volumes. Works
@@ -636,7 +646,8 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   when the box is created, so `fy box down && fy box up` picks up a change.
 - **`[[box.tools]]`** — one-time tool installs, run as bootstrap steps reported ✓/✗:
   `{ name, install, check? }`. `check` is a shell test that skips the install when it succeeds;
-  default `command -v <name>`.
+  default `command -v <name>`. These run on every newly created box; a distro package belongs in
+  `packages` instead, which installs once.
 
   ```toml
   [[box.tools]]
@@ -644,8 +655,9 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   install = "curl -fsSL https://get.pulumi.com | sh -s -- --install-root /opt/fy-tools --no-edit-path"
   ```
 
-  The packaged box image ships no apt package lists, so a bare `apt-get install` fails with
-  `Unable to locate package`. Add the lists as the first step:
+  The packaged box image ships no apt package lists, so a bare `apt-get install` in a step
+  fails with `Unable to locate package` (`packages` fetches its own). Add the lists as the first
+  step:
 
   ```toml
   [[box.tools]]
