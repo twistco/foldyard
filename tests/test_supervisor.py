@@ -1801,12 +1801,37 @@ def test_await_ready_is_a_noop_where_there_is_no_host_supervisor(monkeypatch):
     assert supervisor.await_ready() is True
 
 
-def test_ensure_background_marks_the_launching_worktree(monkeypatch, tmp_path):
+def test_ensure_background_marks_the_launching_worktree_and_holds_it(monkeypatch, tmp_path):
     _patch(monkeypatch, tmp_path)
     monkeypatch.setattr(supervisor.config, "active_worktree", lambda: "feat")
+    monkeypatch.setattr(supervisor.devmode, "worktree_keys", lambda: ["", "feat"])
+    monkeypatch.setattr(supervisor, "_launch_fd", None)
     supervisor.ensure_background()
     marker = supervisor.config.launches_dir() / f"{os.getpid()}.json"
     assert json.loads(marker.read_text()) == {"worktree": "feat"}
+    assert supervisor.devmode.launching_worktrees() == {"feat"}  # held: this launcher lives
+    held = supervisor._launch_fd
+    assert held is not None
+    os.close(held)  # what dying does to the lock
+    supervisor._launch_fd = None
+    assert supervisor.devmode.launching_worktrees() == set() and not marker.exists()
+
+
+def test_tick_reports_a_checkout_with_nothing_adopted_as_unserved(monkeypatch, tmp_path):
+    # Skipped by the tick (nothing adopted ⇒ nothing runs), so it must not read as served: a
+    # worktree's build would otherwise go ahead toward main's proxy port with nothing on it.
+    _gate_world(monkeypatch, tmp_path)
+    monkeypatch.setattr(supervisor, "_report_config_drift", lambda wt, cfg: wt != "")
+    _tick_with(monkeypatch, tmp_path, {}, {}, {})
+    record = json.loads(supervisor.config.supervisor_ready_file().read_text())
+    assert "" in record["unserved"] and "fy config adopt" in record["unserved"][""]
+
+
+def test_readiness_refuses_at_once_when_a_needed_checkout_is_unserved():
+    record = _record(worktrees=["", "feat"])
+    record["unserved"] = {"": "main: nothing adopted — `fy config adopt` there"}
+    verdict, lines = supervisor.readiness(record, 4242, {"", "feat"})
+    assert verdict == "fail" and "fy config adopt" in lines[0]
 
 
 # ── the operator's verbs: status · restart · logs ─────────────────────────────────────────────

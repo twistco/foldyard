@@ -576,39 +576,53 @@ def test_no_up_boxes_still_serves_main_daemons_but_reports_none_up(monkeypatch):
 # are served while it builds, not only from the tick after its box appears.
 
 
-def _launch(launches, pid: int, wt: str) -> None:
+def _dead_launch(launches, name: str, wt: str) -> None:
+    """A launch marker whose launcher is gone: written, its lock released."""
     launches.mkdir(parents=True, exist_ok=True)
-    (launches / f"{pid}.json").write_text(json.dumps({"worktree": wt}))
+    (launches / f"{name}.json").write_text(json.dumps({"worktree": wt}))
+
+
+def _launch(launches, name: str, wt: str) -> int:
+    """A launch marker as `supervisor._mark_launch` leaves it: written, and LOCKED for as long as
+    its launcher lives. Returns the fd holding the lock (closing it is what dying does)."""
+    import fcntl
+
+    _dead_launch(launches, name, wt)
+    fd = os.open(launches / f"{name}.json", os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return fd
 
 
 def test_a_launching_worktree_is_served_with_main_before_its_box_is_up(monkeypatch, tmp_path):
     monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path))
     monkeypatch.setattr(devmode, "worktree_keys", lambda: ["", "feat", "other"])
-    _launch(tmp_path, os.getpid(), "other")
-    # feat's box is up, main's isn't: main's proxy port — the one builds use — had no listener.
-    assert devmode.active_worktrees(["feat"]) == ["feat", "", "other"]
+    fd = _launch(tmp_path, "101", "other")
+    try:
+        # feat's box is up, main's isn't: main's proxy port — the one builds use — had no listener.
+        assert devmode.active_worktrees(["feat"]) == ["feat", "", "other"]
+    finally:
+        os.close(fd)
 
 
 def test_a_dead_launchers_marker_is_ignored_and_swept(monkeypatch, tmp_path):
+    # Judged by its lock, never its pid: a SIGKILLed launcher runs no atexit, and its pid may
+    # already be another process's — but the kernel released its lock either way.
     monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path))
     monkeypatch.setattr(devmode, "worktree_keys", lambda: ["", "feat"])
-    _launch(tmp_path, 999999, "feat")
-
-    def kill(pid, _sig):
-        if pid == 999999:
-            raise ProcessLookupError(pid)
-
-    monkeypatch.setattr(devmode.os, "kill", kill)
+    _dead_launch(tmp_path, str(os.getpid()), "feat")  # a LIVE pid, but nobody holds its lock
     assert devmode.active_worktrees([]) == [""]
-    assert not (tmp_path / "999999.json").exists()
+    assert not (tmp_path / f"{os.getpid()}.json").exists()
 
 
 def test_a_marker_for_an_unregistered_worktree_is_not_served(monkeypatch, tmp_path):
     # The registry is the host's own record of its worktrees; a marker can't widen it.
     monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path))
     monkeypatch.setattr(devmode, "worktree_keys", lambda: ["", "feat"])
-    _launch(tmp_path, os.getpid(), "stray")
-    assert devmode.active_worktrees(["feat"]) == ["feat"]
+    fd = _launch(tmp_path, "101", "stray")
+    try:
+        assert devmode.active_worktrees(["feat"]) == ["feat"]
+    finally:
+        os.close(fd)
 
 
 def _worktree_layout(tmp_path):

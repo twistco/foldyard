@@ -42,6 +42,7 @@ its main():
 
 from __future__ import annotations
 
+import fcntl
 import getpass
 import json
 import math
@@ -845,9 +846,11 @@ def up_worktrees() -> list[str]:
 
 def launching_worktrees() -> set[str]:
     """Registered worktrees a host launch is bringing up right now (``config.launches_dir``: one
-    marker per launching process, written by ``supervisor.ensure_background``). A marker lives as
-    long as its process: a dead launcher's is swept here, so a crashed `fy box up` serves nothing.
-    The registry bounds it — a marker never adds a checkout the host doesn't know."""
+    marker per launching process, written by ``supervisor._mark_launch``). The launcher holds a
+    lock on its marker for its whole life, and the kernel releases it however that ends — so a
+    marker whose lock is free is a dead launcher's, swept here. Never judged by pid: a SIGKILLed
+    launcher runs no cleanup, and its pid may already be another process's. The registry bounds
+    the set — a marker never adds a checkout the host doesn't know."""
     out: set[str] = set()
     try:
         markers = list(config.launches_dir().glob("*.json"))
@@ -856,13 +859,18 @@ def launching_worktrees() -> set[str]:
     known = set(worktree_keys()) if markers else set()
     for marker in markers:
         try:
-            pid = int(marker.stem)
-            os.kill(pid, 0)
-        except PermissionError:
-            pass  # alive, someone else's
-        except (ValueError, OSError):
+            fd = os.open(marker, os.O_RDONLY)
+        except OSError:
+            continue  # gone since the listing
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            pass  # held: its launcher is alive
+        else:
             marker.unlink(missing_ok=True)
             continue
+        finally:
+            os.close(fd)  # releases our probe lock, if we took it
         data = _load(marker)
         wt = data.get("worktree") if isinstance(data, dict) else None
         if isinstance(wt, str) and wt in known:

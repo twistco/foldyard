@@ -671,6 +671,10 @@ def readiness(record: dict | None, holder: int | None, needed: set[str]) -> tupl
     if age is None or age > HEARTBEAT_STALE_SECONDS:
         when = "never" if age is None else f"{int(age)}s ago"
         return "wait", [f"the supervisor's last tick was {when} — it isn't ticking"]
+    unserved = record.get("unserved") or {}
+    refused = [str(unserved[wt]) for wt in sorted(needed) if wt in unserved]
+    if refused:
+        return "fail", refused
     missing = sorted(needed - set(record.get("worktrees") or []))
     if missing:
         names = ", ".join(wt or "main" for wt in missing)
@@ -744,18 +748,37 @@ def await_ready() -> bool:
         time.sleep(0.25)
 
 
+# The fd holding this process's launch-marker lock (``_mark_launch``) — kept open, never closed, so
+# the lock lives exactly as long as the process, like the singleton's ``_lock_fd``.
+_launch_fd: int | None = None
+
+
 def _mark_launch() -> None:
     """Tell the supervisor which worktree this process is bringing up, before its box exists
     (``devmode.launching_worktrees``): it then serves that worktree's daemons, and main's proxy
-    every build goes through, from its next tick. The marker lives as long as this process — the
-    supervisor sweeps a dead launcher's, and a clean exit removes its own. Best-effort: without it
-    a launch is served once its box is up, as before, and :func:`await_ready` says so."""
+    every build goes through, from its next tick. The marker is LOCKED for this process's life —
+    the supervisor sweeps one whose lock is free, so a launcher that dies any way at all (SIGKILL
+    runs no atexit) stops being served. It is locked under a temporary name and renamed into
+    place, so the supervisor never sees it unlocked. Best-effort: without it a launch is served
+    once its box is up, as before."""
+    global _launch_fd
     marker = config.launches_dir() / f"{os.getpid()}.json"
+    staging = marker.with_suffix(".tmp")
+    fd = None
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(json.dumps({"worktree": config.active_worktree()}) + "\n")
+        fd = os.open(staging, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.write(fd, (json.dumps({"worktree": config.active_worktree()}) + "\n").encode())
+        os.replace(staging, marker)
     except OSError:
+        if fd is not None:
+            os.close(fd)
+        staging.unlink(missing_ok=True)
         return
+    if _launch_fd is not None:
+        os.close(_launch_fd)  # a second launch in this process: its marker replaced the first
+    _launch_fd = fd
     atexit.register(marker.unlink, missing_ok=True)
 
 
@@ -1581,6 +1604,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
     active = devmode.active_worktrees(up)  # + any worktree a launch is bringing up, and main
     desired: dict[str, dict] = {}
     owner: dict[str, str] = {}  # daemon name → the worktree it serves (the readiness record's)
+    unserved: dict[str, str] = {}  # worktree → why the tick runs nothing for it
     capabilities: dict[str, dict] = {}
     for wt in active:
         cfg = devmode.worktree_config(wt)  # the ADOPTED config for this checkout (configpin)
@@ -1589,6 +1613,11 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
             # happened, or "my config change did nothing" becomes the new mystery. A checkout with
             # NOTHING adopted gets nothing at all — no daemons, probes or mirror (configpin).
             if not _report_config_drift(wt, cfg):
+                unserved[wt] = (
+                    f"{wt or 'main'}: nothing adopted for it on this computer, so the supervisor "
+                    "runs nothing for it — in that checkout: `fy config diff`, then "
+                    "`fy config adopt`"
+                )
                 continue
             mode = expire_user_modes()
             _report_held(wt, mode)
@@ -1659,7 +1688,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
             "state": state,
             "detail": detail,
         }
-    _publish_ready(active, jobs)
+    _publish_ready(active, jobs, unserved)
 
 
 def _sync_live(name: str, spec: dict, *, running: bool) -> bool:
@@ -1818,16 +1847,21 @@ def _daemon_job(
     return "up", ""
 
 
-def _publish_ready(worktrees: list[str], jobs: dict[str, dict]) -> None:
+def _publish_ready(
+    worktrees: list[str], jobs: dict[str, dict], unserved: dict[str, str] | None = None
+) -> None:
     """Write this tick's readiness record (``config.supervisor_ready_file``) — what a launch waits
     on (:func:`await_ready`). Every job the supervisor runs reports here: today its daemons; a job
     that isn't a daemon (a pull thread, say) adds its own ``{label, worktree, state, detail}`` row
-    (``worktree`` None: the whole project's)."""
+    (``worktree`` None: the whole project's). ``unserved``: the worktrees it picked up but runs
+    nothing for, each with why — a launch that needs one refuses with that, never reads its
+    empty job list as ready."""
     path = config.supervisor_ready_file()
     record = {
         "pid": os.getpid(),
         "at": devmode._iso(devmode.now()),
         "worktrees": worktrees,
+        "unserved": unserved or {},
         "jobs": jobs,
     }
     tmp = path.with_name(path.name + ".tmp")
