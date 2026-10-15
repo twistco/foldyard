@@ -38,6 +38,10 @@ when you ask. (`fy docs glossary` defines each.)
   tool with its own hardcoded trust store (or one that pins) can fail here. Point it at the box's
   combined CA bundle rather than disabling verification. A host that can't work under decryption
   at all (pinned certificates, client certificates) belongs in `[proxy] passthrough`.
+- **`ECONNREFUSED` against a raw IP address, from Node** — Node's `fetch()` went direct instead
+  of through the proxy, and the VM firewall refused it. The box sets `NODE_USE_ENV_PROXY=1`; a
+  stack container must set it itself, with a `NO_PROXY` naming the services it calls
+  (`fy docs networking`, "Node and npm"). Not an allowlist decision: nothing reached the proxy.
 - **Works for a while, then dies ~60s in** — that's an idle-connection reset from the upstream,
   not the proxy. Streaming or keepalives fix it; the proxy doesn't.
 
