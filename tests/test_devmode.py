@@ -1142,6 +1142,167 @@ def test_stack_check_stays_silent_when_the_engine_is_unreachable(tmp_path, monke
     assert list(devmode._stack_shadow_check()) == []
 
 
+# ── the stack-env doctor row (compose settings that override what the walled VM provides) ──
+
+
+def test_stack_env_overrides_flags_a_set_value_and_the_staged_ca_mount():
+    doc = {
+        "services": {
+            "app": {
+                "environment": {
+                    "HTTPS_PROXY": "http://192.168.5.2:42200",
+                    "NODE_EXTRA_CA_CERTS": "/etc/dev-proxy-ca/mitmproxy-ca-cert.pem",
+                    "NODE_USE_ENV_PROXY": "1",  # the app's to set: foldyard doesn't, here
+                    "NO_PROXY": "localhost,kong",
+                },
+                "volumes": ["./.devbox-ca:/etc/dev-proxy-ca:ro", "./src:/app/src"],
+            },
+            "worker": {
+                "environment": {"NPM_CONFIG_HTTPS_PROXY": "http://x"},  # npm reads any case
+                "volumes": [
+                    {
+                        "type": "bind",
+                        "source": "/repo/.devbox-ca/mitmproxy-ca-cert.pem",
+                        "target": "/ca.pem",
+                    },
+                    {"type": "volume", "source": "data", "target": "/data"},
+                ],
+            },
+        }
+    }
+    assert devmode.stack_env_overrides(doc) == {
+        "app": ["HTTPS_PROXY", "NODE_EXTRA_CA_CERTS", "the .devbox-ca mount (./.devbox-ca)"],
+        "worker": [
+            "NPM_CONFIG_HTTPS_PROXY",
+            "the .devbox-ca mount (/repo/.devbox-ca/mitmproxy-ca-cert.pem)",
+        ],
+    }
+
+
+def test_stack_env_overrides_leaves_a_blanked_value_alone():
+    # Services that only talk to the rest of the stack blank the proxy env on purpose (podman
+    # would otherwise send even their healthchecks to the proxy) — legitimate, never a finding.
+    # A bare key (`- HTTPS_PROXY`, rendered as null) passes the compose client's own value through.
+    doc = {
+        "services": {
+            "db": {
+                "environment": {"HTTP_PROXY": "", "HTTPS_PROXY": "", "http_proxy": None},
+                "volumes": ["pgdata:/var/lib/postgresql/data"],
+            },
+            "cache": {"environment": ["https_proxy=", "SSL_CERT_FILE"]},
+            "bare": {},
+        }
+    }
+    assert devmode.stack_env_overrides(doc) == {}
+
+
+def test_stack_env_overrides_reads_the_list_form_too():
+    doc = {"services": {"api": {"environment": ["SSL_CERT_FILE=/etc/ssl/mine.pem", "FOO=1"]}}}
+    assert devmode.stack_env_overrides(doc) == {"api": ["SSL_CERT_FILE"]}
+
+
+def test_stack_env_names_are_what_the_walled_vm_provides():
+    # The doctor's list is hand-kept beside the wall script that provides it: every name the
+    # walled VM sets in every container (the proxy env podman propagates, the CA drop-in, the npm
+    # drop-in) — minus NO_PROXY, which a consumer must extend, and nothing more.
+    import re
+
+    from foldyard import machine
+
+    text = machine._wall_asset().read_text()
+    proxy_env = text[text.index('90-fy-wall-proxy.conf" <<EOF\n') :].split("\nEOF\n", 1)[0]
+    ca = text[text.index("90-fy-proxy-ca.conf.tmp <<'EOF'\n") :].split("\nEOF\n", 1)[0]
+    npm = text[text.index("92-fy-proxy-npm.conf.tmp <<EOF\n") :].split("\nEOF\n", 1)[0]
+    names = set(re.findall(r"^([A-Za-z_]+)=", proxy_env.split("\n", 1)[1], flags=re.M))
+    names |= set(re.findall(r'"([A-Za-z_]+)=', ca + npm))
+    assert names - {"NO_PROXY", "no_proxy"} == set(devmode.STACK_PROVIDED_ENV)
+
+
+def _stack_env_config(monkeypatch, *, firewall=True, compose=True, doc=None):
+    monkeypatch.setattr(devmode.config, "machine_wall", lambda: firewall)
+    monkeypatch.setattr(devmode.config, "has_compose_stack", lambda: compose)
+    monkeypatch.setattr(devmode, "_rendered_compose", lambda: doc)
+
+
+def test_stack_env_check_warns_per_service_and_points_at_the_docs(monkeypatch):
+    doc = {
+        "services": {
+            "app": {"environment": {"HTTPS_PROXY": "http://gw:1", "SSL_CERT_FILE": "/x"}},
+            "db": {"environment": {"HTTPS_PROXY": ""}},
+        }
+    }
+    _stack_env_config(monkeypatch, doc=doc)
+    [(status, name, detail)] = list(devmode._stack_env_override_check())
+    assert (status, name) == ("warn", "stack env overrides")
+    assert "app: HTTPS_PROXY, SSL_CERT_FILE" in detail
+    assert "db" not in detail
+    assert "foldyard already provides" in detail and "takes precedence" in detail
+    assert "private CA" in detail and "`fy docs networking`" in detail
+
+
+def test_stack_env_check_is_ok_when_compose_leaves_them_alone(monkeypatch):
+    _stack_env_config(monkeypatch, doc={"services": {"app": {"environment": {"FOO": "1"}}}})
+    assert [r[:2] for r in devmode._stack_env_override_check()] == [("ok", "stack env overrides")]
+
+
+@pytest.mark.parametrize(
+    ("firewall", "compose", "doc"),
+    [
+        (False, True, {"services": {"app": {"environment": {"HTTPS_PROXY": "http://x"}}}}),
+        (True, False, {"services": {"app": {"environment": {"HTTPS_PROXY": "http://x"}}}}),
+        (True, True, None),  # compose didn't render: quiet, never a guess
+    ],
+)
+def test_stack_env_check_says_nothing_without_the_firewall_a_stack_or_a_render(
+    monkeypatch, firewall, compose, doc
+):
+    # Without the VM firewall foldyard provides none of it, so a compose value is the only one.
+    _stack_env_config(monkeypatch, firewall=firewall, compose=compose, doc=doc)
+    assert list(devmode._stack_env_override_check()) == []
+
+
+def test_rendered_compose_is_none_when_the_stack_cant_be_resolved(monkeypatch):
+    from foldyard import stack
+
+    def refused(**kw):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(stack, "resolve", refused)
+    assert devmode._rendered_compose() is None
+
+
+def test_rendered_compose_never_provisions_the_vm(monkeypatch):
+    from foldyard import stack
+
+    seen = {}
+
+    def resolve(**kw):
+        seen.update(kw)
+        return "ctx"
+
+    monkeypatch.setattr(stack, "resolve", resolve)
+    monkeypatch.setattr(stack, "_render_config", lambda ctx, **kw: {"services": {}})
+    assert devmode._rendered_compose() == {"services": {}}
+    assert seen == {"no_machine": True}
+
+
+def test_doctor_runs_the_stack_env_check_on_either_side(monkeypatch):
+    monkeypatch.setattr(
+        devmode, "_stack_env_override_check", lambda: iter([("ok", "stack env overrides", "x")])
+    )
+    for check in (
+        "_version_window_check",
+        "_git_config_check",
+        "_shadow_volume_check",
+        "_stack_shadow_check",
+        "_disk_headroom_check",
+    ):
+        monkeypatch.setattr(devmode, check, lambda: iter(()))
+    monkeypatch.setattr(devmode, "in_box", lambda: True)
+    rows = devmode.doctor()
+    assert next(rows) == ("ok", "stack env overrides", "x")
+
+
 # ── the engine-disk doctor row (shares `fy up`'s reclaim threshold) ────────────────────
 
 

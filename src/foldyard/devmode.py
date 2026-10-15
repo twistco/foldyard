@@ -1302,6 +1302,7 @@ def doctor(deep: bool = False):
     yield from _git_config_check()
     yield from _shadow_volume_check()
     yield from _stack_shadow_check()
+    yield from _stack_env_override_check()
     yield from _disk_headroom_check()
 
     if in_box():
@@ -1821,6 +1822,128 @@ def _stack_shadow_check():
         f"{n} dependency dir{'' if n == 1 else 's'} left on the host mount by running services"
         "\n      → give each a named volume at that path in the service's compose `volumes:`\n"
         + lines,
+    )
+
+
+# What the walled VM provides in EVERY container it creates (machine-wall.sh): the proxy env
+# podman propagates from the VM user's environment, the CA drop-in's trust env, and the npm
+# drop-in's proxy settings. NO_PROXY isn't here: it's the consumer's to extend. Pinned against the
+# script by tests/test_devmode.py.
+STACK_PROVIDED_ENV = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+    "npm_config_https_proxy",
+    "npm_config_proxy",
+)
+# npm reads its settings case-insensitively, so `NPM_CONFIG_HTTPS_PROXY` overrides the same thing.
+_NPM_PROVIDED = {n.lower() for n in STACK_PROVIDED_ENV if n.startswith("npm_config_")}
+_STAGED_CA_DIR = ".devbox-ca"  # proxy.stage_ca_for_box: the box's copy, under the checkout
+
+
+def _overriding_env(environment: object) -> list[str]:
+    """The provided names a service's rendered ``environment`` sets to a NON-EMPTY value. An empty
+    one is deliberate (a service that only talks to the stack blanks the proxy env), and a bare
+    key passes the compose client's own value through — neither replaces foldyard's."""
+    if isinstance(environment, dict):
+        pairs = [(str(k), v) for k, v in environment.items()]
+    elif isinstance(environment, list):
+        pairs = [
+            (str(e).split("=", 1)[0], str(e).split("=", 1)[1] if "=" in str(e) else None)
+            for e in environment
+        ]
+    else:
+        return []
+    return [
+        name
+        for name, value in pairs
+        if value is not None
+        and str(value) != ""
+        and (name in STACK_PROVIDED_ENV or name.lower() in _NPM_PROVIDED)
+    ]
+
+
+def _staged_ca_mounts(volumes: object) -> list[str]:
+    """Bind sources under the staged ``.devbox-ca`` dir, short (``src:dst[:mode]``) or long form."""
+    from pathlib import PurePosixPath
+
+    sources = []
+    for vol in volumes if isinstance(volumes, list) else []:
+        if isinstance(vol, str):
+            sources.append(vol.split(":", 1)[0])
+        elif isinstance(vol, dict) and vol.get("type", "bind") == "bind":
+            sources.append(str(vol.get("source") or ""))
+    return [src for src in sources if _STAGED_CA_DIR in PurePosixPath(src).parts]
+
+
+def stack_env_overrides(doc: dict) -> dict[str, list[str]]:
+    """``{service: [what it sets]}`` for each service of a rendered compose config that sets what
+    the walled VM already provides in every container (:data:`STACK_PROVIDED_ENV`, or a bind of
+    the box's staged CA). A service's own setting wins over foldyard's, silently — which is how a
+    project that wired these by hand before foldyard provided them keeps a stale proxy port, or a
+    CA copy foldyard re-stages only for the box."""
+    found: dict[str, list[str]] = {}
+    services = doc.get("services")
+    for name, svc in (services if isinstance(services, dict) else {}).items():
+        if not isinstance(svc, dict):
+            continue
+        hits = _overriding_env(svc.get("environment"))
+        hits += [
+            f"the {_STAGED_CA_DIR} mount ({src})" for src in _staged_ca_mounts(svc.get("volumes"))
+        ]
+        if hits:
+            found[str(name)] = hits
+    return found
+
+
+def _rendered_compose() -> dict | None:
+    """The stack's rendered ``compose config``, or None when it can't be had — resolved read-only
+    (never provisions the VM), bounded, and quiet: doctor's other rows already cover a missing
+    worktree or a broken engine."""
+    import time
+
+    from . import stack  # lazy: stack imports devmode
+
+    try:
+        ctx = stack.resolve(no_machine=True)
+        return stack._render_config(ctx, deadline=time.monotonic() + 20)
+    except (Exception, SystemExit):
+        return None
+
+
+def _stack_env_override_check():
+    """ADVISORY: compose settings that override what the walled VM gives every container. Only
+    with the VM firewall on — that's when foldyard provides them (podman propagates the proxy env;
+    the boot setup's drop-ins add the CA's and npm's) — and silent without a stack or a render.
+    A warn, never a fail: a different value can be right (a private CA bundle)."""
+    if not config.machine_wall() or not config.has_compose_stack():
+        return
+    if config.unadopted_notice() is not None:
+        return  # the `adopted config` row says it; resolving would only print the refusal
+    doc = _rendered_compose()
+    if doc is None:
+        return
+    found = stack_env_overrides(doc)
+    if not found:
+        yield _result(
+            True, "stack env overrides", "compose leaves foldyard's proxy and CA alone", ""
+        )
+        return
+    lines = "\n".join(f"          {svc}: {', '.join(hits)}" for svc, hits in sorted(found.items()))
+    n = len(found)
+    yield _result(
+        None,
+        "stack env overrides",
+        "",
+        f"{n} service{'' if n == 1 else 's'} set{'s' if n == 1 else ''} what foldyard already"
+        " provides in every container; yours takes precedence"
+        "\n      → remove it unless you need a different value (e.g. a private CA) —"
+        " `fy docs networking`\n" + lines,
     )
 
 
