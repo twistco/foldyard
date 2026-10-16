@@ -126,6 +126,11 @@ def _start() -> bool:
     _err(f"▶ starting {BACKEND.name} machine '{MACHINE}'…")
     if not BACKEND.start(MACHINE, prefix=prefix):
         _err(f"✗ '{BACKEND.cli}' failed to start '{MACHINE}'.")
+        # `limactl start` also gives up on a VM that IS up, when its boot scripts don't finish
+        # within its timeout: say which ones are still going.
+        if BACKEND.name == "lima":
+            for line in _unfinished_boot_lines(_boot_progress()):
+                _err(line)
         return False
     return True
 
@@ -453,6 +458,56 @@ def _guest_state() -> tuple[str, bool, bool]:
     return (state, active, masked)
 
 
+_BOOT_LOG = "/run/fy-wall/boot.log"
+
+
+def _boot_progress() -> str:
+    """How far the guest's boot got, read WITHOUT root: ``"done"`` — Lima's boot scripts finished
+    (``/run/lima-boot-done`` holds the boot's instance id, written after every provision
+    script — what Lima's own start waits for); ``"ours"`` — not finished, but
+    foldyard's boot script started (it opens ``/run/fy-wall/boot.log`` first); ``"lima"`` — not
+    finished and foldyard's script not started, so Lima's own provisioning, which runs before it,
+    is still going or stuck. ``""`` when the guest can't be asked. Both files are on the guest's
+    tmpfs ``/run``, so both are THIS boot's. A patchable seam (golden tests set it)."""
+    probe = (
+        "if [ -s /run/lima-boot-done ]; then echo done; "
+        f"elif [ -e {_BOOT_LOG} ]; then echo ours; else echo lima; fi"
+    )
+    try:
+        out = subprocess.run(
+            ["limactl", "shell", MACHINE, "--", "sh", "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    got = out.stdout.strip()
+    return got if out.returncode == 0 and got in ("done", "ours", "lima") else ""
+
+
+def _unfinished_boot_lines(progress: str) -> list[str]:
+    """What to tell the operator about a boot that hasn't finished; ``[]`` when it has, or when
+    there's no telling (:func:`_boot_progress`)."""
+    if progress == "lima":
+        return [
+            "  The VM is up, but Lima's own boot scripts haven't finished, and foldyard's runs",
+            "  after them. On a VM created from the template that is most often its podman",
+            "  install (`dnf`), which needs the Fedora mirrors: a slow or unreachable mirror",
+            "  stalls it. It may still be going:",
+            f"      what it runs:       limactl shell {MACHINE} -- ps -eo pid,etime,args",
+            f"      the guest console:  ~/.lima/{MACHINE}/serial*.log",
+            "  then restart:   fy machine stop && fy up",
+        ]
+    if progress == "ours":
+        return [
+            "  foldyard's boot script started but hasn't finished; its log is readable",
+            f"  without root:   limactl shell {MACHINE} cat {_BOOT_LOG}",
+            "  then restart:   fy machine stop && fy up",
+        ]
+    return []
+
+
 # The wall's recent refusals, written by the guest's fy-wall-denies unit (machine-wall.sh): a
 # connection that ignored the proxy env, which the proxy therefore never logged.
 _DENIES_PATH = "/run/fy-wall/denies.jsonl"
@@ -529,9 +584,17 @@ def _check_guest_provisioning() -> None:
             problems.append("the rootful podman.socket is NOT masked (container-root → VM-root)")
     if not problems:
         return
+    # No report at all may be a boot still in progress rather than a script that failed: a report
+    # that differs means foldyard's script ran, so only "nothing" asks how far the boot got.
+    unfinished = [] if got else _unfinished_boot_lines(_boot_progress())
+    if unfinished:
+        _err(f"✗ '{MACHINE}' hasn't finished booting: {'; '.join(problems)}.")
+        for line in unfinished:
+            _err(line)
+        raise SystemExit(1)
     _err(f"✗ '{MACHINE}' did not apply its boot provisioning: {'; '.join(problems)}.")
     _err("  The script runs as root at boot from the recorded config; its log is readable")
-    _err(f"  without root:   limactl shell {MACHINE} cat /run/fy-wall/boot.log")
+    _err(f"  without root:   limactl shell {MACHINE} cat {_BOOT_LOG}")
     _err("  then restart:   fy machine stop && fy up")
     raise SystemExit(1)
 
