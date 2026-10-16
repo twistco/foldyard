@@ -167,14 +167,16 @@ def _install(env: dict) -> str:
         '*) echo "✗ cq: no release for $(uname -m)"; exit 1;; esac\n'
         f'case "$arch" in {sums} esac\n'
         f"dir={shlex.quote(cache)}\n"
-        'if [ ! -x "$dir/cq" ]; then\n'
+        # Reused only if it IS the pinned version — the step's check asks the same, so a cached
+        # binary that is truncated or stale is replaced here, never relinked on every box-up.
+        f'case "$("$dir/cq" --version 2>/dev/null)" in "cq v{CQ_VERSION} "*) ;; *)\n'
         "  tmp=$(mktemp -d)\n"
         f'  curl -fsSL -o "$tmp/cq.tgz" "{_RELEASE}/cq_Linux_$arch.tar.gz"\n'
         '  echo "$sum  $tmp/cq.tgz" | sha256sum -c - >/dev/null '
         '|| { echo "✗ cq: checksum mismatch — not installing"; rm -rf "$tmp"; exit 1; }\n'
         '  tar -xzf "$tmp/cq.tgz" -C "$tmp" cq\n'
-        '  mkdir -p "$dir" && mv "$tmp/cq" "$dir/cq" && chmod 755 "$dir/cq" && rm -rf "$tmp"\n'
-        "fi\n"
+        '  mkdir -p "$dir" && mv "$tmp/cq" "$dir/cq" && chmod 755 "$dir/cq" && rm -rf "$tmp";;\n'
+        "esac\n"
         'mkdir -p "$HOME/.local/bin" && ln -sf "$dir/cq" "$HOME/.local/bin/cq")'
     )
 
