@@ -608,6 +608,38 @@ def test_main_clears_ephemeral_grants_on_start_then_sweeps_each_tick(monkeypatch
     assert calls == ["clear", "sweep"]  # cleared once at startup, then swept on the first tick
 
 
+def test_main_leaves_grants_its_launcher_already_cleared(monkeypatch, tmp_path):
+    # ensure_background cleared them, then offered — the answers belong to THIS supervisor's life.
+    calls: list[str] = []
+    monkeypatch.setenv(supervisor.GRANTS_CLEARED_ENV, "1")
+    monkeypatch.setattr(supervisor.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(supervisor.config, "log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(supervisor.devmode, "in_box", lambda: False)
+    monkeypatch.setattr(supervisor, "acquire_singleton", lambda: True)
+    monkeypatch.setattr(supervisor, "tee_stdio_to_logfile", lambda: None)
+    monkeypatch.setattr(supervisor, "load_host_env", lambda: None)
+    monkeypatch.setattr(supervisor, "log", lambda _m: None)
+    monkeypatch.setattr(supervisor, "expire_user_modes", lambda: {"github": "off"})
+    monkeypatch.setattr(supervisor.devmode, "desired_daemons", lambda _m: {})
+    monkeypatch.setattr(supervisor.devmode, "write_mirror", lambda *a, **k: None)
+    monkeypatch.setattr(supervisor.devmode, "daemon_status", lambda _m: {})
+    monkeypatch.setattr(supervisor.devmode, "read", lambda: {"mode": {}, "expires": {}})
+    monkeypatch.setattr(supervisor.signal, "signal", lambda *a, **k: None)
+    monkeypatch.setattr(supervisor.allowlist, "clear_ephemeral", lambda: calls.append("clear"))
+    monkeypatch.setattr(supervisor.allowlist, "write_effective", lambda: calls.append("write"))
+    monkeypatch.setattr(supervisor.configpin, "gate", lambda _verb: "clean")
+
+    def _sweep():
+        calls.append("sweep")
+        raise _StopTick
+
+    monkeypatch.setattr(supervisor.allowlist, "sweep", _sweep)
+    with pytest.raises(_StopTick):
+        supervisor.main()
+    assert calls == ["write", "sweep"]  # the effective file still written; nothing cleared
+    assert supervisor.GRANTS_CLEARED_ENV not in supervisor.os.environ  # not inherited by daemons
+
+
 # ── staleness: `fy host` / `fy up` must replace a supervisor running old code ────────────────────
 
 
@@ -715,6 +747,61 @@ def test_ensure_background_still_noops_on_a_current_holder(monkeypatch, tmp_path
         assert supervisor.ensure_background() is None and spawns == []
     finally:
         supervisor.os.close(fd)
+
+
+def _order(monkeypatch) -> list[str]:
+    """Record the launch's grant-lifecycle steps in order: clear, offer, spawn (with whether the
+    spawned supervisor was told the clear is done)."""
+    events: list[str] = []
+    monkeypatch.setattr(supervisor.allowlist, "clear_ephemeral", lambda: events.append("clear"))
+    monkeypatch.setattr(supervisor, "_offer_recommended", lambda: events.append("offer"))
+
+    def _fake_popen(cmd, **kw):
+        told = (kw.get("env") or {}).get(supervisor.GRANTS_CLEARED_ENV) == "1"
+        events.append("spawn (cleared)" if told else "spawn")
+        return types.SimpleNamespace(pid=4242)
+
+    monkeypatch.setattr(supervisor.subprocess, "Popen", _fake_popen)
+    return events
+
+
+def test_a_launch_offers_after_the_restart_has_cleared_grants(monkeypatch, tmp_path):
+    # Session/once grants end when a supervisor starts. The offer used to run BEFORE that start, so
+    # it skipped hosts whose session grant was about to vanish, and an operator's [s]ession/[o]nce
+    # answer was wiped by the supervisor that started a moment later. The launcher is now the
+    # restart moment: clear, then offer, then spawn a supervisor told not to clear again.
+    _patch(monkeypatch, tmp_path)
+    events = _order(monkeypatch)
+    assert supervisor.ensure_background() == 4242
+    assert events == ["clear", "offer", "spawn (cleared)"]
+
+
+def test_replacing_a_stale_holder_clears_and_offers_after_the_bounce(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    fd = _hold_lock(tmp_path, "4242 deadbeefdeadbeef\n")
+    events = _order(monkeypatch)
+
+    def _kill(pid, sig):
+        if sig == supervisor.signal.SIGTERM:
+            events.append("bounce")
+            supervisor.os.close(fd)
+
+    monkeypatch.setattr(supervisor.os, "kill", _kill)
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _s: None)
+    assert supervisor.ensure_background() == 4242
+    assert events == ["bounce", "clear", "offer", "spawn (cleared)"]
+
+
+def test_a_current_holder_keeps_its_grants_and_still_offers(monkeypatch, tmp_path):
+    _patch(monkeypatch, tmp_path)
+    monkeypatch.setattr(supervisor, "_heartbeat_age", lambda: 2.0)
+    fd = _hold_lock(tmp_path, f"999999 {supervisor._code_fingerprint()}\n")
+    events = _order(monkeypatch)
+    try:
+        assert supervisor.ensure_background() is None
+    finally:
+        supervisor.os.close(fd)
+    assert events == ["offer"]
 
 
 def test_code_fingerprint_tracks_source_changes(monkeypatch, tmp_path):
