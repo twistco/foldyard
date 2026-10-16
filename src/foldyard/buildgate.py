@@ -42,6 +42,7 @@ import os
 import secrets
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -144,6 +145,9 @@ def _refusals(since: datetime) -> list[dict]:
 
 # The wall's report is a ring of recent refusals; a build is measured by where it stood before.
 _Mark = tuple[str, int] | None
+# How long a failed build waits before reading it: a tool's last refusals land just before it
+# exits, and the guest writes them a moment after the kernel logs them (seen live, 2026-10-16).
+WALL_SETTLE_SECONDS = 1.0
 
 
 def _wall_mark() -> _Mark:
@@ -166,6 +170,7 @@ def _bypasses(mark: _Mark) -> list[dict]:
 
     if mark is None:
         return []
+    time.sleep(WALL_SETTLE_SECONDS)
     boot, seq = mark
     out: dict[tuple, dict] = {}
     for row in machine.wall_denies() or []:

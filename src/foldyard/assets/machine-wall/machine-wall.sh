@@ -274,14 +274,9 @@ def main():
     rows = collections.deque(maxlen=KEEP)
     write(rows)  # an empty report means "reporter running, nothing refused"
     fd = os.open("/dev/kmsg", os.O_RDONLY | os.O_NONBLOCK)
-    dirty = False
     while True:
-        ready, _, _ = select.select([fd], [], [], 0.5)
-        if not ready:
-            if dirty:
-                write(rows)
-                dirty = False
-            continue
+        select.select([fd], [], [])  # until the kernel logs something
+        new = False
         while True:
             try:
                 record = os.read(fd, 8192)
@@ -292,7 +287,9 @@ def main():
             row = parse(record.decode("utf-8", "replace"), boot)
             if row is not None:
                 rows.append(row)
-                dirty = True
+                new = True
+        if new:
+            write(rows)  # at once: a failed build reads this the moment it exits
 
 
 if __name__ == "__main__":

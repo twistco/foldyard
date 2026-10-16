@@ -30,6 +30,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "in_box", lambda: False)
     # No VM report unless a test gives one (the real read shells into the VM).
     monkeypatch.setattr(machine, "wall_denies", lambda: None)
+    monkeypatch.setattr(buildgate, "WALL_SETTLE_SECONDS", 0)
     config.clear_caches()
     yield {"log": buildgate.build_log()}
     config.clear_caches()
@@ -440,6 +441,20 @@ def test_a_failure_the_proxy_never_saw_names_what_the_wall_refused(env, monkeypa
     assert "104.16.24.34:443/tcp (2×)" in out and "104.16.24.34:80/tcp (1×)" in out
     assert "9.9.9.9" not in out
     assert "NODE_USE_ENV_PROXY" in out
+
+
+def test_the_report_is_read_once_the_guest_has_caught_up(env, monkeypatch, capsys):
+    # Seen live (repower, 2026-10-16): the gate read the report the instant the build failed, and
+    # corepack's refusals, made just before it exited, weren't in it yet; two seconds later all
+    # twelve were. A failed build waits a moment first.
+    slept: list[float] = []
+    monkeypatch.setattr(buildgate, "WALL_SETTLE_SECONDS", 1.0)
+    monkeypatch.setattr(buildgate.time, "sleep", slept.append)
+    monkeypatch.setattr(machine, "wall_denies", lambda: [_deny(8)] if slept else [])
+    build = _Build(env["log"], [(1, [])])
+    assert buildgate.run(build, what="box image build", interactive=False) == 1
+    assert slept == [1.0]
+    assert "refused 1 connection that skipped the proxy" in capsys.readouterr().out
 
 
 def test_a_reboot_or_an_empty_report_counts_everything_after(env, monkeypatch, capsys):

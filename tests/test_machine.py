@@ -1770,6 +1770,42 @@ def test_the_reporter_writes_a_whole_world_readable_file(tmp_path, monkeypatch):
     assert json.loads(out.read_text())["dst"] == "104.16.24.34"
 
 
+def test_the_reporter_writes_each_batch_as_soon_as_it_reads_it(monkeypatch):
+    # It used to wait for half a second without a new kernel record before writing, so a build
+    # that failed right after its refusals was read before they were there (seen live,
+    # 2026-10-16). Now the batch is written before the reporter waits again.
+    mod = _denies()
+    reads: list[bytes | BaseException] = [_KMSG_TCP.encode(), BlockingIOError()]
+
+    def read(fd, n):
+        r = reads.pop(0)
+        if isinstance(r, BaseException):
+            raise r
+        return r
+
+    class Stop(Exception):
+        pass
+
+    waits: list[tuple] = []
+
+    def select(r, w, x, *timeout):
+        waits.append(timeout)
+        if len(waits) > 1:
+            raise Stop
+        return (r, [], [])
+
+    written: list[list] = []
+    monkeypatch.setattr(mod, "boot_id", lambda: "b1")
+    monkeypatch.setattr(mod, "write", lambda rows: written.append(list(rows)))
+    monkeypatch.setattr(
+        mod, "os", types.SimpleNamespace(open=lambda *a: 3, read=read, O_RDONLY=0, O_NONBLOCK=0)
+    )
+    monkeypatch.setattr(mod, "select", types.SimpleNamespace(select=select))
+    with pytest.raises(Stop):
+        mod.main()
+    assert [len(rows) for rows in written] == [0, 1]  # the empty report, then the batch
+
+
 def test_wall_install_runs_the_reporter_and_uninstall_removes_it():
     install = _wall_section("install")
     # After the wall's own unit, and only when the guest has the python3 it runs under.
