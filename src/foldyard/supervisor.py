@@ -648,15 +648,21 @@ def ensure_background() -> int | None:
     # grant is about to go, and the operator's [s]ession/[o]nce answers would be wiped by the
     # supervisor starting a moment later — and tell that supervisor the clear is done. Only if it
     # IS done: after a failed clear (an unwritable or damaged store) the supervisor tries itself,
-    # as it always has, rather than carry last session's grants across the restart.
-    cleared = False
+    # as it always has, rather than carry last session's grants across the restart — and nothing
+    # is offered, since that clear would wipe a session/once answer (and a store that can't be
+    # cleared can't take a grant either).
     try:
         allowlist.clear_ephemeral()
-        cleared = True
     except (OSError, SystemExit) as e:
-        print(f"⚠ couldn't reset this session's egress grants: {e}", file=sys.stderr, flush=True)
+        print(
+            f"⚠ couldn't reset this session's egress grants: {e}\n"
+            "  Recommended hosts will be offered at the next launch.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return _spawn()
     _offer_recommended()
-    return _spawn(grants_cleared=cleared)
+    return _spawn(grants_cleared=True)
 
 
 # How long a launch waits for the supervisor's jobs (await_ready). Generous: a first tick asks the

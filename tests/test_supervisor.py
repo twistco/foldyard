@@ -781,7 +781,8 @@ def test_a_launch_offers_after_the_restart_has_cleared_grants(monkeypatch, tmp_p
 )
 def test_a_failed_clear_leaves_the_clear_to_the_supervisor(monkeypatch, tmp_path, capsys, failure):
     # Don't tell the supervisor the grants are gone when they aren't: it would keep last session's
-    # grants across the restart. It clears (or reports the store) itself, as before this change.
+    # grants across the restart. It clears (or reports the store) itself, as before this change —
+    # so nothing is offered either: a [s]ession/[o]nce answer would be wiped by that clear.
     _patch(monkeypatch, tmp_path)
     events = _order(monkeypatch)
 
@@ -791,8 +792,9 @@ def test_a_failed_clear_leaves_the_clear_to_the_supervisor(monkeypatch, tmp_path
 
     monkeypatch.setattr(supervisor.allowlist, "clear_ephemeral", _fail)
     assert supervisor.ensure_background() == 4242  # the launch still goes on
-    assert events == ["clear failed", "offer", "spawn"]
-    assert str(failure) in capsys.readouterr().err
+    assert events == ["clear failed", "spawn"]
+    err = capsys.readouterr().err
+    assert str(failure) in err and "next launch" in err
 
 
 def test_replacing_a_stale_holder_clears_and_offers_after_the_bounce(monkeypatch, tmp_path):
