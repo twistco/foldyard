@@ -240,7 +240,9 @@ jobs:
       # one stalled mirror costs a retry here, not every module after it. Retried once.
       - name: Bake the session's base VM
         run: |
-          cd "$RUNNER_TEMP" # project-less: not from the checkout, which holds foldyard's own toml
+          # Project-less, so not from the checkout (foldyard's own toml) — nor from $RUNNER_TEMP:
+          # machine.MACHINE binds at import from the cwd's NAME, and `_temp` fails its check.
+          cd "$HOME"
           uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake \
             || uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake
 
