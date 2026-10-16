@@ -4,10 +4,15 @@ touches git, podman, or the real mode state."""
 
 from __future__ import annotations
 
+import argparse
+import copy
 import json
+import logging
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -811,8 +816,11 @@ def test_recreate_services_reports_failure_instead_of_raising(fake_repo, monkeyp
 
 
 def test_logs_follows_with_service(fake_repo, capture_run):
+    # `--tail`, never `-n`: docker compose reads `-n` as --tail, but podman-compose reads it as
+    # the value-less --names, so `-n 50` made "50" a service name there (see the argv contract
+    # tests at the end of this file).
     stack.logs(["postgres"])
-    assert _composes(capture_run)[-1][-5:] == ["logs", "-f", "-n", "50", "postgres"]
+    assert _composes(capture_run)[-1][-5:] == ["logs", "-f", "--tail", "50", "postgres"]
 
 
 def test_shell_execs_app_bash(fake_repo, capture_run):
@@ -2718,3 +2726,187 @@ def test_up_renders_the_config_once_for_the_sweep_and_the_guard(fake_repo, captu
     assert stack.up() == 0
     renders = [c for c in capture_run if "compose" in c and c[-1] == "config"]
     assert len(renders) == 2
+
+
+# ── the compose argv contract: what the bundled podman-compose UNDERSTANDS ─────────────────
+# docker compose and podman-compose share most flag spellings, but not all: `-n` is --tail to
+# one and the value-less --names to the other, so `logs -f -n 50 app` asked podman-compose for a
+# service called "50" — `fy logs` failed on podman from the first commit while the golden test
+# above pinned that very argv. So these tests drive the real verbs, capture every compose argv
+# they send, and hand each one to the bundled podman-compose's OWN argument parser, asserting
+# what it understood. Parse only: nothing is executed and no engine is involved. (Its `ps`
+# refusing docker's `-a` is the same class of bug — see `_crashed_services`.)
+
+
+@pytest.fixture
+def podman_compose_reads(monkeypatch) -> Callable[[list[str]], argparse.Namespace]:
+    """How the bundled podman-compose parses an argv (everything after `<engine> compose`).
+
+    The seam is ``PodmanCompose._parse_args``, the parser its own ``run()`` goes through (and
+    the one confighash drives). It builds the parser from the commands registered on the
+    module-level instance and stores the parse on whichever instance it is called on, so a
+    shallow copy takes the result and the singleton is left alone; its ``logging.basicConfig``
+    is stubbed so a parse can't configure this process's logging. argparse exits on an argv it
+    can't read, which is reported as the contract failure it is."""
+    import podman_compose
+
+    monkeypatch.setattr(logging, "basicConfig", lambda **_kw: None)
+
+    def reads(argv: list[str]) -> argparse.Namespace:
+        try:
+            return copy.copy(podman_compose.podman_compose)._parse_args(argv)
+        except SystemExit:
+            pytest.fail(f"podman-compose can't parse {argv!r} (argparse's reason: captured stderr)")
+
+    return reads
+
+
+@pytest.fixture
+def sent_composes(monkeypatch) -> list[list[str]]:
+    """Every compose argv the verbs send, through either runner (subprocess.run, and the posture
+    reconcile's devmode.run_stream), each answered with success and no output."""
+    sent: list[list[str]] = []
+
+    def run(cmd, **_kw):
+        sent.append(cmd)
+        return _FakeProc()
+
+    def stream(cmd, _on_line, **_kw):
+        sent.append(cmd)
+        return 0
+
+    monkeypatch.setattr(stack.subprocess, "run", run)
+    monkeypatch.setattr(stack.devmode, "run_stream", stream)
+    return sent
+
+
+def _drive_build_on_the_docker_engine(monkeypatch) -> None:
+    # Only the docker engine builds through compose (podman builds with buildah, see
+    # _podman_build), but foldyard sends one argv per verb whatever the provider, so the build's
+    # is held to the same contract.
+    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
+    config.clear_caches()
+    stack.build(["app"])
+
+
+def _drive_reconcile_of_an_up_stack(monkeypatch) -> None:
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): True)
+    stack.reconcile_posture(_sig(""), _sig("metadata"))
+
+
+def _drive_reconcile_of_a_down_stack(monkeypatch) -> None:
+    stack._reconcile_posture_services(stack.resolve(), {}, {"metadata": True}, lambda _l: None)
+
+
+def _drive_recreate(monkeypatch) -> None:
+    monkeypatch.setattr(stack, "_running_services", lambda ctx, deadline=None: {"queue-worker"})
+    monkeypatch.setattr(
+        stack,
+        "_rendered_services",
+        lambda ctx, extra_profiles=None, deadline=None: {"queue-worker"},
+    )
+    stack.recreate_services(["queue-worker"])
+
+
+def _drive_probes(monkeypatch) -> None:
+    ctx = stack.resolve()
+    stack._running_services(ctx)
+    stack._rendered_services(ctx, extra_profiles=["data"])
+
+
+class _Sends(NamedTuple):
+    """One run of a real code path: how to drive it, the services it names (the only service
+    list any argv it sends may carry — a flag value misread as a positional shows up there), and
+    the verbs podman-compose must read from it, each with the attributes the parse must hold."""
+
+    drive: Callable[[pytest.MonkeyPatch], object]
+    named: list[str]
+    reads: list[tuple[str, dict]]
+
+
+_ARGV_CONTRACT: dict[str, _Sends] = {
+    "up": _Sends(
+        lambda _mp: stack.up(),
+        [],
+        [
+            ("config", {"services": False}),  # the build graph's and the path guard's renders
+            ("up", {"detach": True, "no_build": True}),
+            ("ps", {"quiet": False}),
+        ],
+    ),
+    "ps": _Sends(lambda _mp: stack.ps(), [], [("ps", {"quiet": False})]),
+    "logs": _Sends(
+        lambda _mp: stack.logs(["app"]),
+        ["app"],
+        [("logs", {"follow": True, "tail": "50", "names": False, "services": ["app"]})],
+    ),
+    "shell": _Sends(
+        lambda _mp: stack.shell(),
+        [],
+        [("exec", {"service": "platform-frontend", "cnt_command": ["bash"]})],
+    ),
+    "down": _Sends(
+        lambda _mp: stack.down(),
+        [],
+        [("down", {"remove_orphans": True, "volumes": False, "rmi": None})],
+    ),
+    "nuke": _Sends(
+        lambda _mp: stack.nuke(),
+        [],
+        [("down", {"remove_orphans": True, "volumes": True, "rmi": None})],
+    ),
+    "build": _Sends(_drive_build_on_the_docker_engine, ["app"], [("build", {"services": ["app"]})]),
+    "reconcile (stack up)": _Sends(
+        _drive_reconcile_of_an_up_stack,
+        [],
+        [("up", {"detach": True, "build": False}), ("config", {"services": True})],
+    ),
+    "reconcile (stack down)": _Sends(
+        _drive_reconcile_of_a_down_stack,
+        ["metadata"],
+        [("up", {"detach": True, "build": False, "services": ["metadata"]})],
+    ),
+    "recreate": _Sends(
+        _drive_recreate,
+        ["queue-worker"],
+        [
+            (
+                "up",
+                {
+                    "detach": True,
+                    "no_build": True,
+                    "force_recreate": True,
+                    "no_deps": True,
+                    "services": ["queue-worker"],
+                },
+            ),
+            ("ps", {"format": "json"}),  # the crash probe
+        ],
+    ),
+    "probes": _Sends(
+        _drive_probes,
+        [],
+        [("ps", {"format": "json"}), ("config", {"services": True, "profile": ["data"]})],
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_ARGV_CONTRACT))
+def test_podman_compose_reads_every_compose_argv_as_meant(
+    case, fake_repo, sent_composes, podman_compose_reads, monkeypatch
+):
+    sends = _ARGV_CONTRACT[case]
+    sends.drive(monkeypatch)
+    composes = [c[2:] for c in sent_composes if c[1:2] == ["compose"]]
+    parsed = [podman_compose_reads(argv) for argv in composes]  # every argv, not just the verbs'
+    shown = "; ".join(f"{argv} → {vars(ns)}" for argv, ns in zip(composes, parsed, strict=True))
+    for argv, ns in zip(composes, parsed, strict=True):
+        assert ns.file and ns.file[-1].endswith("compose.podman.yml"), argv
+        services = getattr(ns, "services", None)  # `config --services` is a switch, not a list
+        if isinstance(services, list):
+            assert services in ([], sends.named), f"spurious services {services}: {argv}"
+    for verb, expected in sends.reads:
+        assert any(ns.command == verb and expected.items() <= vars(ns).items() for ns in parsed), (
+            f"podman-compose read no `{verb}` {expected} from {case}: {shown}"
+        )
