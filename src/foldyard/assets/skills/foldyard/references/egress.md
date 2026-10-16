@@ -31,6 +31,10 @@ when you ask. (`fy docs glossary` defines each.)
   recorded for them to review (`fy allow learn`). It enforces again by itself when the window
   ends, so a host that works now may be refused later if it isn't granted — say which hosts your
   task needed.
+- **Connection refused or reset for one tool only, while `curl` to the same host works** — that
+  tool ignores the proxy settings and connects directly, which the VM firewall refuses. The proxy
+  never sees it, so there is nothing to grant. Configure the tool's own proxy option from
+  `HTTPS_PROXY`. Node is the common case (below).
 - **Connection refused / hangs on everything** — the proxy probably isn't running. `fy doctor`
   names it; the human checks it with `fy host` and restarts it with `fy host restart`, on their
   computer (the box can't).
