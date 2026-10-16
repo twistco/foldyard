@@ -150,9 +150,9 @@ jobs:
       MACHINE_BACKEND: lima
       FOLDYARD_STATE_DIR: /tmp/foldyard-state
       LIMA_VERSION: "2.2.0" # the release the rig and the spike validated; bump deliberately
-      # The session's own base VM (baked below, after the machine): with both set, the live
-      # modules' VMs are clones of it (conftest's isolated_base_vm_stamp) — no per-create
-      # `dnf install podman` over the Fedora mirrors.
+      # The session's own base VM (baked first, below): with both set, the first machine and
+      # the live modules' VMs are clones of it (conftest's isolated_base_vm_stamp) — no
+      # per-create `dnf install podman` over the Fedora mirrors.
       FY_BASE_VM_NAME: fy-ci-base
       FY_BASE_VM_STAMP: /tmp/fy-ci-base-vm.json
       # XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS are appended by the linger step: the `runner`
@@ -208,6 +208,19 @@ jobs:
             echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus"
           } >> "$GITHUB_ENV"
 
+      # Every project VM in this job — the machine below and each one a module recreates — is a
+      # clone of this base. The bake is the run's one template boot over the Fedora mirrors (the
+      # template's `dnf install podman`; test_basevm_e2e bakes its own), so one stalled mirror
+      # costs a retry here, not every module after it. Retried once. The template-created
+      # PROJECT VM (foldyard's provisioning on a fresh template boot) is no longer exercised here.
+      - name: Bake the session's base VM
+        run: |
+          # Project-less, so not from the checkout (foldyard's own toml) — nor from $RUNNER_TEMP:
+          # machine.MACHINE binds at import from the cwd's NAME, and `_temp` fails its check.
+          cd "$HOME"
+          uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake \
+            || uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake
+
       # The VM is created ONCE here, before pytest, from a throwaway copy of the example (preflight
       # refuses the nested project; the launch gate refuses an unadopted checkout with no terminal
       # — `fy config adopt` is the non-interactive path). Every example copy shares the VM name
@@ -233,18 +246,6 @@ jobs:
           test -S "$sock"
           echo "CONTAINER_HOST=unix://$sock" >> "$GITHUB_ENV"
           CONTAINER_HOST="unix://$sock" podman info --format '{{.Host.Arch}} podman {{.Version.Version}} on {{.Host.Distribution.Distribution}} {{.Host.Distribution.Version}}'
-
-      # The machine above is the one template create foldyard's provisioning is checked on before
-      # pytest; every VM the modules create after it is a clone of this base. The bake is the
-      # run's one other template boot over the Fedora mirrors (test_basevm_e2e bakes its own), so
-      # one stalled mirror costs a retry here, not every module after it. Retried once.
-      - name: Bake the session's base VM
-        run: |
-          # Project-less, so not from the checkout (foldyard's own toml) — nor from $RUNNER_TEMP:
-          # machine.MACHINE binds at import from the cwd's NAME, and `_temp` fails its check.
-          cd "$HOME"
-          uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake \
-            || uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake
 
       # The host tier: test_e2e.py (the example + worktree stacks) plus the `*_e2e.py` modules that
       # need a real VM (tests/e2e_host.py — the base VM bake + a cloned VM, verify's negative, the
@@ -457,6 +458,15 @@ jobs:
           } > "$HOME/.fy-ci.env"
           echo "✓ $(git -C "$HOME/foldyard" rev-parse --short HEAD) cloned; user bus up"
 
+      # As in lima-host-e2e: every project VM in this job is a clone of this; retried once.
+      - name: Bake the session's base VM
+        shell: wsl-bash {0}
+        run: |
+          . "$HOME/.fy-ci.env"
+          cd "$HOME"
+          uv run --project "$HOME/foldyard" foldyard machine base bake \
+            || uv run --project "$HOME/foldyard" foldyard machine base bake
+
       # As in lima-host-e2e: the VM is created ONCE, from a throwaway example copy — under the
       # distro's home, not RUNNER_TEMP (a Windows path). CONTAINER_HOST (not DOCKER_HOST) for the
       # tests' own engine calls, handed forward through the env file.
@@ -475,15 +485,6 @@ jobs:
           test -S "$sock"
           echo "export CONTAINER_HOST=unix://$sock" >> "$HOME/.fy-ci.env"
           CONTAINER_HOST="unix://$sock" podman info --format '{{.Host.Arch}} podman {{.Version.Version}} on {{.Host.Distribution.Distribution}} {{.Host.Distribution.Version}}'
-
-      # As in lima-host-e2e: the modules' VMs are clones of this; retried once.
-      - name: Bake the session's base VM
-        shell: wsl-bash {0}
-        run: |
-          . "$HOME/.fy-ci.env"
-          cd "$HOME"
-          uv run --project "$HOME/foldyard" foldyard machine base bake \
-            || uv run --project "$HOME/foldyard" foldyard machine base bake
 
       # The same module list as lima-host-e2e — what differs is the host under it. The wall module
       # gates itself on the kernel's nft `socket` expression and SKIPS here (see the header).

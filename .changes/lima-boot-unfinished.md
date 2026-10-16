@@ -9,5 +9,6 @@ bump: patch
   minutes, and the next `fy up` then said the VM "did not apply its boot provisioning" and
   pointed at a boot log that didn't exist yet, because foldyard's script never started. Both now
   say the VM is up but Lima's boot scripts haven't finished, show how to see what's still running
-  and where the guest console log is, and give the restart. A VM whose base was baked with
+  and where the guest console log is, and say to run `fy up` again once it settles, restarting
+  only if it's stuck. A VM whose base was baked with
   `fy machine base bake` skips that install altogether.

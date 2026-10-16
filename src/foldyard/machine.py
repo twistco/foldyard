@@ -497,13 +497,15 @@ def _unfinished_boot_lines(progress: str) -> list[str]:
             "  stalls it. It may still be going:",
             f"      what it runs:       limactl shell {MACHINE} -- ps -eo pid,etime,args",
             f"      the guest console:  ~/.lima/{MACHINE}/serial*.log",
-            "  then restart:   fy machine stop && fy up",
+            "  Once it settles, run `fy up` again. Restart only if it is stuck (a restart",
+            "  ends an install that may be about to finish):   fy machine stop && fy up",
         ]
     if progress == "ours":
         return [
-            "  foldyard's boot script started but hasn't finished; its log is readable",
-            f"  without root:   limactl shell {MACHINE} cat {_BOOT_LOG}",
-            "  then restart:   fy machine stop && fy up",
+            "  foldyard's boot script started but hasn't reported: it failed, or a later Lima",
+            "  step is still running. Its log is readable without root:",
+            f"      limactl shell {MACHINE} cat {_BOOT_LOG}",
+            "  If it failed, restart:   fy machine stop && fy up",
         ]
     return []
 

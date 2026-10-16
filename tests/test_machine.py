@@ -792,7 +792,9 @@ def test_ensure_names_limas_own_unfinished_boot_when_the_guest_reports_nothing(
     assert "dnf" in err and "Fedora mirrors" in err
     assert "limactl shell homelab -- ps -eo pid,etime,args" in err
     assert "~/.lima/homelab/serial*.log" in err
-    assert "fy machine stop && fy up" in err
+    # It may be about to finish: run `fy up` again first — a restart would end the install.
+    assert "Once it settles, run `fy up` again" in err
+    assert "Restart only if it is stuck" in err and "fy machine stop && fy up" in err
     assert "/run/fy-wall/boot.log" not in err  # foldyard's script never started: no log yet
 
 
@@ -804,7 +806,8 @@ def test_ensure_names_foldyards_own_unfinished_boot_script(lima_env, tmp_path, c
     with pytest.raises(SystemExit):
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     err = capsys.readouterr().err
-    assert "foldyard's boot script started but hasn't finished" in err
+    assert "foldyard's boot script started but hasn't reported" in err
+    assert "it failed, or a later Lima" in err  # Lima's user step runs after it, marker last
     assert "limactl shell homelab cat /run/fy-wall/boot.log" in err
     assert "Lima's own boot scripts" not in err
 
@@ -899,6 +902,41 @@ def test_boot_progress_reads_limas_marker_and_foldyards_log_without_root(
     [cmd] = calls
     assert cmd[:5] == ["limactl", "shell", "homelab", "--", "sh"]
     assert "/run/lima-boot-done" in cmd[-1] and "/run/fy-wall/boot.log" in cmd[-1]
+
+
+@pytest.mark.spawns("sh")  # runs the REAL probe under sh, the guest's two files moved into tmp
+@pytest.mark.parametrize(
+    "marker, log, want",
+    [
+        ("iid-1\n", True, "done"),  # finished — whatever foldyard's script left behind
+        ("iid-1\n", False, "done"),
+        ("", True, "ours"),  # an EMPTY marker is not a finished boot: Lima compares its content
+        (None, True, "ours"),
+        ("", False, "lima"),
+        (None, False, "lima"),
+    ],
+)
+def test_boot_progress_probe_orders_the_marker_before_the_log(
+    monkeypatch, tmp_path, marker, log, want
+):
+    # The order is the diagnosis: a finished boot with foldyard's log present must read "done"
+    # (its script ran and failed: the provisioning message), never "ours".
+    monkeypatch.setattr(machine, "MACHINE", "homelab")
+    done, boot_log = tmp_path / "lima-boot-done", tmp_path / "boot.log"
+    if marker is not None:
+        done.write_text(marker)
+    if log:
+        boot_log.write_text("")
+    real = subprocess.run
+
+    def run(cmd, **kw):
+        probe = cmd[-1].replace("/run/lima-boot-done", str(done))
+        probe = probe.replace("/run/fy-wall/boot.log", str(boot_log))
+        assert probe != cmd[-1]
+        return real(["sh", "-c", probe], **kw)
+
+    monkeypatch.setattr(machine.subprocess, "run", run)
+    assert machine._boot_progress() == want
 
 
 def test_boot_progress_is_unknown_when_limactl_cannot_run(monkeypatch):
