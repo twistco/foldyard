@@ -233,6 +233,7 @@ def test_the_miner_runs_without_tools_mcp_or_a_saved_session():
     for flag in ("--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands"):
         assert flag in argv
     assert "--plugin-dir" not in argv  # cq's own MCP server would let it propose by itself
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"disableAllHooks": True}
     assert json.loads(argv[argv.index("--json-schema") + 1])["required"] == ["candidates"]
     assert kw["input"] == "EXCERPT"  # the transcript is stdin, never part of the instructions
     # from an empty dir: no checkout CLAUDE.md is auto-loaded into every mining call
@@ -298,7 +299,7 @@ def test_the_record_round_trips_and_survives_garbage(tmp_path):
 
 @pytest.fixture
 def box(tmp_path, monkeypatch, homes):
-    """A box with cq wired for Claude, one minable session, and the record beside cq's store."""
+    """A box with cq wired for Claude, one minable session, and the checkout the record lives in."""
     env, claude, _ = homes
     sid = "0b6c620a-8b59-41d0-b554-570e16ca6b7a"
     _touch(
@@ -308,11 +309,10 @@ def box(tmp_path, monkeypatch, homes):
             _claude("assistant", {"type": "tool_use", "id": "t", "name": "Bash", "input": {}}),
         ),
     )
-    env = dict(env, FY_CQ_AGENTS="claude", CQ_LOCAL_DB_PATH=str(tmp_path / "cq/local.db"))
+    env = dict(env, FY_CQ_AGENTS="claude", FOLDYARD_CHECKOUT=str(tmp_path / "co"))
     monkeypatch.setattr(cqbackfill.config, "in_box", lambda: True)
-    monkeypatch.setattr(cqbackfill, "_reflect_prompt", lambda: "REFLECT")
     monkeypatch.setattr(cqbackfill.time, "time", lambda: _NOW)
-    return env, sid, tmp_path / "cq/fy-backfill.json"
+    return env, sid, tmp_path / "co/.devbox-cq/backfill.json"
 
 
 def _calls(argv0: str, run: _Run) -> list[list[str]]:
@@ -364,13 +364,148 @@ def test_queued_proposals_say_how_they_will_upload(box, capsys):
     assert "fy mode cq=on" in capsys.readouterr().out
 
 
-def test_refused_outside_the_box_and_without_cq(box, monkeypatch, capsys):
+def test_refused_without_cq_in_the_box_and_on_the_host(box, monkeypatch, capsys):
     env, _, _ = box
     assert cqbackfill.run(dict(env, FY_CQ_AGENTS=""), model="haiku", yes=True, run=_Run()) == 1
     assert "cq = true" in capsys.readouterr().err
     monkeypatch.setattr(cqbackfill.config, "in_box", lambda: False)
+    monkeypatch.setattr(cqbackfill.config, "cq_agents", lambda: ())
     assert cqbackfill.run(env, model="haiku", yes=True, run=_Run()) == 1
-    assert "in the box" in capsys.readouterr().err
+    assert "cq = true" in capsys.readouterr().err
+
+
+# ── the reflect prompt both sides mine under: cq's own, shipped with foldyard ───────────────
+
+
+def test_the_shipped_reflect_prompt_is_cqs_at_the_pinned_cli_version():
+    # Bumping cq.CQ_VERSION means re-fetching sdk/go/prompts/reflect.md at that tag (the CLI
+    # embeds it; `cq prompt reflect` prints it byte for byte) and updating both pins.
+    import hashlib
+
+    from foldyard.plugins import cq
+
+    text = cqbackfill.reflect_prompt()
+    assert cqbackfill.REFLECT_PROMPT_VERSION == cq.CQ_VERSION
+    assert hashlib.sha256(text.encode()).hexdigest() == cqbackfill.REFLECT_PROMPT_SHA256
+    assert "# /cq:reflect" in text
+
+
+# ── on your computer: this project's host sessions, mined there, handed to the box ──────────
+
+
+def _host_session(home: Path, sid: str, cwd: str, mtime: float = _OLD) -> Path:
+    return _touch(
+        home / "projects" / ("-" + cwd.strip("/").replace("/", "-")) / f"{sid}.jsonl",
+        mtime,
+        body=_jsonl(
+            {"type": "attachment", "x": 1},
+            _claude("user", {"type": "text", "text": "do it"}, cwd=cwd),
+            _claude("assistant", {"type": "tool_use", "id": "t", "name": "Bash", "input": {}}),
+        ),
+    )
+
+
+def test_host_sessions_are_only_this_projects_checkouts(homes, tmp_path):
+    env, claude, codex = homes
+    main, wt = tmp_path / "w/acme", tmp_path / "w/acme-worktrees/feat"
+    mine_a = _host_session(claude, "0b6c620a-8b59-41d0-b554-570e16ca6b7a", str(main))
+    mine_b = _host_session(claude, "1c7d731b-9c6a-52e1-c665-681f27db7c8b", f"{main}/.claude/wt/x")
+    mine_c = _host_session(claude, "2d8e842c-ad7b-63f2-d776-792038ec8d9c", str(wt))
+    _host_session(claude, "3e9f953d-be8c-7403-e887-8a3149fd9ead", f"{main}-rebase")  # a sibling
+    _host_session(claude, "4fa0a64e-cf9d-8514-f998-9b425a0eafbe", "/elsewhere")
+    cx = "01a14176-e4f3-7ee3-9db8-2d59b35b16a0"
+    _touch(
+        codex / f"sessions/2026/10/15/rollout-2026-10-15T22-27-54-{cx}.jsonl",
+        body=_jsonl({"type": "session_meta", "payload": {"id": cx, "cwd": str(wt)}}),
+    )
+    other = "02b25287-f5a4-8ff4-aea4-3e6a26c46cb1"
+    _touch(
+        codex / f"sessions/2026/10/15/rollout-2026-10-15T22-27-55-{other}.jsonl",
+        body=_jsonl({"type": "session_meta", "payload": {"id": other, "cwd": "/elsewhere"}}),
+    )
+    found = cqbackfill.sessions(env, now=_NOW, roots=[main, wt])
+    assert {s.path for s in found if s.agent == "claude"} == {mine_a, mine_b, mine_c}
+    assert [s.id for s in found if s.agent == "codex"] == [cx]
+
+
+@pytest.fixture
+def host(tmp_path, monkeypatch, homes):
+    """Your computer: cq configured, one of this project's sessions, a host.env holding a secret."""
+    env, claude, _ = homes
+    main = tmp_path / "co"
+    sid = "0b6c620a-8b59-41d0-b554-570e16ca6b7a"
+    _host_session(claude, sid, str(main))
+    host_env = _touch(tmp_path / "host.env", body="CQ_API_KEY=cqk_live_SECRETSECRET123\nX=ab\n")
+    monkeypatch.setattr(cqbackfill.config, "in_box", lambda: False)
+    monkeypatch.setattr(cqbackfill.config, "cq_agents", lambda: ("claude",))
+    monkeypatch.setattr(cqbackfill.config, "host_env_file", lambda: host_env)
+    monkeypatch.setattr(cqbackfill, "_host_checkouts", lambda: (main, [main]))
+    monkeypatch.setattr(cqbackfill.time, "time", lambda: _NOW)
+    return env, sid, main
+
+
+def test_host_run_mines_and_hands_the_candidates_to_the_box(host, capsys):
+    env, sid, main = host
+    run = _Run((0, _result([_CANDIDATE]), ""))
+    assert cqbackfill.run(env, model="haiku", yes=True, run=run) == 0
+    assert _calls("cq", run) == []  # never proposes here: the key is the box's proxy's to add
+    handoff = json.loads((main / f".devbox-cq/candidates/claude-{sid}.json").read_text())
+    assert handoff == {
+        "agent": "claude",
+        "session": sid,
+        "model": "haiku",
+        "candidates": [_CANDIDATE],
+    }
+    entry = cqbackfill.load_record(main / ".devbox-cq/backfill.json")[f"claude:{sid}"]
+    assert entry["mined_on"] == "your computer" and entry["candidates"] == 1
+    assert "fy cq backfill" in capsys.readouterr().out  # says how to finish, in the box
+    # never committed, whatever the consumer's own .gitignore says
+    assert (main / ".devbox-cq/.gitignore").read_text() == "*\n"
+    # the instructions came from foldyard's shipped copy, never from the checkout
+    assert cqbackfill.reflect_prompt() in _calls("claude", run)[0][2]
+
+
+def test_host_withholds_a_candidate_that_carries_a_host_secret(host, capsys):
+    env, sid, main = host
+    leaky = dict(_CANDIDATE, detail="set CQ_API_KEY=cqk_live_SECRETSECRET123 first")
+    run = _Run((0, _result([leaky, _CANDIDATE]), ""))
+    assert cqbackfill.run(env, model="haiku", yes=True, run=run) == 0
+    handoff = json.loads((main / f".devbox-cq/candidates/claude-{sid}.json").read_text())
+    assert handoff["candidates"] == [_CANDIDATE]
+    out = capsys.readouterr()
+    assert "SECRETSECRET" not in out.out + out.err and "withheld" in out.out
+
+
+def test_the_box_proposes_handed_over_candidates_first_and_clears_them(box, capsys):
+    env, box_sid, record = box
+    host_sid = "5ab1b75f-d0ae-9625-0aa9-ac536b1fbecf"
+    drop = record.parent / "candidates"
+    _touch(
+        drop / f"claude-{host_sid}.json",
+        body=json.dumps(
+            {"agent": "claude", "session": host_sid, "candidates": [_CANDIDATE, {"junk": 1}]}
+        ),
+    )
+    _touch(drop / "not-a-handoff.json", body="{}")
+    cqbackfill.mark(record, "claude", box_sid, {"skipped": "test"})  # leave only the handoff
+    run = _Run((0, json.dumps({"id": "ku_h"}), ""))
+    assert cqbackfill.run(env, model="haiku", yes=True, run=run) == 0
+    assert _calls("claude", run) == [] and len(_calls("cq", run)) == 1
+    assert not (drop / f"claude-{host_sid}.json").exists()
+    assert cqbackfill.load_record(record)[f"claude:{host_sid}"]["proposed"] == ["ku_h"]
+
+
+def test_a_dry_run_in_the_box_leaves_the_handoffs(box):
+    env, box_sid, record = box
+    host_sid = "5ab1b75f-d0ae-9625-0aa9-ac536b1fbecf"
+    handoff = _touch(
+        record.parent / f"candidates/claude-{host_sid}.json",
+        body=json.dumps({"agent": "claude", "session": host_sid, "candidates": [_CANDIDATE]}),
+    )
+    cqbackfill.mark(record, "claude", box_sid, {"skipped": "test"})
+    run = _Run()
+    assert cqbackfill.run(env, model="haiku", yes=True, dry_run=True, run=run) == 0
+    assert run.calls == [] and handoff.exists()
 
 
 def test_the_cli_passes_the_model_flag_over_the_config(monkeypatch):

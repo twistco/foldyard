@@ -819,6 +819,17 @@ reflect_model = "haiku"   # the default; an alias (haiku, sonnet, opus) means th
 one run. `--dry-run` prints what would be proposed, and `--limit`, `--since <days>` and
 `--session <id>` narrow the run. It asks before it starts; `--yes` skips the question.
 
+**Sessions on your computer.** Run `fy cq backfill` on your computer, too, to cover the Claude and
+Codex sessions you ran there in this project's checkouts and worktrees (it goes by each session's
+working directory, so other projects' sessions are left alone). It mines them with your own
+`claude` login, then leaves the candidates for the box in `.devbox-cq/candidates/`. The next
+`fy cq backfill` in the box proposes them first, through the proxy that adds your cq key. Only
+the candidates cross into the box; your transcripts stay on your computer. Two guards apply
+there: the miner follows cq's reflect instructions as shipped with foldyard, never anything from
+the checkout, and a candidate containing any value from your `host.env` is withheld. Both sides
+share one record in `.devbox-cq/` (gitignored), so a box session that `fy transcripts` copied to
+your computer isn't mined twice.
+
 Both tables deep-merge, so `foldyard.local.toml` can set one key (your model) without
 redeclaring the team's. `fy config widenings` lists their keys under **agent steering**.
 
@@ -1018,7 +1029,7 @@ Per project, `~/.foldyard/<project>/` (env `FOLDYARD_STATE_DIR` relocates it):
 until `main/dev-mode.json` exists.)
 
 In the repo, foldyard also generates gitignored files next to `foldyard.toml` (`init` adds them
-to `.gitignore`): `.devbox-ca/`, `.devbox-claude/`, `.devbox-codex/`, `.devbox-foldyard/`, and
+to `.gitignore`): `.devbox-ca/`, `.devbox-claude/`, `.devbox-codex/`, `.devbox-cq/`, `.devbox-foldyard/`, and
 `.dev-mode.json` — a read-only copy of the mode for tools in the box. Nothing grants access based
 on it.
 

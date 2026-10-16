@@ -47,6 +47,7 @@ GITIGNORE_ENTRIES = (
     ".devbox-ca/",
     ".devbox-claude/",
     ".devbox-codex/",
+    ".devbox-cq/",
     ".devbox-foldyard/",
     ".dev-mode.json",
     # The per-developer overlay itself. It holds each person's keyless credential CHOICE (never a
