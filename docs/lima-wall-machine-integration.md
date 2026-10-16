@@ -116,6 +116,11 @@ never `flush ruleset`, because netavark/pasta keep their own nft state):
   `containers.conf.d` drop-in. Build `RUN` steps get the drop-in's mounts but not its env, so a
   second drop-in points podman's `crun` at a root-owned wrapper that adds the env to a create
   whose spec mounts the CA (`/usr/local/libexec/fy-oci/`).
+- npm's proxy settings (`npm_config_https_proxy`, `npm_config_proxy`) in every container via a
+  sibling drop-in, for install scripts with their own HTTP client. Not `NODE_USE_ENV_PROXY`: the
+  propagated `NO_PROXY` covers only loopback and the gateway, and Node ignoring the proxy env is
+  what lets Node services reach each other by name
+  ([networking](./networking.md#node-and-npm)).
 - A systemd `fy-wall.service` (oneshot nft load) keeps it across restarts.
 
 **Set up at boot, as root; the host never runs `sudo` in the guest.** `machine.ensure` /
@@ -225,7 +230,8 @@ so every guest packet leaves the host as that process. Code: `src/foldyard/hostw
   the destructive battery.
 
 **One caveat stays with you, not foldyard:** stack containers inherit the VM's proxy env, so
-service→service HTTP inside the stack needs a per-service `no_proxy` (the `example-lima-wall`
+service→service HTTP inside the stack needs a per-service `no_proxy` (Node's `fetch()` is the
+exception until a service sets `NODE_USE_ENV_PROXY`) (the `example-lima-wall`
 `worker` shows the fix; `test_network.sh` §E asserts it). Their HTTPS to the outside needs nothing:
 the boot setup gives every container the proxy's CA through a root-owned podman default
 (`/etc/containers/containers.conf.d/90-fy-proxy-ca.conf`; [networking](./networking.md#stack-containers-trust-the-proxy-too)),

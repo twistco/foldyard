@@ -376,9 +376,36 @@ def test_every_name_foldyard_sets_in_the_box_is_one_box_env_refuses(fake, monkey
     assert box.main("up") == 0
     names = {v.split("=", 1)[0] for v in _env_values(_find(fake["calls"], has=["run", "-d"])[0])}
     consumers = set(config.box_env()) | set(config.port_bases())
-    restatable = {"TZ", "LC_TIME", "DO_NOT_TRACK", "NEXT_TELEMETRY_DISABLED"}
+    restatable = {
+        "TZ",
+        "LC_TIME",
+        "DO_NOT_TRACK",
+        "NEXT_TELEMETRY_DISABLED",
+        "NODE_USE_ENV_PROXY",
+        "npm_config_https_proxy",
+        "npm_config_proxy",
+    }
     assert {"HTTPS_PROXY", "SSL_CERT_FILE", "CLAUDE_CONFIG_DIR", "CODEX_HOME"} <= names  # all on
     assert {n for n in names - consumers - restatable if not config.foldyard_owned(n)} == set()
+
+
+def test_up_box_env_overrides_the_node_and_npm_proxy_defaults(fake, monkeypatch, tmp_path):
+    # The proxy plugin's Node/npm settings are defaults the consumer may restate: one value per
+    # key, the consumer's, never a second `-e` for the engine to pick between.
+    fake["ctx"].env["FY_PROXY"] = "h:8088"
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)
+    ca = tmp_path / "mitm" / "mitmproxy-ca-cert.pem"
+    ca.parent.mkdir()
+    ca.write_text("CERT")
+    monkeypatch.setenv("MITMPROXY_CA", str(ca))
+    monkeypatch.setattr(box, "_capture_keyless", lambda: None)  # never the real ~/.codex
+    monkeypatch.setattr(config, "box_env", lambda: {"NODE_USE_ENV_PROXY": "0"})
+    assert box.main("up") == 0
+    values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert [v for v in values if v.startswith("NODE_USE_ENV_PROXY=")] == ["NODE_USE_ENV_PROXY=0"]
+    assert [v for v in values if v.startswith("npm_config_https_proxy=")] == [
+        "npm_config_https_proxy=http://h:8088"
+    ]
 
 
 def test_up_passes_no_timezone_when_your_computer_names_none(fake):

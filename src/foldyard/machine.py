@@ -392,8 +392,7 @@ def _render_provisioning() -> tuple[str, str]:
     recording)."""
     ca = None
     if config.machine_wall():
-        gw = config.LIMA_HOST_GATEWAY
-        args = ["install", gw, _wall_ports(), f"http://{gw}:{config.proxy_port_base()}"]
+        args = ["install", config.LIMA_HOST_GATEWAY, _wall_ports(), config.wall_proxy_url()]
         ca = _guest_ca()
         if ca is not None:
             args.append(_GUEST_CA_PATH)
