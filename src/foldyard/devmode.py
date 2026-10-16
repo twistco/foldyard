@@ -867,7 +867,14 @@ def launching_worktrees() -> set[str]:
         except OSError:
             pass  # held: its launcher is alive
         else:
-            marker.unlink(missing_ok=True)
+            # Only the file we probed: a second launch in one process (same pid, same name)
+            # renames its locked marker over this one BEFORE it releases the old lock, so by the
+            # time ours succeeds the name may already be the live launcher's.
+            try:
+                if os.path.samestat(os.fstat(fd), os.stat(marker)):
+                    marker.unlink(missing_ok=True)
+            except OSError:
+                pass  # gone already
             continue
         finally:
             os.close(fd)  # releases our probe lock, if we took it

@@ -614,6 +614,39 @@ def test_a_dead_launchers_marker_is_ignored_and_swept(monkeypatch, tmp_path):
     assert not (tmp_path / f"{os.getpid()}.json").exists()
 
 
+def test_the_sweep_never_removes_a_marker_renamed_in_after_its_probe(monkeypatch, tmp_path):
+    # The sweep opens a marker, finds its lock free, and removes it — by NAME. A second launch in
+    # one process keeps its pid, so it renames a fresh, locked marker over that name and only then
+    # releases the old one: a sweep that opened the old file just before gets its lock just after,
+    # and unlinking by name would take the live launcher's marker with it.
+    import fcntl
+
+    monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path))
+    monkeypatch.setattr(devmode, "worktree_keys", lambda: ["", "feat"])
+    _dead_launch(tmp_path, "101", "feat")
+    held: list[int] = []
+    real_flock = fcntl.flock
+
+    def relaunch_then_flock(fd, op):
+        if not held:  # the probe of the OLD marker: the relaunch lands first
+            staging = tmp_path / "101.tmp"
+            staging.write_text(json.dumps({"worktree": "feat"}))
+            held.append(os.open(staging, os.O_RDONLY))
+            real_flock(held[0], fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.replace(staging, tmp_path / "101.json")
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(devmode.fcntl, "flock", relaunch_then_flock)
+    try:
+        devmode.launching_worktrees()
+        monkeypatch.setattr(devmode.fcntl, "flock", real_flock)
+        assert (tmp_path / "101.json").exists()
+        assert devmode.launching_worktrees() == {"feat"}  # served from the next tick
+    finally:
+        for fd in held:
+            os.close(fd)
+
+
 def test_a_marker_for_an_unregistered_worktree_is_not_served(monkeypatch, tmp_path):
     # The registry is the host's own record of its worktrees; a marker can't widen it.
     monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path))
