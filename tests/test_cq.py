@@ -385,6 +385,16 @@ def test_reflect_resumes_the_ended_session_when_accepted(agent_runs, monkeypatch
     assert agent_runs == [["claude"], ["claude", "--resume", "sess-1", "/cq:reflect"]]
 
 
+def test_an_accepted_reflect_is_recorded_so_backfill_skips_it(agent_runs, monkeypatch, tmp_path):
+    from foldyard import cqbackfill
+
+    monkeypatch.setenv("CQ_LOCAL_DB_PATH", str(tmp_path / "cq/local.db"))
+    monkeypatch.setattr(box, "_confirm", lambda q: True)
+    box._with_reflect("Codex", ["codex"], lambda sid: ["codex", "resume", sid, "R"])
+    record = cqbackfill.load_record(tmp_path / "cq/fy-backfill.json")
+    assert record["codex:sess-1"]["reflected"] == "at session end"
+
+
 def test_declining_or_no_session_runs_nothing_more(agent_runs, monkeypatch):
     monkeypatch.setattr(box, "_confirm", lambda q: False)
     assert box._with_reflect("Codex", ["codex"], lambda sid: ["never"]) == 3

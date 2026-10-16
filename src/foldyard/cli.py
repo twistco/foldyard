@@ -52,7 +52,18 @@ _PANELS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("The stack", ("up", "down", "ps", "logs", "shell", "build", "open", "reclaim", "nuke")),
     (
         "The box and its agents",
-        ("box", "claude", "codex", "agent", "paste", "code", "worktree", "transcripts", "skill"),
+        (
+            "box",
+            "claude",
+            "codex",
+            "cq",
+            "agent",
+            "paste",
+            "code",
+            "worktree",
+            "transcripts",
+            "skill",
+        ),
     ),
     ("Posture and egress", ("mode", "allow", "config", "verify", "state", "host")),
     ("Machines and projects", ("machine", "ls", "prune")),
@@ -1824,6 +1835,63 @@ def skill_install(
     from . import skills
 
     raise typer.Exit(skills.install(name, force=force))
+
+
+cq_app = typer.Typer(
+    rich_markup_mode="markdown",
+    name="cq",
+    help="The cq shared agent-knowledge commons (in the box; `cq = true` under [claude]/[codex])",
+    no_args_is_help=True,
+)
+app.add_typer(cq_app)
+
+
+def _model_option(value: str | None) -> str | None:
+    from . import cqbackfill
+
+    if value is not None and not cqbackfill.valid_model(value):
+        raise typer.BadParameter(f"not a model name: {value!r}")
+    return value
+
+
+@cq_app.command("backfill")
+def cq_backfill(
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        callback=_model_option,
+        help="the miner's model: an alias (haiku, sonnet, opus) or a full name "
+        "[default: FOLDYARD_CQ_REFLECT_MODEL, else [cq] reflect_model, else haiku]",
+    ),
+    limit: int | None = typer.Option(None, "--limit", min=1, help="at most this many sessions"),
+    since: float | None = typer.Option(
+        None, "--since", min=0, help="only sessions from the last N days"
+    ),
+    session: list[str] = typer.Option([], "--session", help="only this session id (repeatable)"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="print the candidates; propose and record nothing"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="don't ask before mining"),
+) -> None:
+    """Propose to cq what past Claude and Codex sessions learned.
+
+    Mines past sessions in this box for what cq's reflect would propose, and proposes it to
+    cq.exchange, where each waits pending in the review queue until approved."""
+    import os
+
+    from . import config, cqbackfill
+
+    raise typer.Exit(
+        cqbackfill.run(
+            dict(os.environ),
+            model=model or config.cq_reflect_model(),
+            yes=yes,
+            dry_run=dry_run,
+            limit=limit,
+            since_days=since,
+            session_ids=tuple(session),
+        )
+    )
 
 
 def main() -> None:
