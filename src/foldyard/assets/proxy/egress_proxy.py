@@ -74,7 +74,9 @@ Without LIVE_FILE:
                     domain — Claude Code Web allow-list semantics). Empty → decrypt everything
                     under "full". Ignored under "passthrough" (everything is tunnelled anyway).
   DEFAULT_DENY      "1" → ENFORCE the egress allowlist: refuse any host that isn't allowed
-                    (by ALLOW_FILE or the injector host) with a 403 at CONNECT / on the request.
+                    (by ALLOW_FILE or the injector host) with a 403 on the request — HTTPS on
+                    :443 inside a tunnel the proxy answers itself, never dialling the host; any
+                    other port at CONNECT — and cancel any upstream dial no grant covers.
                     Empty/anything else → off (capture/passthrough only, never blocks — the
                     pre-allowlist behaviour). This is the static switch; toggling it restarts the
                     daemon. The live, no-restart part is ALLOW_FILE (re-read per request).
@@ -199,6 +201,22 @@ logging.getLogger("mitmproxy.proxy.server").addFilter(_DropConnectChatter())
 logging.getLogger("mitmproxy.proxy.server").addFilter(_DropWebsocketPingPong())
 logging.getLogger("mitmproxy.proxy.server").addFilter(_DropStreamingNotice())
 
+
+class _DropRefusedDial(logging.Filter):
+    """Suppress mitmproxy's two lines for a dial ``server_connect`` refused (``server connection
+    to … killed before connect: …`` and ``Unable to establish TLS connection with server …``,
+    the latter advising ``connection_strategy=lazy``). Every refused HTTPS connection draws one —
+    its ClientHello asks for the dial (see ``http_connect``) — and its row is in the egress log.
+    Matched on the refusal's own text, so a real connection failure is never swallowed."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return _DIAL_REFUSED not in record.getMessage()
+
+
+# The error `server_connect` sets on a dial it refuses — and so what _DropRefusedDial matches.
+_DIAL_REFUSED = "refused by the foldyard allowlist (no grant covers this host)"
+
+logging.getLogger("mitmproxy.proxy.server").addFilter(_DropRefusedDial())
 
 _HTTPS_PORT = 443  # the one port a bare host grant covers at CONNECT
 _HTTP_PORT = 80  # …and, for a request seen in the clear, this one
@@ -870,6 +888,15 @@ class Injector:
         # Every connection a CONNECT let through, by client id: what `_sweep` re-judges when the
         # policy narrows (see `refresh`). Dropped on disconnect.
         self._conns: dict[str, dict] = {}
+        # Connections whose CONNECT the proxy answered itself, with no upstream dialled (see
+        # `http_connect`), by client id → the refusal row still owed for it: written when a
+        # request inside is refused (its own, fuller row replaces it), or when the connection
+        # ends without one (a client that doesn't trust our CA, one that spoke no HTTP). None
+        # for a host the proxy answers there (``held``/``overlaps``), which owes no row.
+        self._answered: dict[str, dict | None] = {}
+        # Client connections that presented a live build secret on a cleartext request the wall
+        # let through on a build-scoped grant — so `server_connect` lets that dial out too.
+        self._build_requesters: set[str] = set()
         self._policy_dirty = False
         if self.live_path is not None:
             self.refresh()  # the first read: rules, wall and passthrough all come from the file
@@ -1217,15 +1244,24 @@ class Injector:
             entry["build"] = True
         self._write_entry(entry)
 
-    def _log_blocked(self, host: str | None, request=None) -> None:
-        """A row for a host REFUSED by the default-deny wall — no upstream is ever contacted, so
-        there's no method/path/real status (we synthesise a 403). The Network Log panel keys off
-        ``blocked`` to paint it red and offer an 'allow' action. With the refused ``request``,
-        the row also carries its User-Agent and, when it carried a live build secret, ``build`` —
-        what `fy box build`/`fy up` read back to offer the host (never the bare marker, or the box
-        could put its own hosts in that offer). No host → nothing to log."""
+    def _log_blocked(self, host: str | None, request=None, *, mismatch: bool = False) -> None:
+        """A row for a request the proxy REFUSED (:meth:`_blocked_entry`). No host → nothing."""
+        entry = self._blocked_entry(host, request, mismatch=mismatch)
+        if entry is not None:
+            self._write_entry(entry)
+
+    def _blocked_entry(self, host: str | None, request=None, *, mismatch: bool = False):
+        """The row for a refused request — no upstream is ever contacted, so there's no real
+        status (we synthesise a 403). The Network Log panel keys off ``blocked`` to paint it red
+        and offer an 'allow' action. With the refused ``request``, the row carries what was asked
+        — its method, and its path unless it was a ``CONNECT`` (the row a refused HTTPS host gets
+        only when no request inside its tunnel was seen: see ``http_connect``) — its User-Agent
+        and, when it carried a live build secret, ``build``: what `fy box build`/`fy up` read back
+        to offer the host (never the bare marker, or the box could put its own hosts in that
+        offer). ``mismatch``: refused for naming another host in its Host header, not by the
+        allowlist — granting the host is not the fix. No host → None."""
         if not host:
-            return
+            return None
         entry = {
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             "method": "",
@@ -1236,13 +1272,27 @@ class Injector:
             "replayed": False,
             "blocked": True,
         }  # fmt: skip
+        if mismatch:
+            entry["mismatch"] = True
         if request is not None:
+            entry["method"] = str(request.method)
+            if request.method != "CONNECT":
+                entry["path"] = str(request.path)[:200]
             ua = _user_agent(request)
             if ua:
                 entry["ua"] = ua
             if self._trusted_build(request):
                 entry["build"] = True
-        self._write_entry(entry)
+        return entry
+
+    def _settle_answered(self, client_id: str | None) -> None:
+        """Write the refusal row an answered connection still owes (see ``_answered``), once."""
+        if client_id is None:
+            return
+        entry = self._answered.get(client_id)
+        if entry is not None:
+            self._answered[client_id] = None
+            self._write_entry(entry)
 
     def _log_held(self, flow: http.HTTPFlow, axis: str) -> None:
         """A row for a dummy the proxy answered itself (``held``: the axis at rest) —
@@ -1314,10 +1364,22 @@ class Injector:
 
     def http_connect(self, flow: http.HTTPFlow) -> None:
         """The egress wall for proxied HTTPS. The box reaches every HTTPS host through an explicit
-        CONNECT to this proxy, and this hook fires on that CONNECT BEFORE any tunnel/TLS — so
-        answering it with a 403 refuses the host outright (no upstream dialled, no TLS handshake,
-        ``tls_clienthello`` never runs for it). Only the default-deny wall lives here; the
-        decrypt-vs-passthrough choice is still ``tls_clienthello``'s job for hosts we DO allow.
+        CONNECT to this proxy, and this hook fires on that CONNECT BEFORE any tunnel/TLS. The
+        decrypt-vs-passthrough choice is ``tls_clienthello``'s job for hosts we DO allow.
+
+        A refused host on :443 is not refused HERE: the proxy answers the CONNECT itself (a 200,
+        which also skips mitmproxy's eager upstream dial — no packet reaches the host), decrypts
+        the tunnel, and refuses each request inside with the 403 — so its row names the method,
+        path and User-Agent rather than only ``CONNECT host``. Nothing can leave that tunnel:
+        ``_on_request`` refuses every request, and ``server_connect`` refuses any dial to an
+        ungranted host whichever layer attempts it. Two layers DO attempt one: the ClientHello
+        (mitmproxy's eager strategy handshakes the upstream before the client, and its TlsConfig
+        sets that after this addon's ``tls_clienthello`` runs, so no script can turn it off) and
+        a client that speaks raw TCP past the 200. The refused dial never opens a socket, and
+        mitmproxy then completes the client's handshake with our certificate anyway. A client
+        that doesn't trust our CA fails that handshake and gets the CONNECT row.
+        Refused at CONNECT still, with the readable 403: another port (no request to read in a
+        non-TLS tunnel), and a build (``fy-build`` in Proxy-Authorization) — it has no CA.
 
         The PORT is fenced too: a host grant means ``host:443``. CONNECT is a raw TCP tunnel — a
         client that speaks something other than TLS through it is relayed as-is — so a bare host
@@ -1330,12 +1392,14 @@ class Injector:
         port = flow.request.port
         if _claim_mismatch(flow.request):
             flow.response = http.Response.make(403, _MISMATCH_BODY)
-            self._log_blocked(host if port == _HTTPS_PORT else f"{host}:{port}", flow.request)
+            key = host if port == _HTTPS_PORT else f"{host}:{port}"
+            self._log_blocked(key, flow.request, mismatch=True)
             return
-        if self._connect_ok(host, port) or (
-            self._trusted_build(flow.request) and self._build_granted(host, port, _HTTPS_PORT)
-        ):
+        build = self._trusted_build(flow.request)
+        if self._connect_ok(host, port) or (build and self._build_granted(host, port, _HTTPS_PORT)):
             self._note_build(flow)
+            if not self._dial_ok(host, port, build):
+                self._answer_connect(flow, None)  # held/overlaps: answered in the proxy, never sent
             return
         key = host if port == _HTTPS_PORT else f"{host}:{port}"
         if not self.default_deny:
@@ -1344,8 +1408,65 @@ class Injector:
             self._log_would_block(key, flow.request)
             self._note_build(flow)
             return
+        if (
+            host
+            and port == _HTTPS_PORT
+            and not _is_build_marker(flow.request.headers.get("Proxy-Authorization"))
+        ):
+            self._answer_connect(flow, self._blocked_entry(key, flow.request))
+            return
         flow.response = http.Response.make(403, _REFUSED_BODY)
         self._log_blocked(key, flow.request)
+
+    def _answer_connect(self, flow: http.HTTPFlow, owed: dict | None) -> None:
+        """Establish the tunnel in the proxy, without an upstream: mitmproxy dials eagerly only
+        when the CONNECT has no response yet. The 200 is mitmproxy's own (no headers — a
+        Content-Length on a CONNECT 200 breaks some clients); ``owed`` is the row the connection
+        logs if no request inside it is refused (see ``_answered``)."""
+        response = http.Response.make(200, b"")
+        response.headers.pop("content-length", None)
+        flow.response = response
+        client = getattr(flow, "client_conn", None)
+        if client is not None:
+            self._answered[client.id] = owed
+
+    def _dial_ok(self, host: str | None, port: int, build: bool) -> bool:
+        """May the proxy open a connection to ``host:port``? Every grant that lets a request or a
+        tunnel through, whichever hook judged it — the union of the CONNECT policy, the
+        cleartext one (a bare grant on :80), and, for a build, its build-scoped grants — so this
+        never refuses what the hooks allow, and never allows a host nothing grants. With the
+        wall observing, anything."""
+        if not self.default_deny:
+            return True
+        if self._allowed_connect(host, port) or (port == _HTTP_PORT and self._granted(host)):
+            return True
+        return build and (
+            self._build_granted(host, port, _HTTPS_PORT)
+            or self._build_granted(host, port, _HTTP_PORT)
+        )
+
+    def server_connect(self, data) -> None:
+        """The wall at the one place every upstream connection is opened: a dial to a host no
+        grant covers is cancelled (mitmproxy's documented ``server.error``) before any socket,
+        whichever layer asked for it. Inside a tunnel the proxy answered (``http_connect``) a dial
+        is expected — the ClientHello asks for one — and refused quietly: the connection's row is
+        the refused request's, or its CONNECT's when it ends without one. Anywhere else a hook
+        should have refused first, so the dial is logged as a refusal of its own."""
+        self.refresh()
+        address = getattr(data.server, "address", None)
+        if not address:
+            return
+        host, port = _norm_host(str(address[0])), int(address[1])
+        client_id = getattr(getattr(data, "client", None), "id", None)
+        build = client_id in self._build_clients or client_id in self._build_requesters
+        if self._dial_ok(host, port, build):
+            return
+        data.server.error = _DIAL_REFUSED
+        if client_id in self._answered:
+            return
+        key = host if port == _HTTPS_PORT else f"{host}:{port}"
+        self._log_blocked(key)
+        ctx.log.info(f"egress_proxy: refused a connection to {key} (not granted)")
 
     def _trusted_build(self, request) -> bool:
         """Did this request present a LIVE build secret (not just the public marker)?"""
@@ -1394,7 +1515,10 @@ class Injector:
         }
 
     def client_disconnected(self, client) -> None:
+        self._settle_answered(client.id)  # its CONNECT row, if nothing inside was refused
+        self._answered.pop(client.id, None)
         self._build_clients.discard(client.id)
+        self._build_requesters.discard(client.id)
         self._conns.pop(client.id, None)
 
     def _tunnel(self, target: str | None, build: bool) -> bool:
@@ -1479,6 +1603,11 @@ class Injector:
             hooks log the decrypted request.
         """
         self.refresh()
+        client = getattr(getattr(data, "context", None), "client", None)
+        if client is not None and client.id in self._answered:
+            # A tunnel the proxy answered itself (``http_connect``): decrypted, never blind — its
+            # requests are what the wall answers.
+            return
         # The target host: the SNI if the client sent one, else the CONNECT target address (a
         # client reaching a bare IP sends no SNI). We must identify the injector host either way,
         # so it's NEVER tunnelled — even when addressed by IP — or we couldn't rewrite its header.
@@ -1496,7 +1625,6 @@ class Injector:
             return
         if sni and dest and sni != dest:
             return  # names a host it isn't reaching: decrypt, so the request hooks judge it
-        client = getattr(getattr(data, "context", None), "client", None)
         conn = self._conns.get(client.id) if client is not None else None
         if client is not None and client.id in self._build_clients:
             data.ignore_connection = True  # a trusted build: it has no CA to verify ours with
@@ -1551,7 +1679,9 @@ class Injector:
             # Refused whether or not the wall enforces: never a legitimate forward-proxy request.
             flow.response = http.Response.make(403, _MISMATCH_BODY)
             flow.metadata["egress_proxy_blocked"] = True
-            self._log_blocked(host if port == default else f"{host}:{port}", flow.request)
+            key = host if port == default else f"{host}:{port}"
+            self._log_blocked(key, flow.request, mismatch=True)
+            self._owe_nothing(flow)
             return
         # Two switches on, both claiming this host and path, so neither injects: answer with the
         # fix rather than send the dummy to draw a 401. Before the wall, like the held answer
@@ -1575,16 +1705,21 @@ class Injector:
             return
         # The egress wall for plain HTTP (cleartext never CONNECTs, so http_connect can't catch it):
         # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host
-        # grant as CONNECT :22 — here, before it leaves the box. HTTPS is walled at http_connect.
-        allowed = self._allowed_plain(host, port, flow.request.scheme) or (
-            self._trusted_build(flow.request) and self._build_granted(host, port, default)
-        )
+        # grant as CONNECT :22 — here, before it leaves the box. Inside a tunnel http_connect
+        # answered for a refused host, this is where its HTTPS requests are refused.
+        allowed = self._allowed_plain(host, port, flow.request.scheme)
+        if not allowed and self._trusted_build(flow.request):
+            allowed = self._build_granted(host, port, default)
+            client = getattr(flow, "client_conn", None)
+            if allowed and client is not None:
+                self._build_requesters.add(client.id)  # so `server_connect` lets it dial
         if not allowed:
             key = host if port == default else f"{host}:{port}"
             if self.default_deny:
                 flow.response = http.Response.make(403, _REFUSED_BODY)
                 flow.metadata["egress_proxy_blocked"] = True  # so `response` doesn't re-log a 403
                 self._log_blocked(key, flow.request)
+                self._owe_nothing(flow)
                 return
             if flow.request.scheme != "https":
                 # Observing, cleartext: record it (HTTPS was already recorded at its CONNECT).
@@ -1610,6 +1745,13 @@ class Injector:
         flow.metadata["egress_proxy_injected"] = True
         if rule.query_param:  # redact what WAS written, whatever the rules are at log time
             flow.metadata["egress_proxy_redact"] = rule.query_param
+
+    def _owe_nothing(self, flow: http.HTTPFlow) -> None:
+        """A request refused inside a tunnel the proxy answered has logged its own row, which
+        says more than the CONNECT row its connection owed: that one is no longer written."""
+        client = getattr(flow, "client_conn", None)
+        if client is not None and client.id in self._answered:
+            self._answered[client.id] = None
 
     def _answer_mint_failure(
         self, flow: http.HTTPFlow, rule: _Rule, failure: _MintFailure, *, refused: bool = False

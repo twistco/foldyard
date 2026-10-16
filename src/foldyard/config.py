@@ -260,6 +260,17 @@ def _repo_root_ambient() -> Path:
     return (_git_toplevel(cur) or cur).resolve()
 
 
+def in_project() -> bool:
+    """Is there a foldyard project to act on? A bound :class:`Config`, an explicit
+    ``FOLDYARD_REPO``, or a ``foldyard.toml`` in CWD or above. NOT the git/CWD fallbacks
+    :func:`repo_root` keeps for code that already knows it's in one: a project verb run anywhere
+    else would act on a made-up project named after the directory, writing state for it."""
+    if _BOUND.get() is not None or os.environ.get("FOLDYARD_REPO"):
+        return True
+    cur = Path.cwd().resolve()
+    return any((d / "foldyard.toml").is_file() for d in (cur, *cur.parents))
+
+
 def repo_root() -> Path:
     """The consumer repo root. ``FOLDYARD_REPO`` wins (the recipes set it to
     ``justfile_directory()``); otherwise walk up from CWD to the ``foldyard.toml``
@@ -942,7 +953,7 @@ def proxy_default_deny_seed() -> str:
 def proxy_default_deny() -> bool:
     """``[proxy] enforce`` — when true the egress proxy ENFORCES the allowlist: any host
     that isn't allowed (by a live grant in the host-side allow-store, or as an injector host) is
-    REFUSED (403 at CONNECT / on the request). Absent ⇒ false: observe only, never blocks.
+    REFUSED (a 403, never a connection to it). Absent ⇒ false: observe only, never blocks.
     ``"learn"`` enforces too, until a launch verb opens its first learn window
     (:func:`proxy_default_deny_seed`). This key only SEEDS the answer — enforcement is host-owned
     from then on (``fy allow enforce``, see :func:`foldyard.allowlist.default_deny`), and the
@@ -1099,6 +1110,14 @@ def machine_runtime() -> str:
 LIMA_HOST_GATEWAY = "192.168.5.2"
 
 
+def wall_proxy_url() -> str:
+    """The proxy URL the walled VM's podman hands every container it creates (``HTTP_PROXY`` and
+    friends, and npm's pair): the host gateway and THIS PROJECT's main proxy port. VM-level, so
+    not per-worktree. One function for both sides: ``machine`` passes it to the wall script, and
+    ``fy doctor``'s ``stack container env`` row expects it in running containers."""
+    return f"http://{LIMA_HOST_GATEWAY}:{proxy_port_base()}"
+
+
 def host_alias() -> str:
     """The address a CONTAINER in the machine uses to reach the host-side foldyard daemons (egress
     proxy, gcp minter). Backend-dependent: under podman-machine, gvproxy publishes the host as
@@ -1165,12 +1184,14 @@ def box_image() -> dict:
         img = dict(img)
         img.setdefault("tag", f"{project_prefix()}-devbox:latest")
         return img
+    return packaged_box_image(f"{project_prefix()}-devbox:latest")
+
+
+def packaged_box_image(tag: str) -> dict:
+    """foldyard's packaged generic box under ``tag`` — project-free, so the base VM
+    (:mod:`foldyard.basevm`) can build the very image a project's ``box up`` would."""
     box_dir = Path(__file__).resolve().parent / "assets" / "box"
-    return {
-        "dockerfile": str(box_dir / "Dockerfile"),
-        "context": str(box_dir),
-        "tag": f"{project_prefix()}-devbox:latest",
-    }
+    return {"dockerfile": str(box_dir / "Dockerfile"), "context": str(box_dir), "tag": tag}
 
 
 def box_sock_in_vm() -> str:
@@ -1356,6 +1377,34 @@ def box_tools() -> list[dict]:
                     step["check"] = str(item["check"])
                 out.append(step)
     return out
+
+
+# A package name as the image's package manager reads it, plus the version pins they take
+# (`nodejs=20.*` for apt, `python3-3.12*` for dnf, `curl@edge` for apk). No whitespace or shell
+# metacharacters: the list is rendered into the layer's RUN line (quoted as well, belt and braces).
+_PACKAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+_:=~@*-]*")
+
+
+def box_packages() -> list[str]:
+    """System packages baked into a cached layer on top of the box image (``box._packages_layer``)
+    instead of reinstalled by every fresh box's bootstrap. Sorted and deduplicated, so reordering
+    the list rebuilds nothing. From ``[box].packages`` ([]); a name that isn't a package name is
+    refused, so a typo is a message rather than a failed build."""
+    raw = _box_table().get("packages")
+    if raw is None:
+        return []
+    names = [x for x in raw if isinstance(x, str)] if isinstance(raw, list) else []
+    if not isinstance(raw, list) or len(names) != len(raw):
+        raise SystemExit(
+            '✗ [box].packages must be a list of package names, e.g. packages = ["nodejs", "just"].'
+        )
+    if bad := [name for name in names if not _PACKAGE.fullmatch(name)]:
+        raise SystemExit(
+            f"✗ [box].packages: {', '.join(map(repr, bad))} isn't a package name "
+            "(letters, digits and . + _ : = ~ @ * -, starting with a letter or digit).\n"
+            "  Fix or remove it in [box].packages."
+        )
+    return sorted(set(names))
 
 
 def box_bootstrap() -> str:
@@ -1953,6 +2002,24 @@ def blocked_daemons_file() -> Path:
     ``<state_dir>/blocked-daemons.json``."""
     env = os.environ.get("FOLDYARD_BLOCKED_DAEMONS_FILE")
     return Path(env).expanduser() if env else state_dir() / "blocked-daemons.json"
+
+
+def supervisor_ready_file() -> Path:
+    """The supervisor's PROJECT-shared readiness record, rewritten each tick: its pid, the
+    worktrees it served and every job's state (``up`` · ``starting`` · ``blocked`` · ``failing``)
+    — what the launch paths wait on before anything uses a job (``supervisor.await_ready``).
+    ``FOLDYARD_SUPERVISOR_READY_FILE`` wins, else ``<state_dir>/supervisor-ready.json``."""
+    env = os.environ.get("FOLDYARD_SUPERVISOR_READY_FILE")
+    return Path(env).expanduser() if env else state_dir() / "supervisor-ready.json"
+
+
+def launches_dir() -> Path:
+    """One marker per host launch in progress (``<pid>.json``: the worktree it brings up), so the
+    supervisor serves that worktree before its box exists. Host state, outside the mount — the box
+    can't widen what the supervisor reconciles. ``FOLDYARD_LAUNCHES_DIR`` wins, else
+    ``<state_dir>/launches``."""
+    env = os.environ.get("FOLDYARD_LAUNCHES_DIR")
+    return Path(env).expanduser() if env else state_dir() / "launches"
 
 
 def _host_table() -> dict:

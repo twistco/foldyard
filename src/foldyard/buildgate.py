@@ -23,6 +23,12 @@ it: the box used to present it to turn a decrypted request into a hostname-only 
 remains is one build's window (ADR-0029): the box can read a running build's secret through the
 engine socket.
 
+A build can also fail with NOTHING refused at the proxy: a tool that ignores the proxy env (Node's
+own fetch without NODE_USE_ENV_PROXY — corepack ≥ 0.35 is one) dials out directly, and the VM
+firewall refuses it before the proxy could log a row. The guest keeps those refusals readable
+without root (``machine.wall_denies``), so a failed build names them too: the destination IP and
+port, the tool to look for, and why there is nothing to grant.
+
 In the box the gate stays out of the way: grants are host-side and the log is outside the mount.
 An in-box build IS the box, so it gets the plain proxy URL: decrypted like any box request (its
 steps trust the proxy CA through the walled VM's runtime wrapper), on runtime grants only.
@@ -36,6 +42,7 @@ import os
 import secrets
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -136,6 +143,61 @@ def _refusals(since: datetime) -> list[dict]:
     return allowlist.build_refusals(allowlist.read_log_rows(paths), since)
 
 
+# The wall's report is a ring of recent refusals; a build is measured by where it stood before.
+_Mark = tuple[str, int] | None
+# How long a failed build waits before reading it: a tool's last refusals land just before it
+# exits, and the guest writes them a moment after the kernel logs them (seen live, 2026-10-16).
+WALL_SETTLE_SECONDS = 1.0
+
+
+def _wall_mark() -> _Mark:
+    """Where the guest's refusal report stands now: ``(boot, last seq)``, ``("", -1)`` for an
+    empty report, ``None`` when there is no report to read (then a build is never blamed)."""
+    from . import machine  # lazy: the VM module isn't needed unless a build runs
+
+    rows = machine.wall_denies()
+    if rows is None:
+        return None
+    if not rows:
+        return ("", -1)
+    return (str(rows[-1].get("boot", "")), rows[-1]["seq"])
+
+
+def _bypasses(mark: _Mark) -> list[dict]:
+    """The wall's refusals since ``mark``, by destination: ``{dst, port, proto, count}``, first
+    seen first. Anything walled in the VM counts — the build's steps, and the box meanwhile."""
+    from . import machine
+
+    if mark is None:
+        return []
+    time.sleep(WALL_SETTLE_SECONDS)
+    boot, seq = mark
+    out: dict[tuple, dict] = {}
+    for row in machine.wall_denies() or []:
+        if boot and row.get("boot") == boot and row["seq"] <= seq:
+            continue
+        key = (row["dst"], row.get("port"), row.get("proto") or "")
+        entry = out.setdefault(key, {"dst": key[0], "port": key[1], "proto": key[2], "count": 0})
+        entry["count"] += 1
+    return list(out.values())
+
+
+def _report_bypasses(bypassed: list[dict], what: str, echo: Callable[[str], None]) -> None:
+    total = sum(e["count"] for e in bypassed)
+    echo(
+        f"✗ the VM firewall refused {total} connection{'s' if total > 1 else ''} that skipped "
+        f"the proxy while the {what} ran:"
+    )
+    for e in bypassed:
+        where = f"{e['dst']}:{e['port']}" if e["port"] is not None else e["dst"]
+        proto = f"/{e['proto']}" if e["proto"] else ""
+        echo(f"    {where}{proto} ({e['count']}×)")
+    echo("  A tool ignored the proxy settings (HTTPS_PROXY), so the proxy never saw these and")
+    echo("  there is no host to grant. Usual suspects: Node's own fetch (foldyard sets")
+    echo("  NODE_USE_ENV_PROXY=1 in build steps, unless the image sets it itself), a")
+    echo("  postinstall script with its own HTTP client, a raw socket. More: `fy docs networking`.")
+
+
 def _describe(entry: dict) -> str:
     tool = f" · {entry['uas'][0]}" if entry["uas"] else ""
     return f"{entry['host']} ({entry['count']}×{tool})"
@@ -200,6 +262,7 @@ def _run(
     rc = 0
     for attempt in range(1, MAX_ATTEMPTS + 1):
         since = datetime.now(UTC).replace(microsecond=0)
+        mark = _wall_mark()
         rc = build()
         refused = _refusals(since)
         if rc == 0:
@@ -210,6 +273,9 @@ def _run(
                     "way"
                 )
             break
+        bypassed = _bypasses(mark)
+        if bypassed:
+            _report_bypasses(bypassed, what, echo)
         if not refused:
             break
         hosts = ", ".join(e["host"] for e in refused)

@@ -153,6 +153,18 @@ def isolated_port_registry(tmp_path, monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def isolated_base_vm_stamp(tmp_path, monkeypatch, request):
+    """Point the base VM's stamp (basevm.py) at a per-test file, so no test reads the operator's
+    real ~/.foldyard/base-vm.json and clones from their baked base. The live modules that drive
+    the real CLI get cloning switched OFF instead (no per-test path may reach them —
+    test_isolation_e2e.py): their VMs come from the template, as before the base existed."""
+    if _runs_the_real_cli(request.module):
+        monkeypatch.setenv("FOLDYARD_BASE_VM", "0")
+        return
+    monkeypatch.setenv("FY_BASE_VM_STAMP", str(tmp_path / "fy-base-vm.json"))
+
+
+@pytest.fixture(autouse=True)
 def isolated_allow_store(tmp_path, monkeypatch, request):
     """Point the egress allow-store + the effective file the proxy reads at per-test paths, so no
     test reads or writes the real ~/.foldyard/<project>/allow-store.json — and every test starts
@@ -200,6 +212,20 @@ def isolated_capability_state(tmp_path, monkeypatch, request):
     yield
     supervisor._probe_state.clear()
     supervisor._scope_unread_seen.clear()
+
+
+@pytest.fixture(autouse=True)
+def isolated_supervisor_readiness(tmp_path, monkeypatch, request):
+    """Point the supervisor's readiness record (written every tick) and the launch markers (written
+    by every `ensure_background`, read by every tick) at per-test paths: no test may write the
+    operator's real record, or have a live `fy box up`'s marker widen the worktrees it reconciles.
+
+    NOT for the live modules that drive the real CLI: the launcher and the supervisor it starts
+    must agree on both paths, and only the real ones are shared by construction."""
+    if _runs_the_real_cli(request.module):
+        return
+    monkeypatch.setenv("FOLDYARD_SUPERVISOR_READY_FILE", str(tmp_path / "supervisor-ready.json"))
+    monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path / "launches"))
 
 
 @pytest.fixture(autouse=True)

@@ -184,6 +184,35 @@ def stage_ca_for_box(checkout: str, here: str) -> Path | None:
     return staged
 
 
+def _node_proxy_args(proxy_url: str) -> list[str]:
+    """``-e`` args that route the Node ecosystem through the proxy, which the standard proxy
+    variables alone don't: Node's ``fetch()`` is undici, which ignores ``HTTPS_PROXY`` unless
+    ``NODE_USE_ENV_PROXY`` is set — it then goes direct, and the VM firewall refuses it with an
+    ``ECONNREFUSED`` against a raw IP that names no proxy — and a postinstall script fetching with
+    node-fetch (supabase's CLI download) reads only npm's own ``npm_config_https_proxy``.
+    ``NODE_USE_ENV_PROXY`` needs Node 24.0 / 22.21 or later; older Node ignores it (harmless, but
+    its ``fetch()`` still goes direct — docs/networking.md, "Node and npm", says what to do).
+
+    Defaults, not wiring (unlike ``HTTPS_PROXY``, which ``[box].env`` refuses): a name the
+    consumer's ``[box].env`` sets is left to it, the ``TZ`` rule — one value per key, so the winner
+    is never the engine's pick between two ``-e``. npm reads its settings case-insensitively, so
+    the consumer's spelling counts whatever its case. With ``NODE_USE_ENV_PROXY`` Node honours
+    ``NO_PROXY`` as curl does, so a stack name the box calls needs ``[proxy] no_proxy`` for Node
+    too. Stack containers get the npm pair from the walled VM's own defaults, but not
+    ``NODE_USE_ENV_PROXY`` (machine-wall.sh says why)."""
+    declared = {name.lower() for name in config.box_env()}
+    defaults = {
+        "NODE_USE_ENV_PROXY": "1",
+        "npm_config_https_proxy": proxy_url,
+        "npm_config_proxy": proxy_url,
+    }
+    args: list[str] = []
+    for name, value in defaults.items():
+        if name.lower() not in declared:
+            args += ["-e", f"{name}={value}"]
+    return args
+
+
 def _foldyard_src() -> Path | None:
     """The editable foldyard source dir (the one carrying pyproject.toml), so the doctor's reinstall
     fix can reinstall foldyard from source. None when foldyard isn't an editable from-source install
@@ -277,9 +306,17 @@ def _net_leaf(e: dict, escape) -> str:
     host + time — so it renders as a dim `tls` tunnel marker instead of a request line."""
     ts = escape(e.get("ts", "")[11:19])
     if e.get("blocked"):
-        # Refused by the default-deny egress wall — no upstream contacted. Red so it stands out as
-        # the row you act on (press the allow key in the TUI to let the host through).
-        return f"[dim]{ts}[/dim] [red]⛔ refused by the allowlist[/red]"
+        # Refused by the proxy — no upstream contacted. Red so it stands out as the row you act on
+        # (press the allow key in the TUI to let the host through). What was asked: a request's
+        # path (HTTPS on :443 is decrypted to refuse it, so it has one too); a CONNECT's target is
+        # its host[:port] — another port, a build, or a client that never sent a request through
+        # the tunnel (it doesn't trust our CA). Rows from before the method was logged show
+        # neither.
+        method = escape(e.get("method", ""))
+        target = escape((e.get("host", "") if method == "CONNECT" else e.get("path", ""))[:80])
+        asked = f"{method:<6} {target} " if method else ""
+        why = "its Host header names another host" if e.get("mismatch") else "not on the allowlist"
+        return f"[dim]{ts}[/dim] {asked}[red]403 ⛔ blocked — {why}[/red]"
     if e.get("held"):
         # The box sent a dummy (an agent's keyless one, or an [[inject]] row's box_env) with its
         # switch at rest: the proxy answered, nothing left.
@@ -631,6 +668,7 @@ class ProxyPlugin(Plugin):
         #     REAL cert, so a mitm-only bundle would reject them; the combined bundle trusts both.
         #     Routing requires the CA (decrypted/MITM'd flows are mitm-signed), so no CA with
         #     routing is a hard error — `machine up`'s `foldyard host` generates it on first run.
+        #     Node/npm need their own spellings of the route on top (`_node_proxy_args`).
         #
         # A dummy credential is the INJECTOR's concern ([[inject]] box_env, keyless), not the
         # proxy's.
@@ -688,6 +726,7 @@ class ProxyPlugin(Plugin):
             # its documented property, as env. `gcloud storage` (requests) needed nothing extra.
             "-e",
             f"CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE={BOX_CA_BUNDLE}",
+            *_node_proxy_args(f"http://{proxy}"),
         ]
 
     def _ever_rules(self, mode: dict) -> bool:

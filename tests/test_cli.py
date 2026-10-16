@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from foldyard import cli, devmode, supervisor
+from foldyard import cli, config, devmode, supervisor
 
 runner = CliRunner()
 
@@ -179,7 +179,7 @@ def test_callback_pins_worktree_from_cwd_inference(monkeypatch):
 
     monkeypatch.delenv("WORKTREE", raising=False)
     monkeypatch.setattr(config, "in_box", lambda: False)
-    monkeypatch.setattr(stack, "main_repo", lambda: __import__("pathlib").Path("/repo"))
+    monkeypatch.setattr(stack, "find_main_repo", lambda: __import__("pathlib").Path("/repo"))
     monkeypatch.setattr(stack, "worktrees_root", lambda m: __import__("pathlib").Path("/repo-wt"))
     monkeypatch.setattr(stack, "_active_worktree", lambda wt_root: "feat")
     cli._resolve_worktree(_callback_ctx())
@@ -191,7 +191,7 @@ def test_callback_treats_empty_worktree_as_unset(monkeypatch):
 
     monkeypatch.setenv("WORKTREE", "")
     monkeypatch.setattr(config, "in_box", lambda: False)
-    monkeypatch.setattr(stack, "main_repo", lambda: __import__("pathlib").Path("/repo"))
+    monkeypatch.setattr(stack, "find_main_repo", lambda: __import__("pathlib").Path("/repo"))
     monkeypatch.setattr(stack, "worktrees_root", lambda m: __import__("pathlib").Path("/repo-wt"))
     monkeypatch.setattr(stack, "_active_worktree", lambda wt_root: "feat")
     cli._resolve_worktree(_callback_ctx())
@@ -215,18 +215,32 @@ def test_callback_is_a_noop_in_the_box(monkeypatch):
     assert __import__("os").environ.get("WORKTREE") is None
 
 
-def test_callback_swallows_non_git_fallback(monkeypatch):
-    # From a non-git dir, stack.main_repo() raises SystemExit(1) — which is NOT an Exception. The
-    # best-effort pin must swallow it (not abort the fronted command) and leave WORKTREE unset.
+def test_callback_pin_is_silent_outside_git(monkeypatch, capsys):
+    # From a non-git dir the best-effort pin leaves WORKTREE unset, and SAYS nothing: it fronts
+    # every verb, so the "✗ not a git repository" main_repo() prints before exiting reached
+    # `fy --help`, `fy docs` and `uvx foldyard prereq` in a fresh directory.
     from foldyard import config, stack
 
     monkeypatch.delenv("WORKTREE", raising=False)
     monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(stack, "find_main_repo", lambda: None)
+    cli._resolve_worktree(_callback_ctx())  # must not raise
+    assert __import__("os").environ.get("WORKTREE") is None
+    assert capsys.readouterr().err == ""
 
-    def boom():
+
+def test_callback_swallows_a_failing_worktree_lookup(monkeypatch):
+    # SystemExit is NOT an Exception; the pin must swallow it rather than abort the verb.
+    from foldyard import config, stack
+
+    monkeypatch.delenv("WORKTREE", raising=False)
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(stack, "find_main_repo", lambda: Path("/repo"))
+
+    def boom(main):
         raise SystemExit(1)
 
-    monkeypatch.setattr(stack, "main_repo", boom)
+    monkeypatch.setattr(stack, "worktrees_root", boom)
     cli._resolve_worktree(_callback_ctx())  # must not raise
     assert __import__("os").environ.get("WORKTREE") is None
 
@@ -623,3 +637,116 @@ def test_importing_foldyard_does_not_read_install_metadata():
     assert "def __getattr__" in src
     top = [n for n in ast.parse(src).body if isinstance(n, ast.Import | ast.ImportFrom)]
     assert [ast.unparse(n) for n in top] == []
+
+
+# ── outside a project: help everywhere, the project-free verbs, one clear refusal ─────────
+
+
+@pytest.fixture
+def no_project(tmp_path, monkeypatch, fresh_config):
+    """A cwd that is neither a git repo nor under a foldyard.toml, as `uvx foldyard prereq` in a
+    fresh directory is. FOLDYARD_REPO is the explicit "this is the project" — unset here."""
+    cwd = tmp_path / "nowhere"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv("FOLDYARD_REPO", raising=False)
+    monkeypatch.delenv("WORKTREE", raising=False)
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    fresh_config()  # re-resolve from the new cwd
+    return cwd
+
+
+def _every_path(group=None, prefix=()):
+    import typer.main
+
+    group = group or typer.main.get_command(cli.app)
+    for name, sub in getattr(group, "commands", {}).items():
+        yield (*prefix, name)
+        yield from _every_path(sub, (*prefix, name))
+
+
+@pytest.mark.parametrize("path", sorted(_every_path()), ids=" ".join)
+def test_help_works_anywhere_and_says_nothing_else(no_project, path):
+    result = runner.invoke(cli.app, [*path, "--help"])
+    assert result.exit_code == 0, result.output
+    assert "Usage" in result.output
+    assert "not a git repository" not in result.output
+    assert "not in a foldyard project" not in result.output
+
+
+def test_a_bare_group_shows_its_help_outside_a_project(no_project):
+    result = runner.invoke(cli.app, ["machine"])
+    assert "Usage" in result.output and "not in a foldyard project" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("argv", "module", "fn"),
+    [
+        (["prereq"], "prereq", "run"),
+        (["docs"], "docs", "main"),
+        (["machine", "base", "status"], "basevm", "status"),
+        (["skill", "list"], "skills", "list_"),
+    ],
+)
+def test_project_free_verbs_run_outside_a_project(no_project, monkeypatch, argv, module, fn):
+    import importlib
+
+    from foldyard import basevm
+
+    ran = []
+    mod = importlib.import_module(f"foldyard.{module}")
+    stub = (
+        (lambda *a, **k: ran.append(True) or basevm.Status("ok", "stub"))
+        if module == "basevm"
+        else (lambda *a, **k: ran.append(True) or 0)
+    )
+    monkeypatch.setattr(mod, fn, stub)
+    result = runner.invoke(cli.app, argv)
+    assert ran == [True], result.output
+    assert "not a git repository" not in result.output
+    assert "not in a foldyard project" not in result.output
+
+
+def test_init_runs_outside_a_project(no_project):
+    result = runner.invoke(cli.app, ["init", "--name", "demo"])
+    assert result.exit_code == 0, result.output
+    assert (no_project / "foldyard.toml").is_file()
+    assert "not a git repository" not in result.output
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["mode"], ["doctor"], ["state"], ["up"], ["box", "up"], ["skill", "install", "x"], ["host"]],
+)
+def test_project_verbs_refuse_outside_a_project_and_write_nothing(no_project, argv):
+    from foldyard import ports
+
+    result = runner.invoke(cli.app, argv)
+    assert result.exit_code == 1
+    assert "not in a foldyard project" in result.output
+    assert "fy init" in result.output
+    assert "not a git repository" not in result.output
+    # The made-up project it used to run as left state behind: a mode file, a port band.
+    assert not ports.registry_file().exists()
+    assert list(no_project.iterdir()) == []
+
+
+def test_a_git_repo_without_foldyard_toml_is_not_a_project(no_project):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(no_project)], check=True)
+    result = runner.invoke(cli.app, ["mode"])
+    assert result.exit_code == 1 and "not in a foldyard project" in result.output
+
+
+def test_a_subdirectory_of_a_project_is_in_it(no_project, spy_devmode):
+    (no_project / "foldyard.toml").write_text('[project]\nname = "demo"\n')
+    sub = no_project / "src" / "deep"
+    sub.mkdir(parents=True)
+    import os
+
+    os.chdir(sub)
+    config.clear_caches()
+    result = runner.invoke(cli.app, ["mode"])
+    assert "not in a foldyard project" not in result.output
+    assert spy_devmode  # dispatched

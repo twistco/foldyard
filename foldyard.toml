@@ -92,7 +92,7 @@ recommend = [
   { host = "github.com", why = "git fetch/clone + release-asset redirects" },
   { host = "objects.githubusercontent.com", why = "GitHub release assets — uv-managed Python" },
   { host = "release-assets.githubusercontent.com", why = "GitHub release assets (newer host)" },
-  { host = "deb.debian.org", why = "apt — [[box.tools]] system packages" },
+  { host = "deb.debian.org", why = "apt — the [box].packages layer's system packages" },
   { host = "registry-1.docker.io", why = "box image build — base image manifest/blobs" },
   { host = "auth.docker.io", why = "box image build — Docker Hub auth token" },
   { host = "production.cloudfront.docker.com", why = "box image build — Docker Hub blob CDN" },
@@ -204,50 +204,28 @@ warmup = [{ dir = ".", run = "uv sync --frozen" }]
 env = { UV_LINK_MODE = "copy", UV_FROZEN = "1" }
 caches = [{ volume = "foldyard-uv-cache", path = ".cache/uv" }]   # path is under HOME
 #
-# Consumer tools installed once per fresh box, as MONITORED steps (reported ✓/✗):
+# System packages, baked ONCE into a cached layer on the box image (`<tag>-packages`) rather
+# than reinstalled by every fresh box's bootstrap. Each, and why:
+#   • nodejs — `uv run pyright` (the `just typecheck` recipe) needs a Node runtime: the pyright
+#     PyPI package is a thin wrapper that BUNDLES the pyright JS inside its wheel and prefers a
+#     global `node` from PATH (PYRIGHT_PYTHON_GLOBAL_NODE defaults on). Without one it falls
+#     back to nodeenv, which fetches a node tarball from nodejs.org — denied by the wall.
+#     Debian's nodejs (v20) satisfies it outright: no npm, no registry.npmjs.org grant (only
+#     the PYRIGHT_PYTHON_FORCE_VERSION escape hatch would npm-install a non-bundled version),
+#     and the wrapper's update check uses the already-granted pypi.org JSON API with a 1s
+#     timeout that fails silent.
+#   • just — how DEVELOPMENT.md tells you to run everything (`just check`, `just test`,
+#     `just build`); the packaged generic box has no task runner, so without it every one of
+#     those instructions was a dead end in here. Debian trixie ships it (1.40).
+#   • unzip — for inspecting a built wheel: `just build`'s own comment tells you to run
+#     `unzip -l dist/*.whl` to see which docs got force-included, the one check that catches a
+#     `fy docs <topic>` shipping 404 to consumers while resolving fine from source.
+packages = ["nodejs", "just", "unzip"]
+#
+# Other tools, installed once per fresh box, as MONITORED steps (reported ✓/✗):
 # [[box.tools]]
 # name = "pulumi"
 # install = "curl -fsSL https://get.pulumi.com | sh -s -- --install-root /opt/fy-tools --no-edit-path"
-
-# The packaged box image drops its apt lists (`rm -rf /var/lib/apt/lists/*` after its own
-# installs, the usual image hygiene), so the apt steps below need them fetched ONCE first —
-# without this, each of them failed with `Unable to locate package` on every fresh box.
-[[box.tools]]
-name = "apt-lists"
-check = "ls /var/lib/apt/lists/*Packages >/dev/null 2>&1"
-install = "apt-get update -qq"
-
-# `uv run pyright` (the `just typecheck` recipe) needs a Node runtime: the pyright PyPI
-# package is a thin wrapper that BUNDLES the pyright JS inside its wheel and prefers a
-# global `node` from PATH (PYRIGHT_PYTHON_GLOBAL_NODE defaults on). Without one it falls
-# back to nodeenv, which fetches a node tarball from nodejs.org — denied by the wall.
-# Debian's nodejs (v20) satisfies it outright, so this is the whole fix: no npm, no
-# registry.npmjs.org grant (only the PYRIGHT_PYTHON_FORCE_VERSION escape hatch would npm-
-# install a non-bundled version), and the wrapper's update check uses the already-granted
-# pypi.org JSON API with a 1s timeout that fails silent. Verified in-box: apt nodejs alone
-# takes `uv run pyright` from the nodeenv RuntimeError to a clean run.
-[[box.tools]]
-name = "nodejs-for-pyright"
-check = "command -v node"
-install = "apt-get install -y --no-install-recommends nodejs"
-
-# `just` is how DEVELOPMENT.md tells you to run everything (`just check`, `just test`,
-# `just build`), and the packaged generic box has no task runner — so every one of those
-# instructions was a dead end from inside the box, and an agent in here had to reverse the
-# recipes into raw uv commands. Debian trixie ships it (1.40), so this costs one apt package
-# and no new egress grant.
-[[box.tools]]
-name = "just"
-check = "command -v just"
-install = "apt-get install -y --no-install-recommends just"
-
-# `unzip` for inspecting a built wheel — `just build`'s own comment tells you to run
-# `unzip -l dist/*.whl` to see which docs got force-included, and that is the one check that
-# catches a `fy docs <topic>` shipping 404 to consumers while resolving fine from source.
-[[box.tools]]
-name = "unzip"
-check = "command -v unzip"
-install = "apt-get install -y --no-install-recommends unzip"
 
 #
 # VS Code attach (`fy code`). Declaring this table mounts the persisted vscode-server volume so

@@ -19,6 +19,7 @@ consumes). ``recreate`` is interactive, so it talks on stdout.
 from __future__ import annotations
 
 import hashlib
+import json
 import shlex
 import subprocess
 import sys
@@ -392,8 +393,7 @@ def _render_provisioning() -> tuple[str, str]:
     recording)."""
     ca = None
     if config.machine_wall():
-        gw = config.LIMA_HOST_GATEWAY
-        args = ["install", gw, _wall_ports(), f"http://{gw}:{config.proxy_port_base()}"]
+        args = ["install", config.LIMA_HOST_GATEWAY, _wall_ports(), config.wall_proxy_url()]
         ca = _guest_ca()
         if ca is not None:
             args.append(_GUEST_CA_PATH)
@@ -451,6 +451,40 @@ def _guest_state() -> tuple[str, bool, bool]:
     except (OSError, subprocess.SubprocessError):
         return ("", False, False)
     return (state, active, masked)
+
+
+# The wall's recent refusals, written by the guest's fy-wall-denies unit (machine-wall.sh): a
+# connection that ignored the proxy env, which the proxy therefore never logged.
+_DENIES_PATH = "/run/fy-wall/denies.jsonl"
+
+
+def wall_denies() -> list[dict] | None:
+    """The walled guest's recent refusals, oldest first — each ``{boot, seq, chain, dst, proto,
+    port}``, ``seq`` the kernel log's own sequence number within ``boot`` — read WITHOUT root.
+    ``None`` when there is no report to read: not a walled Lima VM, the VM unreachable, or a guest
+    provisioned before the reporter. Diagnosis only: nothing decides on it."""
+    if BACKEND.name != "lima" or not config.machine_wall():
+        return None
+    try:
+        out = subprocess.run(
+            ["limactl", "shell", MACHINE, "--", "cat", _DENIES_PATH],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    rows = []
+    for line in out.stdout.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and isinstance(row.get("seq"), int) and row.get("dst"):
+            rows.append(row)
+    return rows
 
 
 def _record_provisioning() -> None:
@@ -529,7 +563,6 @@ def ensure(main: Path, wt_root: Path) -> None:
     if not exists():
         _err(f"▶ {BACKEND.name} machine '{MACHINE}' not found — initialising (rootless; mounts")
         _err(f"  ONLY {main} and {wt_root})…")
-        _err("  (one-time, a few minutes: downloads the VM image + provisions disk)")
         if not BACKEND.create(MACHINE, _resources(), _volumes(main, wt_root)):
             _err(
                 f"✗ creating {BACKEND.name} machine '{MACHINE}' failed — see the output above. "

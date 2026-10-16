@@ -318,7 +318,7 @@ enforce = "learn"
 ```
 
 - **`enforce`** — where the allowlist *starts*:
-  - `true` — refuse any host not granted (403 at CONNECT) from the first run.
+  - `true` — refuse any host not granted (a 403, and no connection to it) from the first run.
   - `"learn"` — the first `fy up`/`fy box up` opens a one-hour learn window: nothing is refused,
     every host that *would* be is recorded with the client's User-Agent, and enforcement turns
     on by itself when the window ends. `fy allow learn` then grants what it recorded in one
@@ -601,6 +601,7 @@ so a stack-less project can `fy box up` with no Dockerfile.
 ```toml
 [box]
 image = { dockerfile = "box.Dockerfile", tag = "acme-box:latest" }
+packages = ["postgresql-client", "just"]
 shadow_volumes = ["web/node_modules"]
 caches = [{ volume = "shared-pnpm", path = ".local/share/pnpm" }]
 warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
@@ -610,6 +611,15 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   `dockerfile` is repo-root-relative; `context` defaults to the repo root; `tag` to
   `<prefix>-devbox:latest`; `target` picks a multi-stage stage. The image needs an engine client
   and git; foldyard adds its own pieces (socket, CLI, proxy CA) at box-up.
+- **`packages`** — system packages for the box, baked into a cached image layer on top of
+  `image` (tagged `<tag>-packages`). It is built once and reused, so a recreated box doesn't
+  reinstall them through the egress wall, and it is rebuilt when the list changes, when the
+  base image is rebuilt, or by `fy box build`. The layer uses whichever package manager the
+  image has (`apt-get`, `apk`, `dnf`, `microdnf`, `yum`, `zypper`, `pacman`) and fails the
+  build if it has none; the names are that manager's, for the image you chose (the packaged box
+  is Debian). Order doesn't matter. A box already running from the bare image keeps it until
+  `fy box down && fy box up`. Packages are frozen at build time, so run `fy box build` to pick
+  up the distro's updates. Default: `[]`.
 - **`sock_in_vm`** — the rootless podman socket inside the VM, mounted as the box's
   `/var/run/docker.sock`. Default: the backend's own. Env: `PODMAN_SOCK_IN_VM`. Rarely needed.
 - **`shadow_volumes`** — in-tree dirs (checkout-relative) covered by per-box named volumes. Works
@@ -628,7 +638,10 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   like. An override would quietly undo the box's wiring, and the refusal names the setting to use
   instead where there is one. A key must be a plain name (`[A-Za-z_][A-Za-z0-9_]*`). It does override the clock settings the box takes from your
   computer: `TZ`, your timezone, and `LC_TIME`, your time locale, which decides a 12- or 24-hour
-  clock. Set `TZ = "UTC"` here to keep the box on UTC. `LC_TIME` is passed only when the image has that locale (`locale -a`),
+  clock. Set `TZ = "UTC"` here to keep the box on UTC. It also overrides the Node and npm proxy
+  settings a box routed through the proxy gets by default — `NODE_USE_ENV_PROXY=1`,
+  `npm_config_https_proxy` and `npm_config_proxy` ([networking.md](./networking.md#node-and-npm)).
+  `LC_TIME` is passed only when the image has that locale (`locale -a`),
   because a missing one does nothing and makes perl warn on every run, and never under an
   `LC_ALL` (the image's or this table's), which would override it. Debian images add it with
   the `locales` package and `localedef -i en_GB -f UTF-8 en_GB.UTF-8`. `date` and `ls -l` need
@@ -636,7 +649,8 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   when the box is created, so `fy box down && fy box up` picks up a change.
 - **`[[box.tools]]`** — one-time tool installs, run as bootstrap steps reported ✓/✗:
   `{ name, install, check? }`. `check` is a shell test that skips the install when it succeeds;
-  default `command -v <name>`.
+  default `command -v <name>`. These run on every newly created box; a distro package belongs in
+  `packages` instead, which installs once.
 
   ```toml
   [[box.tools]]
@@ -644,8 +658,9 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   install = "curl -fsSL https://get.pulumi.com | sh -s -- --install-root /opt/fy-tools --no-edit-path"
   ```
 
-  The packaged box image ships no apt package lists, so a bare `apt-get install` fails with
-  `Unable to locate package`. Add the lists as the first step:
+  The packaged box image ships no apt package lists, so a bare `apt-get install` in a step
+  fails with `Unable to locate package` (`packages` fetches its own). Add the lists as the first
+  step:
 
   ```toml
   [[box.tools]]

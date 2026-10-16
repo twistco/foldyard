@@ -69,14 +69,21 @@ def main_repo() -> Path:
     function of CWD, which no foldyard process ever changes (no ``os.chdir`` in the package), so
     one resolution per process is correct. Tests that relocate the repo clear it via
     ``config.clear_caches()``."""
+    found = find_main_repo()
+    if found is None:
+        _err("✗ not a git repository")
+        raise SystemExit(1)
+    return found
+
+
+def find_main_repo() -> Path | None:
+    """:func:`main_repo` for a caller that only wants to know: ``None`` outside a git repo, and
+    nothing printed (the CLI's up-front worktree pin runs before every verb, `--help` included)."""
     out = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"])
     if out.returncode == 0 and out.stdout.strip():
         return Path(out.stdout.strip()).parent
     out = _run(["git", "rev-parse", "--show-toplevel"])
-    if out.returncode != 0:
-        _err("✗ not a git repository")
-        raise SystemExit(1)
-    return Path(out.stdout.strip())
+    return Path(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip() else None
 
 
 def worktrees_root(main: Path) -> Path:
@@ -861,6 +868,8 @@ def up() -> int:
     from . import supervisor
 
     supervisor.ensure_background()
+    if not supervisor.await_ready():  # its jobs run before anything (a build) uses them
+        return 1
     # Gated AFTER the machine + supervisor, unlike the other stack verbs: a box-only consumer's
     # `fy up` is how both come up (the note below then points at `fy box up`).
     if (rc := stack_declared("up", "fy box up")) is not None:
@@ -875,8 +884,6 @@ def up() -> int:
         ctx.env["FOLDYARD_CHECKOUT"],
         ctx.env.get("HERE") or config.dev_vm_rel(),
     )
-    # The supervisor is already coming up in parallel with the slow build, so the proxy + its CA
-    # exist by the time a box is created.
     # Span every profile that already has RUNNING services (e.g. the data workers from
     # `just data-up`), so an `up` after a posture change re-renders THEIR config too instead
     # of leaving them on the old identity/env. No extras → plain COMPOSE_PROFILES behaviour.
@@ -1814,7 +1821,9 @@ def logs(svc: list[str]) -> int:
         return rc
     if not engine_reachable("follow"):
         return 0
-    return _compose(resolve(), ["logs", "-f", "-n", "50", *svc])
+    # `--tail`, not `-n`: docker compose reads `-n` as --tail, but podman-compose reads it as
+    # its value-less --names, which made the 50 a service name.
+    return _compose(resolve(), ["logs", "-f", "--tail", "50", *svc])
 
 
 def shell() -> int:

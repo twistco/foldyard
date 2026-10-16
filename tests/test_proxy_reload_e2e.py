@@ -123,6 +123,7 @@ def _tunnel(rig, trust: Path) -> ssl.SSLSocket:
         reply += raw.recv(4096)
     assert reply.startswith(b"HTTP/1.1 200"), reply
     tls = ssl.create_default_context(cafile=str(trust))
+    tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.check_hostname = False
     return tls.wrap_socket(raw, server_hostname=HOST)
 

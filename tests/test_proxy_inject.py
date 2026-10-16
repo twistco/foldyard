@@ -209,6 +209,37 @@ def _write_allow(path: Path, allow: list[str], default_deny: bool = True) -> Non
     path.write_text(json.dumps({"default_deny": default_deny, "allow": allow}) + "\n")
 
 
+def _dial(inj, host: str, port: int = 443, client_id: str = "client-1") -> str | None:
+    """Ask ``server_connect`` about a dial, as mitmproxy does before opening one: the error it
+    set (the dial cancelled), or None (let through)."""
+    data = types.SimpleNamespace(
+        server=types.SimpleNamespace(address=(host, port), error=None),
+        client=types.SimpleNamespace(id=client_id),
+    )
+    inj.server_connect(data)
+    return data.server.error
+
+
+def _answered(inj, flow) -> bool:
+    """The proxy answered this CONNECT itself — a 200 with no Content-Length, which mitmproxy
+    takes as "established" and so dials nothing eagerly — and no grant lets its target be dialled.
+    (The check writes the refusal row the connection owed, as a refused dial does.)"""
+    response = flow.response
+    return (
+        response is not None
+        and response.status_code == 200
+        and "content-length" not in response.headers
+        and flow.client_conn.id in inj._answered
+        and _dial(inj, flow.request.host, flow.request.port, flow.client_conn.id) is not None
+    )
+
+
+def _walled(inj, flow) -> bool:
+    """The wall holds this CONNECT: refused outright (403), or answered with nothing dialled."""
+    response = flow.response
+    return response is not None and (response.status_code == 403 or _answered(inj, flow))
+
+
 @pytest.fixture
 def walled(gh, monkeypatch, tmp_path):
     """A capture-only Injector with the default-deny wall ON, reading a writable ALLOW_FILE.
@@ -1222,25 +1253,92 @@ def test_drop_streaming_notice_but_keeps_the_rest(gh):
 # ── the default-deny egress wall (DEFAULT_DENY + ALLOW_FILE) ──────────────────────────────
 
 
-def test_default_deny_blocks_a_disallowed_https_connect_and_passes_allowed(walled):
-    # The wall lives in http_connect: a host not in ALLOW_FILE is refused with a 403 at CONNECT
-    # (no upstream dialled), an allowed host (exact or *.suffix) tunnels through untouched.
+async def test_default_deny_answers_a_refused_https_connect_and_refuses_the_request(walled):
+    # A host not in ALLOW_FILE: the proxy answers its CONNECT itself (no upstream dialled),
+    # decrypts the tunnel without waiting on an upstream handshake, and refuses the request
+    # inside — so the row names what was asked, not only `CONNECT host`.
     inj, allow, log = walled
     _write_allow(allow, ["good.example.com", "*.trusted.dev"])
 
-    blocked = _Flow("evil.example.com")
+    blocked = _Flow("evil.example.com", method="CONNECT", path="")
+    blocked.response = None
     inj.http_connect(blocked)
-    assert blocked.response is not None and blocked.response.status_code == 403
+    assert blocked.response is not None and blocked.response.status_code == 200
+    assert "content-length" not in blocked.response.headers
+    assert not log.exists()  # owed, not written: the request inside says more
+
+    hello = _ClientHello("evil.example.com")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is False  # decrypted, never blind
+    # Its ClientHello asks for the upstream (mitmproxy's eager strategy): refused, no row yet.
+    assert _dial(inj, "evil.example.com") is not None
+    assert not log.exists()
+
+    request = _Flow("evil.example.com", method="POST", path="/v1/upload")
+    request.request.headers["user-agent"] = "curl/8.5"
+    request.response = None
+    await inj.requestheaders(request)
+    assert request.response is not None and request.response.status_code == 403
+    assert b"fy allow add" in request.response.content  # the readable refusal, inside the tunnel
     entry = _last_log(log)
-    assert (
-        entry["host"] == "evil.example.com" and entry["blocked"] is True and entry["status"] == 403
-    )
+    assert entry["host"] == "evil.example.com" and entry["blocked"] is True
+    assert entry["status"] == 403 and "mismatch" not in entry
+    assert (entry["method"], entry["path"], entry["ua"]) == ("POST", "/v1/upload", "curl/8.5")
+
+    inj.client_disconnected(blocked.client_conn)
+    assert len(_rows(log)) == 1  # the CONNECT row was replaced, not added to
+    assert _dial(inj, "evil.example.com") is not None  # and nothing can dial it
 
     for ok in ("good.example.com", "api.trusted.dev"):
         f = _Flow(ok)
         f.response = None  # an allowed host must NOT be short-circuited
         inj.http_connect(f)
-        assert f.response is None  # tunnel proceeds (exact + glob both allowed)
+        assert f.response is None  # tunnel proceeds (exact + glob both allowed), dialled eagerly
+        assert _dial(inj, ok) is None
+
+
+def test_a_refused_tunnel_with_no_request_logs_its_connect(walled):
+    # A client that doesn't trust our CA fails the handshake; one that speaks raw TCP reaches the
+    # dial, which is refused (quietly — every ClientHello asks for one too). Either way no
+    # request was seen: the CONNECT row is written when the connection ends, once.
+    inj, _allow, log = walled
+    for client_id, ends in (("no-ca", "disconnect"), ("raw-tcp", "dial")):
+        f = _Flow("evil.example.com", method="CONNECT", path="")
+        f.client_conn = types.SimpleNamespace(id=client_id)
+        f.request.headers["user-agent"] = "git/2.43"
+        f.response = None
+        inj.http_connect(f)
+        if ends == "dial":
+            assert _dial(inj, "evil.example.com", client_id=client_id) is not None
+        inj.client_disconnected(f.client_conn)
+        rows = [r for r in _rows(log) if r.get("ua") == "git/2.43"]
+        assert len(rows) == (2 if ends == "dial" else 1), ends  # one per connection
+        row = rows[-1]
+        assert row["blocked"] is True and row["host"] == "evil.example.com"
+        assert (row["method"], row["path"]) == ("CONNECT", "")
+
+
+def test_a_dial_no_grant_covers_is_refused_whoever_asks(walled):
+    # The backstop: `server_connect` sees every upstream connection mitmproxy opens. A host
+    # granted on :443 dials on :443 only; a bare grant also covers cleartext :80; a port grant
+    # that port. Anything else is cancelled and logged, even with no CONNECT behind it.
+    inj, allow, log = walled
+    _write_allow(allow, ["good.example.com", "db.example.com:5432"])
+    assert _dial(inj, "good.example.com", 443) is None
+    assert _dial(inj, "good.example.com", 80) is None
+    assert _dial(inj, "db.example.com", 5432) is None
+    for host, port in (
+        ("good.example.com", 22),
+        ("evil.example.com", 443),
+        ("db.example.com", 443),
+    ):
+        assert _dial(inj, host, port, client_id=f"{host}:{port}") is not None, (host, port)
+    assert _last_log(log)["host"] == "db.example.com" and _last_log(log)["blocked"] is True
+
+
+def test_with_the_wall_observing_every_dial_goes_out(observing):
+    inj, _allow, _log = observing
+    assert _dial(inj, "anywhere.example.com", 22) is None
 
 
 def test_a_host_grant_covers_443_only_and_the_blocked_row_names_the_port(walled):
@@ -1276,7 +1374,10 @@ def test_a_host_port_grant_opens_exactly_that_port(walled):
         inj.http_connect(f)
         assert f.response is None, (host, port)
 
-    for host, port in (("github.com", 443), ("gitlab.com", 22), ("internal.example", 8443)):
+    github = _Flow("github.com", port=443)
+    inj.http_connect(github)
+    assert _answered(inj, github)  # :443 — answered, its requests refused inside
+    for host, port in (("gitlab.com", 22), ("internal.example", 8443)):
         f = _Flow(host, port=port)
         inj.http_connect(f)
         assert f.response is not None and f.response.status_code == 403, (host, port)
@@ -1509,6 +1610,7 @@ def test_a_connect_is_judged_on_its_target_not_its_host_header(gh, monkeypatch, 
     assert f.response is not None and f.response.status_code == 403
     entry = _last_log(log)
     assert entry["host"] == "elsewhere.example" and entry["blocked"] is True
+    assert entry["mismatch"] is True  # not the allowlist: the TUI must not offer a grant for it
 
 
 async def test_a_request_naming_another_host_is_refused_and_gets_no_credential(injector):
@@ -1544,12 +1646,13 @@ async def test_host_comparison_ignores_case_and_the_root_dot(injector):
 async def test_default_deny_blocks_plain_http_in_the_request_hook(walled):
     # Cleartext HTTP never CONNECTs, so http_connect can't catch it — the wall also guards `request`.
     inj, _allow, log = walled
-    f = _Flow("plain.example.com")
+    f = _Flow("plain.example.com", method="POST", path="/upload?id=7", port=80, scheme="http")
     await inj.request(f)
     assert f.response is not None and f.response.status_code == 403
     assert f.metadata.get("egress_proxy_blocked") is True  # so `response` won't re-log it as a 403
     entry = _last_log(log)
     assert entry["host"] == "plain.example.com" and entry["blocked"] is True
+    assert entry["method"] == "POST" and entry["path"] == "/upload?id=7"  # cleartext: all of it
 
 
 async def test_a_refused_plain_http_request_is_logged_once(walled):
@@ -1596,7 +1699,7 @@ def test_malformed_allow_file_fails_closed(gh, monkeypatch, tmp_path):
     f = _Flow("anything.example.com")
     f.response = None
     inj.http_connect(f)
-    assert f.response is not None and f.response.status_code == 403  # corrupt file → still blocks
+    assert _walled(inj, f)  # corrupt file → still blocks
 
 
 # ── the minter's environment is an ALLOWLIST, not an inheritance ───────────────────────
@@ -1723,7 +1826,8 @@ def test_an_unmarked_refusal_is_not_attributed_to_a_build(walled):
     connect = _Flow("evil.example.com")
     connect.response = None
     inj.http_connect(connect)
-    assert "build" not in _last_log(log)
+    inj.client_disconnected(connect.client_conn)
+    assert _last_log(log)["blocked"] is True and "build" not in _last_log(log)
 
 
 def test_the_bare_marker_is_decrypted_like_any_box_request(building):
@@ -1953,7 +2057,7 @@ def test_the_wall_switches_live(live):
     walled = _Flow("anywhere.example.com")
     walled.response = None
     inj.http_connect(walled)
-    assert walled.response is not None and walled.response.status_code == 403
+    assert _walled(inj, walled)
 
 
 def test_passthrough_changes_live(live):
@@ -1973,13 +2077,14 @@ def test_a_missing_or_malformed_live_file_fails_closed(live):
     f = _Flow("anywhere.example.com")
     f.response = None
     inj.http_connect(f)
-    assert f.response is not None and f.response.status_code == 403  # the wall, not open egress
+    assert _walled(inj, f)  # the wall, not open egress
     assert inj.injecting is False
     live.live.unlink()
     g = _Flow("anywhere.example.com", method="POST")
+    g.client_conn = types.SimpleNamespace(id="client-2")
     g.response = None
     inj.http_connect(g)
-    assert g.response is not None and g.response.status_code == 403
+    assert _walled(inj, g)
 
 
 async def test_a_rules_secret_is_read_from_host_env_by_name(live, tmp_path, monkeypatch):
@@ -2376,9 +2481,33 @@ def test_a_build_with_its_secret_reaches_a_build_only_host(gh, build_walled):
     assert hello.ignore_connection is True  # and it is tunnelled, as any build is
 
 
+def test_a_build_only_grant_dials_for_that_build_alone(gh, build_walled):
+    # The backstop knows a build by its connection: the tunnel its CONNECT opened, or the
+    # cleartext request it was let through on. Another connection asking for the same host
+    # (the box's) is refused the dial.
+    inj = gh.Injector()
+    tunnel = _connect(inj, "cdn.example.com", password=_SECRET)
+    assert tunnel.response is None  # allowed, dialled eagerly
+    assert _dial(inj, "cdn.example.com") is None
+    assert _dial(inj, "cdn.example.com", client_id="the-box") is not None
+
+
+async def test_a_builds_cleartext_request_dials_on_its_build_grant(gh, build_walled):
+    inj = gh.Injector()
+    flow = _marked(_Flow("cdn.example.com", port=80, scheme="http"), password=_SECRET)
+    flow.client_conn = types.SimpleNamespace(id="apt")
+    flow.response = None
+    await inj.request(flow)
+    assert flow.response is None  # let through on the build grant
+    assert _dial(inj, "cdn.example.com", 80, client_id="apt") is None
+    assert _dial(inj, "cdn.example.com", 80, client_id="the-box") is not None
+    inj.client_disconnected(flow.client_conn)
+    assert _dial(inj, "cdn.example.com", 80, client_id="apt") is not None  # forgotten
+
+
 def test_the_box_cannot_reach_a_build_only_host(gh, build_walled):
     inj = gh.Injector()
-    assert _refused(_connect(inj, "cdn.example.com"))  # unmarked
+    assert _answered(inj, _connect(inj, "cdn.example.com"))  # unmarked: answered, never dialled
     # The bare marker is public — anyone, the box included, can present it.
     assert _refused(_connect(inj, "cdn.example.com", user="fy-build"))
     assert _refused(_connect(inj, "cdn.example.com", password="guessed"))
@@ -2627,13 +2756,16 @@ async def test_the_wall_lets_a_held_host_connect_so_the_proxy_can_answer(live):
     connect = _Flow("api.anthropic.com")
     connect.response = None
     inj.http_connect(connect)
-    assert connect.response is None
+    # Answered in the proxy: the host is not granted, so not even the CONNECT dials it.
+    assert _answered(inj, connect)
     hello = _ClientHello("api.anthropic.com")
     inj.tls_clienthello(hello)
     assert hello.ignore_connection is False
     flow = _dummy_flow()
     await inj.requestheaders(flow)
     assert flow.response is not None and flow.response.status_code == 401
+    inj.client_disconnected(connect.client_conn)
+    assert not any(r.get("blocked") for r in _rows(live.log))  # held is no refusal
 
 
 async def test_a_held_host_opens_nothing_but_the_answer(live):
@@ -2851,7 +2983,7 @@ async def test_an_overlap_host_connects_and_is_decrypted_so_it_can_be_answered(l
     connect = _Flow("api.github.com")
     connect.response = None
     inj.http_connect(connect)
-    assert connect.response is None
+    assert _answered(inj, connect)
     hello = _ClientHello("api.github.com")
     inj.tls_clienthello(hello)
     assert hello.ignore_connection is False

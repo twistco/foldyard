@@ -82,9 +82,18 @@ _guest_trust() {
 # `crun`, so podman's per-runtime behaviour is unchanged, and the real crun is the fallback), and
 # on a create whose spec mounts the CA the helper adds the four variables the spec doesn't already
 # set — an image's own ENV, a Dockerfile ENV and a create's explicit env still win, exactly as for
-# the drop-in. Every create passes through it (a build's RUN step from the host or the box, a
-# docker-compat create); nothing lands in an image, since the spec is the runtime's, not a layer.
+# the drop-in. A build's RUN step also gets NODE_USE_ENV_PROXY=1: Node's own fetch ignores the
+# proxy env without it, so a tool built on it (corepack ≥ 0.35, Node 24's) dials out directly and
+# the wall refuses it, with no proxy row to say why (seen live, 2026-10-14). Build steps only: a
+# stack service's NO_PROXY doesn't list its sibling services, so turning it on there would send
+# their calls to the proxy, which can't resolve them. Every create passes through it (a build's
+# RUN step from the host or the box, a docker-compat create); nothing lands in an image, since the spec is the runtime's, not a layer.
 # Anything unexpected leaves the spec as the engine wrote it, and crun runs regardless.
+# npm's proxy settings (92-fy-proxy-npm.conf) are deliberately NOT added here: a build's proxy is
+# its own URL (the build tunnel's per-build secret), handed in as predefined build args, so the
+# drop-in's value would be the wrong one, and copying the secret-bearing URL into more variables
+# is a proxy concern this CA helper shouldn't grow. A RUN step that needs npm's spelling writes
+# `npm_config_https_proxy=$HTTPS_PROXY` itself.
 _oci_wrapper() {
     local crun
     crun="$(command -v crun || true)"
@@ -94,7 +103,8 @@ _oci_wrapper() {
     fi
     install -d -m 0755 /usr/local/libexec/fy-oci
     cat >/usr/local/libexec/fy-oci/ca-env.py <<'__FY_CA_ENV__'
-"""foldyard (fy-machine-wall): add the proxy CA's env to a container spec that mounts the CA.
+"""foldyard (fy-machine-wall): add the proxy CA's env to a container spec that mounts the CA,
+and to a build step's, the switch that makes Node's fetch use the proxy env.
 
 Called by the crun wrapper beside it with crun's own argv. Only a create (or run) names a bundle;
 anything else, or anything unexpected, leaves the spec untouched."""
@@ -111,6 +121,21 @@ ENV = (
     ("REQUESTS_CA_BUNDLE", BUNDLE),
     ("GIT_SSL_CAINFO", BUNDLE),
 )
+BUILD_ENV = (("NODE_USE_ENV_PROXY", "1"),)
+CONTAINERENV = "/run/.containerenv"
+
+
+def is_build(spec):
+    """A build's RUN step: buildah writes its own name into the /run/.containerenv it mounts
+    (podman's own containers carry an empty one)."""
+    for m in spec.get("mounts") or []:
+        if m.get("destination") == CONTAINERENV:
+            try:
+                with open(m["source"]) as fh:
+                    return 'engine="buildah-' in fh.read(4096)
+            except (OSError, KeyError, TypeError, UnicodeDecodeError):
+                return False  # unreadable: the CA env still goes in, this doesn't
+    return False
 
 
 def bundle_of(argv):
@@ -130,7 +155,8 @@ def patch(path):
     process = spec["process"]
     env = process.get("env") or []
     have = set(e.split("=", 1)[0] for e in env)
-    add = [name + "=" + value for name, value in ENV if name not in have]
+    wanted = ENV + (BUILD_ENV if is_build(spec) else ())
+    add = [name + "=" + value for name, value in wanted if name not in have]
     if not add:
         return
     process["env"] = env + add
@@ -175,6 +201,125 @@ EOF
     mv -f /etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf.tmp \
         /etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf
     echo "✓ proxy CA: build steps trust it too (containers.conf.d/91-fy-proxy-ca-runtime.conf)"
+}
+
+# The wall's refusals, readable WITHOUT root: a tool that ignores the proxy env dials out
+# directly, the wall refuses it, and the proxy — where every other refusal is logged — never sees
+# it. Its `log` rule writes each refusal to the kernel log, which the VM user can't read (and the
+# host never runs root here). This unit, root, follows the kernel log and keeps the recent
+# refusals in /run/fy-wall/denies.jsonl, world-readable: what `fy box build`/`fy up` read when a
+# build fails with nothing refused at the proxy. Each row carries the kernel's own sequence
+# number, so the host marks where a build began without comparing two clocks.
+_denies_reporter() {
+    cat >/usr/local/libexec/fy-wall-denies.py.tmp <<'__FY_DENIES__'
+"""foldyard (fy-machine-wall): the wall's recent refusals, from the kernel log, as JSON lines in
+/run/fy-wall/denies.jsonl (world-readable). Runs as root under fy-wall-denies.service."""
+
+import collections
+import json
+import os
+import re
+import select
+import sys
+
+OUT = "/run/fy-wall/denies.jsonl"
+KEEP = 200
+FIELD = re.compile(r"\b(DST|PROTO|DPT)=(\S+)")
+CHAINS = {"fy-wall-deny": "out", "fy-wall-deny-fwd": "fwd", "fy-wall-deny6": "out6"}
+
+
+def boot_id():
+    with open("/proc/sys/kernel/random/boot_id") as fh:
+        return fh.read().strip()
+
+
+def parse(record, boot):
+    """One /dev/kmsg record (``pri,seq,usec,flags;message``) → a row, or None."""
+    head, sep, message = record.partition(";")
+    if not sep:
+        return None
+    message = message.split("\n", 1)[0]
+    prefix = message.split(" ", 1)[0]
+    if prefix not in CHAINS:
+        return None
+    try:
+        seq = int(head.split(",")[1])
+    except (IndexError, ValueError):
+        return None
+    fields = dict(FIELD.findall(message))
+    if "DST" not in fields:
+        return None
+    port = fields.get("DPT")
+    return {
+        "boot": boot,
+        "seq": seq,
+        "chain": CHAINS[prefix],
+        "dst": fields["DST"],
+        "proto": fields.get("PROTO", "").lower(),
+        "port": int(port) if port and port.isdigit() else None,
+    }
+
+
+def write(rows):
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    tmp = OUT + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in rows)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, OUT)
+
+
+def drain(fd, rows, boot):
+    """Every record the kernel has for us now; True when one was a refusal."""
+    new = False
+    while True:
+        try:
+            record = os.read(fd, 8192)
+        except BlockingIOError:
+            return new
+        except BrokenPipeError:
+            continue  # records were overwritten before we read them: carry on from the next
+        row = parse(record.decode("utf-8", "replace"), boot)
+        if row is not None:
+            rows.append(row)
+            new = True
+
+
+def main():
+    boot = boot_id()
+    rows = collections.deque(maxlen=KEEP)
+    fd = os.open("/dev/kmsg", os.O_RDONLY | os.O_NONBLOCK)
+    # What the ring still holds goes in the FIRST report (empty means "running, nothing
+    # refused"): published empty first, a build marked in that window would count the replay.
+    drain(fd, rows, boot)
+    write(rows)
+    while True:
+        select.select([fd], [], [])  # until the kernel logs something
+        if drain(fd, rows, boot):
+            write(rows)  # at once: a failed build reads this the moment it exits
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+__FY_DENIES__
+    chmod 0644 /usr/local/libexec/fy-wall-denies.py.tmp
+    mv -f /usr/local/libexec/fy-wall-denies.py.tmp /usr/local/libexec/fy-wall-denies.py
+    cat >/etc/systemd/system/fy-wall-denies.service <<'EOF'
+[Unit]
+Description=foldyard egress wall: recent refusals, readable without root (/run/fy-wall/denies.jsonl)
+After=fy-wall.service
+[Service]
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/fy-wall-denies.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/fy-wall
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 case "$CMD" in
@@ -308,6 +453,31 @@ export HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL
 export http_proxy=$PROXY_URL https_proxy=$PROXY_URL
 export NO_PROXY=localhost,127.0.0.1,$GW no_proxy=localhost,127.0.0.1,$GW
 EOF
+    # npm's own proxy settings for every container this podman creates. podman hands each one the
+    # proxy env above, but a postinstall script that fetches with its own client (node-fetch:
+    # supabase's CLI download) reads only npm_config_https_proxy, so it went direct and the wall
+    # refused it. Proxy env, not the CA's, so a sibling drop-in that doesn't wait for a CA. As
+    # with the CA's, an image's own ENV and a create's explicit env (the box's) win.
+    # NOT NODE_USE_ENV_PROXY, though the box and build steps get it: the NO_PROXY podman
+    # propagates covers only loopback and $GW, and Node's fetch (undici) ignoring HTTP_PROXY is the only reason a Node
+    # service in a stack reaches another by service name (Supabase Studio -> http://kong:8000).
+    # Set here, those calls would go to the proxy, which can't resolve a stack name. An app
+    # container that wants it sets it itself, with a NO_PROXY listing the stack's services in
+    # BOTH cases (podman injects a lowercase no_proxy, which undici prefers).
+    rm -f /etc/containers/containers.conf.d/92-fy-proxy-npm.conf
+    install -d -m 0755 /etc/containers/containers.conf.d
+    cat >/etc/containers/containers.conf.d/92-fy-proxy-npm.conf.tmp <<EOF
+# foldyard: npm's proxy settings in every container of the walled VM (fy-machine-wall).
+[containers]
+env = [
+  "npm_config_https_proxy=$PROXY_URL",
+  "npm_config_proxy=$PROXY_URL",
+  {append=true},
+]
+EOF
+    chmod 0644 /etc/containers/containers.conf.d/92-fy-proxy-npm.conf.tmp
+    mv -f /etc/containers/containers.conf.d/92-fy-proxy-npm.conf.tmp \
+        /etc/containers/containers.conf.d/92-fy-proxy-npm.conf
     # The proxy CA for every container this podman creates. The proxy env above reaches them all
     # (podman propagates it), and the host proxy decrypts every host not on `passthrough` — so a
     # container that doesn't trust its CA fails TLS on any other host. A system containers.conf
@@ -389,21 +559,33 @@ echo "the MAC (fy allow / the Network Log TUI) — blocked HOSTNAMES show there,
 EOF
     chmod 0755 /usr/local/bin/fy-wall-denied
 
+    if [ -x /usr/bin/python3 ]; then
+        _denies_reporter
+    else
+        echo "⚠ no python3 in this guest: a build that bypasses the proxy can't be named" >&2
+    fi
+
     systemctl daemon-reload
     systemctl enable fy-wall.service >/dev/null 2>&1
     systemctl restart fy-wall.service
+    if [ -f /etc/systemd/system/fy-wall-denies.service ]; then
+        systemctl enable fy-wall-denies.service >/dev/null 2>&1 || true
+        systemctl restart fy-wall-denies.service || echo "⚠ fy-wall-denies didn't start" >&2
+    fi
     echo "✓ fy-wall installed: uid $WALL_UID${SUB:+ +subuid$SUB} default-deny; open: lo, local-DNS, $GW tcp {$PORTS}"
     ;;
 
 uninstall)
-    systemctl disable --now fy-wall.service 2>/dev/null || true
-    rm -f /etc/systemd/system/fy-wall.service
+    systemctl disable --now fy-wall-denies.service fy-wall.service 2>/dev/null || true
+    rm -f /etc/systemd/system/fy-wall.service /etc/systemd/system/fy-wall-denies.service
+    rm -f /usr/local/libexec/fy-wall-denies.py /run/fy-wall/denies.jsonl
     systemctl daemon-reload
     nft delete table inet fy_wall 2>/dev/null || true
     nft delete table ip6 fy_wall6 2>/dev/null || true
     rm -rf /etc/fy-wall /etc/profile.d/fy-wall-proxy.sh /usr/local/bin/fy-wall-denied
     rm -f /etc/containers/containers.conf.d/90-fy-proxy-ca.conf
     rm -f /etc/containers/containers.conf.d/91-fy-proxy-ca-runtime.conf
+    rm -f /etc/containers/containers.conf.d/92-fy-proxy-npm.conf
     rm -rf /usr/local/libexec/fy-oci
     _guest_trust "" || echo "⚠ proxy CA: still in the guest's own store" >&2
     # Every uid >= 1000 home, and the walled user's own whatever its uid: Lima's guest user takes

@@ -16,32 +16,35 @@ holds exactly when the repo holds config, not secrets. Scan your history with
 [TruffleHog](https://github.com/trufflesecurity/trufflehog) first, and move anything they find
 out of the repo.
 
-**Three tools: [uv](https://docs.astral.sh/uv/), [Lima](https://lima-vm.io/) and podman.** Lima
-creates the VM; podman talks to the container engine inside it. `fy` refuses to start without
-both.
+**First uv** ([install it](https://docs.astral.sh/uv/getting-started/installation/)). On
+Windows, install WSL2 first and do everything inside its Linux distro. Then let foldyard check
+the rest of this computer:
+
+```bash
+uvx foldyard prereq
+```
+
+It needs no project and doesn't install foldyard. It checks Lima, podman, a hypervisor, and on
+Linux QEMU, KVM and a `systemd --user` session, plus disk and memory. For anything missing it
+prints the command that installs it with the package manager you have, but it doesn't run it.
+It exits non-zero until everything required is there. The usual installs:
 
 macOS:
 
 ```bash
-brew install uv lima podman
+brew install lima podman
 ```
 
-Linux (x86-64; Debian/Ubuntu package names shown — use your distribution's equivalents):
+Linux (x86-64; Debian/Ubuntu package names shown — `fy prereq` names your distribution's):
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh          # uv
 sudo apt-get install qemu-system-x86 qemu-utils ovmf podman
 curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.0/lima-2.2.0-Linux-x86_64.tar.gz \
   | sudo tar Cxz /usr/local                               # Lima (2.2.0 is the version CI tests)
 ```
 
-On Linux you also need:
-
-- **KVM** — `/dev/kvm` must exist and be writable by you (usually: be in the `kvm` group).
-- **`qemu-img`** — it comes in `qemu-utils` on Debian/Ubuntu; the QEMU system package alone
-  doesn't include it.
-- **A `systemd --user` session** — a normal desktop or SSH login has one. For a machine you
-  reach some other way, run `loginctl enable-linger $USER` once.
+On Linux, `/dev/kvm` must be writable by you (usually: be in the `kvm` group), and a machine you
+don't log in to normally needs `loginctl enable-linger $USER` once.
 
 What has been tested on Linux and inside WSL2, and what hasn't, is tracked in
 [linux-support.md](https://github.com/twistco/foldyard/blob/main/docs/linux-support.md).
@@ -61,6 +64,10 @@ the copy inside foldyard's own install is the only `mitmdump` you'll have. (Olde
 said `"foldyard[host]"`; that still works, and the extra is now empty.) The box installs
 foldyard without mitmproxy, since it only routes through the proxy — you don't do anything
 for that, `fy box up` handles it.
+
+**Optional: the big downloads, ahead of time.** `fy prereq --fetch` bakes a base VM once (a few
+hundred MB, about two minutes). After that, each new project's VM is a clone of it, and a first
+`fy box up` takes seconds instead of minutes. See `fy docs base-vm`.
 
 ## Step 1 — a locked-down box you can safely poke
 

@@ -859,6 +859,63 @@ def test_wall_install_gives_every_container_the_proxy_ca():
     assert "dev-proxy-ca" not in machine._wall_asset().read_text()
 
 
+_NPM_CONF = "/etc/containers/containers.conf.d/92-fy-proxy-npm.conf"
+
+
+def _npm_conf(proxy_url: str = "http://192.168.5.2:41000") -> dict:
+    install = _wall_section("install")
+    conf = install[install.index(f"{_NPM_CONF}.tmp") :].split("<<EOF\n", 1)[1]
+    return tomllib.loads(conf.split("\nEOF\n", 1)[0].replace("$PROXY_URL", proxy_url))
+
+
+def test_wall_install_gives_every_container_npms_proxy_settings():
+    # podman hands every container the VM's HTTPS_PROXY, but a postinstall script fetching with
+    # its own client (node-fetch: supabase's CLI download) reads only npm's setting — so it went
+    # direct and the wall refused it. A sibling drop-in, since it's proxy env, not the CA's: it
+    # doesn't wait for a CA, like the proxy env podman propagates.
+    assert _npm_conf("http://gw:1") == {
+        "containers": {
+            "env": [
+                "npm_config_https_proxy=http://gw:1",
+                "npm_config_proxy=http://gw:1",
+                {"append": True},  # keep podman's default env and the CA drop-in's
+            ]
+        }
+    }
+    install = _wall_section("install")
+    write = install.index(f"{_NPM_CONF}.tmp")
+    # Removed first (a re-install rewrites it), written by rename, outside the CA's branch, and
+    # before the user's podman restarts to read it.
+    assert install.index(f"rm -f {_NPM_CONF}") < write
+    assert write < install.index('if [ -n "$CA_SRC" ]; then')
+    assert write < install.index("try-restart podman.service")
+
+
+def test_wall_install_leaves_node_use_env_proxy_to_the_app_container():
+    # NOT set in stack containers: podman's NO_PROXY covers only loopback and the gateway, and
+    # undici ignoring HTTP_PROXY is what lets a Node service reach another by service name
+    # (Supabase Studio → http://kong:8000). Set globally it would send those calls to the proxy,
+    # which can't resolve the name. The reason sits beside the drop-in for the next reader. (A
+    # build's RUN step does get it, from the runtime wrapper: see
+    # test_a_build_step_also_gets_node_onto_the_proxy.)
+    install = _wall_section("install")
+    assert "NODE_USE_ENV_PROXY=" not in install
+    comment = install[: install.index(f"{_NPM_CONF}.tmp")].rsplit("\n\n", 1)[1]
+    assert "NODE_USE_ENV_PROXY" in comment and "no_proxy" in comment
+
+
+@pytest.mark.spawns("bash")  # sources the REAL script under bash; every command is a stub
+def test_wall_uninstall_drops_npms_proxy_settings(tmp_path):
+    script = shlex.quote(str(machine._wall_asset()))
+    stubs = ("systemctl", "rm", "nft", "getent", "awk", "sudo", "install", "update-ca-trust")
+    calls = _stubbed_bash(tmp_path, f"source {script} uninstall", stubs)
+    restart = (
+        "sudo -u #501 XDG_RUNTIME_DIR=/run/user/501 "
+        "systemctl --user try-restart podman.service podman.socket"
+    )
+    assert calls.index(f"rm -f {_NPM_CONF}") < calls.index(restart)
+
+
 @pytest.mark.spawns("bash")  # sources the REAL script under bash; every command is a stub
 def test_wall_uninstall_drops_the_ca_defaults_and_restarts_the_users_podman(tmp_path):
     # Removing the env files is not enough: a rootless podman service already running keeps the
@@ -1604,3 +1661,199 @@ def test_host_wall_verb_uninstall_never_sets_the_slice_up(host_wall_verb, monkey
     machine.host_wall(uninstall=True)
     out = capsys.readouterr().out
     assert "not set up (no slice)" in out and "systemctl --user disable --now" in out
+
+
+# ── build steps reach Node's fetch through the proxy; the wall's refusals are readable ──────
+
+
+def _containerenv(tmp_path: Path, text: str) -> dict:
+    path = tmp_path / ".containerenv"
+    path.write_text(text)
+    return {"destination": "/run/.containerenv", "source": str(path)}
+
+
+_BUILDAH_CONTAINERENV = 'engine="buildah-1.43.2"\nname="alpine-working-container"\nrootless=1\n'
+
+
+def test_a_build_step_also_gets_node_onto_the_proxy(tmp_path):
+    # Node's own fetch ignores HTTPS_PROXY without NODE_USE_ENV_PROXY=1, so corepack ≥ 0.35 (Node
+    # 24's) dialled the registry directly and the wall refused it with no proxy row (2026-10-14).
+    # A build step is buildah's: it writes its name into the /run/.containerenv it mounts.
+    mounts = [*_CA_MOUNTS, _containerenv(tmp_path, _BUILDAH_CONTAINERENV)]
+    spec = _spec(tmp_path, ["PATH=/usr/bin"], mounts=mounts)
+    _ca_env().main(["create", "--bundle", str(spec.parent), "c1"])
+    env = json.loads(spec.read_text())["process"]["env"]
+    assert env == ["PATH=/usr/bin", *_CA_ENV, "NODE_USE_ENV_PROXY=1"]
+
+
+@pytest.mark.parametrize("case", ["podman's empty containerenv", "none", "unreadable"])
+def test_a_service_container_keeps_node_off_the_env_proxy(tmp_path, case):
+    # A stack service's NO_PROXY doesn't name its sibling services, so Node fetching
+    # `http://api:3000` through the proxy would break a stack that works today. Only the CA env.
+    extra = {
+        "podman's empty containerenv": [_containerenv(tmp_path, "")],
+        "none": [],
+        "unreadable": [{"destination": "/run/.containerenv", "source": str(tmp_path / "gone")}],
+    }[case]
+    spec = _spec(tmp_path, ["container=podman"], mounts=[*_CA_MOUNTS, *extra])
+    _ca_env().main(["create", "--bundle", str(spec.parent), "c1"])
+    assert json.loads(spec.read_text())["process"]["env"] == ["container=podman", *_CA_ENV]
+
+
+def test_an_images_own_node_proxy_setting_wins(tmp_path):
+    mounts = [*_CA_MOUNTS, _containerenv(tmp_path, _BUILDAH_CONTAINERENV)]
+    spec = _spec(tmp_path, ["NODE_USE_ENV_PROXY=0"], mounts=mounts)
+    _ca_env().main(["create", "--bundle", str(spec.parent), "c1"])
+    env = json.loads(spec.read_text())["process"]["env"]
+    assert "NODE_USE_ENV_PROXY=0" in env and "NODE_USE_ENV_PROXY=1" not in env
+
+
+def _denies() -> types.ModuleType:
+    """The guest's refusal reporter (embedded in the wall script), loaded in-process."""
+    mod = types.ModuleType("fy_wall_denies")
+    exec(compile(_wall_heredoc("__FY_DENIES__"), "fy-wall-denies.py", "exec"), mod.__dict__)
+    return mod
+
+
+# What nf_log_syslog writes for the wall's `log prefix "fy-wall-deny "` rules, as /dev/kmsg reads
+# it: `pri,seq,usec,flags;message`, then the record's dictionary lines.
+_KMSG_TCP = (
+    "4,8812,912345678,-;fy-wall-deny IN= OUT=eth0 SRC=192.168.5.15 DST=104.16.24.34 LEN=60 "
+    "TOS=0x00 PREC=0x00 TTL=64 ID=4242 DF PROTO=TCP SPT=51234 DPT=443 WINDOW=64240 RES=0x00 "
+    "SYN URGP=0\n SUBSYSTEM=net\n"
+)
+
+
+def test_the_reporter_reads_a_refusal_off_the_kernel_log():
+    mod = _denies()
+    assert mod.parse(_KMSG_TCP, "b1") == {
+        "boot": "b1",
+        "seq": 8812,
+        "chain": "out",
+        "dst": "104.16.24.34",
+        "proto": "tcp",
+        "port": 443,
+    }
+    icmp = "4,9,1,-;fy-wall-deny6 IN= OUT=eth0 SRC=fd00::1 DST=2606:4700::1 PROTO=ICMPv6 TYPE=128"
+    assert mod.parse(icmp, "b1") == {
+        "boot": "b1",
+        "seq": 9,
+        "chain": "out6",
+        "dst": "2606:4700::1",
+        "proto": "icmpv6",
+        "port": None,
+    }
+    fwd = "4,10,1,-;fy-wall-deny-fwd IN=cni0 OUT=eth0 SRC=10.88.0.2 DST=1.1.1.1 PROTO=UDP DPT=53"
+    assert mod.parse(fwd, "b1")["chain"] == "fwd"
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        "6,1,1,-;eth0: link up",  # the rest of the kernel log
+        "4,2,1,-;fy-wall-denyX DST=1.1.1.1",  # not one of the wall's prefixes
+        "4,3,1,-;fy-wall-deny IN= OUT=eth0 PROTO=TCP",  # no destination
+        "no separator",
+        "4,x,1,-;fy-wall-deny DST=1.1.1.1",  # unreadable seq
+    ],
+)
+def test_the_reporter_skips_anything_else(record):
+    assert _denies().parse(record, "b1") is None
+
+
+def test_the_reporter_writes_a_whole_world_readable_file(tmp_path, monkeypatch):
+    mod = _denies()
+    out = tmp_path / "fy-wall" / "denies.jsonl"
+    monkeypatch.setattr(mod, "OUT", str(out))
+    mod.write([mod.parse(_KMSG_TCP, "b1")])
+    assert out.stat().st_mode & 0o777 == 0o644
+    assert json.loads(out.read_text())["dst"] == "104.16.24.34"
+
+
+def test_the_reporter_writes_each_batch_as_soon_as_it_reads_it(monkeypatch):
+    # It used to wait for half a second without a new kernel record before writing, so a build
+    # that failed right after its refusals was read before they were there (seen live,
+    # 2026-10-16). Now the batch is written before the reporter waits again. And its FIRST
+    # report already holds what the kernel ring kept: published empty first, a build marked in
+    # that window — right after a reporter restart — would take every replayed refusal as its own.
+    mod = _denies()
+    reads: list[bytes | BaseException] = [
+        _KMSG_TCP.encode(),  # still in the ring when the reporter (re)starts
+        BlockingIOError(),
+        _KMSG_TCP.replace("4,8812,", "4,8813,").encode(),  # logged while it runs
+        BlockingIOError(),
+    ]
+
+    def read(fd, n):
+        r = reads.pop(0)
+        if isinstance(r, BaseException):
+            raise r
+        return r
+
+    class Stop(Exception):
+        pass
+
+    waits: list[tuple] = []
+
+    def select(r, w, x, *timeout):
+        waits.append(timeout)
+        if len(waits) > 1:
+            raise Stop
+        return (r, [], [])
+
+    written: list[list] = []
+    monkeypatch.setattr(mod, "boot_id", lambda: "b1")
+    monkeypatch.setattr(mod, "write", lambda rows: written.append(list(rows)))
+    monkeypatch.setattr(
+        mod, "os", types.SimpleNamespace(open=lambda *a: 3, read=read, O_RDONLY=0, O_NONBLOCK=0)
+    )
+    monkeypatch.setattr(mod, "select", types.SimpleNamespace(select=select))
+    with pytest.raises(Stop):
+        mod.main()
+    assert [[r["seq"] for r in rows] for rows in written] == [[8812], [8812, 8813]]
+
+
+def test_wall_install_runs_the_reporter_and_uninstall_removes_it():
+    install = _wall_section("install")
+    # After the wall's own unit, and only when the guest has the python3 it runs under.
+    assert install.index("systemctl restart fy-wall.service") < install.index(
+        "systemctl restart fy-wall-denies.service"
+    )
+    assert "if [ -x /usr/bin/python3 ]; then\n        _denies_reporter" in install
+    text = machine._wall_asset().read_text()
+    unit = text[text.index("/etc/systemd/system/fy-wall-denies.service <<'EOF'\n") :]
+    unit = unit.split("<<'EOF'\n", 1)[1].split("\nEOF\n", 1)[0]
+    # Root for the kernel log, nothing else: no network, a read-only system but its own report.
+    for line in ("PrivateNetwork=yes", "ProtectSystem=strict", "ReadWritePaths=/run/fy-wall"):
+        assert line in unit.splitlines()
+    uninstall = _wall_section("uninstall")
+    assert "fy-wall-denies.service" in uninstall and "/run/fy-wall/denies.jsonl" in uninstall
+
+
+def test_wall_denies_reads_the_guests_report_without_root(monkeypatch):
+    monkeypatch.setattr(machine, "MACHINE", "homelab")
+    monkeypatch.setattr(machine, "BACKEND", types.SimpleNamespace(name="lima"))
+    monkeypatch.setattr(machine.config, "machine_wall", lambda: True)
+    calls: list[list[str]] = []
+    report = (
+        json.dumps({"boot": "b1", "seq": 3, "dst": "104.16.24.34", "port": 443, "proto": "tcp"})
+        + "\nnot json\n"
+        + json.dumps({"boot": "b1", "dst": "1.1.1.1"})  # no seq: skipped
+        + "\n"
+    )
+
+    def run(cmd, **_):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, report, "")
+
+    monkeypatch.setattr(machine.subprocess, "run", run)
+    rows = machine.wall_denies()
+    assert [r["seq"] for r in rows or []] == [3]
+    assert calls == [["limactl", "shell", "homelab", "--", "cat", "/run/fy-wall/denies.jsonl"]]
+
+    monkeypatch.setattr(
+        machine.subprocess, "run", lambda cmd, **_: subprocess.CompletedProcess(cmd, 1, "", "")
+    )
+    assert machine.wall_denies() is None  # a guest provisioned before the reporter
+    monkeypatch.setattr(machine.config, "machine_wall", lambda: False)
+    assert machine.wall_denies() is None  # no wall, nothing refused there

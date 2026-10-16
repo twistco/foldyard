@@ -63,6 +63,16 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   the registry's `verify_checks`.
 - `machine.py` / `machine_backend.py` — rootless dev-VM lifecycle behind the pluggable
   backend contract (podman | lima; see `docs/lima-backend-scope.md`).
+- `basevm.py` — the project-less BASE VM (`fy machine base`, `fy prereq --fetch`): Lima's podman
+  template, nothing mounted, booted once, the packaged box image built in it, stopped, stamped in
+  `~/.foldyard/base-vm.json` by its INPUTS (resolved template · vmType · packaged-box
+  fingerprint) + age. `LimaBackend.create` clones a new VM from it when it fits (else the
+  template, as before) and `box up` re-tags its box image (`box._from_base_image`). A clone
+  happens only at creation, the base is never made from a project VM, and an unstamped
+  `foldyard-base` instance is never touched. Lima 2.1.3's clone leaves `sock/` mode 0000 —
+  `clone` resets it. See docs/base-vm.md.
+- `prereq.py` — `fy prereq`: project-free host checks (pure `rows(Host)` over gathered facts,
+  capability-detected, install hints per package manager present); `--fetch` bakes the base.
 - `guestlog.py` — the VM's log budget (`machine ensure`, every VM backend): journald cap as root
   (Lima: rendered into the boot script; podman machine: `sudo -n` over ssh) + the rootless API
   service's log level as a user drop-in over ssh. Best-effort — a warning, never an abort.
@@ -79,7 +89,10 @@ Core (stdlib-only on the hot path; heavy imports lazy):
 - `supervisor.py` — the host supervisor (`fy host` status · `restart` · `logs`; always detached,
   started with the VM, no `stop`): the ONE host-side process per project running the credential
   daemons (singleton lock, per-worktree listeners, replace-on-launch staleness handling, the
-  capability-probe loop, TTL expiry + settle).
+  capability-probe loop, TTL expiry + settle). Each tick publishes a readiness record (every
+  job's `up`/`starting`/`blocked`/`failing`); the launch verbs mark the worktree they bring up
+  (served before its box exists, with main for builds) and `await_ready` on it, refusing on a
+  blocked or failing job.
 - `hostclock.py` — your computer's timezone (`TZ`: the `/etc/localtime` link's name after
   `zoneinfo/`, else `/etc/timezone`) and time locale (`LC_TIME`), each pattern-checked, which
   `fy box up` passes to the BOX only (`box._clock_env`; the stack stays on UTC). Host facts, not

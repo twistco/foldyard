@@ -73,8 +73,18 @@ compose = ["compose.yml"]
 API_PORT = 8080
 ```
 
-**b) The image** → translate the recipe into a `box.Dockerfile` layered on the generic base,
-grouping installs into single `RUN` layers and cleaning caches:
+**b) The image** → if the recipe is only distro packages, list them and stop there — foldyard
+bakes them into a cached layer on top of the box image (built once, not reinstalled by every
+new box), using whichever package manager the image has:
+
+```toml
+[box]
+packages = ["gcc", "libpq-dev"]
+```
+
+Anything more (a toolchain from a tarball, build steps, a different base) → translate the recipe
+into a `box.Dockerfile` layered on the generic base, grouping installs into single `RUN` layers
+and cleaning caches:
 
 ```dockerfile
 # <project> dev box — codified from .foldyard-box-recipe.sh, layered on foldyard's generic base.

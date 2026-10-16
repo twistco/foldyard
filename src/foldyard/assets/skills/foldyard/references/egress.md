@@ -22,11 +22,19 @@ when you ask. (`fy docs glossary` defines each.)
   one-line `why`: that commits the recommendation for the whole team — everyone is *offered* it
   per host on their own computer (after reviewing your edit at the adoption gate) instead of
   rediscovering the block, and nothing is granted without their yes.
+- **A certificate error on one host only** (unknown CA, `certificate verify failed`) from a client
+  that keeps its own trust store — the same refusal, before the `403` could reach it: the proxy
+  doesn't open a connection to an ungranted host, so a client that doesn't trust the proxy's CA
+  fails the handshake instead. Check the host is granted before debugging certificates.
 - **Nothing is blocked, but the human mentions a "learn window"** — the allowlist is observing
   for a while (`fy allow enforce learn`): requests pass, and every host that *would* be refused is
   recorded for them to review (`fy allow learn`). It enforces again by itself when the window
   ends, so a host that works now may be refused later if it isn't granted — say which hosts your
   task needed.
+- **Connection refused or reset for one tool only, while `curl` to the same host works** — that
+  tool ignores the proxy settings and connects directly, which the VM firewall refuses. The proxy
+  never sees it, so there is nothing to grant. Configure the tool's own proxy option from
+  `HTTPS_PROXY`. Node is the common case (below).
 - **Connection refused / hangs on everything** — the proxy probably isn't running. `fy doctor`
   names it; the human checks it with `fy host` and restarts it with `fy host restart`, on their
   computer (the box can't).
@@ -34,6 +42,10 @@ when you ask. (`fy docs glossary` defines each.)
   tool with its own hardcoded trust store (or one that pins) can fail here. Point it at the box's
   combined CA bundle rather than disabling verification. A host that can't work under decryption
   at all (pinned certificates, client certificates) belongs in `[proxy] passthrough`.
+- **`ECONNREFUSED` against a raw IP address, from Node** — Node's `fetch()` went direct instead
+  of through the proxy, and the VM firewall refused it. The box sets `NODE_USE_ENV_PROXY=1`; a
+  stack container must set it itself, with a `NO_PROXY` naming the services it calls
+  (`fy docs networking`, "Node and npm"). Not an allowlist decision: nothing reached the proxy.
 - **Works for a while, then dies ~60s in** — that's an idle-connection reset from the upstream,
   not the proxy. Streaming or keepalives fix it; the proxy doesn't.
 
