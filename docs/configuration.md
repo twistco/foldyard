@@ -803,8 +803,10 @@ Changing `cq` needs a new box, and `fy box up` tells you when the running one do
 after cq is on. `fy cq backfill`, run in the box, goes through the Claude and Codex sessions
 already there instead. It condenses each transcript, keeping failed tool calls and what
 followed them, and has a headless Claude with no tools read it under cq's own reflect
-instructions. Whatever that finds is proposed to cq.exchange, where it waits pending until it is
-approved in the review queue, so the review happens there. With `cq=off`, proposals wait in cq's
+instructions. The same learning often turns up in several sessions, so before anything is
+proposed, one more model call merges duplicates, keeping the most complete wording. Each
+remaining candidate is proposed to cq.exchange, where it waits pending until it is approved in
+the review queue, so the review happens there. With `cq=off`, proposals wait in cq's
 local store instead. Each session is recorded, so a second run picks up where the first stopped
 and nothing is mined twice. A session you reflected on when it ended is skipped.
 

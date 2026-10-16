@@ -127,8 +127,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
 - `cqbackfill.py` — `fy cq backfill`: past Claude/Codex transcripts → compact excerpts (failures
   kept longest) → a headless `claude -p` with no tools, MCP, hooks or saved session, under cq's
   reflect prompt as SHIPPED in `assets/cq/` (pinned to `CQ_VERSION`), model from `--model` /
-  `FOLDYARD_CQ_REFLECT_MODEL` / `[cq] reflect_model` / `haiku` → `cq propose` (pending on
-  cq.exchange). In the box: the box's sessions, proposed there. On the host: this project's host
+  `FOLDYARD_CQ_REFLECT_MODEL` / `[cq] reflect_model` / `haiku` → one merge call over the run's
+  candidates (refused, and proposed unmerged, unless it accounts for every input once) →
+  `cq propose` (pending on cq.exchange). In the box: the box's sessions, proposed there. On the host: this project's host
   sessions (by recorded cwd), mined there and handed to the box as `.devbox-cq/candidates/` —
   only candidates cross, a host.env value in one withholds it, and the key never leaves the proxy.
   One record in `.devbox-cq/backfill.json` (self-gitignored) serves both sides.

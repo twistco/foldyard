@@ -258,6 +258,51 @@ def test_a_failed_mine_raises_with_the_reason(answer):
 # ── proposing ───────────────────────────────────────────────────────────────────────────────
 
 
+# ── merging: one learning found in several sessions becomes one proposal ────────────────────
+
+_OTHER = dict(_CANDIDATE, summary="podman-compose reads --tail", domains=["podman"])
+
+
+def _merged(*outputs) -> str:
+    return _result([dict(c, **{"from": src}) for c, src in outputs])
+
+
+def test_merge_folds_duplicates_and_keeps_where_each_came_from():
+    richer = dict(_CANDIDATE, detail="Richer detail.")
+    run = _Run((0, _merged((richer, [0, 2]), (_OTHER, [1])), ""))
+    got = cqbackfill.merge([_CANDIDATE, _OTHER, _CANDIDATE], "haiku", run=run)
+    assert got == [(richer, [0, 2]), (_OTHER, [1])]
+    argv, kw = run.calls[0]
+    assert argv[argv.index("--tools") + 1] == "" and "--no-session-persistence" in argv
+    assert [c["n"] for c in json.loads(kw["input"])] == [0, 1, 2]  # numbered, on stdin
+    assert (
+        "from"
+        in json.loads(argv[argv.index("--json-schema") + 1])["properties"]["candidates"]["items"][
+            "required"
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        [(_CANDIDATE, [0])],  # input 1 dropped
+        [(_CANDIDATE, [0, 1]), (_OTHER, [1])],  # input 1 twice
+        [(_CANDIDATE, [0]), (_OTHER, [1, 5])],  # no input 5
+        [(_CANDIDATE, [0]), (_OTHER, [1]), (_OTHER, [])],  # more out than in
+    ],
+)
+def test_a_merge_that_doesnt_account_for_every_input_once_is_refused(outputs):
+    with pytest.raises(cqbackfill.MineError):
+        cqbackfill.merge([_CANDIDATE, _OTHER], "haiku", run=_Run((0, _merged(*outputs), "")))
+
+
+def test_a_single_candidate_needs_no_merge():
+    run = _Run()
+    assert cqbackfill.merge([_CANDIDATE], "haiku", run=run) == [(_CANDIDATE, [0])]
+    assert run.calls == []
+
+
 def test_propose_passes_every_field_as_its_flag():
     full = dict(_CANDIDATE, languages=["python"], frameworks=["fastapi"], pattern="retry")
     run = _Run((0, json.dumps({"id": "ku_1"}), ""))
@@ -493,6 +538,45 @@ def test_the_box_proposes_handed_over_candidates_first_and_clears_them(box, caps
     assert _calls("claude", run) == [] and len(_calls("cq", run)) == 1
     assert not (drop / f"claude-{host_sid}.json").exists()
     assert cqbackfill.load_record(record)[f"claude:{host_sid}"]["proposed"] == ["ku_h"]
+
+
+def test_the_box_merges_across_handoffs_and_its_own_sessions(box):
+    env, box_sid, record = box
+    host_sid = "5ab1b75f-d0ae-9625-0aa9-ac536b1fbecf"
+    handoff = _touch(
+        record.parent / f"candidates/claude-{host_sid}.json",
+        body=json.dumps({"agent": "claude", "session": host_sid, "candidates": [_CANDIDATE]}),
+    )
+    run = _Run(
+        (0, _result([_CANDIDATE]), ""),  # the box session yields the same learning
+        (0, _merged((_CANDIDATE, [0, 1])), ""),  # …which the merge folds into one
+        (0, json.dumps({"id": "ku_m"}), ""),
+    )
+    assert cqbackfill.run(env, model="haiku", yes=True, run=run) == 0
+    assert len(_calls("cq", run)) == 1
+    rec = cqbackfill.load_record(record)
+    assert rec[f"claude:{host_sid}"]["proposed"] == ["ku_m"]
+    assert rec[f"claude:{box_sid}"]["proposed"] == ["ku_m"]
+    assert not handoff.exists()
+
+
+def test_a_failed_merge_proposes_everything_unmerged(box, capsys):
+    env, _, record = box
+    host_sid = "5ab1b75f-d0ae-9625-0aa9-ac536b1fbecf"
+    _touch(
+        record.parent / f"candidates/claude-{host_sid}.json",
+        body=json.dumps({"agent": "claude", "session": host_sid, "candidates": [_OTHER]}),
+    )
+    run = _Run(
+        (0, _result([_CANDIDATE]), ""),
+        (1, "", "overloaded"),
+        (0, json.dumps({"id": "ku_a"}), ""),
+        (0, json.dumps({"id": "ku_b"}), ""),
+    )
+    assert cqbackfill.run(env, model="haiku", yes=True, run=run) == 0
+    assert len(_calls("cq", run)) == 2
+    out = capsys.readouterr()
+    assert "overloaded" in out.err and "✓ 2 proposal(s)." in out.out
 
 
 def test_a_dry_run_in_the_box_leaves_the_handoffs(box):
