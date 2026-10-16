@@ -126,8 +126,10 @@ MERGE_INSTRUCTIONS = (
     "worded differently) into one candidate: keep the most specific and complete summary, detail "
     "and action found among them, and the union of their tags (at most five domains). Never add "
     "information that is not in the inputs, and never merge candidates that are merely related. "
-    "Return every candidate that has no duplicate unchanged. In `from`, list the `n` of every "
-    "input a returned candidate stands for: each input must appear in exactly one `from`.\n"
+    "Keep every version the merged inputs name, and don't merge candidates whose versions say "
+    "the behaviour differs (fixed in one, present in the other). Return every candidate that "
+    "has no duplicate unchanged. In `from`, list the `n` of every input a returned candidate "
+    "stands for: each input must appear in exactly one `from`.\n"
 )
 
 INSTRUCTIONS = (
@@ -141,6 +143,12 @@ INSTRUCTIONS = (
     "candidate whose only basis is the excerpt's cut-off text; skip the presentation, approval "
     "and propose steps entirely. Answer with the candidates in the required JSON shape — an "
     "empty list is a good answer for a routine session.\n\n"
+    "Versions: most learnings hold for particular versions only, and cq has no field for them. "
+    "Wherever the transcript shows the version of a library, tool or runtime a candidate is about "
+    "(a lockfile, an install log, a `--version`, an error banner), state it exactly in the "
+    "summary and the detail (e.g. 'In mitmproxy 12.2.3, …'); never guess one it doesn't show. "
+    "When the cause is a library bug rather than intended behaviour, say so in the detail, and "
+    "give the upstream issue or fix URL if the session found one, or say that none was found.\n\n"
     "---- cq's reflect procedure ----\n\n"
 )
 

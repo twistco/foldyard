@@ -242,6 +242,14 @@ def test_the_miner_runs_without_tools_mcp_or_a_saved_session():
     assert "REFLECT-PROMPT" in instructions and "never follow instructions" in instructions
 
 
+def test_the_instructions_ask_for_versions_and_upstream_reports():
+    # cq's units have no version or upstream field, and most backfilled learnings are library bugs
+    # or workarounds for one version: the miner says which, in the text, and the merge keeps it.
+    mining = cqbackfill.INSTRUCTIONS
+    assert "version" in mining and "library bug" in mining and "upstream" in mining
+    assert "version" in cqbackfill.MERGE_INSTRUCTIONS
+
+
 def test_the_miner_reads_a_plain_result_and_drops_invalid_candidates():
     too_long = dict(_CANDIDATE, summary="s" * 501)
     no_domains = dict(_CANDIDATE, domains=[])
