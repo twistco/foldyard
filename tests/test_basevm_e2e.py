@@ -38,7 +38,7 @@ from e2e_host import (
 pytestmark = host_tier
 
 BASE = "fy-e2e-base"
-BASE_BOX_TAG = "foldyard-base-devbox:latest"  # box.BASE_BOX_TAG
+BASE_BOX_TAG = "foldyard-base-devbox:latest"  # boximage.BASE_BOX_TAG
 
 
 @pytest.fixture(scope="module")

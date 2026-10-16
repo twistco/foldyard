@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 import foldyard
-from foldyard import box, config, stack, supervisor
+from foldyard import box, boximage, config, stack, supervisor
 
 
 class _Proc:
@@ -119,7 +119,7 @@ def fake(tmp_path, monkeypatch):
         "exists": False,
         "img": False,
         "image_fingerprint": None,
-        "base_image_fingerprint": None,  # the base VM's box image (box.BASE_BOX_TAG), if any
+        "base_image_fingerprint": None,  # the base VM's box image (boximage.BASE_BOX_TAG), if any
         "box_fingerprint": "expected-fingerprint",
         "net_exists": True,
         "baked_proxy_port": None,  # set to a string to simulate a box's baked FY_PROXY_PORT
@@ -149,7 +149,7 @@ def fake(tmp_path, monkeypatch):
             # -q + status=running → the running probe; -aq → the exists probe.
             present = state["running"] if "status=running" in cmd else state["exists"]
             return _Proc(0, "deadbeef\n" if present else "")
-        if cmd[1] == "inspect" and box._BOX_FINGERPRINT_LABEL in " ".join(cmd):
+        if cmd[1] == "inspect" and boximage.FINGERPRINT_LABEL in " ".join(cmd):
             value = state["box_fingerprint"]
             return _Proc(0, f"{value}\n" if value else "")
         if cmd[1] == "inspect":  # _baked_env reads the container's frozen Config.Env
@@ -168,7 +168,7 @@ def fake(tmp_path, monkeypatch):
         if cmd[1] == "image" and box._packages_tag("img:tag") in cmd:
             value = state["layer_fingerprint"]
             return _Proc(0 if value else 1, f"{value}\n" if value else "")
-        if cmd[1] == "image" and box.BASE_BOX_TAG in cmd:
+        if cmd[1] == "image" and boximage.BASE_BOX_TAG in cmd:
             value = state["base_image_fingerprint"]
             return _Proc(0 if value else 1, f"{value}\n" if value else "")
         if cmd[1] == "image":
@@ -254,7 +254,7 @@ def test_build_command_shape(fake):
     assert build[0] == "podman" and "--format" in build  # podman → --format docker
     assert build[-1] == str(fake["main"])  # build context = the main checkout
     assert "dev-stack/box.Dockerfile" in build
-    assert f"{box._BOX_FINGERPRINT_LABEL}=expected-fingerprint" in build
+    assert f"{boximage.FINGERPRINT_LABEL}=expected-fingerprint" in build
 
 
 def _build_args(build: list[str]) -> list[str]:
@@ -612,14 +612,14 @@ def test_up_takes_the_base_vms_box_image_instead_of_building(fake):
     # exactly what this project would build (same fingerprint), re-tag it — no download, no build.
     fake["state"].update(img=False, base_image_fingerprint="expected-fingerprint")
     assert box.main("up") == 0
-    assert _find(fake["calls"], has=["tag", box.BASE_BOX_TAG, "img:tag"])
+    assert _find(fake["calls"], has=["tag", boximage.BASE_BOX_TAG, "img:tag"])
     assert not _find(fake["calls"], has=["build", "-t", "img:tag"])
 
 
 def test_up_builds_when_the_base_image_is_a_different_box(fake):
     fake["state"].update(img=False, base_image_fingerprint="some-other-box")
     assert box.main("up") == 0
-    assert not _find(fake["calls"], has=["tag", box.BASE_BOX_TAG, "img:tag"])
+    assert not _find(fake["calls"], has=["tag", boximage.BASE_BOX_TAG, "img:tag"])
     assert _find(fake["calls"], has=["build", "-t", "img:tag"])
 
 
@@ -642,7 +642,7 @@ def test_up_bakes_packages_into_a_layer_and_runs_it(fake, monkeypatch):
     assert box.main("up") == 0
     assert not _find(fake["calls"], has=["build", "-t", "img:tag"])  # the base was current
     (layer,) = _find(fake["calls"], has=["build", "-t", _LAYER])
-    assert f"{box._BOX_FINGERPRINT_LABEL}={_layer_fp(fake)}" in layer
+    assert f"{boximage.FINGERPRINT_LABEL}={_layer_fp(fake)}" in layer
     (dockerfile,) = fake["state"]["dockerfiles"]
     assert dockerfile.startswith("FROM img:tag\n")
     assert "USER" not in dockerfile  # the image runs as root already: nothing to restore
@@ -853,7 +853,7 @@ def test_packaged_fingerprint_is_what_a_boxless_project_expects(monkeypatch, tmp
     # The base's image is only re-tagged when its fingerprint matches, so the base's and a
     # project's computation of the packaged box's fingerprint must agree — tag aside.
     monkeypatch.setattr(config, "_box_table", lambda: {})
-    assert box._box_image_fingerprint(tmp_path) == box.packaged_fingerprint()
+    assert box._box_image_fingerprint(tmp_path) == boximage.packaged_fingerprint()
 
 
 def test_build_packaged_image_is_the_projects_build_shape(monkeypatch):
@@ -863,12 +863,12 @@ def test_build_packaged_image_is_the_projects_build_shape(monkeypatch):
         seen["cmd"] = cmd
         return _Proc(0)
 
-    monkeypatch.setattr(box.subprocess, "run", fake_run)
-    box.build_packaged_image("podman", {}, box.BASE_BOX_TAG)
+    monkeypatch.setattr(boximage.subprocess, "run", fake_run)
+    boximage.build_packaged_image("podman", {}, boximage.BASE_BOX_TAG)
     cmd = seen["cmd"]
     assert cmd[:4] == ["podman", "build", "--format", "docker"]
-    assert f"{box._BOX_FINGERPRINT_LABEL}={box.packaged_fingerprint()}" in cmd
-    assert cmd[cmd.index("-t") + 1] == box.BASE_BOX_TAG
+    assert f"{boximage.FINGERPRINT_LABEL}={boximage.packaged_fingerprint()}" in cmd
+    assert cmd[cmd.index("-t") + 1] == boximage.BASE_BOX_TAG
     assert not any("PROXY" in c for c in cmd)  # direct: the base is unwalled and project-less
 
 
