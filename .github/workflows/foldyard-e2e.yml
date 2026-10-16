@@ -150,6 +150,11 @@ jobs:
       MACHINE_BACKEND: lima
       FOLDYARD_STATE_DIR: /tmp/foldyard-state
       LIMA_VERSION: "2.2.0" # the release the rig and the spike validated; bump deliberately
+      # The session's own base VM (baked below, after the machine): with both set, the live
+      # modules' VMs are clones of it (conftest's isolated_base_vm_stamp) — no per-create
+      # `dnf install podman` over the Fedora mirrors.
+      FY_BASE_VM_NAME: fy-ci-base
+      FY_BASE_VM_STAMP: /tmp/fy-ci-base-vm.json
       # XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS are appended by the linger step: the `runner`
       # user has no login session, and anything `systemd --user` (the host wall's per-VM scope)
       # needs the user manager. Harmless without the wall; kept so a walled consumer can run here.
@@ -229,6 +234,16 @@ jobs:
           echo "CONTAINER_HOST=unix://$sock" >> "$GITHUB_ENV"
           CONTAINER_HOST="unix://$sock" podman info --format '{{.Host.Arch}} podman {{.Version.Version}} on {{.Host.Distribution.Distribution}} {{.Host.Distribution.Version}}'
 
+      # The machine above is the one template create foldyard's provisioning is checked on before
+      # pytest; every VM the modules create after it is a clone of this base. The bake is the
+      # run's one other template boot over the Fedora mirrors (test_basevm_e2e bakes its own), so
+      # one stalled mirror costs a retry here, not every module after it. Retried once.
+      - name: Bake the session's base VM
+        run: |
+          cd "$RUNNER_TEMP" # project-less: not from the checkout, which holds foldyard's own toml
+          uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake \
+            || uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake
+
       # The host tier: test_e2e.py (the example + worktree stacks) plus the `*_e2e.py` modules that
       # need a real VM (tests/e2e_host.py — the base VM bake + a cloned VM, verify's negative, the
       # live probes, the machine lifecycle, the walls, the supervisor with the zero-secret rig, the box, `fy reclaim`, the
@@ -283,7 +298,7 @@ jobs:
       # Never leave the VM to the runner teardown.
       - name: Teardown
         if: always()
-        run: limactl delete -f foldyard-example || true
+        run: limactl delete -f foldyard-example "$FY_BASE_VM_NAME" || true
 
   wsl2-host-e2e:
     name: wsl2 host e2e (example + host tier, on a QEMU/KVM VM inside WSL2)
@@ -303,13 +318,15 @@ jobs:
       FOLDYARD_ENGINE: podman
       MACHINE_BACKEND: lima
       FOLDYARD_STATE_DIR: /tmp/foldyard-state
+      FY_BASE_VM_NAME: fy-ci-base # as in lima-host-e2e
+      FY_BASE_VM_STAMP: /tmp/fy-ci-base-vm.json
       # Job `env:` is WINDOWS process environment. wsl.exe hands a Linux process only PATH plus
       # whatever WSLENV names, so every variable the in-distro steps read is listed here (`/u`:
       # forward Windows → WSL; `/p`: translate the path, so GITHUB_WORKSPACE arrives as
       # /mnt/<drive>/a/foldyard/foldyard). GITHUB_ENV is deliberately NOT used across steps —
       # it is a Windows-side file and its exports would not cross into the distro either; the
       # in-distro steps hand state forward through ~/.fy-ci.env instead.
-      WSLENV: FOLDYARD_E2E/u:FOLDYARD_ENGINE/u:MACHINE_BACKEND/u:FOLDYARD_STATE_DIR/u:LIMA_VERSION/u:GITHUB_WORKSPACE/up
+      WSLENV: FOLDYARD_E2E/u:FOLDYARD_ENGINE/u:MACHINE_BACKEND/u:FOLDYARD_STATE_DIR/u:LIMA_VERSION/u:FY_BASE_VM_NAME/u:FY_BASE_VM_STAMP/u:GITHUB_WORKSPACE/up
     steps:
       # Repo-only read (no push) — keep the token out of .git/config. The checkout lands on the
       # Windows drive; the distro clones it onto its own ext4 (below) rather than working over
@@ -457,6 +474,15 @@ jobs:
           echo "export CONTAINER_HOST=unix://$sock" >> "$HOME/.fy-ci.env"
           CONTAINER_HOST="unix://$sock" podman info --format '{{.Host.Arch}} podman {{.Version.Version}} on {{.Host.Distribution.Distribution}} {{.Host.Distribution.Version}}'
 
+      # As in lima-host-e2e: the modules' VMs are clones of this; retried once.
+      - name: Bake the session's base VM
+        shell: wsl-bash {0}
+        run: |
+          . "$HOME/.fy-ci.env"
+          cd "$HOME"
+          uv run --project "$HOME/foldyard" foldyard machine base bake \
+            || uv run --project "$HOME/foldyard" foldyard machine base bake
+
       # The same module list as lima-host-e2e — what differs is the host under it. The wall module
       # gates itself on the kernel's nft `socket` expression and SKIPS here (see the header).
       - name: Host e2e on the VM
@@ -510,4 +536,4 @@ jobs:
       - name: Teardown
         if: always()
         shell: wsl-bash {0}
-        run: limactl delete -f foldyard-example || true
+        run: limactl delete -f foldyard-example "$FY_BASE_VM_NAME" || true

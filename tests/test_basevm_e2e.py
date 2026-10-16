@@ -2,10 +2,11 @@
 of it (`fy machine recreate`) that boots, applies foldyard's provisioning and runs containers.
 
 Host tier (tests/e2e_host.py). Run right after test_e2e.py, so the modules after it start from a
-cloned VM (each one that recreates the VM again does so from the template: the live CLI modules
-run with FOLDYARD_BASE_VM=0 — conftest's isolated_base_vm_stamp). This module bakes its OWN base
-(`FY_BASE_VM_NAME`, a per-module stamp) and removes it at the end, so on an operator's machine it
-never touches their `foldyard-base`.
+cloned VM (each one that recreates the VM again does so from the template — the live CLI modules
+run with FOLDYARD_BASE_VM=0 — or, where the session names a base of its own as CI does, from that
+one: conftest's isolated_base_vm_stamp). This module bakes its OWN base (`FY_BASE_VM_NAME`, a
+per-module stamp) and removes it at the end, so on an operator's machine it never touches their
+`foldyard-base`, nor CI's session base.
 
 Spiked on macOS (Lima 2.1.3, vz, APFS copy-on-write) on 2026-10-12; this is the Linux/WSL2 record:
 Lima 2.2.0's QEMU driver, where a clone is a plain copy of the disk.

@@ -157,9 +157,14 @@ def isolated_base_vm_stamp(tmp_path, monkeypatch, request):
     """Point the base VM's stamp (basevm.py) at a per-test file, so no test reads the operator's
     real ~/.foldyard/base-vm.json and clones from their baked base. The live modules that drive
     the real CLI get cloning switched OFF instead (no per-test path may reach them —
-    test_isolation_e2e.py): their VMs come from the template, as before the base existed."""
+    test_isolation_e2e.py): their VMs come from the template, as before the base existed —
+    unless the SESSION names a base of its own (both `FY_BASE_VM_NAME` and `FY_BASE_VM_STAMP`, as
+    the CI host tiers do after `fy machine base bake`): then they clone it. Every template create
+    runs the template's `dnf install podman` over the Fedora mirrors, and one stalled mirror hung
+    a whole run (2026-10-16); the operator's own `foldyard-base` is still never used."""
     if _runs_the_real_cli(request.module):
-        monkeypatch.setenv("FOLDYARD_BASE_VM", "0")
+        if not (SESSION_ENV.get("FY_BASE_VM_NAME") and SESSION_ENV.get("FY_BASE_VM_STAMP")):
+            monkeypatch.setenv("FOLDYARD_BASE_VM", "0")
         return
     monkeypatch.setenv("FY_BASE_VM_STAMP", str(tmp_path / "fy-base-vm.json"))
 
