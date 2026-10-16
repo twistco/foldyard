@@ -19,6 +19,9 @@ the box trusts, both set when the box is created:
 - `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO`, `SSL_CERT_FILE` and `CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE`
   (gcloud's own transports: `gsutil`, `bq`) point at a **combined** bundle (system roots + the
   proxy CA), so both decrypted and passed-through connections verify.
+- `NODE_USE_ENV_PROXY=1` makes Node's `fetch()` use the proxy, and `npm_config_https_proxy` /
+  `npm_config_proxy` cover install scripts that bring their own HTTP client
+  ([Node and npm](#node-and-npm)).
 - A browser's own store (Chromium/Playwright's NSS database) ignores all of these: import the CA
   once (`certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n foldyard-proxy -i /etc/dev-proxy-ca.pem`)
   or the page fails with `ERR_CERT_AUTHORITY_INVALID`.
@@ -164,14 +167,47 @@ the rules and the `sudo` commands, you run them once, and every `fy up` checks t
 
 ### Stack containers trust the proxy too
 
-With the VM firewall on, podman hands the VM's proxy settings to every container it creates —
-your stack's services, and anything the box starts — so their traffic is decrypted like the box's.
+**Only with the VM firewall on** (`[machine] firewall = true`, lima backend). Everything in this
+section is set up by the firewall's boot setup. Without the firewall, your stack's containers
+get neither the proxy settings nor the CA.
+
+With it, podman hands the VM's proxy settings (`HTTP_PROXY`, `HTTPS_PROXY` and their lowercase
+forms, with a `NO_PROXY` of loopback and the host gateway) to every container it creates — your
+stack's services, and anything the box starts — so their traffic is decrypted like the box's.
 They trust the proxy's CA the same way, without any change to your compose files: the VM's boot
 setup installs the CA and a podman default that mounts it into every container
 (`/etc/fy-proxy-ca.pem`, plus `/etc/fy-proxy-ca-combined.pem` = the VM's trusted roots and the CA)
-and sets `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_SSL_CAINFO`.
+and sets `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_SSL_CAINFO`. A
+second default sets npm's own proxy settings, `npm_config_https_proxy` and `npm_config_proxy`
+([Node and npm](#node-and-npm)).
 
-- **Your image wins.** A variable your image or compose file already sets keeps its value.
+**Pointing a container at the proxy yourself needs the firewall too.** The proxy always decrypts
+([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)), but only the firewall gives containers its
+CA. A container you route through the proxy yourself (`HTTPS_PROXY` in a compose file) on a VM
+without the firewall fails TLS on every host not on `passthrough`, unless its image already
+trusts the proxy's CA.
+
+- **Your settings win, even stale ones.** A variable your image or compose file already sets keeps
+  its value, so don't restate what foldyard provides: a proxy address copied into a compose file
+  stops working when the port band moves, and a mount of `.devbox-ca` (the copy of the CA
+  foldyard puts in the checkout for the box) isn't needed by stack containers. An empty value
+  isn't an override: blanking the proxy variables is how a service that only talks to the rest of
+  the stack stays off the proxy (blank `npm_config_https_proxy` and `npm_config_proxy` too if it
+  runs npm). `fy doctor` has two rows for this, both advisory:
+  - `stack env overrides` reads the rendered compose config and names each of these a service
+    sets, even to foldyard's own value, since a restated value goes stale when the port band
+    moves.
+  - `stack container env` reads what each running container actually has, whatever set it. It
+    names a CA variable an image sets for itself (an `SSL_CERT_FILE` of its own), a different proxy
+    address, and a container that uses the proxy but lacks the CA or npm settings. podman adds
+    foldyard's settings when it creates a container, so one created before the VM had them (or
+    before a foldyard upgrade added one) lacks them until it's recreated: `fy down`, then `fy up`
+    (named volumes are kept). A container that blanks the proxy variables isn't flagged.
+
+  To undo an image's `ENV`, set foldyard's value in the service's compose `environment` (an image
+  can't be told to drop it). The container row is then clean, and the compose row notes the
+  restated value. That's expected; a restated CA path stays right, while a restated proxy address
+  needs updating if the port band moves.
 - **An image that trusts a private CA of its own** (a corporate root baked into its system store)
   keeps it only where the connection goes through the proxy decrypted: the proxy presents its
   own certificate there. A connection that bypasses decryption (a `passthrough` host, or TLS
@@ -186,17 +222,73 @@ and sets `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_S
   `RUN` step's `curl`, `apk`, `pip`, `uv`, `npm` and `git` then work against a decrypted host,
   and installing `ca-certificates` in a step still works (nothing is mounted over the system
   store). Nothing is written into the image: the variables exist only while the step runs. An
-  `ENV` in your Dockerfile wins, as it does for running containers.
-- **Clients with their own trust store** (a Java keystore, a browser's NSS database, a binary
-  with bundled roots) ignore those variables, and so does a GnuTLS client (Debian's `apt` over
-  HTTPS, `wget`), which reads only the image's system store. Add the CA to that store in your
-  image, or put the host on `passthrough`.
+  `ENV` in your Dockerfile wins, as it does for running containers. npm's proxy settings aren't
+  added: a build gets its own proxy URL ([below](#image-builds-trusted-still-behind-the-allowlist)),
+  so a step whose install script needs npm's spelling writes
+  `RUN npm_config_https_proxy="$HTTPS_PROXY" npm install`.
+- **Clients with their own trust store** ignore those variables, in the box as in a container.
+  Add the CA to that store in your image, or put the host on `passthrough`:
+  - a Java keystore, or a browser's NSS database;
+  - a GnuTLS client (Debian's `apt` over HTTPS, `wget`), which reads only the image's system
+    store;
+  - a Rust binary with its CA roots compiled in. Turbopack is one: `next build` fetching Google
+    Fonts fails with ``Failed to fetch `<font>` from Google Fonts`` even though the host is
+    allowed, because it ignores `NODE_EXTRA_CA_CERTS`.
+    `NEXT_TURBOPACK_EXPERIMENTAL_USE_SYSTEM_TLS_CERTS=1` makes it read the system's roots
+    instead, which honour `SSL_CERT_FILE` (the combined bundle). Set it in the service's compose
+    `environment` and in `[box].env`; foldyard doesn't set it for you, since it belongs to one
+    framework and its name says experimental.
 - **Image pulls trust it too.** The same boot setup adds the CA to the VM's own trust store,
   which podman checks image pulls against, so a registry the proxy decrypts still works. Turning
   the VM firewall off takes it out again.
 - **A new CA needs a restart.** The CA is part of the VM's boot setup, so after it changes run
   `fy machine stop && fy up`. The old CA is replaced, not kept beside the new one. Without the VM
   firewall nothing is routed through the proxy, so nothing is needed.
+
+### Node and npm
+
+Node needs more than the standard proxy variables, and every Node project runs into it:
+
+- **`fetch()` ignores `HTTPS_PROXY`.** Node's built-in `fetch()` (undici) goes direct unless
+  `NODE_USE_ENV_PROXY=1` is set. Under the VM firewall a direct request is refused, and the error
+  is an `ECONNREFUSED` against a raw IP address, with nothing naming a proxy. The variable needs
+  Node 24.0 or 22.21 and later; older Node ignores it, so `fetch()` still goes direct. There,
+  upgrade Node, or have the app route undici through the proxy itself
+  (`setGlobalDispatcher(new EnvHttpProxyAgent())` from the `undici` package).
+- **Install scripts bring their own HTTP client.** One that fetches with node-fetch (supabase's
+  postinstall downloading its CLI) reads only npm's `npm_config_https_proxy`.
+
+What foldyard sets:
+
+| where | `NODE_USE_ENV_PROXY=1` | `npm_config_https_proxy`, `npm_config_proxy` |
+| --- | --- | --- |
+| the box | yes | yes |
+| stack containers (VM firewall on) | **no** | yes |
+| image build steps | no | no |
+
+In the box, all three are defaults: `[box].env` may override any of them. With
+`NODE_USE_ENV_PROXY`, Node honours `NO_PROXY` like curl does, so a stack service the box calls by
+name has to be in `[proxy] no_proxy` (it already had to be for curl and Python).
+
+**Why not in stack containers.** podman gives every container `HTTP_PROXY` with a `NO_PROXY` of
+only loopback and the host gateway. Node ignoring it is what lets one Node service reach another
+by service name (Supabase Studio calling `http://kong:8000`). Set everywhere, those calls would
+go to the proxy, which runs on your computer and can't resolve a stack name.
+
+**An app container that calls the internet from Node** sets it itself, with a `NO_PROXY` naming
+the stack services it calls:
+
+```yaml
+environment:
+  NODE_USE_ENV_PROXY: "1"
+  # Both cases: podman injects a lowercase no_proxy of its own, and undici prefers it.
+  # Keep podman's entries (loopback and the host gateway, 192.168.5.2 on lima).
+  NO_PROXY: localhost,127.0.0.1,192.168.5.2,kong,db
+  no_proxy: localhost,127.0.0.1,192.168.5.2,kong,db
+```
+
+Leave the proxy address, the CA and npm's settings out: foldyard provides them, and a copy goes
+stale when the port band moves.
 
 ### Image builds: trusted, still behind the allowlist
 
@@ -247,6 +339,9 @@ refused.
 - **The Network Log is empty.** The box may be missing the proxy variables or the CA — recreate
   it once (`fy box down && fy box up`). The log only shows a request once it gets a response, so
   a failing TLS handshake (CA not trusted) shows nothing.
+- **Node fails with `ECONNREFUSED` against a raw IP address.** Its `fetch()` went direct instead
+  of through the proxy, and the VM firewall refused it. The box sets `NODE_USE_ENV_PROXY=1`; a
+  stack container has to set it itself ([Node and npm](#node-and-npm)).
 - **Every request in the box suddenly refuses to connect.** The box routes through the proxy, so
   a dead proxy means no traffic out. `fy doctor` has an "egress proxy" check for this, and `fy up`
   restarting the supervisor is the usual fix.

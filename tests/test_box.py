@@ -98,6 +98,14 @@ def fake(tmp_path, monkeypatch):
     # sequences don't probe/spawn the real Mac daemons, and record that box up asked for it.
     hosted: list[bool] = []
     monkeypatch.setattr(supervisor, "ensure_background", lambda: hosted.append(True) or None)
+    # …and waits for its jobs before building (supervisor.await_ready); ready unless a test says.
+    readiness: dict[str, Any] = {"ok": True, "asked": 0}
+
+    def _await_ready() -> bool:
+        readiness["asked"] += 1
+        return bool(readiness["ok"])
+
+    monkeypatch.setattr(supervisor, "await_ready", _await_ready)
     # `box.main("up")` runs the host preflight (backend CLI / proxy prereqs) before assembling the
     # run — these golden tests aren't its subject and the box test env has no real podman, so neuter
     # it here (test_preflight.py covers the checks; test_up_runs_preflight covers the wiring).
@@ -193,6 +201,7 @@ def fake(tmp_path, monkeypatch):
         "main": main,
         "ctx": ctx,
         "hosted": hosted,
+        "readiness": readiness,
         "mirror": mirror,
     }
 
@@ -393,9 +402,36 @@ def test_every_name_foldyard_sets_in_the_box_is_one_box_env_refuses(fake, monkey
     assert box.main("up") == 0
     names = {v.split("=", 1)[0] for v in _env_values(_find(fake["calls"], has=["run", "-d"])[0])}
     consumers = set(config.box_env()) | set(config.port_bases())
-    restatable = {"TZ", "LC_TIME", "DO_NOT_TRACK", "NEXT_TELEMETRY_DISABLED"}
+    restatable = {
+        "TZ",
+        "LC_TIME",
+        "DO_NOT_TRACK",
+        "NEXT_TELEMETRY_DISABLED",
+        "NODE_USE_ENV_PROXY",
+        "npm_config_https_proxy",
+        "npm_config_proxy",
+    }
     assert {"HTTPS_PROXY", "SSL_CERT_FILE", "CLAUDE_CONFIG_DIR", "CODEX_HOME"} <= names  # all on
     assert {n for n in names - consumers - restatable if not config.foldyard_owned(n)} == set()
+
+
+def test_up_box_env_overrides_the_node_and_npm_proxy_defaults(fake, monkeypatch, tmp_path):
+    # The proxy plugin's Node/npm settings are defaults the consumer may restate: one value per
+    # key, the consumer's, never a second `-e` for the engine to pick between.
+    fake["ctx"].env["FY_PROXY"] = "h:8088"
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)
+    ca = tmp_path / "mitm" / "mitmproxy-ca-cert.pem"
+    ca.parent.mkdir()
+    ca.write_text("CERT")
+    monkeypatch.setenv("MITMPROXY_CA", str(ca))
+    monkeypatch.setattr(box, "_capture_keyless", lambda: None)  # never the real ~/.codex
+    monkeypatch.setattr(config, "box_env", lambda: {"NODE_USE_ENV_PROXY": "0"})
+    assert box.main("up") == 0
+    values = _env_values(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert [v for v in values if v.startswith("NODE_USE_ENV_PROXY=")] == ["NODE_USE_ENV_PROXY=0"]
+    assert [v for v in values if v.startswith("npm_config_https_proxy=")] == [
+        "npm_config_https_proxy=http://h:8088"
+    ]
 
 
 def test_up_passes_no_timezone_when_your_computer_names_none(fake):
@@ -1012,6 +1048,37 @@ def test_up_ensures_host_supervisor(fake):
     fake["state"]["running"] = True
     assert box.main("up") == 0
     assert fake["hosted"] == [True]  # still ensured even when the box is already up
+
+
+def test_up_refuses_before_building_when_the_supervisor_is_not_ready(fake):
+    # The supervisor's jobs (the proxy every build and the box route through) must be running
+    # before anything uses them; a blocked one has already printed its reason (await_ready).
+    fake["readiness"]["ok"] = False
+    assert box.main("up") == 1
+    assert fake["readiness"]["asked"] == 1
+    assert _find(fake["calls"], has=["build"]) == [] and _find(fake["calls"], has=["run"]) == []
+
+
+def test_up_waits_after_the_capture_prompts(fake, monkeypatch):
+    # A daemon may be blocked on exactly the secret `box up` is about to prompt for — the wait
+    # must not refuse the launch that would have fixed it.
+    order: list[str] = []
+    monkeypatch.setattr(box, "_capture_secrets", lambda: order.append("secrets"))
+    monkeypatch.setattr(box, "_capture_keyless", lambda: order.append("keyless"))
+    monkeypatch.setattr(supervisor, "await_ready", lambda: order.append("ready") or True)
+    assert box.main("up") == 0
+    assert order == ["secrets", "keyless", "ready"]
+
+
+def test_box_build_starts_and_waits_for_the_supervisor(fake):
+    # A walled build reaches its egress through the supervisor's proxy — `fy box build` alone
+    # (no `fy up` before it) never started one.
+    assert box.main("build") == 0
+    assert fake["hosted"] == [True] and fake["readiness"]["asked"] == 1
+    fake["readiness"]["ok"] = False
+    fake["calls"].clear()
+    assert box.main("build") == 1
+    assert _find(fake["calls"], has=["build"]) == []
 
 
 def test_up_proxy_ca_missing_blocks(fake, monkeypatch, tmp_path):

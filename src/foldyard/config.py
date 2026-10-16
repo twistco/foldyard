@@ -1110,6 +1110,14 @@ def machine_runtime() -> str:
 LIMA_HOST_GATEWAY = "192.168.5.2"
 
 
+def wall_proxy_url() -> str:
+    """The proxy URL the walled VM's podman hands every container it creates (``HTTP_PROXY`` and
+    friends, and npm's pair): the host gateway and THIS PROJECT's main proxy port. VM-level, so
+    not per-worktree. One function for both sides: ``machine`` passes it to the wall script, and
+    ``fy doctor``'s ``stack container env`` row expects it in running containers."""
+    return f"http://{LIMA_HOST_GATEWAY}:{proxy_port_base()}"
+
+
 def host_alias() -> str:
     """The address a CONTAINER in the machine uses to reach the host-side foldyard daemons (egress
     proxy, gcp minter). Backend-dependent: under podman-machine, gvproxy publishes the host as
@@ -1969,6 +1977,24 @@ def blocked_daemons_file() -> Path:
     ``<state_dir>/blocked-daemons.json``."""
     env = os.environ.get("FOLDYARD_BLOCKED_DAEMONS_FILE")
     return Path(env).expanduser() if env else state_dir() / "blocked-daemons.json"
+
+
+def supervisor_ready_file() -> Path:
+    """The supervisor's PROJECT-shared readiness record, rewritten each tick: its pid, the
+    worktrees it served and every job's state (``up`` · ``starting`` · ``blocked`` · ``failing``)
+    — what the launch paths wait on before anything uses a job (``supervisor.await_ready``).
+    ``FOLDYARD_SUPERVISOR_READY_FILE`` wins, else ``<state_dir>/supervisor-ready.json``."""
+    env = os.environ.get("FOLDYARD_SUPERVISOR_READY_FILE")
+    return Path(env).expanduser() if env else state_dir() / "supervisor-ready.json"
+
+
+def launches_dir() -> Path:
+    """One marker per host launch in progress (``<pid>.json``: the worktree it brings up), so the
+    supervisor serves that worktree before its box exists. Host state, outside the mount — the box
+    can't widen what the supervisor reconciles. ``FOLDYARD_LAUNCHES_DIR`` wins, else
+    ``<state_dir>/launches``."""
+    env = os.environ.get("FOLDYARD_LAUNCHES_DIR")
+    return Path(env).expanduser() if env else state_dir() / "launches"
 
 
 def _host_table() -> dict:

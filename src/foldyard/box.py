@@ -1336,8 +1336,8 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # without a prior `fy up`) never would, leaving the box pointed at a dead :8088 even with axes
     # like penpot/capture marked "on" (a stored posture is NOT a running daemon). Idempotent +
     # Host-only (a no-op in the box, or when a supervisor already serves its daemons). Done before the
-    # early-return so even an already-up box re-checks, and before the slow build so the proxy + CA
-    # come up in parallel.
+    # early-return so even an already-up box re-checks, and as early as this so the supervisor boots
+    # while the capture prompts below run; `await_ready` then waits for its jobs.
     from . import supervisor
 
     supervisor.ensure_background()
@@ -1355,6 +1355,11 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # Above the early return for the same reason: arming an axis is host-side and needs no recreate,
     # so an already-up box is exactly where this is most likely to be the one thing still missing.
     _warn_keyless_axis_at_rest()
+    # Before anything uses the supervisor's jobs — the first build reaches the proxy within a
+    # second — and AFTER the captures: a daemon blocked on a secret they just stored unblocks on
+    # the next tick instead of refusing the launch that fixed it.
+    if not supervisor.await_ready():
+        return 1
 
     expected_fingerprint = _box_image_fingerprint(main)
 
@@ -1657,6 +1662,13 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
     if cmd == "exec":
         return _exec(engine, box, ctx, env, args or [])
     if cmd == "build":
+        # A walled build's egress is the supervisor's proxy, and `fy box build` may be the first
+        # host verb since the VM started.
+        from . import supervisor
+
+        supervisor.ensure_background()
+        if not supervisor.await_ready():
+            return 1
         rc = _build_img(engine, ctx.main, env)
         tag = config.box_image()["tag"]
         if rc == 0:

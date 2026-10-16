@@ -215,6 +215,20 @@ def isolated_capability_state(tmp_path, monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def isolated_supervisor_readiness(tmp_path, monkeypatch, request):
+    """Point the supervisor's readiness record (written every tick) and the launch markers (written
+    by every `ensure_background`, read by every tick) at per-test paths: no test may write the
+    operator's real record, or have a live `fy box up`'s marker widen the worktrees it reconciles.
+
+    NOT for the live modules that drive the real CLI: the launcher and the supervisor it starts
+    must agree on both paths, and only the real ones are shared by construction."""
+    if _runs_the_real_cli(request.module):
+        return
+    monkeypatch.setenv("FOLDYARD_SUPERVISOR_READY_FILE", str(tmp_path / "supervisor-ready.json"))
+    monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path / "launches"))
+
+
+@pytest.fixture(autouse=True)
 def isolated_proxy_ca(tmp_path, monkeypatch, request):
     """Point the proxy CA, and the confdir it's generated in, at a MISSING file of mitmproxy's
     default name under the test's tmp dir.

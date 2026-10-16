@@ -638,7 +638,10 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   like. An override would quietly undo the box's wiring, and the refusal names the setting to use
   instead where there is one. A key must be a plain name (`[A-Za-z_][A-Za-z0-9_]*`). It does override the clock settings the box takes from your
   computer: `TZ`, your timezone, and `LC_TIME`, your time locale, which decides a 12- or 24-hour
-  clock. Set `TZ = "UTC"` here to keep the box on UTC. `LC_TIME` is passed only when the image has that locale (`locale -a`),
+  clock. Set `TZ = "UTC"` here to keep the box on UTC. It also overrides the Node and npm proxy
+  settings a box routed through the proxy gets by default — `NODE_USE_ENV_PROXY=1`,
+  `npm_config_https_proxy` and `npm_config_proxy` ([networking.md](./networking.md#node-and-npm)).
+  `LC_TIME` is passed only when the image has that locale (`locale -a`),
   because a missing one does nothing and makes perl warn on every run, and never under an
   `LC_ALL` (the image's or this table's), which would override it. Debian images add it with
   the `locales` package and `localedef -i en_GB -f UTF-8 en_GB.UTF-8`. `date` and `ls -l` need
