@@ -473,7 +473,8 @@ def test_both_kinds_of_refusal_are_reported_and_the_proxys_offered(env, monkeypa
     prompt, asked = _answers("o")
     assert buildgate.run(build, what="build", interactive=True, prompt=prompt) == 0
     out = capsys.readouterr().out
-    assert "skipped the proxy" in out and "storage.googleapis.com" in asked[0]
+    assert "skipped the proxy" in out and len(asked) == 1  # the proxy's refusal is still offered
+    assert any(g["host"] == "storage.googleapis.com" for g in allowlist.grants())
 
 
 @pytest.mark.parametrize("report", [None, "unchanged"])
