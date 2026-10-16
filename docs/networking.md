@@ -222,9 +222,11 @@ trusts the proxy's CA.
   `RUN` step's `curl`, `apk`, `pip`, `uv`, `npm` and `git` then work against a decrypted host,
   and installing `ca-certificates` in a step still works (nothing is mounted over the system
   store). Nothing is written into the image: the variables exist only while the step runs. An
-  `ENV` in your Dockerfile wins, as it does for running containers. npm's proxy settings aren't
-  added: a build gets its own proxy URL ([below](#image-builds-trusted-still-behind-the-allowlist)),
-  so a step whose install script needs npm's spelling writes
+  `ENV` in your Dockerfile wins, as it does for running containers. A build step also gets
+  `NODE_USE_ENV_PROXY=1` ([Node and npm](#node-and-npm)), so Node 24's corepack reaches the
+  registry with no `ARG` for it. npm's proxy settings aren't added: a build gets its own proxy
+  URL ([below](#image-builds-trusted-still-behind-the-allowlist)), so a step whose install script
+  needs npm's spelling writes
   `RUN npm_config_https_proxy="$HTTPS_PROXY" npm install`.
 - **Clients with their own trust store** ignore those variables, in the box as in a container.
   Add the CA to that store in your image, or put the host on `passthrough`:
@@ -264,7 +266,7 @@ What foldyard sets:
 | --- | --- | --- |
 | the box | yes | yes |
 | stack containers (VM firewall on) | **no** | yes |
-| image build steps | no | no |
+| image build steps | yes | no |
 
 In the box, all three are defaults: `[box].env` may override any of them. With
 `NODE_USE_ENV_PROXY`, Node honours `NO_PROXY` like curl does, so a stack service the box calls by
@@ -334,8 +336,22 @@ the same kind of grant by hand, and `fy allow list` shows build grants separatel
 only a build needs). A teammate is offered them, with their `why`, when their own build is
 refused.
 
+**A tool that ignores the proxy settings** never reaches the proxy at all. It connects directly,
+the VM firewall refuses it, and the Network Log has no row for it, so there is no host to grant.
+Node's built-in `fetch` is the common case, which foldyard covers in build steps
+([Node and npm](#node-and-npm)): Node 24's corepack (0.35 and later) uses it.
+
+When a build fails, foldyard also reads the VM firewall's recent refusals. It lists any made while
+the build ran, by destination IP and port, so "nothing was refused at the proxy" gets an
+explanation. The firewall can't tell the build's connections from the box's, so the list covers
+anything walled in the VM during that time. Other tools to suspect: a postinstall script with its
+own HTTP client, or a program opening raw sockets.
+
 ## When something's off
 
+- **A build fails at the network and nothing was refused at the proxy.** The tool connected
+  directly and the VM firewall refused it. See "A tool that ignores the proxy settings" under
+  image builds above. The build's output lists what the firewall refused.
 - **The Network Log is empty.** The box may be missing the proxy variables or the CA — recreate
   it once (`fy box down && fy box up`). The log only shows a request once it gets a response, so
   a failing TLS handshake (CA not trusted) shows nothing.

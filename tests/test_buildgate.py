@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from foldyard import allowlist, buildgate, config
+from foldyard import allowlist, buildgate, config, machine
 
 
 @pytest.fixture
@@ -28,6 +28,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("FOLDYARD_STATE_DIR", str(state))
     monkeypatch.delenv("FOLDYARD_LOG_DIR", raising=False)
     monkeypatch.setattr(config, "in_box", lambda: False)
+    # No VM report unless a test gives one (the real read shells into the VM).
+    monkeypatch.setattr(machine, "wall_denies", lambda: None)
     config.clear_caches()
     yield {"log": buildgate.build_log()}
     config.clear_caches()
@@ -403,3 +405,73 @@ def test_concurrent_token_updates_are_serialized(env):
     for t in revokers:
         t.join()
     assert _tokens(env) == {}
+
+
+# ── a build whose traffic never reached the proxy ──────────────────────────────────────────
+
+
+def _deny(seq: int, dst: str = "104.16.24.34", port: int | None = 443, boot: str = "b1") -> dict:
+    return {"boot": boot, "seq": seq, "chain": "out", "dst": dst, "proto": "tcp", "port": port}
+
+
+class _Wall:
+    """The guest's refusal report as it reads before and after each build attempt."""
+
+    def __init__(self, *reads: list[dict] | None) -> None:
+        self.reads = list(reads)
+
+    def __call__(self) -> list[dict] | None:
+        return self.reads.pop(0) if len(self.reads) > 1 else self.reads[0]
+
+
+def test_a_failure_the_proxy_never_saw_names_what_the_wall_refused(env, monkeypatch, capsys):
+    # corepack 0.36 (Node 24) ignores HTTPS_PROXY: it dialled the registry directly, the VM
+    # firewall refused it, and the proxy logged nothing — a failed build with no row to offer.
+    old = [_deny(7, "9.9.9.9")]  # refused before this build: not its
+    monkeypatch.setattr(
+        machine, "wall_denies", _Wall(old, [*old, _deny(8), _deny(9), _deny(10, port=80)])
+    )
+    build = _Build(env["log"], [(1, [])])
+    prompt, asked = _answers()
+    assert buildgate.run(build, what="box image build", interactive=True, prompt=prompt) == 1
+    out = capsys.readouterr().out
+    assert asked == [] and build.calls == 1  # nothing to grant, nothing to retry
+    assert "refused 3 connections that skipped the proxy while the box image build ran" in out
+    assert "104.16.24.34:443/tcp (2×)" in out and "104.16.24.34:80/tcp (1×)" in out
+    assert "9.9.9.9" not in out
+    assert "NODE_USE_ENV_PROXY" in out
+
+
+def test_a_reboot_or_an_empty_report_counts_everything_after(env, monkeypatch, capsys):
+    # seq 3 < 50, but on a new boot: the VM restarted during the build, and its count began anew.
+    monkeypatch.setattr(machine, "wall_denies", _Wall([_deny(50, boot="b0")], [_deny(3)]))
+    assert buildgate.run(_Build(env["log"], [(1, [])]), what="build", interactive=False) == 1
+    assert "104.16.24.34:443/tcp (1×)" in capsys.readouterr().out
+    monkeypatch.setattr(machine, "wall_denies", _Wall([], [_deny(1)]))
+    assert buildgate.run(_Build(env["log"], [(1, [])]), what="build", interactive=False) == 1
+    assert "(1×)" in capsys.readouterr().out
+
+
+def test_both_kinds_of_refusal_are_reported_and_the_proxys_offered(env, monkeypatch, capsys):
+    monkeypatch.setattr(machine, "wall_denies", _Wall([], [_deny(1)], [_deny(1)]))
+    build = _Build(env["log"], [(1, [_row("storage.googleapis.com")]), (0, [])])
+    prompt, asked = _answers("o")
+    assert buildgate.run(build, what="build", interactive=True, prompt=prompt) == 0
+    out = capsys.readouterr().out
+    assert "skipped the proxy" in out and "storage.googleapis.com" in asked[0]
+
+
+@pytest.mark.parametrize("report", [None, "unchanged"])
+def test_no_report_or_nothing_new_blames_nothing(env, monkeypatch, capsys, report):
+    rows = None if report is None else [_deny(4)]
+    monkeypatch.setattr(machine, "wall_denies", lambda: rows)
+    assert buildgate.run(_Build(env["log"], [(1, [])]), what="build", interactive=False) == 1
+    assert "skipped the proxy" not in capsys.readouterr().out
+
+
+def test_a_successful_build_reads_no_report_after_it(env, monkeypatch, capsys):
+    reads: list[int] = []
+    monkeypatch.setattr(machine, "wall_denies", lambda: reads.append(1) or [_deny(len(reads))])
+    assert buildgate.run(_Build(env["log"], [(0, [])]), what="build", interactive=False) == 0
+    assert reads == [1]  # the mark only
+    assert "skipped the proxy" not in capsys.readouterr().out
