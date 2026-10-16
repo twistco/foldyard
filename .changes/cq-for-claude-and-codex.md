@@ -14,3 +14,8 @@ bump: minor
   reads the public commons anonymously and queues proposals locally until the switch is on. Nothing
   is written into your `~/.claude` or `~/.codex`. A running box needs `fy box down && fy box up`
   to pick it up. See `fy docs configuration`.
+- **`fy cq backfill` proposes what past sessions learned.** Run in the box, it reads the Claude
+  and Codex sessions already there, has a model of your choice look for what cq's reflect would
+  propose, and proposes it to cq.exchange, where it waits for review. The model is set in
+  `[cq] reflect_model` (default `haiku`), by `FOLDYARD_CQ_REFLECT_MODEL`, or for one run with
+  `--model`. See `fy docs configuration`.

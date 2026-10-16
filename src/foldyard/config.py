@@ -1507,6 +1507,20 @@ def cq_agents() -> tuple[str, ...]:
     return tuple(a for a, on in (("claude", claude_cq()), ("codex", codex_cq())) if on)
 
 
+CQ_REFLECT_MODEL_DEFAULT = "haiku"
+_MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,127}")
+
+
+def cq_reflect_model() -> str:
+    """The model ``fy cq backfill`` mines past sessions with: ``FOLDYARD_CQ_REFLECT_MODEL`` →
+    ``[cq].reflect_model`` → ``"haiku"`` (the run's ``--model`` beats all three). A Claude Code
+    ``--model`` value — an alias (``haiku``/``sonnet``/``opus``, the latest of each) or a full
+    name. Read in the BOX, where the backfill runs, so it is the checkout's own config. Anything
+    that isn't a plain name (it would land after ``--model`` in an argv) reads as the default."""
+    raw = os.environ.get("FOLDYARD_CQ_REFLECT_MODEL") or _table("cq").get("reflect_model")
+    return raw if isinstance(raw, str) and _MODEL_NAME.fullmatch(raw) else CQ_REFLECT_MODEL_DEFAULT
+
+
 def _transcript_sync_seconds(table: str) -> float:
     """``[<table>].transcript_sync_seconds`` — how often the supervisor promotes that agent's
     bound-out transcripts into its durable host archive while a session is running. ``0``/absent

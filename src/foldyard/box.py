@@ -27,6 +27,7 @@ running box). The command assembly is golden-tested (engine mocked) + faithful t
 
 from __future__ import annotations
 
+import contextlib
 import getpass
 import hashlib
 import json
@@ -921,6 +922,11 @@ def _with_reflect(agent: str, argv: list[str], resume: Callable[[str], list[str]
         return rc
     del env[cqhook.SESSION_FILE_ENV]  # one offer per launch: the reflect session's end asks nothing
     _run_foreground(again, env)
+    from . import cqbackfill
+
+    if record := cqbackfill.record_path(env):  # so `fy cq backfill` doesn't mine it again
+        with contextlib.suppress(OSError):
+            cqbackfill.mark(record, agent.lower(), session, {"reflected": "at session end"})
     return rc
 
 

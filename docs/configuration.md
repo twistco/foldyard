@@ -799,6 +799,26 @@ needs a grant like any other host. All four are offered when you start the box.
 Changing `cq` needs a new box, and `fy box up` tells you when the running one doesn't match:
 `fy box down && fy box up`.
 
+**Past sessions: `fy cq backfill`.** The end-of-session question only reaches sessions you run
+after cq is on. `fy cq backfill`, run in the box, goes through the Claude and Codex sessions
+already there instead. It condenses each transcript, keeping failed tool calls and what
+followed them, and has a headless Claude with no tools read it under cq's own reflect
+instructions. Whatever that finds is proposed to cq.exchange, where it waits pending until it is
+approved in the review queue, so the review happens there. With `cq=off`, proposals wait in cq's
+local store instead. Each session is recorded, so a second run picks up where the first stopped
+and nothing is mined twice. A session you reflected on when it ended is skipped.
+
+The mining model is your choice, since a cheap model is often enough to read an old transcript:
+
+```toml
+[cq]
+reflect_model = "haiku"   # the default; an alias (haiku, sonnet, opus) means the latest of each
+```
+
+`FOLDYARD_CQ_REFLECT_MODEL` overrides it, and `fy cq backfill --model sonnet` overrides both for
+one run. `--dry-run` prints what would be proposed, and `--limit`, `--since <days>` and
+`--session <id>` narrow the run. It asks before it starts; `--yes` skips the question.
+
 Both tables deep-merge, so `foldyard.local.toml` can set one key (your model) without
 redeclaring the team's. `fy config widenings` lists their keys under **agent steering**.
 
