@@ -247,7 +247,7 @@ def render(opts: InitOptions) -> str:
         '  { host = "github.com", why = "git fetch/clone + release-asset redirects" },',
         '  { host = "objects.githubusercontent.com", why = "GitHub release assets — uv-managed Python" },',
         '  { host = "release-assets.githubusercontent.com", why = "GitHub release assets (newer host)" },',
-        '  { host = "deb.debian.org", why = "apt — [[box.tools]] system packages" },',
+        '  { host = "deb.debian.org", why = "apt — the [box].packages layer\'s system packages" },',
         '  { host = "registry-1.docker.io", why = "box image build — base image manifest/blobs" },',
         '  { host = "auth.docker.io", why = "box image build — Docker Hub auth token" },',
         '  { host = "production.cloudfront.docker.com", why = "box image build — Docker Hub blob CDN" },',

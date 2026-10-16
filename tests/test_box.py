@@ -671,6 +671,17 @@ def test_packages_layer_refuses_a_user_it_cant_render(fake, monkeypatch, capsys)
     assert "USER" in capsys.readouterr().err
 
 
+def test_packages_layer_refuses_a_base_it_cant_inspect(fake, monkeypatch, capsys):
+    # The layer's fingerprint carries the base's ID. Without one it would build FROM an image that
+    # may not exist and fail generically, or bake a fingerprint the next inspect calls stale.
+    _with_packages(fake, monkeypatch)
+    fake["state"]["image_id"] = ""
+    assert box.main("up") == 1
+    assert not _find(fake["calls"], has=["build", "-t", _LAYER])
+    assert not _find(fake["calls"], has=["run", "-d"])
+    assert "can't inspect the box image img:tag" in capsys.readouterr().err
+
+
 def test_a_failed_packages_build_starts_no_box(fake, monkeypatch):
     _with_packages(fake, monkeypatch)
     real = box.subprocess.run

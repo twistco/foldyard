@@ -466,6 +466,9 @@ def _ensure_packages_layer(
         return 0, img
     base_id, user = _image_id_user(engine, img, env)
     layer = _packages_tag(img)
+    if not base_id:  # its ID is in the layer's fingerprint, and the layer builds FROM it
+        _err(f"✗ {_PACKAGES_LABEL}: can't inspect the box image {img} — the box was not started.")
+        return 1, layer
     fingerprint = _packages_fingerprint(base_fp, base_id, packages)
     if not force and _fingerprint(engine, "image", layer, env) == fingerprint:
         return 0, layer
