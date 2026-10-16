@@ -37,8 +37,9 @@ or template text); typer's `Argument`/`Option` defaults are exempt from B008 by
 
 **Markdown is formatted too:** `just format` wraps every tracked `.md` at 100 columns with mdformat
 (`.mdformat.toml`; a dev dependency like ruff), and `just lint` fails on one that isn't, so never
-reflow prose by hand. Not formatted: the Marp talk sources and `CHANGELOG.md` (written by
-`just release`). The one-off reformat is in `.git-blame-ignore-revs`;
+reflow prose by hand. Not formatted: the Marp talk sources, `CHANGELOG.md` (written by
+`just release`) and cq's vendored reflect prompt in `src/foldyard/assets/cq/` (byte-exact,
+checksum-pinned). The one-off reformat is in `.git-blame-ignore-revs`;
 `git config blame.ignoreRevsFile .git-blame-ignore-revs` makes local `git blame` skip it too
 (GitHub's does on its own).
 
@@ -324,11 +325,14 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   query nudge after a failed Claude tool call, and the ended session's id for the launcher's
   `/cq:reflect` offer (`box._with_reflect`). Stdlib-only, always exits 0 — Claude gives a plugin's
   SessionEnd hooks 1.5 s in total, and the root CLI callback skips its gates for this verb.
-- `cqbackfill.py` — `fy cq backfill` (in-box): past Claude/Codex transcripts → compact excerpts
-  (failures kept longest) → a headless `claude -p` with no tools, no MCP and no saved session, under
-  cq's own `cq prompt reflect`, model from `--model` / `FOLDYARD_CQ_REFLECT_MODEL` /
-  `[cq] reflect_model` / `haiku` → `cq propose` (pending on cq.exchange). A record beside cq's local
-  store keeps a run resumable and a session from being mined twice.
+- `cqbackfill.py` — `fy cq backfill`: past Claude/Codex transcripts → compact excerpts (failures
+  kept longest) → a headless `claude -p` with no tools, MCP, hooks or saved session, under cq's
+  reflect prompt as SHIPPED in `assets/cq/` (pinned to `CQ_VERSION`), model from `--model` /
+  `FOLDYARD_CQ_REFLECT_MODEL` / `[cq] reflect_model` / `haiku` → `cq propose` (pending on
+  cq.exchange). In the box: the box's sessions, proposed there. On the host: this project's host
+  sessions (by recorded cwd), mined there and handed to the box as `.devbox-cq/candidates/` — only
+  candidates cross, a host.env value in one withholds it, and the key never leaves the proxy. One
+  record in `.devbox-cq/backfill.json` (self-gitignored) serves both sides.
 - `credscope.py` — what each credential was last OBSERVED to grant (ADR-0031: reported, never
   capped): a kind's probe reads it (`CapabilityProbe.scope`), the supervisor records it per switch
   and credential identity and logs + notifies a change; `fy config widenings`, `fy mode` and the TUI

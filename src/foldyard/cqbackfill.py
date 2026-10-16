@@ -1,5 +1,5 @@
-"""``fy cq backfill`` — mine the box's PAST Claude and Codex sessions for what cq's reflect would
-have proposed, with a model you pick, and propose what they yield to cq.
+"""``fy cq backfill`` — mine PAST Claude and Codex sessions for what cq's reflect would have
+proposed, with a model you pick, and propose what they yield to cq.
 
 The end-of-session offer (``box._with_reflect``) only reaches sessions run since cq was wired, and
 only by resuming each one. This reads the transcripts the agents left behind instead:
@@ -10,20 +10,30 @@ only by resuming each one. This reads the transcripts the agents left behind ins
   2. **excerpt** each as compact text — the messages, every tool call, every result, a FAILED
      result kept longest — and, over budget, keep what surrounds the failures, since that is where
      reflect finds its candidates. A session with no tool calls has nothing to mine;
-  3. **mine** the excerpt with a headless Claude (``claude -p --model …``) that has no tools, no
-     MCP servers and no saved session, under cq's OWN reflect prompt (``cq prompt reflect``, so the
-     criteria stay cq's) cut to its non-interactive steps, returning candidates as structured
-     output. The transcript is stdin and is data: what it says is never an instruction;
-  4. **propose** each with ``cq propose``. On cq.exchange a proposal waits PENDING in the review
-     queue until someone approves it — that is the review step. With the ``cq`` switch off, cq
-     keeps it in its local store and uploads it at a later session start;
-  5. **record** the session (beside cq's local store, in the persisted ``devbox_cq_data`` volume),
-     so a run that stops halfway resumes and nothing is mined twice. A session reflected on at its
-     end is recorded too (:func:`mark`).
+  3. **mine** the excerpt with a headless Claude (``claude -p --model …``) with no tools, no MCP
+     servers, no hooks, no saved session and an empty working directory, under cq's OWN reflect
+     prompt (:func:`reflect_prompt`, shipped with foldyard at the pinned CLI version) cut to its
+     non-interactive steps, returning candidates as structured output. The transcript is stdin and
+     is data: what it says is never an instruction;
+  4. **propose** each with ``cq propose`` — in the BOX, through the egress proxy that holds the
+     operator's cq key. On cq.exchange a proposal waits PENDING in the review queue until someone
+     approves it; that is the review step. With the ``cq`` switch off, cq keeps it in its local
+     store and uploads it at a later session start;
+  5. **record** the session in ``<checkout>/.devbox-cq/backfill.json`` (gitignored), so a run that
+     stops halfway resumes and nothing is mined twice. A session reflected on at its end is
+     recorded too (:func:`mark`).
+
+Run in the box it does all five over the box's own sessions. Run on YOUR COMPUTER it does 1–3 over
+the host's sessions of this project's checkouts (by each session's recorded working directory),
+then hands the candidates to the box as ``.devbox-cq/candidates/<agent>-<id>.json``; the next run
+in the box proposes them before mining anything. Only candidates cross into the box — the text that
+goes to cq anyway — never a host transcript, and the key never leaves the proxy. Two host-side
+guards, because the miner there runs with the operator's own Claude login and writes a file the
+box reads: its instructions are foldyard's shipped copy (never anything from the checkout), and a
+candidate that contains any value from ``host.env`` is withheld.
 
 The model: ``--model`` → ``FOLDYARD_CQ_REFLECT_MODEL`` → ``[cq].reflect_model`` → ``haiku``
-(:func:`foldyard.config.cq_reflect_model`). In-box only — the transcripts, ``claude``, ``cq`` and
-the egress route are all there. Stdlib only.
+(:func:`foldyard.config.cq_reflect_model`). Stdlib only.
 """
 
 from __future__ import annotations
@@ -53,6 +63,14 @@ _TEXT_MAX, _CALL_MAX, _OK_MAX, _FAILED_MAX = 2_000, 600, 500, 3_000
 # of each failure.
 _HEAD, _TAIL, _AROUND = 3, 5, 3
 MINE_TIMEOUT_S = 900
+# cq's reflect prompt at the pinned CLI version (sdk/go/prompts/reflect.md at tag cli/v<version>:
+# the CLI embeds it, and `cq prompt reflect` prints it byte for byte). Bumping CQ_VERSION means
+# re-fetching it and updating both pins — tests/test_cq_backfill.py holds them together.
+REFLECT_PROMPT_VERSION = "0.18.0"
+REFLECT_PROMPT_SHA256 = "466792497568c0ac977a7f10b522a8f34bfcfeb758f38c4a7b3f6d192659ad17"
+_REFLECT_PROMPT = Path(__file__).resolve().parent / "assets" / "cq" / "reflect.md"
+# Shorter host.env values are not secrets worth matching (and would match ordinary words).
+_SECRET_MIN = 12
 PROPOSE_TIMEOUT_S = 60
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -132,6 +150,11 @@ class Proposed:
     queued: bool  # kept in cq's local store (the switch is off), not yet on cq.exchange
 
 
+def reflect_prompt() -> str:
+    """cq's ``/cq:reflect`` instructions, as shipped with this foldyard."""
+    return _REFLECT_PROMPT.read_text(encoding="utf-8")
+
+
 def valid_model(model: str) -> bool:
     return bool(config._MODEL_NAME.fullmatch(model))
 
@@ -143,8 +166,10 @@ def _home(env: dict) -> Path:
     return Path(env.get("HOME") or Path.home())
 
 
-def sessions(env: dict, now: float) -> list[Session]:
-    """Every finished top-level session of both agents, newest first."""
+def sessions(env: dict, now: float, roots: list[Path] | None = None) -> list[Session]:
+    """Every finished top-level session of both agents, newest first — with ``roots``, only those
+    whose recorded working directory is one of them or under one (a host's history spans every
+    project; a box's is its own)."""
     claude = Path(env.get("CLAUDE_CONFIG_DIR") or _home(env) / ".claude") / "projects"
     codex = Path(env.get("CODEX_HOME") or _home(env) / ".codex") / "sessions"
     found: list[Session] = []
@@ -155,7 +180,31 @@ def sessions(env: dict, now: float) -> list[Session]:
         match = _UUID.search(path.stem)
         if match and path.stem.endswith(match.group()):
             found.append(Session("codex", match.group(), path, path.stat().st_mtime))
-    return sorted((s for s in found if s.mtime < now - LIVE_S), key=lambda s: s.mtime, reverse=True)
+    found = [s for s in found if s.mtime < now - LIVE_S]
+    if roots is not None:
+        found = [s for s in found if _under(_session_cwd(s), roots)]
+    return sorted(found, key=lambda s: s.mtime, reverse=True)
+
+
+def _session_cwd(session: Session) -> str:
+    """Where the session ran: Claude stamps ``cwd`` on its entries, Codex on ``session_meta``."""
+    for n, e in enumerate(_lines(session.path)):
+        if n > 200:
+            break
+        if session.agent == "claude" and isinstance(e.get("cwd"), str):
+            return e["cwd"]
+        payload = e.get("payload")
+        if e.get("type") == "session_meta" and isinstance(payload, dict):
+            cwd = payload.get("cwd")
+            return cwd if isinstance(cwd, str) else ""
+    return ""
+
+
+def _under(cwd: str, roots: list[Path]) -> bool:
+    if not cwd:
+        return False
+    path = Path(cwd)
+    return any(path == root or path.is_relative_to(root) for root in roots)
 
 
 # ── excerpts ────────────────────────────────────────────────────────────────────────────────
@@ -351,6 +400,9 @@ def mine(text: str, model: str, reflect_prompt: str, run: Runner = subprocess.ru
         "--strict-mcp-config",
         "--no-session-persistence",
         "--disable-slash-commands",
+        # The operator's own hooks (on the host: every one they have) stay out of a mining run.
+        "--settings",
+        json.dumps({"disableAllHooks": True}),
         "--output-format",
         "json",
         "--json-schema",
@@ -416,13 +468,18 @@ def propose(candidate: dict, run: Runner = subprocess.run) -> Proposed:
     return Proposed(str(unit_id or "?"), queued="warning:" in (out.stderr or ""))
 
 
-# ── the record ──────────────────────────────────────────────────────────────────────────────
+# ── the record, and what crosses from your computer to the box ─────────────────────────────
+
+
+def state_dir(checkout: Path) -> Path:
+    """``<main checkout>/.devbox-cq`` (gitignored): read and written on both sides of the mount."""
+    return checkout / ".devbox-cq"
 
 
 def record_path(env: dict) -> Path | None:
-    """Beside cq's local store (``CQ_LOCAL_DB_PATH``, set at box create), so it persists with it."""
-    db = env.get("CQ_LOCAL_DB_PATH")
-    return Path(db).parent / "fy-backfill.json" if db else None
+    """The record, in the box: under the main checkout it was created for."""
+    checkout = env.get("FOLDYARD_CHECKOUT")
+    return state_dir(Path(checkout)) / "backfill.json" if checkout else None
 
 
 def load_record(path: Path) -> dict:
@@ -434,13 +491,58 @@ def load_record(path: Path) -> dict:
 
 
 def mark(path: Path, agent: str, session_id: str, entry: dict) -> None:
-    """Record one session (atomically: a run stopped mid-write leaves the old record whole)."""
+    """Record one session, merged over what is there (atomically: a run stopped mid-write leaves
+    the old record whole)."""
     record = load_record(path)
-    record[f"{agent}:{session_id}"] = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **entry}
+    key = f"{agent}:{session_id}"
+    old = record.get(key)
+    old = old if isinstance(old, dict) else {}
+    record[key] = {**old, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **entry}
+    _write_json(path, record)
+
+
+def _write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Self-ignoring: candidates are unreviewed text, and a consumer's .gitignore may predate this.
+    ignore = next((d for d in (path.parent, *path.parents) if d.name == ".devbox-cq"), None)
+    if ignore is not None and not (ignore / ".gitignore").exists():
+        (ignore / ".gitignore").write_text("*\n")
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(record, indent=1, sort_keys=True))
+    tmp.write_text(json.dumps(data, indent=1, sort_keys=True))
     os.replace(tmp, path)
+
+
+_HANDOFF = re.compile(rf"(claude|codex)-({_UUID.pattern})\.json")
+
+
+def _handoffs(drop: Path) -> list[tuple[Path, str, str, list[dict]]]:
+    """The candidates your computer left for the box: ``(file, agent, session, candidates)``.
+    Box-writable like everything in the checkout, so read as untrusted: a file not named like a
+    handoff is ignored, and each candidate is checked again (:func:`_clean`)."""
+    out = []
+    for path in sorted(drop.glob("*.json")) if drop.is_dir() else ():
+        match = _HANDOFF.fullmatch(path.name)
+        data = load_record(path) if match else {}
+        if not match or not isinstance(data.get("candidates"), list):
+            continue
+        cleaned = [c for c in map(_clean, data["candidates"]) if c is not None]
+        out.append((path, match.group(1), match.group(2), cleaned))
+    return out
+
+
+def _host_secrets() -> list[str]:
+    """Every value in this project's ``host.env`` long enough to be a secret."""
+    try:
+        lines = config.host_env_file().read_text().splitlines()
+    except OSError:
+        return []
+    values = (ln.split("=", 1)[1].strip().strip("'\"") for ln in lines if "=" in ln)
+    return [v for v in values if len(v) >= _SECRET_MIN]
+
+
+def _carries(candidate: dict, secrets: list[str]) -> bool:
+    blob = json.dumps(candidate, ensure_ascii=False)
+    return any(secret in blob for secret in secrets)
 
 
 # ── the run ─────────────────────────────────────────────────────────────────────────────────
@@ -460,30 +562,37 @@ def _confirm(question: str) -> bool:
     return answer.strip().lower() in {"y", "yes"}
 
 
-def _reflect_prompt() -> str | None:
-    try:
-        out = subprocess.run(
-            ["cq", "prompt", "reflect"], capture_output=True, text=True, timeout=10, check=False
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return out.stdout if out.returncode == 0 and out.stdout.strip() else None
+def _host_checkouts() -> tuple[Path, list[Path]]:
+    """``(the main checkout, every checkout of this project)``: main, and its registered worktrees
+    (Claude's own worktrees under the main checkout are covered by it)."""
+    from . import stack, worktree_registry
+
+    main = stack.main_repo()
+    return main, [main, *worktree_registry.checkouts(main).values()]
 
 
 def _todo(
-    env: dict,
+    found: list[Session],
     record: dict,
     now: float,
     limit: int | None,
     since_days: float | None,
     session_ids: tuple[str, ...],
 ) -> list[Session]:
-    todo = [s for s in sessions(env, now) if s.key not in record]
+    todo = [s for s in found if s.key not in record]
     if session_ids:
         todo = [s for s in todo if s.id in session_ids]
     if since_days is not None:
         todo = [s for s in todo if s.mtime >= now - since_days * 86_400]
     return todo[:limit] if limit else todo
+
+
+def _counts(todo: list[Session]) -> str:
+    return ", ".join(
+        f"{n} {agent}"
+        for agent in ("claude", "codex")
+        if (n := sum(s.agent == agent for s in todo))
+    )
 
 
 def run(
@@ -497,34 +606,109 @@ def run(
     session_ids: tuple[str, ...] = (),
     run: Runner = subprocess.run,
 ) -> int:
-    if not config.in_box():
-        _err("✗ `fy cq backfill` runs in the box, where the transcripts and cq are — `fy shell`.")
-        return 1
-    path = record_path(env)
-    if not env.get("FY_CQ_AGENTS") or path is None:
-        _err(
-            "✗ cq isn't wired into this box — set `cq = true` under [claude] or [codex], then "
-            "`fy box down && fy box up` on your computer."
-        )
-        return 1
+    """In the box: propose what your computer handed over, then mine and propose the box's own
+    sessions. On your computer: mine this project's host sessions and hand the candidates over."""
     if not valid_model(model):
         _err(f"✗ not a model name: {model!r}")
         return 1
-    reflect = _reflect_prompt()
-    if reflect is None:
-        _err("✗ `cq prompt reflect` failed — is the cq CLI installed? (`fy box up` installs it)")
+    opts = {"limit": limit, "since_days": since_days, "session_ids": session_ids}
+    if config.in_box():
+        return _run_box(env, model=model, yes=yes, dry_run=dry_run, run=run, **opts)
+    return _run_host(env, model=model, yes=yes, dry_run=dry_run, run=run, **opts)
+
+
+_NOT_WIRED = (
+    "✗ cq isn't on for this project — set `cq = true` under [claude] or [codex] (and on your "
+    "computer `fy config adopt`, then `fy box down && fy box up`)."
+)
+
+
+def _run_host(env: dict, *, model: str, yes: bool, dry_run: bool, run: Runner, **opts) -> int:
+    if not config.cq_agents():
+        _err(_NOT_WIRED)
         return 1
+    main, roots = _host_checkouts()
+    record, drop = state_dir(main) / "backfill.json", state_dir(main) / "candidates"
     now = time.time()
-    todo = _todo(env, load_record(path), now, limit, since_days, session_ids)
+    todo = _todo(sessions(env, now, roots), load_record(record), now, **opts)
     if not todo:
+        print("✓ nothing to backfill: this project's sessions here are all mined or reflected on.")
+        return 0
+    print(
+        f"cq backfill on your computer: {len(todo)} past session(s) of this project "
+        f"({_counts(todo)}), mined with {model} using your Claude login."
+    )
+    print(
+        "  dry run: candidates are printed; nothing is handed over or recorded."
+        if dry_run
+        else "  Candidates go to the box, which proposes them to cq.exchange; transcripts stay "
+        "here."
+    )
+    if not yes and not _confirm(f"Mine {len(todo)} session(s) with {model}? [y/N] "):
+        return 1
+    secrets, prompt = _host_secrets(), reflect_prompt()
+    failures, handed, withheld_total = 0, 0, 0
+    for s in todo:
+        label = f"{s.agent} {s.id[:8]}"
+        text = excerpt(s)
+        if not text:
+            print(f"· {label} — nothing to mine")
+            if not dry_run:
+                mark(record, s.agent, s.id, {"skipped": "no tool calls, or already reflected"})
+            continue
+        try:
+            found = mine(text, model, prompt, run=run)
+        except MineError as exc:
+            _err(f"✗ {label} — mining failed: {exc}")
+            failures += 1
+            continue
+        kept = [c for c in found if not _carries(c, secrets)]
+        withheld = len(found) - len(kept)
+        withheld_total += withheld
+        note = f" ({withheld} withheld: it contained a value from host.env)" if withheld else ""
+        if dry_run:
+            print(f"▶ {label} — {len(kept)} candidate(s){note}")
+            for c in kept:
+                print(f"    • {c['summary']}  [{', '.join(c['domains'])}]")
+            continue
+        if kept:
+            payload = {"agent": s.agent, "session": s.id, "model": model, "candidates": kept}
+            _write_json(drop / f"{s.agent}-{s.id}.json", payload)
+        handed += len(kept)
+        mark(
+            record,
+            s.agent,
+            s.id,
+            {"mined_on": "your computer", "model": model, "candidates": len(kept)}
+            | ({"withheld": withheld} if withheld else {}),
+        )
+        print(f"✓ {label} — {len(kept)} candidate(s){note}")
+    if handed:
+        print(
+            f"{handed} candidate(s) wait in {drop}. Run `fy cq backfill` in the box (`fy shell`) "
+            "to propose them — through the proxy, which adds your cq key."
+        )
+    if withheld_total:
+        print(f"ℹ {withheld_total} candidate(s) withheld for containing a value from host.env.")
+    return 1 if failures else 0
+
+
+def _run_box(env: dict, *, model: str, yes: bool, dry_run: bool, run: Runner, **opts) -> int:
+    path = record_path(env)
+    if not env.get("FY_CQ_AGENTS") or path is None:
+        _err(_NOT_WIRED)
+        return 1
+    handoffs = _handoffs(path.parent / "candidates")
+    now = time.time()
+    todo = _todo(sessions(env, now), load_record(path), now, **opts)
+    waiting = sum(len(h[3]) for h in handoffs)
+    if not todo and not handoffs:
         print("✓ nothing to backfill: every finished session is already mined or reflected on.")
         return 0
-    counts = ", ".join(
-        f"{n} {agent}"
-        for agent in ("claude", "codex")
-        if (n := sum(s.agent == agent for s in todo))
-    )
-    print(f"cq backfill: {len(todo)} past session(s) ({counts}), mined with {model}.")
+    if handoffs:
+        print(f"cq backfill: {waiting} candidate(s) mined on your computer, to propose.")
+    if todo:
+        print(f"cq backfill: {len(todo)} past session(s) ({_counts(todo)}), mined with {model}.")
     if dry_run:
         print("  dry run: candidates are printed; nothing is proposed or recorded.")
     else:
@@ -532,9 +716,19 @@ def run(
             "  What they yield is proposed to cq.exchange, where it waits pending until it is "
             "approved in the review queue."
         )
-    if not yes and not _confirm(f"Mine {len(todo)} session(s) with {model}? [y/N] "):
+    question = (
+        f"Mine {len(todo)} session(s) with {model}? [y/N] " if todo else "Propose them? [y/N] "
+    )
+    if not yes and not _confirm(question):
         return 1
-    failures, proposed, queued = 0, 0, 0
+    tally = {"failures": 0, "proposed": 0, "queued": 0}
+    for handoff, agent, session_id, candidates in handoffs:
+        if dry_run:
+            print(f"▶ {agent} {session_id[:8]} (mined on your computer) — {len(candidates)}")
+            continue
+        _propose_all(path, agent, session_id, candidates, tally, run, {})
+        handoff.unlink(missing_ok=True)
+    reflect = reflect_prompt()
     for s in todo:
         label = f"{s.agent} {s.id[:8]}"
         text = excerpt(s)
@@ -547,38 +741,50 @@ def run(
             candidates = mine(text, model, reflect, run=run)
         except MineError as exc:
             _err(f"✗ {label} — mining failed: {exc}")
-            failures += 1
+            tally["failures"] += 1
             continue
         if dry_run:
             print(f"▶ {label} — {len(candidates)} candidate(s)")
             for c in candidates:
                 print(f"    • {c['summary']}  [{', '.join(c['domains'])}]")
             continue
-        ids, waiting, refused = [], 0, 0
-        for c in candidates:
-            try:
-                result = propose(c, run=run)
-            except ProposeError as exc:
-                _err(f"✗ {label} — cq refused “{c['summary'][:60]}”: {exc}")
-                refused += 1
-                continue
-            ids.append(result.id)
-            waiting += result.queued
-        failures += refused
-        proposed += len(ids)
-        queued += waiting
-        mark(
-            path,
-            s.agent,
-            s.id,
-            {"model": model, "candidates": len(candidates), "proposed": ids, "refused": refused},
-        )
-        print(f"✓ {label} — {len(ids)} proposed" + (f", {refused} refused" if refused else ""))
+        _propose_all(path, s.agent, s.id, candidates, tally, run, {"model": model})
     if not dry_run:
-        print(f"{proposed} proposal(s) from {len(todo)} session(s).")
-    if queued:
+        print(f"{tally['proposed']} proposal(s).")
+    if tally["queued"]:
         print(
-            f"ℹ {queued} of them are queued in cq's local store: the `cq` switch is off. Run "
-            "`fy mode cq=on` on your computer and they upload at the next agent session start."
+            f"ℹ {tally['queued']} of them are queued in cq's local store: the `cq` switch is off. "
+            "Run `fy mode cq=on` on your computer and they upload at the next agent session start."
         )
-    return 1 if failures else 0
+    return 1 if tally["failures"] else 0
+
+
+def _propose_all(
+    record: Path,
+    agent: str,
+    session_id: str,
+    candidates: list[dict],
+    tally: dict,
+    run: Runner,
+    extra: dict,
+) -> None:
+    label = f"{agent} {session_id[:8]}"
+    ids, refused = [], 0
+    for c in candidates:
+        try:
+            result = propose(c, run=run)
+        except ProposeError as exc:
+            _err(f"✗ {label} — cq refused “{c['summary'][:60]}”: {exc}")
+            refused += 1
+            continue
+        ids.append(result.id)
+        tally["queued"] += result.queued
+    tally["failures"] += refused
+    tally["proposed"] += len(ids)
+    mark(
+        record,
+        agent,
+        session_id,
+        {**extra, "candidates": len(candidates), "proposed": ids, "refused": refused},
+    )
+    print(f"✓ {label} — {len(ids)} proposed" + (f", {refused} refused" if refused else ""))
