@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import subprocess
 import tomllib
 from pathlib import Path
@@ -142,6 +143,50 @@ def test_the_cli_is_pinned_and_checksummed(agents):
     # cached in the data volume, so a recreated box relinks it without egress
     assert f"/home/vscode/.local/share/cq/fy-bin/v{cq.CQ_VERSION}" in run
     assert f"^cq v{cq.CQ_VERSION} " in install["check"]
+
+
+# Every tool the install step names, as a function that records its call (builtins only: the
+# suite's PATH carries none of them). `curl`/`tar` succeed without writing; `sha256sum` passes.
+_INSTALL_STUBS = """
+uname() { echo x86_64; }
+mktemp() { echo /nonexistent/tmp; }
+for t in curl sha256sum tar mkdir mv chmod rm ln; do eval "$t() { echo \\"$t \\$*\\"; }"; done
+"""
+
+
+@pytest.mark.spawns("bash")  # runs the REAL step under bash (stubs as functions, builtins only)
+@pytest.mark.parametrize(
+    ("cached", "fetched"),
+    [
+        (None, True),  # first box: nothing cached
+        (b"\x7fELF\x02\x01\x01\x00\x00\x00", True),  # truncated binary: won't run at all
+        (b'echo "cq v0.0.1 (old)"\n', True),  # runs, but isn't the pinned version
+        (f'echo "cq v{cq.CQ_VERSION} (abc123)"\n'.encode(), False),  # the pinned one: relinked
+    ],
+)
+def test_the_cache_is_reused_only_when_it_is_the_pinned_version(agents, tmp_path, cached, fetched):
+    # The step's own check reads `cq --version` too, so a cached binary that fails it must be
+    # replaced here — skipping on "it's executable" would relink the bad one on every box-up.
+    home = tmp_path / "home"
+    dest = home / ".local/share/cq/fy-bin" / f"v{cq.CQ_VERSION}" / "cq"
+    if cached is not None:
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(cached)
+        dest.chmod(0o755)
+    run = agents("claude").box_bootstrap({"FY_BOX_HOME": str(home)})[0]["run"]
+    bash = shutil.which("bash")  # resolved here: the child's PATH holds nothing
+    assert bash
+    out = subprocess.run(
+        [bash, "-c", f"{_INSTALL_STUBS}\n{run}"],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/nonexistent", "HOME": str(home)},
+    )
+    assert out.returncode == 0, out.stderr
+    calls = out.stdout.splitlines()
+    assert any(c.startswith("curl ") for c in calls) is fetched
+    assert any(c.startswith("mv /nonexistent/tmp/cq ") for c in calls) is fetched
+    assert calls[-1] == f"ln -sf {dest} {home}/.local/bin/cq"
 
 
 def test_codex_files_never_replace_the_images_own(agents):
