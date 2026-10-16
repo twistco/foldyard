@@ -571,6 +571,93 @@ def test_no_up_boxes_still_serves_main_daemons_but_reports_none_up(monkeypatch):
     assert devmode.active_worktrees() == [""]
 
 
+# A host launch (`fy up` / `fy box up` / `fy box build`) marks the worktree it brings up BEFORE
+# that worktree's box exists, so its daemons — and main's proxy, which every build goes through —
+# are served while it builds, not only from the tick after its box appears.
+
+
+def _dead_launch(launches, name: str, wt: str) -> None:
+    """A launch marker whose launcher is gone: written, its lock released."""
+    launches.mkdir(parents=True, exist_ok=True)
+    (launches / f"{name}.json").write_text(json.dumps({"worktree": wt}))
+
+
+def _launch(launches, name: str, wt: str) -> int:
+    """A launch marker as `supervisor._mark_launch` leaves it: written, and LOCKED for as long as
+    its launcher lives. Returns the fd holding the lock (closing it is what dying does)."""
+    import fcntl
+
+    _dead_launch(launches, name, wt)
+    fd = os.open(launches / f"{name}.json", os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return fd
+
+
+def test_a_launching_worktree_is_served_with_main_before_its_box_is_up(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path))
+    monkeypatch.setattr(devmode, "worktree_keys", lambda: ["", "feat", "other"])
+    fd = _launch(tmp_path, "101", "other")
+    try:
+        # feat's box is up, main's isn't: main's proxy port — the one builds use — had no listener.
+        assert devmode.active_worktrees(["feat"]) == ["feat", "", "other"]
+    finally:
+        os.close(fd)
+
+
+def test_a_dead_launchers_marker_is_ignored_and_swept(monkeypatch, tmp_path):
+    # Judged by its lock, never its pid: a SIGKILLed launcher runs no atexit, and its pid may
+    # already be another process's — but the kernel released its lock either way.
+    monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path))
+    monkeypatch.setattr(devmode, "worktree_keys", lambda: ["", "feat"])
+    _dead_launch(tmp_path, str(os.getpid()), "feat")  # a LIVE pid, but nobody holds its lock
+    assert devmode.active_worktrees([]) == [""]
+    assert not (tmp_path / f"{os.getpid()}.json").exists()
+
+
+def test_the_sweep_never_removes_a_marker_renamed_in_after_its_probe(monkeypatch, tmp_path):
+    # The sweep opens a marker, finds its lock free, and removes it — by NAME. A second launch in
+    # one process keeps its pid, so it renames a fresh, locked marker over that name and only then
+    # releases the old one: a sweep that opened the old file just before gets its lock just after,
+    # and unlinking by name would take the live launcher's marker with it.
+    import fcntl
+
+    monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path))
+    monkeypatch.setattr(devmode, "worktree_keys", lambda: ["", "feat"])
+    _dead_launch(tmp_path, "101", "feat")
+    held: list[int] = []
+    real_flock = fcntl.flock
+
+    def relaunch_then_flock(fd, op):
+        if not held:  # the probe of the OLD marker: the relaunch lands first
+            staging = tmp_path / "101.tmp"
+            staging.write_text(json.dumps({"worktree": "feat"}))
+            held.append(os.open(staging, os.O_RDONLY))
+            real_flock(held[0], fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.replace(staging, tmp_path / "101.json")
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(devmode.fcntl, "flock", relaunch_then_flock)
+    try:
+        devmode.launching_worktrees()
+        monkeypatch.setattr(devmode.fcntl, "flock", real_flock)
+        assert (tmp_path / "101.json").exists()
+        assert devmode.launching_worktrees() == {"feat"}  # served from the next tick
+    finally:
+        for fd in held:
+            os.close(fd)
+
+
+def test_a_marker_for_an_unregistered_worktree_is_not_served(monkeypatch, tmp_path):
+    # The registry is the host's own record of its worktrees; a marker can't widen it.
+    monkeypatch.setenv("FOLDYARD_LAUNCHES_DIR", str(tmp_path))
+    monkeypatch.setattr(devmode, "worktree_keys", lambda: ["", "feat"])
+    fd = _launch(tmp_path, "101", "stray")
+    try:
+        assert devmode.active_worktrees(["feat"]) == ["feat"]
+    finally:
+        os.close(fd)
+
+
 def _worktree_layout(tmp_path):
     """A primary checkout + one sibling worktree on disk, as `git worktree add` leaves them."""
     main = tmp_path / "repo"

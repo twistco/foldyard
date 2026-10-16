@@ -1951,6 +1951,24 @@ def blocked_daemons_file() -> Path:
     return Path(env).expanduser() if env else state_dir() / "blocked-daemons.json"
 
 
+def supervisor_ready_file() -> Path:
+    """The supervisor's PROJECT-shared readiness record, rewritten each tick: its pid, the
+    worktrees it served and every job's state (``up`` · ``starting`` · ``blocked`` · ``failing``)
+    — what the launch paths wait on before anything uses a job (``supervisor.await_ready``).
+    ``FOLDYARD_SUPERVISOR_READY_FILE`` wins, else ``<state_dir>/supervisor-ready.json``."""
+    env = os.environ.get("FOLDYARD_SUPERVISOR_READY_FILE")
+    return Path(env).expanduser() if env else state_dir() / "supervisor-ready.json"
+
+
+def launches_dir() -> Path:
+    """One marker per host launch in progress (``<pid>.json``: the worktree it brings up), so the
+    supervisor serves that worktree before its box exists. Host state, outside the mount — the box
+    can't widen what the supervisor reconciles. ``FOLDYARD_LAUNCHES_DIR`` wins, else
+    ``<state_dir>/launches``."""
+    env = os.environ.get("FOLDYARD_LAUNCHES_DIR")
+    return Path(env).expanduser() if env else state_dir() / "launches"
+
+
 def _host_table() -> dict:
     """The optional ``[host]`` table — host-side supervisor behaviour knobs."""
     raw = _toml().get("host")
