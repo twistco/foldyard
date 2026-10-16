@@ -215,11 +215,17 @@ jobs:
       # PROJECT VM (foldyard's provisioning on a fresh template boot) is no longer exercised here.
       - name: Bake the session's base VM
         run: |
-          # Project-less, so not from the checkout (foldyard's own toml) — nor from $RUNNER_TEMP:
-          # machine.MACHINE binds at import from the cwd's NAME, and `_temp` fails its check.
-          cd "$HOME"
-          uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake \
-            || uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake
+          # Project-less, so not from the checkout (foldyard's own toml). From $RUNNER_TEMP on
+          # purpose: its name, `_temp`, is not a plain project name, and the bake once refused to
+          # start there (boximage.py) — this keeps that fixed, live.
+          cd "$RUNNER_TEMP"
+          bake() { uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake; }
+          # A retry that succeeds turns the job green with nothing on the run's page to say a
+          # mirror stalled: the bake is now the job's only template boot, so say it out loud.
+          if ! bake; then
+            echo "::warning title=Base VM bake retried::the first bake failed — usually a stalled Fedora mirror (the template's dnf install of podman); see this step's log. Retrying once."
+            bake
+          fi
 
       # The VM is created ONCE here, before pytest, from a throwaway copy of the example (preflight
       # refuses the nested project; the launch gate refuses an unadopted checkout with no terminal
@@ -464,8 +470,13 @@ jobs:
         run: |
           . "$HOME/.fy-ci.env"
           cd "$HOME"
-          uv run --project "$HOME/foldyard" foldyard machine base bake \
-            || uv run --project "$HOME/foldyard" foldyard machine base bake
+          bake() { uv run --project "$HOME/foldyard" foldyard machine base bake; }
+          # As in lima-host-e2e: a retried bake says so on the run's page (the runner reads
+          # workflow commands from the distro's stdout, as it does the Diagnostics' groups).
+          if ! bake; then
+            echo "::warning title=Base VM bake retried::the first bake failed — usually a stalled Fedora mirror (the template's dnf install of podman); see this step's log. Retrying once."
+            bake
+          fi
 
       # As in lima-host-e2e: the VM is created ONCE, from a throwaway example copy — under the
       # distro's home, not RUNNER_TEMP (a Windows path). CONTAINER_HOST (not DOCKER_HOST) for the
