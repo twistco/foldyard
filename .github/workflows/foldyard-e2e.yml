@@ -258,9 +258,14 @@ jobs:
           echo "::group::podman ps -a"; podman ps -a || true; echo "::endgroup::"
           echo "::group::supervisor log"; cat "$FOLDYARD_STATE_DIR"/host-supervisor.log 2>/dev/null || echo "(none)"; echo "::endgroup::"
           echo "::group::lima ha.stderr.log"; tail -n 100 "$HOME"/.lima/*/ha.stderr.log 2>/dev/null || true; echo "::endgroup::"
+          # The guest console: a boot whose provisioning never finishes says why here, and the VM
+          # user can't read the guest's own cloud-init log.
+          echo "::group::lima serial logs"; for f in "$HOME"/.lima/*/serial*.log; do echo "== $f"; tail -n 80 "$f"; done 2>/dev/null || true; echo "::endgroup::"
           echo "::group::inside the guest"
           for cmd in \
             "id; echo HOME=\$HOME; uptime; cat /etc/os-release | head -2" \
+            "echo boot-done=\$(cat /run/lima-boot-done 2>&1); ls -l /etc/lima-podman; rpm -q --qf '%{NAME}-%{VERSION} installed %{INSTALLTIME:date}\n' podman" \
+            "ps -eo pid,etime,args | grep -E 'dnf|rpm|cloud-init|lima|provision' | grep -v grep" \
             "podman info --format '{{.Store.GraphDriverName}} graph={{.Store.GraphRoot}} run={{.Store.RunRoot}} status={{json .Store.GraphStatus}}'" \
             "podman images" \
             "podman run --rm docker.io/library/alpine true && echo NATIVE-RUN-OK" \
@@ -483,9 +488,13 @@ jobs:
           echo "::group::podman ps -a"; podman ps -a; echo "::endgroup::"
           echo "::group::supervisor log"; cat "$FOLDYARD_STATE_DIR"/host-supervisor.log 2>/dev/null || echo "(none)"; echo "::endgroup::"
           echo "::group::lima ha.stderr.log"; tail -n 100 "$HOME"/.lima/*/ha.stderr.log 2>/dev/null; echo "::endgroup::"
+          # As in the Linux job: the guest console, and where a boot's provisioning stands.
+          echo "::group::lima serial logs"; for f in "$HOME"/.lima/*/serial*.log; do echo "== $f"; tail -n 80 "$f"; done 2>/dev/null; echo "::endgroup::"
           echo "::group::inside the guest"
           for cmd in \
             "id; echo HOME=\$HOME; uptime; cat /etc/os-release | head -2" \
+            "echo boot-done=\$(cat /run/lima-boot-done 2>&1); ls -l /etc/lima-podman; rpm -q --qf '%{NAME}-%{VERSION} installed %{INSTALLTIME:date}\n' podman" \
+            "ps -eo pid,etime,args | grep -E 'dnf|rpm|cloud-init|lima|provision' | grep -v grep" \
             "podman info --format '{{.Store.GraphDriverName}} graph={{.Store.GraphRoot}} run={{.Store.RunRoot}}'" \
             "podman images" \
             "mount | grep -E ' / | /home|overlay|9p|virtiofs'" \
