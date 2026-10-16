@@ -337,7 +337,13 @@ recipe `modprobe kvm; chown $USER /dev/kvm` — group membership does not take e
 with and without the walls, QEMU start → READY in 29–41 s and the whole attempt under 2.5 min;
 the record is in [docs/linux-support.md](./docs/linux-support.md#validated-on-a-linux-host). The
 job creates the VM once from a throwaway example copy before pytest (the example stack has no bind
-mounts, so every test copy can drive the one VM) and exports its socket as `CONTAINER_HOST` — for
+mounts, so every test copy can drive the one VM). It bakes a session base VM first (`fy-ci-base`,
+named by `FY_BASE_VM_NAME`/`FY_BASE_VM_STAMP` job-wide, retried once), so that VM and every one a
+module recreates are clones: a template create runs the template's `dnf install podman` over the
+Fedora mirrors, and one stalled mirror once left a WSL2 run's every module after it on a VM whose
+boot never finished (2026-10-16). The cost: a template-created PROJECT VM (foldyard's provisioning
+on a fresh template boot) is no longer exercised by the host tier. It exports the VM's socket as
+`CONTAINER_HOST` — for
 the tests' OWN engine calls; a preset `DOCKER_HOST` would make the CLI under test skip
 `machine.ensure` (`stack._docker_host`: dev-box semantics) and bypass the very lifecycle the tier
 drives. The tests' `foldyard up` then runs the real host path: machine ensure → adopt gate →

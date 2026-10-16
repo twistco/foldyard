@@ -491,6 +491,9 @@ def lima_env(fake, no_proxy_ca, monkeypatch, tmp_path):
         active = False
         masked = False
         reads = 0
+        # How far the guest's boot got (`_boot_progress`): "" — can't tell — unless a test says.
+        boot = ""
+        boot_reads = 0
 
     guest = Guest()
 
@@ -499,6 +502,12 @@ def lima_env(fake, no_proxy_ca, monkeypatch, tmp_path):
         return (guest.state, guest.active, guest.masked)
 
     monkeypatch.setattr(machine, "_guest_state", _guest_state)
+
+    def _boot_progress():
+        guest.boot_reads += 1
+        return guest.boot
+
+    monkeypatch.setattr(machine, "_boot_progress", _boot_progress)
 
     def set_wall(on: bool) -> None:
         monkeypatch.setattr(machine.config, "machine_wall", lambda: on)
@@ -763,6 +772,181 @@ def test_ensure_fails_when_the_guest_did_not_apply_the_provisioning(
     with pytest.raises(SystemExit):
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert "provision" in capsys.readouterr().err, why
+
+
+def test_ensure_names_limas_own_unfinished_boot_when_the_guest_reports_nothing(
+    lima_env, tmp_path, capsys
+):
+    # Lima's boot scripts run the template's provisioning BEFORE foldyard's — on a VM from the
+    # template, its podman install (`dnf`, over the Fedora mirrors). A stalled mirror leaves the
+    # guest with no report from foldyard's script, which never started: "did not apply its boot
+    # provisioning" + its boot.log (which doesn't exist) sent the reader to the wrong script.
+    be, guest, set_wall, _guest_ok = lima_env
+    set_wall(False)
+    be._provision = machine.provision_id()
+    guest.boot = "lima"
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    err = capsys.readouterr().err
+    assert "Lima's own boot scripts" in err
+    assert "dnf" in err and "Fedora mirrors" in err
+    assert "limactl shell homelab -- ps -eo pid,etime,args" in err
+    assert "~/.lima/homelab/serial*.log" in err
+    # It may be about to finish: run `fy up` again first — a restart would end the install.
+    assert "Once it settles, run `fy up` again" in err
+    assert "Restart only if it is stuck" in err and "fy machine stop && fy up" in err
+    assert "/run/fy-wall/boot.log" not in err  # foldyard's script never started: no log yet
+
+
+def test_ensure_names_foldyards_own_unfinished_boot_script(lima_env, tmp_path, capsys):
+    be, guest, set_wall, _guest_ok = lima_env
+    set_wall(False)
+    be._provision = machine.provision_id()
+    guest.boot = "ours"
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    err = capsys.readouterr().err
+    assert "foldyard's boot script started but hasn't reported" in err
+    assert "it failed, or a later Lima" in err  # Lima's user step runs after it, marker last
+    assert "limactl shell homelab cat /run/fy-wall/boot.log" in err
+    assert "Lima's own boot scripts" not in err
+
+
+@pytest.mark.parametrize("boot", ["done", ""])
+def test_ensure_keeps_the_provisioning_message_once_the_boot_finished_or_unknown(
+    lima_env, tmp_path, capsys, boot
+):
+    # Boot finished with no report = foldyard's script failed (its log says why); can't tell =
+    # the message as it was.
+    be, guest, set_wall, _guest_ok = lima_env
+    set_wall(False)
+    be._provision = machine.provision_id()
+    guest.boot = boot
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    err = capsys.readouterr().err
+    assert "did not apply its boot provisioning" in err
+    assert "limactl shell homelab cat /run/fy-wall/boot.log" in err
+    assert "Lima's own boot scripts" not in err
+
+
+def test_ensure_asks_how_far_the_boot_got_only_when_the_guest_reports_nothing(lima_env, tmp_path):
+    # A report that differs is foldyard's script having run (an older one, or a failed step):
+    # the boot got that far, so no second `limactl shell` — and the steady state costs none.
+    be, guest, set_wall, guest_ok = lima_env
+    set_wall(True)
+    be._provision = machine.provision_id()
+    guest.state, guest.active, guest.masked = "wall off", True, True
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    guest_ok()
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert guest.boot_reads == 0
+
+
+def test_a_failed_lima_start_names_an_unfinished_boot(lima_env, monkeypatch, capsys):
+    # `limactl start` gives up after its own timeout waiting for "boot scripts must have
+    # finished" — a VM that IS up, its provisioning stalled. Say where it stopped.
+    be, guest, _set_wall, _guest_ok = lima_env
+    monkeypatch.setattr(be, "start", lambda name, prefix=(): False)
+    guest.boot = "lima"
+    assert machine._start() is False
+    err = capsys.readouterr().err
+    assert "failed to start 'homelab'" in err
+    assert "Lima's own boot scripts" in err
+
+
+def test_a_failed_lima_start_that_never_booted_says_only_that(lima_env, monkeypatch, capsys):
+    be, guest, _set_wall, _guest_ok = lima_env
+    monkeypatch.setattr(be, "start", lambda name, prefix=(): False)
+    guest.boot = ""  # no ssh into the guest: nothing more to say
+    assert machine._start() is False
+    err = capsys.readouterr().err
+    assert "failed to start 'homelab'" in err
+    assert "boot scripts" not in err
+
+
+def test_a_failed_start_on_another_backend_asks_no_guest(fake, monkeypatch, capsys):
+    be = fake(concurrent=True)
+    monkeypatch.setattr(be, "start", lambda name, prefix=(): False)
+    asked: list[int] = []
+    monkeypatch.setattr(machine, "_boot_progress", lambda: (asked.append(1), "lima")[1])
+    assert machine._start() is False
+    assert asked == []
+
+
+@pytest.mark.parametrize(
+    "rc, out, want",
+    [
+        (0, "done\n", "done"),
+        (0, "lima\n", "lima"),
+        (0, "ours\n", "ours"),
+        (0, "something else\n", ""),
+        (255, "", ""),  # ssh couldn't reach the guest
+    ],
+)
+def test_boot_progress_reads_limas_marker_and_foldyards_log_without_root(
+    monkeypatch, rc, out, want
+):
+    # /run is a tmpfs, so both files are THIS boot's: Lima writes /run/lima-boot-done once its
+    # boot scripts (the provisioning included) are done; foldyard's script opens its log first.
+    monkeypatch.setattr(machine, "MACHINE", "homelab")
+    calls: list[list[str]] = []
+
+    def run(cmd, **_):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, rc, out, "")
+
+    monkeypatch.setattr(machine.subprocess, "run", run)
+    assert machine._boot_progress() == want
+    [cmd] = calls
+    assert cmd[:5] == ["limactl", "shell", "homelab", "--", "sh"]
+    assert "/run/lima-boot-done" in cmd[-1] and "/run/fy-wall/boot.log" in cmd[-1]
+
+
+@pytest.mark.spawns("sh")  # runs the REAL probe under sh, the guest's two files moved into tmp
+@pytest.mark.parametrize(
+    "marker, log, want",
+    [
+        ("iid-1\n", True, "done"),  # finished — whatever foldyard's script left behind
+        ("iid-1\n", False, "done"),
+        ("", True, "ours"),  # an EMPTY marker is not a finished boot: Lima compares its content
+        (None, True, "ours"),
+        ("", False, "lima"),
+        (None, False, "lima"),
+    ],
+)
+def test_boot_progress_probe_orders_the_marker_before_the_log(
+    monkeypatch, tmp_path, marker, log, want
+):
+    # The order is the diagnosis: a finished boot with foldyard's log present must read "done"
+    # (its script ran and failed: the provisioning message), never "ours".
+    monkeypatch.setattr(machine, "MACHINE", "homelab")
+    done, boot_log = tmp_path / "lima-boot-done", tmp_path / "boot.log"
+    if marker is not None:
+        done.write_text(marker)
+    if log:
+        boot_log.write_text("")
+    real = subprocess.run
+
+    def run(cmd, **kw):
+        probe = cmd[-1].replace("/run/lima-boot-done", str(done))
+        probe = probe.replace("/run/fy-wall/boot.log", str(boot_log))
+        assert probe != cmd[-1]
+        return real(["sh", "-c", probe], **kw)
+
+    monkeypatch.setattr(machine.subprocess, "run", run)
+    assert machine._boot_progress() == want
+
+
+def test_boot_progress_is_unknown_when_limactl_cannot_run(monkeypatch):
+    monkeypatch.setattr(machine, "MACHINE", "homelab")
+
+    def run(cmd, **_):
+        raise subprocess.TimeoutExpired(cmd, 20)
+
+    monkeypatch.setattr(machine.subprocess, "run", run)
+    assert machine._boot_progress() == ""
 
 
 def test_ensure_wall_off_does_not_require_the_rootful_socket_masked(lima_env, tmp_path):

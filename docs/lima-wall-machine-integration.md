@@ -143,7 +143,13 @@ which only works on a stopped VM. Lima runs it as root on every boot. It:
 - *What did apply:* after every start and on each steady-state `fy up`, `_guest_state()` reads
   `/run/fy-wall/state`, `systemctl is-active fy-wall.service` and `is-enabled podman.socket` —
   none needs root. A mismatch (a reset VM, a failed boot script, a re-enabled rootful socket)
-  fails closed and points at `limactl shell <name> cat /run/fy-wall/boot.log`.
+  fails closed and points at `limactl shell <name> cat /run/fy-wall/boot.log`. When there is no
+  report at all, `_boot_progress()` asks how far the boot got (`/run/lima-boot-done`, the boot
+  log's existence — both on the guest's tmpfs `/run`, so this boot's): Lima's own boot scripts
+  run the template's provisioning BEFORE foldyard's script, and on a VM from the template that
+  is its `dnf install podman`, over the Fedora mirrors — a stalled mirror leaves no report and no
+  boot log, so the message names Lima's step (and the console log) instead of foldyard's. A
+  `limactl start` that times out waiting for the boot gets the same diagnosis.
 
 There is no separate CLI verb: turning the firewall on or off is editing `foldyard.toml`, then
 `fy machine stop && fy up`.
