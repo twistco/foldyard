@@ -1773,9 +1773,16 @@ def test_the_reporter_writes_a_whole_world_readable_file(tmp_path, monkeypatch):
 def test_the_reporter_writes_each_batch_as_soon_as_it_reads_it(monkeypatch):
     # It used to wait for half a second without a new kernel record before writing, so a build
     # that failed right after its refusals was read before they were there (seen live,
-    # 2026-10-16). Now the batch is written before the reporter waits again.
+    # 2026-10-16). Now the batch is written before the reporter waits again. And its FIRST
+    # report already holds what the kernel ring kept: published empty first, a build marked in
+    # that window — right after a reporter restart — would take every replayed refusal as its own.
     mod = _denies()
-    reads: list[bytes | BaseException] = [_KMSG_TCP.encode(), BlockingIOError()]
+    reads: list[bytes | BaseException] = [
+        _KMSG_TCP.encode(),  # still in the ring when the reporter (re)starts
+        BlockingIOError(),
+        _KMSG_TCP.replace("4,8812,", "4,8813,").encode(),  # logged while it runs
+        BlockingIOError(),
+    ]
 
     def read(fd, n):
         r = reads.pop(0)
@@ -1803,7 +1810,7 @@ def test_the_reporter_writes_each_batch_as_soon_as_it_reads_it(monkeypatch):
     monkeypatch.setattr(mod, "select", types.SimpleNamespace(select=select))
     with pytest.raises(Stop):
         mod.main()
-    assert [len(rows) for rows in written] == [0, 1]  # the empty report, then the batch
+    assert [[r["seq"] for r in rows] for rows in written] == [[8812], [8812, 8813]]
 
 
 def test_wall_install_runs_the_reporter_and_uninstall_removes_it():

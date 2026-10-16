@@ -269,26 +269,33 @@ def write(rows):
     os.replace(tmp, OUT)
 
 
+def drain(fd, rows, boot):
+    """Every record the kernel has for us now; True when one was a refusal."""
+    new = False
+    while True:
+        try:
+            record = os.read(fd, 8192)
+        except BlockingIOError:
+            return new
+        except BrokenPipeError:
+            continue  # records were overwritten before we read them: carry on from the next
+        row = parse(record.decode("utf-8", "replace"), boot)
+        if row is not None:
+            rows.append(row)
+            new = True
+
+
 def main():
     boot = boot_id()
     rows = collections.deque(maxlen=KEEP)
-    write(rows)  # an empty report means "reporter running, nothing refused"
     fd = os.open("/dev/kmsg", os.O_RDONLY | os.O_NONBLOCK)
+    # What the ring still holds goes in the FIRST report (empty means "running, nothing
+    # refused"): published empty first, a build marked in that window would count the replay.
+    drain(fd, rows, boot)
+    write(rows)
     while True:
         select.select([fd], [], [])  # until the kernel logs something
-        new = False
-        while True:
-            try:
-                record = os.read(fd, 8192)
-            except BlockingIOError:
-                break
-            except BrokenPipeError:
-                continue  # records were overwritten before we read them: carry on from the next
-            row = parse(record.decode("utf-8", "replace"), boot)
-            if row is not None:
-                rows.append(row)
-                new = True
-        if new:
+        if drain(fd, rows, boot):
             write(rows)  # at once: a failed build reads this the moment it exits
 
 
