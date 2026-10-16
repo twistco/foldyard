@@ -646,13 +646,17 @@ def ensure_background() -> int | None:
     # A supervisor starts here, and session/once grants end when one does. So this launch IS the
     # restart moment: end them now, THEN offer — an offer made before would skip a host whose
     # grant is about to go, and the operator's [s]ession/[o]nce answers would be wiped by the
-    # supervisor starting a moment later — and tell that supervisor the clear is done.
+    # supervisor starting a moment later — and tell that supervisor the clear is done. Only if it
+    # IS done: after a failed clear (an unwritable or damaged store) the supervisor tries itself,
+    # as it always has, rather than carry last session's grants across the restart.
+    cleared = False
     try:
         allowlist.clear_ephemeral()
-    except OSError as e:
-        print(f"⚠ couldn't reset this session's egress grants ({e})", file=sys.stderr, flush=True)
+        cleared = True
+    except (OSError, SystemExit) as e:
+        print(f"⚠ couldn't reset this session's egress grants: {e}", file=sys.stderr, flush=True)
     _offer_recommended()
-    return _spawn(grants_cleared=True)
+    return _spawn(grants_cleared=cleared)
 
 
 # How long a launch waits for the supervisor's jobs (await_ready). Generous: a first tick asks the

@@ -776,6 +776,25 @@ def test_a_launch_offers_after_the_restart_has_cleared_grants(monkeypatch, tmp_p
     assert events == ["clear", "offer", "spawn (cleared)"]
 
 
+@pytest.mark.parametrize(
+    "failure", [OSError("disk full"), SystemExit("✗ the allow-store is unreadable")]
+)
+def test_a_failed_clear_leaves_the_clear_to_the_supervisor(monkeypatch, tmp_path, capsys, failure):
+    # Don't tell the supervisor the grants are gone when they aren't: it would keep last session's
+    # grants across the restart. It clears (or reports the store) itself, as before this change.
+    _patch(monkeypatch, tmp_path)
+    events = _order(monkeypatch)
+
+    def _fail():
+        events.append("clear failed")
+        raise failure
+
+    monkeypatch.setattr(supervisor.allowlist, "clear_ephemeral", _fail)
+    assert supervisor.ensure_background() == 4242  # the launch still goes on
+    assert events == ["clear failed", "offer", "spawn"]
+    assert str(failure) in capsys.readouterr().err
+
+
 def test_replacing_a_stale_holder_clears_and_offers_after_the_bounce(monkeypatch, tmp_path):
     _patch(monkeypatch, tmp_path)
     fd = _hold_lock(tmp_path, "4242 deadbeefdeadbeef\n")
