@@ -89,7 +89,10 @@ Core (stdlib-only on the hot path; heavy imports lazy):
 - `supervisor.py` — the host supervisor (`fy host` status · `restart` · `logs`; always detached,
   started with the VM, no `stop`): the ONE host-side process per project running the credential
   daemons (singleton lock, per-worktree listeners, replace-on-launch staleness handling, the
-  capability-probe loop, TTL expiry + settle).
+  capability-probe loop, TTL expiry + settle). Each tick publishes a readiness record (every
+  job's `up`/`starting`/`blocked`/`failing`); the launch verbs mark the worktree they bring up
+  (served before its box exists, with main for builds) and `await_ready` on it, refusing on a
+  blocked or failing job.
 - `hostclock.py` — your computer's timezone (`TZ`: the `/etc/localtime` link's name after
   `zoneinfo/`, else `/etc/timezone`) and time locale (`LC_TIME`), each pattern-checked, which
   `fy box up` passes to the BOX only (`box._clock_env`; the stack stays on UTC). Host facts, not

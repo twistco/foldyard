@@ -37,6 +37,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from importlib import metadata
 from pathlib import Path
@@ -327,13 +328,8 @@ def _from_base_image(engine: str, img: str, expected: str, env: dict) -> bool:
     return subprocess.run([engine, "tag", BASE_BOX_TAG, img], env=env).returncode == 0
 
 
-def _build_img(engine: str, main: Path, env: dict) -> int:
-    img = config.box_image()
-    # Build context: a consumer dockerfile builds against the repo root; the packaged generic
-    # box carries its own `context` (the packaged assets dir) so it doesn't pull in the repo.
-    context = img.get("context") or str(main)
-    print(f"▶ building dev box image {img['tag']} (from {img['dockerfile']})…")
-    cmd, tail = _build_parts(engine, img, _box_image_fingerprint(main), context)
+def _gated_build(cmd: list, tail: list, env: dict, context: str, what: str) -> int:
+    """Run one ``build`` through the build gate (``buildgate``), proxy build-args in between."""
 
     def build(proxy_url: str | None) -> int:
         # A walled build reaches the proxy as a TRUSTED BUILD (tunnelled, not decrypted — it has no
@@ -349,7 +345,146 @@ def _build_img(engine: str, main: Path, env: dict) -> int:
 
     from . import buildgate
 
-    return buildgate.run(build, what="box image build")
+    return buildgate.run(build, what=what)
+
+
+def _build_img(engine: str, main: Path, env: dict) -> int:
+    img = config.box_image()
+    # Build context: a consumer dockerfile builds against the repo root; the packaged generic
+    # box carries its own `context` (the packaged assets dir) so it doesn't pull in the repo.
+    context = img.get("context") or str(main)
+    print(f"▶ building dev box image {img['tag']} (from {img['dockerfile']})…")
+    cmd, tail = _build_parts(engine, img, _box_image_fingerprint(main), context)
+    return _gated_build(cmd, tail, env, context, "box image build")
+
+
+# `[box].packages` — system packages baked into a layer ON TOP of the box image, so a recreated box
+# doesn't reinstall them through the wall on every bootstrap (`[[box.tools]]` runs per fresh box;
+# this runs once per change). The layer detects the image's package manager itself, so foldyard
+# never needs to know the distro; the NAMES are the consumer's, for the image they chose. Packages
+# arrive as `sh -c` positional args ("$@"), never interpolated into the script. Bump the version
+# when the rendered layer changes shape, so every existing layer is rebuilt.
+_PACKAGES_LAYER_VERSION = 1
+_PACKAGES_LABEL = "[box].packages"
+_INSTALL_PACKAGES = r"""set -e
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends "$@"
+  rm -rf /var/lib/apt/lists/*
+elif command -v apk >/dev/null 2>&1; then
+  apk add --no-cache "$@"
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y "$@"
+  dnf clean all
+elif command -v microdnf >/dev/null 2>&1; then
+  microdnf install -y "$@"
+  microdnf clean all
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y "$@"
+  yum clean all
+elif command -v zypper >/dev/null 2>&1; then
+  zypper --non-interactive install --no-recommends "$@"
+  zypper clean --all
+elif command -v pacman >/dev/null 2>&1; then
+  pacman -Sy --noconfirm --needed "$@"
+  pacman -Scc --noconfirm
+else
+  echo "[box].packages: the box image has no package manager foldyard knows" \
+    "(apt-get, apk, dnf, microdnf, yum, zypper, pacman) - install these in its Dockerfile: $*" >&2
+  exit 1
+fi
+"""
+# What an image's USER may be for the layer to restore it (`name`, `uid`, `name:group`).
+_IMAGE_USER = re.compile(r"[A-Za-z0-9_.-]+(:[A-Za-z0-9_.-]+)?")
+
+
+def _packages_tag(tag: str) -> str:
+    """The layer's tag beside the box image's: ``acme-devbox:latest`` → ``acme-devbox-packages:latest``."""
+    name, sep, version = tag.rpartition(":")
+    if not sep or "/" in version:  # no tag at all (a `:` there is a registry port)
+        return f"{tag}-packages"
+    return f"{name}-packages:{version}"
+
+
+def _packages_fingerprint(base_fp: str, base_id: str, packages: list[str]) -> str:
+    """The layer's fingerprint: what the base SHOULD be (so an edited Dockerfile not yet rebuilt is
+    drift), what it IS (so a rebuilt base rebuilds the layer), and the package list."""
+    payload = {
+        "base": base_fp,
+        "base_id": base_id,
+        "packages": packages,
+        "version": _PACKAGES_LAYER_VERSION,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _image_id_user(engine: str, img: str, env: dict) -> tuple[str, str]:
+    """An image's ID and its USER (``("", "")`` when it can't be inspected)."""
+    out = subprocess.run(
+        [engine, "image", "inspect", img, "--format", "{{.Id}}\t{{.Config.User}}"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        return "", ""
+    image_id, _, user = out.stdout.strip().partition("\t")
+    return image_id, user.strip()
+
+
+def _packages_dockerfile(base: str, user: str, packages: list[str]) -> str:
+    """The layer: root for the install (an image may set a USER), then the image's USER back."""
+    run = json.dumps(["/bin/sh", "-c", _INSTALL_PACKAGES, "fy-packages", *packages])
+    lines = [f"FROM {base}"]
+    if user:
+        lines.append("USER 0")
+    lines.append(f"RUN {run}")
+    if user:
+        lines.append(f"USER {user}")
+    return "\n".join(lines) + "\n"
+
+
+def _box_run_image(engine: str, img: str, base_fp: str, env: dict) -> tuple[str, str]:
+    """``(image, fingerprint)`` the box runs: the base image as is, or its ``[box].packages``
+    layer and the fingerprint that layer must carry."""
+    packages = config.box_packages()
+    if not packages:
+        return img, base_fp
+    base_id, _ = _image_id_user(engine, img, env)
+    return _packages_tag(img), _packages_fingerprint(base_fp, base_id, packages)
+
+
+def _ensure_packages_layer(
+    engine: str, img: str, base_fp: str, env: dict, *, force: bool = False
+) -> tuple[int, str]:
+    """Build the ``[box].packages`` layer over ``img`` unless one with the current fingerprint is
+    already there (``force``: build anyway — `fy box build`). Returns ``(rc, image to run)``."""
+    packages = config.box_packages()
+    if not packages:
+        return 0, img
+    base_id, user = _image_id_user(engine, img, env)
+    layer = _packages_tag(img)
+    if not base_id:  # its ID is in the layer's fingerprint, and the layer builds FROM it
+        _err(f"✗ {_PACKAGES_LABEL}: can't inspect the box image {img} — the box was not started.")
+        return 1, layer
+    fingerprint = _packages_fingerprint(base_fp, base_id, packages)
+    if not force and _fingerprint(engine, "image", layer, env) == fingerprint:
+        return 0, layer
+    if user and not _IMAGE_USER.fullmatch(user):
+        _err(f"✗ {_PACKAGES_LABEL}: can't restore the box image's USER {user!r} after installing.")
+        return 1, layer
+    print(f"▶ baking {_PACKAGES_LABEL} into {layer}: {' '.join(packages)}…")
+    with tempfile.TemporaryDirectory(prefix="fy-box-packages-") as context:
+        dockerfile = Path(context) / "Dockerfile"
+        dockerfile.write_text(_packages_dockerfile(img, user, packages))
+        spec = {"dockerfile": str(dockerfile), "tag": layer}
+        cmd, tail = _build_parts(engine, spec, fingerprint, context)
+        rc = _gated_build(cmd, tail, env, context, f"{_PACKAGES_LABEL} build")
+    if rc != 0:
+        _err(f"✗ {_PACKAGES_LABEL} build failed (output above) — the box was not started.")
+    return rc, layer
 
 
 def _probe_image(engine: str, img: str, env: dict) -> tuple[str, str, list[str], str]:
@@ -1201,8 +1336,8 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # without a prior `fy up`) never would, leaving the box pointed at a dead :8088 even with axes
     # like penpot/capture marked "on" (a stored posture is NOT a running daemon). Idempotent +
     # Host-only (a no-op in the box, or when a supervisor already serves its daemons). Done before the
-    # early-return so even an already-up box re-checks, and before the slow build so the proxy + CA
-    # come up in parallel.
+    # early-return so even an already-up box re-checks, and as early as this so the supervisor boots
+    # while the capture prompts below run; `await_ready` then waits for its jobs.
     from . import supervisor
 
     supervisor.ensure_background()
@@ -1220,13 +1355,19 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # Above the early return for the same reason: arming an axis is host-side and needs no recreate,
     # so an already-up box is exactly where this is most likely to be the one thing still missing.
     _warn_keyless_axis_at_rest()
+    # Before anything uses the supervisor's jobs — the first build reaches the proxy within a
+    # second — and AFTER the captures: a daemon blocked on a secret they just stored unblocks on
+    # the next tick instead of refusing the launch that fixed it.
+    if not supervisor.await_ready():
+        return 1
 
     expected_fingerprint = _box_image_fingerprint(main)
 
     if _running(engine, box, env):
         _warn_stale_proxy_port(engine, box, env)  # a pre-band box strands on a dead proxy port
         _warn_stale_runtime(engine, box, env)  # [machine].runtime is create-time too
-        if _fingerprint(engine, "container", box, env) != expected_fingerprint:
+        _, run_fingerprint = _box_run_image(engine, img, expected_fingerprint, env)
+        if _fingerprint(engine, "container", box, env) != run_fingerprint:
             print(
                 f"⚠ dev box {box} was built from an older image definition. Recreate it to pick "
                 "up the current tools: `fy box down && fy box up`."
@@ -1266,6 +1407,9 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         rc = _build_img(engine, main, env)
         if rc != 0:
             return rc
+    rc, img = _ensure_packages_layer(engine, img, expected_fingerprint, env)
+    if rc != 0:
+        return rc
 
     transcripts_dir = (
         os.environ.get("DEVBOX_TRANSCRIPTS") or f"{checkout}/{here}/.devbox-claude/projects"
@@ -1490,6 +1634,12 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         except SystemExit as e:
             _err(str(e))
             return 1
+    if cmd in ("up", "build"):  # a malformed [box].packages, before anything is built
+        try:
+            config.box_packages()
+        except SystemExit as e:
+            _err(str(e))
+            return 1
     if cmd in ("down", "ps") and not stack.engine_reachable("stop" if cmd == "down" else "show"):
         # Read/teardown verbs must never provision the VM _ctx() would ensure. A `box down`
         # with no machine still clears the posture mirror below on the up path; with the VM
@@ -1512,9 +1662,21 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
     if cmd == "exec":
         return _exec(engine, box, ctx, env, args or [])
     if cmd == "build":
+        # A walled build's egress is the supervisor's proxy, and `fy box build` may be the first
+        # host verb since the VM started.
+        from . import supervisor
+
+        supervisor.ensure_background()
+        if not supervisor.await_ready():
+            return 1
         rc = _build_img(engine, ctx.main, env)
+        tag = config.box_image()["tag"]
         if rc == 0:
-            print(f"✓ built {config.box_image()['tag']}. Start the box: fy box up")
+            rc, tag = _ensure_packages_layer(
+                engine, tag, _box_image_fingerprint(ctx.main), env, force=True
+            )
+        if rc == 0:
+            print(f"✓ built {tag}. Start the box: fy box up")
         return rc
     if cmd == "up":
         return _up(ctx, engine, box, net)

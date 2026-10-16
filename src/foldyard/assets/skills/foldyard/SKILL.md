@@ -75,8 +75,9 @@ design. Detail: [modes-and-credentials.md](references/modes-and-credentials.md).
 **A host the allowlist refuses**: `fy allow add <host> --level session` — **on their computer**.
 Tell them the hostname and what needs it. Detail: [egress.md](references/egress.md).
 
-**A tool in the box**: it belongs in the project's `foldyard.toml` (`[[box.tools]]`) so it survives
-a box rebuild, not in an ad-hoc `apt install` that the next `fy box down` throws away. The
+**A tool in the box**: it belongs in the project's `foldyard.toml` so it survives a box rebuild —
+`[box].packages` for distro packages (baked once into a cached image layer), `[[box.tools]]` for
+anything else — not in an ad-hoc `apt install` that the next `fy box down` throws away. The
 `bootstrap-devbox` skill covers growing that config from inside the box.
 
 ## "I changed it and nothing happened"

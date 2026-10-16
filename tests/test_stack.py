@@ -54,6 +54,7 @@ def fake_repo(tmp_path, monkeypatch):
     # with the test's tmp FY_PORTS_FILE/FOLDYARD_REPO baked in, so it later reallocates a port band
     # and collides with real projects (observed 2026-07: two leaked daemons squatting :41000/:41100).
     monkeypatch.setattr(supervisor, "ensure_background", lambda *a, **k: None)
+    monkeypatch.setattr(supervisor, "await_ready", lambda: True)
     # `stack.up()` runs the host preflight (backend CLI / proxy prereqs) first — not these golden
     # tests' subject, and the test host has no limactl, so neuter it here (test_preflight.py covers
     # the checks; test_up_runs_preflight_before_resolving_the_machine covers the wiring).
@@ -1237,6 +1238,17 @@ def test_up_on_compose_less_project_starts_supervisor_and_points_at_box(
     assert started == [True]
     out = capsys.readouterr().out
     assert "[project].compose" in out and "fy box up" in out and "fy docs quickstart" in out
+
+
+def test_up_refuses_before_building_when_the_supervisor_is_not_ready(
+    fake_repo, capture_run, monkeypatch
+):
+    # Box-only or not, `fy up` is how the supervisor comes up — and a job it can't run is said
+    # (await_ready printed why) instead of surfacing later as a build's connection refused.
+    monkeypatch.setattr(supervisor, "ensure_background", lambda: None)
+    monkeypatch.setattr(supervisor, "await_ready", lambda: False)
+    assert stack.up() == 1
+    assert _composes(capture_run) == []
 
 
 # Every verb that acts on the compose stack, with the box counterpart its note points at.
