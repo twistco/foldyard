@@ -42,10 +42,8 @@ import time
 from importlib import metadata
 from pathlib import Path
 
-from . import config, hostclock, keyless, machine, sandbox, stack
+from . import boximage, config, hostclock, keyless, machine, sandbox, stack
 from .plugins import registry
-
-_BOX_FINGERPRINT_LABEL = "io.foldyard.box-fingerprint"
 
 # TOML's bare-key alphabet, and its two non-finite floats — both for `_toml_value`/`_toml_key`,
 # which render `[codex.config]` back into the TOML syntax `codex -c` parses.
@@ -226,31 +224,7 @@ def _box_image_fingerprint(main: Path) -> str:
     image. Consumer files copied from the wider build context remain the consumer's responsibility
     (``fy box build`` explicitly rebuilds those).
     """
-    return _image_fingerprint(config.box_image(), main)
-
-
-def packaged_fingerprint() -> str:
-    """The fingerprint of foldyard's packaged generic box — what a project without a
-    ``[box].image`` expects, whatever its name (the tag is not part of it)."""
-    return _image_fingerprint(config.packaged_box_image(BASE_BOX_TAG), Path("/"))
-
-
-def _image_fingerprint(img: dict, main: Path) -> str:
-    configured_context = img.get("context")
-    context = Path(configured_context) if configured_context else main
-    if not context.is_absolute():
-        context = main / context
-    dockerfile = Path(img["dockerfile"])
-    if not dockerfile.is_absolute():
-        dockerfile = context / dockerfile
-    payload = {
-        "build_args": img.get("build_args") or {},
-        "context": str(configured_context or "."),
-        "dockerfile_sha256": hashlib.sha256(dockerfile.read_bytes()).hexdigest(),
-        "target": img.get("target"),
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
+    return boximage.image_fingerprint(config.box_image(), main)
 
 
 def _fingerprint(engine: str, kind: str, target: str, env: dict) -> str | None:
@@ -262,7 +236,7 @@ def _fingerprint(engine: str, kind: str, target: str, env: dict) -> str | None:
         "inspect",
         target,
         "--format",
-        f'{{{{ index .Config.Labels "{_BOX_FINGERPRINT_LABEL}" }}}}',
+        f'{{{{ index .Config.Labels "{boximage.FINGERPRINT_LABEL}" }}}}',
     ]
     out = subprocess.run(cmd, env=env, capture_output=True, text=True)
     if out.returncode != 0:
@@ -286,46 +260,13 @@ def _has_compose() -> bool:
     return config.has_compose_stack()
 
 
-def _build_parts(engine: str, img: dict, fingerprint: str, context: str) -> tuple[list, list]:
-    """The build command around where the proxy build-args go: ``(head, tail)``. One shape for
-    a project's box and the base VM's, so the two images are built the same way."""
-    cmd = [engine, "build"]
-    # podman needs --format docker so the Dockerfile's SHELL [...] directive is honoured.
-    if engine == "podman":
-        cmd += ["--format", "docker"]
-    cmd += ["--label", f"{_BOX_FINGERPRINT_LABEL}={fingerprint}"]
-    if img.get("target"):
-        cmd += ["--target", str(img["target"])]
-    tail = []
-    for key, value in (img.get("build_args") or {}).items():
-        tail += ["--build-arg", f"{key}={value}"]
-    tail += ["-f", img["dockerfile"], "-t", img["tag"], context]
-    return cmd, tail
-
-
-# The packaged box's tag in the base VM (basevm.py). A project's `box up` re-tags it as its own
-# when the fingerprints match (`_from_base_image`), instead of building.
-BASE_BOX_TAG = "foldyard-base-devbox:latest"
-
-
-def build_packaged_image(engine: str, env: dict, tag: str) -> int:
-    """Build foldyard's packaged generic box under ``tag``, fingerprinted as a project's would be
-    — the base VM's bake (basevm.py). Direct, never through the build gate: the base is
-    project-less and unwalled, and this Dockerfile is foldyard's own, never the repo's."""
-    img = config.packaged_box_image(tag)
-    head, tail = _build_parts(engine, img, packaged_fingerprint(), img["context"])
-    full = [*head, *tail]
-    _echo(full)
-    return subprocess.run(full, env=env, cwd=img["context"]).returncode
-
-
 def _from_base_image(engine: str, img: str, expected: str, env: dict) -> bool:
     """Re-tag the base VM's box image as ``img`` when it is the image this project would build
     (same fingerprint) — the clone carried it in, so there is nothing to download or build."""
-    if _fingerprint(engine, "image", BASE_BOX_TAG, env) != expected:
+    if _fingerprint(engine, "image", boximage.BASE_BOX_TAG, env) != expected:
         return False
     print(f"▶ dev box image {img}: the base VM's, already in this VM (no build)")
-    return subprocess.run([engine, "tag", BASE_BOX_TAG, img], env=env).returncode == 0
+    return subprocess.run([engine, "tag", boximage.BASE_BOX_TAG, img], env=env).returncode == 0
 
 
 def _gated_build(cmd: list, tail: list, env: dict, context: str, what: str) -> int:
@@ -354,7 +295,7 @@ def _build_img(engine: str, main: Path, env: dict) -> int:
     # box carries its own `context` (the packaged assets dir) so it doesn't pull in the repo.
     context = img.get("context") or str(main)
     print(f"▶ building dev box image {img['tag']} (from {img['dockerfile']})…")
-    cmd, tail = _build_parts(engine, img, _box_image_fingerprint(main), context)
+    cmd, tail = boximage.build_parts(engine, img, _box_image_fingerprint(main), context)
     return _gated_build(cmd, tail, env, context, "box image build")
 
 
@@ -480,7 +421,7 @@ def _ensure_packages_layer(
         dockerfile = Path(context) / "Dockerfile"
         dockerfile.write_text(_packages_dockerfile(img, user, packages))
         spec = {"dockerfile": str(dockerfile), "tag": layer}
-        cmd, tail = _build_parts(engine, spec, fingerprint, context)
+        cmd, tail = boximage.build_parts(engine, spec, fingerprint, context)
         rc = _gated_build(cmd, tail, env, context, f"{_PACKAGES_LABEL} build")
     if rc != 0:
         _err(f"✗ {_PACKAGES_LABEL} build failed (output above) — the box was not started.")

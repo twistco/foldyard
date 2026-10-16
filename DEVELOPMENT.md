@@ -86,6 +86,10 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   `fy up` PROBES enforcement from inside the slice — the table can't be read without root, and one
   that exists may hold a dead slice's id (fail-open otherwise).
 - `box.py` — the dev-box lifecycle (`fy box build|up|shell|down|ps`) + the monitored bootstrap.
+- `boximage.py` — foldyard's packaged box image: its fingerprint and the build shape a project's
+  box and the base VM's share. Imports only `config`, so the project-less bake never imports
+  `box` → `machine`, whose `MACHINE` binds at import from the project name (outside a project,
+  the working directory's name, which the plain-name check can refuse).
 - `supervisor.py` — the host supervisor (`fy host` status · `restart` · `logs`; always detached,
   started with the VM, no `stop`): the ONE host-side process per project running the credential
   daemons (singleton lock, per-worktree listeners, replace-on-launch staleness handling, the

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from foldyard import basevm, box, config
+from foldyard import basevm, boximage, config
 from foldyard import machine_backend as mb
 
 
@@ -341,7 +341,7 @@ def baking(monkeypatch):
         builds.append((engine, env.get("CONTAINER_HOST"), tag))
         return 0
 
-    monkeypatch.setattr(box, "build_packaged_image", fake_build)
+    monkeypatch.setattr(boximage, "build_packaged_image", fake_build)
     return builds
 
 
@@ -354,7 +354,9 @@ def test_bake_creates_an_unmounted_vm_builds_the_box_and_stamps_it(baking):
         f"stop {basevm.NAME}",
     ]
     # The box image is built in the base, over the base's own socket, under the base's tag.
-    assert baking == [("podman", f"unix:///lima/{basevm.NAME}/sock/podman.sock", box.BASE_BOX_TAG)]
+    assert baking == [
+        ("podman", f"unix:///lima/{basevm.NAME}/sock/podman.sock", boximage.BASE_BOX_TAG)
+    ]
     stamp = basevm.read_stamp()
     assert stamp is not None
     assert stamp["inputs"] == INPUTS and stamp["disk_gib"] == basevm.DISK_GIB
@@ -402,7 +404,7 @@ def test_rebake_keeps_the_old_stamp_when_the_old_base_wont_go(baking):
 def test_a_failed_box_build_still_stamps_the_vm_half(baking, monkeypatch, capsys):
     # The VM is the part that saves the dnf + boot; the box image is a bonus a stale fingerprint
     # already handles. A build failure is reported, and the base still stands.
-    monkeypatch.setattr(box, "build_packaged_image", lambda engine, env, tag: 1)
+    monkeypatch.setattr(boximage, "build_packaged_image", lambda engine, env, tag: 1)
     backend = _BakeLima()
     assert basevm.bake(backend) == 0
     stamp = basevm.read_stamp()
@@ -471,3 +473,46 @@ def test_status_of_an_instance_we_did_not_bake_warns(wired):
 
 def test_status_json_is_plain_data(wired):
     json.dumps(basevm.status(wired).__dict__)  # rendered by prereq + `fy machine base`
+
+
+# The bake is project-less (`fy machine base bake`, `fy prereq --fetch`), so where it is run from
+# must not matter. It computed its inputs through `box`, which imports `machine`, whose MACHINE
+# binds at import from the project name — outside a project, the cwd's NAME, held to the plain-name
+# check. From `/`, `_temp` (the CI runner's $RUNNER_TEMP, 2026-10-16) or `My Projects` the bake
+# refused before it started, naming "the checkout's directory name" to someone in no checkout.
+_BAKE_INPUTS_ANYWHERE = """
+import sys
+from foldyard import basevm
+basevm.template_digest = lambda: "t"  # limactl: not this test's subject
+
+
+class Backend:
+    def preferred_vmtype(self):
+        return "qemu"
+
+
+inputs = basevm.current_inputs(Backend())
+print("box-fingerprinted" if len(inputs["box"]) == 64 else inputs)
+print("machine imported" if "foldyard.machine" in sys.modules else "machine not imported")
+"""
+
+
+@pytest.mark.parametrize("dirname", ["_temp", "My Projects"])
+def test_the_bakes_inputs_never_read_a_project_name(tmp_path, dirname):
+    import os
+    import subprocess
+    import sys
+
+    cwd = tmp_path / dirname
+    cwd.mkdir()
+    env = {k: v for k, v in os.environ.items() if k not in ("FOLDYARD_PROJECT", "PODMAN_MACHINE")}
+    out = subprocess.run(
+        [sys.executable, "-c", _BAKE_INPUTS_ANYWHERE],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.splitlines() == ["box-fingerprinted", "machine not imported"]

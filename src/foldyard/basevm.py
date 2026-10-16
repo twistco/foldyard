@@ -107,12 +107,12 @@ def template_digest() -> str:
 
 def current_inputs(backend: LimaBackend) -> dict:
     """What a base baked NOW would be built from."""
-    from . import box
+    from . import boximage  # never box: it imports machine (see boximage's docstring)
 
     return {
         "template": template_digest(),
         "vmtype": backend.preferred_vmtype(),
-        "box": box.packaged_fingerprint(),
+        "box": boximage.packaged_fingerprint(),
     }
 
 
@@ -238,7 +238,7 @@ def bake(backend: LimaBackend | None = None) -> int:
     template's provisioning runs, the packaged box image built in it, stopped, stamped. Direct
     egress, by design: it runs no repo code and mounts nothing — only Lima's provisioning and
     foldyard's own Dockerfile."""
-    from . import box
+    from . import boximage  # never box: it imports machine (see boximage's docstring)
 
     if _refuse_in_box():
         return 1
@@ -273,7 +273,7 @@ def bake(backend: LimaBackend | None = None) -> int:
     sock = backend.socket(NAME)
     env = dict(os.environ, CONTAINER_HOST=sock, DOCKER_HOST=sock)
     _err("▶ building foldyard's generic box image in it…")
-    if box.build_packaged_image("podman", env, box.BASE_BOX_TAG) != 0:
+    if boximage.build_packaged_image("podman", env, boximage.BASE_BOX_TAG) != 0:
         _err("⚠ the box image build failed — the base VM still saves the VM's first boot;")
         _err("  each project's `box up` builds its box image as before.")
         inputs["box"] = ""
