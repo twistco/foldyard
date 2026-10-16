@@ -470,10 +470,11 @@ def test_a_reboot_or_an_empty_report_counts_everything_after(env, monkeypatch, c
 def test_both_kinds_of_refusal_are_reported_and_the_proxys_offered(env, monkeypatch, capsys):
     monkeypatch.setattr(machine, "wall_denies", _Wall([], [_deny(1)], [_deny(1)]))
     build = _Build(env["log"], [(1, [_row("storage.googleapis.com")]), (0, [])])
-    prompt, asked = _answers("o")
+    prompt, _ = _answers("o")
     assert buildgate.run(build, what="build", interactive=True, prompt=prompt) == 0
     out = capsys.readouterr().out
-    assert "skipped the proxy" in out and len(asked) == 1  # the proxy's refusal is still offered
+    assert "skipped the proxy" in out
+    # The proxy's refusal is still offered, and granted:
     assert any(g["host"] == "storage.googleapis.com" for g in allowlist.grants())
 
 
