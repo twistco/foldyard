@@ -571,9 +571,10 @@ def logs(lines: int = 50, follow: bool = False) -> int:
 
 
 def _offer_recommended() -> None:
-    """Right after the config gate on a launch verb: offer any ``[proxy] recommend`` hosts the
-    now-ADOPTED config carries that the operator hasn't answered yet
-    (:func:`allowlist.offer_recommendations`).
+    """After the config gate on a launch verb — and, when the launch starts a supervisor, after the
+    session/once grants that start ends have ended (:func:`ensure_background`) — offer any
+    ``[proxy] recommend`` hosts the now-ADOPTED config carries that the operator hasn't answered
+    yet (:func:`allowlist.offer_recommendations`).
 
     Ordering is the point — gate first, offer second — because the offer reads the adopted copy:
     a first `fy box up` on a locked-down repo adopts the config (Enter), is then offered its
@@ -623,11 +624,11 @@ def ensure_background() -> int | None:
     # supervisor doesn't mean the prompt is skipped — adoption lands within a tick either way
     # (the running supervisor re-reads the pin, no bounce needed).
     configpin.gate("fy up")
-    _offer_recommended()
     bounced = False
     if _supervisor_running():
         reason = _holder_stale_reason()
         if reason is None:
+            _offer_recommended()
             return None  # a CURRENT supervisor holds the singleton lock — don't start a second
         print(f"▶ replacing the running host supervisor: {reason}…", file=sys.stderr)
         if not _bounce_holder():
@@ -640,8 +641,28 @@ def ensure_background() -> int | None:
         bounced = True
     if not bounced:  # after a bounce, lingering daemons are orphans the successor will reap
         if _running_pid() is not None:
+            _offer_recommended()
             return None  # we launched one recently; it may still be binding its ports
-    return _spawn()
+    # A supervisor starts here, and session/once grants end when one does. So this launch IS the
+    # restart moment: end them now, THEN offer — an offer made before would skip a host whose
+    # grant is about to go, and the operator's [s]ession/[o]nce answers would be wiped by the
+    # supervisor starting a moment later — and tell that supervisor the clear is done. Only if it
+    # IS done: after a failed clear (an unwritable or damaged store) the supervisor tries itself,
+    # as it always has, rather than carry last session's grants across the restart — and nothing
+    # is offered, since that clear would wipe a session/once answer (and a store that can't be
+    # cleared can't take a grant either).
+    try:
+        allowlist.clear_ephemeral()
+    except (OSError, SystemExit) as e:
+        print(
+            f"⚠ couldn't reset this session's egress grants: {e}\n"
+            "  Recommended hosts will be offered at the next launch.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return _spawn()
+    _offer_recommended()
+    return _spawn(grants_cleared=True)
 
 
 # How long a launch waits for the supervisor's jobs (await_ready). Generous: a first tick asks the
@@ -782,8 +803,17 @@ def _mark_launch() -> None:
     atexit.register(marker.unlink, missing_ok=True)
 
 
-def _spawn() -> int | None:
+# Set by ensure_background on the supervisor it spawns after ending the session/once grants itself,
+# so the supervisor doesn't end the ones the operator granted in between (see ensure_background).
+GRANTS_CLEARED_ENV = "FY_EPHEMERAL_GRANTS_CLEARED"
+
+
+def _spawn(*, grants_cleared: bool = False) -> int | None:
     """Launch `foldyard host run` detached; the launched pid, or None if it couldn't start."""
+    env = os.environ.copy()
+    env.pop(GRANTS_CLEARED_ENV, None)
+    if grants_cleared:
+        env[GRANTS_CLEARED_ENV] = "1"
     # No terminal here, and the spawned supervisor tees its OWN output to host-supervisor.log
     # (tee_stdio_to_logfile), so send the child's stdio to /dev/null — don't double-write the file.
     try:
@@ -793,6 +823,7 @@ def _spawn() -> int | None:
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
             start_new_session=True,  # detach: survives this process, its own session/pgrp
+            env=env,
         )
     except OSError as e:
         print(
@@ -1926,8 +1957,15 @@ def main() -> int:
     # write_effective) write the resolved effective file the proxy addon reads, so it exists from
     # the very first box request even before any grant. Best-effort: a write hiccup must not stop
     # the supervisor booting (and with default-deny on, a missing file fails safe — blocks).
+    # Unless the launcher that spawned us already did (ensure_background: it clears, offers, then
+    # spawns) — clearing again would end the grants the operator just gave at that offer. Popped,
+    # so no daemon inherits it.
+    launcher_cleared = os.environ.pop(GRANTS_CLEARED_ENV, None) == "1"
     try:
-        allowlist.clear_ephemeral()
+        if launcher_cleared:
+            allowlist.write_effective()
+        else:
+            allowlist.clear_ephemeral()
     except OSError as e:
         log(f"allowlist: could not initialise the effective allowlist file: {e}")
 
