@@ -2173,6 +2173,30 @@ def test_up_no_codex_nag_when_the_box_was_created_with_it(fake, capsys, monkeypa
     assert "[codex]" not in capsys.readouterr().out
 
 
+def test_up_nags_when_the_cq_agents_differ_from_the_running_box(fake, capsys, monkeypatch):
+    # cq's wiring is create-time (env, the data volume, the rendered plugin and /etc/codex files),
+    # and FY_CQ_AGENTS records which agents it went into — so adding, dropping or widening
+    # `cq = true` must name the recreate rather than leave `fy claude` without it.
+    monkeypatch.setattr(config, "cq_agents", lambda: ("claude", "codex"))
+    fake["state"]["running"] = True
+    fake["state"]["baked_env"]["FY_CQ_AGENTS"] = "claude"
+    assert box.main("up") == 0
+    assert "cq (`cq = true`" in capsys.readouterr().out
+
+
+def test_up_no_cq_nag_when_the_box_matches(fake, capsys, monkeypatch):
+    monkeypatch.setattr(config, "cq_agents", lambda: ("codex",))
+    fake["state"]["running"] = True
+    fake["state"]["baked_env"]["FY_CQ_AGENTS"] = "codex"
+    assert box.main("up") == 0
+    assert "cq (`cq = true`" not in capsys.readouterr().out
+    # …and a box with no cq, under a config with none, says nothing either
+    monkeypatch.setattr(config, "cq_agents", lambda: ())
+    del fake["state"]["baked_env"]["FY_CQ_AGENTS"]
+    assert box.main("up") == 0
+    assert "cq (`cq = true`" not in capsys.readouterr().out
+
+
 # ── a keyless agent whose axis is still at rest ──────────────────────────────────────
 
 

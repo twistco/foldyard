@@ -119,6 +119,10 @@ def _resolve_worktree(
 
     from . import compat, config
 
+    if ctx.invoked_subcommand == "_cq-hook":
+        # An agent's hook, not an operator's command: it reads no config, and its contract is to
+        # exit 0 whatever happens — a version refusal here would be an error under every event.
+        return
     path, is_help = _command_path(ctx)
     project_free = is_help or any(path[: len(free)] == free for free in _PROJECT_FREE)
     if not (project_free or config.in_box() or config.in_project()):
@@ -480,6 +484,20 @@ def transcripts(
     from . import transcripts as transcripts_mod
 
     raise typer.Exit(transcripts_mod.transcripts(dest))
+
+
+@app.command("_cq-hook", hidden=True)
+def cq_hook(
+    agent: str = typer.Argument(..., help="claude | codex"),
+    event: str = typer.Argument(..., help="session-start | post-tool-use-failure | session-end"),
+) -> None:
+    """The cq session hooks' handler, run by Claude/Codex in the dev box (internal; wired by
+    `[claude]`/`[codex]` `cq = true`). Reads the event on stdin; never fails the agent."""
+    import sys
+
+    from . import cqhook
+
+    raise typer.Exit(cqhook.run(agent, event, sys.stdin, sys.stdout))
 
 
 @app.command(hidden=True)
@@ -1246,6 +1264,61 @@ def skill_install(
     from . import skills
 
     raise typer.Exit(skills.install(name, force=force))
+
+
+cq_app = typer.Typer(
+    rich_markup_mode="markdown",
+    name="cq",
+    help="cq, the shared agent-knowledge commons (in the box; `cq = true` under [claude]/[codex])",
+    no_args_is_help=True,
+)
+app.add_typer(cq_app)
+
+
+def _model_option(value: str | None) -> str | None:
+    from . import cqbackfill
+
+    if value is not None and not cqbackfill.valid_model(value):
+        raise typer.BadParameter(f"not a model name: {value!r}")
+    return value
+
+
+@cq_app.command("backfill")
+def cq_backfill(
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        callback=_model_option,
+        help="the miner's model: an alias (haiku, sonnet, opus) or a full name "
+        "[default: FOLDYARD_CQ_REFLECT_MODEL, else [cq] reflect_model, else haiku]",
+    ),
+    limit: int | None = typer.Option(None, "--limit", min=1, help="at most this many sessions"),
+    since: float | None = typer.Option(
+        None, "--since", min=0, help="only sessions from the last N days"
+    ),
+    session: list[str] = typer.Option([], "--session", help="only this session id (repeatable)"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="print the candidates; propose and record nothing"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="don't ask before mining"),
+) -> None:
+    """Mine past Claude and Codex sessions in this box for what cq's reflect would propose, and
+    propose it to cq.exchange, where each waits pending in the review queue until approved."""
+    import os
+
+    from . import config, cqbackfill
+
+    raise typer.Exit(
+        cqbackfill.run(
+            dict(os.environ),
+            model=model or config.cq_reflect_model(),
+            yes=yes,
+            dry_run=dry_run,
+            limit=limit,
+            since_days=since,
+            session_ids=tuple(session),
+        )
+    )
 
 
 def main() -> None:

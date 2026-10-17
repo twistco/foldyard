@@ -1114,7 +1114,7 @@ def load_plugins(
     overlay stacking order (identity/storage → auth0 → llm). There is no github plugin: GitHub is
     two ``[[inject]]`` kinds (``github-app``, ``gh-cli``) plus data (ADR-0031)."""
     from .. import config as config_mod
-    from . import auth0_sim, claude, codex, fakecred, gcp, inject, llm, proxy, vscode
+    from . import auth0_sim, claude, codex, cq, fakecred, gcp, inject, llm, proxy, vscode
 
     cfg = config if config is not None else config_mod.current()
 
@@ -1134,6 +1134,7 @@ def load_plugins(
     plugins.append(claude.ClaudePlugin())  # CORE: switch only when [claude].keyless
     plugins.append(vscode.VscodePlugin())  # CORE: no switch, [vscode]-gated box volume only
     plugins.append(codex.CodexPlugin())  # CORE: switch only when [codex].keyless
+    plugins.append(cq.CqPlugin())  # CORE: switch only when [claude]/[codex] say `cq = true`
 
     if discover:
         plugins += _entry_point_plugins()

@@ -58,6 +58,8 @@ Start at [DEVELOPMENT.md](../DEVELOPMENT.md): the module map, test tiers, CI and
   the proxy on the host, and the design of the VM and host firewalls.
 - [nested-virt.md](./nested-virt.md) — a nested-KVM rig for testing the paths that only run on
   the host.
+- [cq.md](./cq.md) — the cq integration: why it is shaped as it is, what we found out about
+  cq.exchange, self-hosting and the alternatives, and the open gaps.
 
 **History:** foldyard was extracted from Twist's monorepo as a fresh start
 ([ADR-0013](./adrs/0013-in-repo-carve-out-until-extraction.md)). The pre-extraction run-logs,

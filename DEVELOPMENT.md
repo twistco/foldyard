@@ -123,6 +123,20 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   a count, injection targets (armed and latent, asked of the registry so an odd shape like Codex's
   ChatGPT rung reports its real host), agent prompts attributed to the shared vs the gitignored
   file, and `IGNORED_KEYS` — config that reads as a control and is no longer honoured.
+- `cqhook.py` — `fy _cq-hook <agent> <event>`, the in-box handler behind cq's session hooks
+  (`[claude]`/`[codex]` `cq = true`, wired by `plugins/cq.py`): the protocol at session start, a
+  query nudge after a failed Claude tool call, and the ended session's id for the launcher's
+  `/cq:reflect` offer (`box._with_reflect`). Stdlib-only, always exits 0 — Claude gives a plugin's
+  SessionEnd hooks 1.5 s in total, and the root CLI callback skips its gates for this verb.
+- `cqbackfill.py` — `fy cq backfill`: past Claude/Codex transcripts → compact excerpts (failures
+  kept longest) → a headless `claude -p` with no tools, MCP, hooks or saved session, under cq's
+  reflect prompt as SHIPPED in `assets/cq/` (pinned to `CQ_VERSION`), model from `--model` /
+  `FOLDYARD_CQ_REFLECT_MODEL` / `[cq] reflect_model` / `haiku` → one merge call over the run's
+  candidates (refused, and proposed unmerged, unless it accounts for every input once) →
+  `cq propose` (pending on cq.exchange). In the box: the box's sessions, proposed there. On the host: this project's host
+  sessions (by recorded cwd), mined there and handed to the box as `.devbox-cq/candidates/` —
+  only candidates cross, a host.env value in one withholds it, and the key never leaves the proxy.
+  One record in `.devbox-cq/backfill.json` (self-gitignored) serves both sides.
 - `credscope.py` — what each credential was last OBSERVED to grant (ADR-0031: reported, never
   capped): a kind's probe reads it (`CapabilityProbe.scope`), the supervisor records it per switch
   and credential identity and logs + notifies a change; `fy config widenings`, `fy mode` and the
@@ -148,7 +162,10 @@ asking for no `permissions` — the installation's are the scope — + the kind'
 mint path runs host-side beside the credentials —
 [ADR-0023](./docs/adrs/0023-no-host-executed-code-from-the-repo-mount.md). There is no github
 plugin: a `[plugins.github]` table is refused at launch with its replacement rows. `claude.py`,
-`codex.py` + `codex_chatgpt_token.py`, `vscode.py`, and the Tangible-bound declared pair
+`codex.py` + `codex_chatgpt_token.py`, `cq.py` (mozilla-ai/cq on hosted cq.exchange for either
+agent: a pinned CLI, a session-only Claude plugin, Codex SYSTEM config under `/etc/codex` — managed,
+so no hook-trust prompt — and a `cq` axis whose rule ADDS the host-side key on `api.cq.exchange`;
+no dummy in the box, since that API refuses a wrong key even on reads), `vscode.py`, and the Tangible-bound declared pair
 `auth0_sim.py` + `llm.py` (both slated for DELETION, not migration — see
 [ADR-0024](./docs/adrs/0024-declarative-consumer-axes-no-repo-path-plugins.md): they turned out to
 be data, so a declarative `[[axis]]` table replaces them), and the declared

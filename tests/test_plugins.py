@@ -257,7 +257,7 @@ def test_broken_entry_point_is_ignored(monkeypatch):
 
     monkeypatch.setattr(plugins, "entry_points", lambda group: [_BadEP()])
     # A broken third-party plugin must never take down the hot path. Under a FULL config (gcp +
-    # auth0-sim namespaces declared) all eight built-ins load, in their deliberate order.
+    # auth0-sim namespaces declared) all nine built-ins load, in their deliberate order.
     assert [p.name for p in plugins.load_plugins(config=_cfg(_FULL_TOML), discover=True)] == [
         "gcp",
         "inject",
@@ -267,6 +267,7 @@ def test_broken_entry_point_is_ignored(monkeypatch):
         "claude",
         "vscode",
         "codex",
+        "cq",
     ]
 
 
@@ -274,7 +275,7 @@ def test_load_plugins_core_only_for_a_generic_consumer():
     # The spinout boundary (registry plan Step C + Test strategy): a consumer that declares none of
     # the credential tables gets only the SMALL CORE — the declared gcp/auth0-sim plugins are absent.
     names = [p.name for p in plugins.load_plugins(config=_cfg(_GENERIC_TOML), discover=False)]
-    assert names == ["inject", "proxy", "claude", "vscode", "codex"]
+    assert names == ["inject", "proxy", "claude", "vscode", "codex", "cq"]
     assert "gcp" not in names and "auth0-sim" not in names
 
 
