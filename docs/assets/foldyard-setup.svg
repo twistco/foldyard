@@ -1,0 +1,265 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1362" height="890" viewBox="99 99 1362 890" fill="none">
+  <style>
+    text { font-family: "Hanken Grotesk", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+           fill: #6e7263; }
+    .title    { font-family: "Newsreader", Georgia, "Times New Roman", serif;
+                font-size: 30px; font-weight: 600; fill: #1a1c16; }
+    .tagline  { font-size: 15px; }
+    .band     { font-size: 12px; font-weight: 700; fill: #1a1c16; letter-spacing: .06em; }
+    .band-yard{ font-size: 12px; font-weight: 700; fill: #265629; letter-spacing: .06em; }
+    .band-sub { font-size: 12px; }
+    .card-h   { font-size: 14.5px; font-weight: 700; fill: #1a1c16; }
+    .body     { font-size: 12px; }
+    .note     { font-size: 12px; font-weight: 700; fill: #265629; text-anchor: middle; }
+    .arrow    { font-size: 15px; fill: #9a9d8c; }
+    .down     { font-size: 16px; fill: #265629; text-anchor: middle; }
+    .col-h    { font-size: 15px; font-weight: 700; fill: #b8923a; }
+    .idea-h   { font-size: 12.5px; font-weight: 700; fill: #1a1c16; }
+    .idea     { font-size: 11.5px; }
+    .mono     { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+                font-size: 10.5px; fill: #265629; }
+    .ring     { font-size: 10.5px; }
+    .box-h    { font-size: 12px; font-weight: 700; fill: #1a1c16; }
+    .frame    { fill: #f6f4ec; stroke: #e1e0d4; }
+    .card     { fill: #fff; stroke: #dcdacb; stroke-width: 1.5; }
+    .fence    { fill: #edf1f3; stroke: #3f6e84; stroke-width: 1.5; }
+    .yardfence{ fill: #ebf1e7; stroke: #265629; stroke-width: 2.5; stroke-dasharray: 12.5 12.5; }
+    .strip    { fill: #fbfaf5; stroke: #dcdacb; stroke-width: 1.5; }
+    .box      { fill: #fff; stroke: #dcdacb; stroke-width: 1.5; }
+    .panel    { fill: #f8f0d8; stroke: #e9d59c; stroke-width: 1.5; }
+    .rule     { stroke: #e0cf9a; stroke-width: 1; }
+  </style>
+  <rect class="frame" x="100" y="100" width="1360" height="888" rx="18"/>
+
+  <!-- header -->
+  <text class="title" x="160" y="160">From nothing to a walled box</text>
+  <text class="tagline" x="160" y="191">Do the big downloads once, before the day. Then each project's VM is a clone, and its box is seconds away.</text>
+
+  <!-- ONCE PER COMPUTER — the part that needs a good connection -->
+  <rect class="fence" x="140" y="228" width="1040" height="202" rx="16"/>
+  <text class="band" x="160" y="259">ONCE PER COMPUTER</text>
+  <text class="band-sub" x="313" y="259">at home, before the workshop — the part that needs a good connection</text>
+
+  <rect class="card" x="160" y="278" width="235" height="132" rx="12"/>
+  <text class="col-h" x="178" y="305">1</text>
+  <text class="card-h" x="194" y="305">Install uv</text>
+  <text class="mono" x="178" y="324">docs.astral.sh/uv</text>
+  <text class="body" x="178" y="346">
+    <tspan x="178">The one thing you install by hand.</tspan>
+    <tspan x="178" dy="16">On Windows: WSL2 first, then</tspan>
+    <tspan x="178" dy="16">everything inside its Linux.</tspan>
+  </text>
+  <rect class="card" x="415" y="278" width="235" height="132" rx="12"/>
+  <text class="col-h" x="433" y="305">2</text>
+  <text class="card-h" x="449" y="305">Check this computer</text>
+  <text class="mono" x="433" y="324">uvx foldyard@latest prereq</text>
+  <text class="body" x="433" y="346">
+    <tspan x="433">Checks Lima, podman, a hypervisor</tspan>
+    <tspan x="433" dy="16">(on Linux: QEMU, KVM, systemd),</tspan>
+    <tspan x="433" dy="16">disk and memory. Prints the install</tspan>
+    <tspan x="433" dy="16">command for anything missing.</tspan>
+  </text>
+  <rect class="card" x="670" y="278" width="235" height="132" rx="12"/>
+  <text class="col-h" x="688" y="305">3</text>
+  <text class="card-h" x="704" y="305">Install foldyard</text>
+  <text class="mono" x="688" y="324">uv tool install foldyard</text>
+  <text class="body" x="688" y="346">
+    <tspan x="688">Puts foldyard on your PATH, with</tspan>
+    <tspan x="688" dy="16">fy as shorthand. mitmproxy, which</tspan>
+    <tspan x="688" dy="16">runs the proxy, comes with it.</tspan>
+  </text>
+  <rect class="card" x="925" y="278" width="235" height="132" rx="12"/>
+  <text class="col-h" x="943" y="305">4</text>
+  <text class="card-h" x="959" y="305">Bake the base VM</text>
+  <text class="mono" x="943" y="324">fy prereq --fetch</text>
+  <text class="body" x="943" y="346">
+    <tspan x="943">Downloads the VM image, installs</tspan>
+    <tspan x="943" dy="16">podman, builds the box image —</tspan>
+    <tspan x="943" dy="16">once, about two minutes. Nothing</tspan>
+    <tspan x="943" dy="16">mounted, no repo code.</tspan>
+  </text>
+  <text class="arrow" x="399" y="346">▶</text>
+  <text class="arrow" x="654" y="346">▶</text>
+  <text class="arrow" x="909" y="346">▶</text>
+
+  <!-- the seam between the two days -->
+  <text class="note" x="660" y="462">on the day: seconds, and almost no downloads</text>
+  <text class="down" x="660" y="489">▼</text>
+
+  <!-- PER PROJECT — on the day -->
+  <rect class="yardfence" x="140" y="502" width="1040" height="290" rx="16"/>
+  <text class="band-yard" x="160" y="533">PER PROJECT</text>
+  <text class="band-sub" x="263" y="533">on the day, in your own repo</text>
+
+  <rect class="card" x="160" y="552" width="235" height="132" rx="12"/>
+  <text class="col-h" x="178" y="579">5</text>
+  <text class="card-h" x="194" y="579">Write the config</text>
+  <text class="mono" x="178" y="598">foldyard init</text>
+  <text class="body" x="178" y="620">
+    <tspan x="178">A locked-down foldyard.toml: Lima,</tspan>
+    <tspan x="178" dy="16">the VM firewall on, the allowlist</tspan>
+    <tspan x="178" dy="16">learning for its first hour. Agents</tspan>
+    <tspan x="178" dy="16">and your stack are commented out.</tspan>
+  </text>
+  <rect class="card" x="415" y="552" width="235" height="132" rx="12"/>
+  <text class="col-h" x="433" y="579">6</text>
+  <text class="card-h" x="449" y="579">Start the box</text>
+  <text class="mono" x="433" y="598">fy box up</text>
+  <text class="body" x="433" y="620">
+    <tspan x="433">Your project's VM, cloned from the</tspan>
+    <tspan x="433" dy="16">base. Shows you the config to</tspan>
+    <tspan x="433" dy="16">adopt and the hosts the repo</tspan>
+    <tspan x="433" dy="16">recommends — one yes each.</tspan>
+  </text>
+  <rect class="card" x="670" y="552" width="235" height="132" rx="12"/>
+  <text class="col-h" x="688" y="579">7</text>
+  <text class="card-h" x="704" y="579">Step inside</text>
+  <text class="mono" x="688" y="598">fy box shell</text>
+  <text class="body" x="688" y="620">
+    <tspan x="688">A shell in the box: the repo, your</tspan>
+    <tspan x="688" dy="16">tools, no credentials. Commits</tspan>
+    <tspan x="688" dy="16">work; pushes are refused.</tspan>
+  </text>
+  <rect class="card" x="925" y="552" width="235" height="132" rx="12"/>
+  <text class="col-h" x="943" y="579">8</text>
+  <text class="card-h" x="959" y="579">Check, don't trust</text>
+  <text class="mono" x="943" y="598">fy verify</text>
+  <text class="body" x="943" y="620">
+    <tspan x="943">Mount audit, the known escapes,</tspan>
+    <tspan x="943" dy="16">credential checks, firewall probes.</tspan>
+    <tspan x="943" dy="16">It should say ALL PASS.</tspan>
+  </text>
+  <text class="arrow" x="399" y="620">▶</text>
+  <text class="arrow" x="654" y="620">▶</text>
+  <text class="arrow" x="909" y="620">▶</text>
+
+  <!-- then, when you're ready -->
+  <rect class="box" x="160" y="700" width="490" height="72" rx="10"/>
+  <text class="col-h" x="176" y="724">9</text>
+  <text class="box-h" x="191" y="724">Put an agent in</text>
+  <text class="body" x="176" y="744">
+    <tspan x="176">Uncomment [claude] or [codex], fy config adopt, fy box down &amp;&amp;</tspan>
+    <tspan x="176" dy="15">fy box up, fy mode claude=on, fy claude. The key stays outside.</tspan>
+  </text>
+  <rect class="box" x="670" y="700" width="490" height="72" rx="10"/>
+  <text class="col-h" x="686" y="724">10</text>
+  <text class="box-h" x="709" y="724">Bring your stack in</text>
+  <text class="body" x="686" y="744">
+    <tspan x="686">Uncomment the compose lines in [project], then fy up: your</tspan>
+    <tspan x="686" dy="15">whole stack runs in the same VM, beside the box.</tspan>
+  </text>
+
+  <!-- WHAT FY BOX UP DID — step 6, in order -->
+  <rect class="strip" x="140" y="812" width="1040" height="136" rx="16"/>
+  <text class="band" x="160" y="843">WHAT FY BOX UP DID</text>
+  <text class="band-sub" x="317" y="843">step 6, opened up, in the order it happens</text>
+
+  <rect class="box" x="160" y="862" width="184" height="66" rx="8"/>
+  <text class="box-h" x="172" y="884">Your config, adopted</text>
+  <text class="ring" x="172" y="902">
+    <tspan x="172">the first time, you read it</tspan>
+    <tspan x="172" dy="14">and press Enter to accept</tspan>
+  </text>
+  <rect class="box" x="364" y="862" width="184" height="66" rx="8"/>
+  <text class="box-h" x="376" y="884">A VM for this project</text>
+  <text class="ring" x="376" y="902">
+    <tspan x="376">a clone of the base, then its</tspan>
+    <tspan x="376" dy="14">own mounts and firewall</tspan>
+  </text>
+  <rect class="box" x="568" y="862" width="184" height="66" rx="8"/>
+  <text class="box-h" x="580" y="884">The supervisor</text>
+  <text class="ring" x="580" y="902">
+    <tspan x="580">starts the proxy on your</tspan>
+    <tspan x="580" dy="14">computer, waits until it's ready</tspan>
+  </text>
+  <rect class="box" x="772" y="862" width="184" height="66" rx="8"/>
+  <text class="box-h" x="784" y="884">The box image</text>
+  <text class="ring" x="784" y="902">
+    <tspan x="784">re-tagged from the base,</tspan>
+    <tspan x="784" dy="14">not rebuilt</tspan>
+  </text>
+  <rect class="box" x="976" y="862" width="184" height="66" rx="8"/>
+  <text class="box-h" x="988" y="884">The dev box</text>
+  <text class="ring" x="988" y="902">
+    <tspan x="988">started with the proxy's CA</tspan>
+    <tspan x="988" dy="14">and settings — and no keys</tspan>
+  </text>
+  <text class="arrow" x="349" y="900">▶</text>
+  <text class="arrow" x="553" y="900">▶</text>
+  <text class="arrow" x="757" y="900">▶</text>
+  <text class="arrow" x="961" y="900">▶</text>
+
+  <!-- right panel: the numbers, and what keeps the base safe -->
+  <rect class="panel" x="1210" y="228" width="210" height="720" rx="12"/>
+  <text class="col-h" x="1228" y="258">The numbers</text>
+  <text class="idea" x="1228" y="282">
+    <tspan x="1228">A first fy box up, without and</tspan>
+    <tspan x="1228" dy="15">with a base:</tspan>
+  </text>
+  <text class="idea-h" x="1300" y="324">without</text>
+  <text class="idea-h" x="1362" y="324">with</text>
+  <line class="rule" x1="1228" y1="332" x2="1402" y2="332"/>
+  <text class="idea" x="1228" y="350">
+    <tspan x="1228">download</tspan>
+    <tspan x="1228" dy="17">first boot</tspan>
+    <tspan x="1228" dy="17">podman</tspan>
+    <tspan x="1228" dy="17">box image</tspan>
+  </text>
+  <text class="idea" x="1300" y="350">
+    <tspan x="1300">~500 MB</tspan>
+    <tspan x="1300" dy="17">~30 s</tspan>
+    <tspan x="1300" dy="17">installed</tspan>
+    <tspan x="1300" dy="17">built</tspan>
+  </text>
+  <text class="idea" x="1362" y="350">
+    <tspan x="1362">none</tspan>
+    <tspan x="1362" dy="17">~10 s</tspan>
+    <tspan x="1362" dy="17">there</tspan>
+    <tspan x="1362" dy="17">reused</tspan>
+  </text>
+  <text class="idea-h" x="1228" y="422">fy box up</text>
+  <text class="idea-h" x="1300" y="422">minutes</text>
+  <text class="idea-h" x="1362" y="422">~26 s</text>
+  <text class="idea" x="1228" y="448">
+    <tspan x="1228">Measured once on an Apple-</tspan>
+    <tspan x="1228" dy="15">silicon macOS computer (Lima</tspan>
+    <tspan x="1228" dy="15">2.1.3, vz); the bake took 105 s.</tspan>
+  </text>
+
+  <line class="rule" x1="1228" y1="500" x2="1402" y2="500"/>
+  <text class="col-h" x="1228" y="530">What keeps it safe</text>
+
+  <text class="idea-h" x="1228" y="558">
+    <tspan x="1228">1 · Bake on your own</tspan>
+    <tspan x="1228" dy="17">computer</tspan>
+  </text>
+  <text class="idea" x="1228" y="597">
+    <tspan x="1228">A VM disk from someone else's</tspan>
+    <tspan x="1228" dy="15">computer is one you didn't see</tspan>
+    <tspan x="1228" dy="15">being made. Share Lima's and</tspan>
+    <tspan x="1228" dy="15">uv's download caches instead.</tspan>
+  </text>
+  <text class="idea-h" x="1228" y="672">
+    <tspan x="1228">2 · Never made from a</tspan>
+    <tspan x="1228" dy="17">project</tspan>
+  </text>
+  <text class="idea" x="1228" y="711">
+    <tspan x="1228">The base is built with nothing</tspan>
+    <tspan x="1228" dy="15">mounted and no agent ever run,</tspan>
+    <tspan x="1228" dy="15">so nothing escapes into it.</tspan>
+  </text>
+  <text class="idea-h" x="1228" y="771">3 · Cloned only at creation</text>
+  <text class="idea" x="1228" y="793">
+    <tspan x="1228">An existing project VM is never</tspan>
+    <tspan x="1228" dy="15">replaced. fy machine base says</tspan>
+    <tspan x="1228" dy="15">when the base is out of date.</tspan>
+  </text>
+
+  <line class="rule" x1="1228" y1="854" x2="1402" y2="854"/>
+  <text class="idea" x="1228" y="878">
+    <tspan x="1228">Left for the day: your project's</tspan>
+    <tspan x="1228" dy="15">own images, packages and</tspan>
+    <tspan x="1228" dy="15">agents — the part no base can</tspan>
+    <tspan x="1228" dy="15">fetch ahead of time.</tspan>
+  </text>
+</svg>

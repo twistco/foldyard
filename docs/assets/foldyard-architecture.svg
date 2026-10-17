@@ -33,10 +33,10 @@
   <text class="title" x="160" y="160">Foldyard Architecture</text>
   <text class="tagline" x="160" y="191">Bring your whole dev stack into the fold — secretless by default.</text>
 
-  <!-- YOUR MACHINE — everything that holds a credential stays out here -->
+  <!-- YOUR COMPUTER — everything that holds a credential stays out here -->
   <rect class="fence" x="140" y="228" width="1040" height="340" rx="16"/>
-  <text class="band" x="160" y="259">YOUR MACHINE</text>
-  <text class="band-sub" x="290" y="259">host · outside the fence — your keys, browser and other repos stay here</text>
+  <text class="band" x="160" y="259">YOUR COMPUTER</text>
+  <text class="band-sub" x="288" y="259">outside the fence — your keys, browser and other repos stay here</text>
 
   <rect class="card" x="160" y="278" width="235" height="127" rx="12"/>
   <text class="card-h" x="178" y="305">foldyard CLI</text>
@@ -48,11 +48,11 @@
     <tspan x="178" dy="16">of it.</tspan>
   </text>
   <rect class="card" x="415" y="278" width="235" height="127" rx="12"/>
-  <text class="card-h" x="433" y="305">Host-side supervisor</text>
+  <text class="card-h" x="433" y="305">The supervisor</text>
   <text class="body" x="433" y="327">
     <tspan x="433">The one process that holds</tspan>
     <tspan x="433" dy="16">credentials, and it runs outside the</tspan>
-    <tspan x="433" dy="16">fence. Starts with the box, keeps</tspan>
+    <tspan x="433" dy="16">fence. Starts with the VM, keeps</tspan>
     <tspan x="433" dy="16">the proxy up, reconciles to the</tspan>
     <tspan x="433" dy="16">mode you set.</tspan>
   </text>
@@ -60,17 +60,18 @@
   <text class="card-h" x="688" y="305">Token services</text>
   <text class="body" x="688" y="327">
     <tspan x="688">GCP metadata emulator · GitHub</tspan>
-    <tspan x="688" dy="16">App · header or query-param auth</tspan>
-    <tspan x="688" dy="16">— or your own, as a plugin.</tspan>
-    <tspan x="688" dy="16">Short-lived, scoped tokens minted</tspan>
-    <tspan x="688" dy="16">on demand, never a long-lived key.</tspan>
+    <tspan x="688" dy="16">App tokens · a static token for</tspan>
+    <tspan x="688" dy="16">any API · or your own, as a plugin.</tspan>
+    <tspan x="688" dy="16">Made on demand from secrets in</tspan>
+    <tspan x="688" dy="16">host.env — never in the yard.</tspan>
   </text>
   <rect class="card" x="925" y="278" width="235" height="127" rx="12"/>
   <text class="card-h" x="943" y="305">Egress proxy</text>
   <text class="body" x="943" y="327">
-    <tspan x="943">The yard's only way out. Injects</tspan>
-    <tspan x="943" dy="16">the minted token at the edge, so it</tspan>
-    <tspan x="943" dy="16">reaches the API but never the</tspan>
+    <tspan x="943">With the VM firewall on (the</tspan>
+    <tspan x="943" dy="16">default), the yard's only way out.</tspan>
+    <tspan x="943" dy="16">It injects the token at the edge, so</tspan>
+    <tspan x="943" dy="16">it reaches the API but never the</tspan>
     <tspan x="943" dy="16">yard. Every destination logged.</tspan>
   </text>
 
@@ -87,25 +88,25 @@
   <text class="card-h" x="433" y="448">Config you approve</text>
   <text class="body" x="433" y="470">
     <tspan x="433">foldyard.toml is committed, so your</tspan>
-    <tspan x="433" dy="16">team shares it — but your computer runs</tspan>
-    <tspan x="433" dy="16">only the copy you adopted. An edit</tspan>
-    <tspan x="433" dy="16">made inside the yard does nothing</tspan>
-    <tspan x="433" dy="16">until you accept it.</tspan>
+    <tspan x="433" dy="16">team shares it — but your computer</tspan>
+    <tspan x="433" dy="16">runs only the copy you adopted. An</tspan>
+    <tspan x="433" dy="16">edit made inside the yard does</tspan>
+    <tspan x="433" dy="16">nothing until you accept it.</tspan>
   </text>
   <rect class="card" x="670" y="421" width="235" height="127" rx="12"/>
   <text class="card-h" x="688" y="448">Allowlist + VM firewall</text>
   <text class="body" x="688" y="470">
-    <tspan x="688">Kept on your computer: you</tspan>
-    <tspan x="688" dy="16">grant a hostname live. A firewall</tspan>
-    <tspan x="688" dy="16">provisioned inside the VM refuses</tspan>
+    <tspan x="688">Kept on your computer: you grant</tspan>
+    <tspan x="688" dy="16">a hostname live. A firewall inside</tspan>
+    <tspan x="688" dy="16">the VM, set up at boot, refuses</tspan>
     <tspan x="688" dy="16">traffic that tries to skip the proxy.</tspan>
   </text>
   <rect class="card" x="925" y="421" width="235" height="127" rx="12"/>
   <text class="card-h" x="943" y="448">Access modes live here</text>
   <text class="body" x="943" y="470">
     <tspan x="943">You set the mode on your</tspan>
-    <tspan x="943" dy="16">machine; the yard gets a read-only</tspan>
-    <tspan x="943" dy="16">copy and can never raise it.</tspan>
+    <tspan x="943" dy="16">computer; the yard gets a read-</tspan>
+    <tspan x="943" dy="16">only copy and can never raise it.</tspan>
     <tspan x="943" dy="16">Emergency levels carry a timer</tspan>
     <tspan x="943" dy="16">and revert on their own.</tspan>
   </text>
@@ -129,11 +130,11 @@
   <text class="card-h" x="433" y="719">Long-lived dev box</text>
   <text class="body" x="433" y="741">
     <tspan x="433">Multi-session, VS Code attaches.</tspan>
-    <tspan x="433" dy="16">Installs land in volumes the host</tspan>
-    <tspan x="433" dy="16">never sees, so a compromised</tspan>
-    <tspan x="433" dy="16">package wakes with nothing to lift.</tspan>
-    <tspan x="433" dy="16">Ships as a Debian box; bring your</tspan>
-    <tspan x="433" dy="16">own Dockerfile to grow it.</tspan>
+    <tspan x="433" dy="16">Installs land in volumes your</tspan>
+    <tspan x="433" dy="16">computer never sees, so a</tspan>
+    <tspan x="433" dy="16">compromised package wakes with</tspan>
+    <tspan x="433" dy="16">nothing to lift. Ships as a Debian</tspan>
+    <tspan x="433" dy="16">box; bring your own Dockerfile.</tspan>
   </text>
   <rect class="card" x="670" y="692" width="235" height="143" rx="12"/>
   <text class="card-h" x="688" y="719">Coding agent</text>
@@ -143,7 +144,7 @@
     <tspan x="688" dy="16">socket: full autonomy over the</tspan>
     <tspan x="688" dy="16">stack, bounded to the repo and the</tspan>
     <tspan x="688" dy="16">containers inside the VM — never</tspan>
-    <tspan x="688" dy="16">your machine.</tspan>
+    <tspan x="688" dy="16">your computer.</tspan>
   </text>
   <rect class="card" x="925" y="692" width="235" height="143" rx="12"/>
   <text class="card-h" x="943" y="719">Worktrees, side by side</text>
@@ -163,16 +164,17 @@
   <text class="card-h" x="178" y="922">Mount audit</text>
   <text class="body" x="178" y="944">
     <tspan x="178">Reads the VM's own mount table</tspan>
-    <tspan x="178" dy="16">and fails on any host path — the</tspan>
-    <tspan x="178" dy="16">stray $HOME bind-mount that</tspan>
-    <tspan x="178" dy="16">would quietly undo everything.</tspan>
+    <tspan x="178" dy="16">and fails on any path from your</tspan>
+    <tspan x="178" dy="16">computer — the stray $HOME</tspan>
+    <tspan x="178" dy="16">bind-mount that would quietly</tspan>
+    <tspan x="178" dy="16">undo everything.</tspan>
   </text>
   <rect class="card" x="415" y="895" width="235" height="127" rx="12"/>
   <text class="card-h" x="433" y="922">Escape battery</text>
   <text class="body" x="433" y="944">
     <tspan x="433">The engine must be rootless, and</tspan>
     <tspan x="433" dy="16">a --privileged --pid=host container</tspan>
-    <tspan x="433" dy="16">must not reach the host's PID 1. It</tspan>
+    <tspan x="433" dy="16">must not read the VM's PID 1. It</tspan>
     <tspan x="433" dy="16">runs the escapes we know about:</tspan>
     <tspan x="433" dy="16">assurance, not proof.</tspan>
   </text>
@@ -198,7 +200,7 @@
   <text class="arrow" x="1178" y="346">▶</text>
 
   <!-- the seam: what crosses the fence, and what does not -->
-  <text class="note" x="660" y="600">the yard mounts ONLY the repo — no $HOME, no keys, no other repos</text>
+  <text class="note" x="660" y="600">the yard mounts ONLY the repo and its worktrees — no $HOME, no keys, no other repos</text>
   <text class="down" x="660" y="628">▼</text>
 
   <!-- upstream + the three ideas -->
@@ -235,12 +237,12 @@
   </text>
   <text class="idea" x="1228" y="677">
     <tspan x="1228">The yard starts with nothing to</tspan>
-    <tspan x="1228" dy="15">lift and no way to push. Declare</tspan>
-    <tspan x="1228" dy="15">a mode and host-side daemons</tspan>
-    <tspan x="1228" dy="15">mint short-lived, scoped tokens</tspan>
-    <tspan x="1228" dy="15">the proxy injects. Emergency</tspan>
-    <tspan x="1228" dy="15">levels expire and revert on their</tspan>
-    <tspan x="1228" dy="15">own.</tspan>
+    <tspan x="1228" dy="15">lift and no way to push. Switch</tspan>
+    <tspan x="1228" dy="15">on a mode, and token services</tspan>
+    <tspan x="1228" dy="15">on your computer make the</tspan>
+    <tspan x="1228" dy="15">tokens the proxy injects.</tspan>
+    <tspan x="1228" dy="15">Emergency levels expire and</tspan>
+    <tspan x="1228" dy="15">revert on their own.</tspan>
   </text>
 
   <text class="idea-h" x="1228" y="793">
@@ -249,8 +251,8 @@
   <text class="idea" x="1228" y="815">
     <tspan x="1228">An escape lands in the</tspan>
     <tspan x="1228" dy="15">throwaway VM, not on your</tspan>
-    <tspan x="1228" dy="15">machine — no host filesystem</tspan>
-    <tspan x="1228" dy="15">is there to reach. Nothing is</tspan>
+    <tspan x="1228" dy="15">computer — none of your files</tspan>
+    <tspan x="1228" dy="15">are there to reach. Nothing is</tspan>
     <tspan x="1228" dy="15">concealed either: Podman</tspan>
     <tspan x="1228" dy="15">Desktop shows every</tspan>
     <tspan x="1228" dy="15">container, and fy verify audits</tspan>
@@ -262,7 +264,7 @@
     <tspan x="1228">fy docs ships the whole manual</tspan>
     <tspan x="1228" dy="15">with the install, offline. fy state</tspan>
     <tspan x="1228" dy="15">and fy doctor show what this</tspan>
-    <tspan x="1228" dy="15">machine can grant, and where</tspan>
+    <tspan x="1228" dy="15">computer can grant, and where</tspan>
     <tspan x="1228" dy="15">reality has drifted.</tspan>
   </text>
 </svg>
