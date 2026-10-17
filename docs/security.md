@@ -140,7 +140,8 @@ The resting state is **zero secrets in the VM**: no key files, no token environm
 in the container for its whole life: any code running in it reads `/proc/<pid>/environ`, and
 anything holding the engine socket, the box included, reads it with `inspect`. Give the service a
 dummy and let a switch inject the real value at the proxy ([modes.md](./modes.md); a stack
-container's traffic reaches the proxy only with the VM firewall on).
+container's traffic reaches the proxy only with the VM firewall on; more in
+[stack.md](./stack.md)).
 
 ## Network: what's cooperative, what's enforced
 

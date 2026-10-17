@@ -1,0 +1,180 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1362" height="694" viewBox="99 99 1362 694" fill="none">
+  <style>
+    text { font-family: "Hanken Grotesk", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+           fill: #6e7263; }
+    .title    { font-family: "Newsreader", Georgia, "Times New Roman", serif;
+                font-size: 30px; font-weight: 600; fill: #1a1c16; }
+    .tagline  { font-size: 15px; }
+    .band     { font-size: 12px; font-weight: 700; fill: #1a1c16; letter-spacing: .06em; }
+    .band-yard{ font-size: 12px; font-weight: 700; fill: #265629; letter-spacing: .06em; }
+    .band-sub { font-size: 12px; }
+    .card-h   { font-size: 14.5px; font-weight: 700; fill: #1a1c16; }
+    .body     { font-size: 12px; }
+    .note     { font-size: 12px; font-weight: 700; fill: #265629; text-anchor: middle; }
+    .arrow    { font-size: 15px; fill: #9a9d8c; }
+    .cap      { font-size: 12px; }
+    .col-h    { font-size: 15px; font-weight: 700; fill: #b8923a; }
+    .idea-h   { font-size: 12.5px; font-weight: 700; fill: #1a1c16; }
+    .idea     { font-size: 11.5px; }
+    .frame    { fill: #f6f4ec; stroke: #e1e0d4; }
+    .card     { fill: #fff; stroke: #dcdacb; stroke-width: 1.5; }
+    .fence    { fill: #edf1f3; stroke: #3f6e84; stroke-width: 1.5; }
+    .yardfence{ fill: #ebf1e7; stroke: #265629; stroke-width: 2.5; stroke-dasharray: 12.5 12.5; }
+    .panel    { fill: #f8f0d8; stroke: #e9d59c; stroke-width: 1.5; }
+    .rule     { stroke: #e0cf9a; stroke-width: 1; }
+    .row      { stroke: #ecebe1; stroke-width: 1; }
+    .mono     { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+                font-size: 10.5px; fill: #265629; }
+    .tag      { font-size: 10px; font-weight: 700; fill: #b8923a; letter-spacing: .08em; text-anchor: end; }
+    .ring     { font-size: 10.5px; text-anchor: middle; }
+    .msg      { stroke: #9a9d8c; stroke-width: 1.5; }
+  </style>
+  <rect class="frame" x="100" y="100" width="1360" height="692" rx="18"/>
+
+  <!-- header -->
+  <text class="title" x="160" y="160">Config in the repo, control on your computer</text>
+  <text class="tagline" x="160" y="191">The repo carries config, never credentials. Everything that grants access lives where the box can't reach it.</text>
+
+  <!-- IN THE REPO — inside the VM's mount -->
+  <rect class="yardfence" x="140" y="228" width="480" height="508" rx="16"/>
+  <text class="band-yard" x="160" y="259">IN THE REPO</text>
+  <text class="band-sub" x="258" y="259">inside the VM's mount — the box can write it</text>
+
+  <rect class="card" x="160" y="278" width="440" height="202" rx="12"/>
+  <text class="card-h" x="178" y="305">foldyard.toml</text>
+  <text class="tag" x="582" y="304">COMMITTED · SHARED WITH YOUR TEAM</text>
+  <text class="mono" x="178" y="330">[project]</text>
+  <text class="body" x="320" y="330">name, your compose files, the app</text>
+  <line class="row" x1="178" y1="338" x2="582" y2="338"/>
+  <text class="mono" x="178" y="352">[machine]</text>
+  <text class="body" x="320" y="352">the VM: backend, size, firewall, gVisor</text>
+  <line class="row" x1="178" y1="360" x2="582" y2="360"/>
+  <text class="mono" x="178" y="374">[proxy]</text>
+  <text class="body" x="320" y="374">passthrough, recommended hosts</text>
+  <line class="row" x1="178" y1="382" x2="582" y2="382"/>
+  <text class="mono" x="178" y="396">[[inject]]</text>
+  <text class="body" x="320" y="396">which credential goes to which host</text>
+  <line class="row" x1="178" y1="404" x2="582" y2="404"/>
+  <text class="mono" x="178" y="418">[claude] [codex]</text>
+  <text class="body" x="320" y="418">keyless agents</text>
+  <line class="row" x1="178" y1="426" x2="582" y2="426"/>
+  <text class="mono" x="178" y="440">[box] [ports]</text>
+  <text class="body" x="320" y="440">the dev box's image and tools; ports</text>
+  <line class="row" x1="178" y1="448" x2="582" y2="448"/>
+  <text class="mono" x="178" y="462">[[overlay]]</text>
+  <text class="body" x="320" y="462">compose files that follow the mode</text>
+
+  <rect class="card" x="160" y="496" width="440" height="90" rx="12"/>
+  <text class="card-h" x="178" y="523">foldyard.local.toml</text>
+  <text class="tag" x="582" y="522">GITIGNORED</text>
+  <text class="body" x="178" y="547">
+    <tspan x="178">Your own overrides, merged key by key over the shared</tspan>
+    <tspan x="178" dy="16">file. Adopted together with it.</tspan>
+  </text>
+
+  <rect class="card" x="160" y="602" width="440" height="114" rx="12"/>
+  <text class="card-h" x="178" y="629">Generated files</text>
+  <text class="tag" x="582" y="628">GITIGNORED</text>
+  <text class="mono" x="178" y="654">.devbox-ca/</text>
+  <text class="body" x="320" y="654">the proxy's CA certificate, for the box</text>
+  <line class="row" x1="178" y1="662" x2="582" y2="662"/>
+  <text class="mono" x="178" y="676">.devbox-claude/ …</text>
+  <text class="body" x="320" y="676">agent and tool state</text>
+  <line class="row" x1="178" y1="684" x2="582" y2="684"/>
+  <text class="mono" x="178" y="698">.dev-mode.json</text>
+  <text class="body" x="320" y="698">read-only copy of the mode — grants nothing</text>
+
+  <!-- ON YOUR COMPUTER — ~/.foldyard/ -->
+  <rect class="fence" x="680" y="228" width="500" height="508" rx="16"/>
+  <text class="band" x="700" y="259">ON YOUR COMPUTER</text>
+  <text class="band-sub" x="850" y="259">~/.foldyard/ — outside the repo, out of the VM's reach</text>
+
+  <rect class="card" x="700" y="278" width="460" height="114" rx="12"/>
+  <text class="card-h" x="718" y="305">~/.foldyard/</text>
+  <text class="tag" x="1142" y="304">SHARED BY ALL PROJECTS</text>
+  <text class="mono" x="718" y="330">ports.json</text>
+  <text class="body" x="888" y="330">each project's own range of ports</text>
+  <line class="row" x1="718" y1="338" x2="1142" y2="338"/>
+  <text class="mono" x="718" y="352">adopted/&lt;checkout&gt;-…/</text>
+  <text class="body" x="888" y="352">the config your computer actually runs</text>
+  <line class="row" x1="718" y1="360" x2="1142" y2="360"/>
+  <text class="mono" x="718" y="374">base-vm.json</text>
+  <text class="body" x="888" y="374">what the base VM was baked from</text>
+
+  <rect class="card" x="700" y="408" width="460" height="136" rx="12"/>
+  <text class="card-h" x="718" y="435">&lt;project&gt;/</text>
+  <text class="tag" x="1142" y="434">ONE PER PROJECT</text>
+  <text class="mono" x="718" y="460">host.env</text>
+  <text class="body" x="888" y="460">the secrets token services need</text>
+  <line class="row" x1="718" y1="468" x2="1142" y2="468"/>
+  <text class="mono" x="718" y="482">allow-store.json</text>
+  <text class="body" x="888" y="482">every allowlist grant, at every level</text>
+  <line class="row" x1="718" y1="490" x2="1142" y2="490"/>
+  <text class="mono" x="718" y="504">host-supervisor.log</text>
+  <text class="body" x="888" y="504">the supervisor and everything it runs</text>
+  <line class="row" x1="718" y1="512" x2="1142" y2="512"/>
+  <text class="mono" x="718" y="526">capabilities.json</text>
+  <text class="body" x="888" y="526">whether each credential still works</text>
+
+  <rect class="card" x="700" y="560" width="460" height="92" rx="12"/>
+  <text class="card-h" x="718" y="587">main/ · worktrees/&lt;name&gt;/</text>
+  <text class="tag" x="1142" y="586">ONE PER CHECKOUT</text>
+  <text class="mono" x="718" y="612">dev-mode.json</text>
+  <text class="body" x="888" y="612">the real mode for this checkout</text>
+  <line class="row" x1="718" y1="620" x2="1142" y2="620"/>
+  <text class="mono" x="718" y="634">logs/egress.jsonl</text>
+  <text class="body" x="888" y="634">every request the proxy saw</text>
+
+  <text class="cap" x="700" y="680">
+    <tspan x="700">Each worktree keeps its own mode: a per-branch setting,</tspan>
+    <tspan x="700" dy="16">not a boundary between branches.</tspan>
+  </text>
+
+  <!-- the seam: adopting is the one way across -->
+  <text class="note" x="650" y="336">adopt</text>
+  <line class="msg" x1="604" y1="348" x2="690" y2="348"/>
+  <text class="arrow" x="686" y="353">▶</text>
+  <text class="ring" x="650" y="368">fy config</text>
+  <text class="ring" x="650" y="381">adopt</text>
+
+  <text class="note" x="660" y="766">the box can write everything on the left — and reach nothing on the right</text>
+
+  <!-- right panel -->
+  <rect class="panel" x="1210" y="228" width="210" height="508" rx="12"/>
+  <text class="col-h" x="1228" y="258">Why the split matters</text>
+
+  <text class="idea-h" x="1228" y="290">1 · The repo is untrusted</text>
+  <text class="idea" x="1228" y="311">
+    <tspan x="1228">Anything that can write the</tspan>
+    <tspan x="1228" dy="15">checkout can edit the left</tspan>
+    <tspan x="1228" dy="15">column. So nothing there grants</tspan>
+    <tspan x="1228" dy="15">access by itself.</tspan>
+  </text>
+
+  <text class="idea-h" x="1228" y="389">2 · Grants live here</text>
+  <text class="idea" x="1228" y="410">
+    <tspan x="1228">An allowlist in the repo would be</tspan>
+    <tspan x="1228" dy="15">one the box could widen. Grants</tspan>
+    <tspan x="1228" dy="15">and the enforce switch stay on</tspan>
+    <tspan x="1228" dy="15">your computer.</tspan>
+  </text>
+
+  <text class="idea-h" x="1228" y="488">
+    <tspan x="1228">3 · Identity per project,</tspan>
+    <tspan x="1228" dy="17">mode per checkout</tspan>
+  </text>
+  <text class="idea" x="1228" y="526">
+    <tspan x="1228">One host.env and supervisor per</tspan>
+    <tspan x="1228" dy="15">project; each worktree keeps its</tspan>
+    <tspan x="1228" dy="15">own mode and logs.</tspan>
+  </text>
+
+  <line class="rule" x1="1228" y1="585" x2="1402" y2="585"/>
+  <text class="idea" x="1228" y="610">
+    <tspan x="1228">The one precondition: a clean</tspan>
+    <tspan x="1228" dy="15">repo. Scan its history with</tspan>
+    <tspan x="1228" dy="15">gitleaks or TruffleHog first —</tspan>
+    <tspan x="1228" dy="15">foldyard can mount a clean repo,</tspan>
+    <tspan x="1228" dy="15">it can't clean a dirty one.</tspan>
+  </text>
+</svg>
