@@ -56,8 +56,8 @@ Why foldyard is built the way it is.
     that showed a VM firewall can force all egress through a proxy.
   - [egress-forcing-study.md](./archive/egress-forcing-study.md) — the 2026-06 study of forcing
     all egress through the proxy, and why the rootless firewall won.
-  - [lessons.md](./archive/lessons.md) — fifteen incidents from building foldyard, each with its
-    lesson and the ADR that records the fix: why a dev sandbox is needed.
+  - [lessons.md](./archive/lessons.md) — fourteen incidents from building foldyard, each with its
+    lesson and the ADR that records the fix, and what's still open: why a dev sandbox is needed.
 - [talks/](./talks/) — slide decks (Marp): [why-sandbox.md](./talks/why-sandbox.md), a
   tool-agnostic talk on why a dev environment needs a sandbox and how to choose one.
 

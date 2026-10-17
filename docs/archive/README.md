@@ -11,8 +11,9 @@ supersedes it; the current design lives in the docs one level up and in the [ADR
   its five proposals, all landed as `reconcile.py` and the capability probes.
 - [firecracker-and-microvm-backends.md](./firecracker-and-microvm-backends.md) — why Firecracker
   can't be a foldyard backend (no filesystem sharing, by design).
-- [lessons.md](./lessons.md) — fifteen incidents and near misses from building foldyard, each with
-  its one-line lesson and the ADR that records the fix; written for any developer.
+- [lessons.md](./lessons.md) — fourteen incidents and near misses from building foldyard, each
+  with its one-line lesson and the ADR that records the fix, then what's still open; written for
+  any developer.
 - [egress-forcing-study.md](./egress-forcing-study.md) — the 2026-06 study of forcing all egress
   through the proxy: the options weighed, what TLS interception costs, and why the rootless uid
   firewall beat the transparent one.

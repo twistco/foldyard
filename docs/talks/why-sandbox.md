@@ -88,12 +88,12 @@ All of it readable by **any program you run** — because it runs as *you*.
 1. You install a package that a compromised maintainer account republished.
 2. Its install script searches your laptop for secrets (it literally runs a secret scanner).
 3. It uses your npm token to publish infected versions of **your** packages.
-4. It dumps what it found into a public GitHub repo — and flips private repos public.
+4. It dumps what it found into a new public GitHub repo.
 
 The worm spreads itself. Its fourth generation (2026) also targets CI pipelines and plants persistence in developer tools.
 
 <!--
-Sources: Krebs on Security, ReversingLabs (first wave, Sep 15 2025, ~180+ packages in days);
+Sources: Krebs on Security, ReversingLabs (first wave from 14–15 Sep 2025; Krebs: at least 187 packages in days);
 Tenable's Mini Shai-Hulud FAQ (2026). Counts differ between sources — quote "hundreds of packages".
 -->
 
@@ -104,13 +104,13 @@ Tenable's Mini Shai-Hulud FAQ (2026). Counts differ between sources — quote "h
 **Nx "s1ngularity"** — August 2025.
 
 - Malicious versions of a popular build tool shipped an install script.
-- It looked for AI command-line tools on the laptop — Claude, Gemini, Q — and **asked them** to find secrets and wallets.
+- It looked for AI command-line tools on the laptop — Claude, Gemini, Q — and ran them, safety prompts off, to **search the disk** for it.
 - Results went to a public repo in the victim's own GitHub account.
 - In a second wave, stolen tokens were used to make thousands of private repos public.
 
 Your AI tools are capable, logged in and *on your laptop*. That makes them part of the attack surface.
 
-<!-- Source: Wiz, StepSecurity write-ups (Aug 2025). Wiz: 400+ users/orgs, 5,500+ private repos exposed. -->
+<!-- Source: Wiz, StepSecurity write-ups (Aug 2025). Wiz: 400+ users/orgs, 5,500+ private repos exposed. The malware's own collector went for wallets, keystores, .env files and SSH keys; Wiz describes the AI CLIs as used for "reconnaissance" with flags like --dangerously-skip-permissions and --yolo. -->
 
 ---
 
@@ -119,7 +119,7 @@ Your AI tools are capable, logged in and *on your laptop*. That makes them part 
 **TrapDoor** — May 2026, npm + PyPI + crates.io.
 
 - The usual: packages that steal SSH keys, cloud credentials and tokens.
-- The new part: pull requests to popular AI projects adding **`CLAUDE.md`** and **`.cursorrules`** files with hidden instructions.
+- The new part: pull requests to popular AI projects that try to add **`CLAUDE.md`** and **`.cursorrules`** files with hidden instructions.
 - The instructions asked the coding assistant to run a "security scan" — that finds and sends out secrets.
 
 A file your agent reads *is* code your agent runs.
@@ -146,11 +146,11 @@ Nobody clicked anything suspicious. The update *was* the attack.
 
 The 2026 worm generation installs **persistence** on developer machines:
 
-- a background daemon watching for your new tokens;
-- injected **editor tasks**;
+- a background daemon that watches your GitHub token — and deletes files if you revoke it;
+- injected **editor tasks** (`.vscode/tasks.json`);
 - injected **AI-agent hooks** in `~/.claude/settings.json`.
 
-The published advice: remove the hooks *before* rotating your credentials, because the daemon reacts to revoked tokens.
+The published advice: find and remove all of it *before* rotating your credentials.
 
 > Rotating keys after an infection is necessary. It isn't a clean-up.
 
@@ -275,7 +275,7 @@ gitleaks dir .       # every file in the folder, ignored ones too
 - **Short-lived and narrow.** Prefer tokens that expire in an hour and can do one job.
 - **"Act as me" is an emergency.** Anything with *your* identity gets a timer and switches itself off.
 
-This used to be rare. In 2026 it became the standard pattern for serious agent sandboxes — that's good news when you're choosing.
+This used to be rare. In 2026 it became close to standard in agent sandboxes — good news when you're choosing.
 
 ---
 
@@ -331,7 +331,7 @@ This used to be rare. In 2026 it became the standard pattern for serious agent s
 ## Verify, don't trust
 
 - A sandbox should **test itself from the inside**: what's mounted, which escapes fail, which credentials are absent, whether traffic that skips the gate is refused.
-- **Test the test.** One self-check once printed *ALL PASS* while checking nothing at all; the fix was a control that must fail on purpose.
+- **Test the test.** One self-check printed *ALL PASS* when its probes had never run; the fix was a control that must succeed first, proving each probe ran.
 - Re-run it after every config change.
 
 > If the only evidence that the fence holds is the vendor's README, you don't know.
@@ -385,12 +385,12 @@ This used to be rare. In 2026 it became the standard pattern for serious agent s
 | --- | --- |
 | Own kernel? | Yes — a throwaway Linux VM per project (Lima), rootless Podman inside |
 | What's mounted? | The repo and its worktrees. No home folder |
-| Credentials? | None by default. Switched on per job; the proxy swaps them in; "act as me" levels expire |
+| Credentials? | None by default. Switched on per job, mostly swapped in by the proxy; "act as me" levels expire |
 | Egress? | Every request goes through a proxy on your computer; a VM firewall refuses anything else |
 | Inside edits config? | Inert until you read the diff and adopt it |
-| Repo code on your computer? | No — the config is data, never commands |
+| Repo code on your computer? | foldyard runs none: its config is data. Your git still runs hooks |
 | Whole dev loop? | Yes — your compose stack, the dev box, your editor's backend, the agent |
-| Verify? | `fy verify`: mounts, escapes, credentials, the firewall in both directions |
+| Verify? | `fy verify`: mounts, escape attempts, credentials, traffic that skips the proxy refused |
 
 ---
 
@@ -440,7 +440,7 @@ Foldyard's own survey of the landscape: `docs/prior-art.md` in the foldyard repo
 | 2 | `fy box up` → `fy box shell` | "cloning the base VM" — seconds, not minutes |
 | 3 | `fy verify` (on your computer, then in the box) | ALL PASS |
 | 4 | uncomment `[claude]` or `[codex]` → `fy config diff` → `fy config adopt` → `fy box down && fy box up` → `fy mode claude=on` → `fy claude` | a hidden prompt for your key, once |
-| 5 | ask the agent to fill in your stack → `fy config adopt` → `fy up` → `fy open` | your app, running in the VM |
+| 5 | ask the agent to fill in your stack → `fy config diff` → `fy config adopt` → `fy up` → `fy open` | your app, running in the VM |
 
 The allowlist **learns for its first hour**. When it starts refusing, `fy allow learn` grants what it saw, after you've reviewed it.
 
@@ -451,8 +451,8 @@ The allowlist **learns for its first hour**. When it starts refusing, `fy allow 
 - `fy doctor` diagnoses; `fy tui` shows the same checks, with one-click fixes.
 - **Changed the config and nothing happened?** It needs adopting: `fy config diff`, then `fy config adopt`.
 - **Agent gets 401s?** The switch is off: `fy mode claude=on`.
-- **A request refused?** Check the Network Log in `fy tui`, then `fy allow learn`.
-- **Everything's slow or swapping?** A smaller VM: `foldyard init --memory 4096`, then `fy machine recreate`.
+- **A request refused?** Find it in `fy tui`'s Network Log and grant it there, or `fy allow add <host>`.
+- **Everything's slow or swapping?** Lower `memory_mib` under `[machine]`, `fy config adopt`, then `fy machine recreate`.
 - **Reading more:** `fy docs` — the whole manual, offline, matched to your version.
 
 ---
@@ -463,8 +463,8 @@ The allowlist **learns for its first hour**. When it starts refusing, `fy allow 
 - Shai-Hulud: [Krebs on Security](https://krebsonsecurity.com/2025/09/self-replicating-worm-hits-180-software-packages/) (Sep 2025); [Tenable — Mini Shai-Hulud FAQ](https://www.tenable.com/blog/mini-shai-hulud-frequently-asked-questions) (2026)
 - Nx "s1ngularity": [Wiz](https://www.wiz.io/blog/s1ngularity-supply-chain-attack) (Aug 2025)
 - TrapDoor: [The Hacker News](https://thehackernews.com/2026/05/trapdoor-supply-chain-attack-spreads.html) (May 2026)
-- VS Code extension breach: [BleepingComputer](https://bleepingcomputer.com/news/security/github-confirms-breach-of-3-800-repos-via-malicious-vscode-extension) (May 2026)
-- Foldyard: [github.com/twistco/foldyard](https://github.com/twistco/foldyard) — `docs/archive/lessons.md` has fifteen more stories from building it
+- VS Code extension breach: [BleepingComputer](https://bleepingcomputer.com/news/security/github-confirms-breach-of-3-800-repos-via-malicious-vscode-extension); [CSA research note](https://labs.cloudsecurityalliance.org/research/csa-research-note-vscode-extension-supply-chain-breach-20260/) (May 2026)
+- Foldyard: [github.com/twistco/foldyard](https://github.com/twistco/foldyard) — `docs/archive/lessons.md` has more stories from building it
 
 <!-- Figures in the incident write-ups differ between sources and change as investigations go on. Re-check them the week of the talk. -->
 

@@ -70,8 +70,8 @@ said `"foldyard[host]"`; that still works, and the extra is now empty.) The box 
 foldyard without mitmproxy, since it only routes through the proxy — you don't do anything
 for that, `fy box up` handles it.
 
-**Optional: the big downloads, ahead of time.** `fy prereq --fetch` bakes a base VM once (a few
-hundred MB, about two minutes). After that, each new project's VM is a clone of it, and a first
+**Optional: the big downloads, ahead of time.** `fy prereq --fetch` bakes a base VM once (about
+1 GB of downloads, two minutes on a good connection). After that, each new project's VM is a clone of it, and a first
 `fy box up` takes seconds instead of minutes. See `fy docs base-vm`.
 
 ## Step 1 — a locked-down box you can safely poke
@@ -125,8 +125,9 @@ fy mode claude=on           # switch on the proxy's key swap for the agent
 fy claude                   # Claude Code, running inside the box
 ```
 
-A plain `fy box up` on a box that's already running doesn't add the agent: the install and the
-dummy credential are set when the box is created.
+For Codex, it's `fy mode codex=on` and `fy codex`. A plain `fy box up` on a box that's already
+running doesn't add the agent: the install and the dummy credential are set when the box is
+created.
 
 **Keyless** means the real key never enters the box. The box holds a dummy value, and the proxy
 on your computer swaps in the real one as each request goes out. You paste the real key once,

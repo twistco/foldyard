@@ -67,8 +67,8 @@ sudo dnf install -y qemu-system-x86-core qemu-img edk2-ovmf podman git openssh-c
 sudo pacman -S --needed qemu-system-x86 qemu-img edk2-ovmf podman git openssh rsync lsof
 ```
 
-Then, on any of them: Lima (2.2.0 is the version foldyard's CI tests), uv, access to KVM, and a
-user session that keeps running:
+Then, on any of them: Lima (2.2.0 is the version foldyard's CI tests), uv, access to KVM (the
+Linux kernel's hardware virtualisation), and a user session that keeps running:
 
 ```bash
 curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.0/lima-2.2.0-Linux-x86_64.tar.gz \
@@ -159,7 +159,7 @@ supplied by [modes](./modes.md) without ever entering the VM.
 ### Step 5 (optional) — a credential for the coding agent
 
 The agent never sees your real key. You paste it once, at a hidden prompt on your computer, and
-the proxy swaps it in as requests leave ([keyless agents](./modes.md#keyless-agents)). Have
+foldyard's proxy on your computer swaps it in as requests leave ([keyless agents](./modes.md#keyless-agents)). Have
 **one** of these ready, in your password manager:
 
 - **Claude with a Pro or Max subscription:** install Claude Code on your computer
@@ -242,7 +242,7 @@ a baked VM disk — bake on the computer that uses it ([why](./base-vm.md#what-k
 | 1 | Scaffold | `fy init`; add `--memory 4096` on 8 GB or 16 GB WSL machines, `--name <name>` if the folder name has spaces | The project name must be letters, digits, `.`, `_` and `-`, starting with a letter or digit. |
 | 2 | The box | `fy box up`: **Enter** adopts the new config, `y` grants each recommended host; then `fy box shell` | "▶ cloning the base VM" and "the base VM's, already in this VM (no build)". A "(no clone: …)" line says why not. |
 | 3 | Prove it | `fy verify` on your computer, and again in the box | ALL PASS. A push check that fails in the box usually means no `origin` remote. |
-| 4 | An agent | Uncomment `[claude]` (or `[codex]`) and its `keyless` line, then `fy config diff`, `fy config adopt`, `fy box down && fy box up` (paste the token at the hidden prompt), `fy mode claude=on`, `fy claude` | A plain `fy box up` on a running box doesn't add the agent. If you skip `fy config adopt`, `fy box up` asks, and its default (Enter) is *ignore*. A 401 naming `fy mode claude=on` means the switch is off. |
+| 4 | An agent | Uncomment `[claude]` (or `[codex]`) and its `keyless` line, then `fy config diff`, `fy config adopt`, `fy box down && fy box up` (paste the token at the hidden prompt), `fy mode claude=on`, `fy claude` (for Codex: `codex=on`, `fy codex`) | A plain `fy box up` on a running box doesn't add the agent. If you skip `fy config adopt`, `fy box up` asks, and its default (Enter) is *ignore*. A 401 naming `fy mode claude=on` means the switch is off. |
 | 5 | The stack | Ask the agent to fill in `[project]` (`compose`, `app`, `app_port`) and `[ports]`, then `fy config diff`, `fy config adopt`, `fy up`, `fy ps`, `fy logs <svc>`, `fy open` | The allowlist learns for **one hour after the first `fy box up`**, then enforces, so by now new hosts may be refused. `fy allow learn` grants what it saw; `fy allow enforce learn --for 30m` learns again. `fy tui` shows the Network Log. |
 | 6 | Extras | `fy tui`, `fy worktree add <name>`, `fy doctor` | — |
 
@@ -272,8 +272,8 @@ a baked VM disk — bake on the computer that uses it ([why](./base-vm.md#what-k
   phone hotspot.
 - **A project image fails with "exec format error" on Apple silicon:** probably an image built
   only for x86-64. Use a multi-arch tag, or leave that service out for the day.
-- **File-heavy work (say, `node_modules`) is slow on Linux and WSL2:** the repo reaches the VM
-  over 9p, which is slow on lots of small files. Expected.
+- **File-heavy work (say, `node_modules`) is slow on Linux and WSL2:** there the repo is shared
+  into the VM over 9p, a file-sharing protocol that is slow on lots of small files. Expected.
 - **`fy down` ends with "Network … still in use":** expected; the box is on that network.
 
 ## Known gaps

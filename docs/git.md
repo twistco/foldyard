@@ -33,7 +33,8 @@ undo the other side's work. So:
   and refuses `git commit` until you sort it out, as below.
 
 Over the mount, the box can also briefly see an *older* version of a branch your computer just
-moved: for up to a second after the change (a few seconds on the podman backend). The shim
+moved: measured at up to about a second on macOS with Lima, and up to five seconds on the podman
+backend. The shim
 checks every branch move under git's own lock, so a box command can't move a branch back over a
 commit you just made.
 
@@ -43,8 +44,8 @@ The design and every case it covers are in [ADR-0021](./adrs/0021-per-kernel-git
 
 ## When `git` refuses: "foldyard git shim: …"
 
-Every refusal starts with `foldyard git shim:` and ends by saying **nothing was changed**. Read
-the middle:
+Every refusal starts with `foldyard git shim:`, and refuses before anything is changed (most say
+so: **nothing was changed**). Read the middle:
 
 - **"your computer moved it while this ran"**, **"HEAD kept moving"**, **"reads as having no
   commits, but it has history"**, **"another git holds its lock"** — the box caught a stale view.

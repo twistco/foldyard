@@ -6,14 +6,16 @@ a few minutes and several hundred megabytes, and none of it carries over: it liv
 VM's disk, where the next project can't reach it.
 
 The **base VM** does that work once per computer. `fy machine base bake` (or `fy prereq --fetch`)
-creates a VM named `foldyard-base` from the same Lima template, with **nothing mounted**, boots it
+creates a VM named `foldyard-base` from Lima's podman template (the recipe a project VM is
+otherwise created from), with **nothing mounted**, boots it
 so the template's setup runs, builds foldyard's generic box image in it, and stops it. From then
 on, a new project's VM is a **clone** of it. On macOS the clone is copy-on-write, so it takes
 seconds. The clone gets the project's own sizing and mounts, exactly as a fresh VM would. Then
 foldyard's usual setup runs on it: the boot provisioning, the VM firewall, the checks. In `fy box
 up`, the box image the clone carries in is re-tagged as the project's instead of being built.
 
-Measured on an Apple-silicon macOS host (Lima 2.1.3, `vz`), from an empty directory to a walled box:
+Measured on Apple-silicon macOS (Lima 2.1.3, `vz`, Apple's hypervisor), from an empty directory to
+a box behind the VM firewall:
 
 | | first `fy box up`, no base | with a base |
 | --- | --- | --- |

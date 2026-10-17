@@ -84,10 +84,11 @@ Variables the current mode sets (from the plugins you use) are there too, and so
 `.env` beside your first compose file, which compose reads itself.
 
 **Nothing else from your shell reaches the compose client.** It gets only what it needs to run
-(`PATH`, `HOME`, locale, `COMPOSE_*` and `PODMAN_*` settings) and the names you list in
-`[project] compose_env`, never the secrets file foldyard keeps on your computer (`host.env`). The
-compose files can be edited from the box, and a `${NAME}` in one hands that value to a container,
-so each `compose_env` name is a widening that `fy config widenings` lists.
+(`PATH`, `HOME`, locale, the engine's and compose's own `COMPOSE_*`/`PODMAN_*` settings) and the
+names you list in `[project] compose_env`. Any name in the secrets file foldyard keeps on your
+computer (`host.env`) is stripped, unless you list it in `compose_env`. The compose files can be
+edited from the box, and a `${NAME}` in one hands that value to a container, so each
+`compose_env` name widens what the box can read; `fy config widenings` lists them.
 
 `MAIN_REPO` is how every worktree's stack shares one directory, say a folder of database dumps
 fetched once:
@@ -109,8 +110,9 @@ holding the compose command with every `-f`.
 - **Its own project**, `<prefix>-<name>`: its own containers, network and named volumes, so its
   database is separate from main's.
 - **Offset ports.** The offset is a hash of the name, from 1 to 89. Two names can land on the
-  same offset; pin one in the main checkout's `foldyard.local.toml` under `[worktree-offsets]`
-  ([configuration.md](./configuration.md#ports)), or set `WT_OFFSET`.
+  same offset; pin one (1 to 89) in the main checkout's `foldyard.local.toml` under
+  `[worktree-offsets]` and adopt it ([configuration.md](./configuration.md#ports)), or set
+  `WT_OFFSET`.
 - **Its own compose files.** The `-f` paths, and the relative paths inside those files (build
   contexts, bind mounts), resolve against the worktree. A compose edit in a worktree changes
   that worktree's stack at its next `fy up`, and leaves main's alone until the change is merged.

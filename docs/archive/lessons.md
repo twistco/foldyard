@@ -1,8 +1,8 @@
 # Lessons from building foldyard
 
-> **What it is:** fifteen short stories from building foldyard, 2026-06 to 2026-09 — the
+> **What it is:** fourteen short stories from building foldyard, 2026-06 to 2026-09 — the
 > incidents and near misses that shaped it, told for any developer rather than for foldyard's
-> maintainers. Each says what happened, the lesson in one line, and where foldyard records the
+> maintainers — and what's still open. Each says what happened, the lesson in one line, and where foldyard records the
 > fix. **Status:** a record; the decisions themselves live in the [ADRs](../adrs/), which this
 > page only points to. Details are generalised: no people, projects or internal names.
 
