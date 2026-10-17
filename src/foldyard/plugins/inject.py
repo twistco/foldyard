@@ -23,9 +23,9 @@ Config (``foldyard.toml``)::
     [[inject]]
     switch          = "github"                          # PEM in host.env as FY_INJECT_GITHUB
     kind            = "github-app"                      # host is pinned to api.github.com
-    app_id          = "4008762"
-    installation_id = "139125083"
-    repositories    = ["Tangible"]                      # optional: narrow to these repos
+    app_id          = "123456"
+    installation_id = "7654321"
+    repositories    = ["my-repo"]                       # optional: narrow to these repos
     box_env         = { GH_TOKEN = "x" }
 
 Each kind takes a FIXED set of fields (the generic ones above plus its own); a field it doesn't

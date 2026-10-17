@@ -104,3 +104,6 @@ tokens are injected in flight and never enter the box — ADR-0007).
 - **Wrap the agent process with a kernel connect() lock (Nono-style Landlock/Seatbelt).**
   Per-process, same-kernel — cannot wrap a VM from outside, and covers only one process tree,
   not the stack. The VM-boundary analogue *is* nftables default-deny.
+- **The other forcing designs** — a gateway container sharing its network, a redirect inside a
+  named podman network, a rootful transparent wall, passive packet capture — are weighed in the
+  [egress-forcing study](https://github.com/twistco/foldyard/blob/main/docs/archive/egress-forcing-study.md).

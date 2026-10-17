@@ -76,9 +76,9 @@ this ADR leaves it alone.
    switch = "github"              # `fy mode github=on`; PEM in host.env as FY_INJECT_GITHUB (base64)
    host = "api.github.com"
    kind = "github-app"
-   app_id = "4008762"
-   installation_id = "139125083"
-   repositories = ["Tangible"]    # optional: a subset of the installation's repos
+   app_id = "123456"
+   installation_id = "7654321"
+   repositories = ["my-repo"]       # optional: a subset of the installation's repos
 
    [[inject]]
    switch = "github-write"        # a second App, with write access, kept on a timer

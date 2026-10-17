@@ -1,0 +1,273 @@
+/* @theme foldyard
+ *
+ * Foldyard brand theme — extends Marp's built-in Gaia.
+ * The same palette and type as the diagrams in docs/assets/:
+ *   green-950 #265629 · gold-700 #b8923a · ink-950 #1a1c16 · sage-300 #9bc78d
+ *   paper #faf8f1 · cream #f6f4ec · stone #efeee4 · yard-bg #14160f
+ * Fonts: Hanken Grotesk (text/headings) · Newsreader (serif accents) · JetBrains Mono (code)
+ *
+ * Usage: see README.md in this folder.
+ */
+
+@import 'gaia';
+
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+:root {
+  /* brand tokens */
+  --fy-green-950: #10240f;
+  --fy-green: #265629;
+  --fy-green-500: #337038;
+  --fy-green-300: #6ba65f;
+  --fy-sage: #9bc78d;
+  --fy-gold-700: #9c7a2c;
+  --fy-gold: #b8923a;
+  --fy-gold-300: #ddc173;
+  --fy-ink-950: #1a1c16;
+  --fy-ink: #14160f;
+  --fy-ink-600: #565a4d;
+  --fy-ink-500: #6e7263;
+  --fy-ink-400: #8f9282;
+  --fy-stone: #efeee4;
+  --fy-cream: #f6f4ec;
+  --fy-paper: #faf8f1;
+  --fy-white: #ffffff;
+
+  /* yard (dark terminal / TUI) */
+  --fy-yard-bg: #14160f;
+  --fy-yard-surface: #1d2016;
+  --fy-yard-raised: #252a1c;
+  --fy-yard-line: #313626;
+  --fy-yard-text: #e9e7d6;
+  --fy-yard-muted: #9a9d88;
+  --fy-yard-faint: #6a6d5b;
+
+  /* status */
+  --fy-ok: #337038;
+  --fy-warn: #bf8526;
+  --fy-fail: #a8432b;
+  --fy-info: #3f6e84;
+
+  /* type */
+  --fy-sans: 'Hanken Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --fy-serif: 'Newsreader', ui-serif, Georgia, 'Times New Roman', serif;
+  --fy-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+
+  /* Gaia hooks — light "paper" default */
+  --color-background: var(--fy-paper);
+  --color-foreground: var(--fy-ink-950);
+  --color-highlight: var(--fy-gold);
+  --color-dimmed: var(--fy-ink-500);
+}
+
+/* ---- base slide ---- */
+section {
+  font-family: var(--fy-sans);
+  font-size: 26px;
+  line-height: 1.42;
+  letter-spacing: 0.1px;
+  background-color: var(--fy-paper);
+  background-image:
+    radial-gradient(120% 120% at 100% 0%, rgba(155, 199, 141, 0.10), transparent 46%),
+    radial-gradient(90% 90% at 0% 100%, rgba(184, 146, 58, 0.07), transparent 50%);
+  color: var(--fy-ink-950);
+  padding: 62px 72px;
+}
+
+section h1,
+section h2,
+section h3 {
+  font-family: var(--fy-sans);
+  font-weight: 800;
+  letter-spacing: -0.4px;
+  color: var(--fy-green);
+}
+section h1 { font-size: 1.72em; line-height: 1.06; }
+section h2 { font-size: 1.16em; color: var(--fy-ink-950); }
+section h3 { font-size: 0.96em; color: var(--fy-gold-700); text-transform: none; }
+
+/* accent underline under the leading h1/h2 of a content slide */
+section > h1:first-child,
+section > h2:first-child {
+  border-bottom: 3px solid var(--fy-gold);
+  padding-bottom: 0.28em;
+  margin-bottom: 0.5em;
+}
+
+section strong { color: var(--fy-green-500); font-weight: 700; }
+section em { font-style: italic; color: var(--fy-ink-600); }
+section a { color: var(--fy-gold-700); }
+
+section ul > li::marker { color: var(--fy-gold); }
+section ul > li,
+section ol > li { margin: 0.24em 0; }
+
+/* code */
+section code {
+  font-family: var(--fy-mono);
+  font-size: 0.82em;
+  background: var(--fy-stone);
+  color: var(--fy-green-950);
+  border-radius: 5px;
+  padding: 0.08em 0.36em;
+}
+section pre {
+  background: var(--fy-yard-bg);
+  border: 1px solid var(--fy-yard-line);
+  border-radius: 10px;
+  padding: 0.85em 1em;
+  box-shadow: 0 8px 24px rgba(20, 22, 15, 0.14);
+}
+section pre code {
+  background: transparent;
+  color: var(--fy-yard-text);
+  font-size: 0.8em;
+  padding: 0;
+}
+
+/* blockquote → "money quote" callout */
+section blockquote {
+  font-family: var(--fy-serif);
+  font-size: 1.16em;
+  font-style: italic;
+  color: var(--fy-ink-950);
+  border: none;
+  border-left: 4px solid var(--fy-gold);
+  background: var(--fy-cream);
+  border-radius: 0 10px 10px 0;
+  padding: 0.5em 0.9em;
+  margin: 0.5em 0;
+}
+section blockquote::before,
+section blockquote::after { content: none; }
+
+/* tables */
+section table {
+  font-size: 0.82em;
+  border-collapse: collapse;
+  margin: 0.2em 0;
+}
+section th {
+  background: var(--fy-green);
+  color: var(--fy-paper);
+  font-weight: 700;
+  text-align: left;
+  padding: 0.42em 0.7em;
+}
+section td {
+  border-bottom: 1px solid var(--fy-stone);
+  padding: 0.36em 0.7em;
+  color: var(--fy-ink-950);
+}
+section tr:nth-child(even) td { background: rgba(239, 238, 228, 0.55); }
+
+/* header / footer / pagination */
+section header { color: var(--fy-ink-400); font-size: 0.6em; letter-spacing: 0.14em; text-transform: uppercase; font-weight: 600; }
+section footer { color: var(--fy-ink-400); font-size: 0.56em; font-family: var(--fy-mono); }
+section::after { color: var(--fy-ink-400); font-family: var(--fy-mono); font-size: 0.62em; }
+
+/* =====================================================================
+   LEAD / TITLE — dark "yard" cover
+   ===================================================================== */
+section.lead {
+  background-color: var(--fy-yard-bg);
+  background-image:
+    radial-gradient(120% 90% at 82% 8%, rgba(38, 86, 41, 0.55), transparent 55%),
+    radial-gradient(80% 80% at 6% 96%, rgba(184, 146, 58, 0.16), transparent 55%);
+  color: var(--fy-yard-text);
+  justify-content: center;
+}
+section.lead h1 { color: var(--fy-paper); font-size: 2.5em; }
+section.lead h2 { color: var(--fy-sage); font-weight: 600; }
+section.lead h3 { color: var(--fy-gold-300); }
+section.lead p { color: var(--fy-yard-muted); }
+section.lead strong { color: var(--fy-gold-300); }
+section.lead blockquote { background: rgba(37, 42, 28, 0.75); color: var(--fy-yard-text); border-left-color: var(--fy-gold); }
+section.lead code { background: var(--fy-yard-raised); color: var(--fy-sage); }
+section.lead a { color: var(--fy-gold-300); }
+section.lead::after { color: var(--fy-yard-faint); }
+
+/* =====================================================================
+   SECTION DIVIDER — dark, big number + title
+   ===================================================================== */
+section.section {
+  background-color: var(--fy-yard-bg);
+  background-image:
+    radial-gradient(100% 100% at 100% 0%, rgba(38, 86, 41, 0.5), transparent 60%),
+    radial-gradient(60% 60% at 0% 100%, rgba(184, 146, 58, 0.14), transparent 60%);
+  color: var(--fy-yard-text);
+  justify-content: center;
+}
+section.section h1 {
+  color: var(--fy-paper);
+  font-size: 2.2em;
+  border-bottom: none;
+}
+section.section h2 { color: var(--fy-sage); font-weight: 600; border: none; padding: 0; }
+section.section h3 { color: var(--fy-gold); font-family: var(--fy-mono); font-size: 0.8em; letter-spacing: 0.2em; text-transform: uppercase; }
+section.section strong { color: var(--fy-gold-300); }
+section.section ul > li::marker { color: var(--fy-sage); }
+section.section p, section.section li { color: var(--fy-yard-muted); }
+
+/* =====================================================================
+   DIAGRAM — center a single SVG, minimal chrome
+   ===================================================================== */
+section.diagram {
+  background: var(--fy-white);
+  background-image: none;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 30px 32px 28px;
+}
+section.diagram h2 {
+  color: var(--fy-green);
+  font-size: 1.0em;
+  border-bottom: 2px solid var(--fy-gold);
+  padding-bottom: 0.2em;
+  margin: 0 0 0.35em;
+  width: 100%;
+}
+section.diagram p { margin: 0; width: 100%; text-align: center; }
+section.diagram img {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  max-height: 625px;
+  height: auto;
+}
+section.diagram .caption {
+  font-size: 0.66em;
+  color: var(--fy-ink-500);
+  text-align: center;
+  margin-top: 0.35em;
+  padding: 0 4%;
+}
+/* the caption owns the bottom of a diagram slide — drop the footer to avoid overlap */
+section.diagram footer { display: none; }
+
+/* wide, short diagrams get more width */
+section.diagram-wide img { max-height: 470px; }
+
+/* =====================================================================
+   Two-column helper (use <div class="cols">…</div>)
+   ===================================================================== */
+section .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4em; align-items: start; }
+section .cols.narrow-left { grid-template-columns: 0.85fr 1.15fr; }
+section .card {
+  background: var(--fy-cream);
+  border: 1px solid var(--fy-stone);
+  border-left: 4px solid var(--fy-gold);
+  border-radius: 8px;
+  padding: 0.6em 0.85em;
+}
+section .card h3 { margin: 0 0 0.25em; }
+
+/* small utility text */
+section .kicker {
+  font-family: var(--fy-mono);
+  font-size: 0.62em;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--fy-gold-700);
+  font-weight: 600;
+}

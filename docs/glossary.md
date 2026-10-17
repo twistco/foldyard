@@ -101,6 +101,11 @@ as they pass through. The box never holds the real value.
 key: the box has a dummy, and the proxy swaps in the real key for the provider's API host. You
 paste the real key once, on your computer.
 
+**Metadata emulator** — a small server on the stack's network that answers Google Cloud's
+"metadata server" requests, so code in the box or a service gets a short-lived token for its own
+service account (or, at `gcp=user`, the box gets yours), made on your computer. The one place a real (short-lived) token does reach the
+box. See [gcp.md](./gcp.md).
+
 **`host.env`** — `~/.foldyard/<project>/host.env`, the file on your computer holding the secrets
 token services need. Readable only by you; never inside the repo or the VM.
 
@@ -127,6 +132,14 @@ box can see it. Nothing grants access based on it.
 
 **Overlay** (`[[overlay]]`) — an extra compose file layered onto the stack while a switch is at
 a given level.
+
+**Git index shim** (`[box] git_index_split`) — the wrapper foldyard installs as `git` in the box.
+It gives git in the box its own staging file (`.git/index-box`), so the box and your computer never
+write the same one over the shared mount, and it refuses a command that would act on a stale view
+of a branch your computer just moved. See [git.md](./git.md).
+
+**Base VM** (`foldyard-base`) — a VM baked once per computer with `fy prereq --fetch`, nothing
+mounted, that new projects' VMs are cloned from. See [base-vm.md](./base-vm.md).
 
 **`fy verify`** — the isolation self-test. It checks the VM's mounts, tries known container
 escapes, and checks the box holds no credentials. Run it any time; it exits non-zero on failure.

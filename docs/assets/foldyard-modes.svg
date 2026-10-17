@@ -1,0 +1,271 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1362" height="1076" viewBox="99 99 1362 1076" fill="none">
+  <style>
+    text { font-family: "Hanken Grotesk", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+           fill: #6e7263; }
+    .title    { font-family: "Newsreader", Georgia, "Times New Roman", serif;
+                font-size: 30px; font-weight: 600; fill: #1a1c16; }
+    .tagline  { font-size: 15px; }
+    .band     { font-size: 12px; font-weight: 700; fill: #1a1c16; letter-spacing: .06em; }
+    .band-sub { font-size: 12px; }
+    .card-h   { font-size: 14.5px; font-weight: 700; fill: #1a1c16; }
+    .body     { font-size: 12px; }
+    .arrow    { font-size: 15px; fill: #9a9d8c; }
+    .down     { font-size: 16px; fill: #265629; text-anchor: middle; }
+    .cap      { font-size: 12px; }
+    .cap-b    { font-size: 12px; font-weight: 700; fill: #1a1c16; }
+    .col-h    { font-size: 15px; font-weight: 700; fill: #b8923a; }
+    .idea-h   { font-size: 12.5px; font-weight: 700; fill: #1a1c16; }
+    .idea     { font-size: 11.5px; }
+    .frame    { fill: #f6f4ec; stroke: #e1e0d4; }
+    .card     { fill: #fff; stroke: #dcdacb; stroke-width: 1.5; }
+    .fence    { fill: #edf1f3; stroke: #3f6e84; stroke-width: 1.5; }
+    .panel    { fill: #f8f0d8; stroke: #e9d59c; stroke-width: 1.5; }
+    .rule     { stroke: #e0cf9a; stroke-width: 1; }
+    /* — added by foldyard-isolation-layers.svg — */
+    .legend   { font-size: 11px; font-style: italic; }
+    .mono     { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+                font-size: 10.5px; fill: #265629; }
+    .tag      { font-size: 10px; font-weight: 700; fill: #b8923a; letter-spacing: .08em; }
+    .ring     { font-size: 10.5px; }
+    .pill-t   { font-size: 10.5px; font-weight: 700; fill: #1a1c16; text-anchor: middle; }
+    .idea-mono{ font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+                font-size: 10.5px; fill: #1a1c16; white-space: pre; }
+    .strip    { fill: #fbfaf5; stroke: #dcdacb; stroke-width: 1.5; }
+    .box      { fill: #fff; stroke: #dcdacb; stroke-width: 1.5; }
+    .pill     { fill: #fff; stroke: #9a9d8c; stroke-width: 1; }
+    .pill-n   { fill: #fbf6e6; stroke: #b8923a; stroke-width: 1.5; }
+    /* — status extras (diagram-specs §2.2) — */
+    .st-warn  { font-size: 14.5px; font-weight: 700; fill: #bf8526; }
+    .st-bad   { font-size: 14.5px; font-weight: 700; fill: #a8432b; }
+    .cell-ok  { fill: #ebf1e7; stroke: #265629; stroke-width: 1.5; }
+  </style>
+  <rect class="frame" x="100" y="100" width="1360" height="1074" rx="18"/>
+
+  <!-- header -->
+  <text class="title" x="160" y="160">Modes — credentials off until you switch them on</text>
+  <text class="tagline" x="160" y="191">A mode is what you want. The supervisor on your computer makes it so — and takes it back when the timer runs out.</text>
+
+  <!-- SWITCHES AND LEVELS — three example rows -->
+  <rect class="fence" x="140" y="228" width="1040" height="312" rx="16"/>
+  <text class="band" x="160" y="259">SWITCHES AND LEVELS</text>
+  <text class="band-sub" x="326" y="259">fy mode shows only the switches your project's config declares — three examples</text>
+
+  <!-- row: gcp -->
+  <rect class="card" x="160" y="296" width="170" height="48" rx="10"/>
+  <text class="card-h" x="176" y="316">gcp</text>
+  <text class="ring" x="176" y="333">from a GCP plugin</text>
+  <rect class="cell-ok" x="352" y="296" width="176" height="48" rx="10"/>
+  <text class="pill-t" x="440" y="315">off</text>
+  <text class="ring" x="440" y="331" text-anchor="middle">no GCP identity</text>
+  <text class="arrow" x="534" y="325">▶</text>
+  <rect class="pill" x="552" y="296" width="176" height="48" rx="10"/>
+  <text class="pill-t" x="640" y="315">logs</text>
+  <text class="ring" x="640" y="331" text-anchor="middle">box reads Cloud Logging</text>
+  <text class="arrow" x="734" y="325">▶</text>
+  <rect class="pill" x="752" y="296" width="176" height="48" rx="10"/>
+  <text class="pill-t" x="840" y="315">sa</text>
+  <text class="ring" x="840" y="331" text-anchor="middle">apps act as the runtime SA</text>
+  <text class="arrow" x="934" y="325">▶</text>
+  <text class="tag" x="952" y="289">EMERGENCY · 1 H TIMER</text>
+  <rect class="pill-n" x="952" y="296" width="176" height="48" rx="10"/>
+  <text class="pill-t" x="1040" y="315">user ⏱</text>
+  <text class="ring" x="1040" y="331" text-anchor="middle">your own identity</text>
+
+  <!-- row: github -->
+  <rect class="card" x="160" y="360" width="170" height="48" rx="10"/>
+  <text class="card-h" x="176" y="380">github</text>
+  <text class="ring" x="176" y="397">an [[inject]] row</text>
+  <rect class="cell-ok" x="352" y="360" width="176" height="48" rx="10"/>
+  <text class="pill-t" x="440" y="379">off</text>
+  <text class="ring" x="440" y="395" text-anchor="middle">the box holds a dummy</text>
+  <text class="arrow" x="534" y="389">▶</text>
+  <rect class="pill" x="552" y="360" width="176" height="48" rx="10"/>
+  <text class="pill-t" x="640" y="379">on</text>
+  <text class="ring" x="640" y="395" text-anchor="middle">App token added at the proxy</text>
+
+  <!-- row: claude -->
+  <rect class="card" x="160" y="424" width="170" height="48" rx="10"/>
+  <text class="card-h" x="176" y="444">claude</text>
+  <text class="ring" x="176" y="461">keyless agent</text>
+  <rect class="cell-ok" x="352" y="424" width="176" height="48" rx="10"/>
+  <text class="pill-t" x="440" y="443">off</text>
+  <text class="ring" x="440" y="459" text-anchor="middle">the proxy answers: switch on</text>
+  <text class="arrow" x="534" y="453">▶</text>
+  <rect class="pill" x="552" y="424" width="176" height="48" rx="10"/>
+  <text class="pill-t" x="640" y="443">on</text>
+  <text class="ring" x="640" y="459" text-anchor="middle">real key swapped in</text>
+
+  <!-- key for the pill colours -->
+  <rect class="cell-ok" x="776" y="370" width="34" height="18" rx="9"/>
+  <text class="legend" x="824" y="383">the default level — zero secrets, and where every switch rests</text>
+  <rect class="pill" x="776" y="402" width="34" height="18" rx="9"/>
+  <text class="legend" x="824" y="415">a level you switch on — it stays until you switch it off</text>
+  <rect class="pill-n" x="776" y="434" width="34" height="18" rx="9"/>
+  <text class="legend" x="824" y="447">an emergency level — acts as you, so it always runs on a timer</text>
+
+  <text class="cap" x="160" y="502">The first level is always the zero-secret default — and what an unset, invalid or expired value reads as.</text>
+  <text class="cap" x="160" y="520">An emergency level acts as you: its timer is 1 hour by default, 8 at most, and it switches itself back off.</text>
+
+  <!-- THE LOOP — fy mode → dev-mode.json → supervisor → token services + proxy -->
+  <rect class="strip" x="140" y="564" width="1040" height="349" rx="16"/>
+  <text class="band" x="160" y="595">THE LOOP</text>
+  <text class="band-sub" x="236" y="595">every couple of seconds, on your computer</text>
+
+  <rect class="card" x="160" y="614" width="235" height="127" rx="12"/>
+  <text class="card-h" x="178" y="641">You set it</text>
+  <text class="mono" x="178" y="659">fy mode github=on</text>
+  <text class="body" x="178" y="681">
+    <tspan x="178">On your computer only — the</tspan>
+    <tspan x="178" dy="15">same command in the box shows</tspan>
+    <tspan x="178" dy="15">the mode, and refuses to</tspan>
+    <tspan x="178" dy="15">change it.</tspan>
+  </text>
+  <rect class="card" x="415" y="614" width="235" height="127" rx="12"/>
+  <text class="card-h" x="433" y="641">The real mode</text>
+  <text class="mono" x="433" y="659">…/main/dev-mode.json</text>
+  <text class="body" x="433" y="681">
+    <tspan x="433">In ~/.foldyard on your computer,</tspan>
+    <tspan x="433" dy="15">outside the repo, one per worktree.</tspan>
+    <tspan x="433" dy="15">Nothing in the VM can edit it.</tspan>
+  </text>
+  <rect class="card" x="670" y="614" width="235" height="127" rx="12"/>
+  <text class="card-h" x="688" y="641">The supervisor</text>
+  <text class="mono" x="688" y="659">fy host</text>
+  <text class="body" x="688" y="681">
+    <tspan x="688">One per project. Re-reads the</tspan>
+    <tspan x="688" dy="15">mode, starts and stops token</tspan>
+    <tspan x="688" dy="15">services, and hands the proxy</tspan>
+    <tspan x="688" dy="15">its new settings — no restart.</tspan>
+  </text>
+  <rect class="card" x="925" y="614" width="235" height="127" rx="12"/>
+  <text class="card-h" x="943" y="641">Token services + proxy</text>
+  <text class="body" x="943" y="663">
+    <tspan x="943">What actually grants access. Off</tspan>
+    <tspan x="943" dy="15">means not running — and no token</tspan>
+    <tspan x="943" dy="15">service running means no</tspan>
+    <tspan x="943" dy="15">credential flows.</tspan>
+  </text>
+
+  <text class="arrow" x="399" y="683">▶</text>
+  <text class="arrow" x="654" y="683">▶</text>
+  <text class="arrow" x="909" y="683">▶</text>
+
+  <!-- the mirror: written out by the supervisor, read by the box -->
+  <text class="down" x="787" y="769">▼</text>
+  <text class="cap" x="803" y="767">copied out on every change and heartbeat</text>
+  <rect class="box" x="670" y="781" width="235" height="112" rx="12"/>
+  <text class="card-h" x="688" y="808">The mode mirror</text>
+  <text class="mono" x="688" y="826">.dev-mode.json</text>
+  <text class="body" x="688" y="848">
+    <tspan x="688">A read-only copy in the checkout,</tspan>
+    <tspan x="688" dy="15">so the box can see its mode.</tspan>
+    <tspan x="688" dy="15">Nothing grants access from it.</tspan>
+  </text>
+
+  <text class="cap-b" x="160" y="826">Raise a level and its token service starts; lower it and it stops.</text>
+  <text class="cap" x="160" y="844">Nothing in the VM can raise its own access by editing a file —</text>
+  <text class="cap" x="160" y="862">the file that counts isn't in the VM.</text>
+
+  <!-- WHEN THINGS CHANGE -->
+  <rect class="strip" x="140" y="937" width="1040" height="197" rx="16"/>
+  <text class="band" x="160" y="968">WHEN THINGS CHANGE</text>
+  <text class="band-sub" x="330" y="968">the mode survives; what it can do is reported</text>
+
+  <rect class="card" x="160" y="987" width="235" height="127" rx="12"/>
+  <text class="card-h" x="178" y="1014">The timer runs out</text>
+  <text class="body" x="178" y="1036">
+    <tspan x="178">The supervisor stops the token</tspan>
+    <tspan x="178" dy="16">service and sets the switch back</tspan>
+    <tspan x="178" dy="16">to its default, lowering any</tspan>
+    <tspan x="178" dy="16">switch that depended on it — you</tspan>
+    <tspan x="178" dy="16">land on a mode that works offline.</tspan>
+  </text>
+  <rect class="card" x="415" y="987" width="235" height="127" rx="12"/>
+  <text class="st-warn" x="433" y="1014">⚠ DEGRADED</text>
+  <text class="body" x="433" y="1036">
+    <tspan x="433">On, but the credential behind it</tspan>
+    <tspan x="433" dy="16">stopped working — an expired</tspan>
+    <tspan x="433" dy="16">login, a revoked token. Shown with</tspan>
+    <tspan x="433" dy="16">the fix; the switch recovers in</tspan>
+    <tspan x="433" dy="16">place.</tspan>
+  </text>
+  <rect class="card" x="670" y="987" width="235" height="127" rx="12"/>
+  <text class="st-bad" x="688" y="1014">○ BLOCKED</text>
+  <text class="body" x="688" y="1036">
+    <tspan x="688">On, but its token service couldn't</tspan>
+    <tspan x="688" dy="16">start: a secret missing from</tspan>
+    <tspan x="688" dy="16">host.env, a port already taken.</tspan>
+    <tspan x="688" dy="16">Shown with the reason.</tspan>
+  </text>
+  <rect class="card" x="925" y="987" width="235" height="127" rx="12"/>
+  <text class="card-h" x="943" y="1014">Refused combinations</text>
+  <text class="body" x="943" y="1036">
+    <tspan x="943">A mode that can only fail is</tspan>
+    <tspan x="943" dy="16">refused, with the command that</tspan>
+    <tspan x="943" dy="16">fixes it. So are two switches that</tspan>
+    <tspan x="943" dy="16">would inject on the same host and</tspan>
+    <tspan x="943" dy="16">path.</tspan>
+  </text>
+
+  <!-- side panel: the three rules -->
+  <rect class="panel" x="1210" y="228" width="210" height="906" rx="12"/>
+  <text class="col-h" x="1228" y="258">Three rules</text>
+
+  <text class="idea-h" x="1228" y="290">
+    <tspan x="1228">1 · No token service, no</tspan>
+    <tspan x="1228" dy="17">credential</tspan>
+  </text>
+  <text class="idea" x="1228" y="329">
+    <tspan x="1228">Whatever a file in the VM says,</tspan>
+    <tspan x="1228" dy="15">a stopped token service makes</tspan>
+    <tspan x="1228" dy="15">nothing.</tspan>
+  </text>
+
+  <text class="idea-h" x="1228" y="415">
+    <tspan x="1228">2 · The box can look, not</tspan>
+    <tspan x="1228" dy="17">touch</tspan>
+  </text>
+  <text class="idea" x="1228" y="454">
+    <tspan x="1228">In the box, fy mode shows the</tspan>
+    <tspan x="1228" dy="15">mode. Only your computer</tspan>
+    <tspan x="1228" dy="15">writes it.</tspan>
+  </text>
+
+  <text class="idea-h" x="1228" y="540">
+    <tspan x="1228">3 · A lapse lands safe</tspan>
+  </text>
+  <text class="idea" x="1228" y="562">
+    <tspan x="1228">An expiry never leaves a</tspan>
+    <tspan x="1228" dy="15">combination that can only fail,</tspan>
+    <tspan x="1228" dy="15">and a lapsed credential never</tspan>
+    <tspan x="1228" dy="15">changes what you asked for.</tspan>
+  </text>
+
+  <line class="rule" x1="1228" y1="645" x2="1402" y2="645"/>
+  <text class="idea" x="1228" y="673">
+    <tspan x="1228">fy state shows every layer —</tspan>
+    <tspan x="1228" dy="15">mode file, mirror, token</tspan>
+    <tspan x="1228" dy="15">services, stack and box —</tspan>
+    <tspan x="1228" dy="15">wanted against actual.</tspan>
+  </text>
+
+  <line class="rule" x1="1228" y1="760" x2="1402" y2="760"/>
+  <text class="idea" x="1228" y="788">
+    <tspan x="1228">Each worktree has its own</tspan>
+    <tspan x="1228" dy="15">mode. Identity is shared: one</tspan>
+    <tspan x="1228" dy="15">host.env, one CA, one</tspan>
+    <tspan x="1228" dy="15">supervisor.</tspan>
+  </text>
+
+  <line class="rule" x1="1228" y1="875" x2="1402" y2="875"/>
+  <text class="idea" x="1228" y="903">On your computer:</text>
+  <text class="idea-mono" x="1228" y="929">
+    <tspan x="1228">fy mode</tspan>
+    <tspan x="1228" dy="19">fy mode github=on</tspan>
+    <tspan x="1228" dy="19">fy mode gcp=user ttl=30m</tspan>
+    <tspan x="1228" dy="19">fy mode claude=off</tspan>
+    <tspan x="1228" dy="19">fy tui</tspan>
+    <tspan x="1228" dy="19">fy host logs -f</tspan>
+    <tspan x="1228" dy="19">fy state</tspan>
+  </text>
+</svg>
