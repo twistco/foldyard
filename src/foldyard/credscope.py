@@ -11,7 +11,7 @@ and, when it differs from the last observation, logs one line and raises one not
 The record, ``config.credential_scopes_file()``, is keyed by switch, then by the credential's
 identity (an App + installation)::
 
-    {"github": {"App 4008762, installation 139125083": {
+    {"github": {"App 123456, installation 7654321": {
         "permissions": {"issues": "write", "actions": "read"},
         "reach": "selected repositories",
         "checked": "2026-10-05T12:03:00Z"}}}

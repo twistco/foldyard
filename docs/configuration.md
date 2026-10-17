@@ -443,15 +443,16 @@ Every kind takes:
   `emergency`.
 
 **`kind = "github-app"`** — a GitHub App installation token, minted on your computer from the
-App's private key and good for an hour:
+App's private key and good for an hour. Registering and installing the App, then checking it
+from the box: [github-app.md](./github-app.md).
 
 ```toml
 [[inject]]
 switch = "github"                  # `fy mode github=on`; the PEM is host.env's FY_INJECT_GITHUB
 kind = "github-app"
-app_id = "4008762"
-installation_id = "139125083"
-repositories = ["Tangible"]        # optional: a subset of the installation's repositories
+app_id = "123456"
+installation_id = "7654321"
+repositories = ["my-repo"]         # optional: a subset of the installation's repositories
 box_env = { GH_TOKEN = "x" }       # so `gh` in the box sends a header to overwrite
 ```
 
