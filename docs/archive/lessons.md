@@ -71,10 +71,11 @@ Consequences.
 
 **What happened.** After story 3, reviewers went through the config file field by field, moving
 risky ones out of the repo. Four rounds later, a developer noticed that an agent's edit to the
-proxy settings had reached the proxy on their computer within seconds. The supervisor still re-read the
-config from the repo on every tick, and two fields nobody had listed could exempt a host from
+proxy settings had reached the proxy on their computer within seconds. The supervisor still
+re-read the config from the repo every few seconds, and two fields nobody had listed could exempt a host from
 monitoring or send a live token to a host of the agent's choosing. The fix was to stop reading the
-repo's file at all: your computer runs a copy you approved (**adopted**), and an edit waits for you.
+repo's file at all: your computer runs a copy you approved (**adopted**), and an edit waits for
+you.
 
 **The lesson:** while a file the sandbox can write is live input to your computer, the next field
 added reopens the hole.
@@ -124,9 +125,9 @@ record is [isolation-layers.md](../isolation-layers.md#the-engine-socket-is-a-ho
 
 **What happened.** An agent that drives a whole stack needs the container engine. With a rootful
 engine, that access *is* root in the VM, and root in the VM can switch off any firewall inside
-it. foldyard's firewall therefore works per user, on a rootless engine the agent can't use to
-become root; and on Linux a second firewall on your computer matches the VM itself, out of reach
-even of VM-root.
+it. foldyard's firewall therefore matches traffic by the VM user that sends it, on a rootless
+engine the agent can't use to become root; and on Linux a second firewall on your computer
+matches the VM itself, out of reach even of VM-root.
 
 **The lesson:** put the guard where the sandbox's own tools can't reach it.
 

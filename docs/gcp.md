@@ -31,8 +31,8 @@ Like every credential, it's off until you switch it on ([modes.md](./modes.md)).
   caller's IP address, so a request can't claim someone else's identity. A container without the
   label gets no token.
 - **The token service runs on your computer**, started by the supervisor. It makes tokens by
-  **impersonating** the service account with your own `gcloud` login: Google lets you mint a
-  token for an SA you've been granted that right on. It only does so for the SAs the current
+  **impersonating** the service account with your own `gcloud` login: Google gives you a token
+  for any SA you've been granted that right on. It only does so for the SAs the current
   level allows. Your login never enters the VM; only the short-lived token does.
 - **Tokens are short-lived.** A token lasts an hour at most, and clients are told to fetch a new
   one every minute, so a mode change reaches running code within about a minute.
@@ -109,8 +109,9 @@ sa_labels = { app = "app-runtime", box = "log-reader", worker = "worker-runtime"
 
 Declaring the table loads the plugin; the `gcp` switch appears once `project` is set. Each
 `sa_labels` entry maps a role to the first part of an SA email, giving
-`<label>@<project>.iam.gserviceaccount.com`. `box` is the box's SA and `app` your app's; every
-other role is one more service's own SA. Defaults and env overrides are under
+`<label>@<project>.iam.gserviceaccount.com`. `box` is the box's SA and `app` your app's (left
+out, they default to `devbox-log-reader` and `app-runtime`); every other role is one more
+service's own SA. Defaults and env overrides are under
 [`[plugins.<name>]`](./configuration.md#pluginsname).
 
 Your computer runs the **adopted config**, so adopt the change (`fy config adopt`, or answer
@@ -246,10 +247,10 @@ other traffic, so with the allowlist enforced their hosts need a grant
 ## When something's off
 
 - **DEGRADED.** The supervisor checks the chain every couple of minutes: that its token service
-  still answers on its port, and that it can really mint the identity the level promises (the
-  `box` SA at `logs`, the `app` SA at `sa`, both your own token and the `app` SA at `user`). A
-  failure shows as DEGRADED on `fy mode` with the fix — usually `gcloud auth login`, or renewing
-  a lapsed permission grant
+  still answers on its port, and that it can really get a token for the identity the level
+  promises (the `box` SA at `logs`, the `app` SA at `sa`, both your own token and the `app` SA at
+  `user`). A failure shows as DEGRADED on `fy mode` with the fix — usually `gcloud auth login`,
+  or renewing a lapsed permission grant
   ([modes.md](./modes.md#degraded--the-switch-is-on-but-the-credential-stopped-working)).
 - **BLOCKED**, for `gcp`, almost always means something else holds the token service's port
   ([modes.md](./modes.md#blocked--the-token-service-never-started)).

@@ -88,9 +88,9 @@ Decryption involves no credential. It works alongside the credential switches (s
 
 **A token service never fetches through the proxy it feeds.** If the shell that started the
 supervisor exports `HTTPS_PROXY` pointing at foldyard's own proxy, the GitHub App token service
-would send its request through the very rule it is minting for, and the proxy would replace the
-App's sign-in header on `api.github.com` with the token being asked for. So foldyard tells it its
-own proxy port, which it skips. Any other proxy your computer exports (a corporate one) is still
+would send its request through the very rule it is making a token for, and the proxy would
+replace the App's sign-in header on `api.github.com` with the token being asked for. So foldyard
+tells it its own proxy port, which it skips. Any other proxy your computer exports (a corporate one) is still
 used, since it may be the only way out.
 
 ## Blocking, not just watching
@@ -390,8 +390,8 @@ own HTTP client, or a program opening raw sockets.
   forwarder (gvproxy), not the egress proxy: it still holds a forward for a host port from a stack
   that wasn't torn down cleanly (a crash, or `rm -f` on a container that publishes a port). The
   forward lasts as long as the VM, so every `fy up` hits it until you run
-  `fy machine stop && fy up`, which also stops the other projects sharing that machine. Ending work
-  with `fy down` avoids it.
+  `fy machine stop && fy up`, which also stops any other project sharing that machine
+  (`[machine] name`). Ending work with `fy down` avoids it.
 
 ## Deeper
 

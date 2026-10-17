@@ -1,8 +1,8 @@
 # ADR-0007 — Credential injection at the egress proxy: the token never enters the box
 
 - **Status:** Accepted (2026-06; multi-injector rule set late 2026-06; addon packaged with
-  PR #23, 2026-06-30) — implemented. **Amended 2026-10-17:** a token service must never mint
-  through the injecting proxy it feeds — its rule would rewrite the minter's own auth header. The
+  PR #23, 2026-06-30) — implemented. **Amended 2026-10-17:** a token service must never fetch
+  its token through the proxy it feeds — the rule would overwrite the minter's own auth header. The
   `github-app` kind is passed foldyard's proxy port (`--own-proxy-port`) and skips that proxy while
   honouring any other (see
   [networking.md](../networking.md#what-gets-decrypted-everything-but-the-trusted-toolchain)).

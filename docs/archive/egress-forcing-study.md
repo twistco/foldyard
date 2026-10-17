@@ -28,7 +28,8 @@ wrote down.
 Three facts made "just force it" hard:
 
 - **No host-side hook on macOS.** Rootless podman machine stacked two userspace network stacks:
-  pasta inside the VM, then gvproxy on your computer. By the time a packet reached your computer
+  pasta (rootless containers' networking) inside the VM, then gvproxy (podman machine's network
+  relay) on your computer. By the time a packet reached your computer
   it had already become an ordinary socket owned by gvproxy, so there was no per-container packet
   path to redirect. gvproxy offers packet capture, a small DNS server and port forwards; none of
   them is a proxy.
@@ -60,8 +61,8 @@ Option D looked weak at first: podman machine's VM image is immutable and config
 creation, so rules wouldn't persist. The Lima spike changed that. No Lima network stack gives a
 cleaner host-side hook than gvproxy, but Lima lets you **own the VM's provisioning**: a root
 script that runs at boot, before any user logs in. That is the real enabler — a root-owned
-firewall on the VM's only way out, applied before the agent exists. (Firewall rules also need a systemd unit to
-survive a reboot; a one-off script is not enough.)
+firewall on the VM's only way out, applied before the agent exists. (Firewall rules also need a
+systemd unit to survive a reboot; a one-off script is not enough.)
 
 Option E is the one idea left open. Recording packets at the VM's edge and comparing them with the
 proxy's log would answer "did anything get out without going through the proxy?" — an audit that
@@ -122,8 +123,8 @@ firewall.
 - **Don't trust image defaults; mask anything that listens or grants.** The Ubuntu cloud image
   the first kit used shipped the rootful `podman.socket` *enabled* — a ready-made route to
   VM-root, caught only because a check looked for it. The kit moved to a minimal Debian image and
-  masked the socket in provisioning anyway. foldyard's boot script masks it on every VM, and the
-  host refuses a VM where it is enabled again.
+  masked the socket in provisioning anyway. foldyard's boot script masks it on every VM with the
+  firewall on, and the host refuses such a VM where it is enabled again.
 - **Refuse, don't drop.** Refusing with a reset gives an instant "connection refused" and a log
   line; silently dropping gives a hang that looks like a network fault.
 
@@ -131,14 +132,15 @@ firewall.
 
 - **The VM firewall** (`[machine] firewall`, Lima only; [lima-wall-machine-integration.md
   §2](../lima-wall-machine-integration.md)): the uid kit's shape on foldyard's real VM.
-  Default-deny for the VM user's uid *and* its rootless subuid range; open only loopback, DNS to local
-  resolvers, and the proxy's port range on your computer; a forward-chain refusal for any bridged
+  Default-deny for the VM user's id *and* the extra user ids its rootless containers run as; open
+  only loopback, DNS to local resolvers, and the proxy's port range on your computer; a forward-chain refusal for any bridged
   container; the rootful socket masked. It is installed as root at boot from a script foldyard
   records in the VM's config, and the host reads back what the guest applied, failing closed on a
   mismatch. The proxy stayed on your computer: running it inside the VM would have pulled
   credentials into the VM the agent lives in.
 - **The host firewall** (`[machine] host_firewall`, Linux only; ADR-0028): the same rule again on
-  your computer, matching the VM's own process by its cgroup, so even VM-root can't get out. This
+  your computer, matching the VM's own process by the kernel control group (cgroup) it runs in,
+  so even VM-root can't get out. This
   partly reverses the study's "no host-side hook" finding — the hook is the VM process, not a
   per-container path. foldyard renders the rules and prints the `sudo` commands, you run them
   once, and every `fy up` probes that they are in effect. Not on macOS, and not on WSL2 (its stock

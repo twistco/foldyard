@@ -3,8 +3,8 @@
 The box has no GitHub credential by default. To let an agent in it read a pull request, answer
 review comments or check CI, give it a **GitHub App** through a `github-app` `[[inject]]` row.
 Once the switch is on, `gh` in the box works against GitHub's API as the App. The App's private
-key stays on your computer, the token is minted there, and the proxy adds it to requests in
-flight, so the box only ever holds a placeholder.
+key stays on your computer, a token service there turns it into a short-lived token, and the
+proxy adds that token to requests on their way out, so the box only ever holds a placeholder.
 
 This page walks through it once, end to end. The row's full reference is in
 [configuration.md](./configuration.md#inject); how switches work is in [modes.md](./modes.md).
@@ -14,8 +14,8 @@ This page walks through it once, end to end. The row's full reference is in
 - **You choose exactly what it can do.** An App has its own permissions, set per area (pull
   requests, issues, checks…), and is installed only on the repositories you pick. A personal
   token carries everything you can do.
-- **Its tokens are short-lived.** foldyard mints an installation token on your computer, good for
-  an hour, and mints a fresh one before it expires. Nothing long-lived ever reaches the box.
+- **Its tokens are short-lived.** foldyard makes an installation token on your computer, good for
+  an hour, and makes a fresh one before it expires. Nothing long-lived ever reaches the box.
 - **The installation's permissions are the scope.** foldyard asks GitHub for no narrower
   permissions and caps none: what the App installation grants is what the box can do
   ([ADR-0031](./adrs/0031-credentials-are-protocol-kinds-the-credential-owns-its-scope.md)). The
@@ -42,7 +42,7 @@ settings.
 
 | job | repository permissions |
 | --- | --- |
-| read and answer PR reviews and comments | Pull requests: Read and write · Issues: Read and write (a PR's conversation comments go through the issues API) |
+| read and answer PR reviews and comments | Pull requests: Read and write (it also covers a PR's conversation comments, which use the issues API; add Issues: Read and write only to work on plain issues) |
 | open pull requests | Pull requests: Read and write (the branch must already be on GitHub) |
 | read CI results | Checks: Read-only · Actions: Read-only · Commit statuses: Read-only |
 | read code through the API | Contents: Read-only |
@@ -107,7 +107,7 @@ fy mode github=on
 
 The first time, foldyard sees that `FY_INJECT_GITHUB` is missing and asks for it on your terminal
 before switching, with a hidden prompt. `host.env` holds one `KEY=VALUE` per line, so the key goes
-in as single-line base64:
+in as single-line base64 (the `.pem` file is several lines):
 
 ```bash
 base64 < my-app.private-key.pem | tr -d '\n'
@@ -115,7 +115,7 @@ base64 < my-app.private-key.pem | tr -d '\n'
 
 Paste the output. foldyard checks it decodes to a whole private key (a half-pasted one is refused
 and nothing is stored) and writes it to `host.env` in `~/.foldyard/<project>/`, readable only by
-you. You can also add the line there yourself; the next mint reads it. Then put the `.pem`
+you. You can also add the line there yourself; the next token request reads it. Then put the `.pem`
 somewhere safe, such as your password manager, or delete it: you can always generate another.
 
 If your team keeps the key in a vault, retarget the prompt's "get it with" hint with a `[[secret]]`
@@ -184,15 +184,15 @@ When a call fails:
   not `foldyard.toml`.
 - **401 starting ``foldyard: `github` is off``**: the switch is off. The proxy answered and sent
   nothing upstream. Run `fy mode github=on` on your computer.
-- **502 "foldyard could not mint a credential for api.github.com …"**: minting failed on your
-  computer, and the message quotes why. `fy host logs` there has the details.
+- **502 "foldyard could not mint a credential for api.github.com …"**: making the token failed on
+  your computer, and the message quotes why. `fy host logs` there has the details.
 
 More on these answers: [modes.md](./modes.md#keyless-agents).
 
 ## Seeing the scope
 
-While the switch is on, its capability check runs every 5 minutes. It signs in as the App (minting
-nothing), checks the key works and the installation still exists, and reads the installation's
+While the switch is on, its capability check runs every 5 minutes. It signs in as the App (without
+making a token), checks the key works and the installation still exists, and reads the installation's
 permissions. A failing check shows the switch as DEGRADED in `fy mode`, naming the fix: a rotated
 or wrong key, an uninstalled App (`installation … not found`), or a suspended installation
 ([DEGRADED](./modes.md#degraded--the-switch-is-on-but-the-credential-stopped-working)).
@@ -202,7 +202,7 @@ row, with any `write` or `admin` permission flagged:
 
 ```text
     api.github.com   ← [[inject]] github (github-app; App private key: $FY_INJECT_GITHUB)  [ON]
-      …
+      Host is REPO CONFIG: adopting a change here re-points the credential.
       scope (probed 2026-10-17T09:12:00+00:00, 3m ago): checks:read, issues:WRITE, metadata:read, pull_requests:WRITE — selected repositories
       ⚠ write or admin: issues, pull_requests — what the box can change through this credential
 ```
@@ -210,14 +210,14 @@ row, with any `write` or `admin` permission flagged:
 `fy mode` and `fy tui` show the same reading beside the switch. Both read the record and never call
 GitHub. Before the switch has first been on, the row says "not yet probed". When the permissions
 change, say after an org owner accepted a new one on github.com, the supervisor logs one line
-naming what changed (`fy host logs`) and sends one desktop notification.
+naming what changed (`fy host logs`) and, on macOS, shows one desktop notification.
 
 ## Rotating the key, and switching it off
 
 To rotate: on the App's page, generate a new private key, replace the `FY_INJECT_GITHUB` line in
 `~/.foldyard/<project>/host.env` with the new key's base64, and check `fy mode` doesn't show the
 switch DEGRADED (the check runs every 5 minutes). Then delete the old key on GitHub. A token
-already minted lasts at most an hour.
+already made lasts at most an hour.
 
 To stop access: `fy mode github=off` stops the proxy adding the token at once. To take it away for
 good, uninstall the App or remove the repository from the installation on github.com.
@@ -229,8 +229,8 @@ good, uninstall the App or remove the repository from the installation on github
 - **Changing permissions needs acceptance.** After you edit the App's permissions, an org owner
   accepts them on the installation before the token carries them.
 - **Managing the installation's repositories through the API** (for example from
-  infrastructure-as-code) needs a classic personal access token: fine-grained ones get a 403 on
-  that endpoint. The install page on github.com always works.
+  infrastructure-as-code) may need a classic personal access token; fine-grained ones have been
+  refused there with a 403. The install page on github.com always works.
 - **Only one credential per host and path at a time.** Two rows that inject on `api.github.com`
   (two Apps, or an App and the `gh-cli` row below) can't both be on. `fy mode` refuses the second
   and names the first; swap in one command, for example `fy mode github=off github-user=on`.

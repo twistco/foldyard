@@ -84,8 +84,9 @@ flows, whatever any file in the VM says.**
 When a switch is on, its token service makes short-lived, scoped tokens on your computer, and the
 proxy adds them to requests as they pass through. The API sees the credential; the box never
 does. (The exception is the `gcp` switch: its metadata emulator hands code in the box a token of
-an hour or less, as Google's own metadata server would — see [gcp.md](./gcp.md).) The secrets token services need live in `~/.foldyard/<project>/host.env` (readable only by
-you, outside the repo).
+an hour or less, as Google's own metadata server would — see [gcp.md](./gcp.md).) The secrets
+token services need live in `~/.foldyard/<project>/host.env` (readable only by you, outside the
+repo).
 
 Two guard rails keep this honest:
 

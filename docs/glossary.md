@@ -103,7 +103,7 @@ paste the real key once, on your computer.
 
 **Metadata emulator** — a small server on the stack's network that answers Google Cloud's
 "metadata server" requests, so code in the box or a service gets a short-lived token for its own
-service account, made on your computer. The one place a real (short-lived) token does reach the
+service account (or, at `gcp=user`, the box gets yours), made on your computer. The one place a real (short-lived) token does reach the
 box. See [gcp.md](./gcp.md).
 
 **`host.env`** — `~/.foldyard/<project>/host.env`, the file on your computer holding the secrets
