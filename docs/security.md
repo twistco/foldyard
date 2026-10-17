@@ -106,7 +106,9 @@ The resting state is **zero secrets in the VM**: no key files, no token environm
   passes through. The real token never enters the box — not as an environment
   variable, not as a file ([ADR-0007](./adrs/0007-credential-injection-at-egress-proxy.md)). A
   fully compromised box can use the access only while the switch is on, and only against the
-  injected host; it never *holds* the credential.
+  injected host; it never *holds* the credential. The one exception is Google Cloud's metadata
+  emulator: Google's client libraries fetch a token and attach it themselves, so a token of an
+  hour or less does sit in the box while the `gcp` switch is on ([gcp.md](./gcp.md)).
 - **Emergency levels expire.** Levels that act as *you* have a mandatory TTL (one hour by
   default) and switch themselves back off
   ([ADR-0005](./adrs/0005-secretless-by-default-posture-axes.md)).
