@@ -204,4 +204,5 @@ packages = ["src/foldyard"]
 "docs/git.md" = "foldyard/assets/docs/git.md"
 "docs/gcp.md" = "foldyard/assets/docs/gcp.md"
 "docs/stack.md" = "foldyard/assets/docs/stack.md"
+"docs/workshop.md" = "foldyard/assets/docs/workshop.md"
 "docs/adrs" = "foldyard/assets/docs/adrs"

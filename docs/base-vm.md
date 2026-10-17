@@ -80,15 +80,9 @@ that.
 
 ## Running a workshop
 
-Ask attendees to do this at home, before the day:
-
-1. Install uv (on Windows: WSL2 first, then uv inside it).
-2. Run `uvx foldyard prereq`. It checks the computer, prints the command for anything missing,
-   and exits non-zero until everything required is there.
-3. Run `uv tool install foldyard`, then `fy prereq --fetch`.
-
-On the day, `fy init` and `fy box up` in their own project take seconds and download almost
-nothing. Their project's own images, packages and agents are the part you can't pre-fetch.
+Attendees bake the base at home (`fy prereq --fetch`), so on the day `fy init` and `fy box up`
+take seconds. [workshop.md](./workshop.md) has the per-platform setup to send them, the running
+order for the day, and the failures to expect.
 
 ## Known Lima quirk
 

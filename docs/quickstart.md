@@ -13,15 +13,20 @@ New words (box, mode, switch, allowlist, adopted config…) are defined in the
 **A clean repo.** Foldyard mounts only your repo into the VM, so the zero-credential guarantee
 holds exactly when the repo holds config, not secrets. Scan your history with
 [gitleaks](https://github.com/gitleaks/gitleaks) or
-[TruffleHog](https://github.com/trufflesecurity/trufflehog) first, and move anything they find
-out of the repo.
+[TruffleHog](https://github.com/trufflesecurity/trufflehog) first, and the working tree too: the
+VM mounts the whole folder, gitignored files like `.env` included
+([the commands](./workshop.md#step-4--check-your-repo-has-no-secrets-in-it)). Move anything they
+find out of the repo.
+
+Running a workshop? [workshop.md](./workshop.md) has the setup to send attendees and the plan for
+the day.
 
 **First uv** ([install it](https://docs.astral.sh/uv/getting-started/installation/)). On
 Windows, install WSL2 first and do everything inside its Linux distro. Then let foldyard check
 the rest of this computer:
 
 ```bash
-uvx foldyard prereq
+uvx foldyard@latest prereq      # @latest: uvx otherwise reuses any copy it cached before
 ```
 
 It needs no project and doesn't install foldyard. It checks Lima, podman, a hypervisor, and on
@@ -38,7 +43,7 @@ brew install lima podman
 Linux (x86-64; Debian/Ubuntu package names shown — `fy prereq` names your distribution's):
 
 ```bash
-sudo apt-get install qemu-system-x86 qemu-utils ovmf podman
+sudo apt-get update && sudo apt-get install qemu-system-x86 qemu-utils ovmf podman
 curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.0/lima-2.2.0-Linux-x86_64.tar.gz \
   | sudo tar Cxz /usr/local                               # Lima (2.2.0 is the version CI tests)
 ```
@@ -101,6 +106,9 @@ Check the isolation rather than trusting it:
 fy verify            # mount audit + escape attempts + credential checks — should be ALL PASS
 ```
 
+Run it in the box too. There it also proves the box can't push, which needs an `origin` remote:
+without one, that row fails as unproven.
+
 Poke around from the box shell as much as you like. Nothing you run in there — installs, build
 scripts, `curl` — can reach your computer, your keys or your other repos.
 
@@ -110,10 +118,15 @@ Uncomment **one** agent table in `foldyard.toml` — `[claude]` for Claude Code 
 OpenAI Codex — including its `keyless` line. Then:
 
 ```bash
-fy box up            # installs the agent; asks once (hidden input) for your real API key/token
-fy mode claude=on    # switch on the proxy's key swap for the agent
-fy claude            # Claude Code, running inside the box
+fy config diff              # read the change your computer would start running…
+fy config adopt             # …and adopt it (`fy box up`'s own prompt defaults to ignore)
+fy box down && fy box up    # recreate it with the agent; asks once (hidden) for your key
+fy mode claude=on           # switch on the proxy's key swap for the agent
+fy claude                   # Claude Code, running inside the box
 ```
+
+A plain `fy box up` on a box that's already running doesn't add the agent: the install and the
+dummy credential are set when the box is created.
 
 **Keyless** means the real key never enters the box. The box holds a dummy value, and the proxy
 on your computer swaps in the real one as each request goes out. You paste the real key once,
@@ -145,6 +158,8 @@ fy tui               # the dashboard: mode, network log, doctor, one-click fixes
 ```
 
 Services reach each other by container name; your computer reaches them on the published ports.
+The details for a real stack — variables, worktrees, volumes, podman-compose's quirks — are in
+[stack.md](./stack.md).
 
 From here, uncomment the rest as the project needs it: your own box image (`[box] image`),
 monitored tool installs (`[[box.tools]]`), VS Code attach (`[vscode]` + `fy code`), compose
