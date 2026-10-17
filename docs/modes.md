@@ -10,6 +10,8 @@ defined in the [glossary](./glossary.md).
 
 ## The model: switches and levels
 
+![Modes: each switch has levels from a zero-secret default upward, for example gcp off, logs, sa and user (an emergency level with a one-hour timer), an [[inject]] github switch off or on, and a keyless claude switch off or on. You set the mode with fy mode on your computer; it is stored outside the repo, one per worktree; the supervisor starts or stops token services and updates the proxy; the box sees only a read-only copy. When a timer runs out the switch returns to its default.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-modes.svg)
+
 **A mode is a set of switches, each at a level.** A **switch** is one credential mechanism
 (`gcp`, `claude`, or one you declare — `github`, say). A **level** is one setting of that switch,
 from its default up to the most privileged, e.g. `gcp=off|logs|sa|user`, or a declared
@@ -76,6 +78,8 @@ That is the whole security story in one line: **no token service running means n
 flows, whatever any file in the VM says.**
 
 ## Tokens never enter the box
+
+![The token never enters the box: the box sends its request with a dummy value; the egress proxy on your computer asks the token service for a real, short-lived token and puts it on the request on the way out; the upstream API answers, and the box only ever held the dummy.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-credential-injection.svg)
 
 When a switch is on, its token service makes short-lived, scoped tokens on your computer, and the
 proxy adds them to requests as they pass through. The API sees the credential; the box never

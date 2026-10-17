@@ -7,6 +7,8 @@ trust — which guarantees are cooperative and which are enforced. Terms are def
 
 ## How traffic leaves the box
 
+![How traffic leaves the box: from the box or a stack container, through the VM firewall, to the egress proxy on your computer, which logs each request, decrypts it unless the host is passthrough, checks it against the allowlist and adds any credential, before it reaches the internet. Traffic that tries to skip the proxy is refused by the VM firewall, and on Linux also by the host firewall.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-network.svg)
+
 The box routes through an always-on `mitmdump` proxy on your computer, configured by the
 `[proxy]` table. `fy up` / `fy box up` start the supervisor that runs it; `fy host` shows its
 status.

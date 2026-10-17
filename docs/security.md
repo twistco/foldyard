@@ -31,6 +31,8 @@ what limits the socket to "repo + containers", so there is no VM-less backend
 
 ## Threat model
 
+![What a bad package can reach: the same malicious install run in three places. On your laptop it reads your keys and tokens straight away, reaches your other repos and files, can push with your git credentials and sends data anywhere. In a typical dev container on a rootful engine, keys are often within reach and your other files are one escape away. In a sandboxed VM that mounts only the repo, keys and other files aren't there, a push is refused, and traffic leaves only through a logging proxy. The repo itself is reachable everywhere, so keep secrets out of it.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-blast-radius.svg)
+
 What foldyard is built against — not the agent as such, but what comes in with development:
 
 - **Malicious packages and install scripts** (`npm install`, PyPI, postinstall hooks). They run

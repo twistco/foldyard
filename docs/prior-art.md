@@ -12,6 +12,8 @@ the landscape: the whole neighbourhood, one row per tool, and the positioning ar
 
 ## The verdict
 
+![Where foldyard sits: a grid of how strong a sandbox's fence is (process sandbox, container, VM) against what's inside it (one agent run, one project's toolchain, the whole dev stack), with filled dots where credentials stay outside the fence.](./assets/foldyard-landscape.svg)
+
 - **The exact combination is unoccupied as a tool**: laptop-local, VM-bounded,
   secretless-by-default, whole-compose-stack + dev box + IDE backend, with host-side
   TTL-bound credential posture. Every component exists separately; nobody ships the
