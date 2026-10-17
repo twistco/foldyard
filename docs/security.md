@@ -134,6 +134,12 @@ The resting state is **zero secrets in the VM**: no key files, no token environm
   whose `how` hint foldyard **prints for you to run** and never runs itself
   ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)).
 
+**Keep real secrets out of your compose file's `environment:` and `env_file`.** A value there sits
+in the container for its whole life: any code running in it reads `/proc/<pid>/environ`, and
+anything holding the engine socket, the box included, reads it with `inspect`. Give the service a
+dummy and let a switch inject the real value at the proxy ([modes.md](./modes.md); a stack
+container's traffic reaches the proxy only with the VM firewall on).
+
 ## Network: what's cooperative, what's enforced
 
 The box's traffic goes through the proxy on your computer because of proxy environment
