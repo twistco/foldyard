@@ -6,6 +6,172 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.5.0 — 2026-10-19
+
+Every VM needs one `fy machine stop && fy up` after upgrading: the VM's boot setup changed (the
+proxy settings it gives build steps and stack containers), and until it restarts foldyard refuses
+a running Lima VM as stale. No config edits are needed. Outside a foldyard project, project verbs
+now refuse instead of running as a project named after the directory. New: `fy prereq` checks
+what your computer needs, and `fy prereq --fetch` bakes a base VM that new projects clone in
+seconds; `[box].packages` bakes system packages into the box image once; and `fy changelog`
+prints what changed since the foldyard your `foldyard.toml` declares.
+
+### Changed
+
+- **Outside a foldyard project, `fy` says so instead of inventing one.** With no `foldyard.toml`
+  in the current directory or above (and no `FOLDYARD_REPO`), a project verb (`fy mode`,
+  `fy doctor`, `fy up`, `fy host`…) used to run as a project named after the directory, writing
+  a mode file and allocating a port band for it in `~/.foldyard/ports.json`. It now prints one
+  line pointing at `fy init` and `fy prereq`, exits 1 and writes nothing. That includes a git
+  repo that has no `foldyard.toml`.
+- **Help, `fy prereq`, `fy docs`, `fy init`, `fy machine base` and `fy skill list` work anywhere,
+  quietly.** Every verb, `--help` included, used to open with "✗ not a git repository" outside a
+  git repo, including `uvx foldyard prereq` in an empty directory.
+- **A refused request in the Network Log now shows what was asked.** A blocked row used to read
+  only "⛔ refused by the allowlist". Now it shows the method and target: `CONNECT host:port` for
+  HTTPS (refused before TLS, so the path is never seen), and the method and path for plain HTTP.
+  The text reads "blocked — not on the allowlist". A request refused because its Host header
+  named a different host than the one it was sent to now says so, instead of blaming the
+  allowlist. It is also no longer offered as a host to grant, since a grant would not let it
+  through. The egress log's blocked rows carry `method`, `path` and `mismatch` to match.
+- **A refused HTTPS request now shows its method, path and User-Agent in the Network Log, and a
+  refused host is never connected to.** The proxy used to refuse an ungranted host at `CONNECT`,
+  before TLS, so the row could only say `CONNECT host:443`. It now answers the `CONNECT` itself,
+  decrypts the tunnel and returns the `403` to the request inside. No connection to the refused
+  host is ever opened: the proxy also refuses, at the point where every upstream connection is
+  made, any connection to a host nothing grants. Previously a separate check on each path made
+  that guarantee, so it now holds in one place. Unchanged: a port other than `:443` and an image
+  build are still refused at `CONNECT`. One visible difference: a client in the box that keeps
+  its own trust store (it doesn't trust the proxy's CA) now gets a certificate error for a
+  refused host instead of the readable `403`. The log still records it as a blocked `CONNECT`.
+
+### Added
+
+- **`fy prereq` checks what your computer needs and prints how to install it.** Lima (and its
+  version), podman, a hypervisor, and on Linux QEMU, `/dev/kvm` and a `systemd --user` session,
+  plus disk, memory and foldyard's own egress proxy. Each missing piece comes with the install
+  command for the package manager you have; foldyard never runs it. It needs no project, so
+  `uvx foldyard prereq` works before foldyard is installed, and it exits non-zero until
+  everything required is there.
+- **New projects' VMs are clones of a base VM: seconds instead of minutes, and almost nothing
+  downloaded.** `fy prereq --fetch` (or `fy machine base bake`) bakes a project-less base VM once:
+  Lima's podman template with nothing mounted, booted, the generic box image built in it. After
+  that, `fy up`/`fy box up` create a new project's VM as a `limactl clone` of it with the
+  project's own sizing and mounts, and `fy box up` re-tags the box image it carries in instead of
+  building one. From an empty directory to a walled box took 26 s on macOS. Existing VMs are
+  never re-cloned; a base out of date with Lima's template is not used, and one over 30 days old
+  is flagged. `FOLDYARD_BASE_VM=0` turns cloning off. `fy docs base-vm` has the rules.
+- **Node's `fetch()` and npm's install scripts go through the proxy without project wiring.**
+  Node's `fetch()` ignores `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY` is set, so under the VM
+  firewall it failed with an `ECONNREFUSED` against a raw IP that named no proxy. An install
+  script that fetches with its own client (supabase's CLI download) reads only
+  `npm_config_https_proxy`. The box now gets `NODE_USE_ENV_PROXY=1`, `npm_config_https_proxy`
+  and `npm_config_proxy` (defaults: `[box].env` may override each), and with the VM firewall on
+  every stack container gets the two npm settings. Stack containers don't get
+  `NODE_USE_ENV_PROXY`: it would send calls between Node services to the proxy, which can't
+  resolve a service name. An app container that wants it sets it itself, with a `NO_PROXY`
+  naming the stack's services (`fy docs networking`, "Node and npm"). The stack containers'
+  settings are part of the VM's boot setup, so `fy up` refuses a running VM until you run
+  `fy machine stop && fy up` once.
+- **`fy doctor` points out compose settings that override what foldyard provides.** With the VM
+  firewall on, foldyard gives every container the proxy settings, the proxy's CA and npm's proxy
+  settings, and a value your compose file sets wins without a word, including a proxy address
+  that has gone stale or a mount of `.devbox-ca`. The new `stack env overrides` row names each
+  one per service. It's advisory: a value you need, such as a private CA bundle, can stay. Empty
+  values aren't flagged, since blanking the proxy is how a stack-only service stays off it. If
+  your project wired any of these by hand before foldyard provided them, you can drop them now.
+  A second row, `stack container env`, reads what each running container actually has, so it
+  also catches an image's own `ENV` (an `SSL_CERT_FILE` of its own) and a container created
+  before the VM provided these settings, which keeps the proxy but lacks the CA until you
+  recreate it (`fy down`, then `fy up`). Containers that blank the proxy aren't flagged there
+  either.
+- **The networking guide says when stack containers trust the proxy, and how to fix Turbopack.**
+  Only the VM firewall gives containers the proxy's CA, so a container you point at the proxy
+  yourself needs it on. `next build` fetching Google Fonts ignores `NODE_EXTRA_CA_CERTS`;
+  `NEXT_TURBOPACK_EXPERIMENTAL_USE_SYSTEM_TLS_CERTS=1` makes it read `SSL_CERT_FILE`.
+- **`[box].packages` installs system packages once, not on every new box.** List them
+  (`packages = ["nodejs", "just"]`) and foldyard bakes them into a cached layer on top of the box
+  image, rebuilt only when the list or the base image changes (or by `fy box build`). Until now
+  the only way to add a package to the packaged box was a `[[box.tools]]` step, which reinstalled
+  it, through the egress wall, every time a box was created. The layer uses whatever package
+  manager the image has (apt, apk, dnf, microdnf, yum, zypper, pacman), so it works on your own
+  `[box].image` too. A box that is already running keeps its old image until
+  `fy box down && fy box up`.
+- **`fy changelog` prints what changed between the foldyard your `foldyard.toml` declares and the
+  one installed.** A project can sit any number of releases behind the `fy` running it, and
+  catching its config up meant reading the whole changelog on GitHub. Now the releases in between
+  (after `min_foldyard_version`, or `recommended_foldyard_version` if higher, up to the installed
+  version) print oldest first, from the changelog the install itself ships, so it works offline
+  and inside the box. `--action` keeps only what can need a step (each release's summary plus
+  Security, Removed, Deprecated and Changed); `--since`/`--until` pick the range by hand and work
+  outside a project. Raise `min_foldyard_version` once the config is caught up and the next run
+  starts there. `fy doctor`'s version row points at it when the install is ahead of the repo.
+- **A project that declares no foldyard version still gets a starting point:** `fy changelog`
+  falls back to the date `foldyard.toml` was last modified and shows the releases from then,
+  labelled as an estimate (a clone or checkout rewrites the file's time, so it can start late).
+  `--since` also takes a date (`--since 2026-09-01`) to set it by hand.
+
+### Fixed
+
+- **`fy verify`'s push check works in a walled box, and on a public origin.** Since 0.3.2 its
+  `git` ran with the compose client's environment, which carries no proxy: in a box behind the
+  VM firewall git went direct, was refused, and every origin read "git remote UNREACHABLE … push
+  refusal UNPROVEN". It now runs with the box's own environment, as every other box check does.
+  And the probe is a dry-run push (`git push --dry-run`, which sends nothing) instead of
+  `git ls-remote`: a read proves nothing about pushing — a public origin answers it with no
+  credential, which made the row FAIL on every public repo — while the push handshake needs write
+  access on any repo.
+- **`fy logs` works on the podman engine.** It asked compose for the last 50 lines with `-n 50`,
+  which docker compose reads as `--tail 50` but the bundled podman-compose reads as its
+  value-less `--names` switch followed by a service called `50`, so every `fy logs [svc]` on
+  podman failed with "missing services [50]". It now sends `--tail 50`, which both read the same.
+  A new test hands every compose command foldyard sends to podman-compose's own argument parser,
+  so a flag the two providers read differently fails the suite instead of a user's command.
+- **`fy up`, `fy box up` and `fy box build` wait for the host supervisor's daemons, and refuse
+  when one can't run.** A launch used to start the supervisor and carry on: right after it
+  replaced the supervisor (an upgraded foldyard, say), the first build could reach the egress
+  proxy before it was listening and fail with apt's "connection refused". Each launch now waits
+  until the supervisor reports every daemon it needs as running. A daemon blocked on a spawn gate
+  (a missing `host.env` secret, a foreign process on its port) or crash-looping stops the launch
+  with its reason. Before, the launch carried on and failed somewhere later and less clearly.
+- **A worktree's launch is served before its box exists.** The supervisor only ran daemons for
+  worktrees whose box was already up, so with one worktree's box running and main's not, a second
+  worktree's `fy box up` built with no proxy listening on main's port, which every image build
+  goes through. A launch now tells the supervisor which worktree it is bringing up.
+- **A launch replaces a supervisor started from another checkout of the same project.** A
+  supervisor serves the checkout it was started from: its worktree registry and its adopted
+  config. A second clone's `fy up` used to reuse it, and its worktrees were never served. A launch
+  from an unregistered worktree now stops at once and names the fix (`fy worktree add <name>`).
+- **Node's built-in `fetch` now goes through the proxy in image builds, and a build that fails
+  because a tool skipped the proxy now says so.** Node's `fetch` ignores `HTTPS_PROXY` unless
+  `NODE_USE_ENV_PROXY=1` is set, and Node 24's corepack (0.35 and later) uses it. So
+  `corepack prepare` in a `node:24` image connected directly, the VM firewall refused it, and the
+  proxy logged nothing. foldyard now sets `NODE_USE_ENV_PROXY=1` in every build step (no `ARG`
+  needed in the Dockerfile; a Dockerfile `ENV` for it still wins), as it already did in the box.
+  When a build fails, foldyard also lists the connections the VM firewall refused while it ran,
+  by IP and port, with the likely causes. Before, a failure like this left no trace. **Existing
+  VMs are refused as stale until you run `fy machine stop && fy up`**, which installs the change.
+- **A VM whose boot never finished now says where it stopped.** Lima runs its own provisioning
+  before foldyard's boot script — on a VM created from the template, that's its podman install
+  (`dnf`, over the Fedora mirrors). A stalled mirror made `limactl start` give up after 10
+  minutes, and the next `fy up` then said the VM "did not apply its boot provisioning" and
+  pointed at a boot log that didn't exist yet, because foldyard's script never started. Both now
+  say the VM is up but Lima's boot scripts haven't finished, show how to see what's still running
+  and where the guest console log is, and say to run `fy up` again once it settles, restarting
+  only if it's stuck. A VM whose base was baked with
+  `fy machine base bake` skips that install altogether.
+- **A host you grant for the session when `fy up` or `fy box up` asks now keeps that grant.**
+  Session and once grants end when the host supervisor restarts, and the launch verbs asked about
+  recommended hosts *before* starting a new supervisor (after a foldyard update, say). An answer
+  of "session" or "once" was then wiped a moment later by the supervisor that started, and a host
+  whose session grant was about to end wasn't asked about at all, so the box hit refusals for a
+  host you had just allowed. The launch now ends the old grants first, then asks.
+- **`fy machine base bake` and `fy prereq --fetch` run from any directory.** Both are meant to
+  work outside a project, but they refused to start from a directory whose name isn't a plain
+  name, such as `_temp`, `My Projects`, a folder under iCloud's `Mobile Documents`, or `/`. The
+  error talked about "the checkout's directory name" and `[project].name` to someone in no project
+  at all. The bake no longer reads a project name.
+
 ## 0.4.0 — 2026-10-08
 
 Every VM needs one `fy machine stop && fy up` after upgrading: the VM's boot script changed, and
