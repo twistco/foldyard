@@ -21,7 +21,7 @@ external capability, and none of the historical bugs was "transition A→B handl
 ## Where the bugs came from: four failure classes
 
 Of the 14 state fixes the audit found, 9 were class 1 — two lifecycles disagreeing about one
-file, port or process — and 3 were class 2. Classes 3 and 4 had produced no fix yet.
+file, port or process — and 3 were class 2.
 
 **1. Several state tiers with different refresh lifetimes.** The mode lives in the authoritative
 host-side `dev-mode.json`; the per-worktree `.dev-mode.json` mirror (refreshed only while that box
