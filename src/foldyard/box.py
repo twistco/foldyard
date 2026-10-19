@@ -1521,6 +1521,10 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         checkout,
         *agent_vols,
         *env_args,
+        # A real PID 1 that reaps. `sleep` never waits, so every orphan handed to it stayed a
+        # zombie for the box's life — one per `git commit` (2.47's detached auto-maintenance) —
+        # until the box hit podman's 2048-pid limit and thread creation aborted its agents.
+        "--init",
         img,
         "sleep",
         "infinity",

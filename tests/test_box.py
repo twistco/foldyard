@@ -333,7 +333,7 @@ def test_up_assembles_run(fake):
     assert "--name" in run and "tangible-podman-devbox" in run
     assert "--network" in run and "tangible-podman_default" in run
     assert run[run.index("-w") + 1] == str(fake["main"])
-    assert run[-3:] == ["img:tag", "sleep", "infinity"]
+    assert run[-4:] == ["--init", "img:tag", "sleep", "infinity"]  # PID 1 reaps orphans
     # config-driven [box] bits
     assert any("shadow-data--venv" in tok for tok in run)  # shadow vol (tr '/.' '--')
     assert "tangible-podman-shared-pnpm:/home/vscode/.local/share/pnpm/store" in run  # cache
