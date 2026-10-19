@@ -33,7 +33,9 @@ _MAC = re.compile(r"\bMacs?\b")
 def _shipped() -> list[Path]:
     build = tomllib.loads((ROOT / "pyproject.toml").read_text())
     pages: list[Path] = []
-    for src in build["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]:
+    for src, dest in build["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"].items():
+        if not dest.startswith("foldyard/assets/docs"):  # the changelog: `fy changelog`, not a page
+            continue
         path = ROOT / src
         pages += sorted(path.glob("*.md")) if path.is_dir() else [path]
     return pages

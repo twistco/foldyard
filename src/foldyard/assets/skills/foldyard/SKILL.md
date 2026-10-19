@@ -38,6 +38,7 @@ Foldyard is introspectable, and its own output is always current — prefer it o
 | the manual, offline, by topic | `fy docs` — then `fy docs <topic>` |
 | what words mean | `fy docs glossary` |
 | what does the config let the host do? | `fy config widenings` |
+| what changed since the foldyard this repo declares? | `fy changelog` (`--action`: only what can need a step) |
 
 `fy docs` serves **this install's** documentation, so it can't drift from the code you're running.
 Start with `fy docs quickstart`, `fy docs modes`, `fy docs networking`, `fy docs security`; the

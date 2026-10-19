@@ -146,7 +146,9 @@ a non-string reason drops that one line.
 
 ### Using the two version bounds
 
-1. Adopt a version: pin CI to it, run the suite, merge.
+1. Adopt a version: pin CI to it, run the suite, merge. `fy changelog` lists what changed
+   since the version this file declares (the higher of the two bounds) up to the installed
+   one — what the config may need to catch up on.
 2. Set `recommended_foldyard_version` to it. Colleagues see one line at their next session start
    and upgrade when it suits them.
 3. When something actually *needs* that version, raise `min_foldyard_version` to match. By then

@@ -1615,7 +1615,17 @@ def _version_window_check():
         want = recommended or minimum
         yield ("warn", "foldyard version", f"{__version__} — repo expects {want}; run {fix}")
     else:
-        yield ("ok", "foldyard version", f"{__version__} satisfies this repo's declared window")
+        # Past what the repo declares: point at the releases its config hasn't caught up with.
+        from .changelog import declared, newer_than
+
+        anchor = declared()
+        behind = newer_than(anchor[0], __version__) if anchor else 0
+        since = f"; {behind} release(s) since its {anchor[0]} — `fy changelog`" if anchor else ""
+        yield (
+            "ok",
+            "foldyard version",
+            f"{__version__} satisfies this repo's declared window" + (since if behind else ""),
+        )
 
 
 def _disk_headroom_check():

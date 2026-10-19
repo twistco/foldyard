@@ -61,7 +61,14 @@ def _version(show: bool) -> None:
 # person runs BEFORE there is one (`uvx foldyard prereq` in an empty directory, a workshop's first
 # step). A prefix matches its subcommands. `skill install` is absent on purpose: it writes into
 # the repo. Help (`--help`, a bare group) is project-free for every verb.
-_PROJECT_FREE = (("prereq",), ("docs",), ("init",), ("machine", "base"), ("skill", "list"))
+_PROJECT_FREE = (
+    ("prereq",),
+    ("docs",),
+    ("changelog",),
+    ("init",),
+    ("machine", "base"),
+    ("skill", "list"),
+)
 
 _NOT_A_PROJECT = (
     "✗ not in a foldyard project — no foldyard.toml here or in any directory above.\n"
@@ -156,7 +163,8 @@ def _resolve_worktree(
 # says it in its own words), the manual, the scaffolder, the TUI and the supervisor (which report
 # it in their own UI/log), and the launch verbs, whose gate asks or refuses on its own.
 _NO_UNADOPTED_NOTICE = frozenset(
-    {"config", "docs", "init", "prereq", "doctor", "tui", "host", "up", "code", "claude", "codex"}
+    {"config", "docs", "changelog", "init", "prereq", "doctor", "tui", "host", "up", "code"}
+    | {"claude", "codex"}
 )
 
 
@@ -448,6 +456,30 @@ def docs(
     from . import docs as docs_mod
 
     raise typer.Exit(docs_mod.main(topic))
+
+
+@app.command()
+def changelog(
+    since: str | None = typer.Option(
+        None, "--since", help="start AFTER this version, or from this date (YYYY-MM-DD)"
+    ),
+    until: str | None = typer.Option(
+        None, "--until", help="stop at this version, inclusive (default: the installed one)"
+    ),
+    action: bool = typer.Option(
+        False, "--action", help="only what can need a step: summary, Security/Removed/Changed"
+    ),
+) -> None:
+    """What changed between the foldyard this project declares and the one installed.
+
+    Prints only the releases in between, oldest first, from THIS install's own changelog —
+    offline. The starting point is `[project].min_foldyard_version` (or the recommended version,
+    if higher); once the config is caught up, raising it moves the next run's starting point.
+    A project that declares neither starts from foldyard.toml's modification date — an estimate.
+    """
+    from . import changelog as changelog_mod
+
+    raise typer.Exit(changelog_mod.main(since, until, action=action))
 
 
 @app.command()
