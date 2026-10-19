@@ -13,7 +13,8 @@ For using foldyard. These pages also ship with the install — `fy docs` prints 
 - [workshop.md](./workshop.md) — running a foldyard workshop: what attendees set up before the
   day, per platform, the running order on the day, and the failures to expect.
 - [base-vm.md](./base-vm.md) — `fy prereq --fetch` and the base VM: new projects' VMs
-  as clones, and the big downloads done once per computer.
+  as clones (when they fit the base; otherwise from the template), and the big downloads done
+  once per computer.
 - [configuration.md](./configuration.md) — every `foldyard.toml` key, `foldyard.local.toml`
   overrides, environment variables, the adopted config, and what lives in `~/.foldyard/`.
 - [modes.md](./modes.md) — switching credentials on and off: switches and levels, time limits,

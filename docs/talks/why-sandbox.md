@@ -386,7 +386,7 @@ This used to be rare. In 2026 it became close to standard in agent sandboxes —
 | Own kernel? | Yes — a throwaway Linux VM per project (Lima), rootless Podman inside |
 | What's mounted? | The repo and its worktrees. No home folder |
 | Credentials? | None by default. Switched on per job, mostly swapped in by the proxy; "act as me" levels expire |
-| Egress? | Every request goes through a proxy on your computer; a VM firewall refuses anything else |
+| Egress? | Every request goes through a proxy on your computer; with `[machine] firewall = true`, the VM firewall refuses anything else |
 | Inside edits config? | Inert until you read the diff and adopt it |
 | Repo code on your computer? | foldyard runs none: its config is data. Your git still runs hooks |
 | Whole dev loop? | Yes — your compose stack, the dev box, your editor's backend, the agent |

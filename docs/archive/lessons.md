@@ -138,8 +138,9 @@ matches the VM itself, out of reach even of VM-root.
 ## 10. Cooperative capture is not enforcement
 
 **What happened.** Pointing `HTTPS_PROXY` at a logging proxy shows you every request from
-well-behaved software. It is only a suggestion: Go binaries, gRPC, QUIC and malicious code ignore
-it and go straight out. A proxy, a log and an allowlist made "egress filtering" one README sentence
+well-behaved software. It is only a suggestion: Go's standard `net/http` honours it, but a client
+that builds its own transport or dialer, many gRPC stacks, QUIC and malicious code ignore it and
+go straight out. A proxy, a log and an allowlist made "egress filtering" one README sentence
 away, while it stopped no attacker. foldyard didn't claim filtering until a firewall made the
 proxy the only way out.
 

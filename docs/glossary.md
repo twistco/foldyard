@@ -139,7 +139,8 @@ write the same one over the shared mount, and it refuses a command that would ac
 of a branch your computer just moved. See [git.md](./git.md).
 
 **Base VM** (`foldyard-base`) — a VM baked once per computer with `fy prereq --fetch`, nothing
-mounted, that new projects' VMs are cloned from. See [base-vm.md](./base-vm.md).
+mounted, that a new project's VM is cloned from when it fits (else it's created from the
+template, as before). See [base-vm.md](./base-vm.md).
 
 **`fy verify`** — the isolation self-test. It checks the VM's mounts, tries known container
 escapes, and checks the box holds no credentials. Run it any time; it exits non-zero on failure.

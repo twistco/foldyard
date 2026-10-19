@@ -27,6 +27,9 @@ container side stays fixed:
 services:
   db:
     image: docker.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: example  # a development-only value
+      POSTGRES_DB: example
     ports:
       - "${PG_PORT:-5544}:5432"
   api:

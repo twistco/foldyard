@@ -21,7 +21,8 @@ diagrams' palette and type.
 # live preview in the browser, reloading on save
 npx @marp-team/marp-cli why-sandbox.md --theme-set foldyard-theme.css --html --preview
 
-# a self-contained HTML file, PDF or PowerPoint (PDF/PPTX need a local Chrome, Edge or Firefox)
+# an HTML file (keep ../assets/ beside it when sharing), PDF or PowerPoint
+# (PDF/PPTX need a local Chrome, Edge or Firefox)
 npx @marp-team/marp-cli why-sandbox.md --theme-set foldyard-theme.css --html --allow-local-files -o why-sandbox.html
 npx @marp-team/marp-cli why-sandbox.md --theme-set foldyard-theme.css --html --allow-local-files --pdf
 npx @marp-team/marp-cli why-sandbox.md --theme-set foldyard-theme.css --html --allow-local-files --pptx
