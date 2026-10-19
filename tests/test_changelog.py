@@ -164,10 +164,59 @@ def test_project_ahead_of_the_install_says_upgrade(sample, capsys):
     assert "upgrade fy" in capsys.readouterr().out
 
 
-def test_no_declaration_and_no_since_is_a_usage_error(sample, repo_declaring, capsys):
-    repo_declaring()
+def test_outside_a_project_with_no_since_is_a_usage_error(
+    sample, fresh_config, tmp_path, monkeypatch, capsys
+):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    fresh_config(FOLDYARD_REPO=empty)
+    monkeypatch.chdir(empty)
+    monkeypatch.setattr("foldyard.config.in_project", lambda: False)
     assert changelog.main() == 2
     assert "fy changelog --since" in capsys.readouterr().err
+
+
+# ── starting from a date ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("day", "want"),
+    [
+        ("2026-10-09", "0.4.0"),  # after the last release: had everything
+        ("2026-10-08", "0.3.1"),  # ON a release day: that release isn't counted as had
+        ("2026-09-19", "0.3.1"),  # two releases share 2026-09-18: the newer one wins
+        ("2026-09-18", "0"),  # before every release: show them all
+    ],
+)
+def test_version_before_a_date(day, want):
+    import datetime as dt
+
+    rels = changelog.releases(SAMPLE)
+    assert changelog.version_before(rels, dt.date.fromisoformat(day)) == want
+
+
+def test_since_takes_a_date(sample, capsys):
+    assert changelog.main("2026-10-01") == 0
+    out = capsys.readouterr().out
+    assert "## 0.4.0" in out and "## 0.3.1" not in out
+    assert "from --since 2026-10-01" in out
+
+
+def test_no_declaration_falls_back_to_the_toml_mtime_and_says_its_an_estimate(
+    sample, repo_declaring, capsys
+):
+    import datetime as dt
+    import os
+
+    repo = repo_declaring()
+    stamp = dt.datetime(2026, 9, 20, 12).timestamp()
+    os.utime(repo / "foldyard.toml", (stamp, stamp))
+    assert changelog.main() == 0
+    out = capsys.readouterr().out
+    assert "## 0.4.0" in out and "## 0.3.1" not in out  # 0.3.1 (09-18) predates the edit
+    assert "foldyard.toml last modified 2026-09-20 (no version declared)" in out
+    assert "ESTIMATE" in out
+    assert 'add `min_foldyard_version = "0.4.0"`' in out
 
 
 def test_an_unparseable_since_is_refused(sample, capsys):

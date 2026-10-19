@@ -461,7 +461,7 @@ def docs(
 @app.command()
 def changelog(
     since: str | None = typer.Option(
-        None, "--since", help="start AFTER this version (default: what foldyard.toml declares)"
+        None, "--since", help="start AFTER this version, or from this date (YYYY-MM-DD)"
     ),
     until: str | None = typer.Option(
         None, "--until", help="stop at this version, inclusive (default: the installed one)"
@@ -475,6 +475,7 @@ def changelog(
     Prints only the releases in between, oldest first, from THIS install's own changelog —
     offline. The starting point is `[project].min_foldyard_version` (or the recommended version,
     if higher); once the config is caught up, raising it moves the next run's starting point.
+    A project that declares neither starts from foldyard.toml's modification date — an estimate.
     """
     from . import changelog as changelog_mod
 

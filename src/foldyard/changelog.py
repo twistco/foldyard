@@ -17,11 +17,19 @@ of any version a consumer can install.
 
 The loop this closes: upgrade, ``fy changelog``, apply what it says to ``foldyard.toml``, raise
 ``min_foldyard_version`` in the same commit — which moves the next ``fy changelog``'s starting
-point past what was just absorbed. Stdlib only.
+point past what was just absorbed.
+
+A project that declares no version (one scaffolded before ``fy init`` stamped the floor) starts
+from a DATE instead: ``foldyard.toml``'s modification time, mapped to the newest release dated
+before it. Not ``git log -- foldyard.toml``, though it would be truer: this runs on your
+computer, and git there reads the checkout's box-writable ``.git/config`` — which can name a
+program for git to run (GHSA-j5mq-v7p4-qw2j). The mtime errs LATE (a clone or checkout rewrites
+it), so the output says it is an estimate and ``--since`` takes a date to correct it. Stdlib only.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 import sys
 from dataclasses import dataclass
@@ -121,6 +129,43 @@ def declared() -> tuple[str, str] | None:
     return value, key
 
 
+def _as_date(raw: str | None) -> dt.date | None:
+    try:
+        return dt.date.fromisoformat(raw[:10]) if raw else None
+    except ValueError:
+        return None
+
+
+def version_before(rels: list[Release], day: dt.date) -> str:
+    """The newest release dated strictly BEFORE ``day`` — what a config last written on ``day``
+    already had. A release dated ``day`` itself is left out of "had": the edit may predate it
+    that day, and showing one release too many beats hiding one. ``"0"`` when every release is
+    on or after ``day`` (show them all); undated releases are never picked."""
+    dated = [
+        (parsed, rel.version)
+        for rel in rels
+        if (d := _as_date(rel.date)) is not None
+        and d < day
+        and (parsed := _parse(rel.version)) is not None
+    ]
+    return max(dated)[1] if dated else "0"
+
+
+def toml_modified() -> dt.date | None:
+    """When this checkout's ``foldyard.toml`` was last written (local date), or ``None`` outside
+    a project. Read from the TREE on purpose: a date range in a printout has no host
+    consequence, and it's the file's history being asked about, not its adopted content."""
+    from . import config
+
+    if not config.in_project():
+        return None
+    try:
+        stamp = (config.repo_root() / "foldyard.toml").stat().st_mtime
+    except OSError:
+        return None
+    return dt.date.fromtimestamp(stamp)
+
+
 def newer_than(version: str, installed: str) -> int:
     """How many released versions lie in ``(version, installed]`` — 0 when the changelog isn't
     available. For the doctor row's pointer; never raises."""
@@ -145,20 +190,33 @@ def main(since: str | None = None, until: str | None = None, *, action: bool = F
         )
         return 1
 
+    rels = releases(path.read_text())
     source = "--since"
+    estimated = False  # the start came from a file date, not a declaration
     if since is None:
         found = declared()
-        if found is None:
+        if found is not None:
+            since, key = found
+            source = f"[project].{key}"
+        elif (day := toml_modified()) is not None:
+            since = version_before(rels, day)
+            source = f"foldyard.toml last modified {day} (no version declared)"
+            estimated = True
+        else:
             print(
-                "✗ no starting version: no foldyard.toml here declares `min_foldyard_version`.\n"
-                "  Pass one: `fy changelog --since 0.3.0`.",
+                "✗ no starting point: not in a foldyard project.\n"
+                "  Pass one: `fy changelog --since 0.3.0` (or a date: `--since 2026-09-01`).",
                 file=sys.stderr,
             )
             return 2
-        since, key = found
-        source = f"[project].{key}"
+    elif (day := _as_date(since)) is not None:
+        since = version_before(rels, day)
+        source = f"--since {day}"
     if _parse(since) is None:
-        print(f"✗ can't order {since!r} as a version (expected e.g. 0.3.1).", file=sys.stderr)
+        print(
+            f"✗ can't order {since!r} as a version or date (expected e.g. 0.3.1 or 2026-09-01).",
+            file=sys.stderr,
+        )
         return 2
 
     upper = until if until is not None else __version__
@@ -169,7 +227,7 @@ def main(since: str | None = None, until: str | None = None, *, action: bool = F
     # everything after `since` rather than nothing.
     bound = upper if _parse(upper) is not None else None
 
-    picked = between(releases(path.read_text()), since, bound)
+    picked = between(rels, since, bound)
     span = f"{since} → {upper}"
     if not picked:
         low, high = _parse(since), _parse(bound)
@@ -184,11 +242,22 @@ def main(since: str | None = None, until: str | None = None, *, action: bool = F
     print(
         f"# foldyard changes {span}: {len(picked)} release(s), oldest first\n"
         f"# starting point: {since}, from {source}{filt}\n"
+        + (
+            "# An ESTIMATE: a clone or checkout rewrites a file's time, so this may start too\n"
+            "# late. If the config is older, pass its date: `fy changelog --since YYYY-MM-DD`.\n"
+            if estimated
+            else ""
+        )
     )
     for rel in picked:
         body = action_only(rel.body) if action else rel.body
         print(f"{rel.heading}\n\n{body or '(nothing in these sections)'}\n")
-    if source != "--since" and bound is not None:
+    if estimated and bound is not None:
+        print(
+            f'# Once foldyard.toml is caught up, add `min_foldyard_version = "{upper}"` to its '
+            "[project] table — the next `fy changelog` then starts there, exactly."
+        )
+    elif source.startswith("[project]") and bound is not None:
         print(
             f"# Once foldyard.toml is caught up, raise {source.split('.')[-1]} to {upper} in the "
             "same commit — the next `fy changelog` then starts there."
