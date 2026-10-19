@@ -138,6 +138,20 @@ def _fresh_registry_cache():
 
 
 @pytest.fixture(autouse=True)
+def _lazy_version():
+    """``foldyard.__version__`` is LAZY (the package's PEP 562 ``__getattr__``), so it must never
+    exist as a real module attribute. ``monkeypatch.setattr(foldyard, "__version__", …)`` breaks
+    that on undo: it saved the value ``__getattr__`` returned and puts it back as a real attribute,
+    which then shadows the lookup for every later test on that worker — the version-resolution
+    tests in test_cli.py read the leftover number instead of what they set up, but only when xdist
+    happens to put them behind a test_box/test_changelog test. Drop whatever a test left."""
+    import foldyard
+
+    yield
+    foldyard.__dict__.pop("__version__", None)
+
+
+@pytest.fixture(autouse=True)
 def isolated_port_registry(tmp_path, monkeypatch, request):
     """Point the cross-project port-band registry (ports.py) at a per-test file, so no test ever
     reads or writes the real ~/.foldyard/ports.json — and every test's project deterministically

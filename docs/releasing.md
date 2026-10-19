@@ -13,6 +13,8 @@ Pushing a `v*` tag runs [`.github/workflows/release.yml`](../.github/workflows/r
 2. **publish** — downloads that artifact and runs `uv publish` into the `pypi` environment.
 3. **github-release** — once PyPI has it, creates the GitHub Release from the notes, with the
    same wheel and sdist attached. It holds `contents: write` and runs no project code.
+4. **demo** — records the README's GIF and attaches it to that release (below). Advisory:
+   nothing waits on it.
 
 Publishing uses PyPI **trusted publishing**: PyPI is configured to trust this workflow in this
 repo, and `uv publish` exchanges the job's OIDC token for a short-lived upload token. **No API
@@ -74,6 +76,34 @@ Until the push everything is local, so a mistake is undone with
 `git tag -d vX.Y.Z && git reset --hard HEAD~1`. If `check` or `build` fails partway, fix it and
 run `just release X.Y.Z` again **by number**: it recognises the prepared, untagged release and
 resumes (a keyword would step past it, so it refuses and says so).
+
+## The demo GIF
+
+The README's demo is [`docs/demo/foldyard.tape`](./demo/foldyard.tape), a
+[VHS](https://github.com/charmbracelet/vhs) script that types the quick start into a real shell
+on a real host: `foldyard init`, `fy box up` with its first-adoption review, `fy verify` in the
+box, the box appending a `[box].packages` line to `foldyard.toml`, and the next `fy box up`
+showing that diff and asking before your computer runs it. Nothing is mocked; the VM boot and the
+image builds are cut out with `Hide`/`Show`, and a typed `#` comment says so at each cut.
+
+[`.github/workflows/demo.yml`](../.github/workflows/demo.yml) records it on `ubuntu-24.04` with
+KVM and Lima, the same setup as the host-tier e2e. The release workflow calls it once the GitHub
+Release exists. It installs the version PyPI now serves, records it, checks that the box it left
+behind still passes `fy verify` and has the adopted package, then attaches `foldyard-demo.gif`
+to the release. The README embeds the latest release's copy:
+
+```markdown
+![foldyard's quick start: init, adopt, verify, and a config edit your computer holds until you approve it](https://github.com/twistco/foldyard/releases/latest/download/foldyard-demo.gif)
+```
+
+so it changes only when a release does, and no bot commits a binary. A failed recording leaves
+that one release without a GIF (and the README image broken until it has one), never the release
+itself. To fill it, dispatch the `demo` workflow with the tag. Dispatched with no tag, it records
+the checkout and only uploads a run artifact, which is how to iterate on the tape. `just demo`
+records the same tape on your own computer, against the `fy` on your PATH.
+
+`tests/test_agent_guide.py` checks that every `fy …` the tape types is a real verb. A renamed
+verb would not fail a recording: it would put the error on the front page.
 
 ## Things that have bitten
 

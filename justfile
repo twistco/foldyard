@@ -119,6 +119,22 @@ check: lint typecheck
     export UV_PROJECT_ENVIRONMENT="${XDG_CACHE_HOME:-$HOME/.cache}/foldyard/dev-venv-$(echo "{{_dir}}" | cksum | cut -d\  -f1)"
     exec uv run --project "{{_dir}}" pytest "{{_dir}}/tests" -n auto
 
+# Record the README demo (docs/demo/foldyard.tape) with VHS, against THIS computer's real VM and
+# the `fy` on PATH (`just install` first to record the source tree). Needs vhs (macOS: `brew
+# install vhs`, which brings ttyd + ffmpeg) and the host prerequisites. Slow — it boots a VM and
+# builds a box; the GIF trims those waits. The demo repo + its state dir are wiped per run and the
+# VM (`acme-api`) is kept, so a re-run is faster; `limactl delete -f acme-api` when done.
+demo out="foldyard-demo.gif":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v vhs >/dev/null 2>&1 || { echo "✗ vhs not found — brew install vhs" >&2; exit 1; }
+    [ "${IN_DEVBOX:-}" != 1 ] || { echo "✗ the demo drives the VM — run it on your computer" >&2; exit 1; }
+    export FY_DEMO_SETUP="{{_dir}}/docs/demo/setup.sh"
+    export FY_DEMO_DIR="${FY_DEMO_DIR:-$HOME/fy-demo/acme-api}"
+    export FY_DEMO_STATE="${FY_DEMO_STATE:-$HOME/fy-demo/state}"
+    vhs -o "{{out}}" "{{_dir}}/docs/demo/foldyard.tape"
+    echo "✓ {{out}}"
+
 # Run before tagging to see what will ship (`unzip -l dist/*.whl` lists the force-included docs).
 # Build the sdist + wheel into dist/ — the artefacts the release workflow publishes.
 build:

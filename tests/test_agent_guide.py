@@ -109,6 +109,41 @@ def test_the_local_overrides_template_only_names_commands_that_exist():
     assert not unknown, f"the foldyard.local.toml.example template names: {unknown}"
 
 
+# VHS's `Type` takes a "…", '…' or `…` string; the tape uses backticks where the text has quotes.
+_TYPED = re.compile(r"^Type\s+(?:\"([^\"]*)\"|'([^']*)'|`([^`]*)`)", re.M)
+DEMO_TAPE = Path(__file__).resolve().parents[1] / "docs" / "demo" / "foldyard.tape"
+
+
+_GROUPS = {name.split()[0] for name in VALID if " " in name}
+
+
+def _unresolved(command: str) -> str | None:
+    """``command`` (``fy box up``) if the CLI wouldn't run it as a verb, else None. Stricter than
+    :func:`_mentions`, which reads an unknown subcommand as its group (prose says "the `fy box`
+    verbs"): a typed command is run, so `fy box upp` must fail here rather than pass as `box`."""
+    words = command.split()[1:]
+    if not words or words[0].startswith("-"):
+        return None
+    verb = " ".join(words[:2]) if words[0] in _GROUPS else words[0]
+    return None if verb in VALID else command
+
+
+def test_the_demo_tape_only_types_commands_that_exist():
+    """The README's GIF (docs/demo/foldyard.tape) is a fourth surface that teaches, and the one a
+    newcomer sees first. VHS types what it is told into a real shell and records whatever comes
+    back, so a renamed verb doesn't fail the recording — it puts the error on the front page.
+    Checked: every typed `fy …`/`foldyard …`, one quoted inside another (`fy box exec "fy
+    verify"`), and the code spans in the tape's own comments."""
+    text = DEMO_TAPE.read_text()
+    typed = ["".join(m) for m in _TYPED.findall(text)]
+    typed += [inner for t in typed for inner in re.findall(r'"((?:fy|foldyard) [^"]+)"', t)]
+    commands = [t for t in typed if t.split()[:1] in (["fy"], ["foldyard"])]
+    assert len(commands) >= 5, f"found too few `fy` commands in the tape: {commands}"
+    unknown = sorted({u for c in commands if (u := _unresolved(c))})
+    unknown += sorted(m for m in _mentions(text) if m not in VALID)
+    assert not unknown, f"the demo tape types: {unknown}"
+
+
 def test_the_init_scaffold_never_teaches_a_key_foldyard_stopped_honouring():
     """The `[proxy] allow` regression, mechanised: `exposure.IGNORED_KEYS` is the list of keys we
     deleted, so the scaffold must not mention any of them — not even commented out, since the

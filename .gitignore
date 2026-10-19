@@ -12,6 +12,8 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+# `just demo`'s output (the release attaches CI's copy; see docs/releasing.md)
+foldyard-demo.gif
 
 # Covered by the monorepo root .gitignore today; listed here so the standalone repo has them too.
 .DS_Store
