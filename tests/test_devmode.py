@@ -1996,8 +1996,11 @@ def test_a_dir_others_can_write_is_a_warn(box_git, which):
 
 def test_a_group_writable_dir_is_a_warn_unless_the_group_is_root(box_git, monkeypatch):
     box_git.hooks.chmod(0o775)
+    gid = box_git.hooks.stat().st_gid
+    # Pinned both ways: run as root, the tmp dir's group IS root, so the default would read ok.
+    monkeypatch.setattr(devmode, "_ROOT_GID", gid + 1)
     assert box_git.rows()["git shim hooks"][0] == "warn"
-    monkeypatch.setattr(devmode, "_ROOT_GID", box_git.hooks.stat().st_gid)
+    monkeypatch.setattr(devmode, "_ROOT_GID", gid)
     assert box_git.rows()["git shim hooks"][0] == "ok"
 
 
