@@ -190,7 +190,9 @@ def _packaged_doc_topics() -> set[str]:
     build = tomllib.loads((root / "pyproject.toml").read_text())
     mapping = build["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
     topics = set()
-    for src in mapping:
+    for src, dest in mapping.items():
+        if not dest.startswith("foldyard/assets/docs"):  # the changelog is `fy changelog`'s
+            continue
         if src.endswith(".md"):
             topics.add(Path(src).stem)
         else:  # a directory — the ADRs, keyed as `adr-NNNN`

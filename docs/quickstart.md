@@ -216,6 +216,11 @@ Why each step is the way it is:
   `fy box down` archives their transcripts, but an agent mid-task is interrupted.
 - **Run `fy code` again** if the release changed anything under `[vscode]`: the VS Code attach
   config is written from the adopted config, so it's out of date until regenerated.
+- **Moving the repo itself onto a newer foldyard?** `fy changelog` prints the releases between
+  the version `foldyard.toml` declares and the one installed, oldest first, from the install's
+  own copy (offline). `fy changelog --action` keeps only what can need a step: each release's
+  summary and its Security, Removed, Deprecated and Changed entries. Once the config is caught
+  up, raise `min_foldyard_version` in the same commit, and the next `fy changelog` starts there.
 
 ## When something's off
 

@@ -201,3 +201,6 @@ packages = ["src/foldyard"]
 "docs/compose-overlays.md" = "foldyard/assets/docs/compose-overlays.md"
 "docs/testing-modes.md" = "foldyard/assets/docs/testing-modes.md"
 "docs/adrs" = "foldyard/assets/docs/adrs"
+# Not a `fy docs` topic: `fy changelog` slices it by version (outside assets/docs, so the
+# shipped-page link guard, which it would fail with its repo-relative links, never sees it).
+"CHANGELOG.md" = "foldyard/assets/CHANGELOG.md"
