@@ -210,11 +210,14 @@ def _deliver(backend: SshBackend, name: str, blob: Path) -> str:
     if target is None:
         return "no ssh route into the VM"
     dest = f"{_INBOX}/tetragon.tar.gz"
-    res = _ssh(
-        target,
-        f"cat > {shlex.quote(dest)}.part && mv -f {shlex.quote(dest)}.part {shlex.quote(dest)}",
-        stdin=blob.read_bytes(),
-    )
+    try:
+        res = _ssh(
+            target,
+            f"cat > {shlex.quote(dest)}.part && mv -f {shlex.quote(dest)}.part {shlex.quote(dest)}",
+            stdin=blob.read_bytes(),
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:  # a stalled ssh warns, never aborts `fy up`
+        return str(e)
     return "" if res.returncode == 0 else (res.stderr.strip() or f"exit {res.returncode}")
 
 

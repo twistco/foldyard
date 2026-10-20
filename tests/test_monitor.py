@@ -360,6 +360,25 @@ def test_ensure_never_delivers_a_download_that_fails_the_pin(guest, monkeypatch)
     assert g.delivered == []
 
 
+def test_a_stalled_delivery_is_a_reason_never_an_abort(guest, monkeypatch):
+    # `_ssh` times out after 600 s; the monitor only observes, so a delivery that hangs is a
+    # warning for `fy up` to print, not an exception that takes `machine.ensure` down with it
+    blob = b"tetragon release bytes"
+    monkeypatch.setitem(monitor.TETRAGON_SHA256, "x86_64", hashlib.sha256(blob).hexdigest())
+    monkeypatch.setattr(monitor, "_fetch", lambda url: blob)
+    g = guest(artifact="awaiting v1.7.1 amd64", policy="not installed")
+    reads = g.ssh
+
+    def stall(target, script, stdin=None):
+        if stdin is not None:
+            raise subprocess.TimeoutExpired("ssh", 600)
+        return reads(target, script)
+
+    monkeypatch.setattr(monitor, "_ssh", stall)
+    problem = monitor.ensure(BACKEND, "acme", WANT)
+    assert "copying Tetragon into the VM failed" in problem and "timed out" in problem
+
+
 def test_a_cached_release_is_rechecked_before_use(guest, monkeypatch, tmp_path):
     blob = b"good release"
     monkeypatch.setitem(monitor.TETRAGON_SHA256, "x86_64", hashlib.sha256(blob).hexdigest())
