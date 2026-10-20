@@ -345,7 +345,9 @@ Arguments pass to pytest (paths, not a quoted `-k` — `just` splits on whitespa
 Tiers 1–3 and the host tier all run on GitHub-hosted runners — Linux, and the host tier once more
 inside WSL2 on a Windows runner. `foldyard.yml` is the fast gate on every push; `foldyard-e2e.yml`
 holds the advisory live tiers, opt-in (`main`, a `[run-e2e]` commit message, or a dispatch). All
-four jobs use standard runners, which GitHub bills nothing for on a public repository. Four jobs:
+four jobs use standard runners, which GitHub bills nothing for on a public repository. (Beside
+them, `claude-pr-review.yml` posts an advisory Claude review on each same-repo PR, from the
+base branch's `.claude/commands/pr-review.md`, the prompt `/pr-review` runs locally.) Four jobs:
 
 | job | what | engine |
 | --- | --- | --- |
