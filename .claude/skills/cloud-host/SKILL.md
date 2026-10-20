@@ -122,14 +122,17 @@ the preset `DOCKER_HOST`. Two more settings are needed:
   bootstrap = '''
   d="${DOCKER_CONFIG:-$HOME/.docker}"
   mkdir -p "$d"
-  printf '{"proxies":{"default":{"httpProxy":"%s","httpsProxy":"%s","noProxy":"localhost,127.0.0.1"}}}' "$HTTPS_PROXY" "$HTTPS_PROXY" > "$d/config.json"
+  printf '{"proxies":{"default":{"httpProxy":"%s","httpsProxy":"%s","noProxy":"localhost,127.0.0.1"}}}' "${HTTP_PROXY:-$HTTPS_PROXY}" "$HTTPS_PROXY" > "$d/config.json"
   '''
   ```
 
   That covers `docker build`, which passes both spellings. Compose's classic builder passes only
-  `HTTP_PROXY`/`HTTPS_PROXY`, and apt reads only the lower-case `http_proxy`. So an apt `RUN` step
-  in a compose build still goes direct (`Could not connect to archive.ubuntu.com:80 … Connection
-  refused`). pip and curl read either spelling.
+  `HTTP_PROXY`/`HTTPS_PROXY`. apt reads only the lower-case `http_proxy`, and so does curl for an
+  `http://` URL. So an apt or `curl http://…` `RUN` step in a compose build still goes direct
+  (`Could not connect to archive.ubuntu.com:80 … Connection refused`). pip, and curl for `https://`,
+  read either spelling. Until the guest gives build steps both spellings, do one of these:
+  - pre-build those images with `docker build`;
+  - add the lower-case pair as build `args` in the compose file.
 
 The box has no `pkill`, `pgrep` or `ps`. To stop a background job, walk `/proc/*/cmdline`. Build
 the match pattern from two pieces (`pat=foo""bar`), or the loop's own command line matches it and
