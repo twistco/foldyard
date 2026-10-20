@@ -1107,7 +1107,7 @@ _MACHINE_MONITORS = ("off", "observe")
 
 
 def machine_monitor() -> str:
-    """``[machine].monitor`` — the guest monitor (:mod:`foldyard.monitor`, ADR-0031): ``"off"``
+    """``[machine].monitor`` — the guest monitor (:mod:`foldyard.monitor`, ADR-0032): ``"off"``
     (the default) or ``"observe"``, a root eBPF collector (Tetragon) provisioned into the lima VM
     at boot that RECORDS process, connection and selected file activity and enforces nothing.
     Only the levels foldyard knows how to provision are accepted — never a collector, policy or

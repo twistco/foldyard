@@ -1,6 +1,6 @@
 #!/bin/bash
 # fy-monitor @@ID@@
-# foldyard's guest-monitor boot provisioning (ADR-0031). The HOST records this in the instance's
+# foldyard's guest-monitor boot provisioning (ADR-0032). The HOST records this in the instance's
 # lima.yaml as a SECOND `provision: mode: system` script, beside foldyard's fy-provision one (so
 # turning the monitor on never changes that script's id); Lima runs it as root on every boot.
 # Rendered from assets/monitor/guest-boot.sh; the id above hashes the rendered content.

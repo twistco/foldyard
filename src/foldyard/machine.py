@@ -568,7 +568,7 @@ def _record_provisioning() -> None:
         raise SystemExit(1)
 
 
-# ── the guest monitor's boot script: a SECOND recording, under its own marker (ADR-0031) ──
+# ── the guest monitor's boot script: a SECOND recording, under its own marker (ADR-0032) ──
 #
 # Recorded beside the wall/sudo script, never inside it: that script's id covers every byte, so
 # folding the monitor in would make every existing VM stale the day it shipped. A VM that never

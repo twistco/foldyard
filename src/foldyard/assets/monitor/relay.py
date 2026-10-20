@@ -1,4 +1,4 @@
-"""fy-monitor relay — the guest monitor's root relay (ADR-0031). Runs IN THE GUEST as root, under
+"""fy-monitor relay — the guest monitor's root relay (ADR-0032). Runs IN THE GUEST as root, under
 systemd (``fy-monitor-relay.service``), from the copy the monitor boot script wrote — foldyard's
 own packaged code, never anything from the repo mount. Stdlib only: it runs under the guest's
 ``/usr/bin/python3``.

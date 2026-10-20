@@ -1,4 +1,4 @@
-# foldyard's guest-monitor policy (ADR-0031), on top of Tetragon's built-in process
+# foldyard's guest-monitor policy (ADR-0032), on top of Tetragon's built-in process
 # exec/exit events. Packaged and fixed: never read from config or the checkout. Observe only —
 # no selector carries an action, so nothing here can block. An invalid policy stops Tetragon
 # from starting at all (docs/ebpf-monitoring-spike.md, finding 3): the host-tier e2e loads it.

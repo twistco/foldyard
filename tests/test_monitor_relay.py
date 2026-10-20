@@ -1,4 +1,4 @@
-"""assets/monitor/relay.py — the guest monitor's root relay (ADR-0031), its pure parts on a fake
+"""assets/monitor/relay.py — the guest monitor's root relay (ADR-0032), its pure parts on a fake
 cgroup tree and a fake /proc. The live loop (tailing Tetragon, systemd, the real cgroup2 mount) is
 the host-tier e2e's (tests/test_monitor_e2e.py)."""
 

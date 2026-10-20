@@ -1,4 +1,4 @@
-"""monitorlog.py — the guest monitor's events on the host (ADR-0031, slice 2): the pull's
+"""monitorlog.py — the guest monitor's events on the host (ADR-0032, slice 2): the pull's
 verification and cursor, and the join that attributes events to containers. Spool lines are made
 with the relay's OWN signing code (assets/monitor/relay.py), so the two sides can't drift apart
 silently. The fetch script itself runs only in the guest (it needs find/stat/tail, which the

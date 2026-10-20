@@ -1,6 +1,6 @@
 # The guest monitor's host side: storage, filtering, the analysis pipeline and hooks
 
-Status: **design**, 2026-10-04. Builds on [ADR-0031](./adrs/0031-a-root-collector-in-the-guest.md)
+Status: **design**, 2026-10-04. Builds on [ADR-0032](./adrs/0032-a-root-collector-in-the-guest.md)
 (slices 1–2: Tetragon in the VM, the signed spool, the host pull and join). What is built today:
 the hook mechanism (§6). Everything else here is proposed, with the measurements it rests on.
 
@@ -161,7 +161,7 @@ flowchart LR
 **Trust:** every string in an event — arguments, paths, binary names — is chosen by whatever ran
 in the box. Stages 3 and 4 receive it as quoted data inside a fixed frame, never as instructions;
 the evaluation (plan §8F) includes adversarial text in filenames and arguments. Names and
-worktrees are claims (ADR-0031) and are labelled as such in every bundle.
+worktrees are claims (ADR-0032) and are labelled as such in every bundle.
 
 None of stages 2–4 is built. Each is reachable today through a hook.
 

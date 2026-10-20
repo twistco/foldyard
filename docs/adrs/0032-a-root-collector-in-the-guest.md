@@ -1,4 +1,4 @@
-# ADR-0031 — A root collector in the guest: Tetragon observes, foldyard attributes
+# ADR-0032 — A root collector in the guest: Tetragon observes, foldyard attributes
 
 - **Status:** Proposed (2026-10-04). Implemented behind `[machine] monitor = "observe"`, default
   off: slice 1 (the guest service you can see) and slice 2 (the relay, the host pull and the

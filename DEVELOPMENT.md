@@ -73,7 +73,7 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   `clone` resets it. See docs/base-vm.md.
 - `prereq.py` — `fy prereq`: project-free host checks (pure `rows(Host)` over gathered facts,
   capability-detected, install hints per package manager present); `--fetch` bakes the base.
-- `monitor.py` — the guest monitor (`[machine] monitor = "observe"`, ADR-0031): a root Tetragon
+- `monitor.py` — the guest monitor (`[machine] monitor = "observe"`, ADR-0032): a root Tetragon
   in the lima VM, provisioned by a SECOND recorded boot script under its own marker
   (`# fy-monitor <id>`, beside `# fy-provision <id>`, so it never makes the wall script's id
   stale); the pinned release is host-downloaded, streamed into a VM-user inbox and installed by a
@@ -593,7 +593,7 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   anyway. (They still say "wall" and "Mac" for that reason.)
   **The one exception is an opt-in feature's own root work**, which gets its own recorded script
   under its own marker so it never touches that id: the guest monitor (`assets/monitor/`,
-  `# fy-monitor <id>`, ADR-0031) is the one instance. Its rules: the two scripts never mention
+  `# fy-monitor <id>`, ADR-0032) is the one instance. Its rules: the two scripts never mention
   each other's marker (`set_provision` drops entries by a regex on the marker, so a mention would
   delete the other script), it ALWAYS exits 0 (Lima marks the whole boot failed otherwise —
   report problems in `/run/fy-monitor/` instead), a VM that never turned it on records nothing,

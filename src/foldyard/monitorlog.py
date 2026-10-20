@@ -1,4 +1,4 @@
-"""monitorlog.py — the guest monitor's events on the host (ADR-0031, slice 2).
+"""monitorlog.py — the guest monitor's events on the host (ADR-0032, slice 2).
 
 Two halves, deliberately apart:
 

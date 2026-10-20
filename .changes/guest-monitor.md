@@ -9,4 +9,4 @@ bump: minor
   is downloaded on your computer, copied into the VM, and checked again as root before it is
   installed. The box's user can't stop it, change its policy or read its log. `fy doctor` shows
   whether it is observing. Off by default; changing it needs `fy machine stop && fy up`. Events
-  stay in the VM in this release ([ADR-0031](docs/adrs/0031-a-root-collector-in-the-guest.md)).
+  stay in the VM in this release ([ADR-0032](docs/adrs/0032-a-root-collector-in-the-guest.md)).

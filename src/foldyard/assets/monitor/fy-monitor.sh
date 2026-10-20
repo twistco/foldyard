@@ -1,5 +1,5 @@
 #!/bin/bash
-# fy-monitor — foldyard's guest-monitor helper (ADR-0031). Root-owned at
+# fy-monitor — foldyard's guest-monitor helper (ADR-0032). Root-owned at
 # /usr/local/libexec/fy-monitor, written by the monitor boot script from the HOST's recording,
 # never from the repo mount. Three verbs, all run as root by systemd or the boot script:
 #

@@ -1,4 +1,4 @@
-"""monitor.py — the guest monitor (ADR-0031): its boot script, the release delivery, the report,
+"""monitor.py — the guest monitor (ADR-0032): its boot script, the release delivery, the report,
 and how machine.ensure records and checks it. The guest is never reached: ssh is stubbed at
 ``monitor._ssh``, the download at ``monitor._fetch``. What only a real guest can show — Tetragon
 loading the packaged policy, the .path unit firing, the box unable to stop it — is the host-tier
@@ -18,9 +18,11 @@ import test_machine
 from foldyard import devmode, machine, monitor
 from foldyard.machine_backend import PROVISION_MARKER, SshTarget
 
-# The machine fixtures, reused: a scripted backend (`fake`) and a running lima VM (`lima_env`).
+# The machine fixtures, reused: a scripted backend (`fake`), a running lima VM (`lima_env`) and
+# the CA isolation it stands on (`no_proxy_ca`).
 fake = test_machine.fake
 lima_env = test_machine.lima_env
+no_proxy_ca = test_machine.no_proxy_ca
 
 KEY = "ab" * 32
 

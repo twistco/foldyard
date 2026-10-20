@@ -1,4 +1,4 @@
-"""monitor.py — the guest monitor (``[machine].monitor = "observe"``, ADR-0031).
+"""monitor.py — the guest monitor (``[machine].monitor = "observe"``, ADR-0032).
 
 A root eBPF collector — Tetragon, a pinned release — runs in the lima VM and records process,
 connection and selected file activity for every container and the VM itself. It observes; it

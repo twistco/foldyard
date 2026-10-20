@@ -1,4 +1,4 @@
-"""The guest monitor (`[machine] monitor = "observe"`, ADR-0031) on a real VM.
+"""The guest monitor (`[machine] monitor = "observe"`, ADR-0032) on a real VM.
 
 `fy up` with the monitor on records its boot script beside the wall's (the VM is stopped first, so
 the recording applies), boots, and — the guest having no release yet — downloads the pinned

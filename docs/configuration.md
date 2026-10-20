@@ -293,7 +293,7 @@ disk_gib = 60
       0 or the URL answers 2xx; after five failures it is skipped and counted.
     - The design, and the analysis pipeline hooks are meant for:
       [docs/monitor-pipeline.md](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md).
-  - Details: [ADR-0031](./adrs/0031-a-root-collector-in-the-guest.md).
+  - Details: [ADR-0032](./adrs/0032-a-root-collector-in-the-guest.md).
 - **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`. Same rule as
   `[project].name`.
 - **`cpus`** / **`memory_mib`** / **`disk_gib`** — sizing at first creation. Defaults: `4` /
