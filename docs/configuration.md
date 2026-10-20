@@ -807,6 +807,13 @@ Best-effort: output streams to the terminal, a non-zero exit is reported but doe
 `fy up`, and a stopped box is a note (run `fy reclaim` in the box to reach its volumes).
 Per-worktree caches are reachable only from that worktree's box.
 
+**A prune that fails with `Permission denied` in a shared volume** is usually SELinux, which the
+VM's guest enforces. Each container has its own label, and a file copied into a volume from the
+container's own filesystem (`/tmp`, say) can keep it. Once that container is recreated, no other
+container can delete the file. `ls -Z` shows the label. Point the step that writes such files
+at a temp dir on the volume itself (`TMPDIR`), and clear the stuck ones once from a throwaway
+container run with `--security-opt label=disable`.
+
 ## `[plugins.<name>]`
 
 Plugin opt-ins: declaring the table, even empty, loads the plugin. Without it you never see its

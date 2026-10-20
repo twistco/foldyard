@@ -81,6 +81,16 @@ Tell them the hostname and what needs it. Detail: [egress.md](references/egress.
 anything else — not in an ad-hoc `apt install` that the next `fy box down` throws away. The
 `bootstrap-devbox` skill covers growing that config from inside the box.
 
+## When the disk fills
+
+`fy reclaim` frees engine-store space without restarting anything (`fy up` does the same by
+itself when the store runs low): foldyard's own image sweeps, then the project's
+`[reclaim] script` in the box. If a step in that script fails with `Permission denied` on a file
+in a volume, even as root, the cause is almost always an SELinux label. The VM's guest gives
+each container a private label, and a file copied into a shared volume can keep it. `ls -Z`
+shows the label; `fy docs configuration` (under `[reclaim]`) has the cause, the fix and the
+one-off cleanup.
+
 ## "I changed it and nothing happened"
 
 The most common class of confusion here. Full table:
