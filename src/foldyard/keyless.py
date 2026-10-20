@@ -181,9 +181,10 @@ def held_dummy(taxonomy: dict, kind: str) -> tuple[str, str] | None:
 
 def inject_spec(taxonomy: dict, host: str, kind: str, label: str) -> dict | None:
     """The ``[[inject]]``-style spec dict for a keyless mode (host + header + token_env + the scheme
-    value_prefix), or ``None`` if ``kind`` isn't in ``taxonomy``. The agent plugin feeds this to
-    ``inject._spec_to_rule`` to build its :class:`~foldyard.plugins.InjectRule` — so claude + codex
-    derive their rule identically, without either importing the other. Pure (no plugins import)."""
+    value_prefix + the dummy the box sends), or ``None`` if ``kind`` isn't in ``taxonomy``. The
+    agent plugin feeds this to ``inject._spec_to_rule`` to build its
+    :class:`~foldyard.plugins.InjectRule` — so claude + codex derive their rule identically,
+    without either importing the other. Pure (no plugins import)."""
     spec = taxonomy.get(kind)
     if spec is None:
         return None
@@ -195,6 +196,9 @@ def inject_spec(taxonomy: dict, host: str, kind: str, label: str) -> dict | None
         # Static long-lived key/token — no rotation benefit to a 401 re-mint (re-reading the same
         # host.env value wouldn't fix a real 401).
         "replay_on_401": False,
+        # The header value the box's client sends with the baked dummy — exactly, scheme included
+        # (``held_dummy``): how a request on a host shared with another injector names this one.
+        "dummies": (spec["value_prefix"] + spec["dummy"],),
         "label": label,
     }
 

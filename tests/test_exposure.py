@@ -210,6 +210,30 @@ def test_a_packaged_rule_overlapping_an_inject_row_is_listed_too(checkout):
     assert len([t for t in alone if t.active]) == 1
 
 
+HARNESS = (
+    '[claude]\nkeyless = "oauth"\n\n'
+    '[[inject]]\nswitch = "haiku"\nhost = "api.anthropic.com"\nheader = "x-api-key"\n'
+    'box_env = { HAIKU_API_KEY = "x" }\n'
+)
+
+
+def test_header_disjoint_credentials_on_one_host_both_show_and_neither_is_held_back(checkout):
+    # Keyless Claude on its OAuth token (authorization) and a harness row on an API key
+    # (x-api-key, with its dummy): the proxy routes each request by the dummy it carries, so both
+    # are injected — two live credentials on one host, each its own line.
+    cfg = checkout(BASE + "passthrough = []\n" + HARNESS)
+    mode = {"haiku": "on", "claude": "on"}
+    on_host = [t for t in collect(cfg, mode).targets if t.host == "api.anthropic.com"]
+    assert len(on_host) == 2 and all(t.active and not t.held_back for t in on_host)
+    _ok, _name, detail = exposure.doctor_row(collect(cfg, mode))
+    assert "2 injector targets live" in detail and "held back" not in detail
+    # The row alone on: Claude's credential can join it there, so it is listed as latent rather
+    # than folded into the row's line — it is a second credential, not the row's.
+    targets = [t for t in collect(cfg, {"haiku": "on"}).targets if t.host == "api.anthropic.com"]
+    assert [t.active for t in targets] == [True, False]
+    assert "fy mode claude=on" in targets[1].source
+
+
 def test_the_doctor_row_does_not_count_a_held_back_target_as_live(checkout):
     cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
     ok, _name, detail = exposure.doctor_row(collect(cfg, {"github": "on", "github-user": "on"}))

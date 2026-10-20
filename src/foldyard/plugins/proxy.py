@@ -341,6 +341,10 @@ def _net_leaf(e: dict, escape) -> str:
     if e.get("overlap"):
         # The proxy's own 502 too: two switches claim this host and path, so neither injects.
         mark = "credential overlap"
+    if e.get("unnamed"):
+        # The proxy's own 502 too: several credentials share this host and the request carried
+        # the dummy of none of them, or of more than one, so it named no one credential.
+        mark = "no credential named"
     line = (
         f"[dim]{ts}[/dim] {escape(e.get('method', '')):<6} "
         f"{escape(e.get('path', '')[:80])} [{colour}]{status}[/{colour}]"
@@ -407,10 +411,12 @@ def _network_panel_tree() -> PanelTree:
     return PanelTree(summary=summary, groups=groups)
 
 
-def _rule_to_json(rule) -> dict:
+def _rule_to_json(rule, switch: str = "") -> dict:
     """One :class:`InjectRule` → the JSON object egress_proxy.py's live-file rule expects
     (``minter``→``command``, ``replay_on_401``→``retry_401``). Only non-empty optional fields are
-    emitted, so the serialized rule set stays compact + stable. Used for the multi-injector case."""
+    emitted, so the serialized rule set stays compact + stable. Used for the multi-injector case.
+    ``switch`` is the one that puts the rule on (``Registry.switch_rules``), for the answer to a
+    request on a shared host that names no credential — or more than one."""
     out: dict = {"host": rule.host, "command": rule.minter, "retry_401": rule.replay_on_401}
     if rule.env:
         out["env"] = list(rule.env)  # the only host env this rule's minter may read
@@ -422,6 +428,12 @@ def _rule_to_json(rule) -> dict:
         out["path_prefix"] = rule.path_prefix
     if rule.value_prefix:
         out["value_prefix"] = rule.value_prefix
+    if rule.dummies:
+        out["dummies"] = list(rule.dummies)  # how a request on a shared host names this rule
+        if rule.any_scheme:
+            out["any_scheme"] = True
+    if switch:
+        out["switch"] = switch
     return out
 
 
@@ -502,10 +514,17 @@ class ProxyPlugin(Plugin):
         # declaring any injector (on or off), keeps the always-on proxy, as Phase A′ needs.
         if not self._opted_in(mode):
             return {}
-        # The addon injects the FIRST rule that matches, so two switches claiming one host and path
-        # would leave the credential to rule order: both sides are held back instead
-        # (Registry.injecting_rules). The listener above still runs for them — the box routes here.
+        # Where several rules match a request the addon injects only the one whose dummy it
+        # carries, so two switches claiming one host and path with nothing to tell them apart
+        # (one header, or no dummy) would leave the credential to chance: both sides are held back
+        # instead (Registry.injecting_rules). The listener above still runs for them — the box
+        # routes here.
         rules = self._registry.injecting_rules(mode) if self._registry else []
+        owner = {
+            rule: name
+            for name, owned in (self._registry.switch_rules(mode) if self._registry else {}).items()
+            for rule in owned
+        }
         # Phase A′ — ALWAYS-ON: the proxy runs unconditionally (was: only for an injector), because
         # the box ALWAYS routes through it (derive_env). A dead :8088 would connection-refuse every
         # box request, so the daemon must never be absent while a box exists.
@@ -535,7 +554,7 @@ class ProxyPlugin(Plugin):
             "BUILD_TOKENS_FILE": str(config.build_tokens_file()),
         }
         live = {
-            "rules": [_rule_to_json(r) for r in rules],
+            "rules": [_rule_to_json(r, owner.get(r, "")) for r in rules],
             # From the HOST-owned allow-store, never straight from the repo's `[proxy]`.
             "default_deny": _default_deny(),
             "passthrough": _resolve_passthrough(config.proxy_passthrough()),

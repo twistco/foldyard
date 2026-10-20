@@ -561,10 +561,36 @@ box_env = { GH_TOKEN = "x" }
 There is no `minter` key: a token service that needs more than a static token is a kind built
 into foldyard or an installed plugin, never a command from config
 ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)). Any number of injectors
-can be on at once, as long as no two of them inject on the same host and path: an `[[inject]]`
-row on `api.anthropic.com` and keyless `claude=on` can't both be on, and `fy mode` refuses the
-second one ([modes](./modes.md#tokens-never-enter-the-box)). Installing `gh` (or any other
-client) in the box is your box image's job.
+can be on at once. Two on the same host and path must be **header-disjoint**: each writes a
+different header (or query parameter), and the box holds a placeholder for each (a row's
+`box_env`; keyless Claude and Codex bake their own). The proxy then routes each request by the
+placeholder it carries in each injector's header, and injects only that injector's credential. A
+request that carries neither placeholder, or both, isn't sent: the proxy answers it with a 502
+whose JSON `message` names the host and both switches, and the Network Log marks the row
+`no credential named`. Two injectors that write the same header on one host, or one whose row has
+no `box_env`, still can't both be on: `fy mode` refuses the second one
+([modes](./modes.md#tokens-never-enter-the-box)). Installing `gh` (or any other client) in the
+box is your box image's job.
+
+For example, Claude Code on your Claude subscription and an evaluation harness in the same box
+that calls the Anthropic API with its own key:
+
+```toml
+[claude]
+keyless = "oauth"                  # Claude Code: `authorization: Bearer …` on api.anthropic.com
+
+[[inject]]
+switch = "haiku"                   # the harness: `fy mode haiku=on`
+host = "api.anthropic.com"
+header = "x-api-key"
+box_env = { HAIKU_API_KEY = "x" }  # the harness reads its key from HAIKU_API_KEY
+```
+
+With `claude=on` and `haiku=on`, Claude Code's requests carry its OAuth placeholder in
+`authorization` and get your OAuth token, and the harness's carry `x` in `x-api-key` and get the
+key in `FY_INJECT_HAIKU`. **Give the row's placeholder a variable only the harness reads.** Claude
+Code prefers `ANTHROPIC_API_KEY` over its OAuth token, so `box_env = { ANTHROPIC_API_KEY = "x" }`
+would move Claude Code onto the harness's API key.
 
 ## `[[secret]]`
 

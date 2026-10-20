@@ -2077,6 +2077,128 @@ def test_rules_overlap_is_same_host_and_nested_paths(a, b, overlap):
     assert plugins.rules_overlap(rule(b), rule(a)) is overlap
 
 
+def _placed(header: str = "", query: str = "", dummies: tuple[str, ...] = ()) -> InjectRule:
+    """A whole-host rule on api.x.test writing ``header`` (or the ``query`` param), whose client
+    in the box sends ``dummies`` there."""
+    return InjectRule(
+        host="api.x.test", header=header, minter="m", query_param=query, dummies=dummies
+    )
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "overlap"),
+    [
+        # Each writes its own header and the box names which it wants by the dummy it sends there.
+        (
+            _placed("authorization", dummies=("Bearer o",)),
+            _placed("x-api-key", dummies=("k",)),
+            False,
+        ),
+        (_placed("x-api-key", dummies=("k",)), _placed("x-goog-api-key", dummies=("k",)), False),
+        (_placed("x-api-key", dummies=("k",)), _placed(query="key", dummies=("q",)), False),
+        (_placed(query="key", dummies=("a",)), _placed(query="token", dummies=("b",)), False),
+        # One place, two credentials: the dummies can't say which (header names ignore case).
+        (_placed("x-api-key", dummies=("a",)), _placed("X-Api-Key", dummies=("b",)), True),
+        (_placed("", dummies=("a",)), _placed("Authorization", dummies=("b",)), True),  # default
+        (_placed(query="key", dummies=("a",)), _placed(query="key", dummies=("b",)), True),
+        # Without a dummy on BOTH sides a request can't name one, so the host is still one claim.
+        (_placed("authorization", dummies=("Bearer o",)), _placed("x-api-key"), True),
+        (_placed("authorization"), _placed("x-api-key"), True),
+    ],
+)
+def test_rules_overlap_unless_header_disjoint_with_dummies(a, b, overlap):
+    assert plugins.rules_overlap(a, b) is overlap
+    assert plugins.rules_overlap(b, a) is overlap
+
+
+def test_header_disjoint_rules_still_need_the_same_host_and_nested_paths():
+    other = InjectRule(host="api.y.test", header="authorization", minter="m", dummies=("o",))
+    assert not plugins.rules_overlap(_placed("authorization", dummies=("o",)), other)
+    v1, v2 = (
+        InjectRule(host="api.x.test", header="authorization", minter="m", path_prefix=p)
+        for p in ("/v1", "/v2")
+    )
+    assert not plugins.rules_overlap(v1, v2)  # one place, but no request reaches both
+
+
+_HARNESS_ROW = {
+    "switch": "haiku",
+    "host": "api.anthropic.com",
+    "header": "x-api-key",
+    "box_env": {"HAIKU_API_KEY": "x"},
+}
+
+
+def test_keyless_oauth_claude_and_an_x_api_key_row_share_api_anthropic_com(monkeypatch):
+    # The case the narrowing is for: Claude Code on its OAuth token (authorization) and a harness
+    # in the same box on an API key (x-api-key) — different headers, different dummies, so each
+    # request names the credential it wants and the proxy routes it (egress_proxy._rule_for).
+    monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
+    reg = Registry(
+        [claude.ClaudePlugin(), _inject_plugin(monkeypatch, [_HARNESS_ROW]), proxy.ProxyPlugin()]
+    )
+    both = {"claude": "on", "haiku": "on"}
+    assert reg.inject_overlaps(both) == [] and reg.mode_issues(both) == []
+    assert len(reg.injecting_rules(both)) == 2
+    live = reg.desired_daemons(both)["egress-proxy"]["live"]["data"]
+    assert live["overlaps"] == []
+    by_header = {r["header"]: r for r in live["rules"]}
+    assert by_header["authorization"]["dummies"] == ["Bearer sk-ant-oat-dummy"]
+    assert by_header["authorization"]["switch"] == "claude"
+    assert "any_scheme" not in by_header["authorization"]  # the agent's dummy is exact
+    assert by_header["x-api-key"]["dummies"] == ["x"]
+    assert by_header["x-api-key"]["switch"] == "haiku"
+    assert by_header["x-api-key"]["any_scheme"] is True  # the harness's client picks the scheme
+
+
+@pytest.mark.parametrize(
+    ("kind", "row"),
+    [
+        # Claude's api-key mode writes x-api-key too: one header, two credentials.
+        ("api-key", _HARNESS_ROW),
+        # A row with no box_env sends no dummy, so no request can name it.
+        ("oauth", {**_HARNESS_ROW, "header": "x-api-key", "box_env": {}}),
+        ("oauth", {**_HARNESS_ROW, "header": "Authorization"}),  # header names ignore case
+    ],
+)
+def test_claude_and_a_row_on_one_place_are_still_refused(monkeypatch, kind, row):
+    monkeypatch.setattr(config, "claude_keyless", lambda: kind)
+    reg = Registry([claude.ClaudePlugin(), _inject_plugin(monkeypatch, [row])])
+    both = {"claude": "on", "haiku": "on"}
+    assert reg.inject_overlaps(both) != []
+    assert [sev for sev, _ in reg.mode_issues(both)] == ["error"]
+
+
+def test_two_rows_writing_one_header_on_one_host_are_still_refused(monkeypatch):
+    rows = [
+        {**_HARNESS_ROW, "switch": "a", "box_env": {"A_KEY": "a"}},
+        {**_HARNESS_ROW, "switch": "b", "header": "X-Api-Key", "box_env": {"B_KEY": "b"}},
+    ]
+    reg = Registry([_inject_plugin(monkeypatch, rows)])
+    assert [sev for sev, _ in reg.mode_issues({"a": "on", "b": "on"})] == ["error"]
+
+
+def test_each_mechanism_that_bakes_a_dummy_puts_it_on_its_rule(monkeypatch):
+    # What the box sends where the rule injects, so the proxy can route by it. A row's box_env
+    # values (any scheme: the row's client decides), a keyless agent's exact header value.
+    rows = [
+        {**_HARNESS_ROW, "box_env": {"HAIKU_API_KEY": "x", "OTHER": "x", "THIRD": "y"}},
+        {"switch": "github", "kind": "github-app", "app_id": "1", "installation_id": "2"},
+    ]
+    haiku, github = _inject_plugin(monkeypatch, rows).proxy_rules({"haiku": "on", "github": "on"})
+    assert haiku.dummies == ("x", "y") and haiku.any_scheme is True
+    assert github.dummies == () and github.any_scheme is False  # no box_env: none known
+    monkeypatch.setattr(config, "claude_keyless", lambda: "api-key")
+    (rule,) = claude.ClaudePlugin().proxy_rules({"claude": "on"})
+    assert rule.dummies == ("sk-ant-dummy",) and rule.any_scheme is False
+    monkeypatch.setattr(config, "codex_keyless", lambda: "api-key")
+    (rule,) = codex.CodexPlugin().proxy_rules({"codex": "on"})
+    assert rule.dummies == ("Bearer sk-dummy",) and rule.any_scheme is False
+    monkeypatch.setattr(config, "codex_keyless", lambda: "chatgpt")
+    dummy = "Bearer " + keyless.codex_chatgpt_dummy_token()
+    assert {r.dummies for r in codex.CodexPlugin().proxy_rules({"codex": "on"})} == {(dummy,)}
+
+
 def test_two_switches_on_one_host_and_path_are_refused_by_name():
     # The github switch's off/app/user levels were exclusive by construction; independent
     # switches aren't, so the registry says so — an error row (set_mode refuses it) naming both
@@ -2626,6 +2748,23 @@ def test_network_panel_marks_a_request_an_overlap_held_back(monkeypatch, tmp_pat
     (tmp_path / "egress.jsonl").write_text(json.dumps(row) + "\n")
     [group] = proxy._network_panel_tree().groups
     assert "credential overlap" in group.children[0] and "[red]502[/red]" in group.children[0]
+
+
+def test_network_panel_marks_a_request_that_named_no_credential(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    row = {
+        "ts": "2026-10-20T10:00:01Z",
+        "method": "POST",
+        "host": "api.anthropic.com",
+        "path": "/v1/messages",
+        "status": 502,
+        "injected": False,
+        "unnamed": True,
+        "error_body": '{"message": "foldyard did not send this request: api.anthropic.com …"}',
+    }
+    (tmp_path / "egress.jsonl").write_text(json.dumps(row) + "\n")
+    [group] = proxy._network_panel_tree().groups
+    assert "no credential named" in group.children[0] and "[red]502[/red]" in group.children[0]
 
 
 def test_a_secret_rotation_changes_nothing_the_supervisor_restarts_for(monkeypatch):

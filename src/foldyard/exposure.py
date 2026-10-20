@@ -257,7 +257,9 @@ def _targets(
         if not (axis and host and kind):
             continue
         where = host + str(spec.get("path_prefix") or "")
-        seen.add(where)  # a LATENT packaged rule on the same place adds nothing the row didn't say
+        # Not added to `seen`: a LATENT packaged rule on the same place is a second credential,
+        # not the row's — header-disjoint injectors may share a host (ADR-0031 decision 4,
+        # amended), so arming it can add a credential there beside the row's.
         out.append(
             Target(
                 host=where,
