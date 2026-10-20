@@ -245,11 +245,13 @@ disk_gib = 60
     webpack `watchOptions.poll`). Edits made in the box work normally.
   - `fy verify` in the box adds a row checking the kernel it runs on; its VM mount audit reads
     `N/A` there, so run `fy verify` on your computer for that.
-- **`monitor`** — `"observe"` runs a guest monitor: a root eBPF collector
+- **`monitor`** *(experimental)* — `"observe"` runs a guest monitor: a root eBPF collector
   ([Tetragon](https://tetragon.io/)) in the VM that records what processes start, which
   connections they open and which selected files they touch, in every container and in the VM
   itself. It records; it blocks nothing. Default: `"off"`; any other value is an error. Lima only
   (preflight enforces it). Env: `MACHINE_MONITOR`.
+  - *Experimental*: nothing changes unless you turn it on, but its event format, `fy monitor
+    --json` output and hook payload may change in a minor release while it settles.
   - It is installed by a second root boot script, so changing it means `fy machine stop && fy up`.
     `fy up` downloads a pinned, checksummed Tetragon release on your computer and copies it into
     the VM; the VM checks the checksum again as root before installing it. Nothing comes from the
