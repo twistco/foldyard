@@ -4,7 +4,8 @@ name: docs
 # Every pull request builds it `--strict` — a dead link, a missing anchor or a link to a page that
 # isn't published yet fails the PR — and main deploys it. Every PR, not only docs ones: the pages
 # link files outside docs/ (DEVELOPMENT.md, workflows), so a PR that renames only one of those
-# breaks the build too. It takes seconds and runs no project code.
+# breaks the build too. It takes seconds, and runs the site's own build hook (docs-site/hooks.py)
+# with a read-only token — never the application.
 #
 # One-time setup, in the repo's settings (a token in a workflow can't do it): Pages → Build and
 # deployment → Source: GitHub Actions. Until then the deploy job fails; the build still checks.
