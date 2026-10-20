@@ -548,6 +548,7 @@ class LimaBackend(Backend):
         every boot, after cloud-init and the template's own provisioning, each independently. The
         other marker's entry is kept. ``edit`` refuses a running instance, which is the contract:
         a provisioning change needs a restart to apply."""
+        # `test` reads the marker as a regex: markers stay regex-literal (a test pins both)
         keep = f'(.provision // [])[] | select((.script // "") | test({json.dumps(marker)}) | not)'
         # UTF-8 intact: a `\uXXXX` escape lands in lima.yaml verbatim (yq keeps it), and the
         # guest would then echo the escape instead of the wall script's glyphs.

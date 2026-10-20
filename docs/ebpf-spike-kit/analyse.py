@@ -20,7 +20,9 @@ def main(events_path: str, workload_path: str) -> None:
             marks[parts[2]] = (parts[1], parts[3] if len(parts) > 3 else "")
         elif parts[:1] in (["CGROUP"], ["SURFACE"]):
             print(line.rstrip())
-    ids = {k: v[1][:31] for k, v in marks.items() if k in ("box", "sibling", "flat", "forge")}
+    # an empty id would claim every event with no container field — only real ids are judged
+    roles = ("box", "sibling", "flat", "forge")
+    ids = {k: v[1][:31] for k, v in marks.items() if k in roles and v[1]}
     who = {v: k for k, v in ids.items()}
 
     events = [json.loads(line) for line in open(events_path) if line.strip()]
@@ -60,6 +62,9 @@ def main(events_path: str, workload_path: str) -> None:
     lo, hi = marks["churn-start"][0][:23], marks["churn-end"][0][:23]
     churn = [e for e in in_run if lo <= e["time"][:23] <= hi]
     sizes = [len(json.dumps(e)) for e in churn]
+    if not sizes:  # missing telemetry, not a failed analysis: say which
+        print("\nchurn (500 execs): 0 events in the churn window — no size measurement")
+        return
     print(
         f"\nchurn (500 execs): {len(churn)} events, median {statistics.median(sizes):.0f} B/event,"
         f" {sum(sizes) / 1e6:.2f} MB"

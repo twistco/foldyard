@@ -540,6 +540,15 @@ def test_lima_set_provision_replaces_only_its_own_markers_entry(monkeypatch):
     assert "fy-provision" not in expr
 
 
+def test_every_provision_marker_reads_the_same_as_a_regex():
+    # set_provision's yq `test()` takes the marker as a REGEX; a `.` or `(` in a future marker
+    # would match — and so delete — another script's entry
+    from foldyard import monitor
+
+    for marker in (mb.PROVISION_MARKER, monitor.MARKER):
+        assert not set(marker) & set(".^$*+?()[]{}|\\"), marker
+
+
 def test_backends_without_a_provisionable_guest_record_nothing():
     for be in (mb.get_backend("podman"),):
         assert be.provision_id("x") == ""

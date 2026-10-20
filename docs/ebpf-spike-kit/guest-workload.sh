@@ -25,11 +25,16 @@ mark box-activity-end
 printf '%s' "{\"Image\":\"$img_alp\",\"Cmd\":[\"sh\",\"-c\",\"sleep 2; cat /etc/passwd >/dev/null; sleep 600\"]}" \
     >/tmp/create-$RUN.json
 podman cp /tmp/create-$RUN.json box-$RUN:/tmp/create.json
-podman exec box-$RUN sh -c "curl -sS --unix-socket /var/run/docker.sock -H 'Content-Type: application/json' \
+# -f: an API error is a failed step, not a silent 4xx/5xx body. No `set -e` here — step 7 expects
+# its probes to fail — so a sibling that didn't start is reported, and its marker never printed:
+# an empty id would make the analysis call every event with no container field the sibling's.
+podman exec box-$RUN sh -c "curl -fsS --unix-socket /var/run/docker.sock -H 'Content-Type: application/json' \
     -d @/tmp/create.json 'http://d/v1.41/containers/create?name=sib-$RUN' >/dev/null &&
-    curl -sS -X POST --unix-socket /var/run/docker.sock http://d/v1.41/containers/sib-$RUN/start"
+    curl -fsS -X POST --unix-socket /var/run/docker.sock http://d/v1.41/containers/sib-$RUN/start" ||
+    echo "SKIP sibling: create/start through the box's socket failed" >&2
 sleep 5
-mark sibling "$(podman inspect -f '{{.Id}}' sib-$RUN)"
+sib=$(podman inspect -f '{{.Id}}' sib-$RUN 2>/dev/null)
+if [ -n "$sib" ]; then mark sibling "$sib"; else echo "SKIP sibling: no container sib-$RUN" >&2; fi
 
 # 4. the same payload with NO sub-cgroup (crun's run.oci.systemd.subgroup annotation emptied) …
 podman run -d --name flat-$RUN --annotation run.oci.systemd.subgroup= $img_alp \
