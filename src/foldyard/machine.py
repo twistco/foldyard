@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -568,6 +569,36 @@ def _record_provisioning() -> None:
         raise SystemExit(1)
 
 
+# Lima copies the host's *_proxy variables into the guest at every start (`propagateProxyEnv`, on
+# by default). Under the VM firewall they override the wall's own proxy env, so on a host behind a
+# proxy the guest's podman pulled through THAT proxy and the wall refused every pull. Walled, the
+# guest gets foldyard's proxy and nothing else; unwalled, the host's proxy is its only one.
+_PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy")
+
+
+def _host_proxy_env() -> list[str]:
+    return [v for p in _PROXY_VARS for v in (p.upper(), p) if os.environ.get(v)]
+
+
+def _record_proxy_propagation() -> None:
+    want = not config.machine_wall()
+    have = BACKEND.proxy_propagation(MACHINE)
+    if have is None or have == want:
+        return
+    if state() == "running":
+        # `limactl edit` refuses a running VM, and what its guest got was decided at its start —
+        # which can't be read back. Recorded at the next stop; warned about where it matters.
+        if not want and (found := _host_proxy_env()):
+            _err(f"⚠ '{MACHINE}' was started copying your proxy env ({', '.join(found)}) into the")
+            _err("  guest, where it overrides the VM firewall's proxy: the guest's image pulls are")
+            _err("  refused. Restart once to stop it:  fy machine stop && fy up")
+        return
+    _err(f"▶ {'copying' if want else 'not copying'} your proxy env into '{MACHINE}'s guest…")
+    if not BACKEND.set_proxy_propagation(MACHINE, want):
+        _err(f"✗ recording propagateProxyEnv into '{MACHINE}' failed (`limactl edit`).")
+        raise SystemExit(1)
+
+
 # ── the guest monitor's boot script: a SECOND recording, under its own marker (ADR-0032) ──
 #
 # Recorded beside the wall/sudo script, never inside it: that script's id covers every byte, so
@@ -699,6 +730,7 @@ def ensure(main: Path, wt_root: Path) -> None:
     # what runs as root at boot — and a running VM whose recording is stale is refused here.
     _record_provisioning()
     _record_monitor()
+    _record_proxy_propagation()
     _pin_ssh_port()
     if state() != "running":
         if not _start():
@@ -921,6 +953,7 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
         return 1
     _record_provisioning()  # the fresh VM is stopped: record before its first boot
     _record_monitor()
+    _record_proxy_propagation()
     if not _start():  # one-VM-at-a-time aware on non-concurrent backends
         return 1
     _check_host_wall()
