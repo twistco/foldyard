@@ -25,7 +25,7 @@ for d in "$demo_dir" "$state_dir"; do
 done
 
 # The host keeps adoptions, the allow-store and the supervisor's state here; a fresh one per
-# recording is what makes the first `fy box up` show the first-adoption review every time.
+# recording is what makes every recording start from "nothing adopted, nothing granted".
 export FOLDYARD_STATE_DIR="$state_dir"
 
 cd "$demo_dir" || return 1
@@ -41,6 +41,11 @@ printf '%s\n' "$marker" > .gitignore
 git init -q
 git add -A
 git -c user.email=demo@foldyard -c user.name=demo commit -qm "initial commit"
+# A real repo has an origin, and `fy verify` needs one: its push probe proves "no credential
+# reaches origin" only from a dry-run push that origin refuses for want of one, and with no
+# remote it reports the refusal UNPROVEN (a FAIL). Any repo works for that; this public one is
+# what tests/test_box_e2e.py gives its copy for the same check.
+git remote add origin https://github.com/twistco/foldyard.git
 
 # A short prompt that says which side of the boundary you're on — the box's own prompt is the
 # Debian default for root (`root@box:/path#`), so the two read differently on screen.

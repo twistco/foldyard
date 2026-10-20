@@ -146,6 +146,16 @@ def test_the_demo_tape_only_types_commands_that_exist():
     assert not unknown, f"the demo tape types: {unknown}"
 
 
+def test_the_demo_tape_types_only_ascii():
+    """VHS sends a typed character as keystrokes, and a non-ASCII one doesn't arrive as itself: the
+    first real recording typed `# the box can write foldyard.toml — e.g. …` and bash's line editor
+    received the em dash as an edit command, so the GIF showed `# the box can foldyard.toml write
+    e.g. …`. Nothing fails when that happens; the front page just reads wrong."""
+    typed = ["".join(m) for m in _TYPED.findall(DEMO_TAPE.read_text())]
+    bad = [t for t in typed if not t.isascii()]
+    assert not bad, f"non-ASCII in typed text (VHS mangles it): {bad}"
+
+
 def test_the_init_scaffold_never_teaches_a_key_foldyard_stopped_honouring():
     """The `[proxy] allow` regression, mechanised: `exposure.IGNORED_KEYS` is the list of keys we
     deleted, so the scaffold must not mention any of them — not even commented out, since the

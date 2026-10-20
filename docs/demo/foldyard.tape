@@ -120,7 +120,7 @@ Sleep 4s
 Type "clear"
 Enter
 Wait
-Type "# the box can write foldyard.toml — e.g. ask for ripgrep:"
+Type "# the box can write foldyard.toml, e.g. to ask for ripgrep:"
 Enter
 Wait
 Type "cat >> foldyard.toml <<'EOF'"
