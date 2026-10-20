@@ -11,6 +11,9 @@ name: demo
 #     (releases/latest/download/foldyard-demo.gif — no bot commits, never newer than a release).
 #   - a manual dispatch, to iterate on the tape: with no `release`, it installs the checkout and
 #     only uploads the GIF as a run artifact. Give it a tag to (re)attach to that release.
+#   - a pull request that touches the tape, its setup or this file: recorded like a plain
+#     dispatch, so a tape change is seen rendered before it merges (and a dispatch can't run a
+#     workflow file the default branch doesn't have yet).
 #
 # Advisory by construction: a failed recording never touches the release itself (the caller runs
 # it after `github-release`), it only leaves that release without a GIF until a dispatch fills it.
@@ -21,6 +24,10 @@ on:
         description: "release tag to install from PyPI and attach the GIF to"
         type: string
         default: ""
+  pull_request:
+    paths:
+      - docs/demo/**
+      - .github/workflows/demo.yml
   workflow_dispatch:
     inputs:
       release:
