@@ -1970,6 +1970,39 @@ def test_a_service_container_keeps_node_off_the_env_proxy(tmp_path, case):
     assert json.loads(spec.read_text())["process"]["env"] == ["container=podman", *_CA_ENV]
 
 
+def test_a_build_steps_proxy_env_comes_in_both_spellings(tmp_path):
+    # Compose's classic builder (DOCKER_BUILDKIT=0 — podman serves no BuildKit) passes only the
+    # upper-case proxy build args, and apt reads only `http_proxy`: an apt RUN step in a compose
+    # build went direct and the wall refused it (2026-10-20). Each one the step lacks is mirrored.
+    mounts = [*_CA_MOUNTS, _containerenv(tmp_path, _BUILDAH_CONTAINERENV)]
+    proxy = "http://192.168.5.2:41000"
+    given = [f"HTTP_PROXY={proxy}", f"https_proxy={proxy}", "NO_PROXY=localhost"]
+    spec = _spec(tmp_path, given, mounts=mounts)
+    _ca_env().main(["create", "--bundle", str(spec.parent), "c1"])
+    env = json.loads(spec.read_text())["process"]["env"]
+    assert env[: len(given)] == given  # what the build said is kept, first
+    for name, value in (("http_proxy", proxy), ("HTTPS_PROXY", proxy), ("no_proxy", "localhost")):
+        assert env.count(f"{name}={value}") == 1
+
+
+def test_a_build_steps_two_spellings_are_left_as_given(tmp_path):
+    # When the build set both, even differently, the step gets what it asked for.
+    mounts = [*_CA_MOUNTS, _containerenv(tmp_path, _BUILDAH_CONTAINERENV)]
+    given = ["HTTP_PROXY=http://a:1", "http_proxy=http://b:2"]
+    spec = _spec(tmp_path, given, mounts=mounts)
+    _ca_env().main(["create", "--bundle", str(spec.parent), "c1"])
+    env = json.loads(spec.read_text())["process"]["env"]
+    assert [e for e in env if e.lower().startswith("http_proxy=")] == given
+
+
+def test_a_service_containers_proxy_env_is_not_mirrored(tmp_path):
+    # podman gives its own containers both spellings already; only build steps are touched.
+    mounts = [*_CA_MOUNTS, _containerenv(tmp_path, "")]
+    spec = _spec(tmp_path, ["HTTP_PROXY=http://a:1"], mounts=mounts)
+    _ca_env().main(["create", "--bundle", str(spec.parent), "c1"])
+    assert json.loads(spec.read_text())["process"]["env"] == ["HTTP_PROXY=http://a:1", *_CA_ENV]
+
+
 def test_an_images_own_node_proxy_setting_wins(tmp_path):
     mounts = [*_CA_MOUNTS, _containerenv(tmp_path, _BUILDAH_CONTAINERENV)]
     spec = _spec(tmp_path, ["NODE_USE_ENV_PROXY=0"], mounts=mounts)

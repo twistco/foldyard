@@ -104,7 +104,9 @@ _oci_wrapper() {
     install -d -m 0755 /usr/local/libexec/fy-oci
     cat >/usr/local/libexec/fy-oci/ca-env.py <<'__FY_CA_ENV__'
 """foldyard (fy-machine-wall): add the proxy CA's env to a container spec that mounts the CA,
-and to a build step's, the switch that makes Node's fetch use the proxy env.
+and to a build step's, the switch that makes Node's fetch use the proxy env and each proxy
+variable in the spelling it lacks (compose's classic builder passes only HTTP_PROXY/HTTPS_PROXY,
+and apt reads only http_proxy).
 
 Called by the crun wrapper beside it with crun's own argv. Only a create (or run) names a bundle;
 anything else, or anything unexpected, leaves the spec untouched."""
@@ -122,7 +124,19 @@ ENV = (
     ("GIT_SSL_CAINFO", BUNDLE),
 )
 BUILD_ENV = (("NODE_USE_ENV_PROXY", "1"),)
+PROXY_VARS = ("http_proxy", "https_proxy", "no_proxy")
 CONTAINERENV = "/run/.containerenv"
+
+
+def other_spellings(env):
+    """The proxy variables in the case the env lacks, valued as the case it has."""
+    given = dict(e.split("=", 1) for e in env if "=" in e)
+    out = []
+    for low in PROXY_VARS:
+        for have, want in ((low.upper(), low), (low, low.upper())):
+            if have in given and want not in given:
+                out.append(want + "=" + given[have])
+    return out
 
 
 def is_build(spec):
@@ -155,8 +169,10 @@ def patch(path):
     process = spec["process"]
     env = process.get("env") or []
     have = set(e.split("=", 1)[0] for e in env)
-    wanted = ENV + (BUILD_ENV if is_build(spec) else ())
+    build = is_build(spec)
+    wanted = ENV + (BUILD_ENV if build else ())
     add = [name + "=" + value for name, value in wanted if name not in have]
+    add += other_spellings(env) if build else []
     if not add:
         return
     process["env"] = env + add
