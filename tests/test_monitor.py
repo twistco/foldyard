@@ -7,6 +7,7 @@ e2e's (tests/test_monitor_e2e.py)."""
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -123,6 +124,19 @@ def test_the_relay_key_is_created_once_private_and_stable(monkeypatch, tmp_path)
     assert monitor.relay_key() == key  # stable: it is in the provisioning id
     path.write_text("truncated")
     assert monitor.relay_key() != key  # a damaged key is replaced, never used
+
+
+def test_the_relay_key_is_never_on_disk_with_wider_permissions(monkeypatch, tmp_path):
+    # the key is what makes the spool's signatures mean anything: created 0600, not chmodded after
+    monkeypatch.undo()
+    monkeypatch.setattr(monitor.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitor.Path, "chmod", lambda self, mode: None)  # no fixing it up later
+    old = os.umask(0o022)
+    try:
+        monitor.relay_key()
+    finally:
+        os.umask(old)
+    assert oct((tmp_path / "monitor-relay.key").stat().st_mode & 0o777) == "0o600"
 
 
 def test_the_collector_is_started_by_the_boot_script_never_by_systemd_at_boot():
@@ -349,7 +363,7 @@ def test_ensure_delivers_the_pinned_release_when_the_guest_waits(guest, monkeypa
     assert monitor.ensure(BACKEND, "acme", WANT) == ""
     assert g.delivered == [blob]
     assert fetched == [monitor.release_url("x86_64")]
-    assert "tetragon-v1.7.1-amd64.tar.gz" in fetched[0]
+    assert f"tetragon-{monitor.TETRAGON_VERSION}-amd64.tar.gz" in fetched[0]
 
 
 def test_ensure_never_delivers_a_download_that_fails_the_pin(guest, monkeypatch):
@@ -377,6 +391,55 @@ def test_a_stalled_delivery_is_a_reason_never_an_abort(guest, monkeypatch):
     monkeypatch.setattr(monitor, "_ssh", stall)
     problem = monitor.ensure(BACKEND, "acme", WANT)
     assert "copying Tetragon into the VM failed" in problem and "timed out" in problem
+
+
+class Clock:
+    """``monitor.time`` with a clock that moves only when ensure() sleeps."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, s):
+        self.now += s
+
+
+def test_a_relay_that_never_comes_up_is_reported_within_its_grace_not_the_wait(guest, monkeypatch):
+    # Restart=always, and the relay waits for Tetragon's export in-process: `activating` with
+    # Tetragon up and the policy loaded is a crash loop — waiting the whole 600 s helps no one
+    g = guest(relay="activating")
+    clock = Clock()
+    monkeypatch.setattr(monitor, "time", clock)
+    problem = monitor.ensure(BACKEND, "acme", WANT)
+    assert "fy-monitor-relay.service" in problem and "activating" in problem
+    assert clock.now <= monitor.RELAY_GRACE + 5 and g.reads < 20
+
+
+def test_a_relay_not_started_because_tetragon_failed_is_reported_at_once(guest, monkeypatch):
+    # fy-monitor.sh starts the relay only after Tetragon starts: an inactive relay beside a
+    # failed Tetragon will never change by itself
+    guest(service="failed", policy="failed: tetragon.service did not start", relay="inactive")
+    clock = Clock()
+    monkeypatch.setattr(monitor, "time", clock)
+    assert "tetragon.service is failed" in monitor.ensure(BACKEND, "acme", WANT)
+    assert clock.now == 0
+
+
+def test_a_relay_still_starting_after_the_policy_loads_is_waited_for(guest, monkeypatch):
+    g = guest(relay="inactive")
+    clock = Clock()
+    monkeypatch.setattr(monitor, "time", clock)
+    reads = g.ssh
+
+    def comes_up(target, script, stdin=None):
+        if g.reads == 2:
+            g.state["relay"] = "active"
+        return reads(target, script, stdin)
+
+    monkeypatch.setattr(monitor, "_ssh", comes_up)
+    assert monitor.ensure(BACKEND, "acme", WANT) == ""
 
 
 def test_a_cached_release_is_rechecked_before_use(guest, monkeypatch, tmp_path):

@@ -30,6 +30,7 @@ apply it is a visible warning (``fy up``, ``fy doctor``), never a reason to refu
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
 import shlex
 import subprocess
@@ -55,6 +56,7 @@ _BASE_URL = "https://github.com/cilium/tetragon/releases/download"
 # First line after the shebang of the rendered boot script; lima.yaml carries it verbatim.
 MARKER = "# fy-monitor "
 POLICY = "fy-observe"
+RELAY_GRACE = 30.0  # seconds a relay may take to come up once the policy loaded
 _INBOX = "/var/lib/fy-monitor/inbox"
 
 
@@ -84,8 +86,10 @@ def relay_key() -> str:
         path.parent.mkdir(parents=True, exist_ok=True)
         key = secrets.token_hex(32)
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(key + "\n")
-        tmp.chmod(0o600)
+        tmp.unlink(missing_ok=True)
+        # 0600 from the create: a write-then-chmod leaves the key readable in between
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            f.write(key + "\n")
         tmp.replace(path)
     return key
 
@@ -243,13 +247,23 @@ def ensure(backend: SshBackend, name: str, want_id: str, *, wait: float = 600.0)
             return f"copying Tetragon into the VM failed: {why}"
         report = replace(report, artifact="installing")  # the guest's .path unit has it now
     deadline = time.monotonic() + wait
+    relay_due = None  # when a relay that is still starting has had long enough
     while True:
         problem = report.problem(want_id)
+        # The relay is started right after Tetragon, so it is worth waiting on only while
+        # Tetragon runs — and only briefly: it waits for Tetragon's export in-process, so one
+        # still not active RELAY_GRACE after the policy loaded is crash-looping (Restart=always).
+        if report.service == "active" and report.policy == f"loaded {POLICY}":
+            relay_due = time.monotonic() + RELAY_GRACE if relay_due is None else relay_due
+        relay_starting = (
+            report.service == "active"
+            and report.relay in ("activating", "inactive", "")
+            and (relay_due is None or time.monotonic() < relay_due)
+        )
         settling = (
             report.artifact.startswith(("awaiting", "installing"))
             or report.policy in ("loading", "not installed")
-            # the relay starts with Tetragon, and restarts every 5 s until its export exists
-            or report.relay in ("activating", "inactive", "")
+            or relay_starting
         )
         if not problem or not settling or time.monotonic() >= deadline:
             return problem

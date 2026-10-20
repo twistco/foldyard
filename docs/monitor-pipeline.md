@@ -10,7 +10,8 @@ From the slice-2 live runs on a Lima `template:podman` guest (Fedora 44, Tetrago
 `fy-observe` policy, `enable-process-ns`), a VM with a box and a stack, under QEMU TCG:
 
 - **~7 events/s at rest**, ~2.1 KB each as stored (the full Tetragon event: the process, its
-  parent, eleven namespaces). About **25 MB/hour** raw.
+  parent, eleven namespaces). About **53 MB/hour** raw at that rate (7 × 2.1 KB × 3,600 s —
+  derived from the two measurements, not measured itself).
 - **60% of events are process exits.** The single largest source is `pasta` exiting (14%); then
   shell plumbing — `readlink`/`basename`/`ln`/`rm`/`grep`/`grepconf.sh` — from login shells and
   Lima's own boot scripts.
