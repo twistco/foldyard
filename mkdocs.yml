@@ -1,0 +1,100 @@
+# The docs site: docs/ rendered for GitHub Pages (.github/workflows/docs.yml; locally `just docs-site`).
+# The markdown is the same files GitHub renders and `fy docs` ships, so nothing here may need the
+# pages to change: links that leave docs/ are pointed at GitHub by docs-site/hooks.py instead.
+site_name: foldyard
+site_description: >-
+  An isolated development environment on your own computer for your whole dev stack, secretless
+  by default.
+site_url: https://twistco.github.io/foldyard/
+repo_url: https://github.com/twistco/foldyard
+repo_name: twistco/foldyard
+edit_uri: edit/main/docs/
+docs_dir: docs
+
+# Not pages of the site: the workshop slides (not published yet), the demo tape + its setup script,
+# and the runnable kits' scripts (their write-ups are pages; the kits stay on GitHub).
+exclude_docs: |
+  talks/
+  demo/
+  ebpf-spike-kit/
+  archive/lima-network-forcing-kit/
+
+hooks:
+  - docs-site/hooks.py
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  # Heading ids are GitHub's, not MkDocs' own (docs-site/hooks.py sets the slugify).
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.details
+
+# --strict turns every warning into a failure, so these say which findings are warnings. A page
+# missing from the nav is fine for the long tail (each ADR, archive study and prior-art deep-dive
+# is reached from its section's index); a link to a page that doesn't exist is not.
+validation:
+  omitted_files: info
+  absolute_links: info
+  unrecognized_links: warn
+  anchors: warn
+
+not_in_nav: |
+  adrs/0*.md
+  archive/*.md
+  prior-art/*.md
+
+nav:
+  - Home: README.md
+  - The manual:
+      - glossary.md
+      - quickstart.md
+      - workshop.md
+      - base-vm.md
+      - configuration.md
+      - modes.md
+      - networking.md
+      - github-app.md
+      - gcp.md
+      - security.md
+      - git.md
+      - stack.md
+      - compose-overlays.md
+      - testing-modes.md
+  - The design record:
+      - Decisions (ADRs): adrs/README.md
+      - prior-art.md
+      - Deep-dives: prior-art/README.md
+      - Archive: archive/README.md
+  - Contributing:
+      - releasing.md
+      - linux-support.md
+      - isolation-layers.md
+      - lima-backend-scope.md
+      - lima-wall-machine-integration.md
+      - nested-virt.md
+      - monitor-pipeline.md
+      - ebpf-monitoring-spike.md

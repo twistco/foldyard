@@ -1,0 +1,65 @@
+name: docs
+
+# The docs site (mkdocs.yml): docs/ rendered for GitHub Pages at https://twistco.github.io/foldyard/.
+# Every pull request that touches it builds it `--strict` — a dead link, a missing anchor or a link
+# to a page that isn't published yet fails the PR — and main deploys it.
+#
+# One-time setup, in the repo's settings (a token in a workflow can't do it): Pages → Build and
+# deployment → Source: GitHub Actions. Until then the deploy job fails; the build still checks.
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - docs-site/**
+      - justfile
+      - .github/workflows/docs.yml
+  pull_request:
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - docs-site/**
+      - justfile
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to a PR supersedes its build; deploys from main queue rather than cancel each other.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@v4
+      - uses: astral-sh/setup-uv@v8.2.0
+      - run: just docs-site
+      - uses: actions/upload-pages-artifact@v4
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: site
+
+  # Holds the Pages + OIDC permissions and runs no project code, like release.yml's publish job.
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

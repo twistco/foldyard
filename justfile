@@ -119,6 +119,19 @@ check: lint typecheck
     export UV_PROJECT_ENVIRONMENT="${XDG_CACHE_HOME:-$HOME/.cache}/foldyard/dev-venv-$(echo "{{_dir}}" | cksum | cut -d\  -f1)"
     exec uv run --project "{{_dir}}" pytest "{{_dir}}/tests" -n auto
 
+# Build the docs site (mkdocs.yml → ./site) the way CI does, `--strict`: a dead link, a missing
+# anchor or a link to an unpublished page fails it. `just docs-site serve` previews it live on
+# http://127.0.0.1:8000. Pinned tools via uvx, deliberately not a dependency group: adding one
+# re-resolves uv.lock wholesale. Material for MkDocs is in maintenance mode and MkDocs 1.x frozen;
+# Zensical, their successor, reads the same mkdocs.yml — the move is these pins and this command.
+docs-site cmd="build":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{_dir}}"
+    args=(--strict)
+    [ "{{cmd}}" = build ] || args=()
+    exec uvx --from 'mkdocs==1.6.1' --with 'mkdocs-material==9.7.7' mkdocs "{{cmd}}" "${args[@]}"
+
 # Record the README demo (docs/demo/foldyard.tape) with VHS, against THIS computer's real VM and
 # the `fy` on PATH (`just install` first to record the source tree). Needs vhs (macOS: `brew
 # install vhs`, which brings ttyd + ffmpeg) and the host prerequisites. Slow — it boots a VM and

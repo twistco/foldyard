@@ -437,6 +437,13 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   [.changes/README.md](./.changes/README.md)); `just release` folds them into `CHANGELOG.md`.
   Never add an `## Unreleased` section back — it made every pair of open PRs conflict.
   `tests/test_changes.py` validates the pending files in `check`.
+- **The docs site renders `docs/` as it is** (`mkdocs.yml`, `.github/workflows/docs.yml`: a
+  `--strict` build on every PR that touches docs, deployed from main to
+  [twistco.github.io/foldyard](https://twistco.github.io/foldyard/); `just docs-site` locally).
+  Write pages for GitHub and `fy docs` as before — `docs-site/hooks.py` adapts them at build time:
+  a link out of `docs/` goes to GitHub, a GitHub URL for something the site holds comes back to
+  the site, and heading ids are GitHub's, so `#anchor` links work in both. `talks/` is in the repo
+  but not on the site yet (the hook's `UNPUBLISHED`): a link into it fails the build.
 - **Three surfaces TEACH, and none of them fails when it lies:** the bundled skills
   (`assets/skills/`, installed into a consumer's `.claude/skills/`), the `fy init` scaffold, and
   the docs `fy docs` ships. `tests/test_agent_guide.py` is the mechanical guard — every ``fy …``

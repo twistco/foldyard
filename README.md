@@ -10,6 +10,8 @@ Podman**. The VM mounts your repo and nothing else.
 
 New to the vocabulary? The [glossary](./docs/glossary.md) defines every term these docs use.
 
+![foldyard's quick start, recorded against a real VM: foldyard init, review and adopt the config, grant the recommended egress, fy box up, fy verify ALL PASS in the box, then the box edits foldyard.toml and your computer shows the diff and asks before it runs it](https://github.com/twistco/foldyard/releases/latest/download/foldyard-demo.gif)
+
 ## TL;DR
 
 Install the prerequisites. Lima creates the VM; podman talks to the container engine inside it.
@@ -55,8 +57,9 @@ out of the repo. Credentials the box really needs are supplied by [modes](./docs
 without ever entering the VM.
 Foldyard can mount a clean repo; it can't clean a dirty one.
 
-The full walkthrough is [docs/quickstart.md](./docs/quickstart.md). The whole manual also ships
-with the install, offline and matched to your version: `fy docs`.
+The full walkthrough is [docs/quickstart.md](./docs/quickstart.md). The whole manual is online at
+[twistco.github.io/foldyard](https://twistco.github.io/foldyard/), and also ships with the
+install, offline and matched to your version: `fy docs`.
 
 ## Architecture
 

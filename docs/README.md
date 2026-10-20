@@ -2,6 +2,8 @@
 
 Start with the [README](../README.md): what foldyard is and why. Then pick by what you need.
 
+![foldyard's quick start, recorded against a real VM: foldyard init, review and adopt the config, grant the recommended egress, fy box up, fy verify ALL PASS in the box, then the box edits foldyard.toml and your computer shows the diff and asks before it runs it](https://github.com/twistco/foldyard/releases/latest/download/foldyard-demo.gif)
+
 ## The manual
 
 For using foldyard. These pages also ship with the install — `fy docs` prints them offline.
@@ -59,8 +61,6 @@ Why foldyard is built the way it is.
     all egress through the proxy, and why the rootless firewall won.
   - [lessons.md](./archive/lessons.md) — fourteen incidents from building foldyard, each with its
     lesson and the ADR that records the fix, and what's still open: why a dev sandbox is needed.
-- [talks/](./talks/) — slide decks (Marp): [why-sandbox.md](./talks/why-sandbox.md), a
-  tool-agnostic talk on why a dev environment needs a sandbox and how to choose one.
 
 ## Contributing to foldyard
 
