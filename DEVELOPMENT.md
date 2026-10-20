@@ -492,6 +492,12 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   `ensure` takes the start path, not the revive: `start` ends a Broken instance with Lima's own
   `limactl stop --force` first (a SIGSTOPped hostagent + removed socket reproduces it; recovered
   in 34 s live, 2026-09-28).
+- **Never `limactl list --json`** — that path re-reads its own output through a 64 KiB-a-line
+  `bufio.Scanner`, and each line carries the instance's whole config. With the wall's and the
+  guest monitor's boot scripts recorded (~68 KB of `lima.yaml`), `list` fails "token too long"
+  and prints nothing, so every lookup reads "no such VM" (Lima 2.2.0; the host tier's first
+  monitor run). `LimaBackend._instances` and `e2e_host.lima_list` use `--format '{{json .}}'`,
+  which writes straight out; split its rows on `\n` only (Go leaves U+0085 unescaped).
 - **Port offsets:** `stack._offset` shells to system `cksum` for exact parity with the
   original shell implementation.
 - **Module-level constants** (`devmode.AXES`/`MODE_BLURB`/`AXIS_DAEMON`/`EMERGENCY`,

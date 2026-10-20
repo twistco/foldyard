@@ -31,6 +31,7 @@ from e2e_host import (
     fy,
     fy_ok,
     host_tier,
+    lima_list,
     lima_shell,
     lima_status,
 )
@@ -57,12 +58,9 @@ def repo(tmp_path_factory):
 
 
 def _base_status() -> str:
-    out = subprocess.run(
-        ["limactl", "list", "--json"], capture_output=True, text=True, timeout=30
-    ).stdout
-    for line in out.splitlines():
-        if line.strip() and json.loads(line).get("name") == BASE:
-            return str(json.loads(line).get("status", ""))
+    for inst in lima_list():
+        if inst.get("name") == BASE:
+            return str(inst.get("status", ""))
     return ""
 
 

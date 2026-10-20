@@ -477,16 +477,23 @@ class LimaBackend(Backend):
         return True  # Lima runs N VMs natively — no exclusive-active gate
 
     def _instances(self, name: str = "") -> list[dict]:
-        """Parse `limactl list --json` (JSON-lines, one object per instance). With ``name``,
-        filters to that instance."""
-        cmd = ["limactl", "list", "--json"]
+        """``limactl list`` as one JSON object per instance (the same fields ``--json`` gives).
+        With ``name``, filters to that instance.
+
+        Through a ``{{json .}}`` template, never ``--json``: that path re-reads its own output
+        through a 64 KiB-a-line ``bufio.Scanner``, and each line carries the instance's whole
+        config — so a VM with the wall's and the guest monitor's boot scripts recorded made
+        ``list`` fail ("token too long", nothing printed) and every lookup read "no such VM"
+        (Lima 2.2.0). The template is written straight out. Rows split on ``\n`` alone: Go's
+        JSON leaves U+0085 unescaped, and ``str.splitlines`` breaks on it."""
+        cmd = ["limactl", "list", "--format", "{{json .}}"]
         if name:
             cmd.append(name)
         out = _run(cmd)
         if out.returncode != 0:
             return []
         rows = []
-        for line in out.stdout.splitlines():
+        for line in out.stdout.split("\n"):
             line = line.strip()
             if not line:
                 continue

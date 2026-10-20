@@ -17,16 +17,14 @@ Host tier (tests/e2e_host.py). Works in a scratch dir inside one of the VM's wri
 from __future__ import annotations
 
 import hashlib
-import json
 import shutil
-import subprocess
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from e2e_host import VM, ensure_vm, example_copy, host_tier, lima_shell, lima_status
+from e2e_host import VM, ensure_vm, example_copy, host_tier, lima_list, lima_shell, lima_status
 
 pytestmark = host_tier
 
@@ -57,10 +55,7 @@ def scratch(tmp_path_factory):
     """A fresh dir inside a writable mount of the running VM (same path on both sides)."""
     if "Running" not in lima_status():
         ensure_vm(example_copy(tmp_path_factory.mktemp("visibility")))
-    listed = subprocess.run(
-        ["limactl", "list", VM, "--json"], capture_output=True, text=True, check=True
-    ).stdout
-    mounts = json.loads(listed.splitlines()[0]).get("config", {}).get("mounts") or []
+    mounts = lima_list(VM)[0].get("config", {}).get("mounts") or []
     shared = [
         Path(m["location"]).expanduser()
         for m in mounts

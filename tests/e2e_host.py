@@ -219,15 +219,20 @@ def guest_diagnostics() -> str:
     return "\n".join(out)
 
 
+def lima_list(name: str = "") -> list[dict]:
+    """``limactl list`` rows, through the same ``{{json .}}`` template foldyard uses — never
+    ``--json``, which fails outright once an instance's config passes 64 KiB (both boot
+    scripts recorded: see ``LimaBackend._instances``)."""
+    out = subprocess.run(
+        ["limactl", "list", "--format", "{{json .}}", *([name] if name else [])],
+        capture_output=True, text=True, timeout=30,
+    ).stdout  # fmt: skip
+    return [json.loads(line) for line in out.split("\n") if line.strip()]
+
+
 def lima_status() -> str:
     """The instance's lifecycle flag as Lima reports it (`Running` / `Stopped` / absent → "")."""
-    out = subprocess.run(
-        ["limactl", "list", "--json"], capture_output=True, text=True, timeout=30
-    ).stdout
-    for line in out.splitlines():
-        if not line.strip():
-            continue
-        inst = json.loads(line)
+    for inst in lima_list():
         if inst.get("name") == VM:
             return str(inst.get("status", ""))
     return ""

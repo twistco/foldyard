@@ -119,6 +119,23 @@ def _json_lines(*objs):
     return "\n".join(json.dumps(o) for o in objs) + "\n"
 
 
+def test_lima_lists_through_a_template_never_the_json_lines_path(monkeypatch):
+    # `limactl list --json` re-reads its own output through a bufio.Scanner (64 KiB a line), and
+    # each line carries the instance's whole config: with the wall's and the monitor's boot
+    # scripts recorded, `list` fails "token too long", prints nothing — and every lookup read "no
+    # such VM" (Lima 2.2.0, reproduced; the host tier's first monitor run, 2026-10-20). The
+    # template path writes each instance directly. Splitting on "\n" only: Go's JSON leaves
+    # U+0085 unescaped, which str.splitlines() would break a row on.
+    seen = []
+    big = {"name": "acme", "status": "Running", "dir": "/h/.lima/acme",
+           "config": {"provision": [{"script": "x" * 100_000 + "\u0085"}]}}  # fmt: skip
+    row = json.dumps(big, ensure_ascii=False) + "\n"  # as Go writes it: U+0085 raw
+    monkeypatch.setattr(mb, "_run", lambda cmd: seen.append(cmd) or _Proc(0, row))
+    assert mb.LimaBackend().state("acme") == "running"
+    assert seen[-1][:4] == ["limactl", "list", "--format", "{{json .}}"]
+    assert "--json" not in seen[-1]
+
+
 def test_lima_state_and_exists_parse_json_lines(monkeypatch):
     rows = _json_lines(
         {"name": "tangible", "status": "Running", "dir": "/h/.lima/tangible"},
