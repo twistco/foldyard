@@ -427,6 +427,16 @@ def test_a_relay_not_started_because_tetragon_failed_is_reported_at_once(guest, 
     assert clock.now == 0
 
 
+def test_a_policy_that_failed_beside_a_running_tetragon_is_reported_at_once(guest, monkeypatch):
+    # Tetragon up, its policy refused: the relay grace never starts (it counts from a LOADED
+    # policy), so an inactive relay must not hold ensure() for the whole wait either
+    guest(policy="failed: fy-observe did not load", relay="inactive")
+    clock = Clock()
+    monkeypatch.setattr(monitor, "time", clock)
+    assert "policy is failed" in monitor.ensure(BACKEND, "acme", WANT)
+    assert clock.now == 0
+
+
 def test_a_relay_still_starting_after_the_policy_loads_is_waited_for(guest, monkeypatch):
     g = guest(relay="inactive")
     clock = Clock()

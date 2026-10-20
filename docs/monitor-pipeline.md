@@ -199,7 +199,9 @@ timeout = 15                        # seconds
   A failing batch is retried with backoff and, after five attempts, skipped and recorded. Each
   hook reads the store from its own position (the store file's inode and the offset where its
   last event ends), so a hook that fell behind catches up rather than skipping to the tail; only
-  the store rotating that position out loses events, and the supervisor log says so.
+  the store rotating that position out loses events, and the supervisor log says so. A NEW hook
+  starts at the store's last 4 MiB (about the last 2,000 events), not its beginning: history
+  stays in `fy monitor`, and a hook added to a full store isn't handed every past event at once.
 - **Isolation:** commands run with a minimal environment (`PATH`, `HOME`, `LANG`, `FY_PROJECT`,
   `FY_HOOK`) — never the supervisor's, which holds every `host.env` secret — on their own thread,
   so a slow hook never delays the pull.

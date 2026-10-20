@@ -258,7 +258,8 @@ def ensure(backend: SshBackend, name: str, want_id: str, *, wait: float = 600.0)
         relay_starting = (
             report.service == "active"
             and report.relay in ("activating", "inactive", "")
-            and (relay_due is None or time.monotonic() < relay_due)
+            and relay_due is not None  # no loaded policy, no grace: a failed one won't change
+            and time.monotonic() < relay_due
         )
         settling = (
             report.artifact.startswith(("awaiting", "installing"))
