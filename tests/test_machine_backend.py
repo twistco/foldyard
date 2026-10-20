@@ -119,6 +119,23 @@ def _json_lines(*objs):
     return "\n".join(json.dumps(o) for o in objs) + "\n"
 
 
+def test_lima_lists_through_a_template_never_the_json_lines_path(monkeypatch):
+    # `limactl list --json` re-reads its own output through a bufio.Scanner (64 KiB a line), and
+    # each line carries the instance's whole config: with the wall's and the monitor's boot
+    # scripts recorded, `list` fails "token too long", prints nothing — and every lookup read "no
+    # such VM" (Lima 2.2.0, reproduced; the host tier's first monitor run, 2026-10-20). The
+    # template path writes each instance directly. Splitting on "\n" only: Go's JSON leaves
+    # U+0085 unescaped, which str.splitlines() would break a row on.
+    seen = []
+    big = {"name": "acme", "status": "Running", "dir": "/h/.lima/acme",
+           "config": {"provision": [{"script": "x" * 100_000 + "\u0085"}]}}  # fmt: skip
+    row = json.dumps(big, ensure_ascii=False) + "\n"  # as Go writes it: U+0085 raw
+    monkeypatch.setattr(mb, "_run", lambda cmd: seen.append(cmd) or _Proc(0, row))
+    assert mb.LimaBackend().state("acme") == "running"
+    assert seen[-1][:4] == ["limactl", "list", "--format", "{{json .}}"]
+    assert "--json" not in seen[-1]
+
+
 def test_lima_state_and_exists_parse_json_lines(monkeypatch):
     rows = _json_lines(
         {"name": "tangible", "status": "Running", "dir": "/h/.lima/tangible"},
@@ -513,6 +530,40 @@ def test_lima_provision_id_reads_the_marker_from_the_stored_config(monkeypatch, 
     monkeypatch.setattr(mb.Path, "home", staticmethod(lambda: home))
     assert mb.LimaBackend().provision_id("acme") == "abc123"
     assert mb.LimaBackend().provision_id("nope") == ""  # no config → nothing recorded
+
+
+def test_lima_provision_id_reads_each_marker_separately(monkeypatch, tmp_path):
+    # Two foldyard boot scripts share lima.yaml — the wall/sudo one and the guest monitor's — and
+    # each id is read by its own marker, so recording one never reads as the other.
+    inst = tmp_path / ".lima" / "acme"
+    inst.mkdir(parents=True)
+    (inst / "lima.yaml").write_text(
+        "provision:\n- mode: system\n  script: |\n    #!/bin/bash\n    # fy-provision abc123\n"
+        "- mode: system\n  script: |\n    #!/bin/bash\n    # fy-monitor def456\n"
+    )
+    monkeypatch.setattr(mb.Path, "home", staticmethod(lambda: tmp_path))
+    assert mb.LimaBackend().provision_id("acme") == "abc123"
+    assert mb.LimaBackend().provision_id("acme", "# fy-monitor ") == "def456"
+
+
+def test_lima_set_provision_replaces_only_its_own_markers_entry(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(mb.subprocess, "run", lambda cmd, *a, **k: seen.update(cmd=cmd) or _Proc(0))
+    script = "#!/bin/bash\n# fy-monitor def456\n"
+    assert mb.LimaBackend().set_provision("acme", script, "# fy-monitor ") is True
+    expr = seen["cmd"][seen["cmd"].index("--set") + 1]
+    # the select drops entries carrying THIS marker only — the wall/sudo script is kept
+    assert 'test("# fy-monitor ") | not' in expr
+    assert "fy-provision" not in expr
+
+
+def test_every_provision_marker_reads_the_same_as_a_regex():
+    # set_provision's yq `test()` takes the marker as a REGEX; a `.` or `(` in a future marker
+    # would match — and so delete — another script's entry
+    from foldyard import monitor
+
+    for marker in (mb.PROVISION_MARKER, monitor.MARKER):
+        assert not set(marker) & set(".^$*+?()[]{}|\\"), marker
 
 
 def test_backends_without_a_provisionable_guest_record_nothing():
