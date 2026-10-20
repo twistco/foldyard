@@ -9,6 +9,13 @@
 # token), GITHUB_REPOSITORY, PR_NUMBER, HEAD_SHA.
 set -euo pipefail
 
+# The action writes the file whenever Claude ran, so no file means it didn't (a PR that changes
+# the workflow is skipped).
+if [[ -z ${EXECUTION_FILE:-} || ! -f $EXECUTION_FILE ]]; then
+  echo "::notice::the review didn't run, so there is nothing to file"
+  exit 0
+fi
+
 findings=$(jq -c '[.[] | select(.type == "result")] | last | .structured_output.private_findings' \
   "$EXECUTION_FILE")
 if [[ -z $findings || $findings == null ]]; then
