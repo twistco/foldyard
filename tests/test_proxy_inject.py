@@ -3137,6 +3137,42 @@ async def test_a_lone_rule_still_injects_whatever_the_request_carries(live, tmp_
         assert flow.request.headers["authorization"] == "Bearer sk-ant-oat-REAL"
 
 
+async def test_a_row_scoped_by_path_leaves_the_rest_of_the_host_to_the_lone_rule(live, tmp_path):
+    # The configuration docs' example: the harness row on /v1/messages only. There both rules
+    # match and a request must name one; anywhere else on the host Claude's rule is alone, so a
+    # request carrying no placeholder at all is injected as it was before the row existed.
+    oauth = _counting_minter(tmp_path, "oauth", "sk-ant-oat-REAL")
+    key = _counting_minter(tmp_path, "key", "sk-ant-api-REAL")
+    claude = {
+        "host": _SHARED,
+        "command": oauth.command,
+        "header": "authorization",
+        "value_prefix": "Bearer ",
+        "dummies": [_OAUTH_DUMMY],
+        "switch": "claude",
+    }
+    harness = {
+        "host": _SHARED,
+        "command": key.command,
+        "header": "x-api-key",
+        "path_prefix": "/v1/messages",
+        "dummies": ["x"],
+        "any_scheme": True,
+        "switch": "haiku",
+    }
+    _write_live(live.live, rules=[claude, harness])
+    inj = live.Injector()
+    elsewhere = _Flow(_SHARED, path="/api/oauth/profile", method="GET")
+    elsewhere.response = None
+    await inj.requestheaders(elsewhere)
+    assert elsewhere.response is None
+    assert elsewhere.request.headers == {"authorization": "Bearer sk-ant-oat-REAL"}
+    unnamed = _shared_flow()  # /v1/messages: both match, and this request names neither
+    await inj.requestheaders(unnamed)
+    assert unnamed.response is not None and unnamed.response.status_code == 502
+    assert not key.calls.exists()
+
+
 _HARNESS_HELD = {
     "host": _SHARED,
     "header": "x-api-key",

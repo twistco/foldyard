@@ -582,6 +582,7 @@ keyless = "oauth"                  # Claude Code: `authorization: Bearer …` on
 [[inject]]
 switch = "haiku"                   # the harness: `fy mode haiku=on`
 host = "api.anthropic.com"
+path_prefix = "/v1/messages"       # only the calls the harness makes
 header = "x-api-key"
 box_env = { HAIKU_API_KEY = "x" }  # the harness reads its key from HAIKU_API_KEY
 ```
@@ -589,9 +590,15 @@ box_env = { HAIKU_API_KEY = "x" }  # the harness reads its key from HAIKU_API_KE
 With `claude=on` and `haiku=on`, Claude Code's requests carry its OAuth placeholder in
 `authorization` and get your OAuth token, and the harness's carry `x` in `x-api-key` and get the
 key in `FY_INJECT_HAIKU`. With only `claude=on`, a harness request is answered with the usual
-401 saying to turn `haiku` on, rather than sent out on your OAuth token. **Give the row's placeholder a variable only the harness reads.** Claude
-Code prefers `ANTHROPIC_API_KEY` over its OAuth token, so `box_env = { ANTHROPIC_API_KEY = "x" }`
-would move Claude Code onto the harness's API key.
+401 saying to turn `haiku` on, rather than sent out on your OAuth token.
+
+- **Give the row's placeholder a variable only the harness reads.** Claude Code prefers
+  `ANTHROPIC_API_KEY` over its OAuth token, so `box_env = { ANTHROPIC_API_KEY = "x" }` would
+  move Claude Code onto the harness's API key.
+- **Scope the row to the paths the harness calls.** Where both rules match, a request that
+  carries neither placeholder gets the 502. Outside the row's `path_prefix` only Claude's rule
+  matches, so any other request Claude Code makes to the host is injected as it was before the
+  row existed, placeholder or not.
 
 ## `[[secret]]`
 
