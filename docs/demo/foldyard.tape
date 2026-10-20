@@ -1,5 +1,6 @@
-# The README demo: `foldyard init` → `fy box up` (review + adopt) → `fy verify` in the box → the
-# box edits foldyard.toml → `fy box up` shows the diff and asks → the change, live.
+# The README demo: `foldyard init` → review + adopt the config → grant its recommended egress →
+# `fy box up` → `fy verify` in the box → the box edits foldyard.toml → `fy box up` shows the diff
+# and asks → the change, live.
 #
 # Rendered by VHS (https://github.com/charmbracelet/vhs) against a REAL host: every command runs,
 # nothing is mocked. Record it with `just demo` (the VM work makes it slow — minutes, not
@@ -33,8 +34,10 @@ Set Framerate 24
 Set TypingSpeed 45ms
 # The prompt setup.sh sets ends in `$ `, and so does the box's — either means "command done".
 Set WaitPattern /\$\s*$/
-# Generous: the first `fy box up` on a cold machine boots a VM and builds an image.
-Set WaitTimeout 25m
+# The first `fy box up` boots a VM (a clone of the base, when one is baked) and builds an image.
+# Every prompt that path can raise is answered by a command typed below, so a Wait that runs out
+# means one this tape doesn't know about — fail at this, not at the job's own timeout.
+Set WaitTimeout 15m
 
 # ── off camera: a fresh repo, a fresh state dir ─────────────────────────────────────────────────
 Hide
@@ -55,18 +58,36 @@ Enter
 Wait
 Sleep 3s
 
-# ── 2. bring the box up: the host shows what it will run, and asks ──────────────────────────────
+# ── 2. your computer runs only a config you adopted, with only the egress you granted ───────────
+# Both are asked at the first `fy box up` too: the adoption once, the egress host by host. Doing
+# them as commands shows each decision once and doesn't depend on how many hosts the scaffold
+# recommends (`--yes` is the bulk form of the same per-host consent).
+Type "clear"
+Enter
+Wait
+Type "fy config diff"
+Enter
+Wait
+Sleep 5s
+Type "fy config adopt"
+Enter
+Wait
+Sleep 1s
+Type "clear"
+Enter
+Wait
+Type "fy allow sync --yes"
+Enter
+Wait
+Sleep 4s
+
+# ── 3. bring the box up ─────────────────────────────────────────────────────────────────────────
 Type "clear"
 Enter
 Wait
 Type "fy box up"
 Enter
-Wait+Screen /\[a\]dopt/
-Sleep 4s
-Type "a"
-Sleep 500ms
-Enter
-Sleep 2s
+Sleep 3s
 
 # The cut: VM boot + box image build.
 Hide
@@ -84,7 +105,7 @@ Enter
 Wait
 Sleep 2s
 
-# ── 3. in the box: verify the boundary ──────────────────────────────────────────────────────────
+# ── 4. in the box: verify the boundary ──────────────────────────────────────────────────────────
 Type "fy box shell"
 Enter
 Wait
@@ -94,7 +115,7 @@ Enter
 Wait@10m
 Sleep 4s
 
-# ── 4. the box edits the config, as an agent in it would ────────────────────────────────────────
+# ── 5. the box edits the config, as an agent in it would ────────────────────────────────────────
 Type "clear"
 Enter
 Wait
@@ -116,7 +137,7 @@ Enter
 Wait
 Sleep 500ms
 
-# ── 5. …but your computer doesn't run it until you say so ───────────────────────────────────────
+# ── 6. …but your computer doesn't run it until you say so ───────────────────────────────────────
 Type "clear"
 Enter
 Wait

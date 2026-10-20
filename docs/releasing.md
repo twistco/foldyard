@@ -81,10 +81,17 @@ resumes (a keyword would step past it, so it refuses and says so).
 
 The README's demo is [`docs/demo/foldyard.tape`](./demo/foldyard.tape), a
 [VHS](https://github.com/charmbracelet/vhs) script that types the quick start into a real shell
-on a real host: `foldyard init`, `fy box up` with its first-adoption review, `fy verify` in the
-box, the box appending a `[box].packages` line to `foldyard.toml`, and the next `fy box up`
-showing that diff and asking before your computer runs it. Nothing is mocked; the VM boot and the
-image builds are cut out with `Hide`/`Show`, and a typed `#` comment says so at each cut.
+on a real host: `foldyard init`, `fy config diff` and `fy config adopt`, `fy allow sync --yes`
+for the egress the scaffold recommends, `fy box up`, `fy verify` in the box, the box appending a
+`[box].packages` line to `foldyard.toml`, and the next `fy box up` showing that diff and asking
+before your computer runs it. Nothing is mocked; the VM boot and the image builds are cut out with
+`Hide`/`Show`, and a typed `#` comment says so at each cut.
+
+The tape answers every prompt the path raises, and VHS gives up on a `Wait` after 15 minutes, so
+a new prompt on that path fails the recording rather than hanging it. When one does, the log's
+last line is the prompt it stopped at, and the tape needs a command that answers it. (The first
+run met exactly that: the first `fy box up` offers each recommended egress host in turn, which is
+why the tape grants them with `fy allow sync --yes` first.)
 
 [`.github/workflows/demo.yml`](../.github/workflows/demo.yml) records it on `ubuntu-24.04` with
 KVM and Lima, the same setup as the host-tier e2e. The release workflow calls it once the GitHub

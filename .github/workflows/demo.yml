@@ -42,6 +42,11 @@ jobs:
   record:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    # A newer push to the same PR supersedes a recording in flight (each holds a VM for minutes);
+    # a release's recording is never cancelled.
+    concurrency:
+      group: demo-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       FOLDYARD_ENGINE: podman
       MACHINE_BACKEND: lima
