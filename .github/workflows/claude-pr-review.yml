@@ -12,6 +12,10 @@ name: Claude PR review
 # The review prompt is read from the BASE branch, so a PR that edits it is still reviewed under
 # the merged version. Only a PR whose base has no prompt yet uses its own.
 #
+# A PR that changes THIS file gets no review: the action refuses to run unless the workflow
+# matches the default branch's copy, so such a PR can't hand the Claude App token to its own
+# workflow. Review those with `/pr-review <number>` in the box.
+#
 # Required repository secret: CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`).
 
 on:

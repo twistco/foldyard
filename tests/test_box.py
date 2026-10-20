@@ -401,7 +401,8 @@ def test_every_name_foldyard_sets_in_the_box_is_one_box_env_refuses(fake, monkey
     fake["state"]["image_locales"] = ["en_GB.utf8"]
     assert box.main("up") == 0
     names = {v.split("=", 1)[0] for v in _env_values(_find(fake["calls"], has=["run", "-d"])[0])}
-    consumers = set(config.box_env()) | set(config.port_bases())
+    dummies = {n for spec in config.inject_specs() for n in spec.get("box_env", {})}
+    consumers = set(config.box_env()) | set(config.port_bases()) | dummies
     restatable = {
         "TZ",
         "LC_TIME",
