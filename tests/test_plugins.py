@@ -2767,6 +2767,23 @@ def test_network_panel_marks_a_request_that_named_no_credential(monkeypatch, tmp
     assert "no credential named" in group.children[0] and "[red]502[/red]" in group.children[0]
 
 
+def test_network_panel_marks_a_placeholder_out_of_scope(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    row = {
+        "ts": "2026-10-20T10:00:01Z",
+        "method": "POST",
+        "host": "api.anthropic.com",
+        "path": "/v1/models",
+        "status": 502,
+        "injected": False,
+        "misdirected": True,
+        "error_body": '{"message": "foldyard did not send this request: api.anthropic.com …"}',
+    }
+    (tmp_path / "egress.jsonl").write_text(json.dumps(row) + "\n")
+    [group] = proxy._network_panel_tree().groups
+    assert "placeholder out of scope" in group.children[0] and "[red]502[/red]" in group.children[0]
+
+
 def test_a_secret_rotation_changes_nothing_the_supervisor_restarts_for(monkeypatch):
     # A minter used to read its secret from the daemon's environment, frozen at spawn — so a keyless
     # token captured (or rotated) in host.env after launch never reached it (days of "OAuth access

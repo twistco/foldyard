@@ -11,9 +11,10 @@ bump: minor
   the first rule matching a host and path whatever the request carried. Now, where several rules
   match, it injects only the one whose placeholder the request carries in that rule's header, and
   answers a request carrying neither or both with a 502 naming the switches (the Network Log marks
-  it `no credential named`); a host with one rule injects as before, except that a request
-  carrying only a resting switch's placeholder, in another header, gets that switch's "turn it
-  on" answer rather than going out on the live rule's credential. Two injectors writing
-  the same header, or one whose row has no `box_env`, are still refused. Give the row's placeholder
+  it `no credential named`). A host with one rule injects as before, except that a request
+  carrying only another credential's placeholder, in another header, is never sent on the rule's
+  credential: it gets that switch's "turn it on" answer if it is off, or a 502 saying the path is
+  outside that credential's `path_prefix` (marked `placeholder out of scope`). Two injectors
+  writing the same header, or one whose row has no `box_env`, are still refused. Give the row's placeholder
   a variable only the harness reads: Claude Code prefers `ANTHROPIC_API_KEY` over its OAuth token.
   See `fy docs configuration`.

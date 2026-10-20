@@ -3173,6 +3173,61 @@ async def test_a_row_scoped_by_path_leaves_the_rest_of_the_host_to_the_lone_rule
     assert not key.calls.exists()
 
 
+@pytest.mark.parametrize("harness_on", [True, False])
+async def test_another_credentials_placeholder_outside_its_path_is_answered_not_sent(
+    live, tmp_path, harness_on
+):
+    # The harness row covers /v1/messages; the harness also calls /v1/models. There only Claude's
+    # rule matches — and, sent on, the harness's request would go out on the OAuth token beside its
+    # own placeholder, whether its switch is on or at rest. It names a credential, just not one
+    # that covers this path: answered, never sent, with what to widen.
+    oauth = _counting_minter(tmp_path, "oauth", "sk-ant-oat-REAL")
+    key = _counting_minter(tmp_path, "key", "sk-ant-api-REAL")
+    claude = {
+        "host": _SHARED,
+        "command": oauth.command,
+        "header": "authorization",
+        "value_prefix": "Bearer ",
+        "dummies": [_OAUTH_DUMMY],
+        "switch": "claude",
+    }
+    harness = {
+        "host": _SHARED,
+        "command": key.command,
+        "header": "x-api-key",
+        "path_prefix": "/v1/messages",
+        "dummies": ["x"],
+        "any_scheme": True,
+        "switch": "haiku",
+    }
+    held = {**_HARNESS_HELD, "path_prefix": "/v1/messages"}
+    if harness_on:
+        _write_live(live.live, rules=[claude, harness])
+    else:
+        _write_live(live.live, rules=[claude], held=[held])
+    inj = live.Injector()
+    flow = _Flow(_SHARED, path="/v1/models", method="GET")
+    flow.response = None
+    flow.request.headers["x-api-key"] = "x"
+    await inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 502
+    message = json.loads(flow.response.content)["message"]
+    assert message.startswith("foldyard did not send this request: ")
+    assert "`haiku`" in message and "/v1/messages" in message and "`claude`" in message
+    assert flow.request.headers == {"x-api-key": "x"}  # nothing written
+    assert not oauth.calls.exists() and not key.calls.exists()
+    await inj.response(flow)
+    [row] = [json.loads(line) for line in live.log.read_text().splitlines()]
+    assert row["status"] == 502 and row["misdirected"] is True and row["injected"] is False
+    # Claude's own request on that path is still Claude's.
+    mine = _Flow(_SHARED, path="/v1/models", method="GET")
+    mine.response = None
+    mine.request.headers["authorization"] = _OAUTH_DUMMY
+    await inj.requestheaders(mine)
+    assert mine.response is None
+    assert mine.request.headers == {"authorization": "Bearer sk-ant-oat-REAL"}
+
+
 _HARNESS_HELD = {
     "host": _SHARED,
     "header": "x-api-key",

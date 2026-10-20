@@ -598,7 +598,9 @@ key in `FY_INJECT_HAIKU`. With only `claude=on`, a harness request is answered w
 - **Scope the row to the paths the harness calls.** Where both rules match, a request that
   carries neither placeholder gets the 502. Outside the row's `path_prefix` only Claude's rule
   matches, so any other request Claude Code makes to the host is injected as it was before the
-  row existed, placeholder or not.
+  row existed, placeholder or not. A harness request outside the prefix isn't sent on Claude's
+  token: it carries the row's placeholder, so the proxy answers it with a 502 naming the path to
+  widen the prefix to (the Network Log marks it `placeholder out of scope`).
 
 ## `[[secret]]`
 

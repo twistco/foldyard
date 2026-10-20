@@ -324,6 +324,20 @@ def _unnamed_body(host: str | None, rules: list, carried: int) -> bytes:
     return json.dumps({"message": text}).encode()
 
 
+def _misdirected_body(host: str | None, path: str, rule, stray: tuple[str, str]) -> bytes:
+    """The proxy's own answer to a request carrying another credential's placeholder where only
+    ``rule`` applies — outside the path that credential covers. Sent on, it would go out on
+    ``rule``'s credential beside the placeholder: one client's credential on another's request."""
+    switch, scope = stray
+    text = (
+        f"foldyard did not send this request: it carries `{switch}`'s placeholder, but "
+        f"`{switch}`'s credential is only for {scope}, and {host}{path.split('?')[0]} is outside "
+        f"it, where only `{rule.switch or rule.label()}`'s applies. Widen `{switch}`'s path "
+        "prefix to cover this path, or send the other client's own placeholder."
+    )
+    return json.dumps({"message": text}).encode()
+
+
 # An HTTP auth scheme (RFC 9110 §11.1's token, in the shape real ones take: `Bearer`, `token`,
 # `Basic`, `Bot`…) — what a client may put before a credential it was handed bare.
 _AUTH_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9._~+-]*$")
@@ -1112,8 +1126,9 @@ class Injector:
         credential, on the way out (`request`) or on a 401 re-issue (`response`).
 
         One rule matching the host and path is THE rule, whatever the request carries — exactly as
-        before rules could share a host — save a request carrying only the dummy of a switch at
-        rest there, in another place, which gets the held answer instead. Several
+        before rules could share a host — save a request carrying only the dummy of another
+        credential on that host (on or at rest, whatever its path), in another place, which gets
+        that one's held answer or `_misdirected`'s instead. Several
         (header-disjoint injectors: the registry lets rules share a host and path only when each
         writes its own place and the box sends a dummy for each) → the one rule whose dummy the
         request carries in that rule's place, else none: a request naming none of them, or more
@@ -1126,12 +1141,11 @@ class Injector:
         matching = self._matching(flow)
         if len(matching) <= 1:
             rule = matching[0] if matching else None
-            # ...unless the request names only a credential at rest on this host, in a place the
-            # rule doesn't write: the held answer says to turn that one on, where the lone rule
-            # would send the request out on its own credential, beside the other's dummy. (In the
+            # ...unless the request names only ANOTHER credential on this host, in a place the
+            # rule doesn't write: the lone rule would send it out on its own credential, beside the
+            # other's dummy. It gets that credential's held answer, or `_misdirected`'s. (In the
             # rule's own place the rule overwrites the dummy, and an active rule wins.)
-            held = self._held_for(flow) if rule is not None else None
-            if held and _held_place(held) != rule.place() and not self._names(flow, rule):
+            if rule is not None and not self._names(flow, rule) and self._stray(flow, rule):
                 rule = None
         else:
             named = [rule for rule in matching if self._names(flow, rule)]
@@ -1171,6 +1185,35 @@ class Injector:
             return None
         named = sum(self._names(flow, rule) for rule in matching)
         return None if named == 1 else (matching, named)
+
+    def _stray(self, flow: http.HTTPFlow, rule: _Rule) -> tuple[str, str] | None:
+        """Another credential on this request's host whose dummy it carries, in a place ``rule``
+        doesn't write — an active rule's or a resting switch's, whatever path that one covers:
+        (its switch, the host and path it injects on); else None."""
+        request = flow.request
+        dest = _destination(request)
+        for other in self.rules:
+            if other is rule or other.host != dest or other.place() == rule.place():
+                continue
+            if self._names(flow, other):
+                return other.switch or other.label(), other.label()
+        for entry in self.held:
+            if entry["host"] != dest or _held_place(entry) == rule.place():
+                continue
+            param = entry.get("query_param")
+            value = request.query.get(param) if param else request.headers.get(entry["header"])
+            if _carries_dummy(value, entry["dummy"], entry.get("any_scheme") is True):
+                return str(entry.get("axis") or ""), dest + (entry.get("path_prefix") or "")
+        return None
+
+    def _misdirected(self, flow: http.HTTPFlow) -> tuple[_Rule, tuple[str, str]] | None:
+        """The lone rule on this request's host and path, and the other credential the request
+        names instead (:meth:`_stray`), when :meth:`_rule_for` defers to that one; else None."""
+        matching = self._matching(flow)
+        if len(matching) != 1 or self._names(flow, matching[0]):
+            return None
+        stray = self._stray(flow, matching[0])
+        return (matching[0], stray) if stray else None
 
     @staticmethod
     def _injectable(flow: http.HTTPFlow) -> str | None:
@@ -1305,6 +1348,8 @@ class Injector:
             entry["overlap"] = True  # the proxy's own 502 too: nothing went upstream
         if flow.metadata.get("egress_proxy_unnamed"):
             entry["unnamed"] = True  # the proxy's own 502 too: the request named no credential
+        if flow.metadata.get("egress_proxy_misdirected"):
+            entry["misdirected"] = True  # the proxy's own 502 too: it named one that isn't here
         ua = _user_agent(flow.request)
         if ua:
             entry["ua"] = ua
@@ -1819,6 +1864,18 @@ class Injector:
                 {"content-type": "application/json"},
             )
             flow.metadata["egress_proxy_unnamed"] = True  # logged by `response`, as an overlap
+            return
+        # One credential applies here, and the request carries another's placeholder — outside the
+        # path that one covers: answered too, rather than sent out on the credential it didn't name.
+        misdirected = self._misdirected(flow)
+        if misdirected is not None:
+            rule, stray = misdirected
+            flow.response = http.Response.make(
+                502,
+                _misdirected_body(_destination(flow.request), flow.request.path, rule, stray),
+                {"content-type": "application/json"},
+            )
+            flow.metadata["egress_proxy_misdirected"] = True  # logged by `response`, as an overlap
             return
         # The egress wall for plain HTTP (cleartext never CONNECTs, so http_connect can't catch it):
         # refuse a disallowed host — or port: `http://host:8080/` is as much a tunnel past a host

@@ -345,6 +345,10 @@ def _net_leaf(e: dict, escape) -> str:
         # The proxy's own 502 too: several credentials share this host and the request carried
         # the dummy of none of them, or of more than one, so it named no one credential.
         mark = "no credential named"
+    if e.get("misdirected"):
+        # The proxy's own 502 too: the request carried the dummy of a credential that doesn't
+        # cover its path, where another credential applies.
+        mark = "placeholder out of scope"
     line = (
         f"[dim]{ts}[/dim] {escape(e.get('method', '')):<6} "
         f"{escape(e.get('path', '')[:80])} [{colour}]{status}[/{colour}]"
