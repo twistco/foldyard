@@ -12,6 +12,8 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+# `just docs-site`'s output
+/site/
 # `just demo`'s output (the release attaches CI's copy; see docs/releasing.md)
 foldyard-demo.gif
 
