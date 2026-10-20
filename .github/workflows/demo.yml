@@ -1,0 +1,183 @@
+name: demo
+
+# Records the README demo — docs/demo/foldyard.tape, rendered by VHS — on a real Linux host: the
+# same ubuntu-24.04 + KVM + Lima setup as `lima-host-e2e` (foldyard-e2e.yml, whose comments say
+# why each step is there), with `foldyard init` → `fy box up` → `fy verify` driven for real.
+#
+# Two ways in:
+#   - the release workflow calls it after the GitHub Release exists, with `release: vX.Y.Z`: the
+#     demo then installs THAT version from PyPI (what a reader of the README would install) and
+#     attaches the GIF to the release, where the README embeds it from
+#     (releases/latest/download/foldyard-demo.gif — no bot commits, never newer than a release).
+#   - a manual dispatch, to iterate on the tape: with no `release`, it installs the checkout and
+#     only uploads the GIF as a run artifact. Give it a tag to (re)attach to that release.
+#   - a pull request that touches the tape, its setup or this file: recorded like a plain
+#     dispatch, so a tape change is seen rendered before it merges (and a dispatch can't run a
+#     workflow file the default branch doesn't have yet).
+#
+# Advisory by construction: a failed recording never touches the release itself (the caller runs
+# it after `github-release`), it only leaves that release without a GIF until a dispatch fills it.
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: "release tag to install from PyPI and attach the GIF to"
+        type: string
+        default: ""
+  pull_request:
+    paths:
+      - docs/demo/**
+      - .github/workflows/demo.yml
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "release tag (vX.Y.Z) to install from PyPI and attach to — empty: record the checkout, artifact only"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # A newer push to the same PR supersedes a recording in flight (each holds a VM for minutes);
+    # a release's recording is never cancelled.
+    concurrency:
+      group: demo-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    env:
+      FOLDYARD_ENGINE: podman
+      MACHINE_BACKEND: lima
+      LIMA_VERSION: "2.2.0" # in step with foldyard-e2e.yml
+      # Not v0.12.0: it hands ffmpeg the context it has just cancelled to stop recording, so every
+      # encode is killed and no GIF is written (exit 2, "Creating foldyard-demo.gif..." and nothing).
+      VHS_VERSION: "v0.12.1"
+      RELEASE: ${{ inputs.release }}
+      FY_DEMO_DIR: /home/runner/fy-demo/acme-api
+      FY_DEMO_STATE: /home/runner/fy-demo/state
+    steps:
+      # The tape and setup script always come from the workflow's own ref, so a dispatch can
+      # record an older release with today's tape.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v8.2.0
+
+      - name: KVM
+        run: |
+          set -euo pipefail
+          sudo modprobe kvm
+          sudo chown "$(id -un)" /dev/kvm
+          test -w /dev/kvm
+
+      - name: Packages (QEMU, podman CLI) + Lima + VHS (ttyd, ffmpeg)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            ovmf qemu-system-x86 qemu-utils podman uidmap slirp4netns nftables jq ttyd ffmpeg
+          url="https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz"
+          curl -fsSL "$url" | sudo tar Cxz /usr/local
+          # VHS's go.mod asks for a newer Go than the runner's; GOTOOLCHAIN=auto (the default)
+          # fetches it. It drives a headless Chromium, which the runner image ships.
+          go install "github.com/charmbracelet/vhs@${VHS_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          limactl --version
+          ttyd --version
+
+      - name: Enable systemd --user session
+        run: |
+          set -euo pipefail
+          sudo loginctl enable-linger "$(id -un)"
+          uid="$(id -u)"
+          for _ in $(seq 1 30); do
+            test -S "/run/user/$uid/bus" && break
+            sleep 1
+          done
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$uid"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus"
+          } >> "$GITHUB_ENV"
+
+      # A release records the wheel PyPI serves (retried: the index can lag the upload by a
+      # minute); a plain dispatch records the checkout.
+      - name: Install foldyard
+        run: |
+          set -euo pipefail
+          if [ -n "$RELEASE" ]; then
+            for i in 1 2 3 4 5 6; do
+              uv tool install --refresh-package foldyard "foldyard==${RELEASE#v}" && break
+              [ "$i" = 6 ] && exit 1
+              sleep 30
+            done
+          else
+            uv tool install .
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Off camera, like the e2e's: the one template boot over the Fedora mirrors, retried once,
+      # so the recorded `fy box up` is a clone and the tape's cut stays a few minutes.
+      - name: Bake the base VM
+        run: |
+          cd "$RUNNER_TEMP"
+          fy machine base bake || {
+            echo "::warning title=Base VM bake retried::the first bake failed — usually a stalled Fedora mirror. Retrying once."
+            fy machine base bake
+          }
+
+      - name: Record
+        run: |
+          set -euo pipefail
+          export FY_DEMO_SETUP="$GITHUB_WORKSPACE/docs/demo/setup.sh"
+          fy --version
+          vhs -o foldyard-demo.gif docs/demo/foldyard.tape
+          ls -l foldyard-demo.gif
+
+      # VHS records whatever the terminal showed — a `fy verify` that failed, or a box up that
+      # errored, still makes a GIF. So the story the demo tells is asserted on what it left
+      # behind: the box still verifies, and the edit adopted on camera is live in it.
+      - name: The demo's story held
+        run: |
+          set -euo pipefail
+          cd "$FY_DEMO_DIR"
+          export FOLDYARD_STATE_DIR="$FY_DEMO_STATE"
+          fy box exec "fy verify" | tee "$RUNNER_TEMP/verify.out"
+          grep -q "ALL PASS" "$RUNNER_TEMP/verify.out"
+          fy box exec "rg --version"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: foldyard-demo
+          path: foldyard-demo.gif
+          if-no-files-found: warn
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          limactl list || true
+          cat "$FY_DEMO_STATE"/host-supervisor.log 2>/dev/null | tail -n 100 || true
+
+      - name: Teardown
+        if: always()
+        run: limactl delete -f acme-api foldyard-base || true
+
+  # Holds contents:write and runs no project code, like release.yml's github-release.
+  attach:
+    needs: record
+    if: inputs.release != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: foldyard-demo
+      - name: Attach the GIF to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: gh release upload "$RELEASE" foldyard-demo.gif --clobber --repo "$GITHUB_REPOSITORY"

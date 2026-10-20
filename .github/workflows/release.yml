@@ -109,3 +109,16 @@ jobs:
           set -euo pipefail
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "foldyard ${GITHUB_REF_NAME#v}" --notes-file notes/notes.md dist/*
+
+  # The README's demo GIF, recorded against the version PyPI now serves and attached to the
+  # release just created (demo.yml). After github-release and depended on by nothing, so a failed
+  # recording leaves this release without a GIF — never without a release; a dispatch of demo.yml
+  # with this tag fills it in. It runs project code (the tape drives `fy`), so it is a SEPARATE
+  # workflow whose recording job holds contents:read; only its attach job, which runs none, writes.
+  demo:
+    needs: github-release
+    permissions:
+      contents: write
+    uses: ./.github/workflows/demo.yml
+    with:
+      release: ${{ github.ref_name }}
