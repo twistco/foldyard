@@ -128,9 +128,10 @@ docs-site cmd="build":
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{_dir}}"
-    args=(--strict)
-    [ "{{cmd}}" = build ] || args=()
-    exec uvx --from 'mkdocs==1.6.1' --with 'mkdocs-material==9.7.7' mkdocs "{{cmd}}" "${args[@]}"
+    # No array: an empty one under `set -u` is "unbound" in macOS's /bin/bash 3.2.
+    strict=""
+    [ "{{cmd}}" = build ] && strict="--strict"
+    exec uvx --from 'mkdocs==1.6.1' --with 'mkdocs-material==9.7.7' mkdocs "{{cmd}}" $strict
 
 # Record the README demo (docs/demo/foldyard.tape) with VHS, against THIS computer's real VM and
 # the `fy` on PATH (`just install` first to record the source tree). Needs vhs (macOS: `brew
