@@ -1,7 +1,7 @@
 ---
 description: Run a Claude code review on the current branch/PR (also run by CI on every ready PR)
 argument-hint: "[PR number|URL] [--base <ref>] [--focus \"<areas>\"] [--post|--no-post]"
-allowed-tools: Read, Glob, Grep, WebSearch, WebFetch, Bash(git diff:*), Bash(git log:*), Bash(git merge-base:*), Bash(git branch:*), Bash(git rev-parse:*), Bash(git symbolic-ref:*), Bash(git remote:*), Bash(command -v gh), Bash(gh auth status:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr list:*), Bash(gh pr comment:*), Bash(gh issue view:*), Bash(gh issue list:*), Bash(gh search:*), Bash(gh api repos/{owner}/{repo}/compare/:*), Bash(gh api repos/{owner}/{repo}/pulls/:*), Bash(echo:*), mcp__github_inline_comment__create_inline_comment
+allowed-tools: Read, Glob, Grep, WebSearch, WebFetch, Bash(git diff:*), Bash(git log:*), Bash(git merge-base:*), Bash(git branch:*), Bash(git rev-parse:*), Bash(git symbolic-ref:*), Bash(git remote:*), Bash(command -v gh), Bash(gh auth status:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr list:*), Bash(gh pr comment:*), Bash(gh issue view:*), Bash(gh issue list:*), Bash(gh api repos/{owner}/{repo}/compare/:*), Bash(gh api repos/{owner}/{repo}/pulls/:*), Bash(echo:*), mcp__github_inline_comment__create_inline_comment
 model: opus
 ---
 
@@ -79,8 +79,9 @@ command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 && echo "gh: rea
 `gh` and its dummy token only work when the egress proxy injects a real one, and
 this repo's `foldyard.toml` declares no `[[inject]]` row for GitHub, so expect the
 local-diff fallback. Say plainly that the review is local-only (nothing read from
-or posted to the PR), and that posting means running `/pr-review` on the host or
-letting CI do it. The box also cannot `git fetch`, so `origin/<base>` is only as
+or posted to the PR), and that CI posts the review. Don't suggest running it on
+the host instead: there `gh` is the user's own login, and the commands allowed
+here take `-R`, so they reach every repository that login can. The box also cannot `git fetch`, so `origin/<base>` is only as
 fresh as the last host-side fetch; mention it if the base looks stale.
 
 Briefly tell the user which mode you're in (e.g. "gh is logged in and PR #123
