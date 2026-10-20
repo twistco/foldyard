@@ -497,6 +497,61 @@ def _tail(max_bytes: int = READ_BYTES) -> list[dict]:
     return out
 
 
+def span(at: list[int] | None, lead: int, size: int) -> tuple[list[tuple[dict, list[int]]], bool]:
+    """The stored records from ``lead`` bytes before the position ``at`` (``[inode, offset]``) to
+    ``size`` bytes after it, oldest first, each with the ``[inode, offset]`` its line ends at — so a
+    reader that keeps one resumes where it stopped, however far the store has grown since.
+    ``at=None`` is the store's end. Rotation renames, so a backup keeps its inode; when ``at``'s
+    file has left the store (or never held that offset — ``[-1, 0]`` asks for that) the read
+    starts at the store's oldest byte and ``found`` is ``False``. A position is only an inode and
+    an offset — a caller checks the record ending there is the one it expects (an inode is reused
+    once its file is deleted)."""
+    files: list[tuple[Path, int, int]] = []
+    for path in [*config.rotated_logs(store_path()), store_path()]:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        files.append((path, st.st_ino, st.st_size))
+    bases, total = [], 0
+    for _path, _ino, sz in files:
+        bases.append(total)
+        total += sz
+    here, found = total, True
+    if at is not None:
+        here, found = 0, False
+        for (_path, ino, sz), base in zip(files, bases, strict=True):
+            if ino == at[0] and at[1] <= sz:
+                here, found = base + at[1], True
+                break
+    start, end = max(0, here - lead), min(total, here + size)
+    out: list[tuple[dict, list[int]]] = []
+    for (path, ino, sz), base in zip(files, bases, strict=True):
+        lo, hi = max(start, base) - base, min(end, base + sz) - base
+        if lo >= hi:
+            continue
+        try:
+            with path.open("rb") as f:
+                f.seek(max(0, lo - 1))
+                data = f.read(hi - lo + (1 if lo else 0))
+        except OSError:
+            continue
+        if lo:  # the byte before `lo` says whether a line starts there
+            cut = data.find(b"\n") + 1
+            if not cut:
+                continue  # inside one line all the way: nothing complete here
+            lo, data = lo - 1 + cut, data[cut:]
+        data = data[: data.rfind(b"\n") + 1]  # a line still being written is the next read's
+        off = lo
+        for line in data.splitlines(keepends=True):
+            off += len(line)
+            try:
+                out.append((json.loads(line), [ino, off]))
+            except ValueError:
+                continue
+    return out, found
+
+
 def recent(limit: int = 50, prefix: str | None = None) -> list[Event]:
     """The last ``limit`` attributed events, joined over the tail of the store."""
     events = attribute(_tail(), prefix if prefix is not None else config.project_prefix())

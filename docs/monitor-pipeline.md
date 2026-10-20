@@ -192,9 +192,13 @@ timeout = 15                        # seconds
   "project", "hook", "events": [...], "first": [boot, seq], "last": [boot, seq]}` — the same
   `Event` fields `fy monitor --json` prints.
 - **Settled events only**: an event is delivered once a snapshot after it exists (or two minutes
-  have passed), so its attribution won't change.
+  have passed), so its attribution won't change — and never ahead of an earlier event that hasn't
+  settled (a VM restarted inside those two minutes would otherwise strand the old boot's tail).
 - **At-least-once:** a hook's cursor advances only when a batch succeeded (exit 0, or HTTP 2xx).
-  A failing batch is retried with backoff and, after five attempts, skipped and recorded.
+  A failing batch is retried with backoff and, after five attempts, skipped and recorded. Each
+  hook reads the store from its own position (the store file's inode and the offset where its
+  last event ends), so a hook that fell behind catches up rather than skipping to the tail; only
+  the store rotating that position out loses events, and the supervisor log says so.
 - **Isolation:** commands run with a minimal environment (`PATH`, `HOME`, `LANG`, `FY_PROJECT`,
   `FY_HOOK`) — never the supervisor's, which holds every `host.env` secret — on their own thread,
   so a slow hook never delays the pull.

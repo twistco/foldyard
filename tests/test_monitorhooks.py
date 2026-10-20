@@ -103,6 +103,18 @@ def test_only_settled_events_are_delivered():
     assert got == [1, 3]
 
 
+def test_settled_stops_at_the_first_unsettled_event():
+    # A VM restarted inside the settle window: the old boot's tail has no snapshot after it and is
+    # recent; the new boot's first snapshot settles its events at once. Delivering those would put
+    # the cursor on the new boot and rank the old tail behind it — never delivered.
+    records = [snap(0), ev(1, recv=900), ev(2, recv=990)]
+    records += [snap(0, boot=BOOT2), ev(1, boot=BOOT2, recv=995), snap(2, boot=BOOT2)]
+    got = [(e.boot, e.seq) for e in mh.settled(records, now=1000)]
+    assert got == []
+    got = [(e.boot, e.seq) for e in mh.settled(records, now=990 + mh.SETTLE_SECONDS)]
+    assert got == [(BOOT, 1), (BOOT, 2), (BOOT2, 1)]
+
+
 def test_after_follows_the_cursor_across_boots():
     events = monitorlog.attribute(
         [snap(0), ev(1), ev(2), snap(0, boot=BOOT2), ev(1, boot=BOOT2)], "fyex"
@@ -229,15 +241,103 @@ def test_a_full_batch_stops_at_its_last_event(ran, monkeypatch):
     assert [[e["seq"] for e in c["body"]["events"]] for c in calls] == [[1, 2], [3, 4], [5]]
 
 
-def test_round_once_reads_the_store_and_saves_each_hooks_state(ran, project, monkeypatch):
+def test_round_once_reads_the_store_and_saves_each_hooks_state(ran, project):
     calls, _ = ran
     (project / "monitor-hooks.toml").write_text('[[hook]]\nname = "s"\ncommand = ["/bin/s"]\n')
-    monkeypatch.setattr(mh.monitorlog, "_tail", lambda n: [snap(0), ev(1), ev(2), snap(3)])
+    monitorlog._append([snap(0), ev(1), ev(2), snap(3)])
     mh.round_once(now=50)
     state = json.loads((project / "monitor-hooks-state.json").read_text())
     assert state["s"]["last"] == [BOOT, 2] and state["s"]["delivered"] == 2
+    assert state["s"]["pos"][0] == monitorlog.store_path().stat().st_ino
     mh.round_once(now=60)
     assert len(calls) == 1  # the saved cursor holds across rounds
+
+
+# ── reading from the hook's own position ────────────────────────────────────────────────
+
+
+def _hook(project, name="s"):
+    (project / "monitor-hooks.toml").write_text(
+        f'[[hook]]\nname = "{name}"\ncommand = ["/bin/s"]\n'
+    )
+
+
+def _delivered(calls) -> list[int]:
+    return [e["seq"] for c in calls for e in c["body"]["events"]]
+
+
+def test_a_hook_further_behind_than_one_read_still_gets_every_event(ran, project, monkeypatch):
+    # A catch-up pull stores up to 8 MB at once and a failing hook backs off for minutes: the
+    # backlog outgrows any fixed tail. Read from the hook's position, nothing in it is skipped.
+    calls, _ = ran
+    _hook(project)
+    monitorlog._append([snap(0), ev(1), snap(2)])
+    mh.round_once(now=10)  # the hook is caught up: delivered 1, its position is after it
+    monkeypatch.setattr(mh, "READ_BYTES", 600)  # a window a few records wide
+    monitorlog._append([*[ev(i) for i in range(3, 40)], snap(40)])
+    for t in range(20, 400, 10):
+        mh.round_once(now=t)
+    assert _delivered(calls) == [1, *range(3, 40)]
+
+
+def test_a_position_the_store_rotated_away_is_said_and_reading_resumes(ran, project, monkeypatch):
+    calls, _ = ran
+    _hook(project)
+    monitorlog._append([snap(0), ev(1), snap(2)])
+    mh.round_once(now=10)
+    stamps = iter(f"2026100{i}T000000Z" for i in range(1, 9))
+    monkeypatch.setattr(monitorlog, "STORE_BYTES", 100)
+    monkeypatch.setattr(monitorlog, "STORE_BACKUPS", 1)
+    monkeypatch.setattr(
+        monitorlog, "datetime", type("D", (), {"now": staticmethod(lambda tz: _Stamp(stamps))})
+    )
+    for i in range(3, 9, 2):  # each append rotates: the hook's file is deleted on the second
+        monitorlog._append([ev(i), snap(i + 1)])
+    logged: list[str] = []
+    mh.round_once(now=500, log=logged.append)
+    assert any("rotated past its position" in m for m in logged)
+    assert _delivered(calls)[-1] == 7  # what the store still holds is delivered
+
+
+class _Stamp:
+    def __init__(self, stamps):
+        self._stamps = stamps
+
+    def strftime(self, fmt):
+        return next(self._stamps)
+
+
+def test_a_position_naming_another_record_counts_as_lost(ran, project):
+    # an inode is reused once its file is deleted: a position is only trusted when the record
+    # ending there is the cursor's own
+    calls, _ = ran
+    _hook(project)
+    monitorlog._append([snap(0), ev(1), ev(2), snap(3)])
+    mh.round_once(now=10)
+    state = json.loads((project / "monitor-hooks-state.json").read_text())
+    state["s"]["last"] = [BOOT, 1]  # the position says 2 ends there
+    (project / "monitor-hooks-state.json").write_text(json.dumps(state))
+    logged: list[str] = []
+    mh.round_once(now=20, log=logged.append)
+    assert any("rotated past its position" in m for m in logged)
+    assert _delivered(calls) == [1, 2, 2]  # at-least-once: re-read from the oldest byte
+
+
+def test_span_resumes_from_a_position_across_a_rotation(project, monkeypatch):
+    monitorlog._append([ev(1), ev(2)])
+    read, found = monitorlog.span(None, 10_000, 0)
+    assert found and [r["seq"] for r, _ in read] == [1, 2]
+    at = read[0][1]
+    monitorlog.store_path().rename(
+        monitorlog.store_path().with_name("monitor.20261001T000000Z.jsonl")
+    )
+    monitorlog._append([ev(3)])
+    read, found = monitorlog.span(at, 0, 10_000)
+    assert found and [r["seq"] for r, _ in read] == [2, 3]
+    read, found = monitorlog.span(at, 1, 10_000)  # a lead inside a line never yields half of it
+    assert [r["seq"] for r, _ in read] == [2, 3]
+    _, found = monitorlog.span([-1, 0], 0, 10)
+    assert not found
 
 
 def test_round_once_logs_config_errors_and_carries_on(project, monkeypatch):

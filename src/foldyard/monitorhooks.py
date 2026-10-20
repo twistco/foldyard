@@ -9,9 +9,14 @@ box chose. The file is re-read every round, so an edit applies within seconds; t
 to adopt, because nothing in the mount can reach it.
 
 Delivery: only SETTLED events (their attribution can't change any more: a later snapshot exists,
-or :data:`SETTLE_SECONDS` passed); at-least-once (a hook's cursor advances only on success — exit
-0, or HTTP 2xx); retried with backoff, and after :data:`MAX_ATTEMPTS` the batch is skipped and
-counted. Commands run with a minimal environment — never the supervisor's, which holds every
+or :data:`SETTLE_SECONDS` passed), and never one past an event that hasn't settled yet;
+at-least-once (a hook's cursor advances only on success — exit 0, or HTTP 2xx); retried with
+backoff, and after :data:`MAX_ATTEMPTS` the batch is skipped and counted. Each hook reads the store
+from its OWN position, so one that fell behind (a catch-up pull, a long backoff) resumes where it
+stopped rather than at the store's tail; only the store rotating its position away loses events,
+and that is logged.
+
+Commands run with a minimal environment — never the supervisor's, which holds every
 ``host.env`` secret — on their own thread, so a slow hook never delays the pull.
 """
 
@@ -35,7 +40,8 @@ SETTLE_SECONDS = 120.0
 BATCH_MAX = 500
 MAX_ATTEMPTS = 5
 ROUND_EVERY = 5.0
-READ_BYTES = 4 << 20
+READ_BYTES = 4 << 20  # how far past its position a hook reads each round
+LEAD_BYTES = 1 << 20  # and before it: the snapshot the first events join against (one a minute)
 
 
 def hooks_file() -> Path:
@@ -156,6 +162,7 @@ def load() -> tuple[list[Hook], list[str]]:
 @dataclass
 class HookState:
     last: list = field(default_factory=list)  # [boot, seq] of the last delivered event
+    pos: list = field(default_factory=list)  # [inode, offset] in the store where that event ends
     attempts: int = 0
     next_try: float = 0.0
     delivered: int = 0
@@ -185,7 +192,10 @@ def _save_state(states: dict[str, HookState]) -> None:
 
 def settled(records: list[dict], now: float) -> list[monitorlog.Event]:
     """The attributed events whose attribution can't change any more: a snapshot after them
-    exists in their boot, or they arrived more than :data:`SETTLE_SECONDS` ago. In store order."""
+    exists in their boot, or they arrived more than :data:`SETTLE_SECONDS` ago. In store order,
+    and only up to the first one that hasn't settled: a VM restarted within the settle window
+    leaves the old boot's tail unsettled while the new boot's first snapshot settles its events,
+    and a cursor moved onto the new boot would rank the old tail behind it for good."""
     last_snap: dict[str, int] = {}
     recv: dict[tuple[str, int], float] = {}
     for r in records:
@@ -196,8 +206,9 @@ def settled(records: list[dict], now: float) -> list[monitorlog.Event]:
     out = []
     for e in monitorlog.attribute(records, config.project_prefix()):
         snapshot_after = e.seq < last_snap.get(e.boot, -1)
-        if snapshot_after or now - recv.get((e.boot, e.seq), now) >= SETTLE_SECONDS:
-            out.append(e)
+        if not (snapshot_after or now - recv.get((e.boot, e.seq), now) >= SETTLE_SECONDS):
+            break
+        out.append(e)
     return out
 
 
@@ -271,9 +282,21 @@ def payload(hook: Hook, events: list[monitorlog.Event]) -> bytes:
     ).encode()
 
 
-def deliver(hook: Hook, st: HookState, events: list[monitorlog.Event], now: float) -> str:
+def deliver(
+    hook: Hook,
+    st: HookState,
+    events: list[monitorlog.Event],
+    now: float,
+    where: dict[tuple[str, int], list[int]] | None = None,
+) -> str:
     """One batch for one hook: send the next up-to-:data:`BATCH_MAX` matching events after its
-    cursor. Returns a log line when something worth saying happened, else ``""``."""
+    cursor. ``where`` maps an event to its store position, kept beside the cursor so the next
+    round reads from there. Returns a log line when something worth saying happened, else ``""``."""
+    where = where or {}
+
+    def move(e: monitorlog.Event) -> None:
+        st.last, st.pos = [e.boot, e.seq], where.get((e.boot, e.seq), [])
+
     if now < st.next_try:
         return ""
     pending = after(events, st.last)
@@ -290,21 +313,21 @@ def deliver(hook: Hook, st: HookState, events: list[monitorlog.Event], now: floa
         # scan is covered — the events this hook doesn't want are passed over with it.
         batch_end = wanted[-1] if len(wanted) == BATCH_MAX else scan[-1]
         if not wanted:
-            st.last = [batch_end.boot, batch_end.seq]
+            move(batch_end)
             pending = pending[len(scan) :]
     if not wanted:
         return ""
     body = payload(hook, wanted)
     why = _run_command(hook, body) if hook.command else _post(hook, body)
     if not why:
-        st.last = [batch_end.boot, batch_end.seq]
+        move(batch_end)
         st.attempts, st.next_try, st.error, st.ok_at = 0, 0.0, "", now
         st.delivered += len(wanted)
         return ""
     st.attempts += 1
     st.error = why
     if st.attempts >= MAX_ATTEMPTS:
-        st.last = [batch_end.boot, batch_end.seq]
+        move(batch_end)
         st.dropped += len(wanted)
         st.attempts, st.next_try = 0, 0.0
         return (
@@ -323,14 +346,45 @@ def round_once(now: float | None = None, log: Callable[[str], None] = lambda m: 
     if not hooks:
         return
     now = time.time() if now is None else now
-    events = settled(monitorlog._tail(READ_BYTES), now)
     states = _load_state()
     for hook in hooks:
         st = states.setdefault(hook.name, HookState())
-        msg = deliver(hook, st, events, now)
+        records, where, lost = _window(st)
+        if lost:
+            log(
+                f"monitor hook '{hook.name}': the store rotated past its position — the events "
+                f"after {st.last[0]}:{st.last[1]} that were rotated out were never delivered to it"
+            )
+        msg = deliver(hook, st, settled(records, now), now, where)
         if msg:
             log(msg)
     _save_state(states)
+
+
+def _window(st: HookState) -> tuple[list[dict], dict[tuple[str, int], list[int]], bool]:
+    """A hook's records for this round — read on from its position, or the store's tail for a hook
+    with none yet — with each event's position, and whether the position was lost: rotated out,
+    or its inode now names another file (the record ending there isn't the cursor's)."""
+    if not st.pos:
+        records, where = _split(monitorlog.span(None, READ_BYTES, 0)[0])
+        return records, where, False
+    read, found = monitorlog.span(st.pos, LEAD_BYTES, READ_BYTES)
+    lost = not found or not any(p == st.pos and _key(r) == tuple(st.last) for r, p in read)
+    if found and lost:
+        read, _ = monitorlog.span([-1, 0], 0, READ_BYTES)  # no inode -1: the oldest byte on
+    records, where = _split(read)
+    return records, where, lost
+
+
+def _key(r: dict) -> tuple[str, int] | None:
+    return (r["boot"], int(r["seq"])) if r.get("k") == "ev" and "boot" in r else None
+
+
+def _split(
+    read: list[tuple[dict, list[int]]],
+) -> tuple[list[dict], dict[tuple[str, int], list[int]]]:
+    where = {k: p for r, p in read if (k := _key(r)) is not None}
+    return [r for r, _ in read], where
 
 
 def run(log: Callable[[str], None], stopping: Callable[[], bool]) -> None:
