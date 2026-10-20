@@ -245,6 +245,57 @@ disk_gib = 60
     webpack `watchOptions.poll`). Edits made in the box work normally.
   - `fy verify` in the box adds a row checking the kernel it runs on; its VM mount audit reads
     `N/A` there, so run `fy verify` on your computer for that.
+- **`monitor`** *(experimental)* — `"observe"` runs a guest monitor: a root eBPF collector
+  ([Tetragon](https://tetragon.io/)) in the VM that records what processes start, which
+  connections they open and which selected files they touch, in every container and in the VM
+  itself. It records; it blocks nothing. Default: `"off"`; any other value is an error. Lima only
+  (preflight enforces it). Env: `MACHINE_MONITOR`.
+  - *Experimental*: nothing changes unless you turn it on, but its event format, `fy monitor
+    --json` output and hook payload may change in a minor release while it settles.
+  - It is installed by a second root boot script, so changing it means `fy machine stop && fy up`.
+    `fy up` downloads a pinned, checksummed Tetragon release on your computer and copies it into
+    the VM; the VM checks the checksum again as root before installing it. Nothing comes from the
+    checkout.
+  - The box's user can't stop it, change its policy or read its log.
+  - `fy doctor` shows whether it is running, and why not if it isn't. If the monitor fails, `fy up`
+    warns and carries on: it only observes.
+  - `fy monitor` shows what it recorded, each event labelled with its container and worktree.
+    `fy monitor -w <worktree>` narrows to one worktree; `--json` gives one object per line.
+    - The host supervisor copies the events to your computer every few seconds
+      (`~/.foldyard/<project>/logs/monitor.jsonl`, rotated at 32 MB × 5).
+    - Each line is signed in the VM with a key the box's user can't read, so a line that was
+      altered on the way is dropped and counted. One that went missing shows as a gap. `fy
+      doctor`'s `monitor events` row shows both counts.
+  - How to read the labels:
+    - A **container** is identified from the kernel's own records. Its name and worktree are what
+      the engine reports, which is whatever the container's creator set. Anything holding the
+      engine socket can claim to be another worktree's container.
+    - **`vm`** is the VM itself, for example podman, or pasta making a container's connection.
+    - **`unattributed`** is a container that came and went too fast to be seen. That is usually
+      the box's own throwaway containers.
+    - **`ambiguous`** means the records disagree, and foldyard doesn't guess.
+  - **Hooks** send batches of these events to your own program or endpoint: a scoring script,
+    a notifier, a model. They are configured in `~/.foldyard/<project>/monitor-hooks.toml` on
+    your computer, never in `foldyard.toml`. Anything in the box can write the checkout, so a
+    command there would run the box's code on your computer, and a URL there would send your
+    events wherever it chose.
+
+    ```toml
+    [[hook]]
+    name = "score"
+    command = ["/usr/local/bin/my-scorer", "--json"]   # absolute path, argv, no shell
+    # url = "https://hooks.example.org/fy"             # or POST each batch as JSON
+    kinds = ["exec", "connect", "file"]                # optional filters
+    who = ["container", "unattributed"]
+    ```
+
+    - A command gets each batch as JSON on stdin, with only `PATH`, `HOME`, `LANG`, `FY_PROJECT`
+      and `FY_HOOK` set. Your other environment, including `host.env`'s secrets, is not passed.
+    - Events are sent once their container is settled. A batch is retried until the command exits
+      0 or the URL answers 2xx; after five failures it is skipped and counted.
+    - The design, and the analysis pipeline hooks are meant for:
+      [docs/monitor-pipeline.md](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md).
+  - Details: [ADR-0032](./adrs/0032-a-root-collector-in-the-guest.md).
 - **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`. Same rule as
   `[project].name`.
 - **`cpus`** / **`memory_mib`** / **`disk_gib`** — sizing at first creation. Defaults: `4` /
@@ -971,7 +1022,7 @@ Per-key overrides are listed with their keys above. The globals:
 | `WORKTREE` | The active worktree; empty = the main checkout. Set in the box; inferred from the working directory on your computer. |
 | `WT_OFFSET` | Worktree port offset, bypassing pins and the hash. |
 | `PODMAN_MACHINE` | The VM name. |
-| `MACHINE_BACKEND` / `MACHINE_VMTYPE` / `MACHINE_FIREWALL` / `MACHINE_HOST_FIREWALL` / `MACHINE_RUNTIME` / `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK` | `[machine]` overrides. |
+| `MACHINE_BACKEND` / `MACHINE_VMTYPE` / `MACHINE_FIREWALL` / `MACHINE_HOST_FIREWALL` / `MACHINE_RUNTIME` / `MACHINE_MONITOR` / `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK` | `[machine]` overrides. |
 | `FY_PROXY_PORT` | The proxy's base port, bypassing the port-range registry. |
 | `GCP_MINTER_PORT` | The gcp token service's base port, likewise. |
 | `FY_HOST_ALIAS` | The address containers use to reach daemons on your computer — for a customised Lima network with a different host gateway. |

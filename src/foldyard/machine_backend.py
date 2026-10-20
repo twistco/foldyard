@@ -49,6 +49,10 @@ from pathlib import Path
 from shutil import which
 
 VM_HELPERS = ("krunkit", "vfkit", "gvproxy", "qemu-system")
+
+# First line after the shebang of foldyard's wall/sudo boot script; lima.yaml carries it verbatim
+# inside the `script: |` block, so a line scan (no YAML parser) finds it.
+PROVISION_MARKER = "# fy-provision "
 """Basenames (prefixes) of the host processes that make up a running podman machine — the
 hypervisor and the user-mode network/socket forwarder. :meth:`PodmanBackend.reap_orphans`
 will only ever signal a process whose argv[0] is one of these."""
@@ -155,15 +159,18 @@ class Backend(ABC):
     def mounts(self, name: str) -> list[str]:
         """The VM's mount targets — for the worktrees-mount drift warning."""
 
-    def provision_id(self, name: str) -> str:
-        """The id of foldyard's boot-provisioning script as RECORDED in the VM's stored config
-        (``""`` = none). Only a backend whose guest foldyard provisions at boot (Lima) has one;
-        the id is what :mod:`foldyard.machine` compares against the script it wants."""
+    def provision_id(self, name: str, marker: str = PROVISION_MARKER) -> str:
+        """The id of foldyard's boot-provisioning script carrying ``marker`` as RECORDED in the
+        VM's stored config (``""`` = none). Only a backend whose guest foldyard provisions at boot
+        (Lima) has one; the id is what :mod:`foldyard.machine` compares against the script it
+        wants. foldyard records two such scripts, each under its own marker: the wall/sudo one
+        (:data:`PROVISION_MARKER`) and the guest monitor's (:data:`foldyard.monitor.MARKER`)."""
         return ""
 
-    def set_provision(self, name: str, script: str) -> bool:
-        """Record ``script`` as the VM's root boot script — the VM must be stopped. False where
-        the guest cannot be provisioned at all (podman-machine's appliance; native's no-VM)."""
+    def set_provision(self, name: str, script: str, marker: str = PROVISION_MARKER) -> bool:
+        """Record ``script`` as the VM's root boot script under ``marker``, replacing any earlier
+        entry with that marker and leaving the other — the VM must be stopped. False where the
+        guest cannot be provisioned at all (podman-machine's appliance; native's no-VM)."""
         return False
 
     @abstractmethod
@@ -470,16 +477,23 @@ class LimaBackend(Backend):
         return True  # Lima runs N VMs natively — no exclusive-active gate
 
     def _instances(self, name: str = "") -> list[dict]:
-        """Parse `limactl list --json` (JSON-lines, one object per instance). With ``name``,
-        filters to that instance."""
-        cmd = ["limactl", "list", "--json"]
+        """``limactl list`` as one JSON object per instance (the same fields ``--json`` gives).
+        With ``name``, filters to that instance.
+
+        Through a ``{{json .}}`` template, never ``--json``: that path re-reads its own output
+        through a 64 KiB-a-line ``bufio.Scanner``, and each line carries the instance's whole
+        config — so a VM with the wall's and the guest monitor's boot scripts recorded made
+        ``list`` fail ("token too long", nothing printed) and every lookup read "no such VM"
+        (Lima 2.2.0). The template is written straight out. Rows split on ``\n`` alone: Go's
+        JSON leaves U+0085 unescaped, and ``str.splitlines`` breaks on it."""
+        cmd = ["limactl", "list", "--format", "{{json .}}"]
         if name:
             cmd.append(name)
         out = _run(cmd)
         if out.returncode != 0:
             return []
         rows = []
-        for line in out.stdout.splitlines():
+        for line in out.stdout.split("\n"):
             line = line.strip()
             if not line:
                 continue
@@ -523,11 +537,7 @@ class LimaBackend(Backend):
                         targets.append(val)
         return targets
 
-    # First line after the shebang of foldyard's boot script; lima.yaml carries it verbatim
-    # inside the `script: |` block, so a line scan (no YAML parser) finds it.
-    _PROVISION_MARKER = "# fy-provision "
-
-    def provision_id(self, name: str) -> str:
+    def provision_id(self, name: str, marker: str = PROVISION_MARKER) -> str:
         cfg = Path.home() / ".lima" / name / "lima.yaml"
         try:
             text = cfg.read_text()
@@ -535,19 +545,18 @@ class LimaBackend(Backend):
             return ""
         for line in text.splitlines():
             s = line.strip()
-            if s.startswith(self._PROVISION_MARKER):
-                return s[len(self._PROVISION_MARKER) :].strip()
+            if s.startswith(marker):
+                return s[len(marker) :].strip()
         return ""
 
-    def set_provision(self, name: str, script: str) -> bool:
-        """``limactl edit --set``: drop any earlier foldyard entry (matched by its marker line)
-        and append this one as ``mode: system`` — Lima runs those as ROOT on every boot, after
-        cloud-init and the template's own provisioning. ``edit`` refuses a running instance,
-        which is the contract: a provisioning change needs a restart to apply."""
-        keep = (
-            '(.provision // [])[] | select((.script // "") | '
-            f"test({json.dumps(self._PROVISION_MARKER)}) | not)"
-        )
+    def set_provision(self, name: str, script: str, marker: str = PROVISION_MARKER) -> bool:
+        """``limactl edit --set``: drop any earlier foldyard entry with THIS marker (matched by
+        its marker line) and append this one as ``mode: system`` — Lima runs those as ROOT on
+        every boot, after cloud-init and the template's own provisioning, each independently. The
+        other marker's entry is kept. ``edit`` refuses a running instance, which is the contract:
+        a provisioning change needs a restart to apply."""
+        # `test` reads the marker as a regex: markers stay regex-literal (a test pins both)
+        keep = f'(.provision // [])[] | select((.script // "") | test({json.dumps(marker)}) | not)'
         # UTF-8 intact: a `\uXXXX` escape lands in lima.yaml verbatim (yq keeps it), and the
         # guest would then echo the escape instead of the wall script's glyphs.
         entry = f'{{"mode": "system", "script": {json.dumps(script, ensure_ascii=False)}}}'
