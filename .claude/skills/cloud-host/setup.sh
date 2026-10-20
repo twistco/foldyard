@@ -80,7 +80,9 @@ if ! [ -x "$H/.local/bin/uv" ]; then
         "$D/run" "curl -LsSf https://astral.sh/uv/install.sh | sh"
     fi
 fi
-[ -d "$H/foldyard/.git" ] || git clone -q "$SRC" "$H/foldyard"
+# --no-local: a local clone HARD-LINKS the source's objects, and the chown below would then hand
+# them, in the source checkout too, to the operator.
+[ -d "$H/foldyard/.git" ] || git clone --no-local -q "$SRC" "$H/foldyard"
 chown -R "$OP:$OP" "$H/foldyard"
 "$D/run" "git config --global --add safe.directory '*'; cd ~/foldyard && uv tool install -q --force --editable ."
 

@@ -73,7 +73,9 @@ The project must live in the operator's home: the VM mounts only the checkout, a
   `fy box up` / `fy up` again:
 
   ```bash
-  $O/run 'until limactl shell --workdir / <machine> test -e /run/lima-boot-done; do sleep 20; done'
+  $O/run 'm=<machine>; for _ in $(seq 90); do   # 30 min, then the logs instead of a hang
+    limactl shell --workdir / $m test -e /run/lima-boot-done && exit 0; sleep 20; done
+    tail -n 40 ~/.lima/$m/ha.stderr.log ~/.lima/$m/serial.log; exit 1'
   ```
 
   Wait in a background command, never in a foreground `sleep`. Anything with its own timeout
@@ -113,15 +115,21 @@ the preset `DOCKER_HOST`. Two more settings are needed:
   build API, which podman implements.
 - **The docker CLI's `proxies` config for builds.** The walled VM gives every container the proxy
   variables and foldyard's CA (`containers.conf.d`), but a build sent over the docker API gets
-  only the CA. Its `RUN` steps go direct and the VM firewall refuses them. Seed the box's docker
-  config from `[box].bootstrap`:
+  only the CA. Its `RUN` steps go direct and the VM firewall refuses them. Seed the docker config
+  the box actually uses (`DOCKER_CONFIG`, `~/.docker-fy` by default) from `[box].bootstrap`:
 
   ```toml
   bootstrap = '''
-  mkdir -p "$HOME/.docker-fy"
-  printf '{"proxies":{"default":{"httpProxy":"%s","httpsProxy":"%s","noProxy":"localhost,127.0.0.1"}}}' "$HTTPS_PROXY" "$HTTPS_PROXY" > "$HOME/.docker-fy/config.json"
+  d="${DOCKER_CONFIG:-$HOME/.docker}"
+  mkdir -p "$d"
+  printf '{"proxies":{"default":{"httpProxy":"%s","httpsProxy":"%s","noProxy":"localhost,127.0.0.1"}}}' "$HTTPS_PROXY" "$HTTPS_PROXY" > "$d/config.json"
   '''
   ```
+
+  That covers `docker build`, which passes both spellings. Compose's classic builder passes only
+  `HTTP_PROXY`/`HTTPS_PROXY`, and apt reads only the lower-case `http_proxy`. So an apt `RUN` step
+  in a compose build still goes direct (`Could not connect to archive.ubuntu.com:80 … Connection
+  refused`). pip and curl read either spelling.
 
 The box has no `pkill`, `pgrep` or `ps`. To stop a background job, walk `/proc/*/cmdline`. Build
 the match pattern from two pieces (`pat=foo""bar`), or the loop's own command line matches it and
