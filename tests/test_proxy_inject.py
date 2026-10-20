@@ -3113,8 +3113,8 @@ async def test_a_request_naming_neither_or_both_is_answered_not_sent(shared, hea
 
 async def test_a_lone_rule_still_injects_whatever_the_request_carries(live, tmp_path):
     # The dummy only chooses BETWEEN rules: a host with one rule injects as it always did — on a
-    # request that carries no credential at all, and on one carrying something else (here a
-    # resting harness row's dummy: the rule overwrites its own header, as before this change).
+    # request that carries no credential at all, and on one carrying something else (here an
+    # x-api-key no switch claims: the rule writes its own header, as before this change).
     minter = _counting_minter(tmp_path, "oauth", "sk-ant-oat-REAL")
     _write_live(
         live.live,
@@ -3131,6 +3131,54 @@ async def test_a_lone_rule_still_injects_whatever_the_request_carries(live, tmp_
     )
     inj = live.Injector()
     for headers in ({}, {"authorization": "something else"}, {"x_api_key": "x"}):
+        flow = _shared_flow(**headers)
+        await inj.requestheaders(flow)
+        assert flow.response is None
+        assert flow.request.headers["authorization"] == "Bearer sk-ant-oat-REAL"
+
+
+_HARNESS_HELD = {
+    "host": _SHARED,
+    "header": "x-api-key",
+    "dummy": "x",
+    "any_scheme": True,
+    "axis": "haiku",
+    "body": _HELD_BODY,
+}
+
+
+async def test_a_resting_switchs_dummy_is_held_not_given_the_lone_rules_credential(live, tmp_path):
+    # Claude on, the harness row at rest: the harness's request names a credential that is off. A
+    # lone rule writing its own header beside that dummy would send it out on the OAuth token —
+    # billed to the subscription, with the held answer ("turn on `haiku`") never seen.
+    minter = _counting_minter(tmp_path, "oauth", "sk-ant-oat-REAL")
+    _write_live(
+        live.live,
+        rules=[
+            {
+                "host": _SHARED,
+                "command": minter.command,
+                "header": "authorization",
+                "value_prefix": "Bearer ",
+                "dummies": [_OAUTH_DUMMY],
+                "switch": "claude",
+            }
+        ],
+        held=[_HARNESS_HELD],
+    )
+    inj = live.Injector()
+    flow = _shared_flow(x_api_key="x")
+    await inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 401
+    assert flow.request.headers == {"x-api-key": "x"}  # nothing written
+    assert not minter.calls.exists()
+    assert _last_log(live.log)["held"] == "haiku"
+    # Claude's own request, and one naming both, still go out on the live rule's credential: the
+    # held answer is for a request that names ONLY a credential at rest.
+    for headers in (
+        {"authorization": _OAUTH_DUMMY},
+        {"authorization": _OAUTH_DUMMY, "x_api_key": "x"},
+    ):
         flow = _shared_flow(**headers)
         await inj.requestheaders(flow)
         assert flow.response is None

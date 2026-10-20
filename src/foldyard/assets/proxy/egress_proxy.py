@@ -342,6 +342,12 @@ def _carries_dummy(value: str | None, dummy: str, any_scheme: bool) -> bool:
     return any_scheme and bool(sep) and bool(_AUTH_SCHEME.match(scheme)) and rest.strip() == dummy
 
 
+def _held_place(entry: dict) -> str:
+    """Where a ``held`` entry's dummy sits, keyed as :meth:`_Rule.place` keys a rule's."""
+    param = entry.get("query_param")
+    return f"q:{param}" if param else f"h:{str(entry.get('header') or 'Authorization').lower()}"
+
+
 def _host_matches(host: str | None, patterns: list[str]) -> bool:
     """Exact host match, or ``*.suffix`` wildcard (matches SUBDOMAINS, not the bare domain) —
     Claude Code Web's allow-list semantics, so its published list drops in unchanged. Used to
@@ -1106,12 +1112,13 @@ class Injector:
         credential, on the way out (`request`) or on a 401 re-issue (`response`).
 
         One rule matching the host and path is THE rule, whatever the request carries — exactly as
-        before rules could share a host. Several (header-disjoint injectors: the registry lets
-        rules share a host and path only when each writes its own place and the box sends a dummy
-        for each) → the one rule whose dummy the request carries in that rule's place, else none:
-        a request naming none of them, or more than one, gets no credential (`_unnamed` answers
-        it). Never the first match: on a shared host that writes one client's credential onto
-        another client's requests.
+        before rules could share a host — save a request carrying only the dummy of a switch at
+        rest there, in another place, which gets the held answer instead. Several
+        (header-disjoint injectors: the registry lets rules share a host and path only when each
+        writes its own place and the box sends a dummy for each) → the one rule whose dummy the
+        request carries in that rule's place, else none: a request naming none of them, or more
+        than one, gets no credential (`_unnamed` answers it). Never the first match: on a shared
+        host that writes one client's credential onto another client's requests.
 
         Once a rule has written this request's credential, only a rule writing that same place is
         its rule: should the one it named go away in flight, the other left alone on the host must
@@ -1119,6 +1126,13 @@ class Injector:
         matching = self._matching(flow)
         if len(matching) <= 1:
             rule = matching[0] if matching else None
+            # ...unless the request names only a credential at rest on this host, in a place the
+            # rule doesn't write: the held answer says to turn that one on, where the lone rule
+            # would send the request out on its own credential, beside the other's dummy. (In the
+            # rule's own place the rule overwrites the dummy, and an active rule wins.)
+            held = self._held_for(flow) if rule is not None else None
+            if held and _held_place(held) != rule.place() and not self._names(flow, rule):
+                rule = None
         else:
             named = [rule for rule in matching if self._names(flow, rule)]
             rule = named[0] if len(named) == 1 else None
