@@ -2101,17 +2101,34 @@ def reclaim(ctx: Context, extra_profiles: list[str] | None = None, *, force: boo
         print(f"✓ {freed} — {after.render()}")
 
 
+# An executable script runs by its own shebang — as `sh <script>`, a bash one died at its first
+# bash-ism under the box's dash, before any sweep — and a plain file under sh, as it always did.
+_RUN_BY_SHEBANG = 'if [ -x "$1" ]; then exec "$1"; else exec sh "$1"; fi'
+
+
+def _reclaim_argv(script: str) -> list[str]:
+    """The command that runs ``[reclaim] script`` from the checkout. A bare name gets ``./`` so
+    ``exec`` runs the checkout's file rather than searching PATH for one."""
+    path = script if "/" in script else f"./{script}"
+    return ["sh", "-c", _RUN_BY_SHEBANG, "sh", path]
+
+
+def _reclaim_failed(script: str, rc: int) -> None:
+    if rc:
+        print(f"⚠ {script} exited {rc} — its sweeps may not have run (output above); continuing")
+
+
 def _project_reclaim(ctx: Context) -> None:
     """Run ``[reclaim] script`` where the volumes are: directly when already in the box, else
     exec'd into it (a stopped box is a note, not a failure — the engine sweeps still ran).
-    Output streams to the terminal; the exit code is deliberately ignored."""
+    Output streams to the terminal; a non-zero exit is said, never fatal."""
     script = config.reclaim_script()
     if not script:
         return
     checkout = ctx.env.get("FOLDYARD_CHECKOUT", str(ctx.main))
     if config.in_box():
         print(f"▶ running the project's reclaim script ({script})…")
-        subprocess.run(["sh", script], cwd=checkout)
+        _reclaim_failed(script, subprocess.run(_reclaim_argv(script), cwd=checkout).returncode)
         return
     from . import box
 
@@ -2122,10 +2139,11 @@ def _project_reclaim(ctx: Context) -> None:
         return
     print(f"▶ running the project's reclaim script in {name} ({script})…")
     # Login shell so PATH (pnpm/uv) matches an attached `fy box shell`.
-    subprocess.run(
-        [eng, "exec", "-w", checkout, name, "bash", "-lc", f"sh {shlex.quote(script)}"],
+    proc = subprocess.run(
+        [eng, "exec", "-w", checkout, name, "bash", "-lc", shlex.join(_reclaim_argv(script))],
         env=ctx.env,
     )
+    _reclaim_failed(script, proc.returncode)
 
 
 def reclaim_now() -> int:

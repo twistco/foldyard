@@ -795,11 +795,17 @@ script = "dev-stack/reclaim.sh"   # checkout-relative; e.g. pnpm store prune, uv
                                   # trimming test artefacts, a stale buildx state volume
 ```
 
-- **`script`** — checkout-relative path. Default: none.
+- **`script`** — checkout-relative path. Default: none. An executable script runs by its own
+  shebang (`#!/usr/bin/env bash` gets bash); a file without the executable bit runs under `sh`,
+  which in a Debian-based box is dash, not bash.
 
-Best-effort: output streams to the terminal, a non-zero exit isn't a failure, and a stopped box
-is a note (run `fy reclaim` in the box to reach its volumes). Per-worktree caches are reachable
-only from that worktree's box.
+The script gets the box's environment and nothing more: it needn't (and shouldn't) `eval` `fy
+shellenv`, which is for recipes — it switches on `set -euo pipefail` and moves to the main
+checkout, and its output is bash.
+
+Best-effort: output streams to the terminal, a non-zero exit is reported but doesn't stop
+`fy up`, and a stopped box is a note (run `fy reclaim` in the box to reach its volumes).
+Per-worktree caches are reachable only from that worktree's box.
 
 ## `[plugins.<name>]`
 
