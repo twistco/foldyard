@@ -73,6 +73,17 @@ compose = ["compose.yml"]
 API_PORT = 8080
 ```
 
+Two things to get right in the compose file and around it, both in `fy docs configuration`
+under `[reclaim]`:
+
+- **A cache volume several services share** (a uv or pip cache, say): run their dependency
+  builds with `TMPDIR` on that volume. On the VM's SELinux guest, a wheel built in `/tmp` and
+  copied into the cache keeps the private label of the container that built it, and nothing can
+  delete it afterwards.
+- **Caches or test artefacts that grow:** give the project a `[reclaim] script`, which foldyard
+  runs in the box when the engine store runs low. Make it executable with its own shebang, and
+  don't `eval` `fy shellenv` in it: that output is bash meant for recipes.
+
 **b) The image** → if the recipe is only distro packages, list them and stop there — foldyard
 bakes them into a cached layer on top of the box image (built once, not reinstalled by every
 new box), using whichever package manager the image has:

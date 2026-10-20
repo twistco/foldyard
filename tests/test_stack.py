@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import os
+import shlex
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -1495,14 +1496,17 @@ def test_forced_reclaim_reports_headroom_even_when_the_before_probe_failed(
 # ── the project's own [reclaim] script ───────────────────────────────────────────────
 
 
-def _box_runs(monkeypatch, *, box_running: bool, free_gib: float = 2.0):
-    """`_headroom_run` plus an answer for the dev-box liveness probe (`ps -q -f name=…`)."""
+def _box_runs(monkeypatch, *, box_running: bool, free_gib: float = 2.0, script_rc: int = 0):
+    """`_headroom_run` plus an answer for the dev-box liveness probe (`ps -q -f name=…`), and
+    ``script_rc`` as the exit of the project script's run (exec'd into the box or direct)."""
     calls, headroom = _headroom_run(free_gib=free_gib)
 
     def fake_run(cmd, **kw):
         proc = headroom(cmd, **kw)
         if cmd[:2] == ["podman", "ps"] and any(a.startswith("name=") for a in cmd):
             proc.stdout = "abc123\n" if box_running else ""
+        if cmd[:2] == ["podman", "exec"] or cmd[:1] == ["sh"]:
+            proc.returncode = script_rc
         return proc
 
     monkeypatch.setattr(stack.subprocess, "run", fake_run)
@@ -1520,7 +1524,9 @@ def test_reclaim_runs_the_project_script_in_the_box(fake_repo, monkeypatch):
     hook = next(c for c in calls if c[:2] == ["podman", "exec"])
     assert "tangible-podman-devbox" in hook
     assert hook[hook.index("-w") + 1] == str(fake_repo)  # the checkout, not the caller's cwd
-    assert hook[-1].endswith("sh dev-stack/reclaim.sh")
+    # A login shell (PATH as in `fy box shell`) running the same argv as the in-box path.
+    assert hook[-3:-1] == ["bash", "-lc"]
+    assert shlex.split(hook[-1]) == stack._reclaim_argv("dev-stack/reclaim.sh")
     # After the engine sweeps, not before: a script that fails must not cost them.
     assert calls.index(hook) > calls.index(next(c for c in calls if "prune" in c))
 
@@ -1539,8 +1545,77 @@ def test_reclaim_runs_the_project_script_directly_inside_the_box(fake_repo, monk
     monkeypatch.setattr(config, "reclaim_script", lambda: "dev-stack/reclaim.sh")
     calls = _box_runs(monkeypatch, box_running=True)
     stack.reclaim(stack.resolve())
-    assert ["sh", "dev-stack/reclaim.sh"] in calls
+    assert stack._reclaim_argv("dev-stack/reclaim.sh") in calls
     assert not [c for c in calls if c[:2] == ["podman", "exec"]]
+
+
+def _reclaim_script(tmp_path: Path, body: str, *, executable: bool) -> str:
+    script = tmp_path / "dev-stack" / "reclaim.sh"
+    script.parent.mkdir(exist_ok=True)
+    script.write_text(body)
+    script.chmod(0o755 if executable else 0o644)
+    return "dev-stack/reclaim.sh"
+
+
+@pytest.mark.spawns("sh")
+def test_reclaim_script_runs_by_its_own_shebang(tmp_path):
+    # Tangible's bash script, run as `sh <script>`, died at its first bash-ism (an array) under
+    # the box's dash — before any sweep, silently. An executable script names its interpreter.
+    script = _reclaim_script(
+        tmp_path, '#!/bin/bash\nset -u\narr=(a b)\necho "ran ${arr[1]}"\n', executable=True
+    )
+    out = subprocess.run(
+        stack._reclaim_argv(script), cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert (out.returncode, out.stdout) == (0, "ran b\n"), out.stderr
+
+
+@pytest.mark.spawns("sh")
+def test_reclaim_script_without_the_exec_bit_still_runs_under_sh(tmp_path):
+    # The contract before shebangs were honoured: a plain (non-executable) file is a sh script.
+    script = _reclaim_script(tmp_path, "echo ran\n", executable=False)
+    out = subprocess.run(
+        stack._reclaim_argv(script), cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert (out.returncode, out.stdout) == (0, "ran\n"), out.stderr
+
+
+@pytest.mark.spawns("sh")
+def test_reclaim_script_at_the_checkout_root_is_not_looked_up_on_path(tmp_path):
+    # A bare name would make `exec` search PATH — and run some other `reclaim.sh` found there.
+    decoys = tmp_path / "bin"
+    decoys.mkdir()
+    for where, says in ((tmp_path, "mine"), (decoys, "decoy")):
+        (where / "reclaim.sh").write_text(f"#!/bin/sh\necho {says}\n")
+        (where / "reclaim.sh").chmod(0o755)
+    out = subprocess.run(
+        stack._reclaim_argv("reclaim.sh"),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PATH": f"{decoys}{os.pathsep}{os.environ['PATH']}"},
+    )
+    assert (out.returncode, out.stdout) == (0, "mine\n"), out.stderr
+
+
+@pytest.mark.parametrize("in_box", [False, True])
+def test_reclaim_says_when_the_project_script_fails(fake_repo, monkeypatch, capsys, in_box):
+    # Still best-effort — the build goes on — but a script that died before its sweeps must
+    # not read the same as one that ran them (a lone stderr line was the only trace).
+    if in_box:
+        monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setattr(config, "reclaim_script", lambda: "dev-stack/reclaim.sh")
+    _box_runs(monkeypatch, box_running=True, script_rc=2)
+    stack.reclaim(stack.resolve())
+    assert "⚠ dev-stack/reclaim.sh exited 2" in capsys.readouterr().out
+
+
+def test_reclaim_is_quiet_about_a_project_script_that_succeeds(fake_repo, monkeypatch, capsys):
+    monkeypatch.setattr(config, "reclaim_script", lambda: "dev-stack/reclaim.sh")
+    _box_runs(monkeypatch, box_running=True, script_rc=0)
+    stack.reclaim(stack.resolve())
+    assert "reclaim.sh exited" not in capsys.readouterr().out
 
 
 def test_reclaim_without_a_script_runs_no_hook(fake_repo, monkeypatch):
