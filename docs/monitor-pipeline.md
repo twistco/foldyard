@@ -191,7 +191,10 @@ timeout = 15                        # seconds
 
 - **Payload** (stdin for a command, the body for a url): `{"schema": "fy.monitor.events/1",
   "project", "hook", "events": [...], "first": [boot, seq], "last": [boot, seq]}` — the same
-  `Event` fields `fy monitor --json` prints.
+  `Event` fields `fy monitor --json` prints. Besides the attribution (`who`, `container`, `name`,
+  `worktree`), each event carries its ancestry: `ppid`, `parent`, `parent_args` (the one hop) and
+  `exec_id`/`parent_exec_id` (the links to rebuild the whole tree from `exec` events) — how a
+  scorer tells a container's own daemon from what a session ran.
 - **Settled events only**: an event is delivered once a snapshot after it exists (or two minutes
   have passed), so its attribution won't change — and never ahead of an earlier event that hasn't
   settled (a VM restarted inside those two minutes would otherwise strand the old boot's tail).

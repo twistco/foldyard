@@ -274,6 +274,11 @@ disk_gib = 60
     - **`unattributed`** is a container that came and went too fast to be seen. That is usually
       the box's own throwaway containers.
     - **`ambiguous`** means the records disagree, and foldyard doesn't guess.
+  - Each event also names the process that started it: `--json` and hooks carry `ppid`, `parent`
+    and `parent_args` (that process's id, binary and arguments), plus `exec_id` and
+    `parent_exec_id` (the ids of the process's own `exec` event and its parent's), so you can
+    rebuild the whole process tree. Use them to tell a container's own background daemons from what a session
+    ran. An event Tetragon reported without them has them empty (`ppid` is `null`).
   - **Hooks** send batches of these events to your own program or endpoint: a scoring script,
     a notifier, a model. They are configured in `~/.foldyard/<project>/monitor-hooks.toml` on
     your computer, never in `foldyard.toml`. Anything in the box can write the checkout, so a

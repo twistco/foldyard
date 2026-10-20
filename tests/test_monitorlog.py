@@ -349,6 +349,51 @@ def test_join_describes_connections_and_file_access():
     ]
 
 
+# BashArena's firewall daemon reloading iptables, as Tetragon reports it: the parent hop and the
+# exec ids are what tell a container's own daemon from a command a session ran.
+_DAEMON = {"binary": "/bin/bash", "arguments": "/usr/local/bin/firewall-daemon", "pid": 41,
+           "exec_id": "OjE0MDA6NDE="}  # fmt: skip
+
+
+def _ancestry(e) -> tuple:
+    return (e.ppid, e.parent, e.parent_args, e.exec_id, e.parent_exec_id)
+
+
+def test_join_carries_the_parent_process_and_the_exec_ids():
+    flush = ev(200, binary="/usr/sbin/iptables", parent=_DAEMON)
+    proc = flush["e"]["process_exec"]["process"]
+    proc |= {"arguments": "-F", "exec_id": "OjE0MDE6NDI=", "parent_exec_id": "OjE0MDA6NDE="}
+    (e,) = monitorlog.attribute(_records(snap({200: [BOX]}), flush), "fyex")
+    assert (e.binary, e.args) == ("/usr/sbin/iptables", "-F")
+    assert _ancestry(e) == (
+        41,
+        "/bin/bash",
+        "/usr/local/bin/firewall-daemon",
+        "OjE0MDE6NDI=",
+        "OjE0MDA6NDE=",
+    )
+
+
+def test_a_kprobe_event_carries_its_parent_too_and_the_parents_exec_id_stands_in():
+    connect = ev(200, kind="process_kprobe", function_name="tcp_connect", parent=_DAEMON,
+                 args=[{"sock_arg": {"daddr": "1.1.1.1", "dport": 443}}])  # fmt: skip
+    connect["e"]["process_kprobe"]["process"]["exec_id"] = "OjE0MDE6NDI="  # no parent_exec_id
+    (e,) = monitorlog.attribute(_records(snap({200: [BOX]}), connect), "fyex")
+    assert (e.kind, e.detail) == ("connect", "1.1.1.1:443")
+    assert _ancestry(e) == (
+        41,
+        "/bin/bash",
+        "/usr/local/bin/firewall-daemon",
+        "OjE0MDE6NDI=",
+        "OjE0MDA6NDE=",  # parent.exec_id
+    )
+
+
+def test_a_record_without_ancestry_takes_the_defaults():
+    (e,) = monitorlog.attribute(_records(snap({200: [BOX]}), ev(200)), "fyex")
+    assert _ancestry(e) == (None, "", "", "", "")
+
+
 # ── fy monitor ──────────────────────────────────────────────────────────────────────────
 
 
