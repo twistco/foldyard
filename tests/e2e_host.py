@@ -222,10 +222,12 @@ def guest_diagnostics() -> str:
 def lima_list(name: str = "") -> list[dict]:
     """``limactl list`` rows, through the same ``{{json .}}`` template foldyard uses — never
     ``--json``, which fails outright once an instance's config passes 64 KiB (both boot
-    scripts recorded: see ``LimaBackend._instances``)."""
+    scripts recorded: see ``LimaBackend._instances``). A failed list RAISES: read as an empty
+    one it says "no such VM", which is how that failure hid behind three modules' errors.
+    (No instances at all is rc 0; a ``name`` Lima doesn't have is rc 1.)"""
     out = subprocess.run(
         ["limactl", "list", "--format", "{{json .}}", *([name] if name else [])],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=30, check=True,
     ).stdout  # fmt: skip
     return [json.loads(line) for line in out.split("\n") if line.strip()]
 
