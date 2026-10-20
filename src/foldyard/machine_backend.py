@@ -173,6 +173,16 @@ class Backend(ABC):
         guest cannot be provisioned at all (podman-machine's appliance; native's no-VM)."""
         return False
 
+    def proxy_propagation(self, name: str) -> bool | None:
+        """Whether the VM's stored config copies the host's ``*_proxy`` variables into the guest
+        at each start; ``None`` where the backend has no such setting."""
+        return None
+
+    def set_proxy_propagation(self, name: str, on: bool) -> bool:
+        """Record :meth:`proxy_propagation` — the VM must be stopped. False where the backend
+        has no such setting."""
+        return False
+
     @abstractmethod
     def socket(self, name: str) -> str:
         """The VM's libpod socket as a ``unix://`` URI (assumes the VM exists)."""
@@ -562,6 +572,24 @@ class LimaBackend(Backend):
         entry = f'{{"mode": "system", "script": {json.dumps(script, ensure_ascii=False)}}}'
         expr = f".provision = ([{keep}] + [{entry}])"
         cmd = ["limactl", "edit", "--tty=false", name, "--set", expr]
+        return subprocess.run(cmd).returncode == 0
+
+    def proxy_propagation(self, name: str) -> bool | None:
+        """Lima's top-level ``propagateProxyEnv`` as recorded in ``lima.yaml``; absent means
+        Lima's default, which is to propagate."""
+        cfg = Path.home() / ".lima" / name / "lima.yaml"
+        try:
+            text = cfg.read_text()
+        except OSError:
+            return None
+        for line in text.splitlines():
+            if line.startswith("propagateProxyEnv:"):  # top level only: not a script's text
+                return line.split(":", 1)[1].split("#", 1)[0].strip() != "false"
+        return True
+
+    def set_proxy_propagation(self, name: str, on: bool) -> bool:
+        value = "true" if on else "false"
+        cmd = ["limactl", "edit", "--tty=false", name, "--set", f".propagateProxyEnv = {value}"]
         return subprocess.run(cmd).returncode == 0
 
     def socket(self, name: str) -> str:

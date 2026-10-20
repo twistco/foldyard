@@ -13,6 +13,7 @@ import json
 import shutil
 import signal
 import socket
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -826,3 +827,45 @@ def test_lima_start_reaps_before_limactl(lima_pids, monkeypatch, capsys):
     assert mb.LimaBackend().start("acme") is True
     assert seen == [["limactl", "start", "acme"]]
     assert "hostagent" in capsys.readouterr().err  # waited: said so
+
+
+@pytest.mark.parametrize(
+    ("recorded", "want"),
+    [
+        (None, True),  # absent: Lima's default is to propagate
+        ("propagateProxyEnv: false\n", False),
+        ("propagateProxyEnv: true\n", True),
+        ("# propagateProxyEnv: false\n", True),  # the template's commented example
+        ("provision:\n- script: |\n    propagateProxyEnv: false\n", True),  # not top level
+    ],
+)
+def test_lima_reads_proxy_propagation_from_the_stored_config(monkeypatch, tmp_path, recorded, want):
+    monkeypatch.setattr(mb.Path, "home", lambda: tmp_path)
+    inst = tmp_path / ".lima" / "acme"
+    inst.mkdir(parents=True)
+    (inst / "lima.yaml").write_text("cpus: 4\n" + (recorded or ""))
+    assert mb.LimaBackend().proxy_propagation("acme") is want
+
+
+def test_lima_proxy_propagation_of_a_vm_with_no_config_is_unknown(monkeypatch, tmp_path):
+    monkeypatch.setattr(mb.Path, "home", lambda: tmp_path)
+    assert mb.LimaBackend().proxy_propagation("absent") is None
+
+
+@pytest.mark.parametrize(("on", "value"), [(False, "false"), (True, "true")])
+def test_lima_set_proxy_propagation_edits_the_stored_config(monkeypatch, on, value):
+    seen = []
+    monkeypatch.setattr(
+        mb.subprocess,
+        "run",
+        lambda cmd, **kw: seen.append(cmd) or subprocess.CompletedProcess(cmd, 0),
+    )
+    assert mb.LimaBackend().set_proxy_propagation("acme", on)
+    assert seen == [
+        ["limactl", "edit", "--tty=false", "acme", "--set", f".propagateProxyEnv = {value}"]
+    ]
+
+
+def test_backends_without_the_setting_report_none():
+    assert mb.PodmanBackend().proxy_propagation("x") is None
+    assert not mb.PodmanBackend().set_proxy_propagation("x", False)
