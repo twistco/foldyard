@@ -282,11 +282,24 @@ def _targets(
             continue
         where, label = rule.host + rule.path_prefix, rule.label or "packaged injector"
         add(where, label, True, False, held_back=held.get(rule, ()), distinct=True)
+    # A rung's rules are every rule its hypothetical mode would arm, so the latent pass skips what
+    # is listed already: the current posture's rules, and any row's (the row's own line has it).
+    current = set(reg.proxy_rules(mode))
+    rows = {str(spec.get("switch")) for spec in config.inject_specs()}
     for axis, rungs in reg.switch_levels().items():  # …and what another rung would
         if not rungs or mode.get(axis, rungs[0]) != rungs[0]:
             continue  # already armed — its rules came from the pass above
         for rung in rungs[1:]:
-            for rule in reg.proxy_rules({**mode, axis: rung}):
+            hypo = {**mode, axis: rung}
+            rows_own = {
+                rule
+                for row, rules in reg.switch_rules(hypo).items()
+                if row in rows
+                for rule in rules
+            }
+            for rule in reg.proxy_rules(hypo):
+                if rule in current or rule in rows_own:
+                    continue
                 add(
                     rule.host + rule.path_prefix,
                     f"{rule.label or 'packaged injector'} — arms with `fy mode {axis}={rung}`",

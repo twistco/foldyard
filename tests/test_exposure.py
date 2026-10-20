@@ -231,7 +231,29 @@ def test_header_disjoint_credentials_on_one_host_both_show_and_neither_is_held_b
     # than folded into the row's line — it is a second credential, not the row's.
     targets = [t for t in collect(cfg, {"haiku": "on"}).targets if t.host == "api.anthropic.com"]
     assert [t.active for t in targets] == [True, False]
+    assert targets[1].source.startswith("Claude keyless proxy")
     assert "fy mode claude=on" in targets[1].source
+
+
+def test_a_resting_row_is_listed_once_not_again_as_its_own_latent_rung(checkout):
+    # The latent pass asks what each resting switch's next rung would arm, and a row's own `on`
+    # rung arms the row's rule: listed again, that is a second line for the same credential.
+    cfg = checkout(BASE + "passthrough = []\n" + GITHUB)
+    on_host = [t for t in collect(cfg, {}).targets if t.host == "api.github.com"]
+    assert on_host and all(t.from_config for t in on_host)  # the rows' own lines, nothing latent
+    assert not [t for t in on_host if "arms with" in t.source]
+
+
+def test_a_latent_rung_never_lists_a_rows_rule_under_its_own_switch(checkout):
+    # The harness row on, scoped to a path, and Claude at rest: Claude's latent rung re-derives
+    # every rule, the row's too. Only Claude's is Claude's to arm.
+    scoped = HARNESS.replace(
+        'header = "x-api-key"', 'path_prefix = "/v1/messages"\nheader = "x-api-key"'
+    )
+    targets = collect(checkout(BASE + "passthrough = []\n" + scoped), {"haiku": "on"}).targets
+    armed_by_claude = [t for t in targets if "fy mode claude=on" in t.source]
+    assert [t.host for t in armed_by_claude] == ["api.anthropic.com"]
+    assert armed_by_claude[0].source.startswith("Claude keyless proxy")
 
 
 def test_the_doctor_row_does_not_count_a_held_back_target_as_live(checkout):
