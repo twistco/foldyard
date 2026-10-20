@@ -65,6 +65,16 @@ exec $D/run "limactl shell --workdir / \$VM podman exec -i \${FY_BOX:-\$VM-devbo
 EOF
 chown "$OP:$OP" "$D"/*; chmod 0755 "$D/run" "$D/box"
 
+# Prove the bundle, don't assume it: the system fallback above lacks the session's CA wherever the
+# egress is intercepted, and then mitmdump answers 502 and every operator fetch fails to verify.
+# Python with cafile= trusts that file ALONE, as mitmdump's option does; curl would not tell (it also
+# reads its compiled-in /etc/ssl/certs).
+echo "▶ TLS as the operator, verified with $D/ca.crt alone"
+if ! "$D/run" "python3 -I -c 'import ssl, sys, urllib.request as u; u.urlopen(\"https://pypi.org/simple/\", timeout=30, context=ssl.create_default_context(cafile=sys.argv[1]))' $D/ca.crt"; then
+    echo "✗ the operator's TLS does not verify with $D/ca.crt ($( [ -f "$CA_SRC" ] && echo "from $CA_SRC" || echo "the system bundle: $CA_SRC is absent")). Point CA_SRC at this session's CA bundle and run again." >&2
+    exit 1
+fi
+
 echo "▶ Lima $LIMA_VERSION → $H/.local"
 if ! [ -x "$H/.local/bin/limactl" ] || ! "$D/run" "limactl --version" | grep -q "$LIMA_VERSION"; then
     url=https://github.com/lima-vm/lima/releases/download/v$LIMA_VERSION/lima-$LIMA_VERSION-Linux-x86_64.tar.gz
