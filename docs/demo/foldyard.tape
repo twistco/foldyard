@@ -138,10 +138,12 @@ Wait
 Sleep 500ms
 
 # ── 6. …but your computer doesn't run it until you say so ───────────────────────────────────────
+# `down` first: on a RUNNING box `fy box up` only warns that its image is stale and returns (the
+# packages layer is create-time), so the recreate is what puts the adopted change in the box.
 Type "clear"
 Enter
 Wait
-Type "fy box up"
+Type "fy box down && fy box up"
 Enter
 Wait+Screen /\[a\]dopt/
 Sleep 4s
