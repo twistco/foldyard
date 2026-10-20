@@ -1316,6 +1316,20 @@ def _widenings_check() -> tuple[str, str, str]:
     return _result(ok, name, detail, detail)
 
 
+def _experimental_check() -> tuple[str, str, str]:
+    """Doctor row: the experimental features the ADOPTED config turns on, and what is unproven
+    about each (:mod:`foldyard.experimental`). Never red — turning one on is a choice."""
+    from . import experimental
+
+    cfg = worktree_config(config.active_worktree())
+    try:
+        with config.using(cfg):
+            ok, name, detail = experimental.doctor_row()
+    except Exception as e:  # pragma: no cover — a report must never break the doctor run
+        return _result(None, "experimental", "", f"couldn't read the config: {e}")
+    return _result(ok, name, detail, detail)
+
+
 def _inject_overlap_check(mode: dict) -> tuple[str, str, str]:
     """Doctor row: no two switches inject on one host and path (``Registry.inject_overlaps``).
     ``fy mode`` refuses to create an overlap, so a failing row means the state arrived some other
@@ -1402,6 +1416,7 @@ def doctor(deep: bool = False):
     yield _worktree_registry_check()
     yield from _rebase_leftover_check()
     yield _widenings_check()
+    yield _experimental_check()
     yield _inject_overlap_check(ctx.mode)
     yield from _podman_checks()
     yield from _ssh_port_check()
