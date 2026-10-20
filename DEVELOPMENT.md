@@ -269,6 +269,9 @@ foldyard's surface splits by *where it can be validated*:
    On a Lima host these run against the example's own VM (creating, restarting, recreating it),
    never a consumer's. What the runner cannot reach — nested virtualisation for the gVisor
    posture — stays the recipe in [docs/nested-virt.md](./docs/nested-virt.md).
+   From a Claude Code cloud session (root, no `/dev/kvm`, an egress proxy that re-signs TLS) the
+   tier runs under QEMU's TCG, slowly: [`.claude/skills/cloud-host/`](./.claude/skills/cloud-host/SKILL.md)
+   sets that host up in one script and lists what breaks there and why.
 
 **In-box validation you CAN do:** `fy verify`, `fy ps/down/up/logs`, the e2e tiers above.
 **CANNOT from inside the box:** `fy host restart` (real daemons), `fy mode <set>` (authoritative
