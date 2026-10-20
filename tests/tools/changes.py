@@ -83,7 +83,7 @@ def parse(path: Path) -> Fragment:
             f"{path.name}: an experimental entry's bullets must each open with a **bold** lead — "
             "the release puts the label there"
         )
-    if any(b.startswith(f"- **{EXPERIMENTAL.strip()}") for b in bullets):
+    if any(b.startswith(f"- **{EXPERIMENTAL.split(':')[0]}") for b in bullets):
         raise FragmentError(
             f"{path.name}: write `experimental: true` in the frontmatter instead of the label — "
             "the release adds it, so it stays the same everywhere"

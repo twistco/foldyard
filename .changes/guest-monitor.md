@@ -1,10 +1,11 @@
 ---
 section: Added
 bump: minor
+experimental: true
 ---
 
-- **Experimental: `[machine] monitor = "observe"` runs a guest monitor — Tetragon, a root eBPF
-  collector, in the lima VM.** Experimental means off unless you turn it on, and its event format,
+- **`[machine] monitor = "observe"` runs a guest monitor — Tetragon, a root eBPF collector, in
+  the lima VM.** Experimental means off unless you turn it on, and its event format,
   `fy monitor --json` output and hook payload may change in a minor release while it settles. It
   records process starts, outbound TCP connections and access to selected credential
   files for every container and the VM itself, and blocks nothing. A pinned, checksummed release

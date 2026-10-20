@@ -78,6 +78,23 @@ REGISTER: tuple[Feature, ...] = (
         ),
         doc_mark="`krunkit` *(experimental)*",
     ),
+    Feature(
+        key="machine.monitor",
+        value="observe",
+        reader="machine_monitor",
+        kinds=(MAY_CHANGE, UNPROVEN),
+        unproven=(
+            "its event format, `fy monitor --json` output and hook payload aren't frozen; it "
+            "passes the host-tier e2e on Linux and WSL2 hosts, but no maintainer runs it day to "
+            "day yet"
+        ),
+        graduates_when=(
+            "the event format and hook payload are declared stable (docs/monitor-pipeline.md's "
+            "open questions settled), and a maintainer has run it on a real project day to day "
+            "for a month with nothing filed against it in that time still open"
+        ),
+        doc_mark="- **`monitor`** *(experimental)*",
+    ),
 )
 
 

@@ -159,6 +159,11 @@ def test_a_fragment_without_the_flag_is_printed_as_written(tmp_path):
         ),
         ("---\nsection: Added\nbump: minor\n---\n\n- **Experimental: x.** y\n", "frontmatter"),
         (EXP + "- **Experimental: x.** y\n", "frontmatter"),  # the release adds it, once
+        # any hand-written variant of the label, not just the release's exact spelling
+        (
+            "---\nsection: Added\nbump: minor\n---\n\n- **Experimental, with y: x.** z\n",
+            "frontmatter",
+        ),
     ],
 )
 def test_the_experimental_label_has_one_way_in(tmp_path, text, why):
