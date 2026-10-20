@@ -441,6 +441,8 @@ enforce = "learn"
 
 ## `[[inject]]`
 
+![A credential is a row plus a kind: one [[inject]] row becomes a switch, a proxy rule pinned to one host, a secret name in host.env on your computer, and a dummy in the box. The kinds are token protocols shipped as foldyard's own code: static, github-app and gh-cli. The credential owns its scope, and foldyard reports what it was seen to grant.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-credential-kinds.svg)
+
 A credential from config alone. Each entry becomes one on/off switch (`fy mode <switch>=on`) and
 one proxy rule that adds a credential to requests for one host, minted on your computer. The
 secret lives only in `host.env` there; turning the switch on prompts for it if missing.
@@ -496,15 +498,16 @@ Every kind takes:
   `emergency`.
 
 **`kind = "github-app"`** — a GitHub App installation token, minted on your computer from the
-App's private key and good for an hour:
+App's private key and good for an hour. Registering and installing the App, then checking it
+from the box: [github-app.md](./github-app.md).
 
 ```toml
 [[inject]]
 switch = "github"                  # `fy mode github=on`; the PEM is host.env's FY_INJECT_GITHUB
 kind = "github-app"
-app_id = "4008762"
-installation_id = "139125083"
-repositories = ["Tangible"]        # optional: a subset of the installation's repositories
+app_id = "123456"
+installation_id = "7654321"
+repositories = ["my-repo"]         # optional: a subset of the installation's repositories
 box_env = { GH_TOKEN = "x" }       # so `gh` in the box sends a header to overwrite
 ```
 
@@ -920,6 +923,8 @@ gcp = ["api"]
 
 ## The adopted config: what the host actually runs
 
+![A repo edit does nothing until you adopt it: anything that can write the checkout can change foldyard.toml, but your computer keeps running the copy you adopted. The change is logged and shown by fy doctor, and launches show the diff and offer adopt, revert or ignore. The box can't adopt; only you can, from your computer.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-adopted-config.svg)
+
 `foldyard.toml` and its local overlay sit **inside the repo**, so anything that can write the
 checkout can change them: an agent in the box, an `npm install` script, a branch you checked out
 to review. Parts of it decide what your computer does with credentials — which host an
@@ -967,6 +972,8 @@ switches `fy mode`/the TUI show. Compose files, `[box]` tools and bootstrap, and
 the working tree: they only affect the VM, which untrusted code can already reach.
 
 ## Host state: `~/.foldyard/`
+
+![Config in the repo, control on your computer: foldyard.toml and the gitignored foldyard.local.toml live in the repo, where the box can write them; your computer holds the adopted copy, the mode for each checkout, host.env with the secrets, the allowlist store and the logs under ~/.foldyard/, where nothing in the box can reach them.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-config-and-state.svg)
 
 All state on your computer lives under `~/.foldyard/`, outside the repo, so nothing in the VM or
 box can read it or raise its own access.

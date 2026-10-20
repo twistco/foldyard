@@ -209,7 +209,7 @@ class GithubAppKind(_GithubKind):
         ):
             raise ValueError(
                 f"{where}: `repositories` must be a list of bare repository names "
-                f'(e.g. ["Tangible"], not "owner/Tangible"), got {repos!r}'
+                f'(e.g. ["my-repo"], not "my-org/my-repo"), got {repos!r}'
             )
 
     def rule(self, spec: dict, var: str) -> InjectRule:

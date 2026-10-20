@@ -7,6 +7,8 @@ trust — which guarantees are cooperative and which are enforced. Terms are def
 
 ## How traffic leaves the box
 
+![How traffic leaves the box: from the box or a stack container, through the VM firewall, to the egress proxy on your computer, which logs each request, decrypts it unless the host is passthrough, checks it against the allowlist and adds any credential, before it reaches the internet. Traffic that tries to skip the proxy is refused by the VM firewall, and on Linux also by the host firewall.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-network.svg)
+
 The box routes through an always-on `mitmdump` proxy on your computer, configured by the
 `[proxy]` table. `fy up` / `fy box up` start the supervisor that runs it; `fy host` shows its
 status.
@@ -83,6 +85,13 @@ edit takes effect when you accept it at the next `fy up` or `fy host restart` (`
 
 Decryption involves no credential. It works alongside the credential switches (see
 [modes.md](./modes.md)) but doesn't depend on them.
+
+**A token service never fetches through the proxy it feeds.** If the shell that started the
+supervisor exports `HTTPS_PROXY` pointing at foldyard's own proxy, the GitHub App token service
+would send its request through the very rule it is making a token for, and the proxy would
+replace the App's sign-in header on `api.github.com` with the token being asked for. So foldyard
+tells it its own proxy port, which it skips. Any other proxy your computer exports (a corporate one) is still
+used, since it may be the only way out.
 
 ## Blocking, not just watching
 
@@ -372,6 +381,17 @@ own HTTP client, or a program opening raw sockets.
 - **A build or tool needs a host you haven't allowed.** Watch the TUI's blocked rows and grant from
   there (`a`), or run `fy allow add <host> --level permanent`. Grants live on your computer, never
   in repo config, so the box can't widen its own allowlist.
+- **A long, quiet request to a Google API dies at about 60 seconds.** That's Google's front ends
+  (`*.googleapis.com`), not the VM or the proxy: they close any connection that has carried no
+  bytes for about 60 s, idle or mid-request, and TCP keepalives don't reset the timer. It measures
+  the same from an ordinary client on the internet with no foldyard involved. Stream the response
+  (or ask for progress output, such as a model's thought summaries) so bytes keep flowing.
+- **`fy up` fails with `proxy already running` (podman backend).** That's podman machine's port
+  forwarder (gvproxy), not the egress proxy: it still holds a forward for a host port from a stack
+  that wasn't torn down cleanly (a crash, or `rm -f` on a container that publishes a port). The
+  forward lasts as long as the VM, so every `fy up` hits it until you run
+  `fy machine stop && fy up`, which also stops any other project sharing that machine
+  (`[machine] name`). Ending work with `fy down` avoids it.
 
 ## Deeper
 

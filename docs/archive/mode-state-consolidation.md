@@ -20,12 +20,19 @@ external capability, and none of the historical bugs was "transition A→B handl
 
 ## Where the bugs came from: four failure classes
 
+Of the 14 state fixes the audit found, 9 were class 1 — two lifecycles disagreeing about one
+file, port or process — and 3 were class 2.
+
 **1. Several state tiers with different refresh lifetimes.** The mode lives in the authoritative
 host-side `dev-mode.json`; the per-worktree `.dev-mode.json` mirror (refreshed only while that box
 is up); env baked into containers at create time (fixed until recreate); and snapshots taken by
 app processes at boot. Bug after bug was a decision reading the wrong tier: a liveness check read
 a mirror and bounced healthy supervisors; an idle supervisor dirtied clean checkouts with mirror
-writes; a box stranded on an old proxy port needed a recreate warning.
+writes; a box stranded on an old proxy port needed a recreate warning. Others were two owners of
+one resource: two projects' supervisors on colliding ports reaped each other's proxies in an
+endless loop (fixed by per-project port bands); a supervisor outlived its deleted VM and
+recreated checkout state; a token service left by a crashed supervisor read as foreign, so it was
+never reaped and its port stayed taken.
 
 **2. Incomplete change-detection signatures.** Reconcile first compared `COMPOSE_PROFILES` only
 and missed overlay/env-only changes; daemon restarts keyed on a hand-rolled `repr((cmd, env))`.

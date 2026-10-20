@@ -99,10 +99,11 @@ The most common class of confusion here. Full table:
 - **`foldyard.toml`** — the host runs the copy it **adopted**, not your working tree. Your edit is
   inert until the human answers the prompt at the next `fy up`/`fy host restart` (or runs
   `fy config adopt`). Check with `fy config status`; see what changed with `fy config diff`.
-- **Compose files** — read from the **primary checkout**, so an edit inside a worktree changes
-  nothing until it reaches that checkout.
-- **A running container** — keeps the command and env it was created with. A config change needs a
-  recreate (`fy up`), not a restart.
+- **Which stack** — each worktree's stack reads that worktree's own compose files, so an edit
+  only reaches the stack you bring up from that checkout (`WORKTREE=<name> fy up`).
+- **A running container** — keeps the command and env it was created with. A compose change needs
+  a recreate (`fy up`), not a restart; an `env_file`'s contents don't count as a change, so after
+  editing one run `fy down` then `fy up`.
 
 ## Working on foldyard itself
 

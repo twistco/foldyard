@@ -200,6 +200,11 @@ packages = ["src/foldyard"]
 "docs/security.md" = "foldyard/assets/docs/security.md"
 "docs/compose-overlays.md" = "foldyard/assets/docs/compose-overlays.md"
 "docs/testing-modes.md" = "foldyard/assets/docs/testing-modes.md"
+"docs/github-app.md" = "foldyard/assets/docs/github-app.md"
+"docs/git.md" = "foldyard/assets/docs/git.md"
+"docs/gcp.md" = "foldyard/assets/docs/gcp.md"
+"docs/stack.md" = "foldyard/assets/docs/stack.md"
+"docs/workshop.md" = "foldyard/assets/docs/workshop.md"
 "docs/adrs" = "foldyard/assets/docs/adrs"
 # Not a `fy docs` topic: `fy changelog` slices it by version (outside assets/docs, so the
 # shipped-page link guard, which it would fail with its repo-relative links, never sees it).

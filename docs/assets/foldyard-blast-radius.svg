@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1362" height="908" viewBox="99 99 1362 908" fill="none">
+  <style>
+    text { font-family: "Hanken Grotesk", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+           fill: #6e7263; }
+    .title    { font-family: "Newsreader", Georgia, "Times New Roman", serif;
+                font-size: 30px; font-weight: 600; fill: #1a1c16; }
+    .tagline  { font-size: 15px; }
+    .frame    { fill: #f6f4ec; stroke: #e1e0d4; }
+    .fence    { fill: #edf1f3; stroke: #3f6e84; stroke-width: 1.5; }
+    .yardfence{ fill: #ebf1e7; stroke: #265629; stroke-width: 2.5; stroke-dasharray: 12.5 12.5; }
+    .strip    { fill: #fbfaf5; stroke: #dcdacb; stroke-width: 1.5; }
+    .cell-ok  { fill: #fff; stroke: #265629; stroke-width: 1.5; }
+    .cell-warn{ fill: #fbf6e6; stroke: #bf8526; stroke-width: 1.5; }
+    .cell-bad { fill: #fbefe9; stroke: #a8432b; stroke-width: 1.5; }
+    /* — talk scale: this one is read from the back of a room — */
+    .col-t    { font-size: 15px; font-weight: 700; fill: #1a1c16; letter-spacing: .06em; }
+    .col-t-vm { font-size: 15px; font-weight: 700; fill: #265629; letter-spacing: .06em; }
+    .col-s    { font-size: 13px; }
+    .row-h    { font-size: 17px; font-weight: 700; fill: #1a1c16; }
+    .row-s    { font-size: 13px; }
+    .st-bad   { font-size: 18px; font-weight: 700; fill: #a8432b; }
+    .st-warn  { font-size: 18px; font-weight: 700; fill: #8a6a1e; }
+    .st-ok    { font-size: 18px; font-weight: 700; fill: #337038; }
+    .sub      { font-size: 13px; }
+    .dot-bad  { fill: #a8432b; }
+    .dot-warn { fill: #bf8526; }
+    .dot-ok   { fill: #337038; }
+    .icon     { font-size: 15px; font-weight: 700; fill: #fff; text-anchor: middle; }
+    .take     { font-family: "Newsreader", Georgia, "Times New Roman", serif;
+                font-size: 23px; font-weight: 600; fill: #1a1c16; }
+  </style>
+  <rect class="frame" x="100" y="100" width="1360" height="906" rx="18"/>
+
+  <!-- header -->
+  <text class="title" x="160" y="160">What a bad package can reach</text>
+  <text class="tagline" x="160" y="191">The same malicious install, run in three places.</text>
+
+  <!-- column wrappers: blue = your computer, neutral = a container engine, green dashed = the VM -->
+  <rect class="fence" x="420" y="228" width="320" height="606" rx="16"/>
+  <text class="col-t" x="440" y="266">ON YOUR LAPTOP</text>
+  <text class="col-s" x="440" y="290">it runs as you</text>
+
+  <rect class="strip" x="760" y="228" width="320" height="606" rx="16"/>
+  <text class="col-t" x="780" y="266">IN A DEV CONTAINER</text>
+  <text class="col-s" x="780" y="290">a typical laptop setup: rootful engine</text>
+
+  <rect class="yardfence" x="1100" y="228" width="320" height="606" rx="16"/>
+  <text class="col-t-vm" x="1120" y="266">IN A SANDBOXED VM</text>
+  <text class="col-s" x="1120" y="290">rootless, mounts only the repo</text>
+
+  <!-- row 1: keys and tokens -->
+  <text class="row-h" x="160" y="352">Your keys and tokens</text>
+  <text class="row-s" x="160" y="376">~/.ssh · cloud logins · .env files</text>
+
+  <rect class="cell-bad" x="434" y="320" width="292" height="90" rx="10"/>
+  <circle class="dot-bad" cx="462" cy="347" r="13"/>
+  <text class="icon" x="462" y="352">✕</text>
+  <text class="st-bad" x="486" y="353">Read straight away</text>
+  <text class="sub" x="486" y="376">no escape needed</text>
+
+  <rect class="cell-warn" x="774" y="320" width="292" height="90" rx="10"/>
+  <circle class="dot-warn" cx="802" cy="347" r="13"/>
+  <text class="icon" x="802" y="352">!</text>
+  <text class="st-warn" x="826" y="353">Often within reach</text>
+  <text class="sub" x="826" y="376">
+    <tspan x="826">passed in, mounted, or one</tspan>
+    <tspan x="826" dy="16">escape from a rootful engine</tspan>
+  </text>
+
+  <rect class="cell-ok" x="1114" y="320" width="292" height="90" rx="10"/>
+  <circle class="dot-ok" cx="1142" cy="347" r="13"/>
+  <text class="icon" x="1142" y="352">✓</text>
+  <text class="st-ok" x="1166" y="353">Not there</text>
+  <text class="sub" x="1166" y="376">never mounted into the VM</text>
+
+  <!-- row 2: other repos and files -->
+  <text class="row-h" x="160" y="454">Your other repos and files</text>
+  <text class="row-s" x="160" y="478">home folder · browser profile</text>
+
+  <rect class="cell-bad" x="434" y="422" width="292" height="90" rx="10"/>
+  <circle class="dot-bad" cx="462" cy="449" r="13"/>
+  <text class="icon" x="462" y="454">✕</text>
+  <text class="st-bad" x="486" y="455">All of it</text>
+  <text class="sub" x="486" y="478">same user, same disk</text>
+
+  <rect class="cell-warn" x="774" y="422" width="292" height="90" rx="10"/>
+  <circle class="dot-warn" cx="802" cy="449" r="13"/>
+  <text class="icon" x="802" y="454">!</text>
+  <text class="st-warn" x="826" y="455">One escape away</text>
+  <text class="sub" x="826" y="478">
+    <tspan x="826">engines often share your</tspan>
+    <tspan x="826" dy="16">home folder</tspan>
+  </text>
+
+  <rect class="cell-ok" x="1114" y="422" width="292" height="90" rx="10"/>
+  <circle class="dot-ok" cx="1142" cy="449" r="13"/>
+  <text class="icon" x="1142" y="454">✓</text>
+  <text class="st-ok" x="1166" y="455">Not there</text>
+  <text class="sub" x="1166" y="478">only this repo is mounted</text>
+
+  <!-- row 3: this repo — reachable everywhere, hence the clean-repo rule -->
+  <text class="row-h" x="160" y="556">This repo</text>
+  <text class="row-s" x="160" y="580">the code you're working on</text>
+
+  <rect class="cell-bad" x="434" y="524" width="292" height="90" rx="10"/>
+  <circle class="dot-bad" cx="462" cy="551" r="13"/>
+  <text class="icon" x="462" y="556">✕</text>
+  <text class="st-bad" x="486" y="557">Yes</text>
+  <text class="sub" x="486" y="580">and every repo beside it</text>
+
+  <rect class="cell-warn" x="774" y="524" width="292" height="90" rx="10"/>
+  <circle class="dot-warn" cx="802" cy="551" r="13"/>
+  <text class="icon" x="802" y="556">!</text>
+  <text class="st-warn" x="826" y="557">Yes</text>
+  <text class="sub" x="826" y="580">mounted in to work on</text>
+
+  <rect class="cell-warn" x="1114" y="524" width="292" height="90" rx="10"/>
+  <circle class="dot-warn" cx="1142" cy="551" r="13"/>
+  <text class="icon" x="1142" y="556">!</text>
+  <text class="st-warn" x="1166" y="557">Yes — the only thing</text>
+  <text class="sub" x="1166" y="580">so keep secrets out of it</text>
+
+  <!-- row 4: push -->
+  <text class="row-h" x="160" y="658">Push to your git remotes</text>
+  <text class="row-s" x="160" y="682">over SSH or HTTPS</text>
+
+  <rect class="cell-bad" x="434" y="626" width="292" height="90" rx="10"/>
+  <circle class="dot-bad" cx="462" cy="653" r="13"/>
+  <text class="icon" x="462" y="658">✕</text>
+  <text class="st-bad" x="486" y="659">Yes</text>
+  <text class="sub" x="486" y="682">your git credentials just work</text>
+
+  <rect class="cell-warn" x="774" y="626" width="292" height="90" rx="10"/>
+  <circle class="dot-warn" cx="802" cy="653" r="13"/>
+  <text class="icon" x="802" y="658">!</text>
+  <text class="st-warn" x="826" y="659">Often</text>
+  <text class="sub" x="826" y="682">
+    <tspan x="826">editors forward your SSH</tspan>
+    <tspan x="826" dy="16">agent and git login in</tspan>
+  </text>
+
+  <rect class="cell-ok" x="1114" y="626" width="292" height="90" rx="10"/>
+  <circle class="dot-ok" cx="1142" cy="653" r="13"/>
+  <text class="icon" x="1142" y="658">✓</text>
+  <text class="st-ok" x="1166" y="659">Refused</text>
+  <text class="sub" x="1166" y="682">no git credential inside</text>
+
+  <!-- row 5: the internet -->
+  <text class="row-h" x="160" y="760">The internet</text>
+  <text class="row-s" x="160" y="784">where stolen data goes</text>
+
+  <rect class="cell-bad" x="434" y="728" width="292" height="90" rx="10"/>
+  <circle class="dot-bad" cx="462" cy="755" r="13"/>
+  <text class="icon" x="462" y="760">✕</text>
+  <text class="st-bad" x="486" y="761">Anywhere, unwatched</text>
+  <text class="sub" x="486" y="784">nothing in the way</text>
+
+  <rect class="cell-warn" x="774" y="728" width="292" height="90" rx="10"/>
+  <circle class="dot-warn" cx="802" cy="755" r="13"/>
+  <text class="icon" x="802" y="760">!</text>
+  <text class="st-warn" x="826" y="761">Anywhere, unwatched</text>
+  <text class="sub" x="826" y="784">open by default</text>
+
+  <rect class="cell-ok" x="1114" y="728" width="292" height="90" rx="10"/>
+  <circle class="dot-ok" cx="1142" cy="755" r="13"/>
+  <text class="icon" x="1142" y="760">✓</text>
+  <text class="st-ok" x="1166" y="761">Only through a gate</text>
+  <text class="sub" x="1166" y="784">
+    <tspan x="1166">a logging proxy; the VM's</tspan>
+    <tspan x="1166" dy="16">firewall refuses the rest</tspan>
+  </text>
+
+  <!-- takeaway, and what stays open -->
+  <rect class="strip" x="140" y="862" width="1280" height="104" rx="16"/>
+  <text class="take" x="170" y="904">Don't try to spot the malware. Leave nothing in reach worth taking.</text>
+  <text class="sub" x="170" y="936">Still open, even in the VM: the repo itself · any access you switch on, for as long as it's on · git hooks, which run on your computer.</text>
+</svg>

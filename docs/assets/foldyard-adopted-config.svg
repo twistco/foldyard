@@ -1,0 +1,194 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1362" height="706" viewBox="99 99 1362 706" fill="none">
+  <style>
+    text { font-family: "Hanken Grotesk", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+           fill: #6e7263; }
+    .title    { font-family: "Newsreader", Georgia, "Times New Roman", serif;
+                font-size: 30px; font-weight: 600; fill: #1a1c16; }
+    .tagline  { font-size: 15px; }
+    .band     { font-size: 12px; font-weight: 700; fill: #1a1c16; letter-spacing: .06em; }
+    .band-yard{ font-size: 12px; font-weight: 700; fill: #265629; letter-spacing: .06em; }
+    .band-sub { font-size: 12px; }
+    .card-h   { font-size: 14.5px; font-weight: 700; fill: #1a1c16; }
+    .body     { font-size: 12px; }
+    .arrow    { font-size: 15px; fill: #9a9d8c; }
+    .cap      { font-size: 12px; }
+    .cap-b    { font-size: 12px; font-weight: 700; fill: #1a1c16; }
+    .col-h    { font-size: 15px; font-weight: 700; fill: #b8923a; }
+    .idea-h   { font-size: 12.5px; font-weight: 700; fill: #1a1c16; }
+    .idea     { font-size: 11.5px; }
+    .frame    { fill: #f6f4ec; stroke: #e1e0d4; }
+    .card     { fill: #fff; stroke: #dcdacb; stroke-width: 1.5; }
+    .fence    { fill: #edf1f3; stroke: #3f6e84; stroke-width: 1.5; }
+    .yardfence{ fill: #ebf1e7; stroke: #265629; stroke-width: 2.5; stroke-dasharray: 12.5 12.5; }
+    .up-card  { fill: #fff; stroke: #b8923a; stroke-width: 1.5; }
+    .panel    { fill: #f8f0d8; stroke: #e9d59c; stroke-width: 1.5; }
+    .rule     { stroke: #e0cf9a; stroke-width: 1; }
+    .mono     { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+                font-size: 10.5px; fill: #265629; }
+    .idea-mono{ font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+                font-size: 10.5px; fill: #1a1c16; white-space: pre; }
+    .strip    { fill: #fbfaf5; stroke: #dcdacb; stroke-width: 1.5; }
+    .diff-add { fill: #a8432b; }
+  </style>
+  <rect class="frame" x="100" y="100" width="1360" height="704" rx="18"/>
+
+  <!-- header -->
+  <text class="title" x="160" y="160">A repo edit does nothing until you adopt it</text>
+  <text class="tagline" x="160" y="191">Your computer runs the copy of foldyard.toml you accepted. Anything in the box can propose a change — only you can make it real.</text>
+
+  <!-- THE VM — where the edit happens -->
+  <rect class="yardfence" x="140" y="228" width="255" height="307" rx="16"/>
+  <text class="band-yard" x="160" y="259">THE VM</text>
+  <text class="band-sub" x="218" y="259">can write the checkout</text>
+
+  <rect class="card" x="160" y="278" width="215" height="143" rx="12"/>
+  <text class="card-h" x="178" y="305">1 · Someone edits it</text>
+  <text class="body" x="178" y="327">
+    <tspan x="178">An agent in the box, a package</tspan>
+    <tspan x="178" dy="16">install script, a branch you</tspan>
+    <tspan x="178" dy="16">checked out to review: anything</tspan>
+    <tspan x="178" dy="16">that can write the repo can</tspan>
+    <tspan x="178" dy="16">change foldyard.toml.</tspan>
+  </text>
+
+  <text class="cap-b" x="160" y="455">The box can't adopt it</text>
+  <text class="cap" x="160" y="473">
+    <tspan x="160">fy config adopt refuses to run</tspan>
+    <tspan x="160" dy="16">inside the box — the answer</tspan>
+    <tspan x="160" dy="16">comes from your terminal.</tspan>
+  </text>
+
+  <text class="arrow" x="399" y="355">▶</text>
+
+  <!-- YOUR COMPUTER — runs only what was adopted -->
+  <rect class="fence" x="415" y="228" width="765" height="307" rx="16"/>
+  <text class="band" x="435" y="259">YOUR COMPUTER</text>
+  <text class="band-sub" x="557" y="259">runs only what you adopted</text>
+
+  <rect class="card" x="435" y="278" width="228" height="143" rx="12"/>
+  <text class="card-h" x="453" y="305">2 · Noticed, not applied</text>
+  <text class="body" x="453" y="327">
+    <tspan x="453">The supervisor keeps running the</tspan>
+    <tspan x="453" dy="16">adopted copy. It logs the change</tspan>
+    <tspan x="453" dy="16">once, fy doctor shows a warning,</tspan>
+    <tspan x="453" dy="16">and on macOS you get a</tspan>
+    <tspan x="453" dy="16">notification.</tspan>
+  </text>
+
+  <text class="arrow" x="667" y="355">▶</text>
+
+  <rect class="card" x="683" y="278" width="228" height="143" rx="12"/>
+  <text class="card-h" x="701" y="305">3 · Asked before launch</text>
+  <text class="body" x="701" y="327">
+    <tspan x="701">fy up, fy box up, fy host restart</tspan>
+    <tspan x="701" dy="16">and fy code show you the diff</tspan>
+    <tspan x="701" dy="16">and ask before starting anything.</tspan>
+  </text>
+
+  <text class="arrow" x="915" y="355">▶</text>
+
+  <rect class="card" x="931" y="278" width="228" height="143" rx="12"/>
+  <text class="card-h" x="949" y="305">4 · Adopted</text>
+  <text class="body" x="949" y="327">
+    <tspan x="949">Takes effect within a couple of</tspan>
+    <tspan x="949" dy="16">seconds, no restart. The copy</tspan>
+    <tspan x="949" dy="16">lives in ~/.foldyard/adopted/,</tspan>
+    <tspan x="949" dy="16">outside the repo.</tspan>
+  </text>
+
+  <!-- the prompt, as the CLI prints it (keeps "host" as printed) -->
+  <text class="cap" x="435" y="463">
+    <tspan x="435">Ignore keeps the adopted copy and</tspan>
+    <tspan x="435" dy="16">asks again next time. Revert puts</tspan>
+    <tspan x="435" dy="16">the file back.</tspan>
+  </text>
+  <rect class="card" x="683" y="441" width="476" height="74" rx="10"/>
+  <text class="idea-mono" x="699" y="463">⚠ foldyard.toml changed since the host adopted it [main]</text>
+  <text class="idea-mono diff-add" x="699" y="481">  +passthrough = ["@all"]</text>
+  <text class="idea-mono" x="699" y="499">  [a]dopt · [r]evert the file · [i]gnore for now (default):</text>
+
+  <!-- THE EDGES -->
+  <rect class="strip" x="140" y="559" width="1040" height="205" rx="16"/>
+  <text class="band" x="160" y="590">THE EDGES</text>
+  <text class="band-sub" x="242" y="590">where it's strictest</text>
+
+  <rect class="card" x="160" y="609" width="235" height="135" rx="12"/>
+  <text class="card-h" x="178" y="636">The first time</text>
+  <text class="body" x="178" y="658">
+    <tspan x="178">A fresh checkout shows its config</tspan>
+    <tspan x="178" dy="16">and asks: adopt, or quit. Until</tspan>
+    <tspan x="178" dy="16">then your computer runs nothing</tspan>
+    <tspan x="178" dy="16">for it: no proxy, no token services.</tspan>
+  </text>
+
+  <rect class="card" x="415" y="609" width="235" height="135" rx="12"/>
+  <text class="card-h" x="433" y="636">No terminal</text>
+  <text class="body" x="433" y="658">
+    <tspan x="433">CI or a detached launch never</tspan>
+    <tspan x="433" dy="16">adopts. A change keeps the old</tspan>
+    <tspan x="433" dy="16">copy running; a checkout with</tspan>
+    <tspan x="433" dy="16">nothing adopted refuses to start</tspan>
+    <tspan x="433" dy="16">and prints fy config adopt.</tspan>
+  </text>
+
+  <rect class="card" x="670" y="609" width="235" height="135" rx="12"/>
+  <text class="card-h" x="688" y="636">A new worktree</text>
+  <text class="body" x="688" y="658">
+    <tspan x="688">Its first adoption is compared</tspan>
+    <tspan x="688" dy="16">with main's adopted copy — never</tspan>
+    <tspan x="688" dy="16">main's working tree — so you see</tspan>
+    <tspan x="688" dy="16">only what this branch would add.</tspan>
+  </text>
+
+  <rect class="up-card" x="925" y="609" width="235" height="135" rx="12"/>
+  <text class="card-h" x="943" y="636">The commands</text>
+  <text class="mono" x="943" y="660">
+    <tspan x="943">fy config status</tspan>
+    <tspan x="943" dy="17">fy config diff</tspan>
+    <tspan x="943" dy="17">fy config adopt</tspan>
+    <tspan x="943" dy="17">fy config revert</tspan>
+  </text>
+  <text class="body" x="943" y="734">on your computer only</text>
+
+  <!-- right panel -->
+  <rect class="panel" x="1210" y="228" width="210" height="536" rx="12"/>
+  <text class="col-h" x="1228" y="258">What it covers</text>
+
+  <text class="idea-h" x="1228" y="290">Adopted</text>
+  <text class="idea" x="1228" y="311">
+    <tspan x="1228">Everything your computer does</tspan>
+    <tspan x="1228" dy="15">with it: the token services,</tspan>
+    <tspan x="1228" dy="15">where credentials are injected,</tspan>
+    <tspan x="1228" dy="15">passthrough, the switches</tspan>
+    <tspan x="1228" dy="15">fy mode shows, [machine].</tspan>
+  </text>
+
+  <text class="idea-h" x="1228" y="404">Read from the checkout</text>
+  <text class="idea" x="1228" y="425">
+    <tspan x="1228">Compose files, [box] tools and</tspan>
+    <tspan x="1228" dy="15">[ports]: they shape the VM,</tspan>
+    <tspan x="1228" dy="15">which untrusted code can</tspan>
+    <tspan x="1228" dy="15">already reach. (The compose</tspan>
+    <tspan x="1228" dy="15">client gets a minimal</tspan>
+    <tspan x="1228" dy="15">environment.)</tspan>
+  </text>
+
+  <line class="rule" x1="1228" y1="523" x2="1402" y2="523"/>
+  <text class="idea-h" x="1228" y="549">Before you say yes</text>
+  <text class="idea" x="1228" y="570">
+    <tspan x="1228">fy config widenings lists what</tspan>
+    <tspan x="1228" dy="15">the config lets through: hosts</tspan>
+    <tspan x="1228" dy="15">left undecrypted, where each</tspan>
+    <tspan x="1228" dy="15">credential goes, which prompts</tspan>
+    <tspan x="1228" dy="15">steer the agent.</tspan>
+  </text>
+
+  <line class="rule" x1="1228" y1="653" x2="1402" y2="653"/>
+  <text class="idea-h" x="1228" y="679">The general rule</text>
+  <text class="idea" x="1228" y="700">
+    <tspan x="1228">Code inside the fence must not</tspan>
+    <tspan x="1228" dy="15">be able to move the fence. The</tspan>
+    <tspan x="1228" dy="15">file is inside; the decision</tspan>
+    <tspan x="1228" dy="15">to act on it is not.</tspan>
+  </text>
+</svg>

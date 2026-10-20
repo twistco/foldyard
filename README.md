@@ -20,7 +20,7 @@ brew install uv lima podman
 
 # Linux (Debian/Ubuntu shown; x86-64 with KVM)
 curl -LsSf https://astral.sh/uv/install.sh | sh
-sudo apt-get install qemu-system-x86 qemu-utils ovmf podman
+sudo apt-get update && sudo apt-get install qemu-system-x86 qemu-utils ovmf podman
 curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.0/lima-2.2.0-Linux-x86_64.tar.gz \
   | sudo tar Cxz /usr/local
 ```
