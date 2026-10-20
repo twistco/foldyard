@@ -322,6 +322,29 @@ def test_add_refuses_multi_component_name(fake_main, name):
     assert not fake_main["calls"]
 
 
+@pytest.mark.parametrize(
+    ("name", "branch", "hint"),
+    [
+        # A branch-shaped name is the usual slip: the first argument is the DIR, not the branch.
+        ("sec/vuln-bumps", "", "fy worktree add sec-vuln-bumps sec/vuln-bumps"),
+        ("a/b/c", "", "fy worktree add a-b-c a/b/c"),
+        # An explicit branch is kept as given; only the dir name is suggested.
+        ("feat/x", "other", "fy worktree add feat-x other"),
+    ],
+)
+def test_add_suggests_a_dir_name_for_a_branch_shaped_name(fake_main, capsys, name, branch, hint):
+    assert worktree.add(name, branch) == 1
+    assert f"did you mean `{hint}`?" in capsys.readouterr().err
+    assert not fake_main["calls"]
+
+
+@pytest.mark.parametrize("name", ["..", ".", "/", "/etc", "../x", "x/.."])
+def test_add_suggests_nothing_for_a_name_that_is_not_branch_shaped(fake_main, capsys, name):
+    # Absolute or dot-segment names aren't a mistyped branch; a dashed rewrite would be nonsense.
+    assert worktree.add(name) == 1
+    assert "did you mean" not in capsys.readouterr().err
+
+
 def _init_hook(monkeypatch, main, *, image: bool = True):
     """Point `[project].worktree_init` at a script that EXISTS, with the yard's engine + image
     stubbed. The script is a repo file, so it runs in a container, never on the host."""

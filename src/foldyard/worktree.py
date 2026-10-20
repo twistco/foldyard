@@ -20,6 +20,7 @@ Host-side: touches git + the rootless machine. Stdlib only.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -317,6 +318,11 @@ def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -
         # wt_root entirely (pathlib joins an absolute right-hand side by replacing the base) —
         # so this would point git worktree operations at an arbitrary filesystem path.
         _err(f"✗ '{name}' must be a single relative path component — pick another")
+        # The usual slip is a branch name ("sec/x") where the DIR name goes: suggest both.
+        if not path.is_absolute() and not {".", ".."} & set(name.split("/")):
+            dashed = "-".join(path.parts)
+            hint = f"fy worktree add {shlex.quote(dashed)} {shlex.quote(branch or name)}"
+            _err(f"  the first argument is the worktree's directory — did you mean `{hint}`?")
         return 1
     main = stack.main_repo()
     wt_root = config.worktrees_root(main)
