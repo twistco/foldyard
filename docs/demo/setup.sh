@@ -43,5 +43,5 @@ git add -A
 git -c user.email=demo@foldyard -c user.name=demo commit -qm "initial commit"
 
 # A short prompt that says which side of the boundary you're on — the box's own prompt is the
-# Debian default (`user@box:/path$`), so the two read differently on screen.
+# Debian default for root (`root@box:/path#`), so the two read differently on screen.
 export PS1='\[\e[1;32m\]your-computer\[\e[0m\]:\[\e[1;34m\]\W\[\e[0m\]$ '

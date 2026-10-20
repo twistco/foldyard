@@ -32,8 +32,9 @@ Set Padding 20
 Set Theme "Catppuccin Mocha"
 Set Framerate 24
 Set TypingSpeed 45ms
-# The prompt setup.sh sets ends in `$ `, and so does the box's — either means "command done".
-Set WaitPattern /\$\s*$/
+# A prompt means "command done": setup.sh's ends in `$ `; the box shell is root (the box runs as
+# `--user 0`), so Debian's default prompt there ends in `# `.
+Set WaitPattern /[#$]\s*$/
 # The first `fy box up` boots a VM (a clone of the base, when one is baked) and builds an image.
 # Every prompt that path can raise is answered by a command typed below, so a Wait that runs out
 # means one this tape doesn't know about — fail at this, not at the job's own timeout.
