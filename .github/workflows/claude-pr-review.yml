@@ -12,7 +12,16 @@ name: Claude PR review
 # The review prompt is read from the BASE branch, so a PR that edits it is still reviewed under
 # the merged version. Only a PR whose base has no prompt yet uses its own.
 #
-# Required repository secret: CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`).
+# A security flaw already on main or released never reaches the public review. Claude returns it
+# as structured output, and a script with no Claude in it files it as a private vulnerability
+# report, skipping one whose fingerprint an advisory already carries. Only that script holds the
+# advisory token, which is minted after the review step ends, so Claude never sees it. The log is
+# public, so the finding travels in the execution file, never in a step's env (which the log
+# prints).
+#
+# Required: secret CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`); a GitHub App with only
+# "Repository security advisories: write", installed on this repository alone, as variable
+# ADVISORY_APP_CLIENT_ID + secret ADVISORY_APP_PRIVATE_KEY; private vulnerability reporting on.
 
 on:
   pull_request:
@@ -51,7 +60,19 @@ jobs:
           git show HEAD^1:.claude/commands/pr-review.md > .pr-review-prompt.md 2>/dev/null \
             || cp .claude/commands/pr-review.md .pr-review-prompt.md
 
+      # Public data, so the job token or no token at all will do.
+      - name: List the published advisories
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url="repos/$GITHUB_REPOSITORY/security-advisories?state=published&per_page=100"
+          fmt='.[] | "## \(.ghsa_id): \(.summary)\n\n\(.description)\n"'
+          gh api --paginate "$url" --jq "$fmt" > .pr-review-published-advisories.md 2>/dev/null \
+            || curl -fsS "https://api.github.com/$url" | jq -r "$fmt" > .pr-review-published-advisories.md \
+            || echo "(The published advisories could not be listed.)" > .pr-review-published-advisories.md
+
       - name: Run Claude PR review
+        id: review
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -67,6 +88,23 @@ jobs:
             Read `.pr-review-prompt.md` (the base branch's `.claude/commands/pr-review.md`) and
             carry out that review with the arguments `${{ github.event.pull_request.number }} --post`.
             You are running in GitHub Actions (see its "Running in CI" section).
-          claude_args: >-
+          claude_args: |
             --model opus --max-turns 100
             --allowed-tools "Read,Glob,Grep,WebSearch,WebFetch,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(gh api repos/{owner}/{repo}/compare/:*),Bash(gh api repos/{owner}/{repo}/pulls/:*),Bash(gh auth status:*),Bash(command -v gh)"
+            --json-schema '{"type":"object","properties":{"private_findings":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"symbol":{"type":"string"},"cwe":{"type":"string"},"severity":{"type":"string","enum":["low","medium","high","critical"]},"summary":{"type":"string"},"description":{"type":"string"}},"required":["path","symbol","cwe","severity","summary","description"]}}},"required":["private_findings"]}'
+
+      # Runs on every review, finding or not: a step that ran only when there was one would say so.
+      - name: Mint the advisory token
+        id: advisory-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.ADVISORY_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ADVISORY_APP_PRIVATE_KEY }}
+
+      - name: File private findings
+        env:
+          GH_TOKEN: ${{ steps.advisory-token.outputs.token }}
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/scripts/report-private-findings.sh

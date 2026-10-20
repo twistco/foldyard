@@ -347,7 +347,9 @@ inside WSL2 on a Windows runner. `foldyard.yml` is the fast gate on every push; 
 holds the advisory live tiers, opt-in (`main`, a `[run-e2e]` commit message, or a dispatch). All
 four jobs use standard runners, which GitHub bills nothing for on a public repository. (Beside
 them, `claude-pr-review.yml` posts an advisory Claude review on each same-repo PR, from the
-base branch's `.claude/commands/pr-review.md`, the prompt `/pr-review` runs locally.) Four jobs:
+base branch's `.claude/commands/pr-review.md`, the prompt `/pr-review` runs locally. A flaw it
+finds already on main is filed as a private vulnerability report by
+`.github/scripts/report-private-findings.sh`, never posted.) Four jobs:
 
 | job | what | engine |
 | --- | --- | --- |

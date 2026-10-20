@@ -27,7 +27,9 @@ commit is checked out shallow, so take diffs from `gh`, not `git`. Skip the dev-
 notes in Step 1. The workflow doesn't wait for CodeRabbit, so its review of this push
 may be missing or partial: build on whatever of its comments are already there.
 Nobody reads your session output: post one summary comment plus any inline comments
-(Step 3) and nothing else. If posting fails, end the run with the error.
+(Step 3) and nothing else. If posting fails, end the run with the error. Your final
+answer is the structured output the workflow asks for: the private findings of Step 3's
+**Disclosure**, or `{"private_findings": []}` when there are none.
 
 ## Arguments
 
@@ -325,13 +327,24 @@ so plainly rather than inventing nits.
 - **Printing locally** (auto-mode without a PR/`gh`, or `--no-post`, or `gh`
   unavailable): output the review directly in this session as markdown.
 
-**Disclosure.** A posted review is public. A flaw the PR introduces is fine to
-describe, since it isn't released yet. A flaw that is already on `main` or in a
-release, which you notice in code the PR doesn't fix, is not: don't post its
-mechanism, location or a reproduction. Post one line saying you saw a possible
-pre-existing security issue and that a maintainer should run
-`/pr-review <number> --no-post --focus security` locally and report it as `SECURITY.md` describes. When running locally, describe it
-in full.
+**Disclosure.** A posted review is public. A flaw the PR introduces, a regression
+included, is a normal finding, since it isn't released yet. A flaw that is already on
+`main` or in a release, in code the PR doesn't fix, is private: nothing about it goes
+in the summary or inline, not even a hint that one exists.
+
+- **Published already?** The published advisories are in
+  `.pr-review-published-advisories.md` in CI, and the `### Security` sections of
+  `CHANGELOG.md` cite each by GHSA id. A flaw a published advisory describes that is
+  still present is an incomplete fix: report it privately and cite the GHSA id.
+- **In CI**, return each one in your final structured output's `private_findings`, and
+  the workflow files it as a private vulnerability report. `path` is the repo-relative
+  file the flaw lives in, `symbol` the enclosing function or class (`Class.method`; the
+  module name at top level), and `cwe` its `CWE-<n>`. Those three are the fingerprint
+  the workflow skips duplicates by, so choose them for the flaw, not for where you
+  noticed it: the same flaw found from another PR must get the same three. `summary`
+  is one line; `description` gives the mechanism, the attacker, the impact and a fix.
+- **Running locally**, describe it in full in the session, never post it, and tell the
+  user to report it as `SECURITY.md` describes.
 
 If `--post` was requested but posting isn't possible (no PR, or `gh`
 unavailable), don't silently swallow it — print the review here and tell the

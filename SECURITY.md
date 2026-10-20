@@ -5,8 +5,9 @@ inside a throwaway VM, and to keep credentials on your computer. A bug in that b
 
 ## Reporting a vulnerability
 
-Email **security@tangible.finance**. Please do not open a public issue for anything you believe
-is exploitable. Include what you observed, how to reproduce it, and which foldyard version and
+Email **security@tangible.finance**, or use GitHub's private reporting (the repository's
+Security tab → **Report a vulnerability**). Please do not open a public issue for anything you
+believe is exploitable. Include what you observed, how to reproduce it, and which foldyard version and
 host platform you were on (`fy --version`). We will acknowledge the report and keep you informed while we work on it.
 
 ## What counts
