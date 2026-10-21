@@ -31,10 +31,13 @@ Nobody reads your session output: post one summary comment plus any inline comme
 answer is the structured output the workflow asks for: the private findings of Step 3's
 **Disclosure**, or `{"private_findings": []}` when there are none.
 
-`gh` is ready, so skip Step 1's detection line. The workflow allows `gh api` only by the
-prefixes `gh api repos/{owner}/{repo}/pulls/` and `gh api repos/{owner}/{repo}/compare/`,
-so write each call with that path FIRST, unquoted, and every flag after it, as the commands
-below do: a flag or a quote before the path doesn't match, and the call is refused.
+`gh` is ready, so skip Step 1's detection line. **Don't call `gh api` in CI**: the workflow
+allows none, and has already fetched everything you'd need it for, into untracked files in
+the checkout: the inline threads (`.pr-review-threads.md`, Step 1b.3), what changed since the
+last review (`.pr-review-since.md`, Step 1b.4) and the published advisories
+(`.pr-review-published-advisories.md`, Step 3). Everything else comes from the `gh pr`
+commands. You start in the checkout, so run each command bare: never `cd` first, since a
+compound command is refused unless every part of it is allowed.
 
 ## Arguments
 
@@ -175,9 +178,9 @@ comment. A thread's state is what the REST call below can't
 show: a RESOLVED thread, or one whose last word is the author's reply naming a fix, is
 addressed (check the fix against the code, then list it under addressed); an OUTDATED one
 sits on lines since changed; only an OPEN one of yours that nobody answered is still
-open. Locally, or if that file says it couldn't read them, use the literal
-`{owner}/{repo}` placeholders; `gh` fills them in. Keep the path first and unquoted (see
-"Running in CI"):
+open. If that file says the workflow couldn't read them, say so in the review and work
+from Step 1b.2's comments. Locally, run this with the literal `{owner}/{repo}`
+placeholders; `gh` fills them in:
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/<number>/comments --paginate --jq '.[] |
@@ -190,7 +193,13 @@ CodeRabbit marks a fixed finding with "✅ Addressed in commits …", and author
 reply "skipping: …" with a reason.
 
 **Step 1b.4 — incremental review.** Every posted Claude review ends with a footer
-naming the commit it reviewed (see Step 3). Find the most recent one:
+naming the commit it reviewed (see Step 3). **In CI, read `.pr-review-since.md`** in place
+of the two commands below. The workflow found the newest footer, counting only the Claude
+App's own comments, since anyone can post a footer. The file says there's nothing new, that
+it's a first pass, or to review the full `gh pr diff`. Otherwise it points at
+`.pr-review-since.diff` and lists the commits since. A commit marked as from the base branch
+came in with a merge and was reviewed in its own PR, so review only what the PR's own commits
+change. Locally, find the most recent footer:
 
 ```bash
 gh pr view <number> --json comments,headRefOid --jq '
