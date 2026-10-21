@@ -571,6 +571,11 @@ class DevModeTui(App):
         # refreshes on a 5s timer, so without this a second `d` mid-`fy box up|down` would launch
         # the same (or the opposite) operation concurrently against the same container.
         self._devbox_busy: set[str] = set()
+        # The workspace hint's env-drift check runs off the UI thread (see refresh_ws_hint): each
+        # request takes the next number, and only the newest one's answer is shown; `_ws_hint_for`
+        # is whose verdict the hint shows now.
+        self._ws_hint_seq = 0
+        self._ws_hint_for: str | None = None
 
     def _pane_ids(self) -> list[str]:
         """The tab ids in display order: Mode, then each plugin panel, then Doctor."""
@@ -971,8 +976,10 @@ class DevModeTui(App):
         lv = self._workspace_list()
         if lv is None:  # transient: list not mounted yet / already torn down (see _workspace_list)
             return
+        self._ws_hint_seq += 1  # whatever is still in flight answers a question nobody asks now
         item = lv.highlighted_child
         if isinstance(item, NewWorktreeCard):
+            self._ws_hint_for = None
             self.query_one("#ws-hint", Static).update(
                 "[b]new worktree[/b]: enter → pick a branch (search, or type a new name)"
             )
@@ -980,16 +987,40 @@ class DevModeTui(App):
         ws = self.selected_workspace
         if ws is None:
             return
-        # This workspace's own config (bound), so the box-vs-config drift hint reads the right one
-        with config.using(self._worktree_cfg()):
-            hint = devmode._box_env_hint(ws["project"]) if ws["devbox"] else None
-        prefix = f"[b]{ws['name']}[/b]: "
-        if hint and ws["name"] != "main":  # the recreate, aimed at THIS worktree's box
-            wt = f"WORKTREE={ws['name']} "
+        name = ws["name"]
+        if not ws["devbox"]:
+            self._show_ws_hint(self._ws_hint_seq, name, None, devbox=False)
+            return
+        # The drift check reads the box and its image through the engine (box.env_drift): seconds
+        # on a slow one, so a worker thread does it every 5s tick and highlight, never the UI
+        # thread. Moved to another workspace: say so now rather than leave the last one's verdict
+        # under this name; a re-check of the same one keeps it until the new answer lands.
+        if self._ws_hint_for != name:
+            self._ws_hint_for = name
+            self.query_one("#ws-hint", Static).update(f"[b]{name}[/b]: checking the devbox env…")
+        seq, project = self._ws_hint_seq, ws["project"]
+        cfg = self._worktree_cfg()  # this workspace's own config, so the check reads the right one
+
+        def work() -> None:
+            with config.using(cfg):
+                hint = devmode._box_env_hint(project)
+            self.call_from_thread(self._show_ws_hint, seq, name, hint, devbox=True)
+
+        self.run_worker(work, thread=True, exclusive=True, group="ws-hint")
+
+    def _show_ws_hint(self, seq: int, name: str, hint: str | None, *, devbox: bool) -> None:
+        """Render a workspace hint — unless a newer request has been made since (the highlight
+        moved on, or a later tick asked again): then this answer is stale and dropped."""
+        hints = self.query("#ws-hint")
+        if seq != self._ws_hint_seq or not self.is_running or not hints:
+            return
+        self._ws_hint_for = name
+        if hint and name != "main":  # the recreate, aimed at THIS worktree's box
+            wt = f"WORKTREE={name} "
             hint = hint.replace("fy box down && fy box up", f"{wt}fy box down && {wt}fy box up")
-        self.query_one("#ws-hint", Static).update(
-            prefix
-            + (hint or ("devbox env matches the config" if ws["devbox"] else "no devbox running"))
+        hints.first(Static).update(
+            f"[b]{name}[/b]: "
+            + (hint or ("devbox env matches the config" if devbox else "no devbox running"))
         )
 
     # ── per-worktree binding (the selected workspace is the consumer) ──────────────

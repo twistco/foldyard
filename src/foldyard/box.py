@@ -429,6 +429,22 @@ def _ensure_packages_layer(
     return rc, layer
 
 
+def _image_probe_cmd(engine: str, img: str) -> list[str]:
+    """The throwaway container :func:`_probe_image` reads the image through — also what the
+    drift check (:func:`env_drift`) runs against a running box's image, so both ask the same
+    source the same question."""
+    return [
+        engine,
+        "run",
+        "--rm",
+        img,
+        "sh",
+        "-c",
+        'printf "%s %s\\nlc_all=%s\\n" "$HOME" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"'
+        ' "${LC_ALL:-}"; locale -a 2>/dev/null',
+    ]
+
+
 def _probe_image(engine: str, img: str, env: dict) -> tuple[str, str, list[str], str]:
     """Where the image puts HOME + where claude resolves its config (CLAUDE_CONFIG_DIR or
     ~/.claude), the locales it can load (``locale -a``) and its own ``LC_ALL``. The image bakes
@@ -436,22 +452,13 @@ def _probe_image(engine: str, img: str, env: dict) -> tuple[str, str, list[str],
     is /home/vscode/.claude — mount THERE, not /root. The locale facts ride the same throwaway
     container (no second start): ``_clock_env`` passes your time locale only when the image has
     it and no LC_ALL of its own overrides it."""
-    out = subprocess.run(
-        [
-            engine,
-            "run",
-            "--rm",
-            img,
-            "sh",
-            "-c",
-            'printf "%s %s\\nlc_all=%s\\n" "$HOME" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"'
-            ' "${LC_ALL:-}"; locale -a 2>/dev/null',
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    first, *rest = out.stdout.splitlines() or [""]
+    out = subprocess.run(_image_probe_cmd(engine, img), env=env, capture_output=True, text=True)
+    return _parse_image_probe(out.stdout)
+
+
+def _parse_image_probe(stdout: str) -> tuple[str, str, list[str], str]:
+    """:func:`_probe_image`'s answer: HOME, the claude config dir, the locales, ``LC_ALL``."""
+    first, *rest = stdout.splitlines() or [""]
     parts = first.split()
     home = parts[0] if len(parts) >= 1 and parts[0] else "/home/vscode"
     claude = parts[1] if len(parts) >= 2 and parts[1] else f"{home}/.claude"
@@ -684,6 +691,7 @@ def env_drift(
     worktree: str | None = None,
     host_facts: bool = True,
     quiet_plugins: Collection[str] = (),
+    ask_image: bool = False,
     timeout: float | None = None,
 ) -> list[str]:
     """How the running ``box``'s environment differs from the one `fy box up` would create it
@@ -691,11 +699,16 @@ def env_drift(
 
     The expected side is the create path's own derivation — :func:`_create_env` plus each plugin's
     ``box_args`` — fed what the box records of its create: the box HOME (its ``devbox_shell``
-    mount), the image's ``LC_ALL`` (its Config.Env) and locales (``locale -a`` in the box, asked
-    only when your computer has a time locale to pass). ``env`` is the resolved stack env (from
+    mount) and the image's ``LC_ALL`` (its Config.Env). ``env`` is the resolved stack env (from
     `fy box up`) or the slimmer one `fy mode` builds; identity the box carries fills its gaps.
     ``host_facts`` False leaves out what only your computer knows (:data:`_HOST_FACTS`) for a
     check run in the box. ``quiet_plugins``: plugins whose names a dedicated row already reported.
+
+    ``LC_TIME`` depends on the locales the IMAGE has, so only the image can judge it — never the
+    running box, which may have gained one since and would then read "missing" for good (a
+    recreate probes the image again). ``ask_image`` (`fy box up`) runs the create's own probe
+    against the box's image id; without it (`fy mode`, `fy state`, every TUI refresh — no
+    container start, no exec) ``LC_TIME`` is left out, as it is when the probe can't answer.
     """
 
     def run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -722,10 +735,19 @@ def env_drift(
         except ValueError:
             image_env = None
     box_home = _box_home_from(mounts, baked)
+    ignore = set() if host_facts else set(_HOST_FACTS)
     locales: list[str] = []
-    if host_facts and hostclock.time_locale():
-        listed = run([engine, "exec", box, "sh", "-c", "locale -a 2>/dev/null"])
-        locales = [ln.strip() for ln in listed.stdout.splitlines() if ln.strip()]
+    if not ask_image:
+        ignore.add("LC_TIME")
+    elif host_facts and hostclock.time_locale():
+        try:
+            probed = run(_image_probe_cmd(engine, image.strip())) if image.strip() else None
+        except (OSError, subprocess.SubprocessError):
+            probed = None
+        if probed is None or probed.returncode != 0:
+            ignore.add("LC_TIME")  # unknown is not "none": that would read a baked one as stale
+        else:
+            locales = _parse_image_probe(probed.stdout)[2]
 
     resolved = {
         **{k: baked[k] for k in ("FOLDYARD_CHECKOUT", "FOLDYARD_ENV_OVERRIDE") if k in baked},
@@ -751,7 +773,6 @@ def env_drift(
     }
     plugin_env["FY_BOX_HOME"] = box_home
     plugin_env["FY_CLAUDE_HOME"] = baked.get("CLAUDE_CONFIG_DIR") or f"{box_home}/.claude"
-    ignore = set() if host_facts else set(_HOST_FACTS)
     complete = True
     plugins: dict[str, str | None] = {}
     for plugin in registry().plugins:
@@ -770,6 +791,12 @@ def env_drift(
     return _compare_env(expected, baked, image_env=image_env if complete else None, ignore=ignore)
 
 
+# Per engine call of `fy box up`'s drift check. Generous — the image probe starts a container, and
+# a nested VM (WSL2) is slow to — but bounded: a wedged engine or a hanging `locale` in the image
+# costs the nag, never `fy box up` itself.
+_DRIFT_TIMEOUT_S = 30
+
+
 def _warn_env_drift(engine: str, box: str, ctx, quiet_plugins: Collection[str] = ()) -> None:
     """Nag when the running box's environment no longer matches the config. Every name is fixed at
     create, so an `[[inject]]` row or a `[box].env` entry adopted since — or your computer's
@@ -783,8 +810,10 @@ def _warn_env_drift(engine: str, box: str, ctx, quiet_plugins: Collection[str] =
             project=ctx.project,
             worktree=ctx.worktree,
             quiet_plugins=quiet_plugins,
+            ask_image=True,
+            timeout=_DRIFT_TIMEOUT_S,
         )
-    except (Exception, SystemExit):  # a nag must never crash `fy box up`
+    except (Exception, SystemExit):  # a nag must never crash (or hang) `fy box up`
         return
     if drift:
         print(

@@ -13,6 +13,7 @@ Run:  fy tui-test                 (uv resolves pytest + textual from foldyard)
 from __future__ import annotations
 
 import sys
+import threading
 from datetime import timedelta
 from typing import cast
 
@@ -734,6 +735,59 @@ def _two_workspaces_feat_box_up():
     ws = _two_workspaces()
     ws[1]["devbox"] = True
     return ws
+
+
+_STALE = "⚠ dev box env out of date (X: missing) — apply with: fy box down && fy box up"
+
+
+async def test_the_box_env_hint_never_holds_the_ui_thread(monkeypatch):
+    # The drift check reads the box and its image through the engine — seconds on a slow one,
+    # every 5s tick and every highlight. On the UI thread that froze the whole TUI; in a worker,
+    # the hint says it's checking and an answer for a workspace you've left is dropped.
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces_feat_box_up)
+    release = threading.Event()
+    ran_on: list[threading.Thread] = []
+
+    def slow_hint(project=None):
+        ran_on.append(threading.current_thread())
+        release.wait(10)
+        return _STALE
+
+    monkeypatch.setattr(devmode, "_box_env_hint", slow_hint)
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        hint = app.query_one("#ws-hint", tui.Static)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.index = 1  # feat: its box is up, and its check hangs
+        await pilot.pause()
+        assert "feat" in _text(hint) and "checking" in _text(hint)  # the UI didn't wait
+        lv.index = 0  # moved on before the answer came
+        await pilot.pause()
+        release.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "main" in _text(hint) and "no devbox running" in _text(hint)
+        assert "out of date" not in _text(hint)  # feat's late answer, dropped
+    assert ran_on and threading.main_thread() not in ran_on
+
+
+async def test_the_box_env_hint_aims_the_recreate_at_the_worktrees_box(monkeypatch):
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces_feat_box_up)
+    asked: list[str | None] = []
+    monkeypatch.setattr(
+        devmode, "_box_env_hint", lambda project=None: asked.append(project) or _STALE
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one("#workspaces", tui.WorkspaceList).index = 1
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = _text(app.query_one("#ws-hint", tui.Static))
+    assert "proj-feat" in asked
+    assert "WORKTREE=feat fy box down && WORKTREE=feat fy box up" in text
 
 
 async def test_devbox_toggle_starts_without_confirmation_when_down(monkeypatch):

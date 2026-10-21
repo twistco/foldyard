@@ -764,6 +764,8 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   table: the box's environment is fixed when it's created, so adding, changing or removing an
   entry needs `fy box down && fy box up` too. `fy box up` on a running box and `fy mode` name
   each variable that no longer matches; they print the values only for `TZ` and `LC_TIME`.
+  Only `fy box up` judges `LC_TIME`, by asking the box's image which locales it has, as the
+  create did.
 - **`[[box.tools]]`** — one-time tool installs, run as bootstrap steps reported ✓/✗:
   `{ name, install, check? }`. `check` is a shell test that skips the install when it succeeds;
   default `command -v <name>`. These run on every newly created box; a distro package belongs in

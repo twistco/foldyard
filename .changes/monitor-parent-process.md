@@ -4,7 +4,7 @@ bump: minor
 experimental: true
 ---
 
-- **Each guest monitor event names the process that started it.**
+- **Each guest monitor event names the process that started it, where Tetragon reports one.**
   `fy monitor --json` and hook payloads gain `ppid`, `parent` and `parent_args` (the parent's id,
   binary and arguments) and `exec_id`/`parent_exec_id` (the links to rebuild the whole process
   tree from `exec` events), all taken from what Tetragon already reports. Without them a consumer

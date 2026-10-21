@@ -143,13 +143,19 @@ def fake(tmp_path, monkeypatch):
         "box_config_env": None,
         "box_image_env": {"PATH": "/usr/bin"},
         "box_home_mount": "/home/vscode",
+        # What `locale -a` lists INSIDE the running box — which can differ from the image's (a
+        # tools step or an agent added one); the drift check must never ask it.
+        "box_locales": [],
+        "image_probe_rc": 0,  # the `run --rm <image>` probe's exit status
     }
 
     envs: list[dict | None] = []
+    timeouts: list[float | None] = []
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
         envs.append(kw.get("env"))
+        timeouts.append(kw.get("timeout"))
         if cmd[1] == "inspect" and "{{.OCIRuntime}}" in cmd:
             return _Proc(0, state["oci_runtime"] + "\n")
         if cmd[1] == "ps" and ("-q" in cmd or "-aq" in cmd):
@@ -170,8 +176,8 @@ def fake(tmp_path, monkeypatch):
             return _Proc(0, f"{json.dumps(env_list)}\nsha256:boximg\n{json.dumps(mounts)}\n")
         if cmd[1:3] == ["image", "inspect"] and "{{json .Config.Env}}" in cmd:
             return _Proc(0, json.dumps([f"{k}={v}" for k, v in state["box_image_env"].items()]))
-        if cmd[1] == "exec" and cmd[-1] == "locale -a 2>/dev/null":
-            return _Proc(0, "".join(f"{name}\n" for name in state["image_locales"]))
+        if cmd[1] == "exec" and "locale -a" in cmd[-1]:
+            return _Proc(0, "".join(f"{name}\n" for name in state["box_locales"]))
         if cmd[1] == "inspect" and boximage.FINGERPRINT_LABEL in " ".join(cmd):
             value = state["box_fingerprint"]
             return _Proc(0, f"{value}\n" if value else "")
@@ -200,6 +206,8 @@ def fake(tmp_path, monkeypatch):
         if cmd[1] == "network" and cmd[2] == "inspect":
             return _Proc(0 if state["net_exists"] else 1)
         if cmd[1:3] == ["run", "--rm"]:
+            if state["image_probe_rc"]:
+                return _Proc(state["image_probe_rc"], "", "probe failed")
             listed = "".join(f"\n{name}" for name in state["image_locales"])
             lc_all = f"\nlc_all={state['image_lc_all']}"
             return _Proc(0, "/home/vscode /home/vscode/.claude" + lc_all + listed)
@@ -220,6 +228,7 @@ def fake(tmp_path, monkeypatch):
     return {
         "calls": calls,
         "envs": envs,
+        "timeouts": timeouts,
         "state": state,
         "main": main,
         "ctx": ctx,
@@ -2447,6 +2456,79 @@ def test_a_dropped_claude_keyless_dummy_is_drift(fake, monkeypatch, tmp_path, ca
     capsys.readouterr()
     assert box.main("up") == 0
     assert "CLAUDE_CODE_OAUTH_TOKEN: no longer set" in _drift_line(capsys.readouterr().out)
+
+
+def test_up_asks_the_boxs_image_for_its_locales_not_the_box(fake, monkeypatch, capsys):
+    # The create asked the IMAGE (a throwaway `run --rm`), so the check asks it too: a box that
+    # gained the locale since (a tools step, an agent's `localedef`) would otherwise read
+    # "LC_TIME: missing" forever — the recreate it points at probes the image again and finds
+    # nothing, so the warning would never clear.
+    _clock(monkeypatch, locale="en_GB.UTF-8")
+    _create_then_run(fake)  # the image lacks en_GB: created without LC_TIME
+    fake["state"]["box_locales"] = ["en_GB.utf8"]
+    capsys.readouterr()
+    assert box.main("up") == 0
+    assert _drift_line(capsys.readouterr().out) == ""
+    assert not [c for c in fake["calls"] if c[1] == "exec" and "locale -a" in c[-1]]
+    probes = _find(fake["calls"], has=["run", "--rm"])
+    assert [c[3] for c in probes] == ["sha256:boximg"]  # the box's own image, by id
+
+
+def test_up_shows_the_time_locale_it_had_and_the_one_it_would_get(fake, monkeypatch, capsys):
+    _clock(monkeypatch, locale="en_GB.UTF-8")
+    fake["state"]["image_locales"] = ["en_GB.utf8", "en_US.utf8"]
+    _create_then_run(fake)
+    _clock(monkeypatch, locale="en_US.UTF-8")
+    capsys.readouterr()
+    assert box.main("up") == 0
+    assert "LC_TIME: en_GB.UTF-8 → en_US.UTF-8" in _drift_line(capsys.readouterr().out)
+
+
+def test_up_leaves_the_time_locale_out_when_the_image_cannot_say(fake, monkeypatch, capsys):
+    # A failed probe is "unknown", never "the image has no locales" — which would read a box
+    # created WITH the locale as "LC_TIME: no longer set".
+    _clock(monkeypatch, locale="en_GB.UTF-8")
+    fake["state"]["image_locales"] = ["en_GB.utf8"]
+    _create_then_run(fake)
+    fake["state"]["image_probe_rc"] = 125
+    capsys.readouterr()
+    assert box.main("up") == 0
+    assert _drift_line(capsys.readouterr().out) == ""
+
+
+def test_up_bounds_every_engine_call_the_drift_check_makes(fake, monkeypatch, capsys):
+    # A wedged engine (or a `locale` that hangs in the image) must not hang `fy box up`.
+    _clock(monkeypatch, locale="en_GB.UTF-8")
+    _create_then_run(fake)
+    fake["timeouts"].clear()
+    assert box.main("up") == 0
+    drift_calls = [
+        i
+        for i, c in enumerate(fake["calls"])
+        if "{{json .Config.Env}}" in " ".join(c) or c[1:3] == ["run", "--rm"]
+    ]
+    assert len(drift_calls) == 3  # the box, its image's env, its image's locales
+    assert all(fake["timeouts"][i] for i in drift_calls)
+
+
+def test_the_status_hint_never_runs_anything_in_the_box(fake, monkeypatch):
+    # `fy mode`, `fy state` and every TUI refresh ask this: an exec there is an engine round trip
+    # per call and, under the guest monitor, a stream of events nobody started. Without the
+    # image's locales LC_TIME can't be judged, so it is left out rather than guessed.
+    from foldyard import devmode
+
+    _clock(monkeypatch, locale="en_GB.UTF-8")
+    fake["state"]["image_locales"] = ["en_GB.utf8"]
+    _create_then_run(fake)
+    fake["state"].update(image_locales=[], box_locales=[])  # either probe would now say "gone"
+    monkeypatch.setattr(config, "engine", lambda: "podman")
+    monkeypatch.setattr(devmode, "in_box", lambda: False)
+    monkeypatch.setattr(devmode, "_engine_env", lambda: dict(fake["ctx"].env))
+    monkeypatch.setattr(devmode, "read", lambda *a, **k: {"mode": {}})
+    monkeypatch.setattr(devmode, "derive_env", lambda mode: {})
+    assert devmode._box_env_hint(project="tangible-podman") is None
+    assert fake["calls"]  # it did read the box…
+    assert not [c for c in fake["calls"] if c[1] in ("exec", "run")]  # …and ran nothing in one
 
 
 def test_the_drift_check_is_silent_when_the_box_cannot_be_read(fake, capsys):
