@@ -984,13 +984,12 @@ class DevModeTui(App):
         with config.using(self._worktree_cfg()):
             hint = devmode._box_env_hint(ws["project"]) if ws["devbox"] else None
         prefix = f"[b]{ws['name']}[/b]: "
-        wt = "" if ws["name"] == "main" else f"just wt {ws['name']} "
+        if hint and ws["name"] != "main":  # the recreate, aimed at THIS worktree's box
+            wt = f"WORKTREE={ws['name']} "
+            hint = hint.replace("fy box down && fy box up", f"{wt}fy box down && {wt}fy box up")
         self.query_one("#ws-hint", Static).update(
             prefix
-            + (
-                (hint and f"{hint.replace('fy box up', wt + 'box up')}")
-                or ("devbox env matches the config" if ws["devbox"] else "no devbox running")
-            )
+            + (hint or ("devbox env matches the config" if ws["devbox"] else "no devbox running"))
         )
 
     # ── per-worktree binding (the selected workspace is the consumer) ──────────────

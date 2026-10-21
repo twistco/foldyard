@@ -11,6 +11,7 @@ and containers freeze parts of their config at creation. Work down the table bef
 | a compose file, inside a worktree | each worktree's stack reads its own checkout's compose files — the edit reaches only that worktree's stack | bring that stack up: `WORKTREE=<name> fy up` (or `fy up` from inside the worktree) |
 | a compose file, anywhere | a running container keeps the command + env it was CREATED with | `fy up` (recreates on a config change) — a `restart` is not enough |
 | an env var in the stack's env file | same: baked at container creation, and an `env_file`'s contents aren't part of the config `fy up` compares | `fy down` then `fy up` |
+| an `[[inject]]` row's `box_env`, `[box].env`, an agent table — with the box already running | the box's environment is fixed when it's CREATED; `fy box up` on a running box keeps it (and `fy box up` / `fy mode` name each variable that moved) | a new box: the human runs `fy box down && fy box up` on their computer — from in here, `fy box down` stops the box you're in |
 | the mode (`fy mode …`) | setting it is host-only; from the box it refuses | ask the human, then re-check `fy mode` |
 | an allowlist grant | grants live in the host's home, never in the repo | `fy allow add <host>` on the host |
 | a code file, expecting hot reload | the watcher may not see host-side writes across the VM's shared filesystem — but **edits made in the box do** propagate | make the edit in the box (you're already there); if a host-side edit was the trigger, touch the file from here |

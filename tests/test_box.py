@@ -4,6 +4,7 @@ config-driven [box] bits + the plugin box env/mounts — without creating a real
 
 from __future__ import annotations
 
+import json
 import shlex
 import shutil
 import subprocess
@@ -136,6 +137,12 @@ def fake(tmp_path, monkeypatch):
         "image_user": "",
         "layer_fingerprint": None,
         "dockerfiles": [],
+        # The env-drift check's reads of a running box (box.env_drift): its whole Config.Env
+        # (None → the inspect fails, so the check stays silent), the image's own Config.Env, and
+        # the box HOME the `devbox_shell` volume was mounted under at create.
+        "box_config_env": None,
+        "box_image_env": {"PATH": "/usr/bin"},
+        "box_home_mount": "/home/vscode",
     }
 
     envs: list[dict | None] = []
@@ -149,6 +156,22 @@ def fake(tmp_path, monkeypatch):
             # -q + status=running → the running probe; -aq → the exists probe.
             present = state["running"] if "status=running" in cmd else state["exists"]
             return _Proc(0, "deadbeef\n" if present else "")
+        if cmd[1] == "inspect" and "{{json .Config.Env}}" in cmd[-1]:  # box.env_drift's read
+            if state["box_config_env"] is None:
+                return _Proc(1, "", "no such container")
+            mounts = [
+                {
+                    "Type": "volume",
+                    "Name": "devbox_shell",
+                    "Destination": f"{state['box_home_mount']}/.devbox",
+                }
+            ]
+            env_list = [f"{k}={v}" for k, v in state["box_config_env"].items()]
+            return _Proc(0, f"{json.dumps(env_list)}\nsha256:boximg\n{json.dumps(mounts)}\n")
+        if cmd[1:3] == ["image", "inspect"] and "{{json .Config.Env}}" in cmd:
+            return _Proc(0, json.dumps([f"{k}={v}" for k, v in state["box_image_env"].items()]))
+        if cmd[1] == "exec" and cmd[-1] == "locale -a 2>/dev/null":
+            return _Proc(0, "".join(f"{name}\n" for name in state["image_locales"]))
         if cmd[1] == "inspect" and boximage.FINGERPRINT_LABEL in " ".join(cmd):
             value = state["box_fingerprint"]
             return _Proc(0, f"{value}\n" if value else "")
@@ -2232,6 +2255,243 @@ def test_up_no_codex_nag_when_the_box_was_created_with_it(fake, capsys, monkeypa
     fake["state"]["baked_env"]["CODEX_HOME"] = "/home/vscode/.codex"
     assert box.main("up") == 0
     assert "[codex]" not in capsys.readouterr().out
+
+
+# ── a running box's environment vs the config (box.env_drift) ──────────────────────────
+#
+# A box's environment is fixed when it is created, so config adopted afterwards — an `[[inject]]`
+# row, a `[box].env` entry, your computer's timezone — reaches it only through a recreate. The
+# create path and the check share `_create_env` (+ the plugins' `box_args`), so the round trip
+# "create, then check" must come back clean; each test below then moves ONE input.
+
+
+def _created_env(fake) -> dict[str, str]:
+    """The Config.Env the engine would hold for the box ``box.main("up")`` just created: each
+    ``-e NAME=value``, a bare ``-e NAME`` copied from the create env, and what podman adds."""
+    run = _find(fake["calls"], has=["run", "-d", "sleep"])[-1]
+    create_env = fake["envs"][fake["calls"].index(run)] or {}
+    out = {"PATH": "/usr/bin", "HOME": "/root", "HOSTNAME": "ad202bf4c219", "container": "podman"}
+    for value in _env_values(run):
+        name, sep, val = value.partition("=")
+        if sep:
+            out[name] = val
+        elif name in create_env:
+            out[name] = create_env[name]
+    return out
+
+
+def _create_then_run(fake) -> None:
+    """Create the box, then leave the fake engine reporting it running with that environment."""
+    assert box.main("up") == 0
+    created = _created_env(fake)
+    fake["state"].update(running=True, exists=True, box_config_env=created, baked_env=created)
+    fake["calls"].clear()
+
+
+def _drift_line(out: str) -> str:
+    lines = [ln for ln in out.splitlines() if "environment" in ln and ln.startswith("⚠")]
+    assert len(lines) <= 1, lines  # one warning, however many names moved
+    return lines[0] if lines else ""
+
+
+def _routed(fake, monkeypatch, tmp_path):
+    """The proxy routed, with a CA — the box every keyless/inject dummy needs."""
+    fake["ctx"].env["FY_PROXY"] = "h:41001"
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)
+    ca = tmp_path / "mitm" / "mitmproxy-ca-cert.pem"
+    ca.parent.mkdir()
+    ca.write_text("CERT")
+    monkeypatch.setenv("MITMPROXY_CA", str(ca))
+
+
+_HAIKU = {"switch": "haiku", "host": "api.haiku.test", "box_env": {"HAIKU_API_KEY": "dummy-x"}}
+
+
+def test_a_box_checked_against_the_config_it_was_created_from_has_no_drift(
+    fake, monkeypatch, tmp_path, capsys
+):
+    # By construction: the check derives the environment from the same function the create path
+    # emits, so a box nothing has moved under reads clean — with every source of box env in play.
+    _routed(fake, monkeypatch, tmp_path)
+    fake["ctx"].env.update(APP_PORT="3001", PG_PORT="5534")
+    monkeypatch.setattr(config, "inject_specs", lambda: [_HAIKU])
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
+    monkeypatch.setattr(config, "codex_enabled", lambda: True)
+    monkeypatch.setattr(box, "_capture_keyless", lambda: None)  # never the real ~/.codex
+    _clock(monkeypatch, zone="Europe/London", locale="en_GB.UTF-8")
+    fake["state"]["image_locales"] = ["en_GB.utf8"]
+    _create_then_run(fake)
+    capsys.readouterr()
+    assert box.main("up") == 0
+    assert _drift_line(capsys.readouterr().out) == ""
+    assert not _find(fake["calls"], has=["run", "-d"])  # checked, never recreated
+
+
+def test_a_plain_box_round_trip_has_no_drift(fake, capsys):
+    # The fixture's defaults: no proxy, a `~` in [box].env (expanded against the box HOME the
+    # `devbox_shell` mount records), and `[ports]` names the create env carries no value for —
+    # which the engine then skips, so the check must not expect them either.
+    _create_then_run(fake)
+    capsys.readouterr()
+    assert box.main("up") == 0
+    assert _drift_line(capsys.readouterr().out) == ""
+
+
+def test_up_names_an_inject_row_added_after_the_box_was_created(
+    fake, monkeypatch, tmp_path, capsys
+):
+    # The case that went silent: a new `[[inject]]` row's dummy is baked only at create, so the
+    # running box lacks it and the client never sends a header the proxy can rewrite.
+    _routed(fake, monkeypatch, tmp_path)
+    _create_then_run(fake)
+    monkeypatch.setattr(config, "inject_specs", lambda: [_HAIKU])
+    capsys.readouterr()
+    assert box.main("up") == 0
+    line = _drift_line(capsys.readouterr().out)
+    assert "HAIKU_API_KEY: missing" in line
+    assert "fy box down && fy box up" in line
+    assert "dummy-x" not in line  # names, never a credential slot's value
+
+
+def test_up_names_a_removed_row_whose_dummy_the_box_still_holds(
+    fake, monkeypatch, tmp_path, capsys
+):
+    # A stale dummy is not harmless: it shadows a real login made in the box (GH_TOKEN beats
+    # `gh auth login`), so the row that is gone from the config is drift too.
+    _routed(fake, monkeypatch, tmp_path)
+    monkeypatch.setattr(config, "inject_specs", lambda: [_HAIKU])
+    _create_then_run(fake)
+    monkeypatch.setattr(config, "inject_specs", lambda: [])
+    capsys.readouterr()
+    assert box.main("up") == 0
+    assert "HAIKU_API_KEY: no longer set" in _drift_line(capsys.readouterr().out)
+
+
+def test_up_shows_the_timezone_it_had_and_the_one_it_would_get(fake, monkeypatch, capsys):
+    # The clock is the one place the value IS the news (and holds nothing sensitive).
+    _clock(monkeypatch, zone="Europe/London")
+    _create_then_run(fake)
+    _clock(monkeypatch, zone="Asia/Tokyo")
+    capsys.readouterr()
+    assert box.main("up") == 0
+    assert "TZ: Europe/London → Asia/Tokyo" in _drift_line(capsys.readouterr().out)
+
+
+def test_up_names_a_changed_box_env_entry_without_printing_values(fake, monkeypatch, capsys):
+    _create_then_run(fake)
+    monkeypatch.setattr(config, "box_env", lambda: {"UV_LINK_MODE": "hardlink", "NEW_ONE": "1"})
+    capsys.readouterr()
+    assert box.main("up") == 0
+    line = _drift_line(capsys.readouterr().out)
+    assert "UV_LINK_MODE: changed" in line and "hardlink" not in line
+    assert "NEW_ONE: missing" in line
+    assert "npm_config_store_dir: no longer set" in line  # dropped from [box].env
+
+
+def test_up_leaves_what_the_image_and_the_engine_set_alone(fake, monkeypatch, capsys):
+    # Only what foldyard set is foldyard's to judge: the image's own ENV and the engine's
+    # additions (podman's container/HOME/HOSTNAME) are not "no longer set".
+    _create_then_run(fake)
+    fake["state"]["box_image_env"] = {"PATH": "/usr/bin", "LANG": "C.UTF-8"}
+    fake["state"]["box_config_env"]["LANG"] = "C.UTF-8"
+    capsys.readouterr()
+    assert box.main("up") == 0
+    assert _drift_line(capsys.readouterr().out) == ""
+
+
+def test_a_moved_port_band_is_the_proxy_port_rows_alone(fake, monkeypatch, tmp_path, capsys):
+    # One change, one warning: FY_PROXY_PORT/GCP_MINTER_PORT and the proxy URLs (which carry the
+    # per-worktree port) all move with the band, and `_warn_stale_proxy_port` already says so.
+    _routed(fake, monkeypatch, tmp_path)
+    fake["ctx"].env.update(APP_PORT="3001")
+    _create_then_run(fake)
+    moved = {
+        **fake["state"]["box_config_env"],
+        "FY_PROXY_PORT": "8088",
+        "GCP_MINTER_PORT": "8188",
+        "HTTPS_PROXY": "http://h:8089",
+        "APP_PORT": "3000",
+    }
+    fake["state"].update(box_config_env=moved, baked_env=moved)
+    capsys.readouterr()
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "8088" in out  # the proxy-port row
+    assert _drift_line(out) == ""
+
+
+def test_a_declared_claude_is_its_own_rows_alone(fake, monkeypatch, tmp_path, capsys):
+    # [claude] added under a running box: its dedicated row says more than the env can (the
+    # install and the volumes are create-time too), so the env line doesn't repeat its names.
+    _routed(fake, monkeypatch, tmp_path)
+    monkeypatch.setattr(config, "claude_enabled", lambda: False)
+    _create_then_run(fake)
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
+    capsys.readouterr()
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "[claude] is declared" in out
+    assert _drift_line(out) == ""
+
+
+def test_a_dropped_claude_keyless_dummy_is_drift(fake, monkeypatch, tmp_path, capsys):
+    # The dummy would shadow the real token a now-bare [claude] box logs in for.
+    _routed(fake, monkeypatch, tmp_path)
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
+    monkeypatch.setattr(box, "_capture_keyless", lambda: None)
+    _create_then_run(fake)
+    monkeypatch.setattr(config, "claude_keyless", lambda: None)
+    capsys.readouterr()
+    assert box.main("up") == 0
+    assert "CLAUDE_CODE_OAUTH_TOKEN: no longer set" in _drift_line(capsys.readouterr().out)
+
+
+def test_the_drift_check_is_silent_when_the_box_cannot_be_read(fake, capsys):
+    fake["state"]["running"] = True  # box_config_env None: the inspect fails
+    assert box.main("up") == 0
+    assert _drift_line(capsys.readouterr().out) == ""
+
+
+# ── the comparison itself (pure) ──────────────────────────────────────────────────────
+
+
+def test_env_pairs_reads_only_the_env_args():
+    args = ["-v", "a:b", "-e", "A=1", "--label", "x=y", "-e", "B", "-e", "C=x=y"]
+    assert box._env_pairs(args) == {"A": "1", "B": None, "C": "x=y"}
+
+
+def test_compare_env_reports_missing_changed_and_stale_names():
+    expected = {"A": "1", "B": "2", "TZ": "Asia/Tokyo", "P": None}
+    baked = {"B": "3", "TZ": "Europe/London", "P": "anything", "OLD": "x", "IMG": "i"}
+    got = box._compare_env(expected, baked, image_env={"IMG": "i"})
+    assert got == [
+        "A: missing",
+        "B: changed",
+        "TZ: Europe/London → Asia/Tokyo",
+        "OLD: no longer set",
+    ]
+
+
+def test_compare_env_presence_only_and_ignored_names():
+    expected = {"HTTPS_PROXY": "http://h:2", "FY_PROXY_PORT": "2", "X": "1"}
+    baked = {"HTTPS_PROXY": "http://h:1", "FY_PROXY_PORT": "1", "X": "1", "SKIP": "s"}
+    assert box._compare_env(expected, baked, image_env={}, ignore={"SKIP"}) == []
+
+
+def test_compare_env_reports_an_image_name_the_box_overrode_and_no_longer_sets():
+    # The image's own value is the image's; a different one in the box was set at create.
+    baked = {"UV_LINK_MODE": "copy", "LANG": "C.UTF-8"}
+    image = {"UV_LINK_MODE": "hardlink", "LANG": "C.UTF-8"}
+    assert box._compare_env({}, baked, image_env=image) == ["UV_LINK_MODE: no longer set"]
+
+
+def test_compare_env_without_the_image_env_names_nothing_stale():
+    # Unknown image env (an unreadable image, or a check that couldn't derive every plugin's
+    # names): "no longer set" would be a guess, so only missing/changed are reported.
+    assert box._compare_env({"A": "1"}, {"A": "1", "OLD": "x"}, image_env=None) == []
 
 
 # ── a keyless agent whose axis is still at rest ──────────────────────────────────────

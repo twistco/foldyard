@@ -2351,48 +2351,35 @@ def _countdown(iso: str) -> str:
 
 
 def _box_env_hint(project: str | None = None) -> str | None:
-    """Does the running dev box's create-time env match the config? (best effort, via the engine)"""
-    box = (project or os.environ.get("PODMAN_PROJECT") or config.project_prefix()) + "-devbox"
-    try:
-        out = subprocess.run(
-            [config.engine(), "inspect", "-f", "{{json .Config.Env}}", box],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=_engine_env(),
-        )
-        if out.returncode != 0:
-            return None  # box not running (or no engine here) — nothing to compare
-        env = dict(e.split("=", 1) for e in json.loads(out.stdout) if "=" in e)
-    except Exception:
-        return None
-    # NB gcp metadata + the egress proxy env are baked UNCONDITIONALLY now: the box ALWAYS points
-    # GCE_METADATA_HOST at the on-network emulator, and Phase A′ ALWAYS routes egress through the
-    # proxy (HTTPS_PROXY always set). Their presence no longer tracks the mode — the rung's enforced
-    # entirely host-side (the minter up/down, the proxy's host-side rules), reconciled live by
-    # `fy host`, so changing gcp or an injector needs NO `fy box up`. (Checking them here mis-fired
-    # "gcp metadata out of date" forever, since gcp defaults to off but the host is always baked.)
-    # The keyless DUMMY is the same story: baked whenever keyless is CONFIGURED on a proxied box,
-    # whatever the rung (so `fy mode claude=on` lands with no new box). Keying this check to the
-    # rung mis-fired on every at-rest box, pointing at `fy box up` when the fix was the mode
-    # (2026-09-26). What does need a new box is the CONFIG moving under it — keyless added, dropped
-    # or switched kind — so compare the dummies present with the ones the config implies. Codex
-    # `chatgpt` is file-based (~/.codex/auth.json, not Config.Env), so it expects no env dummy.
-    from . import keyless
+    """Does the running dev box's create-time env still match the config? Best effort, via the
+    engine; None when it matches, there's no box, or nothing could be read.
 
-    proxied = bool(env.get("HTTPS_PROXY"))
-    mismatches = []
-    for label, kind, taxonomy in (
-        ("claude keyless", config.claude_keyless(), keyless.CLAUDE_KEYLESS),
-        ("codex keyless", config.codex_keyless(), keyless.CODEX_KEYLESS),
-    ):
-        spec = taxonomy.get(kind) if kind and proxied else None
-        want = {spec["env"]: spec["dummy"]} if spec else {}
-        have = {s["env"]: s["dummy"] for s in taxonomy.values() if env.get(s["env"]) == s["dummy"]}
-        if want != have:
-            mismatches.append(label)
-    if mismatches:
-        return f"⚠ dev box env out of date ({', '.join(mismatches)}) — apply with: fy box up"
+    The same comparison `fy box up` makes on a running box (``box.env_drift``), over the create
+    path's own derivation — so this no longer keeps a copy of the creation rules (the keyless-only
+    copy it had mis-fired on every at-rest box, 2026-09-26, and never saw `[[inject]]` or
+    `[box].env`). What tracks the MODE is host-side and reconciled live (the proxy's rules, the gcp
+    minter), so the box env never depends on a rung: only the config moving under it needs a new
+    box — hence `fy box down && fy box up`, as `fy box up` alone keeps a running box. In the box,
+    what only your computer knows (its clock, the proxy CA's host path) is left out."""
+    project = project or os.environ.get("PODMAN_PROJECT") or config.project_prefix()
+    try:
+        from . import box  # lazy: the box tier is only needed when there's a box to compare
+
+        mode_env = {k: os.environ.get(k, v) for k, v in derive_env(read()["mode"]).items()}
+        drift = box.env_drift(
+            config.engine(),
+            f"{project}-devbox",
+            {**_engine_env(), **mode_env},
+            project=project,
+            host_facts=not in_box(),
+            timeout=5,
+        )
+    except (Exception, SystemExit):
+        return None
+    if drift:
+        return (
+            f"⚠ dev box env out of date ({', '.join(drift)}) — apply with: fy box down && fy box up"
+        )
     return None
 
 

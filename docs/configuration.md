@@ -494,7 +494,10 @@ Every kind takes:
 - **`box_env`** — dummies baked into the box's environment, `{ NAME = "dummy" }`: what a client
   needs to see before it sends the header the proxy then overwrites. They're baked whenever the box
   routes through the proxy, whatever the switch's level, so turning the switch on needs no box
-  recreate; a dummy grants nothing. `fy verify` checks each still holds its dummy (anything else
+  recreate; a dummy grants nothing. Adding a row, or changing or removing its `box_env`, does need
+  one: the box's environment is fixed when it's created, so run `fy box down && fy box up`.
+  `fy box up` on a running box and `fy mode` name a dummy the box lacks, or one it still holds
+  after its row is gone (that one would shadow a real login made in the box). `fy verify` checks each still holds its dummy (anything else
   is a possible real credential in the box). A name foldyard sets in the box itself (`FY_*`,
   `FOLDYARD_*`, the proxy and CA variables, `CONTAINER_HOST`, `DOCKER_HOST`, …) is refused, and
   two rows can't give one name different dummies. While the switch is off, the proxy answers a
@@ -757,7 +760,10 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   `LC_ALL` (the image's or this table's), which would override it. Debian images add it with
   the `locales` package and `localedef -i en_GB -f UTF-8 en_GB.UTF-8`. `date` and `ls -l` need
   `tzdata` in the image; the packaged box has it, and Claude Code doesn't need it. Both are read
-  when the box is created, so `fy box down && fy box up` picks up a change.
+  when the box is created, so `fy box down && fy box up` picks up a change. So is the rest of this
+  table: the box's environment is fixed when it's created, so adding, changing or removing an
+  entry needs `fy box down && fy box up` too. `fy box up` on a running box and `fy mode` name
+  each variable that no longer matches; they print the values only for `TZ` and `LC_TIME`.
 - **`[[box.tools]]`** — one-time tool installs, run as bootstrap steps reported ✓/✗:
   `{ name, install, check? }`. `check` is a shell test that skips the install when it succeeds;
   default `command -v <name>`. These run on every newly created box; a distro package belongs in
