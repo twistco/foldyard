@@ -494,16 +494,138 @@ def doctor(
     raise typer.Exit(devmode.main(["doctor", "deep"] if deep else ["doctor"]))
 
 
-@app.command()
+monitor_app = typer.Typer(
+    rich_markup_mode="markdown",
+    name="monitor",
+    help="What the guest monitor recorded: processes, connections, selected files (your "
+    "computer). Bare `fy monitor` shows the recent events; `fy monitor hook` sends them on to a "
+    "file, a program or a URL, and `fy monitor check` verifies a file a hook wrote.",
+    invoke_without_command=True,
+)
+app.add_typer(monitor_app)
+
+
+@monitor_app.callback()
 def monitor(
+    ctx: typer.Context,
     limit: int = typer.Option(40, "--limit", "-n", help="how many recent events"),
     worktree: str = typer.Option("", "--worktree", "-w", help="only this worktree ('main' too)"),
     as_json: bool = typer.Option(False, "--json", help="one JSON object per event"),
 ) -> None:
-    """What the guest monitor recorded: processes, connections, selected files (your computer)."""
-    from . import monitorlog
+    if ctx.invoked_subcommand is None:
+        from . import monitorlog
 
-    raise typer.Exit(monitorlog.show(limit, worktree, as_json))
+        raise typer.Exit(monitorlog.show(limit, worktree, as_json))
+
+
+def _monitor_host_only() -> None:
+    """Hooks, their delivery state and the sink's signing key live in the host's state dir —
+    out of the box's reach by design (a hook command in reach of the box would be host code
+    execution for it; the key would let it forge the file it is scored by)."""
+    from . import config
+
+    if config.in_box():
+        typer.echo(
+            "✗ run on your computer — monitor hooks, their state and the sink's key live there "
+            "(~/.foldyard/<project>/), out of the box's reach"
+        )
+        raise typer.Exit(1)
+
+
+hook_app = typer.Typer(
+    rich_markup_mode="markdown",
+    name="hook",
+    help="Where the monitor's events go besides `fy monitor`: a file, your program or a URL, "
+    "kept in host-only config. Bare `fy monitor hook` lists them with their delivery health.",
+    invoke_without_command=True,
+)
+monitor_app.add_typer(hook_app)
+
+
+@hook_app.callback()
+def _hook_default(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        hook_list()
+
+
+@hook_app.command("list")
+def hook_list() -> None:
+    """Each hook: what it sends where, its filters, what it delivered, and whether it is failing."""
+    _monitor_host_only()
+    from . import monitorhooks
+
+    print("\n".join(monitorhooks.listing()))
+    raise typer.Exit(0)
+
+
+@monitor_app.command("hooks", hidden=True)  # the plural people reach for
+def monitor_hooks() -> None:
+    hook_list()
+
+
+@hook_app.command("add")
+def hook_add(
+    name: str = typer.Argument(..., help="unique; keys the hook's place in the event stream"),
+    command: list[str] | None = typer.Argument(
+        None, help="after `--`: a program (absolute path) and its arguments; no shell"
+    ),
+    file: str = typer.Option(
+        "", "--file", help="append each batch as a signed JSON line (the directory must exist)"
+    ),
+    url: str = typer.Option("", "--url", help="POST each batch as JSON"),
+    who: list[str] | None = typer.Option(
+        None, "--who", help="container, vm, unattributed, ambiguous (repeat or comma-separate)"
+    ),
+    kinds: list[str] | None = typer.Option(
+        None, "--kinds", help="exec, exit, connect, file, other (repeat or comma-separate)"
+    ),
+    worktrees: list[str] | None = typer.Option(
+        None, "--worktree", "-w", help="only these worktrees"
+    ),
+) -> None:
+    """Add a hook: `--file PATH`, `--url URL`, or `-- /abs/program args…` — exactly one.
+
+    A file hook is foldyard's own sink: never written through a symlink, each line signed with a
+    key only your computer holds, so `fy monitor check PATH` tells whether anything (the box,
+    when the file is in the checkout) edited it. Events are sent once settled, starting from the
+    recent ones; the supervisor picks a new hook up within seconds."""
+    _monitor_host_only()
+    from . import monitorhooks
+
+    raise typer.Exit(
+        monitorhooks.cli_add(
+            name,
+            command=tuple(command or ()),
+            file=file,
+            url=url,
+            who=tuple(who or ()),
+            kinds=tuple(kinds or ()),
+            worktrees=tuple(worktrees or ()),
+        )
+    )
+
+
+@hook_app.command("remove")
+def hook_remove(name: str = typer.Argument(..., help="the hook to remove")) -> None:
+    """Remove a hook, keeping the rest of the file and your edits. Its place in the event stream
+    is kept: re-adding the name resumes there, and a file it wrote stays checkable."""
+    _monitor_host_only()
+    from . import monitorhooks
+
+    raise typer.Exit(monitorhooks.cli_remove(name))
+
+
+@monitor_app.command("check")
+def monitor_check(
+    path: str = typer.Argument(..., help="a file a `file` hook wrote"),
+    hook: str = typer.Option("", "--hook", help="the hook that wrote it (default: from config)"),
+) -> None:
+    """Verify a file a hook wrote: every line signed by this computer's sink, none missing,
+    moved or added, and nothing cut from the end. Non-zero on the first problem, with its line."""
+    _monitor_host_only()
+    from . import monitorhooks
+
+    raise typer.Exit(monitorhooks.check(path, hook))
 
 
 @app.command()

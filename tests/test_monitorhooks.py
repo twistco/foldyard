@@ -6,6 +6,7 @@ command or endpoint is really reached: ``subprocess.run`` and ``urlopen`` are st
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 import pytest
@@ -345,3 +346,241 @@ def test_round_once_logs_config_errors_and_carries_on(project, monkeypatch):
     logged = []
     mh.round_once(now=1, log=logged.append)
     assert logged and "absolute path" in logged[0]
+
+
+# ── the file sink ───────────────────────────────────────────────────────────────────────
+
+
+def test_parse_refuses_two_hooks_writing_one_file():
+    hooks, errors = mh.parse(
+        '[[hook]]\nname = "a"\nfile = "/e.jsonl"\n[[hook]]\nname = "b"\nfile = "/e.jsonl"\n'
+    )
+    assert [h.name for h in hooks] == ["a"] and len(errors) == 1 and "'a'" in errors[0], errors
+
+
+def test_parse_accepts_a_file_hook():
+    hooks, errors = mh.parse(
+        '[[hook]]\nname = "ca"\nfile = "/srv/ca/events.jsonl"\nwho = ["container"]\n'
+    )
+    assert errors == []
+    assert hooks[0].file == "/srv/ca/events.jsonl" and hooks[0].who == ("container",)
+
+
+@pytest.mark.parametrize(
+    "body, why",
+    [
+        ('name = "x"\nfile = "logs/e.jsonl"', "absolute"),
+        ('name = "x"\nfile = "/a/../e.jsonl"', "normal"),
+        ('name = "x"\nfile = "/a/./e.jsonl"', "normal"),
+        ('name = "x"\nfile = "/a/"', "normal"),
+        ('name = "x"\nfile = 3', "absolute"),
+        ('name = "x"\nfile = "/e"\ncommand = ["/bin/x"]', "exactly one"),
+        ('name = "x"\nfile = "/e"\nheaders = { a = "b" }', "headers"),
+    ],
+)
+def test_parse_refuses_a_bad_file_hook(body, why):
+    hooks, errors = mh.parse(f"[[hook]]\n{body}\n")
+    assert hooks == [] and len(errors) == 1 and why in errors[0], errors
+
+
+def _sink_hook(tmp_path, name="ca", **kw):
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    return mh.Hook(name=name, file=str(tmp_path / "logs" / "events.jsonl"), **kw)
+
+
+def _check(hook, st):
+    from foldyard import monitorsink
+
+    data, key = monitorsink.read(hook.file), monitorsink.load_key()
+    assert key is not None
+    return monitorsink.verify(data, key, hook.name, (st.sink_seq, st.sink_mac))
+
+
+def test_a_file_hook_appends_signed_chained_lines(project, monkeypatch, tmp_path):
+    monkeypatch.setattr(mh, "BATCH_MAX", 2)
+    hook = _sink_hook(tmp_path)
+    st = mh.HookState()
+    assert mh.deliver(hook, st, _events(3), now=1) == ""
+    assert mh.deliver(hook, st, _events(3), now=2) == ""
+    lines = [json.loads(x) for x in open(hook.file, "rb")]
+    assert [[e["seq"] for e in x["events"]] for x in lines] == [[1, 2], [3]]
+    assert [x["sink"]["seq"] for x in lines] == [1, 2] and lines[1]["sink"]["prev"] == lines[0][
+        "sink"
+    ]["mac"]
+    assert lines[0]["hook"] == "ca" and lines[0]["schema"] == mh.SCHEMA
+    assert st.sink_seq == 2 and st.sink_mac == lines[1]["sink"]["mac"] and st.last == [BOOT, 3]
+    assert _check(hook, st).problem == ""
+    assert (project / "monitor-sink.key").exists()  # made on first use, in the state dir
+
+
+def test_a_refused_file_is_a_failed_delivery_and_nothing_is_written(project, tmp_path):
+    victim = tmp_path / "zshrc"
+    victim.write_text("keep\n")
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "events.jsonl").symlink_to(victim)
+    hook = mh.Hook(name="ca", file=str(tmp_path / "logs" / "events.jsonl"))
+    st = mh.HookState()
+    msg = mh.deliver(hook, st, _events(2), now=1)
+    assert "retrying" in msg and "symlink" in msg
+    assert st.last == [] and st.sink_seq == 0 and victim.read_text() == "keep\n"
+
+
+def test_a_write_torn_part_way_is_undone_retried_and_the_file_checks(
+    project, monkeypatch, tmp_path
+):
+    from foldyard import monitorsink
+
+    hook = _sink_hook(tmp_path)
+    st = mh.HookState()
+    mh.deliver(hook, st, _events(1), now=1)
+    real_write = monitorsink.os.write
+
+    def tear(fd, data):  # 30 bytes reach the file, then the disk fills
+        real_write(fd, bytes(data[:30]))
+        monkeypatch.setattr(monitorsink.os, "write", real_write)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(monitorsink.os, "write", tear)
+    msg = mh.deliver(hook, st, _events(2), now=2)
+    assert "retrying" in msg and st.sink_seq == 1
+    assert mh.deliver(hook, st, _events(2), now=st.next_try) == ""
+    got = _check(hook, st)
+    assert got.problem == "" and got.last_seq == 2 and got.lines == 2 and got.notes == []
+
+
+def test_a_hook_pointed_at_another_file_starts_a_fresh_chain_there(project, tmp_path):
+    # the chain belongs to the file, not the name: re-adding `ca` with another --file (or editing
+    # `file =`) must not carry seq/prev from the old file into the new one
+    hook = _sink_hook(tmp_path)
+    st = mh.HookState()
+    assert mh.deliver(hook, st, _events(1), now=1) == ""
+    moved = mh.Hook(name="ca", file=str(tmp_path / "logs" / "other.jsonl"))
+    assert mh.deliver(moved, st, _events(2), now=2) == ""
+    first = json.loads(open(moved.file, "rb").readline())
+    assert first["sink"]["seq"] == 1 and first["sink"]["prev"] == ""
+    assert st.sink_file == moved.file and _check(moved, st).problem == ""
+
+
+def test_a_missing_file_at_the_same_path_keeps_its_chain(project, tmp_path):
+    # a box deleting the file must keep failing the check: the next line is NOT a fresh seq 1
+    hook = _sink_hook(tmp_path)
+    st = mh.HookState()
+    assert mh.deliver(hook, st, _events(1), now=1) == ""
+    os.unlink(hook.file)
+    assert mh.deliver(hook, st, _events(2), now=2) == ""
+    assert json.loads(open(hook.file, "rb").readline())["sink"]["seq"] == 2
+    assert "seq" in _check(hook, st).problem
+
+
+def test_round_once_records_the_sinks_sequence(project, tmp_path):
+    hook = _sink_hook(tmp_path)
+    (project / "monitor-hooks.toml").write_text(f'[[hook]]\nname = "ca"\nfile = "{hook.file}"\n')
+    monitorlog._append([snap(0), ev(1), ev(2), snap(3)])
+    mh.round_once(now=50)
+    state = json.loads((project / "monitor-hooks-state.json").read_text())
+    assert state["ca"]["sink_seq"] == 1 and len(state["ca"]["sink_mac"]) == 64
+
+
+def test_state_from_a_newer_foldyard_keeps_what_it_knows(project):
+    # an unknown field must not throw every hook's cursor away (HookState(**v) would)
+    (project / "monitor-hooks-state.json").write_text(
+        json.dumps({"s": {"last": [BOOT, 4], "delivered": 4, "from_the_future": 1}})
+    )
+    assert mh._load_state()["s"].last == [BOOT, 4]
+
+
+# ── editing monitor-hooks.toml (`fy monitor hook add|remove`) ───────────────────────────
+
+
+def test_add_creates_the_file_owner_only(project):
+    mh.add(mh.Hook(name="ca", file="/srv/ca/events.jsonl", who=("container",)))
+    path = project / "monitor-hooks.toml"
+    assert oct(path.stat().st_mode & 0o777) == "0o600"  # a url hook's headers may hold a token
+    hooks, errors = mh.load()
+    assert errors == [] and hooks == [
+        mh.Hook(name="ca", file="/srv/ca/events.jsonl", who=("container",))
+    ]
+
+
+HAND = """\
+# my hooks — hand-written
+[[hook]]
+name = "score"   # the scorer
+command = ["/usr/local/bin/fy-score", "--json"]
+
+[[hook]]
+name = "notify"
+url = "https://hooks.example.org/fy"
+[hook.headers]
+Authorization = "Bearer t"
+
+# trailing comment
+"""
+
+
+def test_add_appends_and_keeps_every_hand_edit(project):
+    (project / "monitor-hooks.toml").write_text(HAND)
+    odd = mh.Hook(name='a "quoted" \\ hook', command=("/bin/sh", "-c", 'echo "$1"\n', "é"))
+    mh.add(odd)
+    text = (project / "monitor-hooks.toml").read_text()
+    assert text.startswith(HAND)
+    hooks, errors = mh.load()
+    assert errors == [] and [h.name for h in hooks] == ["score", "notify", odd.name]
+    assert hooks[-1] == odd
+
+
+def test_add_refuses_a_taken_name_even_an_invalid_hooks(project):
+    (project / "monitor-hooks.toml").write_text('[[hook]]\nname = "ca"\ncommand = ["rel"]\n')
+    with pytest.raises(ValueError, match="already"):
+        mh.add(mh.Hook(name="ca", file="/srv/e.jsonl"))
+
+
+def test_add_refuses_what_the_supervisor_would_and_writes_nothing(project):
+    with pytest.raises(ValueError, match="absolute"):
+        mh.add(mh.Hook(name="ca", command=("fy-score",)))
+    assert not (project / "monitor-hooks.toml").exists()
+
+
+def test_remove_drops_one_block_and_keeps_the_rest(project):
+    (project / "monitor-hooks.toml").write_text(HAND)
+    mh.remove("notify")  # its [hook.headers] sub-table goes with it
+    text = (project / "monitor-hooks.toml").read_text()
+    assert "# my hooks — hand-written" in text and "# the scorer" in text and "Bearer" not in text
+    assert [h.name for h in mh.load()[0]] == ["score"]
+    mh.remove("score")
+    assert mh.load() == ([], [])
+
+
+def test_remove_refuses_an_unknown_name(project):
+    (project / "monitor-hooks.toml").write_text(HAND)
+    with pytest.raises(ValueError, match="no hook"):
+        mh.remove("nope")
+
+
+def test_remove_refuses_a_file_it_cant_edit_exactly_and_leaves_it(project):
+    inline = 'hook = [{ name = "a", command = ["/bin/a"] }, { name = "b", command = ["/bin/b"] }]\n'
+    (project / "monitor-hooks.toml").write_text(inline)
+    with pytest.raises(ValueError, match="by hand"):
+        mh.remove("a")
+    assert (project / "monitor-hooks.toml").read_text() == inline
+
+
+# ── listing (`fy monitor hook`) ─────────────────────────────────────────────────────────
+
+
+def test_listing_shows_each_hook_its_filters_and_its_health(project):
+    (project / "monitor-hooks.toml").write_text(
+        HAND + '\n[[hook]]\nname = "ca"\nfile = "/srv/ca/e.jsonl"\nwho = ["container"]\n'
+        '\n[[hook]]\nname = "bad"\ncommand = ["rel"]\n'
+    )
+    mh._save_state({
+        "score": mh.HookState(delivered=12, ok_at=1000.0),
+        "ca": mh.HookState(attempts=2, error="refused: a symlink", dropped=5, next_try=1040.0),
+    })  # fmt: skip
+    text = "\n".join(mh.listing(now=1010.0))
+    assert "score" in text and "command" in text and "/usr/local/bin/fy-score --json" in text
+    assert "12 events delivered" in text and "10s ago" in text
+    assert "Bearer" not in text and "Authorization" in text  # header names, never their values
+    assert "file" in text and "/srv/ca/e.jsonl" in text and "who=container" in text
+    assert "failing" in text and "refused: a symlink" in text and "5 events skipped" in text
+    assert "bad" in text and "absolute path" in text  # a hook the supervisor skips is said

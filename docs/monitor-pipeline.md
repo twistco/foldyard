@@ -2,7 +2,8 @@
 
 Status: **design**, 2026-10-04. Builds on [ADR-0032](./adrs/0032-a-root-collector-in-the-guest.md)
 (slices 1–2: Tetragon in the VM, the signed spool, the host pull and join). What is built today:
-the hook mechanism (§6). Everything else here is proposed, with the measurements it rests on.
+the hook mechanism and its file sink (§6). Everything else here is proposed, with the measurements
+it rests on.
 
 ## 1. What the events look like
 
@@ -181,6 +182,7 @@ box chose. The file is read fresh each round; there is nothing to adopt.
 name = "score"                      # unique; keys the hook's cursor
 command = ["/usr/local/bin/fy-score", "--json"]   # argv, absolute path, no shell
 # or: url = "https://hooks.example.org/fy"      # POST, JSON body
+# or: file = "/abs/path/events.jsonl"           # the built-in sink: one signed line per batch
 # headers = { Authorization = "Bearer …" }      # url hooks only
 stage = "events"                    # the only stage today; later: scored, decided, reviewed
 kinds = ["exec", "connect", "file"] # optional filters; omitted = all
@@ -208,6 +210,76 @@ timeout = 15                        # seconds
 - **Isolation:** commands run with a minimal environment (`PATH`, `HOME`, `LANG`, `FY_PROJECT`,
   `FY_HOOK`) — never the supervisor's, which holds every `host.env` secret — on their own thread,
   so a slow hook never delays the pull.
+- **Managed from the CLI:** `fy monitor hook add NAME` — with `--file PATH`, `--url URL` or
+  `-- /abs/program args…`, and optional `--who`, `--kinds` and `--worktree` filters — appends a
+  `[[hook]]` block, after parsing the result the way the supervisor will (a hook it would skip is refused, and so is a filter value no event
+  has); `fy monitor hook remove NAME` cuts one block out, and refuses — leaving the file alone —
+  when the edit wouldn't parse to exactly the old document minus that hook (an inline array of
+  hooks, say). Comments and hand edits survive both. Bare `fy monitor hook` lists each hook with
+  its filters and delivery state; `fy doctor` has a row per hook (failing, or batches skipped →
+  warn) and one saying when there are none. All of them run on the host only.
+
+### 6.1 The file sink
+
+The use that motivated it: an experiment in the box scores the monitor's events, so the box needs
+them in a file it can read — a file in the checkout. The obvious hook, a command running
+`sh -c 'cat >> "$1"'` on that path, has two flaws. A shell append follows symlinks, so the box
+(which writes the checkout, and whose writes reach the host as the operator) plants `logs → ~` or
+`logs/events.jsonl → ~/.zshrc` and aims host writes at any file the operator owns, with content
+partly shaped by the arguments of what it ran. And the box can edit or cut the file it is scored
+on. `file = "<absolute path>"` replaces that recipe:
+
+- **No symlink is followed that the box could have made.** The sink walks the path from `/`, one
+  `openat(…, O_DIRECTORY|O_NOFOLLOW)` per component relative to the one before, then opens the file
+  `O_APPEND|O_CREAT|O_NOFOLLOW` and refuses anything but a regular file with one link (a FIFO is
+  refused without blocking on it; a hard link would be another file's inode). Resolving the path
+  once (`realpath`) and opening it later would be a race the box wins, and resolving through a link
+  it planted before the hook existed would point the sink wherever it chose. A link on the way is
+  followed only when **root owns it and the operator can't write the directory holding it**:
+  nothing running as the operator could have placed or swapped it. That admits the system's own
+  (`/tmp`, `/var` and `/etc` on macOS; `/var/run` on Linux) and nothing a box can plant through a
+  mount. Any other link is refused with the resolved path to configure instead — the operator
+  resolves it, once, knowingly.
+- **Directories are never created.** A missing one is usually a mistyped path, and evidence
+  written where nobody looks is worse than a refusal that the log, `fy monitor hook` and `fy
+  doctor` show. The file itself is created (0644).
+- **One write per line**, repeated only for a short write. A write that fails part-way (a full
+  disk) is undone: the file is cut back to where it ended, so the sink never leaves a torn line.
+  A refused or failed write is a failed delivery: retried with backoff, skipped after five
+  attempts, like any other hook.
+
+**Each line is signed and chained.** The key is the sink's own (`<state dir>/monitor-sink.key`,
+32 random bytes, 0600, made on first use) — not `monitor-relay.key`, which the guest relay holds.
+A line is the batch body (`schema`, `project`, `hook`, `events`, `first`, `last`) plus
+
+```json
+{"sink": {"seq": 7, "prev": "<line 6's mac>", "mac": "<hex>"}, "schema": "fy.monitor.events/1", …}
+```
+
+where `seq` counts the hook's lines from 1 (kept in the hook's state, so it survives restarts),
+`prev` is the previous line's mac, and `mac` is HMAC-SHA256 over the canonical JSON (sorted keys,
+no spaces) of the line without `mac`. `sink` is written first, so a line leads with its
+sequence. The chain belongs to the file: a hook pointed at another file starts at seq 1 there,
+and one file holds one hook's lines. Only the current file's chain is kept, so pointing a hook
+back at a file it wrote before starts that file at seq 1 again, after its old lines, and the
+check fails it. Give a hook a fresh file instead.
+
+**`fy monitor check PATH [--hook NAME]`** verifies a file against the key and the hook's state:
+every mac, the sequence from 1 with no gap, every `prev`, and that the file ends on the seq and
+mac the supervisor recorded last — which catches lines cut from the end, the edit the chain alone
+can't see. Each line must also be the exact bytes the sink wrote, not just the same JSON: a key
+given twice parses last-wins in Python, and a reader that takes the first would see something
+else. Nothing unparseable is excused, since the sink never leaves a fragment; the one fragment it
+can't prevent, from your computer losing power mid-write, fails the check like an insertion.
+It prints the first problem with its line number and exits non-zero. Host only: the box has no
+key, and that is the point. At-least-once delivery leaves one shape that is not tampering, and
+passes with a note: **a re-sent seq** — written, but the supervisor stopped before recording it:
+the same seq again, chained from the same `prev` (it may carry more events). The next line chains
+from the re-sent one, and so does the recorded state.
+
+The box can still read the file (the point), and it can still damage it — truncate it, delete it,
+fill the disk. The check makes that visible; it doesn't prevent it. A read-only mount the box
+gets the events through is the structural fix, scoped separately.
 
 ## 7. Open questions
 

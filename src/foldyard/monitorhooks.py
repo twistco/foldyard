@@ -17,22 +17,31 @@ stopped rather than at the store's tail; only the store rotating its position aw
 and that is logged.
 
 Commands run with a minimal environment — never the supervisor's, which holds every
-``host.env`` secret — on their own thread, so a slow hook never delays the pull.
+``host.env`` secret — on their own thread, so a slow hook never delays the pull. A ``file`` hook
+is foldyard's own sink (:mod:`foldyard.monitorsink`): each batch appended as one signed, chained
+line, never through a symlink — no shell append into a path the box can write.
+
+Nothing else in foldyard writes the file but :func:`add`/:func:`remove` (``fy monitor hook``),
+which append a block or remove one and keep every hand edit, refusing what they can't do exactly.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
+import secrets
+import shlex
 import subprocess
 import threading
 import time
 import tomllib
 import urllib.request
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-from . import config, monitorlog
+from . import config, monitorlog, monitorsink
 
 SCHEMA = "fy.monitor.events/1"
 STAGES = ("events",)  # later: scored, decided, reviewed (docs/monitor-pipeline.md §5)
@@ -60,6 +69,7 @@ class Hook:
     name: str
     command: tuple[str, ...] = ()
     url: str = ""
+    file: str = ""  # the built-in sink: an absolute path each batch is appended to, signed
     headers: tuple[tuple[str, str], ...] = ()
     stage: str = "events"
     kinds: tuple[str, ...] = ()
@@ -96,6 +106,7 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
     hooks: list[Hook] = []
     errors: list[str] = []
     seen: set[str] = set()
+    files: dict[str, str] = {}  # file → the hook writing it
     for i, raw in enumerate(doc.get("hook") or []):
         label = f"hook #{i + 1}"
         try:
@@ -109,12 +120,21 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
                 raise ValueError("duplicate name (it keys the hook's cursor)")
             command = _strings(raw.get("command"), "`command`")
             url = raw.get("url") or ""
-            if bool(command) == bool(url):
-                raise ValueError("needs exactly one of `command` (an argv list) or `url`")
+            file = raw.get("file") or ""
+            if sum(map(bool, (command, url, file))) != 1:
+                raise ValueError("needs exactly one of `command` (an argv list), `url` or `file`")
             if command and not command[0].startswith("/"):
                 raise ValueError("`command` must start with an absolute path (no PATH lookup)")
             if url and not (isinstance(url, str) and url.startswith(("https://", "http://"))):
                 raise ValueError("`url` must be http(s)")
+            if file and not (isinstance(file, str) and file.startswith("/")):
+                raise ValueError("`file` must be an absolute path")
+            if file and os.path.normpath(file) != file:
+                raise ValueError("`file` must be a normalised path (no `.`, `..` or trailing `/`)")
+            if file in files:
+                raise ValueError(
+                    f"`file` is already hook '{files[file]}'s (a file holds one hook's chain)"
+                )
             headers = raw.get("headers") or {}
             if not isinstance(headers, dict) or not all(
                 isinstance(k, str) and isinstance(v, str) for k, v in headers.items()
@@ -133,6 +153,7 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
                     name=name,
                     command=command,
                     url=url,
+                    file=file,
                     headers=tuple(sorted(headers.items())),
                     stage=stage,
                     kinds=_strings(raw.get("kinds"), "`kinds`"),
@@ -142,6 +163,8 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
                 )
             )
             seen.add(name)
+            if file:
+                files[file] = name
         except (ValueError, TypeError) as e:
             errors.append(f"{label} skipped: {e}")
     return hooks, errors
@@ -154,6 +177,331 @@ def load() -> tuple[list[Hook], list[str]]:
         return [], []
     except OSError as e:
         return [], [f"can't read {hooks_file()}: {e}"]
+
+
+# ── editing it: `fy monitor hook add|remove` ──────────────────────────────────────────
+#
+# There is no TOML writer in the standard library, and the file is the operator's: comments and
+# hand edits must survive. So `add` APPENDS a rendered block and `remove` cuts one block out of
+# the text — and each proves its edit by parsing the result before writing it: `add` that the new
+# hook reads back exactly as meant and nothing else changed, `remove` that the document is the old
+# one minus that hook. A file the text edit can't change exactly (an inline array of hooks, a
+# multi-line string that looks like a header) is refused and left alone, never reformatted.
+
+_FILE_HEAD = """\
+# Monitor hooks: where the guest monitor's events go — a file, your own program or an endpoint.
+# Host-only: never in foldyard.toml, which anything in the box can write. The supervisor re-reads
+# this every few seconds. `fy monitor hook add|remove` edit it and keep your own edits.
+"""
+_HOOK_HEADER = re.compile(r"^\s*\[\[\s*hook\s*\]\]\s*(#.*)?$")
+_TABLE = re.compile(r"^\s*\[")
+_HOOK_SUBTABLE = re.compile(r"^\s*\[\s*hook\s*\.")
+
+
+def _q(s: str) -> str:
+    """A TOML basic string. JSON's escapes are TOML's, bar DEL, which TOML wants escaped."""
+    return json.dumps(s, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
+def _arr(xs: tuple[str, ...]) -> str:
+    return "[" + ", ".join(_q(x) for x in xs) + "]"
+
+
+def render(hook: Hook) -> str:
+    """``hook`` as a ``[[hook]]`` block, defaults left out."""
+    lines = ["[[hook]]", f"name = {_q(hook.name)}"]
+    if hook.command:
+        lines.append(f"command = {_arr(hook.command)}")
+    if hook.url:
+        lines.append(f"url = {_q(hook.url)}")
+    if hook.headers:
+        lines.append(
+            "headers = { " + ", ".join(f"{_q(k)} = {_q(v)}" for k, v in hook.headers) + " }"
+        )
+    if hook.file:
+        lines.append(f"file = {_q(hook.file)}")
+    if hook.stage != "events":
+        lines.append(f"stage = {_q(hook.stage)}")
+    for key in ("kinds", "who", "worktrees"):
+        if getattr(hook, key):
+            lines.append(f"{key} = {_arr(getattr(hook, key))}")
+    if hook.timeout != Hook.timeout:
+        lines.append(f"timeout = {hook.timeout:g}")
+    return "\n".join(lines) + "\n"
+
+
+def _doc(text: str) -> dict:
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"{hooks_file()} is not valid TOML ({e}) — fix it by hand first") from None
+
+
+def added(text: str, hook: Hook) -> str:
+    """``text`` with ``hook`` appended, or :class:`ValueError` saying why the supervisor would
+    refuse it (nothing is written then)."""
+    names = [h.get("name") for h in _doc(text).get("hook") or [] if isinstance(h, dict)]
+    if hook.name in names:
+        raise ValueError(f"a hook named '{hook.name}' is already in {hooks_file()}")
+    sep = "" if not text or text.endswith("\n\n") else "\n" if text.endswith("\n") else "\n\n"
+    new = text + sep + render(hook)
+    (before, old_errors), (after, errors) = parse(text), parse(new)
+    if after != [*before, hook] or errors != old_errors:
+        fresh = [e for e in errors if e not in old_errors]
+        raise ValueError(fresh[0] if fresh else f"hook '{hook.name}' wouldn't read back as written")
+    return new
+
+
+def removed(text: str, name: str) -> str:
+    """``text`` without the hook called ``name`` — or :class:`ValueError` when there is none, or
+    when cutting its block out of the text wouldn't leave exactly the rest of the document."""
+    doc = _doc(text)
+    entries = doc.get("hook")
+    entries = entries if isinstance(entries, list) else []
+    rest = [h for h in entries if not (isinstance(h, dict) and h.get("name") == name)]
+    if len(rest) == len(entries):
+        raise ValueError(f"no hook named '{name}' in {hooks_file()}")
+    want = {k: v for k, v in doc.items() if k != "hook"} | ({"hook": rest} if rest else {})
+    lines = text.splitlines(keepends=True)
+    for start, line in enumerate(lines):
+        if not _HOOK_HEADER.match(line):
+            continue
+        end = start + 1
+        while end < len(lines) and not (
+            _TABLE.match(lines[end]) and not _HOOK_SUBTABLE.match(lines[end])
+        ):
+            end += 1
+        # comments and blank lines just above the next header introduce THAT one: keep them
+        while end > start + 1 and (
+            not lines[end - 1].strip() or lines[end - 1].lstrip()[:1] == "#"
+        ):
+            end -= 1
+        candidate = "".join(lines[:start] + lines[end:])
+        try:
+            if tomllib.loads(candidate) == want:
+                return candidate
+        except tomllib.TOMLDecodeError:
+            continue
+    raise ValueError(
+        f"can't remove '{name}' without disturbing the rest of {hooks_file()} — edit it by hand"
+    )
+
+
+def _write(text: str) -> None:
+    """Atomically, 0600 from the create: a url hook's headers may hold a token."""
+    path = hooks_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}")
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+        f.write(text)
+    tmp.replace(path)
+
+
+def _text() -> str:
+    try:
+        return hooks_file().read_text()
+    except FileNotFoundError:
+        return ""
+
+
+def add(hook: Hook) -> None:
+    text = _text()
+    _write(added(text or _FILE_HEAD, hook))
+
+
+def remove(name: str) -> None:
+    """Remove the hook ``name``. Its delivery state (cursor, sink sequence) is kept: a file it
+    wrote stays checkable, and re-adding the name resumes where it stopped."""
+    _write(removed(_text(), name))
+
+
+WHO = ("container", "vm", "unattributed", "ambiguous")
+KINDS = ("exec", "exit", "connect", "file", "other")
+
+
+def _values(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(x.strip() for v in values for x in v.split(",") if x.strip())
+
+
+def cli_add(
+    name: str,
+    *,
+    command: tuple[str, ...] = (),
+    file: str = "",
+    url: str = "",
+    who: tuple[str, ...] = (),
+    kinds: tuple[str, ...] = (),
+    worktrees: tuple[str, ...] = (),
+) -> int:
+    """`fy monitor hook add`. Refuses — writing nothing — what the supervisor would skip, a filter
+    value that can never match (a typo would silently send nothing), and a file the sink would
+    refuse to write."""
+    if sum(map(bool, (command, file, url))) != 1:
+        print("✗ give exactly one of `--file PATH`, `--url URL`, or a program after `--`")
+        return 1
+    who, kinds, worktrees = _values(who), _values(kinds), _values(worktrees)
+    bad = [w for w in who if w not in WHO] + [k for k in kinds if k not in KINDS]
+    if bad:
+        print(
+            f"✗ no event has {', '.join(map(repr, bad))} — who: {', '.join(WHO)}; "
+            f"kinds: {', '.join(KINDS)}"
+        )
+        return 1
+    if file:
+        file = os.path.abspath(os.path.expanduser(file))
+        try:
+            monitorsink.check_path(file)
+        except monitorsink.Refused as e:
+            print(f"✗ {e}")
+            return 1
+    hook = Hook(
+        name=name, command=command, url=url, file=file, who=who, kinds=kinds, worktrees=worktrees
+    )
+    try:
+        add(hook)
+    except ValueError as e:
+        print(f"✗ {e}")
+        return 1
+    kind, where = target(hook)
+    print(f"✓ hook '{name}' added: {kind} → {where}")
+    print(
+        "  The supervisor picks it up within seconds and sends settled events from the recent "
+        "ones on; `fy monitor hook` shows how its deliveries are going."
+    )
+    if file:
+        print(
+            "  Each batch is one signed JSON line. Anything that can write that directory (the "
+            "box, if it is in the checkout) can still edit the file — "
+            f"`fy monitor check {shlex.quote(file)}` says whether it has."
+        )
+    if config.machine_monitor() == "off":
+        print(
+            '  ℹ the monitor is off: nothing is recorded until `[machine] monitor = "observe"` '
+            "is adopted and the VM re-provisioned (`fy machine stop && fy up`)."
+        )
+    return 0
+
+
+def cli_remove(name: str) -> int:
+    try:
+        remove(name)
+    except ValueError as e:
+        print(f"✗ {e}")
+        return 1
+    print(f"✓ hook '{name}' removed (its place in the event stream is kept if you re-add it)")
+    return 0
+
+
+def _first_hook(data: bytes) -> str:
+    for raw in data.split(b"\n"):
+        try:
+            doc = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(doc, dict) and isinstance(doc.get("hook"), str):
+            return doc["hook"]
+    return ""
+
+
+def check(path: str, name: str = "") -> int:
+    """`fy monitor check`: :func:`monitorsink.verify` over the file, against the hook's recorded
+    state. The hook is ``name``, else the configured hook writing to ``path``, else the one the
+    file's first line names (its state still has to agree)."""
+    path = os.path.abspath(os.path.expanduser(path))
+    key = monitorsink.load_key()
+    if key is None:
+        print(
+            f"✗ no sink key ({monitorsink.key_file()}) — no file hook has written on this computer"
+        )
+        return 1
+    try:
+        data = monitorsink.read(path)
+    except (OSError, monitorsink.Refused) as e:
+        print(f"✗ {e}")
+        return 1
+    name = name or next((h.name for h in load()[0] if h.file == path), "")
+    if not name and (name := _first_hook(data)):
+        print(
+            f"ℹ hook '{name}' is taken from the file's first line, which whatever can write the "
+            "file controls — no configured hook writes this path; `--hook NAME` names it yourself"
+        )
+    if not name:
+        print(f"✗ {path}: no hook names it — say which with `--hook NAME`")
+        return 1
+    st = _load_state().get(name)
+    chain = (st.sink_seq, st.sink_mac) if st and st.sink_file == path else None
+    got = monitorsink.verify(data, key, name, chain)
+    for note in got.notes:
+        print(f"ℹ {note}")
+    if got.problem:
+        print(f"✗ {path}:{got.line}: {got.problem}")
+        return 1
+    print(
+        f"✓ {path}: {got.lines} lines, seq 1–{got.last_seq}, {got.events} events — each signed by "
+        f"this computer's sink for hook '{name}', none missing, moved or added, and the file "
+        "ends where the sink last wrote"
+    )
+    return 0
+
+
+# ── reading it back: `fy monitor hook`, `fy doctor` ───────────────────────────────────
+
+
+def target(hook: Hook) -> tuple[str, str]:
+    """``(kind, where)`` — header names only, never their values (they hold tokens)."""
+    if hook.file:
+        return "file", hook.file
+    if hook.url:
+        names = ", ".join(k for k, _ in hook.headers)
+        return "url", hook.url + (f" (headers: {names})" if names else "")
+    return "command", shlex.join(hook.command)
+
+
+def problems(st: HookState | None, now: float) -> list[str]:
+    """What is wrong with a hook's delivery: failing now, and events it has ever skipped."""
+    out: list[str] = []
+    if st is None:
+        return out
+    if st.attempts:
+        wait = max(0.0, st.next_try - now)
+        out.append(f"failing ({st.attempts} attempts): {st.error} — retrying in {wait:.0f}s")
+    if st.dropped:
+        last = f" (last error: {st.error})" if st.error and not st.attempts else ""
+        out.append(f"{st.dropped} events skipped after {MAX_ATTEMPTS} failed attempts{last}")
+    return out
+
+
+def progress(hook: Hook, st: HookState | None, now: float) -> str:
+    if st is None or not (st.delivered or st.ok_at):
+        return "nothing delivered yet"
+    ago = f", last {now - st.ok_at:.0f}s ago" if st.ok_at else ""
+    line = f", line {st.sink_seq} of its file" if hook.file and st.sink_file == hook.file else ""
+    return f"{st.delivered} events delivered{ago}{line}"
+
+
+def listing(now: float | None = None) -> list[str]:
+    """`fy monitor hook`: each hook — its kind, target, filters and delivery health — and every
+    hook the supervisor is skipping, with why."""
+    now = time.time() if now is None else now
+    hooks, errors = load()
+    if not hooks and not errors:
+        return [
+            "no monitor hooks — the events stay in `fy monitor`. `fy monitor hook add` sends them "
+            f"to a file, a program or a URL (host-only config: {hooks_file()}).",
+        ]
+    states = _load_state()
+    out: list[str] = []
+    for h in hooks:
+        kind, where = target(h)
+        picks = [(k, getattr(h, k)) for k in ("kinds", "who", "worktrees")]
+        filters = " ".join(f"{k}={','.join(v)}" for k, v in picks if v) or "all events"
+        out.append(f"{h.name}  {kind}  {where}  [{filters}]")
+        st = states.get(h.name)
+        out.append(f"  ✓ {progress(h, st, now)}")
+        out.extend(f"  ⚠ {why}" for why in problems(st, now))
+    out.extend(f"✗ {e}" for e in errors)
+    out.append(f"— {hooks_file()}")
+    return out
 
 
 # ── state ─────────────────────────────────────────────────────────────────────────────
@@ -169,14 +517,30 @@ class HookState:
     dropped: int = 0
     error: str = ""
     ok_at: float = 0.0
+    sink_seq: int = 0  # a file hook: the last line written, which `fy monitor check` ends on
+    sink_mac: str = ""  # …and its mac, the next line's `prev`
+    sink_file: str = ""  # …in this file: a hook given another `file` starts a new chain there
+
+
+_STATE_FIELDS = frozenset(f.name for f in fields(HookState))
 
 
 def _load_state() -> dict[str, HookState]:
     try:
         raw = json.loads(_state_file().read_text())
-        return {k: HookState(**v) for k, v in raw.items()}
-    except (OSError, ValueError, TypeError):
+        # a field this version doesn't know (a newer foldyard wrote it) is dropped, not fatal:
+        # failing here would hand every hook a fresh cursor
+        return {
+            k: HookState(**{f: x for f, x in v.items() if f in _STATE_FIELDS})
+            for k, v in raw.items()
+        }
+    except (OSError, ValueError, TypeError, AttributeError):
         return {}
+
+
+def load_state() -> dict[str, HookState]:
+    """Each hook's delivery state, as the supervisor last saved it (read-only callers)."""
+    return _load_state()
 
 
 def _save_state(states: dict[str, HookState]) -> None:
@@ -269,17 +633,37 @@ def _post(hook: Hook, body: bytes) -> str:
     return "" if 200 <= code < 300 else f"HTTP {code}"
 
 
+def batch(hook: Hook, events: list[monitorlog.Event]) -> dict:
+    return {
+        "schema": SCHEMA,
+        "project": config.project(),
+        "hook": hook.name,
+        "first": [events[0].boot, events[0].seq],
+        "last": [events[-1].boot, events[-1].seq],
+        "events": [asdict(e) for e in events],
+    }
+
+
 def payload(hook: Hook, events: list[monitorlog.Event]) -> bytes:
-    return json.dumps(
-        {
-            "schema": SCHEMA,
-            "project": config.project(),
-            "hook": hook.name,
-            "first": [events[0].boot, events[0].seq],
-            "last": [events[-1].boot, events[-1].seq],
-            "events": [asdict(e) for e in events],
-        }
-    ).encode()
+    return json.dumps(batch(hook, events)).encode()
+
+
+def _to_file(hook: Hook, st: HookState, events: list[monitorlog.Event]) -> str:
+    """Append the batch as the next signed line of the hook's chain; ``""`` on success. The
+    sequence moves only on success, so a retry re-writes the same seq (see monitorsink.verify).
+    The chain belongs to the file: a hook pointed at another one starts at seq 1 there (a file
+    that merely went missing at the same path does NOT — its next line must still fail the
+    check)."""
+    if st.sink_file != hook.file:
+        st.sink_seq, st.sink_mac, st.sink_file = 0, "", hook.file
+    try:
+        key = monitorsink.ensure_key()
+        line, mac = monitorsink.signed_line(key, batch(hook, events), st.sink_seq + 1, st.sink_mac)
+        monitorsink.append(hook.file, line)
+    except (OSError, monitorsink.Refused) as e:
+        return str(e)[:300]
+    st.sink_seq, st.sink_mac = st.sink_seq + 1, mac
+    return ""
 
 
 def deliver(
@@ -317,8 +701,11 @@ def deliver(
             pending = pending[len(scan) :]
     if not wanted:
         return ""
-    body = payload(hook, wanted)
-    why = _run_command(hook, body) if hook.command else _post(hook, body)
+    if hook.file:
+        why = _to_file(hook, st, wanted)
+    else:
+        body = payload(hook, wanted)
+        why = _run_command(hook, body) if hook.command else _post(hook, body)
     if not why:
         move(batch_end)
         st.attempts, st.next_try, st.error, st.ok_at = 0, 0.0, "", now
