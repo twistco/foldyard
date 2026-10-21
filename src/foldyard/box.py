@@ -1886,11 +1886,13 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     claude_out = f"{checkout}/{here}/.devbox-claude/projects"
     codex_out = f"{checkout}/{here}/.devbox-codex/sessions"
     if from_box:
+        # A name no slot can carry is one `fy worktree add` refuses, so this is all but
+        # unreachable: it falls back to the legacy place, which the sync reads too.
         try:
             claude_out = str(boxmounts.from_box_dir() / boxmounts.claude_rel(worktree))
             codex_out = str(boxmounts.from_box_dir() / boxmounts.codex_rel(worktree))
-        except ValueError:  # a name `fy worktree add` refuses, so all but unreachable: the
-            from_box = False  # legacy place, as the sync reads it
+        except ValueError:
+            from_box = False
     transcripts_dir = os.environ.get("DEVBOX_TRANSCRIPTS") or claude_out
     box_home, claude_in_box, image_locales, image_lc_all = _probe_image(engine, img, env)
     # Resolved HOME paths the agent/editor plugins' box_args need (they only get `env`): the box
