@@ -6,6 +6,212 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.6.0 — 2026-10-21
+
+A security release: upgrade now. Two flaws let a dev box influence what your computer archives from
+its agent transcripts: a planted link could make it copy other files on your computer into the
+archive, and a planted session could be resumed by an agent on your computer in another project.
+Both are fixed, and box Codex sessions now archive into foldyard's own Codex home instead of
+`~/.codex/sessions`. After upgrading, on the Lima backend run `fy machine stop && fy up` once: every
+Lima VM's boot provisioning changed, walled or not, and a running one is refused until it restarts
+(the `podman` backend needs no restart). Then `fy box down && fy box up`, so the box picks up this
+release.
+
+### Security
+
+- **Archiving transcripts never follows a link out of the checkout.** The bound-out transcript
+  dirs (`.devbox-claude/projects`, `.devbox-codex/sessions`) live in the checkout, which the box
+  can write, and the host copied them into your history (`~/.claude/projects`, `~/.codex/sessions`)
+  with rsync — which follows a symlink in the source path. A box could therefore make `fy box down`,
+  `fy nuke`, `fy worktree remove`, `fy transcripts` or the `transcript_sync_seconds` sweep copy any
+  directory you can read on your computer into that history. The copy is now foldyard's own walk,
+  which opens every directory on the way and every entry inside without following a link: a link
+  on the way to the transcript dir refuses the archive and names the path; one inside it is
+  skipped, as are pipes and other special files. Otherwise it behaves as before (additive, newer
+  copies win, mtimes kept), writes new archive files private to you, skips a single file over 4 GiB
+  and stops copying before the archive's disk falls under 1 GiB free. rsync is no longer needed on
+  your computer. One change for `transcript_sync_seconds`: a file the sweep cannot copy (unreadable,
+  too large, no room) is now reported once, like any other failure, instead of passing silently.
+- **Archiving Claude transcripts copies only the checkout's own project folder.** Claude Code
+  files each session in a folder named after the directory it started in, and a Claude on your
+  computer resumes the folder named after its own directory. The box chooses those folder names,
+  so the archive (`fy box down`, `fy nuke`, `fy worktree remove`, `fy transcripts`, the
+  `transcript_sync_seconds` sweep) could place box-written sessions where `claude --resume` in a
+  different project on your computer would load them. Now only the folder named after the
+  checkout itself is archived (each worktree archives its own); every other entry is left in the
+  bound-out dir and named — printed by `fy transcripts` and box down, logged once by the sweep.
+  Sessions the box starts in a subdirectory of the checkout are left out with them. Codex
+  records a session's directory inside each file rather than in a folder name, so its sessions
+  can't be held to a folder this way; they no longer go into `~/.codex/sessions` at all (below).
+- **Box Codex sessions are no longer archived into `~/.codex/sessions` on your computer.** Codex
+  records a session's working directory inside the session file, which the host can't check, so
+  a session the box wrote could claim another project's directory and be offered by
+  `codex resume` when you worked in that project. `fy transcripts`, `fy box down`, `fy nuke`,
+  `fy worktree remove` and the `transcript_sync_seconds` sweep now archive them into a Codex
+  home of foldyard's own, one per project: `~/.foldyard/<project>/transcripts/codex`. There is no
+  setting that puts them back in `~/.codex`. To resume one, run
+  `CODEX_HOME=~/.foldyard/<project>/transcripts/codex codex resume` from the checkout after
+  logging in there once; `fy transcripts` prints the line. An explicit archive dir
+  (`fy transcripts <dir>` or `FOLDYARD_TRANSCRIPTS_ARCHIVE`) still files them under
+  `codex-sessions/`. Sessions earlier versions archived into `~/.codex/sessions` stay where they
+  are — foldyard never moves or deletes them; each also sits under the same name in the
+  checkout's `.devbox-codex/sessions` unless that was cleaned, and the next archive copies it to
+  the new place too.
+
+### Changed
+
+- **Two injectors may share a host when they write different headers, and the proxy routes each
+  request by the placeholder it carries.** Keyless Claude on its OAuth token (`authorization` on
+  `api.anthropic.com`) and an `[[inject]]` row writing `x-api-key` there, with a `box_env`
+  placeholder, can now both be on, so an evaluation harness in the box can call the Anthropic API
+  with its own key beside Claude Code. Before, `fy mode` refused the pair, because the proxy injected
+  the first rule matching a host and path whatever the request carried. Now, where several rules
+  match, it injects only the one whose placeholder the request carries in that rule's header, and
+  answers a request carrying neither or both with a 502 naming the switches (the Network Log marks
+  it `no credential named`). A host with one rule injects as before, except that a request
+  carrying only another credential's placeholder, in another header, is never sent on the rule's
+  credential: it gets that switch's "turn it on" answer if it is off, or a 502 saying the path is
+  outside that credential's `path_prefix` (marked `placeholder out of scope`). Two injectors
+  writing the same header, or one whose row has no `box_env`, are still refused. Give the row's placeholder
+  a variable only the harness reads: Claude Code prefers `ANTHROPIC_API_KEY` over its OAuth token.
+  See `fy docs configuration`.
+- **`fy worktree add` suggests a directory name when given a branch-shaped one.** The first
+  argument is the worktree's directory, so `fy worktree add sec/vuln-bumps` is refused (a nested
+  directory would never be discovered). The refusal now suggests
+  `fy worktree add sec-vuln-bumps sec/vuln-bumps` instead of leaving you to work out which
+  argument was wrong.
+- **`fy claude` starts a fresh box straight at the prompt.** Claude Code used to ask two
+  questions first: whether to trust the folder (where Enter picks "No, exit") and whether to
+  accept bypass-permissions mode, which `fy claude` always launches in. It now answers both in the
+  box's own Claude config, for the checkout you launch from. Trusting the folder is safe because
+  the box is the boundary: the repo's hooks and MCP servers reach no further than the agent
+  itself. The theme now starts on `auto`, which follows your terminal's light or dark background.
+  All three are defaults: a theme you pick with `/theme` stays.
+- **The VM's boot scripts now say "VM firewall" and "host" instead of "wall" and "Mac".** Their
+  comments, messages, the guest's `fy-wall` unit descriptions and one nft rule comment changed;
+  no rule, path or unit name did. Every byte of those scripts is in the boot provisioning a Lima
+  VM records, and the firewall script is recorded with the firewall off too (its `uninstall`
+  runs then). So every Lima VM, with or without `[machine] firewall`, is refused as stale once:
+  `fy up` stops until you run `fy machine stop && fy up`.
+
+### Added
+
+- **The docs and both bundled skills explain why a cache prune can fail with `Permission
+  denied` in a shared volume.** On the VM's SELinux guest, a file copied into a volume can keep
+  the private label of the container that copied it, and once that container is recreated no
+  other container can delete it. `fy docs configuration` (under `[reclaim]`) gives the fix. To
+  refresh a copy installed in your repo, run `fy skill install --force foldyard` and
+  `fy skill install --force bootstrap-devbox`.
+- **Experimental: `fy monitor` shows what the guest monitor recorded, labelled with each event's container
+  and worktree.** A root relay in the VM signs every event. Your computer pulls them every few
+  seconds over the VM's ssh and keeps only lines that verify, counting any that went missing or
+  were altered (`fy doctor`'s `monitor events` row). Containers are identified from the kernel's
+  own records, not from the container id Tetragon guesses, which a container's creator can forge.
+  Names and worktrees are what the engine reports, and are shown as claims.
+- **Experimental: Guest monitor hooks send batches of attributed events to your own program or endpoint.**
+  Configure them in `~/.foldyard/<project>/monitor-hooks.toml` on your computer, never in
+  `foldyard.toml`, because anything in the box can write the checkout. A command gets each batch
+  as JSON on stdin with a minimal environment, so `host.env` secrets are not passed. A URL gets it
+  as a POST. Events are sent once their attribution is settled. Delivery is at least once,
+  retried with backoff, and a batch is skipped and counted after five failures. A hook that falls
+  behind catches up from where it stopped; if the event store rotates past it first, the
+  supervisor log says so.
+- **Experimental: `[machine] monitor = "observe"` runs a guest monitor — Tetragon, a root eBPF collector, in
+  the lima VM.** Experimental means off unless you turn it on, and its event format,
+  `fy monitor --json` output and hook payload may change in a minor release while it settles. It
+  records process starts, outbound TCP connections and access to selected credential
+  files for every container and the VM itself, and blocks nothing. A pinned, checksummed release
+  is downloaded on your computer, copied into the VM, and checked again as root before it is
+  installed. The box's user can't stop it, change its policy or read its log. `fy doctor` shows
+  whether it is observing. Off by default; changing it needs `fy machine stop && fy up`
+  ([ADR-0032](docs/adrs/0032-a-root-collector-in-the-guest.md)).
+- **Five new pages in `fy docs`: `workshop`, `stack`, `git`, `github-app` and `gcp`.** Running a
+  workshop (what attendees set up beforehand on macOS, Linux and Windows via WSL2, and the order
+  on the day); bringing a compose stack in, including podman-compose's differences from docker
+  compose; git when the box and your computer share a checkout; setting up a GitHub App for
+  `[[inject]] kind = "github-app"`; and Google Cloud access through the metadata emulator. The
+  manual pages now carry diagrams (on GitHub), and the quickstart's agent step is corrected: on a
+  running box, adopt the config and run `fy box down && fy box up` — `fy box up` alone only warns.
+- **The manual is online at [twistco.github.io/foldyard](https://twistco.github.io/foldyard/),
+  and the README opens with a demo.** The site renders the same pages `fy docs` ships, plus the
+  design record and the contributor pages, with search and the diagrams. The demo is a GIF of the
+  quick start (`foldyard init` through `fy verify` and an edit your computer holds until you approve
+  it), recorded by CI against each release on a real VM.
+- **Experimental: Each guest monitor event names the process that started it, where Tetragon reports one.**
+  `fy monitor --json` and hook payloads gain `ppid`, `parent` and `parent_args` (the parent's id,
+  binary and arguments) and `exec_id`/`parent_exec_id` (the links to rebuild the whole process
+  tree from `exec` events), all taken from what Tetragon already reports. Without them a consumer
+  could only attribute by time, and a container's own daemon was blamed on whatever a session was
+  doing: under BashArena, a firewall daemon's reload running `iptables -F` scored the same against
+  an honest run as an attack. The fields are additive (the schema stays `fy.monitor.events/1`) and
+  empty on events that lack them; `fy monitor`'s own output is unchanged.
+- **Settings foldyard isn't ready to stand behind are now marked *(experimental)* in the
+  configuration docs, and `fy doctor` lists the ones your config turns on.** Each says which of
+  two things it means, or both: its config or output may still change, or it is settled but
+  unproven in day-to-day use. `[machine] runtime = "gvisor"` and `[machine] vmtype = "krunkit"`,
+  both released before, are now marked; they work as before. A setting stops being experimental in
+  a release whose changelog says so.
+- **Experimental: A monitor hook can write to a file, and `fy monitor hook add` sets one up.** Use
+  `fy monitor hook add NAME --file PATH` (or `--url URL`, or `-- /abs/program args…`), with
+  `--who`, `--kinds` and `--worktree` filters. Bare `fy monitor hook` lists your hooks and how
+  their deliveries are going, `fy monitor hook remove` removes one, and `fy doctor` warns about a
+  hook that is failing or has skipped events. Before this, hooks had to be written by hand in
+  `~/.foldyard/<project>/monitor-hooks.toml`, and nothing showed whether they worked. A `file`
+  hook replaces a shell command that appends into the checkout so the box can read the events.
+  Such a command follows symlinks, so the box could aim your computer's writes at any of your
+  files. The sink never follows a symlink the box could have made. It signs each line with a key
+  only your computer holds, so `fy monitor check PATH` finds a line edited, removed, moved or
+  added, or lines cut from the end. Bare `fy monitor` is unchanged.
+
+### Fixed
+
+- **A long-running box no longer crashes its agents.** The box's first process was
+  `sleep infinity`, which never collects the processes left to it, and every `git commit` leaves
+  one behind (git's background maintenance). They piled up for the box's whole life, and once
+  the box reached its limit of 2048 processes, a program that couldn't start a thread aborted:
+  Claude sessions died with "core dumped", several at once. A box is now created with `--init`,
+  so they are collected as they exit. A running box keeps the old behaviour until
+  `fy box down && fy box up`.
+- **A `[reclaim] script` runs by its own shebang, and a failed one is reported.** foldyard ran it
+  as `sh <script>`, so a bash script ran under the box's dash and died at its first bash-ism
+  before any of its sweeps ran; the exit code was ignored, so a single stderr line was the only
+  sign. An executable script now runs by its shebang (a file without the executable bit still
+  runs under `sh`), and a non-zero exit prints a `⚠` line. It still doesn't stop `fy up`.
+  If your script `eval`s `fy shellenv`, remove that: shellenv's output is bash and is meant for
+  recipes.
+- **On a host that exports `HTTPS_PROXY`, a walled Lima VM's image pulls no longer fail.** Lima
+  copies the host's proxy variables into the guest at each start (`propagateProxyEnv`), where
+  they overrode the VM firewall's own proxy: the guest's podman pulled through the host's proxy,
+  and the firewall refused every pull (`proxyconnect tcp: dial tcp 192.168.5.2:…: connection
+  refused`). With `[machine] firewall` on, foldyard now records `propagateProxyEnv: false`
+  before the VM boots; without the firewall the host's proxy stays the guest's. A VM already
+  running with the copied proxy is warned about once, and needs `fy machine stop && fy up`.
+- **In a walled VM, apt in a docker-compose build reaches the proxy.** Compose's classic builder
+  (what it uses against podman, which serves no BuildKit) passes only the upper-case
+  `HTTP_PROXY`/`HTTPS_PROXY` build args, and apt reads only `http_proxy`. So an apt `RUN` step
+  in a compose build started from the box went direct, and the VM firewall refused it. The
+  guest's build-step hook, which already adds foldyard's CA to every build step, now also adds
+  each proxy variable in the spelling the step lacks. This changes the VM's boot provisioning:
+  every running Lima VM, walled or not, is refused as stale until `fy machine stop && fy up`.
+- **`fy box shell` now tells the box what terminal you're using.** The engine's `exec -t` set
+  `TERM=xterm` and nothing else, so tools in the box saw a 16-colour terminal: Claude Code mapped
+  its theme onto your terminal's basic palette, where the selected option in a menu could all but
+  vanish on a light background. Each attach now passes your computer's `TERM`, `COLORTERM`,
+  `TERM_PROGRAM`, `TERM_PROGRAM_VERSION` and `COLORFGBG` (whichever are set), and falls back to
+  `xterm-256color` when the box has no terminfo for your `TERM` (Ghostty's `xterm-ghostty`,
+  kitty's `xterm-kitty`).
+- **A running box whose environment no longer matches the config now says so.** A box's
+  environment is fixed when it's created, so an `[[inject]]` row, a `[box].env` entry or a
+  timezone change adopted afterwards never reached it — and `fy box up` printed "already up" while
+  the new variable was simply absent. `fy box up` on a running box now prints one warning naming
+  each variable that's missing, changed or no longer set (values only for `TZ` and `LC_TIME`),
+  with the fix: `fy box down && fy box up`. `fy mode`, `fy state` and the TUI make the same
+  comparison, which used to cover only the keyless Claude and Codex dummies, and their fix line
+  said `fy box up`, which keeps a running box as it is. A timezone or time-locale change on your
+  computer is shown too, with its old → new value, but only as a warning: `fy state` still passes
+  on it. It exits non-zero when any other variable no longer matches, or when a `TZ` or `LC_TIME`
+  pinned in `[box].env` changed (that is config).
+
 ## 0.5.0 — 2026-10-19
 
 Every VM needs one `fy machine stop && fy up` after upgrading: the VM's boot setup changed (the
