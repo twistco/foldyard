@@ -238,25 +238,65 @@ Disk exhaustion is unchanged: the box can already fill the host disk through the
 - The podman backend gets the outbox only after a recreate and never an inbox: no current podman
   provider enforces read-only outside the guest, and applehv/libkrun don't apply it at all.
 
+## Settled with the operator (2026-10-21)
+
+1. **The box sees the monitor's events.** The reader is the in-box harness: control-arena's
+   flip experiment runs in the box, builds each step's kernel digest from the events file and
+   sends it to the scoring model. What is observed is the BashArena task containers, which are the
+   box's SIBLINGS on the engine and have no mounts. They can't read the inbox; only the box can,
+   and it is the experimenter. A box observing ITSELF (a monitor over the box's own agent) is a
+   different deployment. There the inbox would tell the watched what was caught, so a hook only
+   ever delivers into the inbox because the operator configured it to, never by default.
+2. **Your computer verifies; the box doesn't.** No Ed25519. Tampering is unlikely here, so the
+   response is loud and manual rather than automatic: `fy monitor check FILE` on your computer
+   (#107) reports the first bad line, and the operator investigates, then sets the file aside and
+   starts a fresh one. Two follow-ups belong to the sink, not to this ADR:
+   - The supervisor could compare the file's last line with the recorded MAC before each append,
+     so a cut or edit shows in the supervisor log, a notification and doctor, not only at check
+     time. It would keep appending, so evidence isn't lost.
+   - A host-side `rotate` that records where a fresh file starts, so a legitimately rotated file
+     passes `check` and a deleted one still fails it.
+   On the inbox the signature stays for portability. A reader of the results can re-verify, which
+   "it was mounted read-only" doesn't let them do.
+3. **The deferred `guest-boot.sh` / `machine-wall.sh` rewording rides this restart.** The
+   operator runs `fy machine stop && fy up` once for both.
+4. **A live vz test runs before building:** guest root remounts read-write, remounts the
+   virtiofs tag fresh, then writes. The result is recorded below.
+
 ## Open questions for the operator
 
-1. **Should the box see the monitor's events at all?** The inbox makes them tamper-proof, but
-   readable by every box of the project, including the one being observed (it learns what was
-   caught). Is the reader an in-box reviewer agent, or is the inbox only for portability?
-2. **Who verifies the signature?** The HMAC key must never be in the inbox, so a reader in the
-   box can't verify; it relies on the mount. If in-box verification matters, that is an
-   asymmetric signature (Ed25519 — not in the stdlib, so a dependency on the hot path).
-3. **Fold the deferred `guest-boot.sh` / `machine-wall.sh` rewording into the same restart?**
-   CLAUDE.md keeps "wall"/"Mac" there until a re-provision is due anyway. This change needs a
-   restart, not a re-provision, but the operator's act is the same `fy machine stop && fy up`.
-4. **Refuse or warn on a running VM with the old mount set?** Proposed: refuse, like stale
+1. **Refuse or warn on a running VM with the old mount set?** Proposed: refuse, like stale
    provisioning (fail closed; the restart keeps volumes). The alternative is a release of the
    legacy layout behind a warning.
-5. **Names.** `/var/lib/fy-monitor/inbox` already exists in the guest (the Tetragon delivery
+2. **Names.** `/var/lib/fy-monitor/inbox` already exists in the guest (the Tetragon delivery
    inbox, `monitor.py:60`, ADR-0032). Keep inbox/outbox (the box's point of view) and rename
    that one, or pick `to-box/` / `from-box/`?
-6. **One VZ test before building.** The vz verdict rests on Apple's documented contract. A
-   two-minute manual run on a vz VM (guest root: `mount -o remount,rw`, then unmount and remount
-   the virtiofs tag `rw`, then write) would settle it before the e2e exists — the e2e above only
-   runs on QEMU in CI.
-7. **How long do the legacy transcript paths live?** Proposed: one release of dual reading.
+3. **How long do the legacy transcript paths live?** Proposed: one release of dual reading.
+   (The symlink-following transcript sync this ADR flagged is being fixed on its own, ahead of
+   the outbox.)
+
+## The vz test (2026-10-21)
+
+Setup: Lima 2.1.3, macOS 27.0.1, a Fedora 44 guest (kernel 6.19.10) cloned from the base VM, with
+one scratch directory mounted `writable: false` and `mountType: virtiofs`. As root in the guest,
+17 kinds of write were tried, among them create, append, overwrite, `mmap`, `truncate`, `chmod`,
+`chown`, mtime, xattr, symlink, hard link, FIFO, `mkdir`, rename and `rm`. They ran three ways: on
+the mount as Lima made it; after `mount -o remount,rw`; and on the virtiofs tag freshly mounted
+`-o rw`. Every write failed every time, and the directory on the host was unchanged by `stat`,
+sha256 and xattrs after each run. The same writes against a directory inside the guest all
+succeeded, which shows the test could see a write.
+
+**Verdict:** on vz, `writable: false` is enforced on the host side, against root in the guest.
+Three things follow for `verify` and the e2e:
+
+- **The guest's mount table can say the inbox is writable when it isn't.** Both the remount and
+  the fresh mount return 0 and show `rw` in `/proc/mounts`. Only an actual write shows the truth,
+  so the assertion is a write attempt, not the `ro` flag.
+- **The refusal isn't always `EROFS`.** It is `EROFS` while the guest's `ro` flag is set. Once the
+  guest drops it, the host refuses with `EPERM` (create, `chmod`, links, rename, `rm`) or `EACCES`
+  (opening for write). A probe that reads "refused" as `EROFS` alone would misjudge the case that
+  matters.
+- **Ownership seen in the guest says nothing.** It reports the caller as owner (`root:root` to
+  root, the VM user to the VM user).
+
+QEMU with 9p still rests on reading the source. CI's host tier is where that gets proved.
