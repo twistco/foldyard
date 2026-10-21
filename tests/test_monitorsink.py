@@ -256,6 +256,20 @@ def test_a_line_from_another_chain_fails_its_prev():
     _fails(b"".join(lines), 2, "chain", (3, macs[-1]))
 
 
+def test_a_skipped_seq_fails_even_with_an_intact_chain():
+    # Only the sink signs, so this is the sink's own state lost or edited — still not the file
+    # the hook's history says it is.
+    lines, macs = _file(1)
+    jump, mac3 = ms.signed_line(KEY, _body(n=3), 3, macs[0])
+    _fails(lines[0] + jump, 2, "seq", (3, mac3))
+
+
+def test_a_re_sent_seq_must_chain_from_the_same_line():
+    lines, macs = _file(2)
+    stray, mac = ms.signed_line(KEY, _body(n=2), 2, "e" * 64)  # seq 2 of some other chain
+    _fails(lines[0] + lines[1] + stray, 3, "seq 2 where 3", (2, mac))
+
+
 def test_a_truncated_tail_fails_against_the_hook_state():
     lines, macs = _file(3)
     _fails(b"".join(lines[:2]), 2, "end", (3, macs[-1]))
