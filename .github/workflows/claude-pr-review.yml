@@ -199,19 +199,39 @@ jobs:
           EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
         run: |
           # The log is public, and a refused call's input can carry a finding (a body, an -f
-          # field, an echo). So print its SHAPE only: the tool, and for Bash up to three words of
-          # its first command, stopping at the first flag, quote or assignment, plus whether it
-          # chained, piped or redirected. That's what a rule miss shows up as.
+          # field, an echo's words). So print its SHAPE only: the tool, and for Bash the first
+          # command's name, plus whether it chained, piped or redirected. Only where the next
+          # words are structure, not prose, do they show too: a known `gh`/`git` subcommand,
+          # the path after `gh api`, and the one path a `cd`/`cat`/`ls`/`head`/`tail`/`wc`
+          # names. That's what a rule miss shows up as.
           prog=$(cat <<'JQ'
+          def path: test("^[A-Za-z0-9_.~{}/-]*/[A-Za-z0-9_.~{}/-]*$");
+          def one_of($xs): . as $x | $xs | index($x) != null;
           def shape:
             if .tool_name != "Bash" then .tool_name else
               (.tool_input.command // "") as $c
-              | (reduce ([$c | splits("[;&|<>\n]")][0] | splits("[[:space:]]+") | select(length > 0)) as $w
-                  ({out: [], stop: false};
-                   if .stop or ($w | test("^-|[\"'`=$()]")) then .stop = true
-                   else .out += [$w[:80]] end)
-                 | .out[:3] | join(" ")) as $head
-              | "Bash: \(if $head == "" then "(starts with a flag, quote or assignment)" else $head end)"
+              | [[$c | splits("[;&|<>\n]")][0] | splits("[[:space:]]+") | select(length > 0)
+                 | .[:80]] as $w
+              | ($w[0] // "") as $cmd
+              | (if ($cmd | test("^[A-Za-z0-9_./-]+$") | not) then
+                   "(starts with a quote, assignment or expansion)"
+                 elif $cmd == "gh" then
+                   ($w[1] // "") as $a | ($w[2] // "") as $b
+                   | if $a == "api" then "gh api" + (if $b | path then " " + $b else "" end)
+                     elif $a | one_of(["pr", "issue", "auth", "repo", "run", "search"]) then
+                       "gh " + $a + (if $b | one_of(["view", "diff", "list", "comment",
+                         "checks", "status", "create", "edit", "review"]) then " " + $b
+                         else "" end)
+                     else "gh" end
+                 elif $cmd == "git" then
+                   ($w[1] // "") as $a
+                   | "git" + (if $a | one_of(["diff", "log", "show", "status", "merge-base",
+                       "rev-parse", "branch", "remote", "symbolic-ref", "fetch", "cat-file",
+                       "grep", "-C"]) then " " + $a else "" end)
+                 elif ($cmd | IN("cd", "cat", "ls", "head", "tail", "wc")) then
+                   [$cmd] + [$w[1:2][] | select(path)] | join(" ")
+                 else $cmd end) as $head
+              | "Bash: \($head)"
                 + (if $c | test("[;&|<>`\n]|\\$\\(") then " (chained, piped or redirected)"
                    else "" end)
             end;
