@@ -13,6 +13,7 @@ Run:  fy tui-test                 (uv resolves pytest + textual from foldyard)
 from __future__ import annotations
 
 import sys
+import threading
 from datetime import timedelta
 from typing import cast
 
@@ -124,72 +125,55 @@ def test_branches_returns_list():
 # ── devmode: the "dev box env out of date" hint ───────────────────────────────────────
 
 
-def _hint_for(monkeypatch, box_env, *, claude_keyless=None, codex_keyless=None):
-    """Drive _box_env_hint with a stubbed engine-inspect (box env) + keyless config."""
-    import json as _json
+def _hint_for(monkeypatch, drift, *, in_box=False):
+    """Drive _box_env_hint over a stubbed ``box.env_drift`` (the comparison itself, and the
+    keyless/inject/[box].env cases it covers, are test_box.py's); returns (hint, the call)."""
+    from foldyard import box
 
-    class _P:
-        returncode = 0
-        stdout = _json.dumps([f"{k}={v}" for k, v in box_env.items()])
+    seen: dict = {}
 
-    monkeypatch.setattr(devmode.subprocess, "run", lambda *a, **k: _P())
+    def fake_drift(engine, name, env, **kw):
+        seen.update(engine=engine, name=name, env=env, **kw)
+        if isinstance(drift, BaseException):
+            raise drift
+        return drift
+
+    monkeypatch.setattr(box, "env_drift", fake_drift)
     monkeypatch.setattr(devmode.config, "engine", lambda: "docker")
-    monkeypatch.setattr(devmode.config, "claude_keyless", lambda: claude_keyless)
-    monkeypatch.setattr(devmode.config, "codex_keyless", lambda: codex_keyless)
-    return devmode._box_env_hint(project="tangible-podman")
+    monkeypatch.setattr(devmode, "in_box", lambda: in_box)
+    monkeypatch.setattr(devmode, "_engine_env", lambda: {"DOCKER_HOST": "unix:///nonexistent/s"})
+    monkeypatch.setattr(devmode, "read", lambda *a, **k: {"mode": {}})
+    monkeypatch.setattr(devmode, "derive_env", lambda mode: {"FY_PROXY": "h:41001"})
+    return devmode._box_env_hint(project="tangible-podman"), seen
 
 
-def test_box_env_hint_ignores_always_baked_gcp_and_proxy(monkeypatch):
-    # gcp=off (the default) but the box ALWAYS bakes GCE_METADATA_HOST + HTTPS_PROXY — this used to
-    # mis-fire "gcp metadata out of date" forever. They no longer track the mode, so: no hint.
-    env = {"GCE_METADATA_HOST": "metadata-emulator:80", "HTTPS_PROXY": "http://h:8088"}
-    assert _hint_for(monkeypatch, env) is None
+def test_box_env_hint_is_box_ups_comparison(monkeypatch):
+    # One comparison for both surfaces: the running box's env against what `fy box up` would
+    # create it with now — not a second copy of the creation rules (the keyless-only one this
+    # replaced never saw an [[inject]] row or [box].env).
+    hint, seen = _hint_for(monkeypatch, ["HAIKU_API_KEY: missing", "TZ: A → B"])
+    assert hint and "HAIKU_API_KEY: missing, TZ: A → B" in hint
+    assert seen["name"] == "tangible-podman-devbox" and seen["project"] == "tangible-podman"
+    assert seen["env"]["FY_PROXY"] == "h:41001"  # the mode's derived env, as `fy box up` resolves
+    assert seen["host_facts"] is True and seen["timeout"] == 5
 
 
-def test_box_env_hint_flags_stale_keyless_then_clears(monkeypatch):
-    # claude keyless configured but the box hasn't baked its dummy token yet → stale until `fy box up`.
-    base = {"GCE_METADATA_HOST": "metadata-emulator:80", "HTTPS_PROXY": "http://h:8088"}
-    hint = _hint_for(monkeypatch, base, claude_keyless="oauth")
-    assert hint and "claude keyless" in hint
-    baked = {**base, "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-dummy"}
-    assert _hint_for(monkeypatch, baked, claude_keyless="oauth") is None
+def test_box_env_hint_says_the_recreate_not_box_up(monkeypatch):
+    # `fy box up` on a running box only warns — the fix for create-time env is a new box.
+    hint, _ = _hint_for(monkeypatch, ["X: missing"])
+    assert hint and hint.endswith("apply with: fy box down && fy box up")
 
 
-def test_box_env_hint_is_silent_for_the_dummy_at_rest(monkeypatch):
-    # The dummy is baked whenever keyless is configured, whatever the mode — so claude=off with a
-    # dummy in the box is the box being right. This used to say "out of date — fy box up", which
-    # changed nothing and pointed away from the real fix (`fy mode claude=on`), 2026-09-26.
-    env = {"HTTPS_PROXY": "http://h:8088", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-dummy"}
-    assert _hint_for(monkeypatch, env, claude_keyless="oauth") is None
+def test_box_env_hint_is_silent_when_the_box_matches_or_cannot_be_read(monkeypatch):
+    assert _hint_for(monkeypatch, [])[0] is None
+    assert _hint_for(monkeypatch, RuntimeError("engine gone"))[0] is None
+    assert _hint_for(monkeypatch, SystemExit("✗ [box].env refused"))[0] is None
 
 
-def test_box_env_hint_flags_a_missing_dummy(monkeypatch):
-    # Keyless configured after the box was created: no dummy, so the client never sends a header
-    # the proxy can rewrite — only a new box fixes that, whatever the mode.
-    env = {"HTTPS_PROXY": "http://h:8088"}
-    hint = _hint_for(monkeypatch, env, claude_keyless="oauth")
-    assert hint and "claude keyless" in hint
-
-
-def test_box_env_hint_flags_a_dummy_keyless_no_longer_wants(monkeypatch):
-    # The other way: keyless dropped (or switched kind) while the box keeps the old dummy, which
-    # would shadow a real in-box login.
-    env = {"HTTPS_PROXY": "http://h:8088", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-dummy"}
-    assert _hint_for(monkeypatch, env, claude_keyless=None)
-    assert _hint_for(monkeypatch, env, claude_keyless="api-key")
-    codex = {"HTTPS_PROXY": "http://h:8088", "OPENAI_API_KEY": "sk-dummy"}
-    assert "codex keyless" in (_hint_for(monkeypatch, codex, codex_keyless=None) or "")
-
-
-def test_box_env_hint_ignores_an_unproxied_box(monkeypatch):
-    # The dummy is baked only for a box routed through the proxy.
-    assert _hint_for(monkeypatch, {}, claude_keyless="oauth") is None
-
-
-def test_box_env_hint_skips_file_based_codex_chatgpt(monkeypatch):
-    # codex `chatgpt` keyless lives in ~/.codex/auth.json (a file), not Config.Env — so it can't be
-    # detected here and must never be flagged (no false alarm), even with no env var.
-    assert _hint_for(monkeypatch, {"HTTPS_PROXY": "http://h:8088"}, codex_keyless="chatgpt") is None
+def test_box_env_hint_in_the_box_leaves_your_computers_facts_out(monkeypatch):
+    # In the box, its own clock settings and the CA's host path aren't yours to compare.
+    _, seen = _hint_for(monkeypatch, [], in_box=True)
+    assert seen["host_facts"] is False
 
 
 def _mac_doctor(monkeypatch, account_out, recorder=None):
@@ -751,6 +735,59 @@ def _two_workspaces_feat_box_up():
     ws = _two_workspaces()
     ws[1]["devbox"] = True
     return ws
+
+
+_STALE = "⚠ dev box env out of date (X: missing) — apply with: fy box down && fy box up"
+
+
+async def test_the_box_env_hint_never_holds_the_ui_thread(monkeypatch):
+    # The drift check reads the box and its image through the engine — seconds on a slow one,
+    # every 5s tick and every highlight. On the UI thread that froze the whole TUI; in a worker,
+    # the hint says it's checking and an answer for a workspace you've left is dropped.
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces_feat_box_up)
+    release = threading.Event()
+    ran_on: list[threading.Thread] = []
+
+    def slow_hint(project=None):
+        ran_on.append(threading.current_thread())
+        release.wait(10)
+        return _STALE
+
+    monkeypatch.setattr(devmode, "_box_env_hint", slow_hint)
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        hint = app.query_one("#ws-hint", tui.Static)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.index = 1  # feat: its box is up, and its check hangs
+        await pilot.pause()
+        assert "feat" in _text(hint) and "checking" in _text(hint)  # the UI didn't wait
+        lv.index = 0  # moved on before the answer came
+        await pilot.pause()
+        release.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "main" in _text(hint) and "no devbox running" in _text(hint)
+        assert "out of date" not in _text(hint)  # feat's late answer, dropped
+    assert ran_on and threading.main_thread() not in ran_on
+
+
+async def test_the_box_env_hint_aims_the_recreate_at_the_worktrees_box(monkeypatch):
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces_feat_box_up)
+    asked: list[str | None] = []
+    monkeypatch.setattr(
+        devmode, "_box_env_hint", lambda project=None: asked.append(project) or _STALE
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one("#workspaces", tui.WorkspaceList).index = 1
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = _text(app.query_one("#ws-hint", tui.Static))
+    assert "proj-feat" in asked
+    assert "WORKTREE=feat fy box down && WORKTREE=feat fy box up" in text
 
 
 async def test_devbox_toggle_starts_without_confirmation_when_down(monkeypatch):

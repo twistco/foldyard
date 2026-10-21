@@ -39,6 +39,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Collection, Mapping
 from importlib import metadata
 from pathlib import Path
 
@@ -428,6 +429,22 @@ def _ensure_packages_layer(
     return rc, layer
 
 
+def _image_probe_cmd(engine: str, img: str) -> list[str]:
+    """The throwaway container :func:`_probe_image` reads the image through — also what the
+    drift check (:func:`env_drift`) runs against a running box's image, so both ask the same
+    source the same question."""
+    return [
+        engine,
+        "run",
+        "--rm",
+        img,
+        "sh",
+        "-c",
+        'printf "%s %s\\nlc_all=%s\\n" "$HOME" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"'
+        ' "${LC_ALL:-}"; locale -a 2>/dev/null',
+    ]
+
+
 def _probe_image(engine: str, img: str, env: dict) -> tuple[str, str, list[str], str]:
     """Where the image puts HOME + where claude resolves its config (CLAUDE_CONFIG_DIR or
     ~/.claude), the locales it can load (``locale -a``) and its own ``LC_ALL``. The image bakes
@@ -435,22 +452,13 @@ def _probe_image(engine: str, img: str, env: dict) -> tuple[str, str, list[str],
     is /home/vscode/.claude — mount THERE, not /root. The locale facts ride the same throwaway
     container (no second start): ``_clock_env`` passes your time locale only when the image has
     it and no LC_ALL of its own overrides it."""
-    out = subprocess.run(
-        [
-            engine,
-            "run",
-            "--rm",
-            img,
-            "sh",
-            "-c",
-            'printf "%s %s\\nlc_all=%s\\n" "$HOME" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"'
-            ' "${LC_ALL:-}"; locale -a 2>/dev/null',
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    first, *rest = out.stdout.splitlines() or [""]
+    out = subprocess.run(_image_probe_cmd(engine, img), env=env, capture_output=True, text=True)
+    return _parse_image_probe(out.stdout)
+
+
+def _parse_image_probe(stdout: str) -> tuple[str, str, list[str], str]:
+    """:func:`_probe_image`'s answer: HOME, the claude config dir, the locales, ``LC_ALL``."""
+    first, *rest = stdout.splitlines() or [""]
     parts = first.split()
     home = parts[0] if len(parts) >= 1 and parts[0] else "/home/vscode"
     claude = parts[1] if len(parts) >= 2 and parts[1] else f"{home}/.claude"
@@ -478,6 +486,340 @@ def _clock_env(image_locales: list[str], image_lc_all: str = "") -> list[str]:
     if not overridden and locale and hostclock.locale_available(locale, image_locales):
         args += ["-e", f"LC_TIME={locale}"]
     return args
+
+
+def _create_env(
+    env: dict,
+    *,
+    project: str,
+    worktree: str,
+    box_home: str,
+    image_locales: list[str],
+    image_lc_all: str,
+    gvisor: bool,
+) -> list[str]:
+    """The core ``-e`` args `fy box up` creates the box with — the ONE derivation, which the
+    already-up drift check (:func:`env_drift`) reads too, so the two cannot disagree. The plugins'
+    share (proxy, CA, ``[[inject]]`` dummies, agents, gcp) is their ``box_args``, beside it.
+    ``env`` is the resolved stack env: the checkout, the env override, the port values."""
+    env_args = [
+        "-e",
+        "DOCKER_HOST=unix:///var/run/docker.sock",
+        "-e",
+        "CONTAINER_HOST=unix:///var/run/docker.sock",
+    ]
+    if config.box_clean_docker_config():
+        # Sidestep the editor-attach credsStore helper (255s under root, breaks even anonymous
+        # compose pulls) — docker/compose read this foldyard-owned config instead of ~/.docker.
+        # Seeded `{}` by the bootstrap; `docker login` writes here and still works.
+        env_args += ["-e", f"DOCKER_CONFIG={box_home}/.docker-fy"]
+    env_args += _clock_env(image_locales, image_lc_all)  # before [box].env, which may override it
+    for key, value in config.box_env().items():
+        env_args += ["-e", f"{key}={value.replace('~', box_home)}"]
+    env_args += [
+        "-e",
+        f"FOLDYARD_CHECKOUT={env.get('FOLDYARD_CHECKOUT', '')}",
+        "-e",
+        f"FOLDYARD_ENV_OVERRIDE={env.get('FOLDYARD_ENV_OVERRIDE', '')}",
+        "-e",
+        f"WORKTREE={worktree}",
+        "-e",
+        f"PODMAN_PROJECT={project}",
+        "-e",
+        f"COMPOSE_PROJECT_NAME={project}",
+        # PIN the project's host daemon port bases (allocated band, or the env override) into the
+        # box: in-box port derivations (`fy mode` daemon probes, FY_PROXY re-derivation) can't
+        # read the host's ~/.foldyard/ports.json registry, and both env vars already win over
+        # allocation (config._daemon_port_base), so the box always agrees with the host that
+        # created it.
+        "-e",
+        f"FY_PROXY_PORT={config.proxy_port_base()}",
+        "-e",
+        f"GCP_MINTER_PORT={config.gcp_minter_port_base()}",
+        # The operator's home, for the in-box `fy verify` mount audit: the box's own HOME is
+        # /root or /home/vscode, not the path a leaked host mount would carry.
+        "-e",
+        f"FY_HOST_HOME={Path.home()}",
+    ]
+    for key in config.port_bases():  # passthrough -e KEY (value flows from env below)
+        env_args += ["-e", key]
+    if gvisor:
+        # A create-time property (like the port band): baked so the already-up nag and the
+        # in-box `fy verify` row can compare the wish with the box they actually have.
+        env_args += ["-e", f"{sandbox.BAKED_ENV}=gvisor"]
+    env_args += [
+        "-e",
+        "IN_DEVBOX=1",
+        "-e",
+        "IS_SANDBOX=1",
+        "-e",
+        "DO_NOT_TRACK=1",
+        "-e",
+        "NEXT_TELEMETRY_DISABLED=1",
+    ]
+    return env_args
+
+
+def _env_pairs(args: list[str]) -> dict[str, str | None]:
+    """The ``NAME → value`` a run's ``-e`` args set, skipping every other flag's value (``-v``,
+    ``--label`` — all ``box_args`` emits besides ``-e``). A bare ``-e NAME`` maps to None: the
+    engine copies its value from the create env, so the args alone can't say what it was."""
+    out: dict[str, str | None] = {}
+    i = 0
+    while i < len(args):
+        if args[i].startswith("-") and i + 1 < len(args):
+            if args[i] == "-e":
+                name, sep, value = args[i + 1].partition("=")
+                out[name] = value if sep else None
+            i += 2
+        else:
+            i += 1
+    return out
+
+
+# What the drift check never compares, each for a reason other than "the config moved":
+_DRIFT_IGNORED = frozenset(
+    {
+        # This box's identity: the check found the box BY its project, and the checkout and
+        # worktree it was created for name the same box — they can't drift under it.
+        "FOLDYARD_CHECKOUT",
+        "WORKTREE",
+        "PODMAN_PROJECT",
+        "COMPOSE_PROJECT_NAME",
+        # The operator's shell at create time (an env override file), not config.
+        "FOLDYARD_ENV_OVERRIDE",
+        # Your computer's home, for the in-box mount audit — a fact about the host, not config.
+        "FY_HOST_HOME",
+        # The port band: a move is `_warn_stale_proxy_port`'s (one change, one warning).
+        "FY_PROXY_PORT",
+        "GCP_MINTER_PORT",
+        # The runtime: `_warn_stale_runtime`'s.
+        sandbox.BAKED_ENV,
+    }
+)
+# Compared by presence only: the proxy URLs carry the per-worktree proxy PORT, so their value moves
+# with the band — again `_warn_stale_proxy_port`'s. (A bare `-e NAME` — the `[ports]` values, per
+# band too — has no value to compare at all; see `_env_pairs`.)
+_DRIFT_PRESENCE_ONLY = frozenset(
+    {
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "npm_config_https_proxy",
+        "npm_config_proxy",
+    }
+)
+# Facts about your computer that a check run INSIDE the box can't see (its own clock settings
+# aren't yours, and your proxy CA isn't at the host path there): left out of an in-box check.
+_HOST_FACTS = frozenset({"TZ", "LC_TIME", "NODE_EXTRA_CA_CERTS"})
+# The only values ever printed: the clock, where the value IS the news and holds nothing
+# sensitive. Everything else is named only — a credential slot holds a dummy by design, but a
+# `[box].env` value can be long, and the name is what you need to find it.
+_DRIFT_SHOW_VALUES = frozenset({"TZ", "LC_TIME"})
+# What the engine adds to every container's Config.Env (podman: container/HOME/HOSTNAME, TERM
+# under -t) — neither the image's nor foldyard's, so never "no longer set".
+_ENGINE_ADDED = frozenset({"PATH", "HOME", "HOSTNAME", "TERM", "container"})
+
+
+def _compare_env(
+    expected: Mapping[str, str | None],
+    baked: Mapping[str, str],
+    *,
+    image_env: Mapping[str, str] | None,
+    ignore: Collection[str] = (),
+) -> list[str]:
+    """What differs, name by name, between the environment a box would be created with now
+    (``expected``; None = present, value unknown) and the one it was (``baked``, its Config.Env).
+
+    ``missing``: the config now sets a name the box lacks (a new ``[[inject]]`` row's dummy).
+    ``changed``: both have it, with different values. ``no longer set``: the box holds a name
+    neither the config, the image (``image_env`` — its own value; a different one was set at
+    create) nor the engine accounts for — a removed row's dummy shadows a real in-box login, a
+    removed ``[box].env`` pin still steers its tool. Without ``image_env`` that last can't be told
+    from the image's own, so it isn't reported."""
+    skip = _DRIFT_IGNORED | frozenset(ignore)
+    out: list[str] = []
+    for name, want in expected.items():
+        if name in skip:
+            continue
+        have = baked.get(name)
+        if have is None:
+            out.append(f"{name}: missing")
+        elif want is None or name in _DRIFT_PRESENCE_ONLY or have == want:
+            continue
+        elif name in _DRIFT_SHOW_VALUES:
+            out.append(f"{name}: {have} → {want}")
+        else:
+            out.append(f"{name}: changed")
+    if image_env is None:
+        return out
+    for name, have in baked.items():
+        if name in skip or name in expected or name in _ENGINE_ADDED:
+            continue
+        if image_env.get(name) == have:
+            continue
+        out.append(f"{name}: no longer set")
+    return out
+
+
+def _env_list(raw: str) -> dict[str, str]:
+    """A ``{{json .Config.Env}}`` list as a dict (raises on anything that isn't one)."""
+    entries = json.loads(raw)
+    if not isinstance(entries, list):
+        raise ValueError("not a list")
+    return dict(str(e).split("=", 1) for e in entries if "=" in str(e))
+
+
+def _box_home_from(mounts: object, baked: dict[str, str]) -> str:
+    """The box HOME the create probe found: the ``devbox_shell`` volume is mounted at
+    ``<box home>/.devbox`` on every box, so its destination records it. The image's user (what the
+    probe reads) can differ from the root the box runs as, so the box's own HOME is the fallback."""
+    for m in mounts if isinstance(mounts, list) else []:
+        dest = str(m.get("Destination") or "") if isinstance(m, dict) else ""
+        if isinstance(m, dict) and m.get("Name") == "devbox_shell" and dest.endswith("/.devbox"):
+            return dest.removesuffix("/.devbox")
+    return baked.get("HOME") or "/home/vscode"
+
+
+def env_drift(
+    engine: str,
+    box: str,
+    env: dict,
+    *,
+    project: str,
+    worktree: str | None = None,
+    host_facts: bool = True,
+    quiet_plugins: Collection[str] = (),
+    ask_image: bool = False,
+    timeout: float | None = None,
+) -> list[str]:
+    """How the running ``box``'s environment differs from the one `fy box up` would create it
+    with now (:func:`_compare_env`'s items), or ``[]`` when it matches or can't be read.
+
+    The expected side is the create path's own derivation — :func:`_create_env` plus each plugin's
+    ``box_args`` — fed what the box records of its create: the box HOME (its ``devbox_shell``
+    mount) and the image's ``LC_ALL`` (its Config.Env). ``env`` is the resolved stack env (from
+    `fy box up`) or the slimmer one `fy mode` builds; identity the box carries fills its gaps.
+    ``host_facts`` False leaves out what only your computer knows (:data:`_HOST_FACTS`) for a
+    check run in the box. ``quiet_plugins``: plugins whose names a dedicated row already reported.
+
+    ``LC_TIME`` depends on the locales the IMAGE has, so only the image can judge it — never the
+    running box, which may have gained one since and would then read "missing" for good (a
+    recreate probes the image again). ``ask_image`` (`fy box up`) runs the create's own probe
+    against the box's image id; without it (`fy mode`, `fy state`, every TUI refresh — no
+    container start, no exec) ``LC_TIME`` is left out, as it is when the probe can't answer.
+    """
+
+    def run(cmd: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
+
+    out = run(
+        [engine, "inspect", box, "--format", "{{json .Config.Env}}\n{{.Image}}\n{{json .Mounts}}"]
+    )
+    if out.returncode != 0:
+        return []
+    try:
+        raw_env, image, raw_mounts = [*out.stdout.strip().split("\n"), "", ""][:3]
+        baked = _env_list(raw_env)
+        mounts = json.loads(raw_mounts) if raw_mounts else []
+    except ValueError:
+        return []
+    if not baked:
+        return []
+    image_env: dict[str, str] | None = None
+    if image:
+        got = run([engine, "image", "inspect", image.strip(), "--format", "{{json .Config.Env}}"])
+        try:
+            image_env = _env_list(got.stdout) if got.returncode == 0 else None
+        except ValueError:
+            image_env = None
+    box_home = _box_home_from(mounts, baked)
+    ignore = set() if host_facts else set(_HOST_FACTS)
+    locales: list[str] = []
+    if not ask_image:
+        ignore.add("LC_TIME")
+    elif host_facts and hostclock.time_locale():
+        try:
+            probed = run(_image_probe_cmd(engine, image.strip())) if image.strip() else None
+        except (OSError, subprocess.SubprocessError):
+            probed = None
+        if probed is None or probed.returncode != 0:
+            ignore.add("LC_TIME")  # unknown is not "none": that would read a baked one as stale
+        else:
+            locales = _parse_image_probe(probed.stdout)[2]
+
+    resolved = {
+        **{k: baked[k] for k in ("FOLDYARD_CHECKOUT", "FOLDYARD_ENV_OVERRIDE") if k in baked},
+        **env,
+        "PODMAN_PROJECT": project,
+    }
+    expected = _env_pairs(
+        _create_env(
+            resolved,
+            project=project,
+            worktree=baked.get("WORKTREE", "") if worktree is None else worktree,
+            box_home=box_home,
+            image_locales=locales,
+            image_lc_all=(image_env or {}).get("LC_ALL", ""),
+            gvisor=sandbox.wanted(),
+        )
+    )
+    # The plugins' share, each on its own so one that can't answer here (the proxy without its CA
+    # — always, in the box) costs only its own names. The transcripts dirs are left out: their
+    # box_args would create them on disk, and they only ever add a mount.
+    plugin_env = {
+        k: v for k, v in resolved.items() if k not in ("FY_TRANSCRIPTS", "FY_CODEX_TRANSCRIPTS")
+    }
+    plugin_env["FY_BOX_HOME"] = box_home
+    plugin_env["FY_CLAUDE_HOME"] = baked.get("CLAUDE_CONFIG_DIR") or f"{box_home}/.claude"
+    complete = True
+    plugins: dict[str, str | None] = {}
+    for plugin in registry().plugins:
+        try:
+            pairs = _env_pairs(plugin.box_args(plugin_env))
+        except SystemExit:
+            complete = False
+            continue
+        if plugin.name in quiet_plugins:
+            ignore |= set(pairs)
+        plugins.update(pairs)
+    # Engine order: a plugin's `-e` precedes the core args, so a core name wins a collision.
+    expected = {**plugins, **expected}
+    # A bare `-e NAME` the create env doesn't carry is one the engine skips: not expected here.
+    ignore |= {n for n, v in expected.items() if v is None and n not in resolved}
+    return _compare_env(expected, baked, image_env=image_env if complete else None, ignore=ignore)
+
+
+# Per engine call of `fy box up`'s drift check. Generous — the image probe starts a container, and
+# a nested VM (WSL2) is slow to — but bounded: a wedged engine or a hanging `locale` in the image
+# costs the nag, never `fy box up` itself.
+_DRIFT_TIMEOUT_S = 30
+
+
+def _warn_env_drift(engine: str, box: str, ctx, quiet_plugins: Collection[str] = ()) -> None:
+    """Nag when the running box's environment no longer matches the config. Every name is fixed at
+    create, so an `[[inject]]` row or a `[box].env` entry adopted since — or your computer's
+    timezone — reaches the box only through a recreate, and an "already up" that said nothing left
+    the new name silently absent. Best-effort, like the other nags: silent when unreadable."""
+    try:
+        drift = env_drift(
+            engine,
+            box,
+            dict(ctx.env),
+            project=ctx.project,
+            worktree=ctx.worktree,
+            quiet_plugins=quiet_plugins,
+            ask_image=True,
+            timeout=_DRIFT_TIMEOUT_S,
+        )
+    except (Exception, SystemExit):  # a nag must never crash (or hang) `fy box up`
+        return
+    if drift:
+        print(
+            f"⚠ dev box {box}'s environment no longer matches the config ({', '.join(drift)}). "
+            "A box's environment is fixed when it's created: `fy box down && fy box up`."
+        )
 
 
 # The base bootstrap scaffolding (runs once per fresh box). The native Claude installer (now the
@@ -1353,7 +1695,9 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         # credential are all create-time (claude.py box_args/box_bootstrap), so a box created
         # before [claude] was declared stays shell-only however often `fy box up` reruns. A box
         # created WITH [claude] bakes CLAUDE_CONFIG_DIR — its absence is the drift signal.
+        quiet: set[str] = set()  # plugins whose drift a row below already names
         if config.claude_enabled() and _baked_env(engine, box, env, "CLAUDE_CONFIG_DIR") is None:
+            quiet.add("claude")
             print(
                 "⚠ [claude] is declared but this box was created without it (no Claude install, "
                 "volumes or dummy credential). Recreate to add them: `fy box down && fy box up`."
@@ -1362,10 +1706,12 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         # this row the failure is SILENT and reads as an auth bug — the box has no codex, `fy codex`
         # says "add a [codex] table" (which you already did), and nothing points at the recreate.
         if config.codex_enabled() and _baked_env(engine, box, env, "CODEX_HOME") is None:
+            quiet.add("codex")
             print(
                 "⚠ [codex] is declared but this box was created without it (no Codex install, "
                 "~/.codex volume or keyless seed). Recreate to add them: `fy box down && fy box up`."
             )
+        _warn_env_drift(engine, box, ctx, quiet)  # every other create-time name
         _warn_stale_foldyard(engine, box, env)
         if not ensure_harden(engine, box, env):  # a box from before the hygiene gets it here
             print(
@@ -1467,61 +1813,15 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     for cache in config.box_caches():
         agent_vols += ["-v", f"{cache['volume']}:{box_home}/{cache['path'].lstrip('/')}"]
 
-    env_args = [
-        "-e",
-        "DOCKER_HOST=unix:///var/run/docker.sock",
-        "-e",
-        "CONTAINER_HOST=unix:///var/run/docker.sock",
-    ]
-    if config.box_clean_docker_config():
-        # Sidestep the editor-attach credsStore helper (255s under root, breaks even anonymous
-        # compose pulls) — docker/compose read this foldyard-owned config instead of ~/.docker.
-        # Seeded `{}` by the bootstrap; `docker login` writes here and still works.
-        env_args += ["-e", f"DOCKER_CONFIG={box_home}/.docker-fy"]
-    env_args += _clock_env(image_locales, image_lc_all)  # before [box].env, which may override it
-    for key, value in config.box_env().items():
-        env_args += ["-e", f"{key}={value.replace('~', box_home)}"]
-    env_args += [
-        "-e",
-        f"FOLDYARD_CHECKOUT={checkout}",
-        "-e",
-        f"FOLDYARD_ENV_OVERRIDE={env.get('FOLDYARD_ENV_OVERRIDE', '')}",
-        "-e",
-        f"WORKTREE={worktree}",
-        "-e",
-        f"PODMAN_PROJECT={ctx.project}",
-        "-e",
-        f"COMPOSE_PROJECT_NAME={ctx.project}",
-        # PIN the project's host daemon port bases (allocated band, or the env override) into the
-        # box: in-box port derivations (`fy mode` daemon probes, FY_PROXY re-derivation) can't
-        # read the host's ~/.foldyard/ports.json registry, and both env vars already win over
-        # allocation (config._daemon_port_base), so the box always agrees with the host that
-        # created it.
-        "-e",
-        f"FY_PROXY_PORT={config.proxy_port_base()}",
-        "-e",
-        f"GCP_MINTER_PORT={config.gcp_minter_port_base()}",
-        # The operator's home, for the in-box `fy verify` mount audit: the box's own HOME is
-        # /root or /home/vscode, not the path a leaked host mount would carry.
-        "-e",
-        f"FY_HOST_HOME={Path.home()}",
-    ]
-    for key in config.port_bases():  # passthrough -e KEY (value flows from env below)
-        env_args += ["-e", key]
-    if gvisor:
-        # A create-time property (like the port band): baked so the already-up nag and the
-        # in-box `fy verify` row can compare the wish with the box they actually have.
-        env_args += ["-e", f"{sandbox.BAKED_ENV}=gvisor"]
-    env_args += [
-        "-e",
-        "IN_DEVBOX=1",
-        "-e",
-        "IS_SANDBOX=1",
-        "-e",
-        "DO_NOT_TRACK=1",
-        "-e",
-        "NEXT_TELEMETRY_DISABLED=1",
-    ]
+    env_args = _create_env(
+        env,
+        project=ctx.project,
+        worktree=worktree,
+        box_home=box_home,
+        image_locales=image_locales,
+        image_lc_all=image_lc_all,
+        gvisor=gvisor,
+    )
 
     # Who creates `{project}_default` before the box attaches? Stack-less project → nobody
     # else ever will; external_network consumer → foldyard owns it (compose declares it
