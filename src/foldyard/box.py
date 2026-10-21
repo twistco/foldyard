@@ -552,14 +552,21 @@ _TERMINAL_VARS = ("TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "
 
 # A forwarded TERM the box has no terminfo for (Ghostty's own `xterm-ghostty`, kitty's
 # `xterm-kitty`) leaves bash and less "not fully functional"; fall back to one every image has.
-# No infocmp to ask = keep what was forwarded.
+# Asked of infocmp where the image has it, else of the terminfo database's own files (both of
+# ncurses' layouts: first letter, or its hex) — an image without ncurses' tools is the one most
+# likely to lack the entry.
 _TERM_FALLBACK_SNIPPET = r"""
-fy_term_fallback() {
-  if command -v infocmp >/dev/null 2>&1 && ! infocmp "$TERM" >/dev/null 2>&1; then
-    export TERM=xterm-256color
-  fi
+fy_term_known() {
+  if command -v infocmp >/dev/null 2>&1; then infocmp "$1" >/dev/null 2>&1; return; fi
+  local d c="${1:0:1}"
+  for d in "${TERMINFO:-}" "$HOME/.terminfo" /etc/terminfo /lib/terminfo /usr/share/terminfo \
+           /usr/lib/terminfo; do
+    [ -n "$d" ] && [ -n "$c" ] || continue
+    if [ -e "$d/$c/$1" ] || [ -e "$d/$(printf %x "'$c")/$1" ]; then return 0; fi
+  done
+  return 1
 }
-fy_term_fallback
+fy_term_known "$TERM" || export TERM=xterm-256color
 """
 
 

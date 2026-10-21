@@ -1848,29 +1848,39 @@ def test_shell_forwards_the_terminal(fake, monkeypatch):
     passed = [sh[i + 1] for i, a in enumerate(sh) if a == "-e"]
     assert passed == ["TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=ghostty"]
     assert sh.index("-e") < sh.index("tangible-podman-devbox")
-    assert "fy_term_fallback" in sh[-1]
+    assert "fy_term_known" in sh[-1]
 
 
-def _run_term_fallback(term: str, known: tuple[str, ...]) -> str:
+def _run_term_fallback(term: str, known: tuple[str, ...] | None, home: Path | None = None) -> str:
     """Run the REAL `_TERM_FALLBACK_SNIPPET` under bash with ``infocmp`` stubbed as a shell
-    function that knows only ``known`` (``()`` = no infocmp at all); return the TERM it leaves."""
+    function that knows only ``known`` (``None`` = no infocmp at all, so the snippet reads the
+    terminfo files — ``home``'s ``.terminfo`` among them); return the TERM it leaves."""
     import subprocess
 
-    stub = f'infocmp() {{ case "$1" in {"|".join(known)}) return 0;; esac; return 1; }}'
-    lines = [stub if known else "", f"TERM={shlex.quote(term)}", box._TERM_FALLBACK_SNIPPET]
-    lines.append('printf %s "$TERM"')
+    if known is None:
+        lines = ["PATH=/nonexistent", f"HOME={shlex.quote(str(home))}"]
+    else:
+        lines = [f'infocmp() {{ case "$1" in {"|".join(known)}) return 0;; esac; return 1; }}']
+    lines += [f"TERM={shlex.quote(term)}", box._TERM_FALLBACK_SNIPPET, 'printf %s "$TERM"']
     out = subprocess.run(["bash", "-c", "\n".join(lines)], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     return out.stdout
 
 
 @pytest.mark.spawns("bash")  # runs the REAL snippet under bash (builtins only)
-def test_term_fallback_only_replaces_a_term_the_box_cannot_describe():
+def test_term_fallback_only_replaces_a_term_the_box_cannot_describe(tmp_path):
     # Ghostty's own TERM is `xterm-ghostty`; a box image without its terminfo would leave bash and
-    # less "not fully functional", so that one falls back — a known one, or no infocmp to ask, stays.
+    # less "not fully functional", so that one falls back — a known one stays.
     assert _run_term_fallback("xterm-ghostty", ("xterm-256color",)) == "xterm-256color"
     assert _run_term_fallback("xterm-256color", ("xterm-256color",)) == "xterm-256color"
-    assert _run_term_fallback("xterm-kitty", ()) == "xterm-kitty"
+    # No infocmp (a minimal image): the database's files decide, in either of ncurses' layouts.
+    (tmp_path / ".terminfo" / "x").mkdir(parents=True)
+    (tmp_path / ".terminfo" / "x" / "xterm-fy-letter").touch()
+    (tmp_path / ".terminfo" / "78").mkdir()  # 0x78 = "x", the hex layout macOS uses
+    (tmp_path / ".terminfo" / "78" / "xterm-fy-hex").touch()
+    assert _run_term_fallback("xterm-fy-letter", None, tmp_path) == "xterm-fy-letter"
+    assert _run_term_fallback("xterm-fy-hex", None, tmp_path) == "xterm-fy-hex"
+    assert _run_term_fallback("xterm-fy-absent", None, tmp_path) == "xterm-256color"
 
 
 # ── exec (non-interactive; the git-hooks dispatch primitive) ──────────────────────────
