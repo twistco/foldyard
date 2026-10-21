@@ -1932,10 +1932,12 @@ def test_claude_launch_leaves_no_temp_file_when_the_write_fails(gate, monkeypatc
     assert sorted(p.name for p in _claude_home().iterdir()) == [".fy-seed.lock"]
 
 
-def test_claude_launch_goes_on_when_the_seed_lock_is_held(gate):
+def test_claude_launch_goes_on_when_the_seed_lock_is_held(gate, monkeypatch):
     # Something in the box holding the lock (a seed stuck on a hung volume) must not stall the
     # launch: wait briefly, then launch without seeding.
     import fcntl
+
+    monkeypatch.setattr(box, "_SEED_LOCK_WAIT_S", 0.1)
 
     with open(_claude_home() / ".fy-seed.lock", "a") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
@@ -1951,7 +1953,10 @@ def test_claude_launch_seeds_under_an_exclusive_lock(gate, monkeypatch):
     flock = box.fcntl.flock
 
     def recording_flock(fh, op):
-        events.append(f"{Path(fh.name).name}:{'unlock' if op == box.fcntl.LOCK_UN else 'lock'}")
+        kind = (
+            "unlock" if op == box.fcntl.LOCK_UN else "lock" if op & box.fcntl.LOCK_EX else "shared"
+        )
+        events.append(f"{Path(fh.name).name}:{kind}")
         flock(fh, op)
 
     replace = box.os.replace
