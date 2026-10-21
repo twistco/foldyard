@@ -162,7 +162,7 @@ def test_a_fragment_without_the_flag_is_printed_as_written(tmp_path):
             "---\nsection: Summary\nbump: minor\nexperimental: true\n---\n\n- **x.** y\n",
             "not Summary",
         ),
-        (EXP + "Prose with no bullet at all.\n", "bullet"),
+        (EXP + "Prose with no bullet at all.\n", "must be a `- ` bullet"),
         (
             "---\nsection: Added\nbump: minor\nexperimental: yes\n---\n\n- **x.** y\n",
             "true or false",

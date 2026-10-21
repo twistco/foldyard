@@ -79,15 +79,10 @@ def parse(path: Path) -> Fragment:
         raise FragmentError(f"{path.name}: experimental {experimental!r} is not true or false")
     bullets = [line for line in body.splitlines() if line.startswith("- ")]
     if experimental == "true" and section == SUMMARY:
-        # The Summary frames the release; the feature itself goes in a section (Added, …).
+        # The Summary frames the release; the feature itself goes in a section (Added, …). Every
+        # other section's entry is already a bullet (above), so the label always has a lead.
         raise FragmentError(
             f"{path.name}: an experimental feature goes in a section such as Added, not Summary"
-        )
-    if experimental == "true" and not bullets:
-        # Summary prose has no bullet to carry the label, so the release would print it unmarked.
-        raise FragmentError(
-            f"{path.name}: an experimental entry needs at least one `- **bold**` bullet — "
-            "the release puts the label on each one's lead"
         )
     if experimental == "true" and not all(b.startswith("- **") for b in bullets):
         raise FragmentError(
