@@ -596,7 +596,7 @@ def test_provision_script_caps_the_journal_as_root_at_boot(lima_env):
     script = machine.guest_provision_script()
     assert f"SystemMaxUse={guestlog.JOURNAL_MAX_USE}" in script
     assert "/etc/systemd/journald.conf.d/50-foldyard-cap.conf" in script
-    assert "sudo" not in script.split("# 2. The wall script")[0].split("# 1b.")[-1]
+    assert "sudo" not in script.split("# 2. The firewall script")[0].split("# 1b.")[-1]
 
 
 def test_provision_script_wall_off_still_drops_the_sudo_grant(lima_env):
