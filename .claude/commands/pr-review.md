@@ -37,7 +37,9 @@ the checkout: the inline threads (`.pr-review-threads.md`, Step 1b.3), what chan
 last review (`.pr-review-since.md`, Step 1b.4) and the published advisories
 (`.pr-review-published-advisories.md`, Step 3). Everything else comes from the `gh pr`
 commands. You start in the checkout, so run each command bare: never `cd` first, since a
-compound command is refused unless every part of it is allowed.
+compound command is refused unless every part of it is allowed. The only shell commands CI
+allows are the `gh pr`/`gh issue` ones, so read files with the Read tool (never `cat` or
+`git show`), and take a command's output as it comes, never redirected into a file.
 
 ## Arguments
 
