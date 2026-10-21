@@ -195,10 +195,20 @@ jobs:
           client-id: ${{ vars.ADVISORY_APP_CLIENT_ID }}
           private-key: ${{ secrets.ADVISORY_APP_PRIVATE_KEY }}
 
+      # The script comes from the BASE branch, like the prompt. A token can't push a change to this
+      # file without the Workflows permission, but it can change a script, so the PR's own copy
+      # would run with the advisory token, which reads unpublished advisories. No fallback to the
+      # PR's copy: a base without the script has nothing to file with.
       - name: File private findings
         env:
           GH_TOKEN: ${{ steps.advisory-token.outputs.token }}
           EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: bash .github/scripts/report-private-findings.sh
+        run: |
+          script="$RUNNER_TEMP/report-private-findings.sh"
+          if ! git show HEAD^1:.github/scripts/report-private-findings.sh > "$script" 2>/dev/null; then
+            echo "::notice::the base branch has no reporting script, so there is nothing to file with"
+            exit 0
+          fi
+          bash "$script"
