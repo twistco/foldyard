@@ -458,6 +458,33 @@ def test_a_symlinked_dev_vm_dir_is_refused(planted, tmp_path):
     assert not _leaked(planted)
 
 
+def test_a_worktree_swapped_for_a_link_is_refused(planted, tmp_path):
+    """A worktree's checkout sits in the worktrees root, which the box can write: the anchor's own
+    last component is opened without following too (its parents are the operator's)."""
+    other = tmp_path / "other-checkout"
+    (other / "dev-stack/.devbox-claude/projects").mkdir(parents=True)
+    (other / "dev-stack/.devbox-claude/projects/id_rsa").write_text("TOPSECRET")
+    worktree = tmp_path / "worktrees/feat"
+    worktree.parent.mkdir()
+    worktree.symlink_to(other)
+    src = worktree / "dev-stack/.devbox-claude/projects"
+    assert transcripts.sync_archive(src, anchor=worktree) == transcripts.RC_REFUSED
+    assert not _leaked(planted)
+
+
+def test_the_anchors_parents_are_followed(planted, tmp_path):
+    """…while a link ABOVE the checkout is the operator's own layout (macOS's /var → /private/var,
+    a symlinked workspace dir) and is followed."""
+    real = tmp_path / "real-workspace"
+    (real / "repo").mkdir(parents=True)
+    linked = tmp_path / "workspace"
+    linked.symlink_to(real)
+    src = linked / "repo/dev-stack/.devbox-claude/projects"
+    _session(src, "s.jsonl", "mine")
+    assert transcripts.sync_archive(src, anchor=linked / "repo") == 0
+    assert _archived(planted["archive"]) == {"s.jsonl": "mine"}
+
+
 def test_a_source_root_that_is_a_file_is_refused(planted):
     planted["src"].parent.mkdir(parents=True)
     planted["src"].write_text("not a dir")
@@ -554,6 +581,23 @@ def test_a_file_that_vanishes_mid_walk_is_tolerated(planted, monkeypatch):
     monkeypatch.setattr(transcripts, "_lstat_at", vanishing)
     assert transcripts.sync_archive(src, anchor=planted["checkout"]) == transcripts.RC_VANISHED
     assert _archived(planted["archive"]) == {"proj/a.jsonl": "real"}
+
+
+def test_an_entry_the_walk_cannot_look_at_is_reported_by_its_path(planted, monkeypatch, capsys):
+    src = planted["src"]
+    _session(src, "a.jsonl", "real")
+    _session(src, "odd.jsonl", "x")
+    real = transcripts._lstat_at
+
+    def denied(dir_fd: int, entry: str):
+        if entry == "odd.jsonl":
+            raise PermissionError(13, "Permission denied")
+        return real(dir_fd, entry)
+
+    monkeypatch.setattr(transcripts, "_lstat_at", denied)
+    assert transcripts.sync_archive(src, anchor=planted["checkout"]) == transcripts.RC_PARTIAL
+    assert "odd.jsonl: Permission denied" in capsys.readouterr().err
+    assert _archived(planted["archive"]) == {"a.jsonl": "real"}
 
 
 def test_the_archive_is_not_written_through_a_link_either(planted, tmp_path):

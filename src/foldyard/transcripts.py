@@ -76,14 +76,16 @@ def _codex_archive_dest(dest: str = "") -> Path:
 # So the host walks the tree itself, by directory fd: every component from the checkout down — and
 # every entry inside — is opened relative to its parent's fd with O_NOFOLLOW, so a link is never
 # traversed however late it is swapped in. The anchor (the checkout the host resolved itself, or a
-# configured override's parent) is the operator's path and is followed; nothing below it is. Files
-# are opened O_NONBLOCK and re-checked with fstat, so a FIFO swapped in after the walk looked can't
-# hang the supervisor. Semantics are rsync's `-rtu --no-perms`, which this replaces: additive (never
-# deletes), a file is copied when the archive has none, an OLDER one, or one of the same mtime but
-# another size; the copy carries the source's mtime; symlinks and special files are skipped. New
-# files are 0600 and new dirs 0700 — a transcript is private — and each is written to a temp name
-# and renamed into place, so the archive never holds a half-written file and a name that is a link
-# in the archive is replaced, not written through. It also drops rsync as a host prerequisite.
+# configured override's parent) is the operator's path: its parents are followed (a symlinked
+# workspace dir, macOS's /var), but a checkout's own last component is not — a worktree's sits in
+# the box-writable worktrees root — and nothing below it is. Files are opened O_NONBLOCK and
+# re-checked with fstat, so a FIFO swapped in after the walk looked can't hang the supervisor.
+# Semantics are rsync's `-rtu --no-perms`, which this replaces: additive (never deletes), a file is
+# copied when the archive has none, an OLDER one, or one of the same mtime but another size; the
+# copy carries the source's mtime; symlinks and special files are skipped. New files are 0600 and
+# new dirs 0700 — a transcript is private — and each is written to a temp name and renamed into
+# place, so the archive never holds a half-written file and a name that is a link in the archive
+# is replaced, not written through. It also drops rsync as a host prerequisite.
 
 RC_REFUSED = 1  # a link (or non-directory) on the way to the source: nothing was copied
 RC_PARTIAL = 23  # some files couldn't be copied (unreadable, over the cap, no room) — rsync's 23
@@ -162,17 +164,20 @@ def _why(dir_fd: int, name: str) -> str:
 def _open_source(anchor: Path, src: Path) -> int:
     """An fd on ``src``, reached from ``anchor`` one component at a time without following a link.
 
-    ``anchor`` is the checkout the host resolved itself; every component below it is box-writable.
-    A ``src`` outside it (a ``DEVBOX_TRANSCRIPTS`` override) anchors at its own parent instead — the
-    operator named that path, but the dir the box writes into is still never followed. Raises
-    :class:`_Refused` for a link or non-directory on the way, ``FileNotFoundError`` when a component
-    is missing (nothing bound out yet)."""
+    ``anchor`` is the checkout the host resolved itself; every component below it is box-writable,
+    and so is its own last component for a worktree (the worktrees root is mounted into the box), so
+    the walk starts at its PARENT. A ``src`` outside it (a ``DEVBOX_TRANSCRIPTS`` override) anchors
+    at its own parent instead — the operator named that path, but the dir the box writes into is
+    still never followed. Raises :class:`_Refused` for a link or non-directory on the way,
+    ``FileNotFoundError`` when a component is missing (nothing bound out yet)."""
     try:
         rel = src.relative_to(anchor)
     except ValueError:
         rel = None
     if rel is None or ".." in rel.parts:
         anchor, rel = src.parent, Path(src.name)
+    elif anchor.name:  # start above the checkout, so its own name is opened without following
+        anchor, rel = anchor.parent, Path(anchor.name) / rel
     fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     here = anchor
     try:
@@ -235,6 +240,9 @@ def _mirror_dir(
             mode = _lstat_at(src_fd, name).st_mode
         except FileNotFoundError:
             tally.vanished += 1
+            continue
+        except OSError as e:
+            tally.errors.append(f"{path}: {e.strerror or e}")
             continue
         if stat.S_ISDIR(mode):
             if depth >= MAX_DEPTH:
