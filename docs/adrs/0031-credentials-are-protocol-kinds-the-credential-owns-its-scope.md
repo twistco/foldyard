@@ -10,6 +10,9 @@
   and 6, and of 5 the `box_env` dummies with their `fy verify` row and the held-credential answer
   (`plugins/kinds.py`, `plugins/inject.py`, `credscope.py`; the github plugin is deleted).
   Decision 4 (overlapping rules refused) landed in #54 (`Registry.inject_overlaps`).
+  Amended 2026-10-20: decision 4 narrowed — header-disjoint rules whose box sends a dummy for each
+  may share a host and path, and the proxy routes each request by the dummy it carries (see
+  decision 4).
 - **Sources:** the 2026-10-05 incident in a consumer's box (below); the host supervisor log of that
   morning. Related: [0007](./0007-credential-injection-at-egress-proxy.md) (credentials are
   attached at the proxy), [0008](./0008-keyless-agent-auth.md) (the dummy-in-the-box pattern),
@@ -76,9 +79,9 @@ this ADR leaves it alone.
    switch = "github"              # `fy mode github=on`; PEM in host.env as FY_INJECT_GITHUB (base64)
    host = "api.github.com"
    kind = "github-app"
-   app_id = "4008762"
-   installation_id = "139125083"
-   repositories = ["Tangible"]    # optional: a subset of the installation's repos
+   app_id = "123456"
+   installation_id = "7654321"
+   repositories = ["my-repo"]       # optional: a subset of the installation's repos
 
    [[inject]]
    switch = "github-write"        # a second App, with write access, kept on a timer
@@ -110,6 +113,23 @@ this ADR leaves it alone.
    mutual exclusion for free; independent switches don't. `fy mode` refuses to turn a rule on while
    another active rule overlaps it, and names that rule. This generic check replaces the
    service-shaped switch.
+   *Amended 2026-10-20:* the refusal is narrowed to rules a request can't tell apart. Two rules on
+   one host and path may both be on when they are **header-disjoint** — each writes a different
+   place (two headers compared without case, a header and a query parameter, or two query
+   parameters) — and each carries the dummies its box client sends there (`InjectRule.dummies`: a
+   row's `box_env` values, a keyless agent's baked placeholder). The case that asked for it: Claude
+   Code on its OAuth token (`authorization`) and an evaluation harness in the same box on an API key
+   (an `[[inject]]` row writing `x-api-key`), both on `api.anthropic.com`. The proxy, which used to
+   inject the FIRST rule matching a request's host and path whatever it carried, now routes: one
+   rule matching is the rule, exactly as before (so a client that sends no credential still gets
+   one); several → the one rule whose dummy the request carries in that rule's place; none of them,
+   or more than one → no rule, and the proxy answers the request with a 502 naming the host and the
+   switches instead of sending it. That is why it is safe. Each rule only ever writes its own
+   credential, into its own place, on a request that named it by its own dummy, so one client's
+   credential can't reach another client's requests; and a request that names no credential, or
+   two, is answered rather than guessed at. Same-place pairs, and any pair where one side has no
+   dummy, have nothing in the request to choose by, and are still refused (and held back if a state
+   has them anyway).
 
 5. **What every rule gets, whatever its kind:** a dummy in the box's environment (a `box_env` field,
    e.g. `{ GH_TOKEN = "x" }`, so turning the switch on needs no box recreate); the held-credential

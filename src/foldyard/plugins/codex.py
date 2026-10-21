@@ -119,6 +119,8 @@ class CodexPlugin(Plugin):
                     path_prefix=prefix,
                     replay_on_401=True,
                     label="Codex keyless proxy (ChatGPT subscription)",
+                    # The box's auth.json token, as codex sends it (the held entry's dummy too).
+                    dummies=("Bearer " + keyless.codex_chatgpt_dummy_token(),),
                 )
                 for prefix in keyless.CODEX_CHATGPT_PATH_PREFIXES
             ]

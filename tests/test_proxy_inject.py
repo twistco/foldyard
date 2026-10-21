@@ -3017,3 +3017,294 @@ async def test_malformed_overlap_entries_are_ignored(live):
     flow = _gh_flow("x")
     await inj.requestheaders(flow)
     assert flow.response is None and inj.overlaps == []
+
+
+# ── two credentials on one host, told apart by the dummy each client sends ─────────────────
+# Claude Code on its OAuth token (authorization) and a harness on an API key (x-api-key), both on
+# api.anthropic.com: the Registry lets header-disjoint rules with dummies share a host, and the
+# addon must then route each request by the dummy it carries — never by rule order, which would
+# write one client's credential onto the other's requests.
+
+_SHARED = "api.anthropic.com"
+_OAUTH_DUMMY = "Bearer sk-ant-oat-dummy"
+
+
+@pytest.fixture
+def shared(live, tmp_path):
+    """Both rules live on one host, each with its own counting minter."""
+    oauth = _counting_minter(tmp_path, "oauth", "sk-ant-oat-REAL")
+    key = _counting_minter(tmp_path, "key", "sk-ant-api-REAL")
+    _write_live(
+        live.live,
+        rules=[
+            {
+                "host": _SHARED,
+                "command": oauth.command,
+                "header": "authorization",
+                "value_prefix": "Bearer ",
+                "dummies": [_OAUTH_DUMMY],
+                "switch": "claude",
+                "retry_401": True,
+            },
+            {
+                "host": _SHARED,
+                "command": key.command,
+                "header": "x-api-key",
+                "dummies": ["x"],
+                "any_scheme": True,
+                "switch": "haiku",
+                "retry_401": True,
+            },
+        ],
+    )
+    return types.SimpleNamespace(inj=live.Injector(), oauth=oauth, key=key, log=live.log)
+
+
+def _shared_flow(**headers: str) -> _Flow:
+    flow = _Flow(_SHARED, path="/v1/messages", method="POST")
+    flow.response = None
+    flow.request.headers.update({k.replace("_", "-"): v for k, v in headers.items()})
+    return flow
+
+
+async def test_the_oauth_dummy_gets_the_oauth_credential_only(shared):
+    flow = _shared_flow(authorization=_OAUTH_DUMMY)
+    await shared.inj.requestheaders(flow)
+    assert flow.response is None
+    assert flow.request.headers == {"authorization": "Bearer sk-ant-oat-REAL"}
+    assert not shared.key.calls.exists()  # the other credential was never even minted
+
+
+async def test_the_api_key_dummy_gets_the_api_key_only(shared):
+    for sent in ("x", "Bearer x"):  # a row's dummy, whatever scheme its client puts first
+        flow = _shared_flow(x_api_key=sent)
+        await shared.inj.requestheaders(flow)
+        assert flow.response is None
+        assert flow.request.headers == {"x-api-key": "sk-ant-api-REAL"}
+    assert not shared.oauth.calls.exists()
+
+
+@pytest.mark.parametrize(
+    ("headers", "carried"),
+    [
+        ({"authorization": _OAUTH_DUMMY, "x_api_key": "x"}, "more than one"),
+        ({}, "none"),
+        ({"authorization": "sk-ant-oat-dummy"}, "none"),  # an agent's dummy is matched exactly
+        ({"x_api_key": "x-longer"}, "none"),  # never a substring
+        ({"authorization": "Bearer sk-ant-oat-REALLY-MINE"}, "none"),
+    ],
+)
+async def test_a_request_naming_neither_or_both_is_answered_not_sent(shared, headers, carried):
+    flow = _shared_flow(**headers)
+    sent = dict(flow.request.headers)
+    await shared.inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 502
+    assert flow.response.headers["content-type"] == "application/json"
+    message = json.loads(flow.response.content)["message"]
+    assert message.startswith("foldyard did not send this request: ")
+    assert _SHARED in message and "`claude`" in message and "`haiku`" in message
+    assert f"carried {carried} of their placeholders" in message
+    assert flow.request.headers == sent  # nothing written
+    assert not shared.oauth.calls.exists() and not shared.key.calls.exists()
+    await shared.inj.response(flow)  # no 401 re-issue for the proxy's own answer, and one row
+    [row] = [json.loads(line) for line in shared.log.read_text().splitlines()]
+    assert row["status"] == 502 and row["unnamed"] is True and row["injected"] is False
+
+
+async def test_a_lone_rule_still_injects_whatever_the_request_carries(live, tmp_path):
+    # The dummy only chooses BETWEEN rules: a host with one rule injects as it always did — on a
+    # request that carries no credential at all, and on one carrying something else (here an
+    # x-api-key no switch claims: the rule writes its own header, as before this change).
+    minter = _counting_minter(tmp_path, "oauth", "sk-ant-oat-REAL")
+    _write_live(
+        live.live,
+        rules=[
+            {
+                "host": _SHARED,
+                "command": minter.command,
+                "header": "authorization",
+                "value_prefix": "Bearer ",
+                "dummies": [_OAUTH_DUMMY],
+                "switch": "claude",
+            }
+        ],
+    )
+    inj = live.Injector()
+    for headers in ({}, {"authorization": "something else"}, {"x_api_key": "x"}):
+        flow = _shared_flow(**headers)
+        await inj.requestheaders(flow)
+        assert flow.response is None
+        assert flow.request.headers["authorization"] == "Bearer sk-ant-oat-REAL"
+
+
+async def test_a_row_scoped_by_path_leaves_the_rest_of_the_host_to_the_lone_rule(live, tmp_path):
+    # The configuration docs' example: the harness row on /v1/messages only. There both rules
+    # match and a request must name one; anywhere else on the host Claude's rule is alone, so a
+    # request carrying no placeholder at all is injected as it was before the row existed.
+    oauth = _counting_minter(tmp_path, "oauth", "sk-ant-oat-REAL")
+    key = _counting_minter(tmp_path, "key", "sk-ant-api-REAL")
+    claude = {
+        "host": _SHARED,
+        "command": oauth.command,
+        "header": "authorization",
+        "value_prefix": "Bearer ",
+        "dummies": [_OAUTH_DUMMY],
+        "switch": "claude",
+    }
+    harness = {
+        "host": _SHARED,
+        "command": key.command,
+        "header": "x-api-key",
+        "path_prefix": "/v1/messages",
+        "dummies": ["x"],
+        "any_scheme": True,
+        "switch": "haiku",
+    }
+    _write_live(live.live, rules=[claude, harness])
+    inj = live.Injector()
+    elsewhere = _Flow(_SHARED, path="/api/oauth/profile", method="GET")
+    elsewhere.response = None
+    await inj.requestheaders(elsewhere)
+    assert elsewhere.response is None
+    assert elsewhere.request.headers == {"authorization": "Bearer sk-ant-oat-REAL"}
+    unnamed = _shared_flow()  # /v1/messages: both match, and this request names neither
+    await inj.requestheaders(unnamed)
+    assert unnamed.response is not None and unnamed.response.status_code == 502
+    assert not key.calls.exists()
+
+
+@pytest.mark.parametrize("harness_on", [True, False])
+async def test_another_credentials_placeholder_outside_its_path_is_answered_not_sent(
+    live, tmp_path, harness_on
+):
+    # The harness row covers /v1/messages; the harness also calls /v1/models. There only Claude's
+    # rule matches — and, sent on, the harness's request would go out on the OAuth token beside its
+    # own placeholder, whether its switch is on or at rest. It names a credential, just not one
+    # that covers this path: answered, never sent, with what to widen.
+    oauth = _counting_minter(tmp_path, "oauth", "sk-ant-oat-REAL")
+    key = _counting_minter(tmp_path, "key", "sk-ant-api-REAL")
+    claude = {
+        "host": _SHARED,
+        "command": oauth.command,
+        "header": "authorization",
+        "value_prefix": "Bearer ",
+        "dummies": [_OAUTH_DUMMY],
+        "switch": "claude",
+    }
+    harness = {
+        "host": _SHARED,
+        "command": key.command,
+        "header": "x-api-key",
+        "path_prefix": "/v1/messages",
+        "dummies": ["x"],
+        "any_scheme": True,
+        "switch": "haiku",
+    }
+    held = {**_HARNESS_HELD, "path_prefix": "/v1/messages"}
+    if harness_on:
+        _write_live(live.live, rules=[claude, harness])
+    else:
+        _write_live(live.live, rules=[claude], held=[held])
+    inj = live.Injector()
+    flow = _Flow(_SHARED, path="/v1/models", method="GET")
+    flow.response = None
+    flow.request.headers["x-api-key"] = "x"
+    await inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 502
+    message = json.loads(flow.response.content)["message"]
+    assert message.startswith("foldyard did not send this request: ")
+    assert "`haiku`" in message and "/v1/messages" in message and "`claude`" in message
+    assert flow.request.headers == {"x-api-key": "x"}  # nothing written
+    assert not oauth.calls.exists() and not key.calls.exists()
+    await inj.response(flow)
+    [row] = [json.loads(line) for line in live.log.read_text().splitlines()]
+    assert row["status"] == 502 and row["misdirected"] is True and row["injected"] is False
+    # Claude's own request on that path is still Claude's.
+    mine = _Flow(_SHARED, path="/v1/models", method="GET")
+    mine.response = None
+    mine.request.headers["authorization"] = _OAUTH_DUMMY
+    await inj.requestheaders(mine)
+    assert mine.response is None
+    assert mine.request.headers == {"authorization": "Bearer sk-ant-oat-REAL"}
+
+
+_HARNESS_HELD = {
+    "host": _SHARED,
+    "header": "x-api-key",
+    "dummy": "x",
+    "any_scheme": True,
+    "axis": "haiku",
+    "body": _HELD_BODY,
+}
+
+
+async def test_a_resting_switchs_dummy_is_held_not_given_the_lone_rules_credential(live, tmp_path):
+    # Claude on, the harness row at rest: the harness's request names a credential that is off. A
+    # lone rule writing its own header beside that dummy would send it out on the OAuth token —
+    # billed to the subscription, with the held answer ("turn on `haiku`") never seen.
+    minter = _counting_minter(tmp_path, "oauth", "sk-ant-oat-REAL")
+    _write_live(
+        live.live,
+        rules=[
+            {
+                "host": _SHARED,
+                "command": minter.command,
+                "header": "authorization",
+                "value_prefix": "Bearer ",
+                "dummies": [_OAUTH_DUMMY],
+                "switch": "claude",
+            }
+        ],
+        held=[_HARNESS_HELD],
+    )
+    inj = live.Injector()
+    flow = _shared_flow(x_api_key="x")
+    await inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 401
+    assert flow.request.headers == {"x-api-key": "x"}  # nothing written
+    assert not minter.calls.exists()
+    assert _last_log(live.log)["held"] == "haiku"
+    # Claude's own request, and one naming both, still go out on the live rule's credential: the
+    # held answer is for a request that names ONLY a credential at rest.
+    for headers in (
+        {"authorization": _OAUTH_DUMMY},
+        {"authorization": _OAUTH_DUMMY, "x_api_key": "x"},
+    ):
+        flow = _shared_flow(**headers)
+        await inj.requestheaders(flow)
+        assert flow.response is None
+        assert flow.request.headers["authorization"] == "Bearer sk-ant-oat-REAL"
+
+
+async def test_the_401_re_issue_uses_the_rule_the_request_named(shared, gh):
+    # By the response the named place holds the minted credential, not the dummy: the routing
+    # must still find the same rule (re-mint THAT credential, write only its header).
+    flow = _shared_flow(x_api_key="x")
+    await shared.inj.requestheaders(flow)
+    assert flow.request.headers == {"x-api-key": "sk-ant-api-REAL"}
+    flow.response = _Resp(401)
+    await shared.inj.response(flow)
+    assert flow.metadata.get("egress_proxy_retried") is True
+    [reissued] = gh.requests
+    assert reissued["headers"] == {"x-api-key": "sk-ant-api-REAL"}
+    assert shared.key.calls.read_text() == "2"  # the request's mint, then the forced re-mint
+    assert not shared.oauth.calls.exists()
+    row = _last_log(shared.log)
+    assert row["replayed"] is True and row["injected"] is True
+
+
+async def test_a_401_is_never_re_issued_with_a_rule_the_request_did_not_name(shared, live, gh):
+    # The rule that wrote the request's credential goes away while it is in flight (its switch
+    # turned off), leaving the other rule alone on the host. The 401 is the named rule's, not the
+    # survivor's: re-issued with the survivor's credential, a request that asked for the API key
+    # would go out a second time carrying the OAuth token.
+    flow = _shared_flow(x_api_key="x")
+    await shared.inj.requestheaders(flow)
+    assert flow.request.headers == {"x-api-key": "sk-ant-api-REAL"}
+    data = json.loads(live.live.read_text())
+    _write_live(live.live, rules=[data["rules"][0]])  # only the OAuth rule left
+    shared.inj.refresh()  # as the once-a-second watcher would, before the response arrives
+    flow.response = _Resp(401)
+    await shared.inj.response(flow)
+    assert gh.requests == [] and not shared.oauth.calls.exists()
+    assert flow.response.status_code == 401

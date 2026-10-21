@@ -339,6 +339,16 @@ class Event:
     container: str = ""  # the 64-hex id, when who == "container"
     name: str = ""  # engine-reported (a claim)
     worktree: str = ""  # derived from the engine-reported compose project / box name (a claim)
+    # Ancestry, as Tetragon reports it in every process body (additive: older records default).
+    # Attribution names the container; ancestry tells its own daemons from what a session ran —
+    # in BashArena the firewall daemon's reload runs `iptables -F`, which a time-window join blamed
+    # on whichever tool call was running. ``parent``/``parent_args`` are the one hop;
+    # ``exec_id``/``parent_exec_id`` rebuild the whole tree from exec events.
+    ppid: int | None = None
+    parent: str = ""
+    parent_args: str = ""
+    exec_id: str = ""
+    parent_exec_id: str = ""  # Tetragon's, else the parent object's own exec_id
 
 
 def _kind(body: dict, kind: str) -> tuple[str, str]:
@@ -426,6 +436,7 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
             kind = next((k for k in ev if k.startswith("process_")), "")
             body = ev.get(kind) or {}
             proc = body.get("process") or {}
+            parent = body.get("parent") or {}
             inode = str(((proc.get("ns") or {}).get("mnt") or {}).get("inum") or "")
             before = snaps[si - 1]["map"].get(inode) if si > 0 else None
             after = snaps[si]["map"].get(inode) if si < len(snaps) else None
@@ -457,6 +468,11 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
                     container=cid,
                     name=(m or {}).get("name", "") if m else "",
                     worktree=worktree_of(m, prefix),
+                    ppid=parent.get("pid"),
+                    parent=parent.get("binary") or "",
+                    parent_args=parent.get("arguments") or "",
+                    exec_id=proc.get("exec_id") or "",
+                    parent_exec_id=proc.get("parent_exec_id") or parent.get("exec_id") or "",
                 )
             )
     return out

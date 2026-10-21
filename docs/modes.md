@@ -10,6 +10,8 @@ defined in the [glossary](./glossary.md).
 
 ## The model: switches and levels
 
+![Modes: each switch has levels from a zero-secret default upward, for example gcp off, logs, sa and user (an emergency level with a one-hour timer), an [[inject]] github switch off or on, and a keyless claude switch off or on. You set the mode with fy mode on your computer; it is stored outside the repo, one per worktree; the supervisor starts or stops token services and updates the proxy; the box sees only a read-only copy. When a timer runs out the switch returns to its default.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-modes.svg)
+
 **A mode is a set of switches, each at a level.** A **switch** is one credential mechanism
 (`gcp`, `claude`, or one you declare — `github`, say). A **level** is one setting of that switch,
 from its default up to the most privileged, e.g. `gcp=off|logs|sa|user`, or a declared
@@ -77,10 +79,14 @@ flows, whatever any file in the VM says.**
 
 ## Tokens never enter the box
 
+![The token never enters the box: the box sends its request with a dummy value; the egress proxy on your computer asks the token service for a real, short-lived token and puts it on the request on the way out; the upstream API answers, and the box only ever held the dummy.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-credential-injection.svg)
+
 When a switch is on, its token service makes short-lived, scoped tokens on your computer, and the
 proxy adds them to requests as they pass through. The API sees the credential; the box never
-does. The secrets token services need live in `~/.foldyard/<project>/host.env` (readable only by
-you, outside the repo).
+does. (The exception is the `gcp` switch: its metadata emulator hands code in the box a token of
+an hour or less, as Google's own metadata server would — see [gcp.md](./gcp.md).) The secrets
+token services need live in `~/.foldyard/<project>/host.env` (readable only by you, outside the
+repo).
 
 Two guard rails keep this honest:
 
@@ -96,15 +102,22 @@ Two guard rails keep this honest:
   level. `fy mode` checks the whole resulting mode and refuses a combination that can't work. The
   error includes the exact `fy mode a=x b=y` command that fixes it (updates apply together).
   Combinations that work but are probably a mistake print a warning and apply.
-- **One credential per host and path.** Two switches whose levels would both inject on the same
-  host and path (a path prefix under the other's, or either covering the whole host) can't be on
-  together: the proxy would have to pick one credential, and only rule order would decide which.
-  `fy mode` refuses the second and names the first, so turn that one off first (or swap in one
-  command, `fy mode <other>=off <switch>=on`). One switch may still split a host by path, as
-  Codex on a ChatGPT subscription does. If such a pair is on anyway (a state file an older
-  foldyard wrote, or an `[[inject]]` row adopted while both were on), the proxy injects
-  **neither** until one is off. The supervisor logs it and notifies you, `fy mode`,
-  `fy state` and `fy doctor` show it, and `fy config widenings` marks both rows `HELD BACK`.
+- **One credential per host, path and header.** Two switches whose levels would both inject on
+  the same host and path (a path prefix under the other's, or either covering the whole host)
+  can't be on together unless the request itself says which credential it wants: each writes a
+  different header (or query parameter) and the box holds a placeholder for each. Then the proxy
+  injects only the credential whose placeholder the request carries in that switch's header, and
+  answers a request carrying neither or both with a 502 naming both switches (the Network Log
+  marks the row `no credential named`) — keyless `claude` on its OAuth token beside an
+  `[[inject]]` row writing `x-api-key` is the case this is for
+  ([configuration](./configuration.md#inject)). Otherwise the proxy would have to pick one
+  credential, and only rule order would decide which, so `fy mode` refuses the second and names
+  the first: turn that one off first (or swap in one command, `fy mode <other>=off <switch>=on`).
+  One switch may still split a host by path, as Codex on a ChatGPT subscription does. If such a
+  pair is on anyway (a state file an older foldyard wrote, or an `[[inject]]` row adopted while
+  both were on), the proxy injects **neither** until one is off. The supervisor logs it and
+  notifies you, `fy mode`, `fy state` and `fy doctor` show it, and `fy config widenings` marks
+  both rows `HELD BACK`.
   A request from the box to that host and path isn't sent: the proxy answers it with a 502
   whose JSON `message` is the same text, naming both switches and the `fy mode` command to run
   on your computer, rather than let the box's placeholder draw the provider's 401. The Network

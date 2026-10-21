@@ -1,0 +1,228 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1362" height="785" viewBox="99 99 1362 785" fill="none">
+  <style>
+    text { font-family: "Hanken Grotesk", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+           fill: #6e7263; }
+    .title    { font-family: "Newsreader", Georgia, "Times New Roman", serif;
+                font-size: 30px; font-weight: 600; fill: #1a1c16; }
+    .tagline  { font-size: 15px; }
+    .band     { font-size: 12px; font-weight: 700; fill: #1a1c16; letter-spacing: .06em; }
+    .band-yard{ font-size: 12px; font-weight: 700; fill: #265629; letter-spacing: .06em; }
+    .band-sub { font-size: 12px; }
+    .card-h   { font-size: 14.5px; font-weight: 700; fill: #1a1c16; }
+    .body     { font-size: 12px; }
+    .note     { font-size: 12px; font-weight: 700; fill: #265629; text-anchor: middle; }
+    .arrow    { font-size: 15px; fill: #9a9d8c; }
+    .col-lbl  { font-size: 11px; font-weight: 700; fill: #b8923a; letter-spacing: .08em; }
+    .col-h    { font-size: 15px; font-weight: 700; fill: #b8923a; }
+    .idea-h   { font-size: 12.5px; font-weight: 700; fill: #1a1c16; }
+    .idea     { font-size: 11.5px; }
+    .mono     { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+                font-size: 10.5px; fill: #265629; }
+    .box-h    { font-size: 12px; font-weight: 700; fill: #1a1c16; }
+    .frame    { fill: #f6f4ec; stroke: #e1e0d4; }
+    .card     { fill: #fff; stroke: #dcdacb; stroke-width: 1.5; }
+    .fence    { fill: #edf1f3; stroke: #3f6e84; stroke-width: 1.5; }
+    .yardfence{ fill: #ebf1e7; stroke: #265629; stroke-width: 2.5; stroke-dasharray: 12.5 12.5; }
+    .up-card  { fill: #fff; stroke: #b8923a; stroke-width: 1.5; }
+    .panel    { fill: #f8f0d8; stroke: #e9d59c; stroke-width: 1.5; }
+    .rule     { stroke: #e0cf9a; stroke-width: 1; }
+    .strip    { fill: #fbfaf5; stroke: #dcdacb; stroke-width: 1.5; }
+    .wall-card{ fill: #fff; stroke: #265629; stroke-width: 4; }
+    /* — status extras (diagram-specs §2.2) — */
+    .st-bad   { font-size: 12px; font-weight: 700; fill: #a8432b; }
+    .cap-bad  { font-size: 12px; fill: #a8432b; }
+    .msg      { stroke: #9a9d8c; stroke-width: 1.5; }
+    .msg-bad  { stroke: #a8432b; stroke-width: 1.5; stroke-dasharray: 5 4; }
+  </style>
+  <rect class="frame" x="100" y="100" width="1360" height="783" rx="18"/>
+
+  <!-- header -->
+  <text class="title" x="160" y="160">How traffic leaves the box</text>
+  <text class="tagline" x="160" y="191">One way out: a proxy on your computer that logs, decrypts, allowlists and adds credentials. The VM firewall refuses the rest.</text>
+
+  <!-- THE VM — the box and the stack, behind the VM firewall -->
+  <rect class="yardfence" x="140" y="228" width="490" height="392" rx="16"/>
+  <text class="band-yard" x="160" y="259">THE VM</text>
+  <text class="band-sub" x="218" y="259">one per project · starts with no credentials</text>
+
+  <rect class="card" x="160" y="278" width="215" height="127" rx="12"/>
+  <text class="card-h" x="178" y="305">Dev box</text>
+  <text class="body" x="178" y="327">
+    <tspan x="178">HTTPS_PROXY points at your</tspan>
+    <tspan x="178" dy="16">computer (192.168.5.2 on Lima),</tspan>
+    <tspan x="178" dy="16">on this project's own port, and</tspan>
+    <tspan x="178" dy="16">the box trusts the proxy's CA.</tspan>
+  </text>
+  <rect class="card" x="395" y="278" width="215" height="127" rx="12"/>
+  <text class="card-h" x="413" y="305">Stack containers</text>
+  <text class="body" x="413" y="327">
+    <tspan x="413">With the VM firewall on, podman</tspan>
+    <tspan x="413" dy="16">gives each one the same proxy</tspan>
+    <tspan x="413" dy="16">settings and CA. Calls between</tspan>
+    <tspan x="413" dy="16">services stay inside the VM.</tspan>
+  </text>
+
+  <!-- the bypass: a program that ignores the proxy -->
+  <line class="msg-bad" x1="267" y1="407" x2="267" y2="456"/>
+  <text class="st-bad" x="267" y="477" text-anchor="middle" style="font-size:20px">✗</text>
+  <text class="cap-bad" x="284" y="426">
+    <tspan x="284">A program that ignores the proxy (malware,</tspan>
+    <tspan x="284" dy="15">a static binary, QUIC on UDP 443) connects</tspan>
+    <tspan x="284" dy="15">directly — and is refused at the VM firewall.</tspan>
+  </text>
+
+  <rect class="wall-card" x="160" y="480" width="450" height="120" rx="12"/>
+  <text class="card-h" x="178" y="507">VM firewall</text>
+  <text class="mono" x="272" y="506">[machine] firewall = true</text>
+  <text class="body" x="178" y="529">
+    <tspan x="178">nftables, put in as root at every boot — nothing in the box</tspan>
+    <tspan x="178" dy="16">can flush it. Open only: loopback, local DNS, and this project's</tspan>
+    <tspan x="178" dy="16">ports on your computer. Everything else is refused, and each</tspan>
+    <tspan x="178" dy="16">refusal is logged. Lima backend; foldyard init turns it on.</tspan>
+  </text>
+
+  <!-- the one way out -->
+  <text class="note" x="665" y="320">
+    <tspan x="665">the only</tspan>
+    <tspan x="665" dy="14">way out</tspan>
+  </text>
+
+  <!-- YOUR COMPUTER — the egress proxy -->
+  <rect class="fence" x="700" y="228" width="480" height="392" rx="16"/>
+  <text class="band" x="720" y="259">YOUR COMPUTER</text>
+  <text class="band-sub" x="852" y="259">outside the VM · the supervisor keeps the proxy up</text>
+
+  <rect class="card" x="720" y="278" width="440" height="322" rx="12"/>
+  <text class="card-h" x="738" y="305">Egress proxy</text>
+  <text class="mono" x="738" y="323">mitmdump · its own port, from 41000 up</text>
+
+  <line class="rule" x1="738" y1="338" x2="1142" y2="338"/>
+  <text class="box-h" x="738" y="360">Allowlist</text>
+  <text class="body" x="824" y="360">
+    <tspan x="824">A host you haven't granted gets a 403 and is</tspan>
+    <tspan x="824" dy="15">never dialled. In a learn window it goes through</tspan>
+    <tspan x="824" dy="15">and is recorded instead.</tspan>
+  </text>
+  <line class="rule" x1="738" y1="406" x2="1142" y2="406"/>
+  <text class="box-h" x="738" y="428">Decrypt</text>
+  <text class="body" x="824" y="428">
+    <tspan x="824">Every request is decrypted, so its path is seen.</tspan>
+    <tspan x="824" dy="15">passthrough hosts (default @jvm, @linux) are</tspan>
+    <tspan x="824" dy="15">tunnelled untouched and logged by name only.</tspan>
+  </text>
+  <line class="rule" x1="738" y1="474" x2="1142" y2="474"/>
+  <text class="box-h" x="738" y="496">Inject</text>
+  <text class="body" x="824" y="496">
+    <tspan x="824">For a switch that's on, the real credential</tspan>
+    <tspan x="824" dy="15">replaces the box's dummy. An injected host is</tspan>
+    <tspan x="824" dy="15">always decrypted, whatever passthrough says.</tspan>
+  </text>
+  <line class="rule" x1="738" y1="542" x2="1142" y2="542"/>
+  <text class="box-h" x="738" y="564">Log</text>
+  <text class="body" x="824" y="564">
+    <tspan x="824">Every request, refusals too, to egress.jsonl on</tspan>
+    <tspan x="824" dy="15">your computer: the Network Log tab in fy tui.</tspan>
+  </text>
+
+  <!-- VM ▶ proxy, drawn over both bands -->
+  <line class="msg" x1="610" y1="341" x2="712" y2="341"/>
+  <text class="arrow" x="708" y="346">▶</text>
+
+  <!-- proxy ▶ internet -->
+  <line class="msg" x1="1160" y1="341" x2="1200" y2="341"/>
+  <text class="arrow" x="1196" y="346">▶</text>
+
+  <!-- INTERNET -->
+  <text class="col-lbl" x="1212" y="264">INTERNET</text>
+  <rect class="up-card" x="1210" y="278" width="210" height="127" rx="12"/>
+  <text class="card-h" x="1228" y="305">Upstream</text>
+  <text class="body" x="1228" y="327">
+    <tspan x="1228">Package registries, GitHub,</tspan>
+    <tspan x="1228" dy="16">AI providers, your own APIs —</tspan>
+    <tspan x="1228" dy="16">reached only from the proxy.</tspan>
+  </text>
+
+  <!-- THREE CONTROLS -->
+  <rect class="strip" x="140" y="644" width="1040" height="215" rx="16"/>
+  <text class="band" x="160" y="675">THREE CONTROLS</text>
+  <text class="band-sub" x="285" y="675">often confused — they run in different places</text>
+
+  <rect class="card" x="160" y="694" width="235" height="145" rx="12"/>
+  <text class="card-h" x="178" y="721">The allowlist</text>
+  <text class="mono" x="178" y="738">fy allow enforce on|off|learn</text>
+  <text class="body" x="178" y="760">
+    <tspan x="178">Runs in the proxy, on your</tspan>
+    <tspan x="178" dy="15">computer. Refuses hosts you haven't</tspan>
+    <tspan x="178" dy="15">granted: once (2 min) · session ·</tspan>
+    <tspan x="178" dy="15">permanent. The grants and the</tspan>
+    <tspan x="178" dy="15">switch live here, never in the repo.</tspan>
+  </text>
+  <rect class="card" x="415" y="694" width="235" height="145" rx="12"/>
+  <text class="card-h" x="433" y="721">The VM firewall</text>
+  <text class="mono" x="433" y="738">[machine] firewall = true</text>
+  <text class="body" x="433" y="760">
+    <tspan x="433">Runs inside the VM. Refuses any</tspan>
+    <tspan x="433" dy="15">traffic that skips the proxy. Without</tspan>
+    <tspan x="433" dy="15">it, routing is cooperative: tools</tspan>
+    <tspan x="433" dy="15">that ignore the proxy go around it,</tspan>
+    <tspan x="433" dy="15">unseen (always so on podman).</tspan>
+  </text>
+  <rect class="card" x="670" y="694" width="235" height="145" rx="12"/>
+  <text class="card-h" x="688" y="721">The host firewall</text>
+  <text class="mono" x="688" y="738">[machine] host_firewall = true</text>
+  <text class="body" x="688" y="760">
+    <tspan x="688">Linux only. The same rule again on</tspan>
+    <tspan x="688" dy="15">your computer, around the VM — it</tspan>
+    <tspan x="688" dy="15">holds even if the VM's kernel falls.</tspan>
+    <tspan x="688" dy="15">You install it once; every fy up</tspan>
+    <tspan x="688" dy="15">checks it's in effect.</tspan>
+  </text>
+  <rect class="up-card" x="925" y="694" width="235" height="145" rx="12"/>
+  <text class="card-h" x="943" y="721">127.0.0.1 is the VM</text>
+  <text class="body" x="943" y="743">
+    <tspan x="943">Inside the VM, localhost is the VM</tspan>
+    <tspan x="943" dy="15">itself, not your computer. The box</tspan>
+    <tspan x="943" dy="15">reaches your computer at</tspan>
+    <tspan x="943" dy="15">192.168.5.2 on Lima, and at</tspan>
+    <tspan x="943" dy="15">host.containers.internal on podman.</tspan>
+  </text>
+
+  <!-- learn mode -->
+  <rect class="panel" x="1210" y="421" width="210" height="438" rx="12"/>
+  <text class="col-h" x="1228" y="451">Learn, then enforce</text>
+
+  <text class="idea-h" x="1228" y="481">1 · An hour of watching</text>
+  <text class="idea" x="1228" y="501">
+    <tspan x="1228">foldyard init writes enforce =</tspan>
+    <tspan x="1228" dy="15">"learn": for the first hour,</tspan>
+    <tspan x="1228" dy="15">nothing is refused, and every</tspan>
+    <tspan x="1228" dy="15">host that would have been is</tspan>
+    <tspan x="1228" dy="15">recorded, with the tool that</tspan>
+    <tspan x="1228" dy="15">asked for it.</tspan>
+  </text>
+
+  <text class="idea-h" x="1228" y="606">2 · Then it locks by itself</text>
+  <text class="idea" x="1228" y="626">
+    <tspan x="1228">When the hour ends, the</tspan>
+    <tspan x="1228" dy="15">allowlist enforces — no one has</tspan>
+    <tspan x="1228" dy="15">to remember. fy allow learn</tspan>
+    <tspan x="1228" dy="15">grants what it saw, in one go.</tspan>
+  </text>
+
+  <text class="idea-h" x="1228" y="701">
+    <tspan x="1228">3 · The repo can ask,</tspan>
+    <tspan x="1228" dy="17">not grant</tspan>
+  </text>
+  <text class="idea" x="1228" y="738">
+    <tspan x="1228">[proxy] recommend lists hosts</tspan>
+    <tspan x="1228" dy="15">with a reason; each person says</tspan>
+    <tspan x="1228" dy="15">yes on their own computer.</tspan>
+  </text>
+
+  <line class="rule" x1="1228" y1="786" x2="1402" y2="786"/>
+  <text class="idea" x="1228" y="808">
+    <tspan x="1228">New dependency? Learn again:</tspan>
+    <tspan x="1228" dy="15">fy allow enforce learn --for 30m,</tspan>
+    <tspan x="1228" dy="15">not enforce off, which stays off.</tspan>
+  </text>
+</svg>

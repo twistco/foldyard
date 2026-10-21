@@ -255,6 +255,15 @@ class InjectRule:
     value_prefix: str = ""  # string the proxy PREPENDS to the minted value (e.g. "Bearer " for an
     # OAuth `authorization` header); the proxy overwrites verbatim, so the bare token stays in
     # host.env and the prefix is added in flight. "" → inject the minted value unchanged.
+    # What the box's client sends where this rule injects (its header, or its query_param): the
+    # dummy a mechanism bakes into the box, so a request can NAME this credential. Where several
+    # rules match one request the proxy injects the one whose dummy it carries (ADR-0031 decision
+    # 4, amended), and only rules that both have one may share a host (:func:`rules_overlap`).
+    # () → none known: the rule can't be named, so it shares its host and path with nothing.
+    dummies: tuple[str, ...] = ()
+    # A dummy may also follow ONE auth-scheme word (`token x`, `Bearer x`) — for a dummy handed to
+    # a client the mechanism doesn't control, as :class:`HeldCredential`'s ``any_scheme``.
+    any_scheme: bool = False
 
 
 def _rule_host(rule: InjectRule) -> str:
@@ -262,21 +271,42 @@ def _rule_host(rule: InjectRule) -> str:
     return rule.host.lower().rstrip(".")
 
 
+def _rule_place(rule: InjectRule) -> tuple[str, str]:
+    """Where a rule writes its credential, as the addon does: the query param if set, else the
+    header (``Authorization`` by default), whose name compares without case."""
+    if rule.query_param:
+        return ("query", rule.query_param)
+    return ("header", (rule.header or "Authorization").lower())
+
+
 def rules_overlap(a: InjectRule, b: InjectRule) -> bool:
-    """Could one request match both rules? The same host, and path prefixes that nest: either is
-    empty (the whole host) or one starts with the other. The addon matches a prefix with
-    ``startswith``, so ``/v1`` nests ``/v10`` as well as ``/v1/messages``."""
+    """Could one request match both rules with nothing to say which it is for? The same host, and
+    path prefixes that nest: either is empty (the whole host) or one starts with the other. The
+    addon matches a prefix with ``startswith``, so ``/v1`` nests ``/v10`` as well as
+    ``/v1/messages``.
+
+    Unless the two are HEADER-DISJOINT with dummies: each writes a different place (two headers,
+    a header and a query param, two query params) and the box sends a dummy for each. A request
+    then names its credential by the dummy it carries in that rule's place, and the addon injects
+    only the rule it names — answering one that names neither or both (ADR-0031 decision 4, as
+    amended 2026-10-20). One place can't be shared that way: whichever dummy is there, the other
+    rule would overwrite it, and a rule without dummies can't be named at all."""
     if _rule_host(a) != _rule_host(b):
         return False
-    return a.path_prefix.startswith(b.path_prefix) or b.path_prefix.startswith(a.path_prefix)
+    if not (a.path_prefix.startswith(b.path_prefix) or b.path_prefix.startswith(a.path_prefix)):
+        return False
+    return not (a.dummies and b.dummies and _rule_place(a) != _rule_place(b))
 
 
 @dataclass(frozen=True)
 class InjectOverlap:
     """A rule from each of two ACTIVE switches that one request could match
-    (:func:`rules_overlap`) — two credentials claiming one host and path (ADR-0031 decision 4).
-    The addon injects the FIRST rule that matches, so without this check the credential a request
-    carried would be decided by plugin load order. Pairs are in switch declaration order."""
+    (:func:`rules_overlap`) — two credentials claiming one host and path with nothing in the
+    request to choose between them (ADR-0031 decision 4). The addon tells rules on one host apart
+    only by the dummy a request carries in each one's place; two rules writing the same place, or
+    one the box sends no dummy for, leave it nothing to go on, so without this check the
+    credential a request carried would be decided by plugin load order. Pairs are in switch
+    declaration order."""
 
     switches: tuple[str, ...]
     levels: tuple[str, ...]

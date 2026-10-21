@@ -48,6 +48,9 @@ class FakeBackend:
         # The boot-provisioning id the backend's stored config carries ("" = none recorded).
         self._provision = ""
         self._monitor = ""  # the guest monitor's recording, under its own marker
+        # Whether the stored config copies the host's proxy env into the guest; None = the
+        # backend has no such setting (every test that doesn't opt in).
+        self._propagation: bool | None = None
         self.calls: list[str] = []
 
     def supports_concurrent(self):
@@ -116,6 +119,14 @@ class FakeBackend:
         else:
             self._monitor = ident
             self.calls.append(f"monitor:{ident}")
+        return True
+
+    def proxy_propagation(self, name):
+        return self._propagation
+
+    def set_proxy_propagation(self, name, on):
+        self._propagation = on
+        self.calls.append(f"proxy-env:{'on' if on else 'off'}")
         return True
 
     # the host-side wall's input: the VM's host processes
@@ -730,6 +741,73 @@ def test_ensure_updates_stale_provisioning_on_a_stopped_machine(lima_env, tmp_pa
     guest_ok()
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == [f"provision:{machine.provision_id()}", "start:homelab"]
+
+
+def test_ensure_stops_lima_copying_the_host_proxy_into_a_walled_guest(lima_env, tmp_path):
+    # Lima copies the host's *_PROXY into the guest at every start (propagateProxyEnv, on by
+    # default), and they override the wall's own proxy env: on a host behind a proxy the guest's
+    # podman pulled through it, and the wall refused every pull. Recorded off before the boot.
+    be, _guest, set_wall, guest_ok = lima_env
+    be._state = "stopped"
+    be._provision = machine.provision_id()
+    be._propagation = True
+    set_wall(True)
+    guest_ok()
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == ["proxy-env:off", "start:homelab"]
+
+
+def test_ensure_leaves_an_unwalled_guest_the_host_proxy(lima_env, tmp_path):
+    # Without the wall the host's proxy is the guest's only one (image pulls behind a corporate
+    # proxy need it), so a recording left off by an earlier walled config is turned back on.
+    be, _guest, set_wall, guest_ok = lima_env
+    be._state = "stopped"
+    set_wall(False)
+    be._provision = machine.provision_id()
+    be._propagation = False
+    guest_ok()
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == ["proxy-env:on", "start:homelab"]
+
+
+def test_ensure_records_no_propagation_before_a_new_walled_vms_first_boot(lima_env, tmp_path):
+    be, _guest, set_wall, guest_ok = lima_env
+    be._exists = False
+    be._state = "stopped"
+    be._propagation = True  # Lima's default on a fresh instance
+    set_wall(True)
+    guest_ok()
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == [
+        "create:homelab",
+        f"provision:{machine.provision_id()}",
+        "proxy-env:off",
+        "start:homelab",
+    ]
+
+
+@pytest.mark.parametrize("host_proxy", [True, False])
+def test_ensure_never_edits_a_running_vm_for_propagation_and_warns_only_behind_a_proxy(
+    lima_env, tmp_path, capsys, monkeypatch, host_proxy
+):
+    # `limactl edit` refuses a running instance, and the env a running guest got was decided at
+    # its start: record at the next stop. Whether that start copied a proxy in can't be read back,
+    # so the warning goes out when this host has one now, and only then (most hosts don't).
+    be, _guest, set_wall, guest_ok = lima_env
+    for var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    if host_proxy:
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
+    be._provision = machine.provision_id()
+    be._propagation = True
+    set_wall(True)
+    guest_ok()
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == []
+    err = capsys.readouterr().err
+    assert ("copying your proxy env" in err) is host_proxy
+    if host_proxy:
+        assert "HTTPS_PROXY" in err and "fy machine stop && fy up" in err
 
 
 def test_ensure_refuses_a_running_machine_whose_provisioning_is_stale(lima_env, tmp_path, capsys):
@@ -1890,6 +1968,39 @@ def test_a_service_container_keeps_node_off_the_env_proxy(tmp_path, case):
     spec = _spec(tmp_path, ["container=podman"], mounts=[*_CA_MOUNTS, *extra])
     _ca_env().main(["create", "--bundle", str(spec.parent), "c1"])
     assert json.loads(spec.read_text())["process"]["env"] == ["container=podman", *_CA_ENV]
+
+
+def test_a_build_steps_proxy_env_comes_in_both_spellings(tmp_path):
+    # Compose's classic builder (DOCKER_BUILDKIT=0 — podman serves no BuildKit) passes only the
+    # upper-case proxy build args, and apt reads only `http_proxy`: an apt RUN step in a compose
+    # build went direct and the wall refused it (2026-10-20). Each one the step lacks is mirrored.
+    mounts = [*_CA_MOUNTS, _containerenv(tmp_path, _BUILDAH_CONTAINERENV)]
+    proxy = "http://192.168.5.2:41000"
+    given = [f"HTTP_PROXY={proxy}", f"https_proxy={proxy}", "NO_PROXY=localhost"]
+    spec = _spec(tmp_path, given, mounts=mounts)
+    _ca_env().main(["create", "--bundle", str(spec.parent), "c1"])
+    env = json.loads(spec.read_text())["process"]["env"]
+    assert env[: len(given)] == given  # what the build said is kept, first
+    for name, value in (("http_proxy", proxy), ("HTTPS_PROXY", proxy), ("no_proxy", "localhost")):
+        assert env.count(f"{name}={value}") == 1
+
+
+def test_a_build_steps_two_spellings_are_left_as_given(tmp_path):
+    # When the build set both, even differently, the step gets what it asked for.
+    mounts = [*_CA_MOUNTS, _containerenv(tmp_path, _BUILDAH_CONTAINERENV)]
+    given = ["HTTP_PROXY=http://a:1", "http_proxy=http://b:2"]
+    spec = _spec(tmp_path, given, mounts=mounts)
+    _ca_env().main(["create", "--bundle", str(spec.parent), "c1"])
+    env = json.loads(spec.read_text())["process"]["env"]
+    assert [e for e in env if e.lower().startswith("http_proxy=")] == given
+
+
+def test_a_service_containers_proxy_env_is_not_mirrored(tmp_path):
+    # podman gives its own containers both spellings already; only build steps are touched.
+    mounts = [*_CA_MOUNTS, _containerenv(tmp_path, "")]
+    spec = _spec(tmp_path, ["HTTP_PROXY=http://a:1"], mounts=mounts)
+    _ca_env().main(["create", "--bundle", str(spec.parent), "c1"])
+    assert json.loads(spec.read_text())["process"]["env"] == ["HTTP_PROXY=http://a:1", *_CA_ENV]
 
 
 def test_an_images_own_node_proxy_setting_wins(tmp_path):

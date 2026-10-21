@@ -31,6 +31,8 @@ what limits the socket to "repo + containers", so there is no VM-less backend
 
 ## Threat model
 
+![What a bad package can reach: the same malicious install run in three places. On your laptop it reads your keys and tokens straight away, reaches your other repos and files, can push with your git credentials and sends data anywhere. In a typical dev container on a rootful engine, keys are often within reach and your other files are one escape away. In a sandboxed VM that mounts only the repo, keys and other files aren't there and a push is refused; with the VM firewall on (`[machine] firewall = true`, Lima backend), traffic leaves only through a logging proxy. The repo itself is reachable everywhere, so keep secrets out of it.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-blast-radius.svg)
+
 What foldyard is built against — not the agent as such, but what comes in with development:
 
 - **Malicious packages and install scripts** (`npm install`, PyPI, postinstall hooks). They run
@@ -106,7 +108,9 @@ The resting state is **zero secrets in the VM**: no key files, no token environm
   passes through. The real token never enters the box — not as an environment
   variable, not as a file ([ADR-0007](./adrs/0007-credential-injection-at-egress-proxy.md)). A
   fully compromised box can use the access only while the switch is on, and only against the
-  injected host; it never *holds* the credential.
+  injected host; it never *holds* the credential. The one exception is Google Cloud's metadata
+  emulator: Google's client libraries fetch a token and attach it themselves, so a token of an
+  hour or less does sit in the box while the `gcp` switch is on ([gcp.md](./gcp.md)).
 - **Emergency levels expire.** Levels that act as *you* have a mandatory TTL (one hour by
   default) and switch themselves back off
   ([ADR-0005](./adrs/0005-secretless-by-default-posture-axes.md)).
@@ -133,6 +137,13 @@ The resting state is **zero secrets in the VM**: no key files, no token environm
   to review — would run as you, next to your credentials. Secrets are declared with `[[secret]]`,
   whose `how` hint foldyard **prints for you to run** and never runs itself
   ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)).
+
+**Keep real secrets out of your compose file's `environment:` and `env_file`.** A value there sits
+in the container for its whole life: any code running in it reads `/proc/<pid>/environ`, and
+anything holding the engine socket, the box included, reads it with `inspect`. Give the service a
+dummy and let a switch inject the real value at the proxy ([modes.md](./modes.md); a stack
+container's traffic reaches the proxy only with the VM firewall on; more in
+[stack.md](./stack.md)).
 
 ## Network: what's cooperative, what's enforced
 

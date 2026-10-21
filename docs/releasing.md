@@ -97,14 +97,10 @@ why the tape grants them with `fy allow sync --yes` first.)
 KVM and Lima, the same setup as the host-tier e2e. The release workflow calls it once the GitHub
 Release exists. It installs the version PyPI now serves, records it, checks that the box it left
 behind still passes `fy verify` and has the adopted package, then attaches `foldyard-demo.gif`
-to the release. The README embeds the latest release's copy:
-
-```markdown
-![foldyard's quick start: init, adopt, verify, and a config edit your computer holds until you approve it](https://github.com/twistco/foldyard/releases/latest/download/foldyard-demo.gif)
-```
-
+to the release. The README and the docs site's home page (`docs/README.md`) embed the latest
+release's copy, `https://github.com/twistco/foldyard/releases/latest/download/foldyard-demo.gif`,
 so it changes only when a release does, and no bot commits a binary. A failed recording leaves
-that one release without a GIF (and the README image broken until it has one), never the release
+that one release without a GIF (and both images broken until it has one), never the release
 itself. To fill it, dispatch the `demo` workflow with the tag. Dispatched with no tag, it records
 the checkout and only uploads a run artifact, which is how to iterate on the tape. `just demo`
 records the same tape on your own computer, against the `fy` on your PATH.

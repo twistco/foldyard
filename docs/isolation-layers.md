@@ -174,6 +174,15 @@ bounded what the socket could get at. So:
   VM's `/`. On one VM per project that sibling reads only this project's VM, which holds no
   credentials, so it is defence in depth (ADR-0025, Decision §5).
 
+**The verb isn't the boundary; the config it consumes is.** A tempting narrowing is a broker that
+lets the box run `compose up` but not `run -v /:/host`. It buys nothing while the compose file sits
+in the checkout the box can write: `up` re-reads that file, so adding `privileged: true`, a
+`/:/host` volume or a `command:` override to it is the raw socket again. A broker is only a
+boundary if the topology it runs is frozen outside the box's reach, takes no pass-through
+arguments, and changes only through a step a human approves — what the adopted config does for
+`foldyard.toml` ([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)). The deferred allowlist
+above has to pass the same test.
+
 ### Hardening that ships, beyond the VM
 
 In order of cost (all zero at runtime):
