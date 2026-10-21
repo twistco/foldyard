@@ -56,6 +56,14 @@ needs a mount of its own.
   `outbox/main/{claude,codex}/…` and `outbox/worktrees/<wt>/{claude,codex}/…`, so a worktree
   literally named `main` can't collide. The inbox is project-level with per-worktree slots where
   a tenant needs one: `inbox/monitor/…`, `inbox/main/…`, `inbox/worktrees/<wt>/…`.
+- **The host creates outbox slots with the no-follow walk, never `Path.mkdir(parents=True)`.**
+  Before a worktree's first `fy box up` the host makes `outbox/worktrees/<wt>/{claude,codex}/…`,
+  and any box can plant `outbox/worktrees/<wt>` as a symlink to a host directory ahead of time
+  (next bullet). A following `mkdir` would create directories inside the target. The bind itself
+  resolves in the guest, where the link points at nothing mounted, so nothing leaks back, but it is
+  still a host write redirected by a box-planted symlink. So slot creation walks from the outbox
+  root with `O_NOFOLLOW | O_DIRECTORY`, creating each missing component under the parent's fd: a
+  directory-only twin of `mountwrite.write`, refusing (`ELOOP`/`ENOTDIR`) on a link.
 - **Per-worktree slots are organisation, not isolation.** Any box holds the engine socket and
   can start a sibling container mounting the whole outbox or inbox VM path. That is within
   [0004](./0004-one-machine-worktrees-as-compose-projects.md)'s equal-trust tier (a box can
@@ -77,11 +85,13 @@ narrows its sudo to `shutdown`) write through the read-only mount? Only enforcem
 guest kernel counts; a guest `ro` mount option is one `mount -o remount,rw` away for guest root.
 
 Read from source (Lima v2.2.0, the version CI pins in `foldyard-e2e.yml`; sshocker v0.3.11;
-QEMU master; vfkit, krunkit; podman v5.0–v6.1), not yet run live:
+QEMU master; vfkit, krunkit; podman v5.0–v6.1). Only the vz row has since been run live,
+against guest root ([§ The vz test](#the-vz-test-2026-10-21), Lima 2.1.3); the others are read
+from source only:
 
 | backend / path | how `writable: false` reaches the hypervisor | enforced outside the guest? | confidence |
 | --- | --- | --- | --- |
-| **Lima `vz` + virtiofs** (macOS default) | `vz.NewSharedDirectory(location, !writable)` — [`pkg/driver/vz/vm_darwin.go#L674`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/driver/vz/vm_darwin.go#L674), `#L704`; Apple: `readOnly` — "exposed as read-only to the guest" ([`VZSharedDirectory`](https://developer.apple.com/documentation/virtualization/vzshareddirectory/init(url:readonly:))) | **yes** — the flag is in the host's device config; the virtiofs server is in the host's Virtualization process | medium-high (a documented contract; no published guest-root test) |
+| **Lima `vz` + virtiofs** (macOS default) | `vz.NewSharedDirectory(location, !writable)` — [`pkg/driver/vz/vm_darwin.go#L674`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/driver/vz/vm_darwin.go#L674), `#L704`; Apple: `readOnly` — "exposed as read-only to the guest" ([`VZSharedDirectory`](https://developer.apple.com/documentation/virtualization/vzshareddirectory/init(url:readonly:))) | **yes** — the flag is in the host's device config; the virtiofs server is in the host's Virtualization process | high — a documented contract, and [the vz test](#the-vz-test-2026-10-21) (Lima 2.1.3) held against guest root |
 | **Lima `qemu` + 9p** (Linux and WSL2; 9p is the 2.2.0 default for qemu, [`qemu_driver.go#L239-L253`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/driver/qemu/qemu_driver.go#L239-L253)) | `-virtfs …,readonly=on` — [`pkg/driver/qemu/qemu.go#L990-L998`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/driver/qemu/qemu.go#L990-L998) | **yes** — QEMU's 9p server returns `EROFS` for every non-read op and for write/append/trunc opens ([`hw/9pfs/9p.c`](https://github.com/qemu/qemu/blob/8967b2fe1b2aaae3c29e207d85fab901d580a2dc/hw/9pfs/9p.c#L4360) `is_read_only_op`, `#L2186-L2191`) | high |
 | Lima `qemu` + virtiofs (Linux, opt-in) | none: virtiofsd started without `--readonly` ("not supported … yet", [`qemu.go#L1000-L1001`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/driver/qemu/qemu.go#L1000-L1001)) | **no** — guest `ro` only | high |
 | Lima `krunkit` | none ([`krunkit_darwin_arm64.go#L98`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/driver/krunkit/krunkit_darwin_arm64.go#L98)) | **no** | high |
@@ -125,11 +135,16 @@ So:
   today (`box.py`, `env_args`).
 - **New assertion (the inbox is read-only), from inside the box and from the host-side run:**
   1. PID 1's mount table shows the inbox mountpoint with `ro` in its options (`verify.py:221`
-     already reads it). Necessary, not sufficient — it's the guest's own flag.
+     already reads it). Necessary, not sufficient — it's the guest's own flag. A guest that shows
+     `rw` there is a WARN while (2) still refuses (the vz test shows the host's enforcement holds
+     without the flag), naming it as a sign that something in the guest remounted it; a FAIL only
+     comes from (2).
   2. A `--privileged` probe container that binds the inbox VM path **rw** cannot create a file
      there, and `mount -o remount,rw` on it fails. The VM-level mount is in the VM's initial user
      namespace, so in the container's namespace its read-only flag should be locked (the row is
-     what checks that expectation); a successful write is a FAIL that names the file it left.
+     what checks that expectation); a successful write is a FAIL that names the file it left. Any
+     errno counts as refused (`EROFS`, `EPERM`, `EACCES`): which one depends on whether the
+     guest's flag is still set ([§ The vz test](#the-vz-test-2026-10-21)).
   3. In the box: `/run/foldyard/inbox` refuses a write (the `:ro` bind).
   Under gVisor the probe runs in the sandbox and (2)'s remount says nothing about the VM: report
   it as N/A like the PID-1 audit (`verify.py:234-247`); (1) is read host-side, (3) still holds.
@@ -167,8 +182,8 @@ One VM restart on Lima, nothing else.
   stopped → `limactl edit` the mount set; running with a different set → refuse with
   `fy machine stop && fy up`, as stale provisioning is refused. Named volumes survive. Needs a
   mount reader that sees the `writable` flag (`LimaBackend.mounts`, `machine_backend.py:531`,
-  reads only paths). Why a restart suffices: `limactl edit` refuses a running instance and rewrites `lima.yaml` otherwise; vz and qemu both
-  build their shares from it at every start
+  reads only paths). A restart suffices because `limactl edit` refuses a running instance and
+  otherwise rewrites `lima.yaml`, and vz and qemu both build their shares from it at every start
   ([`cmd/limactl/edit.go#L68-L69`](https://github.com/lima-vm/lima/blob/v2.2.0/cmd/limactl/edit.go#L68-L69),
   [`vm_darwin.go#L660-L720`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/driver/vz/vm_darwin.go#L660-L720),
   [`qemu.go#L982-L1003`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/driver/qemu/qemu.go#L982-L1003)).
@@ -178,9 +193,10 @@ One VM restart on Lima, nothing else.
   ([`set.go#L48-L90`](https://github.com/containers/podman/blob/v5.8.9/cmd/podman/machine/set.go#L48-L90)).
   It gets the outbox at its next `fy machine recreate` (which loses named volumes, so a warning
   until then, plus the legacy layout) and never an inbox (above).
-- **No boot-script change**, so the `# fy-provision` id is untouched. If the deferred rewording
-  of `guest-boot.sh` / `machine-wall.sh` ("wall", "Mac"; CLAUDE.md) is to ride a restart, this is
-  the restart — see the open questions.
+- **The boot scripts change only for the deferred rewording.** The mounts need no boot-script
+  change, but the rewording of `guest-boot.sh` / `machine-wall.sh` ("wall", "Mac"; CLAUDE.md)
+  rides this restart (settled item 3), so the `# fy-provision` id does change: every existing VM
+  is refused as stale once, and one `fy machine stop && fy up` takes both.
 - **Transcripts:** the box binds `outbox/<slot>/claude/projects` instead of
   `<checkout>/<here>/.devbox-claude/projects` (likewise Codex). For one release the host also
   reads the old bound-out dirs: `sync_current`, the supervisor sweep, `fy transcripts` and
