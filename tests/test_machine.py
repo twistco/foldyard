@@ -51,6 +51,13 @@ class FakeBackend:
         # Whether the stored config copies the host's proxy env into the guest; None = the
         # backend has no such setting (every test that doesn't opt in).
         self._propagation: bool | None = None
+        # The effective mount set (ADR-0033) — None: can't be read, nothing compared (every test
+        # that doesn't opt in). `create` records what it was given, as Lima's would.
+        self._vmtype = "vz"
+        self._mount_set = None
+        self._mount_type = ""
+        self._override_mounts: list = []  # what Lima's override.yaml forces on top of an edit
+        self.created_with: list = []
         self.calls: list[str] = []
 
     def supports_concurrent(self):
@@ -91,6 +98,33 @@ class FakeBackend:
     def create(self, name, resources, volumes):
         self.calls.append(f"create:{name}")
         self._exists = True
+        self.created_with = list(volumes)
+        if self._mount_set is not None or self.name == "lima":
+            self._mount_set = list(volumes)
+            self._mount_type = {"vz": "virtiofs", "qemu": "9p"}.get(self._vmtype, "")
+        return True
+
+    def vmtype(self, name):
+        return self._vmtype
+
+    def resolve_vmtype(self):
+        return self._vmtype
+
+    def mount_set(self, name):
+        return None if self._mount_set is None else list(self._mount_set)
+
+    def mount_type(self, name):
+        return self._mount_type
+
+    def set_mounts(self, name, mounts, mount_type, owned):
+        kept = [m for m in self._mount_set or [] if m.location not in owned]
+        self._mount_set = [*kept, *mounts]
+        for forced in self._override_mounts:  # Lima's own config wins over the instance's
+            self._mount_set = [m for m in self._mount_set if m.location != forced.location]
+            self._mount_set.append(forced)
+        if mount_type:
+            self._mount_type = mount_type
+        self.calls.append("mounts")
         return True
 
     def stop(self, name):
@@ -2160,3 +2194,207 @@ def test_wall_denies_reads_the_guests_report_without_root(monkeypatch):
     assert machine.wall_denies() is None  # a guest provisioned before the reporter
     monkeypatch.setattr(machine.config, "machine_wall", lambda: False)
     assert machine.wall_denies() is None  # no wall, nothing refused there
+
+
+# ── the mount set (lima only): ADR-0033's to-box and from-box ─────────────────────────────
+#
+# Lima builds its shares from lima.yaml at every start, so a changed set is recorded on the
+# STOPPED VM and a running VM with a stale one is refused — like stale provisioning. The podman
+# backend's mounts are fixed at `podman machine init`: nothing about them changes.
+
+
+def _want(tmp_path, *, to_box=True):
+    from foldyard.machine_backend import Mount
+
+    state = tmp_path / "state"
+    mounts = [
+        Mount(str(tmp_path / "repo"), str(tmp_path / "repo")),
+        Mount(str(tmp_path / "repo-wt"), str(tmp_path / "repo-wt")),
+        Mount(str(state / "from-box"), str(state / "from-box")),
+    ]
+    if to_box:
+        mounts.append(Mount(str(state / "to-box"), str(state / "to-box"), writable=False))
+    return mounts
+
+
+def test_a_new_lima_vm_shares_the_from_box_and_a_read_only_to_box(lima_env, tmp_path):
+    be, _guest, set_wall, guest_ok = lima_env
+    be._exists, be._state = False, "stopped"
+    set_wall(False)
+    guest_ok()
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert sorted(be.created_with) == sorted(_want(tmp_path))
+    assert "mounts" not in be.calls  # created with it: nothing to record
+    # both directories exist on your computer before the VM is asked to share them
+    assert (tmp_path / "state" / "to-box").is_dir() and (tmp_path / "state" / "from-box").is_dir()
+
+
+@pytest.mark.parametrize("vmtype", ["krunkit", ""])
+def test_no_to_box_on_a_hypervisor_that_cant_enforce_read_only_outside_the_guest(
+    lima_env, tmp_path, vmtype
+):
+    be, _guest, set_wall, guest_ok = lima_env
+    be._exists, be._state, be._vmtype = False, "stopped", vmtype
+    set_wall(False)
+    guest_ok()
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert sorted(be.created_with) == sorted(_want(tmp_path, to_box=False))
+
+
+def test_the_podman_backends_mounts_are_unchanged(fake, monkeypatch, tmp_path):
+    from foldyard.machine_backend import Mount
+
+    be = fake(concurrent=False, name="podman", cli="podman")
+    monkeypatch.setattr(machine.config, "in_box", lambda: False)
+    monkeypatch.setattr(machine.config, "state_dir", lambda: tmp_path / "state")
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.created_with == [
+        Mount(str(tmp_path / "repo"), str(tmp_path / "repo")),
+        Mount(str(tmp_path / "repo-wt"), str(tmp_path / "repo-wt")),
+    ]
+    assert not (tmp_path / "state").exists()  # nothing made for a VM that won't share it
+
+
+def test_a_stopped_vm_with_the_old_set_gets_it_recorded_before_its_boot(lima_env, tmp_path):
+    from foldyard.machine_backend import Mount
+
+    be, _guest, set_wall, guest_ok = lima_env
+    be._state = "stopped"
+    set_wall(False)
+    be._provision = machine.provision_id()
+    guest_ok()
+    foreign = Mount("/opt/data", "/opt/data", writable=False)
+    be._mount_set = [*_want(tmp_path)[:2], foreign]  # created before ADR-0033
+    be._mount_type = "virtiofs"
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == ["mounts", "start:homelab"]
+    assert sorted(be._mount_set) == sorted([*_want(tmp_path), foreign])  # someone else's: kept
+
+
+def test_a_running_vm_with_a_stale_mount_set_is_refused(lima_env, tmp_path, capsys):
+    be, guest, set_wall, _guest_ok = lima_env
+    set_wall(False)
+    be._provision = machine.provision_id()
+    be._mount_set = _want(tmp_path)[:2]
+    be._mount_type = "virtiofs"
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == [] and guest.reads == 0
+    err = capsys.readouterr().err
+    assert "STALE mount set" in err and "fy machine stop && fy up" in err
+    assert "to-box" in err
+
+
+def test_a_running_vm_with_the_current_set_is_left_alone(lima_env, tmp_path):
+    be, _guest, set_wall, guest_ok = lima_env
+    set_wall(False)
+    be._provision = machine.provision_id()
+    guest_ok()
+    be._mount_set, be._mount_type = _want(tmp_path), "virtiofs"
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == []
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["writable to-box", "wrong mount type", "no from-box"],
+)
+def test_every_difference_in_foldyards_own_mounts_is_stale(lima_env, tmp_path, capsys, shape):
+    from foldyard.machine_backend import Mount
+
+    be, _guest, set_wall, _guest_ok = lima_env
+    set_wall(False)
+    be._provision = machine.provision_id()
+    be._mount_set, be._mount_type = _want(tmp_path), "virtiofs"
+    if shape == "writable to-box":
+        to_box = str(tmp_path / "state" / "to-box")
+        be._mount_set = [*_want(tmp_path)[:3], Mount(to_box, to_box, writable=True)]
+    elif shape == "wrong mount type":
+        be._vmtype, be._mount_type = "qemu", "virtiofs"  # virtiofsd: no --readonly
+    else:
+        be._mount_set = [m for m in be._mount_set if not m.location.endswith("from-box")]
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert "STALE mount set" in capsys.readouterr().err
+
+
+def test_the_checkout_mounts_are_left_as_the_vm_was_created(lima_env, tmp_path):
+    # Only foldyard's two directories are compared: a VM created from another clone of the same
+    # project (the host tier drives one VM from several example copies) is not refused for it —
+    # `fy machine recreate` is still how the checkout mounts change.
+    from foldyard.machine_backend import Mount
+
+    be, _guest, set_wall, guest_ok = lima_env
+    set_wall(False)
+    be._provision = machine.provision_id()
+    guest_ok()
+    other = [Mount("/elsewhere/repo", "/elsewhere/repo"), *_want(tmp_path)[2:]]
+    be._mount_set, be._mount_type = other, "virtiofs"
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == []
+
+
+def test_limas_own_override_widening_the_to_box_is_refused_after_recording(
+    lima_env, tmp_path, capsys
+):
+    # Lima merges override.yaml over the instance and the most permissive `writable` wins: the
+    # recording "succeeds" and changes nothing. Fail closed, naming where to look.
+    from foldyard.machine_backend import Mount
+
+    be, _guest, set_wall, _guest_ok = lima_env
+    be._state = "stopped"
+    set_wall(False)
+    be._provision = machine.provision_id()
+    to_box = str(tmp_path / "state" / "to-box")
+    be._mount_set, be._mount_type = _want(tmp_path)[:2], "virtiofs"
+    be._override_mounts = [Mount(to_box, to_box, writable=True)]
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert "start:homelab" not in be.calls
+    assert "override.yaml" in capsys.readouterr().err
+
+
+def test_a_state_dir_inside_the_checkout_is_refused(lima_env, tmp_path, monkeypatch, capsys):
+    # A read-only to-box nested in a writable mount stays writable through the parent.
+    be, _guest, _set_wall, _guest_ok = lima_env
+    monkeypatch.setattr(machine.config, "state_dir", lambda: tmp_path / "repo" / ".fy")
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == []
+    assert "FOLDYARD_STATE_DIR" in capsys.readouterr().err
+
+
+def test_guest_mounts_exempts_foldyards_two_directories_on_lima_only(
+    lima_env, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(machine.config, "machine_backend", lambda: "lima")
+    got = machine.guest_mounts(tmp_path / "repo", tmp_path / "repo-wt")
+    assert got == [
+        str(tmp_path / "repo"),
+        str(tmp_path / "repo-wt"),
+        str(tmp_path / "state" / "from-box"),
+        str(tmp_path / "state" / "to-box"),
+    ]
+    monkeypatch.setattr(machine.config, "machine_backend", lambda: "podman")
+    assert machine.guest_mounts(tmp_path / "repo", tmp_path / "repo-wt") == [
+        str(tmp_path / "repo"),
+        str(tmp_path / "repo-wt"),
+    ]
+
+
+def test_to_box_unavailable_says_why(fake, monkeypatch):
+    be = fake(concurrent=False, name="podman", cli="podman")
+    assert "podman backend has no to-box" in (machine.to_box_unavailable() or "")
+    be = fake(concurrent=True, name="lima", cli="limactl")
+    be._exists, be._vmtype = True, "krunkit"
+    assert "only vz (virtiofs) and qemu (9p)" in (machine.to_box_unavailable() or "")
+    be._vmtype = "qemu"
+    assert machine.to_box_unavailable() is None
+
+
+def test_to_box_mounted_reads_the_effective_set(lima_env, tmp_path):
+    be, *_ = lima_env
+    be._mount_set = _want(tmp_path)
+    assert machine.to_box_mounted() and machine.from_box_mounted()
+    be._mount_set = _want(tmp_path)[:2]
+    assert not machine.to_box_mounted() and not machine.from_box_mounted()

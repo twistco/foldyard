@@ -164,7 +164,7 @@ def test_lima_memory_is_verbatim_mib_never_rounded_gib():
     # 1 megabyte"), bricking it until deleted. MiB must pass through verbatim.
     be = mb.LimaBackend()
     assert '.memory = "4000MiB"' in be._set_expr(
-        {"cpus": "4", "memory": "4000", "disk": "60"}, [("/r", "/r")]
+        {"cpus": "4", "memory": "4000", "disk": "60"}, [mb.Mount("/r", "/r")]
     )
     assert mb.LimaBackend._memory_mib("bogus") == 8192  # safe default
 
@@ -173,7 +173,10 @@ def test_lima_set_expr_pins_sizing_and_replaces_mounts():
     be = mb.LimaBackend()
     expr = be._set_expr(
         {"cpus": "4", "memory": "8192", "disk": "60"},
-        [("/Users/x/repo", "/Users/x/repo"), ("/Users/x/repo-wt", "/Users/x/repo-wt")],
+        [
+            mb.Mount("/Users/x/repo", "/Users/x/repo"),
+            mb.Mount("/Users/x/repo-wt", "/Users/x/repo-wt"),
+        ],
     )
     assert ".cpus = 4" in expr
     assert '.memory = "8192MiB"' in expr
@@ -230,9 +233,103 @@ def test_vmtype_unresolvable_pins_nothing(monkeypatch, fresh_config):
 
 def test_set_expr_emits_resolved_vmtype():
     expr = mb.LimaBackend()._set_expr(
-        {"cpus": "4", "memory": "8192", "disk": "60"}, [("/r", "/r")], "vz"
+        {"cpus": "4", "memory": "8192", "disk": "60"}, [mb.Mount("/r", "/r")], "vz"
     )
     assert '.vmType = "vz"' in expr
+
+
+@pytest.mark.parametrize("vmtype, mount_type", [("vz", "virtiofs"), ("qemu", "9p")])
+def test_set_expr_pins_the_mount_type_that_enforces_read_only_outside_the_guest(vmtype, mount_type):
+    # ADR-0033: a Lima default change (or a qemu VM left on virtiofs, whose virtiofsd has no
+    # --readonly) would silently downgrade the to-box to guest-only enforcement.
+    expr = mb.LimaBackend()._set_expr({"cpus": "4", "memory": "8192", "disk": "60"}, [], vmtype)
+    assert f'.mountType = "{mount_type}"' in expr
+
+
+def test_set_expr_pins_no_mount_type_where_none_enforces():
+    expr = mb.LimaBackend()._set_expr({"cpus": "4", "memory": "8192", "disk": "60"}, [], "krunkit")
+    assert ".mountType" not in expr
+
+
+def test_set_expr_carries_each_mounts_writable_flag():
+    expr = mb.LimaBackend()._set_expr(
+        {"cpus": "4", "memory": "8192", "disk": "60"},
+        [mb.Mount("/r", "/r"), mb.Mount("/s/to-box", "/s/to-box", writable=False)],
+        "vz",
+    )
+    assert '"location": "/r", "mountPoint": "/r", "writable": true' in expr
+    assert '"location": "/s/to-box", "mountPoint": "/s/to-box", "writable": false' in expr
+
+
+def _lima_row(monkeypatch, **config):
+    rows = _json_lines(
+        {"name": "acme", "status": "Stopped", "vmType": "qemu", "config": {**config}}
+    )
+    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(0, rows))
+
+
+def test_lima_mount_set_reads_the_effective_config_with_writable_flags(monkeypatch):
+    # `limactl list`'s `config` is lima.yaml merged with Lima's default/override files — where the
+    # most permissive `writable` wins — so it is what the VM will really share.
+    _lima_row(
+        monkeypatch,
+        mountType="9p",
+        mounts=[
+            {"location": "/r", "mountPoint": "/r", "writable": True},
+            {"location": "/s/to-box", "mountPoint": "/s/to-box", "writable": False},
+            {"location": "/x"},  # Lima's defaults: mountPoint = location, read-only
+        ],
+    )
+    be = mb.LimaBackend()
+    assert be.mount_set("acme") == [
+        mb.Mount("/r", "/r"),
+        mb.Mount("/s/to-box", "/s/to-box", writable=False),
+        mb.Mount("/x", "/x", writable=False),
+    ]
+    assert be.mount_type("acme") == "9p"
+    assert be.vmtype("acme") == "qemu"
+
+
+def test_lima_mount_set_unknown_when_the_instance_cant_be_read(monkeypatch):
+    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(1, ""))
+    assert mb.LimaBackend().mount_set("acme") is None
+
+
+def test_lima_set_mounts_replaces_foldyards_entries_and_keeps_anyone_elses(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, *a, **k):
+        seen["cmd"] = cmd
+        return _Proc(0)
+
+    monkeypatch.setattr(mb.subprocess, "run", fake_run)
+    ok = mb.LimaBackend().set_mounts(
+        "acme",
+        [mb.Mount("/r", "/r"), mb.Mount("/s/to-box", "/s/to-box", writable=False)],
+        "9p",
+        ["/r", "/s/to-box"],
+    )
+    assert ok
+    cmd = seen["cmd"]
+    assert cmd[:4] == ["limactl", "edit", "--tty=false", "acme"]
+    expr = cmd[cmd.index("--set") + 1]
+    assert '(.location // "") != "/r"' in expr and '(.mountPoint // "") != "/s/to-box"' in expr
+    assert '"location": "/s/to-box", "mountPoint": "/s/to-box", "writable": false' in expr
+    assert expr.endswith('| .mountType = "9p"')
+
+
+def test_podman_create_passes_only_writable_volumes_as_given(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, *a, **k):
+        seen["cmd"] = cmd
+        return _Proc(0)
+
+    monkeypatch.setattr(mb.subprocess, "run", fake_run)
+    mb.PodmanBackend().create(
+        "acme", {"cpus": "4", "memory": "8192", "disk": "60"}, [mb.Mount("/r", "/r")]
+    )
+    assert seen["cmd"][-2:] == ["--volume", "/r:/r"]
 
 
 def test_lima_create_pins_the_vmtype(monkeypatch, fresh_config):
@@ -244,7 +341,9 @@ def test_lima_create_pins_the_vmtype(monkeypatch, fresh_config):
 
     monkeypatch.setattr(mb.subprocess, "run", fake_run)
     _lima_info(monkeypatch, ["qemu", "vz"])
-    mb.LimaBackend().create("acme", {"cpus": "4", "memory": "8192", "disk": "60"}, [("/r", "/r")])
+    mb.LimaBackend().create(
+        "acme", {"cpus": "4", "memory": "8192", "disk": "60"}, [mb.Mount("/r", "/r")]
+    )
     assert '.vmType = "vz"' in seen["cmd"][seen["cmd"].index("--set") + 1]
 
 
@@ -257,7 +356,7 @@ def test_lima_create_uses_podman_template_and_set(monkeypatch):
 
     monkeypatch.setattr(mb.subprocess, "run", fake_run)
     ok = mb.LimaBackend().create(
-        "tangible", {"cpus": "4", "memory": "8192", "disk": "60"}, [("/r", "/r")]
+        "tangible", {"cpus": "4", "memory": "8192", "disk": "60"}, [mb.Mount("/r", "/r")]
     )
     assert ok is True
     cmd = seen["cmd"]

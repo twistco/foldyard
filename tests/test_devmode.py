@@ -2679,3 +2679,61 @@ def test_doctor_asks_for_the_leftover_on_the_host(monkeypatch, tmp_path):
     monkeypatch.setattr(devmode, "in_box", lambda: False)
     monkeypatch.setattr(devmode, "read", lambda apply_expiry=True: {"mode": {}, "written": None})
     assert "leftover autostash (main)" in [name for _s, name, _d in devmode.doctor(deep=False)]
+
+
+# ── doctor: the to-box row (ADR-0033) — from the instance's effective config, no ssh ─────
+
+
+class _ToBoxBackend:
+    name = "lima"
+
+    def __init__(self, vmtype="vz", mounts=None, exists=True):
+        self._vmtype, self._mounts, self._exists = vmtype, mounts, exists
+
+    def exists(self, name):
+        return self._exists
+
+    def vmtype(self, name):
+        return self._vmtype
+
+    def mount_set(self, name):
+        return self._mounts
+
+
+@pytest.fixture
+def to_box_row(monkeypatch, tmp_path):
+    monkeypatch.setattr(devmode.config, "state_dir", lambda: tmp_path)
+    return tmp_path / "to-box"
+
+
+def test_to_box_row_shared_read_only(to_box_row, monkeypatch):
+    from foldyard.machine_backend import Mount
+
+    shared = [Mount(str(to_box_row), str(to_box_row), writable=False)]
+    monkeypatch.setattr(devmode, "_BACKEND", _ToBoxBackend("qemu", shared))
+    ((status, name, detail),) = devmode._to_box_check()
+    assert (status, name) == ("ok", "to-box") and "read-only" in detail and "qemu/9p" in detail
+
+
+def test_to_box_row_not_shared_yet_says_restart(to_box_row, monkeypatch):
+    from foldyard.machine_backend import Mount
+
+    writable = [Mount(str(to_box_row), str(to_box_row), writable=True)]
+    monkeypatch.setattr(devmode, "_BACKEND", _ToBoxBackend("vz", writable))
+    ((status, _name, detail),) = devmode._to_box_check()
+    assert status == "warn" and "fy machine stop && fy up" in detail
+
+
+def test_to_box_row_says_why_a_hypervisor_has_none(to_box_row, monkeypatch):
+    monkeypatch.setattr(devmode, "_BACKEND", _ToBoxBackend("krunkit", []))
+    ((status, _name, detail),) = devmode._to_box_check()
+    assert status == "ok" and "krunkit" in detail and "--file" in detail
+
+
+@pytest.mark.parametrize("backend", ["podman", "no vm"])
+def test_to_box_row_silent_on_podman_and_before_the_vm(to_box_row, monkeypatch, backend):
+    be = _ToBoxBackend(exists=backend != "no vm")
+    if backend == "podman":
+        be.name = "podman"
+    monkeypatch.setattr(devmode, "_BACKEND", be)
+    assert list(devmode._to_box_check()) == []

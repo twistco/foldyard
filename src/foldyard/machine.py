@@ -27,8 +27,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, guestlog, hostwall, monitor, podman_desktop, sandbox
-from .machine_backend import default_unavailable_block, get_backend
+from . import boxmounts, config, guestlog, hostwall, monitor, podman_desktop, sandbox
+from .machine_backend import Mount, default_unavailable_block, get_backend
 
 MACHINE = config.machine_name()
 BACKEND = get_backend(config.machine_backend())
@@ -42,16 +42,64 @@ def _resources() -> dict:
     return config.machine_resources()
 
 
-def _volumes(main: Path, wt_root: Path) -> list[tuple[str, str]]:
-    """The isolation mount set as ``(host, guest)`` pairs (host==guest path) — the ONLY
-    things the VM may see. REPLACES the backend's default mounts."""
-    return [(str(main), str(main)), (str(wt_root), str(wt_root))]
+def _volumes(main: Path, wt_root: Path, vmtype: str = "") -> list[Mount]:
+    """The isolation mount set (host==guest path) — the ONLY things the VM may see. REPLACES the
+    backend's default mounts. The checkout and the worktrees root, writable; on Lima also
+    foldyard's two directories (ADR-0033, :mod:`foldyard.boxmounts`): the from-box, writable, and
+    — only where ``vmtype`` has a share type that enforces read-only OUTSIDE the guest, which
+    :meth:`LimaBackend._set_expr` / :func:`_record_mounts` pin — the to-box, read-only. An
+    enforcing to-box or none: one the guest could write would read as tamper-proof. The podman
+    backend's set is unchanged (its mounts are fixed at `podman machine init`)."""
+    mounts = [Mount(str(main), str(main)), Mount(str(wt_root), str(wt_root))]
+    if BACKEND.name != "lima":
+        return mounts
+    from_box, to_box = str(boxmounts.from_box_dir()), str(boxmounts.to_box_dir())
+    mounts.append(Mount(from_box, from_box))
+    if boxmounts.mount_type_for(vmtype):
+        mounts.append(Mount(to_box, to_box, writable=False))
+    return mounts
 
 
 def guest_mounts(main: Path, wt_root: Path) -> list[str]:
-    """The GUEST paths of the isolation mount set — the only host paths `verify`'s mount audit
-    exempts (by exact mountpoint) when it reads the VM's real mount table."""
-    return [guest for _, guest in _volumes(main, wt_root)]
+    """The GUEST paths `verify`'s mount audit exempts (by exact mountpoint) when it reads the VM's
+    real mount table: the checkout, the worktrees root and — where they exist — foldyard's two
+    directories (:func:`boxmounts.vm_paths`; in the box, the paths `fy box up` baked)."""
+    return [str(main), str(wt_root), *(p for p in boxmounts.vm_paths() if p)]
+
+
+def to_box_unavailable() -> str | None:
+    """Why this project's VM has no to-box, or ``None`` when it has one (or will, at its next
+    `fy up`). For the tenants that offer it (`fy monitor hook add --to-box`)."""
+    if BACKEND.name != "lima":
+        return (
+            f"the {BACKEND.name} backend has no to-box: no provider enforces a read-only mount "
+            "outside the guest, and its mounts are fixed when the machine is created (the lima "
+            "backend has one)"
+        )
+    vmtype = BACKEND.vmtype(MACHINE) if exists() else BACKEND.resolve_vmtype()
+    if not boxmounts.mount_type_for(vmtype):
+        return (
+            f"this VM's hypervisor ({vmtype or 'Lima’s default'}) has no share type that enforces "
+            "read-only outside the guest — only vz (virtiofs) and qemu (9p) do"
+        )
+    return None
+
+
+def to_box_mounted() -> bool:
+    """Does the VM share the to-box read-only right now (its effective config)? What `fy box up`
+    asks before binding it into the box."""
+    if BACKEND.name != "lima":
+        return False
+    to_box = str(boxmounts.to_box_dir())
+    return Mount(to_box, to_box, writable=False) in (BACKEND.mount_set(MACHINE) or [])
+
+
+def from_box_mounted() -> bool:
+    """Does the VM share the from-box? (`fy box up` binds transcripts there only then.)"""
+    if BACKEND.name != "lima":
+        return False
+    from_box = str(boxmounts.from_box_dir())
+    return Mount(from_box, from_box) in (BACKEND.mount_set(MACHINE) or [])
 
 
 def running_machines() -> list[str]:
@@ -688,6 +736,93 @@ def _check_guest_provisioning() -> None:
     raise SystemExit(1)
 
 
+# ── foldyard's two directories (lima only): recorded on a stopped VM, refused stale if running ──
+#
+# Lima builds its shares from lima.yaml at every start (vz and qemu alike), and `limactl edit`
+# refuses a running instance — so adding ADR-0033's to-box and from-box applies on a RESTART, not
+# a recreate, and is recorded the way the boot provisioning is: on the stopped VM, before it
+# boots. A running VM that lacks them, or shares them differently (the to-box writable, the wrong
+# share type), is REFUSED — fail closed like stale provisioning; `fy machine stop && fy up` keeps
+# every volume. Only those two entries (and the pinned `mountType`) are compared and replaced: the
+# checkout and worktrees-root mounts are left as the VM was created (`fy machine recreate` is
+# still how those change — the drift warning in `ensure` says so), and a mount someone else added
+# is left alone (`fy verify` fails it if it exposes your computer). Read from the EFFECTIVE
+# config, so Lima's own `_config/override.yaml` widening the to-box (the most permissive
+# `writable` wins) or swapping its share type is caught here too, not only by `verify`.
+
+
+def _box_dir_paths() -> list[str]:
+    return [str(boxmounts.from_box_dir()), str(boxmounts.to_box_dir())]
+
+
+def _mounts_drift(main: Path, wt_root: Path) -> tuple[list[Mount], str, str] | None:
+    """``(foldyard's two mounts as wanted, the mountType wanted, what differs)`` when the VM's
+    effective config shares them differently; ``None`` when it matches or can't be read."""
+    vmtype = BACKEND.vmtype(MACHINE)
+    owned = set(_box_dir_paths())
+    want = [m for m in _volumes(main, wt_root, vmtype) if m.location in owned]
+    want_type = boxmounts.mount_type_for(vmtype)
+    have = BACKEND.mount_set(MACHINE)
+    if have is None:
+        return None
+    mine = sorted(m for m in have if m.location in owned or m.mount_point in owned)
+    problems = []
+    for m in sorted(want):
+        if m not in mine:
+            problems.append(f"{m.mount_point} ({'read-write' if m.writable else 'read-only'})")
+    for m in mine:
+        if m not in want:
+            problems.append(f"no {m.mount_point} ({'read-write' if m.writable else 'read-only'})")
+    have_type = BACKEND.mount_type(MACHINE)
+    if want_type and have_type != want_type:
+        problems.append(f"mountType {want_type}, not {have_type or 'unset'}")
+    return (want, want_type, "; ".join(problems)) if problems else None
+
+
+def _record_mounts(main: Path, wt_root: Path) -> None:
+    """Record foldyard's two directories in the (STOPPED) instance config when they differ; refuse
+    a RUNNING VM whose set is stale (see the section comment). Lima only: the podman backend's
+    mounts are fixed at `podman machine init`, and nothing about them changes."""
+    if BACKEND.name != "lima":
+        return
+    drift = _mounts_drift(main, wt_root)
+    if drift is None:
+        return
+    want, want_type, what = drift
+    if state() == "running":
+        _err(f"✗ '{MACHINE}' is running with a STALE mount set — it should share: {what}.")
+        _err("  These are foldyard's to-box and from-box (ADR-0033). Lima applies a mount set at")
+        _err("  start, so restart (containers and volumes are kept):")
+        _err("      fy machine stop && fy up")
+        raise SystemExit(1)
+    _err(f"▶ recording foldyard's to-box/from-box into '{MACHINE}' ({what})…")
+    if not BACKEND.set_mounts(MACHINE, want, want_type, _box_dir_paths()):
+        _err(f"✗ recording the mount set into '{MACHINE}' failed (`limactl edit`).")
+        raise SystemExit(1)
+    still = _mounts_drift(main, wt_root)
+    if still is not None:
+        _err(f"✗ '{MACHINE}''s mount set is still not foldyard's after recording it: {still[2]}.")
+        _err("  Lima's own config wins over the instance's — look for `mounts` / `mountType` in")
+        _err("  ~/.lima/_config/override.yaml (or default.yaml), remove them, then `fy up`.")
+        raise SystemExit(1)
+
+
+def _check_box_dirs(main: Path, wt_root: Path) -> None:
+    """Lima only: make foldyard's two directories, and refuse a state dir inside a writable mount
+    — a read-only to-box nested in the checkout stays writable through it."""
+    if BACKEND.name != "lima":
+        return
+    dirs = [boxmounts.to_box_dir(), boxmounts.from_box_dir()]
+    clash = boxmounts.nested(dirs, [main, wt_root])
+    if clash:
+        d, m = clash[0]
+        _err(f"✗ foldyard's {d.name} ({d}) overlaps the writable mount {m}: the state dir")
+        _err("  (FOLDYARD_STATE_DIR) must sit outside the checkout and the worktrees root, or the")
+        _err("  box could write what it may only read. Point it elsewhere, then `fy up`.")
+        raise SystemExit(1)
+    boxmounts.prepare()
+
+
 def ensure(main: Path, wt_root: Path) -> None:
     """Provision the rootless machine (mounts ONLY repo + worktrees root) if absent, start it
     if stopped. No-op inside the box (manages its host VM from outside). A missing backend CLI
@@ -712,10 +847,13 @@ def ensure(main: Path, wt_root: Path) -> None:
         _err(f"  Install it ({BACKEND.install_hint}) or name a different [machine].backend.")
         raise SystemExit(1)
     wt_root.mkdir(parents=True, exist_ok=True)
+    _check_box_dirs(main, wt_root)
     if not exists():
         _err(f"▶ {BACKEND.name} machine '{MACHINE}' not found — initialising (rootless; mounts")
-        _err(f"  ONLY {main} and {wt_root})…")
-        if not BACKEND.create(MACHINE, _resources(), _volumes(main, wt_root)):
+        extra = ", and foldyard's to-box + from-box" if BACKEND.name == "lima" else ""
+        _err(f"  ONLY {main} and {wt_root}{extra})…")
+        vols = _volumes(main, wt_root, BACKEND.resolve_vmtype())
+        if not BACKEND.create(MACHINE, _resources(), vols):
             _err(
                 f"✗ creating {BACKEND.name} machine '{MACHINE}' failed — see the output above. "
                 "(On macOS, a sandbox like nono can block Apple Virtualization: create it from a "
@@ -726,8 +864,9 @@ def ensure(main: Path, wt_root: Path) -> None:
         _err(f"⚠ machine '{MACHINE}' has no '{wt_root}' mount (created before worktree")
         _err("  support). The main stack still works; worktree stacks need it. To enable")
         _err("  worktrees, recreate once:  fy machine recreate")
-    # Boot provisioning (the sudo grant + the wall) is recorded BEFORE the VM boots — it is
-    # what runs as root at boot — and a running VM whose recording is stale is refused here.
+    # The mount set and the boot provisioning (the sudo grant + the wall) are recorded BEFORE the
+    # VM boots — Lima applies both at start — and a running VM with either stale is refused here.
+    _record_mounts(main, wt_root)
     _record_provisioning()
     _record_monitor()
     _record_proxy_propagation()
@@ -926,15 +1065,17 @@ def delete(assume_yes: bool = False) -> int:
 
 
 def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
-    """Stop + remove + re-create the machine so it mounts the worktrees root (VM mount sets
-    are init-only — neither podman's ``--volume`` nor Lima's ``mounts:`` can be edited live).
-    Interactive unless assume_yes."""
+    """Stop + remove + re-create the machine with foldyard's mount set. On the podman backend
+    that is the only way to change it (``podman machine set`` has no volume flag); Lima applies a
+    changed set at its next start (:func:`_record_mounts`), so there a recreate is for starting
+    over. Interactive unless assume_yes."""
     if config.in_box() or not BACKEND.available():
         print("✗ run on your computer — the box can't recreate its own machine")
         return 1
+    vols = _volumes(main, wt_root, BACKEND.resolve_vmtype())
     print(f"This stops + REMOVES {BACKEND.name} machine '{MACHINE}' and re-creates it with mounts:")
-    print(f"    {main}")
-    print(f"    {wt_root}")
+    for m in vols:
+        print(f"    {m.mount_point}" + ("" if m.writable else "   (read-only)"))
     print("Named volumes (pnpm/playwright caches, dev box login) live IN the machine and")
     print("will be lost — they rebuild on next 'fy up'. Stacks are recreated too.")
     if not assume_yes:
@@ -945,10 +1086,11 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
         if answer not in ("y", "Y"):
             print("Aborted.")
             return 0
+    _check_box_dirs(main, wt_root)
     BACKEND.stop(MACHINE)
     BACKEND.remove(MACHINE)
     wt_root.mkdir(parents=True, exist_ok=True)
-    if not BACKEND.create(MACHINE, _resources(), _volumes(main, wt_root)):
+    if not BACKEND.create(MACHINE, _resources(), vols):
         print(f"✗ creating {BACKEND.name} machine '{MACHINE}' failed.")
         return 1
     _record_provisioning()  # the fresh VM is stopped: record before its first boot
@@ -958,5 +1100,5 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
         return 1
     _check_host_wall()
     _check_guest_provisioning()
-    print(f"✓ machine '{MACHINE}' recreated with the worktrees mount.")
+    print(f"✓ machine '{MACHINE}' recreated with foldyard's mount set.")
     return 0

@@ -104,6 +104,17 @@ def _run(cmd: list[str], timeout: float | None = None) -> subprocess.CompletedPr
         return subprocess.CompletedProcess(cmd, 124, "", "")
 
 
+@dataclass(frozen=True, order=True)
+class Mount:
+    """One host directory shared into the VM: ``location`` on your computer at ``mount_point`` in
+    the guest (foldyard always uses the same path), writable or not. Whether ``writable=False`` is
+    enforced OUTSIDE the guest depends on the backend and its share type (ADR-0033)."""
+
+    location: str
+    mount_point: str
+    writable: bool = True
+
+
 @dataclass(frozen=True)
 class SshTarget:
     """A backend's ssh route into its guest: ``user@127.0.0.1:port`` with ``identity``."""
@@ -159,6 +170,33 @@ class Backend(ABC):
     def mounts(self, name: str) -> list[str]:
         """The VM's mount targets — for the worktrees-mount drift warning."""
 
+    def vmtype(self, name: str) -> str:
+        """The VM's hypervisor as the backend reports it (Lima's ``vmType``); ``""`` where there
+        is no such choice."""
+        return ""
+
+    def resolve_vmtype(self) -> str:
+        """The hypervisor a VM created now would get; ``""`` where there is no such choice."""
+        return ""
+
+    def mount_set(self, name: str) -> list[Mount] | None:
+        """The VM's EFFECTIVE mounts, writable flags included — what the backend will share at its
+        next start; ``None`` where they can't be read (or edited: podman-machine's are fixed at
+        init)."""
+        return None
+
+    def mount_type(self, name: str) -> str:
+        """The VM's effective share type (Lima's ``mountType``); ``""`` where there is none."""
+        return ""
+
+    def set_mounts(
+        self, name: str, mounts: list[Mount], mount_type: str, owned: Sequence[str]
+    ) -> bool:
+        """Record ``mounts`` as the VM's foldyard mounts (replacing every entry at an ``owned``
+        path, keeping any other) and pin ``mount_type`` when given — the VM must be stopped.
+        False where the backend's mount set can't be edited."""
+        return False
+
     def provision_id(self, name: str, marker: str = PROVISION_MARKER) -> str:
         """The id of foldyard's boot-provisioning script carrying ``marker`` as RECORDED in the
         VM's stored config (``""`` = none). Only a backend whose guest foldyard provisions at boot
@@ -213,8 +251,8 @@ class Backend(ABC):
         """Names of currently-running VMs of this backend."""
 
     @abstractmethod
-    def create(self, name: str, resources: dict, volumes: list[tuple[str, str]]) -> bool:
-        """Provision the VM (stopped) with the given sizing + ``(host, guest)`` mounts.
+    def create(self, name: str, resources: dict, volumes: list[Mount]) -> bool:
+        """Provision the VM (stopped) with the given sizing + mounts.
         Mounts REPLACE the backend's defaults so the VM sees ONLY what foldyard declares —
         the isolation property ``fy verify`` asserts."""
 
@@ -340,7 +378,7 @@ class PodmanBackend(Backend):
                 names.append(n.strip())
         return names
 
-    def create(self, name: str, resources: dict, volumes: list[tuple[str, str]]) -> bool:
+    def create(self, name: str, resources: dict, volumes: list[Mount]) -> bool:
         flags = [
             "--cpus",
             resources["cpus"],
@@ -350,8 +388,8 @@ class PodmanBackend(Backend):
             resources["disk"],
         ]
         vols: list[str] = []
-        for src, dst in volumes:
-            vols += ["--volume", f"{src}:{dst}"]  # --volume REPLACES podman's default mounts
+        for m in volumes:  # --volume REPLACES podman's default mounts
+            vols += ["--volume", f"{m.location}:{m.mount_point}" + ("" if m.writable else ":ro")]
         _err("  (one-time, a few minutes: downloads the VM image + provisions disk)")
         return subprocess.run(["podman", "machine", "init", name, *flags, *vols]).returncode == 0
 
@@ -528,6 +566,56 @@ class LimaBackend(Backend):
             return ""
         return "running" if str(inst.get("status", "")).lower() == "running" else "stopped"
 
+    def vmtype(self, name: str) -> str:
+        inst = self._instance(name)
+        return str(inst.get("vmType") or "") if inst else ""
+
+    def _config(self, name: str) -> dict | None:
+        """The instance's EFFECTIVE config as ``limactl list`` reports it — ``lima.yaml`` merged
+        with ``_config/default.yaml`` and ``override.yaml`` (where the most permissive ``writable``
+        wins) and Lima's defaults filled in. ``None`` when the instance can't be read."""
+        inst = self._instance(name)
+        cfg = inst.get("config") if inst else None
+        return cfg if isinstance(cfg, dict) else None
+
+    def mount_set(self, name: str) -> list[Mount] | None:
+        cfg = self._config(name)
+        if cfg is None:
+            return None
+        out = []
+        for m in cfg.get("mounts") or []:
+            if isinstance(m, dict) and isinstance(m.get("location"), str):
+                point = m.get("mountPoint") or m["location"]
+                out.append(Mount(m["location"], str(point), m.get("writable") is True))
+        return out
+
+    def mount_type(self, name: str) -> str:
+        cfg = self._config(name)
+        return str(cfg.get("mountType") or "") if cfg else ""
+
+    def set_mounts(
+        self, name: str, mounts: list[Mount], mount_type: str, owned: Sequence[str]
+    ) -> bool:
+        """``limactl edit --set`` on the STOPPED instance (``edit`` refuses a running one, and vz
+        and qemu both build their shares from ``lima.yaml`` at every start): every entry at an
+        ``owned`` path replaced by ``mounts``, any other kept as it is."""
+        keys = ("location", "mountPoint")
+        keep = " and ".join(f'(.{k} // "") != {json.dumps(p)}' for p in owned for k in keys)
+        kept = f"[(.mounts // [])[] | select({keep or 'true'})]"
+        expr = f".mounts = ({kept} + [{self._mounts_yq(mounts)}])"
+        if mount_type:
+            expr += f" | .mountType = {json.dumps(mount_type)}"
+        cmd = ["limactl", "edit", "--tty=false", name, "--set", expr]
+        return subprocess.run(cmd).returncode == 0
+
+    @staticmethod
+    def _mounts_yq(mounts: list[Mount]) -> str:
+        return ", ".join(
+            f'{{"location": {json.dumps(m.location)}, "mountPoint": {json.dumps(m.mount_point)}, '
+            f'"writable": {"true" if m.writable else "false"}}}'
+            for m in mounts
+        )
+
     def mounts(self, name: str) -> list[str]:
         """Lima records mounts in `~/.lima/<name>/lima.yaml`. `limactl list --json` doesn't
         surface them, so scan the config for `location:`/`mountPoint:` lines — a YAML parser
@@ -664,20 +752,19 @@ class LimaBackend(Backend):
         with. ``""`` when the host offers neither."""
         return next((v for v in self.VMTYPE_PREFERENCE if v in self.available_vmtypes()), "")
 
-    def _set_expr(self, resources: dict, volumes: list[tuple[str, str]], vmtype: str = "") -> str:
+    def _set_expr(self, resources: dict, volumes: list[Mount], vmtype: str = "") -> str:
         """A yq-style override expression for ``limactl create --set`` that pins sizing and
-        REPLACES the template's mounts with ONLY foldyard's (host==guest path, writable) — so
-        the VM sees nothing but the repo + worktrees root, matching podman's isolation.
+        REPLACES the template's mounts with ONLY foldyard's (host==guest path, each with its
+        writable flag) — so the VM sees nothing but the repo, the worktrees root and foldyard's
+        two directories (ADR-0033). The ``mountType`` is pinned with the vmType where one enforces
+        read-only outside the guest (vz → virtiofs, qemu → 9p), so a Lima default change can't
+        silently downgrade the to-box.
 
         Memory is emitted in MiB VERBATIM (never converted to a rounded GiB string): a
         two-decimal GiB like ``"3.91GiB"`` is not a whole number of MiB, and macOS
         Virtualization.framework hard-rejects it at every boot with ``“memorySize” is not a
         multiple of 1 megabyte`` — bricking the created VM until it's deleted."""
-        mounts = ", ".join(
-            f'{{"location": {json.dumps(str(src))}, '
-            f'"mountPoint": {json.dumps(str(dst))}, "writable": true}}'
-            for src, dst in volumes
-        )
+        mounts = self._mounts_yq(volumes)
         expr = (
             f".cpus = {int(resources['cpus'])} "
             f'| .memory = "{self._memory_mib(resources["memory"])}MiB" '
@@ -686,9 +773,15 @@ class LimaBackend(Backend):
         )
         # Only when resolved: an empty `.vmType = ""` would OVERRIDE Lima's own default with a
         # value it can't parse, which is worse than not pinning.
-        return f'{expr} | .vmType = "{vmtype}"' if vmtype else expr
+        if not vmtype:
+            return expr
+        from .boxmounts import mount_type_for
 
-    def create(self, name: str, resources: dict, volumes: list[tuple[str, str]]) -> bool:
+        expr += f' | .vmType = "{vmtype}"'
+        mount_type = mount_type_for(vmtype)
+        return f'{expr} | .mountType = "{mount_type}"' if mount_type else expr
+
+    def create(self, name: str, resources: dict, volumes: list[Mount]) -> bool:
         """Create (stopped): a CLONE of the baked base VM when one fits (:mod:`foldyard.basevm` —
         seconds, no image download, no dnf), else from the podman template. The clone gets the
         same ``--set`` the template path would (sizing, ONLY foldyard's mounts, the vmType), so
@@ -720,7 +813,7 @@ class LimaBackend(Backend):
     TEMPLATE = "template://podman"
 
     def create_template(
-        self, name: str, resources: dict, volumes: list[tuple[str, str]], vmtype: str
+        self, name: str, resources: dict, volumes: list[Mount], vmtype: str
     ) -> bool:
         """Create (stopped) from the podman template, overriding sizing + mounts + the vmType via
         ``--set``. Keeps the template's podman provisioning + socket forward; ``--tty=false``

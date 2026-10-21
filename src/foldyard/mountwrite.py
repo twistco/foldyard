@@ -51,6 +51,31 @@ def write(root: Path, rel: str | Path, data: bytes) -> None:
         os.close(dfd)
 
 
+def makedirs(root: Path, rel: str | Path, mode: int = 0o700) -> None:
+    """Make the directory ``root/rel`` and every missing one between, following no symlink below
+    ``root``: the directory-only twin of :func:`write`, for host-made dirs in a box-writable tree
+    (ADR-0033's from-box slots). Each component is created under its parent's fd and opened
+    ``O_NOFOLLOW | O_DIRECTORY``, so a link the box planted anywhere on the way refuses the walk
+    (``OSError``: ``ELOOP``/``ENOTDIR``) instead of creating directories wherever it points —
+    which ``Path.mkdir(parents=True)`` would. ``root``'s own last component is not followed
+    either. Raises ``ValueError`` for a ``rel`` that isn't a plain relative path."""
+    parts = Path(rel).parts
+    if not parts or Path(rel).is_absolute() or ".." in parts:
+        raise ValueError(f"{rel!r} is not a path inside {root}")
+    dfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts:
+            try:
+                os.mkdir(part, mode, dir_fd=dfd)
+            except FileExistsError:
+                pass
+            sub = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            os.close(dfd)
+            dfd = sub
+    finally:
+        os.close(dfd)
+
+
 def write_file(path: Path, data: bytes, within: Path | None = None) -> None:
     """:func:`write` for a full ``path``: walked from ``within`` when it lies under it (so every
     directory in between is checked), else from its own parent."""
