@@ -217,16 +217,18 @@ One VM restart on Lima, nothing else.
 
 ## Outbox content is box-written: how the host reads it
 
-Treat everything in the outbox like a request body from the box. Today's reader is
-`rsync -rtu --no-perms` (`transcripts.py:79`, `:82-104`):
+Treat everything in the outbox like a request body from the box. The reader this needs already
+exists: #109 replaced the transcript sync's `rsync -rtu --no-perms` with a no-follow walk by
+directory fd (`transcripts._open_source`, `_mirror`). The outbox reuses it with the outbox root as
+the anchor, so the outbox adds no new reader:
 
-| hazard | today (`rsync -rtu` of the bound-out dir) | required of an outbox reader |
+| hazard | before #109 (`rsync -rtu` of the bound-out dir) | #109's walk, which the outbox reader keeps |
 | --- | --- | --- |
-| symlinked file | skipped (no `-l`: "non-regular file") | skip — keep |
-| symlinked **directory on the path** (`…/claude` → `~/.ssh`) | **followed**: rsync opens `src/` through it and copies the target into `~/.claude/projects` | walk with `O_NOFOLLOW \| O_DIRECTORY` from the outbox root (a reading twin of `mountwrite`) |
-| FIFO / device | skipped (no `-D`) | `open(O_NONBLOCK)` + `fstat` `S_ISREG`, else skip (a FIFO blocks a plain open) |
+| symlinked file | skipped (no `-l`: "non-regular file") | skipped |
+| symlinked **directory on the path** (`…/claude` → `~/.ssh`) | **followed**: rsync opened `src/` through it and copied the target into `~/.claude/projects` | every component opened `O_NOFOLLOW \| O_DIRECTORY` relative to its parent's fd, from the anchor down; a link is refused, however late it is swapped in |
+| FIFO / device | skipped (no `-D`) | opened `O_NONBLOCK`, re-checked with `fstat` `S_ISREG`, else skipped (a FIFO blocks a plain open) |
 | hardlink | n/a | can't cross the mount; harmless |
-| size | unbounded | per-file and per-pass caps; a file over the cap is skipped and reported, never truncated silently |
+| size | unbounded | a per-file cap (`MAX_FILE_BYTES`) and a free-space floor (`MIN_FREE_BYTES`); a file over the cap is skipped and reported, never truncated silently |
 | content | copied into `~/.claude/projects`, which a HOST `claude --resume` loads | unchanged by this ADR, but say it: resuming a box session on the host feeds box-written text to a host-privileged agent |
 
 Disk exhaustion is unchanged: the box can already fill the host disk through the checkout.
@@ -288,8 +290,8 @@ Disk exhaustion is unchanged: the box can already fill the host disk through the
    inbox, `monitor.py:60`, ADR-0032). Keep inbox/outbox (the box's point of view) and rename
    that one, or pick `to-box/` / `from-box/`?
 3. **How long do the legacy transcript paths live?** Proposed: one release of dual reading.
-   (The symlink-following transcript sync this ADR flagged is being fixed on its own, ahead of
-   the outbox.)
+   (The symlink-following transcript sync this ADR flagged was fixed on its own, ahead of the
+   outbox, in #109.)
 
 ## The vz test (2026-10-21)
 
