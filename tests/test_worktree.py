@@ -4,6 +4,7 @@ touches a real repo; we assert the right git invocations and the config-driven i
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -330,6 +331,9 @@ def test_add_refuses_multi_component_name(fake_main, name):
         ("a/b/c", "", "fy worktree add a-b-c a/b/c"),
         # An explicit branch is kept as given; only the dir name is suggested.
         ("feat/x", "other", "fy worktree add feat-x other"),
+        # The suggested branch is the name's parts rejoined, so stray slashes don't carry over.
+        ("a/b/", "", "fy worktree add a-b a/b"),
+        ("a//b", "", "fy worktree add a-b a/b"),
     ],
 )
 def test_add_suggests_a_dir_name_for_a_branch_shaped_name(fake_main, capsys, name, branch, hint):
@@ -343,6 +347,50 @@ def test_add_suggests_nothing_for_a_name_that_is_not_branch_shaped(fake_main, ca
     # Absolute or dot-segment names aren't a mistyped branch; a dashed rewrite would be nonsense.
     assert worktree.add(name) == 1
     assert "did you mean" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("name", "branch"),
+    [("a/b.lock", ""), ("a b/c", ""), ("x/~y", ""), ("a/.b", ""), ("feat/x", "bad..branch")],
+)
+def test_add_suggests_nothing_git_would_refuse_as_a_branch(fake_main, capsys, name, branch):
+    # A hint that names a branch git rejects can't succeed: say only what was wrong.
+    assert worktree.add(name, branch) == 1
+    err = capsys.readouterr().err
+    assert "must be a single relative path component" in err
+    assert "did you mean" not in err
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "sec/x",
+        "a/b/c",
+        "wt/x",
+        "a@b",
+        "a/-b",
+        "ä/ü",
+        "a//b",
+        "a/b/",
+        "a/b.lock",
+        "a b",
+        "a~b",
+        "a..b",
+        "a@{b",
+        "-a",
+        "a.",
+        ".a",
+        "a/.",
+        "x\x01y",
+        "a\\b",
+        "a[b",
+        "a:b",
+    ],
+)
+def test_branch_name_check_agrees_with_git(name):
+    # The hint's gate is git's own rule, checked in-process: pinned here against the real thing.
+    git = subprocess.run(["git", "check-ref-format", "--branch", name], capture_output=True)
+    assert worktree._branch_name_ok(name) is (git.returncode == 0)
 
 
 def _init_hook(monkeypatch, main, *, image: bool = True):
