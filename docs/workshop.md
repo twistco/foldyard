@@ -58,13 +58,13 @@ brew upgrade lima podman        # if you already had them: foldyard needs Lima 2
 ```bash
 # Ubuntu / Debian
 sudo apt-get update && sudo apt-get install -y \
-  qemu-system-x86 qemu-utils ovmf podman git curl openssh-client rsync lsof
+  qemu-system-x86 qemu-utils ovmf podman git curl openssh-client lsof
 
 # Fedora
-sudo dnf install -y qemu-system-x86-core qemu-img edk2-ovmf podman git openssh-clients rsync lsof
+sudo dnf install -y qemu-system-x86-core qemu-img edk2-ovmf podman git openssh-clients lsof
 
 # Arch
-sudo pacman -S --needed qemu-system-x86 qemu-img edk2-ovmf podman git openssh rsync lsof
+sudo pacman -S --needed qemu-system-x86 qemu-img edk2-ovmf podman git openssh lsof
 ```
 
 Then, on any of them: Lima (2.2.0 is the version foldyard's CI tests), uv, access to KVM (the

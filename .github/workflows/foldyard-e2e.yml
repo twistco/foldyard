@@ -389,10 +389,9 @@ jobs:
           echo "✓ /dev/kvm present, systemd up, env forwarded (workspace at $GITHUB_WORKSPACE)"
 
       # The Linux job's set, plus what the runner image has and a bare rootfs does not: git,
-      # ssh (Lima), rsync (`worktree remove` archives transcripts), lsof + iproute2 (the port
-      # probes), sudo (the host wall's `nft`). Lima from the release tarball; uv into
-      # /usr/local/bin (an unmanaged install, so it is on every user's PATH — the wrapper's
-      # shell is `--noprofile --norc`, so ~/.local/bin would not be).
+      # ssh (Lima), lsof + iproute2 (the port probes), sudo (the host wall's `nft`). Lima from
+      # the release tarball; uv into /usr/local/bin (an unmanaged install, so it is on every
+      # user's PATH — the wrapper's shell is `--noprofile --norc`, so ~/.local/bin would not be).
       - name: Packages (QEMU, podman CLI, nftables) + Lima + uv
         shell: wsl-bash {0}
         run: |
@@ -400,7 +399,7 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends \
             ovmf qemu-system-x86 qemu-utils podman uidmap slirp4netns nftables jq \
-            git openssh-client curl ca-certificates rsync lsof iproute2 sudo
+            git openssh-client curl ca-certificates lsof iproute2 sudo
           url="https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz"
           curl -fsSL "$url" | tar Cxz /usr/local
           curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
