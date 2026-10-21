@@ -2688,6 +2688,24 @@ def test_the_status_hint_never_runs_anything_in_the_box(fake, monkeypatch):
     assert not [c for c in fake["calls"] if c[1] in ("exec", "run")]  # …and ran nothing in one
 
 
+def test_the_status_check_compares_a_pinned_time_locale(fake, monkeypatch):
+    # An unpinned LC_TIME needs the image's locales, so the status path (no probe) leaves it out;
+    # a `[box].env` pin is passed whatever the image has, so `fy state` judges it — as drift.
+    from foldyard import devmode
+
+    pinned = config.box_env()
+    monkeypatch.setattr(config, "box_env", lambda: {**pinned, "LC_TIME": "en_GB.UTF-8"})
+    _create_then_run(fake)
+    monkeypatch.setattr(config, "box_env", lambda: {**pinned, "LC_TIME": "en_US.UTF-8"})
+    monkeypatch.setattr(config, "engine", lambda: "podman")
+    monkeypatch.setattr(devmode, "in_box", lambda: False)
+    monkeypatch.setattr(devmode, "_engine_env", lambda: dict(fake["ctx"].env))
+    monkeypatch.setattr(devmode, "read", lambda *a, **k: {"mode": {}})
+    monkeypatch.setattr(devmode, "derive_env", lambda mode: {})
+    drift = devmode._box_env_drift(project="tangible-podman")
+    assert [(str(d), d.advisory) for d in drift] == [("LC_TIME: en_GB.UTF-8 → en_US.UTF-8", False)]
+
+
 def test_the_drift_check_is_silent_when_the_box_cannot_be_read(fake, capsys):
     fake["state"]["running"] = True  # box_config_env None: the inspect fails
     assert box.main("up") == 0

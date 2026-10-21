@@ -730,11 +730,12 @@ def env_drift(
     ``host_facts`` False leaves out what only your computer knows (:data:`_HOST_FACTS`) for a
     check run in the box. ``quiet_plugins``: plugins whose names a dedicated row already reported.
 
-    ``LC_TIME`` depends on the locales the IMAGE has, so only the image can judge it — never the
-    running box, which may have gained one since and would then read "missing" for good (a
-    recreate probes the image again). ``ask_image`` (`fy box up`) runs the create's own probe
-    against the box's image id; without it (`fy mode`, `fy state`, every TUI refresh — no
-    container start, no exec) ``LC_TIME`` is left out, as it is when the probe can't answer.
+    ``LC_TIME`` from your computer depends on the locales the IMAGE has, so only the image can
+    judge it — never the running box, which may have gained one since and would then read
+    "missing" for good (a recreate probes the image again). ``ask_image`` (`fy box up`) runs the
+    create's own probe against the box's image id; without it (`fy mode`, `fy state`, every TUI
+    refresh — no container start, no exec) ``LC_TIME`` is left out, as it is when the probe can't
+    answer. A ``[box].env`` pin of it is passed whatever the image has, so it is always judged.
     """
 
     def run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -761,17 +762,21 @@ def env_drift(
         except ValueError:
             image_env = None
     box_home = _box_home_from(mounts, baked)
-    ignore = set() if host_facts else set(_HOST_FACTS)
+    # A `[box].env` pin is config, not your computer's: passed whatever the image has, so it is
+    # judged on every path (and never advisory — see the return).
+    pinned = config.box_env().keys()
+    ignore = set() if host_facts else set(_HOST_FACTS - pinned)
     locales: list[str] = []
     if not ask_image:
-        ignore.add("LC_TIME")
+        ignore |= {"LC_TIME"} - pinned
     elif host_facts and hostclock.time_locale():
         try:
             probed = run(_image_probe_cmd(engine, image.strip())) if image.strip() else None
         except (OSError, subprocess.SubprocessError):
             probed = None
         if probed is None or probed.returncode != 0:
-            ignore.add("LC_TIME")  # unknown is not "none": that would read a baked one as stale
+            # unknown is not "none": that would read a baked one as stale
+            ignore |= {"LC_TIME"} - pinned
         else:
             locales = _parse_image_probe(probed.stdout)[2]
 
@@ -819,7 +824,7 @@ def env_drift(
         baked,
         image_env=image_env if complete else None,
         ignore=ignore,
-        advisory=_DRIFT_ADVISORY - config.box_env().keys(),  # a `[box].env` pin is config
+        advisory=_DRIFT_ADVISORY - pinned,
     )
 
 
