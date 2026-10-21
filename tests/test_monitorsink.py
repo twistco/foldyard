@@ -261,7 +261,7 @@ def test_a_skipped_seq_fails_even_with_an_intact_chain():
     # the hook's history says it is.
     lines, macs = _file(1)
     jump, mac3 = ms.signed_line(KEY, _body(n=3), 3, macs[0])
-    _fails(lines[0] + jump, 2, "seq", (3, mac3))
+    _fails(lines[0] + jump, 2, "seq 3 where 2 was due", (3, mac3))
 
 
 def test_a_re_sent_seq_must_chain_from_the_same_line():
