@@ -403,8 +403,9 @@ def test_when_reads_iso_times_as_utc_and_spans_back_from_now():
     now = 1_792_620_000.0  # 2026-10-21T22:00:00Z
     assert monitorlog.when("90m", now=now) == "2026-10-21T20:30:00.000000000Z"
     assert monitorlog.when("1d", now=now) == "2026-10-20T22:00:00.000000000Z"
-    with pytest.raises(ValueError):
-        monitorlog.when("yesterday")
+    for nonsense in ("yesterday", "99999999999d"):
+        with pytest.raises(ValueError):
+            monitorlog.when(nonsense)
 
 
 def _at(e: dict, t: str) -> dict:

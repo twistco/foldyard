@@ -541,8 +541,11 @@ def when(text: str, now: float | None = None) -> str:
     ``2h``, ``1d``. :class:`ValueError` for anything else."""
     m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhd])\s*", text)
     if m:
-        back = timedelta(seconds=float(m[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m[2]])
-        t = datetime.fromtimestamp(time.time() if now is None else now, UTC) - back
+        try:
+            back = timedelta(seconds=float(m[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m[2]])
+            t = datetime.fromtimestamp(time.time() if now is None else now, UTC) - back
+        except OverflowError:
+            raise ValueError(f"{text}: further back than a date can go") from None
     else:
         t = datetime.fromisoformat(text.strip())
         t = (t if t.tzinfo else t.replace(tzinfo=UTC)).astimezone(UTC)

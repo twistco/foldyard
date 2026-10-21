@@ -54,6 +54,19 @@ LEGACY = "legacy"  # an older foldyard's live segment (no first line naming it) 
 _CLAIMS_KEPT = 10_000  # engine claims, newest first (containers ever described)
 _ORPHANS_KEPT = 64  # snapshots kept from segments already gone (the newest per boot)
 _SCHEMA = 2
+_SCHEMA_SQL = (
+    "DROP TABLE IF EXISTS seg",
+    "DROP TABLE IF EXISTS snap",
+    "DROP TABLE IF EXISTS claim",
+    "DROP TABLE IF EXISTS span",
+    "CREATE TABLE seg (id TEXT PRIMARY KEY, indexed INTEGER NOT NULL, sealed INTEGER NOT NULL, "
+    "t0 TEXT NOT NULL, t1 TEXT NOT NULL)",
+    "CREATE TABLE snap (boot TEXT NOT NULL, seq INTEGER NOT NULL, seg TEXT NOT NULL, "
+    "rec TEXT NOT NULL, PRIMARY KEY (boot, seq))",
+    "CREATE TABLE claim (cid TEXT PRIMARY KEY, meta TEXT NOT NULL, n INTEGER NOT NULL)",
+    "CREATE TABLE span (seg TEXT NOT NULL, boot TEXT NOT NULL, lo INTEGER NOT NULL, "
+    "hi INTEGER NOT NULL, PRIMARY KEY (seg, boot))",
+)
 
 
 def store_dir() -> Path:
@@ -439,7 +452,11 @@ class Catalogue:
         for attempt in (1, 2):
             try:
                 return cls._connect(path)
+            except sqlite3.OperationalError:
+                raise  # locked or busy, not broken: the caller does without it this time
             except sqlite3.DatabaseError:
+                # corrupt ("file is not a database"): never for a lock — other connections hold
+                # these files open, and the snapshots kept from removed segments can't be rebuilt
                 if attempt == 2:
                     raise
                 for p in (
@@ -466,27 +483,18 @@ class Catalogue:
             except sqlite3.OperationalError:
                 pass  # a filesystem without shared memory: the default journal works too
             (version,) = conn.execute("PRAGMA user_version").fetchone()
-            if version != _SCHEMA:
-                conn.executescript(
-                    "DROP TABLE IF EXISTS seg; DROP TABLE IF EXISTS snap; "
-                    "DROP TABLE IF EXISTS claim; DROP TABLE IF EXISTS span;"
-                )
-            conn.executescript(
-                f"""
-                CREATE TABLE IF NOT EXISTS seg (
-                    id TEXT PRIMARY KEY, indexed INTEGER NOT NULL, sealed INTEGER NOT NULL,
-                    t0 TEXT NOT NULL, t1 TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS snap (
-                    boot TEXT NOT NULL, seq INTEGER NOT NULL, seg TEXT NOT NULL, rec TEXT NOT NULL,
-                    PRIMARY KEY (boot, seq));
-                CREATE TABLE IF NOT EXISTS claim (
-                    cid TEXT PRIMARY KEY, meta TEXT NOT NULL, n INTEGER NOT NULL);
-                CREATE TABLE IF NOT EXISTS span (
-                    seg TEXT NOT NULL, boot TEXT NOT NULL, lo INTEGER NOT NULL, hi INTEGER NOT NULL,
-                    PRIMARY KEY (seg, boot));
-                PRAGMA user_version = {_SCHEMA};
-                """
-            )
+            if version != _SCHEMA:  # a reader of an up-to-date catalogue takes no write lock
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    (version,) = conn.execute("PRAGMA user_version").fetchone()
+                    if version != _SCHEMA:  # another opener may have just made it
+                        for statement in _SCHEMA_SQL:
+                            conn.execute(statement)
+                        conn.execute(f"PRAGMA user_version = {_SCHEMA}")
+                    conn.execute("COMMIT")
+                except BaseException:
+                    conn.execute("ROLLBACK")
+                    raise
         except BaseException:
             conn.close()
             raise
@@ -602,7 +610,11 @@ class Catalogue:
             # or removed it): older than every segment listed, or an older foldyard's live file
             # under a name it no longer has. Never anything newer — a reader's listing can be a
             # moment behind the writer's next segment.
-            here, oldest = {s.id for s in segs}, min(s.id for s in segs)
+            # (only below the oldest SEALED one: a live segment sealed between the listing and
+            # the read of the new live file's first line is missing from the listing, and is
+            # older than that new one)
+            here = {s.id for s in segs}
+            oldest = min((s.id for s in segs if not s.live), default="")
             gone = [
                 sid for sid in known if sid not in here and (sid.startswith(LEGACY) or sid < oldest)
             ]

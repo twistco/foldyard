@@ -178,3 +178,27 @@ def test_an_older_supervisor_rotating_under_a_newer_reader_leaves_nothing_uninde
         assert not any(
             sid.startswith(ms.LEGACY) for sid in cat.bounds() if sid != ms.segments()[-1].id
         )
+
+
+def test_a_locked_catalogue_is_done_without_never_wiped(state, monkeypatch):
+    ms.append([snap(0), ev(1)])
+    marker = ms.index_path().stat().st_ino
+
+    def locked(cls, path):
+        raise ms.sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ms.Catalogue, "_connect", classmethod(locked))
+    assert ms.Catalogue.open_or_none() is None
+    assert ms.index_path().stat().st_ino == marker  # still the same file
+
+
+def test_a_segment_sealed_under_a_readers_listing_isnt_forgotten(state, monkeypatch):
+    # the listing caught the directory before the seal's rename and the new live file after:
+    # the just-sealed segment is missing from it, and older than everything it shows
+    ms.append([snap(0), ev(1)])
+    (sealed,) = ms.segments()
+    later = ms.Segment(sealed.id + "z", ms.live_path(), live=True)
+    monkeypatch.setattr(ms, "segments", lambda: [later])
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+        assert sealed.id in cat.bounds() and _seq(cat.before(BOOT, 1)) == 0
