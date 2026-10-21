@@ -498,9 +498,10 @@ Every kind takes:
   one: the box's environment is fixed when it's created, so run `fy box down && fy box up`.
   `fy box up` on a running box and `fy mode` name a dummy the box lacks, or one it still holds
   after its row is gone (that one would shadow a real login made in the box). `fy verify` checks
-  each still holds its dummy (anything else is a possible real credential in the box). A name foldyard sets in the box itself (`FY_*`,
-  `FOLDYARD_*`, the proxy and CA variables, `CONTAINER_HOST`, `DOCKER_HOST`, …) is refused, and
-  two rows can't give one name different dummies. While the switch is off, the proxy answers a
+  each still holds its dummy (anything else is a possible real credential in the box). A name
+  foldyard sets in the box itself (`FY_*`, `FOLDYARD_*`, the proxy and CA variables,
+  `CONTAINER_HOST`, `DOCKER_HOST`, …) is refused, and two rows can't give one name different
+  dummies. While the switch is off, the proxy answers a
   request that carries the dummy where the row would inject (its host, `path_prefix`, and header
   or `query_param`) with a 401 whose JSON `message` names the switch and the command that turns
   it on, instead of sending the dummy upstream. In a header the dummy may stand alone or follow
