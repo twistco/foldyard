@@ -5,8 +5,12 @@
 #
 #   .claude/skills/cloud-host/setup.sh [operator] [foldyard checkout]
 #
-# Afterwards:  /home/<operator>/.fy-cloud/run 'cd ~/<project> && fy box up'
-#              /home/<operator>/.fy-cloud/box <machine> 'fy verify'
+# Afterwards:  /opt/fy-cloud/<operator>/run 'cd ~/<project> && fy box up'
+#              /opt/fy-cloud/<operator>/box <machine> 'fy verify'
+#
+# Root writes only under /opt/fy-cloud (root-owned) and a fresh mktemp dir. Everything in the
+# operator's home is written AS the operator: on a rerun, root following a symlink the operator
+# planted there would let it overwrite or take ownership of any file.
 set -euo pipefail
 OP=${1:-fyhost}
 SRC=${2:-$(cd "$(dirname "$0")/../../.." && pwd)}
@@ -24,20 +28,16 @@ apt-get install -y -qq --no-install-recommends \
 echo "▶ operator '$OP' (Lima refuses to run as root)"
 id "$OP" >/dev/null 2>&1 || useradd -m -s /bin/bash "$OP"
 H=$(getent passwd "$OP" | cut -d: -f6)
-D=$H/.fy-cloud
-install -d -o "$OP" -g "$OP" "$D" "$H/.local" "$H/.local/bin" "$H/.mitmproxy"
+D=/opt/fy-cloud/$OP
+install -d -m 0755 /opt/fy-cloud "$D"
 
 # The session's egress proxy re-signs ALL TLS — even "direct" connections — with its own CA. Copy
 # the bundle where the operator can read it; never into the system store.
 if [ -f "$CA_SRC" ]; then
-    install -o "$OP" -m 0644 "$CA_SRC" "$D/ca.crt"
+    install -m 0644 "$CA_SRC" "$D/ca.crt"
 else
-    install -o "$OP" -m 0644 /etc/ssl/certs/ca-certificates.crt "$D/ca.crt"
+    install -m 0644 /etc/ssl/certs/ca-certificates.crt "$D/ca.crt"
 fi
-# mitmdump (foldyard's egress proxy) verifies upstream with certifi, so without this every
-# decrypted host answers the box 502. Its default confdir is the one foldyard launches it with.
-printf 'ssl_verify_upstream_trusted_ca: %s\n' "$D/ca.crt" >"$H/.mitmproxy/config.yaml"
-chown "$OP:$OP" "$H/.mitmproxy/config.yaml"
 
 # The operator's whole environment. No *_PROXY: Lima copies those into the guest
 # (propagateProxyEnv), where they override the wall's proxy and the VM firewall refuses the pulls.
@@ -49,11 +49,13 @@ export GIT_SSL_CAINFO=$D/ca.crt NODE_EXTRA_CA_CERTS=$D/ca.crt
 export XDG_RUNTIME_DIR=/tmp/$OP-run
 mkdir -p "\$XDG_RUNTIME_DIR" && chmod 700 "\$XDG_RUNTIME_DIR"
 EOF
-# run: a command as the operator, from an EMPTY environment (`su` without `-` would carry root's
-# — tokens, cloud keys, the session proxy — into the supervisor and everything it starts).
+# run: a command as the operator, from an EMPTY environment. `su` without `-` keeps the caller's —
+# tokens, cloud keys, the session proxy, a BASH_ENV its shell would source — so root's is dropped
+# before `su`, not after: the operator's shell never sees it, nor does the supervisor it starts.
 cat >"$D/run" <<EOF
 #!/bin/bash
-[ "\$(id -un)" = "$OP" ] || exec su "$OP" -s /bin/bash -c "$D/run \$(printf '%q ' "\$@")"
+[ "\$(id -un)" = "$OP" ] || exec env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \\
+    su "$OP" -s /bin/bash -c "$D/run \$(printf '%q ' "\$@")"
 exec env -i bash -c '. $D/env; cd ~; eval "\$1"' _ "\$*"
 EOF
 # box: a command inside the running dev box, non-interactively (`fy box shell` needs a TTY). The
@@ -63,7 +65,11 @@ cat >"$D/box" <<EOF
 VM=\${1:?usage: box <machine> <command…>}; shift
 exec $D/run "limactl shell --workdir / \$VM podman exec -i \${FY_BOX:-\$VM-devbox} bash -lc \$(printf %q "\$*")"
 EOF
-chown "$OP:$OP" "$D"/*; chmod 0755 "$D/run" "$D/box"
+chmod 0644 "$D/env"; chmod 0755 "$D/run" "$D/box"
+
+# mitmdump (foldyard's egress proxy) verifies upstream with certifi, so without this every
+# decrypted host answers the box 502. Its default confdir is the one foldyard launches it with.
+"$D/run" "mkdir -p ~/.local/bin ~/.mitmproxy && printf 'ssl_verify_upstream_trusted_ca: %s\n' $D/ca.crt >~/.mitmproxy/config.yaml"
 
 # Prove the bundle, don't assume it: the system fallback above lacks the session's CA wherever the
 # egress is intercepted, and then mitmdump answers 502 and every operator fetch fails to verify.
@@ -78,22 +84,28 @@ fi
 echo "▶ Lima $LIMA_VERSION → $H/.local"
 if ! [ -x "$H/.local/bin/limactl" ] || ! "$D/run" "limactl --version" | grep -q "$LIMA_VERSION"; then
     url=https://github.com/lima-vm/lima/releases/download/v$LIMA_VERSION/lima-$LIMA_VERSION-Linux-x86_64.tar.gz
-    curl -fsSL "$url" | tar -C "$H/.local" -xzf -
-    chown -R "$OP:$OP" "$H/.local"
+    "$D/run" "curl -fsSL $url | tar -C ~/.local -xzf -"
 fi
 
 echo "▶ uv + foldyard (editable, from a clone of $SRC)"
 if ! [ -x "$H/.local/bin/uv" ]; then
     if command -v uv >/dev/null; then
-        install -o "$OP" -m 0755 "$(command -v uv)" "$H/.local/bin/uv"
+        install -m 0755 "$(command -v uv)" "$D/uv" # root's may sit where the operator can't read
+        "$D/run" "install -m 0755 $D/uv ~/.local/bin/uv"; rm -f "$D/uv"
     else
         "$D/run" "curl -LsSf https://astral.sh/uv/install.sh | sh"
     fi
 fi
-# --no-local: a local clone HARD-LINKS the source's objects, and the chown below would then hand
-# them, in the source checkout too, to the operator.
-[ -d "$H/foldyard/.git" ] || git clone --no-local -q "$SRC" "$H/foldyard"
-chown -R "$OP:$OP" "$H/foldyard"
+# Root clones (the operator may not be able to read $SRC) into a dir only root can reach, hands
+# the clone over, and the operator moves it home. --no-local: a local clone HARD-LINKS the
+# source's objects, and the chown would then hand them, in the source checkout too, to the operator.
+if ! [ -d "$H/foldyard/.git" ]; then
+    T=$(mktemp -d)
+    git clone --no-local -q "$SRC" "$T/foldyard"
+    chown -R "$OP:$OP" "$T"
+    "$D/run" "mv $T/foldyard ~/foldyard"
+    rm -rf "$T"
+fi
 "$D/run" "git config --global --add safe.directory '*'; cd ~/foldyard && uv tool install -q --force --editable ."
 
 echo "▶ fy prereq (expect ✗ KVM and ⚠ systemd --user here — see SKILL.md)"

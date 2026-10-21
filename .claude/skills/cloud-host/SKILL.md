@@ -15,12 +15,14 @@ handled by `setup.sh`.
 
 ```bash
 .claude/skills/cloud-host/setup.sh            # operator `fyhost`, foldyard from this checkout
-O=/home/fyhost/.fy-cloud
+O=/opt/fy-cloud/fyhost
 $O/run 'git clone <project> ~/proj && cd ~/proj && fy init && fy config adopt'
 ```
 
 `setup.sh` (root, idempotent) installs QEMU/OVMF/`qemu-img`/podman/`ssh`, creates the operator,
-puts Lima 2.2.0 and an editable foldyard on its PATH, and writes two wrappers:
+puts Lima 2.2.0 and an editable foldyard on its PATH, and writes two wrappers into `$O`. `$O` is
+root-owned, outside the operator's home. Everything in that home is written as the operator, so
+a rerun as root never follows a symlink the operator could have planted there:
 
 - **`$O/run '<command>'`** runs as the operator from an EMPTY environment plus `$O/env`. Use it
   for every `fy`/`limactl` call. `run` starts in the operator's home, so `cd` into the project
@@ -36,9 +38,10 @@ The project must live in the operator's home: the VM mounts only the checkout, a
   shell rc files to set it up: the session's auto-mode reviewer refuses both as persistence.
   The env file and wrappers do the same job per command.
 - **`su` without `-` leaks root's environment.** That includes `GH_TOKEN`, cloud keys and the
-  session proxy, all of which reach the supervisor and everything it starts. `run` uses `env -i`
-  for this reason. If you bypassed it, `fy host restart` through `run` replaces the supervisor
-  with a clean one.
+  session proxy, all of which reach the supervisor and everything it starts. A `BASH_ENV` in it
+  is even sourced by the operator's shell. `run` therefore clears the environment with `env -i`
+  before `su`, and again before the command. If you bypassed it, `fy host restart` through `run`
+  replaces the supervisor with a clean one.
 - **No `ssh` client.** Lima's hostagent dies with `exec: "ssh": executable file not found`.
   `setup.sh` installs `openssh-client`.
 - **`*_PROXY` must not reach Lima.** Lima copies the host's proxy variables into the guest
@@ -73,8 +76,9 @@ The project must live in the operator's home: the VM mounts only the checkout, a
   `fy box up` / `fy up` again:
 
   ```bash
-  $O/run 'm=<machine>; for _ in $(seq 90); do   # 30 min, then the logs instead of a hang
-    limactl shell --workdir / $m test -e /run/lima-boot-done && exit 0; sleep 20; done
+  $O/run 'm=<machine>; end=$((SECONDS + 1800))   # 30 min, then the logs instead of a hang
+    while [ $SECONDS -lt $end ]; do
+      timeout 60 limactl shell --workdir / $m test -e /run/lima-boot-done && exit 0; sleep 20; done
     tail -n 40 ~/.lima/$m/ha.stderr.log ~/.lima/$m/serial.log; exit 1'
   ```
 
