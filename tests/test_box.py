@@ -1562,8 +1562,9 @@ def test_claude_errors_when_not_installed(monkeypatch, capsys):
     assert "[claude]" in capsys.readouterr().err  # points at the enabling config
 
 
-def test_claude_execs_with_env_when_ready(monkeypatch):
+def test_claude_execs_with_env_when_ready(monkeypatch, tmp_path):
     monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))  # in a dev box: the LIVE volume
     monkeypatch.setenv("IS_SANDBOX", "1")  # set at box-create; claude() passes the env through
     monkeypatch.delenv("CLAUDE_CODE_NO_FLICKER", raising=False)
     monkeypatch.setattr(box.shutil, "which", lambda name: "/usr/bin/claude")
@@ -1706,6 +1707,10 @@ def gate(monkeypatch, tmp_path):
         monkeypatch.setattr(box.config, f"{agent}_system_prompt", lambda: "")
     monkeypatch.setattr(box.config, "claude_settings", lambda: {})
     monkeypatch.setattr(box.config, "codex_config", lambda: {})
+    # `fy claude` writes into CLAUDE_CONFIG_DIR — in a dev box that's the LIVE volume.
+    (tmp_path / "claude-home").mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
+    monkeypatch.setattr(box.config, "repo_root", lambda: tmp_path / "checkout")
     ns = types.SimpleNamespace(
         modes=["off"], tty=False, enter=False, execed=None, polls=0, stamps=None, clock=[0.0]
     )
@@ -1849,6 +1854,128 @@ def test_launch_gate_says_nothing_without_keyless_or_a_mirror(gate, agent, monke
     box.config.mirror_file().unlink()
     _launch(agent)
     assert gate.execed and capsys.readouterr().err == ""
+
+
+# ── fy claude pre-answers Claude Code's first-run prompts ────────────────────────────────
+
+
+def _claude_home() -> Path:
+    import os
+
+    return Path(os.environ["CLAUDE_CONFIG_DIR"])
+
+
+def test_claude_launch_pre_answers_the_first_run_prompts(gate, tmp_path):
+    # A fresh box asked twice before the first prompt: trust this folder, accept bypass mode. The
+    # box is the boundary for both, so `fy claude` answers them — and starts the theme on "auto".
+    _launch("claude")
+    assert gate.execed
+    settings = json.loads((_claude_home() / "settings.json").read_text())
+    assert settings == {"theme": "auto", "skipDangerousModePermissionPrompt": True}
+    state = json.loads((_claude_home() / ".claude.json").read_text())
+    assert state == {"projects": {str(tmp_path / "checkout"): {"hasTrustDialogAccepted": True}}}
+
+
+def test_claude_launch_keeps_what_claude_or_you_already_wrote(gate, tmp_path):
+    # Defaults only: a theme picked with /theme stays, and Claude's own state is merged, not replaced.
+    home = _claude_home()
+    (home / "settings.json").write_text(json.dumps({"theme": "light", "model": "opus"}))
+    checkout = str(tmp_path / "checkout")
+    before = {
+        "hasCompletedOnboarding": True,
+        "projects": {"/elsewhere": {"allowedTools": []}, checkout: {"lastCost": 1.5}},
+    }
+    (home / ".claude.json").write_text(json.dumps(before))
+    _launch("claude")
+    settings = json.loads((home / "settings.json").read_text())
+    assert settings == {
+        "theme": "light",
+        "model": "opus",
+        "skipDangerousModePermissionPrompt": True,
+    }
+    state = json.loads((home / ".claude.json").read_text())
+    assert state["hasCompletedOnboarding"] is True
+    assert state["projects"]["/elsewhere"] == {"allowedTools": []}
+    assert state["projects"][checkout] == {"lastCost": 1.5, "hasTrustDialogAccepted": True}
+
+
+def test_claude_launch_leaves_an_unreadable_config_alone(gate):
+    # Claude's file, mid-write or corrupt: never ours to repair — the prompt shows, the launch goes on.
+    (_claude_home() / ".claude.json").write_text("{not json")
+    _launch("claude")
+    assert gate.execed
+    assert (_claude_home() / ".claude.json").read_text() == "{not json"
+
+
+@pytest.mark.parametrize(
+    "projects",
+    [["not", "a", "table"], None, "", {"<root>": "not a table"}, {"<root>": None}, {"<root>": ""}],
+)
+def test_claude_launch_leaves_an_odd_shaped_config_alone(gate, tmp_path, projects):
+    # Valid JSON Claude never writes: not ours to reshape, and never a reason to block the launch.
+    if isinstance(projects, dict):
+        projects = {str(tmp_path / "checkout"): projects["<root>"]}
+    odd = json.dumps({"projects": projects})
+    (_claude_home() / ".claude.json").write_text(odd)
+    _launch("claude")
+    assert gate.execed
+    assert (_claude_home() / ".claude.json").read_text() == odd
+
+
+def test_claude_launch_leaves_no_temp_file_when_the_write_fails(gate, monkeypatch):
+    def refuse(src, dst):
+        raise OSError("read-only volume")
+
+    monkeypatch.setattr(box.os, "replace", refuse)
+    _launch("claude")
+    assert gate.execed
+    assert sorted(p.name for p in _claude_home().iterdir()) == [".fy-seed.lock"]
+
+
+def test_claude_launch_goes_on_when_the_seed_lock_is_held(gate, monkeypatch):
+    # Something in the box holding the lock (a seed stuck on a hung volume) must not stall the
+    # launch: wait briefly, then launch without seeding.
+    import fcntl
+
+    monkeypatch.setattr(box, "_SEED_LOCK_WAIT_S", 0.1)
+
+    with open(_claude_home() / ".fy-seed.lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        _launch("claude")
+    assert gate.execed
+    assert not (_claude_home() / ".claude.json").exists()
+
+
+def test_claude_launch_seeds_under_an_exclusive_lock(gate, monkeypatch):
+    # Every box of a project shares the config volume, so two `fy claude`s from different worktrees
+    # could each read, merge and replace — and one trust entry would be lost. They take turns.
+    events: list[str] = []
+    flock = box.fcntl.flock
+
+    def recording_flock(fh, op):
+        kind = (
+            "unlock" if op == box.fcntl.LOCK_UN else "lock" if op & box.fcntl.LOCK_EX else "shared"
+        )
+        events.append(f"{Path(fh.name).name}:{kind}")
+        flock(fh, op)
+
+    replace = box.os.replace
+    monkeypatch.setattr(box.fcntl, "flock", recording_flock)
+    monkeypatch.setattr(
+        box.os, "replace", lambda s, d: (events.append(f"write {Path(d).name}"), replace(s, d))
+    )
+    _launch("claude")
+    assert events[0] == ".fy-seed.lock:lock"
+    assert events[1:3] == ["write settings.json", "write .claude.json"]
+    assert events[3:] in ([], [".fy-seed.lock:unlock"])  # closing the file releases it too
+
+
+def test_claude_launch_writes_nothing_without_its_config_dir(gate, monkeypatch, tmp_path):
+    # Only the dir foldyard mounted for Claude is foldyard's to write; no CLAUDE_CONFIG_DIR = hands off.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _launch("claude")
+    assert gate.execed and not (tmp_path / "home").exists()
 
 
 # ── shell / down / ps ────────────────────────────────────────────────────────────────

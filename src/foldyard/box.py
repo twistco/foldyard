@@ -27,6 +27,7 @@ running box). The command assembly is golden-tested (engine mocked) + faithful t
 
 from __future__ import annotations
 
+import fcntl
 import getpass
 import hashlib
 import json
@@ -39,9 +40,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from importlib import metadata
 from pathlib import Path
+from typing import IO
 
 from . import boximage, config, hostclock, keyless, machine, sandbox, stack
 from .plugins import registry
@@ -1228,8 +1230,86 @@ def claude(args: list[str] | None = None) -> int:
         return 1
     if not _await_credential("claude", "Claude", config.claude_keyless()):
         return 130
+    _seed_claude_config(config.repo_root())
     argv = _claude_argv(config.claude_system_prompt(), config.claude_settings(), args or [])
     os.execvpe(argv[0], argv, os.environ.copy())
+
+
+# What a fresh box's Claude Code asked before its first prompt, answered: the bypass-mode warning
+# (`fy claude` always launches with --dangerously-skip-permissions) and a theme that follows your
+# terminal. Defaults, never overrides — a theme picked with /theme stays.
+_CLAUDE_SETTINGS_DEFAULTS = {"theme": "auto", "skipDangerousModePermissionPrompt": True}
+
+
+def _seed_claude_config(root: Path) -> None:
+    """Pre-answer Claude Code's first-run prompts in the box: the defaults above into its
+    ``settings.json``, and the trust dialog for ``root`` (the checkout; trust covers what's under it)
+    into its ``.claude.json``. The dialog guards against the repo's own config — hooks, MCP servers
+    — running, which in here reaches no further than the bypass-mode agent itself: the box is the
+    boundary. Only into ``CLAUDE_CONFIG_DIR``, the volume foldyard mounted for Claude; best-effort,
+    never blocks the launch."""
+    home = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not home:
+        return
+
+    def trust(state: dict) -> dict:
+        projects = state.get("projects", {})
+        entry = projects.get(str(root), {}) if isinstance(projects, dict) else None
+        if not isinstance(entry, dict) or entry.get("hasTrustDialogAccepted") is True:
+            return state  # trusted already, or a shape Claude never writes: not ours to reshape
+        entry = {**entry, "hasTrustDialogAccepted": True}
+        return {**state, "projects": {**projects, str(root): entry}}
+
+    # Every box of a project shares this volume: two launches from different worktrees each reading,
+    # merging and replacing would lose one's trust entry. Ours take turns (Claude's own saves don't
+    # take this lock — see _merge_json).
+    try:
+        with open(Path(home) / ".fy-seed.lock", "a") as lock:
+            _flock_briefly(lock)
+            _merge_json(Path(home) / "settings.json", lambda s: {**_CLAUDE_SETTINGS_DEFAULTS, **s})
+            _merge_json(Path(home) / ".claude.json", trust)
+    except OSError:  # no lock to be had: the prompts show, the launch goes on
+        return
+
+
+_SEED_LOCK_WAIT_S = 2.0  # a seed takes milliseconds; longer means a holder that isn't letting go
+
+
+def _flock_briefly(f: IO[str]) -> None:
+    """An exclusive flock on ``f``, waiting at most :data:`_SEED_LOCK_WAIT_S` — then
+    ``BlockingIOError`` (an ``OSError``), so a held lock never stalls the launch."""
+    deadline = time.monotonic() + _SEED_LOCK_WAIT_S
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
+def _merge_json(path: Path, update: Callable[[dict], dict]) -> None:
+    """Rewrite a JSON object file through ``update``, atomically and only on a change. Claude's own
+    file — so one that won't parse (corrupt, or caught mid-write) is left to Claude, not repaired.
+    A running session re-reads it under its lock before saving, so it keeps what we add. We don't
+    take that lock: a save landing between our read and replace (any box — the volume is shared)
+    is lost, and the cost of that is one prompt shown again."""
+    tmp = None
+    try:
+        current = json.loads(path.read_text()) if path.exists() else {}
+        if not isinstance(current, dict) or (new := update(current)) == current:
+            return
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as f:
+            tmp = Path(f.name)
+            json.dump(new, f, indent=2)
+        os.replace(tmp, path)  # mkstemp's 0600, as Claude writes them
+        tmp = None
+    except (OSError, ValueError):
+        return
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
 
 
 def _toml_value(value: object) -> str:

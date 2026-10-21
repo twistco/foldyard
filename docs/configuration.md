@@ -858,6 +858,13 @@ tui = { raw_output_mode = false }
     merges it over the box's `~/.claude/settings.json` per key. Any `settings.json` key works
     (`model`, `env`, `permissions`, `statusLine`, …). Default: `{}`. `fy claude --settings …`
     wins.
+
+  `fy claude` also answers Claude Code's first-run questions in the box, so a fresh box starts at
+  the prompt: it trusts the checkout you launch from, accepts the bypass-permissions warning, and
+  starts the theme on `auto`, which follows your terminal's light or dark background. These are
+  defaults written into the box's own Claude config, so a theme you pick with `/theme` stays.
+  Trusting the folder is safe because the box is the boundary: the repo's hooks and MCP servers
+  can reach nothing the agent itself can't.
 - **`[codex]`** — installs the OpenAI Codex CLI at box-up (native installer, no node) and
   mounts its `~/.codex`.
   - **`keyless`** — `"api-key"` (or `true`) injects the real `OPENAI_API_KEY` as a bearer on
