@@ -24,6 +24,12 @@ bump: patch
 - **`bump`** is the smallest release this change can go out in: `patch`, `minor` or `major`.
   Before 1.0, a change that breaks config or CLI shape is `minor`. `just release` warns when
   the version it is asked for is a smaller step than a fragment says.
+- **`experimental: true`** (optional) marks an entry that introduces a feature in foldyard's
+  experimental register (`src/foldyard/experimental.py`). The release adds the label to each
+  bullet's bold lead (`- **Experimental: …**`), so write the bullet without it; a hand-written
+  "Experimental:" lead is refused, which keeps the wording the same everywhere. So is an
+  experimental entry with no bullet, which would print unlabelled, and an experimental `Summary`:
+  the feature goes in its section (`Added`, …), the Summary only frames the release.
 - **The entry** is one or more `- ` bullets, written as it should read in the changelog. Lead
   with what changed for the reader, in bold, then **why**. The changelog is what a consumer
   reads to decide whether to upgrade, and what they lift into their own

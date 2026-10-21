@@ -130,6 +130,57 @@ def test_a_summary_fragment_need_not_be_a_bullet(tmp_path):
     assert changes.parse(_fragment(tmp_path, text)).body == "A security release."
 
 
+# ── experimental: the frontmatter flag, the label the release writes ──────────────────────────
+
+EXP = "---\nsection: Added\nbump: minor\nexperimental: true\n---\n\n"
+
+
+def test_an_experimental_fragment_gets_the_label_on_every_bullets_lead(tmp_path):
+    body = "- **A guest monitor.** It records.\n  More text.\n- **Hooks.** They send."
+    f = changes.parse(_fragment(tmp_path, EXP + body + "\n"))
+    assert f.experimental
+    out = changes.render("0.6.0", "2026-10-20", [f])
+    assert "- **Experimental: A guest monitor.** It records.\n  More text.\n" in out
+    assert "- **Experimental: Hooks.** They send." in out
+
+
+def test_a_fragment_without_the_flag_is_printed_as_written(tmp_path):
+    f = changes.parse(_fragment(tmp_path, GOOD))
+    assert not f.experimental and changes.labelled(f) == f.body
+
+
+@pytest.mark.parametrize(
+    "text, why",
+    [
+        (EXP + "- a bullet with no bold lead\n", "bold"),
+        # a Summary frames the release; prose would print unmarked, a bullet as a Summary bullet
+        (
+            "---\nsection: Summary\nbump: minor\nexperimental: true\n---\n\nA monitor ships.\n",
+            "not Summary",
+        ),
+        (
+            "---\nsection: Summary\nbump: minor\nexperimental: true\n---\n\n- **x.** y\n",
+            "not Summary",
+        ),
+        (EXP + "Prose with no bullet at all.\n", "must be a `- ` bullet"),
+        (
+            "---\nsection: Added\nbump: minor\nexperimental: yes\n---\n\n- **x.** y\n",
+            "true or false",
+        ),
+        ("---\nsection: Added\nbump: minor\n---\n\n- **Experimental: x.** y\n", "frontmatter"),
+        (EXP + "- **Experimental: x.** y\n", "frontmatter"),  # the release adds it, once
+        # any hand-written variant of the label, not just the release's exact spelling
+        (
+            "---\nsection: Added\nbump: minor\n---\n\n- **Experimental, with y: x.** z\n",
+            "frontmatter",
+        ),
+    ],
+)
+def test_the_experimental_label_has_one_way_in(tmp_path, text, why):
+    with pytest.raises(changes.FragmentError, match=why):
+        changes.parse(_fragment(tmp_path, text))
+
+
 HEAD = "# Changelog\n\nIntro.\n\n"
 OLD = "## 0.3.2 — 2026-09-27\n\n### Fixed\n\n- old\n"
 

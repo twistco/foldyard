@@ -151,6 +151,12 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   capped): a kind's probe reads it (`CapabilityProbe.scope`), the supervisor records it per switch
   and credential identity and logs + notifies a change; `fy config widenings`, `fy mode` and the
   TUI read the record offline.
+- `experimental.py` — the register of experimental settings: per entry, the config value that
+  turns it on, its kind (*may change* — graduates by a decision to freeze it; *unproven in use* —
+  graduates on evidence, which without telemetry means a maintainer's own day-to-day use), what is
+  unproven, and what would graduate it. `fy doctor`'s `experimental` row and the `*(experimental)*`
+  tags in docs/configuration.md derive from it (`tests/test_experimental.py` holds the tags and the
+  register together, both ways); a changelog fragment introducing one says `experimental: true`.
 - `allowlist.py` · `ports.py` · `preflight.py` · `keyless.py` — the egress allow-store behind
   `fy allow` + the TUI's host grants (all levels host-side), cross-project port-band allocation,
   hard-prerequisite checks before `up`, and the keyless-agent credential taxonomy + host-side
@@ -436,6 +442,11 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
 
 ## Conventions & gotchas
 
+- **Experimental means a register entry, not a word in prose.** A setting you're not ready to
+  stand behind goes in `experimental.REGISTER` with what's unproven and what would graduate it,
+  gets the `*(experimental)*` tag in docs/configuration.md, and its changelog fragment says
+  `experimental: true`. Graduating one is deleting the entry and the tag, plus a `.changes/` entry
+  under Changed — review the `graduates_when` lines when cutting a release.
 - **Changelog entries are files, not edits.** A change a consumer would notice adds
   `.changes/<slug>.md` (section + bump frontmatter, then the bullet; format in
   [.changes/README.md](./.changes/README.md)); `just release` folds them into `CHANGELOG.md`.

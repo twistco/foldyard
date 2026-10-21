@@ -38,12 +38,18 @@ class FragmentError(ValueError):
     """A refusal, worded for the person running the release."""
 
 
+# A fragment introducing an experimental feature (src/foldyard/experimental.py) says so in its
+# frontmatter, and the release writes the label: every bullet's bold lead gains this prefix.
+EXPERIMENTAL = "Experimental: "
+
+
 @dataclass(frozen=True)
 class Fragment:
     path: Path
     section: str
     bump: str
     body: str
+    experimental: bool = False
 
 
 def parse(path: Path) -> Fragment:
@@ -54,8 +60,10 @@ def parse(path: Path) -> Fragment:
     meta: dict[str, str] = {}
     for line in m.group(1).splitlines():
         key, sep, value = line.partition(":")
-        if not sep or key.strip() not in ("section", "bump"):
-            raise FragmentError(f"{path.name}: unknown frontmatter line {line!r} (section, bump)")
+        if not sep or key.strip() not in ("section", "bump", "experimental"):
+            raise FragmentError(
+                f"{path.name}: unknown frontmatter line {line!r} (section, bump, experimental)"
+            )
         meta[key.strip()] = value.strip()
     section, bump, body = meta.get("section", ""), meta.get("bump", ""), m.group(2).strip()
     if section not in SECTIONS:
@@ -66,7 +74,37 @@ def parse(path: Path) -> Fragment:
         raise FragmentError(f"{path.name}: the entry is empty")
     if section != SUMMARY and not body.startswith("- "):
         raise FragmentError(f"{path.name}: the entry must be a `- ` bullet (or several)")
-    return Fragment(path, section, bump, body)
+    experimental = meta.get("experimental", "false")
+    if experimental not in ("true", "false"):
+        raise FragmentError(f"{path.name}: experimental {experimental!r} is not true or false")
+    bullets = [line for line in body.splitlines() if line.startswith("- ")]
+    if experimental == "true" and section == SUMMARY:
+        # The Summary frames the release; the feature itself goes in a section (Added, …). Every
+        # other section's entry is already a bullet (above), so the label always has a lead.
+        raise FragmentError(
+            f"{path.name}: an experimental feature goes in a section such as Added, not Summary"
+        )
+    if experimental == "true" and not all(b.startswith("- **") for b in bullets):
+        raise FragmentError(
+            f"{path.name}: an experimental entry's bullets must each open with a **bold** lead — "
+            "the release puts the label there"
+        )
+    if any(b.startswith(f"- **{EXPERIMENTAL.split(':')[0]}") for b in bullets):
+        raise FragmentError(
+            f"{path.name}: write `experimental: true` in the frontmatter instead of the label — "
+            "the release adds it, so it stays the same everywhere"
+        )
+    return Fragment(path, section, bump, body, experimental == "true")
+
+
+def labelled(fragment: Fragment) -> str:
+    """The body as the changelog prints it: an experimental one's bullets carry the label."""
+    if not fragment.experimental:
+        return fragment.body
+    return "\n".join(
+        f"- **{EXPERIMENTAL}{line[4:]}" if line.startswith("- **") else line
+        for line in fragment.body.splitlines()
+    )
 
 
 def load(directory: Path = CHANGES) -> list[Fragment]:
@@ -105,7 +143,7 @@ def required_bump(fragments: list[Fragment]) -> str:
 def render(version: str, date: str, fragments: list[Fragment]) -> str:
     out = [f"## {version} — {date}\n"]
     for section in SECTIONS:
-        bodies = [f.body for f in fragments if f.section == section]
+        bodies = [labelled(f) for f in fragments if f.section == section]
         if bodies and section == SUMMARY:
             out.append("\n" + "\n\n".join(bodies) + "\n")
         elif bodies:

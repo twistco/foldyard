@@ -68,6 +68,20 @@ Some keys are no longer honoured at all — `[proxy] allow`, `[[inject]] minter`
 token_env`, `[vscode] workspace_file`. `fy config widenings` names each one with its
 replacement, and `fy doctor` warns about them.
 
+### Experimental settings
+
+A setting tagged *(experimental)* below is off unless you turn it on, and makes one or both of
+two claims:
+
+- **May change.** Its config, output format or payload isn't settled, and can change in a minor
+  release.
+- **Unproven in use.** Its config is settled, but nobody has used it day to day yet, so expect
+  rough edges.
+
+On your computer, `fy doctor`'s `experimental` row lists the ones your adopted config turns on,
+and what is still unproven about each. (Not in the box, which can't see what's adopted.) A
+setting stops being experimental in a release whose changelog says so.
+
 ## `[project]`
 
 Who the project is and what stack it drives.
@@ -223,10 +237,10 @@ disk_gib = 60
   Linux), printed at create. Pin it deliberately: the hypervisor is a security decision, and QEMU
   is where nearly every published VM escape lives (see
   [isolation-layers.md](https://github.com/twistco/foldyard/blob/main/docs/isolation-layers.md#macos-arm64--the-machine-layer-does-the-work)).
-  `krunkit` (libkrun microVM) is never picked automatically: experimental upstream,
-  macOS/arm64 only, needs `brew install krunkit`. Env: `MACHINE_VMTYPE`.
-- **`runtime`** — `"gvisor"` runs the box, and every container the box creates, under gVisor's
-  userspace kernel (`runsc`) instead of directly on the VM kernel — layer ③ in
+  `krunkit` *(experimental)* (libkrun microVM) is never picked automatically: experimental
+  upstream, macOS/arm64 only, needs `brew install krunkit`. Env: `MACHINE_VMTYPE`.
+- **`runtime`** *(experimental)* — `"gvisor"` runs the box, and every container the box creates,
+  under gVisor's userspace kernel (`runsc`) instead of directly on the VM kernel — layer ③ in
   [isolation-layers.md](https://github.com/twistco/foldyard/blob/main/docs/isolation-layers.md).
   A kernel exploit from the box then has to get through gVisor before it reaches the engine
   socket, the stack and your checkout. Default: unset (the engine's own runtime); any other
