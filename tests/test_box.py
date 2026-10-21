@@ -1907,6 +1907,28 @@ def test_claude_launch_leaves_an_unreadable_config_alone(gate):
     assert (_claude_home() / ".claude.json").read_text() == "{not json"
 
 
+@pytest.mark.parametrize("projects", [["not", "a", "table"], {"<root>": "not a table"}])
+def test_claude_launch_leaves_an_odd_shaped_config_alone(gate, tmp_path, projects):
+    # Valid JSON Claude never writes: not ours to reshape, and never a reason to block the launch.
+    if isinstance(projects, dict):
+        projects = {str(tmp_path / "checkout"): projects["<root>"]}
+    odd = json.dumps({"projects": projects})
+    (_claude_home() / ".claude.json").write_text(odd)
+    _launch("claude")
+    assert gate.execed
+    assert (_claude_home() / ".claude.json").read_text() == odd
+
+
+def test_claude_launch_leaves_no_temp_file_when_the_write_fails(gate, monkeypatch):
+    def refuse(src, dst):
+        raise OSError("read-only volume")
+
+    monkeypatch.setattr(box.os, "replace", refuse)
+    _launch("claude")
+    assert gate.execed
+    assert sorted(p.name for p in _claude_home().iterdir()) == []
+
+
 def test_claude_launch_writes_nothing_without_its_config_dir(gate, monkeypatch, tmp_path):
     # Only the dir foldyard mounted for Claude is foldyard's to write; no CLAUDE_CONFIG_DIR = hands off.
     monkeypatch.delenv("CLAUDE_CONFIG_DIR")

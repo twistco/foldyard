@@ -1252,9 +1252,9 @@ def _seed_claude_config(root: Path) -> None:
 
     def trust(state: dict) -> dict:
         projects = state.get("projects") or {}
-        entry = projects.get(str(root)) or {}
-        if entry.get("hasTrustDialogAccepted") is True:
-            return state
+        entry = (projects.get(str(root)) or {}) if isinstance(projects, dict) else None
+        if not isinstance(entry, dict) or entry.get("hasTrustDialogAccepted") is True:
+            return state  # trusted already, or a shape Claude never writes: not ours to reshape
         entry = {**entry, "hasTrustDialogAccepted": True}
         return {**state, "projects": {**projects, str(root): entry}}
 
@@ -1265,16 +1265,24 @@ def _seed_claude_config(root: Path) -> None:
 def _merge_json(path: Path, update: Callable[[dict], dict]) -> None:
     """Rewrite a JSON object file through ``update``, atomically and only on a change. Claude's own
     file — so one that won't parse (corrupt, or caught mid-write) is left to Claude, not repaired.
-    A running session re-reads it under its lock before saving, so it keeps what we add."""
+    A running session re-reads it under its lock before saving, so it keeps what we add. We don't
+    take that lock: a save landing between our read and replace (any box — the volume is shared)
+    is lost, and the cost of that is one prompt shown again."""
+    tmp = None
     try:
         current = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(current, dict) or (new := update(current)) == current:
             return
-        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as tmp:
-            json.dump(new, tmp, indent=2)
-        os.replace(tmp.name, path)  # mkstemp's 0600, as Claude writes them
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as f:
+            tmp = Path(f.name)
+            json.dump(new, f, indent=2)
+        os.replace(tmp, path)  # mkstemp's 0600, as Claude writes them
+        tmp = None
     except (OSError, ValueError):
         return
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
 
 
 def _toml_value(value: object) -> str:
