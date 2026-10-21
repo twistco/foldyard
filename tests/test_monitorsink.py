@@ -227,6 +227,15 @@ def test_an_edited_line_fails_its_signature():
     _fails(b"".join(lines), 2, "signature", (3, macs[-1]))
 
 
+def test_a_field_added_to_the_sink_object_fails_its_signature():
+    # the mac covers the whole line but `mac` itself — the sink object's other fields included
+    lines, macs = _file(2)
+    doc = json.loads(lines[1])
+    doc["sink"]["note"] = "fine"
+    lines[1] = json.dumps(doc).encode() + b"\n"
+    _fails(b"".join(lines), 2, "signature", (2, macs[-1]))
+
+
 def test_a_deleted_middle_line_breaks_the_sequence():
     lines, macs = _file(3)
     del lines[1]
