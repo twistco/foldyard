@@ -888,6 +888,15 @@ tui = { raw_output_mode = false }
   tick). A failing sync logs once to `host-supervisor.log` when it breaks and once when it
   heals, and notifies only if it stays broken. Read from the adopted config.
 
+  Of Claude's sessions, only those started at the checkout's root are archived — the folder
+  named after the checkout itself (worktrees archive their own). The box names those folders,
+  and a folder named after any other directory would be offered by `claude --resume` there, so
+  sessions started in a subdirectory or elsewhere stay in the bound-out dir and are named in the
+  log (once each) and by `fy transcripts`. Codex records a session's directory inside the file
+  instead, so its sessions are archived as they are; to keep box Codex sessions out of
+  `~/.codex/sessions`, give `fy transcripts` an archive dir or set
+  `FOLDYARD_TRANSCRIPTS_ARCHIVE`.
+
   ```toml
   [claude]
   transcript_sync_seconds = 30

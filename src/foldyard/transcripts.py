@@ -10,8 +10,11 @@ dirs — or a dir you pass / set in FOLDYARD_TRANSCRIPTS_ARCHIVE.
 SAFE by construction: we only ever read an agent's transcript subtree (Claude ``projects/``
 or Codex ``sessions/``) — never sibling credential/config files or settings — and never through a
 link: the checkout is box-writable, so the walk opens every component without following one (see
-``_open_source``). The copy is ADDITIVE (rsync's ``-rtu`` semantics, NO delete), so the archive
-only grows and nothing there is removed or overwritten by an older copy (DRY_RUN=1 previews).
+``_open_source``). Of Claude's tree only the checkout's OWN project folder is copied: the box
+names the folders, and one named after another project would be resumed there (see
+:func:`claude_project_dir`). The copy is ADDITIVE (rsync's ``-rtu`` semantics, NO delete), so
+the archive only grows and nothing there is removed or overwritten by an older copy (DRY_RUN=1
+previews).
 
 RUN ON THE HOST: the archive lives in the host's home, which the box can't reach.
 Becomes part of the `claude-code` plugin later (ADR-0015). Stdlib only.
@@ -130,11 +133,68 @@ class _Refused(Exception):
         self.path, self.why = path, why
 
 
+# ── which folders of the box's tree reach your history ──────────────────────────────────────
+#
+# Claude Code files each session under `projects/<name>/`, the name being the session's cwd with
+# every character but [A-Za-z0-9] turned into `-`, and a Claude on your computer resumes the folder
+# named after ITS cwd. The box chooses every name in the bound-out tree, so a folder named after
+# another project on your computer would be loaded by `claude --resume` there: the box's text in a
+# host agent's context, for a project the box was never given. Box sessions reaching resumes of the
+# SAME checkout is the feature; anything else is refused.
+#
+# The rule is the exact name of the checkout's own folder, computed here from the checkout path the
+# host resolved — the box mounts every checkout at that same path, so an in-box session started at
+# the checkout's root has exactly this name. Not a prefix: `/` and `-` both become `-`, so
+# `<checkout>-old` (a sibling checkout), `<checkout>-worktrees-feat` (a worktree in the default
+# layout, which archives into its own folder) and `<checkout>/sub` all start with it. Sessions a box
+# starts in a SUBDIRECTORY, or in /tmp, are refused with the rest: proving that a name is some real
+# directory inside the checkout would need a search the box could race, and the bound-out dirs on
+# hand (2026-10) hold none — only the root's folder, plus /tmp scratch runs. Refused names are
+# skipped, never failures, and reported by name: `fy transcripts` and box down print them, the
+# sweep logs each one once.
+#
+# Codex has the same exposure and no folder to check: its tree is dated (`sessions/YYYY/MM/DD/
+# rollout-….jsonl`) and the session's directory is recorded INSIDE each file — `cwd` in the first
+# (`session_meta`) line and again in every `turn_context` line, with `runtime_workspace_roots` and
+# git fields beside it — which Codex indexes into its own state database for `codex resume`. A
+# host-side check would mean parsing every line of every file the box writes, on every pass, against
+# a list of fields Codex grows between releases (0.157 → 0.160 added some), and still guessing which
+# of them its picker filters on. So Codex sessions are archived unfiltered: a session the box wrote
+# can claim another directory and be offered by `codex resume` there. Keeping box Codex sessions out
+# of your native history (an explicit archive dir: `fy transcripts <dir>` or
+# FOLDYARD_TRANSCRIPTS_ARCHIVE, which file them under `codex-sessions/` instead) is the mitigation.
+
+_NAME_MAX = 200  # Claude Code's own cap; a longer name is cut and suffixed with a hash of the path
+
+
+def claude_project_dir(path: str) -> str:
+    """Claude Code's folder name under ``projects/`` for a session started in ``path`` — its own
+    rule (2.1.x): every UTF-16 code unit outside [A-Za-z0-9] becomes ``-``; past 200 characters
+    the name is cut there and ``-<the path's Java-style string hash, absolute, base 36>`` added."""
+    raw = path.encode("utf-16-le")
+    units = [int.from_bytes(raw[i : i + 2], "little") for i in range(0, len(raw), 2)]
+    name = "".join(chr(u) if u < 128 and chr(u).isalnum() else "-" for u in units)
+    if len(name) <= _NAME_MAX:
+        return name
+    h = 0
+    for u in units:
+        h = (h * 31 + u) & 0xFFFFFFFF
+    h = abs(h - (1 << 32) if h >= 1 << 31 else h)
+    digits = ""
+    while True:
+        h, d = divmod(h, 36)
+        digits = "0123456789abcdefghijklmnopqrstuvwxyz"[d] + digits
+        if not h:
+            break
+    return f"{name[:_NAME_MAX]}-{digits}"
+
+
 @dataclass
 class _Tally:
     copied: int = 0
     bytes: int = 0
     skipped: list[str] = field(default_factory=list)  # not plain files/dirs: never followed
+    refused: list[str] = field(default_factory=list)  # top-level names that aren't the project's
     vanished: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -212,8 +272,10 @@ def _has_entries(anchor: Path, src: Path) -> bool:
         os.close(fd)
 
 
-def _mirror(src_fd: int, dest_dir: Path, dry: bool) -> _Tally:
-    """Additively copy the tree under ``src_fd`` into ``dest_dir`` (see the block comment above)."""
+def _mirror(src_fd: int, dest_dir: Path, dry: bool, *, only: str | None = None) -> _Tally:
+    """Additively copy the tree under ``src_fd`` into ``dest_dir`` (see the block comment above).
+    ``only``: the one top-level FOLDER copied (a Claude tree's own project); every other top-level
+    entry is refused, by name. ``None`` copies the whole tree."""
     tally = _Tally()
     if dry:
         try:
@@ -224,7 +286,7 @@ def _mirror(src_fd: int, dest_dir: Path, dry: bool) -> _Tally:
         dest_dir.mkdir(parents=True, exist_ok=True)
         dst_fd = os.open(dest_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        _mirror_dir(src_fd, dst_fd, "", 0, dry, tally)
+        _mirror_dir(src_fd, dst_fd, "", 0, dry, tally, only)
     finally:
         if dst_fd is not None:
             os.close(dst_fd)
@@ -232,10 +294,20 @@ def _mirror(src_fd: int, dest_dir: Path, dry: bool) -> _Tally:
 
 
 def _mirror_dir(
-    src_fd: int, dst_fd: int | None, rel: str, depth: int, dry: bool, tally: _Tally
+    src_fd: int,
+    dst_fd: int | None,
+    rel: str,
+    depth: int,
+    dry: bool,
+    tally: _Tally,
+    only: str | None = None,
 ) -> None:
+    held = only is not None and depth == 0
     for name in sorted(os.listdir(src_fd)):
         path = f"{rel}{name}"
+        if held and name != only:
+            tally.refused.append(name)
+            continue
         try:
             mode = _lstat_at(src_fd, name).st_mode
         except FileNotFoundError:
@@ -249,6 +321,8 @@ def _mirror_dir(
                 tally.skipped.append(f"{path}/ (deeper than {MAX_DEPTH} levels)")
             else:
                 _mirror_subdir(src_fd, dst_fd, name, path, depth, dry, tally)
+        elif held:
+            tally.refused.append(name)  # the project's name, but Claude only ever makes a folder
         elif stat.S_ISREG(mode):
             _copy_file(src_fd, dst_fd, name, path, dry, tally)
         else:
@@ -386,8 +460,18 @@ def _write_into(dst_fd: int, name: str, src: int, st: os.stat_result) -> None:
         raise
 
 
-def _report_tally(tally: _Tally, dry: bool) -> None:
+def _refusal(names: list[str], only: str) -> str:
+    shown = ", ".join(names[:5]) + (" …" if len(names) > 5 else "")
+    return (
+        f"not archiving {shown} — only this checkout's own Claude project folder ({only}) is: "
+        "another name would be resumed by a Claude on your computer in another project"
+    )
+
+
+def _report_tally(tally: _Tally, dry: bool, only: str | None = None) -> None:
     """The interactive paths' account of one copy (the sweep stays silent and reports edges)."""
+    if tally.refused and only is not None:
+        _err(f"⚠ {_refusal(tally.refused, only)}.")
     if dry:
         print(
             f"  would copy {tally.copied} file{'s' if tally.copied != 1 else ''} "
@@ -411,52 +495,58 @@ def _archive(
     src_dir: Path,
     *,
     anchor: Path,
+    project_of: Path | None,
     dest: str = "",
     what: str = "transcripts",
     quiet: bool = False,
     announce: bool = True,
-) -> tuple[int, str]:
-    """Additively copy one bound-out transcript tree into its archive. Returns ``(rc, detail)``:
-    0 for success or nothing to do, else :data:`RC_REFUSED` / :data:`RC_PARTIAL` /
-    :data:`RC_VANISHED` / 1 (the archive couldn't be written at all), with a one-line reason.
-    ``quiet`` prints nothing (the sweep reports on edges); ``announce`` prints the ▶/✓ lines."""
+) -> tuple[int, str, list[str]]:
+    """Additively copy one bound-out transcript tree into its archive. Returns ``(rc, detail,
+    refused)``: rc 0 for success or nothing to do, else :data:`RC_REFUSED` / :data:`RC_PARTIAL` /
+    :data:`RC_VANISHED` / 1 (the archive couldn't be written at all), with a one-line reason; and
+    the top-level names left out because they aren't ``project_of``'s Claude project folder (a
+    policy skip, not a failure). ``project_of`` is the checkout whose sessions these are, as the
+    HOST resolved it — required, so no Claude caller can forget it; ``None`` only for a tree with
+    no project folders (Codex's). ``quiet`` prints nothing (the sweep reports on edges);
+    ``announce`` prints the ▶/✓ lines."""
     dry = bool(os.environ.get("DRY_RUN"))
+    only = None if project_of is None else claude_project_dir(str(project_of))
     dest_dir = _archive_dest(dest)
     try:
         src_fd = _open_source(anchor, src_dir)
     except FileNotFoundError:
-        return 0, ""  # nothing bound out yet
+        return 0, "", []  # nothing bound out yet
     except _Refused as r:
         detail = f"{r.path} {r.why} — a link in the box-writable path is never followed"
         if not quiet:
             _err(f"✗ not archiving {what}: {detail}.")
-        return RC_REFUSED, detail
+        return RC_REFUSED, detail, []
     except OSError as e:
         detail = f"{src_dir}: {e.strerror or e}"
         if not quiet:
             _err(f"✗ archiving {what} failed: {detail}")
-        return 1, detail
+        return 1, detail, []
     try:
         if not os.listdir(src_fd):
-            return 0, ""  # nothing worth keeping
+            return 0, "", []  # nothing worth keeping
         if announce and not quiet:
             print(f"▶ archiving {what} → {dest_dir}" + ("   (DRY RUN — no changes)" if dry else ""))
-        tally = _mirror(src_fd, dest_dir, dry)
+        tally = _mirror(src_fd, dest_dir, dry, only=only)
     except OSError as e:
         detail = f"{dest_dir}: {e.strerror or e}"
         if not quiet:
             _err(f"✗ archiving {what} failed: {detail}")
-        return 1, detail
+        return 1, detail, []
     finally:
         os.close(src_fd)
     rc = tally.rc
     if not quiet:
-        _report_tally(tally, dry)
+        _report_tally(tally, dry, only)
         if rc == 0 and announce:
             print(f"✓ {what} {'would be ' if dry else ''}archived → {dest_dir}")
         elif rc:
             _err(f"✗ archiving {what} incomplete (rc={rc}).")
-    return rc, ("" if rc == 0 else tally.problem())
+    return rc, ("" if rc == 0 else tally.problem()), tally.refused
 
 
 def bound_out_dir(checkout: Path, here: str) -> Path:
@@ -471,18 +561,27 @@ def codex_bound_out_dir(checkout: Path, here: str) -> Path:
     return checkout / here / ".devbox-codex/sessions"
 
 
-def sync_archive(src_dir: Path, *, anchor: Path, dest: str = "", what: str = "transcripts") -> int:
+def sync_archive(
+    src_dir: Path,
+    *,
+    anchor: Path,
+    project_of: Path | None,
+    dest: str = "",
+    what: str = "transcripts",
+) -> int:
     """Additively copy one bound-out agent transcript dir → its durable host archive BEFORE a
     destructive op deletes the source. Returns 0 on success or nothing-to-do, non-zero when a copy
     was refused or incomplete. Never raises.
 
     ``anchor`` is the checkout ``src_dir`` lives in, as the HOST resolved it: everything below it is
     box-writable, so no link there is followed (a link on the way to ``src_dir`` refuses the copy;
-    one inside it is skipped). No-op (0) inside the box (the archive lives in the host's home,
-    unreachable there) and when ``src_dir`` is missing/empty."""
+    one inside it is skipped). ``project_of`` is the checkout whose Claude project folder is the
+    only top-level entry copied (``None`` for Codex's tree — see :func:`claude_project_dir`).
+    No-op (0) inside the box (the archive lives in the host's home, unreachable there) and when
+    ``src_dir`` is missing/empty."""
     if config.in_box():
         return 0
-    return _archive(src_dir, anchor=anchor, dest=dest, what=what)[0]
+    return _archive(src_dir, anchor=anchor, project_of=project_of, dest=dest, what=what)[0]
 
 
 # ── the supervisor's per-interval auto-sync (`[claude]/[codex] transcript_sync_seconds`) ──────
@@ -510,19 +609,19 @@ _sweep_state: dict[tuple[str, str], dict] = {}
 NOTIFY_AFTER_FAILURES = 3
 
 
-def _sweep_plan() -> tuple[Path, list[tuple[str, float, Path, str]]]:
-    """The bound checkout, and ``(label, interval, bound-out source, archive dest)`` for each
-    configured agent whose auto-sync is ON, resolved under the CURRENTLY BOUND config — so the
+def _sweep_plan() -> tuple[Path, list[tuple[str, float, Path, str, Path | None]]]:
+    """The bound checkout, and ``(label, interval, bound-out source, archive dest, project_of)`` for
+    each configured agent whose auto-sync is ON, resolved under the CURRENTLY BOUND config — so the
     caller's ``with config.using(worktree_config(wt))`` is what points this at the right
     checkout."""
     checkout = config.repo_root()
     here = config.dev_vm_rel()
-    plan: list[tuple[str, float, Path, str]] = []
+    plan: list[tuple[str, float, Path, str, Path | None]] = []
     if config.claude_enabled() and (secs := config.claude_transcript_sync_seconds()):
-        plan.append(("Claude", secs, bound_out_dir(checkout, here), ""))
+        plan.append(("Claude", secs, bound_out_dir(checkout, here), "", checkout))
     if config.codex_enabled() and (secs := config.codex_transcript_sync_seconds()):
         plan.append(
-            ("Codex", secs, codex_bound_out_dir(checkout, here), str(_codex_archive_dest()))
+            ("Codex", secs, codex_bound_out_dir(checkout, here), str(_codex_archive_dest()), None)
         )
     return checkout, plan
 
@@ -569,6 +668,20 @@ def _report(log, notify, key: tuple[str, str], label: str, wt: str, rc: int, det
         )
 
 
+def _report_refused(
+    log, key: tuple[str, str], label: str, wt: str, refused: list[str], only: str
+) -> None:
+    """Name each refused folder ONCE per supervisor (they persist in the bound-out dir, so every
+    pass refuses them again). Not a failure: no FAILED edge, no notification — the archive of the
+    checkout's own folder is healthy."""
+    seen: set[str] = _sweep_state[key].setdefault("refused", set())
+    new = [name for name in refused if name not in seen]
+    if new:
+        seen.update(new)
+        where = f" ({wt})" if wt else ""
+        log(f"transcript-sync: {label}{where} {_refusal(new, only)}")
+
+
 def sweep(log, wt: str = "", *, tick_seconds: float = 2.0, notify=None) -> None:
     """One supervisor tick's auto-sync pass for the BOUND worktree's configured agents. Off (a
     no-op with no state touched) unless that checkout's ADOPTED config sets a positive
@@ -581,14 +694,18 @@ def sweep(log, wt: str = "", *, tick_seconds: float = 2.0, notify=None) -> None:
     except Exception as e:  # a config hiccup must never wedge the reconcile loop
         log(f"transcript-sync: sweep failed: {type(e).__name__}: {e}")
         return
-    for label, interval, src, dest in plan:
+    for label, interval, src, dest, project_of in plan:
         key = (wt, label)
         try:
             if not _due(key, interval, tick_seconds):
                 continue
-            rc, detail = _archive(src, anchor=checkout, dest=dest, what=label, quiet=True)
+            rc, detail, refused = _archive(
+                src, anchor=checkout, project_of=project_of, dest=dest, what=label, quiet=True
+            )
             if rc in BENIGN_RC:
                 rc = 0
+            if project_of is not None:
+                _report_refused(log, key, label, wt, refused, claude_project_dir(str(project_of)))
         except Exception as e:  # one agent's hiccup must not skip the other
             rc, detail = 1, f"{type(e).__name__}: {e}"
         _report(log, notify, key, label, wt, rc, detail)
@@ -605,7 +722,7 @@ def sync_current(env: dict, *, what: str = "transcripts", dest: str = "") -> int
     checkout = Path(env.get("FOLDYARD_CHECKOUT") or stack.main_repo())
     here = env.get("HERE") or config.dev_vm_rel()
     src = Path(os.environ.get("DEVBOX_TRANSCRIPTS") or bound_out_dir(checkout, here))
-    rc = sync_archive(src, anchor=checkout, what=what, dest=dest)
+    rc = sync_archive(src, anchor=checkout, project_of=checkout, what=what, dest=dest)
 
     if config.codex_enabled():
         codex_src = Path(
@@ -615,6 +732,7 @@ def sync_current(env: dict, *, what: str = "transcripts", dest: str = "") -> int
         codex_rc = sync_archive(
             codex_src,
             anchor=checkout,
+            project_of=None,  # dated, no project folders: see the residual-risk note above
             what=codex_what,
             dest=str(_codex_archive_dest(dest)),
         )
@@ -654,6 +772,7 @@ def transcripts(dest: str = "") -> int:
         box_home_cmd='printf %s "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"',
         box_rel="projects",
         label="Claude transcripts",
+        project_of=checkout,
         # A Codex-only project has no Claude source; continue on to its configured agent.
         missing_ok=config.codex_enabled(),
     )
@@ -677,6 +796,7 @@ def transcripts(dest: str = "") -> int:
             box_home_cmd='printf %s "${CODEX_HOME:-$HOME/.codex}"',
             box_rel="sessions",
             label="Codex transcripts",
+            project_of=None,
             missing_ok=rc == 0,
         )
         rc = rc or codex_rc
@@ -695,6 +815,7 @@ def _sync_source(
     box_home_cmd: str,
     box_rel: str,
     label: str,
+    project_of: Path | None,
     missing_ok: bool = False,
 ) -> int:
     """Sync one agent's bound history, falling back to its live in-box directory."""
@@ -743,7 +864,16 @@ def _sync_source(
         print(f"▶ source: {origin}")
         print(f"  from:   {stage}")
         print(f"  to:     {dest_dir}" + ("   (DRY RUN — no changes)" if dry else ""))
-        rc, _ = _archive(stage, anchor=anchor, dest=str(dest_dir), what=label, announce=False)
+        # Held to the CHECKOUT's folder even when the stage is the box-cp tmp dir: the names in it
+        # are the box's either way.
+        rc, _, _ = _archive(
+            stage,
+            anchor=anchor,
+            project_of=project_of,
+            dest=str(dest_dir),
+            what=label,
+            announce=False,
+        )
         if rc == 0:
             print(f"✓ {label} {'would be ' if dry else ''}synced → {dest_dir}")
         return rc

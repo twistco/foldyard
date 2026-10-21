@@ -79,7 +79,15 @@ def mac(tmp_path, monkeypatch):
         "codex_archive": home / ".codex/sessions",
         "src": checkout / "dev-stack/.devbox-claude/projects",
         "codex_src": checkout / "dev-stack/.devbox-codex/sessions",
+        # The one Claude project folder the box can legitimately write for this checkout.
+        "own": transcripts.claude_project_dir(str(checkout)),
     }
+
+
+def _walk(src: Path, **kw) -> int:
+    """The no-follow walk on its own, with no project-folder filter (the Codex shape) — for the tests
+    of the walk's mechanics, which are the same for every tree."""
+    return transcripts.sync_archive(src, project_of=None, **kw)
 
 
 def _session(src: Path, rel: str = "proj/session.jsonl", text: str = "{}") -> Path:
@@ -96,9 +104,9 @@ def test_refuses_in_box(monkeypatch, capsys):
 
 
 def test_bound_out_dir_is_archived_into_the_hosts_history(mac):
-    _session(mac["src"])
+    _session(mac["src"], f"{mac['own']}/session.jsonl")
     assert transcripts.transcripts() == 0
-    assert _archived(mac["claude_archive"]) == {"proj/session.jsonl": "{}"}
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/session.jsonl": "{}"}
     assert mac["calls"] == []  # host-local: no engine, no rsync, nothing spawned
 
 
@@ -120,15 +128,15 @@ def test_box_cp_fallback(mac, monkeypatch):
         if cmd[1:2] == ["exec"]:
             return _Proc(0, "/home/vscode/.claude")
         if cmd[1:2] == ["cp"]:
-            # Drop a file into the cp destination (the tmp staging dir) so it's non-empty.
-            (Path(cmd[-1]) / "s.jsonl").write_text("{}")
+            # Drop a session into the cp destination (the tmp staging dir) so it's non-empty.
+            _session(Path(cmd[-1]), f"{mac['own']}/s.jsonl")
             return _Proc(0)
         return _Proc(0)
 
     monkeypatch.setattr(transcripts.subprocess, "run", fake_run)
     assert transcripts.transcripts() == 0
     assert any(c[1:2] == ["cp"] for c in seq)
-    assert _archived(mac["claude_archive"]) == {"s.jsonl": "{}"}
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/s.jsonl": "{}"}
 
 
 def test_box_cp_fallback_does_not_follow_links_the_box_copied_out(mac, monkeypatch, tmp_path):
@@ -142,15 +150,15 @@ def test_box_cp_fallback_does_not_follow_links_the_box_copied_out(mac, monkeypat
         if cmd[1:2] == ["ps"]:
             return _Proc(0, "deadbeef\n")
         if cmd[1:2] == ["cp"]:
-            stage = Path(cmd[-1])
-            (stage / "s.jsonl").write_text("{}")
+            stage = Path(cmd[-1]) / mac["own"]
+            _session(stage, "s.jsonl")
             (stage / "keys").symlink_to(secret)
             (stage / "key.jsonl").symlink_to(secret / "id_rsa")
         return _Proc(0)
 
     monkeypatch.setattr(transcripts.subprocess, "run", fake_run)
     assert transcripts.transcripts() == 0
-    assert _archived(mac["claude_archive"]) == {"s.jsonl": "{}"}
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/s.jsonl": "{}"}
 
 
 def test_box_fallback_talks_to_the_projects_engine(mac, monkeypatch):
@@ -188,14 +196,14 @@ def test_a_stopped_machine_is_not_booted_for_host_side_transcripts(mac, monkeypa
 
 def test_dry_run_writes_nothing(mac, monkeypatch, capsys):
     monkeypatch.setenv("DRY_RUN", "1")
-    _session(mac["src"])
+    _session(mac["src"], f"{mac['own']}/session.jsonl")
     assert transcripts.transcripts() == 0
     assert not mac["claude_archive"].exists()
     assert "would copy 1 file" in capsys.readouterr().out
 
 
 def test_codex_sessions_are_archived_only_when_configured(mac, monkeypatch):
-    _session(mac["src"], "proj/claude.jsonl")
+    _session(mac["src"], f"{mac['own']}/claude.jsonl")
     _session(mac["codex_src"], "2026/10/21/codex.jsonl")
 
     monkeypatch.setattr(config, "codex_enabled", lambda: False)
@@ -205,7 +213,7 @@ def test_codex_sessions_are_archived_only_when_configured(mac, monkeypatch):
     monkeypatch.setattr(config, "codex_enabled", lambda: True)
     assert transcripts.transcripts() == 0
     assert _archived(mac["codex_archive"]) == {"2026/10/21/codex.jsonl": "{}"}
-    assert _archived(mac["claude_archive"]) == {"proj/claude.jsonl": "{}"}
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/claude.jsonl": "{}"}
 
 
 def test_codex_only_project_does_not_require_claude_source(mac, monkeypatch):
@@ -227,17 +235,17 @@ def test_sync_archive_noop_in_box(tmp_path, monkeypatch):
     src = tmp_path / "projects"
     src.mkdir()
     (src / "s.jsonl").write_text("{}")
-    assert transcripts.sync_archive(src, anchor=tmp_path) == 0
+    assert _walk(src, anchor=tmp_path) == 0
     assert not (tmp_path / "archive").exists()
 
 
 def test_sync_archive_noop_when_missing_or_empty(mac, monkeypatch):
     monkeypatch.setenv("FOLDYARD_TRANSCRIPTS_ARCHIVE", str(mac["checkout"] / "archive"))
     co = mac["checkout"]
-    assert transcripts.sync_archive(co / "nope/projects", anchor=co) == 0  # missing
+    assert _walk(co / "nope/projects", anchor=co) == 0  # missing
     empty = co / "empty/projects"
     empty.mkdir(parents=True)
-    assert transcripts.sync_archive(empty, anchor=co) == 0  # present but empty
+    assert _walk(empty, anchor=co) == 0  # present but empty
     assert not (co / "archive").exists()
 
 
@@ -258,7 +266,7 @@ def test_sync_archive_copies_additively(mac, monkeypatch, tmp_path):
     os.utime(held_stale, ns=(1_000_000_000_000, 3_000_000_000_000))
     _session(archive, "p/only-here.jsonl", "keep me")
 
-    assert transcripts.sync_archive(src, anchor=mac["checkout"], what="wt feat") == 0
+    assert _walk(src, anchor=mac["checkout"], what="wt feat") == 0
     assert _archived(archive) == {
         "p/fresh.jsonl": "source-fresh",  # source newer ⇒ replaced
         "p/stale.jsonl": "archive-newer",  # archive newer ⇒ kept (-u)
@@ -279,7 +287,7 @@ def test_same_mtime_different_size_is_recopied(mac, monkeypatch, tmp_path):
     held = _session(archive, "s.jsonl", "line1\n")
     for path in (grown, held):
         os.utime(path, ns=(1_000_000_000_000, 1_000_000_000_000))
-    assert transcripts.sync_archive(src, anchor=mac["checkout"]) == 0
+    assert _walk(src, anchor=mac["checkout"]) == 0
     assert (archive / "s.jsonl").read_text() == "line1\nline2\n"
 
 
@@ -289,7 +297,7 @@ def test_sync_archive_reports_a_failed_copy(mac, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(transcripts, "MAX_FILE_BYTES", 3)
     src = mac["checkout"] / "projects"
     _session(src, "big.jsonl", "far more than three bytes")
-    assert transcripts.sync_archive(src, anchor=mac["checkout"]) == transcripts.RC_PARTIAL
+    assert _walk(src, anchor=mac["checkout"]) == transcripts.RC_PARTIAL
     assert "big.jsonl" in capsys.readouterr().err
     assert _archived(tmp_path / "archive") == {}
 
@@ -299,25 +307,25 @@ def test_a_copy_that_would_fill_the_disk_is_refused(mac, monkeypatch, tmp_path, 
     monkeypatch.setattr(transcripts, "MIN_FREE_BYTES", 1 << 62)
     src = mac["checkout"] / "projects"
     _session(src, "s.jsonl")
-    assert transcripts.sync_archive(src, anchor=mac["checkout"]) == transcripts.RC_PARTIAL
+    assert _walk(src, anchor=mac["checkout"]) == transcripts.RC_PARTIAL
     assert "free" in capsys.readouterr().err
     assert _archived(tmp_path / "archive") == {}
 
 
 def test_sync_current_uses_bound_out_dir(mac):
-    _session(mac["src"], "s.jsonl")
+    _session(mac["src"], f"{mac['own']}/s.jsonl")
     env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
     assert transcripts.sync_current(env) == 0
-    assert _archived(mac["claude_archive"]) == {"s.jsonl": "{}"}
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/s.jsonl": "{}"}
 
 
 def test_sync_current_honours_devbox_transcripts(mac, monkeypatch):
     alt = mac["checkout"] / "alt-projects"
-    _session(alt, "s.jsonl", "alt")
+    _session(alt, f"{mac['own']}/s.jsonl", "alt")
     monkeypatch.setenv("DEVBOX_TRANSCRIPTS", str(alt))
     env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
     assert transcripts.sync_current(env) == 0
-    assert _archived(mac["claude_archive"]) == {"s.jsonl": "alt"}
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/s.jsonl": "alt"}
 
 
 def test_an_override_outside_the_checkout_still_refuses_its_own_link(mac, monkeypatch, tmp_path):
@@ -337,13 +345,13 @@ def test_an_override_outside_the_checkout_still_refuses_its_own_link(mac, monkey
 
 def test_sync_current_archives_configured_codex_to_native_destination(mac, monkeypatch, capsys):
     monkeypatch.setattr(config, "codex_enabled", lambda: True)
-    _session(mac["src"], "claude.jsonl")
+    _session(mac["src"], f"{mac['own']}/claude.jsonl")
     _session(mac["codex_src"], "codex.jsonl")
 
     env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
     assert transcripts.sync_current(env) == 0
 
-    assert _archived(mac["claude_archive"]) == {"claude.jsonl": "{}"}
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/claude.jsonl": "{}"}
     assert _archived(mac["codex_archive"]) == {"codex.jsonl": "{}"}
     assert "archiving Codex transcripts" in capsys.readouterr().out
 
@@ -387,18 +395,19 @@ def test_sync_current_ignores_codex_when_unconfigured(mac):
 
 def test_sync_current_attempts_codex_after_claude_archive_failure(mac, monkeypatch):
     monkeypatch.setattr(config, "codex_enabled", lambda: True)
-    seen: list[tuple[Path, Path, str]] = []
+    seen: list[tuple[Path, Path, Path | None]] = []
 
-    def fake_sync(src, *, anchor, dest="", **_kwargs):
-        seen.append((src, anchor, dest))
+    def fake_sync(src, *, anchor, project_of, **_kwargs):
+        seen.append((src, anchor, project_of))
         return 7 if ".devbox-claude" in str(src) else 0
 
     monkeypatch.setattr(transcripts, "sync_archive", fake_sync)
     env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
     assert transcripts.sync_current(env) == 7
-    assert [(str(src), anchor) for src, anchor, _dest in seen] == [
-        (str(mac["src"]), mac["checkout"]),
-        (str(mac["codex_src"]), mac["checkout"]),
+    # Claude's tree is held to the checkout's own project folder; Codex's has no such layout.
+    assert [(str(src), anchor, of) for src, anchor, of in seen] == [
+        (str(mac["src"]), mac["checkout"], mac["checkout"]),
+        (str(mac["codex_src"]), mac["checkout"], None),
     ]
 
 
@@ -430,7 +439,7 @@ def test_a_symlinked_source_root_is_refused(planted, capsys):
     src = planted["src"]
     src.parent.mkdir(parents=True)
     src.symlink_to(planted["secret"])
-    assert transcripts.sync_archive(src, anchor=planted["checkout"]) == transcripts.RC_REFUSED
+    assert _walk(src, anchor=planted["checkout"]) == transcripts.RC_REFUSED
     assert not _leaked(planted)
     err = capsys.readouterr().err
     assert str(src) in err and "symlink" in err
@@ -443,7 +452,7 @@ def test_a_symlinked_parent_is_refused(planted, capsys, tmp_path):
     (planted["checkout"] / "dev-stack").mkdir()
     link = planted["checkout"] / "dev-stack/.devbox-claude"
     link.symlink_to(elsewhere)
-    assert transcripts.sync_archive(planted["src"], anchor=planted["checkout"]) != 0
+    assert _walk(planted["src"], anchor=planted["checkout"]) != 0
     assert not _leaked(planted)
     assert str(link) in capsys.readouterr().err
 
@@ -454,7 +463,7 @@ def test_a_symlinked_dev_vm_dir_is_refused(planted, tmp_path):
     (elsewhere / ".devbox-claude/projects").mkdir(parents=True)
     (elsewhere / ".devbox-claude/projects/id_rsa").write_text("TOPSECRET")
     (planted["checkout"] / "dev-stack").symlink_to(elsewhere)
-    assert transcripts.sync_archive(planted["src"], anchor=planted["checkout"]) != 0
+    assert _walk(planted["src"], anchor=planted["checkout"]) != 0
     assert not _leaked(planted)
 
 
@@ -468,7 +477,7 @@ def test_a_worktree_swapped_for_a_link_is_refused(planted, tmp_path):
     worktree.parent.mkdir()
     worktree.symlink_to(other)
     src = worktree / "dev-stack/.devbox-claude/projects"
-    assert transcripts.sync_archive(src, anchor=worktree) == transcripts.RC_REFUSED
+    assert _walk(src, anchor=worktree) == transcripts.RC_REFUSED
     assert not _leaked(planted)
 
 
@@ -481,14 +490,14 @@ def test_the_anchors_parents_are_followed(planted, tmp_path):
     linked.symlink_to(real)
     src = linked / "repo/dev-stack/.devbox-claude/projects"
     _session(src, "s.jsonl", "mine")
-    assert transcripts.sync_archive(src, anchor=linked / "repo") == 0
+    assert _walk(src, anchor=linked / "repo") == 0
     assert _archived(planted["archive"]) == {"s.jsonl": "mine"}
 
 
 def test_a_source_root_that_is_a_file_is_refused(planted):
     planted["src"].parent.mkdir(parents=True)
     planted["src"].write_text("not a dir")
-    assert transcripts.sync_archive(planted["src"], anchor=planted["checkout"]) != 0
+    assert _walk(planted["src"], anchor=planted["checkout"]) != 0
     assert not planted["archive"].exists()
 
 
@@ -497,7 +506,7 @@ def test_links_inside_the_tree_are_skipped_not_followed(planted, capsys):
     _session(src, "proj/a.jsonl", "real")
     (src / "proj/keys").symlink_to(planted["secret"])  # a symlinked directory
     (src / "proj/key.jsonl").symlink_to(planted["secret"] / "id_rsa")  # a symlinked file
-    assert transcripts.sync_archive(src, anchor=planted["checkout"]) == 0
+    assert _walk(src, anchor=planted["checkout"]) == 0
     assert _archived(planted["archive"]) == {"proj/a.jsonl": "real"}
     assert "skipped 2" in capsys.readouterr().err
 
@@ -509,7 +518,7 @@ def test_a_fifo_is_skipped_without_hanging(planted):
     os.mkfifo(src / "proj/pipe.jsonl")
     result: list[int] = []
     worker = threading.Thread(
-        target=lambda: result.append(transcripts.sync_archive(src, anchor=planted["checkout"])),
+        target=lambda: result.append(_walk(src, anchor=planted["checkout"])),
         daemon=True,
     )
     worker.start()
@@ -538,7 +547,7 @@ def test_a_dir_swapped_for_a_link_mid_walk_is_not_followed(planted, monkeypatch)
     _session(src, "proj/a.jsonl", "real")
     (src / "proj/keys").symlink_to(planted["secret"])
     _lstat_lies(monkeypatch, "keys", stat.S_IFDIR)
-    assert transcripts.sync_archive(src, anchor=planted["checkout"]) == 0
+    assert _walk(src, anchor=planted["checkout"]) == 0
     assert not _leaked(planted)
 
 
@@ -547,7 +556,7 @@ def test_a_file_swapped_for_a_link_mid_walk_is_not_followed(planted, monkeypatch
     _session(src, "proj/a.jsonl", "real")
     (src / "proj/key.jsonl").symlink_to(planted["secret"] / "id_rsa")
     _lstat_lies(monkeypatch, "key.jsonl", stat.S_IFREG)
-    assert transcripts.sync_archive(src, anchor=planted["checkout"]) == 0
+    assert _walk(src, anchor=planted["checkout"]) == 0
     assert not _leaked(planted)
 
 
@@ -556,9 +565,7 @@ def test_a_file_swapped_for_a_fifo_mid_walk_does_not_hang(planted, monkeypatch):
     _session(src, "proj/a.jsonl", "real")
     os.mkfifo(src / "proj/pipe.jsonl")
     _lstat_lies(monkeypatch, "pipe.jsonl", stat.S_IFREG)
-    worker = threading.Thread(
-        target=lambda: transcripts.sync_archive(src, anchor=planted["checkout"]), daemon=True
-    )
+    worker = threading.Thread(target=lambda: _walk(src, anchor=planted["checkout"]), daemon=True)
     worker.start()
     worker.join(timeout=10)
     assert not worker.is_alive(), "the archive copy hung on a FIFO"
@@ -579,7 +586,7 @@ def test_a_file_that_vanishes_mid_walk_is_tolerated(planted, monkeypatch):
         return st
 
     monkeypatch.setattr(transcripts, "_lstat_at", vanishing)
-    assert transcripts.sync_archive(src, anchor=planted["checkout"]) == transcripts.RC_VANISHED
+    assert _walk(src, anchor=planted["checkout"]) == transcripts.RC_VANISHED
     assert _archived(planted["archive"]) == {"proj/a.jsonl": "real"}
 
 
@@ -595,7 +602,7 @@ def test_an_entry_the_walk_cannot_look_at_is_reported_by_its_path(planted, monke
         return real(dir_fd, entry)
 
     monkeypatch.setattr(transcripts, "_lstat_at", denied)
-    assert transcripts.sync_archive(src, anchor=planted["checkout"]) == transcripts.RC_PARTIAL
+    assert _walk(src, anchor=planted["checkout"]) == transcripts.RC_PARTIAL
     assert "odd.jsonl: Permission denied" in capsys.readouterr().err
     assert _archived(planted["archive"]) == {"a.jsonl": "real"}
 
@@ -611,7 +618,7 @@ def test_the_archive_is_not_written_through_a_link_either(planted, tmp_path):
     src = planted["src"]
     _session(src, "proj/a.jsonl", "real")
     _session(src, "held.jsonl", "real")
-    assert transcripts.sync_archive(src, anchor=planted["checkout"]) == transcripts.RC_PARTIAL
+    assert _walk(src, anchor=planted["checkout"]) == transcripts.RC_PARTIAL
     assert list(outside.iterdir()) == []
 
 
@@ -628,6 +635,120 @@ def test_transcripts_refuses_a_planted_link(mac, tmp_path, capsys):
     )
     assert "symlink" in capsys.readouterr().err
     assert mac["calls"] == []  # a refused bound-out dir is not "empty": no fallback to the box
+
+
+# ── the box names the folders: only the checkout's own Claude project is archived ─────
+#
+# Claude Code files a session under `projects/<its cwd, every non-alphanumeric turned into ->/`,
+# and a Claude on your computer resumes the folder named after ITS cwd. The box writes those names,
+# so a folder named after another project would put the box's text into that project's resumes.
+
+
+@pytest.mark.parametrize(
+    ("path", "name"),
+    [
+        # Real folder names from a host's ~/.claude/projects and a box's bound-out dir.
+        ("/Users/dain/workspace/foldyard", "-Users-dain-workspace-foldyard"),
+        (
+            "/Users/dain/workspace/danieldemmel.me-next",
+            "-Users-dain-workspace-danieldemmel-me-next",
+        ),
+        ("/Users/dain/.claude", "-Users-dain--claude"),
+        ("/tmp/fy-cq-mine-vpi8867_", "-tmp-fy-cq-mine-vpi8867-"),
+        # Per UTF-16 code unit, as JavaScript's regex sees the string: an astral char is two.
+        ("/tmp/café/\U0001f600x", "-tmp-caf----x"),
+        # Over 200 characters: the first 200, then the base-36 Java-style hash of the PATH.
+        ("/Users/x/" + "y" * 191, "-Users-x-" + "y" * 191),
+        ("/Users/x/" + "y" * 192, "-Users-x-" + "y" * 191 + "-pcl9cj"),
+        ("/home/u/" + "c" * 210 + "/é", "-home-u-" + "c" * 192 + "-zejrbf"),  # negative hash
+        ("/home/u/" + "d" * 210 + "/é", "-home-u-" + "d" * 192 + "-9ne7th"),  # positive hash
+    ],
+)
+def test_claude_project_dir_is_claude_codes_own_rule(path, name):
+    """Vectors from Claude Code 2.1.306's own function (run under Node), and real folder names."""
+    assert transcripts.claude_project_dir(path) == name
+
+
+def test_only_the_checkouts_own_project_folder_is_archived(mac, capsys):
+    own = mac["own"]
+    _session(mac["src"], f"{own}/mine.jsonl", "mine")
+    _session(mac["src"], "-Users-someone-workspace-other-project/planted.jsonl", "injected")
+    _session(mac["src"], "-tmp/scratch.jsonl", "elsewhere")
+    _session(mac["src"], "index.html", "<html>")  # a top-level file is no project folder either
+    assert transcripts.transcripts() == 0  # a policy skip, not a failure
+    assert _archived(mac["claude_archive"]) == {f"{own}/mine.jsonl": "mine"}
+    err = capsys.readouterr().err
+    for name in ("-Users-someone-workspace-other-project", "-tmp", "index.html"):
+        assert name in err
+    assert own in err  # says which folder it does archive, so a missing session isn't a mystery
+
+
+@pytest.mark.parametrize("suffix", ["-old", "-worktrees-feat", "-sub", "-"])
+def test_a_folder_that_only_starts_with_the_checkouts_name_is_refused(mac, suffix):
+    """`/` and `-` both become `-`, so `<checkout>-old` (a sibling checkout), `<checkout>-worktrees
+    /feat` (a default-layout worktree, its own checkout) and `<checkout>/sub` all share the
+    checkout's name as a prefix. Only the exact name is this checkout's."""
+    _session(mac["src"], f"{mac['own']}/mine.jsonl", "mine")
+    _session(mac["src"], f"{mac['own']}{suffix}/planted.jsonl", "injected")
+    assert transcripts.transcripts() == 0
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/mine.jsonl": "mine"}
+
+
+def test_a_file_under_the_checkouts_own_name_is_refused(mac, capsys):
+    """Claude only ever makes a FOLDER there; a plain file under that name is the box's own."""
+    _session(mac["src"], mac["own"], "not a folder")
+    _session(mac["src"], "-tmp/x.jsonl")
+    assert transcripts.transcripts() == 0
+    assert not mac["claude_archive"].exists() or _archived(mac["claude_archive"]) == {}
+    assert mac["own"] in capsys.readouterr().err
+
+
+def test_a_worktrees_archive_holds_only_the_worktrees_own_folder(mac, tmp_path):
+    """`worktree remove` archives with the WORKTREE as the checkout: main's name is refused there
+    (each checkout's box writes its own bound-out dir), and the worktree's own name is kept."""
+    wt = tmp_path / "repo-worktrees/feat"
+    src = wt / "dev-stack/.devbox-claude/projects"
+    own = transcripts.claude_project_dir(str(wt))
+    _session(src, f"{own}/wt.jsonl", "wt")
+    _session(src, f"{mac['own']}/main.jsonl", "planted for main")
+    env = {"FOLDYARD_CHECKOUT": str(wt), "HERE": "dev-stack"}
+    assert transcripts.sync_current(env) == 0
+    assert _archived(mac["claude_archive"]) == {f"{own}/wt.jsonl": "wt"}
+
+
+def test_the_live_box_fallback_is_held_to_the_checkouts_folder(mac, monkeypatch):
+    """The `<engine> cp` stage is a host tmp dir, but the names in it are still the box's: they are
+    checked against the CHECKOUT, not against the stage."""
+
+    def fake_run(cmd, **kw):
+        if cmd[1:2] == ["ps"]:
+            return _Proc(0, "deadbeef\n")
+        if cmd[1:2] == ["cp"]:
+            _session(Path(cmd[-1]), f"{mac['own']}/s.jsonl", "mine")
+            _session(Path(cmd[-1]), "-Users-someone-other/planted.jsonl", "injected")
+        return _Proc(0)
+
+    monkeypatch.setattr(transcripts.subprocess, "run", fake_run)
+    assert transcripts.transcripts() == 0
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/s.jsonl": "mine"}
+
+
+def test_a_dry_run_names_the_refused_folders_too(mac, monkeypatch, capsys):
+    monkeypatch.setenv("DRY_RUN", "1")
+    _session(mac["src"], f"{mac['own']}/s.jsonl")
+    _session(mac["src"], "-Users-someone-other/planted.jsonl")
+    assert transcripts.transcripts() == 0
+    out = capsys.readouterr()
+    assert "would copy 1 file" in out.out and "-Users-someone-other" in out.err
+
+
+def test_codex_sessions_are_not_held_to_a_folder_name(mac, monkeypatch):
+    """Codex files sessions by DATE (sessions/YYYY/MM/DD) — the project is recorded inside each file,
+    which the host does not parse (see the residual-risk note in transcripts.py)."""
+    monkeypatch.setattr(config, "codex_enabled", lambda: True)
+    _session(mac["codex_src"], "2026/10/21/rollout-x.jsonl")
+    assert transcripts.transcripts() == 0
+    assert _archived(mac["codex_archive"]) == {"2026/10/21/rollout-x.jsonl": "{}"}
 
 
 # ── the supervisor's per-interval auto-sync (`sweep`) ────────────────────────────────
@@ -651,7 +772,7 @@ def sweeper(mac, monkeypatch, tmp_path):
     logs: list[str] = []
     notes: list[tuple[str, str]] = []
 
-    def fake_mirror(src_fd, dest_dir, dry):
+    def fake_mirror(src_fd, dest_dir, dry, **_kw):
         copies.append(dest_dir)
         rc = box["rc"]
         if rc == transcripts.RC_VANISHED:
@@ -704,11 +825,43 @@ def test_sweep_copies_for_real(mac, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "dev_vm_rel", lambda: "dev-stack")
     monkeypatch.setattr(config, "claude_enabled", lambda: True)
     monkeypatch.setattr(config, "claude_transcript_sync_seconds", lambda: 15.0)
-    _session(mac["src"], "s.jsonl", "live")
+    _session(mac["src"], f"{mac['own']}/s.jsonl", "live")
     logs: list[str] = []
     transcripts.sweep(logs.append, "")
-    assert _archived(archive) == {"s.jsonl": "live"}
+    assert _archived(archive) == {f"{mac['own']}/s.jsonl": "live"}
     assert logs == []
+
+
+def test_sweep_names_refused_folders_once_without_failing(mac, monkeypatch, tmp_path):
+    """A refused folder is a policy skip: logged once by name (so "my session didn't archive" has
+    an answer in host-supervisor.log), never repeated every interval, never a failure or a
+    notification. A NEW refused name is logged once in its turn."""
+    transcripts._sweep_state.clear()
+    archive = tmp_path / "archive"
+    monkeypatch.setenv("FOLDYARD_TRANSCRIPTS_ARCHIVE", str(archive))
+    monkeypatch.setattr(config, "repo_root", lambda: mac["checkout"])
+    monkeypatch.setattr(config, "dev_vm_rel", lambda: "dev-stack")
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    monkeypatch.setattr(config, "claude_transcript_sync_seconds", lambda: 2.0)
+    _session(mac["src"], f"{mac['own']}/s.jsonl", "live")
+    _session(mac["src"], "-Users-someone-other/planted.jsonl", "injected")
+    logs: list[str] = []
+    notes: list[tuple[str, str]] = []
+
+    def run() -> None:
+        transcripts.sweep(logs.append, "", notify=lambda t, b: notes.append((t, b)))
+
+    for _ in range(5):
+        run()
+    assert _archived(archive) == {f"{mac['own']}/s.jsonl": "live"}
+    assert len(logs) == 1 and "-Users-someone-other" in logs[0] and mac["own"] in logs[0]
+    assert "FAILED" not in logs[0]
+    assert transcripts._sweep_state[("", "Claude")]["failing"] is False
+    _session(mac["src"], "-tmp/x.jsonl")
+    for _ in range(5):
+        run()
+    assert len(logs) == 2 and "-tmp" in logs[1] and "-Users-someone-other" not in logs[1]
+    assert notes == []
 
 
 def test_sweep_logs_a_planted_link_naming_it(mac, monkeypatch, tmp_path):
