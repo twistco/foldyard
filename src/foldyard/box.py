@@ -27,6 +27,7 @@ running box). The command assembly is golden-tested (engine mocked) + faithful t
 
 from __future__ import annotations
 
+import fcntl
 import getpass
 import hashlib
 import json
@@ -1258,8 +1259,16 @@ def _seed_claude_config(root: Path) -> None:
         entry = {**entry, "hasTrustDialogAccepted": True}
         return {**state, "projects": {**projects, str(root): entry}}
 
-    _merge_json(Path(home) / "settings.json", lambda s: {**_CLAUDE_SETTINGS_DEFAULTS, **s})
-    _merge_json(Path(home) / ".claude.json", trust)
+    # Every box of a project shares this volume: two launches from different worktrees each reading,
+    # merging and replacing would lose one's trust entry. Ours take turns (Claude's own saves don't
+    # take this lock — see _merge_json).
+    try:
+        with open(Path(home) / ".fy-seed.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            _merge_json(Path(home) / "settings.json", lambda s: {**_CLAUDE_SETTINGS_DEFAULTS, **s})
+            _merge_json(Path(home) / ".claude.json", trust)
+    except OSError:  # no lock to be had: the prompts show, the launch goes on
+        return
 
 
 def _merge_json(path: Path, update: Callable[[dict], dict]) -> None:

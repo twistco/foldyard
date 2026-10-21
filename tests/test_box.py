@@ -1926,7 +1926,28 @@ def test_claude_launch_leaves_no_temp_file_when_the_write_fails(gate, monkeypatc
     monkeypatch.setattr(box.os, "replace", refuse)
     _launch("claude")
     assert gate.execed
-    assert sorted(p.name for p in _claude_home().iterdir()) == []
+    assert sorted(p.name for p in _claude_home().iterdir()) == [".fy-seed.lock"]
+
+
+def test_claude_launch_seeds_under_an_exclusive_lock(gate, monkeypatch):
+    # Every box of a project shares the config volume, so two `fy claude`s from different worktrees
+    # could each read, merge and replace — and one trust entry would be lost. They take turns.
+    events: list[str] = []
+    flock = box.fcntl.flock
+
+    def recording_flock(fh, op):
+        events.append(f"{Path(fh.name).name}:{'unlock' if op == box.fcntl.LOCK_UN else 'lock'}")
+        flock(fh, op)
+
+    replace = box.os.replace
+    monkeypatch.setattr(box.fcntl, "flock", recording_flock)
+    monkeypatch.setattr(
+        box.os, "replace", lambda s, d: (events.append(f"write {Path(d).name}"), replace(s, d))
+    )
+    _launch("claude")
+    assert events[0] == ".fy-seed.lock:lock"
+    assert events[1:3] == ["write settings.json", "write .claude.json"]
+    assert events[3:] in ([], [".fy-seed.lock:unlock"])  # closing the file releases it too
 
 
 def test_claude_launch_writes_nothing_without_its_config_dir(gate, monkeypatch, tmp_path):
