@@ -1851,14 +1851,18 @@ def test_shell_forwards_the_terminal(fake, monkeypatch):
     assert "fy_term_known" in sh[-1]
 
 
-def _run_term_fallback(term: str, known: tuple[str, ...] | None, home: Path | None = None) -> str:
+def _run_term_fallback(
+    term: str, known: tuple[str, ...] | None, home: Path | None = None, dirs: str = ""
+) -> str:
     """Run the REAL `_TERM_FALLBACK_SNIPPET` under bash with ``infocmp`` stubbed as a shell
     function that knows only ``known`` (``None`` = no infocmp at all, so the snippet reads the
-    terminfo files — ``home``'s ``.terminfo`` among them); return the TERM it leaves."""
+    terminfo files — ``home``'s ``.terminfo`` and ``dirs`` as ``TERMINFO_DIRS`` among them);
+    return the TERM it leaves."""
     import subprocess
 
     if known is None:
         lines = ["PATH=/nonexistent", f"HOME={shlex.quote(str(home))}"]
+        lines.append(f"TERMINFO_DIRS={shlex.quote(dirs)}")
     else:
         lines = [f'infocmp() {{ case "$1" in {"|".join(known)}) return 0;; esac; return 1; }}']
     lines += [f"TERM={shlex.quote(term)}", box._TERM_FALLBACK_SNIPPET, 'printf %s "$TERM"']
@@ -1881,6 +1885,13 @@ def test_term_fallback_only_replaces_a_term_the_box_cannot_describe(tmp_path):
     assert _run_term_fallback("xterm-fy-letter", None, tmp_path) == "xterm-fy-letter"
     assert _run_term_fallback("xterm-fy-hex", None, tmp_path) == "xterm-fy-hex"
     assert _run_term_fallback("xterm-fy-absent", None, tmp_path) == "xterm-256color"
+    # …and the TERMINFO_DIRS list ncurses also searches (colon-separated; an empty entry = default).
+    (tmp_path / "extra" / "x").mkdir(parents=True)
+    (tmp_path / "extra" / "x" / "xterm-fy-dirs").touch()
+    dirs = f":/nonexistent:{tmp_path / 'extra'}"
+    assert (
+        _run_term_fallback("xterm-fy-dirs", None, tmp_path / "elsewhere", dirs) == "xterm-fy-dirs"
+    )
 
 
 # ── exec (non-interactive; the git-hooks dispatch primitive) ──────────────────────────
