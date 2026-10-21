@@ -124,8 +124,14 @@ def test_a_containers_activity_reaches_fy_monitor_attributed_to_it(repo):
                         hit = e
             time.sleep(5)
         assert hit is not None, f"no attributed /etc/shadow read from {cid[:12]}:\n{out[-3000:]}"
+        assert isinstance(hit["mnt"], int)  # the namespace the join matched, for consumers
+        # the same event read back as a range over the whole store, joined the same way
+        ranged = fy(["monitor", "--json", "--since", "15m"], repo, timeout=120, env_extra=ON).out
+        again = [json.loads(x) for x in ranged.splitlines() if x.startswith("{")]
+        assert any(e["seq"] == hit["seq"] and e["container"] == cid for e in again), ranged[-3000:]
         doc = fy(["doctor"], repo, timeout=300, env_extra=ON).out
         assert "monitor events" in doc and "0 failed the signature" in doc, doc
+        assert "store:" in doc, doc
     finally:
         engine("rm", "-f", cid, timeout=60)
 

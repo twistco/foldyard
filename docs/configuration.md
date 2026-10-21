@@ -300,8 +300,18 @@ disk_gib = 60
     warns and carries on: it only observes.
   - `fy monitor` shows what it recorded, each event labelled with its container and worktree.
     `fy monitor -w <worktree>` narrows to one worktree; `--json` gives one object per line.
-    - The host supervisor copies the events to your computer every few seconds
-      (`~/.foldyard/<project>/logs/monitor.jsonl`, rotated at 32 MB × 5).
+    `fy monitor --since 2h` (or an ISO time, UTC unless it gives an offset; `--until` too) reads
+    any stretch the store still holds, labelled exactly as when it was recorded, and says what is
+    missing in it.
+    - The host supervisor copies the events to your computer every few seconds, into
+      `~/.foldyard/<project>/logs/`: `monitor.jsonl` is the newest 32 MB, and older events are in
+      gzip-compressed `monitor.<id>.jsonl.gz` files (about 30 times smaller: roughly 80 bytes an
+      event).
+    - The store keeps **1 GB** on disk by default — about 13 million events: hours of the busiest
+      stack starts measured (520 events a second), days at a steady 30. Set it in
+      `~/.foldyard/<project>/monitor-store.toml` on your computer, never in `foldyard.toml`, so the
+      box can't shorten what is kept about it: `max_mb = 4096` (64 MB–64 GB; read every few
+      seconds). `fy monitor` and `fy doctor` show how much it holds and how far back.
     - Each line is signed in the VM with a key the box's user can't read, so a line that was
       altered on the way is dropped and counted. One that went missing shows as a gap. `fy
       doctor`'s `monitor events` row shows both counts.
@@ -362,6 +372,12 @@ disk_gib = 60
     - Events are sent once their container is settled. A batch is retried until the command exits
       0, the URL answers 2xx or the line is written; after five failures it is skipped and
       counted. `fy doctor` shows each hook's health.
+    - Every batch has a `gaps` list, usually empty. An entry means the hook can't vouch for a
+      stretch of time: the store removed events before the hook read them, events were lost
+      between the VM and your computer, a batch was skipped, or events were labelled without the
+      record that would confirm their container. Read those times as "no evidence", not "nothing
+      happened". Each event also carries `mnt`, its mount namespace number. The format:
+      [docs/monitor-pipeline.md](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md#6-hooks-built).
     - The design, and the analysis pipeline hooks are meant for:
       [docs/monitor-pipeline.md](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md).
   - Details: [ADR-0032](./adrs/0032-a-root-collector-in-the-guest.md).

@@ -578,7 +578,8 @@ def between(since: str, until: str, prefix: str, notes: list[str]) -> Iterator[E
         if since and oldest and oldest > since:
             notes.append(
                 f"the store reaches back to {oldest[:19].replace('T', ' ')} UTC — older events "
-                "were removed to keep it within its budget (`fy docs monitor-pipeline`)"
+                "were removed to keep it within its budget (`max_mb` in "
+                f"{monitorstore.settings_file()}; `fy docs configuration`)"
             )
 
         def touches(seg: monitorstore.Segment) -> bool:

@@ -2,8 +2,8 @@
 
 Status: **design**, 2026-10-04. Builds on [ADR-0032](./adrs/0032-a-root-collector-in-the-guest.md)
 (slices 1–2: Tetragon in the VM, the signed spool, the host pull and join). What is built today:
-the hook mechanism and its file sink (§6). Everything else here is proposed, with the measurements
-it rests on.
+the compressed, budgeted store and its catalogue (§2.1), and the hook mechanism and its file sink
+(§6). Everything else here is proposed, with the measurements it rests on.
 
 ## 1. What the events look like
 
@@ -66,6 +66,37 @@ as an **optional engine for the analysis stages** (§5), not as the store.
   while the writer writes): which segments exist and what they cover, the rollups (§3), the
   exemplars, and each hook's cursor. Small, indexed, and the thing `fy monitor`/the TUI query.
 - The supervisor is the only writer; every reader opens files and the catalogue read-only.
+
+### 2.1 Built: the store today
+
+A first step towards that, stdlib only, in `src/foldyard/monitorstore.py`:
+
+- **Segments.** `logs/monitor.jsonl` is the live one; its first line names it
+  (`{"k": "segment", "id": …}`). Past 32 MB it is renamed `monitor.<id>.jsonl` and gzip-compressed
+  to `monitor.<id>.jsonl.gz`: 2,443 B a record raw, 81 B compressed on a real 33.7 MB segment
+  (30×, 0.1 s). A position is `[segment id, offset]`, the offset in uncompressed bytes, so it
+  survives the rename and the compression; an inode would not (and ext4 reuses them).
+- **A disk budget**, 1 GB by default (≈13 M events: 7 hours at the 520 events/s storms of
+  2026-10-21, 5 days at a steady 30). Host-only: `max_mb` in
+  `~/.foldyard/<project>/monitor-store.toml`, 64 MB–64 GB. The oldest compressed segments go
+  first; the live one never does. Not `foldyard.toml`: the store is the evidence of what ran in
+  the box, and the box can write the checkout.
+- **A SQLite catalogue** (`logs/monitor-index.sqlite`, WAL; derived data, rebuilt from the
+  segments if lost): every snapshot, each container's latest engine claim, each segment's event
+  time range and which boot's sequence numbers it holds. A record's entry is written before the
+  record itself, and every reader first indexes whatever isn't yet (an older store, a crash).
+  When a segment goes, its snapshots go too, except the newest of each boot: the one before the
+  oldest events still kept.
+
+**Why the catalogue (2026-10-21).** The join needs the snapshot before an event and the one after
+it. Readers used to look only within a byte window — a hook 1 MB back and 4 MB on from its
+position, `fy monitor` the last 8 MB — and the relay snapshots once a minute. In stack-start
+storms (265–520 events/s, 2.2–3.7 KB each) two snapshots were 6–90 MB apart, so the events between
+had neither in view: hooks released them after two minutes as `unattributed`, a `who =
+["container"]` hook dropped them, and its cursor moved on. A replay of the real store against the
+real hook code reproduced the lost events exactly; the same replay through the catalogue delivered
+every container event the whole-store join finds. Nothing was lost in transport. Events from
+before the fix that the old store rotated out can't be recovered.
 
 ## 3. Tiers and retention
 
@@ -192,21 +223,46 @@ timeout = 15                        # seconds
 ```
 
 - **Payload** (stdin for a command, the body for a url): `{"schema": "fy.monitor.events/1",
-  "project", "hook", "events": [...], "first": [boot, seq], "last": [boot, seq]}` — the same
-  `Event` fields `fy monitor --json` prints. Besides the attribution (`who`, `container`, `name`,
-  `worktree`), each event carries its ancestry: `ppid`, `parent`, `parent_args` (the one hop) and
-  `exec_id`/`parent_exec_id` (the links to rebuild the whole tree from `exec` events) — how a
-  scorer tells a container's own daemon from what a session ran.
-- **Settled events only**: an event is delivered once a snapshot after it exists (or two minutes
-  have passed), so its attribution won't change — and never ahead of an earlier event that hasn't
-  settled (a VM restarted inside those two minutes would otherwise strand the old boot's tail).
+  "project", "hook", "events": [...], "first": [boot, seq], "last": [boot, seq], "gaps": [...]}`
+  — the same `Event` fields `fy monitor --json` prints. Besides the attribution (`who`,
+  `container`, `name`, `worktree`), each event carries its ancestry: `ppid`, `parent`,
+  `parent_args` (the one hop) and `exec_id`/`parent_exec_id` (the links to rebuild the whole tree
+  from `exec` events) — how a scorer tells a container's own daemon from what a session ran — and
+  `mnt`, its mount namespace number (what the join matched; namespace numbers are reused, so
+  never a container id on its own).
+- **Gaps** (added 2026-10-21, within the same schema: `gaps` and `mnt` are new keys, nothing
+  changed meaning). Every batch carries `gaps`, usually `[]`. Each entry says the batch can't
+  vouch for a stretch of the stream:
+
+  ```json
+  {"why": "rotated", "after": ["<boot>", 1041], "before": ["<boot>", 9310],
+   "since": "2026-10-21T20:44:02.1Z", "until": "2026-10-21T20:51:40.7Z", "detail": "…"}
+  ```
+
+  Evidence is missing, or incomplete, for the records strictly between `after` and `before`
+  (`[boot, seq]`, in store order; `null` = open), between the event times `since` and `until`
+  (`""` = unknown). `why` is one of: `rotated` — the store removed events before this hook read
+  them; `transport` — sequence numbers that never reached your computer; `relay` — the relay
+  restarted and missed Tetragon's events; `unsettled` — events released after two minutes with
+  no snapshot after them in the store (the relay stalled, or the boot ended), attributed from
+  the snapshot before alone; `skipped` — a batch this hook failed to take five times. A gap is
+  sent with the batch whose events the cursor moves past it; when nothing the hook wants comes
+  with it, a batch carries the gaps alone (`events` empty, `first`/`last` null). Read those
+  times as "no evidence", never "nothing happened".
+- **Settled events only**: an event is delivered once a snapshot after it exists anywhere in the
+  store, so its attribution won't change — or, only when none does, two minutes after it arrived
+  (an `unsettled` gap then says so). Never ahead of an earlier event that hasn't settled (a VM
+  restarted inside those two minutes would otherwise strand the old boot's tail). Whatever stretch
+  a hook reads, it is joined with the catalogue's snapshots around it (§2.1).
 - **At-least-once:** a hook's cursor advances only when a batch succeeded (exit 0, or HTTP 2xx).
   A failing batch is retried with backoff and, after five attempts, skipped and recorded. Each
-  hook reads the store from its own position (the store file's inode and the offset where its
-  last event ends), so a hook that fell behind catches up rather than skipping to the tail; only
-  the store rotating that position out loses events, and the supervisor log says so. A NEW hook
-  starts at the store's last 4 MiB (about the last 2,000 events), not its beginning: history
-  stays in `fy monitor`, and a hook added to a full store isn't handed every past event at once.
+  hook reads the store from its own position (the segment and the offset where its last event
+  ends), so a hook that fell behind catches up — up to twenty batches a round — rather than
+  skipping to the tail; only the budget removing that position loses events, and the supervisor
+  log and the next batch's `rotated` gap say so. A NEW hook starts at the store's last 4 MiB
+  (about the last 2,000 events), anchored there the first time it is seen, not its beginning:
+  history stays in `fy monitor --since`, and a hook added to a full store isn't handed every past
+  event at once.
 - **Isolation:** commands run with a minimal environment (`PATH`, `HOME`, `LANG`, `FY_PROJECT`,
   `FY_HOOK`) — never the supervisor's, which holds every `host.env` secret — on their own thread,
   so a slow hook never delays the pull.
@@ -303,3 +359,8 @@ gets the events through is the structural fix, scoped separately.
    should set it.
 4. **Where scoring runs:** in the supervisor (cheap, always on) or as a hook (replaceable)?
    Proposed: the deterministic rules in the supervisor, models behind hooks.
+5. **Snapshot by volume too?** The relay snapshots every 60 s (and ~1 s after a namespace it
+   hasn't seen). The catalogue makes the distance between snapshots harmless to the join, but a
+   minute is also how long a reused namespace number can't be told from its last owner. A
+   snapshot every ~2,000 events or 2 MB of spool would narrow that; it changes the relay, so the
+   monitor boot script's id, so every VM needs `fy machine stop && fy up`.
