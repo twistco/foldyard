@@ -327,7 +327,8 @@ disk_gib = 60
         would aim your computer's writes anywhere. The only links it follows are the system's
         own, such as `/tmp` on macOS: owned by root, in a directory you can't write. Give the
         real path otherwise; the refusal names it.
-      - The directory must exist. The file is created if it doesn't.
+      - The directory must exist. The file is created if it doesn't. Each file belongs to one
+        hook; pointing a hook at a new file starts its numbering again there.
       - Each line is signed with a key only your computer holds
         (`~/.foldyard/<project>/monitor-sink.key`), numbered, and linked to the line before it.
         The box can still edit the file, but `fy monitor check <path>` finds any line edited,

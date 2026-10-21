@@ -106,6 +106,7 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
     hooks: list[Hook] = []
     errors: list[str] = []
     seen: set[str] = set()
+    files: dict[str, str] = {}  # file → the hook writing it
     for i, raw in enumerate(doc.get("hook") or []):
         label = f"hook #{i + 1}"
         try:
@@ -130,6 +131,10 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
                 raise ValueError("`file` must be an absolute path")
             if file and os.path.normpath(file) != file:
                 raise ValueError("`file` must be a normalised path (no `.`, `..` or trailing `/`)")
+            if file in files:
+                raise ValueError(
+                    f"`file` is already hook '{files[file]}'s (a file holds one hook's chain)"
+                )
             headers = raw.get("headers") or {}
             if not isinstance(headers, dict) or not all(
                 isinstance(k, str) and isinstance(v, str) for k, v in headers.items()
@@ -158,6 +163,8 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
                 )
             )
             seen.add(name)
+            if file:
+                files[file] = name
         except (ValueError, TypeError) as e:
             errors.append(f"{label} skipped: {e}")
     return hooks, errors
@@ -389,7 +396,7 @@ def _first_hook(data: bytes) -> str:
     for raw in data.split(b"\n"):
         try:
             doc = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(doc, dict) and isinstance(doc.get("hook"), str):
             return doc["hook"]
@@ -412,12 +419,18 @@ def check(path: str, name: str = "") -> int:
     except (OSError, monitorsink.Refused) as e:
         print(f"✗ {e}")
         return 1
-    name = name or next((h.name for h in load()[0] if h.file == path), "") or _first_hook(data)
+    name = name or next((h.name for h in load()[0] if h.file == path), "")
+    if not name and (name := _first_hook(data)):
+        print(
+            f"ℹ hook '{name}' is taken from the file's first line, which whatever can write the "
+            "file controls — no configured hook writes this path; `--hook NAME` names it yourself"
+        )
     if not name:
         print(f"✗ {path}: no hook names it — say which with `--hook NAME`")
         return 1
     st = _load_state().get(name)
-    got = monitorsink.verify(data, key, name, (st.sink_seq, st.sink_mac) if st else None)
+    chain = (st.sink_seq, st.sink_mac) if st and st.sink_file == path else None
+    got = monitorsink.verify(data, key, name, chain)
     for note in got.notes:
         print(f"ℹ {note}")
     if got.problem:
@@ -462,7 +475,7 @@ def progress(hook: Hook, st: HookState | None, now: float) -> str:
     if st is None or not (st.delivered or st.ok_at):
         return "nothing delivered yet"
     ago = f", last {now - st.ok_at:.0f}s ago" if st.ok_at else ""
-    line = f", line {st.sink_seq} of its file" if hook.file else ""
+    line = f", line {st.sink_seq} of its file" if hook.file and st.sink_file == hook.file else ""
     return f"{st.delivered} events delivered{ago}{line}"
 
 
@@ -506,6 +519,7 @@ class HookState:
     ok_at: float = 0.0
     sink_seq: int = 0  # a file hook: the last line written, which `fy monitor check` ends on
     sink_mac: str = ""  # …and its mac, the next line's `prev`
+    sink_file: str = ""  # …in this file: a hook given another `file` starts a new chain there
 
 
 _STATE_FIELDS = frozenset(f.name for f in fields(HookState))
@@ -636,7 +650,12 @@ def payload(hook: Hook, events: list[monitorlog.Event]) -> bytes:
 
 def _to_file(hook: Hook, st: HookState, events: list[monitorlog.Event]) -> str:
     """Append the batch as the next signed line of the hook's chain; ``""`` on success. The
-    sequence moves only on success, so a retry re-writes the same seq (see monitorsink.verify)."""
+    sequence moves only on success, so a retry re-writes the same seq (see monitorsink.verify).
+    The chain belongs to the file: a hook pointed at another one starts at seq 1 there (a file
+    that merely went missing at the same path does NOT — its next line must still fail the
+    check)."""
+    if st.sink_file != hook.file:
+        st.sink_seq, st.sink_mac, st.sink_file = 0, "", hook.file
     try:
         key = monitorsink.ensure_key()
         line, mac = monitorsink.signed_line(key, batch(hook, events), st.sink_seq + 1, st.sink_mac)

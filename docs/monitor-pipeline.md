@@ -243,8 +243,10 @@ on. `file = "<absolute path>"` replaces that recipe:
 - **Directories are never created.** A missing one is usually a mistyped path, and evidence
   written where nobody looks is worse than a refusal that the log, `fy monitor hook` and `fy
   doctor` show. The file itself is created (0644).
-- **One write per line**, repeated only for a short write. A refused or failed write is a failed
-  delivery: retried with backoff, skipped after five attempts, like any other hook.
+- **One write per line**, repeated only for a short write. A write that fails part-way (a full
+  disk) is undone: the file is cut back to where it ended, so the sink never leaves a torn line.
+  A refused or failed write is a failed delivery: retried with backoff, skipped after five
+  attempts, like any other hook.
 
 **Each line is signed and chained.** The key is the sink's own (`<state dir>/monitor-sink.key`,
 32 random bytes, 0600, made on first use) — not `monitor-relay.key`, which the guest relay holds.
@@ -256,23 +258,22 @@ A line is the batch body (`schema`, `project`, `hook`, `events`, `first`, `last`
 
 where `seq` counts the hook's lines from 1 (kept in the hook's state, so it survives restarts),
 `prev` is the previous line's mac, and `mac` is HMAC-SHA256 over the canonical JSON (sorted keys,
-no spaces) of the line without `mac`. `sink` is written first, so even a torn line says which
-line it was.
+no spaces) of the line without `mac`. `sink` is written first, so a line leads with its
+sequence. The chain belongs to the file: a hook pointed at another file starts at seq 1 there,
+and one file holds one hook's lines.
 
 **`fy monitor check PATH [--hook NAME]`** verifies a file against the key and the hook's state:
 every mac, the sequence from 1 with no gap, every `prev`, and that the file ends on the seq and
 mac the supervisor recorded last — which catches lines cut from the end, the edit the chain alone
-can't see. It prints the first problem with its line number and exits non-zero. Host only: the
-box has no key, and that is the point. At-least-once delivery leaves two shapes that are not
-tampering, and pass with a note:
-
-- **a torn line** — a write that failed part-way. The sink ends a file that doesn't end in a
-  newline before writing again, so the fragment is a line of its own; it must be the start of
-  the line that was due (or of a re-send), and that line must follow it. A fragment at the very
-  end is a delivery still being retried.
-- **a re-sent seq** — written, but the supervisor stopped before recording it: the same seq again,
-  chained from the same `prev` (it may carry more events). The next line chains from the re-sent
-  one, and so does the recorded state.
+can't see. Each line must also be the exact bytes the sink wrote, not just the same JSON: a key
+given twice parses last-wins in Python, and a reader that takes the first would see something
+else. Nothing unparseable is excused, since the sink never leaves a fragment; the one fragment it
+can't prevent, from your computer losing power mid-write, fails the check like an insertion.
+It prints the first problem with its line number and exits non-zero. Host only: the box has no
+key, and that is the point. At-least-once delivery leaves one shape that is not tampering, and
+passes with a note: **a re-sent seq** — written, but the supervisor stopped before recording it:
+the same seq again, chained from the same `prev` (it may carry more events). The next line chains
+from the re-sent one, and so does the recorded state.
 
 The box can still read the file (the point), and it can still damage it — truncate it, delete it,
 fill the disk. The check makes that visible; it doesn't prevent it. A read-only mount the box

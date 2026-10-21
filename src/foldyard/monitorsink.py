@@ -11,7 +11,7 @@ the operator could have placed (see :func:`_open_parent`), and refuses a final c
 symlink, a hard link or anything but a regular file. And the box can edit or cut the file, so each
 line carries an HMAC under a key only the host holds (:func:`ensure_key` — not the guest relay's
 key, which the VM has), a per-hook sequence and the previous line's mac: :func:`verify` finds an
-edited, removed, reordered or forged line, and a cut tail against the hook's recorded state.
+edited, added, removed, reordered or forged line, and a cut tail against the hook's recorded state.
 
 Directories are never created: a missing one is most often a mistyped path, and evidence written
 somewhere nobody looks is worse than a refusal the supervisor log and ``fy doctor`` report.
@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import stat
 from dataclasses import dataclass, field
@@ -205,16 +206,28 @@ def check_path(path: str) -> None:
 
 def append(path: str, line: bytes) -> None:
     """Append ``line`` to ``path`` (created 0644 if absent). One write call, repeated only for a
-    short write. A file that doesn't end in a newline holds a torn write from a failed delivery:
-    it is ended first, so the fragment stays a line of its own that :func:`verify` recognises."""
+    short write. A write that fails part-way is UNDONE — the file is cut back to where it ended —
+    so the sink never leaves a torn line: any shape :func:`verify` excused, the box could write.
+    A file that doesn't end in a newline (something else wrote it) is ended first, so the sink's
+    line stays a line of its own."""
     fd = _open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, writing=True)
     try:
         size = os.fstat(fd).st_size
         if size and os.pread(fd, 1, size - 1) != b"\n":
             line = b"\n" + line
         view = memoryview(line)
-        while view:
-            view = view[os.write(fd, view) :]
+        try:
+            while view:
+                view = view[os.write(fd, view) :]
+        except BaseException as e:
+            try:
+                os.ftruncate(fd, size)
+            except OSError as cut:
+                raise Refused(
+                    f"{path}: a write failed part-way ({e}) and the part written couldn't be cut "
+                    f"off ({cut.strerror}) — `fy monitor check` will report that line"
+                ) from None
+            raise
     finally:
         os.close(fd)
 
@@ -246,7 +259,8 @@ def _head(seq: int, prev: str) -> bytes:
 def signed_line(key: bytes, body: dict, seq: int, prev: str) -> tuple[bytes, str]:
     """``body`` as one line, with ``"sink": {"seq", "prev", "mac"}``, and its mac: HMAC-SHA256
     over the canonical JSON (sorted keys, no spaces) of the line without ``mac``. The sink object
-    is written FIRST, so even a torn line names the sequence it was."""
+    is written first, so the line leads with the sequence it is. Deterministic: :func:`verify`
+    rebuilds it and holds the file's line to these exact bytes."""
     if not body or "sink" in body:
         raise ValueError("a sink line needs a body without its own `sink`")
     mac = hmac.new(key, _canonical({**body, "sink": {"seq": seq, "prev": prev}}), hashlib.sha256)
@@ -254,10 +268,13 @@ def signed_line(key: bytes, body: dict, seq: int, prev: str) -> tuple[bytes, str
     return _head(seq, prev) + digest.encode() + b'"},' + _canonical(body)[1:] + b"\n", digest
 
 
+_MAC = re.compile(r"[0-9a-f]{64}")
+
+
 def _parse(raw: bytes) -> dict | None:
     try:
         doc = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):  # RecursionError: nesting deeper than the parser's stack
         return None
     sink = doc.get("sink") if isinstance(doc, dict) else None
     if not (
@@ -265,6 +282,7 @@ def _parse(raw: bytes) -> dict | None:
         and type(sink.get("seq")) is int
         and isinstance(sink.get("prev"), str)
         and isinstance(sink.get("mac"), str)
+        and _MAC.fullmatch(sink["mac"])  # else hmac.compare_digest raises on a non-ASCII one
     ):
         return None
     return doc
@@ -291,15 +309,15 @@ def verify(data: bytes, key: bytes, hook: str, state: tuple[int, str] | None) ->
     ``state`` — the hook's last written ``(seq, mac)`` as the supervisor recorded it, which is
     what catches lines cut from the end.
 
-    At-least-once delivery leaves two shapes that are NOT tampering, and pass with a note:
+    Every line must be the exact bytes :func:`signed_line` writes for its content: a line that
+    parses to the same thing but reads differently (a duplicate key, which ``json.loads`` resolves
+    last-wins and another reader may not) is not the sink's. Nothing unparseable is excused — the
+    sink undoes a failed write (:func:`append`), so a fragment is never its own.
 
-    * a **torn line** — a write that failed part-way (the sink ends it with a newline before the
-      next one): a fragment that is the start of the line due next (or of a re-send of the last),
-      which the sink always writes ``seq`` and ``prev`` first for. The line after it must then be
-      that line; a torn fragment at the very end is the delivery being retried.
-    * a **re-sent seq** — a line written but not recorded before the supervisor stopped: the same
-      seq again, chained from the same ``prev``, possibly with more events. The next line chains
-      from the re-sent one, and so does the recorded state.
+    At-least-once delivery leaves one shape that is NOT tampering, and passes with a note: a
+    **re-sent seq** — a line written but not recorded before the supervisor stopped: the same seq
+    again, chained from the same ``prev``, possibly with more events. The next line chains from the
+    re-sent one, and so does the recorded state.
     """
     out = Check()
     raw = data.split(b"\n")
@@ -310,23 +328,23 @@ def verify(data: bytes, key: bytes, hook: str, state: tuple[int, str] | None) ->
         out.problem, out.line = why, n
         return out
 
-    def torn(fragment: bytes) -> bool:
-        heads = [_head(seq + 1, mac)] + ([_head(seq, parent)] if seq else [])
-        return bool(fragment) and any(h[: len(fragment)] == fragment[: len(h)] for h in heads)
-
     for n, line in enumerate(raw, 1):
         doc = _parse(line)
         if doc is None:
-            if not torn(line):
-                return fail(n, "not a line the sink wrote (not JSON, or no `sink` object)")
-            out.notes.append(f"line {n}: torn write (a delivery that failed part-way)")
-            continue
+            return fail(n, "not a line the sink wrote (not JSON, or no `sink` object)")
         sink = doc["sink"]
         if not hmac.compare_digest(sink["mac"], _mac_of(key, doc)):
             return fail(
                 n,
                 "signature doesn't match — the line was altered, or not written by this "
                 "computer's sink",
+            )
+        body = {k: v for k, v in doc.items() if k != "sink"}
+        if not body or signed_line(key, body, sink["seq"], sink["prev"])[0] != line + b"\n":
+            return fail(
+                n,
+                "signed content, but not the bytes the sink wrote (reformatted, or a key given "
+                "twice — a reader that takes the first would see something else)",
             )
         if doc.get("hook") != hook:
             return fail(n, f"belongs to hook '{doc.get('hook')}', not '{hook}'")
@@ -347,9 +365,11 @@ def verify(data: bytes, key: bytes, hook: str, state: tuple[int, str] | None) ->
         out.events += len(doc.get("events") or [])
     out.lines, out.last_seq = len(raw), seq
     if tail:
-        if not torn(tail):
-            return fail(len(raw) + 1, "not a line the sink wrote (an unterminated fragment)")
-        out.notes.append(f"line {len(raw) + 1}: torn write at the end (the delivery is retried)")
+        return fail(
+            len(raw) + 1,
+            "not a line the sink wrote (an unterminated fragment — if the supervisor was writing "
+            "just then, check again)",
+        )
     if state is None:
         return fail(
             out.lines,

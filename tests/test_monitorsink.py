@@ -147,11 +147,33 @@ def test_a_refusal_suggests_the_real_path(tmp_path):
     assert os.path.realpath(tmp_path / "real") in str(e.value)
 
 
-def test_a_torn_tail_is_ended_before_the_next_line(tmp_path):
+def test_a_file_not_ending_in_a_newline_is_ended_before_the_next_line(tmp_path):
+    # something else left a fragment: the sink's line still starts a line of its own (and the
+    # fragment fails the check — the sink never leaves one, see below)
     target = tmp_path / "events.jsonl"
-    target.write_bytes(b'{"sink":{"seq":1,"pr')  # a write that failed half-way
+    target.write_bytes(b'{"sink":{"seq":1,"pr')
     ms.append(str(target), b'{"b":1}\n')
     assert target.read_bytes() == b'{"sink":{"seq":1,"pr\n{"b":1}\n'
+
+
+def test_a_write_that_fails_part_way_is_undone(tmp_path, monkeypatch):
+    # A torn line the sink left behind would be a shape the check has to excuse — and whatever it
+    # excuses, the box can write. So the sink never leaves one: what reached the file is cut off.
+    target = tmp_path / "events.jsonl"
+    target.write_bytes(b'{"a":1}\n')
+    real_write = os.write
+
+    def tear(fd, data):  # 3 bytes reach the file, then the disk fills
+        real_write(fd, bytes(data[:3]))
+        monkeypatch.setattr(
+            ms.os, "write", lambda fd, data: (_ for _ in ()).throw(OSError(28, "full"))
+        )
+        return 3
+
+    monkeypatch.setattr(ms.os, "write", tear)
+    with pytest.raises(OSError):
+        ms.append(str(target), b'{"a":"0123456789"}\n')
+    assert target.read_bytes() == b'{"a":1}\n'
 
 
 def test_short_writes_still_write_the_whole_line(tmp_path, monkeypatch):
@@ -303,26 +325,58 @@ def test_junk_between_lines_fails():
     _fails(data, 2, "not a line", (2, macs[-1]))
 
 
-def test_a_torn_line_then_its_rewrite_passes_with_a_note():
+def _invented(seq: int, prev: str) -> bytes:
+    # what the box can write: the start the next line would have (it reads `prev` from the file),
+    # then events of its own, left unparseable by leaving the object open
+    return b'{"sink":{"seq":%d,"prev":"%s","mac":"x"},"events":[{"binary":"/usr/bin/innocent"}]' % (
+        seq,
+        prev.encode(),
+    )
+
+
+def test_a_fragment_shaped_like_the_next_line_fails_mid_file():
     lines, macs = _file(3)
-    torn = lines[1][:40] + b"\n"  # the write failed after 40 bytes; the sink ended it with \n
-    data = lines[0] + torn + lines[1] + lines[2]
-    got = ms.verify(data, KEY, "ca", (3, macs[-1]))
-    assert got.problem == "" and got.last_seq == 3
-    assert any("line 2" in n and "torn" in n for n in got.notes)
+    data = lines[0] + _invented(2, macs[0]) + b"\n" + lines[1] + lines[2]
+    _fails(data, 2, "not a line", (3, macs[-1]))
+    data = lines[0] + lines[1][:40] + b"\n" + lines[1] + lines[2]  # a mere prefix too
+    _fails(data, 2, "not a line", (3, macs[-1]))
 
 
-def test_a_torn_line_not_followed_by_its_rewrite_fails():
-    lines, macs = _file(3)
-    data = lines[0] + lines[1][:40] + b"\n" + lines[2]
-    _fails(data, 3, "seq", (3, macs[-1]))
-
-
-def test_a_torn_trailing_fragment_passes_with_a_note():
+def test_a_fragment_shaped_like_the_next_line_fails_at_the_end():
     lines, macs = _file(2)
-    torn, _ = ms.signed_line(KEY, _body(n=3), 3, macs[-1])
-    got = ms.verify(b"".join(lines) + torn[:30], KEY, "ca", (2, macs[-1]))
-    assert got.problem == "" and any("torn" in n for n in got.notes)
+    _fails(b"".join(lines) + _invented(3, macs[-1]), 3, "not a line", (2, macs[-1]))
+    nxt, _ = ms.signed_line(KEY, _body(n=3), 3, macs[-1])
+    _fails(b"".join(lines) + nxt[:30], 3, "not a line", (2, macs[-1]))
+
+
+def test_a_duplicate_key_that_keeps_the_signed_content_fails():
+    # json.loads keeps the LAST of two keys, so the mac still matches — but a first-wins reader
+    # would see the box's events. The check holds the line to the exact bytes the sink wrote.
+    lines, macs = _file(2)
+    lines[1] = lines[1].replace(
+        b'"events":', b'"events":[{"binary":"/usr/bin/innocent"}],"events":'
+    )
+    _fails(b"".join(lines), 2, "bytes", (2, macs[-1]))
+
+
+def test_reformatting_a_line_fails():
+    lines, macs = _file(2)
+    lines[1] = json.dumps(json.loads(lines[1]), indent=None).encode() + b"\n"  # ", " and ": "
+    _fails(b"".join(lines), 2, "bytes", (2, macs[-1]))
+
+
+@pytest.mark.parametrize("mac", ["é" * 64, "X" * 64, "ab"])
+def test_a_mac_that_isnt_hex_is_a_problem_not_a_crash(mac):
+    lines, macs = _file(2)
+    doc = json.loads(lines[1])
+    doc["sink"]["mac"] = mac
+    lines[1] = json.dumps(doc).encode() + b"\n"
+    _fails(b"".join(lines), 2, "not a line", (2, macs[-1]))
+
+
+def test_deep_nesting_is_a_problem_not_a_crash():
+    lines, macs = _file(1)
+    _fails(lines[0] + b"[" * 100_000 + b"\n", 2, "not a line", (1, macs[-1]))
 
 
 def test_a_fragment_that_isnt_the_next_lines_start_fails():

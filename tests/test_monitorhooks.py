@@ -6,6 +6,7 @@ command or endpoint is really reached: ``subprocess.run`` and ``urlopen`` are st
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 import pytest
@@ -350,6 +351,13 @@ def test_round_once_logs_config_errors_and_carries_on(project, monkeypatch):
 # ── the file sink ───────────────────────────────────────────────────────────────────────
 
 
+def test_parse_refuses_two_hooks_writing_one_file():
+    hooks, errors = mh.parse(
+        '[[hook]]\nname = "a"\nfile = "/e.jsonl"\n[[hook]]\nname = "b"\nfile = "/e.jsonl"\n'
+    )
+    assert [h.name for h in hooks] == ["a"] and len(errors) == 1 and "'a'" in errors[0], errors
+
+
 def test_parse_accepts_a_file_hook():
     hooks, errors = mh.parse(
         '[[hook]]\nname = "ca"\nfile = "/srv/ca/events.jsonl"\nwho = ["container"]\n'
@@ -417,7 +425,9 @@ def test_a_refused_file_is_a_failed_delivery_and_nothing_is_written(project, tmp
     assert st.last == [] and st.sink_seq == 0 and victim.read_text() == "keep\n"
 
 
-def test_a_write_torn_part_way_is_retried_and_the_file_still_checks(project, monkeypatch, tmp_path):
+def test_a_write_torn_part_way_is_undone_retried_and_the_file_checks(
+    project, monkeypatch, tmp_path
+):
     from foldyard import monitorsink
 
     hook = _sink_hook(tmp_path)
@@ -435,7 +445,31 @@ def test_a_write_torn_part_way_is_retried_and_the_file_still_checks(project, mon
     assert "retrying" in msg and st.sink_seq == 1
     assert mh.deliver(hook, st, _events(2), now=st.next_try) == ""
     got = _check(hook, st)
-    assert got.problem == "" and got.last_seq == 2 and any("torn" in n for n in got.notes)
+    assert got.problem == "" and got.last_seq == 2 and got.lines == 2 and got.notes == []
+
+
+def test_a_hook_pointed_at_another_file_starts_a_fresh_chain_there(project, tmp_path):
+    # the chain belongs to the file, not the name: re-adding `ca` with another --file (or editing
+    # `file =`) must not carry seq/prev from the old file into the new one
+    hook = _sink_hook(tmp_path)
+    st = mh.HookState()
+    assert mh.deliver(hook, st, _events(1), now=1) == ""
+    moved = mh.Hook(name="ca", file=str(tmp_path / "logs" / "other.jsonl"))
+    assert mh.deliver(moved, st, _events(2), now=2) == ""
+    first = json.loads(open(moved.file, "rb").readline())
+    assert first["sink"]["seq"] == 1 and first["sink"]["prev"] == ""
+    assert st.sink_file == moved.file and _check(moved, st).problem == ""
+
+
+def test_a_missing_file_at_the_same_path_keeps_its_chain(project, tmp_path):
+    # a box deleting the file must keep failing the check: the next line is NOT a fresh seq 1
+    hook = _sink_hook(tmp_path)
+    st = mh.HookState()
+    assert mh.deliver(hook, st, _events(1), now=1) == ""
+    os.unlink(hook.file)
+    assert mh.deliver(hook, st, _events(2), now=2) == ""
+    assert json.loads(open(hook.file, "rb").readline())["sink"]["seq"] == 2
+    assert "seq" in _check(hook, st).problem
 
 
 def test_round_once_records_the_sinks_sequence(project, tmp_path):

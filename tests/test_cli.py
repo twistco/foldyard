@@ -856,6 +856,42 @@ def test_monitor_check_passes_a_clean_sink_file_and_fails_an_edited_one(monitor_
     assert r.exit_code == 1 and ":1:" in r.output and "signature" in r.output, r.output
 
 
+def _one_sink_line(tmp_path, name="ca", file="e.jsonl"):
+    from foldyard import monitorhooks, monitorlog
+
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    hook = monitorhooks.Hook(name=name, file=str(tmp_path / "logs" / file))
+    st = monitorhooks.HookState()
+    events = monitorlog.attribute(
+        [{"k": "ev", "boot": "b", "seq": 1, "recv": 0,
+          "e": {"process_exec": {"process": {"binary": "/bin/cat", "pid": 7, "uid": 1}}, "time": "t"}}],
+        "fyex",
+    )  # fmt: skip
+    assert monitorhooks.deliver(hook, st, events, now=1) == ""
+    return hook, st
+
+
+def test_monitor_check_uses_the_state_only_for_the_file_its_chain_is_in(monitor_home, tmp_path):
+    from foldyard import monitorhooks
+
+    hook, st = _one_sink_line(tmp_path)
+    other, _ = _one_sink_line(tmp_path, file="old.jsonl")
+    monitorhooks._save_state({"ca": st})  # the chain is in e.jsonl
+    r = runner.invoke(cli.app, ["monitor", "check", other.file, "--hook", "ca"])
+    assert r.exit_code == 1 and "no delivery state" in r.output, r.output
+    r = runner.invoke(cli.app, ["monitor", "check", hook.file, "--hook", "ca"])
+    assert r.exit_code == 0, r.output
+
+
+def test_monitor_check_says_when_the_hook_came_from_the_file_itself(monitor_home, tmp_path):
+    from foldyard import monitorhooks
+
+    hook, st = _one_sink_line(tmp_path)  # not configured: only the file's own line names it
+    monitorhooks._save_state({"ca": st})
+    r = runner.invoke(cli.app, ["monitor", "check", hook.file])
+    assert r.exit_code == 0 and "--hook" in r.output and "first line" in r.output, r.output
+
+
 @pytest.mark.parametrize(
     "argv",
     [["monitor", "hook"], ["monitor", "hook", "add", "x", "--url", "https://h"],
