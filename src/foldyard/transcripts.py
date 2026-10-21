@@ -4,8 +4,9 @@ stable host archive (RUN ON THE HOST).
 Faithful port of the `transcripts` recipe. In-box agents write session transcripts to
 gitignored bound-out dirs inside the repo. Those dirs survive `nuke`, but they're fragile
 for long-term keeping (`git clean -fdx` wipes them, the worktree may be removed, they carry
-two-hop ownership). This copies configured agents' transcripts into their native host history
-dirs — or a dir you pass / set in FOLDYARD_TRANSCRIPTS_ARCHIVE.
+two-hop ownership). This copies Claude's transcripts into its native host history dir, and a
+configured Codex's into foldyard's own per-project archive (never Codex's native history — see
+:func:`codex_archive_home`) — or both into a dir you pass / set in FOLDYARD_TRANSCRIPTS_ARCHIVE.
 
 SAFE by construction: we only ever read an agent's transcript subtree (Claude ``projects/``
 or Codex ``sessions/``) — never sibling credential/config files or settings — and never through a
@@ -26,6 +27,7 @@ import contextlib
 import errno
 import os
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -59,11 +61,24 @@ def _archive_dest(dest: str = "") -> Path:
     ).expanduser()
 
 
+def codex_archive_home() -> Path:
+    """Where box Codex sessions are archived by default: a Codex home of foldyard's own, per
+    project (``~/.foldyard/<project>/transcripts/codex``), never Codex's native history on your
+    computer — see the note on Codex below. Shaped as a ``CODEX_HOME`` (sessions under
+    ``sessions/``), so ``CODEX_HOME=<this> codex resume`` lists them."""
+    return config.state_dir() / "transcripts" / "codex"
+
+
+def _explicit_archive(dest: str = "") -> bool:
+    return bool(dest or os.environ.get("FOLDYARD_TRANSCRIPTS_ARCHIVE"))
+
+
 def _codex_archive_dest(dest: str = "") -> Path:
-    """Codex's native history, or a distinct child of an explicit shared archive."""
-    if dest or os.environ.get("FOLDYARD_TRANSCRIPTS_ARCHIVE"):
+    """foldyard's per-project Codex archive, or a distinct child of an explicit shared archive.
+    Never ``~/.codex/sessions``: there is deliberately no setting that archives into it."""
+    if _explicit_archive(dest):
         return _archive_dest(dest) / "codex-sessions"
-    return Path.home() / ".codex/sessions"
+    return codex_archive_home() / "sessions"
 
 
 # ── the copy: a no-follow walk, in Python, instead of rsync ──────────────────────────────────
@@ -159,10 +174,14 @@ class _Refused(Exception):
 # git fields beside it — which Codex indexes into its own state database for `codex resume`. A
 # host-side check would mean parsing every line of every file the box writes, on every pass, against
 # a list of fields Codex grows between releases (0.157 → 0.160 added some), and still guessing which
-# of them its picker filters on. So Codex sessions are archived unfiltered: a session the box wrote
-# can claim another directory and be offered by `codex resume` there. Keeping box Codex sessions out
-# of your native history (an explicit archive dir: `fy transcripts <dir>` or
-# FOLDYARD_TRANSCRIPTS_ARCHIVE, which file them under `codex-sessions/` instead) is the mitigation.
+# of them its picker filters on. So Codex sessions are archived unfiltered — and so NEVER into your
+# native history (`~/.codex/sessions`), where a session claiming another directory would be offered
+# by `codex resume` in that other project. They go to a Codex home of foldyard's own, one per
+# project (:func:`codex_archive_home`), or under `codex-sessions/` of an explicit archive dir.
+# There is no opt-in to the native dir: it would re-open exactly this. Resuming one from the
+# per-project home (`CODEX_HOME=<it> codex resume`) still puts box-written text in front of a Codex
+# on your computer — for the project that box was given, which is the trade-off Claude's archive
+# makes too.
 
 _NAME_MAX = 200  # Claude Code's own cap; a longer name is cut and suffixed with a hash of the path
 
@@ -557,7 +576,7 @@ def bound_out_dir(checkout: Path, here: str) -> Path:
 
 
 def codex_bound_out_dir(checkout: Path, here: str) -> Path:
-    """The host-side directory bound to Codex's resumable ``~/.codex/sessions`` tree."""
+    """The host-side directory bound to the box Codex's ``~/.codex/sessions`` tree."""
     return checkout / here / ".devbox-codex/sessions"
 
 
@@ -779,9 +798,9 @@ def transcripts(dest: str = "") -> int:
         missing_ok=config.codex_enabled(),
     )
 
-    # A [codex] table opts into Codex installation and transcript persistence. Keep its archive in
-    # Codex's native history directory so `codex resume` can see the sessions. For the legacy
-    # explicit-destination form, use a child dir to avoid mixing two agents' unrelated layouts.
+    # A [codex] table opts into Codex installation and transcript persistence. Its archive is a
+    # Codex home of foldyard's own (never ~/.codex/sessions — see the note on Codex above), which
+    # `CODEX_HOME=<it> codex resume` reads; an explicit archive dir takes a child of its own.
     if config.codex_enabled():
         codex_src = Path(
             os.environ.get("DEVBOX_CODEX_TRANSCRIPTS") or codex_bound_out_dir(checkout, here)
@@ -800,9 +819,19 @@ def transcripts(dest: str = "") -> int:
             label="Codex transcripts",
             project_of=None,
             missing_ok=rc == 0,
+            hint=None if _explicit_archive(dest) else _codex_resume_hint(checkout),
         )
         rc = rc or codex_rc
     return rc
+
+
+def _codex_resume_hint(checkout: Path) -> str:
+    home = shlex.quote(str(codex_archive_home()))
+    return (
+        f"  resume one: cd {shlex.quote(str(checkout))} && CODEX_HOME={home} codex resume\n"
+        "  (a Codex home of its own: log in there once; your ~/.codex config is not read."
+        " A resumed session's text was written by the box.)"
+    )
 
 
 def _sync_source(
@@ -819,8 +848,10 @@ def _sync_source(
     label: str,
     project_of: Path | None,
     missing_ok: bool = False,
+    hint: str | None = None,
 ) -> int:
-    """Sync one agent's bound history, falling back to its live in-box directory."""
+    """Sync one agent's bound history, falling back to its live in-box directory. ``hint`` is
+    printed after a real (not dry-run) sync: how to read what was archived."""
     # Stage the source. Prefer the bound-out dir (already on the host, no engine needed; reached
     # from the checkout without following a link — see `_open_source`); if it's empty, fall back to
     # pulling the live projects/ tree out of the running box over the socket with `<engine> cp` —
@@ -878,6 +909,8 @@ def _sync_source(
         )
         if rc == 0:
             print(f"✓ {label} {'would be ' if dry else ''}synced → {dest_dir}")
+            if hint and not dry:
+                print(hint)
         return rc
     finally:
         if tmp:

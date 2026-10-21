@@ -640,7 +640,9 @@ def tui() -> None:
 
 @app.command()
 def transcripts(
-    dest: str = typer.Argument("", help="archive dir (default ~/.claude/projects)"),
+    dest: str = typer.Argument(
+        "", help="archive dir (default: ~/.claude/projects, Codex's under ~/.foldyard/<project>)"
+    ),
 ) -> None:
     """Copy the dev box's Claude and configured Codex transcripts to archives on your computer."""
     from . import transcripts as transcripts_mod
