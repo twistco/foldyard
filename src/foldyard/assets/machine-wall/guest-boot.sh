@@ -40,7 +40,7 @@ echo "sudo: '$user' may only 'shutdown -h now' without a password"
 
 # 1b. The journal cap (guestlog.py) — root-owned /etc, so only this script can place it here.
 @@JOURNAL@@
-# 2. The wall script, root-owned in the guest — from this recording, never from the repo mount.
+# 2. The firewall script, root-owned in the guest — from this recording, never from the repo mount.
 install -d -m 0755 /usr/local/libexec
 cat >@@WALL_PATH@@.tmp <<'__FY_WALL_ASSET__'
 @@WALL_ASSET@@
@@ -48,11 +48,13 @@ __FY_WALL_ASSET__
 chmod 0755 @@WALL_PATH@@.tmp
 mv -f @@WALL_PATH@@.tmp @@WALL_PATH@@
 
-# 2b. The egress proxy's CA (walled only), for the wall's install to hand every container the
-#     VM's podman creates — embedded by the host from your computer's CA, never the mount.
+# 2b. The egress proxy's CA (VM firewall on only), for the firewall's install to hand every
+#     container the VM's podman creates — embedded by the host from your computer's CA, never
+#     the mount.
 @@PROXY_CA_STEP@@
 
-# 3. Apply the wall state the host recorded (`[machine].wall` + this project's port band).
+# 3. Apply the VM firewall state the host recorded (`[machine] firewall` + this project's port
+#    band).
 FY_WALL_UID="$uid" @@WALL_PATH@@ @@WALL_ARGS@@
 
 # 4. Report, LAST: an absent report means "not applied", which the host fails closed on.

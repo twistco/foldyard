@@ -1,29 +1,31 @@
 #!/bin/bash
-# fy machine wall — the nftables egress wall for the REAL lima machine VM.
+# fy-machine-wall — the VM firewall (`[machine] firewall`): nftables egress rules for the REAL
+# lima machine VM.
 #
 # Runs INSIDE the guest as root, at BOOT: foldyard's boot provisioning (`guest-boot.sh`,
 # recorded in the instance's lima.yaml; Lima runs it as root on every boot) installs this file
 # root-owned at /usr/local/libexec/fy-machine-wall from its own embedded copy — never from the
 # repo mount, never via sudo from the VM user, who has no sudo (the same boot script narrows
 # Lima's grant to `shutdown` only). NOT the standalone proof rig — that lives at
-# docs/lima-network-forcing-kit/ (its own throwaway VM + red-team battery; the packaged
-# `fy wall` verb was retired). This script enforces the SAME model on
+# docs/archive/lima-network-forcing-kit/ (its own throwaway VM + red-team battery; the
+# packaged `fy wall` verb was retired). This script enforces the SAME model on
 # the project's real machine, with one architectural difference: there is NO in-VM proxy. The
-# chokepoint stays the Mac-side mitmdump egress proxy (allowlist + keyless injection + network
-# log all live on the Mac, and real credentials NEVER enter the VM); the wall just makes the VM
-# fail-closed — the walled uid's only way out is the Mac proxy at the Lima host gateway.
+# chokepoint stays the host-side mitmdump egress proxy (allowlist + keyless injection + network
+# log all live on the host machine, and real credentials NEVER enter the VM); the firewall just
+# makes the VM fail-closed — the walled uid's only way out is the host-side proxy at the Lima
+# host gateway.
 #
 # Walled principals: the Lima default user (resolved from SUDO_UID — `limactl shell` logs in as
 # that user, sudo records it) AND its rootless-podman SUBUID range (from /etc/subuid). Normal
 # container egress (the dev box, stack services, builds, pulls — via pasta/slirp4netns) NATs out
 # as the user's own uid, so the uid rule catches it; but a `--network=host` container process
 # running as a non-root CONTAINER user egresses with a host-visible SUBUID (no pasta NAT hop), so
-# the wall must default-deny the subuid range too — else `podman run --network=host --user 1000 …`
-# tunnels straight past it. The moat: the user has NO path to VM-root — Lima's passwordless
-# sudo grant is narrowed to `shutdown` at every boot — so the wall is enforcement against the
-# box AND against a container escape that lands as the VM user; only a guest-KERNEL exploit
-# reaches VM-root. The security argument is ADR-0009: no in-VM wall holds against VM-root; the
-# backstop is the host-side chokepoint, which holds no less for it.
+# the firewall must default-deny the subuid range too — else `podman run --network=host
+# --user 1000 …` tunnels straight past it. The moat: the user has NO path to VM-root — Lima's
+# passwordless sudo grant is narrowed to `shutdown` at every boot — so the firewall is
+# enforcement against the box AND against a container escape that lands as the VM user; only a
+# guest-KERNEL exploit reaches VM-root. The security argument is ADR-0009: no in-VM firewall
+# holds against VM-root; the backstop is the host-side chokepoint, which holds no less for it.
 #
 # Usage (as root in the guest; the walled uid comes from FY_WALL_UID, which the boot script
 # sets from Lima's own record of the user — SUDO_UID is the fallback for a manual run):
@@ -52,8 +54,8 @@ _wall_user() {
 
 # The guest's OWN trust store: what the VM user's podman verifies image PULLS against (Go reads
 # the system bundle), so a registry host the proxy decrypts no longer fails "unknown authority".
-# With the CA it goes in; without one (no CA yet, or the wall off) ours comes out. One fixed file
-# name, so a rotated CA replaces the old one rather than joining it. Fedora (Lima's podman
+# With the CA it goes in; without one (no CA yet, or the firewall off) ours comes out. One fixed
+# file name, so a rotated CA replaces the old one rather than joining it. Fedora (Lima's podman
 # template) has update-ca-trust; a Debian-family guest, update-ca-certificates.
 _guest_trust() {
     local ca="${1:-}" anchor update
@@ -84,8 +86,8 @@ _guest_trust() {
 # set — an image's own ENV, a Dockerfile ENV and a create's explicit env still win, exactly as for
 # the drop-in. A build's RUN step also gets NODE_USE_ENV_PROXY=1: Node's own fetch ignores the
 # proxy env without it, so a tool built on it (corepack ≥ 0.35, Node 24's) dials out directly and
-# the wall refuses it, with no proxy row to say why (seen live, 2026-10-14). Build steps only: a
-# stack service's NO_PROXY doesn't list its sibling services, so turning it on there would send
+# the firewall refuses it, with no proxy row to say why (seen live, 2026-10-14). Build steps only:
+# a stack service's NO_PROXY doesn't list its sibling services, so turning it on there would send
 # their calls to the proxy, which can't resolve them. Every create passes through it (a build's
 # RUN step from the host or the box, a docker-compat create); nothing lands in an image, since the spec is the runtime's, not a layer.
 # Anything unexpected leaves the spec as the engine wrote it, and crun runs regardless.
@@ -219,17 +221,17 @@ EOF
     echo "✓ proxy CA: build steps trust it too (containers.conf.d/91-fy-proxy-ca-runtime.conf)"
 }
 
-# The wall's refusals, readable WITHOUT root: a tool that ignores the proxy env dials out
-# directly, the wall refuses it, and the proxy — where every other refusal is logged — never sees
-# it. Its `log` rule writes each refusal to the kernel log, which the VM user can't read (and the
-# host never runs root here). This unit, root, follows the kernel log and keeps the recent
-# refusals in /run/fy-wall/denies.jsonl, world-readable: what `fy box build`/`fy up` read when a
-# build fails with nothing refused at the proxy. Each row carries the kernel's own sequence
-# number, so the host marks where a build began without comparing two clocks.
+# The VM firewall's refusals, readable WITHOUT root: a tool that ignores the proxy env dials
+# out directly, the firewall refuses it, and the proxy — where every other refusal is logged —
+# never sees it. Its `log` rule writes each refusal to the kernel log, which the VM user can't
+# read (and the host never runs root here). This unit, root, follows the kernel log and keeps the
+# recent refusals in /run/fy-wall/denies.jsonl, world-readable: what `fy box build`/`fy up` read
+# when a build fails with nothing refused at the proxy. Each row carries the kernel's own
+# sequence number, so the host marks where a build began without comparing two clocks.
 _denies_reporter() {
     cat >/usr/local/libexec/fy-wall-denies.py.tmp <<'__FY_DENIES__'
-"""foldyard (fy-machine-wall): the wall's recent refusals, from the kernel log, as JSON lines in
-/run/fy-wall/denies.jsonl (world-readable). Runs as root under fy-wall-denies.service."""
+"""foldyard (fy-machine-wall): the VM firewall's recent refusals, from the kernel log, as JSON
+lines in /run/fy-wall/denies.jsonl (world-readable). Runs as root under fy-wall-denies.service."""
 
 import collections
 import json
@@ -322,7 +324,7 @@ __FY_DENIES__
     mv -f /usr/local/libexec/fy-wall-denies.py.tmp /usr/local/libexec/fy-wall-denies.py
     cat >/etc/systemd/system/fy-wall-denies.service <<'EOF'
 [Unit]
-Description=foldyard egress wall: recent refusals, readable without root (/run/fy-wall/denies.jsonl)
+Description=foldyard VM firewall: recent refusals, readable without root (/run/fy-wall/denies.jsonl)
 After=fy-wall.service
 [Service]
 ExecStart=/usr/bin/python3 -I /usr/local/libexec/fy-wall-denies.py
@@ -357,9 +359,9 @@ install)
 
     # The walled user's rootless-podman SUBUID range (/etc/subuid: LOGIN:START:COUNT, keyed by
     # name OR uid). Container processes map into this range, and a --network=host container skips
-    # the pasta NAT, so its packets carry a subuid, not WALL_UID — the wall must cover both.
-    # SUB is the ", start-end" tail spliced into the nft skuid set; empty (no entry) degrades to
-    # the old uid-only rule, so a VM without /etc/subuid still installs.
+    # the pasta NAT, so its packets carry a subuid, not WALL_UID — the firewall must cover
+    # both. SUB is the ", start-end" tail spliced into the nft skuid set; empty (no entry)
+    # degrades to the old uid-only rule, so a VM without /etc/subuid still installs.
     SUB=""
     if [ -r /etc/subuid ]; then
         sub_line="$(awk -F: -v u="$WALL_NAME" -v i="$WALL_UID" '$1==u || $1==i {print; exit}' /etc/subuid)"
@@ -372,12 +374,13 @@ install)
         fi
     fi
 
-    # The wall's `log` lines land in dmesg (recourse via fy-wall-denied).
+    # The firewall's `log` lines land in dmesg (recourse via fy-wall-denied).
     modprobe nf_log_syslog 2>/dev/null || true
 
     # CRITICAL: no ROOTFUL podman socket may be reachable from a container — container-root over a
-    # rootful socket is VM-root, i.e. `nft flush` and the wall is gone. foldyard only ever uses the
-    # user's rootless socket, so masking the system one costs nothing. (Same rule as the proof rig.)
+    # rootful socket is VM-root, i.e. `nft flush` and the firewall is gone. foldyard only ever
+    # uses the user's rootless socket, so masking the system one costs nothing. (Same rule as the
+    # proof rig.)
     systemctl disable --now podman.socket podman.service 2>/dev/null || true
     systemctl mask podman.socket 2>/dev/null || true
     rm -f /run/podman/podman.sock 2>/dev/null || true
@@ -394,7 +397,7 @@ table inet fy_wall {
     meta skuid != { $WALL_UID$SUB } accept comment "exempt system uids (root/services) — NOT the walled user or its container subuids"
     ip daddr { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } udp dport 53 accept comment "DNS to LOCAL resolvers only"
     ip daddr { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport 53 accept comment "a public-IP :53 stream is an exfil tunnel, not resolution — deny it"
-    ip daddr $GW tcp dport { $PORTS } accept comment "Mac-side foldyard daemons (proxy, minters)"
+    ip daddr $GW tcp dport { $PORTS } accept comment "host-side foldyard daemons (proxy, minters)"
     log prefix "fy-wall-deny " counter
     meta l4proto tcp reject with tcp reset comment "REJECT fast, not a silent hang"
     reject
@@ -420,7 +423,7 @@ EOF
 
     cat >/etc/systemd/system/fy-wall.service <<'EOF'
 [Unit]
-Description=foldyard egress wall (default-deny the podman user; Mac proxy is the only way out)
+Description=foldyard VM firewall (default-deny the podman user; the host-side proxy is the way out)
 After=network-pre.target
 [Service]
 Type=oneshot
@@ -435,17 +438,18 @@ WantedBy=multi-user.target
 EOF
 
     # Proxy env for the VM user's own session + user services. This is what lets podman PULLS and
-    # image-build RUN steps (both egress as the walled uid) out through the Mac proxy — podman
-    # propagates the service's proxy env into containers/builds by default. Uses the MAIN proxy
-    # port: VM-level operations aren't per-worktree (each box still gets its own FY_PROXY).
+    # image-build RUN steps (both egress as the walled uid) out through the host-side proxy —
+    # podman propagates the service's proxy env into containers/builds by default. Uses the MAIN
+    # proxy port: VM-level operations aren't per-worktree (each box still gets its own FY_PROXY).
     #  - environment.d → the systemd --user manager (the rootless podman service),
     #  - profile.d     → interactive `limactl shell` sessions (diagnosis parity).
-    # $GW (the Mac) is in NO_PROXY so a container's DIRECT calls to the Mac-side daemons — e.g. the
-    # gcp metadata-emulator hitting GCP_MINTER_URL=http://$GW:<minter> (gcp.py derive_env) — go
-    # straight there instead of being tunnelled through the mitmdump proxy, which runs ON the Mac
-    # and can't reach $GW (Lima's internal usernet address) from there. The wall already scopes
-    # $GW to the daemon ports, so direct egress to it is safe. Using $GW as the PROXY is unaffected
-    # (NO_PROXY filters request destinations, not the proxy connection itself).
+    # $GW (the host machine) is in NO_PROXY so a container's DIRECT calls to the host-side
+    # daemons — e.g. the gcp metadata-emulator hitting GCP_MINTER_URL=http://$GW:<minter>
+    # (gcp.py derive_env) — go straight there instead of being tunnelled through the mitmdump
+    # proxy, which runs ON the host machine and can't reach $GW (Lima's internal usernet address)
+    # from there. The firewall already scopes $GW to the daemon ports, so direct egress to it is
+    # safe. Using $GW as the PROXY is unaffected (NO_PROXY filters request destinations, not the
+    # proxy connection itself).
     # Every directory created here is created OWNED BY THE USER: this runs as root at boot, and
     # a root-owned ~/.config (what a bare `install -d` leaves behind on a fresh image where nothing
     # made it yet) makes every later user-level step fail — Lima's `systemctl --user enable
@@ -471,9 +475,9 @@ export NO_PROXY=localhost,127.0.0.1,$GW no_proxy=localhost,127.0.0.1,$GW
 EOF
     # npm's own proxy settings for every container this podman creates. podman hands each one the
     # proxy env above, but a postinstall script that fetches with its own client (node-fetch:
-    # supabase's CLI download) reads only npm_config_https_proxy, so it went direct and the wall
-    # refused it. Proxy env, not the CA's, so a sibling drop-in that doesn't wait for a CA. As
-    # with the CA's, an image's own ENV and a create's explicit env (the box's) win.
+    # supabase's CLI download) reads only npm_config_https_proxy, so it went direct and the
+    # firewall refused it. Proxy env, not the CA's, so a sibling drop-in that doesn't wait for a
+    # CA. As with the CA's, an image's own ENV and a create's explicit env (the box's) win.
     # NOT NODE_USE_ENV_PROXY, though the box and build steps get it: the NO_PROXY podman
     # propagates covers only loopback and $GW, and Node's fetch (undici) ignoring HTTP_PROXY is the only reason a Node
     # service in a stack reaches another by service name (Supabase Studio -> http://kong:8000).
@@ -571,7 +575,7 @@ echo "== fy-wall REJECTs (direct egress that ignored the proxy; dest IPs) =="
 dmesg 2>/dev/null | grep -E "fy-wall-deny" | tail -25 || echo "  (none — needs nf_log_syslog)"
 echo
 echo "Cooperative clients (curl, uv, git, …) go out via the proxy env and are allowlisted on"
-echo "the MAC (fy allow / the Network Log TUI) — blocked HOSTNAMES show there, not here."
+echo "your computer (fy allow / the Network Log TUI) — blocked HOSTNAMES show there, not here."
 EOF
     chmod 0755 /usr/local/bin/fy-wall-denied
 
@@ -588,7 +592,7 @@ EOF
         systemctl enable fy-wall-denies.service >/dev/null 2>&1 || true
         systemctl restart fy-wall-denies.service || echo "⚠ fy-wall-denies didn't start" >&2
     fi
-    echo "✓ fy-wall installed: uid $WALL_UID${SUB:+ +subuid$SUB} default-deny; open: lo, local-DNS, $GW tcp {$PORTS}"
+    echo "✓ VM firewall (fy-wall) installed: uid $WALL_UID${SUB:+ +subuid$SUB} default-deny; open: lo, local-DNS, $GW tcp {$PORTS}"
     ;;
 
 uninstall)
@@ -634,7 +638,7 @@ EOF
     # podman.socket stays masked — foldyard never needs the rootful socket, and unmasking it
     # silently on uninstall would reopen the container-root→VM-root hole. `systemctl unmask
     # podman.socket` by hand if you truly want it back.
-    echo "✓ fy-wall removed (rootful podman.socket left masked — see comment in this script)"
+    echo "✓ VM firewall (fy-wall) removed (rootful podman.socket left masked — see this script)"
     ;;
 
 status)
@@ -648,7 +652,7 @@ status)
         sku=$(nft list table inet fy_wall | grep -o 'skuid != [{][^}]*[}]' | head -1)
         echo "nft:      table inet fy_wall PRESENT (walled: ${sku:-?})"
     else
-        echo "nft:      table inet fy_wall ABSENT — the wall is NOT enforcing"
+        echo "nft:      table inet fy_wall ABSENT — the VM firewall is NOT enforcing"
     fi
     rootful="$(systemctl is-enabled podman.socket 2>/dev/null || true)"
     echo "rootful:  podman.socket ${rootful:-absent}"
