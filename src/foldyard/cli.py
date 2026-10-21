@@ -572,6 +572,12 @@ def hook_add(
     file: str = typer.Option(
         "", "--file", help="append each batch as a signed JSON line (the directory must exist)"
     ),
+    to_box: bool = typer.Option(
+        False,
+        "--to-box",
+        help="the signed file sink in the to-box, which every box reads and none can write "
+        "(lima backend): <state dir>/to-box/monitor/NAME.jsonl",
+    ),
     url: str = typer.Option("", "--url", help="POST each batch as JSON"),
     who: list[str] | None = typer.Option(
         None, "--who", help="container, vm, unattributed, ambiguous (repeat or comma-separate)"
@@ -583,12 +589,14 @@ def hook_add(
         None, "--worktree", "-w", help="only these worktrees"
     ),
 ) -> None:
-    """Add a hook: `--file PATH`, `--url URL`, or `-- /abs/program args…` — exactly one.
+    """Add a hook: `--to-box`, `--file PATH`, `--url URL`, or `-- /abs/program args…` — one.
 
     A file hook is foldyard's own sink: never written through a symlink, each line signed with a
-    key only your computer holds, so `fy monitor check PATH` tells whether anything (the box,
-    when the file is in the checkout) edited it. Events are sent once settled, starting from the
-    recent ones; the supervisor picks a new hook up within seconds."""
+    key only your computer holds, so `fy monitor check PATH` tells whether anything edited it.
+    `--to-box` is the place for events a box reads: the file sits in the to-box, read-only to the
+    VM and every box (the box sees it under /run/foldyard/to-box/monitor/), so the box can read it
+    but not change it; the signature still travels with any copy. Events are sent once settled,
+    starting from the recent ones; the supervisor picks a new hook up within seconds."""
     _monitor_host_only()
     from . import monitorhooks
 
@@ -597,6 +605,7 @@ def hook_add(
             name,
             command=tuple(command or ()),
             file=file,
+            to_box=to_box,
             url=url,
             who=tuple(who or ()),
             kinds=tuple(kinds or ()),
