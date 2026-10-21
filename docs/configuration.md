@@ -304,14 +304,37 @@ disk_gib = 60
     name = "score"
     command = ["/usr/local/bin/my-scorer", "--json"]   # absolute path, argv, no shell
     # url = "https://hooks.example.org/fy"             # or POST each batch as JSON
+    # file = "/abs/path/events.jsonl"                  # or append each batch as a signed line
     kinds = ["exec", "connect", "file"]                # optional filters
     who = ["container", "unattributed"]
     ```
 
+    - `fy monitor hook add` writes this file for you, checking each hook the way the supervisor
+      will. Your own edits and comments are kept. For example, to give the box a file of its
+      containers' events:
+
+      ```sh
+      fy monitor hook add events --file ~/code/app/logs/events.jsonl --who container
+      ```
+
+      Bare `fy monitor hook` lists the hooks and how their deliveries are going, and
+      `fy monitor hook remove <name>` removes one.
     - A command gets each batch as JSON on stdin, with only `PATH`, `HOME`, `LANG`, `FY_PROJECT`
       and `FY_HOOK` set. Your other environment, including `host.env`'s secrets, is not passed.
+    - A `file` hook appends each batch as one JSON line. Use it rather than a shell command that
+      appends: a file the box can read is a file in the checkout, which the box can also write.
+      - It never writes through a symlink. A symbolic link the box could have made (`logs → ~`)
+        would aim your computer's writes anywhere. The only links it follows are the system's
+        own, such as `/tmp` on macOS: owned by root, in a directory you can't write. Give the
+        real path otherwise; the refusal names it.
+      - The directory must exist. The file is created if it doesn't.
+      - Each line is signed with a key only your computer holds
+        (`~/.foldyard/<project>/monitor-sink.key`), numbered, and linked to the line before it.
+        The box can still edit the file, but `fy monitor check <path>` finds any line edited,
+        removed, moved or added, and lines cut from the end.
     - Events are sent once their container is settled. A batch is retried until the command exits
-      0 or the URL answers 2xx; after five failures it is skipped and counted.
+      0, the URL answers 2xx or the line is written; after five failures it is skipped and
+      counted. `fy doctor` shows each hook's health.
     - The design, and the analysis pipeline hooks are meant for:
       [docs/monitor-pipeline.md](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md).
   - Details: [ADR-0032](./adrs/0032-a-root-collector-in-the-guest.md).

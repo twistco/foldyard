@@ -528,3 +528,37 @@ def test_doctor_row_warns_never_fails(doctor_env, monkeypatch):
     monkeypatch.setattr(monitor, "guest_report", lambda be, name: report)
     rows = [r for r in devmode._guest_monitor_check() if r[0] != "running"]
     assert rows[0][0] == "warn" and "NOT observing" in rows[0][2]
+
+
+# ── the hooks rows ──────────────────────────────────────────────────────────────────────
+
+
+def test_doctor_hooks_row_says_none_and_how_to_add_one(doctor_env):
+    [row] = list(devmode._monitor_hooks_check())
+    assert row[:2] == ("ok", "monitor hooks") and "`fy monitor hook add`" in row[2]
+
+
+def test_doctor_hooks_rows_are_silent_when_the_monitor_is_off(doctor_env, monkeypatch):
+    monkeypatch.setattr(devmode.config, "machine_monitor", lambda: "off")
+    assert list(devmode._monitor_hooks_check()) == []
+
+
+def test_doctor_hooks_rows_report_each_hooks_health(doctor_env, tmp_path):
+    from foldyard import monitorhooks
+
+    (tmp_path / "monitor-hooks.toml").write_text(
+        '[[hook]]\nname = "score"\ncommand = ["/bin/score"]\n'
+        '[[hook]]\nname = "ca"\nfile = "/srv/e.jsonl"\n'
+        '[[hook]]\nname = "bad"\ncommand = ["rel"]\n'
+    )
+    monitorhooks._save_state(
+        {"score": monitorhooks.HookState(delivered=3, ok_at=1.0),
+         "ca": monitorhooks.HookState(dropped=4, error="refused: a symlink")}
+    )  # fmt: skip
+    rows = {r[1]: r for r in devmode._monitor_hooks_check()}
+    assert rows["monitor hooks"][0] == "warn" and "absolute path" in rows["monitor hooks"][2]
+    assert (
+        rows["monitor hook score"][0] == "ok"
+        and "3 events delivered" in rows["monitor hook score"][2]
+    )
+    assert rows["monitor hook ca"][0] == "warn" and "4 events skipped" in rows["monitor hook ca"][2]

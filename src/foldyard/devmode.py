@@ -1422,6 +1422,7 @@ def doctor(deep: bool = False):
     yield from _ssh_port_check()
     yield from _host_wall_check()
     yield from _guest_monitor_check()
+    yield from _monitor_hooks_check()
     yield from registry().doctor_checks(ctx)
 
 
@@ -2322,6 +2323,45 @@ def _monitor_events_check():
         f"pulled {age or 0:.0f}s ago ({counts}); `fy monitor` shows them",
         why,
     )
+
+
+def _monitor_hooks_check():
+    """The operator's monitor hooks (host-only config), from the delivery state the supervisor
+    saves — no ssh, so they show with the VM down too. Silent when the monitor is off. Warn,
+    never fail: a hook forwards what `fy monitor` already holds."""
+    if _BACKEND.name != "lima" or config.machine_monitor() == "off":
+        return
+    import time
+
+    from . import monitorhooks
+
+    hooks, errors = monitorhooks.load()
+    if errors:
+        yield _result(
+            None,
+            "monitor hooks",
+            "",
+            f"{len(errors)} skipped by the supervisor — {errors[0]}; `fy monitor hook`",
+        )
+    elif not hooks:
+        yield _result(
+            True,
+            "monitor hooks",
+            "none — the events stay in `fy monitor`; `fy monitor hook add` sends them on to a "
+            "file, a program or a URL",
+            "",
+        )
+    states, now = monitorhooks.load_state(), time.time()
+    for hook in hooks:
+        st = states.get(hook.name)
+        kind, _ = monitorhooks.target(hook)
+        why = "; ".join(monitorhooks.problems(st, now))
+        yield _result(
+            None if why else True,
+            f"monitor hook {hook.name}",
+            f"{kind}: {monitorhooks.progress(hook, st, now)}",
+            f"{kind}: {why} — `fy monitor hook`",
+        )
 
 
 def doctor_cli(deep: bool) -> int:
