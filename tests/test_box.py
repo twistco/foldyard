@@ -1907,7 +1907,10 @@ def test_claude_launch_leaves_an_unreadable_config_alone(gate):
     assert (_claude_home() / ".claude.json").read_text() == "{not json"
 
 
-@pytest.mark.parametrize("projects", [["not", "a", "table"], {"<root>": "not a table"}])
+@pytest.mark.parametrize(
+    "projects",
+    [["not", "a", "table"], None, "", {"<root>": "not a table"}, {"<root>": None}, {"<root>": ""}],
+)
 def test_claude_launch_leaves_an_odd_shaped_config_alone(gate, tmp_path, projects):
     # Valid JSON Claude never writes: not ours to reshape, and never a reason to block the launch.
     if isinstance(projects, dict):
@@ -1927,6 +1930,18 @@ def test_claude_launch_leaves_no_temp_file_when_the_write_fails(gate, monkeypatc
     _launch("claude")
     assert gate.execed
     assert sorted(p.name for p in _claude_home().iterdir()) == [".fy-seed.lock"]
+
+
+def test_claude_launch_goes_on_when_the_seed_lock_is_held(gate):
+    # Something in the box holding the lock (a seed stuck on a hung volume) must not stall the
+    # launch: wait briefly, then launch without seeding.
+    import fcntl
+
+    with open(_claude_home() / ".fy-seed.lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        _launch("claude")
+    assert gate.execed
+    assert not (_claude_home() / ".claude.json").exists()
 
 
 def test_claude_launch_seeds_under_an_exclusive_lock(gate, monkeypatch):

@@ -43,6 +43,7 @@ import time
 from collections.abc import Callable, Collection, Mapping
 from importlib import metadata
 from pathlib import Path
+from typing import IO
 
 from . import boximage, config, hostclock, keyless, machine, sandbox, stack
 from .plugins import registry
@@ -1252,8 +1253,8 @@ def _seed_claude_config(root: Path) -> None:
         return
 
     def trust(state: dict) -> dict:
-        projects = state.get("projects") or {}
-        entry = (projects.get(str(root)) or {}) if isinstance(projects, dict) else None
+        projects = state.get("projects", {})
+        entry = projects.get(str(root), {}) if isinstance(projects, dict) else None
         if not isinstance(entry, dict) or entry.get("hasTrustDialogAccepted") is True:
             return state  # trusted already, or a shape Claude never writes: not ours to reshape
         entry = {**entry, "hasTrustDialogAccepted": True}
@@ -1264,11 +1265,28 @@ def _seed_claude_config(root: Path) -> None:
     # take this lock — see _merge_json).
     try:
         with open(Path(home) / ".fy-seed.lock", "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            _flock_briefly(lock)
             _merge_json(Path(home) / "settings.json", lambda s: {**_CLAUDE_SETTINGS_DEFAULTS, **s})
             _merge_json(Path(home) / ".claude.json", trust)
     except OSError:  # no lock to be had: the prompts show, the launch goes on
         return
+
+
+_SEED_LOCK_WAIT_S = 2.0  # a seed takes milliseconds; longer means a holder that isn't letting go
+
+
+def _flock_briefly(f: IO[str]) -> None:
+    """An exclusive flock on ``f``, waiting at most :data:`_SEED_LOCK_WAIT_S` — then
+    ``BlockingIOError`` (an ``OSError``), so a held lock never stalls the launch."""
+    deadline = time.monotonic() + _SEED_LOCK_WAIT_S
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def _merge_json(path: Path, update: Callable[[dict], dict]) -> None:
