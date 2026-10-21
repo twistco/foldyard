@@ -36,7 +36,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import config, stack
+from . import boxmounts, config, stack
 
 
 def _err(*a: object) -> None:
@@ -569,15 +569,72 @@ def _archive(
 
 
 def bound_out_dir(checkout: Path, here: str) -> Path:
-    """The host-side dir a box binds Claude's ``projects/`` out to. It survives ``nuke`` (a
-    plain host dir), but is fragile to ``git clean -fdx`` and worktree removal — which is
-    why destructive ops :func:`sync_archive` it to the durable store first."""
+    """The LEGACY host-side dir a box binds Claude's ``projects/`` out to, inside the checkout —
+    a box created before the from-box (ADR-0033), or one on the podman backend, which keeps it.
+    Fragile to ``git clean -fdx`` and worktree removal, which is why destructive ops
+    :func:`sync_archive` it to the durable store first."""
     return checkout / here / ".devbox-claude/projects"
 
 
 def codex_bound_out_dir(checkout: Path, here: str) -> Path:
-    """The host-side directory bound to the box Codex's ``~/.codex/sessions`` tree."""
+    """The LEGACY host-side directory bound to the box Codex's ``~/.codex/sessions`` tree."""
     return checkout / here / ".devbox-codex/sessions"
+
+
+# ── where a checkout's transcripts are: the from-box slot, then the legacy bind-out ──────────
+#
+# A box on the from-box layout (ADR-0033, the lima backend) binds its agents' trees out to the
+# checkout's slot under `<state dir>/from-box/` — out of the checkout, so `git clean`, grep and
+# `worktree remove` never see them. For one release the host ALSO reads the legacy bind-out inside
+# the checkout (a box not yet recreated, the podman backend, a session written before the switch);
+# the next release drops it. Both are box-writable and read by the same no-follow walk: the
+# from-box one anchored at the from-box root, whose parent — the state dir — no box can reach,
+# so even the root's own name is opened without following a link.
+
+
+def sources(
+    checkout: Path, here: str, worktree: str = "", *, codex: bool = False
+) -> list[tuple[Path, Path]]:
+    """``(source, anchor)`` for one agent's bound-out tree, newest layout first. An operator's
+    ``DEVBOX_TRANSCRIPTS`` / ``DEVBOX_CODEX_TRANSCRIPTS`` is the one place the box was told to bind
+    to, so it replaces both."""
+    override = os.environ.get("DEVBOX_CODEX_TRANSCRIPTS" if codex else "DEVBOX_TRANSCRIPTS")
+    if override:
+        return [(Path(override), checkout)]
+    legacy = (codex_bound_out_dir if codex else bound_out_dir)(checkout, here)
+    try:
+        rel = boxmounts.codex_rel(worktree) if codex else boxmounts.claude_rel(worktree)
+    except ValueError:  # a worktree name no slot can carry: it never had one
+        return [(legacy, checkout)]
+    root = boxmounts.from_box_dir()
+    return [(root / rel, root), (legacy, checkout)]
+
+
+def archive_legacy(checkout: Path, here: str) -> None:
+    """`fy box up` on the from-box layout: archive whatever the legacy bind-out in the checkout
+    still holds — never moved into the from-box — and say it can be deleted."""
+    trees: list[tuple[Path, str, Path | None, str]] = [
+        (bound_out_dir(checkout, here), "Claude transcripts (old layout)", checkout, "")
+    ]
+    if config.codex_enabled():
+        trees.append(
+            (
+                codex_bound_out_dir(checkout, here),
+                "Codex transcripts (old layout)",
+                None,
+                str(_codex_archive_dest()),
+            )
+        )
+    for src, what, project_of, dest in trees:
+        if not _has_entries(checkout, src):
+            continue
+        if sync_archive(src, anchor=checkout, project_of=project_of, what=what, dest=dest) == 0:
+            print(
+                f"ℹ transcripts now bind out to foldyard's from-box; the old {src} is archived "
+                "and can be deleted."
+            )
+        else:
+            print(f"⚠ {src} (the old layout) could not be fully archived — keep it for now.")
 
 
 def sync_archive(
@@ -628,19 +685,29 @@ _sweep_state: dict[tuple[str, str], dict] = {}
 NOTIFY_AFTER_FAILURES = 3
 
 
-def _sweep_plan() -> tuple[Path, list[tuple[str, float, Path, str, Path | None]]]:
-    """The bound checkout, and ``(label, interval, bound-out source, archive dest, project_of)`` for
-    each configured agent whose auto-sync is ON, resolved under the CURRENTLY BOUND config — so the
-    caller's ``with config.using(worktree_config(wt))`` is what points this at the right
-    checkout."""
+_Plan = list[tuple[str, float, list[tuple[Path, Path]], str, Path | None]]
+
+
+def _sweep_plan() -> tuple[Path, _Plan]:
+    """The bound checkout, and ``(label, interval, [(source, anchor)…], archive dest, project_of)``
+    for each configured agent whose auto-sync is ON, resolved under the CURRENTLY BOUND config — so
+    the caller's ``with config.using(worktree_config(wt))`` is what points this at the right
+    checkout (and its from-box slot)."""
     checkout = config.repo_root()
     here = config.dev_vm_rel()
-    plan: list[tuple[str, float, Path, str, Path | None]] = []
+    wt = config.active_worktree()
+    plan: _Plan = []
     if config.claude_enabled() and (secs := config.claude_transcript_sync_seconds()):
-        plan.append(("Claude", secs, bound_out_dir(checkout, here), "", checkout))
+        plan.append(("Claude", secs, sources(checkout, here, wt), "", checkout))
     if config.codex_enabled() and (secs := config.codex_transcript_sync_seconds()):
         plan.append(
-            ("Codex", secs, codex_bound_out_dir(checkout, here), str(_codex_archive_dest()), None)
+            (
+                "Codex",
+                secs,
+                sources(checkout, here, wt, codex=True),
+                str(_codex_archive_dest()),
+                None,
+            )
         )
     return checkout, plan
 
@@ -711,20 +778,23 @@ def sweep(log, wt: str = "", *, tick_seconds: float = 2.0, notify=None) -> None:
     if config.in_box():  # the archive is in the host's home, unreachable from the box
         return
     try:
-        checkout, plan = _sweep_plan()
+        _checkout, plan = _sweep_plan()
     except Exception as e:  # a config hiccup must never wedge the reconcile loop
         log(f"transcript-sync: sweep failed: {type(e).__name__}: {e}")
         return
-    for label, interval, src, dest, project_of in plan:
+    for label, interval, srcs, dest, project_of in plan:
         key = (wt, label)
         try:
             if not _due(key, interval, tick_seconds):
                 continue
-            rc, detail, refused = _archive(
-                src, anchor=checkout, project_of=project_of, dest=dest, what=label, quiet=True
-            )
-            if rc in BENIGN_RC:
-                rc = 0
+            rc, detail, refused = 0, "", []
+            for src, anchor in srcs:  # the from-box slot, then the legacy bind-out
+                got, why, held = _archive(
+                    src, anchor=anchor, project_of=project_of, dest=dest, what=label, quiet=True
+                )
+                if got not in BENIGN_RC and not rc:
+                    rc, detail = got, why
+                refused += [name for name in held if name not in refused]
             if project_of is not None:
                 _report_refused(log, key, label, wt, refused, claude_project_dir(str(project_of)))
         except Exception as e:  # one agent's hiccup must not skip the other
@@ -742,22 +812,23 @@ def sync_current(env: dict, *, what: str = "transcripts", dest: str = "") -> int
     """
     checkout = Path(env.get("FOLDYARD_CHECKOUT") or stack.main_repo())
     here = env.get("HERE") or config.dev_vm_rel()
-    src = Path(os.environ.get("DEVBOX_TRANSCRIPTS") or bound_out_dir(checkout, here))
-    rc = sync_archive(src, anchor=checkout, project_of=checkout, what=what, dest=dest)
+    wt = env.get("WORKTREE", "")
+    rc = 0
+    for src, anchor in sources(checkout, here, wt):  # the from-box slot, then the legacy dir
+        got = sync_archive(src, anchor=anchor, project_of=checkout, what=what, dest=dest)
+        rc = rc or got
 
     if config.codex_enabled():
-        codex_src = Path(
-            os.environ.get("DEVBOX_CODEX_TRANSCRIPTS") or codex_bound_out_dir(checkout, here)
-        )
         codex_what = "Codex transcripts" if what == "transcripts" else f"{what} (Codex transcripts)"
-        codex_rc = sync_archive(
-            codex_src,
-            anchor=checkout,
-            project_of=None,  # dated, no project folders: see the residual-risk note above
-            what=codex_what,
-            dest=str(_codex_archive_dest(dest)),
-        )
-        rc = rc or codex_rc
+        for src, anchor in sources(checkout, here, wt, codex=True):
+            got = sync_archive(
+                src,
+                anchor=anchor,
+                project_of=None,  # dated, no project folders: see the residual-risk note above
+                what=codex_what,
+                dest=str(_codex_archive_dest(dest)),
+            )
+            rc = rc or got
     return rc
 
 
@@ -776,15 +847,15 @@ def transcripts(dest: str = "") -> int:
     box = f"{ctx.project}-devbox"
     checkout = Path(env["FOLDYARD_CHECKOUT"])
     here = env.get("HERE") or config.dev_vm_rel()
-    # The Claude bound-out dir on the host, honouring the same override as `devbox up`.
-    src_dir = Path(os.environ.get("DEVBOX_TRANSCRIPTS") or bound_out_dir(checkout, here))
+    wt = env.get("WORKTREE", "")
     # Default into the host's own history so `claude --resume` lists these in-box sessions.
     claude_dest = _archive_dest(dest)
     dry = bool(os.environ.get("DRY_RUN"))
 
     rc = _sync_source(
-        src_dir,
-        checkout,
+        sources(
+            checkout, here, wt
+        ),  # the from-box slot, then the legacy bind-out (or the override)
         claude_dest,
         dry,
         engine=engine,
@@ -802,13 +873,9 @@ def transcripts(dest: str = "") -> int:
     # Codex home of foldyard's own (never ~/.codex/sessions — see the note on Codex above), which
     # `CODEX_HOME=<it> codex resume` reads; an explicit archive dir takes a child of its own.
     if config.codex_enabled():
-        codex_src = Path(
-            os.environ.get("DEVBOX_CODEX_TRANSCRIPTS") or codex_bound_out_dir(checkout, here)
-        )
         codex_dest = _codex_archive_dest(dest)
         codex_rc = _sync_source(
-            codex_src,
-            checkout,
+            sources(checkout, here, wt, codex=True),
             codex_dest,
             dry,
             engine=engine,
@@ -835,8 +902,7 @@ def _codex_resume_hint(checkout: Path) -> str:
 
 
 def _sync_source(
-    src_dir: Path,
-    checkout: Path,
+    srcs: list[tuple[Path, Path]],
     dest_dir: Path,
     dry: bool,
     *,
@@ -850,16 +916,23 @@ def _sync_source(
     missing_ok: bool = False,
     hint: str | None = None,
 ) -> int:
-    """Sync one agent's bound history, falling back to its live in-box directory. ``hint`` is
+    """Sync one agent's bound history — every bound-out ``(source, anchor)`` that holds anything,
+    newest layout first — falling back to its live in-box directory when none does. ``hint`` is
     printed after a real (not dry-run) sync: how to read what was archived."""
-    # Stage the source. Prefer the bound-out dir (already on the host, no engine needed; reached
-    # from the checkout without following a link — see `_open_source`); if it's empty, fall back to
-    # pulling the live projects/ tree out of the running box over the socket with `<engine> cp` —
+    # Prefer the bound-out dirs (already on the host, no engine needed; reached from their anchor
+    # without following a link — see `_open_source`); if they're all empty, fall back to pulling
+    # the live projects/ tree out of the running box over the socket with `<engine> cp` —
     # projects/ ONLY, so creds never come along.
+    held = [(src, anchor) for src, anchor in srcs if _has_entries(anchor, src)]
+    if held:
+        rc = 0
+        for src, anchor in held:
+            got = _sync_stage(src, anchor, "bound-out dir", dest_dir, dry, label, project_of, hint)
+            rc = rc or got
+        return rc
+    src_dir = srcs[0][0]
     tmp: str | None = None
-    if _has_entries(checkout, src_dir):
-        stage, anchor, origin = src_dir, checkout, "bound-out dir"
-    elif engine_env is not None and _box_running(engine, box, engine_env):
+    if engine_env is not None and _box_running(engine, box, engine_env):
         # Resolve where Claude actually writes IN the box: the image bakes HOME=/home/vscode,
         # so even as root ~/.claude is /home/vscode/.claude. Honour CLAUDE_CONFIG_DIR too.
         out = subprocess.run(
@@ -881,7 +954,7 @@ def _sync_source(
             return 1
         # The stage is the host's own tmp dir, but what `cp` put in it came from the box (links
         # included, pointing at host paths): the same no-follow walk copies it out.
-        stage, anchor, origin = Path(tmp), Path(tmp), f"live box {box} ({box_src})"
+        stage, origin = Path(tmp), f"live box {box} ({box_src})"
     else:
         if missing_ok:
             print(f"✓ no {label.lower()} yet — nothing to do.")
@@ -890,28 +963,40 @@ def _sync_source(
         return 1
 
     try:
-        if not _has_entries(anchor, stage):
+        if not _has_entries(stage, stage):
             print(f"✓ no {label.lower()} yet (source is empty) — nothing to do.")
             return 0
-
-        print(f"▶ source: {origin}")
-        print(f"  from:   {stage}")
-        print(f"  to:     {dest_dir}" + ("   (DRY RUN — no changes)" if dry else ""))
-        # Held to the CHECKOUT's folder even when the stage is the box-cp tmp dir: the names in it
-        # are the box's either way.
-        rc, _, _ = _archive(
-            stage,
-            anchor=anchor,
-            project_of=project_of,
-            dest=str(dest_dir),
-            what=label,
-            announce=False,
-        )
-        if rc == 0:
-            print(f"✓ {label} {'would be ' if dry else ''}synced → {dest_dir}")
-            if hint and not dry:
-                print(hint)
-        return rc
+        return _sync_stage(stage, stage, origin, dest_dir, dry, label, project_of, hint)
     finally:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _sync_stage(
+    stage: Path,
+    anchor: Path,
+    origin: str,
+    dest_dir: Path,
+    dry: bool,
+    label: str,
+    project_of: Path | None,
+    hint: str | None,
+) -> int:
+    print(f"▶ source: {origin}")
+    print(f"  from:   {stage}")
+    print(f"  to:     {dest_dir}" + ("   (DRY RUN — no changes)" if dry else ""))
+    # Held to the CHECKOUT's folder even when the stage is the box-cp tmp dir: the names in it
+    # are the box's either way.
+    rc, _, _ = _archive(
+        stage,
+        anchor=anchor,
+        project_of=project_of,
+        dest=str(dest_dir),
+        what=label,
+        announce=False,
+    )
+    if rc == 0:
+        print(f"✓ {label} {'would be ' if dry else ''}synced → {dest_dir}")
+        if hint and not dry:
+            print(hint)
+    return rc

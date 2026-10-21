@@ -87,6 +87,10 @@ def mac(tmp_path, monkeypatch):
         "codex_native": home / ".codex",
         "src": checkout / "dev-stack/.devbox-claude/projects",
         "codex_src": checkout / "dev-stack/.devbox-codex/sessions",
+        # ADR-0033: the from-box (out of the checkout) and the main checkout's slot in it
+        "from_box": home / ".foldyard/acme/from-box",
+        "fb_src": home / ".foldyard/acme/from-box/main/claude/projects",
+        "fb_codex_src": home / ".foldyard/acme/from-box/main/codex/sessions",
         # The one Claude project folder the box can legitimately write for this checkout.
         "own": transcripts.claude_project_dir(str(checkout)),
     }
@@ -416,9 +420,13 @@ def test_sync_current_attempts_codex_after_claude_archive_failure(mac, monkeypat
     monkeypatch.setattr(transcripts, "sync_archive", fake_sync)
     env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
     assert transcripts.sync_current(env) == 7
-    # Claude's tree is held to the checkout's own project folder; Codex's has no such layout.
+    # Claude's tree is held to the checkout's own project folder; Codex's has no such layout. Each
+    # agent's from-box slot first (anchored at the from-box root), then the legacy bind-out.
+    from_box = mac["from_box"]
     assert [(str(src), anchor, of) for src, anchor, of in seen] == [
+        (str(mac["fb_src"]), from_box, mac["checkout"]),
         (str(mac["src"]), mac["checkout"], mac["checkout"]),
+        (str(mac["fb_codex_src"]), from_box, None),
         (str(mac["codex_src"]), mac["checkout"], None),
     ]
 
@@ -1059,3 +1067,120 @@ def test_sweep_never_raises(sweeper, monkeypatch):
     monkeypatch.setattr(transcripts, "_archive", boom)
     sweeper["run"]()
     assert len(sweeper["logs"]) == 1 and "disk full" in sweeper["logs"][0]
+
+
+# ── ADR-0033: the from-box slot, read beside the legacy bind-out for one release ───────────
+#
+# A box on the from-box layout binds its agents' trees out to the checkout's slot under
+# `<state dir>/from-box/` (out of the checkout). The host reads it with the same no-follow walk,
+# anchored at the from-box root — whose parent, the state dir, no box can reach — and the same
+# own-project-folder rule; Codex's still goes to foldyard's own Codex home, never `~/.codex`.
+
+
+def test_fy_transcripts_archives_the_from_box_slot(mac):
+    _session(mac["fb_src"], f"{mac['own']}/session.jsonl", "new layout")
+    assert transcripts.transcripts() == 0
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/session.jsonl": "new layout"}
+    assert mac["calls"] == []  # host-local: no engine
+
+
+def test_both_layouts_are_read_for_this_release(mac):
+    _session(mac["fb_src"], f"{mac['own']}/new.jsonl", "from-box")
+    _session(mac["src"], f"{mac['own']}/old.jsonl", "checkout")
+    assert transcripts.transcripts() == 0
+    assert _archived(mac["claude_archive"]) == {
+        f"{mac['own']}/new.jsonl": "from-box",
+        f"{mac['own']}/old.jsonl": "checkout",
+    }
+    env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
+    _session(mac["fb_src"], f"{mac['own']}/newer.jsonl", "from-box 2")
+    assert transcripts.sync_current(env) == 0
+    assert f"{mac['own']}/newer.jsonl" in _archived(mac["claude_archive"])
+
+
+def test_the_from_box_keeps_the_own_project_folder_rule(mac, capsys):
+    _session(mac["fb_src"], f"{mac['own']}/s.jsonl", "mine")
+    _session(mac["fb_src"], "-Users-someone-other/planted.jsonl", "injected")
+    assert transcripts.transcripts() == 0
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/s.jsonl": "mine"}
+    assert "-Users-someone-other" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("link", ["main", "main/claude", "main/claude/projects"])
+def test_a_symlinked_from_box_slot_is_refused(mac, tmp_path, link):
+    # Any box can write the from-box (a sibling container can bind all of it): a slot swapped for a
+    # link to a directory on your computer must never be followed into the archive.
+    secret = tmp_path / "secret"
+    (secret / mac["own"]).mkdir(parents=True)
+    (secret / mac["own"] / "id_rsa").write_text("TOPSECRET")
+    (secret / "projects" / mac["own"]).mkdir(parents=True)
+    (secret / "projects" / mac["own"] / "id_rsa").write_text("TOPSECRET")
+    (secret / "claude" / "projects" / mac["own"]).mkdir(parents=True)
+    (secret / "claude" / "projects" / mac["own"] / "id_rsa").write_text("TOPSECRET")
+    planted = mac["from_box"] / link
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.symlink_to(secret)
+    env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
+    assert transcripts.sync_current(env) == transcripts.RC_REFUSED
+    assert not mac["claude_archive"].exists()  # nothing was copied through the link
+
+
+def test_a_symlinked_from_box_root_is_refused(mac, tmp_path):
+    # The box can't replace the mount root itself, but the walk doesn't rely on that: it starts
+    # at the state dir, so even the root's own name is opened without following a link.
+    secret = tmp_path / "secret"
+    (secret / "main/claude/projects" / mac["own"]).mkdir(parents=True)
+    (secret / "main/claude/projects" / mac["own"] / "id_rsa").write_text("TOPSECRET")
+    mac["from_box"].parent.mkdir(parents=True, exist_ok=True)
+    mac["from_box"].symlink_to(secret)
+    env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
+    assert transcripts.sync_current(env) == transcripts.RC_REFUSED
+    assert not mac["claude_archive"].exists()
+
+
+def test_a_worktrees_sync_reads_its_own_slot(mac):
+    feat = mac["from_box"] / "worktrees/feat/claude/projects"
+    _session(feat, f"{mac['own']}/wt.jsonl", "feat")
+    _session(mac["fb_src"], f"{mac['own']}/main.jsonl", "main")  # another checkout's slot
+    env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack", "WORKTREE": "feat"}
+    assert transcripts.sync_current(env) == 0
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/wt.jsonl": "feat"}
+
+
+def test_codex_from_box_sessions_go_to_foldyards_own_codex_home(mac, monkeypatch):
+    monkeypatch.setattr(config, "codex_enabled", lambda: True)
+    _session(mac["fb_codex_src"], "2026/10/21/rollout-x.jsonl", "codex")
+    env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
+    assert transcripts.sync_current(env) == 0
+    assert _archived(mac["codex_archive"]) == {"2026/10/21/rollout-x.jsonl": "codex"}
+    assert not mac["codex_native"].exists()
+
+
+def test_an_override_replaces_both_layouts(mac, monkeypatch, tmp_path):
+    override = tmp_path / "elsewhere" / "projects"
+    _session(override, f"{mac['own']}/o.jsonl", "override")
+    _session(mac["fb_src"], f"{mac['own']}/fb.jsonl", "from-box")
+    monkeypatch.setenv("DEVBOX_TRANSCRIPTS", str(override))
+    env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
+    assert transcripts.sync_current(env) == 0
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/o.jsonl": "override"}
+
+
+def test_the_sweep_reads_the_bound_worktrees_slot(mac, monkeypatch, tmp_path):
+    transcripts._sweep_state.clear()
+    archive = tmp_path / "archive"
+    monkeypatch.setenv("FOLDYARD_TRANSCRIPTS_ARCHIVE", str(archive))
+    monkeypatch.setattr(config, "repo_root", lambda: mac["checkout"])
+    monkeypatch.setattr(config, "dev_vm_rel", lambda: "dev-stack")
+    monkeypatch.setattr(config, "active_worktree", lambda: "feat")
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    monkeypatch.setattr(config, "claude_transcript_sync_seconds", lambda: 15.0)
+    _session(mac["from_box"] / "worktrees/feat/claude/projects", f"{mac['own']}/s.jsonl", "fb")
+    _session(mac["src"], f"{mac['own']}/old.jsonl", "legacy")
+    logs: list[str] = []
+    transcripts.sweep(logs.append, "feat")
+    assert _archived(archive) == {
+        f"{mac['own']}/s.jsonl": "fb",
+        f"{mac['own']}/old.jsonl": "legacy",
+    }
+    assert logs == []

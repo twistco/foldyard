@@ -608,10 +608,67 @@ def test_remove_archives_all_configured_agents_via_sync_current(fake_main, monke
     assert worktree.remove("feat", assume_yes=True) == 0
     assert seen == [
         (
-            {"FOLDYARD_CHECKOUT": str(wt), "HERE": config.dev_vm_rel()},
+            {"FOLDYARD_CHECKOUT": str(wt), "HERE": config.dev_vm_rel(), "WORKTREE": "feat"},
             {"what": "worktree 'feat' transcripts"},
         )
     ]
+
+
+def test_remove_deletes_the_worktrees_from_box_slot_after_archiving_it(fake_main, monkeypatch):
+    # ADR-0033: the checkout's deletion no longer takes the transcripts with it — they live in the
+    # worktree's from-box slot, archived in step 3 and deleted with the rest of its local state.
+    from foldyard import transcripts
+
+    _make_wt(fake_main)
+    slot = fake_main["state_dir"] / "from-box" / "worktrees" / "feat"
+    (slot / "claude" / "projects").mkdir(parents=True)
+    sibling = fake_main["state_dir"] / "from-box" / "worktrees" / "other"
+    sibling.mkdir()
+    order: list[str] = []
+    monkeypatch.setattr(
+        transcripts, "sync_current", lambda env, **kw: order.append(f"archive:{slot.exists()}") or 0
+    )
+    assert worktree.remove("feat", assume_yes=True) == 0
+    assert order == ["archive:True"]  # archived while the slot was still there
+    assert not slot.exists() and sibling.is_dir()
+
+
+def test_remove_unlinks_a_planted_slot_link_without_following_it(fake_main, monkeypatch, tmp_path):
+    from foldyard import transcripts
+
+    _make_wt(fake_main)
+    target = tmp_path / "precious"
+    target.mkdir()
+    (target / "keep").write_text("x")
+    (fake_main["state_dir"] / "from-box" / "worktrees").mkdir(parents=True)
+    (fake_main["state_dir"] / "from-box" / "worktrees" / "feat").symlink_to(target)
+    monkeypatch.setattr(transcripts, "sync_current", lambda env, **kw: 0)
+    assert worktree.remove("feat", assume_yes=True) == 0
+    assert (target / "keep").read_text() == "x"
+    assert not os.path.lexists(fake_main["state_dir"] / "from-box" / "worktrees" / "feat")
+
+
+def test_a_leftover_slot_is_archived_before_it_is_deleted(fake_main, monkeypatch):
+    from foldyard import transcripts
+
+    slot = fake_main["state_dir"] / "from-box" / "worktrees" / "feat"
+    (slot / "claude" / "projects").mkdir(parents=True)
+    seen = []
+    monkeypatch.setattr(transcripts, "sync_current", lambda env, **kw: seen.append(env) or 0)
+    assert worktree.remove("feat", force=True) == 0
+    assert seen and seen[0]["WORKTREE"] == "feat"
+    assert not slot.exists()
+
+
+def test_a_leftover_slot_that_failed_to_archive_is_kept(fake_main, monkeypatch, capsys):
+    from foldyard import transcripts
+
+    slot = fake_main["state_dir"] / "from-box" / "worktrees" / "feat"
+    slot.mkdir(parents=True)
+    monkeypatch.setattr(transcripts, "sync_current", lambda env, **kw: 23)
+    assert worktree.remove("feat") == 23
+    assert slot.is_dir()
+    assert "NOT archived" in capsys.readouterr().err
 
 
 def test_remove_retries_local_state_cleanup_when_checkout_gone(fake_main):

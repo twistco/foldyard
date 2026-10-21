@@ -35,9 +35,8 @@ from __future__ import annotations
 
 import base64
 import json
-from pathlib import Path
 
-from .. import config, keyless
+from .. import boxmounts, config, keyless
 from ..keyless import CLAUDE_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CLAUDE_KEYLESS_HOST as _KEYLESS_HOST
 from . import HeldCredential, InjectRule, Plugin, Secret, Switch
@@ -161,7 +160,8 @@ class ClaudePlugin(Plugin):
         ]
         transcripts = env.get("FY_TRANSCRIPTS") or ""
         if transcripts:  # bound out to the host (survives nuke); create the host dir for the mount
-            Path(transcripts).mkdir(parents=True, exist_ok=True)
+            # never through a link the box planted in its from-box slot (ADR-0033)
+            boxmounts.ensure_bind_source(transcripts)
             args += ["-v", f"{transcripts}:{home}/projects"]
         # Keyless: bake the DUMMY credential so the client emits the header the proxy overwrites in
         # flight. AMBIENT with the proxy substrate (FY_PROXY) whenever keyless is CONFIGURED, like

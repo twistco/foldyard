@@ -46,7 +46,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import IO
 
-from . import boximage, config, hostclock, keyless, machine, sandbox, stack
+from . import boximage, boxmounts, config, hostclock, keyless, machine, sandbox, stack
 from .plugins import registry
 
 # TOML's bare-key alphabet, and its two non-finite floats — both for `_toml_value`/`_toml_key`,
@@ -218,6 +218,18 @@ def _warn_stale_foldyard(engine: str, box: str, env: dict) -> None:
         "bootstrap that installs it runs only on a freshly created box, so `fy box up` alone "
         "won't move it: `fy box down && fy box up`."
     )
+
+
+def _warn_legacy_transcripts(engine: str, box: str, env: dict) -> None:
+    """A box created before the from-box (ADR-0033) binds its transcripts into the checkout. It
+    still works — the sync reads both places for this release — but the bind is create-time."""
+    if not machine.from_box_mounted():
+        return
+    if _baked_env(engine, box, env, boxmounts.ENV_FROM_BOX) is None:
+        print(
+            f"⚠ dev box {box} binds its transcripts into the checkout (created before foldyard's "
+            "from-box). Recreate it to move them out: `fy box down && fy box up`."
+        )
 
 
 def _box_image_fingerprint(main: Path) -> str:
@@ -598,6 +610,10 @@ _DRIFT_IGNORED = frozenset(
         "GCP_MINTER_PORT",
         # The runtime: `_warn_stale_runtime`'s.
         sandbox.BAKED_ENV,
+        # ADR-0033's two VM paths: facts about the VM's mounts, not config — and a box from before
+        # them is `_warn_legacy_transcripts`'s (one change, one warning).
+        boxmounts.ENV_TO_BOX,
+        boxmounts.ENV_FROM_BOX,
     }
 )
 # Compared by presence only: the proxy URLs carry the per-worktree proxy PORT, so their value moves
@@ -1833,6 +1849,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
                 "~/.codex volume or keyless seed). Recreate to add them: `fy box down && fy box up`."
             )
         _warn_env_drift(engine, box, ctx, quiet)  # every other create-time name
+        _warn_legacy_transcripts(engine, box, env)
         _warn_stale_foldyard(engine, box, env)
         if not ensure_harden(engine, box, env):  # a box from before the hygiene gets it here
             print(
@@ -1855,16 +1872,29 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     if rc != 0:
         return rc
 
-    transcripts_dir = (
-        os.environ.get("DEVBOX_TRANSCRIPTS") or f"{checkout}/{here}/.devbox-claude/projects"
-    )
+    # Where the agents' transcripts bind out to on your computer: the checkout's own slot in the
+    # from-box (ADR-0033) where the VM shares one — out of the checkout, so `git clean` and grep
+    # never see them — else the legacy dirs inside the checkout (the podman backend, which keeps
+    # its mounts as they were).
+    from_box = machine.from_box_mounted()
+    if from_box:
+        claude_out = str(boxmounts.from_box_dir() / boxmounts.claude_rel(worktree))
+        codex_out = str(boxmounts.from_box_dir() / boxmounts.codex_rel(worktree))
+    else:
+        claude_out = f"{checkout}/{here}/.devbox-claude/projects"
+        codex_out = f"{checkout}/{here}/.devbox-codex/sessions"
+    transcripts_dir = os.environ.get("DEVBOX_TRANSCRIPTS") or claude_out
     box_home, claude_in_box, image_locales, image_lc_all = _probe_image(engine, img, env)
     # Resolved HOME paths the agent/editor plugins' box_args need (they only get `env`): the box
     # HOME, where Claude resolves ~/.claude, and the host-side transcripts dir to bind in.
     env["FY_BOX_HOME"] = box_home
     env["FY_CLAUDE_HOME"] = claude_in_box
     env["FY_TRANSCRIPTS"] = transcripts_dir
-    env["FY_CODEX_TRANSCRIPTS"] = f"{checkout}/{here}/.devbox-codex/sessions"
+    env["FY_CODEX_TRANSCRIPTS"] = os.environ.get("DEVBOX_CODEX_TRANSCRIPTS") or codex_out
+    if from_box:
+        from . import transcripts
+
+        transcripts.archive_legacy(Path(checkout), here)
     print(f"▶ starting long-lived dev box {box} (network {net})…")
     if config.claude_enabled():
         print(
@@ -1885,6 +1915,14 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         mounts += ["-v", f"{wt_root}:{wt_root}"]
     if checkout != str(main) and not str(checkout).startswith(f"{wt_root}/"):
         mounts += ["-v", f"{checkout}:{checkout}"]
+    # The to-box (ADR-0033), read-only: what your computer publishes for every box of the project.
+    # The `:ro` is defence in depth — the VM's own mount is read-only on the host's side.
+    box_dirs: list[str] = []
+    if from_box:
+        box_dirs += ["-e", f"{boxmounts.ENV_FROM_BOX}={boxmounts.from_box_dir()}"]
+    if machine.to_box_mounted():
+        mounts += ["-v", f"{boxmounts.to_box_dir()}:{boxmounts.TO_BOX_IN_BOX}:ro"]
+        box_dirs += ["-e", f"{boxmounts.ENV_TO_BOX}={boxmounts.to_box_dir()}"]
 
     # Shadow each in-tree build-artifact dir with a per-box named volume (uid-squash
     # workaround): the volume masks the host bind mount at that subpath.
@@ -1978,6 +2016,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         checkout,
         *agent_vols,
         *env_args,
+        *box_dirs,
         # A real PID 1 that reaps. `sleep` never waits, so every orphan handed to it stayed a
         # zombie for the box's life — one per `git commit` (2.47's detached auto-maintenance) —
         # until the box hit podman's 2048-pid limit and thread creation aborted its agents.

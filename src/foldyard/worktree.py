@@ -27,7 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config, machine, stack, worktree_registry
+from . import boxmounts, config, machine, stack, worktree_registry
 
 
 def _err(*a: object) -> None:
@@ -188,6 +188,27 @@ def _remove_local_state(name: str) -> bool:
             _err(f"✗ couldn't remove worktree state {path}: {e}")
             ok = False
     return ok
+
+
+def _has_from_box_slot(name: str) -> bool:
+    try:
+        slot = boxmounts.from_box_dir() / boxmounts.slot_rel(name)
+    except ValueError:
+        return False
+    return os.path.lexists(slot)
+
+
+def _remove_from_box_slot(name: str) -> bool:
+    """Delete the worktree's from-box slot, never through a link a box planted
+    (:func:`boxmounts.remove_slot`). Its transcripts were archived first."""
+    try:
+        why = boxmounts.remove_slot(name)
+    except ValueError:
+        return True  # a name no slot can carry never had one
+    if why:
+        _err(f"✗ couldn't remove the worktree's from-box slot: {why}")
+        return False
+    return True
 
 
 def _git_resolves(repo: Path, ref: str) -> bool:
@@ -535,6 +556,25 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
             if not _remove_local_state(name):
                 return 1
             leftovers = True
+        if _has_from_box_slot(name):
+            # Its transcripts may never have been archived (the checkout went out-of-band).
+            archive_env = {
+                "FOLDYARD_CHECKOUT": str(wt_dir),
+                "HERE": config.dev_vm_rel(),
+                "WORKTREE": name,
+            }
+            rc = transcripts.sync_current(archive_env, what=f"worktree '{name}' transcripts")
+            if rc != 0 and not force:
+                _err(
+                    f"✗ not deleting '{name}''s from-box slot — its transcripts were NOT archived."
+                )
+                _err(
+                    "  Resolve the issue, or re-run with --force to delete it anyway (loses them)."
+                )
+                return rc
+            if not _remove_from_box_slot(name):
+                return 1
+            leftovers = True
         # resolve() refuses a missing worktree dir, so name the project explicitly.
         if stack.remove_devbox_volumes(project=f"{config.project_prefix()}-{name}"):
             leftovers = True
@@ -589,8 +629,9 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
     # REMOVAL they'd leak forever, so drop them explicitly.
     stack.remove_devbox_volumes()
 
-    # 3. Save configured agents' transcripts BEFORE git deletes their bound-out dirs.
-    archive_env = {"FOLDYARD_CHECKOUT": str(wt_dir), "HERE": config.dev_vm_rel()}
+    # 3. Save configured agents' transcripts BEFORE git deletes their bound-out dirs (the legacy
+    #    ones live in the checkout) and step 5 deletes the worktree's from-box slot.
+    archive_env = {"FOLDYARD_CHECKOUT": str(wt_dir), "HERE": config.dev_vm_rel(), "WORKTREE": name}
     rc = transcripts.sync_current(archive_env, what=f"worktree '{name}' transcripts")
     if rc != 0 and not force:
         _err(f"✗ refusing to remove worktree '{name}' — its transcripts were NOT archived.")
@@ -628,9 +669,10 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
         if rc != 0:
             _err("✗ git worktree remove failed (uncommitted changes? use --force).")
             return rc
-    # 5. The checkout is gone, so its posture and isolated VS Code process state are stale too.
-    # Keep shared identity/allow state and the main checkout's VS Code profile untouched.
-    if not _remove_local_state(name):
+    # 5. The checkout is gone, so its posture and isolated VS Code process state are stale too —
+    # and its from-box slot (ADR-0033), whose transcripts step 3 archived. Keep shared
+    # identity/allow state and the main checkout's VS Code profile untouched.
+    if not _remove_local_state(name) or not _remove_from_box_slot(name):
         _err(f"✗ worktree '{name}' was removed, but some local state could not be deleted.")
         return 1
     print(
