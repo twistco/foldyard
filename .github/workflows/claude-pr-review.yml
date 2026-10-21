@@ -80,7 +80,7 @@ jobs:
                   | gsub("\r\n?"; "\n") | "> " + gsub("\n"; "\n> "))),
               (if .comments.totalCount > (.comments.nodes | length)
                then "--- \(.comments.totalCount - (.comments.nodes | length)) later comments not shown:"
-                 + " read this thread with Step 1b.3's command" else empty end)
+                 + " read this thread with the Step 1b.3 command" else empty end)
           ' > .pr-review-threads.md \
             || echo "The workflow couldn't read the review threads: use Step 1b.3's command." \
             > .pr-review-threads.md
