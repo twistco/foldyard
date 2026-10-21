@@ -276,6 +276,7 @@ def test_inject_spec_and_dummy_box_args_helpers():
         "token_env": "OPENAI_API_KEY",
         "value_prefix": "Bearer ",
         "replay_on_401": False,
+        "dummies": ("Bearer sk-dummy",),  # what the box sends: how a request names this rule
         "label": "Codex proxy",
     }
     assert keyless.inject_spec(keyless.CODEX_KEYLESS, "h", "nope", "l") is None  # unknown mode
