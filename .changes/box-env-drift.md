@@ -10,4 +10,5 @@ bump: patch
   each variable that's missing, changed or no longer set (values only for `TZ` and `LC_TIME`),
   with the fix: `fy box down && fy box up`. `fy mode`, `fy state` and the TUI make the same
   comparison, which used to cover only the keyless Claude and Codex dummies, and their fix line
-  said `fy box up`, which keeps a running box as it is.
+  said `fy box up`, which keeps a running box as it is. A timezone change on your computer counts
+  too, so `fy state` exits non-zero until the box is recreated.
