@@ -103,7 +103,7 @@ if ! [ -d "$H/foldyard/.git" ]; then
     T=$(mktemp -d)
     git clone --no-local -q "$SRC" "$T/foldyard"
     chown -R "$OP:$OP" "$T"
-    "$D/run" "mv $T/foldyard ~/foldyard"
+    "$D/run" "mv -T $T/foldyard ~/foldyard" # -T: an empty ~/foldyard becomes the clone, not its parent
     rm -rf "$T"
 fi
 "$D/run" "git config --global --add safe.directory '*'; cd ~/foldyard && uv tool install -q --force --editable ."
