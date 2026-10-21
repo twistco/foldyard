@@ -78,8 +78,9 @@ two claims:
 - **Unproven in use.** Its config is settled, but nobody has used it day to day yet, so expect
   rough edges.
 
-`fy doctor`'s `experimental` row lists the ones your config turns on, and what is still unproven
-about each. A setting stops being experimental in a release whose changelog says so.
+On your computer, `fy doctor`'s `experimental` row lists the ones your adopted config turns on,
+and what is still unproven about each. (Not in the box, which can't see what's adopted.) A
+setting stops being experimental in a release whose changelog says so.
 
 ## `[project]`
 

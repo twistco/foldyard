@@ -28,7 +28,8 @@ bump: patch
   experimental register (`src/foldyard/experimental.py`). The release adds the label to each
   bullet's bold lead (`- **Experimental: …**`), so write the bullet without it; a hand-written
   "Experimental:" lead is refused, which keeps the wording the same everywhere. So is an
-  experimental entry with no bullet (`Summary` prose), which would print unlabelled.
+  experimental entry with no bullet, which would print unlabelled, and an experimental `Summary`:
+  the feature goes in its section (`Added`, …), the Summary only frames the release.
 - **The entry** is one or more `- ` bullets, written as it should read in the changelog. Lead
   with what changed for the reader, in bold, then **why**. The changelog is what a consumer
   reads to decide whether to upgrade, and what they lift into their own
