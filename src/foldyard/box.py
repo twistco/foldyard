@@ -622,7 +622,9 @@ _HOST_FACTS = frozenset({"TZ", "LC_TIME", "NODE_EXTRA_CA_CERTS"})
 _DRIFT_SHOW_VALUES = frozenset({"TZ", "LC_TIME"})
 # Your computer's clock settings (hostclock): they move when you travel, not when config is
 # adopted, and a box on the old zone still works — so a difference is a warning, shown with its
-# values, never drift that fails `fy state`. Every other name does.
+# values, never drift that fails `fy state`. Every other name does, and so do these two when
+# `[box].env` pins them (that is config). The same names as `_DRIFT_SHOW_VALUES` today, but a
+# different question — which values are safe to print vs which differences break nothing.
 _DRIFT_ADVISORY = frozenset({"TZ", "LC_TIME"})
 # What the engine adds to every container's Config.Env (podman: container/HOME/HOSTNAME, TERM
 # under -t) — neither the image's nor foldyard's, so never "no longer set".
@@ -632,15 +634,13 @@ _ENGINE_ADDED = frozenset({"PATH", "HOME", "HOSTNAME", "TERM", "container"})
 @dataclass(frozen=True)
 class EnvDrift:
     """One name whose value in a running box differs from what a create would give it now.
-    ``what``: ``missing``, ``changed``, ``no longer set``, or ``<old> → <new>`` (the clock only)."""
+    ``what``: ``missing``, ``changed``, ``no longer set``, or ``<old> → <new>`` (the clock only).
+    ``advisory``: your computer's clock settings (:data:`_DRIFT_ADVISORY`) — a warning, not
+    drift."""
 
     name: str
     what: str
-
-    @property
-    def advisory(self) -> bool:
-        """Only your computer's clock settings (:data:`_DRIFT_ADVISORY`): a warning, not drift."""
-        return self.name in _DRIFT_ADVISORY
+    advisory: bool = False
 
     def __str__(self) -> str:
         return f"{self.name}: {self.what}"
@@ -652,6 +652,7 @@ def _compare_env(
     *,
     image_env: Mapping[str, str] | None,
     ignore: Collection[str] = (),
+    advisory: Collection[str] = _DRIFT_ADVISORY,
 ) -> list[EnvDrift]:
     """What differs, name by name, between the environment a box would be created with now
     (``expected``; None = present, value unknown) and the one it was (``baked``, its Config.Env).
@@ -661,7 +662,8 @@ def _compare_env(
     neither the config, the image (``image_env`` — its own value; a different one was set at
     create) nor the engine accounts for — a removed row's dummy shadows a real in-box login, a
     removed ``[box].env`` pin still steers its tool. Without ``image_env`` that last can't be told
-    from the image's own, so it isn't reported."""
+    from the image's own, so it isn't reported. A name in ``advisory`` is marked so: a
+    warning, not drift (:data:`_DRIFT_ADVISORY`, less any ``[box].env`` pins)."""
     skip = _DRIFT_IGNORED | frozenset(ignore)
     out: list[EnvDrift] = []
     for name, want in expected.items():
@@ -669,13 +671,13 @@ def _compare_env(
             continue
         have = baked.get(name)
         if have is None:
-            out.append(EnvDrift(name, "missing"))
+            out.append(EnvDrift(name, "missing", name in advisory))
         elif want is None or name in _DRIFT_PRESENCE_ONLY or have == want:
             continue
         elif name in _DRIFT_SHOW_VALUES:
-            out.append(EnvDrift(name, f"{have} → {want}"))
+            out.append(EnvDrift(name, f"{have} → {want}", name in advisory))
         else:
-            out.append(EnvDrift(name, "changed"))
+            out.append(EnvDrift(name, "changed", name in advisory))
     if image_env is None:
         return out
     for name, have in baked.items():
@@ -683,7 +685,7 @@ def _compare_env(
             continue
         if image_env.get(name) == have:
             continue
-        out.append(EnvDrift(name, "no longer set"))
+        out.append(EnvDrift(name, "no longer set", name in advisory))
     return out
 
 
@@ -812,7 +814,13 @@ def env_drift(
     expected = {**plugins, **expected}
     # A bare `-e NAME` the create env doesn't carry is one the engine skips: not expected here.
     ignore |= {n for n, v in expected.items() if v is None and n not in resolved}
-    return _compare_env(expected, baked, image_env=image_env if complete else None, ignore=ignore)
+    return _compare_env(
+        expected,
+        baked,
+        image_env=image_env if complete else None,
+        ignore=ignore,
+        advisory=_DRIFT_ADVISORY - config.box_env().keys(),  # a `[box].env` pin is config
+    )
 
 
 # Per engine call of `fy box up`'s drift check. Generous — the image probe starts a container, and

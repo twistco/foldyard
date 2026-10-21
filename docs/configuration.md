@@ -793,7 +793,8 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   Only `fy box up` judges `LC_TIME`, by asking the box's image which locales it has, as the
   create did. `fy state` counts a different `TZ` or `LC_TIME` as a warning, not drift: your
   computer's clock settings moved (you travelled, say) and the box still works, so it passes and
-  shows the old → new value. Any other variable that no longer matches makes it exit non-zero.
+  shows the old → new value. Any other variable that no longer matches makes it exit non-zero,
+  and so does a `TZ` or `LC_TIME` this table pins, since changing the pin is a config change.
 - **`[[box.tools]]`** — one-time tool installs, run as bootstrap steps reported ✓/✗:
   `{ name, install, check? }`. `check` is a shell test that skips the install when it succeeds;
   default `command -v <name>`. These run on every newly created box; a distro package belongs in

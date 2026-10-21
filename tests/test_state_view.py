@@ -64,7 +64,7 @@ def test_state_flags_a_down_daemon_and_a_degraded_capability(
 def _box_drift(monkeypatch, *items: tuple[str, str]):
     from foldyard import box
 
-    drift = [box.EnvDrift(name, what) for name, what in items]
+    drift = [box.EnvDrift(name, what, advisory=name == "TZ") for name, what in items]
     monkeypatch.setattr(devmode, "_box_env_drift", lambda: drift)
 
 

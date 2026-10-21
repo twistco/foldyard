@@ -23,7 +23,8 @@ conformance suite (tests/test_reconcile_scenarios.py), which pins what fires whe
 | assets     | `fy up` + mode change      | registry().stage_assets — an idempotent copy,  |
 |            |                            | self-converging at its triggers (no rows: the  |
 |            |                            | staging has no observation hook to render)     |
-| box env    | `fy box up` (observe-only) | can't act — devmode._box_env_hint nags         |
+| box env    | `fy box up` (observe-only) | can't act — devmode._box_env_drift nags (a     |
+|            |                            | clock-only difference is a warning, not drift) |
 
 Stdlib only at import (loads on the `fy state` path); the stack scope reads overlays with PyYAML,
 imported lazily — it rides in with the bundled podman-compose.

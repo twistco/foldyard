@@ -2517,6 +2517,21 @@ def test_up_shows_the_timezone_it_had_and_the_one_it_would_get(fake, monkeypatch
     assert "fy box down && fy box up" in line
 
 
+def test_a_box_env_pin_of_the_timezone_is_config_not_your_computers_clock(
+    fake, monkeypatch, capsys
+):
+    # `[box].env` may pin TZ/LC_TIME over your computer's; a change to that pin is adopted config,
+    # so it is drift like any other entry, not the clock warning.
+    pinned = config.box_env()
+    monkeypatch.setattr(config, "box_env", lambda: {**pinned, "TZ": "UTC"})
+    _create_then_run(fake)
+    monkeypatch.setattr(config, "box_env", lambda: {**pinned, "TZ": "Asia/Tokyo"})
+    capsys.readouterr()
+    assert box.main("up") == 0
+    line = _drift_line(capsys.readouterr().out)
+    assert "TZ: UTC → Asia/Tokyo" in line and "no longer matches the config" in line
+
+
 def test_up_names_the_config_when_more_than_the_clock_moved(fake, monkeypatch, capsys):
     _clock(monkeypatch, zone="Europe/London")
     _create_then_run(fake)
@@ -2706,6 +2721,8 @@ def test_compare_env_marks_only_your_computers_clock_advisory():
     baked = {"TZ": "Europe/London", "LC_TIME": "en_GB.UTF-8"}
     got = box._compare_env(expected, baked, image_env={})
     assert {d.name: d.advisory for d in got} == {"TZ": True, "LC_TIME": True, "A": False}
+    pinned = box._compare_env(expected, baked, image_env={}, advisory={"LC_TIME"})
+    assert {d.name: d.advisory for d in pinned} == {"TZ": False, "LC_TIME": True, "A": False}
 
 
 def test_compare_env_presence_only_and_ignored_names():
