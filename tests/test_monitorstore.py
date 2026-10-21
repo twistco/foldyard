@@ -1,0 +1,157 @@
+"""monitorstore.py — the guest monitor's store on your computer: segments named by their first
+line, sealed and compressed with positions intact, retention by a host-only disk budget, and the
+catalogue that lets any stretch of the store be joined as a whole. All in a tmp state dir."""
+
+from __future__ import annotations
+
+import gzip
+import json
+
+import pytest
+
+from foldyard import monitorstore as ms
+
+BOOT = "boot-1"
+BOX = "a" * 64
+
+
+def ev(seq: int, inode: int = 200, boot: str = BOOT) -> dict:
+    proc = {"binary": "/bin/cat", "pid": 7, "uid": 1, "ns": {"mnt": {"inum": inode}}}
+    return {"k": "ev", "boot": boot, "seq": seq, "recv": 1.0,
+            "e": {"process_exec": {"process": proc}, "time": f"2026-10-21T20:00:{seq:02d}Z"}}  # fmt: skip
+
+
+def snap(seq: int, boot: str = BOOT, mapping=None) -> dict:
+    return {"k": "scopes", "boot": boot, "seq": seq, "vm": 1,
+            "map": {"200": [BOX]} if mapping is None else mapping}  # fmt: skip
+
+
+@pytest.fixture(autouse=True)
+def state(monkeypatch, tmp_path):
+    monkeypatch.setattr(ms.config, "state_dir", lambda: tmp_path)
+    return tmp_path
+
+
+def _seq(rec: dict | None) -> int:
+    assert rec is not None
+    return rec["seq"]
+
+
+def _seqs(read) -> list[int]:
+    return [r["seq"] for r, _ in read if "seq" in r]
+
+
+def test_a_live_segment_is_named_by_its_first_line(state):
+    ms.append([snap(0), ev(1)])
+    (seg,) = ms.segments()
+    head = json.loads((state / "logs" / "monitor.jsonl").read_text().splitlines()[0])
+    assert seg.live and head == {"k": "segment", "id": seg.id, "t": head["t"]}
+    read, found = ms.read(None, 1 << 20)
+    assert found and _seqs(read) == [0, 1]  # the first line is the store's, never a record
+
+
+def test_a_sealed_segment_is_compressed_and_positions_survive_both(state, monkeypatch):
+    ms.append([snap(0), ev(1), ev(2)])
+    read, _ = ms.read(None, 1 << 20)
+    at = read[1][1]  # just past ev 1, in the live segment
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([ev(3)])  # seals the full live segment first
+    sealed, live = ms.segments()
+    assert sealed.gz and sealed.id == at[0] and live.live and live.id != at[0]
+    assert not (state / "logs" / f"monitor.{sealed.id}.jsonl").exists()  # only compressed
+    read, found = ms.read(at, 1 << 20)
+    assert found and _seqs(read) == [2, 3]  # the same position, now inside a .gz
+    assert ms.find([BOOT, 1]) == at  # and found again by the event alone
+    assert ms.raw_size(sealed) == len(gzip.decompress(sealed.path.read_bytes()))
+
+
+def test_the_budget_removes_the_oldest_sealed_segments_never_the_live(state, monkeypatch):
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    monkeypatch.setattr(ms, "budget", lambda: 1)
+    for i in range(0, 9, 3):
+        ms.append([snap(i), ev(i + 1), ev(i + 2)])
+    (live,) = ms.segments()
+    assert live.live and _seqs(ms.read(None, 1 << 20)[0]) == [6, 7, 8]
+    with ms.Catalogue.open() as cat:
+        # the segments' snapshots went with them — but the newest of the boot's stays: the one
+        # before the oldest events still stored
+        assert _seq(cat.before(BOOT, 6)) == 3
+        assert cat.before(BOOT, 3) is None
+
+
+def test_the_budget_is_host_only_and_clamped(state):
+    assert ms.settings_file() == state / "monitor-store.toml"  # the state dir, not the checkout
+    assert ms.budget_setting() == (ms.BUDGET_MB << 20, "")
+    (state / "monitor-store.toml").write_text("max_mb = 4096\n")
+    assert ms.budget_setting() == (4096 << 20, "")
+    (state / "monitor-store.toml").write_text("max_mb = 1\n")
+    size, note = ms.budget_setting()
+    assert size == ms.BUDGET_MIN_MB << 20 and "outside" in note
+    (state / "monitor-store.toml").write_text('max_mb = "lots"\n')
+    assert ms.budget_setting()[0] == ms.BUDGET_MB << 20
+    (state / "monitor-store.toml").write_text("max_mb = [\n")
+    assert "unreadable" in ms.budget_setting()[1]
+
+
+def test_an_older_foldyards_store_is_indexed_sealed_and_compressed(state):
+    logs = state / "logs"
+    logs.mkdir()
+    lines = lambda *rs: "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rs)  # noqa: E731
+    (logs / "monitor.20261001T000000Z.jsonl").write_text(lines(snap(0), ev(1)))
+    (logs / "monitor.jsonl").write_text(lines(ev(2), snap(3, mapping={})))  # no first line
+    old, live = ms.segments()
+    assert (old.id, live.id) == ("20261001T000000Z", ms.LEGACY)
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+        assert _seq(cat.before(BOOT, 2)) == 0 and _seq(cat.after(BOOT, 1)) == 3
+    ms.append([ev(4)])  # the older live file is sealed under an id of its own; both compressed
+    ids = [s.id for s in ms.segments()]
+    assert ids[0] == "20261001T000000Z" and ms.LEGACY not in ids and len(ids) == 3
+    assert all(s.gz for s in ms.segments()[:-1])
+    assert _seqs(ms.read(None, 1 << 20)[0]) == [0, 1, 2, 3, 4]
+    with ms.Catalogue.open() as cat:
+        assert cat.last_snapshot(BOOT) == 3
+
+
+def test_a_lost_catalogue_is_rebuilt_from_the_segments(state, monkeypatch):
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0), ev(1)])
+    ms.append([{"k": "engine", "containers": {BOX: {"name": "fyex-devbox"}}}, snap(2)])
+    for p in (state / "logs").glob("monitor-index.sqlite*"):
+        p.unlink()
+    (state / "logs" / "monitor-index.sqlite").write_text("not a database")
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+        assert _seq(cat.after(BOOT, 1)) == 2
+        assert cat.claims() == {BOX: {"name": "fyex-devbox"}}
+
+
+def test_records_the_catalogue_missed_are_indexed_before_the_store_moves_on(state):
+    ms.append([snap(0)])
+    (live,) = ms.segments()
+    with (state / "logs" / "monitor.jsonl").open("a") as f:  # written, never indexed (a crash)
+        f.write(json.dumps(snap(1)) + "\n")
+    ms.append([ev(2)])
+    with ms.Catalogue.open() as cat:
+        assert cat.last_snapshot(BOOT) == 1
+    with ms.Catalogue.open() as cat:  # and indexed past the end of a write that never happened
+        cat.add(live.id, [], indexed=10_000, exact=True)
+    ms.append([snap(3)])
+    with ms.Catalogue.open() as cat:
+        assert cat.last_snapshot(BOOT) == 3
+
+
+def test_a_read_never_stops_short_of_an_event(state):
+    big = {"k": "engine", "containers": {f"{i:064d}": {"name": "x" * 200} for i in range(20)}}
+    ms.append([snap(0), big, ev(1)])
+    read, _ = ms.read(None, 10)
+    assert [r["k"] for r, _ in read] == ["scopes", "engine", "ev"]
+
+
+def test_tail_is_a_position_that_many_bytes_before_the_end(state, monkeypatch):
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0), ev(1)])
+    ms.append([ev(2), ev(3)])
+    assert ms.tail(0) == [ms.segments()[-1].id, ms.raw_size(ms.segments()[-1])]
+    assert _seqs(ms.read(ms.tail(1 << 20), 1 << 20)[0]) == [0, 1, 2, 3]
+    assert ms.tail(1, []) is None

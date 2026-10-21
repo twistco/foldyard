@@ -12,7 +12,7 @@ import subprocess
 import pytest
 
 from foldyard import monitorhooks as mh
-from foldyard import monitorlog
+from foldyard import monitorlog, monitorstore
 
 BOOT, BOOT2 = "boot-1", "boot-2"
 BOX = "a" * 64
@@ -249,7 +249,7 @@ def test_round_once_reads_the_store_and_saves_each_hooks_state(ran, project):
     mh.round_once(now=50)
     state = json.loads((project / "monitor-hooks-state.json").read_text())
     assert state["s"]["last"] == [BOOT, 2] and state["s"]["delivered"] == 2
-    assert state["s"]["pos"][0] == monitorlog.store_path().stat().st_ino
+    assert state["s"]["pos"][0] == monitorstore.segments()[-1].id  # the segment, not an inode
     mh.round_once(now=60)
     assert len(calls) == 1  # the saved cursor holds across rounds
 
@@ -286,59 +286,116 @@ def test_a_position_the_store_rotated_away_is_said_and_reading_resumes(ran, proj
     _hook(project)
     monitorlog._append([snap(0), ev(1), snap(2)])
     mh.round_once(now=10)
-    stamps = iter(f"2026100{i}T000000Z" for i in range(1, 9))
-    monkeypatch.setattr(monitorlog, "STORE_BYTES", 100)
-    monkeypatch.setattr(monitorlog, "STORE_BACKUPS", 1)
-    monkeypatch.setattr(
-        monitorlog, "datetime", type("D", (), {"now": staticmethod(lambda tz: _Stamp(stamps))})
-    )
-    for i in range(3, 9, 2):  # each append rotates: the hook's file is deleted on the second
+    monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 100)
+    monkeypatch.setattr(monitorstore, "budget", lambda: 1)  # keeps only the live segment
+    for i in range(3, 9, 2):  # each append seals the last segment, and the budget removes it
         monitorlog._append([ev(i), snap(i + 1)])
     logged: list[str] = []
     mh.round_once(now=500, log=logged.append)
     assert any("rotated past its position" in m for m in logged)
     assert _delivered(calls)[-1] == 7  # what the store still holds is delivered
+    (gap,) = calls[-1]["body"]["gaps"]  # …and the batch says what it couldn't
+    assert gap["why"] == "rotated" and gap["after"] == [BOOT, 1] and gap["before"] == [BOOT, 7]
 
 
-class _Stamp:
-    def __init__(self, stamps):
-        self._stamps = stamps
-
-    def strftime(self, fmt):
-        return next(self._stamps)
-
-
-def test_a_position_naming_another_record_counts_as_lost(ran, project):
-    # an inode is reused once its file is deleted: a position is only trusted when the record
-    # ending there is the cursor's own
+def test_an_older_foldyards_position_is_found_again_by_the_cursor(ran, project):
+    # it named an inode, which compression changes and ext4 hands out again: the cursor's
+    # (boot, seq) finds the place instead — no re-reading from the oldest byte, no gap
     calls, _ = ran
     _hook(project)
     monitorlog._append([snap(0), ev(1), ev(2), snap(3)])
-    mh.round_once(now=10)
-    state = json.loads((project / "monitor-hooks-state.json").read_text())
-    state["s"]["last"] = [BOOT, 1]  # the position says 2 ends there
-    (project / "monitor-hooks-state.json").write_text(json.dumps(state))
+    (project / "monitor-hooks-state.json").write_text(
+        json.dumps({"s": {"last": [BOOT, 1], "pos": [64240151, 399]}})
+    )
     logged: list[str] = []
     mh.round_once(now=20, log=logged.append)
-    assert any("rotated past its position" in m for m in logged)
-    assert _delivered(calls) == [1, 2, 2]  # at-least-once: re-read from the oldest byte
+    assert logged == [] and _delivered(calls) == [2] and calls[0]["body"]["gaps"] == []
 
 
-def test_span_resumes_from_a_position_across_a_rotation(project, monkeypatch):
-    monitorlog._append([ev(1), ev(2)])
-    read, found = monitorlog.span(None, 10_000, 0)
-    assert found and [r["seq"] for r, _ in read] == [1, 2]
-    at = read[0][1]
-    monitorlog.store_path().rename(
-        monitorlog.store_path().with_name("monitor.20261001T000000Z.jsonl")
+def test_a_new_hook_is_anchored_where_it_first_reads(ran, project, monkeypatch):
+    # nothing settled yet the first time it looks: it must not slide along with the tail
+    calls, _ = ran
+    _hook(project)
+    monkeypatch.setattr(mh, "READ_BYTES", 300)
+    monitorlog._append([snap(0), ev(1, recv=100)])
+    mh.round_once(now=110)  # 1 has no snapshot after it and is recent: nothing to send
+    assert calls == []
+    monitorlog._append([*(ev(i, recv=120) for i in range(2, 30)), snap(30)])
+    for t in range(130, 400, 10):
+        mh.round_once(now=t)
+    assert _delivered(calls) == list(range(1, 30))
+
+
+def test_a_far_snapshot_and_a_far_claim_still_attribute_the_events_between(
+    ran, project, monkeypatch
+):
+    # The 2026-10-21 loss: in a storm two snapshots are megabytes apart, more than any read. The
+    # events between must still be joined to both — and named by a claim made long before.
+    calls, _ = ran
+    (project / "monitor-hooks.toml").write_text(
+        '[[hook]]\nname = "s"\ncommand = ["/bin/s"]\nwho = ["container"]\n'
     )
-    monitorlog._append([ev(3)])
-    read, found = monitorlog.span(at, 0, 10_000)
-    assert found and [r["seq"] for r, _ in read] == [2, 3]
-    read, found = monitorlog.span(at, 1, 10_000)  # a lead inside a line never yields half of it
-    assert [r["seq"] for r, _ in read] == [2, 3]
-    _, found = monitorlog.span([-1, 0], 0, 10)
-    assert not found
+    monkeypatch.setattr(mh, "READ_BYTES", 400)  # a few events a read
+    meta = {"name": "fyex-devbox", "project": "", "service": ""}
+    monitorlog._append([{"k": "engine", "containers": {BOX: meta}}, snap(0), ev(1)])
+    mh.round_once(now=10)
+    monitorlog._append([*(ev(i) for i in range(2, 60)), snap(60), ev(61, recv=1000)])
+    for t in range(20, 300, 10):
+        mh.round_once(now=t)
+    got = [e for c in calls for e in c["body"]["events"]]
+    assert [e["seq"] for e in got] == list(range(1, 60))
+    assert {(e["who"], e["name"], e["mnt"]) for e in got} == {("container", "fyex-devbox", 200)}
+    assert all(c["body"]["gaps"] == [] for c in calls)
+
+
+def test_events_released_without_a_later_snapshot_are_said(ran, project):
+    calls, _ = ran
+    _hook(project)
+    monitorlog._append([snap(0), ev(1, recv=100), ev(2, inode=999, recv=100)])
+    mh.round_once(now=100 + mh.SETTLE_SECONDS + 1)  # the relay went quiet: released on age
+    assert _delivered(calls) == [1, 2]
+    (gap,) = calls[0]["body"]["gaps"]
+    assert (gap["why"], gap["after"], gap["before"]) == ("unsettled", [BOOT, 0], [BOOT, 3])
+
+
+def test_transport_and_relay_gaps_reach_the_hook_even_when_it_wants_nothing_there(ran, project):
+    calls, _ = ran
+    (project / "monitor-hooks.toml").write_text(
+        '[[hook]]\nname = "s"\ncommand = ["/bin/s"]\nwho = ["container"]\n'
+    )
+    relay = {
+        "k": "gap",
+        "boot": BOOT,
+        "seq": 3,
+        "t": 1.0,
+        "why": "tetragon's export rotated unseen",
+    }
+    lost = {"k": "gap", "boot": BOOT, "from": 5, "to": 6}
+    monitorlog._append([snap(0), ev(1, inode=1), ev(2, inode=1), relay, ev(4, inode=1), lost,
+                        ev(7, inode=1), snap(8)])  # fmt: skip
+    mh.round_once(now=50)
+    assert len(calls) == 1 and calls[0]["body"]["events"] == []  # the vm's: not this hook's
+    assert calls[0]["body"]["first"] is None
+    gaps = calls[0]["body"]["gaps"]
+    assert [(g["why"], g["after"], g["before"]) for g in gaps] == [
+        ("relay", [BOOT, 2], [BOOT, 4]),
+        ("transport", [BOOT, 4], [BOOT, 7]),
+    ]
+    mh.round_once(now=60)
+    assert len(calls) == 1  # said once
+
+
+def test_a_skipped_batch_is_owed_to_the_next_one_as_a_gap(ran):
+    calls, result = ran
+    hook = mh.Hook(name="s", command=("/bin/s",))
+    st = mh.HookState()
+    result["rc"] = 1
+    for t in range(mh.MAX_ATTEMPTS):
+        mh.deliver(hook, st, _events(2), now=st.next_try + t)
+    assert st.dropped == 2 and [g["why"] for g in st.gaps] == ["skipped"]
+    result["rc"] = 0
+    mh.deliver(hook, st, _events(3), now=st.next_try + 1)
+    assert [g["why"] for g in calls[-1]["body"]["gaps"]] == ["skipped"] and st.gaps == []
 
 
 def test_round_once_logs_config_errors_and_carries_on(project, monkeypatch):

@@ -11,13 +11,16 @@ Two halves, deliberately apart:
   host never trusts the transport: whatever sits between the root relay and here (the VM user's
   ssh session included) can drop or delay lines, and the sequence shows it; it can't forge them.
   New container ids are described by asking the engine once (name, compose project) and that is
-  stored too — as a CLAIM: names and labels are whatever the container's creator set.
+  stored too — as a CLAIM: names and labels are whatever the container's creator set. The store
+  itself — segments, compression, retention, the catalogue — is :mod:`foldyard.monitorstore`.
 
 * **The join** (:func:`attribute`, pure): which container did each event. The relay ships each
   event's mount-namespace inode and, separately, kernel snapshots of inode → container; the join
   happens here, at read time, over the stored evidence — so it can be improved and re-run without
   touching the VM. See :func:`attribute` for the rules, including why a namespace number on its
-  own is never trusted across time.
+  own is never trusted across time. Any stretch of the store is joined with the catalogue's
+  snapshots around it (:func:`join`), never just the ones that happen to fall inside the bytes
+  read: two snapshots can be a minute and tens of megabytes apart under load.
 """
 
 from __future__ import annotations
@@ -25,28 +28,29 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import os
+import re
 import shlex
 import subprocess
+import sys
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from . import config
+from . import config, monitorstore
 from .sandbox import SshBackend, _ssh_argv
 
 SPOOL = "/var/lib/fy-monitor/spool"
 FETCH_BUDGET = 8_000_000  # bytes per pull; a full one is followed by another at once
-STORE_BYTES = 32 << 20
-STORE_BACKUPS = 4
 PULL_EVERY = 5.0
 
 
 def store_path() -> Path:
-    return config.state_dir() / "logs" / "monitor.jsonl"
+    """The live segment of the store (see :mod:`foldyard.monitorstore`)."""
+    return monitorstore.live_path()
 
 
 def _cursor_path() -> Path:
@@ -173,16 +177,7 @@ def ingest(cur: Cursor, key: bytes, chunks: list[tuple[str, int, bytes]], now: f
 
 
 def _append(records: list[dict]) -> None:
-    path = store_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.stat().st_size > STORE_BYTES:
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        path.replace(path.with_name(f"{path.stem}.{stamp}{path.suffix}"))
-        for old in config.rotated_logs(path)[:-STORE_BACKUPS]:
-            old.unlink(missing_ok=True)
-    with path.open("a") as f:
-        for rec in records:
-            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    monitorstore.append(records)
 
 
 def _engine_describe(ids: list[str]) -> dict[str, dict | None] | None:
@@ -349,6 +344,9 @@ class Event:
     parent_args: str = ""
     exec_id: str = ""
     parent_exec_id: str = ""  # Tetragon's, else the parent object's own exec_id
+    # The event's mount-namespace number, as the kernel reported it: what the join matched
+    # against the snapshots — so a consumer can group or re-join events itself (additive).
+    mnt: int | None = None
 
 
 def _kind(body: dict, kind: str) -> tuple[str, str]:
@@ -404,8 +402,11 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
       be handed to the next one; a mapping is therefore only ever trusted from the snapshot
       nearest the event, never carried forward past a snapshot that no longer had it.
 
-    The VM's own namespace is ``vm``; anything else unmatched is ``unattributed``. Duplicate
-    (boot, seq) records — a re-read after a crash — count once.
+    The VM's own namespace (as those same two snapshots report it) is ``vm``; anything else
+    unmatched is ``unattributed``. Duplicate (boot, seq) records — a re-read after a crash —
+    count once. Only the two snapshots around an event decide it, so joining a stretch of the
+    store with the snapshots just outside it gives what joining the whole store would
+    (:func:`join`).
     """
     by_boot: dict[str, list[dict]] = {}
     meta: dict[str, dict | None] = {}
@@ -426,7 +427,6 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
     for boot, recs in by_boot.items():
         recs.sort(key=lambda r: int(r["seq"]))
         snaps = [r for r in recs if r["k"] == "scopes"]
-        vm = {str(s.get("vm")) for s in snaps}
         si = 0  # index of the first snapshot AFTER the current record
         for r in recs:
             if r["k"] == "scopes":
@@ -438,6 +438,8 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
             proc = body.get("process") or {}
             parent = body.get("parent") or {}
             inode = str(((proc.get("ns") or {}).get("mnt") or {}).get("inum") or "")
+            near = [snaps[i] for i in (si - 1, si) if 0 <= i < len(snaps)]
+            vm = {str(s.get("vm")) for s in near}
             before = snaps[si - 1]["map"].get(inode) if si > 0 else None
             after = snaps[si]["map"].get(inode) if si < len(snaps) else None
             ids = before or after
@@ -473,105 +475,135 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
                     parent_args=parent.get("arguments") or "",
                     exec_id=proc.get("exec_id") or "",
                     parent_exec_id=proc.get("parent_exec_id") or parent.get("exec_id") or "",
+                    mnt=int(inode) if inode.isdigit() else None,
                 )
             )
     return out
 
 
-READ_BYTES = 8 << 20  # how much of the store's tail `recent` joins over
+READ_BYTES = 8 << 20  # how much of the store's tail `recent` reads
+CHUNK = 20_000  # records joined at a time when reading a range
 
 
-def _tail(max_bytes: int = READ_BYTES) -> list[dict]:
-    """The stored records in the last ``max_bytes`` of the store (reaching into the newest backup
-    when the live file is shorter), oldest first. Wider than ``config.tail_jsonl``'s window on
-    purpose: the join needs the snapshots around the events it shows, and the relay snapshots
-    once a minute — so it reads megabytes, not the last few hundred lines."""
-    paths = [*config.rotated_logs(store_path())[-1:], store_path()]
-    chunks: list[bytes] = []
-    budget = max_bytes
-    for path in reversed(paths):
-        try:
-            with path.open("rb") as f:
-                f.seek(0, os.SEEK_END)
-                start = max(0, f.tell() - budget)
-                f.seek(start)
-                data = f.read()
-        except OSError:
-            continue
-        if start > 0:
-            data = data[data.find(b"\n") + 1 :]  # drop the partial first line
-        chunks.insert(0, data)
-        budget -= len(data)
-        if budget <= 0:
-            break
-    out = []
-    for line in b"".join(chunks).splitlines():
-        try:
-            out.append(json.loads(line))
-        except ValueError:
-            continue
-    return out
+def join(records: list[dict], cat: monitorstore.Catalogue | None, prefix: str) -> list[Event]:
+    """:func:`attribute` over ``records`` — one contiguous stretch of the store — giving what
+    joining the WHOLE store would: with the catalogue's snapshot before and after each boot's
+    events in it, and every container's latest engine claim (put last, so it is the last word,
+    as in the store). Without a catalogue, over ``records`` alone."""
+    if cat is None:
+        return attribute(records, prefix)
+    span: dict[str, tuple[int, int]] = {}
+    for r in records:
+        if r.get("k") == "ev" and "boot" in r:
+            seq = int(r["seq"])
+            lo, hi = span.get(r["boot"], (seq, seq))
+            span[r["boot"]] = (min(lo, seq), max(hi, seq))
+    near = []
+    for boot, (lo, hi) in span.items():
+        near += [s for s in (cat.before(boot, lo), cat.after(boot, hi)) if s]
+    # the snapshots after the records: attribute() orders boots by first appearance, and the
+    # events must come out in store order (a hook's cursor moves by them)
+    return attribute([*records, *near, {"k": "engine", "containers": cat.claims()}], prefix)
 
 
-def span(at: list[int] | None, lead: int, size: int) -> tuple[list[tuple[dict, list[int]]], bool]:
-    """The stored records from ``lead`` bytes before the position ``at`` (``[inode, offset]``) to
-    ``size`` bytes after it, oldest first, each with the ``[inode, offset]`` its line ends at — so a
-    reader that keeps one resumes where it stopped, however far the store has grown since.
-    ``at=None`` is the store's end. Rotation renames, so a backup keeps its inode; when ``at``'s
-    file has left the store (or never held that offset — ``[-1, 0]`` asks for that) the read
-    starts at the store's oldest byte and ``found`` is ``False``. A position is only an inode and
-    an offset — a caller checks the record ending there is the one it expects (an inode is reused
-    once its file is deleted)."""
-    files: list[tuple[Path, int, int]] = []
-    for path in [*config.rotated_logs(store_path()), store_path()]:
-        try:
-            st = path.stat()
-        except OSError:
-            continue
-        files.append((path, st.st_ino, st.st_size))
-    bases, total = [], 0
-    for _path, _ino, sz in files:
-        bases.append(total)
-        total += sz
-    here, found = total, True
-    if at is not None:
-        here, found = 0, False
-        for (_path, ino, sz), base in zip(files, bases, strict=True):
-            if ino == at[0] and at[1] <= sz:
-                here, found = base + at[1], True
-                break
-    start, end = max(0, here - lead), min(total, here + size)
-    out: list[tuple[dict, list[int]]] = []
-    for (path, ino, sz), base in zip(files, bases, strict=True):
-        lo, hi = max(start, base) - base, min(end, base + sz) - base
-        if lo >= hi:
-            continue
-        try:
-            with path.open("rb") as f:
-                f.seek(max(0, lo - 1))
-                data = f.read(hi - lo + (1 if lo else 0))
-        except OSError:
-            continue
-        if lo:  # the byte before `lo` says whether a line starts there
-            cut = data.find(b"\n") + 1
-            if not cut:
-                continue  # inside one line all the way: nothing complete here
-            lo, data = lo - 1 + cut, data[cut:]
-        data = data[: data.rfind(b"\n") + 1]  # a line still being written is the next read's
-        off = lo
-        for line in data.splitlines(keepends=True):
-            off += len(line)
-            try:
-                out.append((json.loads(line), [ino, off]))
-            except ValueError:
-                continue
-    return out, found
+def catalogue(segs: list[monitorstore.Segment] | None = None) -> monitorstore.Catalogue | None:
+    """The store's catalogue, brought up to date with ``segs`` — ``None`` when it can't be opened
+    (the join then sees only what it reads, and says less)."""
+    segs = monitorstore.segments() if segs is None else segs
+    cat = monitorstore.Catalogue.open_or_none() if segs else None  # no store, nothing to make
+    if cat is None:
+        return None
+    try:
+        cat.catch_up(segs)
+    except Exception:
+        cat.close()
+        return None
+    return cat
 
 
 def recent(limit: int = 50, prefix: str | None = None) -> list[Event]:
-    """The last ``limit`` attributed events, joined over the tail of the store."""
-    events = attribute(_tail(), prefix if prefix is not None else config.project_prefix())
+    """The last ``limit`` attributed events, from the tail of the store."""
+    segs = monitorstore.segments()
+    read, _ = monitorstore.read(monitorstore.tail(READ_BYTES, segs), READ_BYTES, segs)
+    cat = catalogue(segs)
+    try:
+        prefix = prefix if prefix is not None else config.project_prefix()
+        events = join([r for r, _ in read], cat, prefix)
+    finally:
+        if cat is not None:
+            cat.close()
     return events[-limit:]
+
+
+def when(text: str, now: float | None = None) -> str:
+    """A ``--since``/``--until`` value as an event-time bound: an ISO time (UTC unless it says
+    otherwise, like the times ``fy monitor`` prints) or a span back from now — ``90s``, ``15m``,
+    ``2h``, ``1d``. :class:`ValueError` for anything else."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhd])\s*", text)
+    if m:
+        back = timedelta(seconds=float(m[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m[2]])
+        t = datetime.fromtimestamp(time.time() if now is None else now, UTC) - back
+    else:
+        t = datetime.fromisoformat(text.strip())
+        t = (t if t.tzinfo else t.replace(tzinfo=UTC)).astimezone(UTC)
+    # nine fractional digits, as Tetragon writes them, so the bound compares as text
+    return t.strftime("%Y-%m-%dT%H:%M:%S.%f") + "000Z"
+
+
+def _iso(t: float) -> str:
+    return datetime.fromtimestamp(t, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _gap_note(r: dict) -> str:
+    seen = _iso(float(r.get("recv", 0.0)))
+    if "from" in r:
+        n = int(r["to"]) - int(r["from"]) + 1
+        return (
+            f"{n} events lost between the VM and here (boot {str(r.get('boot'))[:8]}, seen {seen})"
+        )
+    return f"the relay restarted and missed Tetragon's events up to {seen}: {r.get('why', '')}"
+
+
+def between(since: str, until: str, prefix: str, notes: list[str]) -> Iterator[Event]:
+    """Every stored event with ``since <= time < until`` (bounds from :func:`when`; "" = open),
+    oldest first, joined as over the whole store — read segment by segment (each one's time
+    bounds come from the catalogue, so a range skips what it can't touch), never all at once.
+    ``notes`` collects what is missing in the range: transport and relay gaps, and a range
+    reaching back past the store's oldest record."""
+    segs = monitorstore.segments()
+    cat = catalogue(segs)
+    try:
+        bounds = cat.bounds() if cat is not None else {}
+        oldest = bounds.get(segs[0].id, ("", ""))[0] if segs else ""
+        if since and oldest and oldest > since:
+            notes.append(
+                f"the store reaches back to {oldest[:19].replace('T', ' ')} UTC — older events "
+                "were removed to keep it within its budget (`fy docs monitor-pipeline`)"
+            )
+
+        def touches(seg: monitorstore.Segment) -> bool:
+            t0, t1 = bounds.get(seg.id, ("", ""))
+            return seg.live or not t0 or ((not since or t1 >= since) and (not until or t0 < until))
+
+        def inside(e: Event) -> bool:
+            return bool(e.time) and (not since or e.time >= since) and (not until or e.time < until)
+
+        for seg in (s for s in segs if touches(s)):
+            buf: list[dict] = []
+            for rec, _at in monitorstore.scan([seg.id, 0], [seg]):
+                if rec.get("k") == "gap":
+                    t = datetime.fromtimestamp(float(rec.get("recv", 0.0)), UTC)
+                    at = t.strftime("%Y-%m-%dT%H:%M:%S.%f") + "000Z"
+                    if (not since or at >= since) and (not until or at < until):
+                        notes.append(_gap_note(rec))
+                buf.append(rec)
+                if len(buf) >= CHUNK:
+                    yield from filter(inside, join(buf, cat, prefix))
+                    buf = []
+            yield from filter(inside, join(buf, cat, prefix))
+    finally:
+        if cat is not None:
+            cat.close()
 
 
 # ── `fy monitor` ──────────────────────────────────────────────────────────────────────
@@ -584,32 +616,84 @@ def _who(e: Event) -> str:
     return e.who
 
 
-def show(limit: int = 40, worktree: str = "", as_json: bool = False) -> int:
-    """`fy monitor`: the last ``limit`` events the guest monitor recorded, attributed. Host only:
-    the store lives on the host, outside the box's reach."""
+def store_summary() -> str:
+    """How much the store holds on your computer, against its budget, and how far back."""
+    segs = monitorstore.segments()
+    used = sum(monitorstore.disk_size(s) for s in segs)
+    cap, note = monitorstore.budget_setting()
+    cat = monitorstore.Catalogue.open_or_none() if segs else None
+    oldest = ""
+    if cat is not None:
+        try:
+            oldest = cat.bounds().get(segs[0].id, ("", ""))[0]
+        except Exception:
+            oldest = ""
+        finally:
+            cat.close()
+    since = f", events from {oldest[:19].replace('T', ' ')} UTC" if oldest else ""
+    warn = f" ⚠ {note}" if note else ""
+    return f"store: {used / 2**20:.0f} of {cap >> 20} MB{since}{warn}"
+
+
+def show(
+    limit: int | None = 40,
+    worktree: str = "",
+    as_json: bool = False,
+    since: str = "",
+    until: str = "",
+) -> int:
+    """`fy monitor`: the last ``limit`` events the guest monitor recorded, attributed — or, with
+    ``since``/``until``, every event in that range (the last ``limit`` of them when given), read
+    from the whole store. Host only: the store lives on the host, outside the box's reach."""
     if config.in_box():
         print("✗ run on your computer — the monitor's events are kept there, out of the box")
         return 1
-    events = recent(limit=100_000)
+    ranged = bool(since or until)
+    try:
+        lo, hi = (when(since) if since else ""), (when(until) if until else "")
+    except ValueError:
+        print(
+            "✗ --since/--until take an ISO time (UTC unless it gives an offset, e.g. "
+            "2026-10-21T19:55) or a span back from now: 90s, 15m, 2h, 1d"
+        )
+        return 1
+    notes: list[str] = []
+    events: Iterable[Event] = (
+        between(lo, hi, config.project_prefix(), notes) if ranged else recent(limit=100_000)
+    )
     if worktree:
-        events = [e for e in events if e.worktree == worktree]
-    events = events[-limit:]
-    if as_json:
-        for e in events:
-            print(json.dumps(asdict(e)))
-        return 0
-    cur = Cursor.load()
-    if not events:
-        print("no monitor events yet" + (f" for worktree '{worktree}'" if worktree else ""))
+        events = (e for e in events if e.worktree == worktree)
+    if limit is None and not ranged:
+        limit = 40
+    if limit is not None:
+        events = deque(events, maxlen=limit)
+    shown = 0
     for e in events:
-        what = e.detail or e.args
-        print(f"{e.time[11:19]}  {_who(e):<28.28}  {e.kind:<7}  {e.binary:<28.28}  {what[:80]}")
+        shown += 1
+        if as_json:
+            print(json.dumps(asdict(e)))
+        else:
+            what = e.detail or e.args
+            stamp = e.time[:19].replace("T", " ") if ranged else e.time[11:19]
+            print(f"{stamp}  {_who(e):<28.28}  {e.kind:<7}  {e.binary:<28.28}  {what[:80]}")
+    if as_json:
+        for note in notes:
+            print(f"⚠ {note}", file=sys.stderr)
+        return 0
+    if not shown:
+        where = f" for worktree '{worktree}'" if worktree else ""
+        print(("no monitor events in that range" if ranged else "no monitor events yet") + where)
+    for note in notes:
+        print(f"⚠ {note}")
+    cur = Cursor.load()
     age = f"{time.time() - cur.pulled:.0f}s ago" if cur.pulled else "never"
     print(
         f"— last pull {age}; {cur.stored} stored, {cur.gaps} lost in transit, {cur.forged} "
         "failed their signature. Names and worktrees are what the engine reports (claims); "
-        "`unattributed` is a container too short-lived to be seen — the box's own activity."
+        "`unattributed` is a container too short-lived to be seen — the box's own activity. "
+        "Times are UTC."
     )
+    print(f"— {store_summary()}")
     if cur.error:
         print(f"⚠ the last pull failed: {cur.error}")
     return 0

@@ -774,7 +774,12 @@ def test_monitor_bare_and_its_options_still_show_events(monkeypatch):
     monkeypatch.setattr(monitorlog, "show", lambda *a: calls.append(a) or 0)
     assert runner.invoke(cli.app, ["monitor"]).exit_code == 0
     assert runner.invoke(cli.app, ["monitor", "-n", "5", "-w", "main", "--json"]).exit_code == 0
-    assert calls == [(40, "", False), (5, "main", True)]
+    assert runner.invoke(cli.app, ["monitor", "--since", "2h", "--until", "1h"]).exit_code == 0
+    assert calls == [
+        (None, "", False, "", ""),  # show() picks the default: 40, or the whole range
+        (5, "main", True, "", ""),
+        (None, "", False, "2h", "1h"),
+    ]
 
 
 def test_monitor_hook_add_a_file_sink_lists_it_and_removes_it(monitor_home, tmp_path):
