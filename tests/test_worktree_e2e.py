@@ -31,6 +31,7 @@ from e2e_host import (
     host_tier,
     state_dir,
 )
+from foldyard.transcripts import claude_project_dir
 
 pytestmark = host_tier
 
@@ -122,10 +123,15 @@ def test_the_worktree_stack_comes_up_beside_mains(rig):
 def test_remove_tears_down_archives_and_drops_the_checkout_but_not_main_or_the_branch(rig):
     # A transcript the box would have bound out (transcripts.bound_out_dir, `here` = "."), and a
     # posture/state dir for the worktree — both must be gone from the tree, the transcript
-    # ARCHIVED first.
-    session = rig.feat / ".devbox-claude" / "projects" / "-work-feat" / "session.jsonl"
+    # ARCHIVED first. Under the folder Claude Code names for the worktree's own path, the only one
+    # archived; a folder named for another path is skipped, never copied.
+    projects = rig.feat / ".devbox-claude" / "projects"
+    session = projects / claude_project_dir(str(rig.feat)) / "session.jsonl"
     session.parent.mkdir(parents=True)
     session.write_text('{"type":"user","text":"hello from feat"}\n')
+    planted = projects / claude_project_dir(str(rig.main)) / "planted.jsonl"
+    planted.parent.mkdir(parents=True)
+    planted.write_text('{"type":"user","text":"not feat\'s"}\n')
     marker = state_dir() / "worktrees" / NAME / "marker"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("x")
@@ -150,6 +156,7 @@ def test_remove_tears_down_archives_and_drops_the_checkout_but_not_main_or_the_b
     assert f"archiving worktree '{NAME}' transcripts" in removed.out, removed.out
     archived = list(rig.archive.rglob("session.jsonl"))
     assert archived and "hello from feat" in archived[0].read_text(), removed.out
+    assert not list(rig.archive.rglob("planted.jsonl")), removed.out
     # 4. the checkout is gone and git no longer tracks it; the branch is KEPT.
     assert not rig.feat.exists()
     assert str(rig.feat) not in _worktree_paths(rig.main)
