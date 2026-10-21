@@ -2511,7 +2511,22 @@ def test_up_shows_the_timezone_it_had_and_the_one_it_would_get(fake, monkeypatch
     _clock(monkeypatch, zone="Asia/Tokyo")
     capsys.readouterr()
     assert box.main("up") == 0
-    assert "TZ: Europe/London → Asia/Tokyo" in _drift_line(capsys.readouterr().out)
+    line = _drift_line(capsys.readouterr().out)
+    assert "TZ: Europe/London → Asia/Tokyo" in line
+    assert "your computer's clock settings" in line  # not "the config": nothing was adopted
+    assert "fy box down && fy box up" in line
+
+
+def test_up_names_the_config_when_more_than_the_clock_moved(fake, monkeypatch, capsys):
+    _clock(monkeypatch, zone="Europe/London")
+    _create_then_run(fake)
+    _clock(monkeypatch, zone="Asia/Tokyo")
+    monkeypatch.setattr(config, "box_env", lambda: {"NEW_ONE": "1"})
+    capsys.readouterr()
+    assert box.main("up") == 0
+    line = _drift_line(capsys.readouterr().out)  # still one line, every name in it
+    assert "TZ: Europe/London → Asia/Tokyo" in line and "NEW_ONE: missing" in line
+    assert "no longer matches the config" in line
 
 
 def test_up_names_a_changed_box_env_entry_without_printing_values(fake, monkeypatch, capsys):
@@ -2676,12 +2691,21 @@ def test_compare_env_reports_missing_changed_and_stale_names():
     expected = {"A": "1", "B": "2", "TZ": "Asia/Tokyo", "P": None}
     baked = {"B": "3", "TZ": "Europe/London", "P": "anything", "OLD": "x", "IMG": "i"}
     got = box._compare_env(expected, baked, image_env={"IMG": "i"})
-    assert got == [
+    assert [str(d) for d in got] == [
         "A: missing",
         "B: changed",
         "TZ: Europe/London → Asia/Tokyo",
         "OLD: no longer set",
     ]
+
+
+def test_compare_env_marks_only_your_computers_clock_advisory():
+    # TZ/LC_TIME move with your computer (you travelled): worth saying, never a broken box — so
+    # they are the only names that don't count as drift for `fy state`.
+    expected = {"TZ": "Asia/Tokyo", "LC_TIME": "en_US.UTF-8", "A": "1"}
+    baked = {"TZ": "Europe/London", "LC_TIME": "en_GB.UTF-8"}
+    got = box._compare_env(expected, baked, image_env={})
+    assert {d.name: d.advisory for d in got} == {"TZ": True, "LC_TIME": True, "A": False}
 
 
 def test_compare_env_presence_only_and_ignored_names():
@@ -2694,7 +2718,8 @@ def test_compare_env_reports_an_image_name_the_box_overrode_and_no_longer_sets()
     # The image's own value is the image's; a different one in the box was set at create.
     baked = {"UV_LINK_MODE": "copy", "LANG": "C.UTF-8"}
     image = {"UV_LINK_MODE": "hardlink", "LANG": "C.UTF-8"}
-    assert box._compare_env({}, baked, image_env=image) == ["UV_LINK_MODE: no longer set"]
+    got = box._compare_env({}, baked, image_env=image)
+    assert [str(d) for d in got] == ["UV_LINK_MODE: no longer set"]
 
 
 def test_compare_env_without_the_image_env_names_nothing_stale():

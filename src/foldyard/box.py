@@ -41,6 +41,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 from typing import IO
@@ -619,9 +620,30 @@ _HOST_FACTS = frozenset({"TZ", "LC_TIME", "NODE_EXTRA_CA_CERTS"})
 # sensitive. Everything else is named only — a credential slot holds a dummy by design, but a
 # `[box].env` value can be long, and the name is what you need to find it.
 _DRIFT_SHOW_VALUES = frozenset({"TZ", "LC_TIME"})
+# Your computer's clock settings (hostclock): they move when you travel, not when config is
+# adopted, and a box on the old zone still works — so a difference is a warning, shown with its
+# values, never drift that fails `fy state`. Every other name does.
+_DRIFT_ADVISORY = frozenset({"TZ", "LC_TIME"})
 # What the engine adds to every container's Config.Env (podman: container/HOME/HOSTNAME, TERM
 # under -t) — neither the image's nor foldyard's, so never "no longer set".
 _ENGINE_ADDED = frozenset({"PATH", "HOME", "HOSTNAME", "TERM", "container"})
+
+
+@dataclass(frozen=True)
+class EnvDrift:
+    """One name whose value in a running box differs from what a create would give it now.
+    ``what``: ``missing``, ``changed``, ``no longer set``, or ``<old> → <new>`` (the clock only)."""
+
+    name: str
+    what: str
+
+    @property
+    def advisory(self) -> bool:
+        """Only your computer's clock settings (:data:`_DRIFT_ADVISORY`): a warning, not drift."""
+        return self.name in _DRIFT_ADVISORY
+
+    def __str__(self) -> str:
+        return f"{self.name}: {self.what}"
 
 
 def _compare_env(
@@ -630,7 +652,7 @@ def _compare_env(
     *,
     image_env: Mapping[str, str] | None,
     ignore: Collection[str] = (),
-) -> list[str]:
+) -> list[EnvDrift]:
     """What differs, name by name, between the environment a box would be created with now
     (``expected``; None = present, value unknown) and the one it was (``baked``, its Config.Env).
 
@@ -641,19 +663,19 @@ def _compare_env(
     removed ``[box].env`` pin still steers its tool. Without ``image_env`` that last can't be told
     from the image's own, so it isn't reported."""
     skip = _DRIFT_IGNORED | frozenset(ignore)
-    out: list[str] = []
+    out: list[EnvDrift] = []
     for name, want in expected.items():
         if name in skip:
             continue
         have = baked.get(name)
         if have is None:
-            out.append(f"{name}: missing")
+            out.append(EnvDrift(name, "missing"))
         elif want is None or name in _DRIFT_PRESENCE_ONLY or have == want:
             continue
         elif name in _DRIFT_SHOW_VALUES:
-            out.append(f"{name}: {have} → {want}")
+            out.append(EnvDrift(name, f"{have} → {want}"))
         else:
-            out.append(f"{name}: changed")
+            out.append(EnvDrift(name, "changed"))
     if image_env is None:
         return out
     for name, have in baked.items():
@@ -661,7 +683,7 @@ def _compare_env(
             continue
         if image_env.get(name) == have:
             continue
-        out.append(f"{name}: no longer set")
+        out.append(EnvDrift(name, "no longer set"))
     return out
 
 
@@ -695,7 +717,7 @@ def env_drift(
     quiet_plugins: Collection[str] = (),
     ask_image: bool = False,
     timeout: float | None = None,
-) -> list[str]:
+) -> list[EnvDrift]:
     """How the running ``box``'s environment differs from the one `fy box up` would create it
     with now (:func:`_compare_env`'s items), or ``[]`` when it matches or can't be read.
 
@@ -818,8 +840,14 @@ def _warn_env_drift(engine: str, box: str, ctx, quiet_plugins: Collection[str] =
     except (Exception, SystemExit):  # a nag must never crash (or hang) `fy box up`
         return
     if drift:
+        # Only the clock moved: it's your computer that changed, not the config, and it's a
+        # warning (`fy state` passes) — but still one line, with the same fix.
+        source = (
+            "your computer's clock settings" if all(d.advisory for d in drift) else "the config"
+        )
         print(
-            f"⚠ dev box {box}'s environment no longer matches the config ({', '.join(drift)}). "
+            f"⚠ dev box {box}'s environment no longer matches {source} "
+            f"({', '.join(map(str, drift))}). "
             "A box's environment is fixed when it's created: `fy box down && fy box up`."
         )
 
