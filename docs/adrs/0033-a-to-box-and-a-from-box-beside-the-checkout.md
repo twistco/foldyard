@@ -1,6 +1,11 @@
-# ADR-0033 — An inbox and an outbox beside the checkout: two foldyard-owned mounts, one per direction
+# ADR-0033 — A to-box and a from-box beside the checkout: two foldyard-owned mounts, one per direction
 
-- **Status:** Proposed (2026-10-21). Scope only — nothing is built. Open questions at the end.
+- **Status:** Accepted (2026-10-21), with the operator's decisions in
+  [§ Decided with the operator](#decided-with-the-operator-2026-10-21), which override this
+  proposal where they differ: the names are `to-box/` and `from-box/`; a running VM with a stale
+  mount set is refused; transcripts get one release of dual reading; the to-box's first tenant
+  is `fy monitor hook add NAME --to-box`; and on the podman backend nothing about the VM's mounts
+  changes. Built for 0.6.1.
 - **Sources:** the current mount set (`machine.py`, `machine_backend.py`, `box.py`, `verify.py`
   as cited below); the transcript bind-out (`transcripts.py`, `plugins/claude.py`,
   `plugins/codex.py`); the guest monitor's hooks (`monitorhooks.py`) and the stopgap file sink
@@ -38,36 +43,36 @@ the box is the VM user (rootless podman), the VM user owns every file on the sha
 host uid), and an owner can `chmod`. Lima's `writable` flag is per mount. So a read-only area
 needs a mount of its own.
 
-## Decision (proposed)
+## Decision
 
 **Two foldyard-owned host directories, each its own VM mount, one per direction.**
 
-| | outbox | inbox |
+| | from-box | to-box |
 | --- | --- | --- |
-| host path | `<state dir>/outbox/` (`~/.foldyard/<project>/outbox/`) | `<state dir>/inbox/` |
+| host path | `<state dir>/from-box/` (`~/.foldyard/<project>/from-box/`) | `<state dir>/to-box/` |
 | VM mount | writable, host path == guest path (as today) | **read-only** (`writable: false`), host path == guest path — Lima `vz`/virtiofs and `qemu`/9p only (below) |
-| box mount | its own slot only, rw, at the agent's native path | whole inbox `:ro` at a fixed path (`/run/foldyard/inbox`) |
+| box mount | its own slot only, rw, at the agent's native path | whole to-box `:ro` at a fixed path (`/run/foldyard/to-box`) |
 | written by | the box | the host only |
 | read by | the host — as **untrusted** input | the box (and anything in the VM) |
-| first tenant | Claude transcripts, Codex sessions | the monitor's event file sink |
+| first tenant | Claude transcripts, Codex sessions | the monitor's event file sink (`fy monitor hook add NAME --to-box`) |
 | what it guards against | grep noise; transcripts lost to `git clean` / `worktree remove` | a box that tampers with evidence or plants symlinks to redirect host writes — refused by the hypervisor/host share server, not by politeness |
 
 - **Layout mirrors the posture dirs** (`config.posture_dir`, `config.py:1905`):
-  `outbox/main/{claude,codex}/…` and `outbox/worktrees/<wt>/{claude,codex}/…`, so a worktree
-  literally named `main` can't collide. The inbox is project-level with per-worktree slots where
-  a tenant needs one: `inbox/monitor/…`, `inbox/main/…`, `inbox/worktrees/<wt>/…`.
-- **The host creates outbox slots with the no-follow walk, never `Path.mkdir(parents=True)`.**
-  Before a worktree's first `fy box up` the host makes `outbox/worktrees/<wt>/{claude,codex}/…`,
-  and any box can plant `outbox/worktrees/<wt>` as a symlink to a host directory ahead of time
+  `from-box/main/{claude,codex}/…` and `from-box/worktrees/<wt>/{claude,codex}/…`, so a worktree
+  literally named `main` can't collide. The to-box is project-level with per-worktree slots where
+  a tenant needs one: `to-box/monitor/…`, `to-box/main/…`, `to-box/worktrees/<wt>/…`.
+- **The host creates from-box slots with the no-follow walk, never `Path.mkdir(parents=True)`.**
+  Before a worktree's first `fy box up` the host makes `from-box/worktrees/<wt>/{claude,codex}/…`,
+  and any box can plant `from-box/worktrees/<wt>` as a symlink to a host directory ahead of time
   (next bullet). A following `mkdir` would create directories inside the target. The bind itself
   resolves in the guest, where the link points at nothing mounted, so nothing leaks back, but it is
-  still a host write redirected by a box-planted symlink. So slot creation walks from the outbox
+  still a host write redirected by a box-planted symlink. So slot creation walks from the from-box
   root with `O_NOFOLLOW | O_DIRECTORY`, creating each missing component under the parent's fd: a
   directory-only twin of `mountwrite.write`, refusing (`ELOOP`/`ENOTDIR`) on a link.
 - **Per-worktree slots are organisation, not isolation.** Any box holds the engine socket and
-  can start a sibling container mounting the whole outbox or inbox VM path. That is within
+  can start a sibling container mounting the whole from-box or to-box VM path. That is within
   [0004](./0004-one-machine-worktrees-as-compose-projects.md)'s equal-trust tier (a box can
-  already edit every worktree), but it means **the inbox must hold only what every box of the
+  already edit every worktree), but it means **the to-box must hold only what every box of the
   project may see**, and nothing secret ever: no HMAC key, no `host.env` value, no token.
 - **The box's `:ro` is defence in depth, not the boundary.** The boundary is the VM mount being
   read-only on the host side (next section). The box isn't `--privileged`, so it can't remount
@@ -79,7 +84,7 @@ needs a mount of its own.
 
 ### Read-only enforcement by backend
 
-The question that decides whether the inbox is worth a mount: can **root in the guest** (a
+The question that decides whether the to-box is worth a mount: can **root in the guest** (a
 container escape that reaches VM root — the VM user itself has no root after boot, `guest-boot.sh`
 narrows its sudo to `shutdown`) write through the read-only mount? Only enforcement outside the
 guest kernel counts; a guest `ro` mount option is one `mount -o remount,rw` away for guest root.
@@ -106,12 +111,12 @@ which is the guest-only layer the VM user meets first.
 
 So:
 
-- **The inbox exists only on Lima `vz`+virtiofs and `qemu`+9p.** foldyard doesn't set
+- **The to-box exists only on Lima `vz`+virtiofs and `qemu`+9p.** foldyard doesn't set
   `mountType` today (`_set_expr` writes mounts, sizing and `vmType`), so a Lima default change or
   an operator's `[machine].vmtype = "krunkit"` would silently downgrade it. Pin `.mountType`
   with the vmType (vz → virtiofs, qemu → 9p), and on any other pair, or on the podman backend,
-  mount **no inbox**: tenants fall back to their signed-sink-in-the-checkout form, and `fy
-  doctor` says why. An inbox the guest can write is worse than none, because it reads as
+  mount **no to-box**: tenants fall back to their signed-sink-in-the-checkout form (`--file`),
+  and `fy doctor`'s `to-box` row (and `fy monitor hook add --to-box`) says why. A to-box the guest can write is worse than none, because it reads as
   tamper-proof.
 - **Never nested in a writable mount.** A read-only mount inside a writable one stays writable
   through the parent (Lima's `--mount` help: "do not specify directories that overlap"). With
@@ -124,7 +129,9 @@ So:
 - **Only the operator can widen it:** Lima merges mounts across default, instance and
   `~/.lima/_config/override.yaml`, and the most permissive `writable` wins
   ([`defaults.go#L139-L141`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/limayaml/defaults.go#L139-L141)).
-  The verify row below catches it.
+  The verify row below catches it, and so does `ensure`: it reads the instance's EFFECTIVE config
+  (`limactl list`'s merged `config`), so an override that widens the to-box or swaps its share
+  type is refused at `fy up` too.
 
 ### `verify`: two exemptions, one new assertion
 
@@ -133,45 +140,48 @@ So:
   The in-box run can't resolve the host's state dir (`FOLDYARD_STATE_DIR` may move it), so
   `fy box up` bakes the two VM paths into the box env, as it bakes `FY_HOST_HOME` for the audit
   today (`box.py`, `env_args`).
-- **New assertion (the inbox is read-only), from inside the box and from the host-side run:**
-  1. PID 1's mount table shows the inbox mountpoint with `ro` in its options (`verify.py:221`
+- **New assertion (the to-box is read-only), from inside the box and from the host-side run:**
+  1. PID 1's mount table shows the to-box mountpoint with `ro` in its options (`verify.py:221`
      already reads it). Necessary, not sufficient — it's the guest's own flag. A guest that shows
      `rw` there is a WARN while (2) still refuses (the vz test shows the host's enforcement holds
      without the flag), naming it as a sign that something in the guest remounted it; a FAIL only
      comes from (2).
-  2. A `--privileged` probe container that binds the inbox VM path **rw** cannot create a file
+  2. A `--privileged` probe container that binds the to-box VM path **rw** cannot create a file
      there, and `mount -o remount,rw` on it fails. The VM-level mount is in the VM's initial user
      namespace, so in the container's namespace its read-only flag should be locked (the row is
      what checks that expectation); a successful write is a FAIL that names the file it left. Any
      errno counts as refused (`EROFS`, `EPERM`, `EACCES`): which one depends on whether the
      guest's flag is still set ([§ The vz test](#the-vz-test-2026-10-21)).
-  3. In the box: `/run/foldyard/inbox` refuses a write (the `:ro` bind).
+  3. In the box: `/run/foldyard/to-box` refuses a write (the `:ro` bind).
   Under gVisor the probe runs in the sandbox and (2)'s remount says nothing about the VM: report
   it as N/A like the PID-1 audit (`verify.py:234-247`); (1) is read host-side, (3) still holds.
 - **What verify can't prove:** host-side enforcement against guest ROOT. The box never has it,
   so that proof is a host-tier e2e (next item), not a verify row. `fy docs security` says so in
   "What verify doesn't prove".
 - **The negative stays a negative.** `test_verify_e2e`'s home-mounting VM mounts the home at
-  `/mnt/c`, not at an exempted path, so it still FAILs. Add a second negative: the same VM with
-  the inbox flipped `writable: true` (`lima_edit` on the stopped instance, restored in the
-  fixture) must FAIL the new row.
+  `/mnt/c`, not at an exempted path, so it still FAILs. The second negative — the same VM with
+  the to-box flipped `writable: true` (`lima_edit` on the stopped instance, restored in the
+  fixture) FAILs the write row — rides the host-tier proof's red-first control below, which
+  boots that VM anyway (one restart, not two).
 
 ### Host-tier proof (new e2e, Lima on QEMU/9p in CI, vz/virtiofs on a macOS host)
 
 Root in the guest is boot-time only, and the harness must not break that rule by adding a sudo
 path. So the test records a **test-only** `mode: system` provision script under its own marker
 (the [0032](./0032-a-root-collector-in-the-guest.md) precedent: never mentions the other
-markers, always exits 0), which at boot, as root: `mount -o remount,rw` the inbox; tries to
+markers, always exits 0), which at boot, as root: `mount -o remount,rw` the to-box; tries to
 create, append to, truncate, `chmod`, `chown`, rename and delete a host-seeded file; creates a
-symlink and a hardlink; writes each result to `/run/fy-test/inbox-ro`. The host then asserts
+symlink and a hardlink; writes each result to `/run/fy-test/to-box-ro`. The host then asserts
 every attempt was refused **and** that the seeded file's bytes, mode and inode are unchanged on
 the host, then removes the script and restarts. Same harness, `writable: true` flipped, must show
-the writes landing (the red-first control). Lives beside `test_verify_e2e.py` as
-`test_mounts_e2e.py`; skips on a backend without a recorded-script route (the podman backend).
+the writes landing (the red-first control), and `fy verify` against it FAILs. Lives beside
+`test_verify_e2e.py` as `test_mounts_e2e.py`; skips on a pair with no to-box (and the host tier
+is lima-only, so never runs on the podman backend). First run by hand on vz/virtiofs, Lima 2.1.3:
+every write refused, the seeded file unchanged.
 
 ## Migration
 
-One VM restart on Lima, nothing else.
+One VM restart on Lima and one box recreate; on the podman backend, the box recreate alone.
 
 - **Mount set changes apply on a restart, not a recreate (Lima).** There is no mount-set
   staleness check today: `ensure` only warns when the worktrees root is missing
@@ -182,7 +192,12 @@ One VM restart on Lima, nothing else.
   stopped → `limactl edit` the mount set; running with a different set → refuse with
   `fy machine stop && fy up`, as stale provisioning is refused. Named volumes survive. Needs a
   mount reader that sees the `writable` flag (`LimaBackend.mounts`, `machine_backend.py:531`,
-  reads only paths). A restart suffices because `limactl edit` refuses a running instance and
+  reads only paths) — built as `LimaBackend.mount_set`, from `limactl list`'s effective config.
+  As built it compares and replaces only the two new entries and the pinned `mountType`: the
+  checkout and worktrees-root mounts stay as the VM was created (the host tier drives one VM from
+  several example copies, and an operator's second clone of a project shares its VM — refusing
+  those would be new breakage for nothing this ADR needs), and an entry someone else added is
+  kept. A restart suffices because `limactl edit` refuses a running instance and
   otherwise rewrites `lima.yaml`, and vz and qemu both build their shares from it at every start
   ([`cmd/limactl/edit.go#L68-L69`](https://github.com/lima-vm/lima/blob/v2.2.0/cmd/limactl/edit.go#L68-L69),
   [`vm_darwin.go#L660-L720`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/driver/vz/vm_darwin.go#L660-L720),
@@ -191,38 +206,42 @@ One VM restart on Lima, nothing else.
 - **podman backend:** mounts are fixed at `podman machine init`; `podman machine set` has no
   volume flag
   ([`set.go#L48-L90`](https://github.com/containers/podman/blob/v5.8.9/cmd/podman/machine/set.go#L48-L90)).
-  It gets the outbox at its next `fy machine recreate` (which loses named volumes, so a warning
-  until then, plus the legacy layout) and never an inbox (above).
-- **The boot scripts change only for the deferred rewording.** The mounts need no boot-script
-  change, but the rewording of `guest-boot.sh` / `machine-wall.sh` ("wall", "Mac"; CLAUDE.md)
-  rides this restart (settled item 3), so the `# fy-provision` id does change: every existing VM
-  is refused as stale once, and one `fy machine stop && fy up` takes both.
-- **Transcripts:** the box binds `outbox/<slot>/claude/projects` instead of
+  Decided: nothing about its mounts changes — no from-box even after a recreate, and never a
+  to-box (above). Its boxes keep the legacy in-checkout bind-out, so the dual-read path is the
+  only path there; `fy monitor hook add --to-box` says it needs the lima backend and points at
+  `--file`.
+- **The boot scripts don't change here.** The mounts need no boot-script change. The deferred
+  rewording of `guest-boot.sh` / `machine-wall.sh` ("wall", "Mac"; CLAUDE.md) ships on its own
+  (#114) in the same release (settled item 3), so its new `# fy-provision` id and this mount set
+  are both taken by the one `fy machine stop && fy up`.
+- **Transcripts:** the box binds `from-box/<slot>/claude/projects` instead of
   `<checkout>/<here>/.devbox-claude/projects` (likewise Codex). For one release the host also
   reads the old bound-out dirs: `sync_current`, the supervisor sweep, `fy transcripts` and
   `worktree remove` archive both, the new one first. The first `fy box up` on the new layout
-  archives the old dir once and prints that it can be deleted; it never moves it into the outbox.
+  archives the old dir once and prints that it can be deleted; it never moves it into the from-box.
   `DEVBOX_TRANSCRIPTS` / `DEVBOX_CODEX_TRANSCRIPTS` keep working. The `.devbox-claude/` /
   `.devbox-codex/` ignore lines (`init.py:47-49`) stay for that release, then go.
 - **`worktree remove`** archives the slot, then deletes it (the checkout deletion no longer takes
   it). The delete must not follow symlinks the box planted: `shutil.rmtree` only where
   `shutil.rmtree.avoids_symlink_attacks` is true, else refuse.
-- **Monitor file sink:** defaults to `inbox/monitor/`. It keeps its HMAC: the inbox protects the
+- **Monitor file sink:** `fy monitor hook add NAME --to-box` writes `to-box/monitor/NAME.jsonl`
+  (the box reads it at `/run/foldyard/to-box/monitor/NAME.jsonl`) — opt-in, never a default
+  (settled item 1). It keeps its HMAC: the to-box protects the
   file at rest on this host; the signature is what a reader re-verifies once a copy has left it.
-  The no-follow writes stay (cheap, and on a backend with no inbox the sink is back in the
+  The no-follow writes stay (cheap, and on a backend with no to-box the sink is back in the
   checkout, where they matter). A sink path the operator points at a box-writable tree (the checkout, the
-  worktrees root, the outbox) gets a warning.
-- **Later inbox tenants, each its own change:** the posture mirror, the staged proxy CA, the
+  worktrees root, the from-box) gets a warning.
+- **Later to-box tenants, each its own change:** the posture mirror, the staged proxy CA, the
   staged wheel and `server.py`. Each removes a `mountwrite` call site and a file the box can swap.
 
-## Outbox content is box-written: how the host reads it
+## From-box content is box-written: how the host reads it
 
-Treat everything in the outbox like a request body from the box. The reader this needs already
+Treat everything in the from-box like a request body from the box. The reader this needs already
 exists: #109 replaced the transcript sync's `rsync -rtu --no-perms` with a no-follow walk by
-directory fd (`transcripts._open_source`, `_mirror`). The outbox reuses it with the outbox root as
-the anchor, so the outbox adds no new reader:
+directory fd (`transcripts._open_source`, `_mirror`). The from-box reuses it with the from-box root as
+the anchor, so the from-box adds no new reader:
 
-| hazard | before #109 (`rsync -rtu` of the bound-out dir) | #109's walk, which the outbox reader keeps |
+| hazard | before #109 (`rsync -rtu` of the bound-out dir) | #109's walk, which the from-box reader keeps |
 | --- | --- | --- |
 | symlinked file | skipped (no `-l`: "non-regular file") | skipped |
 | symlinked **directory on the path** (`…/claude` → `~/.ssh`) | **followed**: rsync opened `src/` through it and copied the target into `~/.claude/projects` | every component opened `O_NOFOLLOW \| O_DIRECTORY` relative to its parent's fd, from the anchor down; a link is refused, however late it is swapped in |
@@ -238,7 +257,7 @@ Disk exhaustion is unchanged: the box can already fill the host disk through the
 | option | box → host | host → box tamper-proof | cost | verdict |
 | --- | --- | --- | --- | --- |
 | **bind-out in the checkout** (today) | live, durable | no | grep noise; lost to `git clean`; host walks a box-writable tree | the status quo being replaced |
-| **bind-out under the worktrees root** | live | no | a reserved dir name inside a box-writable tree; the same tamper surface | rejected — a hack, and no inbox |
+| **bind-out under the worktrees root** | live | no | a reserved dir name inside a box-writable tree; the same tamper surface | rejected — a hack, and no to-box |
 | **dedicated mounts** (this) | live | **yes, where the backend enforces it** | one Lima restart; two audit exemptions; a new e2e | proposed |
 | **named volume + tar pulled over ssh** | seconds of loss window | n/a (one way) | the host parses a box-produced tar stream; a pull loop per worktree | rejected — loses the tail on a crash, adds a parser |
 | **read the VM's disk image on the host** | only when stopped | n/a | no btrfs tooling on macOS; host parses an attacker-shaped filesystem | rejected |
@@ -250,21 +269,22 @@ Disk exhaustion is unchanged: the box can already fill the host disk through the
   directories, one of them read-only, and their verify rows.
 - The checkout stops carrying box-written content; grep and `git status` see only the code.
 - Evidence the host publishes can no longer be altered by the box on a host-enforcing backend;
-  on a backend with no inbox it is no worse than today, and the HMAC still detects.
-- One more thing the host must read defensively (the outbox) — but it is one place, not
+  on a backend with no to-box it is no worse than today, and the HMAC still detects.
+- One more thing the host must read defensively (the from-box) — but it is one place, not
   "anywhere in the checkout".
-- The podman backend gets the outbox only after a recreate and never an inbox: no current podman
-  provider enforces read-only outside the guest, and applehv/libkrun don't apply it at all.
+- The podman backend gets neither directory (decided item 6): no current podman provider enforces
+  read-only outside the guest, applehv/libkrun don't apply it at all, and its mount set changes
+  only with a machine recreate. Its transcripts stay bound out in the checkout.
 
 ## Settled with the operator (2026-10-21)
 
 1. **The box sees the monitor's events.** The reader is the in-box harness: control-arena's
    flip experiment runs in the box, builds each step's kernel digest from the events file and
    sends it to the scoring model. What is observed is the BashArena task containers, which are the
-   box's SIBLINGS on the engine and have no mounts. They can't read the inbox; only the box can,
+   box's SIBLINGS on the engine and have no mounts. They can't read the to-box; only the box can,
    and it is the experimenter. A box observing ITSELF (a monitor over the box's own agent) is a
-   different deployment. There the inbox would tell the watched what was caught, so a hook only
-   ever delivers into the inbox because the operator configured it to, never by default.
+   different deployment. There the to-box would tell the watched what was caught, so a hook only
+   ever delivers into the to-box because the operator configured it to, never by default.
 2. **Your computer verifies; the box doesn't.** No Ed25519. Tampering is unlikely here, so the
    response is loud and manual rather than automatic: `fy monitor check FILE` on your computer
    (#107) reports the first bad line, and the operator investigates, then sets the file aside and
@@ -274,24 +294,39 @@ Disk exhaustion is unchanged: the box can already fill the host disk through the
      time. It would keep appending, so evidence isn't lost.
    - A host-side `rotate` that records where a fresh file starts, so a legitimately rotated file
      passes `check` and a deleted one still fails it.
-   On the inbox the signature stays for portability. A reader of the results can re-verify, which
+   On the to-box the signature stays for portability. A reader of the results can re-verify, which
    "it was mounted read-only" doesn't let them do.
 3. **The deferred `guest-boot.sh` / `machine-wall.sh` rewording rides this restart.** The
-   operator runs `fy machine stop && fy up` once for both.
+   operator runs `fy machine stop && fy up` once for both. (It ships as its own change, #114, in
+   the same release.)
 4. **A live vz test runs before building:** guest root remounts read-write, remounts the
    virtiofs tag fresh, then writes. The result is recorded below.
 
-## Open questions for the operator
+## Decided with the operator (2026-10-21)
 
-1. **Refuse or warn on a running VM with the old mount set?** Proposed: refuse, like stale
-   provisioning (fail closed; the restart keeps volumes). The alternative is a release of the
-   legacy layout behind a warning.
-2. **Names.** `/var/lib/fy-monitor/inbox` already exists in the guest (the Tetragon delivery
-   inbox, `monitor.py:60`, ADR-0032). Keep inbox/outbox (the box's point of view) and rename
-   that one, or pick `to-box/` / `from-box/`?
-3. **How long do the legacy transcript paths live?** Proposed: one release of dual reading.
-   (The symlink-following transcript sync this ADR flagged was fixed on its own, ahead of the
-   outbox, in #109.)
+The open questions this ADR was proposed with, answered — plus what building it settled:
+
+1. **Names: `to-box/` and `from-box/`**, not inbox/outbox: the guest already has
+   `/var/lib/fy-monitor/inbox` (the Tetragon delivery inbox, `monitor.py:60`, ADR-0032), which
+   keeps its name. Host paths `~/.foldyard/<project>/to-box/` (read-only to the VM and the box)
+   and `~/.foldyard/<project>/from-box/` (box-writable); in the box, `/run/foldyard/to-box`.
+2. **A running VM whose mount set is stale is REFUSED** — fail closed, like stale provisioning:
+   `fy up` and friends stop with `fy machine stop && fy up`, volumes kept. `_record_mounts()`
+   sits beside `_record_provisioning()`, on the Lima backend only.
+3. **Transcripts: one release of dual reading.** New boxes bind out into the from-box; the host
+   sync reads the from-box and the legacy in-checkout bind-out for this release, and the next one
+   drops the legacy path. #109's no-follow walk, #111's own-project-folder rule and #113's
+   per-project Codex home apply to the from-box exactly as to the legacy path; slots are made with
+   the no-follow mkdir walk; a symlinked slot is refused.
+4. **The to-box's first tenant is the monitor's signed file sink:** `fy monitor hook add NAME
+   --to-box` writes `<state dir>/to-box/monitor/NAME.jsonl` and prints the box-side path. The
+   signature stays (portable evidence); `--file` stays for other paths. Without a to-box it says
+   why and points at `--file`.
+5. **`mountType` is pinned per vmType** (vz → virtiofs, qemu → 9p), and no to-box is mounted on a
+   combination that doesn't enforce read-only outside the guest.
+6. **The podman backend changes nothing about the VM's mounts** (some consumers run it, and there
+   a mount-set change is a machine recreate): no to-box, no from-box, no stale-mount refusal. Its
+   transcripts keep the legacy bind-out, and the dual-read path is simply the only path there.
 
 ## The vz test (2026-10-21)
 
@@ -307,7 +342,7 @@ succeeded, which shows the test could see a write.
 **Verdict:** on vz, `writable: false` is enforced on the host side, against root in the guest.
 Three things follow for `verify` and the e2e:
 
-- **The guest's mount table can say the inbox is writable when it isn't.** Both the remount and
+- **The guest's mount table can say the to-box is writable when it isn't.** Both the remount and
   the fresh mount return 0 and show `rw` in `/proc/mounts`. Only an actual write shows the truth,
   so the assertion is a write attempt, not the `ro` flag.
 - **The refusal isn't always `EROFS`.** It is `EROFS` while the guest's `ro` flag is set. Once the

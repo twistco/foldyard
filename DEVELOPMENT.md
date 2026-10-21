@@ -63,6 +63,16 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   the registry's `verify_checks`.
 - `machine.py` / `machine_backend.py` — rootless dev-VM lifecycle behind the pluggable
   backend contract (podman | lima; see `docs/lima-backend-scope.md`).
+- `boxmounts.py` — ADR-0033's two foldyard-owned directories beside the checkout, lima only:
+  `<state dir>/to-box` (written by the host, shared READ-ONLY with the VM and bound `:ro` at
+  `/run/foldyard/to-box` in every box — only on vz+virtiofs / qemu+9p, the `mountType` pinned
+  with the vmType, since read-only must hold outside the guest) and `<state dir>/from-box`
+  (box-writable, a slot per checkout: `main/`, `worktrees/<n>/`; the agents' transcripts bind out
+  there). `machine._record_mounts` records the two on a stopped VM and refuses a running one that
+  lacks them, from the instance's EFFECTIVE config (`limactl list`'s merged `config`); the
+  checkout mounts are left as created. The podman backend's mounts are untouched. Host writes
+  into the from-box go through `mountwrite.makedirs` (no `mkdir(parents=True)`), reads through
+  the transcript sync's no-follow walk, deletes through `boxmounts.remove_slot`.
 - `basevm.py` — the project-less BASE VM (`fy machine base`, `fy prereq --fetch`): Lima's podman
   template, nothing mounted, booted once, the packaged box image built in it, stopped, stamped in
   `~/.foldyard/base-vm.json` by its INPUTS (resolved template · vmType · packaged-box
@@ -256,6 +266,11 @@ foldyard's surface splits by *where it can be validated*:
    - `test_mount_visibility_e2e.py` — the git heal's premise on THIS host's mount (virtiofs on
      macOS, 9p on the Linux/WSL2 runners): a file the VM renames into place reaches the host
      whole, never briefly missing, never older than one already seen (ADR-0021, 2026-09-27).
+   - `test_mounts_e2e.py` — ADR-0033's to-box against ROOT in the guest: a test-only boot script
+     (own marker, always exits 0) remounts it rw and tries every kind of write; all refused and the
+     host's seeded file unchanged. The red-first control records it `writable: true` (started with
+     `limactl start`, as `fy up` would re-record it read-only): the writes land and `fy verify`
+     FAILs its to-box row.
    - `test_reclaim_e2e.py` — `fy reclaim` on a real store: a removed worktree's tagged images
      (both provider spellings) swept, the main image + base images kept, the next `up` still
      `Using cache` (the three reclaim properties below, live).
@@ -637,6 +652,14 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   report problems in `/run/fy-monitor/` instead), a VM that never turned it on records nothing,
   and no recursive `rm` reaches `/run` or `/sys` (Tetragon mounts cgroup2 under
   `/var/run/tetragon`; an `rm -rf` there rmdirs empty system cgroups — seen live).
+- **The to-box is read-only OUTSIDE the guest, or it isn't mounted** (ADR-0033). Never mount it
+  on a vmType/mountType pair whose share server doesn't enforce `writable: false` (only vz +
+  virtiofs and qemu + 9p do), never mount the state dir itself (it holds `host.env` and the keys —
+  `verify` exempts exactly the two subdirectories), and never put a secret in it: every box of the
+  project reads it. `verify` proves it by a real write from a `--privileged` container, never by
+  the `ro` flag (root in the guest can drop the flag and the host still refuses). The from-box is
+  box-written: the host makes its slots with `mountwrite.makedirs`, reads it only through the
+  transcript sync's no-follow walk, and never mounts it on the podman backend.
 - **Under the gVisor posture the box mounts the NARROWED socket, never the runsc socket
   directly.** `box.py` mounts `sandbox.box_socket()` (`podman-runsc-filtered.sock`), not
   `guest_socket()` — the filter (`assets/sandbox/socket_filter.py`, a guest user unit provisioned

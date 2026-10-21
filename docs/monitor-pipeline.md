@@ -210,8 +210,8 @@ timeout = 15                        # seconds
 - **Isolation:** commands run with a minimal environment (`PATH`, `HOME`, `LANG`, `FY_PROJECT`,
   `FY_HOOK`) — never the supervisor's, which holds every `host.env` secret — on their own thread,
   so a slow hook never delays the pull.
-- **Managed from the CLI:** `fy monitor hook add NAME` — with `--file PATH`, `--url URL` or
-  `-- /abs/program args…`, and optional `--who`, `--kinds` and `--worktree` filters — appends a
+- **Managed from the CLI:** `fy monitor hook add NAME` — with `--to-box`, `--file PATH`,
+  `--url URL` or `-- /abs/program args…`, and optional `--who`, `--kinds` and `--worktree` filters — appends a
   `[[hook]]` block, after parsing the result the way the supervisor will (a hook it would skip is refused, and so is a filter value no event
   has); `fy monitor hook remove NAME` cuts one block out, and refuses — leaving the file alone —
   when the edit wouldn't parse to exactly the old document minus that hook (an inline array of
@@ -221,8 +221,21 @@ timeout = 15                        # seconds
 
 ### 6.1 The file sink
 
-The use that motivated it: an experiment in the box scores the monitor's events, so the box needs
-them in a file it can read — a file in the checkout. The obvious hook, a command running
+**Put it in the to-box:** `fy monitor hook add NAME --to-box` writes
+`~/.foldyard/<project>/to-box/monitor/NAME.jsonl`, which every box reads at
+`/run/foldyard/to-box/monitor/NAME.jsonl` and nothing in the VM can write — the share is
+read-only outside the guest ([ADR-0033](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md);
+lima on `vz` or `qemu`). The box can read the evidence and can't edit, cut or replace it, and the
+lines stay signed, so a copy that leaves your computer can still be checked
+(`fy monitor check PATH`). `--to-box` makes the `monitor/` directory once. Where there is no
+to-box — the podman backend, or a hypervisor that can't enforce read-only outside the guest — it
+says so and points at `--file`, which works as below; a `--file` in a tree the box can write (the
+checkout, the worktrees root, the from-box) gets a warning when it is added. A VM or box created
+before the to-box needs `fy machine stop && fy up` and then `fy box down && fy box up`.
+
+The rest of this section is the sink itself, wherever it writes. The use that motivated it: an
+experiment in the box scores the monitor's events, so the box needs them in a file it can read —
+before the to-box, a file in the checkout. The obvious hook, a command running
 `sh -c 'cat >> "$1"'` on that path, has two flaws. A shell append follows symlinks, so the box
 (which writes the checkout, and whose writes reach the host as the operator) plants `logs → ~` or
 `logs/events.jsonl → ~/.zshrc` and aims host writes at any file the operator owns, with content
