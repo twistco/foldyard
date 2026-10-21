@@ -69,3 +69,10 @@ def test_in_box_verify_is_all_pass(repo):
     inside = fy_ok(["box", "exec", "fy verify"], repo, timeout=600)
     assert "ALL PASS" in inside.out, inside.out
     assert "dev-box checks — skipped" not in inside.out, inside.out
+    # ADR-0033: the box was created with the to-box, so all three of its rows ran from in here
+    for row in (
+        "to-box mounted read-only in the VM",
+        "to-box refuses a write from a --privileged container binding it read-write",
+        "/run/foldyard/to-box refuses a write",
+    ):
+        assert row in inside.out, inside.out
