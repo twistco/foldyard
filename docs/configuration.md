@@ -70,8 +70,8 @@ replacement, and `fy doctor` warns about them.
 
 ### Experimental settings
 
-A setting tagged *(experimental)* below is off unless you turn it on, and makes one of two
-claims:
+A setting tagged *(experimental)* below is off unless you turn it on, and makes one or both of
+two claims:
 
 - **May change.** Its config, output format or payload isn't settled, and can change in a minor
   release.

@@ -153,6 +153,11 @@ def test_a_fragment_without_the_flag_is_printed_as_written(tmp_path):
     "text, why",
     [
         (EXP + "- a bullet with no bold lead\n", "bold"),
+        # Summary prose has no bullet for the label to go on, so it would print unmarked
+        (
+            "---\nsection: Summary\nbump: minor\nexperimental: true\n---\n\nA monitor ships.\n",
+            "at least one",
+        ),
         (
             "---\nsection: Added\nbump: minor\nexperimental: yes\n---\n\n- **x.** y\n",
             "true or false",

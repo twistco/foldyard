@@ -78,6 +78,12 @@ def parse(path: Path) -> Fragment:
     if experimental not in ("true", "false"):
         raise FragmentError(f"{path.name}: experimental {experimental!r} is not true or false")
     bullets = [line for line in body.splitlines() if line.startswith("- ")]
+    if experimental == "true" and not bullets:
+        # Summary prose has no bullet to carry the label, so the release would print it unmarked.
+        raise FragmentError(
+            f"{path.name}: an experimental entry needs at least one `- **bold**` bullet — "
+            "the release puts the label on each one's lead"
+        )
     if experimental == "true" and not all(b.startswith("- **") for b in bullets):
         raise FragmentError(
             f"{path.name}: an experimental entry's bullets must each open with a **bold** lead — "
