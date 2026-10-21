@@ -328,7 +328,8 @@ disk_gib = 60
         own, such as `/tmp` on macOS: owned by root, in a directory you can't write. Give the
         real path otherwise; the refusal names it.
       - The directory must exist. The file is created if it doesn't. Each file belongs to one
-        hook; pointing a hook at a new file starts its numbering again there.
+        hook; pointing a hook at a new file starts its numbering again there. Give it a file no
+        earlier hook wrote: lines starting again at 1 after old ones fail `fy monitor check`.
       - Each line is signed with a key only your computer holds
         (`~/.foldyard/<project>/monitor-sink.key`), numbered, and linked to the line before it.
         The box can still edit the file, but `fy monitor check <path>` finds any line edited,

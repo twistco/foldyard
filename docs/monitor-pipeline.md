@@ -260,7 +260,9 @@ where `seq` counts the hook's lines from 1 (kept in the hook's state, so it surv
 `prev` is the previous line's mac, and `mac` is HMAC-SHA256 over the canonical JSON (sorted keys,
 no spaces) of the line without `mac`. `sink` is written first, so a line leads with its
 sequence. The chain belongs to the file: a hook pointed at another file starts at seq 1 there,
-and one file holds one hook's lines.
+and one file holds one hook's lines. Only the current file's chain is kept, so pointing a hook
+back at a file it wrote before starts that file at seq 1 again, after its old lines, and the
+check fails it. Give a hook a fresh file instead.
 
 **`fy monitor check PATH [--hook NAME]`** verifies a file against the key and the hook's state:
 every mac, the sequence from 1 with no gap, every `prev`, and that the file ends on the seq and
