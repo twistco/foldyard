@@ -15,10 +15,14 @@ filters, rounds interleaved with pulls — and hold every hook's deliveries agai
 ``attribute(all records)`` filtered by that hook. Allowed differences must be SAID: an event the
 hook never got, or got attributed differently, lies inside a ``gaps`` entry it was sent.
 
-Validated red against: the code before the fix (shrinks to one engine claim, a snapshot and three
-events read a window apart — names lost, nothing in ``gaps``); after it, against: settling on age
-while a later snapshot exists (the old ``settled``), joining without the catalogue's snapshots
-around the read, and dropping the ``rotated`` gap — each shrinks to a handful of steps.
+Validated red against the code before the fix: a new hook slid along with the tail while it had
+nothing settled to send (shrinks to four events in one pull), and — anchored by hand — the
+windowed join (shrinks to a snapshot and three events: attributed ``unattributed`` where the full
+join says ``vm``, nothing in ``gaps``). After the fix, red against each of: joining without the
+catalogue's snapshots around the read, dropping the ``rotated`` gap, re-anchoring a new hook every
+round, no ``unsettled`` gap for an event released on age, a read that may end before any event
+(the cursor stalls), and the catalogue's snapshots put before the read (events then come out of
+store order) — the last three pinned by the @examples below, which random search finds rarely.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
-from hypothesis import event, given, settings
+from hypothesis import event, example, given, settings
 from hypothesis import strategies as st
 
 from foldyard import monitorhooks as mh
@@ -170,8 +174,29 @@ def _covered(key, gaps: list[dict], rank, whys: tuple[str, ...]) -> bool:
     return False
 
 
-@settings(max_examples=150, deadline=None)
+EVERYTHING = [([], [], [])]
+
+
+@settings(max_examples=200, deadline=None)
 @given(scenario=steps, filters=hooks, budget=st.sampled_from(["tiny", "ample"]))
+# released on age, then a snapshot names its container: the hook must say it went without one
+@example(
+    scenario=[("snap", {}), ("ev", 200, "process_exec"), ("pull",), ("wait", 200.0), ("round",),
+              ("snap", {200: [A]}), ("pull",), ("round",)],
+    filters=EVERYTHING, budget="ample",
+)  # fmt: skip
+# claims and a snapshot wider than a read: the read must go on to an event
+@example(
+    scenario=[("ev", 1, "process_exec"), ("engine", A), ("engine", B),
+              ("snap", {200: [A], 300: [A], 400: [A, B]}), *[("ev", 1, "process_exec")] * 4],
+    filters=EVERYTHING, budget="tiny",
+)  # fmt: skip
+# a VM restart inside the settle window: the old boot's tail must come before the new boot's
+@example(
+    scenario=[("ev", 1, "process_exec"), ("boot",), ("ev", 1, "process_exec"), ("snap", {}),
+              ("relaygap",), ("pull",), ("snap", {}), ("round",)],
+    filters=EVERYTHING, budget="tiny",
+)  # fmt: skip
 def test_a_hook_delivers_the_full_store_join_or_says_what_it_could_not(
     monkeypatch, scenario, filters, budget
 ):

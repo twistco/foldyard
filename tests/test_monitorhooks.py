@@ -348,6 +348,18 @@ def test_a_far_snapshot_and_a_far_claim_still_attribute_the_events_between(
     assert all(c["body"]["gaps"] == [] for c in calls)
 
 
+def test_a_later_snapshot_beyond_the_read_settles_events_at_once(ran, project, monkeypatch):
+    # the snapshot after them exists — just further on than one read: no settle-window wait
+    calls, _ = ran
+    _hook(project)
+    monkeypatch.setattr(mh, "READ_BYTES", 300)
+    monitorlog._append([snap(0), ev(1, recv=100)])
+    mh.round_once(now=101)
+    monitorlog._append([*(ev(i, recv=100) for i in range(2, 30)), snap(30)])
+    mh.round_once(now=102)
+    assert _delivered(calls)[:2] == [1, 2]
+
+
 def test_events_released_without_a_later_snapshot_are_said(ran, project):
     calls, _ = ran
     _hook(project)
