@@ -17,6 +17,14 @@ DOCS = Path(__file__).resolve().parents[1] / "docs" / "configuration.md"
 TAG = re.compile(r"`[^`\n]+`(?:\*\*)? \*\(experimental\)\*")
 
 
+@pytest.fixture(autouse=True)
+def _no_machine_env(monkeypatch):
+    # Each register entry's reader lets its env var win over the config, so an exported one
+    # (an operator's MACHINE_MONITOR=observe, say) would turn a feature on in every test here.
+    for name in ("MACHINE_RUNTIME", "MACHINE_VMTYPE", "MACHINE_MONITOR"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.mark.parametrize("f", experimental.REGISTER, ids=lambda f: f.key)
 def test_every_entry_says_what_is_unproven_and_what_would_graduate_it(f):
     # a label with no exit criterion stays forever, or is dropped quietly with nothing changed
@@ -37,8 +45,6 @@ def test_the_docs_tag_exactly_the_registers_entries():
 
 
 def test_nothing_turned_on_is_one_quiet_green_row(monkeypatch):
-    monkeypatch.delenv("MACHINE_RUNTIME", raising=False)
-    monkeypatch.delenv("MACHINE_VMTYPE", raising=False)
     monkeypatch.setattr(config, "_table", lambda name: {})
     assert experimental.turned_on() == []
     assert experimental.doctor_row() == (True, "experimental", "none turned on")

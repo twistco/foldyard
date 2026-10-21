@@ -1,6 +1,6 @@
 """experimental.py — what foldyard ships as EXPERIMENTAL, and what would graduate each one.
 
-"Experimental" makes one of two claims, and they graduate differently:
+"Experimental" makes one or both of two claims, and they graduate differently:
 
 - **may change** — the interface (a config key, an output format, a payload) isn't frozen. It
   graduates when a maintainer decides to freeze it: a decision, not evidence.
