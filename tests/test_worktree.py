@@ -351,7 +351,15 @@ def test_add_suggests_nothing_for_a_name_that_is_not_branch_shaped(fake_main, ca
 
 @pytest.mark.parametrize(
     ("name", "branch"),
-    [("a/b.lock", ""), ("a b/c", ""), ("x/~y", ""), ("a/.b", ""), ("feat/x", "bad..branch")],
+    [
+        ("a/b.lock", ""),
+        ("a b/c", ""),
+        ("x/~y", ""),
+        ("a/.b", ""),
+        ("feat/x", "bad..branch"),
+        ("feat/x", "HEAD"),
+        ("-a/b", "ok"),
+    ],
 )
 def test_add_suggests_nothing_git_would_refuse_as_a_branch(fake_main, capsys, name, branch):
     # A hint that names a branch git rejects can't succeed: say only what was wrong.
@@ -378,6 +386,9 @@ def test_add_suggests_nothing_git_would_refuse_as_a_branch(fake_main, capsys, na
         "a..b",
         "a@{b",
         "-a",
+        "HEAD",
+        "head",
+        "feat/HEAD",
         "a.",
         ".a",
         "a/.",

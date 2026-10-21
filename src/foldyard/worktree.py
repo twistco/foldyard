@@ -289,6 +289,7 @@ def _branch_name_ok(name: str) -> bool:
     parts = name.split("/")
     return not (
         not name
+        or name == "HEAD"
         or name.startswith("-")
         or name.endswith(".")
         or re.search(r"[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{", name)
@@ -338,7 +339,8 @@ def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -
         if not path.is_absolute() and not {".", ".."} & set(name.split("/")):
             dashed = "-".join(path.parts)
             suggested = branch or "/".join(path.parts)
-            if _branch_name_ok(suggested):
+            # A dir starting with "-" would be read as an option, so that hint couldn't run either.
+            if _branch_name_ok(suggested) and not dashed.startswith("-"):
                 hint = f"fy worktree add {shlex.quote(dashed)} {shlex.quote(suggested)}"
                 _err(f"  the first argument is the worktree's directory — did you mean `{hint}`?")
         return 1
