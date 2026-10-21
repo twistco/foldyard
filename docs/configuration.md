@@ -886,7 +886,8 @@ tui = { raw_output_mode = false }
     beats `system_prompt` on `developer_instructions`, and `fy codex -c …` beats both.
 - **`transcript_sync_seconds`** (both tables) — while the box is up, the supervisor copies that
   agent's transcripts into their archive on your computer (`~/.claude/projects` /
-  `~/.codex/sessions`) at this interval, so a crashed box or a `git clean -fdx` loses nothing.
+  `~/.foldyard/<project>/transcripts/codex/sessions`) at this interval, so a crashed box or a
+  `git clean -fdx` loses nothing.
   Default: `0` (off — transcripts are archived at `fy box down`, or by hand with
   `fy transcripts`). Rounded down to a multiple of the 2-second supervisor tick (minimum one
   tick). A failing sync logs once to `host-supervisor.log` when it breaks and once when it
@@ -896,10 +897,29 @@ tui = { raw_output_mode = false }
   named after the checkout itself (worktrees archive their own). The box names those folders,
   and a folder named after any other directory would be offered by `claude --resume` there, so
   sessions started in a subdirectory or elsewhere stay in the bound-out dir and are named in the
-  log (once each) and by `fy transcripts`. Codex records a session's directory inside the file
-  instead, so its sessions are archived as they are; to keep box Codex sessions out of
-  `~/.codex/sessions`, give `fy transcripts` an archive dir or set
-  `FOLDYARD_TRANSCRIPTS_ARCHIVE`.
+  log (once each) and by `fy transcripts`.
+
+  Codex records a session's directory inside the file instead, where the host can't check it,
+  so box Codex sessions never go into your own `~/.codex/sessions`: a Codex there would offer a
+  session claiming another project's directory when you resume in that project. They go to a
+  Codex home of their own, one per project — `~/.foldyard/<project>/transcripts/codex` — and
+  there is no setting that puts them back in `~/.codex`. To resume one, point Codex at that
+  home from the checkout (`fy transcripts` prints the line):
+
+  ```bash
+  cd <checkout> && CODEX_HOME=~/.foldyard/<project>/transcripts/codex codex resume
+  ```
+
+  It is a separate Codex home, so log in there once (`CODEX_HOME=… codex login`, or have
+  `OPENAI_API_KEY` set) — don't copy your `auth.json` in — and your `~/.codex/config.toml` is
+  not read. `codex resume` lists the interactive sessions started in the directory you run it
+  from; `--all` drops the directory filter and `--include-non-interactive` adds `codex exec`
+  runs. Resuming still puts text the box wrote in front of a Codex on your computer,
+  for the project that box was given: the same trade-off as Claude's archive. Box sessions
+  archived into `~/.codex/sessions` by earlier foldyard versions stay there; each also still
+  sits, under the same name, in the checkout's `.devbox-codex/sessions` unless that was cleaned.
+  With an explicit archive dir (`fy transcripts <dir>` or `FOLDYARD_TRANSCRIPTS_ARCHIVE`) both
+  agents go there, Codex's under `codex-sessions/`.
 
   ```toml
   [claude]

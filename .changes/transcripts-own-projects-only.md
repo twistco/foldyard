@@ -13,5 +13,4 @@ bump: patch
   bound-out dir and named — printed by `fy transcripts` and box down, logged once by the sweep.
   Sessions the box starts in a subdirectory of the checkout are left out with them. Codex
   records a session's directory inside each file rather than in a folder name, so its sessions
-  are still archived unchanged; an explicit archive dir (`fy transcripts <dir>` or
-  `FOLDYARD_TRANSCRIPTS_ARCHIVE`) keeps them out of `~/.codex/sessions`.
+  can't be held to a folder this way; they no longer go into `~/.codex/sessions` at all (below).

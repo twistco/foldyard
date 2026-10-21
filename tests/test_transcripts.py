@@ -37,13 +37,17 @@ def _archived(root: Path) -> dict[str, str]:
 @pytest.fixture
 def mac(tmp_path, monkeypatch):
     """Pretend we're on the host; stack.resolve mocked; engine calls recorded; HOME is a tmp dir
-    so the default archives (``~/.claude/projects``, ``~/.codex/sessions``) land in the test's
-    tree. Returns the recorded commands + the tmp checkout + the archive roots."""
+    so the default archives (``~/.claude/projects``, foldyard's own Codex archive under
+    ``~/.foldyard/<project>/``) land in the test's tree — and so does Codex's native history
+    (``~/.codex/sessions``), which no archive may ever write by default. Returns the recorded
+    commands + the tmp checkout + the archive roots."""
     checkout = tmp_path / "repo"
     checkout.mkdir()
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("FOLDYARD_STATE_DIR", raising=False)
+    monkeypatch.setenv("FOLDYARD_PROJECT", "acme")
     monkeypatch.setattr(config, "in_box", lambda: False)
     ctx = stack.Context(
         main=checkout,
@@ -76,7 +80,11 @@ def mac(tmp_path, monkeypatch):
         "ctx": ctx,
         "resolved": resolved,
         "claude_archive": home / ".claude/projects",
-        "codex_archive": home / ".codex/sessions",
+        # A Codex home of its own (`CODEX_HOME=… codex resume` reads its `sessions/`), per project.
+        "codex_home": home / ".foldyard/acme/transcripts/codex",
+        "codex_archive": home / ".foldyard/acme/transcripts/codex/sessions",
+        # Codex's native history on your computer: never an archive's default destination.
+        "codex_native": home / ".codex",
         "src": checkout / "dev-stack/.devbox-claude/projects",
         "codex_src": checkout / "dev-stack/.devbox-codex/sessions",
         # The one Claude project folder the box can legitimately write for this checkout.
@@ -214,6 +222,7 @@ def test_codex_sessions_are_archived_only_when_configured(mac, monkeypatch):
     assert transcripts.transcripts() == 0
     assert _archived(mac["codex_archive"]) == {"2026/10/21/codex.jsonl": "{}"}
     assert _archived(mac["claude_archive"]) == {f"{mac['own']}/claude.jsonl": "{}"}
+    assert not mac["codex_native"].exists()
 
 
 def test_codex_only_project_does_not_require_claude_source(mac, monkeypatch):
@@ -343,7 +352,9 @@ def test_an_override_outside_the_checkout_still_refuses_its_own_link(mac, monkey
     assert "TOPSECRET" not in str(_archived(mac["claude_archive"]))
 
 
-def test_sync_current_archives_configured_codex_to_native_destination(mac, monkeypatch, capsys):
+def test_sync_current_archives_configured_codex_into_foldyards_own_dir(mac, monkeypatch, capsys):
+    """`fy box down`, `fy nuke` and `fy worktree remove` all archive through `sync_current`: by
+    default box Codex sessions go to foldyard's per-project archive, never Codex's own history."""
     monkeypatch.setattr(config, "codex_enabled", lambda: True)
     _session(mac["src"], f"{mac['own']}/claude.jsonl")
     _session(mac["codex_src"], "codex.jsonl")
@@ -353,6 +364,7 @@ def test_sync_current_archives_configured_codex_to_native_destination(mac, monke
 
     assert _archived(mac["claude_archive"]) == {f"{mac['own']}/claude.jsonl": "{}"}
     assert _archived(mac["codex_archive"]) == {"codex.jsonl": "{}"}
+    assert not mac["codex_native"].exists()
     assert "archiving Codex transcripts" in capsys.readouterr().out
 
 
@@ -742,6 +754,39 @@ def test_a_dry_run_names_the_refused_folders_too(mac, monkeypatch, capsys):
     assert "would copy 1 file" in out.out and "-Users-someone-other" in out.err
 
 
+def test_codex_default_archive_is_per_project_under_foldyards_state(mac, monkeypatch, tmp_path):
+    """One project's box can't put sessions in another project's archive — and none in Codex's own
+    `~/.codex/sessions`, which `codex resume` on your computer reads for every project."""
+    assert transcripts._codex_archive_dest() == mac["codex_archive"]
+    monkeypatch.setenv("FOLDYARD_PROJECT", "other")
+    other = transcripts._codex_archive_dest()
+    assert other != mac["codex_archive"] and other.parent.parent.parent.name == "other"
+    # FOLDYARD_STATE_DIR moves it with the rest of the project's host state.
+    monkeypatch.setenv("FOLDYARD_STATE_DIR", str(tmp_path / "state"))
+    assert transcripts._codex_archive_dest() == (tmp_path / "state").resolve() / (
+        "transcripts/codex/sessions"
+    )
+
+
+def test_fy_transcripts_says_where_codex_sessions_went_and_how_to_resume(mac, monkeypatch, capsys):
+    monkeypatch.setattr(config, "codex_enabled", lambda: True)
+    _session(mac["codex_src"], "2026/10/21/rollout-x.jsonl")
+    assert transcripts.transcripts() == 0
+    out = capsys.readouterr().out
+    assert f"synced → {mac['codex_archive']}" in out
+    assert f"CODEX_HOME={mac['codex_home']} codex resume" in out
+    assert not mac["codex_native"].exists()
+
+
+def test_no_resume_hint_for_an_explicit_archive(mac, monkeypatch, capsys, tmp_path):
+    """`<dir>/codex-sessions` is not a Codex home's layout: no recipe that wouldn't work."""
+    monkeypatch.setattr(config, "codex_enabled", lambda: True)
+    _session(mac["codex_src"], "codex.jsonl")
+    assert transcripts.transcripts(str(tmp_path / "archive")) == 0
+    assert "CODEX_HOME" not in capsys.readouterr().out
+    assert _archived(tmp_path / "archive") == {"codex-sessions/codex.jsonl": "{}"}
+
+
 def test_codex_sessions_are_not_held_to_a_folder_name(mac, monkeypatch):
     """Codex files sessions by DATE (sessions/YYYY/MM/DD) — the project is recorded inside each file,
     which the host does not parse (see the residual-risk note in transcripts.py)."""
@@ -986,6 +1031,23 @@ def test_sweep_covers_codex_independently(sweeper, mac, monkeypatch):
     archive = Path(os.environ["FOLDYARD_TRANSCRIPTS_ARCHIVE"])
     assert sweeper["copies"] == [archive, archive / "codex-sessions"]
     assert {k[1] for k in transcripts._sweep_state} == {"Claude", "Codex"}
+
+
+def test_sweep_archives_codex_into_foldyards_own_dir_by_default(mac, monkeypatch):
+    """The unstubbed sweep with no explicit archive: Codex's sessions land in foldyard's
+    per-project archive, and nothing is written under Codex's own history."""
+    transcripts._sweep_state.clear()
+    monkeypatch.setattr(config, "repo_root", lambda: mac["checkout"])
+    monkeypatch.setattr(config, "dev_vm_rel", lambda: "dev-stack")
+    monkeypatch.setattr(config, "claude_enabled", lambda: False)
+    monkeypatch.setattr(config, "codex_enabled", lambda: True)
+    monkeypatch.setattr(config, "codex_transcript_sync_seconds", lambda: 4.0)
+    _session(mac["codex_src"], "2026/10/21/rollout-x.jsonl", "live")
+    logs: list[str] = []
+    transcripts.sweep(logs.append, "")
+    assert _archived(mac["codex_archive"]) == {"2026/10/21/rollout-x.jsonl": "live"}
+    assert not mac["codex_native"].exists()
+    assert logs == []
 
 
 def test_sweep_never_raises(sweeper, monkeypatch):
