@@ -627,7 +627,8 @@ over — Windows-on-ARM boots the distro at EL1, no KVM, so this is x86-only too
   **Every byte of `guest-boot.sh` and `machine-wall.sh` is in that id** — a comment edit too —
   so any change refuses every existing VM as stale until its user runs `fy machine stop && fy up`.
   Don't reword them in a sweep; batch text changes with a change that needs the re-provision
-  anyway. (They still say "wall" and "Mac" for that reason.)
+  anyway. (Their `fy-wall` paths, units and tables keep the old name: renaming those is a
+  migration, not wording.)
   **The one exception is an opt-in feature's own root work**, which gets its own recorded script
   under its own marker so it never touches that id: the guest monitor (`assets/monitor/`,
   `# fy-monitor <id>`, ADR-0032) is the one instance. Its rules: the two scripts never mention
