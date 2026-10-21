@@ -33,7 +33,7 @@ def offline_engine(monkeypatch):
     """Make the engine-backed scopes deterministic: stack/box report 'unknown/down'."""
 
     monkeypatch.setattr(devmode, "ps_labels", lambda *a, **k: None)  # engine unreachable
-    monkeypatch.setattr(devmode, "_box_env_hint", lambda: None)
+    monkeypatch.setattr(devmode, "_box_env_drift", lambda: [])
 
 
 def test_state_all_ok_when_fully_offline(isolated_state, offline_engine, capsys):
@@ -61,6 +61,36 @@ def test_state_flags_a_down_daemon_and_a_degraded_capability(
     assert "DOWN" in out and "DEGRADED — PAM lapsed" in out
 
 
+def _box_drift(monkeypatch, *items: tuple[str, str]):
+    from foldyard import box
+
+    drift = [box.EnvDrift(name, what, advisory=name == "TZ") for name, what in items]
+    monkeypatch.setattr(devmode, "_box_env_drift", lambda: drift)
+
+
+def test_state_passes_with_a_warning_when_only_your_computers_clock_moved(
+    isolated_state, offline_engine, monkeypatch, capsys
+):
+    # A box created before you travelled keeps the old timezone: worth a ⚠ with the old → new
+    # value, but the box works as it is — `fy state` must not fail on it.
+    _box_drift(monkeypatch, ("TZ", "Europe/London → Asia/Tokyo"))
+    rc = state_view.show()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "⚠" in out and "TZ: Europe/London → Asia/Tokyo" in out
+    assert "fy box down && fy box up" in out and "✗" not in out
+
+
+def test_state_fails_when_the_clock_moved_beside_another_name(
+    isolated_state, offline_engine, monkeypatch, capsys
+):
+    _box_drift(monkeypatch, ("TZ", "Europe/London → Asia/Tokyo"), ("HAIKU_API_KEY", "missing"))
+    rc = state_view.show()
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "✗" in out and "TZ: Europe/London → Asia/Tokyo, HAIKU_API_KEY: missing" in out
+
+
 def test_state_reports_standing_incoherence_as_posture_drift(
     isolated_state, offline_engine, capsys
 ):
@@ -76,7 +106,7 @@ def test_state_flags_a_stale_extra_overlay_as_drift(isolated_state, monkeypatch,
     # A stack still carrying a posture overlay the CURRENT mode no longer wants (compose.llm.yml
     # after llm=off) is drift in the other direction — it must not read as healthy.
     devmode.set_mode({"gcp": "sa"})  # desires the identity overlays, NOT the storage one
-    monkeypatch.setattr(devmode, "_box_env_hint", lambda: None)
+    monkeypatch.setattr(devmode, "_box_env_drift", lambda: [])
     monkeypatch.setattr(
         devmode, "daemon_status", lambda mode: {"gcp-minter": {"up": True, "port": 41100}}
     )

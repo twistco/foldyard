@@ -18,7 +18,12 @@ def show() -> int:
     where = "box" if devmode.in_box() else "host"
     wt = config.active_worktree() or "main"
     print(f"State — desired vs observed, per tier ({config.project_prefix()}, {wt}, {where})")
-    marks = {"ok": "\033[32m✓\033[0m", "drift": "\033[31m✗\033[0m", "unknown": "\033[33m○\033[0m"}
+    marks = {
+        "ok": "\033[32m✓\033[0m",
+        "warn": "\033[33m⚠\033[0m",
+        "drift": "\033[31m✗\033[0m",
+        "unknown": "\033[33m○\033[0m",
+    }
     worst = 0
     for scope in reconcile.scopes():
         if scope.host_only and devmode.in_box():
@@ -26,7 +31,7 @@ def show() -> int:
         for row in scope.rows(state):
             print(f"  {marks[row.status]} {row.scope:<11} {row.desired}")
             print(f"    {'':<11} → {row.observed}")
-            worst = max(worst, {"ok": 0, "unknown": 0, "drift": 1}[row.status])
+            worst = max(worst, {"ok": 0, "warn": 0, "unknown": 0, "drift": 1}[row.status])
     if worst:
         print("  (✗ = a tier disagrees with the desired mode — the fix is in its row)")
     return worst

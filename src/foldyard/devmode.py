@@ -56,11 +56,14 @@ from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import config, configpin, mountwrite, worktree_registry
 from .machine_backend import get_backend
 from .plugins import DoctorContext, registry
+
+if TYPE_CHECKING:
+    from .box import EnvDrift
 
 # Axes / rungs / blurbs / daemons / env / doctor checks are PLUGIN-defined (ADR-0015), and the
 # ACTIVE set is now a function of the RESOLVED CONFIG (per-consumer-registry-plan.md Steps A/B):
@@ -2390,23 +2393,23 @@ def _countdown(iso: str) -> str:
     return f"{left // 60}m{left % 60:02d}s" if left > 0 else "EXPIRED"
 
 
-def _box_env_hint(project: str | None = None) -> str | None:
-    """Does the running dev box's create-time env still match the config? Best effort, via the
-    engine; None when it matches, there's no box, or nothing could be read.
+def _box_env_drift(project: str | None = None) -> list[EnvDrift]:
+    """How the running dev box's create-time env differs from the config's now (``box.env_drift``'s
+    items); ``[]`` when it matches, there's no box, or nothing could be read. Best effort, via the
+    engine.
 
-    The same comparison `fy box up` makes on a running box (``box.env_drift``), over the create
-    path's own derivation — so this no longer keeps a copy of the creation rules (the keyless-only
-    copy it had mis-fired on every at-rest box, 2026-09-26, and never saw `[[inject]]` or
-    `[box].env`). What tracks the MODE is host-side and reconciled live (the proxy's rules, the gcp
-    minter), so the box env never depends on a rung: only the config moving under it needs a new
-    box — hence `fy box down && fy box up`, as `fy box up` alone keeps a running box. In the box,
-    what only your computer knows (its clock, the proxy CA's host path) is left out."""
+    The same comparison `fy box up` makes on a running box, over the create path's own derivation
+    — so this no longer keeps a copy of the creation rules (the keyless-only copy it had mis-fired
+    on every at-rest box, 2026-09-26, and never saw `[[inject]]` or `[box].env`). What tracks the
+    MODE is host-side and reconciled live (the proxy's rules, the gcp minter), so the box env never
+    depends on a rung: only the config moving under it needs a new box. In the box, what only your
+    computer knows (its clock, the proxy CA's host path) is left out."""
     project = project or os.environ.get("PODMAN_PROJECT") or config.project_prefix()
     try:
         from . import box  # lazy: the box tier is only needed when there's a box to compare
 
         mode_env = {k: os.environ.get(k, v) for k, v in derive_env(read()["mode"]).items()}
-        drift = box.env_drift(
+        return box.env_drift(
             config.engine(),
             f"{project}-devbox",
             {**_engine_env(), **mode_env},
@@ -2415,12 +2418,21 @@ def _box_env_hint(project: str | None = None) -> str | None:
             timeout=5,
         )
     except (Exception, SystemExit):
-        return None
-    if drift:
-        return (
-            f"⚠ dev box env out of date ({', '.join(drift)}) — apply with: fy box down && fy box up"
-        )
-    return None
+        return []
+
+
+def _box_env_hint_text(drift: Iterable[object]) -> str:
+    """The one-line nag for ``drift``: `fy box up` alone keeps a running box, hence the recreate."""
+    names = ", ".join(map(str, drift))
+    return f"⚠ dev box env out of date ({names}) — apply with: fy box down && fy box up"
+
+
+def _box_env_hint(project: str | None = None) -> str | None:
+    """:func:`_box_env_drift` as the dashboards' one-line nag; None when there's nothing to say.
+    A difference in your computer's clock settings alone is said the same way — it's `fy state`
+    (``reconcile.BoxEnvScope``) that counts it as a warning rather than drift."""
+    drift = _box_env_drift(project)
+    return _box_env_hint_text(drift) if drift else None
 
 
 def show() -> int:

@@ -23,7 +23,8 @@ conformance suite (tests/test_reconcile_scenarios.py), which pins what fires whe
 | assets     | `fy up` + mode change      | registry().stage_assets — an idempotent copy,  |
 |            |                            | self-converging at its triggers (no rows: the  |
 |            |                            | staging has no observation hook to render)     |
-| box env    | `fy box up` (observe-only) | can't act — devmode._box_env_hint nags         |
+| box env    | `fy box up` (observe-only) | can't act — devmode._box_env_drift nags (a     |
+|            |                            | clock-only difference is a warning, not drift) |
 
 Stdlib only at import (loads on the `fy state` path); the stack scope reads overlays with PyYAML,
 imported lazily — it rides in with the bundled podman-compose.
@@ -39,8 +40,10 @@ from . import config, devmode
 
 @dataclass(frozen=True)
 class ScopeRow:
-    """One desired → observed line: ``status`` is ``ok`` (agree), ``drift`` (disagree — the
-    observed text carries the fix), or ``unknown`` (can't observe from here; never guessed)."""
+    """One desired → observed line: ``status`` is ``ok`` (agree), ``warn`` (disagree on
+    something that doesn't break the tier — said, with its fix, but `fy state` still passes),
+    ``drift`` (disagree — the observed text carries the fix), or ``unknown`` (can't observe from
+    here; never guessed)."""
 
     status: str
     scope: str
@@ -326,7 +329,9 @@ def _touches(touches: dict[str, set[str] | None], overlay: str, service: str) ->
 class BoxEnvScope(Scope):
     """The dev box's create-time baked env — the immutable-until-recreate tier. This scope
     CANNOT act (env can't change in a running box), so its whole job is the nag: reuse the
-    dashboard's staleness hint. Host-only (the box can't inspect its own create args)."""
+    dashboard's staleness hint. Host-only (the box can't inspect its own create args). A box whose
+    only difference is your computer's clock settings (``TZ``/``LC_TIME`` — you travelled) still
+    works: that row is a warning, not drift."""
 
     name = "box"
     host_only = True
@@ -334,11 +339,13 @@ class BoxEnvScope(Scope):
     def rows(self, state: dict) -> list[ScopeRow]:
         desired = "dev box env matches the config"
         try:
-            hint = devmode._box_env_hint()
+            drift = devmode._box_env_drift()
         except Exception:
             return [ScopeRow("unknown", self.name, desired, "engine unreachable")]
-        if hint:
-            return [ScopeRow("drift", self.name, desired, hint.lstrip("⚠ "))]
+        if drift:
+            status = "warn" if all(d.advisory for d in drift) else "drift"
+            hint = devmode._box_env_hint_text(drift).removeprefix("⚠ ")
+            return [ScopeRow(status, self.name, desired, hint)]
         return [ScopeRow("ok", self.name, desired, "current (or box down)")]
 
 

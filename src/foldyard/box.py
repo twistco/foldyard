@@ -41,6 +41,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 from typing import IO
@@ -619,9 +620,30 @@ _HOST_FACTS = frozenset({"TZ", "LC_TIME", "NODE_EXTRA_CA_CERTS"})
 # sensitive. Everything else is named only — a credential slot holds a dummy by design, but a
 # `[box].env` value can be long, and the name is what you need to find it.
 _DRIFT_SHOW_VALUES = frozenset({"TZ", "LC_TIME"})
+# Your computer's clock settings (hostclock): they move when you travel, not when config is
+# adopted, and a box on the old zone still works — so a difference is a warning, shown with its
+# values, never drift that fails `fy state`. Every other name does, and so do these two when
+# `[box].env` pins them (that is config). The same names as `_DRIFT_SHOW_VALUES` today, but a
+# different question — which values are safe to print vs which differences break nothing.
+_DRIFT_ADVISORY = frozenset({"TZ", "LC_TIME"})
 # What the engine adds to every container's Config.Env (podman: container/HOME/HOSTNAME, TERM
 # under -t) — neither the image's nor foldyard's, so never "no longer set".
 _ENGINE_ADDED = frozenset({"PATH", "HOME", "HOSTNAME", "TERM", "container"})
+
+
+@dataclass(frozen=True)
+class EnvDrift:
+    """One name whose value in a running box differs from what a create would give it now.
+    ``what``: ``missing``, ``changed``, ``no longer set``, or ``<old> → <new>`` (the clock only).
+    ``advisory``: your computer's clock settings (:data:`_DRIFT_ADVISORY`) — a warning, not
+    drift."""
+
+    name: str
+    what: str
+    advisory: bool = False
+
+    def __str__(self) -> str:
+        return f"{self.name}: {self.what}"
 
 
 def _compare_env(
@@ -630,7 +652,8 @@ def _compare_env(
     *,
     image_env: Mapping[str, str] | None,
     ignore: Collection[str] = (),
-) -> list[str]:
+    advisory: Collection[str] = _DRIFT_ADVISORY,
+) -> list[EnvDrift]:
     """What differs, name by name, between the environment a box would be created with now
     (``expected``; None = present, value unknown) and the one it was (``baked``, its Config.Env).
 
@@ -639,21 +662,22 @@ def _compare_env(
     neither the config, the image (``image_env`` — its own value; a different one was set at
     create) nor the engine accounts for — a removed row's dummy shadows a real in-box login, a
     removed ``[box].env`` pin still steers its tool. Without ``image_env`` that last can't be told
-    from the image's own, so it isn't reported."""
+    from the image's own, so it isn't reported. A name in ``advisory`` is marked so: a
+    warning, not drift (:data:`_DRIFT_ADVISORY`, less any ``[box].env`` pins)."""
     skip = _DRIFT_IGNORED | frozenset(ignore)
-    out: list[str] = []
+    out: list[EnvDrift] = []
     for name, want in expected.items():
         if name in skip:
             continue
         have = baked.get(name)
         if have is None:
-            out.append(f"{name}: missing")
+            out.append(EnvDrift(name, "missing", name in advisory))
         elif want is None or name in _DRIFT_PRESENCE_ONLY or have == want:
             continue
         elif name in _DRIFT_SHOW_VALUES:
-            out.append(f"{name}: {have} → {want}")
+            out.append(EnvDrift(name, f"{have} → {want}", name in advisory))
         else:
-            out.append(f"{name}: changed")
+            out.append(EnvDrift(name, "changed", name in advisory))
     if image_env is None:
         return out
     for name, have in baked.items():
@@ -661,7 +685,7 @@ def _compare_env(
             continue
         if image_env.get(name) == have:
             continue
-        out.append(f"{name}: no longer set")
+        out.append(EnvDrift(name, "no longer set", name in advisory))
     return out
 
 
@@ -695,7 +719,7 @@ def env_drift(
     quiet_plugins: Collection[str] = (),
     ask_image: bool = False,
     timeout: float | None = None,
-) -> list[str]:
+) -> list[EnvDrift]:
     """How the running ``box``'s environment differs from the one `fy box up` would create it
     with now (:func:`_compare_env`'s items), or ``[]`` when it matches or can't be read.
 
@@ -706,11 +730,12 @@ def env_drift(
     ``host_facts`` False leaves out what only your computer knows (:data:`_HOST_FACTS`) for a
     check run in the box. ``quiet_plugins``: plugins whose names a dedicated row already reported.
 
-    ``LC_TIME`` depends on the locales the IMAGE has, so only the image can judge it — never the
-    running box, which may have gained one since and would then read "missing" for good (a
-    recreate probes the image again). ``ask_image`` (`fy box up`) runs the create's own probe
-    against the box's image id; without it (`fy mode`, `fy state`, every TUI refresh — no
-    container start, no exec) ``LC_TIME`` is left out, as it is when the probe can't answer.
+    ``LC_TIME`` from your computer depends on the locales the IMAGE has, so only the image can
+    judge it — never the running box, which may have gained one since and would then read
+    "missing" for good (a recreate probes the image again). ``ask_image`` (`fy box up`) runs the
+    create's own probe against the box's image id; without it (`fy mode`, `fy state`, every TUI
+    refresh — no container start, no exec) ``LC_TIME`` is left out, as it is when the probe can't
+    answer. A ``[box].env`` pin of it is passed whatever the image has, so it is always judged.
     """
 
     def run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -737,17 +762,21 @@ def env_drift(
         except ValueError:
             image_env = None
     box_home = _box_home_from(mounts, baked)
-    ignore = set() if host_facts else set(_HOST_FACTS)
+    # A `[box].env` pin is config, not your computer's: passed whatever the image has, so it is
+    # judged on every path (and never advisory — see the return).
+    pinned = config.box_env().keys()
+    ignore = set() if host_facts else set(_HOST_FACTS - pinned)
     locales: list[str] = []
     if not ask_image:
-        ignore.add("LC_TIME")
+        ignore |= {"LC_TIME"} - pinned
     elif host_facts and hostclock.time_locale():
         try:
             probed = run(_image_probe_cmd(engine, image.strip())) if image.strip() else None
         except (OSError, subprocess.SubprocessError):
             probed = None
         if probed is None or probed.returncode != 0:
-            ignore.add("LC_TIME")  # unknown is not "none": that would read a baked one as stale
+            # unknown is not "none": that would read a baked one as stale
+            ignore |= {"LC_TIME"} - pinned
         else:
             locales = _parse_image_probe(probed.stdout)[2]
 
@@ -790,7 +819,13 @@ def env_drift(
     expected = {**plugins, **expected}
     # A bare `-e NAME` the create env doesn't carry is one the engine skips: not expected here.
     ignore |= {n for n, v in expected.items() if v is None and n not in resolved}
-    return _compare_env(expected, baked, image_env=image_env if complete else None, ignore=ignore)
+    return _compare_env(
+        expected,
+        baked,
+        image_env=image_env if complete else None,
+        ignore=ignore,
+        advisory=_DRIFT_ADVISORY - pinned,
+    )
 
 
 # Per engine call of `fy box up`'s drift check. Generous — the image probe starts a container, and
@@ -818,8 +853,14 @@ def _warn_env_drift(engine: str, box: str, ctx, quiet_plugins: Collection[str] =
     except (Exception, SystemExit):  # a nag must never crash (or hang) `fy box up`
         return
     if drift:
+        # Only the clock moved: it's your computer that changed, not the config, and it's a
+        # warning (`fy state` passes) — but still one line, with the same fix.
+        source = (
+            "your computer's clock settings" if all(d.advisory for d in drift) else "the config"
+        )
         print(
-            f"⚠ dev box {box}'s environment no longer matches the config ({', '.join(drift)}). "
+            f"⚠ dev box {box}'s environment no longer matches {source} "
+            f"({', '.join(map(str, drift))}). "
             "A box's environment is fixed when it's created: `fy box down && fy box up`."
         )
 
