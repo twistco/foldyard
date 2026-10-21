@@ -1834,6 +1834,66 @@ def test_shell_execs_when_running(fake):
     assert sh and "bash" in sh[0] and sh[0][-2] == "-lc"
 
 
+def test_shell_forwards_the_terminal(fake, monkeypatch):
+    # podman's `exec -t` sets TERM=xterm and nothing else, so a TUI in the box saw a 16-colour
+    # terminal (Claude Code's highlight vanished on a light palette). Only what's set is passed.
+    fake["state"]["running"] = True
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    monkeypatch.setenv("TERM_PROGRAM", "ghostty")
+    monkeypatch.delenv("TERM_PROGRAM_VERSION", raising=False)
+    monkeypatch.delenv("COLORFGBG", raising=False)
+    box.main("shell")
+    sh = _find(fake["calls"], has=["exec", "-it"])[0]
+    passed = [sh[i + 1] for i, a in enumerate(sh) if a == "-e"]
+    assert passed == ["TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=ghostty"]
+    assert sh.index("-e") < sh.index("tangible-podman-devbox")
+    assert "fy_term_known" in sh[-1]
+
+
+def _run_term_fallback(
+    term: str, known: tuple[str, ...] | None, home: Path | None = None, dirs: str = ""
+) -> str:
+    """Run the REAL `_TERM_FALLBACK_SNIPPET` under bash with ``infocmp`` stubbed as a shell
+    function that knows only ``known`` (``None`` = no infocmp at all, so the snippet reads the
+    terminfo files — ``home``'s ``.terminfo`` and ``dirs`` as ``TERMINFO_DIRS`` among them);
+    return the TERM it leaves."""
+    import subprocess
+
+    if known is None:
+        lines = ["PATH=/nonexistent", f"HOME={shlex.quote(str(home))}"]
+        lines.append(f"TERMINFO_DIRS={shlex.quote(dirs)}")
+    else:
+        lines = [f'infocmp() {{ case "$1" in {"|".join(known)}) return 0;; esac; return 1; }}']
+    lines += [f"TERM={shlex.quote(term)}", box._TERM_FALLBACK_SNIPPET, 'printf %s "$TERM"']
+    out = subprocess.run(["bash", "-c", "\n".join(lines)], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+@pytest.mark.spawns("bash")  # runs the REAL snippet under bash (builtins only)
+def test_term_fallback_only_replaces_a_term_the_box_cannot_describe(tmp_path):
+    # Ghostty's own TERM is `xterm-ghostty`; a box image without its terminfo would leave bash and
+    # less "not fully functional", so that one falls back — a known one stays.
+    assert _run_term_fallback("xterm-ghostty", ("xterm-256color",)) == "xterm-256color"
+    assert _run_term_fallback("xterm-256color", ("xterm-256color",)) == "xterm-256color"
+    # No infocmp (a minimal image): the database's files decide, in either of ncurses' layouts.
+    (tmp_path / ".terminfo" / "x").mkdir(parents=True)
+    (tmp_path / ".terminfo" / "x" / "xterm-fy-letter").touch()
+    (tmp_path / ".terminfo" / "78").mkdir()  # 0x78 = "x", the hex layout macOS uses
+    (tmp_path / ".terminfo" / "78" / "xterm-fy-hex").touch()
+    assert _run_term_fallback("xterm-fy-letter", None, tmp_path) == "xterm-fy-letter"
+    assert _run_term_fallback("xterm-fy-hex", None, tmp_path) == "xterm-fy-hex"
+    assert _run_term_fallback("xterm-fy-absent", None, tmp_path) == "xterm-256color"
+    # …and the TERMINFO_DIRS list ncurses also searches (colon-separated; an empty entry = default).
+    (tmp_path / "extra" / "x").mkdir(parents=True)
+    (tmp_path / "extra" / "x" / "xterm-fy-dirs").touch()
+    dirs = f":/nonexistent:{tmp_path / 'extra'}"
+    assert (
+        _run_term_fallback("xterm-fy-dirs", None, tmp_path / "elsewhere", dirs) == "xterm-fy-dirs"
+    )
+
+
 # ── exec (non-interactive; the git-hooks dispatch primitive) ──────────────────────────
 
 
