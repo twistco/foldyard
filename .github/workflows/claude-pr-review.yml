@@ -68,14 +68,19 @@ jobs:
                 reviewThreads(first: 50, after: $endCursor) {
                   pageInfo { hasNextPage endCursor }
                   nodes { isResolved isOutdated path line originalLine
-                    comments(first: 50) { nodes { databaseId author { login } createdAt body } } }
+                    comments(first: 50) { totalCount
+                      nodes { databaseId author { login } createdAt body } } }
                 } } } }' --jq '
             .data.repository.pullRequest.reviewThreads.nodes[]
             | "\n===== \(.path):\(.line // .originalLine) · "
               + (if .isResolved then "RESOLVED" else "OPEN" end)
               + (if .isOutdated then " · OUTDATED" else "" end) + " =====",
               (.comments.nodes[] | "--- \(.author.login // "ghost") · \(.createdAt) · id \(.databaseId)\n"
-                + (.body | gsub("<!--[\\s\\S]*?-->"; "") | gsub("<details>[\\s\\S]*?</details>"; "")))
+                + (.body | gsub("<!--[\\s\\S]*?-->"; "") | gsub("<details>[\\s\\S]*?</details>"; "")
+                  | gsub("\r\n?"; "\n") | "> " + gsub("\n"; "\n> "))),
+              (if .comments.totalCount > (.comments.nodes | length)
+               then "--- \(.comments.totalCount - (.comments.nodes | length)) later comments not shown:"
+                 + " read this thread with Step 1b.3's command" else empty end)
           ' > .pr-review-threads.md \
             || echo "The workflow couldn't read the review threads: use Step 1b.3's command." \
             > .pr-review-threads.md
