@@ -2269,13 +2269,18 @@ def _to_box_check():
         )
         return
     to_box = str(boxmounts.to_box_dir())
-    shared = Mount(to_box, to_box, writable=False) in (_BACKEND.mount_set(PODMAN_MACHINE) or [])
+    want_type = boxmounts.mount_type_for(vmtype)
+    listed = Mount(to_box, to_box, writable=False) in (_BACKEND.mount_set(PODMAN_MACHINE) or [])
+    have_type = _BACKEND.mount_type(PODMAN_MACHINE)
     yield _result(
-        shared or None,
+        (listed and have_type == want_type) or None,
         "to-box",
-        f"shared read-only with the VM and every box ({to_box}; "
-        f"{vmtype}/{boxmounts.mount_type_for(vmtype)})",
-        "not shared yet — the VM's mount set predates it: `fy machine stop && fy up`",
+        f"shared read-only with the VM and every box ({to_box}; {vmtype}/{want_type})",
+        f"shared by {have_type or 'an unknown type'}, not {want_type}, which can't hold it "
+        "read-only outside the guest (Lima's override.yaml?) — `fy machine stop && fy up` refuses "
+        "until it's fixed"
+        if listed
+        else "not shared yet — the VM's mount set predates it: `fy machine stop && fy up`",
     )
 
 

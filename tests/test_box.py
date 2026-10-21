@@ -2894,6 +2894,15 @@ def test_a_worktrees_box_binds_its_own_slot(fake, lima_dirs, monkeypatch):
     assert f"{slot}/claude/projects:/home/vscode/.claude/projects" in run
 
 
+def test_a_worktree_name_no_slot_can_carry_keeps_the_legacy_bind_out(fake, lima_dirs, monkeypatch):
+    monkeypatch.setattr(box.boxmounts, "claude_rel", lambda wt: (_ for _ in ()).throw(ValueError()))
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d"])[0]
+    legacy = fake["main"] / "dev-stack" / ".devbox-claude" / "projects"
+    assert f"{legacy}:/home/vscode/.claude/projects" in run
+    assert not any(v.startswith("FY_FROM_BOX=") for v in _env_values(run))
+
+
 def test_up_refuses_a_slot_the_box_planted_as_a_symlink(fake, lima_dirs, tmp_path):
     # Any box can plant `from-box/worktrees/<wt>` before that worktree's first `fy box up`; the
     # host's mkdir must not create directories wherever it points.

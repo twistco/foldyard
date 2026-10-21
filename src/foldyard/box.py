@@ -1882,12 +1882,14 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # never see them — else the legacy dirs inside the checkout (the podman backend, which keeps
     # its mounts as they were).
     from_box = machine.from_box_mounted()
+    claude_out = f"{checkout}/{here}/.devbox-claude/projects"
+    codex_out = f"{checkout}/{here}/.devbox-codex/sessions"
     if from_box:
-        claude_out = str(boxmounts.from_box_dir() / boxmounts.claude_rel(worktree))
-        codex_out = str(boxmounts.from_box_dir() / boxmounts.codex_rel(worktree))
-    else:
-        claude_out = f"{checkout}/{here}/.devbox-claude/projects"
-        codex_out = f"{checkout}/{here}/.devbox-codex/sessions"
+        try:
+            claude_out = str(boxmounts.from_box_dir() / boxmounts.claude_rel(worktree))
+            codex_out = str(boxmounts.from_box_dir() / boxmounts.codex_rel(worktree))
+        except ValueError:  # a name no slot can carry: the legacy place, as the sync reads it
+            from_box = False
     transcripts_dir = os.environ.get("DEVBOX_TRANSCRIPTS") or claude_out
     box_home, claude_in_box, image_locales, image_lc_all = _probe_image(engine, img, env)
     # Resolved HOME paths the agent/editor plugins' box_args need (they only get `env`): the box

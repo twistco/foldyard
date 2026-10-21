@@ -39,12 +39,15 @@ def test_slots_mirror_the_posture_dirs_so_a_worktree_named_main_cant_collide():
     assert boxmounts.codex_rel("") == Path("main/codex/sessions")
 
 
-@pytest.mark.parametrize("name", ["..", "a/b", ".hidden", "", "x y"])
+@pytest.mark.parametrize("name", ["..", ".", "a/b", "/abs"])
 def test_a_worktree_name_that_isnt_one_path_component_names_no_slot(name):
-    if name == "":
-        return  # the main checkout
     with pytest.raises(ValueError):
         boxmounts.slot_rel(name)
+
+
+@pytest.mark.parametrize("name", [".hidden", "fix+x", "x y", "feat@2"])
+def test_any_name_fy_worktree_add_allows_gets_its_slot(name):
+    assert boxmounts.slot_rel(name) == Path("worktrees") / name
 
 
 @pytest.mark.parametrize(
@@ -75,6 +78,18 @@ def test_enabled_on_lima_only(monkeypatch):
     assert boxmounts.enabled()
     monkeypatch.setattr(config, "machine_backend", lambda: "podman")
     assert not boxmounts.enabled()
+
+
+def test_nested_sees_through_a_symlinked_worktrees_root(tmp_path):
+    # Review on #115: FOLDYARD_WORKTREES_ROOT isn't resolved; a link to a directory holding the
+    # state dir overlaps it all the same.
+    real = tmp_path / "real"
+    (real / "state" / "to-box").mkdir(parents=True)
+    link = tmp_path / "wt-link"
+    link.symlink_to(real)
+    assert boxmounts.nested([real / "state" / "to-box"], [link]) == [
+        (real / "state" / "to-box", link)
+    ]
 
 
 def test_nested_finds_a_state_dir_inside_a_writable_mount(tmp_path):

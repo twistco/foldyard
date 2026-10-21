@@ -25,7 +25,6 @@ plugins call it from ``box_args``, and the in-box ``fy verify`` reads :func:`vm_
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import stat
 from pathlib import Path
@@ -45,8 +44,6 @@ ENV_FROM_BOX = "FY_FROM_BOX"
 # server (`readonly=on`, EROFS for every write op). Not qemu + virtiofs (virtiofsd runs without
 # `--readonly`), not krunkit, not reverse-sshfs.
 ENFORCING_MOUNT_TYPE = {"vz": "virtiofs", "qemu": "9p"}
-
-_SLOT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def enabled() -> bool:
@@ -78,7 +75,13 @@ def slot_rel(worktree: str = "") -> Path:
     """A checkout's slot under from-box: ``main`` for the main checkout, ``worktrees/<name>``."""
     if not worktree:
         return Path("main")
-    if not _SLOT_NAME.fullmatch(worktree):
+    # `fy worktree add`'s own rule: one plain path component. Anything else never had a checkout.
+    if (
+        worktree in (".", "..")
+        or "/" in worktree
+        or "\0" in worktree
+        or Path(worktree).is_absolute()
+    ):
         raise ValueError(f"worktree name {worktree!r} can't name a from-box slot")
     return Path("worktrees") / worktree
 
@@ -101,7 +104,9 @@ def nested(dirs: list[Path], mounts: list[Path]) -> list[tuple[Path, Path]]:
     A read-only mount inside a writable one stays writable through the parent (Lima: "do not
     specify directories that overlap"), and a from-box inside the checkout is the checkout again —
     so `FOLDYARD_STATE_DIR` pointed into the checkout or the worktrees root is refused."""
-    return [(d, m) for d in dirs for m in mounts if overlaps(d, m)]
+    # Resolved first: a worktrees root that is a symlink to a directory holding the state dir
+    # overlaps it all the same (FOLDYARD_STATE_DIR is resolved already; the roots may not be).
+    return [(d, m) for d in dirs for m in mounts if overlaps(d.resolve(), m.resolve())]
 
 
 def prepare() -> None:

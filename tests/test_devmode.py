@@ -2687,8 +2687,14 @@ def test_doctor_asks_for_the_leftover_on_the_host(monkeypatch, tmp_path):
 class _ToBoxBackend:
     name = "lima"
 
-    def __init__(self, vmtype="vz", mounts=None, exists=True):
+    def __init__(self, vmtype="vz", mounts=None, exists=True, mount_type=None):
         self._vmtype, self._mounts, self._exists = vmtype, mounts, exists
+        self._mount_type = (
+            {"vz": "virtiofs", "qemu": "9p"}.get(vmtype, "") if mount_type is None else mount_type
+        )
+
+    def mount_type(self, name):
+        return self._mount_type
 
     def exists(self, name):
         return self._exists
@@ -2722,6 +2728,17 @@ def test_to_box_row_not_shared_yet_says_restart(to_box_row, monkeypatch):
     monkeypatch.setattr(devmode, "_BACKEND", _ToBoxBackend("vz", writable))
     ((status, _name, detail),) = devmode._to_box_check()
     assert status == "warn" and "fy machine stop && fy up" in detail
+
+
+def test_to_box_row_on_the_wrong_share_type_is_not_ok(to_box_row, monkeypatch):
+    # Review on #115: a qemu VM sharing by virtiofs (an override.yaml) lists the entry read-only,
+    # but virtiofsd enforces nothing outside the guest.
+    from foldyard.machine_backend import Mount
+
+    shared = [Mount(str(to_box_row), str(to_box_row), writable=False)]
+    monkeypatch.setattr(devmode, "_BACKEND", _ToBoxBackend("qemu", shared, mount_type="virtiofs"))
+    ((status, _name, detail),) = devmode._to_box_check()
+    assert status == "warn" and "virtiofs, not 9p" in detail
 
 
 def test_to_box_row_says_why_a_hypervisor_has_none(to_box_row, monkeypatch):
