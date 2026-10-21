@@ -482,7 +482,7 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
 
 
 READ_BYTES = 8 << 20  # how much of the store's tail `recent` reads
-CHUNK = 20_000  # records joined at a time when reading a range
+CHUNK = 5_000  # records joined at a time when reading a range (tens of MB parsed, at most)
 
 
 def join(records: list[dict], cat: monitorstore.Catalogue | None, prefix: str) -> list[Event]:

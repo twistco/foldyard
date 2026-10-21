@@ -50,7 +50,7 @@ from . import config
 SEGMENT_BYTES = 32 << 20  # the live segment is sealed past this (uncompressed)
 BUDGET_MB = 1024  # default disk budget for the whole store
 BUDGET_MIN_MB, BUDGET_MAX_MB = 64, 65536
-LEGACY = "legacy"  # the id of a live segment an older foldyard wrote (no first line naming it)
+LEGACY = "legacy"  # an older foldyard's live segment (no first line naming it) is "legacy-<inode>"
 _CLAIMS_KEPT = 10_000  # engine claims, newest first (containers ever described)
 _ORPHANS_KEPT = 64  # snapshots kept from segments already gone (the newest per boot)
 _SCHEMA = 2
@@ -123,20 +123,23 @@ def _sealed_id(name: str) -> str | None:
 
 
 def _header(path: Path) -> str | None:
-    """The id a live segment's first line gives it, :data:`LEGACY` for one without, ``None``
-    when there is no such file."""
+    """The id a live segment's first line gives it, ``None`` when there is no such file. One an
+    older foldyard wrote has no such line: it is ``legacy-<inode>`` — stable while that foldyard
+    keeps appending to it, and a different id once it rotates it and starts another (which would
+    otherwise inherit the first one's place in the catalogue)."""
     try:
         with path.open("rb") as f:
             first = f.readline(4096)
+            ino = os.fstat(f.fileno()).st_ino
     except OSError:
         return None
     try:
         doc = json.loads(first)
     except ValueError:
-        return LEGACY
+        doc = None
     if isinstance(doc, dict) and doc.get("k") == "segment" and isinstance(doc.get("id"), str):
         return doc["id"]
-    return LEGACY
+    return f"{LEGACY}-{ino}"
 
 
 def segments() -> list[Segment]:
@@ -320,7 +323,7 @@ def _new_id(segs: list[Segment]) -> str:
     """A new segment's id: its creation time, and always past every id the store has — segments
     are read in id order, so a clock stepped back must not file one before an older one."""
     sid = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-    top = max((s.id for s in segs if s.id != LEGACY), default="")
+    top = max((s.id for s in segs if not s.id.startswith(LEGACY)), default="")
     return sid if sid > top else top + "a"
 
 
@@ -339,7 +342,7 @@ def append(records: list[dict]) -> None:
     live = segs[-1] if segs and segs[-1].live else None
     cat = Catalogue.open_or_none()
     try:
-        if live is not None and (live.id == LEGACY or raw_size(live) > SEGMENT_BYTES):
+        if live is not None and (live.id.startswith(LEGACY) or raw_size(live) > SEGMENT_BYTES):
             _seal(live, segs, cat)
             live = None
         lines: list[bytes] = []
@@ -368,11 +371,11 @@ def append(records: list[dict]) -> None:
 
 def _seal(live: Segment, segs: list[Segment], cat: Catalogue | None) -> None:
     sid = live.id
-    if sid == LEGACY:
+    if sid.startswith(LEGACY):
         sid = _new_id(segs)
         if cat is not None:
             try:
-                cat.rename(LEGACY, sid)
+                cat.rename(live.id, sid)
             except sqlite3.Error:
                 pass
     live_path().replace(store_dir() / f"monitor.{sid}.jsonl")
@@ -524,7 +527,9 @@ class Catalogue:
                 k = r.get("k")
                 if k == "scopes" and "boot" in r:
                     c.execute(
-                        "INSERT OR IGNORE INTO snap VALUES (?, ?, ?, ?)",
+                        # seen again (a re-read, or a file that changed name): it lives here now
+                        "INSERT INTO snap VALUES (?, ?, ?, ?) ON CONFLICT(boot, seq) DO UPDATE "
+                        "SET seg = excluded.seg",
                         (r["boot"], int(r["seq"]), sid, json.dumps(r, separators=(",", ":"))),
                     )
                 elif k == "engine":
@@ -586,11 +591,23 @@ class Catalogue:
     def catch_up(self, segs: list[Segment] | None = None) -> None:
         """Index whatever of ``segs`` (default: the whole store) isn't yet: a store an older
         foldyard wrote, a catalogue that was lost, or a crash between the two writes."""
+        listing = segs is None
         segs = segments() if segs is None else segs
         known = {
             sid: (indexed, sealed)
             for sid, indexed, sealed in self.conn.execute("SELECT id, indexed, sealed FROM seg")
         }
+        if listing and segs:
+            # Gone from the store without this catalogue seeing it go (an older foldyard rotated
+            # or removed it): older than every segment listed, or an older foldyard's live file
+            # under a name it no longer has. Never anything newer — a reader's listing can be a
+            # moment behind the writer's next segment.
+            here, oldest = {s.id for s in segs}, min(s.id for s in segs)
+            gone = [
+                sid for sid in known if sid not in here and (sid.startswith(LEGACY) or sid < oldest)
+            ]
+            if gone:
+                self.drop(gone)
         for seg in segs:
             indexed, sealed = known.get(seg.id, (0, 0))
             if sealed:

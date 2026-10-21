@@ -100,13 +100,14 @@ def test_an_older_foldyards_store_is_indexed_sealed_and_compressed(state):
     (logs / "monitor.20261001T000000Z.jsonl").write_text(lines(snap(0), ev(1)))
     (logs / "monitor.jsonl").write_text(lines(ev(2), snap(3, mapping={})))  # no first line
     old, live = ms.segments()
-    assert (old.id, live.id) == ("20261001T000000Z", ms.LEGACY)
+    assert old.id == "20261001T000000Z" and live.id.startswith(ms.LEGACY)
     with ms.Catalogue.open() as cat:
         cat.catch_up()
         assert _seq(cat.before(BOOT, 2)) == 0 and _seq(cat.after(BOOT, 1)) == 3
     ms.append([ev(4)])  # the older live file is sealed under an id of its own; both compressed
     ids = [s.id for s in ms.segments()]
-    assert ids[0] == "20261001T000000Z" and ms.LEGACY not in ids and len(ids) == 3
+    assert ids[0] == "20261001T000000Z" and len(ids) == 3
+    assert not any(i.startswith(ms.LEGACY) for i in ids)
     assert all(s.gz for s in ms.segments()[:-1])
     assert _seqs(ms.read(None, 1 << 20)[0]) == [0, 1, 2, 3, 4]
     with ms.Catalogue.open() as cat:
@@ -155,3 +156,25 @@ def test_tail_is_a_position_that_many_bytes_before_the_end(state, monkeypatch):
     assert ms.tail(0) == [ms.segments()[-1].id, ms.raw_size(ms.segments()[-1])]
     assert _seqs(ms.read(ms.tail(1 << 20), 1 << 20)[0]) == [0, 1, 2, 3]
     assert ms.tail(1, []) is None
+
+
+def test_an_older_supervisor_rotating_under_a_newer_reader_leaves_nothing_unindexed(state):
+    # the transition: the old supervisor still writes headerless files and rotates them by its
+    # own naming, while a newer `fy monitor` indexes what it finds
+    logs = state / "logs"
+    logs.mkdir()
+    write = lambda p, *rs: p.write_text(  # noqa: E731
+        "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rs)
+    )
+    write(logs / "monitor.jsonl", snap(0), ev(1), snap(2), ev(3), ev(4))
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+    (logs / "monitor.jsonl").rename(logs / "monitor.20261002T000000Z.jsonl")  # the old rotation
+    write(logs / "monitor.jsonl", ev(5), snap(6, mapping={}))  # a new, shorter, headerless file
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+        assert cat.last_snapshot(BOOT) == 6  # the new file wasn't taken for the old one
+        assert _seq(cat.before(BOOT, 5)) == 2 and _seq(cat.before(BOOT, 1)) == 0  # both kept
+        assert not any(
+            sid.startswith(ms.LEGACY) for sid in cat.bounds() if sid != ms.segments()[-1].id
+        )
