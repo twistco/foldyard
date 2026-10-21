@@ -220,16 +220,21 @@ def _warn_stale_foldyard(engine: str, box: str, env: dict) -> None:
     )
 
 
-def _warn_legacy_transcripts(engine: str, box: str, env: dict) -> None:
-    """A box created before the from-box (ADR-0033) binds its transcripts into the checkout. It
-    still works — the sync reads both places for this release — but the bind is create-time."""
+def _warn_predates_box_dirs(engine: str, box: str, env: dict) -> None:
+    """A box created before the to-box and from-box (ADR-0033) has no to-box, and binds its agents'
+    transcripts into the checkout. It still works — the sync reads both places for this release —
+    but both binds are create-time."""
     if not machine.from_box_mounted():
         return
-    if _baked_env(engine, box, env, boxmounts.ENV_FROM_BOX) is None:
-        print(
-            f"⚠ dev box {box} binds its transcripts into the checkout (created before foldyard's "
-            "from-box). Recreate it to move them out: `fy box down && fy box up`."
-        )
+    if _baked_env(engine, box, env, boxmounts.ENV_FROM_BOX) is not None:
+        return
+    agents = config.claude_enabled() or config.codex_enabled()
+    print(
+        f"⚠ dev box {box} predates foldyard's to-box and from-box: it has no "
+        f"{boxmounts.TO_BOX_IN_BOX}"
+        + (" and binds its transcripts into the checkout" if agents else "")
+        + ". Recreate it: `fy box down && fy box up`."
+    )
 
 
 def _box_image_fingerprint(main: Path) -> str:
@@ -611,7 +616,7 @@ _DRIFT_IGNORED = frozenset(
         # The runtime: `_warn_stale_runtime`'s.
         sandbox.BAKED_ENV,
         # ADR-0033's two VM paths: facts about the VM's mounts, not config — and a box from before
-        # them is `_warn_legacy_transcripts`'s (one change, one warning).
+        # them is `_warn_predates_box_dirs`'s (one change, one warning).
         boxmounts.ENV_TO_BOX,
         boxmounts.ENV_FROM_BOX,
     }
@@ -1849,7 +1854,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
                 "~/.codex volume or keyless seed). Recreate to add them: `fy box down && fy box up`."
             )
         _warn_env_drift(engine, box, ctx, quiet)  # every other create-time name
-        _warn_legacy_transcripts(engine, box, env)
+        _warn_predates_box_dirs(engine, box, env)
         _warn_stale_foldyard(engine, box, env)
         if not ensure_harden(engine, box, env):  # a box from before the hygiene gets it here
             print(

@@ -2931,7 +2931,26 @@ def test_up_archives_the_legacy_transcripts_once_and_says_they_can_go(fake, lima
 def test_up_nags_when_a_running_box_still_binds_into_the_checkout(fake, lima_dirs, capsys):
     fake["state"]["running"] = True
     assert box.main("up") == 0
-    assert "binds its transcripts into the checkout" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "predates foldyard's to-box and from-box" in out and "fy box down && fy box up" in out
+    assert "binds its transcripts into the checkout" in out
     fake["state"]["baked_env"]["FY_FROM_BOX"] = str(lima_dirs / "from-box")
     assert box.main("up") == 0
-    assert "binds its transcripts into the checkout" not in capsys.readouterr().out
+    assert "predates foldyard's to-box" not in capsys.readouterr().out
+
+
+def test_the_nag_for_a_box_with_no_agents_names_only_the_to_box(
+    fake, lima_dirs, capsys, monkeypatch
+):
+    monkeypatch.setattr(config, "claude_enabled", lambda: False)
+    monkeypatch.setattr(config, "codex_enabled", lambda: False)
+    fake["state"]["running"] = True
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "has no /run/foldyard/to-box." in out and "transcripts" not in out
+
+
+def test_no_nag_on_the_podman_backend(fake, capsys):
+    fake["state"]["running"] = True
+    assert box.main("up") == 0
+    assert "predates foldyard's to-box" not in capsys.readouterr().out
