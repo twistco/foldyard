@@ -321,8 +321,8 @@ def _mirror_dir(
                 tally.skipped.append(f"{path}/ (deeper than {MAX_DEPTH} levels)")
             else:
                 _mirror_subdir(src_fd, dst_fd, name, path, depth, dry, tally)
-        elif held:
-            tally.refused.append(name)  # the project's name, but Claude only ever makes a folder
+        elif held:  # the project's name, but Claude only ever makes a folder there
+            tally.refused.append(f"{name} (not a folder)")
         elif stat.S_ISREG(mode):
             _copy_file(src_fd, dst_fd, name, path, dry, tally)
         else:
@@ -671,15 +671,17 @@ def _report(log, notify, key: tuple[str, str], label: str, wt: str, rc: int, det
 def _report_refused(
     log, key: tuple[str, str], label: str, wt: str, refused: list[str], only: str
 ) -> None:
-    """Name each refused folder ONCE per supervisor (they persist in the bound-out dir, so every
+    """Name each refused folder ONCE while it stays (they persist in the bound-out dir, so every
     pass refuses them again). Not a failure: no FAILED edge, no notification — the archive of the
-    checkout's own folder is healthy."""
-    seen: set[str] = _sweep_state[key].setdefault("refused", set())
+    checkout's own folder is healthy. Remembers only what this pass refused, so what is held is
+    bounded by the listing itself; a name removed and planted again is named again."""
+    state = _sweep_state[key]
+    seen: set[str] = state.get("refused", set())
     new = [name for name in refused if name not in seen]
     if new:
-        seen.update(new)
         where = f" ({wt})" if wt else ""
         log(f"transcript-sync: {label}{where} {_refusal(new, only)}")
+    state["refused"] = set(refused)
 
 
 def sweep(log, wt: str = "", *, tick_seconds: float = 2.0, notify=None) -> None:

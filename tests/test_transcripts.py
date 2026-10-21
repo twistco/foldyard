@@ -700,7 +700,7 @@ def test_a_file_under_the_checkouts_own_name_is_refused(mac, capsys):
     _session(mac["src"], "-tmp/x.jsonl")
     assert transcripts.transcripts() == 0
     assert not mac["claude_archive"].exists() or _archived(mac["claude_archive"]) == {}
-    assert mac["own"] in capsys.readouterr().err
+    assert f"{mac['own']} (not a folder)" in capsys.readouterr().err
 
 
 def test_a_worktrees_archive_holds_only_the_worktrees_own_folder(mac, tmp_path):
@@ -862,6 +862,11 @@ def test_sweep_names_refused_folders_once_without_failing(mac, monkeypatch, tmp_
         run()
     assert len(logs) == 2 and "-tmp" in logs[1] and "-Users-someone-other" not in logs[1]
     assert notes == []
+    # What it remembers is bounded by what is there now: a name the box removed is forgotten.
+    (mac["src"] / "-Users-someone-other/planted.jsonl").unlink()
+    (mac["src"] / "-Users-someone-other").rmdir()
+    run()
+    assert transcripts._sweep_state[("", "Claude")]["refused"] == {"-tmp"}
 
 
 def test_sweep_logs_a_planted_link_naming_it(mac, monkeypatch, tmp_path):
