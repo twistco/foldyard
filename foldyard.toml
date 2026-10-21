@@ -163,6 +163,18 @@ lives outside this box, out of your reach.
 model_reasoning_summary = "auto"
 tui = { raw_output_mode = false }
 
+# GitHub for the box (`fy mode github=on` on your computer; walkthrough: `fy docs github-app`).
+# twistco's PR-bot App, the installation Tangible's box uses too; `repositories` narrows each
+# token to this repo, and the App's permissions are the scope. The key goes in host.env as
+# FY_INJECT_GITHUB: the same key as Tangible's, so that line can be copied across.
+[[inject]]
+switch = "github"
+kind = "github-app"
+app_id = "4008762"
+installation_id = "139125083"
+repositories = ["foldyard"]
+box_env = { GH_TOKEN = "x" }
+
 # ── The rest — uncomment as you grow (step 3) ────────────────────────────────────────────
 # Host-published ports, keyed by the env var your compose file reads. In-container ports
 # never move, so a second worktree's stack gets offset host ports and never collides.
@@ -221,7 +233,8 @@ caches = [{ volume = "foldyard-uv-cache", path = ".cache/uv" }]   # path is unde
 #   • unzip — for inspecting a built wheel: `just build`'s own comment tells you to run
 #     `unzip -l dist/*.whl` to see which docs got force-included, the one check that catches a
 #     `fy docs <topic>` shipping 404 to consumers while resolving fine from source.
-packages = ["nodejs", "just", "unzip"]
+#   • gh — for `/pr-review` and PR feedback under `fy mode github=on` (the [[inject]] row below).
+packages = ["nodejs", "just", "unzip", "gh"]
 #
 # Other tools, installed once per fresh box, as MONITORED steps (reported ✓/✗):
 # [[box.tools]]
