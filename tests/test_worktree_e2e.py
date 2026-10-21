@@ -132,6 +132,12 @@ def test_remove_tears_down_archives_and_drops_the_checkout_but_not_main_or_the_b
     planted = projects / claude_project_dir(str(rig.main)) / "planted.jsonl"
     planted.parent.mkdir(parents=True)
     planted.write_text('{"type":"user","text":"not feat\'s"}\n')
+    # …and one in the worktree's from-box slot (ADR-0033), where a box on the new layout binds it:
+    # read beside the legacy dir for this release, archived, and the slot deleted with the rest.
+    slot = state_dir() / "from-box" / "worktrees" / NAME
+    fb_session = slot / "claude" / "projects" / claude_project_dir(str(rig.feat)) / "fb.jsonl"
+    fb_session.parent.mkdir(parents=True)
+    fb_session.write_text('{"type":"user","text":"hello from the from-box"}\n')
     marker = state_dir() / "worktrees" / NAME / "marker"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("x")
@@ -157,6 +163,9 @@ def test_remove_tears_down_archives_and_drops_the_checkout_but_not_main_or_the_b
     archived = list(rig.archive.rglob("session.jsonl"))
     assert archived and "hello from feat" in archived[0].read_text(), removed.out
     assert not list(rig.archive.rglob("planted.jsonl")), removed.out
+    from_box = list(rig.archive.rglob("fb.jsonl"))
+    assert from_box and "hello from the from-box" in from_box[0].read_text(), removed.out
+    assert not slot.exists(), removed.out
     # 4. the checkout is gone and git no longer tracks it; the branch is KEPT.
     assert not rig.feat.exists()
     assert str(rig.feat) not in _worktree_paths(rig.main)
