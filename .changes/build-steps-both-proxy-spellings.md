@@ -9,4 +9,4 @@ bump: patch
   in a compose build started from the box went direct, and the VM firewall refused it. The
   guest's build-step hook, which already adds foldyard's CA to every build step, now also adds
   each proxy variable in the spelling the step lacks. This changes the VM's boot provisioning:
-  a running walled VM is refused as stale until `fy machine stop && fy up`.
+  every running Lima VM, walled or not, is refused as stale until `fy machine stop && fy up`.
