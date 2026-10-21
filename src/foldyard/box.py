@@ -1881,15 +1881,16 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # from-box (ADR-0033) where the VM shares one — out of the checkout, so `git clean` and grep
     # never see them — else the legacy dirs inside the checkout (the podman backend, which keeps
     # its mounts as they were).
-    from_box = machine.from_box_mounted()
+    vm_from_box = machine.from_box_mounted()
+    from_box = vm_from_box
     claude_out = f"{checkout}/{here}/.devbox-claude/projects"
     codex_out = f"{checkout}/{here}/.devbox-codex/sessions"
     if from_box:
         try:
             claude_out = str(boxmounts.from_box_dir() / boxmounts.claude_rel(worktree))
             codex_out = str(boxmounts.from_box_dir() / boxmounts.codex_rel(worktree))
-        except ValueError:  # a name no slot can carry: the legacy place, as the sync reads it
-            from_box = False
+        except ValueError:  # a name `fy worktree add` refuses, so all but unreachable: the
+            from_box = False  # legacy place, as the sync reads it
     transcripts_dir = os.environ.get("DEVBOX_TRANSCRIPTS") or claude_out
     box_home, claude_in_box, image_locales, image_lc_all = _probe_image(engine, img, env)
     # Resolved HOME paths the agent/editor plugins' box_args need (they only get `env`): the box
@@ -1925,7 +1926,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # The to-box (ADR-0033), read-only: what your computer publishes for every box of the project.
     # The `:ro` is defence in depth — the VM's own mount is read-only on the host's side.
     box_dirs: list[str] = []
-    if from_box:
+    if vm_from_box:  # what the VM shares (verify's exemption), whether or not this box binds a slot
         box_dirs += ["-e", f"{boxmounts.ENV_FROM_BOX}={boxmounts.from_box_dir()}"]
     if machine.to_box_mounted():
         mounts += ["-v", f"{boxmounts.to_box_dir()}:{boxmounts.TO_BOX_IN_BOX}:ro"]

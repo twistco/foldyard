@@ -2900,7 +2900,8 @@ def test_a_worktree_name_no_slot_can_carry_keeps_the_legacy_bind_out(fake, lima_
     run = _find(fake["calls"], has=["run", "-d"])[0]
     legacy = fake["main"] / "dev-stack" / ".devbox-claude" / "projects"
     assert f"{legacy}:/home/vscode/.claude/projects" in run
-    assert not any(v.startswith("FY_FROM_BOX=") for v in _env_values(run))
+    # …but the VM still shares the from-box: in-box verify exempts it, and no recreate nag
+    assert f"FY_FROM_BOX={lima_dirs / 'from-box'}" in _env_values(run)
 
 
 def test_up_refuses_a_slot_the_box_planted_as_a_symlink(fake, lima_dirs, tmp_path):
