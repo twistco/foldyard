@@ -265,7 +265,7 @@ def test_a_skipped_seq_fails_even_with_an_intact_chain():
 
 
 def test_a_re_sent_seq_must_chain_from_the_same_line():
-    lines, macs = _file(2)
+    lines, _ = _file(2)
     stray, mac = ms.signed_line(KEY, _body(n=2), 2, "e" * 64)  # seq 2 of some other chain
     _fails(lines[0] + lines[1] + stray, 3, "seq 2 where 3", (2, mac))
 

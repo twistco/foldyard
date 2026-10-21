@@ -97,6 +97,12 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   the supervisor's: it holds every host.env secret) on their own supervisor thread. The design
   they plug into — storage tiers, source filtering, score → decide → review — is
   [docs/monitor-pipeline.md](./docs/monitor-pipeline.md).
+- `monitorsink.py` — the hooks' built-in `file` sink: an append that walks the path from `/` with
+  `O_NOFOLLOW` per component (a link is followed only when root owns it in a directory the operator
+  can't write — the box writes the checkout AS the operator), each batch one line HMAC-signed with a
+  host-only key (`monitor-sink.key`, never the relay's), numbered and chained; `verify` is
+  `fy monitor check`. `monitorhooks` also edits `monitor-hooks.toml` for `fy monitor hook add|remove`
+  — textual, proven by re-parsing, refusing what it can't change exactly.
 - `guestlog.py` — the VM's log budget (`machine ensure`, every VM backend): journald cap as root
   (Lima: rendered into the boot script; podman machine: `sudo -n` over ssh) + the rootless API
   service's log level as a user drop-in over ssh. Best-effort — a warning, never an abort.
