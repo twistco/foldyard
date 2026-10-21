@@ -20,6 +20,8 @@ Host-side: touches git + the rootless machine. Stdlib only.
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -281,6 +283,20 @@ def _seed_keyless_posture(name: str) -> None:
         print(f"  (couldn't seed keyless mode — set it manually with `fy mode`: {e})")
 
 
+def _branch_name_ok(name: str) -> bool:
+    """Whether git would take ``name`` as a branch (`git check-ref-format --branch`'s rules),
+    checked in-process: it only gates a hint, so it costs no git call."""
+    parts = name.split("/")
+    return not (
+        not name
+        or name == "HEAD"
+        or name.startswith("-")
+        or name.endswith(".")
+        or re.search(r"[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{", name)
+        or any(not p or p.startswith(".") or p.endswith(".lock") for p in parts)
+    )
+
+
 def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -> int:
     """Create a host-sibling worktree under the worktrees root, record it in the host's
     worktree registry, and init its config.
@@ -317,6 +333,16 @@ def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -
         # wt_root entirely (pathlib joins an absolute right-hand side by replacing the base) —
         # so this would point git worktree operations at an arbitrary filesystem path.
         _err(f"✗ '{name}' must be a single relative path component — pick another")
+        # The usual slip is a branch name ("sec/x") where the DIR name goes: suggest both. The
+        # branch is the name's own parts rejoined ("a//b/" → "a/b"), and only one git would
+        # accept is ever suggested: a hint that can't succeed is worse than none.
+        if not path.is_absolute() and not {".", ".."} & set(name.split("/")):
+            dashed = "-".join(path.parts)
+            suggested = branch or "/".join(path.parts)
+            # A dir starting with "-" would be read as an option, so that hint couldn't run either.
+            if _branch_name_ok(suggested) and not dashed.startswith("-"):
+                hint = f"fy worktree add {shlex.quote(dashed)} {shlex.quote(suggested)}"
+                _err(f"  the first argument is the worktree's directory — did you mean `{hint}`?")
         return 1
     main = stack.main_repo()
     wt_root = config.worktrees_root(main)
