@@ -1562,8 +1562,9 @@ def test_claude_errors_when_not_installed(monkeypatch, capsys):
     assert "[claude]" in capsys.readouterr().err  # points at the enabling config
 
 
-def test_claude_execs_with_env_when_ready(monkeypatch):
+def test_claude_execs_with_env_when_ready(monkeypatch, tmp_path):
     monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))  # in a dev box: the LIVE volume
     monkeypatch.setenv("IS_SANDBOX", "1")  # set at box-create; claude() passes the env through
     monkeypatch.delenv("CLAUDE_CODE_NO_FLICKER", raising=False)
     monkeypatch.setattr(box.shutil, "which", lambda name: "/usr/bin/claude")
@@ -1706,6 +1707,10 @@ def gate(monkeypatch, tmp_path):
         monkeypatch.setattr(box.config, f"{agent}_system_prompt", lambda: "")
     monkeypatch.setattr(box.config, "claude_settings", lambda: {})
     monkeypatch.setattr(box.config, "codex_config", lambda: {})
+    # `fy claude` writes into CLAUDE_CONFIG_DIR — in a dev box that's the LIVE volume.
+    (tmp_path / "claude-home").mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
+    monkeypatch.setattr(box.config, "repo_root", lambda: tmp_path / "checkout")
     ns = types.SimpleNamespace(
         modes=["off"], tty=False, enter=False, execed=None, polls=0, stamps=None, clock=[0.0]
     )
@@ -1849,6 +1854,65 @@ def test_launch_gate_says_nothing_without_keyless_or_a_mirror(gate, agent, monke
     box.config.mirror_file().unlink()
     _launch(agent)
     assert gate.execed and capsys.readouterr().err == ""
+
+
+# ── fy claude pre-answers Claude Code's first-run prompts ────────────────────────────────
+
+
+def _claude_home() -> Path:
+    import os
+
+    return Path(os.environ["CLAUDE_CONFIG_DIR"])
+
+
+def test_claude_launch_pre_answers_the_first_run_prompts(gate, tmp_path):
+    # A fresh box asked twice before the first prompt: trust this folder, accept bypass mode. The
+    # box is the boundary for both, so `fy claude` answers them — and starts the theme on "auto".
+    _launch("claude")
+    assert gate.execed
+    settings = json.loads((_claude_home() / "settings.json").read_text())
+    assert settings == {"theme": "auto", "skipDangerousModePermissionPrompt": True}
+    state = json.loads((_claude_home() / ".claude.json").read_text())
+    assert state == {"projects": {str(tmp_path / "checkout"): {"hasTrustDialogAccepted": True}}}
+
+
+def test_claude_launch_keeps_what_claude_or_you_already_wrote(gate, tmp_path):
+    # Defaults only: a theme picked with /theme stays, and Claude's own state is merged, not replaced.
+    home = _claude_home()
+    (home / "settings.json").write_text(json.dumps({"theme": "light", "model": "opus"}))
+    checkout = str(tmp_path / "checkout")
+    before = {
+        "hasCompletedOnboarding": True,
+        "projects": {"/elsewhere": {"allowedTools": []}, checkout: {"lastCost": 1.5}},
+    }
+    (home / ".claude.json").write_text(json.dumps(before))
+    _launch("claude")
+    settings = json.loads((home / "settings.json").read_text())
+    assert settings == {
+        "theme": "light",
+        "model": "opus",
+        "skipDangerousModePermissionPrompt": True,
+    }
+    state = json.loads((home / ".claude.json").read_text())
+    assert state["hasCompletedOnboarding"] is True
+    assert state["projects"]["/elsewhere"] == {"allowedTools": []}
+    assert state["projects"][checkout] == {"lastCost": 1.5, "hasTrustDialogAccepted": True}
+
+
+def test_claude_launch_leaves_an_unreadable_config_alone(gate):
+    # Claude's file, mid-write or corrupt: never ours to repair — the prompt shows, the launch goes on.
+    (_claude_home() / ".claude.json").write_text("{not json")
+    _launch("claude")
+    assert gate.execed
+    assert (_claude_home() / ".claude.json").read_text() == "{not json"
+
+
+def test_claude_launch_writes_nothing_without_its_config_dir(gate, monkeypatch, tmp_path):
+    # Only the dir foldyard mounted for Claude is foldyard's to write; no CLAUDE_CONFIG_DIR = hands off.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _launch("claude")
+    assert gate.execed and not (tmp_path / "home").exists()
 
 
 # ── shell / down / ps ────────────────────────────────────────────────────────────────

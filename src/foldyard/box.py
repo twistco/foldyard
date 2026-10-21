@@ -39,7 +39,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from importlib import metadata
 from pathlib import Path
 
@@ -1228,8 +1228,53 @@ def claude(args: list[str] | None = None) -> int:
         return 1
     if not _await_credential("claude", "Claude", config.claude_keyless()):
         return 130
+    _seed_claude_config(config.repo_root())
     argv = _claude_argv(config.claude_system_prompt(), config.claude_settings(), args or [])
     os.execvpe(argv[0], argv, os.environ.copy())
+
+
+# What a fresh box's Claude Code asked before its first prompt, answered: the bypass-mode warning
+# (`fy claude` always launches with --dangerously-skip-permissions) and a theme that follows your
+# terminal. Defaults, never overrides — a theme picked with /theme stays.
+_CLAUDE_SETTINGS_DEFAULTS = {"theme": "auto", "skipDangerousModePermissionPrompt": True}
+
+
+def _seed_claude_config(root: Path) -> None:
+    """Pre-answer Claude Code's first-run prompts in the box: the defaults above into its
+    ``settings.json``, and the trust dialog for ``root`` (the checkout; trust covers what's under it)
+    into its ``.claude.json``. The dialog guards against the repo's own config — hooks, MCP servers
+    — running, which in here reaches no further than the bypass-mode agent itself: the box is the
+    boundary. Only into ``CLAUDE_CONFIG_DIR``, the volume foldyard mounted for Claude; best-effort,
+    never blocks the launch."""
+    home = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not home:
+        return
+
+    def trust(state: dict) -> dict:
+        projects = state.get("projects") or {}
+        entry = projects.get(str(root)) or {}
+        if entry.get("hasTrustDialogAccepted") is True:
+            return state
+        entry = {**entry, "hasTrustDialogAccepted": True}
+        return {**state, "projects": {**projects, str(root): entry}}
+
+    _merge_json(Path(home) / "settings.json", lambda s: {**_CLAUDE_SETTINGS_DEFAULTS, **s})
+    _merge_json(Path(home) / ".claude.json", trust)
+
+
+def _merge_json(path: Path, update: Callable[[dict], dict]) -> None:
+    """Rewrite a JSON object file through ``update``, atomically and only on a change. Claude's own
+    file — so one that won't parse (corrupt, or caught mid-write) is left to Claude, not repaired.
+    A running session re-reads it under its lock before saving, so it keeps what we add."""
+    try:
+        current = json.loads(path.read_text()) if path.exists() else {}
+        if not isinstance(current, dict) or (new := update(current)) == current:
+            return
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as tmp:
+            json.dump(new, tmp, indent=2)
+        os.replace(tmp.name, path)  # mkstemp's 0600, as Claude writes them
+    except (OSError, ValueError):
+        return
 
 
 def _toml_value(value: object) -> str:
