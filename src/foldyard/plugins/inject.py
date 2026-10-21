@@ -71,6 +71,7 @@ import re
 import shlex
 import sys
 from collections.abc import Iterator
+from dataclasses import replace
 
 from .. import config
 from . import (
@@ -166,7 +167,12 @@ class InjectPlugin(Plugin):
             # docstring: a config-named one reaches every other mechanism's secret.
             rule = _kind(spec).rule(spec, token_var(str(spec["switch"])))
             if rule is not None:
-                rules.append(rule)
+                # The row's box_env dummies are what its client sends where the rule injects — in
+                # whatever scheme that client puts first, as `held_credentials` matches them. They
+                # let a request name this credential on a host another injector shares (ADR-0031
+                # decision 4, amended); a row with none can't be named, and shares nothing.
+                dummies = tuple(dict.fromkeys(spec["box_env"].values()))
+                rules.append(replace(rule, dummies=dummies, any_scheme=bool(dummies)))
         return rules
 
     def held_credentials(self, mode: dict) -> list[HeldCredential]:
@@ -389,4 +395,7 @@ def _spec_to_rule(spec: dict) -> InjectRule | None:
         query_param=query_param,
         path_prefix=str(spec.get("path_prefix", "") or ""),
         value_prefix=str(spec.get("value_prefix", "") or ""),
+        # The keyless agents' exact dummy (``keyless.inject_spec``). A row never carries the key —
+        # `_validated` refuses it — and gets its box_env dummies in `InjectPlugin.proxy_rules`.
+        dummies=tuple(str(d) for d in spec.get("dummies", ())),
     )

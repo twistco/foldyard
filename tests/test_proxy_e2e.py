@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import http.server
 import itertools
+import json
 import os
 import shutil
 import socket
@@ -103,6 +104,13 @@ def _make_upstream(port: int, cert: Path, key: Path) -> http.server.ThreadingHTT
             auth = self.headers.get("Authorization", "<none>")
             if self.path == "/sse":
                 self._sse()
+                return
+            if self.path == "/headers":  # both credential headers, for the shared-host case
+                body = {k: self.headers.get(k, "<none>") for k in ("Authorization", "x-api-key")}
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode())
                 return
             if self.path == "/flap" and not state["flapped"]:
                 state["flapped"] = True
@@ -457,3 +465,61 @@ def test_an_event_stream_reaches_the_box_as_it_is_sent(tmp_path, setting):
         f"events sent {_SSE_GAP:.1f}s apart arrived {', '.join(f'{g:.2f}s' for g in gaps)} apart: "
         "the proxy held an event back until the next one"
     )
+
+
+def test_two_credentials_on_one_host_are_routed_by_the_dummy_each_request_carries(tmp_path):
+    # Header-disjoint injectors sharing a host (Claude Code's OAuth token in Authorization, a
+    # harness's API key in x-api-key): each request gets ONLY the credential whose dummy it
+    # carries, and one naming neither or both is answered by the proxy, never sent.
+    key_minter = tmp_path / "key_minter.py"
+    key_minter.write_text("import json; print(json.dumps({'value': 'KEY-REAL', 'ttl': 3600}))\n")
+    rules = [
+        {
+            "host": HOST,
+            "command": f"{sys.executable} {tmp_path / 'minter.py'}",  # _MINTER: "token FAKE"
+            "header": "Authorization",
+            "dummies": ["Bearer OAUTH-DUMMY"],
+            "switch": "claude",
+            "retry_401": False,
+        },
+        {
+            "host": HOST,
+            "command": f"{sys.executable} {key_minter}",
+            "header": "x-api-key",
+            "dummies": ["x"],
+            "any_scheme": True,
+            "switch": "haiku",
+            "retry_401": False,
+        },
+    ]
+    with _running_proxy(tmp_path, _MINTER, {"INJECT_RULES": json.dumps(rules)}) as proxy:
+        import requests
+
+        def send(headers: dict[str, str]):
+            s = requests.Session()
+            s.trust_env = False
+            return s.get(
+                f"https://{HOST}:{proxy.uport}/headers",
+                proxies={"https": f"http://{HOST}:{proxy.pport}"},
+                verify=str(proxy.ca),
+                headers=headers,
+                timeout=20,
+            )
+
+        oauth = send({"Authorization": "Bearer OAUTH-DUMMY"})
+        assert oauth.status_code == 200, proxy.mitm_log.read_text()
+        assert oauth.json() == {"Authorization": "token FAKE", "x-api-key": "<none>"}
+        key = send({"X-Api-Key": "x"})  # the header's spelling is the client's
+        assert key.json() == {"Authorization": "<none>", "x-api-key": "KEY-REAL"}
+        for headers, carried in (
+            ({"Authorization": "Bearer OAUTH-DUMMY", "x-api-key": "x"}, "more than one"),
+            ({}, "none"),
+        ):
+            answered = send(headers)
+            assert answered.status_code == 502
+            message = answered.json()["message"]
+            assert f"carried {carried} of their placeholders" in message
+            assert "`claude`" in message and "`haiku`" in message
+        rows = _log_entries(proxy.log)
+    assert sum(bool(r.get("unnamed")) for r in rows) == 2
+    assert sum(bool(r.get("injected")) for r in rows) == 2
