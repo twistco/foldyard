@@ -276,9 +276,23 @@ def _vm_boundary(
     if not host:
         rep.ok("VM mount table (PID 1's namespace) free of host home/paths beyond the repo mounts")
     else:
-        rep.bad(f"VM exposes host paths: {host[0]}")
+        rep.bad(f"VM exposes host paths: {host[0]}{_predates_box_dirs_hint(host)}")
     if to_box:
         _to_box_rows(rep, engine, env, probe, mp.stdout, to_box, to_box_expected)
+
+
+def _predates_box_dirs_hint(leaks: list[str]) -> str:
+    """A box created before ADR-0033's to-box and from-box has neither path baked
+    (:func:`boxmounts.vm_paths`), so once its VM shares them they aren't exempt here. They stay a
+    FAIL — nothing is exempted by guess — but one that names the likely cause and the fix."""
+    if not config.in_box() or any(boxmounts.vm_paths()):
+        return ""
+    if all(_mountpoint(ln).endswith(("/to-box", "/from-box")) for ln in leaks):
+        return (
+            " — if that is foldyard's to-box/from-box, this box was created before them and "
+            "doesn't know their paths: `fy box down && fy box up`"
+        )
+    return ""
 
 
 # Where the write probe binds the to-box. A fixed path in the probe container's own namespace.
@@ -328,7 +342,7 @@ def _to_box_rows(
         f"if mount -o remount,rw {_TO_BOX_AT} 2>/dev/null; then echo remount=done; "
         "else echo remount=refused; fi; "
         f'if (: >"{target}") 2>/dev/null; then echo write=LANDED; '
-        f'rm -f "{target}" 2>/dev/null && echo removed=yes; else echo write=refused; fi'
+        f'rm -f "{target}" 2>/dev/null && echo removed=yes; else echo write=refused; fi; true'
     )
     got = _run(
         [
@@ -338,7 +352,7 @@ def _to_box_rows(
         env,
         capture=True,
     )  # fmt: skip
-    out = got.stdout if got.returncode == 0 else ""
+    out = got.stdout or ""  # judged by what it printed: a failed cleanup must not hide a write
     if "write=" not in out:
         rep.bad("the to-box write probe did not run — read-only UNPROVEN")
     elif "write=LANDED" in out:

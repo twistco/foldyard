@@ -628,13 +628,16 @@ def archive_legacy(checkout: Path, here: str) -> None:
     for src, what, project_of, dest in trees:
         if not _has_entries(checkout, src):
             continue
-        if sync_archive(src, anchor=checkout, project_of=project_of, what=what, dest=dest) == 0:
+        rc, detail, _ = _archive(
+            src, anchor=checkout, project_of=project_of, dest=dest, what=what, quiet=True
+        )
+        if rc in BENIGN_RC:  # one line, not the archive's ▶/✓ pair: this runs at every `box up`
             print(
                 f"ℹ transcripts now bind out to foldyard's from-box; the old {src} is archived "
                 "and can be deleted."
             )
         else:
-            print(f"⚠ {src} (the old layout) could not be fully archived — keep it for now.")
+            print(f"⚠ {src} (the old layout) could not be fully archived ({detail}) — keep it.")
 
 
 def sync_archive(

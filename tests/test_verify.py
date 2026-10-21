@@ -890,3 +890,31 @@ def test_in_the_box_with_no_to_box_baked_there_is_no_row(tmp_path, monkeypatch, 
     verify._to_box_in_box(rep)
     assert rep.fails == rep.warns == 0
     assert capsys.readouterr().out == ""
+
+
+def test_a_box_from_before_the_two_directories_fails_with_the_recreate_hint(
+    secure_engine, monkeypatch, capsys
+):
+    # Review on #115: a box created before ADR-0033 has no FY_FROM_BOX / FY_TO_BOX, so once its VM
+    # restarts with them, foldyard's own mounts aren't exempt there. Never exempted by guess — a
+    # FAIL still — but one that says what it is and how to clear it.
+    _, results = secure_engine
+    monkeypatch.setattr(verify.config, "in_box", lambda: True)
+    monkeypatch.setattr(verify, "_box_posture", lambda rep, env: None)
+    results["pid1_mounts"] = f"mount3 {TO_BOX} virtiofs ro,relatime 0 0\n"
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "VM exposes host paths" in out and "fy box down && fy box up" in out
+    # …while a real leak gets no such hint
+    results["pid1_mounts"] = f"mount3 {pathlib.Path.home()} virtiofs rw 0 0\n"
+    assert verify.verify() == 1
+    assert "fy box down && fy box up" not in capsys.readouterr().out
+
+
+def test_a_write_that_lands_and_cant_be_removed_still_names_the_file(with_to_box, capsys):
+    _, results = with_to_box
+    results["to_box_rc"] = 1  # `rm` failed: the shell's last status
+    results["to_box_probe"] = "remount=refused\nwrite=LANDED\n"
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "CREATED" in out and "LEFT there" in out and "UNPROVEN" not in out
