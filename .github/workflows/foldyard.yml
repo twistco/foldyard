@@ -10,6 +10,10 @@ concurrency:
   group: foldyard-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only: the job checks out and tests; it writes nothing back to the repository.
+permissions:
+  contents: read
+
 jobs:
   check:
     name: lint + types + unit
