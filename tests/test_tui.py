@@ -1021,6 +1021,69 @@ async def test_tree_panel_preserves_expand_state_across_a_rebuild(monkeypatch):
         assert tree.root.children[0].is_expanded  # expand state survived the rebuild
 
 
+def _capped(key: str, requests: int, newest: str) -> plugins.PanelGroup:
+    # A host past the Network Log's row cap: always the same number of children however much
+    # traffic it gets — its label and its rows change, its child count doesn't.
+    return plugins.PanelGroup(
+        key=key,
+        label=f"{key}  {requests} req",
+        children=[newest, *(f"r{i}" for i in range(49)), f"… {requests - 50} earlier"],
+    )
+
+
+async def test_tree_panel_updates_a_capped_group_whose_child_count_holds(monkeypatch):
+    # The rebuild used to key on (group, child count) only, so once every host was capped and the
+    # order held, the panel froze at its first paint: tallies, newest rows, "N earlier" and all.
+    state = {"data": plugins.PanelTree(summary="s", groups=[_capped("a.com", 60, "GET /1")])}
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_TreePanelPlugin(lambda: state["data"]))
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        tree = app.query_one("#tree-tree", tui.Tree)
+        state["data"] = plugins.PanelTree(summary="s", groups=[_capped("a.com", 61, "GET /2")])
+        app.refresh_panels()
+        group = tree.root.children[0]
+        assert "61 req" in str(group.label)
+        assert str(group.children[0].label) == "GET /2"
+        assert str(group.children[-1].label) == "… 11 earlier"
+
+
+async def test_tree_panel_keeps_the_cursor_on_its_host_across_refreshes(monkeypatch):
+    # Traffic changes the panel every second; the operator must be able to rest the cursor on a
+    # host long enough to press `a`. A label-only change keeps every node; a reorder rebuilds and
+    # puts the cursor back on the same host.
+    state = {
+        "data": plugins.PanelTree(
+            summary="s", groups=[_capped("a.com", 60, "x"), _capped("b.com", 60, "y")]
+        )
+    }
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_TreePanelPlugin(lambda: state["data"]))
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        tree = app.query_one("#tree-tree", tui.Tree)
+        tree.focus()
+        tree.cursor_line = 1  # b.com
+        await pilot.pause()
+        assert tree.cursor_node is not None and tree.cursor_node.data == "b.com"
+        state["data"] = plugins.PanelTree(
+            summary="s", groups=[_capped("a.com", 61, "x2"), _capped("b.com", 62, "y2")]
+        )
+        app.refresh_panels()
+        await pilot.pause()
+        assert tree.cursor_node is not None and tree.cursor_node.data == "b.com"
+        state["data"] = plugins.PanelTree(
+            summary="s", groups=[_capped("b.com", 63, "y3"), _capped("a.com", 61, "x2")]
+        )
+        app.refresh_panels()
+        await pilot.pause()
+        assert tree.cursor_node is not None and tree.cursor_node.data == "b.com"
+
+
 class _NetworkPanelPlugin(plugins.Plugin):
     """A tree panel with the Network Log's id, so the allow-host action (which keys off
     `#network-tree` / `tab-network`) has its real target to drive in the pilot."""

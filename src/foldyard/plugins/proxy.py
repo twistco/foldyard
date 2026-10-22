@@ -261,6 +261,10 @@ BOX_CA_BUNDLE = Path("/etc/dev-proxy-ca-combined.pem")
 # One filename constant so the daemon's PROXY_LOG_FILE and the panel never drift.
 _PROXY_LOG = "egress.jsonl"
 
+# The most host groups the panel renders, and of them the most floated for an unanswered refusal.
+_NET_GROUPS = 200
+_NET_FLOATED = 50
+
 # One index per log path, kept across the panel's repaints so each reads only what was appended.
 _NET_INDEXES: dict[Path, _netlog.NetworkIndex] = {}
 
@@ -368,19 +372,23 @@ def _network_panel_tree() -> PanelTree:
     tallies over all of it) whose children are its newest requests, newest first, capped at
     :data:`._netlog.KEEP` plus any older refusal, then a line saying how many are earlier. Hosts
     with a refusal the operator hasn't answered come first — those are the rows to act on — then
-    the rest by most-recent activity. Called by the TUI on a timer, so the rich import is lazy
-    here — the module stays stdlib-only on the registry hot path. Untrusted text (hosts, paths)
-    is escaped before it carries any markup."""
+    the rest by most-recent activity, :data:`_NET_GROUPS` at most. Called by the TUI on a timer,
+    so the rich import is lazy here — the module stays stdlib-only on the registry hot path.
+    Untrusted text (hosts, paths) is escaped before it carries any markup."""
     from rich.markup import escape  # lazy: only when the TUI paints this panel
 
     from .. import allowlist  # lazy, as in _default_deny
 
     log = _proxy_log()
     snap = _network_index().refresh()
-    # Most recently active host first (ISO ts sorts lexically), then — a stable sort — the hosts
-    # still refused on top. Only a host with a refusal is looked up in the allow-store.
-    ordered = sorted(snap.hosts, key=lambda v: v.last_ts, reverse=True)
-    ordered.sort(key=lambda v: not (v.blocked and not allowlist.answered(v.host)))
+    # Most recently active host first (ISO ts sorts lexically), the hosts the wall refused and the
+    # operator hasn't answered on top — at most _NET_FLOATED of them, and none in the slots
+    # below: the box decides how many hosts get refused, and a flood of made-up names mustn't
+    # push the hosts it really uses off the panel.
+    recent = sorted(snap.hosts, key=lambda v: v.last_ts, reverse=True)
+    owed = allowlist.unanswered(v.host for v in recent if v.refused)
+    floated = [v for v in recent if v.host in owed][:_NET_FLOATED]
+    ordered = floated + [v for v in recent if v.host not in owed][: _NET_GROUPS - len(floated)]
 
     groups: list[PanelGroup] = []
     for v in ordered:
@@ -401,9 +409,10 @@ def _network_panel_tree() -> PanelTree:
         groups.append(PanelGroup(key=v.host, label=header, children=children))
 
     since = f" · since {snap.since[:16].replace('T', ' ')}" if snap.since else ""
+    shown = f" ({len(groups)} shown)" if len(groups) < len(snap.hosts) else ""
     summary = (
-        f"{snap.requests} requests across {len(groups)} hosts · {snap.injected} with injected "
-        f"Authorization{since} · [dim]{log}[/dim]"
+        f"{snap.requests} requests across {len(snap.hosts)} hosts{shown} · {snap.injected} with "
+        f"injected Authorization{since} · [dim]{log}[/dim]"
         if groups
         else "no proxied traffic yet — the box routes through the always-on proxy; make a request "
         f"(or check the supervisor: `fy host`) · [dim]{log}[/dim]"

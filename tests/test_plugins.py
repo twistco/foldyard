@@ -1833,6 +1833,48 @@ def test_network_panel_puts_hosts_with_unanswered_refusals_first(monkeypatch, tm
     assert keys == ["api.anthropic.com", "pypi.org", "ftp.gnu.org", "dot.net"]
 
 
+def test_network_panel_reads_the_allow_store_once_per_repaint(monkeypatch, tmp_path):
+    # The box decides how many hosts get refused; the panel repaints every second. Reading the
+    # store per refused host let a box flooding made-up names make the panel unusable.
+    from foldyard import allowlist
+
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    reads: list[int] = []
+    real = allowlist._load_raw
+    monkeypatch.setattr(allowlist, "_load_raw", lambda: reads.append(1) or real())
+    _net_rows(tmp_path / "egress.jsonl", [_refused(f"h{i}.example", 0, i) for i in range(30)])
+    proxy._network_panel_tree()
+    assert len(reads) <= 2  # declined + the live grants, whatever the number of hosts
+
+
+def test_network_panel_does_not_float_a_host_refused_only_for_its_host_header(
+    monkeypatch, tmp_path
+):
+    # A Host-header mismatch is refused whatever is granted, and never offered for a grant — so it
+    # is no answer the operator owes.
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    _net_rows(
+        tmp_path / "egress.jsonl",
+        [{**_refused("spoofed.example", 0), "mismatch": True}, _ok("pypi.org", 1)],
+    )
+    groups = proxy._network_panel_tree().groups
+    assert [g.key for g in groups] == ["pypi.org", "spoofed.example"]
+    assert "⛔ 1 blocked" in groups[1].label  # still counted, just not floated
+
+
+def test_network_panel_bounds_the_hosts_it_renders(monkeypatch, tmp_path):
+    # Unanswered refusals first, but a flood of them can't push every real host off the panel.
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    log = tmp_path / "egress.jsonl"
+    _net_rows(log, [_ok(f"real{i}.example", 0, i % 60) for i in range(200)])
+    _net_rows(log, [_refused(f"fake{i}.example", 1, i % 60) for i in range(100)])
+    data = proxy._network_panel_tree()
+    keys = [g.key for g in data.groups]
+    assert len(keys) == 200
+    assert all(k.startswith("fake") for k in keys[:50]) and keys[50].startswith("real")
+    assert "300 requests across 300 hosts" in data.summary and "200 shown" in data.summary
+
+
 def test_gcp_panel_data_rows_summary_and_escaping(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
     (tmp_path / "gcp-minter.jsonl").write_text(

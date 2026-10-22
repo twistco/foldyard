@@ -65,9 +65,10 @@ from textual.widgets import (
     TabPane,
     Tree,
 )
+from textual.widgets.tree import TreeNode
 
 from . import allowlist, config, configpin, devmode, term
-from .plugins import DoctorFix, PanelData, PanelTree, TuiPanel, registry
+from .plugins import DoctorFix, PanelData, PanelGroup, PanelTree, TuiPanel, registry
 
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -670,9 +671,9 @@ class DevModeTui(App):
         manage = self.query("#network-manage")
         if manage:
             manage.first(DataTable).add_columns("", "host", "why / expiry")
-        # Tree-panel rebuild guard: panel-id → last (key, child-count) signature, so a tree only
-        # rebuilds when its data changed (otherwise the user's expand/collapse state is left alone).
-        self._tree_sigs: dict[str, tuple] = {}
+        # Tree-panel guard: panel-id → the PanelTree last rendered, so a tree is touched only when
+        # its data changed, and relabelled in place while its groups' order holds.
+        self._tree_data: dict[str, PanelTree] = {}
         self.refresh_workspaces()
         self._select_launch_workspace()
         self.refresh_mode()
@@ -1533,17 +1534,30 @@ class DevModeTui(App):
                 table.add_row(*row)
 
     def _refresh_tree_panel(self, panel: TuiPanel, data: PanelTree) -> None:
-        """Render a tree-kind panel's PanelTree as a Textual Tree (groups → their rows). Rebuilds
-        only when the (group key, child count) signature changed; across a rebuild the user's
-        expanded groups are preserved by key (live counts in the labels would otherwise reset it).
-        While unchanged we don't touch the tree at all, so native expand/collapse just works."""
+        """Render a tree-kind panel's PanelTree as a Textual Tree (groups → their rows). While the
+        groups' order holds, the nodes are kept and only what changed is relabelled, so the cursor
+        and native expand/collapse stay where the user left them — a capped group's labels and
+        rows change while its child count doesn't. A new order rebuilds, keeping the expanded
+        groups open and the cursor on its group, both by key."""
         tree = self.query_one(f"#{panel.id}-tree", Tree)
         self.query_one(f"#{panel.id}-summary", Static).update(data.summary)
-        sig = tuple((g.key, len(g.children)) for g in data.groups)
-        if self._tree_sigs.get(panel.id) == sig:
+        previous = self._tree_data.get(panel.id)
+        if previous == data:
             return
-        self._tree_sigs[panel.id] = sig
+        self._tree_data[panel.id] = data
+        if previous is not None and [g.key for g in previous.groups] == [
+            g.key for g in data.groups
+        ]:
+            for node, old, new in zip(
+                tree.root.children, previous.groups, data.groups, strict=True
+            ):
+                self._update_group(node, old, new)
+            return
         expanded = {n.data for n in tree.root.children if n.is_expanded}  # keep open groups open
+        at = tree.cursor_node
+        while at is not None and at.parent is not None and at.parent is not tree.root:
+            at = at.parent  # a row's cursor goes back to its group
+        at_key = at.data if at is not None else None
         tree.clear()
         tree.show_root = False
         for g in data.groups:
@@ -1553,6 +1567,26 @@ class DevModeTui(App):
             if g.key in expanded:
                 node.expand()
         tree.root.expand()
+        for node in tree.root.children:
+            if at_key is not None and node.data == at_key:
+                tree.move_cursor(node)
+                break
+
+    @staticmethod
+    def _update_group(node: TreeNode, old: PanelGroup, new: PanelGroup) -> None:
+        """Bring one group's node from ``old`` to ``new`` without replacing the node."""
+        if old.label != new.label:
+            node.set_label(Text.from_markup(new.label))
+        if old.children == new.children:
+            return
+        if len(old.children) == len(new.children):
+            for leaf, was, now in zip(node.children, old.children, new.children, strict=True):
+                if was != now:
+                    leaf.set_label(Text.from_markup(now))
+            return
+        node.remove_children()
+        for child in new.children:
+            node.add_leaf(Text.from_markup(child))
 
     def _manage_data(self) -> tuple[str, list[tuple[str, str, str]], list[tuple[str, str]]]:
         """``(summary, rows, keys)`` for the wall pane — pending recommendation offers first (the

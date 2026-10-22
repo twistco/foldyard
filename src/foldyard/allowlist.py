@@ -35,7 +35,7 @@ import os
 import re
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -678,13 +678,18 @@ def live_hosts() -> list[str]:
     return [g["host"] for g in grants() if g["scope"] == "runtime"]
 
 
-def answered(key: str) -> bool:
-    """Whether the operator has answered a refused host ``key`` on this computer: a live runtime
-    grant covers it (the proxy's semantics, :func:`_matches`) or they declined it. What the Network
-    Log floats is the refusals still unanswered. An unreadable store reads as answered, as
-    :func:`declined` does — it re-opens nothing."""
+def unanswered(keys: Iterable[str]) -> set[str]:
+    """The refused host ``keys`` the operator hasn't answered on this computer: no live runtime
+    grant covers one (the proxy's grant semantics, :func:`_matches`) and it wasn't declined (an
+    exact entry, as every reader of :func:`declined` takes it). What the Network Log floats. The
+    store is read once however many keys there are — the panel asks every second, for every host
+    the box got refused. An unreadable store answers everything, as :func:`declined` does: it
+    re-opens nothing."""
     refused = declined()
-    return "*" in refused or key in refused or _matches(key, live_hosts())
+    if "*" in refused:
+        return set()
+    granted = live_hosts()
+    return {key for key in keys if key not in refused and not _matches(key, granted)}
 
 
 def build_hosts() -> list[str]:

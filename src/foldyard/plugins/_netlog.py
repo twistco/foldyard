@@ -40,6 +40,7 @@ class _Host:
     requests: int = 0
     injected: int = 0
     blocked: int = 0
+    refused: int = 0  # the blocked rows the WALL refused — a grant's to answer, unlike a mismatch
     would_block: int = 0
     held: int = 0
     errors: int = 0  # 4xx/5xx the proxy didn't answer itself (a refusal or a held dummy is not one)
@@ -54,6 +55,7 @@ class _Host:
         self.held += bool(e.get("held"))
         if e.get("blocked"):
             self.blocked += 1
+            self.refused += not e.get("mismatch")
             self.refusals.append(e)
         elif not e.get("held") and _status(e) >= 400:
             self.errors += 1
@@ -97,6 +99,7 @@ class HostView:
     requests: int
     injected: int
     blocked: int
+    refused: int
     would_block: int
     held: int
     errors: int
@@ -179,6 +182,7 @@ def _merge(files: list[_File]) -> Snapshot:
                 requests=sum(p.requests for p in parts),
                 injected=sum(p.injected for p in parts),
                 blocked=sum(p.blocked for p in parts),
+                refused=sum(p.refused for p in parts),
                 would_block=sum(p.would_block for p in parts),
                 held=sum(p.held for p in parts),
                 errors=sum(p.errors for p in parts),
