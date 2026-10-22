@@ -148,11 +148,16 @@ def render(opts: InitOptions) -> str:
     project grows into (agents, then a stack + the rest). The header spells out the intended
     order so the file bootstraps itself.
 
-    Deliberately ABSENT (documented in docs/configuration.md instead): the posture-wiring tier —
-    ``[[overlay]]``, ``[[require]]``, ``[[inject]]``, the credential plugins. A scaffold has no
-    axes to wire yet. If a stack/overlay section is ever added here, ``[[require]]`` must ride
-    along with it (they're one tier: an overlay creates the coupling a require declares); until
-    then the onboarding pathway is the example consumer + compose-overlays.md's worked example."""
+    Credential switches ship COMMENTED like the rest — the keyless agents, and the two GitHub
+    ``[[inject]]`` rows (an App token, and your own as an emergency switch): which credentials a
+    project may use, and what its switches are called, is a team decision, so it belongs in the
+    shared file, and a declared row is off until someone turns it on.
+
+    Deliberately ABSENT (documented in docs/configuration.md instead): ``[[overlay]]`` and
+    ``[[require]]`` — they couple the mode to a stack, and a scaffold has none yet. If a
+    stack/overlay section is ever added here, ``[[require]]`` must ride along with it (they're one
+    tier: an overlay creates the coupling a require declares); until then the onboarding pathway
+    is the example consumer + compose-overlays.md's worked example."""
     prefix = _slug(opts.name)
     lines = [
         f"# foldyard config — {opts.name}",
@@ -164,10 +169,13 @@ def render(opts: InitOptions) -> str:
         "#      allowlist LEARNING for an hour: setup isn't refused, every host it would have refused",
         "#      is recorded, and then it ENFORCES by itself. `fy allow learn` grants what it saw in",
         "#      one reviewed batch ([proxy] below).",
-        "#   2. Uncomment ONE agent ([claude] or [codex]) + `fy box up` again — now an AI agent",
-        "#      runs INSIDE the safe sandbox (it offers that agent's install hosts the same way).",
-        "#      Use it to work out the rest of this config with you.",
-        "#   3. Uncomment a stack + the features at the bottom as the project needs them.",
+        "#   2. Uncomment ONE agent ([claude] or [codex]), `fy config adopt`, then",
+        "#      `fy box down && fy box up` — the agent is installed when the box is CREATED, so a",
+        "#      running box won't pick it up (with `keyless`, then `fy mode claude=on`). Now an AI",
+        "#      agent runs INSIDE the safe sandbox (it offers that agent's install hosts the same",
+        "#      way). Use it to work out the rest of this config with you.",
+        "#   3. Uncomment a stack + the features at the bottom as the project needs them. Box",
+        "#      settings are create-time too: adopt, then `fy box down && fy box up`.",
         "# Resolution everywhere: explicit env var wins → foldyard.local.toml (gitignored,",
         "# per-developer overrides) → this file → built-in default. Keep what's PERSONAL out of",
         "# here: which agent subscription you pay for, how big your VM is, a pinned worktree port.",
@@ -182,11 +190,14 @@ def render(opts: InitOptions) -> str:
         f'prefix = "{prefix}"',
         *_version_lines(opts.version),
         "# A compose stack to drive alongside the box — uncomment when you have one (step 3), add",
-        "# its host ports under [ports] below, and extend [claude].system_prompt with the stack",
-        "# paragraph parked beside it (an agent that knows the box but not the stack is half-lost).",
+        "# its host ports under [ports] below and its service names to [proxy] no_proxy, and",
+        "# extend [claude].system_prompt with the stack paragraph parked beside it (an agent that",
+        "# knows the box but not the stack is half-lost).",
         '#   app = "app"                # the app service (fy shell target)',
         '#   app_port = "WEB_PORT"      # [ports] key shown in the TUI + opened by `fy open`',
         '#   compose = ["compose.yml"]  # compose files in -f order, relative to this dir',
+        '#   worktree_init = "scripts/worktree-init.sh"  # copies gitignored files (.env…) into',
+        "#                              # each new worktree; runs in a container, never on your computer",
         "# Why this repo wanted each foldyard it adopted. Both version messages list the entries",
         "# between the fy you have and the one you're being pointed at, so an upgrade prompt says",
         "# what you'd GAIN. A sub-table, so it must stay last in [project]:",
@@ -204,10 +215,11 @@ def render(opts: InitOptions) -> str:
         "#                         # nothing stops a process that ignores it (cooperative only)",
         "#   host_firewall = true  # Linux: enforce the same firewall on your computer too",
         "#                         # (nftables; you install it once — `fy machine host-firewall`",
-        "#                         # prints the steps)",
-        '#   runtime = "gvisor"    # the box (and what it creates) under gVisor\'s userspace kernel',
-        "#                         # (a kernel-exploit layer; ~1.2x on a test suite; edits from",
-        "#                         # your computer need dev-server polling — docs/configuration.md)",
+        "#                         # prints the steps). Only if every developer is on Linux: fy",
+        "#                         # refuses to start where it can't (macOS, stock WSL2)",
+        '#   runtime = "gvisor"    # (experimental) the box (and what it creates) under gVisor\'s',
+        "#                         # userspace kernel: a kernel-exploit layer; ~1.2x on a test",
+        "#                         # suite; edits from your computer need dev-server polling",
         'backend = "lima"',
         "firewall = true",
         f'name = "{prefix}"',
@@ -257,6 +269,8 @@ def render(opts: InitOptions) -> str:
         "]",
         '# passthrough = ["@jvm", "@linux"]   # the default: tunnelled UN-decrypted (Java, apt);',
         '#                                    # the rest is decrypted. ["@all"] = every bundle',
+        '# no_proxy = ["{project}-db", "redis"]  # step 3: your stack\'s service names, reached',
+        "#                                    # directly — through the proxy they hang, then 502",
         "",
         "# ── Agents — uncomment ONE, then `fy box up` (step 2) ────────────────────────────────────",
         "# Claude Code (`fy claude`). Declaring [claude] installs it on box-up + mounts its persisted",
@@ -271,6 +285,8 @@ def render(opts: InitOptions) -> str:
         "# [claude]",
         '# keyless = "oauth"      # Bearer on api.anthropic.com ← `claude setup-token` on your computer',
         '# # keyless = "api-key"  # x-api-key on api.anthropic.com ← from console.anthropic.com',
+        "# # (on your own, keyless is fine here; on a team, put it in foldyard.local.toml — which",
+        "# #  subscription you pay for is personal, and a shared one prompts every colleague)",
         '# system_prompt = """',
         "# You are root in this project's foldyard dev box, started by `fy claude` with permission",
         "# prompts skipped. Orientation, so you don't have to re-derive it:",
@@ -320,7 +336,9 @@ def render(opts: InitOptions) -> str:
         "#",
         "# OpenAI Codex CLI (`fy codex`). Declaring [codex] installs it on box-up + mounts ~/.codex.",
         "# Native installer (a static binary — no node needed). Keyless like Claude: the proxy",
-        "# injects on your computer. Leave `keyless` out and you get a plain in-box `codex login` instead.",
+        "# injects on your computer. Leave `keyless` out for an in-box `codex login --api-key` (the",
+        "# ChatGPT browser login can't complete in the box). On a team, `keyless` goes in",
+        "# foldyard.local.toml, as for [claude].",
         "# [codex]",
         '# keyless = "api-key"    # Authorization: Bearer ← OPENAI_API_KEY (captured to host.env)',
         '# # keyless = "chatgpt"  # ChatGPT subscription: a token service refreshes ~/.codex/auth.json',
@@ -331,6 +349,27 @@ def render(opts: InitOptions) -> str:
         "# [codex.config]",
         '# model_reasoning_summary = "auto"',
         "# tui = { raw_output_mode = false }",
+        "",
+        "# ── GitHub — uncomment as you need it (step 3) ───────────────────────────────────────────",
+        "# Two switches, both off until you turn one on; `fy docs github-app` sets up the App.",
+        "# `github` is a GitHub App installation token minted on your computer — the App's",
+        "# permissions on github.com are its scope. `github-user` is YOUR OWN `gh` token, an",
+        "# emergency switch: `fy mode github-user=on ttl=30m`, and it switches itself off. Both",
+        "# inject on api.github.com only, so `gh` can act there while `git push` still can't. The box",
+        "# holds a dummy GH_TOKEN for the proxy to replace; the packaged box has no `gh`, so add",
+        '# `packages = ["gh"]` under [box]. A new row takes `fy box down && fy box up`.',
+        "# [[inject]]",
+        '# switch = "github"                 # the App\'s PEM → host.env FY_INJECT_GITHUB (prompted)',
+        '# kind = "github-app"',
+        '# app_id = "123456"',
+        '# installation_id = "7654321"',
+        '# box_env = { GH_TOKEN = "x" }',
+        "#",
+        "# [[inject]]",
+        '# switch = "github-user"',
+        '# kind = "gh-cli"',
+        "# emergency = true",
+        '# box_env = { GH_TOKEN = "x" }',
         "",
         "# ── The rest — uncomment as you grow (step 3) ────────────────────────────────────────────",
         "# Ports published on your computer, keyed by the env var your compose file reads.",
@@ -458,6 +497,15 @@ def render_local(opts: InitOptions) -> str:
         f"# cpus = {opts.cpus}",
         f"# memory_mib = {opts.memory_mib}   # MiB — any whole number",
         f"# disk_gib = {opts.disk_gib}",
+        '# vmtype = "vz"   # the hypervisor, at creation: vz is macOS only, qemu everywhere',
+        "#",
+        "# Desktop notifications when a credential stops or starts working (macOS today).",
+        "# [host]",
+        "# notifications = false",
+        "#",
+        "# Your agent's own session settings, merged over the shared ones key by key.",
+        "# [claude.settings]",
+        '# model = "opus"',
         "",
         "# ── Pin a worktree's host-port offset ────────────────────────────────────────────────────",
         "# A worktree's ports are offset by a deterministic 1..89 hash of its name, so two checkouts",
@@ -470,16 +518,18 @@ def render_local(opts: InitOptions) -> str:
         "# my-worktree = 1",
         "",
         "# ── A private injector (e.g. your own MCP endpoint) ──────────────────────────────────────",
-        "# Same shape as the [[inject]] tables in foldyard.toml, and it becomes its own on/off",
-        "# switch in the mode (`fy mode myservice=on`). The token is read host-side from",
-        "# $FY_INJECT_MYSERVICE in ~/.foldyard/<project>/host.env — the box only ever holds a",
-        "# dummy. Add the hostname to the egress allowlist too (`fy allow add my-host.example.com`),",
-        "# or the proxy refuses it.",
+        "# A static token of your own, as its own on/off switch (`fy mode myservice=on`). The token",
+        "# is read host-side from $FY_INJECT_MYSERVICE in ~/.foldyard/<project>/host.env; the box",
+        "# holds only the dummy in `box_env`, which its client sends for the proxy to replace. While",
+        "# the switch is on its host is allowed through the proxy — no grant needed.",
+        "# An [[inject]] here REPLACES the shared file's rows WHOLESALE: copy in every row of",
+        "# foldyard.toml you still want, or they're gone for you.",
         "# [[inject]]",
         '# switch = "myservice"',
         '# host   = "my-host.example.com"',
         '# header = "Authorization"',
         '# label  = "My private service"',
+        '# box_env = { MYSERVICE_TOKEN = "x" }',
         "# emergency = true   # optional: `on` expires (default 1h) and switches itself off",
     ]
     return "\n".join(lines) + "\n"
@@ -587,7 +637,7 @@ def init(
         verb = "created" if gitignore_status == "created" else "updated"
         print(f"✓ {verb} {target / '.gitignore'} (box-generated dirs + foldyard.local.toml)")
     _install_agent_skill(target, force=force)
-    print("  A locked-down, stack-less Lima box. Next: `foldyard box up` then `foldyard box shell`")
-    print("  (needs Lima: https://lima-vm.io — `brew install lima` on macOS). The file itself")
-    print("  guides what to uncomment next.")
+    print("  A locked-down, stack-less Lima box. Next: `fy prereq` (what this computer still")
+    print("  needs; `--fetch` bakes the base VM), then `fy box up` and `fy box shell`. The file")
+    print("  itself guides what to uncomment next.")
     return 0

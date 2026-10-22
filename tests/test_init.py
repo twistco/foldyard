@@ -355,3 +355,107 @@ def test_template_learns_then_enforces_and_recommends_the_bootstrap_hosts():
     entries = {e["host"]: e["why"] for e in doc["proxy"]["recommend"]}
     assert "pypi.org" in entries and "github.com" in entries
     assert all(why for why in entries.values())  # every recommendation carries its why
+
+
+# ── what the scaffold teaches must match what fy does today ───────────────────────────────
+
+
+def _both(opts: init.InitOptions | None = None) -> str:
+    opts = opts or init.InitOptions(name="x")
+    return init.render(opts) + init.render_local(opts)
+
+
+def test_every_experimental_setting_the_scaffold_offers_says_so():
+    # The register (experimental.py) is the one list; docs/configuration.md is held to it by
+    # test_experimental.py, and the two scaffolds are held to it here: a line offering an
+    # experimental value must say so on that line or the comment line after it.
+    from foldyard import experimental
+
+    lines = _both().splitlines()
+    for feature in experimental.REGISTER:
+        field = feature.key.split(".", 1)[1]
+        offer = re.compile(rf'^#?\s*{re.escape(field)}\s*=\s*"{re.escape(feature.value)}"')
+        for i, line in enumerate(lines):
+            if offer.search(line):
+                said = " ".join(lines[i : i + 2]).lower()
+                assert "experimental" in said, f"the scaffold offers {feature.label} untagged"
+
+
+def test_step_two_recreates_the_box_because_an_agent_is_installed_at_create():
+    # `fy box up` on a running box only says "already up": the agent install and its dummy are
+    # create-time, and the adopt prompt defaults to ignore. The sequence the quickstart teaches:
+    header = init.render(init.InitOptions(name="x")).split("[project]", 1)[0]
+    assert "+ `fy box up` again" not in header
+    for step in ("fy config adopt", "fy box down && fy box up", "fy mode claude=on"):
+        assert step in header, f"step 2 no longer says `{step}`"
+
+
+def test_keyless_says_where_it_belongs_on_a_team():
+    # Which subscription you pay for is personal; a shared `keyless` prompts every colleague.
+    body = init.render(init.InitOptions(name="x"))
+    for table in ("# [claude]", "# [codex]"):
+        i = body.index(f"\n{table}\n")
+        block = body[i - 300 : i + 400]  # the table's intro comment, or the lines under it
+        assert "foldyard.local.toml" in block, f"{table}'s keyless doesn't say where a team puts it"
+
+
+def test_host_firewall_warns_it_refuses_colleagues_who_cant_enforce_it():
+    body = init.render(init.InitOptions(name="x"))
+    i = body.index("#   host_firewall = true")
+    assert "every developer" in body[i : i + 400]
+
+
+def test_render_github_block_uncomments_into_the_app_row_and_your_own_emergency_row():
+    body = init.render(init.InitOptions(name="x"))
+    start = body.index("# [[inject]]")
+    block = body[start : body.index("\n\n", start)]  # the two rows, up to the section's end
+    doc = tomllib.loads(
+        "\n".join(line.removeprefix("#").removeprefix(" ") for line in block.splitlines())
+    )
+    app, user = doc["inject"]
+    assert (app["switch"], app["kind"]) == ("github", "github-app")
+    assert (user["switch"], user["kind"], user["emergency"]) == ("github-user", "gh-cli", True)
+    assert app["box_env"] == user["box_env"] == {"GH_TOKEN": "x"}
+    # The packaged box has no `gh`, so the dummy does nothing without it; and the rows are
+    # create-time, like every box setting.
+    block = body[body.index("── GitHub") : body.index("# [[inject]]")]
+    assert 'packages = ["gh"]' in block
+    assert "fy docs github-app" in block
+
+
+def test_render_proxy_offers_no_proxy_for_the_stacks_service_names():
+    # The parked step-3 prompt tells the agent to reach services by container name; under the
+    # proxy those calls hang and 502 unless the names are listed.
+    body = init.render(init.InitOptions(name="x"))
+    line = next(ln for ln in body.splitlines() if ln.startswith("# no_proxy = "))
+    assert tomllib.loads(line.lstrip("# ").split("#", 1)[0])["no_proxy"]
+
+
+def test_render_project_comment_offers_worktree_init():
+    body = init.render(init.InitOptions(name="x"))
+    line = next(ln for ln in body.splitlines() if ln.startswith("#   worktree_init = "))
+    assert tomllib.loads(line[1:].strip().split("#", 1)[0])["worktree_init"]
+
+
+def test_local_private_injector_has_a_dummy_and_no_false_allowlist_step():
+    body = init.render_local(init.InitOptions(name="x"))
+    section = body[body.index("── A private injector") :]
+    doc = tomllib.loads(_uncomment(section, "# [[inject]]", section.rstrip("\n").splitlines()[-1]))
+    assert doc["inject"][0]["box_env"], "without a dummy the box has nothing for the proxy to swap"
+    # An injector's host is allowed while its switch is on; telling people to grant it is wrong.
+    assert "fy allow add" not in section
+    # …and a local [[inject]] REPLACES the shared array, so it must say so where it's offered.
+    assert "WHOLESALE" in section or "wholesale" in section
+
+
+def test_local_example_offers_the_personal_settings_the_docs_call_personal():
+    body = init.render_local(init.InitOptions(name="x"))
+    for hint in ("# [claude.settings]", "# vmtype = ", "# [host]", "# notifications = false"):
+        assert hint in body, f"the overrides template no longer offers {hint!r}"
+
+
+def test_init_points_at_fy_prereq_for_what_the_computer_needs(tmp_path, capsys):
+    init.init(path=str(tmp_path), name="x")
+    out = capsys.readouterr().out
+    assert "fy prereq" in out
+    assert "brew install lima" not in out
