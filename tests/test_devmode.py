@@ -1104,7 +1104,7 @@ def _box_row_setup(tmp_path, monkeypatch, register_worktree, *, worktree="", ins
     monkeypatch.setattr(devmode.config, "active_worktree", lambda: worktree)
     from foldyard import stack
 
-    monkeypatch.setattr(stack, "find_main_repo", lambda: main)
+    monkeypatch.setattr(stack, "main_repo", lambda: main)
     monkeypatch.setattr(devmode, "_engine_env", lambda: {"DOCKER_HOST": "unix:///nonexistent/x"})
     seen: list[list[str]] = []
 

@@ -1532,9 +1532,7 @@ def _box_shadow_check():
     try:
         from . import box, stack  # lazy: the box tier only when there's a box to ask
 
-        main = stack.find_main_repo()
-        if main is None:
-            return
+        main = stack.main_repo()  # memoized: in the box, git goes through the (slow) shim
         worktree = config.active_worktree()
         checkout = str(config.worktrees_root(main) / worktree) if worktree else str(main)
         name = f"{active_project()}-devbox"
