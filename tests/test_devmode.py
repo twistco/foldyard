@@ -1045,7 +1045,9 @@ def test_shadow_check_flags_undeclared_dep_dirs(tmp_path, monkeypatch):
 def test_shadow_check_is_ok_once_every_dir_is_declared(tmp_path, monkeypatch):
     _tree(tmp_path, "api/.venv", "web/node_modules")
     status, detail = _shadow_row(monkeypatch, tmp_path, ["api/.venv", "web/node_modules"])
-    assert status == "ok" and "2 shadowed" in detail
+    # "declared", not "shadowed": the config can't say what the running box mounts (#91) — the
+    # `box shadowing` row asks the box.
+    assert status == "ok" and "2 declared" in detail
 
 
 def test_shadow_check_never_descends_into_a_dep_dir(tmp_path, monkeypatch):
@@ -1082,6 +1084,121 @@ def test_shadow_check_respects_max_depth_and_survives_unreadable_dirs(tmp_path, 
         locked.chmod(0o755)
     assert '"a/b/node_modules"' in detail and deep not in detail
     assert status == "warn"
+
+
+# ── the box-shadowing doctor row (what the RUNNING box actually mounts — #91) ──────────
+
+
+def _box_row_setup(tmp_path, monkeypatch, register_worktree, *, worktree="", inspect=None):
+    """main + worktrees a and b registered; ``inspect`` → the box's ``{{json .Mounts}}`` (None →
+    the inspect fails). The engine is stubbed, with a dead socket in its env."""
+    main = tmp_path / "repo"
+    main.mkdir()
+    wt_root = devmode.config.worktrees_root(main)
+    for name in ("a", "b"):
+        register_worktree(main, name, wt_root / name)
+    monkeypatch.setattr(devmode.config, "box_shadow_volumes", lambda: ["node_modules"])
+    monkeypatch.setattr(devmode.config, "project_prefix", lambda: "acme")
+    monkeypatch.setattr(devmode.config, "engine", lambda: "podman")
+    monkeypatch.setattr(devmode.config, "in_box", lambda: False)
+    monkeypatch.setattr(devmode.config, "active_worktree", lambda: worktree)
+    from foldyard import stack
+
+    monkeypatch.setattr(stack, "find_main_repo", lambda: main)
+    monkeypatch.setattr(devmode, "_engine_env", lambda: {"DOCKER_HOST": "unix:///nonexistent/x"})
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        assert kw["env"]["DOCKER_HOST"] == "unix:///nonexistent/x"
+        if inspect is None:
+            return subprocess.CompletedProcess(cmd, 125, "", "no such container")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(inspect), "")
+
+    from foldyard import box
+
+    monkeypatch.setattr(box.subprocess, "run", fake_run)
+    return main, wt_root, seen
+
+
+def _vol(dest: str, name: str = "acme-elsewhere") -> dict:
+    return {"Type": "volume", "Name": name, "Destination": dest, "RW": name != "acme-elsewhere"}
+
+
+def test_box_shadow_row_is_ok_when_the_box_mounts_what_a_create_would(
+    tmp_path, monkeypatch, register_worktree
+):
+    main = tmp_path / "repo"
+    wt_root = devmode.config.worktrees_root(main)
+    mounts = [
+        _vol(f"{main}/node_modules", "acme-devbox-shadow-node_modules"),
+        _vol(f"{wt_root}/a/node_modules"),
+        _vol(f"{wt_root}/b/node_modules"),
+    ]
+    _, _, seen = _box_row_setup(tmp_path, monkeypatch, register_worktree, inspect=mounts)
+    [(status, name, detail)] = list(devmode._box_shadow_check())
+    assert (status, name) == ("ok", "box shadowing")
+    assert "1 own dir shadowed" in detail and "2 in other checkouts masked" in detail
+    assert seen == [["podman", "inspect", "acme-devbox", "--format", "{{json .Mounts}}"]]
+
+
+def test_box_shadow_row_flags_a_late_worktree_the_box_does_not_mask(
+    tmp_path, monkeypatch, register_worktree
+):
+    # The #91 shape: a worktree box, created before b was added — main's dir is masked, b's isn't.
+    main = tmp_path / "repo"
+    wt_root = devmode.config.worktrees_root(main)
+    mounts = [
+        _vol(f"{wt_root}/a/node_modules", "acme-a-devbox-shadow-node_modules"),
+        _vol(f"{main}/node_modules"),
+    ]
+    _, _, seen = _box_row_setup(
+        tmp_path, monkeypatch, register_worktree, worktree="a", inspect=mounts
+    )
+    [(status, name, detail)] = list(devmode._box_shadow_check())
+    assert (status, name) == ("warn", "box shadowing")  # never fail
+    assert f"{wt_root}/b/node_modules" in detail and f"{main}/node_modules" not in detail
+    assert "WORKTREE=b fy box exec" in detail
+    assert "WORKTREE=a fy box down && WORKTREE=a fy box up" in detail
+    assert seen[0][2] == "acme-a-devbox"
+
+
+def test_box_shadow_row_flags_own_dirs_that_are_plain_binds(
+    tmp_path, monkeypatch, register_worktree
+):
+    main = tmp_path / "repo"
+    wt_root = devmode.config.worktrees_root(main)
+    mounts = [_vol(f"{wt_root}/a/node_modules"), _vol(f"{wt_root}/b/node_modules")]
+    _box_row_setup(tmp_path, monkeypatch, register_worktree, inspect=mounts)
+    [(status, _, detail)] = list(devmode._box_shadow_check())
+    assert status == "warn"
+    assert "node_modules" in detail and "not shadowed" in detail
+    assert "fy box down && fy box up" in detail
+
+
+def test_box_shadow_row_says_nothing_without_a_box_or_declared_dirs(
+    tmp_path, monkeypatch, register_worktree
+):
+    _box_row_setup(tmp_path, monkeypatch, register_worktree, inspect=None)
+    assert list(devmode._box_shadow_check()) == []  # no box (or the engine couldn't say)
+    monkeypatch.setattr(devmode.config, "box_shadow_volumes", lambda: [])
+    assert list(devmode._box_shadow_check()) == []
+
+
+def test_doctor_asks_the_box_on_either_side(monkeypatch):
+    for check in (
+        "_version_window_check",
+        "_git_config_check",
+        "_shadow_volume_check",
+        "_stack_shadow_check",
+        "_stack_env_override_check",
+        "_stack_container_env_check",
+        "_disk_headroom_check",
+    ):
+        monkeypatch.setattr(devmode, check, lambda: iter(()))
+    monkeypatch.setattr(devmode, "_box_shadow_check", lambda: iter([("ok", "box shadowing", "")]))
+    monkeypatch.setattr(devmode, "in_box", lambda: True)
+    assert next(devmode.doctor()) == ("ok", "box shadowing", "")
 
 
 def _stub_engine(monkeypatch, names: list[str], specs: list[dict], seen: list | None = None):

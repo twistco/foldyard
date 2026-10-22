@@ -150,6 +150,17 @@ checkout and branch (`wt/<name>` by default, forked from the trunk), its own box
 ports, all in the one VM. Don't run `git worktree add` in the box, and `fy worktree add` refuses
 there: it would record paths in the shared `.git` that exist on only one side.
 
+Every box sees every checkout: main's box reaches the worktrees, a worktree's box reaches main
+and the other worktrees. Edit and read across them freely, but run installs in a checkout from
+its own box. Each box keeps only its own checkout's `[box].shadow_volumes` dirs in volumes; the
+same dirs of every other checkout are read-only in it, so `pnpm install` or `uv sync` there fails
+instead of writing onto your computer's disk. The note in each of those dirs,
+`RUN-IT-IN-ITS-OWN-BOX`, gives the command: from that directory, `WORKTREE=<name> fy box exec
+'<command>'` runs it in the worktree's own box (`WORKTREE= fy box exec '<command>'` in main's), as
+long as that box is running — `WORKTREE=<name> fy box up` on your computer starts it. A worktree
+added after a box was created isn't masked in that box until it's recreated: `fy worktree add`
+names the boxes it isn't masked in, and `fy doctor`'s `box shadowing` row reports it.
+
 `fy worktree remove <name>` takes down that worktree's box, stack and volumes, deletes the
 checkout and keeps its branch. A worktree with uncommitted work needs `--force`; that work is
 saved first on a ref in the main checkout (`refs/fy/removed/<name>-<time>`), and the command

@@ -138,6 +138,12 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   `fy up` PROBES enforcement from inside the slice — the table can't be read without root, and one
   that exists may hold a dead slice's id (fail-open otherwise).
 - `box.py` — the dev-box lifecycle (`fy box build|up|shell|down|ps`) + the monitored bootstrap.
+- `crossmask.py` — what a box mounts over OTHER checkouts' `[box].shadow_volumes` dirs (#91): one
+  read-only note volume per project (`<prefix>-elsewhere`, holding `RUN-IT-IN-ITS-OWN-BOX`,
+  rewritten by `box up`) over each, so an install there fails instead of writing onto your computer;
+  the box's own dirs keep their shadow volumes. Worktrees from the host's registry at create, never
+  a listing of the mount. Mounts are create-time, so `fy worktree add`, the already-up `fy box up`
+  and doctor's `box shadowing` row report a box that lacks one — none of them recreates it.
 - `boximage.py` — foldyard's packaged box image: its fingerprint and the build shape a project's
   box and the base VM's share. Imports only `config`, so the project-less bake never imports
   `box` → `machine`, whose `MACHINE` binds at import from the project name (outside a project,
