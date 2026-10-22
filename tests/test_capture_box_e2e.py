@@ -15,7 +15,7 @@ It asserts, from the host side + inside the box, that (a) a NAIVE ``curl https:/
 MITM CA system-wide (the fix for "curl/wget showed nothing"); (b) capture does NOT rewrite — the
 upstream echoes the box's ORIGINAL header, and the egress log records the request with
 ``injected=False``; (c) the host-grouped Network Log panel (the real ``proxy._network_panel_tree``,
-reading via ``config.tail_jsonl``) shows the request under its host with zero injected; and (d)
+reading via ``plugins._netlog``) shows the request under its host with zero injected; and (d)
 capture sets the proxy env with only a ``github-app`` row's ambient ``box_env`` dummy ``GH_TOKEN``
 in the box, never a real token. The daemon spec + box args come from the REAL ``ProxyPlugin``; only the
 upstream is a fake.

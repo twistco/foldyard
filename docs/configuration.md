@@ -1248,7 +1248,7 @@ Test and CI hatches with no `foldyard.toml` keys; you shouldn't normally need th
   `FOLDYARD_SUPERVISOR_LOG`, `FOLDYARD_HEARTBEAT_FILE`, `FOLDYARD_CAPABILITIES_FILE`,
   `FOLDYARD_BLOCKED_DAEMONS_FILE` — each repoints one of the state files above.
 - **`FOLDYARD_CLOCK_OFFSET`** — clock skew in seconds, overriding `fy clock`'s file.
-- **`FOLDYARD_LOG_TAIL_BYTES`** — how much of each JSONL log's end the TUI reads (default
-  256 KiB).
+- **`FOLDYARD_LOG_TAIL_BYTES`** — how much of the GCP minter log's end the TUI reads (default
+  256 KiB). The Network Log reads the whole retained egress log instead.
 - **`FOLDYARD_CHECKOUT`** / **`FOLDYARD_ENV_OVERRIDE`** — set *by* foldyard for the stack: the
   checkout it mounts (main or a worktree) and the per-checkout env-override file.
