@@ -614,6 +614,8 @@ class Catalogue:
             # the read of the new live file's first line is missing from the listing, and is
             # older than that new one)
             here = {s.id for s in segs}
+            # No sealed segment listed (the budget took them all with the catalogue locked): no
+            # age-based drop until one is; the stale rows only keep a few snapshots a while.
             oldest = min((s.id for s in segs if not s.live), default="")
             gone = [
                 sid for sid in known if sid not in here and (sid.startswith(LEGACY) or sid < oldest)
