@@ -26,7 +26,7 @@ prefix = "foldyard"
 # and be none. The recommendation is where contributors should actually be; raise the floor
 # to meet it once everyone has moved.
 min_foldyard_version = "0.2.0"
-recommended_foldyard_version = "0.6.1"
+recommended_foldyard_version = "0.6.2"
 # A compose stack to drive alongside the box — uncomment when you have one (step 3), add
 # its host ports under [ports] below, and extend [claude].system_prompt with the stack
 # paragraph parked beside it (an agent that knows the box but not the stack is half-lost).
@@ -50,6 +50,7 @@ recommended_foldyard_version = "0.6.1"
 "0.5.0" = "`fy prereq` + base-VM clones (seconds, not minutes); `[box].packages`; `fy changelog`; Node/npm through the proxy by default; launches wait for the supervisor's daemons — `fy machine stop && fy up` once after upgrading"
 "0.6.0" = "security release: the box can no longer steer what your computer archives from its transcripts; the guest monitor (experimental) with signed hook files; a box whose env drifted says what — on Lima `fy machine stop && fy up`, then `fy box down && fy box up`, once after upgrading"
 "0.6.1" = "monitor hooks no longer drop container events under load; `fy monitor --since/--until`; a read-only to-box (`fy monitor hook add NAME --to-box`) and transcripts out of the checkout — on Lima `fy machine stop && fy up`, then `fy box down && fy box up`, once after upgrading"
+"0.6.2" = "a monitor hook stalled silently by the 0.6.1 upgrade resumes where it stopped — `fy host restart` after upgrading"
 
 [machine]
 # A rootless VM that mounts ONLY this repo. Default here is the Lima backend + an in-VM
