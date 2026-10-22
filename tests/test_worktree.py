@@ -280,6 +280,81 @@ def test_add_refuses_to_register_a_symlink(fake_main, tmp_path):
     assert worktree_registry.checkouts(fake_main["main"]) == {}
 
 
+def _engine_with(monkeypatch, fake_main, running: list[str], mounts: dict[str, list] | None = None):
+    """The golden engine for the late-worktree report: `ps` lists ``running``; a box's
+    ``{{json .Mounts}}`` is ``mounts[box]``. Dead socket in the env, every call recorded."""
+    import json
+
+    monkeypatch.setattr(config, "box_shadow_volumes", lambda: ["node_modules"])
+    from foldyard import devmode
+
+    monkeypatch.setattr(devmode, "_engine_env", lambda: {"DOCKER_HOST": "unix:///nonexistent/x"})
+    inner = worktree.subprocess.run
+    engine_calls: list[list[str]] = []
+
+    def run(cmd, **kw):
+        if cmd[0] != "podman":
+            return inner(cmd, **kw)
+        engine_calls.append(cmd)
+        assert kw["env"]["DOCKER_HOST"] == "unix:///nonexistent/x"
+        if cmd[1] == "ps":
+            return _Proc(0, "".join(f"{n}\n" for n in running))
+        if cmd[1] == "inspect":
+            return _Proc(0, json.dumps((mounts or {}).get(cmd[2], [])))
+        return _Proc(1)
+
+    monkeypatch.setattr(worktree.subprocess, "run", run)
+    return engine_calls
+
+
+def test_add_names_running_boxes_that_do_not_mask_the_new_worktree(fake_main, monkeypatch, capsys):
+    _existing_git_worktree(fake_main, "other")
+    worktree_registry.register(fake_main["main"], "other", fake_main["wt_root"] / "other")
+    calls = _engine_with(monkeypatch, fake_main, ["proj-devbox", "proj-other-devbox", "x-devbox"])
+    assert worktree.add("feat") == 0
+    out = capsys.readouterr().out
+    # Both running boxes predate it, so neither can mask it — whatever their mounts say.
+    assert "proj-devbox, proj-other-devbox" in out and "x-devbox" not in out
+    assert "WORKTREE=feat fy box up" in out and "fy box down && fy box up" in out
+    assert not [c for c in calls if c[1] == "inspect"]
+    assert not [c for c in calls if c[1] in ("rm", "run", "stop")]  # never recreates a box
+
+
+def test_add_says_nothing_about_boxes_without_declared_dirs(fake_main, monkeypatch, capsys):
+    _engine_with(monkeypatch, fake_main, ["proj-devbox"])
+    monkeypatch.setattr(config, "box_shadow_volumes", lambda: [])
+    assert worktree.add("feat") == 0
+    assert "mask" not in capsys.readouterr().out
+
+
+def test_registering_an_existing_worktree_asks_each_box_what_it_masks(
+    fake_main, monkeypatch, capsys
+):
+    wt = _existing_git_worktree(fake_main, "old")
+    main = fake_main["main"]
+    covered = [
+        {
+            "Type": "volume",
+            "Name": "proj-elsewhere",
+            "Destination": f"{wt}/node_modules",
+            "RW": False,
+        }
+    ]
+    _engine_with(
+        monkeypatch,
+        fake_main,
+        ["proj-devbox"],
+        {"proj-devbox": [*covered, {"Type": "volume", "Destination": f"{main}/node_modules"}]},
+    )
+    assert worktree.add("old", assume_yes=True) == 0
+    assert "proj-devbox" not in capsys.readouterr().out  # it already masks old's dirs
+
+    _engine_with(monkeypatch, fake_main, ["proj-devbox"], {"proj-devbox": []})
+    worktree_registry.unregister(main, "old")
+    assert worktree.add("old", assume_yes=True) == 0
+    assert "proj-devbox" in capsys.readouterr().out
+
+
 def test_remove_unregisters(fake_main):
     assert worktree.add("feat") == 0
     assert worktree.remove("feat", assume_yes=True) == 0

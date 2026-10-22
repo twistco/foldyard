@@ -414,7 +414,30 @@ def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -
 
     print(f"\n✓ worktree ready: {wt_dir}  (branch {branch})")
     print(f"  bring its stack up:  WORKTREE={name} fy up")
+    _say_unmasked(main, name, fresh=True)
     return 0
+
+
+def _say_unmasked(main: Path, name: str, *, fresh: bool) -> None:
+    """Name the running boxes that don't mask the new worktree's ``[box].shadow_volumes`` dirs
+    (a box's mounts are fixed at create — see :mod:`foldyard.crossmask`), and the two ways out.
+    Says it; never recreates a box. Best-effort: a report must not fail the add."""
+    from . import box
+
+    try:
+        late = box.boxes_not_masking(main, name, fresh=fresh)
+    except (Exception, SystemExit):
+        return
+    if not late:
+        return
+    print(
+        f"\n⚠ running dev boxes created before '{name}' don't mask its dependency dirs "
+        f"([box].shadow_volumes): {', '.join(late)}."
+    )
+    print(f"  An install in '{name}' from one of them would land on your computer's disk. Either")
+    print(f"  run it in '{name}''s own box — `WORKTREE={name} fy box up`, then `fy box exec` or")
+    print(f"  `fy box shell` with WORKTREE={name} — or recreate a box so it masks '{name}':")
+    print("  `fy box down && fy box up` (prefixed WORKTREE=<its name> for a worktree's box).")
 
 
 def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) -> int:
@@ -448,6 +471,7 @@ def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) ->
         _err(f"✗ {e}")
         return 1
     print(f"✓ worktree '{name}' registered.  Bring its stack up:  WORKTREE={name} fy up")
+    _say_unmasked(main, name, fresh=False)
     return 0
 
 

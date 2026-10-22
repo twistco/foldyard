@@ -1366,6 +1366,7 @@ def doctor(deep: bool = False):
     yield from _version_window_check()
     yield from _git_config_check()
     yield from _shadow_volume_check()
+    yield from _box_shadow_check()
     yield from _stack_shadow_check()
     yield from _stack_env_override_check()
     yield from _stack_container_env_check()
@@ -1488,7 +1489,9 @@ def _shadow_volume_check():
     covered = {d.strip("/") for d in config.box_shadow_volumes()}
     exposed = [d for d in _artifact_dirs(checkout) if d not in covered]
     if not exposed:
-        detail = f"{len(covered)} shadowed, none exposed" if covered else "none in the checkout"
+        # "declared": this row reads the config; whether the running box mounts them is the
+        # `box shadowing` row's question (#91 — a declared dir isn't a shadowed one).
+        detail = f"{len(covered)} declared, none left out" if covered else "none in the checkout"
         yield _result(True, "shadow volumes", detail, "")
         return
     # Wrapped, not truncated: a monorepo can expose a dozen dirs, and the whole point of the row
@@ -1513,6 +1516,72 @@ def _shadow_volume_check():
         "\n      → add to [box].shadow_volumes:\n" + listed + "\n"
         "        (+ [box].warmup to fill them — a fresh shadow volume is EMPTY; uv/pnpm also"
         " need a copy link mode)",
+    )
+
+
+def _box_shadow_check():
+    """What the RUNNING box serving this checkout actually mounts (#91): each of its own
+    ``[box].shadow_volumes`` dirs really a volume, and the same dirs of every other checkout it
+    binds masked read-only (:mod:`foldyard.crossmask`). A box's mounts are fixed at create, so a
+    dir declared — or a worktree added — since then is missing from it until a recreate; nothing
+    else sees that, because the install just goes to your computer's disk. Yields nothing when no
+    dirs are declared or there's no box to ask. WARN, never fail. In the box it asks its own box,
+    and the worktrees it expects are the ones it can see (it has no registry)."""
+    if not config.box_shadow_volumes():
+        return
+    try:
+        from . import box, stack  # lazy: the box tier only when there's a box to ask
+
+        main = stack.main_repo()  # memoized: in the box, git goes through the (slow) shim
+        worktree = config.active_worktree()
+        checkout = str(config.worktrees_root(main) / worktree) if worktree else str(main)
+        name = f"{active_project()}-devbox"
+        gaps = box._mask_gaps(
+            config.engine(), name, _engine_env(), checkout=checkout, main=main, timeout=5
+        )
+    except (Exception, SystemExit):
+        return
+    if gaps is None:
+        return
+    own, others = gaps
+    if not (own or others):
+        from . import crossmask
+
+        dirs = config.box_shadow_volumes()
+        n_masks = len(
+            crossmask.targets(
+                checkout, main, config.worktrees_root(main), crossmask.registered(main), dirs
+            )[0]
+        )
+        n_own = len(dirs)
+        yield _result(
+            True,
+            "box shadowing",
+            f"{n_own} own dir{'' if n_own == 1 else 's'} shadowed, "
+            f"{n_masks} in other checkouts masked ({name})",
+            "",
+        )
+        return
+    lines = []
+    if own:
+        lines.append(f"      not shadowed (declared after {name} was created): {', '.join(own)}")
+    if others:
+        lines.append(
+            f"      other checkouts' dirs not masked (added after {name} was created):\n"
+            + "\n".join(
+                f"          {m.path}  →  run there with: WORKTREE={m.checkout} fy box exec '<cmd>'"
+                for m in others
+            )
+        )
+    pin = f"WORKTREE={worktree} " if worktree else ""
+    where = " on your computer" if in_box() else ""
+    yield _result(
+        None,
+        "box shadowing",
+        "",
+        f"{name} lets an install land on your computer's disk:\n"
+        + "\n".join(lines)
+        + f"\n      → recreate it{where}: `{pin}fy box down && {pin}fy box up`",
     )
 
 

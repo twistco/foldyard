@@ -807,7 +807,15 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   around bind-mount uid squashing, runs installs at VM-disk speed, and keeps what the box
   installs (compromised or merely different) off your checkout, where your own tools would load
   it (see [isolation-layers.md](https://github.com/twistco/foldyard/blob/main/docs/isolation-layers.md)).
-  Default: `[]`.
+  Each box shadows only its own checkout's dirs, but it can see every checkout of the project:
+  the same dirs of the others (main's from a worktree's box, every registered worktree's) are
+  masked read-only, so an install there fails instead of landing on your computer. The one file
+  in a masked dir, `RUN-IT-IN-ITS-OWN-BOX`, says how to run the command in that checkout's own
+  box ([git.md](./git.md#worktrees)). Podman creates a missing mountpoint, so a declared dir that
+  doesn't exist yet appears empty in each checkout once a box is created. A box's mounts are
+  fixed when it's created: a dir added here, or a worktree added later, needs
+  `fy box down && fy box up`, and `fy doctor`'s `box shadowing` row says when a running box lacks
+  one. Default: `[]`.
 - **`caches`** — shared cache volumes: `[{ volume, path }]`, `path` relative to the box's `HOME`.
   Default: `[]`.
 - **`warmup`** — background steps after box-up: `[{ dir, run }]`, each run in `<checkout>/<dir>`.

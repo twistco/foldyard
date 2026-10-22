@@ -66,6 +66,17 @@ The stash is shared too: `git stash list` is one list for the human, every workt
 agent, and a bare `git stash pop` takes whatever went on last, which may be theirs. Label yours
 (`git stash push -m <label>`) and pop that entry by its `stash@{n}` from `git stash list`.
 
+## Working in another checkout
+
+Your box sees every checkout of the project — the main one and each worktree — so read and edit
+across them freely. Installs are the exception. The dependency dirs the project declares
+(`[box].shadow_volumes`) live in volumes only for your own checkout; in every other checkout they
+are read-only in your box, so a `pnpm install` or `uv sync` there fails with "Read-only file
+system". That's deliberate: from your box the install would have landed on the human's disk,
+shared with their own tools. Don't route around it (another install dir, a copy, `chmod`); run it
+in that checkout's own box — the `RUN-IT-IN-ITS-OWN-BOX` file in the read-only dir has the
+command. If that box isn't running, `fy box up` for it runs only on their computer: ask them.
+
 ## When you need something you don't have
 
 **A credential** (a cloud token, an API key): you can't grant it. Name the exact command the human

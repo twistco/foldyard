@@ -2964,3 +2964,236 @@ def test_no_nag_on_the_podman_backend(fake, capsys):
     fake["state"]["running"] = True
     assert box.main("up") == 0
     assert "predates foldyard's to-box" not in capsys.readouterr().out
+
+
+# ── masks over OTHER checkouts' dependency dirs (#91) ────────────────────────────────
+
+
+def _masked(fake, monkeypatch, *, mounts=None, volume_exists=True):
+    """Wrap the golden engine: the note volume's inspect answers ``volume_exists``, the running
+    box's ``{{json .Mounts}}`` answers ``mounts`` (None → the inspect fails), and each call's env
+    and stdin are recorded."""
+    monkeypatch.setenv("FOLDYARD_PROJECT_PREFIX", "tangible-podman")
+    inner = box.subprocess.run
+    seen: list[tuple[list[str], dict | None, str | None]] = []
+
+    def run(cmd, **kw):
+        seen.append((cmd, kw.get("env"), kw.get("input")))
+        if cmd[1:3] == ["volume", "inspect"]:
+            fake["calls"].append(cmd)
+            return _Proc(0 if volume_exists else 1)
+        if cmd[1] == "inspect" and cmd[-1] == "{{json .Mounts}}":
+            fake["calls"].append(cmd)
+            return _Proc(0, json.dumps(mounts) + "\n") if mounts is not None else _Proc(1)
+        return inner(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", run)
+    return seen
+
+
+def _mask_args(run: list[str]) -> list[str]:
+    return [run[i + 1] for i, tok in enumerate(run) if tok == "-v" and "elsewhere" in run[i + 1]]
+
+
+def _filler(calls: list[list[str]]) -> list[str]:
+    (filler,) = [c for c in calls if "tangible-podman-elsewhere:/fy-note" in c]
+    return filler
+
+
+def test_up_main_box_masks_each_registered_worktrees_dirs_read_only(
+    fake, monkeypatch, register_worktree
+):
+    main = fake["main"]
+    wt_root = config.worktrees_root(main)
+    for name in ("a", "b"):
+        register_worktree(main, name, wt_root / name)
+    seen = _masked(fake, monkeypatch, volume_exists=False)
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d", "sleep"])[0]
+    assert _mask_args(run) == [
+        f"tangible-podman-elsewhere:{wt_root}/a/data/.venv:ro",
+        f"tangible-podman-elsewhere:{wt_root}/a/platform/node_modules:ro",
+        f"tangible-podman-elsewhere:{wt_root}/b/data/.venv:ro",
+        f"tangible-podman-elsewhere:{wt_root}/b/platform/node_modules:ro",
+    ]
+    # Its own checkout keeps its real per-box shadow volumes, unchanged.
+    assert f"tangible-podman-devbox-shadow-data--venv:{main}/data/.venv" in run
+    # The note volume: created when missing, then filled by a throwaway container BEFORE the box.
+    calls = fake["calls"]
+    create = calls.index(["podman", "volume", "create", "tangible-podman-elsewhere"])
+    filler = _filler(calls)
+    assert create < calls.index(filler) < calls.index(run)
+    assert filler[1:3] == ["run", "--rm"]
+    assert filler[filler.index("--network") + 1] == "none"
+    assert filler[filler.index("--user") + 1] == "0"  # a fresh volume's root is root's
+    assert filler[filler.index("--cap-drop") + 1] == "ALL"  # root that owns the files, no more
+    (note,) = [stdin for cmd, _, stdin in seen if cmd is filler]
+    assert note is not None and "WORKTREE=<name> fy box exec '<command>'" in note
+
+
+def test_up_worktree_box_masks_main_and_its_siblings_not_itself(
+    fake, monkeypatch, register_worktree
+):
+    main = fake["main"]
+    wt_root = config.worktrees_root(main)
+    for name in ("a", "b"):
+        register_worktree(main, name, wt_root / name)
+    ctx = fake["ctx"]
+    ctx.worktree, ctx.project = "a", "tangible-podman-a"
+    ctx.env["FOLDYARD_CHECKOUT"] = str(wt_root / "a")
+    _masked(fake, monkeypatch)
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d", "sleep"])[0]
+    masks = _mask_args(run)
+    assert f"tangible-podman-elsewhere:{main}/data/.venv:ro" in masks
+    assert f"tangible-podman-elsewhere:{wt_root}/b/platform/node_modules:ro" in masks
+    assert len(masks) == 4 and not [a for a in masks if f"{wt_root}/a/" in a]
+    # its own dirs: the worktree box's own shadow volumes, as before
+    assert f"tangible-podman-a-devbox-shadow-data--venv:{wt_root}/a/data/.venv" in run
+    # an existing note volume is reused (no create), and still refilled for this foldyard
+    assert not _find(fake["calls"], has=["volume", "create"])
+    assert _filler(fake["calls"])
+
+
+def test_up_with_no_other_checkout_touches_no_note_volume(fake, monkeypatch):
+    _masked(fake, monkeypatch)
+    assert box.main("up") == 0
+    assert not [c for c in fake["calls"] if "elsewhere" in " ".join(c)]
+
+
+def test_up_says_which_dirs_it_could_not_mask(fake, monkeypatch, register_worktree, capsys):
+    wt_root = config.worktrees_root(fake["main"])
+    register_worktree(fake["main"], "x:y", wt_root / "x:y")
+    _masked(fake, monkeypatch)
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d", "sleep"])[0]
+    assert not [a for a in run if "x:y" in a]
+    out = capsys.readouterr().out
+    assert f"{wt_root}/x:y/data/.venv" in out and "not masked" in out
+
+
+def test_up_masks_even_when_the_note_cannot_be_written(
+    fake, monkeypatch, register_worktree, capsys
+):
+    # The mask is the protection; the note only explains it. A failed fill still masks.
+    wt_root = config.worktrees_root(fake["main"])
+    register_worktree(fake["main"], "a", wt_root / "a")
+    _masked(fake, monkeypatch)
+    inner = box.subprocess.run
+
+    def failing_fill(cmd, **kw):
+        if any("/fy-note" in tok for tok in cmd):
+            fake["calls"].append(cmd)
+            return _Proc(1, "", "boom")
+        return inner(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", failing_fill)
+    assert box.main("up") == 0
+    assert _mask_args(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert "note" in capsys.readouterr().out
+
+
+def test_a_wedged_note_filler_costs_the_note_never_box_up(
+    fake, monkeypatch, register_worktree, capsys
+):
+    wt_root = config.worktrees_root(fake["main"])
+    register_worktree(fake["main"], "a", wt_root / "a")
+    _masked(fake, monkeypatch)
+    inner = box.subprocess.run
+    timeouts: list[float | None] = []
+
+    def hanging_fill(cmd, **kw):
+        if any("/fy-note" in tok for tok in cmd):
+            fake["calls"].append(cmd)
+            timeouts.append(kw.get("timeout"))
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout") or 0)
+        return inner(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", hanging_fill)
+    assert box.main("up") == 0
+    assert timeouts == [box._DRIFT_TIMEOUT_S]  # bounded
+    assert _mask_args(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert "note" in capsys.readouterr().out
+
+
+def test_up_does_not_mask_when_the_note_volume_cannot_be_created(
+    fake, monkeypatch, register_worktree, capsys
+):
+    wt_root = config.worktrees_root(fake["main"])
+    register_worktree(fake["main"], "a", wt_root / "a")
+    _masked(fake, monkeypatch, volume_exists=False)
+    inner = box.subprocess.run
+
+    def failing_create(cmd, **kw):
+        if cmd[1:3] == ["volume", "create"]:
+            fake["calls"].append(cmd)
+            return _Proc(1, "", "no space")
+        return inner(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", failing_create)
+    assert box.main("up") == 0
+    assert not _mask_args(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert "not masked" in capsys.readouterr().out
+
+
+def test_up_under_gvisor_masks_too_and_fills_the_note_off_the_runsc_endpoint(
+    fake, monkeypatch, register_worktree
+):
+    uri = _gvisor(fake, monkeypatch)
+    wt_root = config.worktrees_root(fake["main"])
+    register_worktree(fake["main"], "a", wt_root / "a")
+    seen = _masked(fake, monkeypatch)
+    assert box.main("up") == 0
+    assert _mask_args(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    # The filler is foldyard's own throwaway on the stack env, like the image probe: only the
+    # box's create goes through the runsc socket (both share the VM's one store).
+    filler = _filler(fake["calls"])
+    (env,) = [e for cmd, e, _ in seen if cmd is filler]
+    assert env is not None and env.get("CONTAINER_HOST") != uri
+
+
+def _box_mounts(*dests: str, name: str = "tangible-podman-elsewhere") -> list[dict]:
+    return [{"Type": "volume", "Name": name, "Destination": d, "RW": False} for d in dests]
+
+
+def test_up_already_up_names_worktrees_its_box_does_not_mask(
+    fake, monkeypatch, register_worktree, capsys
+):
+    main = fake["main"]
+    wt_root = config.worktrees_root(main)
+    register_worktree(main, "a", wt_root / "a")
+    register_worktree(main, "late", wt_root / "late")
+    mounts = _box_mounts(f"{wt_root}/a/data/.venv", f"{wt_root}/a/platform/node_modules")
+    mounts += _box_mounts(f"{main}/data/.venv", f"{main}/platform/node_modules", name="own")
+    fake["state"]["running"] = True
+    _masked(fake, monkeypatch, mounts=mounts)
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert f"{wt_root}/late/data/.venv" in out and f"{wt_root}/a/" not in out
+    assert "fy box down && fy box up" in out
+
+
+def test_up_already_up_says_when_its_own_dirs_are_not_shadowed(fake, monkeypatch, capsys):
+    main = fake["main"]
+    fake["state"]["running"] = True
+    _masked(fake, monkeypatch, mounts=_box_mounts(f"{main}/data/.venv", name="own"))
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "platform/node_modules" in out and "fy box down && fy box up" in out
+
+
+def test_up_already_up_is_quiet_when_the_mounts_cannot_be_read(fake, monkeypatch, capsys):
+    fake["state"]["running"] = True
+    _masked(fake, monkeypatch, mounts=None)
+    assert box.main("up") == 0
+    assert "shadow" not in capsys.readouterr().out
+
+
+def test_exec_from_inside_a_box_says_where_to_start_the_missing_box(fake, monkeypatch, capsys):
+    # `WORKTREE=a fy box exec …` from main's box, with a's box down: `fy box up` can't run in a
+    # box, so the hint says where it does.
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    fake["ctx"].worktree = "a"
+    assert box.main("exec", ["pnpm install"]) == 1
+    err = capsys.readouterr().err
+    assert "WORKTREE=a fy box up" in err and "on your computer" in err

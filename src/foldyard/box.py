@@ -46,7 +46,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import IO
 
-from . import boximage, boxmounts, config, hostclock, keyless, machine, sandbox, stack
+from . import boximage, boxmounts, config, crossmask, hostclock, keyless, machine, sandbox, stack
 from .plugins import registry
 
 # TOML's bare-key alphabet, and its two non-finite floats — both for `_toml_value`/`_toml_key`,
@@ -272,6 +272,178 @@ def _attach_hint(worktree: str) -> str:
 
 def _start_hint(worktree: str) -> str:
     return f"WORKTREE={worktree} fy box up" if worktree else "fy box up"
+
+
+def _start_it(worktree: str) -> str:
+    """The "start it" half of a not-running refusal. From a box it says where: `fy box up` runs
+    only on your computer (an agent reaching a sibling's box with `WORKTREE=<name> fy box exec`)."""
+    where = " on your computer" if config.in_box() else ""
+    return f"start it{where}: {_start_hint(worktree)}"
+
+
+def _mask_gaps(
+    engine: str, box: str, env: dict, *, checkout: str, main: Path, timeout: float | None = None
+) -> tuple[list[str], list[crossmask.Mask]] | None:
+    """What the running ``box`` lacks of what a create would give it now (:mod:`crossmask`): its
+    OWN ``[box].shadow_volumes`` dirs that aren't a volume, and other checkouts' dirs that aren't
+    masked (a worktree added after it was created). None when its mounts can't be read."""
+    dirs = config.box_shadow_volumes()
+    if not dirs:
+        return [], []
+    out = subprocess.run(
+        [engine, "inspect", box, "--format", "{{json .Mounts}}"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if out.returncode != 0:
+        return None
+    try:
+        mounts = json.loads(out.stdout)
+    except ValueError:
+        return None
+    if not isinstance(mounts, list):
+        return None
+    wt_root = config.worktrees_root(main)
+    masks, _ = crossmask.targets(checkout, main, wt_root, crossmask.registered(main), dirs)
+    return (
+        crossmask.unshadowed(mounts, checkout, dirs),
+        crossmask.unmasked(mounts, masks, crossmask.note_volume()),
+    )
+
+
+def _warn_mask_gaps(engine: str, box: str, ctx) -> None:
+    """The already-up nag for :func:`_mask_gaps`: a box's mounts are fixed at create, so only a
+    recreate adds what it lacks. Best-effort, like the other nags."""
+    try:
+        gaps = _mask_gaps(
+            engine,
+            box,
+            ctx.env,
+            checkout=ctx.env["FOLDYARD_CHECKOUT"],
+            main=ctx.main,
+            timeout=_DRIFT_TIMEOUT_S,
+        )
+    except (Exception, SystemExit):
+        return
+    if not gaps:
+        return
+    own, others = gaps
+    if own:
+        print(
+            f"⚠ dev box {box} doesn't shadow {', '.join(own)} (declared in [box].shadow_volumes "
+            "after it was created), so an install there lands on your computer's disk. "
+            "Recreate it: `fy box down && fy box up`."
+        )
+    if others:
+        print(
+            f"⚠ dev box {box} doesn't mask the dependency dirs of checkouts added after it was "
+            f"created: {', '.join(m.path for m in others)}. An install there from this box lands "
+            "on your computer's disk — run it in that checkout's own box "
+            "(`WORKTREE=<name> fy box exec '<command>'`), or recreate this one to mask them: "
+            "`fy box down && fy box up`."
+        )
+
+
+def boxes_not_masking(main: Path, worktree: str, *, fresh: bool) -> list[str]:
+    """The project's RUNNING boxes that don't mask worktree ``worktree``'s dependency dirs, for
+    `fy worktree add` to name (it never recreates them). ``fresh``: the checkout was just made, so
+    every box already running predates it and can't cover it — even one holding a mask at that
+    path from an earlier worktree of the same name, which is pinned to the directory that was
+    removed. Otherwise each box's mounts are asked. Read-only, never provisions the VM."""
+    dirs = config.box_shadow_volumes()
+    if not dirs:
+        return []
+    from . import devmode  # lazy: devmode imports box lazily too
+
+    engine, env = config.engine(), devmode._engine_env()
+    prefix = config.project_prefix()
+    wt_root = config.worktrees_root(main)
+    registered = crossmask.registered(main)
+    boxes = {f"{prefix}-devbox": str(main)}
+    boxes |= {f"{prefix}-{n}-devbox": str(wt_root / n) for n in registered if n != worktree}
+    out = subprocess.run(
+        [engine, "ps", "--filter", "status=running", "--format", "{{.Names}}"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=_DRIFT_TIMEOUT_S,
+    )
+    running = set(out.stdout.split()) if out.returncode == 0 else set()
+    late = []
+    for name, checkout in boxes.items():
+        if name not in running:
+            continue
+        wanted = [
+            m
+            for m in crossmask.targets(checkout, main, wt_root, registered, dirs)[0]
+            if m.checkout == worktree
+        ]
+        if not wanted:
+            continue  # a box that couldn't mask it anyway (a path no engine can mount)
+        if not fresh:
+            gaps = _mask_gaps(
+                engine, name, env, checkout=checkout, main=main, timeout=_DRIFT_TIMEOUT_S
+            )
+            if gaps is None or not set(wanted) & set(gaps[1]):
+                continue  # masks it (or its mounts can't be read: no claim either way)
+        late.append(name)
+    return late
+
+
+def _ensure_note(engine: str, img: str, env: dict, main: Path, wt_root: Path) -> bool:
+    """Create the project's note volume if it's missing and (re)write its one file — what an
+    agent finds in a masked dir (:mod:`crossmask`). A throwaway container on the stack env (never
+    the gVisor create socket: the VM's one store serves both), as root with no capabilities and no
+    network. ``label=disable`` like the box itself, so the note never carries the filler's private
+    SELinux label into a volume every box reads. Bounded: a wedged image costs the note, never
+    `fy box up`. False only when the volume can't be created, so there is nothing to mount; a
+    failed write still masks."""
+    vol = crossmask.note_volume()
+    if subprocess.run([engine, "volume", "inspect", vol], env=env, capture_output=True).returncode:
+        create = [engine, "volume", "create", vol]
+        _echo(create)
+        if subprocess.run(create, env=env, capture_output=True).returncode != 0:
+            return False
+    fill = [
+        engine,
+        "run",
+        "--rm",
+        "-i",
+        "--user",
+        "0",
+        "--cap-drop",
+        "ALL",
+        "--network",
+        "none",
+        "--security-opt",
+        "label=disable",
+        "-v",
+        f"{vol}:{crossmask.FILL_AT}",
+        img,
+        "sh",
+        "-c",
+        crossmask.fill_script(),
+    ]
+    try:
+        got = subprocess.run(
+            fill,
+            env=env,
+            input=crossmask.note_text(main, wt_root),
+            capture_output=True,
+            text=True,
+            timeout=_DRIFT_TIMEOUT_S,
+        )
+        why = None if got.returncode == 0 else (got.stderr or "").strip() or "no output"
+    except subprocess.TimeoutExpired:
+        why = f"no answer in {_DRIFT_TIMEOUT_S}s"
+    if why:
+        print(
+            f"⚠ couldn't write the note in {vol} ({why}) — other checkouts' dependency dirs are "
+            "still masked read-only, without it."
+        )
+    return True
 
 
 def _has_compose() -> bool:
@@ -1854,6 +2026,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
                 "~/.codex volume or keyless seed). Recreate to add them: `fy box down && fy box up`."
             )
         _warn_env_drift(engine, box, ctx, quiet)  # every other create-time name
+        _warn_mask_gaps(engine, box, ctx)  # and its mounts: shadows + other checkouts' masks
         _warn_predates_box_dirs(engine, box, env)
         _warn_stale_foldyard(engine, box, env)
         if not ensure_harden(engine, box, env):  # a box from before the hygiene gets it here
@@ -1940,6 +2113,12 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     for d in config.box_shadow_volumes():
         vn = f"{box}-shadow-" + d.replace("/", "-").replace(".", "-")
         shadow_args += ["-v", f"{vn}:{checkout}/{d}"]
+    # …and every OTHER checkout this box binds gets those dirs masked read-only (crossmask): an
+    # install there from this box would otherwise land on your computer's disk, shared with your
+    # own tools. The worktrees come from the host's registry, never a listing of the mount.
+    masks, unmaskable = crossmask.targets(
+        checkout, main, wt_root, crossmask.registered(main), config.box_shadow_volumes()
+    )
 
     # Stage the proxy CA under the checkout (VM-visible) before box_args mounts it — the machine
     # mounts ONLY repo + worktrees, so a CA under ~/.mitmproxy can't be bind-mounted. AMBIENT and
@@ -2007,6 +2186,22 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         _err("  external in compose to let foldyard own it — then box up works standalone).")
         return 1
 
+    mask_args: list[str] = []
+    if masks and _ensure_note(engine, img, env, main, wt_root):
+        mask_args = crossmask.run_args(crossmask.note_volume(), masks)
+        print(
+            f"  other checkouts' dependency dirs → read-only ({len(masks)}; an install there "
+            "runs in that checkout's own box)"
+        )
+    elif masks:
+        unmaskable = [m.path for m in masks] + unmaskable
+        print(f"⚠ couldn't create the note volume {crossmask.note_volume()}.")
+    if unmaskable:
+        print(
+            "⚠ not masked in this box, so an install there from it lands on your computer's disk: "
+            + ", ".join(unmaskable)
+        )
+
     run = [
         engine,
         "run",
@@ -2021,6 +2216,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         net,
         *mounts,
         *shadow_args,
+        *mask_args,
         *plugin_args,
         "-w",
         checkout,
@@ -2133,8 +2329,7 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         return _up(ctx, engine, box, net)
     if cmd == "shell":
         if not _running(engine, box, env):
-            hint = _start_hint(ctx.worktree)
-            _err(f"dev box {box} not running — start it: {hint}")
+            _err(f"dev box {box} not running — {_start_it(ctx.worktree)}")
             return 1
         # Same idempotent prepend the bootstrap uses, not a raw `PATH=…:$PATH` — this exec's
         # `bash -l` re-reads the rc files on top of whatever we set here, which is how the box's
@@ -2201,7 +2396,7 @@ def _exec(engine: str, box: str, ctx, env: dict, args: list[str]) -> int:
         if skip_if_down:
             _err(f"(dev box {box} not running — skipping; start it with `{hint}` or run inside it)")
             return 0
-        _err(f"dev box {box} not running — start it: {hint}")
+        _err(f"dev box {box} not running — {_start_it(ctx.worktree)}")
         return 1
     # Login shell so PATH (pnpm/node/uv) matches an attached `fy box shell`.
     return subprocess.run(
