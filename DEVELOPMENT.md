@@ -497,7 +497,10 @@ recreate carries it. **Runner speed dominates a single run**: the same WSL2 shar
 `fy up`s, which pull and build, most of all), and the apt step alone from under a minute to 12 min
 on WSL2 (once 9 on Linux). So judge a rebalance on several runs' tables, not one. (Pointing the
 distro's apt at `azure.archive.ubuntu.com`, the Linux runners' mirror, made that step slower, 2–16
-min, not faster.) On the slowest WSL2 runners, in-box `fy verify`'s dry-run push to the public
+min, not faster. What the WSL2 job does instead is cache the debs together with the package lists
+they were resolved against, keyed by month (`actions/cache`, restored to `RUNNER_TEMP`), and
+install offline from them. On a miss, or if the offline install fails, it installs online as
+before and saves the result. Bump the key's `v1` when the package list changes.) On the slowest WSL2 runners, in-box `fy verify`'s dry-run push to the public
 origin has timed out (its 12 s bound: "push refusal UNPROVEN (timed out)"), failing `test_box_e2e`
 until a re-run on another runner. That's a network fact about the runner, not a posture failure,
 and the bound stays: verify is never weakened to suit CI.
