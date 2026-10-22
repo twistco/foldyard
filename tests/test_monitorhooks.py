@@ -813,6 +813,19 @@ def test_a_hook_behind_a_cursor_the_store_cant_find_walks_on_to_it(ran, project,
     assert _delivered(calls) == [31, 33, 34, 35, 37, 38, 39]
 
 
+def test_a_new_hooks_position_past_its_segments_end_is_said_not_waited_on(ran, project):
+    # no cursor to find it by, and the segment it names is there but shorter: never "look again"
+    # for good (nothing would say so — a hook that never delivered has no progress to compare)
+    calls, _ = ran
+    _hook(project)
+    monitorlog._append([snap(0), ev(1), ev(2), snap(3)])
+    live = monitorstore.segments()[-1].id
+    (project / "monitor-hooks-state.json").write_text(json.dumps({"s": {"pos": [live, 1 << 30]}}))
+    logged: list[str] = []
+    mh.round_once(now=20, log=logged.append)
+    assert any("rotated past its position" in m for m in logged) and _delivered(calls) == [1, 2]
+
+
 def test_a_store_that_moves_under_the_search_is_looked_at_again_not_lost(ran, project, monkeypatch):
     # no catalogue (locked), and a listing from before the seal: the legacy file the search
     # reads has just been renamed. Nothing proves the cursor's events gone: look again.

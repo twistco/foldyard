@@ -2378,7 +2378,7 @@ def _monitor_hooks_check():
         return
     import time
 
-    from . import monitorhooks
+    from . import monitorhooks, monitorstore
 
     hooks, errors = monitorhooks.load()
     if errors:
@@ -2397,10 +2397,11 @@ def _monitor_hooks_check():
             "",
         )
     states, now = monitorhooks.load_state(), time.time()
+    grew = monitorstore.last_event_recv()
     for hook in hooks:
         st = states.get(hook.name)
         kind, _ = monitorhooks.target(hook)
-        why = "; ".join(monitorhooks.problems(st, now))
+        why = "; ".join(monitorhooks.problems(st, now, grew))
         yield _result(
             None if why else True,
             f"monitor hook {hook.name}",

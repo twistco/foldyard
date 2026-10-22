@@ -574,6 +574,7 @@ def listing(now: float | None = None) -> list[str]:
             f"to a file, a program or a URL (host-only config: {hooks_file()}).",
         ]
     states = _load_state()
+    grew = monitorstore.last_event_recv()
     out: list[str] = []
     for h in hooks:
         kind, where = target(h)
@@ -582,7 +583,7 @@ def listing(now: float | None = None) -> list[str]:
         out.append(f"{h.name}  {kind}  {where}  [{filters}]")
         st = states.get(h.name)
         out.append(f"  ✓ {progress(h, st, now)}")
-        out.extend(f"  ⚠ {why}" for why in problems(st, now))
+        out.extend(f"  ⚠ {why}" for why in problems(st, now, grew))
     out.extend(f"✗ {e}" for e in errors)
     out.append(f"— {hooks_file()}")
     return out
@@ -1047,9 +1048,12 @@ def _removed(pos: list, segs: list[monitorstore.Segment]) -> bool | None:
     position names was removed — ``True`` when older than every one the store has (and the store
     didn't move under the listing), or when no segment can have it (an older foldyard's inode, or
     its live file since sealed under an id of its own: with no cursor to find, nothing can say
-    whether retention took what was after it, so the gap is claimed); ``None``: look again."""
+    whether retention took what was after it, so the gap is claimed), or when its segment is
+    there but the offset is past its end (another file now); ``None``: look again."""
     sid = pos[0] if pos else None
     if not isinstance(sid, str) or sid.startswith(monitorstore.LEGACY):
+        return True
+    if any(s.id == sid for s in segs):
         return True
     if monitorstore.segments() != segs:
         return None
