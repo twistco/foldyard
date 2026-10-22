@@ -226,16 +226,17 @@ disk_gib = 60
 
 - **`backend`** — `"lima"` | `"podman"`. Default: `"lima"` (also what `init` writes): one VM per
   project, running concurrently, and the only backend with the VM firewall. `"podman"` is a
-  podman machine per project too (shared by its worktrees, like Lima's) — nothing extra to
-  install, but only one of them can run at a time, and no VM firewall. **The podman backend is deprecated and will be removed in a future release.** It
-  can't run two projects' VMs at once ([one VM at a time](https://github.com/twistco/foldyard/blob/main/docs/lima-backend-scope.md#podman-machine-one-vm-at-a-time-upstream-podman26281)), it can't
-  carry the VM firewall, and it has none of what is built on Lima since: the read-only to-box,
-  the from-box that keeps transcripts out of the checkout
+  podman machine per project too (shared by its worktrees, like Lima's), with nothing extra to
+  install. **The podman backend is deprecated and will be removed in a future release.** Only
+  one of its machines can run at a time
+  ([one VM at a time](https://github.com/twistco/foldyard/blob/main/docs/lima-backend-scope.md#podman-machine-one-vm-at-a-time-upstream-podman26281)),
+  it can't carry the VM firewall, and it has none of what is built on Lima since: the read-only
+  to-box, the from-box that keeps transcripts out of the checkout
   ([ADR-0033](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md)), and the guest
   monitor. To move, set `backend = "lima"`: the next `fy up` creates a new VM, so images are
   rebuilt and the podman machine's volumes (agent logins included) don't come along. There is
-  no VM-less option; a config still naming the retired `native` backend
-  gets a warning and the podman backend
+  no VM-less option; a config still naming the retired `native` backend gets a warning and,
+  for now, the deprecated podman backend: set `lima` instead
   ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)). Lima needs `limactl` *and*
   `podman` (which drives the VM's socket). A missing CLI is a hard error, whether you named the
   backend or inherited the default. Env: `MACHINE_BACKEND`.
