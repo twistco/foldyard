@@ -1853,9 +1853,13 @@ def _liveness_world(monkeypatch, replies: list[bool]):
     child = _running(started_at=0.0, pid=4242)
     desired = {"egress-proxy": _spec(port=41000, liveness="http://foldyard-liveness.invalid/")}
 
+    # The proxy's CPU time at each sample: 1.5 s of it over the 2 s between the first miss and the
+    # second — 75% over the stall, whatever its lifetime average.
+    cpu_times = iter([10.0, 11.5, 12.0, 12.1, 12.2])
+
     def tick() -> None:
         supervisor.check_liveness(
-            desired, {"egress-proxy": child}, ask=answers, cpu=lambda pid: 97.5
+            desired, {"egress-proxy": child}, ask=answers, cpu_seconds=lambda pid: next(cpu_times)
         )
 
     return tick, logged, asked
@@ -1876,8 +1880,59 @@ def test_a_stall_is_logged_once_with_the_cpu_and_its_end_with_how_long(monkeypat
     assert len(logged) == 2
     stall, recovery = logged
     assert "egress-proxy" in stall and "stopped answering" in stall and ":41000" in stall
-    assert "pid 4242" in stall and "97.5% CPU" in stall  # pegged, or idle: which kind of stall
+    assert "(pid 4242, 75% CPU since the first miss)" in stall  # pegged, or idle?
     assert "answering again" in recovery and "after 8s" in recovery  # first miss → the answer
+
+
+def test_cpu_seconds_reads_proc_where_it_exists(tmp_path):
+    # Linux: utime + stime, fields 14 and 15 of /proc/<pid>/stat, in clock ticks — counted after
+    # the ")" that ends the command name, which may itself hold spaces and parentheses.
+    (tmp_path / "42").mkdir()
+    tick = supervisor.os.sysconf("SC_CLK_TCK")
+    fields = ["S", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", str(3 * tick), str(tick)]
+    (tmp_path / "42" / "stat").write_text(f"42 (mitm dump (x)) {' '.join(fields)} 0 0\n")
+    assert supervisor._cpu_seconds(42, proc=tmp_path) == 4.0
+
+
+def test_cpu_seconds_parses_ps_time_elsewhere():
+    # macOS has no /proc: `ps -o time=` gives cumulative CPU time, as [[dd-]hh:]mm:ss[.ss].
+    parse = supervisor._ps_time
+    assert parse("0:12.34") == 12.34
+    assert parse("00:01:05") == 65.0
+    assert parse("1-02:03:04") == 93784.0
+    assert parse("garbage") is None
+
+
+def test_liveness_probes_its_daemons_at_once(monkeypatch):
+    # Under load several worktrees' proxies can stall together; asked one after another, each
+    # holds the tick for its whole timeout. Two asks that must overlap to get past a barrier.
+    import threading
+
+    _tick, _logged, _asked = _liveness_world(monkeypatch, [])
+    both = threading.Barrier(2, timeout=5)
+
+    def ask(port, url):
+        both.wait()
+        return True
+
+    young = {"a": _running(started_at=0.0), "b": _running(started_at=0.0)}
+    spec = _spec(port=41000, liveness="http://x.invalid/")
+    supervisor.check_liveness({"a": spec, "b": {**spec, "port": 41001}}, young, ask=ask)
+    assert not both.broken
+
+
+def test_a_restarted_daemon_starts_a_fresh_stall_record(monkeypatch):
+    # A restart (config changed) keeps the name; the old process's misses must not carry into the
+    # new one's record, or its first answer would report a stall that spanned the restart.
+    _tick, logged, _asked = _liveness_world(monkeypatch, [])
+    replies = iter([False, False, True])
+    spec = {"egress-proxy": _spec(port=41000, liveness="http://x.invalid/")}
+    old, new = _running(started_at=0.0, pid=1), _running(started_at=0.0, pid=2)
+    for child in (old, old, new):
+        supervisor.check_liveness(
+            spec, {"egress-proxy": child}, ask=lambda p, u: next(replies), cpu_seconds=lambda p: 0
+        )
+    assert len(logged) == 1 and "stopped answering" in logged[0]  # no "answering again after …"
 
 
 def test_liveness_leaves_a_warming_or_undeclared_daemon_alone(monkeypatch):

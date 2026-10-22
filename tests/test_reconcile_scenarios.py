@@ -66,7 +66,7 @@ def tick_world(isolated_state, monkeypatch):
             self.name, self.spec = name, spec
             self.signature = repr((spec["cmd"], sorted(spec["env"].items())))
             self.started_at = 0.0
-            self.proc = types.SimpleNamespace(returncode=None)
+            self.proc = types.SimpleNamespace(returncode=None, pid=4242)
             launched.append(name)
 
         def alive(self):
