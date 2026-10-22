@@ -125,7 +125,10 @@ So:
 - **Freshness:** a read-only 9p mount defaults to `cache=fscache`
   ([`defaults.go#L803-L811`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/limayaml/defaults.go#L803-L811)),
   so a reader in the guest may see host appends late. Fine for evidence, wrong for anything the
-  box polls for liveness; pin `9p.cache` if a tenant needs it.
+  box polls for liveness; pin `9p.cache` if a tenant needs it. *Decided 2026-10-22, with the
+  operator:* measured now (`tests/test_mounts_e2e.py`, an append and a rename-over after the guest
+  has cached the file; a strict xfail on default-cache 9p), pinned with the posture mirror's move
+  to the to-box — the first tenant that polls — so Linux and WSL2 VMs restart once, for both.
 - **Only the operator can widen it:** Lima merges mounts across default, instance and
   `~/.lima/_config/override.yaml`, and the most permissive `writable` wins
   ([`defaults.go#L139-L141`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/limayaml/defaults.go#L139-L141)).
