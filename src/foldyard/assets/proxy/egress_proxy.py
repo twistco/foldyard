@@ -417,6 +417,22 @@ def _with_query_param(url: str, name: str, value: str) -> str:
     return urlunsplit(parts._replace(query=urlencode(pairs)))
 
 
+# The name foldyard's supervisor asks for (``GET http://<this>/``) to learn the event loop still
+# answers — a bare TCP connect can't: the kernel completes it for a listener that has stalled.
+# Answered here, before the wall, with nothing dialled and no row logged. ``.invalid`` never
+# resolves (RFC 2606), so it can't shadow a real host. Duplicated as ``proxy.LIVENESS_URL``.
+_LIVENESS_HOST = "foldyard-liveness.invalid"
+
+
+def _is_liveness(request) -> bool:
+    return (
+        request.method == "GET"
+        and request.scheme == "http"
+        and request.host == _LIVENESS_HOST
+        and request.path == "/"
+    )
+
+
 _DEFAULT_LOG = str(Path.home() / ".foldyard" / "logs" / "egress.jsonl")
 # Rotate the log to a DATED backup (egress-proxy.<UTC-stamp>.jsonl) once it grows past this, then
 # prune to the newest PROXY_LOG_BACKUPS — so the on-disk footprint is bounded (decrypted flows log
@@ -1820,6 +1836,10 @@ class Injector:
         if flow.metadata.get("egress_proxy_judged"):
             return
         flow.metadata["egress_proxy_judged"] = True
+        if _is_liveness(flow.request):
+            flow.response = http.Response.make(204)
+            flow.metadata["egress_proxy_liveness"] = True
+            return
         self.refresh()
         host, port = _destination(flow.request), flow.request.port
         default = _HTTPS_PORT if flow.request.scheme == "https" else _HTTP_PORT
@@ -1962,6 +1982,8 @@ class Injector:
             and not flow.metadata.get("egress_proxy_retried")  # at most once — loop guard
         ):
             await self._reissue_401(flow, rule)
+        if flow.metadata.get("egress_proxy_liveness"):
+            return  # the supervisor's probe, every tick: nothing went anywhere
         if flow.metadata.get("egress_proxy_blocked") or flow.metadata.get("egress_proxy_held"):
             return  # our own answer, already logged — nothing went upstream
         self._log_flow(flow)

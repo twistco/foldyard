@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import dataclasses
 import enum
 import fcntl
 import hashlib
@@ -39,6 +40,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Collection
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from shutil import which
@@ -1712,6 +1714,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
         if reason:
             blocked_now[name] = reason
     _publish_blocked(blocked_now, {name: spec["label"] for name, spec in desired.items()})
+    check_liveness(desired, children)
     jobs = {}
     for name, spec in desired.items():
         state, detail = _daemon_job(spec, children.get(name), blocked_now.get(name))
@@ -1878,6 +1881,146 @@ def _daemon_job(
     if port and not (probe or devmode.probe)(port):
         return "starting", f"not answering on :{port} yet"
     return "up", ""
+
+
+# ── liveness: a daemon that stops answering is SAID, not just re-marked ──────────────────────────
+# A daemon may declare `liveness`: a URL it answers itself, asked in proxy form on its port each
+# tick. The readiness probe (devmode.probe) is a bare TCP connect, which the kernel completes into
+# the backlog of a listener whose event loop has stalled, so a proxy that had stopped answering
+# read as up and its stall left no trace on the host (2026-10-22: a box's apt timed out connecting
+# for ~6 minutes under four parallel image builds). LIVENESS_MISSES misses in a row log the stall
+# once, with the daemon's CPU (pegged: load; idle: blocked on something); the answer that ends it
+# logs how long it lasted.
+LIVENESS_TIMEOUT = 2.0
+LIVENESS_MISSES = 2
+
+
+@dataclasses.dataclass
+class _Stall:
+    """A daemon's run of missed answers: since its first miss (monotonic), by which process, and
+    that process's CPU time then."""
+
+    since: float
+    pid: int
+    cpu: float | None
+    misses: int = 0
+
+
+_stalls: dict[str, _Stall] = {}  # daemon name → its current run of misses
+
+
+def answers(port: int, url: str, timeout: float = LIVENESS_TIMEOUT) -> bool:
+    """Whether the daemon on loopback ``port`` answers a proxy-form ``GET url`` with a 2xx within
+    ``timeout``."""
+    import http.client
+    from urllib.parse import urlsplit
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        conn.request("GET", url, headers={"Host": urlsplit(url).netloc})
+        return 200 <= conn.getresponse().status < 300
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        conn.close()
+
+
+def _cpu_seconds(pid: int, proc: Path = Path("/proc")) -> float | None:
+    """``pid``'s cumulative CPU time in seconds; None when it can't say. From ``/proc`` where it
+    exists (clock-tick resolution), else ``ps -o time=`` (macOS gives hundredths). Sampled twice
+    and differenced: ``ps -o %cpu`` is a lifetime average on Linux, so a proxy idle for a day and
+    pegged for the stall would read as idle — the wrong side of what the figure is there to say."""
+    try:
+        # The command name, in parentheses, may hold spaces and parentheses itself: count the
+        # fields after the last ")". utime and stime are fields 14 and 15 of the whole line.
+        rest = (proc / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+        return (int(rest[11]) + int(rest[12])) / os.sysconf("SC_CLK_TCK")
+    except FileNotFoundError:
+        pass
+    except (OSError, IndexError, ValueError):
+        return None
+    if not which("ps"):
+        return None
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "time=", "-p", str(pid)], capture_output=True, text=True, timeout=5
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return _ps_time(out.strip())
+
+
+def _ps_time(text: str) -> float | None:
+    """``ps``'s cumulative CPU time, ``[[dd-]hh:]mm:ss[.ss]``, in seconds; None when unparseable."""
+    days, _, clock = text.rpartition("-")
+    try:
+        parts = [float(p) for p in clock.split(":")]
+        seconds = sum(v * 60**i for i, v in enumerate(reversed(parts)))
+        return seconds + (int(days) * 86400 if days else 0)
+    except ValueError:
+        return None
+
+
+def _cpu_share(stall: _Stall, used: float | None, now: float) -> float | None:
+    """The CPU share (%) a stalled daemon used between its first miss and ``now``."""
+    if used is None or stall.cpu is None or now <= stall.since:
+        return None
+    return (used - stall.cpu) / (now - stall.since) * 100
+
+
+def check_liveness(
+    desired: dict[str, dict],
+    children: dict[str, Child],
+    *,
+    ask: Callable[[int, str], bool] | None = None,
+    cpu_seconds: Callable[[int], float | None] | None = None,
+) -> None:
+    """Ask each running daemon that declares ``liveness`` (past its warm-up) whether it answers,
+    all at once (several proxies can stall under the same load, and each holds its ask for the
+    whole timeout), and log the edges (see the section comment). A daemon that exits, stops being
+    desired or is restarted under its name drops its record: its restart is logged on its own.
+    ``ask``/``cpu_seconds`` default to :func:`answers`/:func:`_cpu_seconds`, looked up per call so
+    a monkeypatch reaches them."""
+    ask = ask or answers
+    cpu_seconds = cpu_seconds or _cpu_seconds
+    now = time.monotonic()
+    for name in [n for n in _stalls if n not in children or not children[n].alive()]:
+        del _stalls[name]
+    due: dict[str, tuple[Child, int, str]] = {}
+    for name, spec in desired.items():
+        child = children.get(name)
+        url, port = spec.get("liveness"), spec.get("port")
+        if not url or not port or child is None or not child.alive():
+            continue
+        if now - child.started_at < DAEMON_WARMUP_SECONDS:
+            continue
+        due[name] = (child, port, url)
+    if not due:
+        return
+    with ThreadPoolExecutor(max_workers=len(due)) as pool:
+        answered = dict(zip(due, pool.map(lambda d: ask(d[1], d[2]), due.values()), strict=True))
+    for name, (child, port, _url) in due.items():
+        pid = child.proc.pid
+        stall = _stalls.get(name)
+        if stall and stall.pid != pid:
+            del _stalls[name]  # the misses were another process's
+            stall = None
+        if answered[name]:
+            if stall and stall.misses >= LIVENESS_MISSES:
+                log(f"✓ {name} answering again on :{port} after {_age(now - stall.since)}")
+            _stalls.pop(name, None)
+            continue
+        if stall is None:
+            stall = _stalls[name] = _Stall(since=now, pid=pid, cpu=cpu_seconds(pid))
+        stall.misses += 1
+        if stall.misses == LIVENESS_MISSES:
+            share = _cpu_share(stall, cpu_seconds(pid), now)
+            load = f", {share:.0f}% CPU since the first miss" if share is not None else ""
+            log(
+                f"⚠ {name} stopped answering on :{port} — no reply within "
+                f"{LIVENESS_TIMEOUT:g}s, {LIVENESS_MISSES} probes running (pid {pid}{load}); "
+                "requests through it wait or time out until it does"
+            )
 
 
 def _publish_ready(

@@ -372,6 +372,13 @@ own HTTP client, or a program opening raw sockets.
 - **Every request in the box suddenly refuses to connect.** The box routes through the proxy, so
   a dead proxy means no traffic out. `fy doctor` has an "egress proxy" check for this, and `fy up`
   restarting the supervisor is the usual fix.
+- **Requests in the box time out connecting to the proxy, then work again.** The proxy was
+  running but not answering. `fy host logs` says when: the supervisor asks it for a reserved
+  address (`http://foldyard-liveness.invalid/`) every tick, and logs `stopped answering` after two
+  misses in a row, with the share of a CPU the proxy used since the first miss, then
+  `answering again` with how long it lasted. A proxy near 100% was overloaded (fewer parallel
+  builds help); an idle one was stuck on something else. No such line while the box saw timeouts
+  points at the VM's network instead.
 - **A request gets a 502 from foldyard rather than from the service.** The proxy answers a
   request itself, without sending it, when the credential it should carry can't be had: the
   token service on your computer failed (`mint failed` in the Network Log; the message quotes
