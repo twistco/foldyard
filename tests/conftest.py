@@ -184,6 +184,20 @@ def isolated_base_vm_stamp(tmp_path, monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def isolated_home(tmp_path_factory, monkeypatch, request):
+    """Point HOME at a per-test directory, so nothing a test drives reaches the operator's real
+    home — Claude's native history above all: the transcript archive's default destination is
+    ``~/.claude/projects``, and `fy box up`'s legacy-transcript migration archived into it from
+    test_box for a whole release (46 `…pytest-…-repo` folders on one operator's computer, found
+    2026-10-22). The same reason as the state fixtures here; the live modules that drive the real
+    CLI keep the real home, as the operator's `fy` does."""
+    if _runs_the_real_cli(request.module):
+        return
+    home = tmp_path_factory.mktemp("home")  # beside tmp_path: tests list tmp_path exactly
+    monkeypatch.setenv("HOME", str(home))
+
+
+@pytest.fixture(autouse=True)
 def isolated_allow_store(tmp_path, monkeypatch, request):
     """Point the egress allow-store + the effective file the proxy reads at per-test paths, so no
     test reads or writes the real ~/.foldyard/<project>/allow-store.json — and every test starts

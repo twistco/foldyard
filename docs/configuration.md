@@ -971,7 +971,11 @@ tui = { raw_output_mode = false }
   `git clean -fdx` and `fy worktree remove` don't take them (`remove` archives the slot, then
   deletes it). A box created before that, and every box on the podman backend, binds them into
   the checkout (`.devbox-claude/`, `.devbox-codex/`); for this release the sync reads both
-  places. `DEVBOX_TRANSCRIPTS` / `DEVBOX_CODEX_TRANSCRIPTS` still name a place of your own.
+  places. Creating a box on Lima moves what that old place holds out of the checkout: copied
+  into the new box's slot (an in-box resume still lists those sessions) and into the archive,
+  then deleted. Whatever can't be copied whole stays, with a warning, and the next new box tries
+  again. `DEVBOX_TRANSCRIPTS` / `DEVBOX_CODEX_TRANSCRIPTS` still name a place of your own (the
+  old place is then only archived).
 
   Codex records a session's directory inside the file instead, where the host can't check it,
   so box Codex sessions never go into your own `~/.codex/sessions`: a Codex there would offer a

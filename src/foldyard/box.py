@@ -2125,7 +2125,17 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     if from_box:
         from . import transcripts
 
-        transcripts.archive_legacy(Path(checkout), here)
+        # The legacy bind-out is dead from here (its bind is create-time, the old box is gone):
+        # moved into the slot each agent now binds, or archived and kept where it binds elsewhere.
+        def _slot(enabled: bool, override: str, out: str) -> Path | None:
+            return Path(out) if enabled and not os.environ.get(override) else None
+
+        transcripts.migrate_legacy(
+            Path(checkout),
+            here,
+            claude_to=_slot(config.claude_enabled(), "DEVBOX_TRANSCRIPTS", claude_out),
+            codex_to=_slot(config.codex_enabled(), "DEVBOX_CODEX_TRANSCRIPTS", codex_out),
+        )
     print(f"▶ starting long-lived dev box {box} (network {net})…")
     if config.claude_enabled():
         print(

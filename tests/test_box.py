@@ -3068,17 +3068,49 @@ def test_up_on_the_podman_backend_keeps_the_legacy_bind_out(fake, monkeypatch):
     assert not any(v.startswith(("FY_FROM_BOX=", "FY_TO_BOX=")) for v in _env_values(run))
 
 
-def test_up_archives_the_legacy_transcripts_once_and_says_they_can_go(fake, lima_dirs, capsys):
+def test_up_moves_the_legacy_transcripts_into_the_slot_before_the_box_starts(
+    fake, lima_dirs, capsys, monkeypatch
+):
     from foldyard import transcripts
 
+    legacy = fake["main"] / "dev-stack" / ".devbox-claude" / "projects"
+    codex_legacy = fake["main"] / "dev-stack" / ".devbox-codex" / "sessions"
+    own = transcripts.claude_project_dir(str(fake["main"]))
+    (legacy / own).mkdir(parents=True)
+    (legacy / own / "s.jsonl").write_text("{}")
+    (codex_legacy / "2026/10/01").mkdir(parents=True)
+    (codex_legacy / "2026/10/01/rollout.jsonl").write_text("{}")
+    seen: list[bool] = []  # was the slot filled by the time the box was created?
+    slot = lima_dirs / "from-box" / "main"
+    real_run = box.subprocess.run
+
+    def run(cmd, *a, **kw):
+        if "run" in cmd and "-d" in cmd:
+            seen.append((slot / "claude/projects" / own / "s.jsonl").exists())
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", run)
+    assert box.main("up") == 0
+    assert seen == [True]
+    assert (slot / "codex/sessions/2026/10/01/rollout.jsonl").exists()
+    assert not (fake["main"] / "dev-stack" / ".devbox-claude").exists()
+    assert not (fake["main"] / "dev-stack" / ".devbox-codex").exists()
+    assert "moved out of the checkout" in capsys.readouterr().out
+
+
+def test_an_override_keeps_the_legacy_transcripts_archived_in_place(
+    fake, lima_dirs, capsys, monkeypatch, tmp_path
+):
+    from foldyard import transcripts
+
+    monkeypatch.setenv("DEVBOX_TRANSCRIPTS", str(tmp_path / "mine"))
     legacy = fake["main"] / "dev-stack" / ".devbox-claude" / "projects"
     own = transcripts.claude_project_dir(str(fake["main"]))
     (legacy / own).mkdir(parents=True)
     (legacy / own / "s.jsonl").write_text("{}")
     assert box.main("up") == 0
-    out = capsys.readouterr().out
-    assert "can be deleted" in out and str(legacy) in out
-    assert (legacy / own / "s.jsonl").exists()  # archived, never moved
+    assert (legacy / own / "s.jsonl").exists()  # the box binds the override, not the slot
+    assert "can be deleted" in capsys.readouterr().out
 
 
 def test_up_nags_when_a_running_box_still_binds_into_the_checkout(fake, lima_dirs, capsys):

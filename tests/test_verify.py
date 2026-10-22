@@ -769,19 +769,26 @@ def test_a_failed_verdict_repeats_the_manual_pointer(secure_engine, capsys):
 # to-box rw (the table then says `rw`) while the host still refuses every write — and the refusal
 # is EROFS, EPERM or EACCES depending on which layer said no. A write that lands is the FAIL.
 
-TO_BOX = str(pathlib.Path.home() / ".foldyard" / "p" / "to-box")
-FROM_BOX = str(pathlib.Path.home() / ".foldyard" / "p" / "from-box")
+
+def _to_box() -> str:
+    # At TEST time, like the tables above: conftest gives each test its own HOME, and the audit
+    # judges a leak by the home it runs with — a path built at import time is the operator's.
+    return str(pathlib.Path.home() / ".foldyard" / "p" / "to-box")
+
+
+def _from_box() -> str:
+    return str(pathlib.Path.home() / ".foldyard" / "p" / "from-box")
 
 
 @pytest.fixture
 def with_to_box(secure_engine, monkeypatch):
     calls, results = secure_engine
-    monkeypatch.setattr(verify.boxmounts, "vm_paths", lambda: (FROM_BOX, TO_BOX))
+    monkeypatch.setattr(verify.boxmounts, "vm_paths", lambda: (_from_box(), _to_box()))
     monkeypatch.setattr(verify.machine, "to_box_mounted", lambda: True)
     results["pid1_mounts"] = (
         "/dev/vda2 / btrfs rw 0 0\n"
-        f"mount2 {FROM_BOX} virtiofs rw,relatime 0 0\n"
-        f"mount3 {TO_BOX} virtiofs ro,relatime 0 0\n"
+        f"mount2 {_from_box()} virtiofs rw,relatime 0 0\n"
+        f"mount3 {_to_box()} virtiofs ro,relatime 0 0\n"
     )
     return calls, results
 
@@ -794,7 +801,7 @@ def test_a_read_only_to_box_that_refuses_the_write_passes(with_to_box, capsys):
     assert "to-box refuses a write from a --privileged container binding it read-write" in out
     # the probe binds the to-box READ-WRITE into a privileged container: the VM mount is the claim
     cmd = results["to_box_cmd"]
-    assert "--privileged" in cmd and f"{TO_BOX}:/fy-to-box" in cmd
+    assert "--privileged" in cmd and f"{_to_box()}:/fy-to-box" in cmd
     assert "remount,rw" in cmd[-1]
 
 
@@ -803,7 +810,7 @@ def test_foldyards_two_directories_are_not_a_leak_but_their_parent_is(with_to_bo
     assert verify.verify() == 0
     assert "free of host home/paths" in capsys.readouterr().out
     # the state dir itself (host.env, the keys) or a sibling under it: still a leak
-    state = str(pathlib.Path(TO_BOX).parent)
+    state = str(pathlib.Path(_to_box()).parent)
     for leak in (state, f"{state}/monitor-sink.key.d"):
         results["pid1_mounts"] += f"mount9 {leak} virtiofs rw 0 0\n"
         assert verify.verify() == 1
@@ -816,7 +823,7 @@ def test_a_write_that_lands_on_the_to_box_fails(with_to_box, capsys):
     results["to_box_probe"] = "remount=refused\nwrite=LANDED\nremoved=yes\n"
     assert verify.verify() == 1
     out = capsys.readouterr().out
-    assert "CREATED" in out and f"{TO_BOX}/.fy-verify-" in out and "writable from the VM" in out
+    assert "CREATED" in out and f"{_to_box()}/.fy-verify-" in out and "writable from the VM" in out
 
 
 def test_a_guest_showing_rw_while_the_host_refuses_is_a_warning_not_a_fail(with_to_box, capsys):
@@ -856,7 +863,7 @@ def test_under_gvisor_the_write_probe_is_not_applicable_in_the_box(
     monkeypatch.setenv("FY_MACHINE_RUNTIME", "gvisor")
     results["mount_rc"] = 1
     results["pid1_mounts"] = ""
-    verify._vm_boundary(verify._Report(), "podman", {}, "alpine", [], TO_BOX, True)
+    verify._vm_boundary(verify._Report(), "podman", {}, "alpine", [], _to_box(), True)
     out = capsys.readouterr().out
     assert "to-box write probe runs at another layer" in out
     assert "to_box_cmd" not in results
@@ -866,7 +873,7 @@ def test_in_the_box_the_to_box_bind_refuses_a_write(tmp_path, monkeypatch, capsy
     here = tmp_path / "to-box"
     here.mkdir()
     monkeypatch.setattr(verify.boxmounts, "TO_BOX_IN_BOX", str(here))
-    monkeypatch.setenv("FY_TO_BOX", TO_BOX)
+    monkeypatch.setenv("FY_TO_BOX", _to_box())
     rep = verify._Report()
     verify._to_box_in_box(rep)  # a writable dir: the bind is not read-only
     assert rep.fails == 1
@@ -901,7 +908,7 @@ def test_a_box_from_before_the_two_directories_fails_with_the_recreate_hint(
     _, results = secure_engine
     monkeypatch.setattr(verify.config, "in_box", lambda: True)
     monkeypatch.setattr(verify, "_box_posture", lambda rep, env: None)
-    results["pid1_mounts"] = f"mount3 {TO_BOX} virtiofs ro,relatime 0 0\n"
+    results["pid1_mounts"] = f"mount3 {_to_box()} virtiofs ro,relatime 0 0\n"
     assert verify.verify() == 1
     out = capsys.readouterr().out
     assert "VM exposes host paths" in out and "fy box down && fy box up" in out
