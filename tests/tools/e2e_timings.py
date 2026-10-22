@@ -35,7 +35,10 @@ def modules(junit: Path) -> list[Module]:
         return []
     rows: dict[str, Module] = {}
     for case in root.iter("testcase"):
-        name = (case.get("classname") or "?").split(".")[-1]
+        # `tests.test_x` or, for a test in a class, `tests.test_x.TestThing`: the module is the
+        # last dotted part named like one.
+        parts = (case.get("classname") or "?").split(".")
+        name = next((p for p in reversed(parts) if p.startswith("test_")), parts[-1])
         row = rows.setdefault(name, Module(name))
         row.seconds += float(case.get("time") or 0)
         if case.find("failure") is not None or case.find("error") is not None:

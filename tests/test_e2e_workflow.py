@@ -128,7 +128,7 @@ def test_without_both_variables_there_is_no_session_base(env):
 JUNIT = """<?xml version="1.0" encoding="utf-8"?>
 <testsuites><testsuite name="pytest" tests="5">
 <testcase classname="tests.test_machine_e2e" name="test_a" time="61.5"/>
-<testcase classname="tests.test_machine_e2e" name="test_b" time="20.0"><failure message="x"/></testcase>
+<testcase classname="tests.test_machine_e2e.TestLifecycle" name="test_b" time="20.0"><failure message="x"/></testcase>
 <testcase classname="tests.test_wall_e2e" name="test_c" time="0.4"><skipped message="no nft"/></testcase>
 <testcase classname="tests.test_e2e" name="test_d" time="125.0"/>
 <testcase classname="tests.test_e2e" name="test_e" time="3.1"><error message="teardown"/></testcase>

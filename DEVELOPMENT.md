@@ -487,10 +487,12 @@ the shared folder ~12×), and the minutes go on the cold `fy up` after each VM r
 fine. Every module drives the one VM, so tests can't run in parallel INSIDE a job — the modules
 are split across jobs instead: each host job is a matrix whose shards (`matrix.shard.modules`)
 each pay the full setup on their own runner (distro, Lima, the session base bake, the first VM),
-then run their modules in order — four on WSL2 (`W1`–`W4`), two on Linux (`L1`/`L2`, each the union
-of two WSL2 shards, so a module's neighbours are the same on both hosts). The split is by measured
-module times, and each shard starts with a module that recreates the VM (`W3` starts from the VM
-the setup just created). `tests/test_e2e_workflow.py`, in the fast suite, holds the matrix to the
+then run their modules in order — four on WSL2 (`W1`–`W4`), two on Linux (`L1`/`L2`, roughly
+`W1`+`W3` and `W2`+`W4`). The split is by measured module times on each host, and each shard starts
+with a module that recreates the VM (`W3` starts from the VM the setup just created). A module's
+time depends on its place: the first `fy up` after a recreate is the cold one (image builds and
+pulls), so whichever module follows a recreate carries it. The WSL2 distro's apt points at the
+Azure mirror the Linux runners use (the default archive once took that step from 45 s to 3 min). `tests/test_e2e_workflow.py`, in the fast suite, holds the matrix to the
 modules: every host-tier module (test_e2e.py and each `test_*_e2e.py` that imports `e2e_host`) in
 exactly one shard per job, so **a new host-tier module must be added to a shard in both jobs** or
 `check` goes red. Three smaller savings ride along:
