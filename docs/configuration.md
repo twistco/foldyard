@@ -845,6 +845,16 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   (you travelled, say) and the box still works, so it passes and shows the old → new value. Any
   other variable that no longer matches makes it exit non-zero, and so does a `TZ` or `LC_TIME`
   this table pins, since changing the pin is a config change.
+
+  The box also commits as you. Its home directory is new with every box, so it has no global git
+  config of its own: a new box gets your computer's `user.name` and `user.email` (from your
+  global git config — those two keys, nothing else) in its own global config, each only where the
+  box doesn't already have one. Git's own order is unchanged: `GIT_AUTHOR_*` and
+  `GIT_COMMITTER_*` set here, or a `user.name` in the repo's own `.git/config`, still win. An
+  `includeIf` identity isn't followed, because matching it means running git against the
+  checkout, which the box can write. When your global config has any `includeIf` rule, a new box
+  says so as it sets up, unless the repo already sets its own email; set that identity in the
+  repo (`git config user.email …`).
 - **`[[box.tools]]`** — one-time tool installs, run as bootstrap steps reported ✓/✗:
   `{ name, install, check? }`. `check` is a shell test that skips the install when it succeeds;
   default `command -v <name>`. These run on every newly created box; a distro package belongs in
