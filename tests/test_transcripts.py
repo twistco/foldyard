@@ -1184,3 +1184,148 @@ def test_the_sweep_reads_the_bound_worktrees_slot(mac, monkeypatch, tmp_path):
         f"{mac['own']}/old.jsonl": "legacy",
     }
     assert logs == []
+
+
+# ── moving the legacy bind-out out of the checkout (`fy box up`, on the from-box layout) ──────
+#
+# Creating a box on the from-box layout is the one moment the legacy dir is known to be dead: its
+# bind is create-time, the previous box is gone, and only this checkout's box ever bound it. So
+# that is where the old tree is moved — COPIED into the new box's slot (an in-box `claude --resume`
+# keeps the old sessions) and into the archive on your computer, then removed from the checkout —
+# and only when both copies came out whole. Anything short of that keeps it and says so.
+
+
+def _migrate(mac, *, claude: bool = True, codex: bool = False) -> None:
+    mac["from_box"].mkdir(
+        parents=True, exist_ok=True
+    )  # `boxmounts.prepare`, before the VM shares it
+    transcripts.migrate_legacy(
+        mac["checkout"],
+        "dev-stack",
+        claude_to=mac["fb_src"] if claude else None,
+        codex_to=mac["fb_codex_src"] if codex else None,
+    )
+
+
+def test_the_legacy_tree_moves_into_the_slot_and_the_archive(mac, capsys):
+    _session(mac["src"], f"{mac['own']}/s.jsonl", "old session")
+    _migrate(mac)
+    assert _archived(mac["fb_src"]) == {f"{mac['own']}/s.jsonl": "old session"}
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/s.jsonl": "old session"}
+    assert not (mac["checkout"] / "dev-stack/.devbox-claude").exists()  # out of the checkout
+    out = capsys.readouterr().out
+    assert "moved out of the checkout" in out and str(mac["src"]) in out
+
+
+def test_codex_sessions_move_into_their_slot_and_foldyards_codex_home(mac, monkeypatch):
+    monkeypatch.setattr(config, "codex_enabled", lambda: True)
+    _session(mac["codex_src"], "2026/10/01/rollout-a.jsonl", "codex")
+    _migrate(mac, claude=False, codex=True)
+    assert _archived(mac["fb_codex_src"]) == {"2026/10/01/rollout-a.jsonl": "codex"}
+    assert _archived(mac["codex_archive"]) == {"2026/10/01/rollout-a.jsonl": "codex"}
+    assert not (mac["checkout"] / "dev-stack/.devbox-codex").exists()
+    assert not mac["codex_native"].exists()
+
+
+def test_another_projects_folder_moves_into_the_slot_but_never_the_archive(mac, capsys):
+    # The own-folder rule guards resumes on your computer; the box's own slot is not one, and
+    # dropping the folder would delete what the box wrote.
+    _session(mac["src"], f"{mac['own']}/s.jsonl", "mine")
+    _session(mac["src"], "-tmp-scratch/t.jsonl", "scratch")
+    _migrate(mac)
+    assert _archived(mac["fb_src"]) == {
+        f"{mac['own']}/s.jsonl": "mine",
+        "-tmp-scratch/t.jsonl": "scratch",
+    }
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/s.jsonl": "mine"}
+    assert not mac["src"].exists()
+    assert "-tmp-scratch" in capsys.readouterr().err
+
+
+def test_an_incomplete_copy_keeps_the_legacy_tree(mac, capsys):
+    _session(mac["src"], f"{mac['own']}/s.jsonl", "old")
+    (mac["fb_src"] / mac["own"] / "s.jsonl").mkdir(parents=True)  # the slot can't take the file
+    _migrate(mac)
+    assert (mac["src"] / mac["own"] / "s.jsonl").read_text() == "old"
+    assert "kept" in capsys.readouterr().out
+
+
+def test_a_tree_deeper_than_the_walk_keeps_the_legacy_tree(mac, monkeypatch):
+    monkeypatch.setattr(transcripts, "MAX_DEPTH", 1)
+    _session(mac["src"], f"{mac['own']}/a/b/deep.jsonl", "deep")
+    _migrate(mac)
+    assert (mac["src"] / mac["own"] / "a/b/deep.jsonl").read_text() == "deep"
+
+
+def test_a_failed_archive_keeps_the_legacy_tree(mac, monkeypatch):
+    _session(mac["src"], f"{mac['own']}/s.jsonl", "old")
+    mac["claude_archive"].parent.mkdir(parents=True)
+    mac["claude_archive"].write_text("not a directory")  # the archive can't be written
+    _migrate(mac)
+    assert (mac["src"] / mac["own"] / "s.jsonl").read_text() == "old"
+
+
+def test_a_linked_legacy_dir_is_never_followed(mac, tmp_path):
+    secret = tmp_path / "secret"
+    _session(secret, f"{mac['own']}/id_rsa", "TOPSECRET")
+    mac["src"].parent.mkdir(parents=True)
+    mac["src"].symlink_to(secret)
+    _migrate(mac)
+    assert _archived(secret) == {f"{mac['own']}/id_rsa": "TOPSECRET"}  # nothing deleted there
+    assert not mac["fb_src"].exists() or _archived(mac["fb_src"]) == {}
+    assert not mac["claude_archive"].exists()
+
+
+def test_a_link_inside_the_tree_is_removed_never_followed(mac, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOPSECRET")
+    _session(mac["src"], f"{mac['own']}/s.jsonl", "old")
+    (mac["src"] / mac["own"] / "planted").symlink_to(secret)
+    _migrate(mac)
+    assert secret.read_text() == "TOPSECRET"
+    assert not mac["src"].exists()  # a link is no session: nothing of value is left behind
+    assert _archived(mac["fb_src"]) == {f"{mac['own']}/s.jsonl": "old"}
+
+
+def test_a_linked_slot_refuses_the_move(mac, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _session(mac["src"], f"{mac['own']}/s.jsonl", "old")
+    mac["from_box"].mkdir(parents=True)
+    (mac["from_box"] / "main").symlink_to(elsewhere)  # planted before the first new box
+    with pytest.raises(OSError):
+        _migrate(mac)
+    assert list(elsewhere.iterdir()) == []
+    assert (mac["src"] / mac["own"] / "s.jsonl").read_text() == "old"
+
+
+def test_the_legacy_parent_stays_when_it_holds_anything_else(mac):
+    _session(mac["src"], f"{mac['own']}/s.jsonl", "old")
+    (mac["checkout"] / "dev-stack/.devbox-claude/notes.txt").write_text("mine")
+    _migrate(mac)
+    assert not mac["src"].exists()
+    assert (mac["checkout"] / "dev-stack/.devbox-claude/notes.txt").read_text() == "mine"
+
+
+def test_without_a_slot_the_legacy_tree_is_only_archived(mac, capsys):
+    # An operator's DEVBOX_TRANSCRIPTS: the new box binds there, not into a slot.
+    _session(mac["src"], f"{mac['own']}/s.jsonl", "old")
+    _migrate(mac, claude=False)
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/s.jsonl": "old"}
+    assert (mac["src"] / mac["own"] / "s.jsonl").exists()
+    assert "can be deleted" in capsys.readouterr().out
+
+
+def test_a_dry_run_moves_nothing(mac, monkeypatch):
+    monkeypatch.setenv("DRY_RUN", "1")
+    _session(mac["src"], f"{mac['own']}/s.jsonl", "old")
+    _migrate(mac)
+    assert (mac["src"] / mac["own"] / "s.jsonl").exists()
+    assert not mac["claude_archive"].exists()
+    assert not mac["fb_src"].exists() or _archived(mac["fb_src"]) == {}
+
+
+def test_nothing_to_move_says_nothing(mac, capsys):
+    _migrate(mac)
+    _migrate(mac, codex=True)
+    assert capsys.readouterr().out == ""

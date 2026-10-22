@@ -219,6 +219,11 @@ One VM restart on Lima and one box recreate; on the podman backend, the box recr
   reads the old bound-out dirs: `sync_current`, the supervisor sweep, `fy transcripts` and
   `worktree remove` archive both, the new one first. The first `fy box up` on the new layout
   archives the old dir once and prints that it can be deleted; it never moves it into the from-box.
+  *Changed 2026-10-22, with the operator:* that left the grep noise in every existing checkout and
+  the old sessions out of an in-box resume, so creating a box on the new layout now MOVES the old
+  dir — copied into the slot and the archive, then deleted, only when both copies are whole
+  (`transcripts.migrate_legacy`). Box creation is the trigger because it is the one moment the old
+  dir has no writer: its bind is create-time and the previous box is gone.
   `DEVBOX_TRANSCRIPTS` / `DEVBOX_CODEX_TRANSCRIPTS` keep working. The `.devbox-claude/` /
   `.devbox-codex/` ignore lines (`init.py:47-49`) stay for that release, then go.
 - **`worktree remove`** archives the slot, then deletes it (the checkout deletion no longer takes

@@ -36,7 +36,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import boxmounts, config, stack
+from . import boxmounts, config, mountwrite, stack
 
 
 def _err(*a: object) -> None:
@@ -213,6 +213,7 @@ class _Tally:
     copied: int = 0
     bytes: int = 0
     skipped: list[str] = field(default_factory=list)  # not plain files/dirs: never followed
+    deep: int = 0  # of those, directories past MAX_DEPTH — real content left uncopied
     refused: list[str] = field(default_factory=list)  # top-level names that aren't the project's
     vanished: int = 0
     errors: list[str] = field(default_factory=list)
@@ -338,6 +339,7 @@ def _mirror_dir(
         if stat.S_ISDIR(mode):
             if depth >= MAX_DEPTH:
                 tally.skipped.append(f"{path}/ (deeper than {MAX_DEPTH} levels)")
+                tally.deep += 1
             else:
                 _mirror_subdir(src_fd, dst_fd, name, path, depth, dry, tally)
         elif held:  # the project's name, but Claude only ever makes a folder there
@@ -610,34 +612,151 @@ def sources(
     return [(root / rel, root), (legacy, checkout)]
 
 
-def archive_legacy(checkout: Path, here: str) -> None:
-    """`fy box up` on the from-box layout: archive whatever the legacy bind-out in the checkout
-    still holds — never moved into the from-box — and say it can be deleted."""
-    trees: list[tuple[Path, str, Path | None, str]] = [
-        (bound_out_dir(checkout, here), "Claude transcripts (old layout)", checkout, "")
+def migrate_legacy(
+    checkout: Path, here: str, *, claude_to: Path | None, codex_to: Path | None
+) -> None:
+    """`fy box up`, creating a box on the from-box layout: move each agent's legacy bind-out out of
+    the checkout. ``claude_to`` / ``codex_to`` are the slots the new box binds (``None`` where it
+    binds elsewhere — an operator's override — or the agent isn't configured).
+
+    The one moment the legacy tree is known to be dead: its bind is create-time, the previous box
+    is gone, and only this checkout's box ever bound it. Each tree is COPIED into its slot (so an
+    in-box resume keeps the old sessions — every name, since the slot is the box's own) and into
+    the archive on your computer (under the own-folder rule), then removed — only when both copies
+    came out whole: a failed or partial copy, a vanished file or a directory past the walk's depth
+    keeps it, and the next new box tries again. Every copy is additive, so a retry duplicates
+    nothing. A tree with no slot is archived and kept, as before."""
+    trees: list[tuple[Path, Path | None, str, Path | None, str]] = [
+        (bound_out_dir(checkout, here), claude_to, "Claude transcripts", checkout, "")
     ]
     if config.codex_enabled():
         trees.append(
             (
                 codex_bound_out_dir(checkout, here),
-                "Codex transcripts (old layout)",
+                codex_to,
+                "Codex sessions",
                 None,
                 str(_codex_archive_dest()),
             )
         )
-    for src, what, project_of, dest in trees:
+    for src, slot, what, project_of, dest in trees:
         if not _has_entries(checkout, src):
             continue
-        rc, detail, _ = _archive(
+        if slot is None:
+            _archive_and_keep(src, checkout, what, project_of, dest)
+            continue
+        kept = _copy_into_slot(src, checkout, slot)
+        rc, detail, refused = _archive(
             src, anchor=checkout, project_of=project_of, dest=dest, what=what, quiet=True
         )
-        if rc in BENIGN_RC:  # one line, not the archive's ▶/✓ pair: this runs at every `box up`
-            print(
-                f"ℹ transcripts now bind out to foldyard's from-box; the old {src} is archived "
-                "and can be deleted."
-            )
+        if refused and project_of is not None:
+            only = claude_project_dir(str(project_of))
+            _err(f"ℹ {_refusal(refused, only)}; kept in the box's slot.")
+        if not kept and rc != 0:
+            kept = detail
+        if not kept and os.environ.get("DRY_RUN"):
+            kept = "a dry run"
+        if not kept:
+            kept = _remove_legacy(checkout, src)
+        if kept:
+            print(f"⚠ old {what} in {src} kept ({kept}); the next new box tries again.")
         else:
-            print(f"⚠ {src} (the old layout) could not be fully archived ({detail}) — keep it.")
+            print(f"✓ old {what} moved out of the checkout: {src} → {slot} (and archived).")
+
+
+def _archive_and_keep(
+    src: Path, checkout: Path, what: str, project_of: Path | None, dest: str
+) -> None:
+    """The legacy tree of an agent whose new box binds somewhere other than its slot: archived,
+    never moved, and left for you to delete."""
+    rc, detail, _ = _archive(
+        src, anchor=checkout, project_of=project_of, dest=dest, what=what, quiet=True
+    )
+    if rc in BENIGN_RC:  # one line, not the archive's ▶/✓ pair: this runs at every new box
+        print(
+            f"ℹ transcripts now bind out of the checkout; the old {src} is archived and can be "
+            "deleted."
+        )
+    else:
+        print(f"⚠ {src} (the old layout) could not be fully archived ({detail}) — keep it.")
+
+
+def _copy_into_slot(src: Path, checkout: Path, slot: Path) -> str:
+    """Additively copy a legacy tree into its from-box slot, every name in it. ``""`` when the copy
+    is whole, else why not. The slot is box-writable, so it is made with the no-follow mkdir walk
+    (a planted link raises ``OSError``, refusing the box's creation, as its bind would) and opened
+    from the from-box root without following a link; the source is walked as every sync walks it."""
+    root = boxmounts.from_box_dir()
+    dry = bool(os.environ.get("DRY_RUN"))
+    if not dry:
+        mountwrite.makedirs(root, slot.relative_to(root))
+    try:
+        src_fd = _open_source(checkout, src)
+    except FileNotFoundError:
+        return ""
+    except _Refused as r:
+        return f"{r.path} {r.why}, never followed"
+    except OSError as e:
+        return f"{src}: {e.strerror or e}"
+    dst_fd: int | None = None
+    try:
+        try:
+            dst_fd = _open_source(root, slot)
+        except FileNotFoundError:
+            if not dry:
+                raise
+        except _Refused as r:
+            return f"{r.path} {r.why}, never followed"
+        tally = _Tally()
+        _mirror_dir(src_fd, dst_fd, "", 0, dry, tally)
+    except OSError as e:
+        return f"{slot}: {e.strerror or e}"
+    finally:
+        os.close(src_fd)
+        if dst_fd is not None:
+            os.close(dst_fd)
+    if tally.errors or tally.vanished:
+        return tally.problem()
+    if tally.deep:
+        dirs = "directories" if tally.deep != 1 else "directory"
+        return f"{tally.deep} {dirs} deeper than {MAX_DEPTH} levels"
+    return ""
+
+
+def _remove_legacy(checkout: Path, src: Path) -> str:
+    """Delete a legacy tree that is safely copied, then its parent if that is left empty — never
+    following a link the box planted: both are reached from the checkout by the no-follow walk, a
+    link in the tree is unlinked (``rmtree`` by fd), and a platform whose ``rmtree`` could follow
+    one swapped in mid-delete is refused. ``""`` on success, else why it was kept."""
+    if not shutil.rmtree.avoids_symlink_attacks:
+        return "this platform's rmtree can follow a symlink planted mid-delete; delete it by hand"
+    try:
+        top = _open_source(checkout, src.parent.parent)
+    except _Refused as r:
+        return f"{r.path} {r.why}, never followed"
+    except OSError as e:
+        return f"{src.parent.parent}: {e.strerror or e}"
+    try:
+        try:
+            parent = os.open(src.parent.name, _DIR_FLAGS, dir_fd=top)
+        except OSError as e:
+            return f"{src.parent}: {e.strerror or e}, never followed"
+        try:
+            if stat.S_ISDIR(os.stat(src.name, dir_fd=parent, follow_symlinks=False).st_mode):
+                shutil.rmtree(src.name, dir_fd=parent)
+            else:
+                os.unlink(src.name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            return f"{src}: {e.strerror or e}"
+        finally:
+            os.close(parent)
+        with contextlib.suppress(OSError):  # only when empty: anything else there stays
+            os.rmdir(src.parent.name, dir_fd=top)
+    finally:
+        os.close(top)
+    return ""
 
 
 def sync_archive(
