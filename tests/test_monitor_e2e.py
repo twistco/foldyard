@@ -14,7 +14,10 @@ by hand on Fedora 44 / kernel 6.19.10 / Tetragon v1.7.1 under QEMU TCG (2026-10-
 module ran in CI.
 
 Host tier (tests/e2e_host.py). The VM is left RUNNING with the monitor's `off` recording, which
-every later module's `fy up` (monitor off) already matches — so no restart is forced on them.
+every later module's `fy up` (monitor off) already matches — so no restart is forced on them. When
+the session declares this module its LAST (`FY_E2E_MODULES`, as the CI shards do), there is no
+later module, and the teardown skips that stop + `fy up`: the VM is left with the monitor on. The
+teardown asserts nothing, so the skip loses no check.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from e2e_host import (
     fy_ok,
     host_tier,
     lima_shell,
+    runs_last,
 )
 
 pytestmark = host_tier
@@ -48,6 +52,11 @@ def repo(tmp_path_factory):
     assert "✓ guest monitor" in up.out, up.out
     yield r
     fy(["down"], r, timeout=180, env_extra=ON)
+    if runs_last(__file__):
+        # Nothing after this module needs the monitor off, so skip the reboot that turns it off
+        # (~2 min on WSL2). Only when the session declared this module last (FY_E2E_MODULES).
+        print("(the last module of this session: the VM keeps the monitor on)")
+        return
     fy(["machine", "stop"], r, timeout=300)
     fy(["up"], r, timeout=1800)  # monitor off: the `off` rendering removes it at boot
     fy(["down"], r, timeout=180)
