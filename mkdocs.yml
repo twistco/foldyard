@@ -99,3 +99,4 @@ nav:
       - nested-virt.md
       - monitor-pipeline.md
       - ebpf-monitoring-spike.md
+      - forwarder-spike.md
