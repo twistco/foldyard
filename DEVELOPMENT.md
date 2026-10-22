@@ -492,11 +492,13 @@ of two WSL2 shards, so a module's neighbours are the same on both hosts). The sp
 times averaged over several runs, and each shard starts with a module that recreates the VM (`W3`
 starts from the VM the setup just created). A module's time depends on its place: the first
 `fy up` after a recreate is the cold one (image builds and pulls), so whichever module follows a
-recreate carries it. **Runner speed dominates a single run**: the same WSL2 shard has taken 21 min
-on one runner and 37 on another (module for module ~2×, the apt step 45 s to 16 min), so judge a
-rebalance on several runs' tables, not one. (Pointing the distro's apt at
-`azure.archive.ubuntu.com`, the Linux runners' mirror, made that step slower, not faster.) `tests/test_e2e_workflow.py`, in the fast suite, holds the matrix to the
-modules: every host-tier module (test_e2e.py and each `test_*_e2e.py` that imports `e2e_host`) in
+recreate carries it. **Runner speed dominates a single run**: the same WSL2 shard (`W1`) has taken
+18, 21 and 37 min on three runners, module for module up to ~2×, and the apt step alone ranges from
+under a minute to 5 min on WSL2 and once 9 min on Linux. So judge a rebalance on several runs'
+tables, not one. (Pointing the distro's apt at `azure.archive.ubuntu.com`, the Linux runners'
+mirror, made that step slower, 2–16 min, not faster.)
+`tests/test_e2e_workflow.py`, in the fast suite, holds the matrix to the modules: every host-tier
+module (test_e2e.py and each `test_*_e2e.py` that imports `e2e_host`) in
 exactly one shard per job, so **a new host-tier module must be added to a shard in both jobs** or
 `check` goes red. Three smaller savings ride along:
 - every CI VM runs on **4 vCPUs** (`MACHINE_CPUS=4`, which wins over the example's `cpus = 2`; on
