@@ -497,8 +497,10 @@ ranged from under a minute to 13 min on the same install (once 12 on Linux). (Po
 distro's apt at `azure.archive.ubuntu.com`, the Linux runners' mirror, made it slower, 2–16 min,
 not faster. What the WSL2 job does instead is cache the debs together with the package lists they
 were resolved against, keyed by month (`actions/cache`, restored to `RUNNER_TEMP`), and install
-offline from them. On a miss, or if the offline install fails, it installs online as before and
-saves the result. Bump the key's `v1` when the package list changes.)
+offline from them. On a miss it installs online as before and saves the result; if the offline
+install fails it installs online too, but a cache key can't be overwritten, so that cache stays
+until the month's key changes — bump the key's `v1` to replace it sooner, and when the package
+list changes.)
 
 **4 vCPUs for the CI VM was tried and reverted (2026-10-22).** `MACHINE_CPUS=4` (over the example's
 `cpus = 2`) made no Linux module faster, and on WSL2 it made the VM-heavy ones slower and erratic.

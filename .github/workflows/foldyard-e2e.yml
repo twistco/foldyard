@@ -478,9 +478,10 @@ jobs:
       # runner and 13 min on another (2026-10-22, from archive.ubuntu.com and Azure's mirror
       # alike), enough on its own to push a shard past its timeout. So the debs AND the package
       # lists they were resolved against are cached, a month at a time: on a hit the install runs
-      # offline from them (no `apt-get update`, `--no-download`), on a miss, or if the offline
-      # install fails, it runs online as before and the result is saved for the next run. Bump
-      # the key's `v1` when the package list below changes.
+      # offline from them (no `apt-get update`, `--no-download`); on a miss it runs online as
+      # before and the result is saved for the next run. An unusable hit installs online too, but
+      # the key can't be overwritten: bump its `v1` to replace that cache before the month ends,
+      # and when the package list below changes.
       - name: Month (the apt cache's key)
         id: month
         shell: pwsh
