@@ -500,9 +500,10 @@ distro's apt at `azure.archive.ubuntu.com`, the Linux runners' mirror, made that
 min, not faster. What the WSL2 job does instead is cache the debs together with the package lists
 they were resolved against, keyed by month (`actions/cache`, restored to `RUNNER_TEMP`), and
 install offline from them. On a miss, or if the offline install fails, it installs online as
-before and saves the result. Bump the key's `v1` when the package list changes.) On the slowest WSL2 runners, in-box `fy verify`'s dry-run push to the public
-origin has timed out (its 12 s bound: "push refusal UNPROVEN (timed out)"), failing `test_box_e2e`
-until a re-run on another runner. That's a network fact about the runner, not a posture failure,
+before and saves the result. Bump the key's `v1` when the package list changes.) On the slowest
+WSL2 runners, in-box `fy verify`'s dry-run push to the public origin has timed out (its 12 s
+bound: "push refusal UNPROVEN (timed out)"), failing `test_box_e2e` until a re-run on another
+runner. That's a network fact about the runner, not a posture failure,
 and the bound stays: verify is never weakened to suit CI.
 `tests/test_e2e_workflow.py`, in the fast suite, holds the matrix to the modules: every host-tier
 module (test_e2e.py and each `test_*_e2e.py` that imports `e2e_host`) in
