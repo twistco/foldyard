@@ -118,6 +118,7 @@
   </text>
   <!-- step 3: + gVisor -->
   <text class="card-h" x="670" y="293">3 · + gVisor</text>
+  <text class="tag" x="790" y="292">EXPERIMENTAL</text>
   <text class="mono" x="670" y="311">[machine] runtime = "gvisor"</text>
   <text class="tag" x="670" y="327">MACOS (M1/M2 TOO) · LINUX</text>
   <rect class="host" x="670" y="340" width="235" height="250" rx="12"/>

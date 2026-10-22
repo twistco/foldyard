@@ -21,6 +21,11 @@ The first level is always the zero-secret default. It is also what an unset, inv
 value reads as. Credential switches call it `off`. A switch whose default is a choice rather than
 a toggle names it for what it is (a `storage` switch might default to `local`).
 
+An emergency can be a whole switch rather than a level. The usual one is GitHub as you: a
+`kind = "gh-cli"` `[[inject]]` row, conventionally named `github-user`, next to the App's `github`
+row. Acting as you is then `fy mode github-user=on`, not a third level on `github`
+([configuration](./configuration.md#inject)).
+
 ```bash
 fy mode                        # show every switch, its level, token services, TTLs
 fy mode github=on              # set a mode (on your computer only)

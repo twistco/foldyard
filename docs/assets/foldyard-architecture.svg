@@ -68,8 +68,8 @@
   <rect class="card" x="925" y="278" width="235" height="127" rx="12"/>
   <text class="card-h" x="943" y="305">Egress proxy</text>
   <text class="body" x="943" y="327">
-    <tspan x="943">With the VM firewall on (the</tspan>
-    <tspan x="943" dy="16">default), the yard's only way out.</tspan>
+    <tspan x="943">With the VM firewall on (as fy init</tspan>
+    <tspan x="943" dy="16">sets it), the yard's only way out.</tspan>
     <tspan x="943" dy="16">It injects the token at the edge, so</tspan>
     <tspan x="943" dy="16">it reaches the API but never the</tspan>
     <tspan x="943" dy="16">yard. Every destination logged.</tspan>

@@ -46,6 +46,7 @@ theme:
 markdown_extensions:
   - admonition
   - attr_list
+  - footnotes
   - tables
   # Heading ids are GitHub's, not MkDocs' own (docs-site/hooks.py sets the slugify).
   - toc:

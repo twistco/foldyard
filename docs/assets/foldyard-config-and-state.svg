@@ -87,7 +87,7 @@
   <!-- ON YOUR COMPUTER — ~/.foldyard/ -->
   <rect class="fence" x="680" y="228" width="500" height="508" rx="16"/>
   <text class="band" x="700" y="259">ON YOUR COMPUTER</text>
-  <text class="band-sub" x="850" y="259">~/.foldyard/ — outside the repo, out of the VM's reach</text>
+  <text class="band-sub" x="850" y="259">~/.foldyard/ — outside the repo; the VM sees two folders</text>
 
   <rect class="card" x="700" y="278" width="460" height="114" rx="12"/>
   <text class="card-h" x="718" y="305">~/.foldyard/</text>
@@ -101,7 +101,7 @@
   <text class="mono" x="718" y="374">base-vm.json</text>
   <text class="body" x="888" y="374">what the base VM was baked from</text>
 
-  <rect class="card" x="700" y="408" width="460" height="136" rx="12"/>
+  <rect class="card" x="700" y="408" width="460" height="158" rx="12"/>
   <text class="card-h" x="718" y="435">&lt;project&gt;/</text>
   <text class="tag" x="1142" y="434">ONE PER PROJECT</text>
   <text class="mono" x="718" y="460">host.env</text>
@@ -115,17 +115,20 @@
   <line class="row" x1="718" y1="512" x2="1142" y2="512"/>
   <text class="mono" x="718" y="526">capabilities.json</text>
   <text class="body" x="888" y="526">whether each credential still works</text>
+  <line class="row" x1="718" y1="534" x2="1142" y2="534"/>
+  <text class="mono" x="718" y="548">to-box/ · from-box/</text>
+  <text class="body" x="888" y="548">Lima only: read-only in · box-written out</text>
 
-  <rect class="card" x="700" y="560" width="460" height="92" rx="12"/>
-  <text class="card-h" x="718" y="587">main/ · worktrees/&lt;name&gt;/</text>
-  <text class="tag" x="1142" y="586">ONE PER CHECKOUT</text>
-  <text class="mono" x="718" y="612">dev-mode.json</text>
-  <text class="body" x="888" y="612">the real mode for this checkout</text>
-  <line class="row" x1="718" y1="620" x2="1142" y2="620"/>
-  <text class="mono" x="718" y="634">logs/egress.jsonl</text>
-  <text class="body" x="888" y="634">every request the proxy saw</text>
+  <rect class="card" x="700" y="582" width="460" height="92" rx="12"/>
+  <text class="card-h" x="718" y="609">main/ · worktrees/&lt;name&gt;/</text>
+  <text class="tag" x="1142" y="608">ONE PER CHECKOUT</text>
+  <text class="mono" x="718" y="634">dev-mode.json</text>
+  <text class="body" x="888" y="634">the real mode for this checkout</text>
+  <line class="row" x1="718" y1="642" x2="1142" y2="642"/>
+  <text class="mono" x="718" y="656">logs/egress.jsonl</text>
+  <text class="body" x="888" y="656">every request the proxy saw</text>
 
-  <text class="cap" x="700" y="680">
+  <text class="cap" x="700" y="702">
     <tspan x="700">Each worktree keeps its own mode: a per-branch setting,</tspan>
     <tspan x="700" dy="16">not a boundary between branches.</tspan>
   </text>
@@ -137,7 +140,7 @@
   <text class="ring" x="650" y="368">fy config</text>
   <text class="ring" x="650" y="381">adopt</text>
 
-  <text class="note" x="660" y="766">the box can write everything on the left — and reach nothing on the right</text>
+  <text class="note" x="660" y="766">the box can write everything on the left — and nothing on the right that grants access</text>
 
   <!-- right panel -->
   <rect class="panel" x="1210" y="228" width="210" height="508" rx="12"/>

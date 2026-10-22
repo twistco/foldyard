@@ -54,7 +54,7 @@ The same layers as a hardening ladder — one ring per step, each a line in `fol
 the egress setting alongside:
 
 ![Foldyard isolation layers: four cumulative steps — a rootless Podman VM, Lima with the
-VM firewall, gVisor under the dev box behind a narrowed engine socket, and the host firewall on
+VM firewall, gVisor (experimental) under the dev box behind a narrowed engine socket, and the host firewall on
 Linux — then the egress dial from open through observe and enforce to fail-closed, and what
 never moves: the credentials stay on the host, the socket is the design hole, fy verify proves
 the ring you are in.](./assets/foldyard-isolation-layers.svg)
