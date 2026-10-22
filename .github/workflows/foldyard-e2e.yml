@@ -154,9 +154,9 @@ jobs:
       || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     # Two shards, balanced by measured module times (unsharded, the job took 16–18 min, ~14 of
-    # them pytest; sharded, 11 and 8). Each is roughly two WSL2 shards below (W1+W3 and W2+W4,
-    # with test_mounts_e2e in L2 because the Linux times balance that way). L1 ends with the
-    # monitor, whose teardown reboot is skipped there (e2e_host.runs_last).
+    # them pytest; sharded, 7–11 min each). Each is the union of two WSL2 shards below (W1+W3,
+    # W2+W4), so a module has the same neighbours on both hosts. L1 ends with the monitor, whose
+    # teardown reboot is skipped there (e2e_host.runs_last).
     strategy:
       fail-fast: false
       matrix:
@@ -382,19 +382,20 @@ jobs:
               - tests/test_basevm_e2e.py
               - tests/test_reclaim_e2e.py
               - tests/test_host_daemons_e2e.py
+              - tests/test_mounts_e2e.py
           - name: W3
             modules:
               - tests/test_e2e.py
               - tests/test_probes_e2e.py
-              - tests/test_mounts_e2e.py
               - tests/test_monitor_e2e.py
           - name: W4
             modules:
               - tests/test_box_e2e.py
               - tests/test_worktree_e2e.py
               - tests/test_wall_e2e.py
-    # A shard takes ~20 min and runners vary ±50%; a hung one fails inside the window.
-    timeout-minutes: 40
+    # A shard takes ~20 min on a typical runner, but a slow one runs the same shard ~2× slower
+    # (W1 at 37 min on 2026-10-22, against 21 the run before); a hung one still fails here.
+    timeout-minutes: 45
     env:
       FY_E2E_MODULES: ${{ join(matrix.shard.modules, ' ') }} # as in lima-host-e2e
       MACHINE_CPUS: "4" # as in lima-host-e2e
@@ -474,10 +475,6 @@ jobs:
         shell: wsl-bash {0}
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          # The Azure mirror the Linux runners' own apt uses: the distro's default
-          # archive.ubuntu.com took this step from 45 s to 3 min on one shard (2026-10-22).
-          sed -i 's#://archive.ubuntu.com/#://azure.archive.ubuntu.com/#g' /etc/apt/sources.list.d/ubuntu.sources
-          grep -m1 '^URIs:' /etc/apt/sources.list.d/ubuntu.sources
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends \
             ovmf qemu-system-x86 qemu-utils podman uidmap slirp4netns nftables jq \
