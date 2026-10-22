@@ -202,3 +202,64 @@ def test_a_segment_sealed_under_a_readers_listing_isnt_forgotten(state, monkeypa
     with ms.Catalogue.open() as cat:
         cat.catch_up()
         assert sealed.id in cat.bounds() and _seq(cat.before(BOOT, 1)) == 0
+
+
+def test_find_reads_a_segment_the_catalogue_hasnt_indexed_yet(state, monkeypatch):
+    # a catalogue caught up with a listing from before a seal has no span for the sealed
+    # segment: its silence about it is not "the store doesn't hold it"
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0), ev(1)])
+    with ms.Catalogue.open() as cat:
+        cat.conn.execute("DELETE FROM span")  # as if the segment had never been indexed
+        cat.conn.execute("DELETE FROM seg")
+        ms.append([ev(2)])  # sealed now, under the catalogue
+        at = ms.find([BOOT, 1], ms.segments(), cat)
+    assert at is not None and at[0] == ms.segments()[0].id
+
+
+def test_an_older_foldyards_live_file_is_indexed_before_it_is_sealed(state, monkeypatch):
+    # no reader has caught up since the upgrade: the seal itself must leave the catalogue
+    # holding the segment under its new id — and its snapshot, when retention takes it at once
+    logs = state / "logs"
+    logs.mkdir()
+    (logs / "monitor.jsonl").write_text(
+        "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in (snap(0), ev(1), ev(2)))
+    )
+    ms.append([ev(3)])
+    sealed = ms.segments()[0]
+    with ms.Catalogue.open() as cat:
+        assert cat.holding(BOOT, 1) == {sealed.id} and cat.unindexed([sealed]) == set()
+    monkeypatch.setattr(ms, "budget", lambda: 1)  # keeps only the live segment
+    (logs / "monitor.jsonl").rename(logs / "monitor.jsonl.x")
+    (logs / "monitor.jsonl").write_text(json.dumps(snap(4)) + "\n" + json.dumps(ev(5)) + "\n")
+    ms.append([ev(6)])
+    with ms.Catalogue.open() as cat:
+        assert _seq(cat.before(BOOT, 6)) == 4  # gone from the store, kept by the catalogue
+
+
+def test_a_reader_racing_the_seal_of_an_older_live_file_leaves_no_row_for_it(state):
+    # how cabash's catalogue got its empty `legacy-65215819` row (sealed 0, no span, no times)
+    logs = state / "logs"
+    logs.mkdir()
+    (logs / "monitor.jsonl").write_text(json.dumps(snap(0)) + "\n" + json.dumps(ev(1)) + "\n")
+    listing = ms.segments()  # the reader lists the store…
+    ms.append([ev(2)])  # …the pull seals the older live file under an id of its own…
+    with ms.Catalogue.open() as cat:
+        cat.catch_up(listing)  # …and the reader catches up with what it listed
+        assert not any(sid.startswith(ms.LEGACY) for sid in cat.bounds())
+
+
+def test_a_row_for_a_segment_the_store_no_longer_has_is_dropped(state):
+    # a reader racing the seal of an older foldyard's live file left an empty `legacy-<inode>`
+    # row, which no reader ever dropped: each caught up with an explicit listing
+    from foldyard import monitorlog
+
+    ms.append([snap(0), ev(1)])
+    with ms.Catalogue.open() as cat:
+        cat.add(f"{ms.LEGACY}-65215819", [], 0)
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        assert not any(sid.startswith(ms.LEGACY) for sid in cat.bounds())
+    finally:
+        cat.close()

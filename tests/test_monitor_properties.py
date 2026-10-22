@@ -23,6 +23,16 @@ catalogue's snapshots around the read, dropping the ``rotated`` gap, re-anchorin
 round, no ``unsettled`` gap for an event released on age, a read that may end before any event
 (the cursor stalls), and the catalogue's snapshots put before the read (events then come out of
 store order) — the last three pinned by the @examples below, which random search finds rarely.
+
+The 0.6.1 upgrade (cabash, 2026-10-22): the generator's ``upgrade`` step turns the store into what
+0.6.0 left (a live file with no first line, which no catalogue has seen; hooks at inode positions)
+and races the next round against the pull's first append, which seals that file under a new id;
+``behind`` puts a hook where the false "lost" this caused put it — at the oldest record, behind its
+own cursor. Red against 0.6.1 on both (the two @examples after the first three: "rotated, with room
+to spare", then an event never delivered — the hook stalled for good), and after the fix against
+not indexing an older foldyard's live file before sealing it (its snapshots go with retention
+unseen, and events after them are attributed wrong) and against leaving a hook that is behind its
+cursor where it is.
 """
 
 from __future__ import annotations
@@ -34,6 +44,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from hypothesis import event, example, given, settings
 from hypothesis import strategies as st
 
@@ -69,6 +80,8 @@ steps = st.lists(
         st.just(("boot",)),
         st.just(("pull",)),
         st.just(("round",)),
+        st.just(("upgrade",)),
+        st.just(("behind",)),
         st.tuples(st.just("wait"), st.sampled_from([1.0, 30.0, 200.0])),
     ),
     min_size=8,
@@ -100,6 +113,8 @@ class World:
         self.pending: list[dict] = []
         self.all: list[dict] = []  # every record ever appended, in store order
         self.described: set[str] = set()
+        self.states: dict[str, dict] = {}
+        self.anchorless: set[str] = set()  # hooks an upgrade left with neither cursor nor place
 
     def _rec(self, body: dict) -> None:
         self.pending.append({**body, "boot": self.boot, "seq": self.seq})
@@ -136,6 +151,60 @@ class World:
             mh.round_once(now=self.now)
         elif what == "wait":
             self.now += s[1]
+        elif what == "upgrade":
+            self.upgrade()
+        elif what == "behind":  # what 0.6.1's false "rotated" left: the oldest record's position
+            # (in the cursor's own boot: there, every read was events it already had — a stall;
+            # from an older boot's, 0.6.1 re-sent them instead)
+            first = next((r for r, _ in monitorstore.scan(None) if r.get("k") == "ev"), None)
+            oldest = [monitorstore.segments()[0].id, 0] if first else []
+            for h in self._states():
+                if first and h.get("last") and h["last"][0] == first["boot"]:
+                    h["pos"] = oldest
+            self._save()
+
+    def _states(self) -> list[dict]:
+        path = mh._state_file()
+        self.states = json.loads(path.read_text()) if path.exists() else {}
+        return list(self.states.values())
+
+    def _save(self) -> None:
+        mh._state_file().write_text(json.dumps(self.states))
+
+    def upgrade(self) -> None:
+        """0.6.0 → 0.6.1 at this point: the store an older foldyard leaves (a live file with no
+        first line naming it, no catalogue), hooks holding its positions (an inode and an offset),
+        and the new supervisor's first hook round racing its first pull — the round lists the
+        store, the pull seals the older live file under a new id, and only then does the round's
+        catalogue catch up, with the listing from before (cabash, 2026-10-22)."""
+        live = monitorstore.live_path()
+        if not live.exists():
+            return
+        lines = live.read_bytes().split(b"\n", 1)
+        if b'"k":"segment"' in lines[0]:
+            live.write_bytes(lines[1] if len(lines) > 1 else b"")
+        with monitorstore.Catalogue.open() as cat:  # which no catalogue has seen
+            sid = json.loads(lines[0]).get("id")
+            for table in ("seg WHERE id", "span WHERE seg", "snap WHERE seg"):
+                cat.conn.execute(f"DELETE FROM {table} = ?", (sid,))
+        self._states()
+        for name, h in self.states.items():
+            if h.get("pos"):
+                h["pos"] = [live.stat().st_ino, 99]
+                if not h.get("last"):  # nothing to find it again by: a gap is all it can say
+                    self.anchorless.add(name)
+        self._save()
+        real = monitorlog.catalogue
+
+        def catalogue(segs=None):
+            before = monitorstore.segments()
+            self.pending.append({"k": "engine", "containers": {}})  # the pull always writes
+            self.pull()
+            return real(before)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(monitorlog, "catalogue", catalogue)
+            mh.round_once(now=self.now)
 
     def pull(self) -> None:
         # as pull_once does: every container a snapshot names is described once, in that pull
@@ -196,6 +265,18 @@ EVERYTHING = [([], [], [])]
     scenario=[("ev", 1, "process_exec"), ("boot",), ("ev", 1, "process_exec"), ("snap", {}),
               ("relaygap",), ("pull",), ("snap", {}), ("round",)],
     filters=EVERYTHING, budget="tiny",
+)  # fmt: skip
+# 0.6.1's upgrade: the segment sealed under the round's catalogue held the cursor — not "rotated"
+@example(
+    scenario=[("snap", {}), ("ev", 1, "process_exec"), ("snap", {}), ("pull",), ("round",),
+              ("ev", 1, "process_exec"), ("snap", {}), ("pull",), ("upgrade",)],
+    filters=EVERYTHING, budget="ample",
+)  # fmt: skip
+# …and where that left a hook: behind its own cursor by more than a read — it must walk on
+@example(
+    scenario=[("snap", {}), ("burst", 8, 1), ("snap", {}), ("pull",), ("round",),
+              ("ev", 1, "process_exec"), ("snap", {}), ("pull",), ("behind",)],
+    filters=EVERYTHING, budget="ample",
 )  # fmt: skip
 def test_a_hook_delivers_the_full_store_join_or_says_what_it_could_not(
     monkeypatch, scenario, filters, budget
@@ -276,4 +357,7 @@ def test_a_hook_delivers_the_full_store_join_or_says_what_it_could_not(
             event(f"delivered>0={bool(delivered)}")
             event(f"whys={sorted({g['why'] for g in gaps})}")
             if budget == "ample":
-                assert not [g for g in gaps if g["why"] == "rotated"], "rotated, with room to spare"
+                rotated = [g for g in gaps if g["why"] == "rotated"]
+                if hook.name in world.anchorless:
+                    rotated = [g for g in rotated if g["after"] is not None]
+                assert not rotated, "rotated, with room to spare"

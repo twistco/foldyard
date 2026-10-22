@@ -514,7 +514,7 @@ def catalogue(segs: list[monitorstore.Segment] | None = None) -> monitorstore.Ca
     if cat is None:
         return None
     try:
-        cat.catch_up(segs)
+        cat.catch_up(segs, whole=True)  # every caller passes a full listing
     except Exception:
         cat.close()
         return None
