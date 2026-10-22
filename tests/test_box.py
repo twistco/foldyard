@@ -1498,7 +1498,8 @@ def test_identity_step_keeps_an_identity_the_image_includes(tmp_path, monkeypatc
 
     assert bash(check).returncode == 0  # present: the step is skipped…
     assert bash(run).returncode == 0  # …and run anyway, it writes nothing
-    assert bash("git var GIT_AUTHOR_IDENT").stdout.startswith("Baked Into The Image ")
+    got = bash("git config --global --includes --get user.name").stdout.strip()
+    assert got == "Baked Into The Image"
 
 
 class _StubRegistry:
