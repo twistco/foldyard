@@ -22,6 +22,16 @@ name: foldyard · live e2e
 #     guest). GitHub calls nested virtualisation experimental, so this tier is the most likely
 #     to regress for reasons outside the change.
 #
+# The two host tiers run SHARDED: each is a job matrix whose every shard is its own runner, VM and
+# pytest process over the modules it lists (`matrix.shard.modules`, handed to pytest AND to the
+# substrate as FY_E2E_MODULES). Every module drives the one VM, so a shard is serial inside; the
+# shards run side by side. Each shard starts with a module that recreates the VM, or (W3) from the
+# VM the setup just created, so no module leans on another shard's leftovers.
+# tests/test_e2e_workflow.py, in the fast suite, holds the matrix to the modules: every host-tier
+# module in exactly one shard per job, so a new one can't fall out of CI unnoticed. Each shard
+# writes a per-module timing table to its run page (tests/tools/e2e_timings.py), and the `e2e` job
+# at the bottom is the one status to read for the whole workflow.
+#
 # Split out from foldyard.yml so the fast lint/types/unit suite can run on every push while this
 # heavier job stays OPT-IN. The workflow triggers on every push, but the job only runs on `main`
 # (the post-merge net), on a manual `workflow_dispatch`, or when a commit message carries
@@ -33,8 +43,8 @@ on:
   push: # all branches; the job-level `if` decides whether to run
   workflow_dispatch: # allow manual runs
 
-# Least privilege, declared at the workflow level so BOTH jobs (and any added later) inherit it
-# rather than the repository default. Neither job needs a write scope: they check out, pull images
+# Least privilege, declared at the workflow level so EVERY job (and any added later) inherits it
+# rather than the repository default. No job needs a write scope: they check out, pull images
 # and run pytest — nothing pushes, comments, or publishes. It matters more here than in most
 # workflows because `live-e2e` bind-mounts the workspace into a sibling container over the host
 # Docker socket, so a token with write scopes would be reachable from inside the code under test.
@@ -136,15 +146,48 @@ jobs:
             '
 
   lima-host-e2e:
-    name: lima host e2e (example + worktree, on a QEMU/KVM VM)
+    name: lima host e2e · ${{ matrix.shard.name }}
     # Same opt-in policy as the container topology.
     if: >-
       github.ref == 'refs/heads/main'
       || contains(github.event.head_commit.message, '[run-e2e]')
       || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    # Two shards, balanced by measured module times (unsharded, the job took 16–18 min, ~14 of
+    # them pytest; sharded, 7–11 min each). Each is the union of two WSL2 shards below (W1+W3,
+    # W2+W4), so a module has the same neighbours on both hosts. L1 ends with the monitor, whose
+    # teardown reboot is skipped there (e2e_host.runs_last).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - name: L1
+            modules:
+              - tests/test_machine_e2e.py
+              - tests/test_verify_e2e.py
+              - tests/test_mount_visibility_e2e.py
+              - tests/test_e2e.py
+              - tests/test_probes_e2e.py
+              - tests/test_monitor_e2e.py
+          - name: L2
+            modules:
+              - tests/test_basevm_e2e.py
+              - tests/test_reclaim_e2e.py
+              - tests/test_host_daemons_e2e.py
+              - tests/test_mounts_e2e.py
+              - tests/test_box_e2e.py
+              - tests/test_worktree_e2e.py
+              - tests/test_wall_e2e.py
+    # A shard takes ~10 min; a hung one fails well inside the window instead of eating it.
     timeout-minutes: 30
     env:
+      # The shard's modules, in order: pytest's arguments, and what e2e_host.runs_last reads.
+      FY_E2E_MODULES: ${{ join(matrix.shard.modules, ' ') }}
+      # The VM's size, explicitly (the env wins over [machine], see config.machine_resources;
+      # the create step asserts it took). 2, the example's own, on purpose: 4 was tried on
+      # 2026-10-22 and made no module faster here, while on WSL2 it made every VM-heavy module
+      # slower and less predictable (DEVELOPMENT.md, CI).
+      MACHINE_CPUS: "2"
       FOLDYARD_E2E: "1"
       FOLDYARD_ENGINE: podman
       MACHINE_BACKEND: lima
@@ -210,9 +253,11 @@ jobs:
 
       # Every project VM in this job — the machine below and each one a module recreates — is a
       # clone of this base. The bake is the run's one template boot over the Fedora mirrors (the
-      # template's `dnf install podman`; test_basevm_e2e bakes its own), so one stalled mirror
-      # costs a retry here, not every module after it. Retried once. The template-created
-      # PROJECT VM (foldyard's provisioning on a fresh template boot) is no longer exercised here.
+      # template's `dnf install podman`), so one stalled mirror costs a retry here, not every
+      # module after it. Retried once. test_basevm_e2e checks THIS base instead of baking a
+      # second (a local run, with no session base, still bakes its own), so this step is the
+      # bake's proof in CI. The template-created PROJECT VM (foldyard's provisioning on a fresh
+      # template boot) is no longer exercised here.
       - name: Bake the session's base VM
         run: |
           # Project-less, so not from the checkout (foldyard's own toml). From $RUNNER_TEMP on
@@ -222,8 +267,13 @@ jobs:
           bake() { uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake; }
           # A retry that succeeds turns the job green with nothing on the run's page to say a
           # mirror stalled: the bake is now the job's only template boot, so say it out loud.
-          if ! bake; then
-            echo "::warning title=Base VM bake retried::the first bake failed — usually a stalled Fedora mirror (the template's dnf install of podman); see this step's log. Retrying once."
+          # The first attempt is capped at 6 min: a good bake takes 1–4.5 (WSL2 included), while
+          # a stalled mirror holds Lima's "boot scripts must have finished" for its full 10 min
+          # (9 min 20 s seen live). A killed bake leaves an unstamped instance the retry would
+          # refuse as not ours, so it is deleted first.
+          if ! timeout --kill-after=30 360 bash -c "$(declare -f bake); bake"; then
+            echo "::warning title=Base VM bake retried::the first bake failed or passed 6 min — usually a stalled Fedora mirror (the template's dnf install of podman); see this step's log. Retrying once."
+            limactl delete -f "$FY_BASE_VM_NAME" || true
             bake
           fi
 
@@ -252,30 +302,30 @@ jobs:
           test -S "$sock"
           echo "CONTAINER_HOST=unix://$sock" >> "$GITHUB_ENV"
           CONTAINER_HOST="unix://$sock" podman info --format '{{.Host.Arch}} podman {{.Version.Version}} on {{.Host.Distribution.Distribution}} {{.Host.Distribution.Version}}'
+          # MACHINE_CPUS reached the VM (a clone takes its sizing from the project's --set).
+          cpus="$(limactl list foldyard-example --format '{{.CPUs}}')"
+          echo "VM: $cpus vCPUs (Lima), $(limactl shell foldyard-example nproc) online in the guest"
+          test "$cpus" = "$MACHINE_CPUS"
 
       # The host tier: test_e2e.py (the example + worktree stacks) plus the `*_e2e.py` modules that
-      # need a real VM (tests/e2e_host.py — the base VM bake + a cloned VM, verify's negative, the
-      # live probes, the machine lifecycle, the guest monitor, the walls, the supervisor with the
-      # zero-secret rig, the box, `fy reclaim`, the worktree verbs). Listed by name:
-      # `-k e2e` would also pick the proxy/box e2es that need the in-box topology (`live-e2e`).
-      # The `e2e` group brings mitmdump for the wall module's `[proxy]`. No pre-pull: the box
-      # module recreates the VM (its mount set is init-only), which would discard it anyway.
+      # need a real VM (tests/e2e_host.py — the base VM + a cloned VM, verify's negative, the live
+      # probes, the machine lifecycle, the guest monitor, the walls, the supervisor with the
+      # zero-secret rig, the box, `fy reclaim`, the worktree verbs), this shard's share of them.
+      # Listed by name: `-k e2e` would also pick the proxy/box e2es that need the in-box topology
+      # (`live-e2e`). The `e2e` group brings mitmdump for the wall module's `[proxy]`. No
+      # pre-pull: the box module recreates the VM (its mount set is init-only), which would
+      # discard it anyway. FY_E2E_MODULES is split into arguments on purpose.
       - name: Host e2e on the VM
+        run: uv run --group e2e pytest -v --junitxml="$RUNNER_TEMP/e2e-junit.xml" $FY_E2E_MODULES
+
+      # The run page's per-module table. Cosmetic, so it never fails the shard.
+      - name: Timings
+        if: always()
+        continue-on-error: true
         run: >-
-          uv run --group e2e pytest -v
-          tests/test_e2e.py
-          tests/test_basevm_e2e.py
-          tests/test_box_e2e.py
-          tests/test_host_daemons_e2e.py
-          tests/test_machine_e2e.py
-          tests/test_monitor_e2e.py
-          tests/test_mount_visibility_e2e.py
-          tests/test_mounts_e2e.py
-          tests/test_probes_e2e.py
-          tests/test_reclaim_e2e.py
-          tests/test_verify_e2e.py
-          tests/test_wall_e2e.py
-          tests/test_worktree_e2e.py
+          python3 tests/tools/e2e_timings.py "$RUNNER_TEMP/e2e-junit.xml"
+          --title "lima host e2e · ${{ matrix.shard.name }}"
+          | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Diagnostics
         if: always()
@@ -312,18 +362,50 @@ jobs:
         run: limactl delete -f foldyard-example "$FY_BASE_VM_NAME" || true
 
   wsl2-host-e2e:
-    name: wsl2 host e2e (example + host tier, on a QEMU/KVM VM inside WSL2)
+    name: wsl2 host e2e · ${{ matrix.shard.name }}
     # Same opt-in policy as the other two tiers.
     if: >-
       github.ref == 'refs/heads/main'
       || contains(github.event.head_commit.message, '[run-e2e]')
       || github.event_name == 'workflow_dispatch'
     runs-on: windows-2025
-    # The Linux job takes ~15 min; QEMU under a second level of nesting boots ~4× slower, and
-    # the distro install + apt run on top. Generous on purpose — a hung VM is what the
-    # per-test timeouts are for, not this.
-    timeout-minutes: 75
+    # Unsharded, this tier took 47–62 min: three levels of virtualisation make everything 3–6×
+    # slower than on Linux (the cold `fy up` after each VM recreate most of all), with no single
+    # hotspot to fix. So four shards, balanced by measured module times, each paying the ~6 min
+    # setup (distro, Lima, the base bake, the first VM) on its own runner. W3 ends with the
+    # monitor, whose teardown reboot is skipped there (e2e_host.runs_last). test_wall_e2e skips
+    # itself here (see the header), so W4 is lighter than it reads.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - name: W1
+            modules:
+              - tests/test_machine_e2e.py
+              - tests/test_verify_e2e.py
+              - tests/test_mount_visibility_e2e.py
+          - name: W2
+            modules:
+              - tests/test_basevm_e2e.py
+              - tests/test_reclaim_e2e.py
+              - tests/test_host_daemons_e2e.py
+              - tests/test_mounts_e2e.py
+          - name: W3
+            modules:
+              - tests/test_e2e.py
+              - tests/test_probes_e2e.py
+              - tests/test_monitor_e2e.py
+          - name: W4
+            modules:
+              - tests/test_box_e2e.py
+              - tests/test_worktree_e2e.py
+              - tests/test_wall_e2e.py
+    # A shard takes ~20 min, but runners and apt vary (the apt cache below takes most of the
+    # latter); room for a slow-but-progressing runner, while a hung one still fails here.
+    timeout-minutes: 45
     env:
+      FY_E2E_MODULES: ${{ join(matrix.shard.modules, ' ') }} # as in lima-host-e2e
+      MACHINE_CPUS: "2" # as in lima-host-e2e
       LIMA_VERSION: "2.2.0" # keep in step with lima-host-e2e
       FOLDYARD_E2E: "1"
       FOLDYARD_ENGINE: podman
@@ -336,8 +418,11 @@ jobs:
       # forward Windows → WSL; `/p`: translate the path, so GITHUB_WORKSPACE arrives as
       # /mnt/<drive>/a/foldyard/foldyard). GITHUB_ENV is deliberately NOT used across steps —
       # it is a Windows-side file and its exports would not cross into the distro either; the
-      # in-distro steps hand state forward through ~/.fy-ci.env instead.
-      WSLENV: FOLDYARD_E2E/u:FOLDYARD_ENGINE/u:MACHINE_BACKEND/u:FOLDYARD_STATE_DIR/u:LIMA_VERSION/u:FY_BASE_VM_NAME/u:FY_BASE_VM_STAMP/u:GITHUB_WORKSPACE/up
+      # in-distro steps hand state forward through ~/.fy-ci.env instead. GITHUB_STEP_SUMMARY is
+      # the runner's per-step file, path-translated like the workspace, so the distro appends the
+      # timing table straight to the run page; RUNNER_TEMP is where the apt cache is restored.
+      # tests/test_e2e_workflow.py holds this list to the `env:` keys above.
+      WSLENV: FY_E2E_MODULES/u:MACHINE_CPUS/u:FOLDYARD_E2E/u:FOLDYARD_ENGINE/u:MACHINE_BACKEND/u:FOLDYARD_STATE_DIR/u:LIMA_VERSION/u:FY_BASE_VM_NAME/u:FY_BASE_VM_STAMP/u:GITHUB_WORKSPACE/up:RUNNER_TEMP/up:GITHUB_STEP_SUMMARY/p
     steps:
       # Repo-only read (no push) — keep the token out of .git/config. The checkout lands on the
       # Windows drive; the distro clones it onto its own ext4 (below) rather than working over
@@ -389,6 +474,26 @@ jobs:
           test -d "$GITHUB_WORKSPACE" || { echo "GITHUB_WORKSPACE did not translate: '$GITHUB_WORKSPACE'" >&2; exit 1; }
           echo "✓ /dev/kvm present, systemd up, env forwarded (workspace at $GITHUB_WORKSPACE)"
 
+      # The apt step was the most erratic one in the job: the same install took 45 s on one
+      # runner and 13 min on another (2026-10-22, from archive.ubuntu.com and Azure's mirror
+      # alike), enough on its own to push a shard past its timeout. So the debs AND the package
+      # lists they were resolved against are cached, a month at a time: on a hit the install runs
+      # offline from them (no `apt-get update`, `--no-download`); on a miss it runs online as
+      # before and the result is saved for the next run. An unusable hit installs online too, but
+      # the key can't be overwritten: bump its `v1` to replace that cache before the month ends,
+      # and when the package list below changes.
+      - name: Month (the apt cache's key)
+        id: month
+        shell: pwsh
+        run: '"month=$(Get-Date -Format yyyy-MM)" >> $env:GITHUB_OUTPUT'
+
+      - name: Restore the distro's apt cache
+        id: apt-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}\wsl-apt
+          key: wsl2-apt-v1-${{ steps.month.outputs.month }}
+
       # The Linux job's set, plus what the runner image has and a bare rootfs does not: git,
       # ssh (Lima), lsof + iproute2 (the port probes), sudo (the host wall's `nft`). Lima from
       # the release tarball; uv into /usr/local/bin (an unmanaged install, so it is on every
@@ -397,10 +502,22 @@ jobs:
         shell: wsl-bash {0}
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qq
-          apt-get install -y -qq --no-install-recommends \
-            ovmf qemu-system-x86 qemu-utils podman uidmap slirp4netns nftables jq \
+          pkgs=(
+            ovmf qemu-system-x86 qemu-utils podman uidmap slirp4netns nftables jq
             git openssh-client curl ca-certificates lsof iproute2 sudo
+          )
+          cache="$RUNNER_TEMP/wsl-apt/apt.tar" # RUNNER_TEMP arrives path-translated (WSLENV /p)
+          if [ -f "$cache" ] && tar -xf "$cache" -C / \
+            && apt-get install -y -qq --no-install-recommends --no-download "${pkgs[@]}"; then
+            echo "✓ installed offline from the cached debs"
+          else
+            [ -f "$cache" ] && echo "::warning title=apt cache unusable::installing online instead"
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends "${pkgs[@]}"
+            mkdir -p "$(dirname "$cache")"
+            tar -cf "$cache" -C / --exclude=lock --exclude=partial var/lib/apt/lists var/cache/apt/archives
+            echo "apt cache: $(find /var/cache/apt/archives -name '*.deb' | wc -l) debs, $(du -h "$cache" | cut -f1) to save"
+          fi
           url="https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz"
           curl -fsSL "$url" | tar Cxz /usr/local
           curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
@@ -408,6 +525,16 @@ jobs:
           podman --version
           uv --version
           test -x /usr/local/bin/limactl # limactl refuses to run as root; the version prints as `runner`
+
+      # Saved by whichever shard gets there first on a miss (the others' saves are refused as a
+      # duplicate key, a warning). Never fails the shard.
+      - name: Save the distro's apt cache
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}\wsl-apt
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       # The operator: an ordinary user, as on the Linux runner. kvm group + a chown (belt and
       # braces: udev may not have applied the group rule under WSL), passwordless sudo for the
@@ -474,8 +601,10 @@ jobs:
           bake() { uv run --project "$HOME/foldyard" foldyard machine base bake; }
           # As in lima-host-e2e: a retried bake says so on the run's page (the runner reads
           # workflow commands from the distro's stdout, as it does the Diagnostics' groups).
-          if ! bake; then
-            echo "::warning title=Base VM bake retried::the first bake failed — usually a stalled Fedora mirror (the template's dnf install of podman); see this step's log. Retrying once."
+          # As there: the first attempt is capped at 6 min, a killed one deleted before the retry.
+          if ! timeout --kill-after=30 360 bash -c "$(declare -f bake); bake"; then
+            echo "::warning title=Base VM bake retried::the first bake failed or passed 6 min — usually a stalled Fedora mirror (the template's dnf install of podman); see this step's log. Retrying once."
+            limactl delete -f "$FY_BASE_VM_NAME" || true
             bake
           fi
 
@@ -497,28 +626,29 @@ jobs:
           test -S "$sock"
           echo "export CONTAINER_HOST=unix://$sock" >> "$HOME/.fy-ci.env"
           CONTAINER_HOST="unix://$sock" podman info --format '{{.Host.Arch}} podman {{.Version.Version}} on {{.Host.Distribution.Distribution}} {{.Host.Distribution.Version}}'
+          # As in lima-host-e2e: MACHINE_CPUS (forwarded by WSLENV) reached the VM.
+          cpus="$(limactl list foldyard-example --format '{{.CPUs}}')"
+          echo "VM: $cpus vCPUs (Lima), $(limactl shell foldyard-example nproc) online in the guest"
+          test "$cpus" = "$MACHINE_CPUS"
 
-      # The same module list as lima-host-e2e — what differs is the host under it. The wall module
-      # gates itself on the kernel's nft `socket` expression and SKIPS here (see the header).
+      # The same modules as lima-host-e2e, sharded four ways — what differs is the host under it.
+      # The wall module gates itself on the kernel's nft `socket` expression and SKIPS here (see
+      # the header). FY_E2E_MODULES is split into arguments on purpose.
       - name: Host e2e on the VM
         shell: wsl-bash {0}
         run: |
           . "$HOME/.fy-ci.env"
           cd "$HOME/foldyard"
-          uv run --group e2e pytest -v \
-            tests/test_e2e.py \
-            tests/test_basevm_e2e.py \
-            tests/test_box_e2e.py \
-            tests/test_host_daemons_e2e.py \
-            tests/test_machine_e2e.py \
-            tests/test_monitor_e2e.py \
-            tests/test_mount_visibility_e2e.py \
-            tests/test_mounts_e2e.py \
-            tests/test_probes_e2e.py \
-            tests/test_reclaim_e2e.py \
-            tests/test_verify_e2e.py \
-            tests/test_wall_e2e.py \
-            tests/test_worktree_e2e.py
+          uv run --group e2e pytest -v --junitxml="$HOME/e2e-junit.xml" $FY_E2E_MODULES
+
+      - name: Timings
+        if: always()
+        continue-on-error: true # as in lima-host-e2e
+        shell: wsl-bash {0}
+        run: |
+          test -d "$HOME/foldyard" || exit 0 # the job failed before the clone: nothing ran
+          python3 "$HOME/foldyard/tests/tools/e2e_timings.py" "$HOME/e2e-junit.xml" \
+            --title "wsl2 host e2e · ${{ matrix.shard.name }}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Diagnostics
         if: always()
@@ -554,3 +684,25 @@ jobs:
         if: always()
         shell: wsl-bash {0}
         run: limactl delete -f foldyard-example "$FY_BASE_VM_NAME" || true
+
+  # The one status for the whole workflow: green only when every job above succeeded, each matrix
+  # shard included (a matrix job's result is its worst shard's). `always()` so a failed or
+  # cancelled shard still reaches this job and turns it red rather than leaving it skipped; the
+  # opt-in condition so an ordinary push, whose jobs are all skipped, skips this one too.
+  e2e:
+    name: e2e (every job above)
+    needs: [live-e2e, lima-host-e2e, wsl2-host-e2e]
+    if: >-
+      always()
+      && (github.ref == 'refs/heads/main'
+        || contains(github.event.head_commit.message, '[run-e2e]')
+        || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null

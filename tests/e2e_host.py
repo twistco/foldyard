@@ -13,7 +13,8 @@ recreate it, and mount things into it — never a consumer's VM.
 Every module here reuses `tests/test_e2e.py`'s runner (`_foldyard`: the real CLI as a subprocess
 with the example copy as the repo root) and its engine helpers, and follows its rules: a
 throwaway git copy of `example/` per module, adopted; `fy down` in teardown; the VM left RUNNING
-and un-walled so the next module (alphabetical, in one pytest process) starts from the same state.
+and un-walled so the next module (in the order pytest was given them, in one process — in CI, a
+shard's list) starts from the same state.
 Versions asserted against are named in each module's docstring.
 """
 
@@ -24,6 +25,7 @@ import os
 import shutil
 import subprocess
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,6 +63,30 @@ host_tier = pytest.mark.skipif(
     not host_tier_available(),
     reason="host tier: FOLDYARD_E2E=1 on a host (not a box) with limactl — the lima backend",
 )
+
+
+def runs_last(module_file: str, env: Mapping[str, str] = os.environ) -> bool:
+    """Whether the session DECLARED ``module_file`` the last module of this pytest process: the
+    CI host-tier shards set ``FY_E2E_MODULES`` to the very list they hand pytest, in order. A
+    teardown that only puts the VM back for the modules after it can skip that work when this is
+    True. Nothing declared (a local run) or any other position: False — restore as always."""
+    declared = (env.get("FY_E2E_MODULES") or "").split()
+    return bool(declared) and Path(declared[-1]).name == Path(module_file).name
+
+
+@dataclass(frozen=True)
+class SessionBase:
+    name: str
+    stamp: Path
+
+
+def session_base_vm(env: Mapping[str, str] = os.environ) -> SessionBase | None:
+    """The base VM the SESSION baked before pytest — the CI host tiers run `fy machine base bake`
+    with ``FY_BASE_VM_NAME`` and ``FY_BASE_VM_STAMP`` set job-wide, and every project VM in the job
+    is a clone of it (conftest's isolated_base_vm_stamp) — or None when either is unset (a local
+    run). Read it at import, before any fixture touches the environment."""
+    name, stamp = env.get("FY_BASE_VM_NAME"), env.get("FY_BASE_VM_STAMP")
+    return SessionBase(name, Path(stamp)) if name and stamp else None
 
 
 def state_dir() -> Path:
