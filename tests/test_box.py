@@ -1435,8 +1435,8 @@ def test_bootstrap_gives_the_box_your_git_identity(monkeypatch):
     assert "git identity" in label
     # Each key only where the box's GLOBAL layer lacks it: the env and a repo's own config still
     # win, as they do on your computer, and an image that bakes an identity keeps it.
-    assert "git config --global --get user.name" in check
-    assert "git config --global --get user.email" in check
+    assert "git config --global --includes --get user.name" in check
+    assert "git config --global --includes --get user.email" in check
     assert "git config --global user.name " + shlex.quote("Dáire O'Brien") in run
 
 
@@ -1478,6 +1478,27 @@ def test_identity_step_fills_only_what_the_box_lacks(tmp_path, monkeypatch):
     assert get("user.name") == "Baked Into The Image"
     assert get("user.email") == "ada@host.test"
     assert bash(check).returncode == 0  # a second bootstrap reports it present
+
+
+@pytest.mark.spawns("bash")
+def test_identity_step_keeps_an_identity_the_image_includes(tmp_path, monkeypatch):
+    # An image may keep its identity in a file its global config includes: `--get` without
+    # `--includes` doesn't see it, and the box would then write yours over it.
+    monkeypatch.setattr(box.hostgit, "identity", lambda: {"user.name": "Ada"})
+    step = box._git_identity_step()
+    assert step is not None
+    _, check, run = step
+    (tmp_path / "identity").write_text("[user]\n\tname = Baked Into The Image\n")
+    gitconfig = tmp_path / "gitconfig"
+    gitconfig.write_text(f"[include]\n\tpath = {tmp_path / 'identity'}\n")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": str(gitconfig)}
+
+    def bash(script: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+
+    assert bash(check).returncode == 0  # present: the step is skipped…
+    assert bash(run).returncode == 0  # …and run anyway, it writes nothing
+    assert bash("git var GIT_AUTHOR_IDENT").stdout.startswith("Baked Into The Image ")
 
 
 class _StubRegistry:

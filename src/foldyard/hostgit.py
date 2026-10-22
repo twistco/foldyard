@@ -16,9 +16,13 @@ dropped rather than passed. Stdlib-only.
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 KEYS = ("user.name", "user.email")
+# What would point git at a repository despite the cwd: an inherited one (a git hook's, say) lets
+# `includeIf gitdir:` match the checkout.
+_REPO_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 _TIMEOUT_S = 5
 
 
@@ -34,10 +38,11 @@ def identity() -> dict[str, str]:
 
 def _global(key: str) -> str | None:
     try:
-        # cwd `/`: no repository around it, so nothing of the checkout's can take part.
+        # cwd `/` and no repository in the env: nothing of the checkout's can take part.
         got = subprocess.run(
             ["git", "config", "--global", "--includes", "--get", key],
             cwd="/",
+            env={k: v for k, v in os.environ.items() if k not in _REPO_ENV},
             capture_output=True,
             timeout=_TIMEOUT_S,
         )

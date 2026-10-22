@@ -68,3 +68,19 @@ def test_keeps_quotes_and_non_ascii(tmp_path, monkeypatch):
     # The value is shell-quoted where it is used, so a name is never "cleaned".
     _global(tmp_path, monkeypatch, '[user]\n\tname = Dáire O\'Brien \\"Dee\\"\n')
     assert hostgit.identity() == {"user.name": 'Dáire O\'Brien "Dee"'}
+
+
+def test_an_inherited_git_dir_never_points_the_read_at_the_checkout(tmp_path, monkeypatch):
+    # `fy box up` run from a git hook (or any shell with GIT_DIR exported) must not let
+    # `includeIf gitdir:` match the checkout: the read is of your global config alone.
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (tmp_path / "work").write_text("[user]\n\temail = work@example.test\n")
+    _global(
+        tmp_path,
+        monkeypatch,
+        f'[user]\n\temail = me@example.test\n[includeIf "gitdir:{repo}/"]\n\tpath = {tmp_path / "work"}\n',
+    )
+    monkeypatch.setenv("GIT_DIR", str(repo / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(repo))
+    assert hostgit.identity() == {"user.email": "me@example.test"}

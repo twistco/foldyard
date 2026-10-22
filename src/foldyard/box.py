@@ -1760,9 +1760,10 @@ def _git_identity_step() -> tuple[str, str, str] | None:
     identity = hostgit.identity()
     if not identity:
         return None
-    check = " && ".join(f"git config --global --get {key}" for key in identity)
+    # `--includes`: an image may keep its identity in a file its global config includes.
+    check = " && ".join(f"git config --global --includes --get {key}" for key in identity)
     run = "\n".join(
-        f"git config --global --get {key} >/dev/null || "
+        f"git config --global --includes --get {key} >/dev/null || "
         f"git config --global {key} {shlex.quote(value)}"
         for key, value in identity.items()
     )
