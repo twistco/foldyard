@@ -225,9 +225,9 @@ disk_gib = 60
 ```
 
 - **`backend`** — `"lima"` | `"podman"`. Default: `"lima"` (also what `init` writes): one VM per
-  project, running concurrently, and the only backend with the VM firewall. `"podman"` is one
-  shared podman machine for everything — nothing extra to install, but no per-project VMs and no
-  VM firewall. **The podman backend is deprecated and will be removed in a future release.** It
+  project, running concurrently, and the only backend with the VM firewall. `"podman"` is a
+  podman machine per project too (shared by its worktrees, like Lima's) — nothing extra to
+  install, but only one of them can run at a time, and no VM firewall. **The podman backend is deprecated and will be removed in a future release.** It
   can't run two projects' VMs at once ([one VM at a time](https://github.com/twistco/foldyard/blob/main/docs/lima-backend-scope.md#podman-machine-one-vm-at-a-time-upstream-podman26281)), it can't
   carry the VM firewall, and it has none of what is built on Lima since: the read-only to-box,
   the from-box that keeps transcripts out of the checkout
