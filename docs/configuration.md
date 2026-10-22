@@ -185,7 +185,32 @@ Why it works this way:
 ## `[machine]`
 
 The rootless VM that mounts only this repo. Sizing, `vmtype` and mounts apply at **first
-creation**; change them with `fy machine recreate`.
+creation**; change them with `fy machine recreate`. The one exception is foldyard's two
+directories on Lima, below, which a restart adds.
+
+### What the VM mounts
+
+The checkout and the worktrees root, both writable — and, on the **lima** backend, two
+directories of foldyard's own beside them, one per direction
+([ADR-0033](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md)):
+
+- **`to-box`** (`~/.foldyard/<project>/to-box/`) — your computer writes it; the VM and every box
+  can only read it (the box sees it at `/run/foldyard/to-box`). Read-only is enforced outside
+  the guest, so even root in the VM can't change what is there. That holds only for `vz` with
+  virtiofs and `qemu` with 9p, so foldyard pins Lima's `mountType` to match the `vmtype` and
+  mounts no to-box on any other pair (`krunkit`, say). Every box of the project can read it, so
+  it never holds a secret. Its first use is the monitor's file sink
+  (`fy monitor hook add NAME --to-box`).
+- **`from-box`** (`~/.foldyard/<project>/from-box/`) — the box writes it: one slot per checkout
+  (`main/`, `worktrees/<name>/`), where the agents' transcripts are bound out (see
+  [`transcript_sync_seconds`](#claude--codex--vscode)). Your computer reads it as untrusted
+  input, never through a link.
+
+A VM that predates them is refused while it runs (`fy machine stop && fy up` once adds them;
+containers and volumes are kept), and `FOLDYARD_STATE_DIR` must point outside the checkout and
+the worktrees root. The **podman** backend's mounts are fixed when the machine is created and no
+podman provider enforces read-only outside the guest, so it gets neither: its boxes keep binding
+transcripts into the checkout. `fy doctor` shows a `to-box` row; `fy verify` checks both.
 
 ```toml
 [machine]
@@ -899,6 +924,13 @@ tui = { raw_output_mode = false }
   sessions started in a subdirectory or elsewhere stay in the bound-out dir and are named in the
   log (once each) and by `fy transcripts`.
 
+  Where the box binds them out: on Lima, the checkout's slot in foldyard's from-box
+  (`~/.foldyard/<project>/from-box/main/` or `…/worktrees/<name>/`), out of the checkout, so
+  `git clean -fdx` and `fy worktree remove` don't take them (`remove` archives the slot, then
+  deletes it). A box created before that, and every box on the podman backend, binds them into
+  the checkout (`.devbox-claude/`, `.devbox-codex/`); for this release the sync reads both
+  places. `DEVBOX_TRANSCRIPTS` / `DEVBOX_CODEX_TRANSCRIPTS` still name a place of your own.
+
   Codex records a session's directory inside the file instead, where the host can't check it,
   so box Codex sessions never go into your own `~/.codex/sessions`: a Codex there would offer a
   session claiming another project's directory when you resume in that project. They go to a
@@ -1132,6 +1164,8 @@ Per project, `~/.foldyard/<project>/` (env `FOLDYARD_STATE_DIR` relocates it):
 - **`capabilities.json`** — the latest credential-check results `fy mode`/`fy state` show.
 - **`blocked-daemons.json`** — daemons the supervisor is holding back, with the reason.
 - **`clock-offset`** — test-only clock skew set by `fy clock`; absent normally.
+- **`to-box/`**, **`from-box/`** — the two directories the VM shares on Lima (see
+  [What the VM mounts](#what-the-vm-mounts)): read-only to the box, and box-writable.
 - **`main/`** — the main checkout's `dev-mode.json` (its mode) and `logs/` (per-daemon JSONL
   logs: proxy, token services).
 - **`worktrees/<name>/`** — the same for each worktree, so each branch holds its own mode
@@ -1142,7 +1176,8 @@ Per project, `~/.foldyard/<project>/` (env `FOLDYARD_STATE_DIR` relocates it):
 until `main/dev-mode.json` exists.)
 
 In the repo, foldyard also generates gitignored files next to `foldyard.toml` (`init` adds them
-to `.gitignore`): `.devbox-ca/`, `.devbox-claude/`, `.devbox-codex/`, `.devbox-foldyard/`, and
+to `.gitignore`): `.devbox-ca/`, `.devbox-claude/` and `.devbox-codex/` (transcripts, where they
+are still bound into the checkout), `.devbox-foldyard/`, and
 `.dev-mode.json` — a read-only copy of the mode for tools in the box. Nothing grants access based
 on it.
 

@@ -68,6 +68,9 @@ def test_verify_all_pass_on_the_vm(repo):
         "engine is rootless",
         "escape refused",
         "free of host home/paths beyond the repo mounts",
+        # ADR-0033: the to-box, read-only by the guest's flag AND by a real write refused
+        "to-box mounted read-only in the VM",
+        "to-box refuses a write from a --privileged container binding it read-write",
     ):
         assert check in run.out, f"missing {check!r} in:\n{run.out}"
 

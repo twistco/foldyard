@@ -94,6 +94,11 @@ def fake(tmp_path, monkeypatch):
     # operator's LANG); the timezone tests opt in.
     monkeypatch.setattr(box.hostclock, "zone", lambda: None)
     monkeypatch.setattr(box.hostclock, "time_locale", lambda: None)
+    # ADR-0033's two directories: the VM shares neither unless a test says (the podman shape).
+    monkeypatch.setattr(box.machine, "from_box_mounted", lambda: False)
+    monkeypatch.setattr(box.machine, "to_box_mounted", lambda: False)
+    monkeypatch.setattr(config, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.delenv("DEVBOX_CODEX_TRANSCRIPTS", raising=False)
 
     # box up ensures the host supervisor (always-on egress proxy) is running; stub it so the golden
     # sequences don't probe/spawn the real Mac daemons, and record that box up asked for it.
@@ -2835,3 +2840,127 @@ def test_up_warns_about_a_resting_axis_even_when_the_box_is_already_up(
     fake["state"]["running"] = True
     assert box.main("up") == 0
     assert "fy mode claude=on" in capsys.readouterr().err
+
+
+# ── ADR-0033: transcripts bind out to the from-box; the to-box binds in read-only ─────────
+
+
+@pytest.fixture
+def lima_dirs(fake, monkeypatch, tmp_path):
+    """The VM shares both of foldyard's directories (lima, vz or qemu)."""
+    monkeypatch.setattr(box.machine, "from_box_mounted", lambda: True)
+    monkeypatch.setattr(box.machine, "to_box_mounted", lambda: True)
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    monkeypatch.setattr(config, "codex_enabled", lambda: True)
+    monkeypatch.setattr(box, "_capture_keyless", lambda: None)  # never the real ~/.codex
+    (tmp_path / "state" / "from-box").mkdir(parents=True)
+    (tmp_path / "state" / "to-box").mkdir(parents=True)
+    return tmp_path / "state"
+
+
+def test_up_binds_the_agents_transcripts_into_the_checkouts_from_box_slot(fake, lima_dirs):
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d"])[0]
+    slot = lima_dirs / "from-box" / "main"
+    assert f"{slot}/claude/projects:/home/vscode/.claude/projects" in run
+    assert f"{slot}/codex/sessions:/home/vscode/.codex/sessions" in run
+    assert (slot / "claude" / "projects").is_dir() and (slot / "codex" / "sessions").is_dir()
+    assert f"FY_FROM_BOX={lima_dirs / 'from-box'}" in _env_values(run)
+    # nothing bound out into the checkout any more
+    assert not (fake["main"] / "dev-stack" / ".devbox-claude").exists()
+    assert not any(".devbox-claude" in tok or ".devbox-codex" in tok for tok in run)
+
+
+def test_up_binds_the_to_box_read_only_at_its_fixed_path(fake, lima_dirs):
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d"])[0]
+    assert f"{lima_dirs / 'to-box'}:/run/foldyard/to-box:ro" in run
+    assert f"FY_TO_BOX={lima_dirs / 'to-box'}" in _env_values(run)
+
+
+def test_up_binds_no_to_box_where_the_vm_shares_none(fake, lima_dirs, monkeypatch):
+    monkeypatch.setattr(box.machine, "to_box_mounted", lambda: False)  # krunkit, say
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d"])[0]
+    assert not any("/run/foldyard/to-box" in tok for tok in run)
+    assert not any(v.startswith("FY_TO_BOX=") for v in _env_values(run))
+
+
+def test_a_worktrees_box_binds_its_own_slot(fake, lima_dirs, monkeypatch):
+    monkeypatch.setattr(fake["ctx"], "worktree", "feat")
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d"])[0]
+    slot = lima_dirs / "from-box" / "worktrees" / "feat"
+    assert f"{slot}/claude/projects:/home/vscode/.claude/projects" in run
+
+
+def test_a_worktree_name_no_slot_can_carry_keeps_the_legacy_bind_out(fake, lima_dirs, monkeypatch):
+    monkeypatch.setattr(box.boxmounts, "claude_rel", lambda wt: (_ for _ in ()).throw(ValueError()))
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d"])[0]
+    legacy = fake["main"] / "dev-stack" / ".devbox-claude" / "projects"
+    assert f"{legacy}:/home/vscode/.claude/projects" in run
+    # …but the VM still shares the from-box: in-box verify exempts it, and no recreate nag
+    assert f"FY_FROM_BOX={lima_dirs / 'from-box'}" in _env_values(run)
+
+
+def test_up_refuses_a_slot_the_box_planted_as_a_symlink(fake, lima_dirs, tmp_path):
+    # Any box can plant `from-box/worktrees/<wt>` before that worktree's first `fy box up`; the
+    # host's mkdir must not create directories wherever it points.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (lima_dirs / "from-box" / "main").symlink_to(elsewhere)
+    with pytest.raises(OSError):
+        box.main("up")
+    assert list(elsewhere.iterdir()) == []
+    assert not _find(fake["calls"], has=["run", "-d"])
+
+
+def test_up_on_the_podman_backend_keeps_the_legacy_bind_out(fake, monkeypatch):
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d"])[0]
+    legacy = fake["main"] / "dev-stack" / ".devbox-claude" / "projects"
+    assert f"{legacy}:/home/vscode/.claude/projects" in run
+    assert not any(v.startswith(("FY_FROM_BOX=", "FY_TO_BOX=")) for v in _env_values(run))
+
+
+def test_up_archives_the_legacy_transcripts_once_and_says_they_can_go(fake, lima_dirs, capsys):
+    from foldyard import transcripts
+
+    legacy = fake["main"] / "dev-stack" / ".devbox-claude" / "projects"
+    own = transcripts.claude_project_dir(str(fake["main"]))
+    (legacy / own).mkdir(parents=True)
+    (legacy / own / "s.jsonl").write_text("{}")
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "can be deleted" in out and str(legacy) in out
+    assert (legacy / own / "s.jsonl").exists()  # archived, never moved
+
+
+def test_up_nags_when_a_running_box_still_binds_into_the_checkout(fake, lima_dirs, capsys):
+    fake["state"]["running"] = True
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "predates foldyard's to-box and from-box" in out and "fy box down && fy box up" in out
+    assert "binds its transcripts into the checkout" in out
+    fake["state"]["baked_env"]["FY_FROM_BOX"] = str(lima_dirs / "from-box")
+    assert box.main("up") == 0
+    assert "predates foldyard's to-box" not in capsys.readouterr().out
+
+
+def test_the_nag_for_a_box_with_no_agents_names_only_the_to_box(
+    fake, lima_dirs, capsys, monkeypatch
+):
+    monkeypatch.setattr(config, "claude_enabled", lambda: False)
+    monkeypatch.setattr(config, "codex_enabled", lambda: False)
+    fake["state"]["running"] = True
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "has no /run/foldyard/to-box." in out and "transcripts" not in out
+
+
+def test_no_nag_on_the_podman_backend(fake, capsys):
+    fake["state"]["running"] = True
+    assert box.main("up") == 0
+    assert "predates foldyard's to-box" not in capsys.readouterr().out

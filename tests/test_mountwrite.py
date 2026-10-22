@@ -105,3 +105,41 @@ def test_dev_vm_dir_inside_the_checkout_is_fine(fresh_config, checkout):
     (checkout / "foldyard.toml").write_text('[project]\nname = "p"\ndev_vm_dir = "infra/dev"\n')
     fresh_config(FOLDYARD_REPO=checkout, FOLDYARD_DEV_VM_DIR=None)
     assert config.dev_vm_rel() == "infra/dev"
+
+
+# ── makedirs: the directory-only twin (ADR-0033's from-box slots) ─────────────────────────
+
+
+def test_makedirs_creates_every_missing_component(checkout):
+    mountwrite.makedirs(checkout, "worktrees/feat/claude/projects")
+    assert (checkout / "worktrees/feat/claude/projects").is_dir()
+    mountwrite.makedirs(checkout, "worktrees/feat/claude/projects")  # idempotent
+
+
+def test_makedirs_creates_private_dirs(checkout):
+    mountwrite.makedirs(checkout, "main/claude")
+    assert (checkout / "main").stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize("planted", ["worktrees", "worktrees/feat", "worktrees/feat/claude"])
+def test_makedirs_refuses_a_planted_symlink_anywhere_on_the_way(checkout, victim, planted):
+    # A box can plant `from-box/worktrees/<wt>` as a link to a host dir before the worktree's
+    # first `fy box up`: `Path.mkdir(parents=True)` would create `claude/projects` inside it.
+    (checkout / planted).parent.mkdir(parents=True, exist_ok=True)
+    (checkout / planted).symlink_to(victim.parent)
+    with pytest.raises(OSError):
+        mountwrite.makedirs(checkout, "worktrees/feat/claude/projects")
+    assert sorted(p.name for p in victim.parent.iterdir()) == ["authorized_keys"]
+
+
+def test_makedirs_refuses_a_root_that_is_a_symlink(tmp_path, victim):
+    (tmp_path / "root").symlink_to(victim.parent)
+    with pytest.raises(OSError):
+        mountwrite.makedirs(tmp_path / "root", "a")
+    assert sorted(p.name for p in victim.parent.iterdir()) == ["authorized_keys"]
+
+
+@pytest.mark.parametrize("rel", ["/etc/x", "../x", "a/../../x", ""])
+def test_makedirs_refuses_a_path_leaving_the_root(checkout, rel):
+    with pytest.raises(ValueError):
+        mountwrite.makedirs(checkout, rel)

@@ -19,6 +19,15 @@ Two properties combine ([ADR-0001](./adrs/0001-rootless-podman-vm-isolation-boun
 - **Repo-only mounts.** The VM's mount table holds your repo and nothing else from your computer.
   Even with full control of the VM, there is no other file of yours to reach.
 
+On the lima backend the VM also shares two directories of foldyard's own, both outside the repo
+and both empty of secrets ([ADR-0033](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md)):
+a **from-box** the box writes (agent transcripts leave the checkout through it; your computer
+reads them without following a link) and a **to-box** your computer writes and the box can only
+read. The to-box is read-only *outside* the guest — the hypervisor's share refuses the write — so
+even root in the VM can't change what your computer published there; foldyard mounts it only on
+`vz` with virtiofs and `qemu` with 9p, where that holds. Never the state directory above them,
+which holds `host.env` and the keys.
+
 So a container escape — a kernel bug, a runtime bug — lands the attacker in a disposable VM
 whose only contents are a repo they could already read. Not on your computer, not near your keys,
 browser profile or other projects. That is also why handing the agent the VM's container socket
@@ -172,7 +181,12 @@ the box only the VM-boundary checks run. What it checks:
 - **VM boundary** (over the container socket): the engine reports **rootless**; a
   `--privileged --pid=host` container **can't read the VM's PID-1 namespace** (the known breakout,
   attempted and refused); and a **mount audit** — the VM's own mount table carries no path from
-  your computer beyond the repo and worktrees mounts, matched exactly.
+  your computer beyond the repo and worktrees mounts and foldyard's to-box and from-box, matched
+  exactly. Where there is a to-box, two more rows: the VM's table shows it read-only, and a
+  `--privileged` container that binds it **read-write** still can't create a file in it — an
+  actual write, refused (by `EROFS`, `EPERM` or `EACCES` — any refusal counts), since the guest's
+  own `ro` flag is one remount away for root in the VM. Inside the box, the box's own
+  `/run/foldyard/to-box` must refuse a write too.
 - **Credential checks** (inside the box): no SSH agent forwarded, no git-credential bridge to your
   computer (`GIT_ASKPASS`), no editor-attach bridge sockets in `/tmp`, no `~/.ssh` private keys,
   no `~/.netrc`, and a dry-run push to `origin` (`git push --dry-run`, which sends nothing) is
@@ -210,6 +224,18 @@ Each row names *what* failed. What it usually means, and what to do:
   VM is created: fix the `[machine]` config, then `fy machine recreate`. **`could not read the VM
   mount table … UNPROVEN`** means the probe failed, not that anything leaked. Under gVisor the row
   reads `N/A`; run `fy verify` on your computer for the audit.
+- **to-box rows:**
+  - `a --privileged container binding the to-box read-write CREATED …` — something in the VM can
+    write what only your computer should: the share isn't read-only outside the guest. Look for
+    `mounts` or `mountType` in `~/.lima/_config/override.yaml` (Lima's most permissive `writable`
+    wins), then `fy machine stop && fy up`, which records foldyard's read-only to-box again and
+    refuses while an override still widens it. The row names the file it made (and removed).
+  - `to-box shows rw in the VM's mount table` (`WARN`) — the guest's own flag was dropped, by
+    root in the VM or a hand-made remount; the write row is the verdict, and it still passed.
+  - `the to-box write probe did not run — read-only UNPROVEN` — the probe container failed; the
+    same causes as the probe-image row above.
+  - `/run/foldyard/to-box took a write` (in the box) — the box's own bind isn't `:ro`: recreate
+    the box (`fy box down && fy box up`).
 - **`SSH_AUTH_SOCK set` / `git-credential bridge to the host` / `editor-attach bridge sockets`**
   — a VS Code attach forwarded your computer's credentials into the box. See
   [below](#editor-attach-credential-bridges).
@@ -273,7 +299,11 @@ but "what did we agree to, and where is it written?" — the `passthrough` hosts
 is shared and which is yours, and any key that reads as security config but is no longer honoured.
 
 verify exercises the escapes we know about. A pass means the known breakouts are refused and the
-mode is what it claims, not that no unknown escape exists. It also doesn't scan your repo for
+mode is what it claims, not that no unknown escape exists. Nor does it prove the to-box holds
+against **root in the VM**: the box never has that, so verify can only write from a container.
+That proof is foldyard's own host-tier test (`tests/test_mounts_e2e.py`), which runs as root at
+boot in a real VM, remounts the to-box read-write, tries every kind of write, and checks the file
+on your computer is unchanged. It also doesn't scan your repo for
 committed secrets — that is your precondition, below.
 
 ## The precondition: a clean repo

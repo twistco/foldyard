@@ -584,3 +584,58 @@ def test_listing_shows_each_hook_its_filters_and_its_health(project):
     assert "file" in text and "/srv/ca/e.jsonl" in text and "who=container" in text
     assert "failing" in text and "refused: a symlink" in text and "5 events skipped" in text
     assert "bad" in text and "absolute path" in text  # a hook the supervisor skips is said
+
+
+# ── `fy monitor hook add NAME --to-box`: the sink in ADR-0033's to-box ─────────────────────
+
+
+@pytest.fixture
+def to_box(monkeypatch):
+    from foldyard import machine
+
+    why = {"value": None}
+    monkeypatch.setattr(machine, "to_box_unavailable", lambda: why["value"])
+    monkeypatch.setattr(mh, "_box_writable_roots", lambda: [])
+    return why
+
+
+def test_add_to_box_puts_the_signed_sink_in_the_to_box(project, to_box, capsys):
+    assert mh.cli_add("experiment", to_box=True) == 0
+    path = project / "to-box" / "monitor" / "experiment.jsonl"
+    hooks, errors = mh.load()
+    assert errors == [] and hooks == [mh.Hook(name="experiment", file=str(path))]
+    assert path.parent.is_dir() and path.parent.stat().st_mode & 0o077 == 0
+    out = capsys.readouterr().out
+    assert "/run/foldyard/to-box/monitor/experiment.jsonl" in out  # where the box reads it
+    assert "fy monitor check" in out
+
+
+def test_add_to_box_without_one_says_why_and_points_at_file(project, to_box, capsys):
+    to_box["value"] = "the podman backend has no to-box: …"
+    assert mh.cli_add("experiment", to_box=True) == 1
+    out = capsys.readouterr().out
+    assert "podman backend has no to-box" in out and "--file PATH" in out
+    assert not (project / "monitor-hooks.toml").exists()
+    assert not (project / "to-box").exists()
+
+
+@pytest.mark.parametrize("name", ["../x", "a/b", ".hidden"])
+def test_add_to_box_refuses_a_name_that_isnt_a_file_name(project, to_box, name):
+    assert mh.cli_add(name, to_box=True) == 1
+    assert not (project / "monitor-hooks.toml").exists()
+
+
+def test_add_to_box_and_file_together_is_refused(project, to_box, capsys):
+    assert mh.cli_add("x", to_box=True, file=str(project / "e.jsonl")) == 1
+    assert "exactly one of `--to-box`" in capsys.readouterr().out
+
+
+def test_a_file_in_a_box_writable_tree_gets_a_warning(project, monkeypatch, capsys, tmp_path):
+    checkout = tmp_path / "repo"
+    (checkout / "logs").mkdir(parents=True)
+    monkeypatch.setattr(mh, "_box_writable_roots", lambda: [(checkout, "the checkout")])
+    assert mh.cli_add("ca", file=str(checkout / "logs" / "e.jsonl")) == 0
+    out = capsys.readouterr().out
+    assert "it is in the checkout, which the box can write" in out and "--to-box" in out
+    assert mh.cli_add("cb", file=str(tmp_path / "e.jsonl")) == 0
+    assert "which the box can write" not in capsys.readouterr().out

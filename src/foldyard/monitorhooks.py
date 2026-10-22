@@ -41,7 +41,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-from . import config, monitorlog, monitorsink
+from . import boxmounts, config, monitorlog, monitorsink
 
 SCHEMA = "fy.monitor.events/1"
 STAGES = ("events",)  # later: scored, decided, reviewed (docs/monitor-pipeline.md §5)
@@ -323,11 +323,34 @@ def _values(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(x.strip() for v in values for x in v.split(",") if x.strip())
 
 
+_TO_BOX_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def to_box_file(name: str) -> Path:
+    """Where ``fy monitor hook add NAME --to-box`` puts the sink: the to-box's ``monitor/``."""
+    return boxmounts.to_box_dir() / "monitor" / f"{name}.jsonl"
+
+
+def _box_writable_roots() -> list[tuple[Path, str]]:
+    """Trees a box can write, for the warning on a ``--file`` placed in one."""
+    from . import stack
+
+    main = stack.find_main_repo()
+    if main is None:  # not in a checkout: nothing to compare against
+        return []
+    return [
+        (main, "the checkout"),
+        (config.worktrees_root(main), "the worktrees root"),
+        (boxmounts.from_box_dir(), "the from-box"),
+    ]
+
+
 def cli_add(
     name: str,
     *,
     command: tuple[str, ...] = (),
     file: str = "",
+    to_box: bool = False,
     url: str = "",
     who: tuple[str, ...] = (),
     kinds: tuple[str, ...] = (),
@@ -335,10 +358,29 @@ def cli_add(
 ) -> int:
     """`fy monitor hook add`. Refuses — writing nothing — what the supervisor would skip, a filter
     value that can never match (a typo would silently send nothing), and a file the sink would
-    refuse to write."""
-    if sum(map(bool, (command, file, url))) != 1:
-        print("✗ give exactly one of `--file PATH`, `--url URL`, or a program after `--`")
+    refuse to write. ``to_box``: the sink in the to-box (ADR-0033), which every box reads and none
+    can write — on a VM that has one; elsewhere it says why and points at ``--file``."""
+    if sum(map(bool, (command, file or to_box, url))) != 1 or (file and to_box):
+        print(
+            "✗ give exactly one of `--to-box`, `--file PATH`, `--url URL`, or a program after `--`"
+        )
         return 1
+    if to_box:
+        from . import machine  # lazy: binds the machine name from the adopted config
+
+        why = machine.to_box_unavailable()
+        if why:
+            print(f"✗ no to-box for this project: {why}.")
+            print(
+                "  Use `--file PATH` instead: still signed (`fy monitor check PATH` finds an "
+                "edit), but a box that can write that directory can change the file."
+            )
+            return 1
+        if not _TO_BOX_NAME.fullmatch(name):
+            print(f"✗ '{name}' can't name a file in the to-box: letters, digits, `.`, `_`, `-`")
+            return 1
+        file = str(to_box_file(name))
+        Path(file).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     who, kinds, worktrees = _values(who), _values(kinds), _values(worktrees)
     bad = [w for w in who if w not in WHO] + [k for k in kinds if k not in KINDS]
     if bad:
@@ -368,12 +410,33 @@ def cli_add(
         "  The supervisor picks it up within seconds and sends settled events from the recent "
         "ones on; `fy monitor hook` shows how its deliveries are going."
     )
-    if file:
+    if to_box:
+        in_box = f"{boxmounts.TO_BOX_IN_BOX}/monitor/{name}.jsonl"
+        print(f"  In every box it is {in_box} — read-only there and in the VM.")
+        print(
+            "  Each batch is one signed JSON line; `fy monitor check "
+            f"{shlex.quote(file)}` verifies it, and a copy that leaves your computer keeps the "
+            "signature."
+        )
+        print(
+            "  A VM or box from before the to-box shares none: `fy machine stop && fy up`, then "
+            "`fy box down && fy box up`."
+        )
+    elif file:
         print(
             "  Each batch is one signed JSON line. Anything that can write that directory (the "
             "box, if it is in the checkout) can still edit the file — "
             f"`fy monitor check {shlex.quote(file)}` says whether it has."
         )
+        where = next(
+            (what for root, what in _box_writable_roots() if Path(file).is_relative_to(root)), ""
+        )
+        if where:
+            print(
+                f"  ⚠ it is in {where}, which the box can write: it can delete or replace the "
+                "file (the signature finds an edit, but can't stop one). `--to-box` puts it where "
+                "the box can read it and not change it."
+            )
     if config.machine_monitor() == "off":
         print(
             '  ℹ the monitor is off: nothing is recorded until `[machine] monitor = "observe"` '

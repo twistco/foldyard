@@ -42,9 +42,8 @@ import base64
 import json
 import shlex
 import sys
-from pathlib import Path
 
-from .. import config, keyless
+from .. import boxmounts, config, keyless
 from ..keyless import CODEX_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CODEX_KEYLESS_HOST as _KEYLESS_HOST
 from . import HeldCredential, InjectRule, Plugin, Secret, Switch
@@ -192,8 +191,8 @@ class CodexPlugin(Plugin):
         # codex's "CODEX_HOME must exist" check is satisfied.
         args = ["-e", f"CODEX_HOME={codex_home}", "-v", f"devbox_codex_home:{codex_home}"]
         transcripts = env.get("FY_CODEX_TRANSCRIPTS") or ""
-        if transcripts:
-            Path(transcripts).mkdir(parents=True, exist_ok=True)
+        if transcripts:  # never through a link the box planted in its from-box slot (ADR-0033)
+            boxmounts.ensure_bind_source(transcripts)
             args += ["-v", f"{transcripts}:{codex_home}/sessions"]
         # Keyless: bake the DUMMY OPENAI_API_KEY so the client emits the Authorization header the
         # proxy overwrites in flight. AMBIENT with the proxy substrate (FY_PROXY) whenever keyless

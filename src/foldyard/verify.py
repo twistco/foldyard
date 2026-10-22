@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import socket
 import subprocess
 from pathlib import Path
 from shutil import which
 
-from . import config, machine, stack
+from . import boxmounts, config, machine, stack
 from .plugins import VerifyContext, registry
 
 _PASS = "\033[32m✓ PASS\033[0m"
@@ -191,7 +192,13 @@ def _rootless(engine: str, env: dict) -> bool:
 
 
 def _vm_boundary(
-    rep: _Report, engine: str, env: dict, probe: str, allowed: list[str] | None = None
+    rep: _Report,
+    engine: str,
+    env: dict,
+    probe: str,
+    allowed: list[str] | None = None,
+    to_box: str = "",
+    to_box_expected: bool = False,
 ) -> None:
     socket = env.get("CONTAINER_HOST") or env.get("DOCKER_HOST", "")
     print(f"▶ VM boundary (engine: {engine}, over the socket: {socket})")
@@ -244,6 +251,11 @@ def _vm_boundary(
                 "blocks --pid=host into the VM — see 'escape refused'); run `fy verify` on the "
                 "host, or from a crun box, to audit the VM mount boundary"
             )
+            if to_box:  # the probe container would run in the sandbox, not on the VM's mount
+                rep.na(
+                    "to-box write probe runs at another layer, not inside a gVisor box (its "
+                    "container runs in the sandbox); `fy verify` on the host probes the VM's mount"
+                )
         else:
             rep.bad(
                 "could not read the VM mount table (probe produced nothing) — leak check UNPROVEN"
@@ -264,7 +276,121 @@ def _vm_boundary(
     if not host:
         rep.ok("VM mount table (PID 1's namespace) free of host home/paths beyond the repo mounts")
     else:
-        rep.bad(f"VM exposes host paths: {host[0]}")
+        rep.bad(f"VM exposes host paths: {host[0]}{_predates_box_dirs_hint(host)}")
+    if to_box:
+        _to_box_rows(rep, engine, env, probe, mp.stdout, to_box, to_box_expected)
+
+
+def _predates_box_dirs_hint(leaks: list[str]) -> str:
+    """A box created before ADR-0033's to-box and from-box has neither path baked
+    (:func:`boxmounts.vm_paths`), so once its VM shares them they aren't exempt here. They stay a
+    FAIL — nothing is exempted by guess — but one that names the likely cause and the fix."""
+    if not config.in_box() or any(boxmounts.vm_paths()):
+        return ""
+    if all(_mountpoint(ln).endswith(("/to-box", "/from-box")) for ln in leaks):
+        return (
+            " — if that is foldyard's to-box/from-box, this box was created before them and "
+            "doesn't know their paths: `fy box down && fy box up`"
+        )
+    return ""
+
+
+# Where the write probe binds the to-box. A fixed path in the probe container's own namespace.
+_TO_BOX_AT = "/fy-to-box"
+
+
+def _to_box_rows(
+    rep: _Report, engine: str, env: dict, probe: str, table: str, to_box: str, expected: bool
+) -> None:
+    """ADR-0033: the to-box is READ-ONLY to everything in the VM. Two rows, read and probed from the
+    VM's side (the host-side enforcement against guest ROOT is a host-tier e2e, not a verify row —
+    the box never has root in the guest):
+
+    1. PID 1's mount table carries the to-box with ``ro``. The guest's own flag — necessary, not
+       sufficient: root in the guest can drop it while the host still refuses every write (the vz
+       test), so ``rw`` here is a WARN that something remounted it, never the verdict.
+    2. A ``--privileged`` container that binds the to-box READ-WRITE can't create a file in it,
+       even after trying ``mount -o remount,rw``. The verdict is an actual WRITE, never the flag:
+       a guest can show ``rw`` and still be refused, and the refusal's errno varies (EROFS while
+       the guest flag is set, EPERM/EACCES from the host once it isn't) — any refusal counts. A
+       write that lands is a FAIL naming the file it made."""
+    line = next((ln for ln in table.splitlines() if _mountpoint(ln) == to_box), "")
+    if not line:
+        if expected:
+            rep.warn(
+                f"the to-box ({to_box}) is not in the VM's mount table — expected there; "
+                "`fy machine stop && fy up` re-records the VM's mount set"
+            )
+        else:
+            print(
+                f"  ℹ no to-box in this VM ({to_box}) — nothing to check (Lima vz or qemu only; "
+                "the podman backend has none)"
+            )
+        return
+    fields = line.split()
+    options = fields[3].split(",") if len(fields) > 3 else []
+    if "ro" in options:
+        rep.ok("to-box mounted read-only in the VM (the guest's own flag)")
+    else:
+        rep.warn(
+            f"to-box shows {'rw' if 'rw' in options else 'no ro'} in the VM's mount table — "
+            "something in the guest remounted it; the write probe below is the verdict"
+        )
+    name = f".fy-verify-{secrets.token_hex(4)}"
+    target = f"{_TO_BOX_AT}/{name}"
+    script = (
+        f"if mount -o remount,rw {_TO_BOX_AT} 2>/dev/null; then echo remount=done; "
+        "else echo remount=refused; fi; "
+        f'if (: >"{target}") 2>/dev/null; then echo write=LANDED; '
+        f'rm -f "{target}" 2>/dev/null && echo removed=yes; else echo write=refused; fi; true'
+    )
+    got = _run(
+        [
+            engine, "run", "--rm", "--privileged", "-v", f"{to_box}:{_TO_BOX_AT}",
+            probe, "sh", "-c", script,
+        ],
+        env,
+        capture=True,
+    )  # fmt: skip
+    out = got.stdout or ""  # judged by what it printed: a failed cleanup must not hide a write
+    if "write=" not in out:
+        rep.bad("the to-box write probe did not run — read-only UNPROVEN")
+    elif "write=LANDED" in out:
+        left = "removed again" if "removed=yes" in out else "LEFT there"
+        rep.bad(
+            f"a --privileged container binding the to-box read-write CREATED {to_box}/{name} "
+            f"({left}) — the to-box is writable from the VM"
+        )
+    else:
+        tried = " (its remount to rw returned 0; the write was still refused)"
+        rep.ok(
+            "to-box refuses a write from a --privileged container binding it read-write"
+            + (tried if "remount=done" in out else "")
+        )
+
+
+def _to_box_in_box(rep: _Report) -> None:
+    """In the box: the to-box bind (``:ro``) refuses a write. Defence in depth — the boundary is
+    the VM mount below it, which the rows above probe."""
+    if not os.environ.get(boxmounts.ENV_TO_BOX):
+        return
+    here = Path(boxmounts.TO_BOX_IN_BOX)
+    if not here.is_dir():
+        rep.warn(f"{here} is missing — this box was created with a to-box; recreate it")
+        return
+    probe = here / f".fy-verify-{secrets.token_hex(4)}"
+    try:
+        fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError:  # EROFS, EPERM or EACCES: any refusal is the claim
+        rep.ok(f"{here} refuses a write (the box's read-only bind)")
+        return
+    os.close(fd)
+    try:
+        probe.unlink()
+        left = "removed again"
+    except OSError:
+        left = "LEFT there"
+    rep.bad(f"{here} took a write ({probe}, {left}) — the box's to-box bind is writable")
 
 
 def _plugin_posture(rep: _Report, env: dict) -> None:
@@ -358,6 +484,7 @@ def _box_posture(rep: _Report, env: dict) -> None:
         rep.bad(f"~/.ssh key material: {' '.join(keys)}")
 
     _plugin_posture(rep, env)
+    _to_box_in_box(rep)
 
     if not (home / ".netrc").exists():
         rep.ok("no ~/.netrc")
@@ -543,7 +670,9 @@ def verify() -> int:
     print(f"ℹ what each check proves, why it fails, what to do: `{_MANUAL}` ({_MANUAL_SECTION})")
 
     allowed = machine.guest_mounts(ctx.main, stack.worktrees_root(ctx.main))
-    _vm_boundary(rep, engine, ctx.env, probe, allowed)
+    to_box = boxmounts.vm_paths()[1]
+    expected = bool(to_box) and (config.in_box() or machine.to_box_mounted())
+    _vm_boundary(rep, engine, ctx.env, probe, allowed, to_box, expected)
 
     if config.in_box():
         _box_posture(rep, ctx.env)

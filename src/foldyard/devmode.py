@@ -1423,6 +1423,7 @@ def doctor(deep: bool = False):
     yield _inject_overlap_check(ctx.mode)
     yield from _podman_checks()
     yield from _ssh_port_check()
+    yield from _to_box_check()
     yield from _host_wall_check()
     yield from _guest_monitor_check()
     yield from _monitor_hooks_check()
@@ -2243,6 +2244,43 @@ def _ssh_port_check():
         "",
         f"{PODMAN_MACHINE}'s ssh forward is :{have}, not its port range's :{want} — "
         "`fy machine stop` then `fy up` re-pins it",
+    )
+
+
+def _to_box_check():
+    """ADR-0033's to-box (lima): shared READ-ONLY with the VM and every box, where the VM's share
+    type enforces that outside the guest; otherwise there is none, and this says why. Read from
+    the instance's effective config — no ssh. Silent on the podman backend, whose mounts foldyard
+    leaves as they were, and before the VM exists."""
+    if _BACKEND.name != "lima" or not _BACKEND.exists(PODMAN_MACHINE):
+        return
+    from . import boxmounts
+    from .machine_backend import Mount
+
+    vmtype = _BACKEND.vmtype(PODMAN_MACHINE)
+    if not boxmounts.mount_type_for(vmtype):
+        yield _result(
+            True,
+            "to-box",
+            f"none — this VM's hypervisor ({vmtype or 'Lima’s default'}) can't make a share "
+            "read-only outside the guest (vz or qemu can); a monitor hook's file goes where "
+            "`--file` says",
+            "",
+        )
+        return
+    to_box = str(boxmounts.to_box_dir())
+    want_type = boxmounts.mount_type_for(vmtype)
+    listed = Mount(to_box, to_box, writable=False) in (_BACKEND.mount_set(PODMAN_MACHINE) or [])
+    have_type = _BACKEND.mount_type(PODMAN_MACHINE)
+    yield _result(
+        (listed and have_type == want_type) or None,
+        "to-box",
+        f"shared read-only with the VM and every box ({to_box}; {vmtype}/{want_type})",
+        f"shared by {have_type or 'an unknown type'}, not {want_type}, which can't hold it "
+        "read-only outside the guest (Lima's override.yaml?) — `fy machine stop && fy up` refuses "
+        "until it's fixed"
+        if listed
+        else "not shared yet — the VM's mount set predates it: `fy machine stop && fy up`",
     )
 
 
