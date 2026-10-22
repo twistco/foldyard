@@ -6,6 +6,81 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.6.1 — 2026-10-22
+
+Monitor hooks no longer drop container events under load, and the monitor keeps far more history:
+`fy monitor --since/--until` reads it back, and each hook batch names the stretches it can't vouch
+for. On the Lima backend, a read-only to-box and a box-written from-box now sit beside the checkout:
+`fy monitor hook add NAME --to-box` gives the box a signed event file it can read but not change,
+and a new box's transcripts leave the checkout. After upgrading, on the Lima backend run
+`fy machine stop && fy up` once (the VM's mounts changed; a running one is refused until it
+restarts), then `fy box down && fy box up`. On the `podman` backend, `fy host restart` is enough.
+
+### Changed
+
+- **On the lima backend, the VM shares two directories of foldyard's own, and transcripts leave
+  the checkout.** Beside the checkout, the VM now mounts `~/.foldyard/<project>/from-box/`, which
+  the box writes, and `~/.foldyard/<project>/to-box/`, which only your computer writes: the VM and
+  every box can read it (in the box, at `/run/foldyard/to-box`), and not even root in the VM can
+  change it, because the hypervisor's share refuses the write. That holds on `vz` (virtiofs) and
+  `qemu` (9p), so foldyard now pins Lima's `mountType` to match the hypervisor and mounts no to-box
+  on any other (`krunkit`). A new box binds Claude's and Codex's transcripts into its checkout's
+  slot in the from-box instead of `.devbox-claude/` / `.devbox-codex/` in the checkout, so
+  `git clean -fdx` and grep no longer see them and `fy worktree remove` archives the slot, then
+  deletes it. For this release the transcript sync reads both places; the next drops the old one.
+  `fy verify` checks the to-box with a real write, and `fy doctor` has a `to-box` row.
+  **Every Lima VM needs one `fy machine stop && fy up`** (its mount set changed; until then
+  foldyard refuses the running VM, and nothing is lost: containers and volumes stay), **then
+  `fy box down && fy box up`** to move a box's transcripts out of the checkout (`fy box up` warns
+  until you do). **On the podman backend nothing about the VM changes** — its mounts are fixed
+  when the machine is created, and no podman provider enforces read-only outside the guest — so
+  there is no restart to do, and boxes keep binding transcripts into the checkout.
+  `FOLDYARD_STATE_DIR` must now point outside the checkout and the worktrees root on Lima
+  ([ADR-0033](https://github.com/twistco/foldyard/blob/main/docs/adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md)).
+
+### Added
+
+- **`fy monitor hook add NAME --to-box` puts the monitor's signed event file where the box can
+  read it and can't change it.** The file is `~/.foldyard/<project>/to-box/monitor/NAME.jsonl`,
+  which every box sees at `/run/foldyard/to-box/monitor/NAME.jsonl`, read-only. A file in the
+  checkout could be edited, cut or replaced by the box (the signature found that, but couldn't
+  stop it). Each line is still signed, so a copy that leaves your computer can still be checked
+  with `fy monitor check`. It needs the lima backend on `vz` or `qemu`; elsewhere it says why and
+  points at `--file`, which works as before. A `--file` inside the checkout, the worktrees root
+  or the from-box now gets a warning that the box can write there.
+- **Experimental: Hook batches say what they can't vouch for.** Every batch now carries a `gaps` list (usually
+  empty) naming the stretches of time where evidence is missing or incomplete: the store removed
+  events before the hook read them, events were lost on the way from the VM, the relay restarted,
+  a batch was skipped, or events were labelled without the record that would confirm their
+  container. Mark those times "no evidence", not "nothing happened". Each event also carries
+  `mnt`, its mount namespace number. Both are new keys in the same `fy.monitor.events/1` schema;
+  a batch can now hold gaps alone (`events` empty, `first`/`last` null), and file-sink lines
+  that carry them still pass `fy monitor check`.
+- **Experimental: `fy monitor --since/--until` reads any stretch the store still holds.** Give an ISO time (UTC
+  unless it has an offset) or a span back from now (`90s`, `15m`, `2h`, `1d`). Events are
+  labelled as they were when recorded, and missing evidence in the range is listed.
+- **Experimental: The monitor's store keeps hours of activity instead of minutes.** Older events are
+  gzip-compressed (about 30 times smaller) and the store keeps 1 GB on your computer by default
+  — about 13 million events, where it used to keep 160 MB of uncompressed records, two minutes of
+  a busy stack start. Set `max_mb` in `~/.foldyard/<project>/monitor-store.toml` (64 MB to 64 GB);
+  it is never read from `foldyard.toml`, so the box can't shorten what is kept about it.
+  `fy monitor` and `fy doctor` show how much is kept and how far back. Old files are converted in
+  place; anything copying `logs/monitor*.jsonl` should now also take `monitor*.jsonl.gz`.
+
+### Fixed
+
+- **Monitor hooks no longer silently drop container events under load.** A hook matched events to
+  their containers using only the records near its place in the store. When events arrived fast —
+  a few hundred a second while stacks start, or even 30–40 a second from ten idle containers —
+  the two records that name the containers were further apart than that, so the events between
+  were labelled `unattributed`, a `who = ["container"]` hook left them out, and nothing said so.
+  In one measured run a hook lost 5% of its container events, in holes of 10–60 seconds; in
+  stack-start storms, whole tool calls. Every stretch of the store is now matched against the
+  records around it wherever they are, so a hook gets what `fy monitor` over the whole store
+  shows. Events dropped before this fix can't be recovered: the store had already removed them.
+  `fy monitor` had the same flaw and is fixed too. Restart the host supervisor
+  (`fy host restart`) to pick it up.
+
 ## 0.6.0 — 2026-10-21
 
 A security release: upgrade now. Two flaws let a dev box influence what your computer archives from
