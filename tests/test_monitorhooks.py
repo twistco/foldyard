@@ -708,3 +708,179 @@ def test_a_file_in_a_box_writable_tree_gets_a_warning(project, monkeypatch, caps
     assert "it is in the checkout, which the box can write" in out and "--to-box" in out
     assert mh.cli_add("cb", file=str(tmp_path / "e.jsonl")) == 0
     assert "which the box can write" not in capsys.readouterr().out
+
+
+# ── 0.6.1's upgrade: a false "rotated", then a hook stuck behind its own cursor ─────────────
+
+
+def _older_foldyards_store(project, live_from: int, live_to: int):
+    """A 0.6.0 store: a dated backup and a live file, neither with a first line naming it."""
+    logs = project / "logs"
+    logs.mkdir(exist_ok=True)
+    dump = lambda *rs: "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rs)  # noqa: E731
+    (logs / "monitor.20261001T000000Z.jsonl").write_text(dump(snap(0), *map(ev, range(1, 5))))
+    (logs / "monitor.jsonl").write_text(dump(*map(ev, range(live_from, live_to)), snap(live_to)))
+
+
+def test_a_segment_sealed_while_the_catalogue_caught_up_is_not_taken_for_lost(
+    ran, project, monkeypatch
+):
+    # cabash, 2026-10-22: the new supervisor's first hook round listed the store, the pull then
+    # sealed the older foldyard's live file under a new id, and the catalogue — caught up with
+    # the listing from before — had no span for it. The cursor was in it; the hook was told
+    # "rotated" and sent back to the oldest segment.
+    calls, _ = ran
+    _hook(project)
+    _older_foldyards_store(project, 5, 12)
+    (project / "monitor-hooks-state.json").write_text(
+        json.dumps({"s": {"last": [BOOT, 8], "pos": [64240151, 399]}})  # an inode
+    )
+    real = monitorlog.catalogue
+
+    def pull_seals_under_the_round(segs=None):
+        before = monitorstore.segments()
+        monitorlog._append([ev(13), snap(14)])  # the pull's first append seals the legacy file
+        return real(before)
+
+    monkeypatch.setattr(monitorlog, "catalogue", pull_seals_under_the_round)
+    logged: list[str] = []
+    mh.round_once(now=50, log=logged.append)
+    monkeypatch.setattr(monitorlog, "catalogue", real)
+    mh.round_once(now=60, log=logged.append)
+    assert logged == []
+    assert _delivered(calls) == [9, 10, 11, 13]
+    assert all(c["body"]["gaps"] == [] for c in calls)
+
+
+def test_a_round_reads_with_the_catalogue_caught_up_with_what_it_reads(ran, project, monkeypatch):
+    # the round's catalogue came up to date with a listing from before a segment appeared under
+    # it (the pull sealing with its own catalogue locked): that segment's snapshot — too far
+    # back for the read — must still attribute the events after it
+    calls, _ = ran
+    (project / "monitor-hooks.toml").write_text(
+        '[[hook]]\nname = "s"\ncommand = ["/bin/s"]\nwho = ["container"]\n'
+    )
+    monkeypatch.setattr(mh, "READ_BYTES", 400)
+    monitorlog._append([snap(0), ev(1)])
+    mh.round_once(now=10 + mh.SETTLE_SECONDS)  # delivered 1, on age
+    monitorlog._append([*(ev(i) for i in range(2, 12)), snap(12, mapping={})])
+    for p in (project / "logs").glob("monitor-index.sqlite*"):
+        p.unlink()  # as if no catalogue had seen any of it
+    monkeypatch.setattr(monitorlog, "catalogue", lambda segs=None: monitorstore.Catalogue.open())
+    for t in range(500, 700, 10):
+        mh.round_once(now=t)
+    assert _delivered(calls) == list(range(1, 12))
+
+
+def test_a_hook_left_behind_its_cursor_resumes_right_after_it(ran, project, monkeypatch):
+    # what that false "rotated" left: the position at the oldest segment's start, the cursor
+    # in a later one. Every read was all events before the cursor — nothing to send, nothing
+    # passed, the position never moved: silent, for good.
+    calls, _ = ran
+    _hook(project)
+    monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 300)
+    monkeypatch.setattr(mh, "READ_BYTES", 300)
+    for i in range(0, 40, 4):
+        monitorlog._append([snap(i), ev(i + 1), ev(i + 2), ev(i + 3)])
+    oldest = monitorstore.segments()[0].id
+    (project / "monitor-hooks-state.json").write_text(
+        json.dumps({"s": {"last": [BOOT, 30], "pos": [oldest, 0], "delivered": 7}})
+    )
+    monitorlog._append([snap(40)])
+    logged: list[str] = []
+    for t in range(50, 100, 5):
+        mh.round_once(now=t, log=logged.append)
+    assert logged == []
+    assert _delivered(calls) == [31, 33, 34, 35, 37, 38, 39]
+    assert all(c["body"]["gaps"] == [] for c in calls)
+
+
+def test_a_hook_behind_a_cursor_the_store_cant_find_walks_on_to_it(ran, project, monkeypatch):
+    # the cursor's own event isn't there to jump to: the position walks forward, read by read
+    calls, _ = ran
+    _hook(project)
+    monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 300)
+    monkeypatch.setattr(mh, "READ_BYTES", 300)
+    for i in range(0, 40, 4):
+        monitorlog._append([snap(i), *(ev(j) for j in range(i + 1, i + 4) if j != 30)])
+    oldest = monitorstore.segments()[0].id
+    (project / "monitor-hooks-state.json").write_text(
+        json.dumps({"s": {"last": [BOOT, 30], "pos": [oldest, 0]}})
+    )
+    monitorlog._append([snap(40)])
+    for t in range(50, 100, 5):
+        mh.round_once(now=t)
+    assert _delivered(calls) == [31, 33, 34, 35, 37, 38, 39]
+
+
+def test_a_new_hooks_position_past_its_segments_end_is_said_not_waited_on(ran, project):
+    # no cursor to find it by, and the segment it names is there but shorter: never "look again"
+    # for good (nothing would say so — a hook that never delivered has no progress to compare)
+    calls, _ = ran
+    _hook(project)
+    monitorlog._append([snap(0), ev(1), ev(2), snap(3)])
+    live = monitorstore.segments()[-1].id
+    (project / "monitor-hooks-state.json").write_text(json.dumps({"s": {"pos": [live, 1 << 30]}}))
+    logged: list[str] = []
+    mh.round_once(now=20, log=logged.append)
+    assert any("rotated past its position" in m for m in logged) and _delivered(calls) == [1, 2]
+
+
+def test_a_new_hooks_segment_sealed_under_the_listing_is_looked_at_again_not_lost(
+    ran, project, monkeypatch
+):
+    # the listing still shows its segment live, but the live file is a new, shorter one now:
+    # the position reads as past the end for a moment, which proves nothing
+    calls, _ = ran
+    _hook(project)
+    monitorlog._append([snap(0), ev(1), *(ev(i, inode=999) for i in range(2, 9))])
+    monkeypatch.setattr(mh, "READ_BYTES", 500)  # anchored well into the segment
+    mh.round_once(now=20)  # nothing settled yet
+    assert calls == [] and mh.load_state()["s"].pos[1] > 600
+    stale = monitorstore.segments()
+    monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 10)
+    monitorlog._append([snap(9)])  # seals the live segment, starts a new one
+    real = monitorstore.segments
+    listings = iter([real(), stale])  # the round's catalogue lists first, then the hook's read
+    monkeypatch.setattr(monitorstore, "segments", lambda: next(listings, None) or real())
+    logged: list[str] = []
+    mh.round_once(now=30, log=logged.append)
+    mh.round_once(now=40, log=logged.append)
+    assert logged == [] and calls and set(_delivered(calls)) <= set(range(2, 9))
+    assert all(c["body"]["gaps"] == [] for c in calls)
+
+
+def test_a_store_that_moves_under_the_search_is_looked_at_again_not_lost(ran, project, monkeypatch):
+    # no catalogue (locked), and a listing from before the seal: the legacy file the search
+    # reads has just been renamed. Nothing proves the cursor's events gone: look again.
+    calls, _ = ran
+    _hook(project)
+    _older_foldyards_store(project, 5, 12)
+    (project / "monitor-hooks-state.json").write_text(
+        json.dumps({"s": {"last": [BOOT, 8], "pos": [64240151, 399]}})
+    )
+    monkeypatch.setattr(monitorlog, "catalogue", lambda segs=None: None)
+    stale = monitorstore.segments()
+    monitorlog._append([ev(13), snap(14)])
+    real = monitorstore.segments
+    listings = iter([stale])
+    monkeypatch.setattr(monitorstore, "segments", lambda: next(listings, None) or real())
+    logged: list[str] = []
+    mh.round_once(now=50, log=logged.append)
+    mh.round_once(now=60, log=logged.append)
+    assert logged == []
+    assert _delivered(calls) == [9, 10, 11, 13]
+    assert all(c["body"]["gaps"] == [] for c in calls)
+
+
+def test_a_hook_making_no_progress_while_events_arrive_says_so(project):
+    # it used to read ✓ — the stuck hook above was found by its file going quiet
+    _hook(project)
+    monitorlog._append([snap(0), ev(1, recv=5000.0), snap(2)])  # snapshots alone aren't progress
+    st = mh.HookState(last=[BOOT, 1], delivered=3, ok_at=1400.0, moved_at=1400.0)
+    (why,) = mh.problems(st, now=5001.0)
+    assert "no progress for 60 min" in why and f"{BOOT[:8]}:1" in why
+    assert mh.problems(mh.HookState(moved_at=4990.0), now=5001.0) == []  # moving
+    assert mh.problems(mh.HookState(ok_at=1400.0), now=9000.0, grew=1500.0) == []  # nothing new
+    mh._save_state({"s": st})
+    assert any("⚠" in line and "no progress" in line for line in mh.listing(now=5001.0))

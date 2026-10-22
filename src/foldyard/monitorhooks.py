@@ -59,6 +59,7 @@ ROUND_EVERY = 5.0
 READ_BYTES = 4 << 20  # how far past its position a hook reads at a time
 ROUND_BATCHES = 20  # a hook behind (a storm, a backoff) sends up to this many batches a round…
 ROUND_SECONDS = 2.0  # …for about this long
+STALL_SECONDS = 600.0  # a cursor still this long while the store grows is stuck (`problems`)
 
 
 def hooks_file() -> Path:
@@ -528,14 +529,26 @@ def target(hook: Hook) -> tuple[str, str]:
     return "command", shlex.join(hook.command)
 
 
-def problems(st: HookState | None, now: float) -> list[str]:
-    """What is wrong with a hook's delivery: failing now, and events it has ever skipped."""
+def problems(st: HookState | None, now: float, grew: float | None = None) -> list[str]:
+    """What is wrong with a hook's delivery: failing now, events it has ever skipped, and a
+    cursor that stood still for :data:`STALL_SECONDS` while events kept arriving (``grew``: when
+    the store's newest one did). A cursor moves over the events a filter doesn't want too, so only
+    a hook that is stuck stays still that long — 0.6.1's upgrade left hooks so, silently."""
     out: list[str] = []
     if st is None:
         return out
     if st.attempts:
         wait = max(0.0, st.next_try - now)
         out.append(f"failing ({st.attempts} attempts): {st.error} — retrying in {wait:.0f}s")
+    else:
+        since = st.moved_at or st.ok_at
+        grew = monitorstore.last_event_recv() if grew is None else grew
+        if since and grew - since > STALL_SECONDS:
+            at = f"{st.last[0][:8]}:{st.last[1]}" if st.last else "nothing yet"
+            out.append(
+                f"no progress for {(now - since) / 60:.0f} min while events kept arriving — "
+                f"its cursor is at {at}; `fy host logs` says why"
+            )
     if st.dropped:
         last = f" (last error: {st.error})" if st.error and not st.attempts else ""
         out.append(f"{st.dropped} events skipped after {MAX_ATTEMPTS} failed attempts{last}")
@@ -561,6 +574,7 @@ def listing(now: float | None = None) -> list[str]:
             f"to a file, a program or a URL (host-only config: {hooks_file()}).",
         ]
     states = _load_state()
+    grew = monitorstore.last_event_recv()
     out: list[str] = []
     for h in hooks:
         kind, where = target(h)
@@ -569,7 +583,7 @@ def listing(now: float | None = None) -> list[str]:
         out.append(f"{h.name}  {kind}  {where}  [{filters}]")
         st = states.get(h.name)
         out.append(f"  ✓ {progress(h, st, now)}")
-        out.extend(f"  ⚠ {why}" for why in problems(st, now))
+        out.extend(f"  ⚠ {why}" for why in problems(st, now, grew))
     out.extend(f"✗ {e}" for e in errors)
     out.append(f"— {hooks_file()}")
     return out
@@ -581,7 +595,7 @@ def listing(now: float | None = None) -> list[str]:
 @dataclass
 class HookState:
     last: list = field(default_factory=list)  # [boot, seq] of the last delivered event
-    pos: list = field(default_factory=list)  # [inode, offset] in the store where that event ends
+    pos: list = field(default_factory=list)  # [segment id, offset] in the store after that event
     attempts: int = 0
     next_try: float = 0.0
     delivered: int = 0
@@ -593,6 +607,7 @@ class HookState:
     sink_file: str = ""  # …in this file: a hook given another `file` starts a new chain there
     gaps: list = field(default_factory=list)  # gaps owed to the hook's next batch (see `gaps`)
     last_time: str = ""  # the time of the event at `last`
+    moved_at: float = 0.0  # when `last` last moved — sent or passed over, so progress either way
 
 
 _STATE_FIELDS = frozenset(f.name for f in fields(HookState))
@@ -841,7 +856,7 @@ def deliver(
 
     def move(e: monitorlog.Event) -> None:
         st.last, st.pos = [e.boot, e.seq], where.get((e.boot, e.seq), [])
-        st.last_time = e.time
+        st.last_time, st.moved_at = e.time, now
 
     if now < st.next_try:
         return ""
@@ -944,22 +959,44 @@ def _window(st: HookState, cat=None) -> tuple[list[dict], dict, list, bool]:
     to send yet doesn't slide along with the tail) — with each event's position, the gaps the
     store records among them, and whether the position was lost. A position this store can't
     resolve (an older foldyard's inode) is found again by the cursor's ``(boot, seq)``; one whose
-    segment retention removed is lost: reading resumes at the oldest record, and the hook owes a
-    ``rotated`` gap from its cursor to there."""
+    segment retention removed is lost — only once the store PROVES it (:func:`_gone`), never
+    because a search came up empty while the store moved under it: reading resumes at the
+    oldest record, and the hook owes a ``rotated`` gap from its cursor to there. A position
+    behind its own cursor (0.6.1 put hooks there, at the oldest record, on a false "lost") is
+    moved up to the cursor, or past what it read — never left where every read is events the
+    hook already had, with nothing to send and nothing to move it on."""
     segs = monitorstore.segments()
+    if cat is not None:
+        # caught up with THIS listing, not the round's: a segment sealed since (the pull's first
+        # append after an upgrade seals the older foldyard's live file) would otherwise be read
+        # with no snapshots, claims or spans of its own — joined wrong, or its events not found
+        try:
+            cat.catch_up(segs, whole=True)
+        except Exception:
+            pass
     if not st.pos and not st.last:
         start = monitorstore.tail(READ_BYTES, segs)
         if start is None:
             return [], {}, [], False
         st.pos = start
     read, found = monitorstore.read(st.pos, READ_BYTES, segs) if st.pos else ([], False)
+    if found and _behind(read, st.last):
+        at = monitorstore.find(st.last, segs, cat)
+        again, there = monitorstore.read(at, READ_BYTES, segs) if at else ([], False)
+        if at is None or not there or _behind(again, st.last):
+            st.pos = read[-1][1]  # walk on: the cursor's event is further on, or gone
+            return [], {}, [], False
+        st.pos, read = at, again
     lost = False
     if not found:
         at = monitorstore.find(st.last, segs, cat) if st.last else None
         if at is None:
             if not segs:
                 return [], {}, [], False
-            lost, at = True, [segs[0].id, 0]
+            gone = _gone(st.last, segs, cat) if st.last else _removed(st.pos, segs)
+            if gone is None:
+                return [], {}, [], False  # nothing proves it gone: look again next round
+            lost, at = gone, [segs[0].id, 0]
         read, _ = monitorstore.read(at, READ_BYTES, segs)
         st.pos = at
         if lost:
@@ -977,6 +1014,49 @@ def _window(st: HookState, cat=None) -> tuple[list[dict], dict, list, bool]:
     records = [r for r, _ in read]
     where = {(r["boot"], int(r["seq"])): p for r, p in read if r.get("k") == "ev" and "boot" in r}
     return records, where, _record_gaps(records), lost
+
+
+def _behind(read: list[tuple[dict, list]], last: list) -> bool:
+    """Every event in ``read`` (one at least) is the cursor's or one before it in its boot: the
+    position is behind the cursor."""
+    if not last:
+        return False
+    seqs = [(r["boot"], int(r["seq"])) for r, _ in read if r.get("k") == "ev" and "boot" in r]
+    return bool(seqs) and all(b == last[0] and s <= int(last[1]) for b, s in seqs)
+
+
+def _gone(last: list, segs: list[monitorstore.Segment], cat=None) -> bool | None:
+    """``True`` when the store PROVES the event ``last`` gone, after :func:`monitorstore.find`
+    came up empty over ``segs``: the store didn't move under that search (a segment sealed,
+    compressed or removed since ``segs`` was listed — the search may have missed it), and the
+    catalogue doesn't say ``segs`` hold that boot's events on both sides of it (then it is the
+    catalogue that is behind, not the store). Without a catalogue, the search read every segment.
+    ``None``: not proven — look again."""
+    if monitorstore.segments() != segs:
+        return None
+    if cat is None:
+        return True
+    try:
+        span = cat.span(str(last[0]), segs)
+    except Exception:
+        return None
+    return True if span is None or not span[0] <= int(last[1]) <= span[1] else None
+
+
+def _removed(pos: list, segs: list[monitorstore.Segment]) -> bool | None:
+    """For a hook with no cursor yet (anchored, nothing past it): whether the segment its
+    position names was removed — ``True`` when older than every one the store has (and the store
+    didn't move under the listing), or when no segment can have it (an older foldyard's inode, or
+    its live file since sealed under an id of its own: with no cursor to find, nothing can say
+    whether retention took what was after it, so the gap is claimed), or when its segment is
+    there but the offset is past its end in a store that didn't move (a seal or a compression
+    under the listing makes a listed segment read short for a moment); ``None``: look again."""
+    sid = pos[0] if pos else None
+    if not isinstance(sid, str) or sid.startswith(monitorstore.LEGACY):
+        return True
+    if monitorstore.segments() != segs:
+        return None
+    return True if any(s.id == sid for s in segs) or sid < segs[0].id else None
 
 
 def run(log: Callable[[str], None], stopping: Callable[[], bool]) -> None:

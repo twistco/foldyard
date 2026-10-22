@@ -208,6 +208,26 @@ def raw_size(seg: Segment) -> int:
         return 0
 
 
+def last_event_recv(within: int = 256 << 10) -> float:
+    """When the store's newest event reached your computer (its ``recv``), from the live
+    segment's last ``within`` bytes; 0 when there is none there."""
+    try:
+        with live_path().open("rb") as f:
+            f.seek(max(0, f.seek(0, os.SEEK_END) - within))
+            lines = f.read().split(b"\n")
+    except OSError:
+        return 0.0
+    for line in reversed(lines):
+        if b'"k":"ev"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+            return float(rec.get("recv") or 0.0)
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return 0.0
+
+
 def disk_size(seg: Segment) -> int:
     try:
         return seg.path.stat().st_size
@@ -307,13 +327,15 @@ def tail(max_bytes: int, segs: list[Segment] | None = None) -> list | None:
 def find(key: list, segs: list[Segment] | None = None, cat: Catalogue | None = None) -> list | None:
     """The position just past the event ``key`` (``[boot, seq]``) — how a reader whose position
     was lost (an older foldyard's inode) finds its place again. ``None`` when the store no longer
-    holds it. Only the segments the catalogue says hold that boot's seq are read (without one,
-    every segment, newest first): an event retention removed must not cost a scan of the
-    whole store to find out."""
+    holds it. Only the segments the catalogue says hold that boot's seq are read — and every one
+    it hasn't indexed yet, whose silence says nothing (a segment sealed since the catalogue last
+    caught up: 0.6.1's upgrade took a hook's cursor for lost that way); without a catalogue, every
+    segment, newest first. An event retention removed must not cost a scan of the whole store to
+    find out."""
     segs = segments() if segs is None else segs
     boot, seq = str(key[0]), int(key[1])
     if cat is not None:
-        holding = cat.holding(boot, seq)
+        holding = cat.holding(boot, seq) | cat.unindexed(segs)
         segs = [s for s in segs if s.id in holding]
     needle, also = f'"seq":{seq}'.encode(), json.dumps(boot).encode()
     for seg in reversed(segs):
@@ -356,6 +378,15 @@ def append(records: list[dict]) -> None:
     cat = Catalogue.open_or_none()
     try:
         if live is not None and (live.id.startswith(LEGACY) or raw_size(live) > SEGMENT_BYTES):
+            if cat is not None:
+                try:
+                    # indexed BEFORE it is sealed — an older foldyard's live file was never: its
+                    # rows then move with it to its new id, and no reader's catalogue is left
+                    # without the segment a hook's cursor is in (cabash, 2026-10-22), nor does
+                    # retention take its snapshots with it unseen
+                    cat.catch_up([live])
+                except sqlite3.Error:
+                    pass
             _seal(live, segs, cat)
             live = None
         lines: list[bytes] = []
@@ -596,10 +627,12 @@ class Catalogue:
         )
         c.execute("COMMIT")
 
-    def catch_up(self, segs: list[Segment] | None = None) -> None:
+    def catch_up(self, segs: list[Segment] | None = None, whole: bool = False) -> None:
         """Index whatever of ``segs`` (default: the whole store) isn't yet: a store an older
-        foldyard wrote, a catalogue that was lost, or a crash between the two writes."""
-        listing = segs is None
+        foldyard wrote, a catalogue that was lost, or a crash between the two writes. ``whole``:
+        ``segs`` is a full listing of the store (as the default is), so a row for a segment it
+        doesn't show may be one the store no longer has."""
+        listing = segs is None or whole
         segs = segments() if segs is None else segs
         known = {
             sid: (indexed, sealed)
@@ -625,6 +658,11 @@ class Catalogue:
         for seg in segs:
             indexed, sealed = known.get(seg.id, (0, 0))
             if sealed:
+                continue
+            if seg.live and _header(live_path()) != seg.id:
+                # sealed since it was listed: the live file is another segment now, and this one
+                # is indexed under the id it has by the next catch-up (an older foldyard's
+                # `legacy-<inode>` gets a new one) — never a row for a name nothing has any more
                 continue
             size = raw_size(seg)
             if indexed < size:
@@ -679,6 +717,33 @@ class Catalogue:
             "SELECT seg FROM span WHERE boot = ? AND lo <= ? AND hi >= ?", (boot, seq, seq)
         )
         return {sid for (sid,) in rows}
+
+    def unindexed(self, segs: list[Segment]) -> set[str]:
+        """Those of ``segs`` this catalogue hasn't indexed to their end: what it says of them
+        (:meth:`holding`) is not yet everything they hold."""
+        known = {
+            sid: (indexed, sealed)
+            for sid, indexed, sealed in self.conn.execute("SELECT id, indexed, sealed FROM seg")
+        }
+        out = set()
+        for s in segs:
+            indexed, sealed = known.get(s.id, (-1, 0))
+            if indexed < 0 or (not sealed and indexed < raw_size(s)):
+                out.add(s.id)
+        return out
+
+    def span(self, boot: str, segs: list[Segment]) -> tuple[int, int] | None:
+        """The lowest and highest seq of ``boot`` that ``segs`` hold, as far as this catalogue
+        has indexed them; ``None`` when none does."""
+        ids = {s.id for s in segs}
+        rows = [
+            (lo, hi)
+            for sid, lo, hi in self.conn.execute(
+                "SELECT seg, lo, hi FROM span WHERE boot = ?", (boot,)
+            )
+            if sid in ids
+        ]
+        return (min(r[0] for r in rows), max(r[1] for r in rows)) if rows else None
 
     def claims(self) -> dict[str, dict | None]:
         """Every container's latest engine claim (name, compose project/service — claims)."""
