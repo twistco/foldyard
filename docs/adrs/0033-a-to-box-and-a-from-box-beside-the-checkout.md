@@ -129,6 +129,10 @@ So:
   operator:* measured now (`tests/test_mounts_e2e.py`, an append and a rename-over after the guest
   has cached the file; a strict xfail on default-cache 9p), pinned with the posture mirror's move
   to the to-box — the first tenant that polls — so Linux and WSL2 VMs restart once, for both.
+  First measurement, vz + virtiofs (Lima 2.1.3, 2026-10-22): both writes reach the guest after
+  ~1.0 s (1000–1052 ms, ten rounds each), and a rename-over reads as NO FILE for that second
+  (19–20 consecutive misses at a 50 ms poll). So a box reading the mirror must take a missing
+  file as "not changed yet, read again", never as "no posture".
 - **Only the operator can widen it:** Lima merges mounts across default, instance and
   `~/.lima/_config/override.yaml`, and the most permissive `writable` wins
   ([`defaults.go#L139-L141`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/limayaml/defaults.go#L139-L141)).
