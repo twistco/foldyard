@@ -96,6 +96,19 @@ def test_entries_that_cannot_name_a_dir_in_the_checkout_are_dropped(layout):
     assert [m.path for m in masks] == [f"{wt_root}/a/web", f"{wt_root}/b/web"]
 
 
+@pytest.mark.parametrize("entry", [".", "./.", "./", "a/..", "./a/../."])
+def test_an_entry_naming_the_checkout_root_never_masks_a_whole_checkout(layout, entry):
+    # `<other>/.` is the other checkout itself: a mask there would make all of it read-only.
+    main, wt_root, wts = layout
+    assert crossmask.targets(main, main, wt_root, wts, [entry]) == ([], [])
+
+
+def test_entries_are_normalised_before_they_become_mount_targets(layout):
+    main, wt_root, wts = layout
+    masks, _ = crossmask.targets(main, main, wt_root, {"a": wts["a"]}, ["./web/./node_modules"])
+    assert masks == [Mask("a", f"{wt_root}/a/web/node_modules")]
+
+
 def test_run_args_mount_the_note_volume_read_only():
     masks = [Mask("a", "/w/a/node_modules"), Mask("", "/repo/node_modules")]
     assert crossmask.run_args("acme-elsewhere", masks) == [
@@ -128,6 +141,17 @@ def test_unmasked_names_the_masks_a_running_box_lacks():
     assert crossmask.unmasked(None, masks, "acme-elsewhere") == masks
 
 
+@pytest.mark.parametrize("rw", [True, None])
+def test_a_note_volume_mounted_writable_is_not_a_mask(rw):
+    # Only a read-only mount stops an install; a writable one (or one the engine doesn't
+    # describe) lets it land in the shared note volume instead.
+    mask = Mask("a", "/w/a/node_modules")
+    mount = {"Type": "volume", "Name": "acme-elsewhere", "Destination": mask.path}
+    if rw is not None:
+        mount["RW"] = rw
+    assert crossmask.unmasked([mount], [mask], "acme-elsewhere") == [mask]
+
+
 def test_unshadowed_names_own_dirs_without_a_volume():
     mounts = [_vol("/repo/data/.venv", name="acme-devbox-shadow-data--venv", rw=True)]
     assert crossmask.unshadowed(mounts, "/repo", DIRS) == ["platform/node_modules"]
@@ -147,6 +171,7 @@ def test_the_fill_script_writes_the_note_atomically_and_world_readable():
     script = crossmask.fill_script()
     assert f"{crossmask.FILL_AT}/{crossmask.NOTE_FILE}" in script
     assert "chmod 0444" in script and "mv -f" in script
+    assert script.startswith(f"rm -f {crossmask.FILL_AT}/{crossmask.NOTE_FILE}.tmp && ")
 
 
 def test_registered_on_the_host_is_the_registry_never_a_listing(

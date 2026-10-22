@@ -332,7 +332,14 @@ def test_registering_an_existing_worktree_asks_each_box_what_it_masks(
 ):
     wt = _existing_git_worktree(fake_main, "old")
     main = fake_main["main"]
-    covered = [{"Type": "volume", "Name": "proj-elsewhere", "Destination": f"{wt}/node_modules"}]
+    covered = [
+        {
+            "Type": "volume",
+            "Name": "proj-elsewhere",
+            "Destination": f"{wt}/node_modules",
+            "RW": False,
+        }
+    ]
     _engine_with(
         monkeypatch,
         fake_main,

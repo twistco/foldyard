@@ -3026,6 +3026,7 @@ def test_up_main_box_masks_each_registered_worktrees_dirs_read_only(
     assert filler[1:3] == ["run", "--rm"]
     assert filler[filler.index("--network") + 1] == "none"
     assert filler[filler.index("--user") + 1] == "0"  # a fresh volume's root is root's
+    assert filler[filler.index("--cap-drop") + 1] == "ALL"  # root that owns the files, no more
     (note,) = [stdin for cmd, _, stdin in seen if cmd is filler]
     assert note is not None and "WORKTREE=<name> fy box exec '<command>'" in note
 
@@ -3088,6 +3089,29 @@ def test_up_masks_even_when_the_note_cannot_be_written(
 
     monkeypatch.setattr(box.subprocess, "run", failing_fill)
     assert box.main("up") == 0
+    assert _mask_args(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
+    assert "note" in capsys.readouterr().out
+
+
+def test_a_wedged_note_filler_costs_the_note_never_box_up(
+    fake, monkeypatch, register_worktree, capsys
+):
+    wt_root = config.worktrees_root(fake["main"])
+    register_worktree(fake["main"], "a", wt_root / "a")
+    _masked(fake, monkeypatch)
+    inner = box.subprocess.run
+    timeouts: list[float | None] = []
+
+    def hanging_fill(cmd, **kw):
+        if any("/fy-note" in tok for tok in cmd):
+            fake["calls"].append(cmd)
+            timeouts.append(kw.get("timeout"))
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout") or 0)
+        return inner(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", hanging_fill)
+    assert box.main("up") == 0
+    assert timeouts == [box._DRIFT_TIMEOUT_S]  # bounded
     assert _mask_args(_find(fake["calls"], has=["run", "-d", "sleep"])[0])
     assert "note" in capsys.readouterr().out
 

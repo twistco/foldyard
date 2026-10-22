@@ -395,8 +395,11 @@ def boxes_not_masking(main: Path, worktree: str, *, fresh: bool) -> list[str]:
 def _ensure_note(engine: str, img: str, env: dict, main: Path, wt_root: Path) -> bool:
     """Create the project's note volume if it's missing and (re)write its one file — what an
     agent finds in a masked dir (:mod:`crossmask`). A throwaway container on the stack env (never
-    the gVisor create socket: the VM's one store serves both), as root with no network. False only
-    when the volume can't be created, so there is nothing to mount; a failed write still masks."""
+    the gVisor create socket: the VM's one store serves both), as root with no capabilities and no
+    network. ``label=disable`` like the box itself, so the note never carries the filler's private
+    SELinux label into a volume every box reads. Bounded: a wedged image costs the note, never
+    `fy box up`. False only when the volume can't be created, so there is nothing to mount; a
+    failed write still masks."""
     vol = crossmask.note_volume()
     if subprocess.run([engine, "volume", "inspect", vol], env=env, capture_output=True).returncode:
         create = [engine, "volume", "create", vol]
@@ -410,6 +413,8 @@ def _ensure_note(engine: str, img: str, env: dict, main: Path, wt_root: Path) ->
         "-i",
         "--user",
         "0",
+        "--cap-drop",
+        "ALL",
         "--network",
         "none",
         "--security-opt",
@@ -421,13 +426,22 @@ def _ensure_note(engine: str, img: str, env: dict, main: Path, wt_root: Path) ->
         "-c",
         crossmask.fill_script(),
     ]
-    got = subprocess.run(
-        fill, env=env, input=crossmask.note_text(main, wt_root), capture_output=True, text=True
-    )
-    if got.returncode != 0:
+    try:
+        got = subprocess.run(
+            fill,
+            env=env,
+            input=crossmask.note_text(main, wt_root),
+            capture_output=True,
+            text=True,
+            timeout=_DRIFT_TIMEOUT_S,
+        )
+        why = None if got.returncode == 0 else (got.stderr or "").strip() or "no output"
+    except subprocess.TimeoutExpired:
+        why = f"no answer in {_DRIFT_TIMEOUT_S}s"
+    if why:
         print(
-            f"⚠ couldn't write the note in {vol} ({(got.stderr or '').strip() or 'no output'}) — "
-            "other checkouts' dependency dirs are still masked read-only, without it."
+            f"⚠ couldn't write the note in {vol} ({why}) — other checkouts' dependency dirs are "
+            "still masked read-only, without it."
         )
     return True
 

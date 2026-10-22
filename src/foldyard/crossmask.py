@@ -21,6 +21,7 @@ Stdlib + ``config`` + ``worktree_registry`` only: the doctor row imports it."""
 from __future__ import annotations
 
 import os
+import posixpath
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,12 +53,14 @@ class Mask:
 
 
 def _norm(d: str) -> str | None:
-    """A checkout-relative ``[box].shadow_volumes`` entry, or None for one that can't name a dir
-    inside a checkout (empty, ``..``)."""
+    """A checkout-relative ``[box].shadow_volumes`` entry, normalised (``./a/./b`` → ``a/b``), or
+    None for one that can't name a dir INSIDE a checkout: empty, any ``..``, or the checkout root
+    itself (``.``, ``./.``) — a mask there would make a whole other checkout read-only."""
     rel = d.strip().strip("/")
     if not rel or ".." in rel.split("/"):
         return None
-    return rel
+    rel = posixpath.normpath(rel)
+    return None if rel == "." else rel
 
 
 def _seen_at(path: Path, roots: Iterable[Path]) -> Path | None:
@@ -135,11 +138,16 @@ def registered(main: Path) -> dict[str, Path]:
 
 def unmasked(mounts: object, masks: Iterable[Mask], volume: str) -> list[Mask]:
     """Of ``masks``, those a running box does NOT have: no read-only mount of ``volume`` at that
-    destination in its inspected ``Mounts`` (a worktree added after the box was created)."""
+    destination in its inspected ``Mounts`` (a worktree added after the box was created). Only an
+    explicit ``RW: false`` counts: a writable mount (or one the engine doesn't describe) would let
+    an install land in the shared note volume, which is no mask."""
     have = {
         str(m.get("Destination") or "").rstrip("/")
         for m in (mounts if isinstance(mounts, list) else [])
-        if isinstance(m, dict) and m.get("Type") == "volume" and m.get("Name") == volume
+        if isinstance(m, dict)
+        and m.get("Type") == "volume"
+        and m.get("Name") == volume
+        and m.get("RW") is False
     }
     return [m for m in masks if m.path not in have]
 
@@ -183,6 +191,9 @@ Or work in that checkout from its own box all along: WORKTREE=<name> fy box shel
 
 
 def fill_script() -> str:
-    """The filler container's script: the note from stdin, readable by every box user."""
+    """The filler container's script: the note from stdin, readable by every box user, swapped in
+    whole. The stale temp file from an interrupted run goes first: it is 0444, and the filler's
+    root has no CAP_DAC_OVERRIDE to write through that."""
     note = f"{FILL_AT}/{NOTE_FILE}"
-    return f"cat > {note}.tmp && chmod 0444 {note}.tmp && mv -f {note}.tmp {note}"
+    tmp = f"{note}.tmp"
+    return f"rm -f {tmp} && cat > {tmp} && chmod 0444 {tmp} && mv -f {tmp} {note}"
