@@ -159,6 +159,10 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   `zoneinfo/`, else `/etc/timezone`) and time locale (`LC_TIME`), each pattern-checked, which
   `fy box up` passes to the BOX only (`box._clock_env`; the stack stays on UTC). Host facts, not
   repo config; `[box].env` overrides either.
+- `hostgit.py` — your computer's git `user.name` / `user.email`, from the GLOBAL config only
+  (run from `/`, never the box-writable checkout's), which the box bootstrap writes into the box's
+  own global config where it has none (`box._git_identity_step`) — the layer the box's fresh HOME
+  lacks, so the env and a repo's own config still win. Those two keys only.
 - `worktree_registry.py` — the host's own record of a project's worktrees (name → real path,
   keyed by the main checkout's path). Written only by `fy worktree add`/`remove`; everything
   host-side that enumerates worktrees (supervisor, git heal, `fy mode`, the TUI) reads it, never a

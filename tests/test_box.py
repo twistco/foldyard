@@ -5,6 +5,7 @@ config-driven [box] bits + the plugin box env/mounts — without creating a real
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -94,6 +95,9 @@ def fake(tmp_path, monkeypatch):
     # operator's LANG); the timezone tests opt in.
     monkeypatch.setattr(box.hostclock, "zone", lambda: None)
     monkeypatch.setattr(box.hostclock, "time_locale", lambda: None)
+    # …and so is your git identity (never a `git config` through the fake engine); the identity
+    # tests opt in.
+    monkeypatch.setattr(box.hostgit, "identity", lambda: {})
     # ADR-0033's two directories: the VM shares neither unless a test says (the podman shape).
     monkeypatch.setattr(box.machine, "from_box_mounted", lambda: False)
     monkeypatch.setattr(box.machine, "to_box_mounted", lambda: False)
@@ -1404,6 +1408,76 @@ def test_bootstrap_installs_git_index_shim_by_default(monkeypatch):
     monkeypatch.setattr(box.config, "box_git_index_split", lambda: False)
     script = box._bootstrap_script("/repo", "dev-stack", {})
     assert "index-box" not in script and "git index shim" not in script
+
+
+# ── your computer's git identity: the box's global layer, filled only where it's empty ──────
+
+
+def _identity_bootstrap(monkeypatch, identity: dict[str, str]) -> str:
+    monkeypatch.setattr(
+        box, "_foldyard_install_subst", lambda c, h: {"fy_wheel": "", "fy_version": ""}
+    )
+    monkeypatch.setattr(box.config, "box_tools", lambda: [])
+    monkeypatch.setattr(box.config, "box_bootstrap", lambda: "")
+    monkeypatch.setattr(box, "registry", lambda: _StubRegistry([]))
+    monkeypatch.setattr(box.hostgit, "identity", lambda: identity)
+    return box._bootstrap_script("/repo", "dev-stack", {})
+
+
+def test_bootstrap_gives_the_box_your_git_identity(monkeypatch):
+    script = _identity_bootstrap(
+        monkeypatch, {"user.name": "Dáire O'Brien", "user.email": "d@example.test"}
+    )
+    step = box._git_identity_step()
+    assert step is not None
+    assert box._step_line(*step) in script
+    label, check, run = step
+    assert "git identity" in label
+    # Each key only where the box's GLOBAL layer lacks it: the env and a repo's own config still
+    # win, as they do on your computer, and an image that bakes an identity keeps it.
+    assert "git config --global --get user.name" in check
+    assert "git config --global --get user.email" in check
+    assert "git config --global user.name " + shlex.quote("Dáire O'Brien") in run
+
+
+def test_bootstrap_has_no_identity_step_without_one(monkeypatch):
+    script = _identity_bootstrap(monkeypatch, {})
+    assert box._git_identity_step() is None
+    assert "git identity" not in script
+
+
+def test_identity_step_runs_before_the_install_steps(monkeypatch):
+    # A consumer's own bootstrap (or a tool's install) that sets an identity runs after it, so it
+    # sees the global layer already filled and its own `git config --global` still wins.
+    script = _identity_bootstrap(monkeypatch, {"user.name": "Ada"})
+    assert script.index("run_step 'git identity") < script.index("run_step 'foldyard CLI'")
+
+
+@pytest.mark.spawns("bash")  # runs the REAL step under bash, against a real git and a tmp HOME
+def test_identity_step_fills_only_what_the_box_lacks(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        box.hostgit, "identity", lambda: {"user.name": "Ada", "user.email": "ada@host.test"}
+    )
+    step = box._git_identity_step()
+    assert step is not None
+    _, check, run = step
+    gitconfig = tmp_path / "gitconfig"
+    gitconfig.write_text("[user]\n\tname = Baked Into The Image\n")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": str(gitconfig)}
+
+    def bash(script: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+
+    assert bash(check).returncode != 0  # the email is missing, so the step runs
+    out = bash(run)
+    assert out.returncode == 0, out.stderr
+
+    def get(key: str) -> str:
+        return bash(f"git config --global --get {key}").stdout.strip()
+
+    assert get("user.name") == "Baked Into The Image"
+    assert get("user.email") == "ada@host.test"
+    assert bash(check).returncode == 0  # a second bootstrap reports it present
 
 
 class _StubRegistry:

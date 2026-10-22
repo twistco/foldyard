@@ -268,6 +268,20 @@ def isolated_proxy_ca(tmp_path, monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def isolated_git_global(tmp_path, monkeypatch, request):
+    """Point git's global config at a MISSING file under the test's tmp dir, so the box bootstrap
+    (``hostgit.identity``) never copies the operator's real name and email into a script under
+    test — CI has none, so a test reading it asserts different bootstraps in each place — and no
+    git a test runs picks up their aliases or ``commit.gpgsign``. A test that wants one writes it
+    and re-points ``GIT_CONFIG_GLOBAL`` (its setenv runs after this one, so it wins).
+
+    NOT for the live modules that drive the real CLI: their `fy box up` is the operator's."""
+    if _runs_the_real_cli(request.module):
+        return
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-such-gitconfig"))
+
+
+@pytest.fixture(autouse=True)
 def isolated_config_pin(tmp_path, monkeypatch):
     """Point the ADOPTED-config snapshot (configpin) at a per-test dir, so no test reads or writes
     the real ``~/.foldyard/<project>/*/config/`` — and every test starts from "nothing adopted
