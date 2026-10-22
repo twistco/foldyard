@@ -1265,6 +1265,24 @@ def test_a_failed_archive_keeps_the_legacy_tree(mac, monkeypatch):
     assert (mac["src"] / mac["own"] / "s.jsonl").read_text() == "old"
 
 
+def test_a_file_vanishing_mid_move_keeps_the_legacy_tree(mac, monkeypatch):
+    # Nothing should be writing a dead tree: a file that vanishes mid-copy says something is, so the
+    # tree is not the quiet one the move assumes, and it stays.
+    _session(mac["src"], f"{mac['own']}/a.jsonl", "real")
+    gone = _session(mac["src"], f"{mac['own']}/gone.jsonl", "rotated")
+    real = transcripts._lstat_at
+
+    def vanishing(dir_fd: int, entry: str):
+        st = real(dir_fd, entry)
+        if entry == "gone.jsonl" and gone.exists():
+            gone.unlink()
+        return st
+
+    monkeypatch.setattr(transcripts, "_lstat_at", vanishing)
+    _migrate(mac)
+    assert (mac["src"] / mac["own"] / "a.jsonl").read_text() == "real"
+
+
 def test_a_linked_legacy_dir_is_never_followed(mac, tmp_path):
     secret = tmp_path / "secret"
     _session(secret, f"{mac['own']}/id_rsa", "TOPSECRET")
