@@ -183,9 +183,11 @@ jobs:
     env:
       # The shard's modules, in order: pytest's arguments, and what e2e_host.runs_last reads.
       FY_E2E_MODULES: ${{ join(matrix.shard.modules, ' ') }}
-      # Every VM in the job on 4 vCPUs (the example asks for 2; the env wins, see
-      # config.machine_resources). The runner has 4; the create step asserts it took.
-      MACHINE_CPUS: "4"
+      # The VM's size, explicitly (the env wins over [machine], see config.machine_resources;
+      # the create step asserts it took). 2, the example's own, on purpose: 4 was tried on
+      # 2026-10-22 and made no module faster here, while on WSL2 it made every VM-heavy module
+      # slower and less predictable (DEVELOPMENT.md, CI).
+      MACHINE_CPUS: "2"
       FOLDYARD_E2E: "1"
       FOLDYARD_ENGINE: podman
       MACHINE_BACKEND: lima
@@ -265,8 +267,13 @@ jobs:
           bake() { uv run --project "$GITHUB_WORKSPACE" foldyard machine base bake; }
           # A retry that succeeds turns the job green with nothing on the run's page to say a
           # mirror stalled: the bake is now the job's only template boot, so say it out loud.
-          if ! bake; then
-            echo "::warning title=Base VM bake retried::the first bake failed — usually a stalled Fedora mirror (the template's dnf install of podman); see this step's log. Retrying once."
+          # The first attempt is capped at 6 min: a good bake takes 1–4.5 (WSL2 included), while
+          # a stalled mirror holds Lima's "boot scripts must have finished" for its full 10 min
+          # (9 min 20 s seen live). A killed bake leaves an unstamped instance the retry would
+          # refuse as not ours, so it is deleted first.
+          if ! timeout --kill-after=30 360 bash -c "$(declare -f bake); bake"; then
+            echo "::warning title=Base VM bake retried::the first bake failed or passed 6 min — usually a stalled Fedora mirror (the template's dnf install of podman); see this step's log. Retrying once."
+            limactl delete -f "$FY_BASE_VM_NAME" || true
             bake
           fi
 
@@ -393,12 +400,12 @@ jobs:
               - tests/test_box_e2e.py
               - tests/test_worktree_e2e.py
               - tests/test_wall_e2e.py
-    # A shard takes ~20 min on a typical runner, but a slow one runs the same shard ~2× slower
-    # (W1 at 37 min on 2026-10-22, against 21 the run before); a hung one still fails here.
+    # A shard takes ~20 min, but runners and apt vary (the apt cache below takes most of the
+    # latter); room for a slow-but-progressing runner, while a hung one still fails here.
     timeout-minutes: 45
     env:
       FY_E2E_MODULES: ${{ join(matrix.shard.modules, ' ') }} # as in lima-host-e2e
-      MACHINE_CPUS: "4" # as in lima-host-e2e
+      MACHINE_CPUS: "2" # as in lima-host-e2e
       LIMA_VERSION: "2.2.0" # keep in step with lima-host-e2e
       FOLDYARD_E2E: "1"
       FOLDYARD_ENGINE: podman
@@ -593,8 +600,10 @@ jobs:
           bake() { uv run --project "$HOME/foldyard" foldyard machine base bake; }
           # As in lima-host-e2e: a retried bake says so on the run's page (the runner reads
           # workflow commands from the distro's stdout, as it does the Diagnostics' groups).
-          if ! bake; then
-            echo "::warning title=Base VM bake retried::the first bake failed — usually a stalled Fedora mirror (the template's dnf install of podman); see this step's log. Retrying once."
+          # As there: the first attempt is capped at 6 min, a killed one deleted before the retry.
+          if ! timeout --kill-after=30 360 bash -c "$(declare -f bake); bake"; then
+            echo "::warning title=Base VM bake retried::the first bake failed or passed 6 min — usually a stalled Fedora mirror (the template's dnf install of podman); see this step's log. Retrying once."
+            limactl delete -f "$FY_BASE_VM_NAME" || true
             bake
           fi
 

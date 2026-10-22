@@ -492,26 +492,34 @@ of two WSL2 shards, so a module's neighbours are the same on both hosts). The sp
 times averaged over several runs, and each shard starts with a module that recreates the VM (`W3`
 starts from the VM the setup just created). A module's time depends on its place: the first
 `fy up` after a recreate is the cold one (image builds and pulls), so whichever module follows a
-recreate carries it. **Runner speed dominates a single run**: the same WSL2 shard has taken 18 and
-34–37 min (`W1`), 14 and 24 (`W4`) on different runners, module for module up to ~2× (the cold
-`fy up`s, which pull and build, most of all), and the apt step alone from under a minute to 12 min
-on WSL2 (once 9 on Linux). So judge a rebalance on several runs' tables, not one. (Pointing the
-distro's apt at `azure.archive.ubuntu.com`, the Linux runners' mirror, made that step slower, 2–16
-min, not faster. What the WSL2 job does instead is cache the debs together with the package lists
-they were resolved against, keyed by month (`actions/cache`, restored to `RUNNER_TEMP`), and
-install offline from them. On a miss, or if the offline install fails, it installs online as
-before and saves the result. Bump the key's `v1` when the package list changes.) On the slowest
-WSL2 runners, in-box `fy verify`'s dry-run push to the public origin has timed out (its 12 s
-bound: "push refusal UNPROVEN (timed out)"), failing `test_box_e2e` until a re-run on another
-runner. That's a network fact about the runner, not a posture failure,
-and the bound stays: verify is never weakened to suit CI.
+recreate carries it. Judge a rebalance on several runs' tables, not one: the apt step alone has
+ranged from under a minute to 13 min on the same install (once 12 on Linux). (Pointing the
+distro's apt at `azure.archive.ubuntu.com`, the Linux runners' mirror, made it slower, 2–16 min,
+not faster. What the WSL2 job does instead is cache the debs together with the package lists they
+were resolved against, keyed by month (`actions/cache`, restored to `RUNNER_TEMP`), and install
+offline from them. On a miss, or if the offline install fails, it installs online as before and
+saves the result. Bump the key's `v1` when the package list changes.)
+
+**4 vCPUs for the CI VM was tried and reverted (2026-10-22).** `MACHINE_CPUS=4` (over the example's
+`cpus = 2`) made no Linux module faster, and on WSL2 it made the VM-heavy ones slower and erratic.
+Six unsharded 2-vCPU runs plus the 2-vCPU sharded spike had `test_machine_e2e` at 6.4–9.2 min
+and `test_verify_e2e` at 3.6–4.2. Six sharded 4-vCPU runs had them at 7.5–14.7 and 4.2–10, the
+box module at 6–11 against 4.3–6.5, and in-box `fy verify`'s 12 s dry-run push to the public
+origin timing out in three of eight `test_box_e2e` attempts ("push refusal UNPROVEN (timed
+out)"), which never happened at 2. The likely mechanism is a nested guest given every vCPU WSL2's
+utility VM has, which leaves QEMU's own I/O thread (Lima's user-mode network included) and the
+host processes to fight it. The jobs now set `MACHINE_CPUS=2` explicitly. The create step asserts
+`limactl list`'s CPU count and prints the guest's `nproc`, and on WSL2 the variable is forwarded by
+`WSLENV` like every job variable (the guard test holds `WSLENV` to the job's `env:` keys). Trying
+another size is a one-line change; measure it over several runs. The verify bound stays where it
+is: verify is never weakened to suit CI. The setup's base bake caps its first attempt at 6 min
+(good bakes take 1–4.5): a stalled Fedora mirror otherwise holds Lima's boot wait for its full 10
+min before the retry.
+
 `tests/test_e2e_workflow.py`, in the fast suite, holds the matrix to the modules: every host-tier
-module (test_e2e.py and each `test_*_e2e.py` that imports `e2e_host`) in
-exactly one shard per job, so **a new host-tier module must be added to a shard in both jobs** or
-`check` goes red. Three smaller savings ride along:
-- every CI VM runs on **4 vCPUs** (`MACHINE_CPUS=4`, which wins over the example's `cpus = 2`; on
-  WSL2 forwarded by `WSLENV` like every job variable — the guard test holds `WSLENV` to the job's
-  `env:` keys). The create step asserts `limactl list`'s CPU count and prints the guest's `nproc`;
+module (test_e2e.py and each `test_*_e2e.py` that imports `e2e_host`) in exactly one shard per
+job, so **a new host-tier module must be added to a shard in both jobs** or `check` goes red. Two
+smaller savings ride along:
 - the guest monitor's teardown skips its monitor-off reboot when nothing runs after it: the shard
   hands its module list to the substrate as `FY_E2E_MODULES` (the same string pytest gets), and
   `e2e_host.runs_last` is true only for its final entry. Unset (a local run), the VM is restored as
