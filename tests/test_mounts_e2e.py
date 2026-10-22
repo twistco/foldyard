@@ -202,6 +202,11 @@ for line in sys.stdin:
 """
 
 
+class _ReaderBroke(RuntimeError):
+    """The guest reader didn't answer as it should — a harness failure, never the stale read the
+    9p xfail expects (``raises=AssertionError``), so it can't pass for one."""
+
+
 def _to_box_cache() -> tuple[str, str]:
     """The to-box mount's effective share type and 9p cache mode (``""`` when unset)."""
     row = next(i for i in lima_list(VM) if i.get("name") == VM)
@@ -224,7 +229,8 @@ def _rounds(path, write) -> list[str]:
     try:
         for k in range(ROUNDS):
             reader.stdin.write("prime\n")
-            assert reader.stdout.readline().strip() == "primed"
+            if (got := reader.stdout.readline().strip()) != "primed":
+                raise _ReaderBroke(f"the guest reader answered {got!r} to prime")
             text = f"fy-e2e-fresh-{time.time_ns()}-{k}"
             write(text)
             reader.stdin.write(f"want {text}\n")
@@ -244,6 +250,7 @@ def test_what_your_computer_writes_to_the_to_box_reaches_the_guest_promptly(repo
         request.applymarker(
             pytest.mark.xfail(
                 strict=True,
+                raises=AssertionError,  # a stale read only; a broken reader is _ReaderBroke
                 reason=f"9p cache={cache or 'fscache (Lima default)'} caches without revalidating; "
                 "pinned with the posture mirror's move to the to-box (ADR-0033 § Freshness)",
             )
@@ -267,8 +274,10 @@ def test_what_your_computer_writes_to_the_to_box_reaches_the_guest_promptly(repo
     finally:
         path.unlink(missing_ok=True)
     print(f"(to-box freshness, {how}, {mount_type} cache={cache or 'default'}: {replies})")
-    stale = [r for r in replies if not r.startswith("seen ")]
-    assert stale == [], f"the guest read a stale to-box {len(stale)}/{ROUNDS} times: {replies}"
+    if broke := [r for r in replies if not r.startswith(("seen ", "stale "))]:
+        raise _ReaderBroke(f"the guest reader died or answered garbage: {broke}")
+    stale = [r for r in replies if r.startswith("stale ")]
+    assert stale == [], f"the guest read a stale to-box at round {len(replies)}/{ROUNDS}: {replies}"
 
 
 def test_guest_root_cannot_write_through_the_to_box(repo):
