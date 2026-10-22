@@ -16,8 +16,8 @@ Two properties combine ([ADR-0001](./adrs/0001-rootless-podman-vm-isolation-boun
 
 - **Rootless engine.** A container's "root" maps to an unprivileged user *inside the VM*, so the
   classic `--privileged --pid=host` breakout to VM root is refused at the source.
-- **Repo-only mounts.** The VM's mount table holds your repo and nothing else from your computer.
-  Even with full control of the VM, there is no other file of yours to reach.
+- **Repo-only mounts.** The VM's mount table holds your repo and nothing else from your
+  computer.[^mounts] Even with full control of the VM, there is no other file of yours to reach.
 
 On the lima backend the VM also shares two directories of foldyard's own, both outside the repo
 and both empty of secrets ([ADR-0033](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md)):
@@ -27,6 +27,10 @@ read. The to-box is read-only *outside* the guest — the hypervisor's share ref
 even root in the VM can't change what your computer published there; foldyard mounts it only on
 `vz` with virtiofs and `qemu` with 9p, where that holds. Never the state directory above them,
 which holds `host.env` and the keys.
+
+[^mounts]: Strictly, the repo, its worktrees folder and — on the lima backend — the to-box and
+    from-box described below: two folders of foldyard's own that never hold a secret. Wherever
+    these docs say the VM "mounts only your repo", this is what they mean.
 
 So a container escape — a kernel bug, a runtime bug — lands the attacker in a disposable VM
 whose only contents are a repo they could already read. Not on your computer, not near your keys,

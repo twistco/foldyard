@@ -1158,7 +1158,7 @@ the working tree: they only affect the VM, which untrusted code can already reac
 
 ## Host state: `~/.foldyard/`
 
-![Config in the repo, control on your computer: foldyard.toml and the gitignored foldyard.local.toml live in the repo, where the box can write them; your computer holds the adopted copy, the mode for each checkout, host.env with the secrets, the allowlist store and the logs under ~/.foldyard/, where nothing in the box can reach them.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-config-and-state.svg)
+![Config in the repo, control on your computer: foldyard.toml and the gitignored foldyard.local.toml live in the repo, where the box can write them; your computer holds the adopted copy, the mode for each checkout, host.env with the secrets, the allowlist store and the logs under ~/.foldyard/, where nothing in the box can reach them — apart from two folders the VM shares on Lima: to-box, read-only, and from-box, which the box writes.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-config-and-state.svg)
 
 All state on your computer lives under `~/.foldyard/`, outside the repo, so nothing in the VM or
 box can read it or raise its own access.

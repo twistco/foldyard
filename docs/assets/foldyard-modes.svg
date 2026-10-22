@@ -203,8 +203,8 @@
     <tspan x="943">A mode that can only fail is</tspan>
     <tspan x="943" dy="16">refused, with the command that</tspan>
     <tspan x="943" dy="16">fixes it. So are two switches that</tspan>
-    <tspan x="943" dy="16">would inject on the same host and</tspan>
-    <tspan x="943" dy="16">path.</tspan>
+    <tspan x="943" dy="16">would write the same header on</tspan>
+    <tspan x="943" dy="16">one host.</tspan>
   </text>
 
   <!-- side panel: the three rules -->

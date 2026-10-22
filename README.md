@@ -78,7 +78,7 @@ box, to a second firewall on a Linux host — with egress control as a separate 
 Each step is one line in `foldyard.toml`, and the credentials never move:
 
 ![Foldyard isolation layers: four cumulative steps — a rootless Podman VM; Lima with the
-firewall inside the VM; gVisor under the dev box, reached through a narrowed engine socket;
+firewall inside the VM; gVisor (experimental) under the dev box, reached through a narrowed engine socket;
 and the host-side firewall on Linux — then the egress dial from open through observe and
 enforce to fail-closed, and what never moves: the credentials stay on your computer, the
 engine socket is the one deliberate opening, and `fy verify` checks the layer you are
