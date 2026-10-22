@@ -39,6 +39,9 @@ favour of `template:podman`, so every creation prints a deprecation warning.
 
 ## podman machine: one VM at a time (upstream podman#26281)
 
+The podman backend is **deprecated** (see `backend` in
+[configuration.md](./configuration.md)); this limit is one of the reasons.
+
 On macOS, `podman machine` with the **applehv** and **libkrun** providers allows only **one
 active machine at a time**: the providers gate on `RequireExclusiveActive`, and starting a second
 fails with an "only one VM can be active at a time"-class error. It is a macOS-provider limit,
