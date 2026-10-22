@@ -28,9 +28,10 @@ even root in the VM can't change what your computer published there; foldyard mo
 `vz` with virtiofs and `qemu` with 9p, where that holds. Never the state directory above them,
 which holds `host.env` and the keys.
 
-[^mounts]: Strictly, the repo, its worktrees folder and — on the lima backend — the to-box and
-    from-box described below: two folders of foldyard's own that never hold a secret. Wherever
-    these docs say the VM "mounts only your repo", this is what they mean.
+[^mounts]: Strictly, the repo, its worktrees folder and — on the lima backend — the from-box
+    and, where the share can enforce read-only, the to-box, both described below: folders of
+    foldyard's own that never hold a secret. Wherever these docs say the VM "mounts only your
+    repo", this is what they mean.
 
 So a container escape — a kernel bug, a runtime bug — lands the attacker in a disposable VM
 whose only contents are a repo they could already read. Not on your computer, not near your keys,

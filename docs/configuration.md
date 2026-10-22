@@ -1158,10 +1158,13 @@ the working tree: they only affect the VM, which untrusted code can already reac
 
 ## Host state: `~/.foldyard/`
 
-![Config in the repo, control on your computer: foldyard.toml and the gitignored foldyard.local.toml live in the repo, where the box can write them; your computer holds the adopted copy, the mode for each checkout, host.env with the secrets, the allowlist store and the logs under ~/.foldyard/, where nothing in the box can reach them — apart from two folders the VM shares on Lima: to-box, read-only, and from-box, which the box writes.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-config-and-state.svg)
+![Config in the repo, control on your computer: foldyard.toml and the gitignored foldyard.local.toml live in the repo, where the box can write them; your computer holds the adopted copy, the mode for each checkout, host.env with the secrets, the allowlist store and the logs under ~/.foldyard/, where nothing in the box can reach them — apart from the folders the VM shares on Lima: from-box, which the box writes, and, where the share can enforce read-only, to-box, which it can only read.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-config-and-state.svg)
 
 All state on your computer lives under `~/.foldyard/`, outside the repo, so nothing in the VM or
-box can read it or raise its own access.
+box can read it or raise its own access. The exceptions are the two folders a Lima VM shares, both
+empty of secrets: the from-box, which the box writes, and the to-box, which it can only read and
+which is mounted only where Lima's share enforces that (`vz` with virtiofs, `qemu` with 9p;
+[security](./security.md#the-boundary-a-disposable-vm-that-mounts-only-your-repo)).
 
 Shared by all projects:
 
