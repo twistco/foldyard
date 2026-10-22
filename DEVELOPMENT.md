@@ -492,11 +492,15 @@ of two WSL2 shards, so a module's neighbours are the same on both hosts). The sp
 times averaged over several runs, and each shard starts with a module that recreates the VM (`W3`
 starts from the VM the setup just created). A module's time depends on its place: the first
 `fy up` after a recreate is the cold one (image builds and pulls), so whichever module follows a
-recreate carries it. **Runner speed dominates a single run**: the same WSL2 shard (`W1`) has taken
-18, 21 and 37 min on three runners, module for module up to ~2×, and the apt step alone ranges from
-under a minute to 5 min on WSL2 and once 9 min on Linux. So judge a rebalance on several runs'
-tables, not one. (Pointing the distro's apt at `azure.archive.ubuntu.com`, the Linux runners'
-mirror, made that step slower, 2–16 min, not faster.)
+recreate carries it. **Runner speed dominates a single run**: the same WSL2 shard has taken 18 and
+34–37 min (`W1`), 14 and 24 (`W4`) on different runners, module for module up to ~2× (the cold
+`fy up`s, which pull and build, most of all), and the apt step alone from under a minute to 12 min
+on WSL2 (once 9 on Linux). So judge a rebalance on several runs' tables, not one. (Pointing the
+distro's apt at `azure.archive.ubuntu.com`, the Linux runners' mirror, made that step slower, 2–16
+min, not faster.) On the slowest WSL2 runners, in-box `fy verify`'s dry-run push to the public
+origin has timed out (its 12 s bound: "push refusal UNPROVEN (timed out)"), failing `test_box_e2e`
+until a re-run on another runner. That's a network fact about the runner, not a posture failure,
+and the bound stays: verify is never weakened to suit CI.
 `tests/test_e2e_workflow.py`, in the fast suite, holds the matrix to the modules: every host-tier
 module (test_e2e.py and each `test_*_e2e.py` that imports `e2e_host`) in
 exactly one shard per job, so **a new host-tier module must be added to a shard in both jobs** or
