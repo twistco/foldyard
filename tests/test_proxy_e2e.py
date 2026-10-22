@@ -156,6 +156,7 @@ def _make_upstream(port: int, cert: Path, key: Path) -> http.server.ThreadingHTT
 
     httpd = http.server.ThreadingHTTPServer((HOST, port), Handler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
     httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
