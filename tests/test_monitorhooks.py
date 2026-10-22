@@ -826,6 +826,30 @@ def test_a_new_hooks_position_past_its_segments_end_is_said_not_waited_on(ran, p
     assert any("rotated past its position" in m for m in logged) and _delivered(calls) == [1, 2]
 
 
+def test_a_new_hooks_segment_sealed_under_the_listing_is_looked_at_again_not_lost(
+    ran, project, monkeypatch
+):
+    # the listing still shows its segment live, but the live file is a new, shorter one now:
+    # the position reads as past the end for a moment, which proves nothing
+    calls, _ = ran
+    _hook(project)
+    monitorlog._append([snap(0), ev(1), *(ev(i, inode=999) for i in range(2, 9))])
+    monkeypatch.setattr(mh, "READ_BYTES", 500)  # anchored well into the segment
+    mh.round_once(now=20)  # nothing settled yet
+    assert calls == [] and mh.load_state()["s"].pos[1] > 600
+    stale = monitorstore.segments()
+    monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 10)
+    monitorlog._append([snap(9)])  # seals the live segment, starts a new one
+    real = monitorstore.segments
+    listings = iter([real(), stale])  # the round's catalogue lists first, then the hook's read
+    monkeypatch.setattr(monitorstore, "segments", lambda: next(listings, None) or real())
+    logged: list[str] = []
+    mh.round_once(now=30, log=logged.append)
+    mh.round_once(now=40, log=logged.append)
+    assert logged == [] and calls and set(_delivered(calls)) <= set(range(2, 9))
+    assert all(c["body"]["gaps"] == [] for c in calls)
+
+
 def test_a_store_that_moves_under_the_search_is_looked_at_again_not_lost(ran, project, monkeypatch):
     # no catalogue (locked), and a listing from before the seal: the legacy file the search
     # reads has just been renamed. Nothing proves the cursor's events gone: look again.

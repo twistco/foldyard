@@ -1049,15 +1049,14 @@ def _removed(pos: list, segs: list[monitorstore.Segment]) -> bool | None:
     didn't move under the listing), or when no segment can have it (an older foldyard's inode, or
     its live file since sealed under an id of its own: with no cursor to find, nothing can say
     whether retention took what was after it, so the gap is claimed), or when its segment is
-    there but the offset is past its end (another file now); ``None``: look again."""
+    there but the offset is past its end in a store that didn't move (a seal or a compression
+    under the listing makes a listed segment read short for a moment); ``None``: look again."""
     sid = pos[0] if pos else None
     if not isinstance(sid, str) or sid.startswith(monitorstore.LEGACY):
         return True
-    if any(s.id == sid for s in segs):
-        return True
     if monitorstore.segments() != segs:
         return None
-    return True if sid < segs[0].id else None
+    return True if any(s.id == sid for s in segs) or sid < segs[0].id else None
 
 
 def run(log: Callable[[str], None], stopping: Callable[[], bool]) -> None:
