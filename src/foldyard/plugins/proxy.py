@@ -31,7 +31,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .. import config, mountwrite
-from . import DoctorContext, DoctorFix, PanelGroup, PanelTree, Plugin, TuiPanel
+from . import DoctorContext, DoctorFix, PanelGroup, PanelTree, Plugin, TuiPanel, _netlog
 from ._passthrough_bundles import BUNDLES
 
 # The host ports the mitmdump injection proxy listens on come from ``config.proxy_port()`` —
@@ -261,11 +261,17 @@ BOX_CA_BUNDLE = Path("/etc/dev-proxy-ca-combined.pem")
 # One filename constant so the daemon's PROXY_LOG_FILE and the panel never drift.
 _PROXY_LOG = "egress.jsonl"
 
-_NET_ROWS = 400  # how many recent log lines the panel groups (across all hosts)
+# One index per log path, kept across the panel's repaints so each reads only what was appended.
+_NET_INDEXES: dict[Path, _netlog.NetworkIndex] = {}
 
 
 def _proxy_log() -> Path:
     return config.log_dir() / _PROXY_LOG
+
+
+def _network_index() -> _netlog.NetworkIndex:
+    log = _proxy_log()
+    return _NET_INDEXES.setdefault(log, _netlog.NetworkIndex(log))
 
 
 def _live_file() -> Path:
@@ -290,13 +296,6 @@ def _launch_addon_path() -> Path:
     step), so the watched file never changes under a live mitmdump. Pure path here — no I/O, since
     ``daemons()`` is on the registry hot path / called bare in tests."""
     return config.state_dir() / "egress_proxy.py"
-
-
-def _tail_network_log(limit: int = _NET_ROWS) -> list[dict]:
-    """The last ``limit`` JSON lines across the rotated + live egress log (oldest→newest). Tails
-    only the END of the (possibly multi-MB, capture-fed) log — see ``config.tail_jsonl`` — so the
-    panel's per-second refresh stays cheap regardless of how big the log has grown."""
-    return config.tail_jsonl(_proxy_log(), limit)
 
 
 def _net_leaf(e: dict, escape) -> str:
@@ -365,50 +364,47 @@ def _net_leaf(e: dict, escape) -> str:
 
 def _network_panel_tree() -> PanelTree:
     """The Network Log tab's data, GROUPED BY HOST into a collapsible tree: one group per domain
-    (header = request count + injected/error tallies) whose children are its requests, newest
-    first; groups ordered by most-recent activity. The summary counts the whole capture. Called by
-    the TUI on a timer, so the rich import is lazy here — the module stays stdlib-only on the
-    registry hot path. Untrusted text (hosts, paths) is escaped before it carries any markup."""
+    in the whole retained log (:mod:`._netlog` — header = its request count + injected/error
+    tallies over all of it) whose children are its newest requests, newest first, capped at
+    :data:`._netlog.KEEP` plus any older refusal, then a line saying how many are earlier. Hosts
+    with a refusal the operator hasn't answered come first — those are the rows to act on — then
+    the rest by most-recent activity. Called by the TUI on a timer, so the rich import is lazy
+    here — the module stays stdlib-only on the registry hot path. Untrusted text (hosts, paths)
+    is escaped before it carries any markup."""
     from rich.markup import escape  # lazy: only when the TUI paints this panel
 
+    from .. import allowlist  # lazy, as in _default_deny
+
     log = _proxy_log()
-    entries = _tail_network_log()  # oldest→newest
-    by_host: dict[str, list[dict]] = {}
-    for e in entries:
-        by_host.setdefault(e.get("host", "—"), []).append(e)
-    # Most recently active host first (its last entry's timestamp); ISO ts sorts lexically.
-    ordered = sorted(by_host.items(), key=lambda kv: kv[1][-1].get("ts", ""), reverse=True)
+    snap = _network_index().refresh()
+    # Most recently active host first (ISO ts sorts lexically), then — a stable sort — the hosts
+    # still refused on top. Only a host with a refusal is looked up in the allow-store.
+    ordered = sorted(snap.hosts, key=lambda v: v.last_ts, reverse=True)
+    ordered.sort(key=lambda v: not (v.blocked and not allowlist.answered(v.host)))
 
     groups: list[PanelGroup] = []
-    injected = 0
-    for host, evs in ordered:
-        inj = sum(bool(e.get("injected")) for e in evs)
-        blocked = sum(bool(e.get("blocked")) for e in evs)
-        unlisted = sum(bool(e.get("would_block")) for e in evs)
-        held = sum(bool(e.get("held")) for e in evs)
-        # A blocked (403) or held (401) request is the proxy's own answer, so it's already in
-        # `errs` — subtract it so the tallies don't double-count the same row (the specific,
-        # actionable label wins).
-        errs = sum(1 for e in evs if e.get("status", 0) >= 400) - blocked - held
-        injected += inj
-        header = f"[bold]{escape(host)}[/bold]  [dim]{len(evs)} req[/dim]"
-        if inj:
-            header += f" · [cyan]{inj} inj[/cyan]"
-        if blocked:
-            header += f" · [red]⛔ {blocked} blocked[/red]"
-        if unlisted:
+    for v in ordered:
+        header = f"[bold]{escape(v.host)}[/bold]  [dim]{v.requests} req[/dim]"
+        if v.injected:
+            header += f" · [cyan]{v.injected} inj[/cyan]"
+        if v.blocked:
+            header += f" · [red]⛔ {v.blocked} blocked[/red]"
+        if v.would_block:
             header += " · [yellow]◌ not granted[/yellow]"
-        if held:
-            header += f" · [yellow]⏸ {held} held[/yellow]"
-        if errs:
-            header += f" · [red]{errs} err[/red]"
-        children = [_net_leaf(e, escape) for e in reversed(evs)]  # newest first within the host
-        groups.append(PanelGroup(key=host, label=header, children=children))
+        if v.held:
+            header += f" · [yellow]⏸ {v.held} held[/yellow]"
+        if v.errors:
+            header += f" · [red]{v.errors} err[/red]"
+        children = [_net_leaf(e, escape) for e in v.rows]
+        if v.earlier:
+            children.append(f"[dim]… {v.earlier} earlier[/dim]")
+        groups.append(PanelGroup(key=v.host, label=header, children=children))
 
+    since = f" · since {snap.since[:16].replace('T', ' ')}" if snap.since else ""
     summary = (
-        f"{len(entries)} requests across {len(groups)} hosts · {injected} with injected "
-        f"Authorization · [dim]{log}[/dim]"
-        if entries
+        f"{snap.requests} requests across {len(groups)} hosts · {snap.injected} with injected "
+        f"Authorization{since} · [dim]{log}[/dim]"
+        if groups
         else "no proxied traffic yet — the box routes through the always-on proxy; make a request "
         f"(or check the supervisor: `fy host`) · [dim]{log}[/dim]"
     )

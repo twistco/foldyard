@@ -1757,6 +1757,82 @@ def test_network_panel_marks_would_block_rows_with_their_tool(monkeypatch, tmp_p
     assert "\\[bold]x" in leaf  # the UA's markup was escaped (rich's \\[), not rendered
 
 
+def _net_rows(path, rows) -> None:
+    with path.open("a") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+
+
+def _ok(host: str, minute: int, second: int = 0, **extra) -> dict:
+    return {"ts": f"2026-10-22T20:{minute:02}:{second:02}+00:00", "host": host, "method": "GET",
+            "path": "/", "status": 200, **extra}  # fmt: skip
+
+
+def _refused(host: str, minute: int, second: int = 0) -> dict:
+    return {**_ok(host, minute, second), "status": 403, "blocked": True}
+
+
+def test_network_panel_lists_every_host_in_the_retained_log(monkeypatch, tmp_path):
+    # It grouped only the last 400 lines, so a busy host (an agent's API calls) pushed every other
+    # host — and the refusals the operator had to act on — out of the panel within minutes.
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    log = tmp_path / "egress.jsonl"
+    _net_rows(log, [_ok("rubygems.org", 0)])
+    _net_rows(log, [_ok("api.anthropic.com", 1 + i // 60, i % 60) for i in range(900)])
+    data = proxy._network_panel_tree()
+    assert {g.key for g in data.groups} == {"rubygems.org", "api.anthropic.com"}
+    assert "901 requests across 2 hosts" in data.summary
+
+
+def test_network_panel_counts_rotated_backups_too(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    _net_rows(tmp_path / "egress.20261022T200500Z.jsonl", [_ok("old.example", 0)])
+    _net_rows(tmp_path / "egress.jsonl", [_ok("new.example", 6)])
+    data = proxy._network_panel_tree()
+    assert [g.key for g in data.groups] == ["new.example", "old.example"]
+    assert "2 requests across 2 hosts" in data.summary and "since 2026-10-22 20:00" in data.summary
+
+
+def test_network_panel_caps_a_hosts_rows_and_says_how_many_are_earlier(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    _net_rows(tmp_path / "egress.jsonl", [_ok("a.com", 0, i, path=f"/{i}") for i in range(60)])
+    [group] = proxy._network_panel_tree().groups
+    assert "60 req" in group.label  # the tally is the whole history, not what's shown
+    assert len(group.children) == 50 + 1
+    assert "/59" in group.children[0] and "/10" in group.children[49]  # the newest 50
+    assert "10 earlier" in group.children[-1]
+
+
+def test_network_panel_keeps_a_hosts_blocked_rows_past_the_cap(monkeypatch, tmp_path):
+    # The refusal is the row to act on; later traffic to the same host must not hide it.
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    log = tmp_path / "egress.jsonl"
+    _net_rows(log, [_refused("pypi.org", 0)])
+    _net_rows(log, [_ok("pypi.org", 1, i) for i in range(60)])
+    [group] = proxy._network_panel_tree().groups
+    assert "⛔ 1 blocked" in group.label
+    assert sum("⛔ blocked" in c for c in group.children) == 1
+    assert "10 earlier" in group.children[-1]  # 61 rows: 50 newest + the refusal shown
+
+
+def test_network_panel_puts_hosts_with_unanswered_refusals_first(monkeypatch, tmp_path):
+    # Hosts still refused float above busier, more recent traffic; once the operator answers one
+    # on this computer — a grant, or "never" — it goes back to its place by recency.
+    from foldyard import allowlist
+
+    monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
+    _net_rows(
+        tmp_path / "egress.jsonl",
+        [_refused("dot.net", 0), _refused("ftp.gnu.org", 1), _ok("pypi.org", 2),
+         _ok("api.anthropic.com", 3)],
+    )  # fmt: skip
+    keys = [g.key for g in proxy._network_panel_tree().groups]
+    assert keys == ["ftp.gnu.org", "dot.net", "api.anthropic.com", "pypi.org"]
+    allowlist.grant("ftp.gnu.org", "session")
+    allowlist.decline("dot.net")
+    keys = [g.key for g in proxy._network_panel_tree().groups]
+    assert keys == ["api.anthropic.com", "pypi.org", "ftp.gnu.org", "dot.net"]
+
+
 def test_gcp_panel_data_rows_summary_and_escaping(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "log_dir", lambda: tmp_path)
     (tmp_path / "gcp-minter.jsonl").write_text(

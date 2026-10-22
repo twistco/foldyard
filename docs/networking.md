@@ -51,8 +51,10 @@ The log is bounded:
 
 - past `PROXY_LOG_MAX_BYTES` (default 5 MiB) it rotates into dated backups;
 - the newest `PROXY_LOG_BACKUPS` (default 5) backups are kept;
-- the TUI reads only the last `FOLDYARD_LOG_TAIL_BYTES` (default 256 KiB), so a big log never
-  slows it down.
+- the TUI's Network Log covers everything kept: every host, with its tallies over the whole
+  history and its newest 50 requests (plus any older refusal), hosts with a refusal you haven't
+  answered first. It reads the files once, then only what was appended, so a big log never slows
+  it down.
 
 ## What gets decrypted: everything but the trusted toolchain
 

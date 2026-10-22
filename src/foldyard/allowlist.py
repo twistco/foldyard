@@ -678,6 +678,15 @@ def live_hosts() -> list[str]:
     return [g["host"] for g in grants() if g["scope"] == "runtime"]
 
 
+def answered(key: str) -> bool:
+    """Whether the operator has answered a refused host ``key`` on this computer: a live runtime
+    grant covers it (the proxy's semantics, :func:`_matches`) or they declined it. What the Network
+    Log floats is the refusals still unanswered. An unreadable store reads as answered, as
+    :func:`declined` does — it re-opens nothing."""
+    refused = declined()
+    return "*" in refused or key in refused or _matches(key, live_hosts())
+
+
 def build_hosts() -> list[str]:
     """Every non-expired BUILD-scoped grant — allowed only for a host-started image build."""
     return [g["host"] for g in grants() if g["scope"] == "build"]
