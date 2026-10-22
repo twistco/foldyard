@@ -97,13 +97,25 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   forgeries, asks the engine once per new container for its name/compose project, recorded as
   claims) and the JOIN (pure, at read time: an event takes the snapshot before it if that still
   holds its mount namespace, else the one after; never carried past a snapshot that dropped it —
-  namespace numbers are reused). `fy monitor` prints it; doctor's `monitor events` row reads the
+  namespace numbers are reused). Any stretch is joined with the catalogue's snapshots around it
+  (`join`), never only those inside the bytes read: under load two snapshots are tens of MB apart,
+  and a byte window once silently dropped every event between them (2026-10-21). `fy monitor`
+  prints it (`--since/--until` reads the whole store); doctor's `monitor events` row reads the
   pull cursor. The relay only signs and snapshots — attribution lives here so it changes with a
   foldyard upgrade, not a VM restart.
+- `monitorstore.py` — that store on the host: segments named by their first line (a position is
+  `[segment id, uncompressed offset]`, surviving the seal and the gzip — never an inode), sealed
+  at 32 MB and compressed (~30×), kept within a HOST-ONLY disk budget
+  (`<state dir>/monitor-store.toml`, never `foldyard.toml`: the box mustn't shorten the evidence
+  about itself), and a SQLite catalogue (derived; rebuilt from the segments) of every snapshot,
+  engine claim and segment span. The pull indexes a record before writing it; every reader
+  catches the catalogue up first.
 - `monitorhooks.py` — the operator's hooks over those events: host-only config
   (`<state dir>/monitor-hooks.toml`, NEVER `foldyard.toml` — a command there is host code
-  execution for the box, a url an exfiltration channel), settled events only, at-least-once with a
-  per-hook cursor, backoff and a bounded give-up, commands run with a minimal environment (never
+  execution for the box, a url an exfiltration channel), settled events only (a later snapshot
+  ANYWHERE in the store, else the settle window), at-least-once with a per-hook cursor, backoff and
+  a bounded give-up, every batch's `gaps` saying what it can't vouch for (rotated, transport,
+  relay, unsettled, skipped), commands run with a minimal environment (never
   the supervisor's: it holds every host.env secret) on their own supervisor thread. The design
   they plug into — storage tiers, source filtering, score → decide → review — is
   [docs/monitor-pipeline.md](./docs/monitor-pipeline.md).
@@ -209,7 +221,9 @@ foldyard's surface splits by *where it can be validated*:
 1. **Substrate + TUI** — `devmode`/`config`/`plugins` unit tests + headless Textual pilot
    tests. Run anywhere, no engine. Includes the **property-based tier** (hypothesis):
    `tests/test_properties.py` (pure-function properties + `settle_incoherent` over GENERATED
-   registries — synthetic axes/constraints from `tests/pbt.py`) and `tests/test_reconcile_model.py`
+   registries — synthetic axes/constraints from `tests/pbt.py`),
+   `tests/test_monitor_properties.py` (a hook's deliveries == the whole-store join, or a `gaps`
+   entry says why, over generated streams, rotation and filters) and `tests/test_reconcile_model.py`
    (a stateful model driving the real set_mode/expiry/probe/publish pipeline — including the box
    mirror tier via box_up/box_down rules — through generated operation sequences). Convention: a new property must be validated **red first** — mutate the
    code under test, watch hypothesis shrink a counterexample, revert (each test section notes its

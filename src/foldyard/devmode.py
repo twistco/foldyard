@@ -2343,10 +2343,11 @@ def _monitor_events_check():
     its cursor (no ssh here). Stale = the supervisor isn't pulling (`fy host restart`)."""
     import time
 
-    from . import monitorlog
+    from . import monitorlog, monitorstore
 
     cur = monitorlog.Cursor.load()
     age = time.time() - cur.pulled if cur.pulled else None
+    budget_note = monitorstore.budget_setting()[1]
     counts = f"{cur.stored} stored, {cur.gaps} lost in transit, {cur.forged} failed the signature"
     if cur.forged:
         why = f"{cur.forged} spool lines failed their signature — something altered them in transit"
@@ -2356,12 +2357,15 @@ def _monitor_events_check():
         why = "nothing pulled yet — is the supervisor running? `fy host`"
     elif age > 60:
         why = f"last pull {age:.0f}s ago — is the supervisor running? `fy host`"
+    elif budget_note:
+        why = budget_note
     else:
         why = ""
     yield _result(
         None if why else True,
         "monitor events",
-        f"pulled {age or 0:.0f}s ago ({counts}); `fy monitor` shows them",
+        f"pulled {age or 0:.0f}s ago ({counts}); {monitorlog.store_summary()}; `fy monitor` "
+        "shows them",
         why,
     )
 

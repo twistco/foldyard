@@ -498,8 +498,9 @@ monitor_app = typer.Typer(
     rich_markup_mode="markdown",
     name="monitor",
     help="What the guest monitor recorded: processes, connections, selected files (your "
-    "computer). Bare `fy monitor` shows the recent events; `fy monitor hook` sends them on to a "
-    "file, a program or a URL, and `fy monitor check` verifies a file a hook wrote.",
+    "computer). Bare `fy monitor` shows the recent events, `--since`/`--until` any stretch the "
+    "store still holds; `fy monitor hook` sends them on to a file, a program or a URL, and "
+    "`fy monitor check` verifies a file a hook wrote.",
     invoke_without_command=True,
 )
 app.add_typer(monitor_app)
@@ -508,14 +509,26 @@ app.add_typer(monitor_app)
 @monitor_app.callback()
 def monitor(
     ctx: typer.Context,
-    limit: int = typer.Option(40, "--limit", "-n", help="how many recent events"),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        "-n",
+        help="how many events, the latest (default 40; with --since/--until, all in the range)",
+    ),
     worktree: str = typer.Option("", "--worktree", "-w", help="only this worktree ('main' too)"),
     as_json: bool = typer.Option(False, "--json", help="one JSON object per event"),
+    since: str = typer.Option(
+        "",
+        "--since",
+        help="events from this time on: ISO (UTC unless it gives an offset, e.g. "
+        "2026-10-21T19:55) or back from now (90s, 15m, 2h, 1d)",
+    ),
+    until: str = typer.Option("", "--until", help="events before this time (as --since)"),
 ) -> None:
     if ctx.invoked_subcommand is None:
         from . import monitorlog
 
-        raise typer.Exit(monitorlog.show(limit, worktree, as_json))
+        raise typer.Exit(monitorlog.show(limit, worktree, as_json, since, until))
 
 
 def _monitor_host_only() -> None:

@@ -181,7 +181,10 @@ def test_pull_once_stores_records_describes_new_containers_once_and_resumes(pull
     state["out"] = chunk(f"{DIR}/000000000000.jsonl", 0, data)
     assert monitorlog.pull_once(_Backend(), "fymon", KEY, now=lambda: 5.0) == 4  # + engine
     assert asked == [[BOX, SIB]]
-    stored = [json.loads(x) for x in (tmp / "logs" / "monitor.jsonl").read_text().splitlines()]
+    head, *stored = [
+        json.loads(x) for x in (tmp / "logs" / "monitor.jsonl").read_text().splitlines()
+    ]
+    assert head["k"] == "segment"  # the store's own: which segment this is
     assert [r["k"] for r in stored] == ["start", "scopes", "ev", "engine"]
     assert stored[-1]["containers"][SIB] is None  # already gone: recorded as such
     # the next pull asks from where this one stopped, and never re-describes a container
@@ -232,28 +235,6 @@ def test_pull_once_records_a_failure_on_the_cursor(pulled, monkeypatch):
     with pytest.raises(OSError):
         monitorlog.pull_once(_Backend(), "fymon", KEY)
     assert "Connection refused" in monitorlog.Cursor.load().error
-
-
-def test_the_store_rotates_and_keeps_a_bounded_number_of_backups(pulled, monkeypatch):
-    _state, _f, _a, tmp = pulled
-    monkeypatch.setattr(monitorlog, "STORE_BYTES", 100)
-    stamps = iter(f"2026100{i}T000000Z" for i in range(1, 9))
-
-    class _Now:
-        @staticmethod
-        def now(tz):
-            class _S:
-                @staticmethod
-                def strftime(fmt):
-                    return next(stamps)
-
-            return _S
-
-    monkeypatch.setattr(monitorlog, "datetime", _Now)
-    for _ in range(8):
-        monitorlog._append([{"k": "x", "pad": "p" * 120}])
-    backups = sorted((tmp / "logs").glob("monitor.*.jsonl"))
-    assert len(backups) == monitorlog.STORE_BACKUPS
 
 
 def test_run_idles_while_the_monitor_is_off(monkeypatch):
@@ -414,3 +395,65 @@ def test_show_prints_attributed_events_and_the_pull_state(monkeypatch, tmp_path,
 def test_show_refuses_in_the_box(monkeypatch, capsys):
     monkeypatch.setattr(monitorlog.config, "in_box", lambda: True)
     assert monitorlog.show() == 1
+
+
+def test_when_reads_iso_times_as_utc_and_spans_back_from_now():
+    assert monitorlog.when("2026-10-21T19:55") == "2026-10-21T19:55:00.000000000Z"
+    assert monitorlog.when("2026-10-21T20:55+01:00") == "2026-10-21T19:55:00.000000000Z"
+    now = 1_792_620_000.0  # 2026-10-21T22:00:00Z
+    assert monitorlog.when("90m", now=now) == "2026-10-21T20:30:00.000000000Z"
+    assert monitorlog.when("1d", now=now) == "2026-10-20T22:00:00.000000000Z"
+    for nonsense in ("yesterday", "99999999999d"):
+        with pytest.raises(ValueError):
+            monitorlog.when(nonsense)
+
+
+def _at(e: dict, t: str) -> dict:
+    e["e"]["time"] = t
+    return e
+
+
+def test_show_since_reads_the_whole_store_joined_and_says_whats_missing(
+    monkeypatch, tmp_path, capsys
+):
+    from foldyard import monitorstore
+
+    monkeypatch.setattr(monitorlog.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitorlog.config, "in_box", lambda: False)
+    monkeypatch.setattr(monitorlog.config, "project_prefix", lambda: "fyex")
+    monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 400)  # every append seals the last
+    claim = {
+        "k": "engine",
+        "containers": {BOX: {"name": "fyex-devbox", "project": "", "service": ""}},
+    }
+    monitorlog._append([claim, *_records(snap({200: [BOX]}), _at(ev(200), "2026-10-21T19:00:00Z"))])
+    early = _records(snap({}), _at(ev(200, binary="/bin/early"), "2026-10-21T19:59:00Z"))
+    monitorlog._append([{**r, "seq": r["seq"] + 2} for r in early])
+    inside = [_at(ev(200, binary=f"/bin/b{i}"), f"2026-10-21T20:0{i}:00Z") for i in range(3)]
+    monitorlog._append(
+        [{**r, "seq": r["seq"] + 4} for r in _records(snap({200: [OTHER]}), *inside)]
+    )
+    monitorlog._append([{"k": "gap", "boot": BOOT, "from": 8, "to": 9, "recv": 1_792_612_900.0}])
+    assert any(s.gz for s in monitorstore.segments())  # sealed and compressed on the way
+    assert monitorlog.show(limit=None, since="2026-10-21T20:00", until="2026-10-21T20:02") == 0
+    out = capsys.readouterr().out
+    assert (
+        "/bin/b0" in out and "/bin/b1" in out and "/bin/b2" not in out and "/bin/early" not in out
+    )
+    assert "2 events lost between the VM and here" in out
+    assert "store:" in out
+    # a range is joined like the whole store: the claim and snapshot from segments before it
+    monitorlog.show(limit=None, since="2026-10-21T19:59", as_json=True)
+    rows = [json.loads(x) for x in capsys.readouterr().out.splitlines()]
+    assert [(r["binary"], r["who"], r["name"]) for r in rows][:2] == [
+        ("/bin/early", "container", ""),  # the snapshot before dropped 200; the one after: OTHER
+        ("/bin/b0", "container", ""),
+    ]
+    assert rows[0]["container"] == OTHER and rows[0]["mnt"] == 200
+
+
+def test_show_refuses_a_time_it_cant_read(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(monitorlog.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitorlog.config, "in_box", lambda: False)
+    assert monitorlog.show(since="last tuesday") == 1
+    assert "span back from now" in capsys.readouterr().out
