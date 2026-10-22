@@ -98,6 +98,7 @@ def fake(tmp_path, monkeypatch):
     # …and so is your git identity (never a `git config` through the fake engine); the identity
     # tests opt in.
     monkeypatch.setattr(box.hostgit, "identity", lambda: {})
+    monkeypatch.setattr(box.hostgit, "conditional_includes", lambda: False)
     # ADR-0033's two directories: the VM shares neither unless a test says (the podman shape).
     monkeypatch.setattr(box.machine, "from_box_mounted", lambda: False)
     monkeypatch.setattr(box.machine, "to_box_mounted", lambda: False)
@@ -1421,6 +1422,7 @@ def _identity_bootstrap(monkeypatch, identity: dict[str, str]) -> str:
     monkeypatch.setattr(box.config, "box_bootstrap", lambda: "")
     monkeypatch.setattr(box, "registry", lambda: _StubRegistry([]))
     monkeypatch.setattr(box.hostgit, "identity", lambda: identity)
+    monkeypatch.setattr(box.hostgit, "conditional_includes", lambda: False)
     return box._bootstrap_script("/repo", "dev-stack", {})
 
 
@@ -1444,6 +1446,51 @@ def test_bootstrap_has_no_identity_step_without_one(monkeypatch):
     script = _identity_bootstrap(monkeypatch, {})
     assert box._git_identity_step() is None
     assert "git identity" not in script
+
+
+def test_identity_step_warns_only_when_your_config_has_includeif_rules(monkeypatch):
+    # fy doesn't follow `includeIf` (it would mean running git against the box-writable
+    # checkout), so someone with a per-directory work identity gets their default one: say so.
+    monkeypatch.setattr(box.hostgit, "identity", lambda: {"user.name": "Ada"})
+    monkeypatch.setattr(box.hostgit, "conditional_includes", lambda: False)
+    step = box._git_identity_step()
+    assert step is not None and "includeIf" not in step[2]
+    monkeypatch.setattr(box.hostgit, "conditional_includes", lambda: True)
+    step = box._git_identity_step()
+    assert step is not None and "includeIf" in step[2]
+
+
+def test_identity_step_still_warns_when_every_identity_is_behind_an_includeif(monkeypatch):
+    # Nothing to fill, so commits fail as before, but the warning says why and what to do.
+    monkeypatch.setattr(box.hostgit, "identity", lambda: {})
+    monkeypatch.setattr(box.hostgit, "conditional_includes", lambda: True)
+    step = box._git_identity_step()
+    assert step is not None and "includeIf" in step[2]
+    monkeypatch.setattr(box.hostgit, "conditional_includes", lambda: False)
+    assert box._git_identity_step() is None
+
+
+@pytest.mark.spawns("bash")  # the real step under bash and git: the warning, and when it holds off
+def test_identity_warning_holds_off_when_the_repo_sets_its_own_email(tmp_path, monkeypatch):
+    monkeypatch.setattr(box.hostgit, "identity", lambda: {"user.name": "Ada"})
+    monkeypatch.setattr(box.hostgit, "conditional_includes", lambda: True)
+    step = box._git_identity_step()
+    assert step is not None
+    _, _, run = step
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig")}
+
+    def bash(script: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", "-c", script], env=env, cwd=repo, capture_output=True, text=True
+        )
+
+    out = bash(run)
+    assert out.returncode == 0, out.stderr
+    assert "includeIf" in out.stdout and "git config user.email" in out.stdout
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "w@x"], check=True)
+    assert "includeIf" not in bash(run).stdout
 
 
 def test_identity_step_runs_before_the_install_steps(monkeypatch):

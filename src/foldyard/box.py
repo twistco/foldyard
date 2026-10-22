@@ -1756,18 +1756,34 @@ def _git_identity_step() -> tuple[str, str, str] | None:
     bootstrap step: each written into the box's GLOBAL config only where it has none. That is the
     layer the box lacks — its HOME is new with every box — so git's own order still holds: the
     env (``[box].env``'s ``GIT_AUTHOR_*``) and a repo's own config win over it, and an image that
-    bakes an identity keeps it. None when your computer names neither."""
+    bakes an identity keeps it.
+
+    ``includeIf`` rules aren't followed (that would mean running git against the box-writable
+    checkout on your computer), so when your global config has any, the step also says so —
+    unless this repo already sets its own email, which wins anyway. None when there's nothing to
+    fill and nothing to say."""
     identity = hostgit.identity()
-    if not identity:
+    warn = hostgit.conditional_includes()
+    if not identity and not warn:
         return None
     # `--includes`: an image may keep its identity in a file its global config includes.
     check = " && ".join(f"git config --global --includes --get {key}" for key in identity)
-    run = "\n".join(
+    lines = [
         f"git config --global --includes --get {key} >/dev/null || "
         f"git config --global {key} {shlex.quote(value)}"
         for key, value in identity.items()
-    )
-    return ("git identity from your computer", check, run)
+    ]
+    if warn:
+        lines.append(
+            "git config --local --get user.email >/dev/null 2>&1 || printf '%s\\n' "
+            + shlex.quote(
+                "⚠ git identity: your global git config has includeIf rules, which fy does not "
+                "follow, so this box has your default identity. If this repo should commit as "
+                "someone else: git config user.email <address> (in the repo, here or on your "
+                "computer)."
+            )
+        )
+    return ("git identity from your computer", check, "\n".join(lines))
 
 
 # The bootstrap's last word: the in-box `fy doctor`, once per NEW box. Nobody runs doctor in a box

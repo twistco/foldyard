@@ -851,8 +851,10 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   global git config — those two keys, nothing else) in its own global config, each only where the
   box doesn't already have one. Git's own order is unchanged: `GIT_AUTHOR_*` and
   `GIT_COMMITTER_*` set here, or a `user.name` in the repo's own `.git/config`, still win. An
-  `includeIf gitdir:` identity isn't followed, because the checkout's config is writable from the
-  box; set that identity in the repo (`git config user.email …`) instead.
+  `includeIf` identity isn't followed, because matching it means running git against the
+  checkout, which the box can write. When your global config has any `includeIf` rule, a new box
+  says so as it sets up, unless the repo already sets its own email; set that identity in the
+  repo (`git config user.email …`).
 - **`[[box.tools]]`** — one-time tool installs, run as bootstrap steps reported ✓/✗:
   `{ name, install, check? }`. `check` is a shell test that skips the install when it succeeds;
   default `command -v <name>`. These run on every newly created box; a distro package belongs in

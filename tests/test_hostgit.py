@@ -84,3 +84,24 @@ def test_an_inherited_git_dir_never_points_the_read_at_the_checkout(tmp_path, mo
     monkeypatch.setenv("GIT_DIR", str(repo / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(repo))
     assert hostgit.identity() == {"user.email": "me@example.test"}
+
+
+def test_conditional_includes_says_whether_any_includeif_rule_exists(tmp_path, monkeypatch):
+    _global(tmp_path, monkeypatch, "[user]\n\tname = Ada\n")
+    assert hostgit.conditional_includes() is False
+    _global(tmp_path, monkeypatch, '[includeIf "gitdir:~/work/"]\n\tpath = ~/.gitconfig-work\n')
+    assert hostgit.conditional_includes() is True
+
+
+def test_conditional_includes_sees_a_rule_in_an_included_file(tmp_path, monkeypatch):
+    (tmp_path / "more").write_text('[includeIf "gitdir:~/work/"]\n\tpath = ~/.gitconfig-work\n')
+    _global(tmp_path, monkeypatch, f"[include]\n\tpath = {tmp_path / 'more'}\n")
+    assert hostgit.conditional_includes() is True
+
+
+def test_conditional_includes_is_false_without_git_or_a_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "missing"))
+    assert hostgit.conditional_includes() is False
+    _global(tmp_path, monkeypatch, '[includeIf "gitdir:~/work/"]\n\tpath = x\n')
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert hostgit.conditional_includes() is False

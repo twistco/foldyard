@@ -26,6 +26,14 @@ _REPO_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 _TIMEOUT_S = 5
 
 
+def conditional_includes() -> bool:
+    """Whether your global git config (or a file it includes) has any ``includeIf`` rule — the
+    per-directory identities this module deliberately doesn't follow, which the box warns about.
+    False when git isn't installed or there's no global config."""
+    got = _git("--name-only", "--get-regexp", r"^includeif\.")
+    return got is not None and got.returncode == 0 and bool(got.stdout.strip())
+
+
 def identity() -> dict[str, str]:
     """``user.name`` and ``user.email`` from your global git config, each only when set to a
     usable value; ``{}`` when git isn't installed or names neither."""
@@ -37,18 +45,27 @@ def identity() -> dict[str, str]:
 
 
 def _global(key: str) -> str | None:
+    got = _git("--get", key)
+    if got is None or got.returncode != 0:
+        return None
+    value = got.stdout.removesuffix("\n")
+    if not value.strip():
+        return None
+    return None if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value) else value
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
+    """``git config --global --includes <args>``, or None when git can't be run or answers in
+    something other than UTF-8."""
     try:
         # cwd `/` and no repository in the env: nothing of the checkout's can take part.
         got = subprocess.run(
-            ["git", "config", "--global", "--includes", "--get", key],
+            ["git", "config", "--global", "--includes", *args],
             cwd="/",
             env={k: v for k, v in os.environ.items() if k not in _REPO_ENV},
             capture_output=True,
             timeout=_TIMEOUT_S,
         )
-        value = got.stdout.decode("utf-8").removesuffix("\n")
+        return subprocess.CompletedProcess(got.args, got.returncode, got.stdout.decode("utf-8"))
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return None
-    if got.returncode != 0 or not value.strip():
-        return None
-    return None if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value) else value
