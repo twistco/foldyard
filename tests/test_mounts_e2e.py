@@ -163,8 +163,9 @@ def repo(tmp_path_factory):
     SEED.unlink()
 
 
-FRESH_WITHIN = 5.0  # seconds: generous for a box polling its posture; a cache that never
-# revalidates misses it by far more
+# Seconds: generous for a box polling its posture; a cache that never revalidates misses it by far
+# more. Rounds stop at the first stale one: past it, the rest only wait out the window again.
+FRESH_WITHIN = 5.0
 ROUNDS = 10
 
 # Runs under the guest's python3 (stdlib only), driven line by line over stdin: `prime` reads the
@@ -210,7 +211,7 @@ def _to_box_cache() -> tuple[str, str]:
 
 
 def _rounds(path, write) -> list[str]:
-    """ROUNDS of prime → your computer's write → want, against the guest reader."""
+    """Up to ROUNDS of prime → your computer's write → want, against the guest reader."""
     reader = subprocess.Popen(
         ["limactl", "shell", VM, "--", "python3", "-c", _READER, str(path), str(FRESH_WITHIN)],
         stdin=subprocess.PIPE,
@@ -228,6 +229,8 @@ def _rounds(path, write) -> list[str]:
             write(text)
             reader.stdin.write(f"want {text}\n")
             replies.append(reader.stdout.readline().strip())
+            if not replies[-1].startswith("seen "):
+                break
     finally:
         reader.kill()
         reader.wait()

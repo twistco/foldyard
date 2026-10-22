@@ -20,7 +20,12 @@ from pathlib import Path
 def write(root: Path, rel: str | Path, data: bytes) -> None:
     """Write ``data`` to ``root/rel`` atomically, following no symlink below ``root``. Raises
     ``ValueError`` for a ``rel`` that isn't a plain relative path inside ``root``, and ``OSError``
-    (``ELOOP``/``ENOTDIR``) when a directory along it is a symlink or not a directory."""
+    (``ELOOP``/``ENOTDIR``) when a directory along it is a symlink or not a directory.
+
+    Atomic for a reader on THIS side. A reader in the VM over the share sees the name MISSING for
+    about a second after the replace on virtiofs (test_mount_visibility_e2e, test_mounts_e2e's
+    freshness test), so a guest-side reader must take a missing file as "not changed yet, read
+    again", never as "gone" (ADR-0033 § Freshness)."""
     parts = Path(rel).parts
     if not parts or Path(rel).is_absolute() or ".." in parts:
         raise ValueError(f"{rel!r} is not a path inside {root}")
