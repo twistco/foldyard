@@ -81,6 +81,9 @@ def tick_world(isolated_state, monkeypatch):
     monkeypatch.setattr(supervisor.githeal, "sweep", lambda log: None)
     monkeypatch.setattr(supervisor.devmode, "up_worktrees", lambda: world["up"])
     monkeypatch.setattr(supervisor.devmode, "probe", lambda port, host=None: False)
+    # The real proxy plugin declares a liveness URL and FakeChild is past its warm-up: without
+    # this the tick would ask a REAL loopback port — where a developer's live proxy listens.
+    monkeypatch.setattr(supervisor, "answers", lambda port, url: True)
     monkeypatch.setattr(devmode, "probe", lambda port, host=None: False)
     return world
 

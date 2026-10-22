@@ -1766,6 +1766,142 @@ def test_daemon_job_states():
     assert state == "failing" and "rc 1" in detail and "fy host logs" in detail
 
 
+# ── liveness: a proxy that stops answering is logged, not just re-marked in the record ─────────
+# 2026-10-22: a box's apt timed out connecting to the proxy for ~6 minutes under four parallel
+# image builds, and nothing on the host recorded it — the proxy never exited, and the readiness
+# probe is a bare TCP connect, which the kernel completes for a listener whose loop is stalled.
+
+
+class _Server:
+    """A loopback listener that answers each connection with ``reply`` — or, with ``reply=None``,
+    accepts nothing at all, as a proxy whose event loop has stalled (the kernel still completes
+    the handshake into the backlog)."""
+
+    def __init__(self, reply: bytes | None):
+        import socket
+        import threading
+
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.port = self.sock.getsockname()[1]
+        self.requests: list[bytes] = []
+        if reply is not None:
+            threading.Thread(target=self._serve, args=(reply,), daemon=True).start()
+
+    def _serve(self, reply: bytes) -> None:
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn:
+                self.requests.append(conn.recv(4096))
+                conn.sendall(reply)
+
+    def close(self) -> None:
+        self.sock.close()
+
+
+def test_answers_asks_the_daemon_for_the_url_and_wants_a_2xx():
+    server = _Server(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+    try:
+        assert supervisor.answers(server.port, "http://foldyard-liveness.invalid/") is True
+        head = server.requests[0].decode()
+        assert head.startswith("GET http://foldyard-liveness.invalid/ HTTP/1.1\r\n")
+        assert "\r\nHost: foldyard-liveness.invalid\r\n" in head
+    finally:
+        server.close()
+    refused = _Server(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+    try:
+        assert supervisor.answers(refused.port, "http://foldyard-liveness.invalid/") is False
+    finally:
+        refused.close()
+
+
+def test_a_stalled_listener_passes_the_connect_probe_but_not_answers():
+    stalled = _Server(None)
+    try:
+        assert supervisor.devmode.probe(stalled.port) is True  # what readiness has relied on
+        assert supervisor.answers(stalled.port, "http://x.invalid/", timeout=0.3) is False
+    finally:
+        stalled.close()
+
+
+def _running(started_at: float, pid: int = 1) -> supervisor.Child:
+    from typing import cast
+
+    fake = types.SimpleNamespace(
+        alive=lambda: True, started_at=started_at, proc=types.SimpleNamespace(pid=pid)
+    )
+    return cast("supervisor.Child", fake)
+
+
+def _liveness_world(monkeypatch, replies: list[bool]):
+    logged: list[str] = []
+    monkeypatch.setattr(supervisor, "log", logged.append)
+    monkeypatch.setattr(supervisor, "_stalls", {})
+    clock = iter(range(1000, 2000, 2))  # a tick every 2 s
+    monkeypatch.setattr(supervisor.time, "monotonic", lambda: next(clock))
+    answered = iter(replies)
+    asked: list[tuple[int, str]] = []
+
+    def answers(port, url):
+        asked.append((port, url))
+        return next(answered)
+
+    child = _running(started_at=0.0, pid=4242)
+    desired = {"egress-proxy": _spec(port=41000, liveness="http://foldyard-liveness.invalid/")}
+
+    def tick() -> None:
+        supervisor.check_liveness(
+            desired, {"egress-proxy": child}, ask=answers, cpu=lambda pid: 97.5
+        )
+
+    return tick, logged, asked
+
+
+def test_one_missed_answer_is_not_a_stall(monkeypatch):
+    tick, logged, asked = _liveness_world(monkeypatch, [True, False, True])
+    for _ in range(3):
+        tick()
+    assert asked == [(41000, "http://foldyard-liveness.invalid/")] * 3
+    assert logged == []
+
+
+def test_a_stall_is_logged_once_with_the_cpu_and_its_end_with_how_long(monkeypatch):
+    tick, logged, _asked = _liveness_world(monkeypatch, [False, False, False, False, True])
+    for _ in range(5):
+        tick()
+    assert len(logged) == 2
+    stall, recovery = logged
+    assert "egress-proxy" in stall and "stopped answering" in stall and ":41000" in stall
+    assert "pid 4242" in stall and "97.5% CPU" in stall  # pegged, or idle: which kind of stall
+    assert "answering again" in recovery and "after 8s" in recovery  # first miss → the answer
+
+
+def test_liveness_leaves_a_warming_or_undeclared_daemon_alone(monkeypatch):
+    _tick, logged, _asked = _liveness_world(monkeypatch, [])
+    supervisor.check_liveness(
+        {"egress-proxy": _spec(port=41000, liveness="http://x.invalid/"), "gcp-minter": _spec()},
+        {"egress-proxy": _running(started_at=999.0), "gcp-minter": _running(started_at=0.0)},
+        ask=lambda port, url: pytest.fail("probed a daemon it must leave alone"),
+    )
+    assert logged == []
+
+
+def test_the_tick_checks_liveness_over_its_daemons(monkeypatch, tmp_path):
+    _gate_world(monkeypatch, tmp_path)
+    monkeypatch.setattr(supervisor, "_blocked", {})
+    monkeypatch.setattr(supervisor, "_notify", lambda t, b: None)
+    seen: list[set[str]] = []
+    monkeypatch.setattr(
+        supervisor, "check_liveness", lambda desired, children: seen.append(set(children))
+    )
+    _tick_with(monkeypatch, tmp_path, {"egress-proxy": _spec(port=41000)}, {}, {})
+    assert seen == [{"egress-proxy"}]
+
+
 def test_tick_publishes_readiness_per_job_with_its_worktree(monkeypatch, tmp_path):
     _gate_world(monkeypatch, tmp_path)
     monkeypatch.setattr(supervisor, "_blocked", {})

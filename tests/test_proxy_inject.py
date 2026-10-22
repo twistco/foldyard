@@ -1613,6 +1613,41 @@ def test_a_connect_is_judged_on_its_target_not_its_host_header(gh, monkeypatch, 
     assert entry["mismatch"] is True  # not the allowlist: the TUI must not offer a grant for it
 
 
+# ── the liveness answer ───────────────────────────────────────────────────────────────────────
+# The supervisor's probe asks the proxy for a reserved `.invalid` URL and needs an answer from the
+# event loop itself: a bare TCP connect is completed by the kernel while the loop is stalled.
+# Mutations that must turn these red: dropping the early return in `_on_request` (the wall refuses
+# it, and logs a blocked row); dropping the `response` guard (a row per probe, every tick).
+
+
+async def test_the_liveness_url_is_answered_by_the_proxy_and_never_logged(walled):
+    inj, _allow, log = walled
+    flow = _Flow("foldyard-liveness.invalid", path="/", port=80, scheme="http")
+    flow.response = None
+    await inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 204
+    await inj.request(flow)
+    await inj.response(flow)
+    assert not log.exists() or log.read_text() == ""  # nothing went anywhere, nothing to log
+
+
+async def test_only_a_plain_get_is_the_liveness_answer(walled):
+    # Any other shape of request to the name is an ordinary one: refused by the wall, and logged.
+    inj, _allow, log = walled
+    flow = _Flow("foldyard-liveness.invalid", method="POST", path="/", port=80, scheme="http")
+    flow.response = None
+    await inj.requestheaders(flow)
+    assert flow.response is not None and flow.response.status_code == 403
+    assert _last_log(log)["blocked"] is True
+
+
+def test_the_addon_and_the_plugin_name_the_same_liveness_url(gh):
+    # The addon can't import foldyard, so the name is written twice.
+    from foldyard.plugins import proxy
+
+    assert proxy.LIVENESS_URL == f"http://{gh.module._LIVENESS_HOST}/"
+
+
 async def test_a_request_naming_another_host_is_refused_and_gets_no_credential(injector):
     # The wall is off here (observe-everything): the mismatch is refused regardless.
     inj, log = injector

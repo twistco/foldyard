@@ -1712,6 +1712,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
         if reason:
             blocked_now[name] = reason
     _publish_blocked(blocked_now, {name: spec["label"] for name, spec in desired.items()})
+    check_liveness(desired, children)
     jobs = {}
     for name, spec in desired.items():
         state, detail = _daemon_job(spec, children.get(name), blocked_now.get(name))
@@ -1878,6 +1879,90 @@ def _daemon_job(
     if port and not (probe or devmode.probe)(port):
         return "starting", f"not answering on :{port} yet"
     return "up", ""
+
+
+# ── liveness: a daemon that stops answering is SAID, not just re-marked ──────────────────────────
+# A daemon may declare `liveness`: a URL it answers itself, asked in proxy form on its port each
+# tick. The readiness probe (devmode.probe) is a bare TCP connect, which the kernel completes into
+# the backlog of a listener whose event loop has stalled, so a proxy that had stopped answering
+# read as up and its stall left no trace on the host (2026-10-22: a box's apt timed out connecting
+# for ~6 minutes under four parallel image builds). LIVENESS_MISSES misses in a row log the stall
+# once, with the daemon's CPU (pegged: load; idle: blocked on something); the answer that ends it
+# logs how long it lasted.
+LIVENESS_TIMEOUT = 2.0
+LIVENESS_MISSES = 2
+_stalls: dict[str, dict] = {}  # daemon name → {"since": monotonic at the first miss, "misses": n}
+
+
+def answers(port: int, url: str, timeout: float = LIVENESS_TIMEOUT) -> bool:
+    """Whether the daemon on loopback ``port`` answers a proxy-form ``GET url`` with a 2xx within
+    ``timeout``."""
+    import http.client
+    from urllib.parse import urlsplit
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        conn.request("GET", url, headers={"Host": urlsplit(url).netloc})
+        return 200 <= conn.getresponse().status < 300
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        conn.close()
+
+
+def _cpu_percent(pid: int) -> float | None:
+    """``pid``'s CPU use as ``ps`` reports it; None when it can't say."""
+    if not which("ps"):
+        return None
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "%cpu=", "-p", str(pid)], capture_output=True, text=True, timeout=5
+        ).stdout
+        return float(out.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def check_liveness(
+    desired: dict[str, dict],
+    children: dict[str, Child],
+    *,
+    ask: Callable[[int, str], bool] | None = None,
+    cpu: Callable[[int], float | None] | None = None,
+) -> None:
+    """Ask each running daemon that declares ``liveness`` (past its warm-up) whether it answers,
+    and log the edges (see the section comment). A daemon that exits, or stops being desired,
+    drops its record: its restart is logged on its own. ``ask``/``cpu`` default to
+    :func:`answers`/:func:`_cpu_percent`, looked up per call so a monkeypatch reaches them."""
+    ask = ask or answers
+    cpu = cpu or _cpu_percent
+    now = time.monotonic()
+    for name in [n for n in _stalls if n not in children or not children[n].alive()]:
+        del _stalls[name]
+    for name, spec in desired.items():
+        child = children.get(name)
+        url, port = spec.get("liveness"), spec.get("port")
+        if not url or not port or child is None or not child.alive():
+            continue
+        if now - child.started_at < DAEMON_WARMUP_SECONDS:
+            continue
+        stall = _stalls.get(name)
+        if ask(port, url):
+            if stall and stall["misses"] >= LIVENESS_MISSES:
+                log(f"✓ {name} answering again on :{port} after {_age(now - stall['since'])}")
+            _stalls.pop(name, None)
+            continue
+        stall = _stalls.setdefault(name, {"since": now, "misses": 0})
+        stall["misses"] += 1
+        if stall["misses"] == LIVENESS_MISSES:
+            pid = child.proc.pid
+            use = cpu(pid)
+            load = f", {use:g}% CPU" if use is not None else ""
+            log(
+                f"⚠ {name} stopped answering on :{port} — no reply within "
+                f"{LIVENESS_TIMEOUT:g}s, {LIVENESS_MISSES} probes running (pid {pid}{load}); "
+                "requests through it wait or time out until it does"
+            )
 
 
 def _publish_ready(

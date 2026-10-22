@@ -1319,6 +1319,14 @@ def test_registry_box_args_merges(monkeypatch, tmp_path):
 # ── proxy_rules + the proxy plugin (the egress-proxy framework, ADR-0015) ──────
 
 
+def test_the_proxy_declares_its_liveness_url_for_the_supervisor():
+    # The supervisor probes what a daemon declares — it never names the proxy itself.
+    cfg = config.Config(repo_root=config.repo_root(), worktree="", toml={"proxy": {}})
+    with config.using(cfg):
+        spec = Registry([proxy.ProxyPlugin()], config=cfg).desired_daemons({})["egress-proxy"]
+    assert spec["liveness"] == proxy.LIVENESS_URL == "http://foldyard-liveness.invalid/"
+
+
 def test_proxy_and_gcp_daemons_are_per_worktree(monkeypatch):
     # Per-worktree-proxy.md: the ONE supervisor runs N listeners, so a worktree's proxy + minter
     # daemons carry a "@<worktree>" name suffix and listen on the worktree's OFFSET port. The main

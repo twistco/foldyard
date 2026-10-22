@@ -261,6 +261,11 @@ BOX_CA_BUNDLE = Path("/etc/dev-proxy-ca-combined.pem")
 # One filename constant so the daemon's PROXY_LOG_FILE and the panel never drift.
 _PROXY_LOG = "egress.jsonl"
 
+# What the supervisor asks the proxy for each tick to learn its event loop still answers
+# (``supervisor.check_liveness``); the addon answers it itself. Duplicated there as
+# ``_LIVENESS_HOST`` — it can't import foldyard.
+LIVENESS_URL = "http://foldyard-liveness.invalid/"
+
 # The most host groups the panel renders, and of them the most floated for an unanswered refusal.
 _NET_GROUPS = 200
 _NET_FLOATED = 50
@@ -609,6 +614,7 @@ class ProxyPlugin(Plugin):
             f"egress-proxy{config.worktree_suffix()}": {
                 "label": label,
                 "port": port,
+                "liveness": LIVENESS_URL,
                 # Snapshot the packaged addon to the stable launch path BEFORE (re)launch — the
                 # supervisor copies each (src, dst) here, so mitmdump's `-s` watches a file under
                 # state_dir that no git checkout can rewrite under it (see _launch_addon_path).
