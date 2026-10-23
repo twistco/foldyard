@@ -11,7 +11,6 @@ import logging
 import os
 import shlex
 import subprocess
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
@@ -1174,9 +1173,23 @@ def test_podman_build_reports_progress_while_it_runs(
 ):
     # The build's output goes to the log, so a long build would be silent on the terminal: every
     # heartbeat with nothing finished names what is still building and whether the log grew.
+    import re
+    import threading
     import types
 
     monkeypatch.setattr(stack, "_BUILD_HEARTBEAT", 0.05)
+    # The slow build stays pending until a beat has seen it go quiet — a bounded wait on what the
+    # assertions need, not a fixed sleep that a busy runner can outlast.
+    quiet = threading.Event()
+    real_err = stack._err
+
+    def spy_err(*a):
+        real_err(*a)
+        msg = " ".join(map(str, a))
+        if "still building slow — 1/2 done" in msg and msg.endswith("(no new output)"):
+            quiet.set()
+
+    monkeypatch.setattr(stack, "_err", spy_err)
     cfg = json.dumps(
         {
             "services": {
@@ -1192,16 +1205,17 @@ def test_podman_build_reports_progress_while_it_runs(
         if len(cmd) >= 2 and cmd[1] == "build" and cmd[-1] == "/repo/slow":
             kw["stdout"].write("STEP 1/2: " + "x" * 4096 + "\n")
             kw["stdout"].flush()
-            time.sleep(0.4)
+            assert quiet.wait(timeout=10), "no quiet heartbeat while the slow build ran"
         return _FakeProc()
 
     monkeypatch.setattr(stack.subprocess, "run", fake_run)
     assert stack.build([]) == 0
     beats = [ln for ln in capsys.readouterr().err.splitlines() if "still building" in ln]
     assert beats
-    assert beats[-1].startswith("… still building slow — 1/2 done, 0:00 elapsed")
-    assert "(log +" in beats[0]  # the first beat sees the slow build's output
-    assert beats[-1].endswith("(no new output)")  # then nothing more while it sleeps
+    assert re.fullmatch(
+        r"… still building slow — 1/2 done, \d+:\d{2} elapsed \(no new output\)", beats[-1]
+    )  # nothing more once its output stopped
+    assert any("(log +" in b for b in beats)  # an earlier beat saw the slow build's output
 
 
 def test_podman_build_failure_tails_the_log_and_names_it(
