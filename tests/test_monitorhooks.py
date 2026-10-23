@@ -990,6 +990,10 @@ def test_skip_unless_asked_after_a_hook_is_reported_never_silently_ignored(proje
     assert [h.name for h in hooks] == ["a"]  # the hook itself still runs
     assert hooks[0].unless_asked == mh.SKIP_UNLESS_ASKED
     assert len(errors) == 1 and "skip_unless_asked" in errors[0] and "top" in errors[0]
+    _, errors = mh.parse(
+        'skip_unless_asked = []\n[[hook]]\nname = "a"\ncommand = ["/bin/a"]\nskip_unless_asked = []\n'
+    )
+    assert "nothing skipped kept" in errors[0]  # what is in force, said even when it is nothing
 
 
 def test_an_event_that_crossed_out_of_a_container_reaches_every_hook(ran):

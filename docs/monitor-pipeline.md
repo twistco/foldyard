@@ -96,8 +96,9 @@ A first step towards that, stdlib only, in `src/foldyard/monitorstore.py`:
   entering a namespace from the VM's own, and anything entering one from elsewhere (an `other`),
   each kept once a run. The marks and entries were a few thousand rows over cabash's boot; the
   `other` facts, added after that measurement, add a row each time a run of them starts on a
-  namespace (a container's runtime entering it, `podman exec`). When a segment goes, the newest fact of each kind about each namespace stays: podman
-  entered its own once, at boot, and the join must still know it.
+  namespace (a container's runtime entering it, `podman exec`). When a segment goes, the newest
+  fact of each kind about each namespace stays: podman entered its own once, at boot, and the join
+  must still know it.
 
 **Why the catalogue (2026-10-21).** The join needs the snapshot before an event and the one after
 it. Readers used to look only within a byte window — a hook 1 MB back and 4 MB on from its
@@ -162,7 +163,11 @@ changed):
   namespace the VM once entered, and that Tetragon never shows an init for (`--pid=host`), would
   be read as podman's, which a default hook skips (the review of #138). The price: after a step
   into podman's namespace from a container (itself `crossed`), what runs there reads
-  `unattributed` until podman next enters it from the VM, seconds on a busy VM.
+  `unattributed` until podman next enters it from the VM — any podman command run in the VM (the
+  API service that starts the box's containers never enters again). A step in doesn't make the
+  namespace someone else's, though: the containers and builds podman starts from it keep their
+  marks. Only a number seen TAKEN (an init on it, or something entering it from podman's or the
+  VM's side) stops counting as where podman starts them.
 - **`build`** — an init (`in_init_tree`, its parent outside its mount namespace) started in
   podman's namespace by podman itself rather than conmon: buildah's `RUN` step. 594 of them on
   cabash's boot, none ever named by a snapshot (builds run outside podman's container scopes). A

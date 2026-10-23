@@ -686,6 +686,28 @@ def test_a_namespace_made_inside_a_container_on_a_number_podman_entered_once_is_
     assert got[2:] == [("unattributed", "", False)] * 2
 
 
+def test_a_namespace_made_on_a_number_podman_entered_once_takes_it_for_the_inits_from_there():
+    # the box's own namespace made on the reused number (`unshare -Urpm --fork`): an init from
+    # there, whatever its parent is called, is no build's
+    nested = init(800, start="2026-10-04T10:00:01Z")
+    nested["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 200  # from inside BOX
+    made = init(900, start="2026-10-04T10:00:02Z", by="/bin/sh")
+    made["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 800
+    recs = _records(snap({200: [BOX]}), entered(800), snap({200: [BOX]}), nested, made,
+                    proc(900, "2026-10-04T10:00:03Z"), snap({200: [BOX]}))  # fmt: skip
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][2:] == ["unattributed"] * 2
+
+
+def test_a_step_into_podmans_namespace_leaves_the_inits_podman_starts_there_what_they_are():
+    # a step in from a container (itself `crossed`) says the label is no longer podman's to give,
+    # not that the namespace died: the containers and builds podman goes on starting from it are
+    # still what they are — the API service that starts them never enters it again
+    into = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    recs = _records(snap({200: [BOX]}), into, init(500, start="2026-10-04T10:00:01Z",
+                    by="/proc/self/exe"), proc(500, "2026-10-04T10:00:02Z"), snap({200: [BOX]}))  # fmt: skip
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][1:] == ["build", "build"]
+
+
 def test_an_init_from_a_number_podman_entered_once_is_no_build_once_the_number_was_taken():
     # where an init came from decides whether it is a build's or a container's — and a number the
     # VM entered once, then taken by a box container, is not podman's: the box's own namespace

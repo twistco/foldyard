@@ -485,22 +485,29 @@ class _Facts:
 
     Every fact, nested inits and ``other`` (a number entered from anywhere but the VM) included, is
     also kept in order per namespace (``seen``): an entry never ends and numbers are reused, so a
-    namespace is podman's only while nothing else has been seen taking it since (:meth:`podman`)."""
+    namespace is podman's to label only while nothing else has been seen entering it since
+    (:meth:`podman`), and podman's to start containers and builds from only until the number is
+    seen TAKEN (:meth:`trusted`) — an init on it, or something entering it from podman's or the
+    VM's side. A step in from a container takes nothing: the namespace is still alive."""
 
     def __init__(self, facts: Iterable[dict]) -> None:
         # inode -> [(seq, kind, what, init start, init pid namespace)]
         self.held: dict[str, list[tuple[int, str, str, int | None, str]]] = {}
         self.seqs: dict[str, list[int]] = {}
-        self.seen: dict[str, list[tuple[int, str]]] = {}  # inode -> [(seq, what)], every fact
+        # inode -> [(seq, what, taken)], every fact; taken: the number went to someone else
+        self.seen: dict[str, list[tuple[int, str, bool]]] = {}
         for f in sorted(facts, key=lambda f: int(f["seq"])):
             what, seq = f["what"], int(f["seq"])
-            self.seen.setdefault(str(f["inode"]), []).append((seq, what))
+            taken = what in ("start", "end") or (
+                what == "other" and self.entered(str(f["outside"]), seq - 1)
+            )
+            self.seen.setdefault(str(f["inode"]), []).append((seq, what, taken))
             if what == "entry":
                 kind = "entry"
             elif what == "other":
                 continue  # says only that the number is no longer podman's
             else:
-                if not self.podman(str(f["outside"]), seq - 1):
+                if not self.trusted(str(f["outside"]), seq - 1):
                     continue  # nested: never a holder of its number
                 kind = "container" if str(f.get("by") or "").startswith("conmon") else "build"
             fact = (seq, kind, what, _ns(f["start"]), str(f.get("pidns") or ""))
@@ -533,6 +540,18 @@ class _Facts:
             return False
         i = bisect_right(seen, (seq, "\uffff"))
         return bool(i) and seen[i - 1][1] == "entry"
+
+    def trusted(self, inode: str, seq: int) -> bool:
+        """Whether an init coming from ``inode`` at ``seq`` was started by podman: the namespace
+        was entered from the VM's and the number not seen taken since — a step in from a
+        container (an ``other`` from outside podman's and the VM's) leaves it podman's."""
+        seen = self.seen.get(inode, [])
+        for _, what, taken in reversed(seen[: bisect_right(seen, (seq, "\uffff"))]):
+            if what == "entry":
+                return True
+            if taken:
+                return False
+        return False
 
     def start_of(self, inode: str, life: str, below: int) -> tuple | None:
         """The container init start, before ``below``, of the life whose init is in pid namespace
