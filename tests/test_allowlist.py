@@ -860,3 +860,28 @@ def test_sync_yes_on_a_damaged_store_does_not_die_on_build_recommendations(env):
         interactive=False, prompt=prompt, echo=echo, accept_all=True
     )
     assert counts["granted"] == 0
+
+
+def test_learned_hosts_name_who_asked_when_the_rows_say(env):
+    # ADR-0034: with attribution on, each row carries the forwarder's stamp, and the host resolves
+    # it — the review then says which service reached the host, not only which tool. The names are
+    # the engine's claims (whatever the creator called the container), so they are cut to safe
+    # characters like everything else here, and at most three are kept.
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    ts = "2026-09-22T10:01:00+00:00"
+    names = {"10.89.0.6": "fyex-api-1", "10.89.0.7": 'evil"}{x', "10.89.0.8": "c", "10.89.0.9": "d"}
+
+    def stamped(ip):
+        row = _row("pypi.example.org", ts, "pip/24")
+        row["origin"] = {"via": "bridge", "src": f"{ip}:1", "net": "podman1"}
+        return row
+
+    rows = [stamped(ip) for ip in names] + [stamped("10.89.0.6")]
+    who = lambda origin, at: names[origin["src"].split(":")[0]]  # noqa: E731
+    (entry,) = allowlist.learned_hosts(rows, window, who=who)
+    assert entry["by"] == ["fyex-api-1", "evilx", "c"]
+    why = allowlist.recommend_why(entry)
+    assert why == "observed: pip/24 by fyex-api-1, evilx, c — edit me"
+    # without a resolver (attribution off), nothing changes
+    (plain,) = allowlist.learned_hosts(rows, window)
+    assert plain["by"] == [] and allowlist.recommend_why(plain) == "observed: pip/24 — edit me"

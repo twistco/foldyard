@@ -424,6 +424,9 @@ def recommend_why(entry: dict) -> str:
     if paths:
         more = entry.get("more_paths", 0)
         parts.append("GET " + ", ".join(paths) + (f" (+{more})" if more else ""))
+    by = [_why_safe(b) for b in entry.get("by") or []]
+    if any(by):
+        parts.append("by " + ", ".join(b for b in by if b))
     return f"observed: {' '.join(parts) or 'no detail (tunnelled)'} — edit me"
 
 
@@ -447,10 +450,14 @@ def read_log_rows(paths: list[Path]) -> list[dict]:
     return rows
 
 
-def learned_hosts(rows: list[dict], window: dict) -> list[dict]:
+def learned_hosts(
+    rows: list[dict], window: dict, who: Callable[[object, object], str | None] | None = None
+) -> list[dict]:
     """The hosts the proxy recorded as WOULD-BLOCK inside ``window``, still not granted and not
-    declined: ``{host, count, first, last, uas, paths, more_paths}`` in first-seen order. ``uas``
-    is up to three distinct User-Agents — which TOOL reached the host. ``paths`` samples what it
+    declined: ``{host, count, first, last, uas, by, paths, more_paths}`` in first-seen order.
+    ``uas`` is up to three distinct User-Agents — which TOOL reached the host. ``by`` is up to
+    three distinct names of who asked — which SERVICE, from each row's attributing-forwarder stamp
+    (ADR-0034) as ``who(origin, ts)`` resolves it; empty without ``who``. ``paths`` samples what it
     FETCHED there, from the decrypted request rows for the same host in the window (a tunnelled
     host has none): the attribution a reviewer needs without anything logging commands in the box.
     Pure over the log rows (tests pass them directly).
@@ -479,12 +486,19 @@ def learned_hosts(rows: list[dict], window: dict) -> list[dict]:
             continue
         if _matches(key, granted) or key in refused or "*" in refused:
             continue
-        entry = out.setdefault(key, {"host": key, "count": 0, "first": row["ts"], "uas": []})
+        entry = out.setdefault(
+            key, {"host": key, "count": 0, "first": row["ts"], "uas": [], "by": []}
+        )
         entry["count"] += 1
         entry["last"] = row["ts"]
         ua = _printable(row.get("ua"))
         if ua and ua not in entry["uas"] and len(entry["uas"]) < 3:
             entry["uas"].append(ua)
+        if who is not None and row.get("origin") is not None and len(entry["by"]) < 3:
+            # the engine's claim (a container's name): the box chose it, like every byte here
+            name = _why_safe(_printable(who(row["origin"], row.get("ts")) or ""))[:40].strip()
+            if name and name not in entry["by"]:
+                entry["by"].append(name)
     for key, entry in out.items():
         # A `host:port` key was a non-TLS-port tunnel — its requests (if any were decrypted) are
         # logged under the bare host, which may also be a different, granted :443 host; don't mix.
