@@ -86,9 +86,12 @@ jobs:
         timeout-minutes: 22
         env:
           FOLDYARD_HYPOTHESIS_PROFILE: explore
-          FOLDYARD_HYPOTHESIS_MAX_EXAMPLES: ${{ inputs.max_examples }}
+          FOLDYARD_HYPOTHESIS_MAX_EXAMPLES: ${{ inputs.max_examples || '200' }} # TEMPORARY
         run: |
           set -o pipefail
+          # hypothesis makes the directory only when it has a failure to keep; made here, the save
+          # below always has a path (an empty one when everything passed).
+          mkdir -p .hypothesis/examples
           # shellcheck disable=SC2086 # the module list splits on purpose
           just test $PROPERTY_MODULES -n auto -v --junitxml="$RUNNER_TEMP/junit.xml" \
             2>&1 | tee "$RUNNER_TEMP/pytest.log"

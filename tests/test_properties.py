@@ -365,3 +365,14 @@ def test_no_operation_sequence_reaches_overlapping_rules(world, data, tmp_path, 
                 # satisfy the invariant below on its own).
                 devmode.set_mode(updates, reconcile=False)
         assert not world.overlaps(devmode.read()["mode"])
+
+
+# TEMPORARY (reverted before merge): a deterministic failure, to prove the notifier's path in CI.
+@given(n=st.integers())
+def test_temporary_injected_failure(n):
+    assert n < 10, "TEMPORARY: proves the failure path"
+
+
+@given(s=st.text())
+def test_temporary_injected_backtick(s):
+    assert "`" not in s, "TEMPORARY: a falsifying example with a backtick in it"
