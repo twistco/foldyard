@@ -58,6 +58,7 @@ from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, ru
 
 from foldyard import config, devmode, supervisor
 from foldyard.plugins import CapabilityProbe, Plugin, Registry, Requires, Switch
+from pbt import scaled_examples
 
 # The synthetic world: an identity ladder (emergency top rung → TTL-bound) + a dependent axis.
 # dep=live requires ident∈{sa,user} — the llm-live-under-gcp shape from the incident history.
@@ -472,4 +473,6 @@ class ModeStateModel(RuleBasedStateMachine):
 
 
 TestModeStateModel = ModeStateModel.TestCase
-TestModeStateModel.settings = settings(max_examples=60, stateful_step_count=40, deadline=None)
+TestModeStateModel.settings = settings(
+    max_examples=scaled_examples(60), stateful_step_count=40, deadline=None
+)

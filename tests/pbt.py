@@ -36,10 +36,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from hypothesis import settings
 from hypothesis import strategies as st
 
 from foldyard import config as config_mod
 from foldyard.plugins import InjectRule, Plugin, Registry, Requires, Switch
+
+
+def scaled_examples(n: int) -> int:
+    """A test's own ``max_examples``, scaled with the loaded profile's budget.
+
+    An explicit ``@settings(max_examples=…)`` overrides the profile, so without this the weekly
+    ``explore`` profile (tests/conftest.py) would leave those tests at their everyday budget.
+    The default profiles' budget is hypothesis's 100, which leaves ``n`` unchanged.
+    """
+    return max(1, n * settings().max_examples // 100)
+
 
 # A constraint row: (axis, trigger_rungs, other_axis, allowed_rungs, severity) — an issue of
 # `severity` while mode[axis] ∈ trigger_rungs and mode[other_axis] ∉ allowed_rungs.

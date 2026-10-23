@@ -51,6 +51,7 @@ from hypothesis import strategies as st
 
 from foldyard import monitorhooks as mh
 from foldyard import monitorlog, monitorstore
+from pbt import scaled_examples
 
 A, B, C = "a" * 64, "b" * 64, "c" * 64
 META = {
@@ -254,7 +255,7 @@ def _covered(key, gaps: list[dict], rank, whys: tuple[str, ...]) -> bool:
 EVERYTHING = [([], [], [])]
 
 
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=scaled_examples(200), deadline=None)
 @given(scenario=steps, filters=hooks, budget=st.sampled_from(["tiny", "ample"]))
 # released on age, then a snapshot names its container: the hook must say it went without one
 @example(
@@ -546,7 +547,7 @@ def _around(recs: list[dict], seq: int) -> tuple[dict | None, dict | None]:
     return before, after
 
 
-@settings(max_examples=300, deadline=None)
+@settings(max_examples=scaled_examples(300), deadline=None)
 @given(scenario=ns_steps)
 # the brief's case: the old container's number handed straight on, no snapshot in between
 @example(scenario=[("start", 0, True, False), ("snap",), ("run", 0, False), ("stop", 0),

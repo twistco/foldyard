@@ -1,0 +1,121 @@
+name: property explore
+
+# The property tier, RANDOMISED and with a far larger budget, once a week. Every other job loads
+# the `ci` hypothesis profile (tests/conftest.py: derandomised, no database), which replays the same
+# examples every run and so never finds a new counterexample; this one loads `explore`, which does.
+# Weekly, to go easy on GitHub's runners. A manual run (Actions → property explore → Run workflow)
+# can lower the budget and dry-run the notifier.
+#
+# A failure opens (or comments on) a PUBLIC issue assigned to NOTIFY_LOGIN below, because GitHub's
+# own email for a failed scheduled run goes to whoever last edited the cron line, not to the
+# operator. The run's log is public anyway, falsifying examples included, so the issue adds no
+# exposure. To send it to someone else, change NOTIFY_LOGIN.
+on:
+  schedule:
+    - cron: "17 3 * * 2" # Tuesdays 03:17 UTC: off-peak, and off the top of the hour
+  workflow_dispatch:
+    inputs:
+      max_examples:
+        description: "max_examples for the explore profile (empty: its default)"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "On a failure, print the issue instead of posting it"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: property-explore-${{ github.ref }}
+  cancel-in-progress: false
+
+# Read-only by default; the one job adds issues: write for the notifier.
+permissions:
+  contents: read
+
+env:
+  NOTIFY_LOGIN: daaain
+  ISSUE_LABEL: property-tests
+  # The property tier (CLAUDE.md, Test tiers): every module that runs hypothesis.
+  # tests/test_property_explore.py holds this list to the modules that import it.
+  PROPERTY_MODULES: tests/test_properties.py tests/test_monitor_properties.py tests/test_reconcile_model.py
+
+jobs:
+  explore:
+    name: randomised property tier
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v4
+      - uses: astral-sh/setup-uv@v8.2.0
+
+      # A dispatch input reaches the shell only through env, and only once it is a number.
+      - name: Check the inputs
+        id: inputs
+        env:
+          MAX_EXAMPLES: ${{ inputs.max_examples }}
+        run: |
+          if [[ -n $MAX_EXAMPLES && ! $MAX_EXAMPLES =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::max_examples must be a positive whole number, not: $MAX_EXAMPLES"
+            exit 1
+          fi
+
+      # The example database, carried run to run: every run saves under its own key and the next
+      # restores the newest (the prefix), so a counterexample found one week is replayed first
+      # every week until it is fixed. GitHub evicts an entry nobody has read for 7 days, and a
+      # weekly run reads it about every 7 days: a late start can find it gone, and the run then
+      # starts a fresh database. The issue keeps each example and its @reproduce_failure line, so
+      # nothing found is lost with it.
+      - name: Restore the example database
+        uses: actions/cache/restore@v6
+        with:
+          path: .hypothesis/examples
+          key: hypothesis-explore-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: hypothesis-explore-
+
+      # The step's own timeout (under the job's) fails it rather than cancel the job, so the
+      # database is still saved and the notifier still runs.
+      - name: Property tier (explore profile)
+        timeout-minutes: 22
+        env:
+          FOLDYARD_HYPOTHESIS_PROFILE: explore
+          FOLDYARD_HYPOTHESIS_MAX_EXAMPLES: ${{ inputs.max_examples }}
+        run: |
+          set -o pipefail
+          # shellcheck disable=SC2086 # the module list splits on purpose
+          just test $PROPERTY_MODULES -n auto -v --junitxml="$RUNNER_TEMP/junit.xml" \
+            2>&1 | tee "$RUNNER_TEMP/pytest.log"
+
+      - name: Save the example database
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .hypothesis/examples
+          key: hypothesis-explore-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Any failure from here on, not only a failing test: a timeout or a broken setup must reach
+      # the operator too. A refused input is the dispatcher's own mistake, already on their screen.
+      - name: Summarise the failure
+        if: failure() && steps.inputs.outcome == 'success'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUDGET: ${{ inputs.max_examples }}
+        run: |
+          python3 tests/tools/property_failures.py --junit "$RUNNER_TEMP/junit.xml" \
+            --log "$RUNNER_TEMP/pytest.log" --run-url "$RUN_URL" --commit "$GITHUB_SHA" \
+            --budget "${BUDGET:-default}" --out "$RUNNER_TEMP/summary.md"
+          cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tell the operator
+        if: failure() && steps.inputs.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMMARY_FILE: ${{ runner.temp }}/summary.md
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: .github/scripts/notify-property-failure.sh

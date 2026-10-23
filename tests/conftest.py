@@ -7,10 +7,12 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from hypothesis import HealthCheck, settings
+from hypothesis.database import DirectoryBasedExampleDatabase
 
 from foldyard import config, devmode, plugins
 
@@ -30,7 +32,35 @@ SESSION_ENV = dict(os.environ)
 _SUPPRESSED = [HealthCheck.function_scoped_fixture, HealthCheck.too_slow]
 settings.register_profile("ci", derandomize=True, database=None, suppress_health_check=_SUPPRESSED)
 settings.register_profile("dev", suppress_health_check=_SUPPRESSED)
-settings.load_profile("ci" if os.environ.get("CI") else "dev")
+# `explore` is the weekly hunt (.github/workflows/property-explore.yml): randomised, with a budget
+# EXPLORE_EXAMPLES / 100 times the default's, which pbt.scaled_examples carries over to the tests
+# that set their own max_examples. The example database is ON, at a fixed path the workflow
+# caches, so a counterexample found one week is replayed first every week until it is fixed.
+# deadline=None: it hunts wrong answers, not slow ones, and a shared runner's timing is noise.
+# print_blob: the failure also prints the @reproduce_failure line to replay it anywhere.
+# derandomize=False is said outright: a profile inherits from the default one, and under CI
+# hypothesis's default is its own derandomised `ci` profile — the run would replay, not explore.
+EXPLORE_EXAMPLES = 5000
+settings.register_profile(
+    "explore",
+    derandomize=False,
+    max_examples=int(os.environ.get("FOLDYARD_HYPOTHESIS_MAX_EXAMPLES") or EXPLORE_EXAMPLES),
+    deadline=None,
+    print_blob=True,
+    database=DirectoryBasedExampleDatabase(
+        Path(__file__).resolve().parents[1] / ".hypothesis" / "examples"
+    ),
+    suppress_health_check=_SUPPRESSED,
+)
+
+
+def hypothesis_profile(env: Mapping[str, str]) -> str:
+    """FOLDYARD_HYPOTHESIS_PROFILE names one outright, winning over CI (which every Actions job
+    sets); otherwise `ci` under CI and `dev` everywhere else."""
+    return env.get("FOLDYARD_HYPOTHESIS_PROFILE") or ("ci" if env.get("CI") else "dev")
+
+
+settings.load_profile(hypothesis_profile(os.environ))
 
 # ── resolved-config test helpers (per-consumer-registry-plan.md) ───────────────────────
 # foldyard's OWN foldyard.toml (the ambient config under `cd foldyard && pytest`) declares NO
