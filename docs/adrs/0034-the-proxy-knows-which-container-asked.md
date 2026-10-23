@@ -148,7 +148,9 @@ resolves the stamp to a container from the engine at read time.**
   client wrote. It adds its own: the source address, its network, a per-boot sequence and an HMAC
   under a per-project key the host keeps (`<state dir>/forwarder.key`). After the head it splices
   bytes and parses nothing, including TLS. It passes `Proxy-Authorization` through untouched, so
-  a host-started build keeps proving itself with its secret (spike finding 4).
+  a host-started build keeps proving itself with its secret (spike finding 4). A first head that
+  isn't a canonical HTTP/1 request (CRLF lines, single spaces, an upper-case method) is refused:
+  mitmproxy serves looser heads, so passing one on would carry a request through unstamped.
 - **It runs as root, provisioned at boot.** It follows 0032's pattern: a recorded boot script
   under its own marker, packaged code, never config. The key is written root-only, so the box
   can't read it through the socket. The forwarder listens *inside* the rootless namespace but

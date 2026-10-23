@@ -67,6 +67,24 @@ def test_only_an_http1_request_head_is_stamped():
     assert not fwd.is_request_head(b"\x16\x03\x01junk\r\n\r\n")
 
 
+# Heads mitmproxy still serves (it splits the request line on whitespace, takes any case of
+# method, and ends lines at a bare LF) that a canonical check doesn't: each one is refused, never
+# passed on unstamped — or a container could choose what its rows say.
+LENIENT_HEADS = [
+    b"GET  http://x/ HTTP/1.1\r\nHost: x\r\n\r\n",  # two spaces
+    b"GET http://x/ HTTP/1.1 \r\nHost: x\r\n\r\n",  # a trailing space
+    b"get http://x/ HTTP/1.1\r\nHost: x\r\n\r\n",  # a lowercase method
+    b"GET http://x/ HTTP/1.1\nHost: x\nX-Fy-Origin: forged\n\n",  # bare LF line ends
+    b"GET http://x/ HTTP/1.1\r\nHost: x\nX-Fy-Origin: forged\r\n\r\n",  # one bare LF
+    b"GET http://x/ HTTP/1.1\n\r\n\r\n",  # a bare LF in the request line's place
+]
+
+
+@pytest.mark.parametrize("head", LENIENT_HEADS)
+def test_a_head_that_isnt_canonical_is_not_a_request_head(head):
+    assert not fwd.is_request_head(head)
+
+
 # ── who owns a socket ──────────────────────────────────────────────────────────────────
 
 
@@ -311,9 +329,43 @@ def test_a_token_service_connection_is_spliced_untouched():
     assert asyncio.run(_round_trip("plain", sent)) == sent
 
 
-def test_a_head_that_isnt_http1_is_spliced_unstamped():
-    sent = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\nEND"
-    assert asyncio.run(_round_trip("proxy", sent)) == sent
+async def _refused(payload: bytes) -> tuple[bytes, bool, dict]:
+    """A client sends ``payload`` to a proxy port: what it reads back, whether upstream was ever
+    connected to, and the forwarder's counters."""
+    dialled = False
+
+    async def upstream(r, w):
+        nonlocal dialled
+        dialled = True
+        w.close()
+
+    up = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    port = up.sockets[0].getsockname()[1]
+    f = fwd.Forwarder(_args(port), KEY, "b00t")
+
+    async def front(r, w):
+        await f.relay(r, w, ("127.0.0.1", port), [("via", "bridge"), ("src", "10.89.0.6:1")])
+
+    fr = await asyncio.start_server(front, "127.0.0.1", 0)
+    cr, cw = await asyncio.open_connection("127.0.0.1", fr.sockets[0].getsockname()[1])
+    cw.write(payload)
+    await cw.drain()
+    got = await asyncio.wait_for(cr.read(), 2)  # well inside HEAD_TIMEOUT: refused, not timed out
+    cw.close()
+    fr.close()
+    up.close()
+    return got, dialled, f.stats
+
+
+@pytest.mark.parametrize(
+    "sent",
+    [b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\nEND"]
+    + [h + b"END" for h in LENIENT_HEADS]
+    + [b"GET http://x/ HTTP/1.1\nHost: x\n\n"],  # bare LF and no CRLF at all: no waiting for one
+)
+def test_a_proxy_head_that_isnt_a_canonical_request_is_refused_never_spliced(sent):
+    got, dialled, stats = asyncio.run(_refused(sent))
+    assert got == b"" and not dialled and stats["refused"] == 1
 
 
 def test_a_finished_relay_closes_both_of_its_sockets():

@@ -25,7 +25,8 @@ On each connection to a proxy port the forwarder reads the request head (plain t
 ``CONNECT host:443``), removes every ``X-Fy-Origin`` line the client wrote, appends its own — where
 the connection came from, a per-boot sequence and an HMAC under a key only root can read here
 (``/etc/fy-fwd/forwarder.key``, the host's) — and then splices bytes both ways, parsing nothing
-more. Connections to the other daemon ports (token services) are spliced untouched. Upstream
+more; a first head that isn't a canonical HTTP/1 request is refused, never passed on unstamped.
+Connections to the other daemon ports (token services) are spliced untouched. Upstream
 connections leave from the VM's own namespace as root, which the VM firewall already admits; its
 own table refuses the walled principals' direct connections to those ports, so a dead forwarder
 means a refused connection, never unattributed egress.
@@ -75,7 +76,8 @@ SCOPE = re.compile(r"^libpod-([0-9a-f]{64})\.scope$")
 # buildah's own cgroup when the engine API does (`buildah-buildah<N>`: the host's `fy up`, the box).
 BUILD_SCOPE = re.compile(r"^(crun-)?buildah-buildah[0-9]+(\.scope)?$")
 PASTA = {"pasta", "pasta.avx2", "passt", "passt.avx2", "slirp4netns"}
-REQUEST_LINE = re.compile(rb"^[A-Z]+ \S+ HTTP/1\.[01]$")
+REQUEST_LINE = re.compile(rb"\A[A-Z]+ \S+ HTTP/1\.[01]\Z")
+BARE_LF = re.compile(rb"(?<!\r)\n")
 # The names nft and the routing table go by: one table per namespace, replaced atomically.
 TABLE = "fy_fwd"
 RULE_PRIORITY = 4747  # this and the next: the policy rules, deleted and re-added as a pair
@@ -137,8 +139,13 @@ def stamp(key: bytes, items: list[tuple[str, str]]) -> str:
 
 
 def is_request_head(head: bytes) -> bool:
-    """An HTTP/1 request head (a proxy request): what the stamp may be added to. Anything else —
-    HTTP/2's preface (``PRI * HTTP/2.0``), garbage — is spliced as it came."""
+    """A canonical HTTP/1 request head (a proxy request): CRLF line ends only, and a request line
+    of an upper-case method, one space, the target, one space, the version. Only such a head is
+    stamped; anything else on a proxy port is refused, never spliced: mitmproxy serves heads this
+    rejects (it splits the request line on whitespace, takes any case of method, and ends a line
+    at a bare LF), so splicing one would carry a container's request through unstamped."""
+    if BARE_LF.search(head):
+        return False
     return bool(REQUEST_LINE.match(head.split(b"\r\n", 1)[0]))
 
 
@@ -486,6 +493,8 @@ def original_dst(sock: socket.socket) -> tuple[str, int] | None:
 async def read_head(reader: asyncio.StreamReader) -> tuple[bytes, bytes] | None:
     buf = b""
     while b"\r\n\r\n" not in buf:
+        if BARE_LF.search(buf):  # not a canonical head, whatever follows: refused without waiting
+            return buf, b""
         chunk = await asyncio.wait_for(reader.read(4096), timeout=HEAD_TIMEOUT)
         if not chunk:
             return None
@@ -600,9 +609,11 @@ class Forwarder:
                 writer.close()
                 return
             head, rest = got
-            if is_request_head(head):
-                head, stripped = restamp(head, self.next_stamp(items))
-                self.stats["stripped"] += stripped
+            if not is_request_head(head):
+                why = "not a canonical HTTP/1 proxy request"
+                return self.refuse(writer, why, writer.get_extra_info("peername"))
+            head, stripped = restamp(head, self.next_stamp(items))
+            self.stats["stripped"] += stripped
             rest = head + rest
         try:
             ur, uw = await self.open_upstream(dest)
