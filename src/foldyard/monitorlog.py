@@ -930,8 +930,9 @@ def crossing_note(boot: str | None = None) -> str:
     return (
         f"{n} process{'es' if n > 1 else ''} crossed out of a container in this VM boot (of "
         f"those the store still holds: it keeps only the first once its segment goes), the "
-        f"first at {t[:19].replace('T', ' ')} UTC{source} — from there on, hooks get every event "
-        "of this boot (`who` no longer filters; `fy docs configuration`)"
+        f"first at {t[:19].replace('T', ' ')} UTC{source} — from there on, `who` stops "
+        "filtering this boot for every hook without `keep_who_after_crossing` "
+        "(`fy docs configuration`)"
     )
 
 

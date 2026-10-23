@@ -1057,7 +1057,7 @@ def test_show_and_doctor_say_a_crossing_happened_in_this_boot(monkeypatch, tmp_p
         "2 processes crossed out of a container in this VM boot (of those the store still holds"
     )
     assert ", the first at " in note
-    assert "fyex-api-1" in note and "every event of this boot" in note
+    assert "fyex-api-1" in note and "`who` stops filtering this boot" in note
     assert monitorlog.crossing_note(boot="another-boot") == ""
     assert monitorlog.show(limit=10) == 0
     assert f"⚠ {note}" in capsys.readouterr().out.splitlines()
