@@ -11,6 +11,7 @@ import logging
 import os
 import shlex
 import subprocess
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
@@ -1161,10 +1162,46 @@ def test_podman_build_success_keeps_build_output_off_the_terminal(
     assert build_kwargs and build_kwargs[0]["stderr"] is stack.subprocess.STDOUT
     captured = capsys.readouterr()
     assert "hundreds of layer lines" not in captured.out + captured.err
+    assert "still building" not in captured.err  # a quick build finishes before any heartbeat
     assert "+ podman build" in captured.err  # the command echo survives (thin-and-echoing rule)
     log_path = config.state_dir() / "build-tangible-podman.log"
     assert f"build output → {log_path}" in captured.err
     assert "hundreds of layer lines" in log_path.read_text()
+
+
+def test_podman_build_reports_progress_while_it_runs(
+    fake_repo, monkeypatch, capsys, paths_unguarded
+):
+    # The build's output goes to the log, so a long build would be silent on the terminal: every
+    # heartbeat with nothing finished names what is still building and whether the log grew.
+    import types
+
+    monkeypatch.setattr(stack, "_BUILD_HEARTBEAT", 0.05)
+    cfg = json.dumps(
+        {
+            "services": {
+                "quick": {"build": {"context": "/repo/quick"}},
+                "slow": {"build": {"context": "/repo/slow"}},
+            }
+        }
+    )
+
+    def fake_run(cmd, **kw):
+        if "config" in cmd:
+            return types.SimpleNamespace(returncode=0, stdout=cfg, stderr="")
+        if len(cmd) >= 2 and cmd[1] == "build" and cmd[-1] == "/repo/slow":
+            kw["stdout"].write("STEP 1/2: " + "x" * 4096 + "\n")
+            kw["stdout"].flush()
+            time.sleep(0.4)
+        return _FakeProc()
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    assert stack.build([]) == 0
+    beats = [ln for ln in capsys.readouterr().err.splitlines() if "still building" in ln]
+    assert beats
+    assert beats[-1].startswith("… still building slow — 1/2 done, 0:00 elapsed")
+    assert "(log +" in beats[0]  # the first beat sees the slow build's output
+    assert beats[-1].endswith("(no new output)")  # then nothing more while it sleeps
 
 
 def test_podman_build_failure_tails_the_log_and_names_it(
