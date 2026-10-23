@@ -283,3 +283,15 @@ async def test_the_vm_listeners_stamp_verifies_too(origin):
     await _request(inj, _flow(scheme="http", port=80, stamps=[_stamp(items)]))
     got = _rows(origin.log)[-1]["origin"]
     assert got["who"] == "container" and got["ctr"] == "a" * 64 and got["uid"] == "525287"
+
+
+def test_a_row_from_no_known_connection_still_says_so_while_recording(origin):
+    # A refused dial mitmproxy reports with no client (or one no head was seen on) has no stamp to
+    # inherit: while recording it is `unattributed`, said, never silently blank.
+    inj = origin.Injector()
+    inj._log_blocked("refused.example")
+    assert _all_rows(origin.log)[-1]["origin"] == "unattributed"
+    origin.set(record=False)
+    inj.refresh()
+    inj._log_blocked("refused.example")
+    assert "origin" not in _all_rows(origin.log)[-1]
