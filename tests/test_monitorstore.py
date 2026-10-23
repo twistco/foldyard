@@ -349,3 +349,30 @@ def test_an_older_catalogue_gains_the_marks_and_keeps_what_it_cant_rebuild(state
         cat.catch_up()
         assert [(m[0], m[2]) for m in _marks(cat)] == [(11, "start"), (13, "end")]
         assert _seq(cat.before(BOOT, 10)) == 3  # kept
+
+
+def test_a_supervisor_still_on_0_6_works_beside_the_marks(state, monkeypatch):
+    # an editable install upgrades the CLI at once and the supervisor only at its restart: the
+    # marks must not make 0.6's catalogue code drop and rebuild the catalogue (a schema it doesn't
+    # know) nor fail its writes (a column it doesn't know). Then 0.6 indexes a record without its
+    # mark, and the next reader reads the mark from what 0.6 indexed.
+    import sqlite3
+
+    ms.append([snap(0), init(1)])
+    path = state / "logs" / "monitor-index.sqlite"
+    conn = sqlite3.connect(path, isolation_level=None)
+    (version,) = conn.execute("PRAGMA user_version").fetchone()
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(seg)")]
+    assert version == 2 and cols == ["id", "indexed", "sealed", "t0", "t1"]
+    (live,) = ms.segments()
+    with (state / "logs" / "monitor.jsonl").open("a") as f:  # 0.6's pull: the record, then…
+        f.write(json.dumps(init(2, "process_exit")) + "\n")
+    conn.execute(  # …its catalogue write, exactly as 0.6 makes it
+        "INSERT INTO seg VALUES (?, ?, 0, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+        "indexed = excluded.indexed",
+        (live.id, ms.raw_size(live), "", ""),
+    )
+    conn.close()
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+        assert [(m[0], m[2]) for m in _marks(cat)] == [(1, "start"), (2, "end")]

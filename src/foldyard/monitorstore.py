@@ -58,10 +58,17 @@ BUDGET_MIN_MB, BUDGET_MAX_MB = 64, 65536
 LEGACY = "legacy"  # an older foldyard's live segment (no first line naming it) is "legacy-<inode>"
 _CLAIMS_KEPT = 10_000  # engine claims, newest first (containers ever described)
 _ORPHANS_KEPT = 64  # snapshots kept from segments already gone (the newest per boot)
-_SCHEMA = 3
+_SCHEMA = 2
+# The marks (:func:`init_mark`) live in tables of their own BESIDE schema 2, never in it: an
+# editable install upgrades the CLI at once and the supervisor only at its restart, and 0.6's
+# catalogue code drops and rebuilds a catalogue whose schema it doesn't know (losing the snapshots
+# kept from removed segments) and fails every write to a `seg` with a column it doesn't know.
+# `markseg.marked` is how far a segment has been read for marks: behind `seg.indexed` wherever 0.6
+# indexed (:meth:`Catalogue.catch_up` reads the marks out of that part first).
 _MARK_SQL = (
     "CREATE TABLE IF NOT EXISTS mark (boot TEXT NOT NULL, seq INTEGER NOT NULL, seg TEXT NOT NULL, "
     "inode TEXT NOT NULL, what TEXT NOT NULL, start TEXT NOT NULL, PRIMARY KEY (boot, seq))",
+    "CREATE TABLE IF NOT EXISTS markseg (id TEXT PRIMARY KEY, marked INTEGER NOT NULL)",
 )
 _SCHEMA_SQL = (
     "DROP TABLE IF EXISTS seg",
@@ -69,10 +76,9 @@ _SCHEMA_SQL = (
     "DROP TABLE IF EXISTS claim",
     "DROP TABLE IF EXISTS span",
     "DROP TABLE IF EXISTS mark",
-    # `marked`: how far the segment has been read for marks — behind `indexed` only in a catalogue
-    # an older foldyard indexed, before marks were kept (:meth:`Catalogue.catch_up` reads them)
+    "DROP TABLE IF EXISTS markseg",
     "CREATE TABLE seg (id TEXT PRIMARY KEY, indexed INTEGER NOT NULL, sealed INTEGER NOT NULL, "
-    "t0 TEXT NOT NULL, t1 TEXT NOT NULL, marked INTEGER NOT NULL DEFAULT 0)",
+    "t0 TEXT NOT NULL, t1 TEXT NOT NULL)",
     "CREATE TABLE snap (boot TEXT NOT NULL, seq INTEGER NOT NULL, seg TEXT NOT NULL, "
     "rec TEXT NOT NULL, PRIMARY KEY (boot, seq))",
     "CREATE TABLE claim (cid TEXT PRIMARY KEY, meta TEXT NOT NULL, n INTEGER NOT NULL)",
@@ -80,10 +86,9 @@ _SCHEMA_SQL = (
     "hi INTEGER NOT NULL, PRIMARY KEY (seg, boot))",
     *_MARK_SQL,
 )
-# 0.6's catalogue (schema 2) gains the marks in place: its snapshots kept from segments retention
-# removed can't be rebuilt, so it is never dropped for this
-_FROM_2_SQL = (*_MARK_SQL, "ALTER TABLE seg ADD COLUMN marked INTEGER NOT NULL DEFAULT 0")
-_MARK_NEEDLE = b'"in_init_tree":true'  # every mark's line holds it: the backfill parses only those
+# every mark's line holds one (the store writes compact JSON; the spaced form, should anything
+# else have): the backfill parses only those — `"in_init_tree"` alone is in nearly every line
+_MARK_NEEDLES = (b'"in_init_tree":true', b'"in_init_tree": true')
 
 
 def store_dir() -> Path:
@@ -563,9 +568,19 @@ class Catalogue:
                 try:
                     (version,) = conn.execute("PRAGMA user_version").fetchone()
                     if version != _SCHEMA:  # another opener may have just made it
-                        for statement in _FROM_2_SQL if version == 2 else _SCHEMA_SQL:
+                        for statement in _SCHEMA_SQL:
                             conn.execute(statement)
                         conn.execute(f"PRAGMA user_version = {_SCHEMA}")
+                    conn.execute("COMMIT")
+                except BaseException:
+                    conn.execute("ROLLBACK")
+                    raise
+            have = {name for (name,) in conn.execute("SELECT name FROM sqlite_master")}
+            if not {"mark", "markseg"} <= have:  # a catalogue 0.6 made: the marks go beside it
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    for statement in _MARK_SQL:
+                        conn.execute(statement)
                     conn.execute("COMMIT")
                 except BaseException:
                     conn.execute("ROLLBACK")
@@ -630,18 +645,25 @@ class Catalogue:
                             "n = excluded.n",
                             (cid, json.dumps(meta)),
                         )
-            new = "excluded.indexed" if exact else "MAX(indexed, excluded.indexed)"
+            before = c.execute("SELECT indexed FROM seg WHERE id = ?", (sid,)).fetchone()
+            marked = c.execute("SELECT marked FROM markseg WHERE id = ?", (sid,)).fetchone()
             c.execute(
-                "INSERT INTO seg VALUES (?, ?, 0, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
-                f"indexed = {new}, "
-                # read for marks as far as it is indexed — unless an older catalogue's backfill
-                # is still owed (`marked` behind `indexed`: catch_up reads it first)
-                f"marked = CASE WHEN marked >= indexed THEN {new} ELSE marked END, "
+                "INSERT INTO seg VALUES (?, ?, 0, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                f"indexed = {'excluded.indexed' if exact else 'MAX(indexed, excluded.indexed)'}, "
                 "t0 = CASE WHEN t0 = '' OR (excluded.t0 <> '' AND excluded.t0 < t0) "
                 "     THEN excluded.t0 ELSE t0 END, "
                 "t1 = CASE WHEN excluded.t1 > t1 THEN excluded.t1 ELSE t1 END",
-                (sid, indexed, t0, t1, indexed),
+                (sid, indexed, t0, t1),
             )
+            # read for marks as far as it is indexed now — unless part of what was indexed before
+            # was indexed without them (0.6): catch_up reads that part first
+            if before is None or (marked is not None and marked[0] >= before[0]):
+                (now,) = c.execute("SELECT indexed FROM seg WHERE id = ?", (sid,)).fetchone()
+                c.execute(
+                    "INSERT INTO markseg VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET "
+                    "marked = excluded.marked",
+                    (sid, now),
+                )
             c.execute(
                 "DELETE FROM claim WHERE n <= (SELECT MAX(n) FROM claim) - ?", (_CLAIMS_KEPT,)
             )
@@ -660,6 +682,8 @@ class Catalogue:
         c.execute("UPDATE seg SET id = ? WHERE id = ?", (new, old))
         c.execute("UPDATE snap SET seg = ? WHERE seg = ?", (new, old))
         c.execute("UPDATE mark SET seg = ? WHERE seg = ?", (new, old))
+        c.execute("DELETE FROM markseg WHERE id = ?", (new,))
+        c.execute("UPDATE markseg SET id = ? WHERE id = ?", (new, old))
         c.execute("DELETE FROM span WHERE seg = ?", (new,))
         c.execute("UPDATE span SET seg = ? WHERE seg = ?", (new, old))
         c.execute("COMMIT")
@@ -672,6 +696,7 @@ class Catalogue:
         c.executemany("DELETE FROM seg WHERE id = ?", [(g,) for g in gone])
         c.executemany("DELETE FROM span WHERE seg = ?", [(g,) for g in gone])
         c.executemany("DELETE FROM mark WHERE seg = ?", [(g,) for g in gone])
+        c.executemany("DELETE FROM markseg WHERE id = ?", [(g,) for g in gone])
         orphan = "seg NOT IN (SELECT id FROM seg)"
         c.execute(
             f"DELETE FROM snap WHERE {orphan} AND seq < (SELECT MAX(o.seq) FROM snap o "
@@ -755,7 +780,9 @@ class Catalogue:
         owed = {
             sid: (marked, indexed)
             for sid, marked, indexed in self.conn.execute(
-                "SELECT id, marked, indexed FROM seg WHERE marked < indexed"
+                "SELECT seg.id, COALESCE(markseg.marked, 0), seg.indexed FROM seg "
+                "LEFT JOIN markseg ON markseg.id = seg.id "
+                "WHERE COALESCE(markseg.marked, 0) < seg.indexed"
             )
         }
         for seg in segs:
@@ -766,7 +793,7 @@ class Catalogue:
             for line, end in _lines(seg, marked):
                 if end > indexed:
                     break
-                if _MARK_NEEDLE not in line:
+                if not any(n in line for n in _MARK_NEEDLES):
                     continue
                 try:
                     rec = json.loads(line)
@@ -785,7 +812,11 @@ class Catalogue:
                         "UPDATE SET seg = excluded.seg",
                         (r["boot"], int(r["seq"]), seg.id, m["inode"], m["what"], m["start"]),
                     )
-                c.execute("UPDATE seg SET marked = indexed WHERE id = ?", (seg.id,))
+                c.execute(
+                    "INSERT INTO markseg VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET "
+                    "marked = excluded.marked",
+                    (seg.id, indexed),
+                )
                 c.execute("COMMIT")
             except BaseException:
                 c.execute("ROLLBACK")

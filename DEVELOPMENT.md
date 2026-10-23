@@ -111,9 +111,10 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   at 32 MB and compressed (~30×), kept within a HOST-ONLY disk budget
   (`<state dir>/monitor-store.toml`, never `foldyard.toml`: the box mustn't shorten the evidence
   about itself), and a SQLite catalogue (derived; rebuilt from the segments) of every snapshot,
-  container-init mark, engine claim and segment span (schema 3; a 0.6 catalogue gains the marks
-  in place, its kept snapshots intact). The pull indexes a record before writing it; every reader
-  catches the catalogue up first.
+  container-init mark, engine claim and segment span. The marks sit in tables BESIDE schema 2,
+  never in it: a supervisor still on 0.6 after an editable upgrade would drop a catalogue whose
+  schema it doesn't know, and fail every write to a table with a column it doesn't know. The pull
+  indexes a record before writing it; every reader catches the catalogue up first.
 - `monitorhooks.py` — the operator's hooks over those events: host-only config
   (`<state dir>/monitor-hooks.toml`, NEVER `foldyard.toml` — a command there is host code
   execution for the box, a url an exfiltration channel), settled events only (a later snapshot
