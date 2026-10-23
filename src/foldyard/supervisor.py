@@ -2131,7 +2131,7 @@ def main() -> int:
 
     # The guest monitor's events (ADR-0032): pulled from the VM on their own thread, so an ssh
     # that stalls never holds up this loop's heartbeat. It idles while the monitor is off.
-    monitorlog.start(log, lambda: stopping)
+    monitorlog.start(log, lambda: stopping, notify=_notify)
     # …and the operator's hooks (host-only config, ~/.foldyard/<project>/monitor-hooks.toml), on
     # a third thread: a slow webhook or script never delays the pull.
     monitorhooks.start(log, lambda: stopping)

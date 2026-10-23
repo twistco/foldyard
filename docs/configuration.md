@@ -402,7 +402,9 @@ disk_gib = 60
       example a scorer that only understands containers' events, can set
       `keep_who_after_crossing = true` to keep its filter. It still gets the `crossed` events
       themselves. `fy monitor` and `fy doctor` say when this VM boot has had a crossing, and
-      `fy monitor` always shows everything.
+      `fy monitor` always shows everything. The first crossing of each VM boot is also told on
+      your computer, once: a line in `fy host logs` and, with `[host] notifications` on, a desktop
+      notification naming the container it came from (its id, and the name the engine reports).
 
     - `fy monitor hook add` writes this file for you, checking each hook the way the supervisor
       will. Your own edits and comments are kept. For example, to give the box a file of its
@@ -1190,7 +1192,8 @@ sa_labels = { app = "app-runtime", box = "log-reader" }
 Two more top-level tables tune the supervisor, foldyard's background process on your computer:
 
 - **`[host] notifications`** — post desktop notifications when a credential stops or starts
-  working again (macOS only today). Default: `true`.
+  working again, and when a process first crosses out of a container in a monitored VM boot
+  (macOS only today). Default: `true`.
 - **`[resnapshot_on_capability]`** — `switch = ["service", …]`: compose services the supervisor
   recreates when that switch's credential check goes from failing to working — from the current
   mode, so a service still on an older mode's settings catches up too. For a service that fetches

@@ -73,6 +73,7 @@ class Cursor:
     gaps: int = 0  # sequence numbers that never arrived
     forged: int = 0  # lines that failed the HMAC
     behind: bool = False  # the last pull filled its budget: more is waiting
+    told: str = ""  # "<boot>:<seq>" of the crossing last told on your computer (tell_crossing)
 
     @classmethod
     def load(cls) -> Cursor:
@@ -277,9 +278,62 @@ def pull_once(
         raise
 
 
-def run(log: Callable[[str], None], stopping: Callable[[], bool]) -> None:
+def tell_crossing(
+    log: Callable[[str], None], notify: Callable[[str, str], None] | None = None
+) -> None:
+    """Say, once, that something crossed out of a container in the boot the pull is reading: its
+    first crossing, as the pull judged it (:meth:`monitorstore.Catalogue.first_crossing`) — a log
+    line and a desktop notification. ``fy monitor`` and doctor say it too, but only to someone
+    looking, and a crossing should be rare. Told once per crossing (the cursor keeps which), so a
+    supervisor restart doesn't tell it again; a new boot's first crossing is told anew."""
+    boot = current_boot()
+    cat = monitorstore.Catalogue.open_or_none() if boot and monitorstore.segments() else None
+    if cat is None:
+        return
+    try:
+        first = cat.first_crossing(boot)
+        claims = cat.claims() if first else {}
+    except Exception:
+        return  # a busy catalogue: the next pull asks again
+    finally:
+        cat.close()
+    if first is None:
+        return
+    seq, when, cid = first
+    cur = Cursor.load()
+    key = f"{boot}:{seq}"
+    if cur.told == key:
+        return
+    # the id is the kernel's (its scope); the name only the engine's claim, which the box chooses
+    claimed = ((claims.get(cid) or {}).get("name") or "") if cid else ""
+    name = (
+        (f"container {cid[:12]}" + (f" (named {claimed})" if claimed else ""))
+        if cid
+        else ("a container")
+    )
+    at = when[11:19] if len(when) >= 19 else "?"
+    log(
+        f"⚠ guest monitor: a process crossed out of {name} at {at} UTC — every monitor hook now "
+        "gets the rest of this VM boot unfiltered (`fy monitor` shows it)"
+    )
+    if notify is not None:
+        notify(
+            f"fy {config.project()}: a process crossed out of a container",
+            f"From {name} at {at} UTC. Hooks get the rest of this VM boot unfiltered; "
+            "`fy monitor` shows what it did.",
+        )
+    cur.told = key
+    cur.save()
+
+
+def run(
+    log: Callable[[str], None],
+    stopping: Callable[[], bool],
+    notify: Callable[[str, str], None] | None = None,
+) -> None:
     """The supervisor's pull loop (a daemon thread): every :data:`PULL_EVERY` seconds while the
-    monitor is wanted and the VM runs. Logs a failure once per distinct message, never raises."""
+    monitor is wanted and the VM runs. Logs a failure once per distinct message, never raises;
+    tells a crossing once (:func:`tell_crossing`)."""
     from . import machine, monitor
 
     said = ""
@@ -290,6 +344,7 @@ def run(log: Callable[[str], None], stopping: Callable[[], bool]) -> None:
             if monitor.wanted() and machine.state() == "running":
                 pull_once(machine.BACKEND, machine.MACHINE, monitor.relay_key())
                 behind = Cursor.load().behind
+                tell_crossing(log, notify)
         except Exception as e:
             msg = f"guest monitor: pulling events failed: {e}"
         if msg and msg != said:
@@ -303,8 +358,12 @@ def run(log: Callable[[str], None], stopping: Callable[[], bool]) -> None:
             time.sleep(0.2)
 
 
-def start(log: Callable[[str], None], stopping: Callable[[], bool]) -> threading.Thread:
-    t = threading.Thread(target=run, args=(log, stopping), name="monitor-pull", daemon=True)
+def start(
+    log: Callable[[str], None],
+    stopping: Callable[[], bool],
+    notify: Callable[[str, str], None] | None = None,
+) -> threading.Thread:
+    t = threading.Thread(target=run, args=(log, stopping, notify), name="monitor-pull", daemon=True)
     t.start()
     return t
 
