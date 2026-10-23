@@ -664,10 +664,13 @@ def test_the_join_names_a_reused_namespace_only_by_its_own_container(scenario):
 # tools run in the VM's pid namespace; a container's processes, the ones killed after its init
 # included, in its own.
 # Validated red: without the lifetime bounds (netavark before an init, the snapshot after naming
-# the container; and after an init's exit, the snapshot before naming it — the two @examples),
-# and against each of: no process-start guard for the one-sided case (a late event of a
-# container that came and went unseen given to the next), and reading an init exit as the end of
-# the snapshot before's container when a container came and went in between.
+# the container; and after an init's exit, the snapshot before naming it — the first two
+# @examples), and against each of (the @examples after, which random search finds only at tens of
+# thousands of examples): no process-start guard; an exited life's processes taken as the
+# container's in any pid namespace, or whichever life it was; the number free since inside the
+# window read as free since before it; and a life that ended inside the window taken as the
+# container's again because the snapshot after names it. What only completeness or the catalogue
+# path depends on is pinned by unit tests (tests/test_monitorlog.py).
 
 
 @settings(max_examples=300, deadline=None)
@@ -677,6 +680,21 @@ def test_the_join_names_a_reused_namespace_only_by_its_own_container(scenario):
 # …and after its init left, only the snapshot before naming it
 @example(scenario=[("start", 0, True, False), ("snap",), ("stop", 0), ("transient",),
                    ("snap",)])  # fmt: skip
+# a late event of a container that came and went unseen, behind the next one's init (needs the
+# process-start guard)
+@example(scenario=[("start", 1, True, False), ("stop", 1), ("start", 0, False, False), ("stop", 0),
+                   ("start", 1, False, False), ("late", 0)])  # fmt: skip
+# the next container's processes after the old one's init left: only the old one's pid namespace
+# is still the old one's, and only when the snapshot before saw that life
+@example(scenario=[("start", 0, True, True), ("stop", 0), ("start", 1, True, False),
+                   ("stop", 1)])  # fmt: skip
+# …and the number free again inside the window: not the snapshot's container's either
+@example(scenario=[("start", 0, True, False), ("snap",), ("stop", 0), ("start", 1, False, False),
+                   ("stop", 1)])  # fmt: skip
+# another container's whole life between a container's two: the snapshot after naming the first
+# again doesn't make the middle one's events its
+@example(scenario=[("start", 0, True, False), ("snap",), ("stop", 0), ("start", 1, True, False),
+                   ("run", 1, False), ("stop", 1), ("start", 0, True, False), ("snap",)])  # fmt: skip
 def test_no_event_is_given_to_a_container_outside_its_life(scenario):
     world = NsWorld()
     for s in scenario:

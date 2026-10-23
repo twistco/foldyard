@@ -557,6 +557,74 @@ def test_after_a_containers_init_left_only_its_own_processes_are_its():
     ]  # fmt: skip
 
 
+def test_a_container_the_snapshot_before_saw_being_set_up_keeps_its_life():
+    # the relay reads the export a moment behind: its snapshot can name a container whose init's
+    # exec comes after it in the stream — that life is the one it saw, even if it's over by the next
+    recs = _records(
+        snap({300: [BOX]}, t=T_BEFORE),
+        init(300, start="2026-10-04T09:29:59Z"),  # started before the snapshot was taken
+        proc(300, "2026-10-04T10:00:00Z"),
+        init(300, "process_exit", start="2026-10-04T09:29:59Z"),
+        snap({}),
+    )
+    assert _who(monitorlog.attribute(recs, "fyex")) == [("container", "a")] * 3
+
+
+def test_a_number_free_since_before_the_window_is_never_given_for_podmans_tools():
+    # the old container left long ago; a container Tetragon never marks (say one in the VM's pid
+    # namespace) holds the number now: its own processes are its, podman's tools in the VM's pid
+    # namespace are not
+    recs = _records(
+        snap({}, t=T_BEFORE),
+        init(300, start="2026-10-04T09:00:00Z"),
+        init(300, "process_exit", start="2026-10-04T09:00:00Z"),
+        snap({300: [OTHER]}),
+        proc(300, "2026-10-04T10:00:02Z"),
+        proc(300, "2026-10-04T10:00:03Z", host_pid=True),
+        snap({300: [OTHER]}),
+    )
+    assert _who(monitorlog.attribute(recs, "fyex"))[2:] == [
+        ("container", "c"),
+        ("unattributed", ""),
+    ]
+
+
+def test_a_build_between_two_containers_is_the_builds_not_ambiguous():
+    # the box's number went to an image build step, then to the next container: the step's
+    # events are neither container's, and the facts say whose they are
+    recs = _records(
+        snap({200: [BOX]}, t=T_BEFORE),
+        init(200, "process_exit", start="2026-10-04T09:00:00Z"),
+        init(200, start="2026-10-04T10:00:01Z", by="/proc/self/exe"),
+        proc(200, "2026-10-04T10:00:02Z"),
+        init(200, "process_exit", start="2026-10-04T10:00:01Z", by="/proc/self/exe"),
+        init(200, start="2026-10-04T10:00:03Z"),
+        snap({200: [OTHER]}),
+    )
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][2] == "build"
+
+
+def test_a_stretch_reads_an_old_init_by_where_it_came_from_then(monkeypatch, tmp_path):
+    # a hook's read holds only podman's tool on a number whose last container left before the
+    # snapshot before: the join must fetch where that container's init came from (podman's
+    # namespace, entered long before) to know it was a container's init at all
+    from foldyard import monitorstore
+
+    monkeypatch.setattr(monitorstore.config, "state_dir", lambda: tmp_path)
+    stream = [entered(), snap({}, t=T_BEFORE), init(300, start="2026-10-04T09:00:00Z"),
+              init(300, "process_exit", start="2026-10-04T09:00:00Z"), snap({300: [OTHER]}),
+              proc(300, "2026-10-04T10:00:03Z", host_pid=True), snap({300: [OTHER]})]  # fmt: skip
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    monitorstore.append(recs)
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        (e,) = monitorlog.join([recs[5]], cat, "fyex")
+    finally:
+        cat.close()
+    assert e.who == "unattributed"
+
+
 def test_a_container_holding_a_process_in_the_vms_or_podmans_namespace_is_ambiguous():
     # a container's scope with a process in podman's own namespace (a privileged container can
     # `nsenter` there; crun joins a scope a moment before it leaves podman's namespace): neither
