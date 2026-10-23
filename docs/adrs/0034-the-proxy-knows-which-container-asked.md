@@ -27,9 +27,12 @@
   - **Token-service ports are forwarded but not stamped.**
   - **`fy up` refuses a forwarder that isn't serving**, since nothing in the VM reaches the
     proxy without it.
-  - **Not yet:** `fy monitor`'s join and learn mode naming the service, the hooks' batches
-    resolving stamps, and networks as foldyard's own record (names and labels are still the
-    engine's claims). Untested: gVisor, podman 6, and load from real image builds.
+  - **Done:** the Network Log names who used each host and who was refused; `fy allow learn`
+    names the service that asked (container names are the engine's claims).
+  - **Not yet:** `fy monitor`'s join of proxy rows, the hooks' batches resolving stamps, and
+    networks as foldyard's own record (names and labels are still the engine's claims).
+    Untested: gVisor, podman 6, `fy verify` and `fy box up` with it on, and load from real image
+    builds.
 - **Sources:** the 2026-10-22 investigation of a proxy stall during parallel BashArena image
   builds (the egress log, `lsof` on the host, a replay batch's monitor digest; not in the repo); the
   spike record [forwarder-spike.md](https://github.com/twistco/foldyard/blob/main/docs/forwarder-spike.md) (a real Lima `template:podman` guest:
