@@ -823,17 +823,17 @@ def crossings(events: list[monitorlog.Event], cat=None) -> dict[str, Crossing]:
 
 def uncatalogued(events: list[monitorlog.Event], first: dict[str, Crossing]) -> dict[str, Crossing]:
     """``first`` for a round whose catalogue couldn't be read: a crossing earlier in a boot than
-    what was read can't be seen, so every boot ``events`` touch counts as crossed from before them
-    — delivered unfiltered rather than missed, as for a candidate a busy catalogue couldn't judge
-    — unless a crossing among ``events`` is earlier still."""
+    what was read can't be ruled out — not even when the read holds one — so every boot ``events``
+    touch counts as crossed from before them: delivered unfiltered rather than missed, as for a
+    candidate a busy catalogue couldn't judge."""
     out = dict(first)
     for boot in dict.fromkeys(e.boot for e in events):
-        if boot not in out:
-            out[boot] = Crossing(
-                boot, -1, "", "",
-                why="the monitor's catalogue couldn't be read, so a crossing earlier in this boot "
-                    "can't be ruled out: `who` filters nothing in this batch",
-            )  # fmt: skip
+        out[boot] = Crossing(
+            boot, -1, "", "",
+            why="the monitor's catalogue couldn't be read, so a crossing earlier in this boot "
+                "can't be ruled out: `who` filters nothing in this batch, nor `worktrees` an "
+                "event with no worktree",
+        )  # fmt: skip
     return out
 
 

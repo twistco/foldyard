@@ -1095,8 +1095,9 @@ def test_without_a_catalogue_a_round_counts_every_boot_as_crossed_and_says_why()
     events = monitorlog.attribute([snap(0), ev(1, inode=1), ev(2)], "fyex")
     first = mh.uncatalogued(events, {})
     assert first[BOOT].seq == -1 and "catalogue" in first[BOOT].why
-    seen = {BOOT: mh.Crossing(BOOT, 0, "t0", BOX)}
-    assert mh.uncatalogued(events, seen) == seen  # one it can see is earlier than any event
+    # one it can see in the read doesn't help: an earlier one still can't be ruled out
+    seen = {BOOT: mh.Crossing(BOOT, 2, "t2", BOX)}
+    assert mh.uncatalogued(events, seen)[BOOT].seq == -1
 
 
 def test_a_round_that_cant_read_the_catalogue_delivers_unfiltered_and_says_why(
