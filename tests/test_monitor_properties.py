@@ -60,6 +60,7 @@ META = {
     C: None,  # gone before the host asked
 }
 INODES = (1, 200, 300, 400)  # 1 is the VM's own namespace
+PODMAN_NS = 7  # podman's rootless namespace, where conmon runs
 KINDS = ("process_exec", "process_exit")
 
 # ── the generated world, as plain data ─────────────────────────────────────────────────
@@ -77,6 +78,10 @@ steps = st.lists(
         st.tuples(st.just("burst"), st.integers(5, 40), st.sampled_from(INODES)),
         # a container's init entering (exec) or leaving (exit) its namespace: a mark the join reads
         st.tuples(st.just("init"), st.sampled_from(INODES[1:]), st.sampled_from(KINDS)),
+        # podman entering a namespace from the VM's (its own: 7, where conmon runs; or a helper's),
+        # and an image build step's init, started by podman itself there
+        st.tuples(st.just("entry"), st.sampled_from((PODMAN_NS, *INODES[1:]))),
+        st.tuples(st.just("build"), st.sampled_from(INODES[1:]), st.sampled_from(KINDS)),
         st.tuples(st.just("snap"), mappings),
         st.tuples(st.just("engine"), st.sampled_from([A, B, C])),
         st.tuples(st.just("lost"), st.integers(1, 3)),
@@ -126,14 +131,19 @@ class World:
 
     def step(self, s: tuple) -> None:
         what = s[0]
-        if what in ("ev", "init"):
+        if what in ("ev", "init", "build", "entry"):
             proc = {"binary": f"/bin/b{s[1]}", "pid": 7, "uid": 1, "ns": {"mnt": {"inum": s[1]}},
                     "start_time": _iso(self.now)}  # fmt: skip
             body: dict = {"process": proc}
-            if what == "init":
+            if what in ("init", "build"):
                 proc["in_init_tree"] = True
-                body["parent"] = {"ns": {"mnt": {"inum": 7}}}  # conmon, outside it
-            self._rec({"k": "ev", "e": {s[2]: body, "time": _iso(self.now)}})
+                by = "/usr/bin/conmon" if what == "init" else "/proc/self/exe"
+                body["parent"] = {"binary": by, "ns": {"mnt": {"inum": PODMAN_NS}}}
+            if what == "entry":
+                proc["ns"]["user"] = {"inum": 4026532575}
+                body["parent"] = {"ns": {"mnt": {"inum": 1, "is_host": True}}}
+            kind = "process_exec" if what == "entry" else s[2]
+            self._rec({"k": "ev", "e": {kind: body, "time": _iso(self.now)}})
         elif what == "burst":  # a storm: many events, no snapshot among them
             for i in range(s[1]):
                 self.step(("ev", s[2] if i % 3 else INODES[i % len(INODES)], KINDS[i % 2]))
@@ -171,6 +181,10 @@ class World:
                 if first and h.get("last") and h["last"][0] == first["boot"]:
                     h["pos"] = oldest
             self._save()
+
+    def states_now(self) -> dict[str, dict]:
+        path = mh._state_file()
+        return json.loads(path.read_text()) if path.exists() else {}
 
     def _states(self) -> list[dict]:
         path = mh._state_file()
@@ -386,6 +400,20 @@ def test_a_hook_delivers_the_full_store_join_or_says_what_it_could_not(
                     assert _covered(key, gaps, rank, ("unsettled",)), (
                         f"{hook.name} got {key}, which its filter doesn't match in the full join"
                     )
+            # never silently dropped: an event its filters pass over (the VM's and podman's own,
+            # by default) is counted in a batch's `passed`, or still owed to the next one
+            counted: dict[str, int] = {}
+            for b in batches:
+                for w, n in b["passed"].items():
+                    counted[w] = counted.get(w, 0) + n
+            owed = world.states_now().get(hook.name, {}).get("passed", {})
+            for w in mh.WHO:
+                over = [k for k, e in truth.items() if e["who"] == w and k not in delivered
+                        and not _covered(k, gaps, rank, ("rotated", "unsettled"))]  # fmt: skip
+                assert len(over) <= counted.get(w, 0) + owed.get(w, 0), (
+                    f"{hook.name} passed over {len(over)} {w} events, counted "
+                    f"{counted.get(w, 0)} + {owed.get(w, 0)} owed"
+                )
             event(f"delivered>0={bool(delivered)}")
             event(f"whys={sorted({g['why'] for g in gaps})}")
             if budget == "ample":
@@ -458,6 +486,8 @@ class NsWorld:
         self.t = 1_800_000_000 * 10**9
         self.recs: list[dict] = []
         self.truth: dict[int, str | None] = {}  # seq -> container (None: not a container's)
+        self.recs.append(_entry(0, "b", _stamp(self.t), CONMON_NS))  # podman's namespace, at boot
+        self.truth[0] = None
         self.running: dict[str, tuple[int, int, bool]] = {}  # cid -> (number, init start, seen)
         self.dead: dict[str, tuple[int, int, int]] = {}  # cid -> (number, init start, snaps then)
         self.snaps = 0
@@ -479,8 +509,12 @@ class NsWorld:
 
     def _ev(self, kind, number, pstart, init, parent_ns, cid, binary="/bin/sh") -> int:
         seq = len(self.recs)
+        # a container's processes are in its own pid namespace (each life a new one); podman's
+        # tools in the VM's
+        life = self.cur.get(cid, 0) if cid is not None else 0
+        pid = {"inum": 5000 + life} if cid is not None else {"inum": 4026531836, "is_host": True}
         proc = {"binary": binary, "pid": 1000 + seq, "uid": 0, "in_init_tree": init,
-                "start_time": _stamp(pstart), "ns": {"mnt": {"inum": number}}}  # fmt: skip
+                "start_time": _stamp(pstart), "ns": {"mnt": {"inum": number}, "pid": pid}}  # fmt: skip
         body = {"process": proc, "parent": {"binary": "/usr/bin/conmon",
                                             "ns": {"mnt": {"inum": parent_ns}}}}  # fmt: skip
         self.recs.append({"k": "ev", "boot": "b", "seq": seq,
@@ -541,6 +575,22 @@ class NsWorld:
             self._snap()
 
 
+def _entry(seq: int, boot: str, time: str, inode: int) -> dict:
+    """podman entering its rootless namespace ``inode`` from the VM's own (a process there, its
+    parent in the VM's mount namespace, outside the VM's user namespace) — how the join knows the
+    namespace conmon starts containers from (:func:`foldyard.monitorstore.ns_fact`)."""
+    proc = {"binary": "/usr/bin/conmon", "pid": 3, "uid": 0, "start_time": time,
+            "ns": {"mnt": {"inum": inode}, "user": {"inum": 4026532575}}}  # fmt: skip
+    parent = {"binary": "/usr/bin/podman", "ns": {"mnt": {"inum": 1, "is_host": True}}}
+    return {"k": "ev", "boot": boot, "seq": seq,
+            "e": {"process_exec": {"process": proc, "parent": parent}, "time": time}}  # fmt: skip
+
+
+def _mnt(rec: dict) -> int:
+    body = next(v for k, v in rec["e"].items() if k.startswith("process_"))
+    return body["process"]["ns"]["mnt"]["inum"]
+
+
 def _around(recs: list[dict], seq: int) -> tuple[dict | None, dict | None]:
     before = next((r for r in reversed(recs[:seq]) if r["k"] == "scopes"), None)
     after = next((r for r in recs[seq + 1 :] if r["k"] == "scopes"), None)
@@ -577,8 +627,14 @@ def test_the_join_names_a_reused_namespace_only_by_its_own_container(scenario):
         cid, life = world.life[seq]
         late = seq in world.late
         # complete, the new holder: an event its own snapshot (the next) names it for, its init
-        # seen entering — in this snapshot window or the one before
-        if a == [cid] and life in world.starts and not late:
+        # seen entering — in this snapshot window or the one before — and alive when that snapshot
+        # was taken (a restart under the same id inside one window reads as two containers: the
+        # earlier life, over before the snapshot, is no one's the join can name)
+        ended = world.exits.get(life)
+        over = after is not None and ended is not None and ended < after["seq"]
+        later = [q for other, q in world.starts.items() if other != life and q > world.starts.get(
+            life, 1 << 30) and after is not None and q < after["seq"] and _mnt(world.recs[q]) == e.mnt]  # fmt: skip
+        if a == [cid] and life in world.starts and not late and not later and not over:
             assert (e.who, e.container) == ("container", cid), f"{seq}: new holder lost"
         # complete, the old holder: an event before its init's exit, the snapshot before naming it
         # and not taken mid-setup (its own start mark would come after that snapshot)
@@ -592,3 +648,56 @@ def test_the_join_names_a_reused_namespace_only_by_its_own_container(scenario):
             and not any(r["k"] == "scopes" for r in world.recs[seq:exit_seq])
         ):
             assert (e.who, e.container) == ("container", cid), f"{seq}: old holder lost"
+
+
+# ── no event given to a container outside its life ──────────────────────────────────────
+#
+# The follow-up (cabash, 2026-10-23, docs/monitor-pipeline.md §3): podman's netavark, nft and crun
+# run for an instant in a mount namespace of their own, and the kernel gives it the lowest free
+# number — the one a container is about to take, or has just left. A snapshot names the container
+# for that number, and the join gave it podman's events from before its init entered or after it
+# left: ~1,300 events a boot on cabash. The same world as above, held to the stronger claim: an
+# event the join gives a container is that container's — unless Tetragon never marks its init, so
+# nothing says where its life begins or ends, or a snapshot named it while the runtime was still
+# setting it up (its init's exec after that snapshot in the stream: telling those apart needs the
+# next window's marks, which a hook delivering at the first snapshot after can't wait for). Podman's
+# tools run in the VM's pid namespace; a container's processes, the ones killed after its init
+# included, in its own.
+# Validated red: without the lifetime bounds (netavark before an init, the snapshot after naming
+# the container; and after an init's exit, the snapshot before naming it — the two @examples),
+# and against each of: no process-start guard for the one-sided case (a late event of a
+# container that came and went unseen given to the next), and reading an init exit as the end of
+# the snapshot before's container when a container came and went in between.
+
+
+@settings(max_examples=300, deadline=None)
+@given(scenario=ns_steps)
+# netavark on the number before the container's init entered, only the snapshot after naming it
+@example(scenario=[("snap",), ("transient",), ("start", 0, True, False), ("snap",)])  # fmt: skip
+# …and after its init left, only the snapshot before naming it
+@example(scenario=[("start", 0, True, False), ("snap",), ("stop", 0), ("transient",),
+                   ("snap",)])  # fmt: skip
+def test_no_event_is_given_to_a_container_outside_its_life(scenario):
+    world = NsWorld()
+    for s in scenario:
+        world.step(s)
+    world._snap()
+    events = {e.seq: e for e in monitorlog.attribute(world.recs, "fyex")}
+    for seq, true in world.truth.items():
+        e = events[seq]
+        if e.who != "container" or e.container == true:
+            continue
+        _, after = _around(world.recs, seq)
+        named_early = after is not None and any(
+            q > after["seq"] and _mnt(world.recs[q]) == e.mnt
+            and world.life.get(q, ("", 0))[0] == e.container
+            and not any(q2 for q2 in world.starts.values() if seq < q2 < after["seq"]
+                        and _mnt(world.recs[q2]) == e.mnt)
+            for q in world.starts.values()
+        )  # fmt: skip
+        if named_early:
+            continue
+        assert not world.marked.get(e.container, False), (
+            f"{seq} ({'podman' if true is None else true[:1]}'s) given to {e.container[:1]}, "
+            "outside its life"
+        )

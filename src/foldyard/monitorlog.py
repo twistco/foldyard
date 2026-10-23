@@ -34,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+from bisect import bisect_right
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
@@ -314,12 +315,22 @@ def start(log: Callable[[str], None], stopping: Callable[[], bool]) -> threading
 
 @dataclass(frozen=True)
 class Event:
-    """One normalised event (the schema `fy monitor` prints). ``who`` is how it was attributed:
-    ``container`` (a kernel snapshot names its scope), ``vm`` (the VM's own namespace: a VM
-    process, e.g. podman, conmon, pasta, sshd), ``ambiguous`` (the snapshots disagree, or one
-    namespace held two scopes — never resolved by guessing) or ``unattributed`` (no snapshot
-    holds its namespace: a container too short-lived to be seen, or one outside podman's scopes —
-    read it as the dev box's own activity)."""
+    """One normalised event (the schema `fy monitor` prints). ``who`` is how it was attributed
+    (:func:`attribute`), each from kernel facts the box can't fake:
+
+    * ``container``: a kernel snapshot names its scope, within that container's life;
+    * ``build``: an image build's step (an init podman itself started in its own namespace);
+    * ``podman``: podman's own rootless namespace — conmon, pasta, crun, netavark, the API service;
+    * ``vm``: the VM itself — its own mount namespace, or its own user namespace (systemd's
+      sandboxed services);
+    * ``ambiguous``: the records disagree — two containers for one namespace, or a container's
+      scope holding a process in the VM's or podman's namespace — never resolved by guessing;
+    * ``unattributed``: none of these — a container too short-lived for any snapshot, a process
+      Tetragon never saw start, podman's tools in a namespace of their own for an instant.
+
+    ``crossed``: the process is in the VM's or podman's namespace, but its parent was in one that
+    isn't — something crossed out of a container. Attributed to where it came from, and never left
+    out by a hook's ``who`` filter."""
 
     time: str
     boot: str
@@ -347,6 +358,7 @@ class Event:
     # The event's mount-namespace number, as the kernel reported it: what the join matched
     # against the snapshots — so a consumer can group or re-join events itself (additive).
     mnt: int | None = None
+    crossed: bool = False  # additive: see the class doc
 
 
 def _kind(body: dict, kind: str) -> tuple[str, str]:
@@ -463,6 +475,213 @@ def _handover(
     return ""
 
 
+class _Facts:
+    """One boot's namespace facts (:func:`monitorstore.ns_fact`), read forward: each init mark's
+    KIND, decided by where its init came from at the time — ``container`` (conmon, in podman's
+    namespace), ``build`` (podman itself there) or ``nested`` (anywhere else: a namespace made
+    inside another, which says nothing about who holds a number) — and podman's entries
+    (``entry``). Forward, in seq order, so a kind depends only on what came before it: no chain of
+    namespaces made inside each other can make the reading recurse."""
+
+    def __init__(self, facts: Iterable[dict]) -> None:
+        # inode -> [(seq, kind, what, init start, init pid namespace)]
+        self.held: dict[str, list[tuple[int, str, str, int | None, str]]] = {}
+        self.seqs: dict[str, list[int]] = {}
+        for f in sorted(facts, key=lambda f: int(f["seq"])):
+            what, seq = f["what"], int(f["seq"])
+            if what == "entry":
+                kind = "entry"
+            else:
+                outside = self.holder(str(f["outside"]), seq - 1)
+                if outside is None or outside[1] != "entry":
+                    continue  # nested: never a holder of its number
+                kind = "container" if str(f.get("by") or "").startswith("conmon") else "build"
+            fact = (seq, kind, what, _ns(f["start"]), str(f.get("pidns") or ""))
+            self.held.setdefault(str(f["inode"]), []).append(fact)
+            self.seqs.setdefault(str(f["inode"]), []).append(seq)
+
+    def holder(self, inode: str, seq: int) -> tuple[int, str, str, int | None, str] | None:
+        """The newest fact about who holds ``inode`` at or before ``seq``: ``(seq, kind, what,
+        init start, init pid namespace)``, kind ``entry``/``container``/``build``, what
+        ``entry``/``start``/``end``."""
+        seqs = self.seqs.get(inode)
+        if not seqs:
+            return None
+        i = bisect_right(seqs, seq)
+        return self.held[inode][i - 1] if i else None
+
+    def podman(self, inode: str, seq: int) -> bool:
+        h = self.holder(inode, seq)
+        return h is not None and h[1] == "entry"
+
+    def start_of(self, inode: str, life: str, below: int) -> tuple | None:
+        """The container init start, before ``below``, of the life whose init is in pid namespace
+        ``life`` — the start an exit pairs with."""
+        return next(
+            (f for f in reversed(self.held.get(inode, ())) if f[0] < below and f[1] == "container"
+             and f[2] == "start" and f[4] == life),
+            None,
+        )  # fmt: skip
+
+    def inits(self, inode: str, lo: int, hi: int) -> list[tuple[int, str, int | None, str]]:
+        """The container inits entering (``start``) and leaving (``end``) ``inode`` strictly
+        between ``lo`` and ``hi``: ``(seq, what, init start, init pid namespace)``."""
+        return [
+            (q, w, t, p)
+            for q, k, w, t, p in self.held.get(inode, ())
+            if k == "container" and lo < q < hi
+        ]
+
+
+def _lifetime(
+    facts: _Facts,
+    inode: str,
+    seq: int,
+    window: tuple[int, int, int | None],
+    before: bool,
+    again: bool,
+    proc: tuple[str, bool, int | None],
+) -> bool:
+    """Whether an event the snapshots give to one container falls within that container's life —
+    from its init entering the namespace to its init leaving it, as the init's marks say (a life is
+    paired by its init's pid namespace) — or, where no mark says, is taken as the snapshots do.
+    ``window``: the snapshot before and the one after (seqs) and when the one before was taken
+    (ns); ``before``: the snapshot before names the container (else only the one after does);
+    ``again``: the one after names it too; ``proc``: the event's process's pid namespace, whether
+    that is the VM's (where podman's tools run) and when the process started.
+
+    * The life holding the number at the event is the newest container init mark at or before it.
+      None: the snapshots decide — except, named only by the snapshot after, before an init
+      entering later in the window (podman's netavark, nft and crun run for an instant in a
+      namespace of their own carrying the number the container takes next).
+    * A life in progress is the container's when the snapshot before saw it (it started before
+      that snapshot was taken: the relay reads the export a moment behind, so the init may come
+      after the snapshot in the stream), or, named only after, when it still runs at the snapshot
+      after; another life started in between is it again only if the snapshot after names it too
+      (a restart keeps the id) — and never for a process that started before the life's init (an
+      event of the one before it, delivered late).
+    * After a life's init left: the container's own processes, killed after their init, are in its
+      pid namespace and still its — when that life was the container's; nothing else is (podman's
+      teardown on the freed number, or the next container's processes) — except, where the number
+      was free since before the window, the snapshots' container's own, if Tetragon never marked it,
+      never podman's tools.
+
+    The marks are init marks from podman's namespace only (:class:`_Facts`): a container can make
+    an init of its own, but it never comes from there. A snapshot taken while the runtime was
+    still setting the container up (its init's exec after it in the stream) names it for podman's
+    tools just before, too: 157 events over cabash's whole store (2026-10-23). Telling those apart
+    needs the next window's marks, which a hook — taking an event as settled at the first snapshot
+    after it — can't wait for."""
+    lo, hi, taken = window
+    pidns, host_pid, started = proc
+    marks = facts.inits(inode, lo, hi)
+    if not before and any(w == "start" and seq < q for q, w, _, _ in marks):
+        return False
+    h = facts.holder(inode, seq)
+    if h is None or h[1] != "container":
+        return True
+    q, _, what, t0, life = h
+
+    def seen_by_before(start: tuple | None) -> bool:  # that life is the one the snapshot before saw
+        return start is None or start[0] <= lo or (taken is not None and start[3] is not None
+                                                    and start[3] <= taken)  # fmt: skip
+
+    if what == "start":
+        if started is not None and t0 is not None and started < t0:
+            return False
+        ended = any(w == "end" and p == life and q < m for m, w, _, p in marks)
+        if before and seen_by_before(h):
+            return True
+        return again and not ended
+    if pidns and pidns == life:  # the ended life's own processes, dying
+        return before and seen_by_before(facts.start_of(inode, life, q))
+    return q <= lo and not host_pid
+
+
+def _fallback(facts: _Facts, inode: str, seq: int, host_pid: bool) -> str:
+    """``who`` for an event no container's life holds, by the newest fact about its namespace."""
+    h = facts.holder(inode, seq)
+    if h is None:
+        return "unattributed"
+    if h[1] == "entry":
+        return "podman"
+    if h[1] == "build" and (h[2] == "start" or not host_pid):
+        return "build"
+    return "unattributed"
+
+
+def _taken(snap: dict) -> int | None:
+    """When a snapshot was taken, in nanoseconds (the relay's clock: the guest's, as Tetragon's)."""
+    t = snap.get("t")
+    return round(t * 10**9) if isinstance(t, int | float) else None
+
+
+def _is_host(obj: dict, kind: str) -> bool:
+    return ((obj.get("ns") or {}).get(kind) or {}).get("is_host") is True
+
+
+def _mnt(obj: dict) -> str:
+    return str(((obj.get("ns") or {}).get("mnt") or {}).get("inum") or "")
+
+
+def _one(
+    known: _Facts, around: tuple[dict | None, dict | None], seq: int, proc: dict, parent: dict
+) -> tuple[str, str, bool]:
+    """``(who, container, crossed)`` for one event (:func:`attribute`): its process ``proc`` and
+    that process's ``parent``, between the snapshots ``around`` it (``None`` past either end)."""
+    snap_b, snap_a = around
+    inode, pmnt = _mnt(proc), _mnt(parent)
+    vm = {str(s.get("vm")) for s in around if s}
+    lo = int(snap_b["seq"]) if snap_b else -1
+    hi = int(snap_a["seq"]) if snap_a else 1 << 62
+
+    def named(i: str) -> tuple[list[str] | None, list[str] | None]:
+        return (snap_b["map"].get(i) if snap_b else None, snap_a["map"].get(i) if snap_a else None)
+
+    def system(i: str, obj: dict) -> bool:  # the VM's own namespace, or podman's
+        return i in vm or _is_host(obj, "mnt") or _is_host(obj, "user") or known.podman(i, seq)
+
+    host_pid = _is_host(proc, "pid")
+    before, after = named(inode)
+    if system(inode, proc) and pmnt and pmnt != inode and not system(pmnt, parent):
+        pb, pa = named(pmnt)  # crossed: named after where it came from
+        ids = pb or pa
+        if ids and len(ids) == 1 and not (pb and pa and pb != pa):
+            return "container", ids[0], True
+        who = _fallback(known, pmnt, seq, host_pid)
+        return ("unattributed" if who == "podman" else who), "", True
+    if inode in vm or _is_host(proc, "mnt") or _is_host(proc, "user"):
+        return ("ambiguous" if before or after else "vm"), "", False
+    if before and after and before != after:
+        cid = _handover(
+            before,
+            after,
+            [m[:3] for m in known.inits(inode, lo, hi)],
+            seq,
+            _ns(proc.get("start_time")),
+            _taken(snap_b) if snap_b else None,
+        )
+        if cid:
+            return "container", cid, False
+        # neither container's: podman's own or a build's, when the facts say so
+        fallback = _fallback(known, inode, seq, host_pid)
+        return (fallback if fallback in ("podman", "build") else "ambiguous"), "", False
+    ids = before or after
+    if ids and len(ids) == 1:
+        if known.podman(inode, seq):
+            return "ambiguous", "", False  # a container's scope in podman's namespace
+        pidns = str(((proc.get("ns") or {}).get("pid") or {}).get("inum") or "")
+        window = (lo, hi, _taken(snap_b) if snap_b else None)
+        started = _ns(proc.get("start_time"))
+        if _lifetime(
+            known, inode, seq, window, bool(before), after == ids, (pidns, host_pid, started)
+        ):
+            return "container", ids[0], False
+    elif ids:
+        return "ambiguous", "", False
+    return _fallback(known, inode, seq, host_pid), "", False
+
+
 def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
     """Join events to containers, per boot, over the stored records (in store order).
 
@@ -478,95 +697,68 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
       ``ambiguous``. A mapping is otherwise only ever trusted from the snapshot nearest the event,
       never carried forward past a snapshot that no longer had it.
 
-    The VM's own namespace (as those same two snapshots report it) is ``vm``; anything else
-    unmatched is ``unattributed``. Duplicate (boot, seq) records — a re-read after a crash —
-    count once. Only the two snapshots around an event, and the init marks between them, decide
-    it, so joining a stretch of the store with the snapshots and marks just outside it gives what
-    joining the whole store would (:func:`join`); ``{"k": "mark"}`` records (the catalogue's) are
-    read as marks only, never as events.
+    A container's name holds only within its life (:func:`_lifetime`). Every namespace no
+    container holds is told by kernel facts (:class:`_Facts`, :class:`Event`): the VM's own (as
+    those two snapshots report it, or Tetragon's ``is_host`` on the mount or user namespace) is
+    ``vm``; the one podman enters from it is ``podman``; an image build step's is ``build``;
+    anything else ``unattributed``. A container's scope holding a process in the VM's or podman's
+    namespace is ``ambiguous``; a process in one of those whose parent was in a namespace that
+    isn't is ``crossed``, and named after its parent's. Duplicate (boot, seq) records — a re-read
+    after a crash — count once. Only the two snapshots around an event and the facts before it
+    decide it, so joining a stretch of the store with the snapshots and facts the catalogue holds
+    around it gives what joining the whole store would (:func:`join`); ``{"k": "fact"}`` records
+    (the catalogue's) are read as facts only, never as events.
     """
     by_boot: dict[str, list[dict]] = {}
+    facts: dict[str, dict[int, dict]] = {}
     meta: dict[str, dict | None] = {}
     seen: set[tuple[str, int]] = set()
-    extra: list[dict] = []
     for r in records:
         k = r.get("k")
         if k == "engine":
             meta.update(r.get("containers") or {})
             continue
-        if k == "mark" and "boot" in r:
-            extra.append(r)
+        if "boot" not in r:
             continue
-        if k in ("ev", "scopes") and "boot" in r:
+        if k == "fact":
+            facts.setdefault(r["boot"], {})[int(r["seq"])] = r
+            continue
+        if k in ("ev", "scopes"):
             key = (r["boot"], int(r["seq"]))
             if key in seen:
                 continue
             seen.add(key)
             by_boot.setdefault(r["boot"], []).append(r)
-    for r in extra:  # the catalogue's marks for events outside these records
-        key = (r["boot"], int(r["seq"]))
-        if key not in seen:
-            seen.add(key)
-            by_boot.setdefault(r["boot"], []).append(r)
+            f = monitorstore.ns_fact(r)
+            if f is not None:
+                facts.setdefault(r["boot"], {})[int(r["seq"])] = {**f, "seq": int(r["seq"])}
 
     out: list[Event] = []
     for boot, recs in by_boot.items():
         recs.sort(key=lambda r: int(r["seq"]))
         snaps = [r for r in recs if r["k"] == "scopes"]
-        marks: dict[tuple[str, int], list[tuple[int, str, int | None]]] = {}
-        si = 0
-        for r in recs:  # each namespace's init marks, by the snapshot window they fall in
-            if r["k"] == "scopes":
-                si += 1
-                continue
-            m = r if r["k"] == "mark" else monitorstore.init_mark(r)
-            if m is not None:
-                window = marks.setdefault((str(m["inode"]), si), [])
-                window.append((int(r["seq"]), m["what"], _ns(m["start"])))
+        known = _Facts(facts.get(boot, {}).values())
         si = 0  # index of the first snapshot AFTER the current record
         for r in recs:
             if r["k"] == "scopes":
                 si += 1
                 continue
-            if r["k"] == "mark":
-                continue
+            seq = int(r["seq"])
             ev = r.get("e") or {}
             kind = next((k for k in ev if k.startswith("process_")), "")
             body = ev.get(kind) or {}
             proc = body.get("process") or {}
             parent = body.get("parent") or {}
-            inode = str(((proc.get("ns") or {}).get("mnt") or {}).get("inum") or "")
-            near = [snaps[i] for i in (si - 1, si) if 0 <= i < len(snaps)]
-            vm = {str(s.get("vm")) for s in near}
-            before = snaps[si - 1]["map"].get(inode) if si > 0 else None
-            after = snaps[si]["map"].get(inode) if si < len(snaps) else None
-            ids = before or after
-            if inode in vm:
-                who, cid = "vm", ""
-            elif before and after and before != after:
-                taken = snaps[si - 1].get("t")
-                cid = _handover(
-                    before,
-                    after,
-                    marks.get((inode, si), []),
-                    int(r["seq"]),
-                    _ns(proc.get("start_time")),
-                    round(taken * 10**9) if isinstance(taken, int | float) else None,
-                )
-                who = "container" if cid else "ambiguous"
-            elif ids and len(ids) == 1:
-                who, cid = "container", ids[0]
-            elif ids:
-                who, cid = "ambiguous", ""
-            else:
-                who, cid = "unattributed", ""
+            inode = _mnt(proc)
+            around = (snaps[si - 1] if si > 0 else None, snaps[si] if si < len(snaps) else None)
+            who, cid, crossed = _one(known, around, seq, proc, parent)
             what, detail = _kind(body, kind)
             m = meta.get(cid) if cid else None
             out.append(
                 Event(
                     time=ev.get("time", ""),
                     boot=boot,
-                    seq=int(r["seq"]),
+                    seq=seq,
                     kind=what,
                     binary=proc.get("binary", ""),
                     args=proc.get("arguments", ""),
@@ -583,6 +775,7 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
                     exec_id=proc.get("exec_id") or "",
                     parent_exec_id=proc.get("parent_exec_id") or parent.get("exec_id") or "",
                     mnt=int(inode) if inode.isdigit() else None,
+                    crossed=crossed,
                 )
             )
     return out
@@ -609,9 +802,27 @@ def join(records: list[dict], cat: monitorstore.Catalogue | None, prefix: str) -
     for boot, (lo, hi) in span.items():
         before, after = cat.before(boot, lo), cat.after(boot, hi)
         near += [s for s in (before, after) if s]
-        # the init marks from the snapshot before to the one after: a container's init entering
-        # its namespace may sit in an earlier read than its first command
-        near += cat.marks(boot, before["seq"] if before else -1, after["seq"] if after else 1 << 62)
+        # the facts from the snapshot before to the one after (a container's init entering its
+        # namespace may sit in an earlier read than its first command)…
+        blo = before["seq"] if before else -1
+        window = cat.facts(boot, blo, after["seq"] if after else 1 << 62)
+        # …and the newest one before that about every namespace the events and those facts touch
+        # (podman entered its own at boot; a container's init may have entered hours ago), with,
+        # for an init among them, the newest about where it came from, as it was then
+        inodes = {f["outside"] for f in window}
+        for r in records:
+            if r.get("k") == "ev" and r.get("boot") == boot:
+                body = next((v for k, v in (r.get("e") or {}).items() if k.startswith("process_")),
+                            {}) or {}  # fmt: skip
+                for obj in (body.get("process") or {}, body.get("parent") or {}):
+                    inum = ((obj.get("ns") or {}).get("mnt") or {}).get("inum")
+                    if inum:
+                        inodes.add(str(inum))
+        prior = [f for i in sorted(inodes) for f in cat.latest_facts(boot, i, blo)]
+        for f in list(prior):
+            if f["what"] != "entry":
+                prior += cat.latest_facts(boot, f["outside"], f["seq"])
+        near += prior + window
     # the snapshots after the records: attribute() orders boots by first appearance, and the
     # events must come out in store order (a hook's cursor moves by them)
     return attribute([*records, *near, {"k": "engine", "containers": cat.claims()}], prefix)

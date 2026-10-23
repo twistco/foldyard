@@ -31,7 +31,10 @@ snapshot before the oldest events still kept.
 It also keeps every container init's MARK — its exec into its mount namespace and its exit from it
 (:func:`init_mark`) — for the same reason it keeps the snapshots: the join reads a namespace number
 handed from one container to the next by them (:func:`foldyard.monitorlog.attribute`), and the
-mark may sit in an earlier read than the event it decides.
+mark may sit in an earlier read than the event it decides. Beside them it keeps each namespace's
+FACTS (:func:`ns_fact`): the same marks with where the init came from (its parent's namespace and
+binary), and podman entering a namespace straight from the VM's own — how the join tells podman's
+own namespace, an image build and a container apart, however long ago the fact was recorded.
 """
 
 from __future__ import annotations
@@ -39,6 +42,8 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import posixpath
+import re
 import shutil
 import sqlite3
 import time
@@ -70,6 +75,16 @@ _MARK_SQL = (
     "inode TEXT NOT NULL, what TEXT NOT NULL, start TEXT NOT NULL, PRIMARY KEY (boot, seq))",
     "CREATE TABLE IF NOT EXISTS markseg (id TEXT PRIMARY KEY, marked INTEGER NOT NULL)",
 )
+# The facts (:func:`ns_fact`) go beside schema 2 the same way, with their own progress
+# (`nsfactseg`): a supervisor that knows only the marks indexes without them, and the next reader
+# reads them out of what it indexed (:meth:`Catalogue.catch_up`).
+_FACT_SQL = (
+    "CREATE TABLE IF NOT EXISTS nsfact (boot TEXT NOT NULL, seq INTEGER NOT NULL, "
+    "seg TEXT NOT NULL, inode TEXT NOT NULL, what TEXT NOT NULL, start TEXT NOT NULL, "
+    "outside TEXT NOT NULL, by TEXT NOT NULL, pidns TEXT NOT NULL, PRIMARY KEY (boot, seq))",
+    "CREATE INDEX IF NOT EXISTS nsfact_inode ON nsfact (boot, inode, what, seq)",
+    "CREATE TABLE IF NOT EXISTS nsfactseg (id TEXT PRIMARY KEY, done INTEGER NOT NULL)",
+)
 _SCHEMA_SQL = (
     "DROP TABLE IF EXISTS seg",
     "DROP TABLE IF EXISTS snap",
@@ -77,6 +92,8 @@ _SCHEMA_SQL = (
     "DROP TABLE IF EXISTS span",
     "DROP TABLE IF EXISTS mark",
     "DROP TABLE IF EXISTS markseg",
+    "DROP TABLE IF EXISTS nsfact",
+    "DROP TABLE IF EXISTS nsfactseg",
     "CREATE TABLE seg (id TEXT PRIMARY KEY, indexed INTEGER NOT NULL, sealed INTEGER NOT NULL, "
     "t0 TEXT NOT NULL, t1 TEXT NOT NULL)",
     "CREATE TABLE snap (boot TEXT NOT NULL, seq INTEGER NOT NULL, seg TEXT NOT NULL, "
@@ -85,10 +102,21 @@ _SCHEMA_SQL = (
     "CREATE TABLE span (seg TEXT NOT NULL, boot TEXT NOT NULL, lo INTEGER NOT NULL, "
     "hi INTEGER NOT NULL, PRIMARY KEY (seg, boot))",
     *_MARK_SQL,
+    *_FACT_SQL,
 )
 # every mark's line holds one (the store writes compact JSON; the spaced form, should anything
 # else have): the backfill parses only those — `"in_init_tree"` alone is in nearly every line
 _MARK_NEEDLES = (b'"in_init_tree":true', b'"in_init_tree": true')
+# …and every fact's line holds one of those, or a mount namespace that is the VM's and one that
+# isn't (an entry: the parent in the VM's, the process not) — about 1% of cabash's lines
+_HOST_MNT = re.compile(rb'"mnt":\s*\{"inum":\s*\d+,\s*"is_host":\s*true\}')
+_OTHER_MNT = re.compile(rb'"mnt":\s*\{"inum":\s*\d+\s*\}')
+
+
+def _may_hold_fact(line: bytes) -> bool:
+    if any(n in line for n in _MARK_NEEDLES):
+        return True
+    return bool(_HOST_MNT.search(line)) and bool(_OTHER_MNT.search(line))
 
 
 def store_dir() -> Path:
@@ -518,6 +546,60 @@ def init_mark(rec: dict) -> dict | None:
     return {"inode": str(inode), "what": what[kind], "start": str(proc.get("start_time") or "")}
 
 
+def _ns(obj: dict, kind: str) -> dict:
+    got = (obj.get("ns") or {}).get(kind)
+    return got if isinstance(got, dict) else {}
+
+
+def ns_fact(rec: dict) -> dict | None:
+    """What ``rec`` says about who holds a mount namespace — ``{"inode", "what", "start",
+    "outside", "by", "pidns"}`` — else ``None``. Kernel facts as Tetragon reports them, never a
+    name:
+
+    * ``start``/``end``: an init entering or leaving its namespace (:func:`init_mark`), with where
+      it came from: ``outside``, its parent's mount namespace, and ``by``, its parent's binary —
+      and ``pidns``, the init's pid namespace (its container's processes are in it, the ones killed
+      after it included; nothing else can enter it). A
+      container's init comes from conmon in podman's namespace, an image build step's from podman
+      itself there; one from anywhere else is a namespace a process made inside another (any
+      container can, ``unshare``), which the join never reads as a container's or a build's
+      (:func:`foldyard.monitorlog.attribute`).
+    * ``entry``: a process in a mount namespace that isn't the VM's, whose parent is in the VM's own
+      (``is_host``), outside the VM's user namespace — podman entering its rootless namespace, as
+      every podman command does. Only a process of the VM's can be that parent: nothing in a
+      container has one. ``outside`` is the VM's namespace, ``by`` empty.
+
+    ``start`` is the process's start time, as Tetragon wrote it."""
+    if rec.get("k") != "ev":
+        return None
+    e = rec.get("e") or {}
+    kind = next((k for k in e if k.startswith("process_")), None)
+    if kind is None or not isinstance(e[kind], dict):
+        return None
+    proc, parent = e[kind].get("process") or {}, e[kind].get("parent") or {}
+    mnt, pmnt = _ns(proc, "mnt"), _ns(parent, "mnt")
+    inode, outside = mnt.get("inum"), pmnt.get("inum")
+    if not inode or not outside or outside == inode:
+        return None
+    fact = {
+        "inode": str(inode),
+        "start": str(proc.get("start_time") or ""),
+        "outside": str(outside),
+    }
+    mark = init_mark(rec)
+    if mark is not None:
+        by = posixpath.basename(str(parent.get("binary") or ""))
+        pidns = str(_ns(proc, "pid").get("inum") or "")
+        return {**fact, "what": mark["what"], "by": by, "pidns": pidns}
+    if (
+        pmnt.get("is_host") is True
+        and mnt.get("is_host") is not True
+        and (_ns(proc, "user").get("is_host") is not True)
+    ):
+        return {**fact, "what": "entry", "by": "", "pidns": ""}
+    return None
+
+
 class Catalogue:
     """The store's index (see the module doc). One connection per use; any number of readers
     beside the one writer (WAL)."""
@@ -576,10 +658,16 @@ class Catalogue:
                     conn.execute("ROLLBACK")
                     raise
             have = {name for (name,) in conn.execute("SELECT name FROM sqlite_master")}
-            if not {"mark", "markseg"} <= have:  # a catalogue 0.6 made: the marks go beside it
+            for tables, sql in (
+                ({"mark", "markseg"}, _MARK_SQL),
+                ({"nsfact", "nsfactseg"}, _FACT_SQL),
+            ):
+                if tables <= have:
+                    continue
+                # a catalogue an older foldyard made (0.6: no marks; #136: no facts): beside it
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    for statement in _MARK_SQL:
+                    for statement in sql:
                         conn.execute(statement)
                     conn.execute("COMMIT")
                 except BaseException:
@@ -621,8 +709,21 @@ class Catalogue:
                     "lo = MIN(lo, excluded.lo), hi = MAX(hi, excluded.hi)",
                     (sid, boot, lo, hi),
                 )
+            run: dict[tuple[str, str], str] = {}  # (boot, inode) -> what its last fact here was
             for r in records:
                 k = r.get("k")
+                fact = r.get("fact") if k == "ev" and "fact" in r else ns_fact(r)
+                if fact is not None and "boot" in r and "seq" in r:
+                    key = (r["boot"], fact["inode"])
+                    # a run of entries is kept as its first (podman enters on every command)
+                    if not (fact["what"] == "entry" and run.get(key) == "entry"):
+                        c.execute(
+                            "INSERT INTO nsfact VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT("
+                            "boot, seq) DO UPDATE SET seg = excluded.seg",
+                            (r["boot"], int(r["seq"]), sid, fact["inode"], fact["what"],
+                             fact["start"], fact["outside"], fact["by"], fact.get("pidns", "")),
+                        )  # fmt: skip
+                    run[key] = fact["what"]
                 mark = r.get("mark") if k == "ev" and "mark" in r else init_mark(r)
                 if mark is not None and "boot" in r and "seq" in r:
                     c.execute(
@@ -647,6 +748,7 @@ class Catalogue:
                         )
             before = c.execute("SELECT indexed FROM seg WHERE id = ?", (sid,)).fetchone()
             marked = c.execute("SELECT marked FROM markseg WHERE id = ?", (sid,)).fetchone()
+            done = c.execute("SELECT done FROM nsfactseg WHERE id = ?", (sid,)).fetchone()
             c.execute(
                 "INSERT INTO seg VALUES (?, ?, 0, ?, ?) ON CONFLICT(id) DO UPDATE SET "
                 f"indexed = {'excluded.indexed' if exact else 'MAX(indexed, excluded.indexed)'}, "
@@ -657,11 +759,17 @@ class Catalogue:
             )
             # read for marks as far as it is indexed now — unless part of what was indexed before
             # was indexed without them (0.6): catch_up reads that part first
+            (now,) = c.execute("SELECT indexed FROM seg WHERE id = ?", (sid,)).fetchone()
             if before is None or (marked is not None and marked[0] >= before[0]):
-                (now,) = c.execute("SELECT indexed FROM seg WHERE id = ?", (sid,)).fetchone()
                 c.execute(
                     "INSERT INTO markseg VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET "
                     "marked = excluded.marked",
+                    (sid, now),
+                )
+            if before is None or (done is not None and done[0] >= before[0]):
+                c.execute(
+                    "INSERT INTO nsfactseg VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET "
+                    "done = excluded.done",
                     (sid, now),
                 )
             c.execute(
@@ -684,19 +792,38 @@ class Catalogue:
         c.execute("UPDATE mark SET seg = ? WHERE seg = ?", (new, old))
         c.execute("DELETE FROM markseg WHERE id = ?", (new,))
         c.execute("UPDATE markseg SET id = ? WHERE id = ?", (new, old))
+        c.execute("UPDATE nsfact SET seg = ? WHERE seg = ?", (new, old))
+        c.execute("DELETE FROM nsfactseg WHERE id = ?", (new,))
+        c.execute("UPDATE nsfactseg SET id = ? WHERE id = ?", (new, old))
         c.execute("DELETE FROM span WHERE seg = ?", (new,))
         c.execute("UPDATE span SET seg = ? WHERE seg = ?", (new, old))
         c.execute("COMMIT")
 
     def drop(self, gone: list[str]) -> None:
         """Forget segments the store removed — but keep the newest snapshot of each boot among
-        theirs: the one before the oldest events still stored."""
+        theirs (the one before the oldest events still stored), and the newest fact of each kind
+        about each namespace (podman enters its own once a command, a container's init once: the
+        join must still know whose a namespace is, however long ago that was said)."""
         c = self.conn
         c.execute("BEGIN IMMEDIATE")
         c.executemany("DELETE FROM seg WHERE id = ?", [(g,) for g in gone])
         c.executemany("DELETE FROM span WHERE seg = ?", [(g,) for g in gone])
         c.executemany("DELETE FROM mark WHERE seg = ?", [(g,) for g in gone])
         c.executemany("DELETE FROM markseg WHERE id = ?", [(g,) for g in gone])
+        c.executemany("DELETE FROM nsfactseg WHERE id = ?", [(g,) for g in gone])
+        # of everything before what the store still holds, the newest of each kind (an entry, an
+        # init entering, one leaving) — what the oldest records left need to be read by
+        gone_seg = "seg NOT IN (SELECT id FROM seg)"
+        c.execute(
+            f"DELETE FROM nsfact WHERE {gone_seg} AND seq < (SELECT MAX(f.seq) FROM nsfact f "
+            "WHERE f.boot = nsfact.boot AND f.inode = nsfact.inode AND f.what = nsfact.what "
+            f"AND f.{gone_seg})"
+        )
+        # …for as long as the store holds anything of that boot
+        c.execute(
+            "DELETE FROM nsfact WHERE seg NOT IN (SELECT id FROM seg) "
+            "AND boot NOT IN (SELECT boot FROM span)"
+        )
         orphan = "seg NOT IN (SELECT id FROM seg)"
         c.execute(
             f"DELETE FROM snap WHERE {orphan} AND seq < (SELECT MAX(o.seq) FROM snap o "
@@ -721,6 +848,7 @@ class Catalogue:
             for sid, indexed, sealed in self.conn.execute("SELECT id, indexed, sealed FROM seg")
         }
         self._backfill_marks(segs)
+        self._backfill_facts(segs)
         if listing and segs:
             # Gone from the store without this catalogue seeing it go (an older foldyard rotated
             # or removed it): older than every segment listed, or an older foldyard's live file
@@ -759,12 +887,13 @@ class Catalogue:
                     if not isinstance(rec, dict):
                         continue
                     if rec.get("k") == "ev":  # all the catalogue keeps of an event
-                        mark = init_mark(rec)
+                        mark, fact = init_mark(rec), ns_fact(rec)
                         rec = {
                             "k": "ev",
                             **{k: rec[k] for k in ("boot", "seq") if k in rec},
                             "e": {"time": _ev_time(rec)},
                             **({"mark": mark} if mark else {}),
+                            **({"fact": fact} if fact else {}),
                         }
                     batch.append(rec)
                     if len(batch) >= 20_000:
@@ -823,6 +952,58 @@ class Catalogue:
                 c.execute("ROLLBACK")
                 raise
 
+    def _backfill_facts(self, segs: list[Segment]) -> None:
+        """Read the facts out of what an older catalogue indexed before facts were kept (as
+        :meth:`_backfill_marks` does the marks): only the lines that can hold one are parsed."""
+        owed = {
+            sid: (done, indexed)
+            for sid, done, indexed in self.conn.execute(
+                "SELECT seg.id, COALESCE(nsfactseg.done, 0), seg.indexed FROM seg "
+                "LEFT JOIN nsfactseg ON nsfactseg.id = seg.id "
+                "WHERE COALESCE(nsfactseg.done, 0) < seg.indexed"
+            )
+        }
+        for seg in segs:
+            if seg.id not in owed:
+                continue
+            done, indexed = owed[seg.id]
+            facts: list[tuple] = []
+            run: dict[tuple[str, str], str] = {}
+            for line, end in _lines(seg, done):
+                if end > indexed:
+                    break
+                if not _may_hold_fact(line):
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                f = ns_fact(rec) if isinstance(rec, dict) else None
+                if f is None or "boot" not in rec or "seq" not in rec:
+                    continue
+                key = (rec["boot"], f["inode"])
+                if not (f["what"] == "entry" and run.get(key) == "entry"):
+                    facts.append((rec["boot"], int(rec["seq"]), seg.id, f["inode"], f["what"],
+                                  f["start"], f["outside"], f["by"], f["pidns"]))  # fmt: skip
+                run[key] = f["what"]
+            c = self.conn
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                c.executemany(
+                    "INSERT INTO nsfact VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(boot, "
+                    "seq) DO UPDATE SET seg = excluded.seg",
+                    facts,
+                )
+                c.execute(
+                    "INSERT INTO nsfactseg VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET "
+                    "done = excluded.done",
+                    (seg.id, indexed),
+                )
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
+
     # ── reading ──
 
     def _snap(self, sql: str, args: tuple) -> dict | None:
@@ -852,6 +1033,42 @@ class Catalogue:
         return [
             {"k": "mark", "boot": boot, "seq": seq, "inode": inode, "what": what, "start": start}
             for seq, inode, what, start in rows
+        ]
+
+    _FACT_COLS = "seq, inode, what, start, outside, by, pidns"
+
+    @staticmethod
+    def _fact(boot: str, row: tuple) -> dict:
+        seq, inode, what, start, outside, by, pidns = row
+        return {"k": "fact", "boot": boot, "seq": seq, "inode": inode, "what": what,
+                "start": start, "outside": outside, "by": by, "pidns": pidns}  # fmt: skip
+
+    def facts(self, boot: str, lo: int, hi: int) -> list[dict]:
+        """``boot``'s namespace facts strictly between seqs ``lo`` and ``hi``, as records the join
+        reads (``{"k": "fact", "boot", "seq", "inode", "what", "start", "outside", "by",
+        "pidns"}``)."""
+        return [
+            self._fact(boot, row)
+            for row in self.conn.execute(
+                f"SELECT {self._FACT_COLS} FROM nsfact WHERE boot = ? AND seq > ? AND seq < ? "
+                "ORDER BY seq",
+                (boot, lo, hi),
+            )
+        ]
+
+    def latest_facts(self, boot: str, inode: str, below: int) -> list[dict]:
+        """The newest fact of each kind (``entry``, ``start``, ``end``) about namespace ``inode``
+        in ``boot`` before seq ``below`` — what the join needs to know whose it was then: the
+        newest one alone may be an init that says nothing about the number (one made inside a
+        container)."""
+        return [
+            self._fact(boot, row)
+            for what in ("entry", "start", "end")
+            for row in self.conn.execute(
+                f"SELECT {self._FACT_COLS} FROM nsfact WHERE boot = ? AND inode = ? AND what = ? "
+                "AND seq < ? ORDER BY seq DESC LIMIT 1",
+                (boot, inode, what, below),
+            )
         ]
 
     def last_snapshot(self, boot: str) -> int:
