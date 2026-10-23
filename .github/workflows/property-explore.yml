@@ -11,6 +11,8 @@ name: property explore
 # operator. The run's log is public anyway, falsifying examples included, so the issue adds no
 # exposure. To send it to someone else, change NOTIFY_LOGIN.
 on:
+  push: # TEMPORARY: dispatch needs the file on main; reverted before merge
+    branches: [ci/weekly-property-explore]
   schedule:
     - cron: "17 3 * * 2" # Tuesdays 03:17 UTC: off-peak, and off the top of the hour
   workflow_dispatch:
@@ -117,5 +119,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SUMMARY_FILE: ${{ runner.temp }}/summary.md
-          DRY_RUN: ${{ inputs.dry_run }}
+          DRY_RUN: "true" # TEMPORARY: never post while testing; reverted before merge
         run: .github/scripts/notify-property-failure.sh
