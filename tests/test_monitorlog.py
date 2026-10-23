@@ -680,10 +680,8 @@ def test_a_namespace_made_inside_a_container_on_a_number_podman_entered_once_is_
                     snap({200: [BOX]}))  # fmt: skip
     got = _whos(monitorlog.attribute(recs, "fyex"))
     assert got[0] == ("podman", "", False)
-    # the init itself reads as a step out of BOX (the number was podman's, last anyone said):
-    # loud, and the safe way to be wrong
-    assert got[1] == ("container", "a", True)
-    assert got[2:] == [("unattributed", "", False)] * 2
+    # a new namespace on the number, not a step into podman's: no one's, and not `crossed`
+    assert got[1:] == [("unattributed", "", False)] * 3
 
 
 def test_a_namespace_made_on_a_number_podman_entered_once_takes_it_for_the_inits_from_there():

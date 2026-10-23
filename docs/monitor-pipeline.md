@@ -96,9 +96,13 @@ A first step towards that, stdlib only, in `src/foldyard/monitorstore.py`:
   entering a namespace from the VM's own, and anything entering one from elsewhere (an `other`),
   each kept once a run. The marks and entries were a few thousand rows over cabash's boot; the
   `other` facts, added after that measurement, add a row each time a run of them starts on a
-  namespace (a container's runtime entering it, `podman exec`). When a segment goes, the newest
-  fact of each kind about each namespace stays: podman entered its own once, at boot, and the join
-  must still know it.
+  namespace (a container's runtime entering it, `podman exec`). When a segment goes, what a read
+  of the events still stored depends on stays: each namespace's facts from its newest entry or
+  init on, and for each of those inits where it came from, as it was then (podman entered its own
+  namespace once, at boot, and the join must still know it). The join fetches exactly that set
+  (`fact_closure`), and a property holds the two together: after any drop, any stretch still
+  stored reads as the join over everything ever stored. The first retention, the newest fact of
+  each kind, lost an init's origin to a later entry (randomised runs, 2026-10-23).
 
 **Why the catalogue (2026-10-21).** The join needs the snapshot before an event and the one after
 it. Readers used to look only within a byte window — a hook 1 MB back and 4 MB on from its

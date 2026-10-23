@@ -321,6 +321,15 @@ EVERYTHING = [([], [], [])]
               ("ev", 200, "process_exec"), ("snap", {})],
     filters=EVERYTHING, budget="tiny",
 )  # fmt: skip
+# retention kept podman's later entry into its namespace and dropped the one before a kept init's
+# exit came from it: that init then read as one from nowhere, and its container's life went
+# unbounded (#138, the randomised runs)
+@example(
+    scenario=[("ev", 1, "process_exec"), ("ev", 1, "process_exec"), ("entry", 7), ("pull",),
+              ("entry", 200), ("init", 300, "process_exit"), ("entry", 7), ("pull",),
+              ("ev", 300, "process_exec"), ("snap", {300: [A]})],
+    filters=EVERYTHING, budget="tiny",
+)  # fmt: skip
 def test_a_hook_delivers_the_full_store_join_or_says_what_it_could_not(
     monkeypatch, scenario, filters, budget
 ):
@@ -582,6 +591,10 @@ class NsWorld:
             seq = len(self.recs)
             self.recs.append(_entry(seq, "b", _stamp(self._tick()), number))
             self.truth[seq] = None
+        elif what == "podman":  # podman entering its namespace again: every podman command does
+            seq = len(self.recs)
+            self.recs.append(_entry(seq, "b", _stamp(self._tick()), CONMON_NS))
+            self.truth[seq] = None
         elif what == "snap":
             self._snap()
 
@@ -742,7 +755,9 @@ def test_no_event_is_given_to_a_container_outside_its_life(scenario):
 # caused is ever `podman` or `vm`. Validated red with an entry read as podman's for as long as
 # nothing marked the number since (the first @example: an unmarked container's own process on it).
 
-sandboxed_steps = st.lists(st.one_of(_ns_step, st.just(("sandbox",))), min_size=4, max_size=50)
+sandboxed_steps = st.lists(
+    st.one_of(_ns_step, st.just(("sandbox",)), st.just(("podman",))), min_size=4, max_size=50
+)
 
 
 @settings(max_examples=300, deadline=None)
@@ -761,3 +776,62 @@ def test_a_containers_event_is_never_filed_under_what_hooks_skip(scenario):
         if true is not None:
             who = events[seq].who
             assert who not in mh.SKIP_UNLESS_ASKED, f"{seq} ({true[:1]}'s) filed under {who}"
+
+
+# ── retention keeps what the join reads ─────────────────────────────────────────────────
+#
+# The catalogue keeps namespace facts from segments retention removed, so the events still stored
+# are read as they were. The randomised runs on #138 found two ways it didn't: the running boot's
+# facts deleted while the live segment held none of its records, and a kept init read without the
+# fact before it that said where it came from (podman's earlier entry, dropped for a later one). The
+# property: the namespace world above (with the VM's short-lived namespaces), stored in small
+# segments and its oldest ones dropped as retention does; then ANY stretch of what is still stored,
+# joined with the catalogue, reads every event exactly as the join over every record ever stored.
+# Validated red against keeping only the newest fact of each kind about each namespace (the
+# drop the PR first had), and against the join fetching only those.
+
+retained = st.tuples(sandboxed_steps, st.integers(1, 6), st.integers(0, 40), st.integers(0, 40))
+
+
+@settings(max_examples=300, deadline=None)
+@given(case=retained)
+# a container's init exit kept, the entry into podman's namespace before it dropped for a later one:
+# the exit then read as an init from nowhere, and podman's tool on the freed number went to the
+# dead container
+@example(case=([("start", 0, True, False), ("snap",), ("stop", 0), ("podman",), ("transient",),
+                ("snap",)], 2, 0, 9))  # fmt: skip
+def test_retention_keeps_every_fact_the_join_of_what_is_still_stored_reads(case):
+    scenario, gone, start, length = case
+    world = NsWorld()
+    for s in scenario:
+        world.step(s)
+    world._snap()
+    truth = {e.seq: e for e in monitorlog.attribute(world.recs, "fyex")}
+    with tempfile.TemporaryDirectory() as tmp, pytest.MonkeyPatch.context() as mp:
+        mp.setattr(monitorstore.config, "state_dir", lambda: Path(tmp))
+        mp.setattr(monitorstore, "SEGMENT_BYTES", 600)
+        for i in range(0, len(world.recs), 3):  # the pull's appends: a few records at a time
+            monitorstore.append(world.recs[i : i + 3])
+        segs = monitorstore.segments()
+        gone = min(gone, len(segs) - 1)
+        with monitorstore.Catalogue.open() as cat:  # as retention does: the oldest files go
+            cat.catch_up()
+            for seg in segs[:gone]:
+                seg.path.unlink()
+            cat.drop([s.id for s in segs[:gone]])
+        kept = [r for r, _ in monitorstore.scan(None)]  # a read: every record, not only events
+        stretch = kept[start : start + max(length, 1)]
+        if not any(r.get("k") == "ev" for r in stretch):
+            return
+        cat = monitorlog.catalogue()
+        assert cat is not None
+        try:
+            got = monitorlog.join(stretch, cat, "fyex")
+        finally:
+            cat.close()
+    for e in got:
+        want = truth[e.seq]
+        assert (e.who, e.container, e.crossed) == (want.who, want.container, want.crossed), (
+            f"{e.seq}: {e.who} {e.container[:1]} after the drop, {want.who} {want.container[:1]} "
+            "over everything"
+        )

@@ -118,8 +118,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   (`<state dir>/monitor-store.toml`, never `foldyard.toml`: the box mustn't shorten the evidence
   about itself), and a SQLite catalogue (derived; rebuilt from the segments) of every snapshot,
   container-init mark, namespace fact (`ns_fact`: an init's mark with where it came from and its
-  pid namespace, and podman entering a namespace from the VM's — retention keeps the newest of
-  each kind per namespace), engine claim and segment span. The marks and the facts sit in tables
+  pid namespace, podman entering a namespace from the VM's, and anything entering one from
+  elsewhere — retention keeps exactly what a read of the events still stored depends on,
+  `fact_closure`, which the join fetches too), engine claim and segment span. The marks and the facts sit in tables
   BESIDE schema 2, never in it, each with its own progress: a supervisor still on 0.6 (or on the
   marks alone) after an editable upgrade would drop a catalogue whose schema it doesn't know, and
   fail every write to a table with a column it doesn't know. The pull indexes a record before

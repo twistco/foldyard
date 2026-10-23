@@ -49,7 +49,7 @@ import sqlite3
 import time
 import tomllib
 import zlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BufferedReader
@@ -83,6 +83,7 @@ _FACT_SQL = (
     "seg TEXT NOT NULL, inode TEXT NOT NULL, what TEXT NOT NULL, start TEXT NOT NULL, "
     "outside TEXT NOT NULL, by TEXT NOT NULL, pidns TEXT NOT NULL, PRIMARY KEY (boot, seq))",
     "CREATE INDEX IF NOT EXISTS nsfact_inode ON nsfact (boot, inode, what, seq)",
+    "CREATE INDEX IF NOT EXISTS nsfact_seq ON nsfact (boot, inode, seq)",
     "CREATE TABLE IF NOT EXISTS nsfactseg (id TEXT PRIMARY KEY, done INTEGER NOT NULL)",
 )
 _SCHEMA_SQL = (
@@ -611,6 +612,51 @@ def ns_fact(rec: dict) -> dict | None:
     return None
 
 
+_ANCHORS = ("entry", "start", "end")  # facts that say who holds a namespace from then on
+
+
+def fact_suffix(rows: list[dict], below: int) -> list[dict]:
+    """What the join needs of one namespace's facts (``rows``, in seq order) to read it at seq
+    ``below`` or later: everything from the newest ANCHOR before ``below`` — an entry, or an init
+    entering or leaving, which says who holds the number from then on — and, when that is an init
+    leaving, the init entering before it (the life it ends). Facts before the anchor decide
+    nothing the join asks after it; a namespace with no anchor yet is no one's whatever else
+    entered it."""
+    before = [r for r in rows if int(r["seq"]) < below]
+    at = next((i for i in range(len(before) - 1, -1, -1) if before[i]["what"] in _ANCHORS), None)
+    if at is None:
+        return []
+    out = before[at:]
+    if before[at]["what"] == "end":
+        start = next((r for r in reversed(before[:at]) if r["what"] == "start"), None)
+        out = ([start] if start else []) + out
+    return out
+
+
+def fact_closure(
+    suffix: Callable[[str, int], list[dict]], seeds: Iterable[tuple[str, int]]
+) -> dict[int, dict]:
+    """Every fact reading the ``seeds`` — ``(namespace, below)`` — depends on, by seq: each one's
+    :func:`fact_suffix`, and for every init or ``other`` in it, the suffix of the namespace it came
+    from as it was then (where its kind is decided), recursively. The join reads exactly this
+    (:func:`foldyard.monitorlog.join`) and retention keeps exactly this (:meth:`Catalogue.drop`),
+    so a fact retention removed is one no read of what is still stored needs."""
+    out: dict[int, dict] = {}
+    todo, done = list(seeds), set()
+    while todo:
+        key = todo.pop()
+        if key in done:
+            continue
+        done.add(key)
+        for f in suffix(*key):
+            seq = int(f["seq"])
+            if seq not in out:
+                out[seq] = f
+                if f["what"] != "entry":
+                    todo.append((str(f["outside"]), seq))
+    return out
+
+
 class Catalogue:
     """The store's index (see the module doc). One connection per use; any number of readers
     beside the one writer (WAL)."""
@@ -813,9 +859,10 @@ class Catalogue:
 
     def drop(self, gone: list[str]) -> None:
         """Forget segments the store removed — but keep the newest snapshot of each boot among
-        theirs (the one before the oldest events still stored), and the newest fact of each kind
-        about each namespace (podman enters its own once a command, a container's init once: the
-        join must still know whose a namespace is, however long ago that was said)."""
+        theirs (the one before the oldest events still stored), and of their namespace facts what
+        a read of the events still stored depends on (:meth:`_retain_facts`: podman enters its own
+        namespace at boot, a container's init once — the join must still know whose a namespace
+        is, however long ago that was said)."""
         c = self.conn
         c.execute("BEGIN IMMEDIATE")
         c.executemany("DELETE FROM seg WHERE id = ?", [(g,) for g in gone])
@@ -823,15 +870,7 @@ class Catalogue:
         c.executemany("DELETE FROM mark WHERE seg = ?", [(g,) for g in gone])
         c.executemany("DELETE FROM markseg WHERE id = ?", [(g,) for g in gone])
         c.executemany("DELETE FROM nsfactseg WHERE id = ?", [(g,) for g in gone])
-        # of everything before what the store still holds, the newest of each kind (an entry, an
-        # other, an init entering, one leaving) — what the oldest records left need to be read by
-        gone_seg = "seg NOT IN (SELECT id FROM seg)"
-        c.execute(
-            f"DELETE FROM nsfact WHERE {gone_seg} AND seq < (SELECT MAX(f.seq) FROM nsfact f "
-            "WHERE f.boot = nsfact.boot AND f.inode = nsfact.inode AND f.what = nsfact.what "
-            f"AND f.{gone_seg})"
-        )
-        # …for as long as the store holds anything of that boot, and always for the running boot:
+        # a boot's facts go once the store holds nothing of that boot — never the running boot's:
         # the one whose fact was indexed last (the store is in boot order — the relay's spool
         # paths sort by epoch — and the catalogue indexes it in that order). Right after a seal the
         # live segment may hold no record of the running boot yet, only an engine claim: its facts
@@ -851,7 +890,39 @@ class Catalogue:
             f"(SELECT rowid FROM snap WHERE {orphan} ORDER BY rowid DESC LIMIT ?)",
             (_ORPHANS_KEPT,),
         )
+        self._retain_facts()
         c.execute("COMMIT")
+
+    def _retain_facts(self) -> None:
+        """Of the facts from segments already gone, keep what a read of anything still stored needs
+        (:func:`fact_closure`): every namespace's suffix as of the boot's oldest stored record, and
+        every fact after the snapshot kept from before it (a read's window starts there) — with
+        what each of those depends on. Inside :meth:`drop`'s transaction."""
+        c = self.conn
+        rows: dict[str, dict[str, list[dict]]] = {}
+        for boot, seq, inode, what, outside in c.execute(
+            "SELECT boot, seq, inode, what, outside FROM nsfact "
+            "WHERE seg NOT IN (SELECT id FROM seg) ORDER BY boot, seq"
+        ):
+            rows.setdefault(boot, {}).setdefault(inode, []).append(
+                {"seq": seq, "inode": inode, "what": what, "outside": outside}
+            )
+        for boot, by_inode in rows.items():
+            (lo,) = c.execute("SELECT MIN(lo) FROM span WHERE boot = ?", (boot,)).fetchone()
+            lo = 1 << 62 if lo is None else int(lo)
+            (snap,) = c.execute(
+                "SELECT MAX(seq) FROM snap WHERE boot = ? AND seq < ?", (boot, lo)
+            ).fetchone()
+            wlo = -1 if snap is None else int(snap)
+            window = [f for fs in by_inode.values() for f in fs if f["seq"] > wlo]
+            seeds = [(i, lo) for i in by_inode]
+            seeds += [(str(f["outside"]), f["seq"]) for f in window if f["what"] != "entry"]
+            keep = set(fact_closure(lambda i, b, m=by_inode: fact_suffix(m.get(i, []), b), seeds))
+            keep |= {f["seq"] for f in window}
+            drop = [
+                (boot, f["seq"]) for fs in by_inode.values() for f in fs if f["seq"] not in keep
+            ]
+            c.executemany("DELETE FROM nsfact WHERE boot = ? AND seq = ?", drop)
 
     def catch_up(self, segs: list[Segment] | None = None, whole: bool = False) -> None:
         """Index whatever of ``segs`` (default: the whole store) isn't yet: a store an older
@@ -1073,20 +1144,38 @@ class Catalogue:
             )
         ]
 
-    def latest_facts(self, boot: str, inode: str, below: int) -> list[dict]:
-        """The newest fact of each kind (``entry``, ``other``, ``start``, ``end``) about ``inode``
-        in ``boot`` before seq ``below`` — what the join needs to know whose it was then: the
-        newest one alone may be an init that says nothing about the number (one made inside a
-        container)."""
-        return [
+    def suffix(self, boot: str, inode: str, below: int) -> list[dict]:
+        """:func:`fact_suffix` of namespace ``inode`` in ``boot`` before seq ``below``, read from
+        the catalogue: its newest anchor on (and the start of the life it ends)."""
+        c = self.conn
+        anchor = c.execute(
+            "SELECT seq, what FROM nsfact WHERE boot = ? AND inode = ? AND seq < ? AND what IN "
+            "('entry', 'start', 'end') ORDER BY seq DESC LIMIT 1",
+            (boot, inode, below),
+        ).fetchone()
+        if anchor is None:
+            return []
+        lo = anchor[0]
+        if anchor[1] == "end":
+            (start,) = c.execute(
+                "SELECT MAX(seq) FROM nsfact WHERE boot = ? AND inode = ? AND seq < ? AND "
+                "what = 'start'",
+                (boot, inode, lo),
+            ).fetchone()
+            lo = lo if start is None else start
+        rows = [
             self._fact(boot, row)
-            for what in ("entry", "other", "start", "end")
-            for row in self.conn.execute(
-                f"SELECT {self._FACT_COLS} FROM nsfact WHERE boot = ? AND inode = ? AND what = ? "
-                "AND seq < ? ORDER BY seq DESC LIMIT 1",
-                (boot, inode, what, below),
+            for row in c.execute(
+                f"SELECT {self._FACT_COLS} FROM nsfact WHERE boot = ? AND inode = ? AND seq >= ? "
+                "AND seq < ? ORDER BY seq",
+                (boot, inode, lo, below),
             )
         ]
+        return fact_suffix(rows, below)
+
+    def closure(self, boot: str, seeds: Iterable[tuple[str, int]]) -> list[dict]:
+        """:func:`fact_closure` over the catalogue: the facts a read of ``seeds`` needs."""
+        return list(fact_closure(lambda i, b: self.suffix(boot, i, b), seeds).values())
 
     def last_snapshot(self, boot: str) -> int:
         (seq,) = self.conn.execute("SELECT MAX(seq) FROM snap WHERE boot = ?", (boot,)).fetchone()

@@ -479,9 +479,9 @@ class _Facts:
     """One boot's namespace facts (:func:`monitorstore.ns_fact`), read forward: each init mark's
     KIND, decided by where its init came from at the time — ``container`` (conmon, in podman's
     namespace), ``build`` (podman itself there) or ``nested`` (anywhere else: a namespace made
-    inside another, which says nothing about who holds a number) — and podman's entries
-    (``entry``). Forward, in seq order, so a kind depends only on what came before it: no chain of
-    namespaces made inside each other can make the reading recurse.
+    inside another, no mark of a container or a build, though it ends what held the number before)
+    — and podman's entries (``entry``). Forward, in seq order, so a kind depends only on what came
+    before it: no chain of namespaces made inside each other can make the reading recurse.
 
     Every fact, nested inits and ``other`` (a number entered from anywhere but the VM) included, is
     also kept in order per namespace (``seen``): an entry never ends and numbers are reused, so a
@@ -506,9 +506,12 @@ class _Facts:
                 kind = "entry"
             elif what == "other":
                 continue  # says only that the number is no longer podman's
+            elif not self.trusted(str(f["outside"]), seq - 1):
+                # nested: a namespace made inside another, which says nothing about a container
+                # or a build — but it is a new namespace on that number, so it ends whatever an
+                # older fact said held it
+                kind = "nested"
             else:
-                if not self.trusted(str(f["outside"]), seq - 1):
-                    continue  # nested: never a holder of its number
                 kind = "container" if str(f.get("by") or "").startswith("conmon") else "build"
             fact = (seq, kind, what, _ns(f["start"]), str(f.get("pidns") or ""))
             self.held.setdefault(str(f["inode"]), []).append(fact)
@@ -516,8 +519,8 @@ class _Facts:
 
     def holder(self, inode: str, seq: int) -> tuple[int, str, str, int | None, str] | None:
         """The newest fact about who holds ``inode`` at or before ``seq``: ``(seq, kind, what,
-        init start, init pid namespace)``, kind ``entry``/``container``/``build``, what
-        ``entry``/``start``/``end``."""
+        init start, init pid namespace)``, kind ``entry``/``container``/``build``/``nested``, what
+        ``entry``/``start``/``end`` — the newest anchor (:func:`monitorstore.fact_suffix`)."""
         seqs = self.seqs.get(inode)
         if not seqs:
             return None
@@ -852,10 +855,11 @@ def join(records: list[dict], cat: monitorstore.Catalogue | None, prefix: str) -
         # namespace may sit in an earlier read than its first command)…
         blo = before["seq"] if before else -1
         window = cat.facts(boot, blo, after["seq"] if after else 1 << 62)
-        # …and the newest one before that about every namespace the events and those facts touch
-        # (podman entered its own at boot; a container's init may have entered hours ago), with,
-        # for an init among them, the newest about where it came from, as it was then
-        inodes = {f["outside"] for f in window}
+        # …and, before that, every fact reading the namespaces the events touch depends on
+        # (monitorstore.fact_closure: podman entered its own at boot; a container's init may have
+        # entered hours ago; an init's kind is decided by where it came from, as it was then) —
+        # exactly what retention keeps
+        inodes = set()
         for r in records:
             if r.get("k") == "ev" and r.get("boot") == boot:
                 body = next((v for k, v in (r.get("e") or {}).items() if k.startswith("process_")),
@@ -864,10 +868,9 @@ def join(records: list[dict], cat: monitorstore.Catalogue | None, prefix: str) -
                     inum = ((obj.get("ns") or {}).get("mnt") or {}).get("inum")
                     if inum:
                         inodes.add(str(inum))
-        prior = [f for i in sorted(inodes) for f in cat.latest_facts(boot, i, blo)]
-        for f in list(prior):
-            if f["what"] != "entry":
-                prior += cat.latest_facts(boot, f["outside"], f["seq"])
+        seeds = [(i, blo) for i in sorted(inodes | {str(f["inode"]) for f in window})]
+        seeds += [(str(f["outside"]), int(f["seq"])) for f in window if f["what"] != "entry"]
+        prior = cat.closure(boot, seeds)
         near += prior + window
     # the snapshots after the records: attribute() orders boots by first appearance, and the
     # events must come out in store order (a hook's cursor moves by them)
