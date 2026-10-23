@@ -253,8 +253,10 @@ foldyard's surface splits by *where it can be validated*:
    revert save you — it only guards the round where the mutation step itself failed.) There
    is no bare `python`/`python3` in a dev box — `uv run python`. Profiles live in
    `conftest.py`: CI (`CI` env) is derandomized so `check` never
-   flakes; local runs stay randomized. Keep strategies as plain data (hypothesis shrinks data,
-   not closures).
+   flakes; local runs stay randomized; `explore` (`FOLDYARD_HYPOTHESIS_PROFILE=explore`, which
+   wins over `CI`) is the weekly randomised hunt in CI, below. A test that sets its own
+   `max_examples` wraps it in `pbt.scaled_examples(n)`, or `explore` leaves it at its everyday
+   budget. Keep strategies as plain data (hypothesis shrinks data, not closures).
 2. **Engine verbs (golden tests)** — mock the engine; assert the exact `docker`/`podman`
    command *sequences* foldyard emits. No real engine.
 3. **Live smoke (e2e)** — drive the REAL machinery on a real engine, opt-in (`FOLDYARD_E2E=1`):
@@ -419,6 +421,35 @@ sharded (below):
 | `lima-host-e2e` | the HOST topology: `ubuntu-24.04` as a real Linux host running foldyard's default `lima` backend — `machine ensure` boots a QEMU/KVM VM on the runner, then `tests/test_e2e.py` drives the real `foldyard up` / worktree lifecycle through the config-adopt gate, the supervisor and compose, exactly as on an operator's machine. Two shards, `L1`/`L2` | Lima VM (podman in the guest, over the forwarded socket) |
 | `wsl2-host-e2e` | the same host tier on `windows-2025`: an Ubuntu 24.04 distro under WSL2 ([Vampire/setup-wsl](https://github.com/Vampire/setup-wsl)) is the host, and the `lima` backend boots the QEMU/KVM VM INSIDE it — a second level of nesting the hosted Windows runners expose. Same modules, four shards `W1`–`W4`; `test_wall_e2e.py` skips itself there (below) | Lima VM inside the WSL2 distro |
 | `e2e` | the one status for the workflow: `needs:` every job above and fails unless each succeeded (a matrix job's result is its worst shard's) | none |
+
+**The weekly randomised property run (`property-explore.yml`).** Every job above loads the `ci`
+hypothesis profile, which replays the same examples every run and so never finds a new
+counterexample; local randomised runs at about 3,000 examples found two real bugs that CI's replayed
+examples had passed (PR #138, 2026-10). So once a week (Tuesdays 03:17 UTC, kept weekly to go easy
+on GitHub's runners) one job runs the property tier — every test module that imports hypothesis,
+which `tests/test_property_explore.py` holds the workflow's `PROPERTY_MODULES` list to — under the
+`explore` profile: randomised, `max_examples` 5000 (50× the default; each test's own budget scales
+with it), no deadline, `-n auto`. The tier took 7.7 min on a hosted runner (5.4 on 4 local workers),
+under the step's 22-minute cap; the hook-delivery property is most of it. The example database lives
+at `.hypothesis/examples`, which `actions/cache` carries from run to run (each run saves under
+`hypothesis-explore-<run_id>-<attempt>`, the next restores the newest by the prefix), so a
+counterexample found one week is replayed first every week until it is fixed. GitHub evicts an entry
+nobody has read for 7 days, which a weekly run only just beats; a late start may find it gone and
+begin a fresh database, which loses nothing the issue below doesn't keep. A manual run (Actions →
+property explore → Run workflow) takes a `max_examples` and a `dry_run`.
+
+**A failure opens a public issue, because GitHub's own failure email does not reach the
+operator.** A failed scheduled run emails whoever last edited the workflow's cron line, so a
+reformatting PR would silently move the alert to its author. Instead, on any failure,
+`tests/tools/property_failures.py` turns the JUnit report (or, without one, the log's tail) into a
+summary — the run's URL, the failing tests, each falsifying example and its `@reproduce_failure`
+line — and `.github/scripts/notify-property-failure.sh` comments it on the open issue labelled
+`property-tests`, or opens one assigned to and @-mentioning `NOTIFY_LOGIN` (the workflow's
+top-level `env`; change it there to send it elsewhere). Assignment and mention both email under
+GitHub's default notification settings. Public is deliberate: the run's log already shows the same
+examples. The summary is untrusted text (whatever a strategy generated): it reaches `gh` only as
+`--body-file`, inside a code fence it cannot close, and no `run:` in the workflow expands an
+expression. A `dry_run` prints the issue instead of posting it.
 
 **Why `live-e2e` runs inside a container.** The box e2e (`test_proxy_box_e2e.py`) spawns a
 *sibling* box and must discover its own network — so the test process itself has to be in a
