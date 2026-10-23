@@ -537,7 +537,7 @@ def _lifetime(
     facts: _Facts,
     inode: str,
     seq: int,
-    window: tuple[int, int, int | None],
+    window: tuple[int, int],
     before: bool,
     again: bool,
     proc: tuple[str, bool, int | None],
@@ -545,21 +545,22 @@ def _lifetime(
     """Whether an event the snapshots give to one container falls within that container's life —
     from its init entering the namespace to its init leaving it, as the init's marks say (a life is
     paired by its init's pid namespace) — or, where no mark says, is taken as the snapshots do.
-    ``window``: the snapshot before and the one after (seqs) and when the one before was taken
-    (ns); ``before``: the snapshot before names the container (else only the one after does);
-    ``again``: the one after names it too; ``proc``: the event's process's pid namespace, whether
-    that is the VM's (where podman's tools run) and when the process started.
+    ``window``: the snapshot before and the one after (seqs); ``before``: the snapshot before
+    names the container (else only the one after does); ``again``: the one after names it too;
+    ``proc``: the event's process's pid namespace, whether that is the VM's (where podman's tools
+    run) and when the process started.
 
     * The life holding the number at the event is the newest container init mark at or before it.
       None: the snapshots decide — except, named only by the snapshot after, before an init
       entering later in the window (podman's netavark, nft and crun run for an instant in a
       namespace of their own carrying the number the container takes next).
     * A life in progress is the container's when the snapshot before saw it (it started before
-      that snapshot was taken: the relay reads the export a moment behind, so the init may come
-      after the snapshot in the stream), or, named only after, when it still runs at the snapshot
-      after; another life started in between is it again only if the snapshot after names it too
-      (a restart keeps the id) — and never for a process that started before the life's init (an
-      event of the one before it, delivered late).
+      that snapshot, or after it with no init leaving the number in between: the snapshot named the
+      container while the runtime set it up — cabash's relay did, 31 ms before an init's exec), or,
+      named only after, when it still runs at the snapshot after; another life started in between
+      is it again only if the snapshot after names it too (a restart keeps the id) — and never for
+      a process that started before the life's init (an event of the one before it, delivered
+      late).
     * After a life's init left: the container's own processes, killed after their init, are in its
       pid namespace and still its — when that life was the container's; nothing else is (podman's
       teardown on the freed number, or the next container's processes) — except, where the number
@@ -572,7 +573,7 @@ def _lifetime(
     tools just before, too: 157 events over cabash's whole store (2026-10-23). Telling those apart
     needs the next window's marks, which a hook — taking an event as settled at the first snapshot
     after it — can't wait for."""
-    lo, hi, taken = window
+    lo, hi = window
     pidns, host_pid, started = proc
     marks = facts.inits(inode, lo, hi)
     if not before and any(w == "start" and seq < q for q, w, _, _ in marks):
@@ -583,8 +584,14 @@ def _lifetime(
     q, _, what, t0, life = h
 
     def seen_by_before(start: tuple | None) -> bool:  # that life is the one the snapshot before saw
-        return start is None or start[0] <= lo or (taken is not None and start[3] is not None
-                                                    and start[3] <= taken)  # fmt: skip
+        # it started before that snapshot, or after it with no init leaving the number in between:
+        # the snapshot saw its namespace while the runtime set it up (the relay reads the export a
+        # moment behind, and a container's scope holds the runtime before its init's exec)
+        return (
+            start is None
+            or start[0] <= lo
+            or not any(w == "end" and lo < m < start[0] for m, w, _, _ in marks)
+        )
 
     if what == "start":
         if started is not None and t0 is not None and started < t0:
@@ -671,7 +678,7 @@ def _one(
         if known.podman(inode, seq):
             return "ambiguous", "", False  # a container's scope in podman's namespace
         pidns = str(((proc.get("ns") or {}).get("pid") or {}).get("inum") or "")
-        window = (lo, hi, _taken(snap_b) if snap_b else None)
+        window = (lo, hi)
         started = _ns(proc.get("start_time"))
         if _lifetime(
             known, inode, seq, window, bool(before), after == ids, (pidns, host_pid, started)

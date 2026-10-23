@@ -558,16 +558,26 @@ def test_after_a_containers_init_left_only_its_own_processes_are_its():
 
 
 def test_a_container_the_snapshot_before_saw_being_set_up_keeps_its_life():
-    # the relay reads the export a moment behind: its snapshot can name a container whose init's
-    # exec comes after it in the stream — that life is the one it saw, even if it's over by the next
+    # a container's scope holds the runtime in its namespace before its init's exec, and the relay
+    # reads the export a moment behind: its snapshot can name a container whose init's exec comes
+    # after it in the stream (cabash: 31 ms) — that life is the one it saw, even if it's over by the
+    # next snapshot. Not once another init left the number in between: that was someone else's.
     recs = _records(
         snap({300: [BOX]}, t=T_BEFORE),
-        init(300, start="2026-10-04T09:29:59Z"),  # started before the snapshot was taken
-        proc(300, "2026-10-04T10:00:00Z"),
-        init(300, "process_exit", start="2026-10-04T09:29:59Z"),
+        init(300, start="2026-10-04T10:00:01Z"),  # after the snapshot was taken
+        proc(300, "2026-10-04T10:00:02Z"),
+        init(300, "process_exit", start="2026-10-04T10:00:01Z"),
         snap({}),
     )
     assert _who(monitorlog.attribute(recs, "fyex")) == [("container", "a")] * 3
+    after_another = _records(
+        snap({300: [BOX]}, t=T_BEFORE),
+        init(300, "process_exit", start="2026-10-04T09:00:00Z"),
+        init(300, start="2026-10-04T10:00:01Z"),
+        proc(300, "2026-10-04T10:00:02Z"),
+        snap({}),
+    )
+    assert _who(monitorlog.attribute(after_another, "fyex"))[1:] == [("unattributed", "")] * 2
 
 
 def test_a_number_free_since_before_the_window_is_never_given_for_podmans_tools():
