@@ -50,11 +50,8 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: extractions/setup-just@v4
-      - uses: astral-sh/setup-uv@v8.2.0
-
-      # A dispatch input reaches the shell only through env, and only once it is a number.
+      # First, so a failure in any step after it reaches the operator. A dispatch input reaches the
+      # shell only through env, and only once it is a number.
       - name: Check the inputs
         id: inputs
         env:
@@ -64,6 +61,10 @@ jobs:
             echo "::error::max_examples must be a positive whole number, not: $MAX_EXAMPLES"
             exit 1
           fi
+
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v4
+      - uses: astral-sh/setup-uv@v8.2.0
 
       # The example database, carried run to run: every run saves under its own key and the next
       # restores the newest (the prefix), so a counterexample found one week is replayed first
@@ -102,8 +103,9 @@ jobs:
           path: .hypothesis/examples
           key: hypothesis-explore-${{ github.run_id }}-${{ github.run_attempt }}
 
-      # Any failure from here on, not only a failing test: a timeout or a broken setup must reach
-      # the operator too. A refused input is the dispatcher's own mistake, already on their screen.
+      # Any failure after the input check, not only a failing test: a timeout or a broken setup
+      # must reach the operator too. A refused input is the dispatcher's own mistake, already on
+      # their screen. (Without a checkout there is no script to run: GitHub's email is all.)
       - name: Summarise the failure
         if: failure() && steps.inputs.outcome == 'success'
         env:
