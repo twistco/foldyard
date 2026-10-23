@@ -1181,13 +1181,17 @@ class Catalogue:
         # The crossings: what turned out not to be one goes with its segment; of what did, the
         # first of each boot stays (from it on, every hook has the boot unfiltered) — and one not
         # yet judged stays to be (its snapshot after may be the next record stored). Each for as
-        # long as the store holds anything of that boot.
+        # long as the store holds anything of that boot, and always for the running boot (as the
+        # facts above).
         c.execute(f"DELETE FROM crossing WHERE {gone_seg} AND verdict = 0")
         c.execute(
             f"DELETE FROM crossing WHERE {gone_seg} AND verdict = 1 AND seq > (SELECT MIN(f.seq) "
             "FROM crossing f WHERE f.boot = crossing.boot AND f.verdict = 1)"
         )
-        c.execute(f"DELETE FROM crossing WHERE {gone_seg} AND boot NOT IN (SELECT boot FROM span)")
+        c.execute(
+            f"DELETE FROM crossing WHERE {gone_seg} AND boot NOT IN (SELECT boot FROM span) "
+            "AND boot IS NOT (SELECT boot FROM nsfact ORDER BY rowid DESC LIMIT 1)"
+        )
         orphan = "seg NOT IN (SELECT id FROM seg)"
         c.execute(
             f"DELETE FROM snap WHERE {orphan} AND seq < (SELECT MAX(o.seq) FROM snap o "

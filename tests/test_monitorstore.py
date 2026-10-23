@@ -802,8 +802,8 @@ def test_retention_keeps_a_boots_first_crossing_and_what_is_not_yet_judged(state
     ms.append([snap(7)])  # its snapshot after: judged though its segment is gone
     with ms.Catalogue.open() as cat:
         assert _crossings(cat) == [(1, 1, BOX), (5, 1, BOX)]
-    ms.append([snap(0, boot="boot-2"), ev(1, boot="boot-2")])
-    with ms.Catalogue.open() as cat:  # its boot gone from the store: nothing of it is kept
+    ms.append([snap(0, boot="boot-2"), {**entry(1), "boot": "boot-2"}])
+    with ms.Catalogue.open() as cat:  # its boot gone from the store, another running: none kept
         cat.drop([s.id for s in ms.segments() if not s.live])
         assert _crossings(cat) == []
 
@@ -817,3 +817,16 @@ def test_a_failing_judge_never_stops_the_store(state, monkeypatch):
     assert _seqs(ms.read(None, 1 << 20)[0]) == [0, 1, 2]
     with ms.Catalogue.open() as cat:
         assert cat.first_unjudged(BOOT) == (1, "2026-10-21T20:00:01Z")
+
+
+def test_the_running_boots_first_crossing_stays_though_the_live_segment_holds_none_of_it(
+    state, monkeypatch
+):
+    # right after a seal the live segment may hold only an engine claim: the running boot has no
+    # span, but its next events are still decided by its first crossing
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0), entry(1), crossed(2), snap(3)])
+    ms.append([{"k": "engine", "containers": {}}])
+    with ms.Catalogue.open() as cat:
+        cat.drop([ms.segments()[0].id])
+        assert _crossings(cat) == [(2, 1, BOX)]
