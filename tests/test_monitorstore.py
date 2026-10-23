@@ -376,3 +376,36 @@ def test_a_supervisor_still_on_0_6_works_beside_the_marks(state, monkeypatch):
     with ms.Catalogue.open() as cat:
         cat.catch_up()
         assert [(m[0], m[2]) for m in _marks(cat)] == [(1, "start"), (2, "end")]
+
+
+def test_the_marks_move_with_a_sealed_segment_and_go_with_a_removed_one(state, monkeypatch):
+    # an older foldyard's live file is sealed under a new id (`rename`): its marks and how far it
+    # was read for them follow it, leaving no row on the old id; retention then removes it
+    # (`drop`): its marks and that row go with it
+    logs = state / "logs"
+    logs.mkdir()
+    (logs / "monitor.jsonl").write_text(
+        "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in (snap(0), init(1), ev(2)))
+    )
+    (legacy,) = ms.segments()
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+    ms.append([ev(3)])
+    sealed = ms.segments()[0]
+    assert sealed.id != legacy.id
+    with ms.Catalogue.open() as cat:
+        assert _marks(cat) == [(1, "200", "start", "2026-10-21T20:00:00.5Z")]
+        rows = cat.conn.execute("SELECT seg FROM mark").fetchall()
+        read = dict(cat.conn.execute("SELECT id, marked FROM markseg").fetchall())
+        (indexed,) = cat.conn.execute(
+            "SELECT indexed FROM seg WHERE id = ?", (sealed.id,)
+        ).fetchone()
+        assert rows == [(sealed.id,)] and legacy.id not in read and read[sealed.id] == indexed
+    monkeypatch.setattr(ms, "budget", lambda: 1)  # keeps only the live segment
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([init(4), ev(5)])  # seals the live segment, whose mark stays
+    ms.append([ev(6)])  # and seals that one too: retention removes both sealed segments
+    (live,) = ms.segments()
+    with ms.Catalogue.open() as cat:
+        assert _marks(cat) == []
+        assert cat.conn.execute("SELECT id FROM markseg").fetchall() == [(live.id,)]

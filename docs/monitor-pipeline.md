@@ -122,15 +122,15 @@ the kernel snapshots named, never a third; a container that came and went inside
 blocks both; and a mark counts only if its init started after the snapshot before was taken (a
 start) or before it (an exit), since the relay reads the export a moment behind and that snapshot
 may already have seen the init. They assume Tetragon delivers a container's marks: an exit lost at
-random, with a container Tetragon can't mark taking the number next, could mislead them. On
-cabash every init exec had its exit. In between, the old container's children dying after its init and podman's own
-short-lived namespaces (netavark) stay `ambiguous`. The same window re-joined: 538 `ambiguous`
-events left, and all five agents' events from their init's first exec on. Three agents that lived
-under 40 s were never in any snapshot at all — the relay had already looked for their number once
-that minute, and its minute only restarts after 60 s with no snapshot at all — so no join can name
-them: their events stay `unattributed`. The relay now snapshots within a second of a container's
-init entering a number too (the same mark), makes a number new again when an init leaves it, and
-looks for a number no snapshot found again after a minute whatever else it snapshots — which
+random, with a container Tetragon can't mark taking the number next, could mislead them. On cabash
+every init exec had its exit. In between, the old container's children dying after its init and
+podman's own short-lived namespaces (netavark) stay `ambiguous`. The same window re-joined: 538
+`ambiguous` events left, and all five agents' events from their init's first exec on. Three agents
+that lived under 40 s were never in any snapshot at all — the relay had already looked for their
+number once that minute, and its minute only restarts after 60 s with no snapshot at all — so no
+join can name them: their events stay `unattributed`. The relay now snapshots within a second of a
+container's init entering a number too (the same mark), makes a number new again when an init leaves
+it, and looks for a number no snapshot found again after a minute whatever else it snapshots — which
 changes the monitor's boot script, so a monitored VM takes it at `fy machine stop && fy up`.
 
 ## 3. Tiers and retention

@@ -386,8 +386,9 @@ disk_gib = 60
       stretch of time: the store removed events before the hook read them, events were lost
       between the VM and your computer, a batch was skipped, events were labelled without the
       record that would confirm their container, or events the hook's `who` filter passed over
-      because foldyard couldn't tell which of two containers they were (`ambiguous`). Read those times as "no evidence", not "nothing
-      happened". Each event also carries `mnt`, its mount namespace number. The format:
+      because foldyard couldn't tell which of two containers they were (`ambiguous`). Read those
+      times as "no evidence", not "nothing happened". Each event also carries `mnt`, its mount
+      namespace number. The format:
       [docs/monitor-pipeline.md](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md#6-hooks-built).
     - The design, and the analysis pipeline hooks are meant for:
       [docs/monitor-pipeline.md](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md).
