@@ -370,6 +370,36 @@ def test_events_released_without_a_later_snapshot_are_said(ran, project):
     assert (gap["why"], gap["after"], gap["before"]) == ("unsettled", [BOOT, 0], [BOOT, 3])
 
 
+def test_ambiguous_events_a_who_filter_passes_over_are_said(ran, project):
+    # a namespace number two snapshots name different containers for, the containers' inits not
+    # saying where it changed hands: events a `who = ["container"]` hook can't be sent — and must
+    # not read as "the container did nothing"
+    calls, _ = ran
+    (project / "monitor-hooks.toml").write_text(
+        '[[hook]]\nname = "c"\ncommand = ["/bin/c"]\nwho = ["container"]\n'
+        '[[hook]]\nname = "both"\ncommand = ["/bin/b"]\nwho = ["container", "ambiguous"]\n'
+        '[[hook]]\nname = "net"\ncommand = ["/bin/n"]\nwho = ["container"]\nkinds = ["connect"]\n'
+        '[[hook]]\nname = "vm"\ncommand = ["/bin/v"]\nwho = ["vm"]\n'
+    )
+    other = "c" * 64
+    monitorlog._append([snap(0), ev(1), ev(2, inode=999), ev(3), snap(4, mapping={"200": [other]})])
+    mh.round_once(now=50)
+    by = {c["env"]["FY_HOOK"]: c["body"] for c in calls}
+    (gap,) = by["c"]["gaps"]
+    assert (gap["why"], gap["after"], gap["before"], gap["mnt"]) == (
+        "ambiguous",
+        [BOOT, 0],
+        [BOOT, 4],
+        200,
+    )
+    assert (gap["since"], gap["until"]) == ("t1", "t3") and "2 events" in gap["detail"]
+    assert by["both"]["gaps"] == [] and len(by["both"]["events"]) == 2  # it takes them
+    assert "net" not in by  # it wanted none of them anyway: connections only
+    assert "vm" not in by  # …nor this one: none of them could be the VM's
+    mh.round_once(now=60)
+    assert len(calls) == 2  # said once
+
+
 def test_transport_and_relay_gaps_reach_the_hook_even_when_it_wants_nothing_there(ran, project):
     calls, _ = ran
     (project / "monitor-hooks.toml").write_text(

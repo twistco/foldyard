@@ -135,3 +135,69 @@ def test_a_resumed_spool_appends_to_its_newest_segment(tmp_path, monkeypatch):
     files = list((tmp_path / "spool" / "d").iterdir())
     assert len(files) == 1
     assert [ln.split()[0] for ln in files[0].read_text().splitlines()] == ["0", "1"]
+
+
+# ── when the relay snapshots, besides its timer ─────────────────────────────────────────
+
+
+def _event(inode: int, kind: str = "process_exec", init: bool = False, parent: int = 7) -> dict:
+    proc = {"ns": {"mnt": {"inum": inode}}, "in_init_tree": init}
+    return {kind: {"process": proc, "parent": {"ns": {"mnt": {"inum": parent}}}}, "time": "t"}
+
+
+def _snap(mapping: dict[int, list[str]]) -> dict:
+    return {"vm": 1, "map": {str(k): v for k, v in mapping.items()}}
+
+
+def test_a_container_init_entering_a_number_the_last_snapshot_had_is_snapshotted():
+    # cabash, 2026-10-23: the number a dead container held, handed straight to the next one — the
+    # last snapshot still had it, so nothing was "new" and the next snapshot came on the timer
+    t = relay.Trigger()
+    t.took(_snap({200: [BOX]}), now=100.0)
+    t.saw(_event(200), now=100.2)  # the old container's: nothing to do
+    assert t.due(now=101.5, last=100.0) == ""
+    t.saw(_event(200, init=True), now=101.6)  # the next container's init, from conmon
+    assert t.due(now=101.7, last=101.65) == ""  # at most one a second
+    assert t.due(now=102.7, last=101.65) == "init 200"
+
+
+def test_a_container_init_leaving_makes_its_number_new_again():
+    t = relay.Trigger()
+    t.took(_snap({200: [BOX]}), now=100.0)
+    t.saw(_event(200, "process_exit", init=True), now=100.5)  # the init leaving: nothing yet…
+    assert t.due(now=102.0, last=100.0) == ""
+    t.saw(_event(200), now=102.1)  # …until something runs in that number again
+    assert t.due(now=102.2, last=100.0) == "new 200"
+
+
+def test_a_number_no_snapshot_found_is_looked_for_again_a_minute_later():
+    # the relay looked once per number until its timer fired — and the timer only fires after a
+    # minute with no snapshot at all, so under churn a number once looked for never was again
+    t = relay.Trigger()
+    t.took(_snap({}), now=100.0)
+    t.saw(_event(300), now=100.1)
+    assert t.due(now=101.1, last=100.0) == "new 300"
+    t.took(_snap({}), now=101.1)  # no scope held it yet (a runtime mid-setup)
+    t.saw(_event(300), now=130.0)
+    assert t.due(now=131.0, last=101.1) == ""
+    t.saw(_event(300), now=161.2)
+    assert t.due(now=162.0, last=101.1) == "new 300"
+
+
+@pytest.mark.parametrize(
+    "event, mark",
+    [
+        (_event(200, init=True), "start"),
+        (_event(200, "process_exit", init=True), "end"),
+        (_event(200, init=False), None),  # podman exec: from conmon, not in the init tree
+        (_event(200, init=True, parent=200), None),  # the init's own child
+        (_event(200, "process_kprobe", init=True), None),
+        ({"process_exec": {"process": {"in_init_tree": True}}, "time": "t"}, None),
+    ],
+)
+def test_the_relay_and_the_host_agree_on_what_a_container_init_is(event, mark):
+    from foldyard import monitorstore
+
+    assert relay.init_mark(event) == ((200, mark) if mark else None)
+    host = monitorstore.init_mark({"k": "ev", "e": event})
+    assert (host["what"] if host else None) == mark

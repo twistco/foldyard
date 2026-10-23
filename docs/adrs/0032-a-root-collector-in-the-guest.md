@@ -80,11 +80,16 @@ owns attribution: Tetragon is the sensor, the way the proxy is for HTTP.**
     makes the untrusted transport acceptable.
   - **The relay never joins.** It ships raw events and, separately, kernel snapshots of
     mount namespace → container: at start, every 60 s, and within a second of a namespace it
-    hasn't seen. The host joins at read time over the stored evidence, so attribution improves
-    with a foldyard upgrade (no VM restart), and stored history can be re-joined after a fix. An
-    event takes the snapshot before it if that still holds its namespace, else the one after;
-    disagreement is `ambiguous`. A namespace number is freed with its container and handed on,
-    so a mapping is never carried past a snapshot that dropped it.
+    hasn't seen (since 2026-10-23, also of a container's init entering one it has). The host
+    joins at read time over the stored evidence, so attribution improves with a foldyard upgrade
+    (no VM restart), and stored history can be re-joined after a fix. An event takes the
+    snapshot before it if that still holds its namespace, else the one after; disagreement is
+    `ambiguous`. A namespace number is freed with its container and handed on,
+    so a mapping is never carried past a snapshot that dropped it. *(2026-10-23: where the two
+    disagree, the containers' own inits leaving and entering the namespace, seen in the stored
+    events, now say which of the two each event was —
+    [monitor-pipeline §2.1](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md#21-built-the-store-today).
+    Stored history re-joins with it, as this decision intended.)*
   - **Long-lived containers are the case that matters.** The box and the stack keep one
     namespace for hours, and every `podman exec` joins it. A container too short-lived for any
     snapshot comes out `unattributed`, which reads as the box's own activity: the box is what

@@ -389,6 +389,80 @@ def worktree_of(meta: dict | None, prefix: str) -> str:
     return ""
 
 
+def _ns(stamp: object) -> int | None:
+    """A Tetragon timestamp (RFC 3339, UTC, up to nine fractional digits — Go trims trailing
+    zeros, so two of them don't compare as text) in nanoseconds; ``None`` when it isn't one."""
+    if not isinstance(stamp, str) or not stamp.endswith("Z"):
+        return None
+    head, _, frac = stamp[:-1].partition(".")
+    if frac and not (frac.isdigit() and len(frac) <= 9):
+        return None
+    try:
+        secs = datetime.fromisoformat(head).replace(tzinfo=UTC).timestamp()
+    except ValueError:
+        return None
+    return round(secs) * 10**9 + int(frac.ljust(9, "0") or 0)
+
+
+def _handover(
+    before: list[str],
+    after: list[str],
+    marks: list[tuple[int, str, int | None]],
+    seq: int,
+    started: int | None,
+    taken: int | None,
+) -> str:
+    """The container an event belongs to when the snapshot before names ``before`` for its
+    namespace and the snapshot after names ``after`` — the number changed hands between them — or
+    ``""`` when the stream can't say. ``marks`` are that namespace's container-init marks between
+    the two snapshots (:func:`monitorstore.init_mark`), as ``(seq, "start"|"end", process start)``
+    in nanoseconds; ``taken`` is when the snapshot before was taken, ``started`` when the event's
+    process started.
+
+    * From the LAST init start on, when no init exit follows it, the namespace is the one the
+      snapshot after names: nothing else entered it as a container since. Only an init that
+      started after the snapshot before was taken: the relay reads Tetragon's export a moment
+      behind, so that snapshot may already have seen this very init (it then names the same
+      container, or that container came and went). And only for a process that started no
+      earlier than that init — Tetragon's per-CPU buffers can deliver an event of the old
+      container a moment late, and its process started before the old container died.
+    * Up to the FIRST init exit, when no init start comes before it, it is the one the snapshot
+      before names: that container's init was still running — an init that started before that
+      snapshot was taken, so the one it saw.
+
+    Between the two — the old container's children dying after its init, podman's own short-lived
+    namespace (netavark) holding the number — neither, and a container that came and went inside
+    the window (a start and its exit) blocks both. The marks only ever choose between the two
+    containers the KERNEL snapshots named; they never name one themselves."""
+    if len(before) != 1 or len(after) != 1:
+        return ""
+    starts = [m for m in marks if m[1] == "start"]
+    ends = [m for m in marks if m[1] == "end"]
+    if taken is None:
+        return ""
+    if starts:
+        last = starts[-1]
+        if (
+            not any(e[0] > last[0] for e in ends)
+            and seq >= last[0]
+            and last[2] is not None
+            and last[2] > taken
+            and started is not None
+            and started >= last[2]
+        ):
+            return after[0]
+    if ends:
+        first = ends[0]
+        if (
+            not any(s[0] < first[0] for s in starts)
+            and seq <= first[0]
+            and first[2] is not None
+            and first[2] < taken
+        ):
+            return before[0]
+    return ""
+
+
 def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
     """Join events to containers, per boot, over the stored records (in store order).
 
@@ -398,23 +472,30 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
     * the snapshot before, when it still holds the namespace — the container was alive then;
     * otherwise the snapshot after — the relay snapshots within a second of an unseen namespace,
       so a container that started just before its first event is named by the next one;
-    * both, disagreeing → ``ambiguous``. A namespace number is freed with its container and can
-      be handed to the next one; a mapping is therefore only ever trusted from the snapshot
-      nearest the event, never carried forward past a snapshot that no longer had it.
+    * both, disagreeing: the number was handed from one container to the next between them (the
+      kernel gives a freed number to the next namespace made). The containers' own inits say where
+      — the old one's leaving, the new one's entering (:func:`_handover`) — and where they can't,
+      ``ambiguous``. A mapping is otherwise only ever trusted from the snapshot nearest the event,
+      never carried forward past a snapshot that no longer had it.
 
     The VM's own namespace (as those same two snapshots report it) is ``vm``; anything else
     unmatched is ``unattributed``. Duplicate (boot, seq) records — a re-read after a crash —
-    count once. Only the two snapshots around an event decide it, so joining a stretch of the
-    store with the snapshots just outside it gives what joining the whole store would
-    (:func:`join`).
+    count once. Only the two snapshots around an event, and the init marks between them, decide
+    it, so joining a stretch of the store with the snapshots and marks just outside it gives what
+    joining the whole store would (:func:`join`); ``{"k": "mark"}`` records (the catalogue's) are
+    read as marks only, never as events.
     """
     by_boot: dict[str, list[dict]] = {}
     meta: dict[str, dict | None] = {}
     seen: set[tuple[str, int]] = set()
+    extra: list[dict] = []
     for r in records:
         k = r.get("k")
         if k == "engine":
             meta.update(r.get("containers") or {})
+            continue
+        if k == "mark" and "boot" in r:
+            extra.append(r)
             continue
         if k in ("ev", "scopes") and "boot" in r:
             key = (r["boot"], int(r["seq"]))
@@ -422,15 +503,32 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
                 continue
             seen.add(key)
             by_boot.setdefault(r["boot"], []).append(r)
+    for r in extra:  # the catalogue's marks for events outside these records
+        key = (r["boot"], int(r["seq"]))
+        if key not in seen:
+            seen.add(key)
+            by_boot.setdefault(r["boot"], []).append(r)
 
     out: list[Event] = []
     for boot, recs in by_boot.items():
         recs.sort(key=lambda r: int(r["seq"]))
         snaps = [r for r in recs if r["k"] == "scopes"]
+        marks: dict[tuple[str, int], list[tuple[int, str, int | None]]] = {}
+        si = 0
+        for r in recs:  # each namespace's init marks, by the snapshot window they fall in
+            if r["k"] == "scopes":
+                si += 1
+                continue
+            m = r if r["k"] == "mark" else monitorstore.init_mark(r)
+            if m is not None:
+                window = marks.setdefault((str(m["inode"]), si), [])
+                window.append((int(r["seq"]), m["what"], _ns(m["start"])))
         si = 0  # index of the first snapshot AFTER the current record
         for r in recs:
             if r["k"] == "scopes":
                 si += 1
+                continue
+            if r["k"] == "mark":
                 continue
             ev = r.get("e") or {}
             kind = next((k for k in ev if k.startswith("process_")), "")
@@ -446,7 +544,16 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
             if inode in vm:
                 who, cid = "vm", ""
             elif before and after and before != after:
-                who, cid = "ambiguous", ""
+                taken = snaps[si - 1].get("t")
+                cid = _handover(
+                    before,
+                    after,
+                    marks.get((inode, si), []),
+                    int(r["seq"]),
+                    _ns(proc.get("start_time")),
+                    round(taken * 10**9) if isinstance(taken, int | float) else None,
+                )
+                who = "container" if cid else "ambiguous"
             elif ids and len(ids) == 1:
                 who, cid = "container", ids[0]
             elif ids:
@@ -500,7 +607,11 @@ def join(records: list[dict], cat: monitorstore.Catalogue | None, prefix: str) -
             span[r["boot"]] = (min(lo, seq), max(hi, seq))
     near = []
     for boot, (lo, hi) in span.items():
-        near += [s for s in (cat.before(boot, lo), cat.after(boot, hi)) if s]
+        before, after = cat.before(boot, lo), cat.after(boot, hi)
+        near += [s for s in (before, after) if s]
+        # the init marks from the snapshot before to the one after: a container's init entering
+        # its namespace may sit in an earlier read than its first command
+        near += cat.marks(boot, before["seq"] if before else -1, after["seq"] if after else 1 << 62)
     # the snapshots after the records: attribute() orders boots by first appearance, and the
     # events must come out in store order (a hook's cursor moves by them)
     return attribute([*records, *near, {"k": "engine", "containers": cat.claims()}], prefix)

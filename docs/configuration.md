@@ -336,7 +336,9 @@ disk_gib = 60
     - **`vm`** is the VM itself, for example podman, or pasta making a container's connection.
     - **`unattributed`** is a container that came and went too fast to be seen. That is usually
       the box's own throwaway containers.
-    - **`ambiguous`** means the records disagree, and foldyard doesn't guess.
+    - **`ambiguous`** means the records disagree, and foldyard doesn't guess. Usually a
+      namespace number one container left and the next one took within the same minute, for an
+      event the containers' own start and exit don't place on either side.
   - Each event also names the process that started it: `--json` and hooks carry `ppid`, `parent`
     and `parent_args` (that process's id, binary and arguments), plus `exec_id` and
     `parent_exec_id` (the ids of the process's own `exec` event and its parent's), so you can
@@ -388,9 +390,11 @@ disk_gib = 60
       counted. `fy doctor` shows each hook's health.
     - Every batch has a `gaps` list, usually empty. An entry means the hook can't vouch for a
       stretch of time: the store removed events before the hook read them, events were lost
-      between the VM and your computer, a batch was skipped, or events were labelled without the
-      record that would confirm their container. Read those times as "no evidence", not "nothing
-      happened". Each event also carries `mnt`, its mount namespace number. The format:
+      between the VM and your computer, a batch was skipped, events were labelled without the
+      record that would confirm their container, or events the hook's `who` filter passed over
+      because foldyard couldn't tell which of two containers they were (`ambiguous`). Read those
+      times as "no evidence", not "nothing happened". Each event also carries `mnt`, its mount
+      namespace number. The format:
       [docs/monitor-pipeline.md](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md#6-hooks-built).
     - The design, and the analysis pipeline hooks are meant for:
       [docs/monitor-pipeline.md](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md).

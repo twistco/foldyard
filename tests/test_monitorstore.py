@@ -269,3 +269,162 @@ def test_a_row_for_a_segment_the_store_no_longer_has_is_dropped(state):
         assert not any(sid.startswith(ms.LEGACY) for sid in cat.bounds())
     finally:
         cat.close()
+
+
+def init(
+    seq: int, kind: str = "process_exec", inode: int = 200, start: str = "2026-10-21T20:00:00.5Z"
+):
+    """A container's init entering (exec) or leaving (exit) its namespace — a mark the join reads."""
+    e = ev(seq, inode)
+    body = e["e"].pop("process_exec")
+    body["process"] |= {"in_init_tree": True, "start_time": start}
+    body["parent"] = {"ns": {"mnt": {"inum": 7}}}
+    e["e"][kind] = body
+    return e
+
+
+def _marks(cat, lo: int = -1, hi: int = 1 << 40) -> list[tuple]:
+    return [(m["seq"], m["inode"], m["what"], m["start"]) for m in cat.marks(BOOT, lo, hi)]
+
+
+def test_the_catalogue_keeps_each_containers_init_marks(state, monkeypatch):
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0), init(1), ev(2), init(3, "process_exit")])
+    ms.append([snap(4), ev(5)])
+    want = [
+        (1, "200", "start", "2026-10-21T20:00:00.5Z"),
+        (3, "200", "end", "2026-10-21T20:00:00.5Z"),
+    ]
+    with ms.Catalogue.open() as cat:
+        assert _marks(cat) == want
+        assert _marks(cat, 1, 4) == want[1:]  # strictly between the two seqs
+    for p in (state / "logs").glob("monitor-index.sqlite*"):
+        p.unlink()
+    with ms.Catalogue.open() as cat:  # derived: a lost catalogue gets them back from the segments
+        cat.catch_up()
+        assert _marks(cat) == want
+
+
+def test_a_process_entering_from_outside_but_not_an_init_is_no_mark(state):
+    podman_exec = init(1)
+    podman_exec["e"]["process_exec"]["process"]["in_init_tree"] = False  # conmon's exec session
+    child = init(2)
+    child["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 200  # the init's own child
+    ms.append([snap(0), podman_exec, child, init(3, "process_kprobe")])
+    with ms.Catalogue.open() as cat:
+        assert _marks(cat) == []
+
+
+_V2_SQL = (
+    "CREATE TABLE seg (id TEXT PRIMARY KEY, indexed INTEGER NOT NULL, sealed INTEGER NOT NULL, "
+    "t0 TEXT NOT NULL, t1 TEXT NOT NULL)",
+    "CREATE TABLE snap (boot TEXT NOT NULL, seq INTEGER NOT NULL, seg TEXT NOT NULL, "
+    "rec TEXT NOT NULL, PRIMARY KEY (boot, seq))",
+    "CREATE TABLE claim (cid TEXT PRIMARY KEY, meta TEXT NOT NULL, n INTEGER NOT NULL)",
+    "CREATE TABLE span (seg TEXT NOT NULL, boot TEXT NOT NULL, lo INTEGER NOT NULL, "
+    "hi INTEGER NOT NULL, PRIMARY KEY (seg, boot))",
+)
+
+
+def test_an_older_catalogue_gains_the_marks_and_keeps_what_it_cant_rebuild(state, monkeypatch):
+    # 0.6.x's catalogue (schema 2), its segments all indexed and one sealed: the marks are read
+    # from what it already indexed — and the snapshot it kept from a segment retention removed,
+    # which nothing could rebuild, is still there
+    import sqlite3
+
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(10), init(11), ev(12)])
+    ms.append([init(13, "process_exit"), snap(14)])
+    sealed, live = ms.segments()
+    path = state / "logs" / "monitor-index.sqlite"
+    for p in (state / "logs").glob("monitor-index.sqlite*"):
+        p.unlink()
+    conn = sqlite3.connect(path, isolation_level=None)
+    for statement in _V2_SQL:
+        conn.execute(statement)
+    conn.execute("INSERT INTO seg VALUES (?, ?, 1, '', '')", (sealed.id, ms.raw_size(sealed)))
+    conn.execute("INSERT INTO seg VALUES (?, ?, 0, '', '')", (live.id, ms.raw_size(live)))
+    orphan = snap(3)
+    conn.execute("INSERT INTO snap VALUES (?, 3, 'gone', ?)", (BOOT, json.dumps(orphan)))
+    for s in (snap(10), snap(14)):
+        seg = sealed.id if s["seq"] == 10 else live.id
+        conn.execute("INSERT INTO snap VALUES (?, ?, ?, ?)", (BOOT, s["seq"], seg, json.dumps(s)))
+    conn.execute("PRAGMA user_version = 2")
+    conn.close()
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+        assert [(m[0], m[2]) for m in _marks(cat)] == [(11, "start"), (13, "end")]
+        assert _seq(cat.before(BOOT, 10)) == 3  # kept
+
+
+def test_a_supervisor_still_on_0_6_works_beside_the_marks(state, monkeypatch):
+    # an editable install upgrades the CLI at once and the supervisor only at its restart: the
+    # marks must not make 0.6's catalogue code drop and rebuild the catalogue (a schema it doesn't
+    # know) nor fail its writes (a column it doesn't know). Then 0.6 indexes a record without its
+    # mark, and the next reader reads the mark from what 0.6 indexed.
+    import sqlite3
+
+    ms.append([snap(0), init(1)])
+    path = state / "logs" / "monitor-index.sqlite"
+    conn = sqlite3.connect(path, isolation_level=None)
+    (version,) = conn.execute("PRAGMA user_version").fetchone()
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(seg)")]
+    assert version == 2 and cols == ["id", "indexed", "sealed", "t0", "t1"]
+    (live,) = ms.segments()
+    with (state / "logs" / "monitor.jsonl").open("a") as f:  # 0.6's pull: the record, then…
+        f.write(json.dumps(init(2, "process_exit")) + "\n")
+    conn.execute(  # …its catalogue write, exactly as 0.6 makes it
+        "INSERT INTO seg VALUES (?, ?, 0, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+        "indexed = excluded.indexed",
+        (live.id, ms.raw_size(live), "", ""),
+    )
+    conn.close()
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+        assert [(m[0], m[2]) for m in _marks(cat)] == [(1, "start"), (2, "end")]
+
+
+def test_the_marks_move_with_a_sealed_segment_and_go_with_a_removed_one(state, monkeypatch):
+    # an older foldyard's live file is sealed under a new id (`rename`): its marks and how far it
+    # was read for them follow it, leaving no row on the old id; retention then removes it
+    # (`drop`): its marks and that row go with it
+    logs = state / "logs"
+    logs.mkdir()
+    (logs / "monitor.jsonl").write_text(
+        "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in (snap(0), init(1), ev(2)))
+    )
+    (legacy,) = ms.segments()
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+    ms.append([ev(3)])
+    sealed = ms.segments()[0]
+    assert sealed.id != legacy.id
+    with ms.Catalogue.open() as cat:
+        assert _marks(cat) == [(1, "200", "start", "2026-10-21T20:00:00.5Z")]
+        rows = cat.conn.execute("SELECT seg FROM mark").fetchall()
+        read = dict(cat.conn.execute("SELECT id, marked FROM markseg").fetchall())
+        (indexed,) = cat.conn.execute(
+            "SELECT indexed FROM seg WHERE id = ?", (sealed.id,)
+        ).fetchone()
+        assert rows == [(sealed.id,)] and legacy.id not in read and read[sealed.id] == indexed
+    monkeypatch.setattr(ms, "budget", lambda: 1)  # keeps only the live segment
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([init(4), ev(5)])  # seals the live segment, whose mark stays
+    ms.append([ev(6)])  # and seals that one too: retention removes both sealed segments
+    (live,) = ms.segments()
+    with ms.Catalogue.open() as cat:
+        assert _marks(cat) == []
+        assert cat.conn.execute("SELECT id FROM markseg").fetchall() == [(live.id,)]
+
+
+def test_a_mark_without_its_boot_or_seq_is_skipped_by_the_backfill(state):
+    # a corrupted or hand-edited line in what 0.6 indexed: the backfill reads past it, as `add`
+    # does, never failing every reader's catch-up on it
+    bad = init(2)
+    del bad["seq"]
+    ms.append([snap(0), init(1), bad])
+    with ms.Catalogue.open() as cat:
+        cat.conn.execute("DELETE FROM mark")
+        cat.conn.execute("DELETE FROM markseg")  # as 0.6 left it: indexed, never read for marks
+        cat.catch_up()
+        assert [m[0] for m in _marks(cat)] == [1]

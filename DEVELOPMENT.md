@@ -97,19 +97,24 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   forgeries, asks the engine once per new container for its name/compose project, recorded as
   claims) and the JOIN (pure, at read time: an event takes the snapshot before it if that still
   holds its mount namespace, else the one after; never carried past a snapshot that dropped it —
-  namespace numbers are reused). Any stretch is joined with the catalogue's snapshots around it
-  (`join`), never only those inside the bytes read: under load two snapshots are tens of MB apart,
-  and a byte window once silently dropped every event between them (2026-10-21). `fy monitor`
-  prints it (`--since/--until` reads the whole store); doctor's `monitor events` row reads the
-  pull cursor. The relay only signs and snapshots — attribution lives here so it changes with a
-  foldyard upgrade, not a VM restart.
+  namespace numbers are reused, the lowest free one handed to the next namespace made. Where the
+  two disagree, the containers' own init marks between them — the old init leaving, the new one
+  entering (`monitorstore.init_mark`) — choose between the two containers the snapshots named,
+  never a third (`_handover`; cabash, 2026-10-23). Any stretch is joined with the catalogue's
+  snapshots and marks around it (`join`), never only those inside the bytes read: under load two
+  snapshots are tens of MB apart, and a byte window once silently dropped every event between
+  them (2026-10-21). `fy monitor` prints it (`--since/--until` reads the whole store); doctor's
+  `monitor events` row reads the pull cursor. The relay only signs and snapshots — attribution
+  lives here so it changes with a foldyard upgrade, not a VM restart.
 - `monitorstore.py` — that store on the host: segments named by their first line (a position is
   `[segment id, uncompressed offset]`, surviving the seal and the gzip — never an inode), sealed
   at 32 MB and compressed (~30×), kept within a HOST-ONLY disk budget
   (`<state dir>/monitor-store.toml`, never `foldyard.toml`: the box mustn't shorten the evidence
   about itself), and a SQLite catalogue (derived; rebuilt from the segments) of every snapshot,
-  engine claim and segment span. The pull indexes a record before writing it; every reader
-  catches the catalogue up first.
+  container-init mark, engine claim and segment span. The marks sit in tables BESIDE schema 2,
+  never in it: a supervisor still on 0.6 after an editable upgrade would drop a catalogue whose
+  schema it doesn't know, and fail every write to a table with a column it doesn't know. The pull
+  indexes a record before writing it; every reader catches the catalogue up first.
 - `monitorhooks.py` — the operator's hooks over those events: host-only config
   (`<state dir>/monitor-hooks.toml`, NEVER `foldyard.toml` — a command there is host code
   execution for the box, a url an exfiltration channel), settled events only (a later snapshot
