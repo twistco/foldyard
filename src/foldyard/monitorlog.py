@@ -897,6 +897,43 @@ def store_summary() -> str:
     return f"store: {used / 2**20:.0f} of {cap >> 20} MB{since}{warn}"
 
 
+def current_boot() -> str:
+    """The VM boot the pull is reading (its cursor's spool path), "" before the first pull."""
+    path = Cursor.load().path
+    return path.split("/", 1)[0].split("-", 1)[-1] if path else ""
+
+
+def crossing_note(boot: str | None = None) -> str:
+    """One line when something crossed out of a container in ``boot`` (default: the current one),
+    else "": how many the store holds and the first — from which every hook's ``who`` stops
+    filtering that boot (:mod:`foldyard.monitorhooks`). Read from the catalogue as the pull left it
+    (the pull judges a crossing within a pull of the snapshot after it)."""
+    boot = current_boot() if boot is None else boot
+    if not boot:
+        return ""
+    cat = monitorstore.Catalogue.open_or_none() if monitorstore.segments() else None
+    if cat is None:
+        return ""
+    try:
+        found = cat.crossings(boot)
+        claims = cat.claims() if found else {}
+    except Exception:
+        return ""
+    finally:
+        cat.close()
+    if not found:
+        return ""
+    _, t, cid = found[0]
+    meta = claims.get(cid) or {}
+    source = f" from {meta.get('name') or cid[:12]}" if cid else ""
+    n = len(found)
+    return (
+        f"{n} process{'es' if n > 1 else ''} crossed out of a container in this VM boot, the "
+        f"first at {t[:19].replace('T', ' ')} UTC{source} — from there on, hooks get every event "
+        "of this boot (`who` no longer filters; `fy docs configuration`)"
+    )
+
+
 def show(
     limit: int | None = 40,
     worktree: str = "",
@@ -958,6 +995,9 @@ def show(
         "VM's or podman's namespace. Times are UTC."
     )
     print(f"— {store_summary()}")
+    note = crossing_note()
+    if note:
+        print(f"⚠ {note}")
     if cur.error:
         print(f"⚠ the last pull failed: {cur.error}")
     return 0

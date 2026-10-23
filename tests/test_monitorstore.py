@@ -663,3 +663,147 @@ def test_a_catalogue_holding_facts_without_their_kinds_reads_them_again(state):
             (1, "entry"),
             (2, "build"),
         ]
+
+
+# ── the crossings: something stepping out of a container, judged once settled ──────────
+
+
+def crossed(seq: int, inode: int = 1, parent: int = 200, host: bool = True) -> dict:
+    """A process in the VM's mount namespace (``inode`` 1, Tetragon's ``is_host``) or podman's,
+    whose parent was in a container's (``parent``): the kernel's trace of a step out of it."""
+    e = ev(seq, inode)
+    body = e["e"]["process_exec"]
+    if host:
+        body["process"]["ns"]["mnt"]["is_host"] = True
+    body["parent"] = {"binary": "/bin/sh", "ns": {"mnt": {"inum": parent}}}
+    return e
+
+
+def _crossings(cat) -> list[tuple]:
+    return [
+        tuple(r)
+        for r in cat.conn.execute("SELECT seq, verdict, container FROM crossing ORDER BY seq")
+    ]
+
+
+def test_a_crossing_is_noted_as_indexed_and_judged_once_a_snapshot_after_it_is_stored(state):
+    ms.append([snap(0), ev(1), crossed(2)])
+    with ms.Catalogue.open() as cat:
+        # a later record could still change what it is: not judged, and not a crossing yet
+        assert _crossings(cat) == [(2, None, "")] and cat.first_crossing(BOOT) is None
+        assert cat.first_unjudged(BOOT) is None  # nothing has settled it either
+    ms.append([crossed(3), snap(4), ev(5)])
+    with ms.Catalogue.open() as cat:
+        # judged by the join at the pull's append: named after where it came from
+        assert _crossings(cat) == [(2, 1, BOX), (3, 1, BOX)]
+        assert cat.first_crossing(BOOT) == (2, "2026-10-21T20:00:02Z", BOX)
+        assert [c[0] for c in cat.crossings(BOOT)] == [2, 3]
+        assert cat.crossings("boot-2") == [] and cat.first_crossing("boot-2") is None
+        rec = cat.conn.execute("SELECT rec FROM crossing WHERE seq = 2").fetchone()[0]
+        assert rec == ""  # what judging needed goes once it is judged
+
+
+def test_what_is_never_a_crossing_candidate(state):
+    exec_in = ev(1)  # podman exec: conmon in podman's namespace, the process in the container's
+    exec_in["e"]["process_exec"]["parent"] = {"ns": {"mnt": {"inum": 7}}}
+    entry_ = entry(2)  # podman entering its own from the VM's: the parent is the VM's
+    vm_child = crossed(3, parent=1)  # inside the VM's namespace, both
+    no_parent = ev(4, inode=1)
+    ms.append([snap(0), exec_in, entry_, vm_child, no_parent, snap(5)])
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == []
+
+
+def test_a_candidate_the_join_says_did_not_cross_is_judged_not_one(state):
+    # before the boot's first snapshot nothing says which namespace is the VM's: a candidate —
+    # and the join, with the snapshot after, says it isn't (400 is neither the VM's nor podman's)
+    ms.append([crossed(1, inode=400, host=False), snap(2)])
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(1, 0, "")]
+        assert cat.first_crossing(BOOT) is None
+    # after it, the snapshot says so first: not even a candidate
+    ms.append([crossed(3, inode=400, host=False), snap(4)])
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(1, 0, "")]
+
+
+def test_a_step_into_podmans_namespace_is_one(state):
+    ms.append([snap(0), entry(1, inode=300), crossed(2, inode=300, host=False), snap(3)])
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(2, 1, BOX)]
+
+
+def test_the_vm_namespace_by_the_snapshots_alone_makes_a_candidate(state):
+    # an older record with no is_host: the snapshot's `vm` is what says the namespace is the VM's
+    ms.append([snap(0), crossed(1, host=False), snap(2)])
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(1, 1, BOX)]
+
+
+def test_a_lost_catalogue_or_an_older_one_gets_the_crossings_back(state, monkeypatch):
+    import sqlite3
+
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0), crossed(1), ev(2)])
+    ms.append([snap(3), crossed(4)])
+    want = [(1, 1, BOX), (4, None, "")]
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == want
+    path = state / "logs" / "monitor-index.sqlite"
+    conn = sqlite3.connect(path, isolation_level=None)  # #138's catalogue: no crossings
+    conn.execute("DROP TABLE crossing")
+    conn.execute("DROP TABLE crossseg")
+    conn.close()
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+        assert _crossings(cat) == want
+    for p in (state / "logs").glob("monitor-index.sqlite*"):
+        p.unlink()
+    with ms.Catalogue.open() as cat:  # derived: rebuilt from the segments
+        cat.catch_up()
+        assert _crossings(cat) == want
+
+
+def test_a_verdict_is_kept_through_a_re_read(state):
+    ms.append([snap(0), crossed(1), snap(2)])
+    with ms.Catalogue.open() as cat:
+        cat.conn.execute("UPDATE seg SET indexed = 0")  # a crash between catalogue and store
+        cat.conn.execute("UPDATE crossseg SET done = 0")
+        cat.catch_up()
+        assert _crossings(cat) == [(1, 1, BOX)]
+
+
+def test_retention_keeps_a_boots_first_crossing_and_what_is_not_yet_judged(state, monkeypatch):
+    # The segment holding the crossing goes: from it on every hook has the boot unfiltered, so
+    # the first stays for as long as anything of its boot does — the later ones go with their
+    # segments, as do candidates judged not to be one; one not judged yet stays to be.
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0), crossed(1), crossed(2), crossed(3, inode=400, host=False), snap(4),
+               crossed(5)])  # fmt: skip
+    ms.append([ev(6)])
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(1, 1, BOX), (2, 1, BOX), (5, None, "")]
+        cat.conn.execute(  # one that turned out not to be, in the same segment
+            "INSERT INTO crossing SELECT boot, 3, seg, time, '', 0, '' FROM crossing WHERE seq = 1"
+        )
+        cat.drop([ms.segments()[0].id])
+        assert _crossings(cat) == [(1, 1, BOX), (5, None, "")]
+        assert cat.first_crossing(BOOT) == (1, "2026-10-21T20:00:01Z", BOX)
+    ms.append([snap(7)])  # its snapshot after: judged though its segment is gone
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(1, 1, BOX), (5, 1, BOX)]
+    ms.append([snap(0, boot="boot-2"), ev(1, boot="boot-2")])
+    with ms.Catalogue.open() as cat:  # its boot gone from the store: nothing of it is kept
+        cat.drop([s.id for s in ms.segments() if not s.live])
+        assert _crossings(cat) == []
+
+
+def test_a_failing_judge_never_stops_the_store(state, monkeypatch):
+    def broken(self):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ms.Catalogue, "judge", broken)
+    ms.append([snap(0), crossed(1), snap(2)])
+    assert _seqs(ms.read(None, 1 << 20)[0]) == [0, 1, 2]
+    with ms.Catalogue.open() as cat:
+        assert cat.first_unjudged(BOOT) == (1, "2026-10-21T20:00:01Z")

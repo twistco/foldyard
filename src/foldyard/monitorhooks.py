@@ -24,6 +24,15 @@ an hour on a busy VM, none of them the box's. What a hook's filters pass over is
 each batch counts it by ``who`` (``passed``), and an event that crossed out of a container into
 the VM's or podman's namespace reaches every hook whatever its ``who``.
 
+**A crossing unfilters the rest of its boot** (:func:`crossings`): from the first crossed event of
+a VM boot on, ``who`` — a hook's own, or the default skip — filters nothing more of that boot, for
+every hook but one that sets ``keep_who_after_crossing = true``; each batch it affects says so
+(``unfiltered``). What an escaped process does next is the VM's or podman's by its namespace; a
+crossing should be rare, and sifting through that is better than missing it. "Boot B first crossed
+at seq P" is the catalogue's (:meth:`monitorstore.Catalogue.judge`), never a hook's: judged once a
+snapshot after P is stored, it is the same for every hook at any cursor, and an event's delivery
+depends only on crossings before it, which are settled whenever it is.
+
 Whatever a hook didn't get, or got without the full evidence, is SAID in the batch: ``gaps``
 (:func:`_record_gaps`, :func:`_unsettled`, :func:`_ambiguous`) — the store rotated past its
 position, events lost between the VM and here, the relay missing Tetragon's, events released
@@ -75,6 +84,8 @@ WHO = ("container", "build", "unattributed", "ambiguous", "podman", "vm")
 # own events — none of them the box's, unless one crossed out of a container (always sent). Image
 # builds are NOT here: a build step runs what the box wrote. `skip_unless_asked` in the file.
 SKIP_UNLESS_ASKED = ("vm", "podman")
+# ...for the rest of a boot, nothing is skipped by `who` once something crossed out of a container
+# in it (:func:`crossings`) — unless the hook sets `keep_who_after_crossing = true`.
 
 
 def hooks_file() -> Path:
@@ -100,11 +111,21 @@ class Hook:
     who: tuple[str, ...] = ()
     worktrees: tuple[str, ...] = ()
     timeout: float = 15.0
+    # its `who` (or the default skip) still filters after a crossing in the boot (:func:`crossings`)
+    keep_who_after_crossing: bool = False
     # what it gets only when its `who` names it — the file's `skip_unless_asked`, not the hook's
     unless_asked: tuple[str, ...] = field(default=SKIP_UNLESS_ASKED, compare=False)
 
-    def matches(self, e: monitorlog.Event) -> bool:
-        if self.who:
+    def unfiltered(self, after_crossing: bool) -> bool:
+        """Whether ``who`` stops filtering for an event after a crossing in its boot."""
+        return after_crossing and not self.keep_who_after_crossing
+
+    def matches(self, e: monitorlog.Event, after_crossing: bool = False) -> bool:
+        """Whether the hook wants ``e``; ``after_crossing``: ``e`` is at or after its boot's first
+        crossing (:func:`crossings`), so ``who`` no longer filters it (:meth:`unfiltered`)."""
+        if self.unfiltered(after_crossing):
+            who = True
+        elif self.who:
             who = e.who in self.who
         else:
             who = e.who not in self.unless_asked
@@ -196,6 +217,9 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
             timeout = float(raw.get("timeout", 15))
             if not 1 <= timeout <= 300:
                 raise ValueError("`timeout` must be 1–300 seconds")
+            keep = raw.get("keep_who_after_crossing", False)
+            if not isinstance(keep, bool):
+                raise ValueError("`keep_who_after_crossing` must be true or false")
             hooks.append(
                 Hook(
                     name=name,
@@ -208,6 +232,7 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
                     who=_strings(raw.get("who"), "`who`"),
                     worktrees=_strings(raw.get("worktrees"), "`worktrees`"),
                     timeout=timeout,
+                    keep_who_after_crossing=keep,
                     unless_asked=unless_asked,
                 )
             )
@@ -278,6 +303,8 @@ def render(hook: Hook) -> str:
             lines.append(f"{key} = {_arr(getattr(hook, key))}")
     if hook.timeout != Hook.timeout:
         lines.append(f"timeout = {hook.timeout:g}")
+    if hook.keep_who_after_crossing:
+        lines.append("keep_who_after_crossing = true")
     return "\n".join(lines) + "\n"
 
 
@@ -624,6 +651,8 @@ def listing(now: float | None = None) -> list[str]:
         if not h.who:
             but = f" but {', '.join(h.unless_asked)}" if h.unless_asked else ""
             filters = " ".join(x for x in (filters, f"all events{but}") if x)
+        if h.keep_who_after_crossing:
+            filters += " keep_who_after_crossing"
         out.append(f"{h.name}  {kind}  {where}  [{filters}]")
         st = states.get(h.name)
         out.append(f"  ✓ {progress(h, st, now)}")
@@ -741,6 +770,71 @@ def after(events: list[monitorlog.Event], last: list) -> list[monitorlog.Event]:
     return [e for e in events if order.index(e.boot) > rank or (e.boot == boot and e.seq > seq)]
 
 
+@dataclass(frozen=True)
+class Crossing:
+    """A boot's first crossing out of a container: from ``seq`` on, ``who`` filters nothing of
+    ``boot`` (:meth:`Hook.unfiltered`)."""
+
+    boot: str
+    seq: int
+    time: str
+    container: str  # where it came from ("" when the join couldn't name one)
+
+
+def crossings(events: list[monitorlog.Event], cat=None) -> dict[str, Crossing]:
+    """The first crossing of each boot ``events`` touch: the catalogue's (:meth:`monitorstore.
+    Catalogue.crossings` — wherever it is in the store, however long ago), or a crossed event
+    among ``events`` that is earlier (no catalogue, or one released on age before a snapshot after
+    it let the catalogue judge it). A candidate the catalogue couldn't judge though a snapshot after
+    it is stored (:meth:`monitorstore.Catalogue.first_unjudged` — a busy catalogue) counts as one:
+    an event is delivered unfiltered rather than missed.
+
+    Stable, as delivery must be (only settled events are delivered, and a settled one's decision
+    never changes): an event a snapshot after it has settled is decided by the crossings before it,
+    each judged by then — that snapshot is after them too — and kept for good."""
+    out: dict[str, Crossing] = {}
+
+    def take(c: Crossing) -> None:
+        if c.boot not in out or c.seq < out[c.boot].seq:
+            out[c.boot] = c
+
+    if cat is not None:
+        try:
+            cat.judge()
+        except Exception:
+            pass  # what it left unjudged counts as crossed, below
+        for boot in dict.fromkeys(e.boot for e in events):
+            first = cat.first_crossing(boot)
+            if first is not None:
+                take(Crossing(boot, *first))
+            unjudged = cat.first_unjudged(boot)
+            if unjudged is not None:
+                take(Crossing(boot, unjudged[0], unjudged[1], ""))
+    for e in events:
+        if e.crossed:
+            take(Crossing(e.boot, e.seq, e.time, e.container))
+    return out
+
+
+def _unfiltered(
+    hook: Hook, passed: list[monitorlog.Event], first: dict[str, Crossing]
+) -> list[dict]:
+    """An entry per boot whose crossing let this hook's ``who`` stop filtering for events the
+    batch accounts for — what it says so with (``unfiltered``)."""
+    out = []
+    for boot in dict.fromkeys(e.boot for e in passed):
+        c = first.get(boot)
+        if c is None or not hook.unfiltered(any(e.boot == boot and e.seq >= c.seq for e in passed)):
+            continue
+        source = f" from container {c.container[:12]}" if c.container else ""
+        out.append({
+            "boot": boot, "since": [boot, c.seq], "time": c.time, "container": c.container,
+            "why": f"a process crossed out of a container{source} at {c.time or '?'}: `who` "
+                   "filters nothing more of this boot",
+        })  # fmt: skip
+    return out
+
+
 # ── delivery ──────────────────────────────────────────────────────────────────────────
 
 
@@ -790,13 +884,16 @@ def batch(
     events: list[monitorlog.Event],
     gaps: list[dict] | None = None,
     passed: dict[str, int] | None = None,
+    unfiltered: list[dict] | None = None,
 ) -> dict:
     """One batch. ``gaps`` is always there, usually empty: the stretches of the stream this batch
     accounts for that it can't vouch for (see :func:`deliver`). ``passed`` too: how many events
     the hook's filters passed over since its last batch, by ``who`` — so the VM's and podman's own,
-    which a hook gets only when it asks, are counted, never silently gone. A batch can carry only
-    gaps — ``events`` empty, ``first``/``last`` null — when nothing this hook wants came with
-    them."""
+    which a hook gets only when it asks, are counted, never silently gone. And ``unfiltered``: a
+    boot whose events here ``who`` didn't filter, from its first crossing out of a container on
+    (``boot``, ``since`` [boot, seq], ``time``, ``container``, ``why``; :func:`crossings`). A batch
+    can carry only gaps — ``events`` empty, ``first``/``last`` null — when nothing this hook wants
+    came with them."""
     return {
         "schema": SCHEMA,
         "project": config.project(),
@@ -806,6 +903,7 @@ def batch(
         "events": [asdict(e) for e in events],
         "gaps": list(gaps or []),
         "passed": dict(passed or {}),
+        "unfiltered": list(unfiltered or []),
     }
 
 
@@ -814,8 +912,9 @@ def payload(
     events: list[monitorlog.Event],
     gaps: list[dict] | None = None,
     passed: dict[str, int] | None = None,
+    unfiltered: list[dict] | None = None,
 ) -> bytes:
-    return json.dumps(batch(hook, events, gaps, passed)).encode()
+    return json.dumps(batch(hook, events, gaps, passed, unfiltered)).encode()
 
 
 def _to_file(
@@ -824,6 +923,7 @@ def _to_file(
     events: list[monitorlog.Event],
     gaps: list[dict] | None = None,
     passed: dict[str, int] | None = None,
+    unfiltered: list[dict] | None = None,
 ) -> str:
     """Append the batch as the next signed line of the hook's chain; ``""`` on success. The
     sequence moves only on success, so a retry re-writes the same seq (see monitorsink.verify).
@@ -834,7 +934,7 @@ def _to_file(
         st.sink_seq, st.sink_mac, st.sink_file = 0, "", hook.file
     try:
         key = monitorsink.ensure_key()
-        body = batch(hook, events, gaps, passed)
+        body = batch(hook, events, gaps, passed, unfiltered)
         line, mac = monitorsink.signed_line(key, body, st.sink_seq + 1, st.sink_mac)
         monitorsink.append(hook.file, line)
     except (OSError, monitorsink.Refused) as e:
@@ -906,7 +1006,9 @@ def _unsettled(passed: list[monitorlog.Event], aged: set[tuple[str, int]]) -> li
     return out
 
 
-def _ambiguous(hook: Hook, passed: list[monitorlog.Event]) -> list[dict]:
+def _ambiguous(
+    hook: Hook, passed: list[monitorlog.Event], opened: Callable[[monitorlog.Event], bool]
+) -> list[dict]:
     """A gap per mount namespace for the ``ambiguous`` events in ``passed`` that ``hook`` is passing
     over (a worktree filter passes over every one: it has no worktree) but would want were they
     placed: two snapshots name different containers for the
@@ -921,7 +1023,7 @@ def _ambiguous(hook: Hook, passed: list[monitorlog.Event]) -> list[dict]:
     for e in passed:
         if (
             e.who == "ambiguous"
-            and not hook.matches(e)
+            and not hook.matches(e, opened(e))
             and (not hook.kinds or e.kind in hook.kinds)
             and (not hook.who or "container" in hook.who)
         ):
@@ -943,14 +1045,21 @@ def deliver(
     where: dict[tuple[str, int], list] | None = None,
     gaps: list[tuple[tuple[str, int] | None, dict]] | None = None,
     aged: set[tuple[str, int]] | None = None,
+    first_crossed: dict[str, Crossing] | None = None,
 ) -> str:
     """One batch for one hook: the next up-to-:data:`BATCH_MAX` matching events after its cursor,
     with every gap the cursor moves past (``st.gaps`` owed from before, the store's own gap
     records ``gaps``, and runs of ``aged`` events — released without a later snapshot). Nothing
     wanted but a gap owed → a batch of gaps alone. ``where`` maps an event to its store position,
-    kept beside the cursor so the next round reads from there. Returns a log line when something
-    worth saying happened, else ``""``."""
+    kept beside the cursor so the next round reads from there. ``first_crossed``: each boot's
+    first crossing (:func:`crossings`) — from it on, ``who`` filters nothing of that boot.
+    Returns a log line when something worth saying happened, else ``""``."""
     where = where or {}
+    crossed = first_crossed or {}
+
+    def opened(e: monitorlog.Event) -> bool:  # at or after its boot's first crossing
+        c = crossed.get(e.boot)
+        return c is not None and e.seq >= c.seq
 
     def move(e: monitorlog.Event) -> None:
         st.last, st.pos = [e.boot, e.seq], where.get((e.boot, e.seq), [])
@@ -965,7 +1074,7 @@ def deliver(
     # minutes of rounds to skip a backlog (seen on a 72k-event store); send at most one batch.
     for i in range(0, len(pending), BATCH_MAX * 4):
         scan = range(i, min(i + BATCH_MAX * 4, len(pending)))
-        picked = [j for j in scan if hook.matches(pending[j])][:BATCH_MAX]
+        picked = [j for j in scan if hook.matches(pending[j], opened(pending[j]))][:BATCH_MAX]
         if picked:
             # A full batch ends at its last event (the rest comes next round); otherwise the
             # whole scan is covered — the events this hook doesn't want are passed over with it.
@@ -975,7 +1084,8 @@ def deliver(
     passed = pending[: end + 1]
     keys = {(e.boot, e.seq) for e in passed}
     owed = [*st.gaps, *(g for k, g in gaps or [] if k in keys), *_unsettled(passed, aged or set()),
-            *_ambiguous(hook, passed)]  # fmt: skip
+            *_ambiguous(hook, passed, opened)]  # fmt: skip
+    unfiltered = _unfiltered(hook, passed, crossed)
     sent = set(picked)
     over = dict(st.passed)  # everything the cursor moves over unsent, by who: never silently
     for j, e in enumerate(passed):
@@ -987,9 +1097,9 @@ def deliver(
             st.passed = over  # owed to the next batch
         return ""
     if hook.file:
-        why = _to_file(hook, st, wanted, owed, over)
+        why = _to_file(hook, st, wanted, owed, over, unfiltered)
     else:
-        body = payload(hook, wanted, owed, over)
+        body = payload(hook, wanted, owed, over, unfiltered)
         why = _run_command(hook, body) if hook.command else _post(hook, body)
     if not why:
         if passed:
@@ -1047,7 +1157,7 @@ def round_once(now: float | None = None, log: Callable[[str], None] = lambda m: 
                 events = settled(records, now, cat)
                 last_snap = last_snapshots(records, cat)
                 aged = {(e.boot, e.seq) for e in events if e.seq > last_snap.get(e.boot, -1)}
-                msg = deliver(hook, st, events, now, where, gaps, aged)
+                msg = deliver(hook, st, events, now, where, gaps, aged, crossings(events, cat))
                 if msg:
                     log(msg)
                 moved = (list(st.last), list(st.pos), len(st.gaps), st.attempts, st.dropped)

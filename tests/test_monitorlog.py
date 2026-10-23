@@ -1038,6 +1038,30 @@ def test_show_labels_what_isnt_a_container_and_a_crossing(monkeypatch, tmp_path,
     assert "⚠ crossed ?:aaaaaaaaaaaa" in lines[2]
 
 
+def test_show_and_doctor_say_a_crossing_happened_in_this_boot(monkeypatch, tmp_path, capsys):
+    import time
+
+    from foldyard import devmode
+
+    monkeypatch.setattr(monitorlog.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitorlog.config, "in_box", lambda: False)
+    monkeypatch.setattr(monitorlog.config, "project_prefix", lambda: "fyex")
+    crossing = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    stream = [snap({200: [BOX]}), entered(), crossing, ev(200), crossing, snap({200: [BOX]})]
+    monitorlog._append([{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+                       + [{"k": "engine", "containers": {BOX: {"name": "fyex-api-1"}}}])  # fmt: skip
+    assert monitorlog.crossing_note() == ""  # nothing pulled: no current boot to speak of
+    monitorlog.Cursor(pulled=time.time(), path=f"{DIR}/000.jsonl").save()
+    note = monitorlog.crossing_note()
+    assert note.startswith("2 processes crossed out of a container in this VM boot, the first at ")
+    assert "fyex-api-1" in note and "every event of this boot" in note
+    assert monitorlog.crossing_note(boot="another-boot") == ""
+    assert monitorlog.show(limit=10) == 0
+    assert f"⚠ {note}" in capsys.readouterr().out.splitlines()
+    [row] = list(devmode._monitor_events_check())
+    assert row[0] == "warn" and row[2].startswith(note)
+
+
 def test_show_refuses_in_the_box(monkeypatch, capsys):
     monkeypatch.setattr(monitorlog.config, "in_box", lambda: True)
     assert monitorlog.show() == 1

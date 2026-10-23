@@ -2486,6 +2486,7 @@ def _monitor_events_check():
     age = time.time() - cur.pulled if cur.pulled else None
     budget_note = monitorstore.budget_setting()[1]
     counts = f"{cur.stored} stored, {cur.gaps} lost in transit, {cur.forged} failed the signature"
+    crossed = monitorlog.crossing_note()
     if cur.forged:
         why = f"{cur.forged} spool lines failed their signature — something altered them in transit"
     elif cur.error:
@@ -2498,6 +2499,8 @@ def _monitor_events_check():
         why = budget_note
     else:
         why = ""
+    if crossed:  # what the box did, before how the pull is doing
+        why = f"{crossed}; `fy monitor` shows them" + (f" — and {why}" if why else "")
     yield _result(
         None if why else True,
         "monitor events",
