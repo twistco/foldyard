@@ -119,12 +119,12 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   about itself), and a SQLite catalogue (derived; rebuilt from the segments) of every snapshot,
   container-init mark, namespace fact (`ns_fact`: an init's mark with where it came from and its
   pid namespace, podman entering a namespace from the VM's, and anything entering one from
-  elsewhere — retention keeps exactly what a read of the events still stored depends on,
-  `fact_closure`, which the join fetches too), engine claim and segment span. The marks and the facts sit in tables
-  BESIDE schema 2, never in it, each with its own progress: a supervisor still on 0.6 (or on the
-  marks alone) after an editable upgrade would drop a catalogue whose schema it doesn't know, and
-  fail every write to a table with a column it doesn't know. The pull indexes a record before
-  writing it; every reader catches the catalogue up first.
+  elsewhere — each classified when indexed and stored with its kind, so a read and retention need
+  only the newest few of some kinds per namespace), engine claim and segment span. The marks and
+  the facts sit in tables BESIDE schema 2, never in it, each with its own progress: a supervisor
+  still on 0.6 (or on the marks alone) after an editable upgrade would drop a catalogue whose
+  schema it doesn't know, and fail every write to a table with a column it doesn't know. The pull
+  indexes a record before writing it; every reader catches the catalogue up first.
 - `monitorhooks.py` — the operator's hooks over those events: host-only config
   (`<state dir>/monitor-hooks.toml`, NEVER `foldyard.toml` — a command there is host code
   execution for the box, a url an exfiltration channel), settled events only (a later snapshot

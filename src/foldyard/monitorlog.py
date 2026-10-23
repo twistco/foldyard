@@ -34,7 +34,6 @@ import subprocess
 import sys
 import threading
 import time
-from bisect import bisect_right
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
@@ -401,19 +400,7 @@ def worktree_of(meta: dict | None, prefix: str) -> str:
     return ""
 
 
-def _ns(stamp: object) -> int | None:
-    """A Tetragon timestamp (RFC 3339, UTC, up to nine fractional digits — Go trims trailing
-    zeros, so two of them don't compare as text) in nanoseconds; ``None`` when it isn't one."""
-    if not isinstance(stamp, str) or not stamp.endswith("Z"):
-        return None
-    head, _, frac = stamp[:-1].partition(".")
-    if frac and not (frac.isdigit() and len(frac) <= 9):
-        return None
-    try:
-        secs = datetime.fromisoformat(head).replace(tzinfo=UTC).timestamp()
-    except ValueError:
-        return None
-    return round(secs) * 10**9 + int(frac.ljust(9, "0") or 0)
+_ns = monitorstore.stamp_ns
 
 
 def _handover(
@@ -475,104 +462,7 @@ def _handover(
     return ""
 
 
-class _Facts:
-    """One boot's namespace facts (:func:`monitorstore.ns_fact`), read forward: each init mark's
-    KIND, decided by where its init came from at the time — ``container`` (conmon, in podman's
-    namespace), ``build`` (podman itself there) or ``nested`` (anywhere else: a namespace made
-    inside another, no mark of a container or a build, though it ends what held the number before)
-    — and podman's entries (``entry``). Forward, in seq order, so a kind depends only on what came
-    before it: no chain of namespaces made inside each other can make the reading recurse.
-
-    Every fact, nested inits and ``other`` (a number entered from anywhere but the VM) included, is
-    also kept in order per namespace (``seen``): an entry never ends and numbers are reused, so a
-    namespace is podman's to label only while nothing else has been seen entering it since
-    (:meth:`podman`), and podman's to start containers and builds from only until the number is
-    seen TAKEN (:meth:`trusted`) — an init on it, or something entering it from podman's or the
-    VM's side. A step in from a container takes nothing: the namespace is still alive."""
-
-    def __init__(self, facts: Iterable[dict]) -> None:
-        # inode -> [(seq, kind, what, init start, init pid namespace)]
-        self.held: dict[str, list[tuple[int, str, str, int | None, str]]] = {}
-        self.seqs: dict[str, list[int]] = {}
-        # inode -> [(seq, what, taken)], every fact; taken: the number went to someone else
-        self.seen: dict[str, list[tuple[int, str, bool]]] = {}
-        for f in sorted(facts, key=lambda f: int(f["seq"])):
-            what, seq = f["what"], int(f["seq"])
-            taken = what in ("start", "end") or (
-                what == "other" and self.entered(str(f["outside"]), seq - 1)
-            )
-            self.seen.setdefault(str(f["inode"]), []).append((seq, what, taken))
-            if what == "entry":
-                kind = "entry"
-            elif what == "other":
-                continue  # says only that the number is no longer podman's
-            elif not self.trusted(str(f["outside"]), seq - 1):
-                # nested: a namespace made inside another, which says nothing about a container
-                # or a build — but it is a new namespace on that number, so it ends whatever an
-                # older fact said held it
-                kind = "nested"
-            else:
-                kind = "container" if str(f.get("by") or "").startswith("conmon") else "build"
-            fact = (seq, kind, what, _ns(f["start"]), str(f.get("pidns") or ""))
-            self.held.setdefault(str(f["inode"]), []).append(fact)
-            self.seqs.setdefault(str(f["inode"]), []).append(seq)
-
-    def holder(self, inode: str, seq: int) -> tuple[int, str, str, int | None, str] | None:
-        """The newest fact about who holds ``inode`` at or before ``seq``: ``(seq, kind, what,
-        init start, init pid namespace)``, kind ``entry``/``container``/``build``/``nested``, what
-        ``entry``/``start``/``end`` — the newest anchor (:func:`monitorstore.fact_suffix`)."""
-        seqs = self.seqs.get(inode)
-        if not seqs:
-            return None
-        i = bisect_right(seqs, seq)
-        return self.held[inode][i - 1] if i else None
-
-    def entered(self, inode: str, seq: int) -> bool:
-        """Whether the newest holder of ``inode`` at ``seq`` is podman's entry — however much has
-        been seen entering it from elsewhere since: where a step out of a container is read."""
-        h = self.holder(inode, seq)
-        return h is not None and h[1] == "entry"
-
-    def podman(self, inode: str, seq: int) -> bool:
-        """Whether ``inode`` is podman's own namespace at ``seq``: entered from the VM's, and since
-        then nothing seen entering it from anywhere else (an init, or a process from another
-        namespace) — else the namespace podman entered has died and the number gone to someone
-        else (a box container that never shows an init, say), or something stepped in."""
-        seen = self.seen.get(inode)
-        if not seen:
-            return False
-        i = bisect_right(seen, (seq, "\uffff"))
-        return bool(i) and seen[i - 1][1] == "entry"
-
-    def trusted(self, inode: str, seq: int) -> bool:
-        """Whether an init coming from ``inode`` at ``seq`` was started by podman: the namespace
-        was entered from the VM's and the number not seen taken since — a step in from a
-        container (an ``other`` from outside podman's and the VM's) leaves it podman's."""
-        seen = self.seen.get(inode, [])
-        for _, what, taken in reversed(seen[: bisect_right(seen, (seq, "\uffff"))]):
-            if what == "entry":
-                return True
-            if taken:
-                return False
-        return False
-
-    def start_of(self, inode: str, life: str, below: int) -> tuple | None:
-        """The container init start, before ``below``, of the life whose init is in pid namespace
-        ``life`` — the start an exit pairs with."""
-        return next(
-            (f for f in reversed(self.held.get(inode, ())) if f[0] < below and f[1] == "container"
-             and f[2] == "start" and f[4] == life),
-            None,
-        )  # fmt: skip
-
-    def inits(self, inode: str, lo: int, hi: int) -> list[tuple[int, str, int | None, str]]:
-        """The container inits entering (``start``) and leaving (``end``) ``inode`` strictly
-        between ``lo`` and ``hi``: ``(seq, what, init start, init pid namespace)``."""
-        return [
-            (q, w, t, p)
-            for q, k, w, t, p in self.held.get(inode, ())
-            if k == "container" and lo < q < hi
-        ]
+_Facts = monitorstore.NsFacts
 
 
 def _lifetime(
@@ -855,11 +745,10 @@ def join(records: list[dict], cat: monitorstore.Catalogue | None, prefix: str) -
         # namespace may sit in an earlier read than its first command)…
         blo = before["seq"] if before else -1
         window = cat.facts(boot, blo, after["seq"] if after else 1 << 62)
-        # …and, before that, every fact reading the namespaces the events touch depends on
-        # (monitorstore.fact_closure: podman entered its own at boot; a container's init may have
-        # entered hours ago; an init's kind is decided by where it came from, as it was then) —
-        # exactly what retention keeps
-        inodes = set()
+        # …and, before that, what the join asks about every namespace the events touch: each fact
+        # carries its kind, so the newest few of some kinds (Catalogue.prior: podman entered its
+        # own at boot; a container's init may have entered hours ago) — what retention keeps
+        inodes = {str(f["inode"]) for f in window} | {str(f["outside"]) for f in window}
         for r in records:
             if r.get("k") == "ev" and r.get("boot") == boot:
                 body = next((v for k, v in (r.get("e") or {}).items() if k.startswith("process_")),
@@ -868,9 +757,7 @@ def join(records: list[dict], cat: monitorstore.Catalogue | None, prefix: str) -
                     inum = ((obj.get("ns") or {}).get("mnt") or {}).get("inum")
                     if inum:
                         inodes.add(str(inum))
-        seeds = [(i, blo) for i in sorted(inodes | {str(f["inode"]) for f in window})]
-        seeds += [(str(f["outside"]), int(f["seq"])) for f in window if f["what"] != "entry"]
-        prior = cat.closure(boot, seeds)
+        prior = [f for i in sorted(inodes) for f in cat.prior(boot, i, blo)]
         near += prior + window
     # the snapshots after the records: attribute() orders boots by first appearance, and the
     # events must come out in store order (a hook's cursor moves by them)

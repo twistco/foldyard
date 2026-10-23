@@ -96,13 +96,16 @@ A first step towards that, stdlib only, in `src/foldyard/monitorstore.py`:
   entering a namespace from the VM's own, and anything entering one from elsewhere (an `other`),
   each kept once a run. The marks and entries were a few thousand rows over cabash's boot; the
   `other` facts, added after that measurement, add a row each time a run of them starts on a
-  namespace (a container's runtime entering it, `podman exec`). When a segment goes, what a read
-  of the events still stored depends on stays: each namespace's facts from its newest entry or
-  init on, and for each of those inits where it came from, as it was then (podman entered its own
-  namespace once, at boot, and the join must still know it). The join fetches exactly that set
-  (`fact_closure`), and a property holds the two together: after any drop, any stretch still
-  stored reads as the join over everything ever stored. The first retention, the newest fact of
-  each kind, lost an init's origin to a later entry (randomised runs, 2026-10-23).
+  namespace (a container's runtime entering it, `podman exec`). Each fact is classified once,
+  when it is indexed, from the facts before it (`monitorstore.classify`), and stored with its
+  kind: a container's init, a build's, a nested one, a step in. So a read asks only for the newest
+  few facts of some kinds about a namespace, never for the history behind them, and when a
+  segment goes those few stay, with every fact after the snapshot kept from before the oldest
+  stored record (podman entered its own namespace once, at boot, and the join must still know
+  it). A property holds retention to the join: after any drop, any stretch still stored reads as
+  the join over everything ever stored. The first retention, the newest fact of each kind with
+  kinds worked out at read time, lost an init's origin to a later entry (randomised runs,
+  2026-10-23).
 
 **Why the catalogue (2026-10-21).** The join needs the snapshot before an event and the one after
 it. Readers used to look only within a byte window — a hook 1 MB back and 4 MB on from its
@@ -171,7 +174,10 @@ changed):
   API service that starts the box's containers never enters again). A step in doesn't make the
   namespace someone else's, though: the containers and builds podman starts from it keep their
   marks. Only a number seen TAKEN (an init on it, or something entering it from podman's or the
-  VM's side) stops counting as where podman starts them.
+  VM's side) stops counting as where podman starts them. An init from a container into a namespace
+  podman's entry still holds (`unshare -p -f nsenter …`: in the init tree, its parent outside) is
+  no new namespace but a step in shaped like an init: `crossed`, and so is the next step, while
+  podman's own inits from there lose their marks until podman enters again (the review of #138).
 - **`build`** — an init (`in_init_tree`, its parent outside its mount namespace) started in
   podman's namespace by podman itself rather than conmon: buildah's `RUN` step. 594 of them on
   cabash's boot, none ever named by a snapshot (builds run outside podman's container scopes). A

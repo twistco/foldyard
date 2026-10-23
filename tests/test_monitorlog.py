@@ -713,8 +713,10 @@ def test_a_namespace_made_inside_a_container_on_a_number_podman_entered_once_is_
                     snap({200: [BOX]}))  # fmt: skip
     got = _whos(monitorlog.attribute(recs, "fyex"))
     assert got[0] == ("podman", "", False)
-    # a new namespace on the number, not a step into podman's: no one's, and not `crossed`
-    assert got[1:] == [("unattributed", "", False)] * 3
+    # the init itself reads as a step out of BOX — the facts can't tell a new namespace on a
+    # reused number from a step into a live one (the next test): loud, the safe way to be wrong
+    assert got[1] == ("container", "a", True)
+    assert got[2:] == [("unattributed", "", False)] * 2
 
 
 def test_a_namespace_made_on_a_number_podman_entered_once_takes_it_for_the_inits_from_there():
@@ -727,6 +729,27 @@ def test_a_namespace_made_on_a_number_podman_entered_once_takes_it_for_the_inits
     recs = _records(snap({200: [BOX]}), entered(800), snap({200: [BOX]}), nested, made,
                     proc(900, "2026-10-04T10:00:03Z"), snap({200: [BOX]}))  # fmt: skip
     assert [e.who for e in monitorlog.attribute(recs, "fyex")][2:] == ["unattributed"] * 2
+
+
+def test_a_step_into_podmans_live_namespace_shaped_like_an_init_is_still_a_step_out():
+    # `unshare -p -f nsenter -t <podman's pid> -m sh` from a container: in the init tree, its parent
+    # in the container — a mark's shape — but into podman's namespace, which podman's entry still
+    # holds: no new namespace, a step out. It and the next one are `crossed`; podman's own inits
+    # from there lose their marks (read by the snapshots) until podman enters it again.
+    setns = init(PODMAN_NS, start="2026-10-04T10:00:01Z", by="/usr/bin/unshare")
+    setns["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 200  # from inside BOX
+    again = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+
+    def build(inode: int, t: str) -> list[dict]:
+        return [init(inode, start=t, by="/proc/self/exe"), proc(inode, t)]
+
+    recs = _records(snap({200: [BOX]}), setns, again, *build(500, "2026-10-04T10:00:02Z"),
+                    entered(), *build(600, "2026-10-04T10:00:03Z"), snap({200: [BOX]}))  # fmt: skip
+    assert _whos(monitorlog.attribute(recs, "fyex")) == [
+        ("container", "a", True), ("container", "a", True),
+        ("unattributed", "", False), ("unattributed", "", False),
+        ("podman", "", False), ("build", "", False), ("build", "", False),
+    ]  # fmt: skip
 
 
 def test_a_step_into_podmans_namespace_leaves_the_inits_podman_starts_there_what_they_are():

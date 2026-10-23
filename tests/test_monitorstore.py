@@ -467,9 +467,10 @@ def test_the_catalogue_keeps_who_entered_each_namespace_from_where(state, monkey
     with ms.Catalogue.open() as cat:
         assert _facts(cat) == want
         assert _facts(cat, 1, 5) == want[1:3]  # strictly between the two seqs
-        assert [f["seq"] for f in cat.suffix(BOOT, "200", 4)] == [2]  # strictly before
-        assert [f["seq"] for f in cat.suffix(BOOT, "200", 9)] == [2, 4]  # one of each kind
-        assert cat.suffix(BOOT, "7", 1) == []
+        assert [f["seq"] for f in cat.prior(BOOT, "200", 4)] == [2]  # strictly before
+        # the newest holder (the exit) and the start of the life it ends
+        assert sorted(f["seq"] for f in cat.prior(BOOT, "200", 9)) == [2, 4]
+        assert cat.prior(BOOT, "7", 1) == []
     for p in (state / "logs").glob("monitor-index.sqlite*"):
         p.unlink()
     with ms.Catalogue.open() as cat:  # derived: a lost catalogue gets them back from the segments
@@ -543,22 +544,22 @@ def test_a_supervisor_still_on_the_marks_works_beside_the_facts(state):
 def test_retention_keeps_what_a_read_of_the_stored_events_needs(state, monkeypatch):
     # podman entered its namespace once, at boot, in a segment retention has since removed: the
     # join must still know that namespace is podman's — as the newest snapshot of a boot is kept.
-    # What goes is what nothing still stored is read by: a namespace's facts before its newest
-    # anchor (an entry, an init entering or leaving), unless a kept fact's kind depends on them.
+    # Every fact carries its kind, decided when it was indexed, so what a read asks of the past is
+    # the newest few of some kinds per namespace, and the facts after the kept snapshot.
     monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
     ms.append([snap(0), entry(1), init(2), init(3, "process_exit"), entry(4, inode=200), snap(5)])
-    ms.append([init(6), ev(7), entry(8)])
-    ms.append([snap(9), ev(10)])
+    ms.append([init(6), ev(7), entered_from(8, 7, 900), entry(9)])  # a step in, then podman again
+    ms.append([snap(10), ev(11)])
     with ms.Catalogue.open() as cat:
         cat.drop([ms.segments()[0].id])
-        # 200's old life went with the VM's entry there; 6 and 8 are still stored
+        # 200's old life went with the VM's entry there; the rest is still stored
         assert [(f[0], f[1], f[2]) for f in _facts(cat)] == [
-            (1, "7", "entry"), (4, "200", "entry"), (6, "200", "start"), (8, "7", "entry")
+            (1, "7", "entry"), (4, "200", "entry"), (6, "200", "start"), (8, "7", "other"),
+            (9, "7", "entry"),
         ]  # fmt: skip
         cat.drop([ms.segments()[1].id])
-        # podman's entry at boot stays though a later one came: the init at 6 came from it, and
-        # where an init came from, then, is what makes it a container's
-        assert [(f[0], f[2]) for f in _facts(cat)] == [(1, "entry"), (6, "start"), (8, "entry")]
+        # podman's entry at boot goes now: the init at 6 that came from it carries its kind
+        assert [(f[0], f[2]) for f in _facts(cat)] == [(6, "start"), (8, "other"), (9, "entry")]
 
 
 def entered_from(seq: int, inode: int, outside: int, kind: str = "process_exec") -> dict:
@@ -584,7 +585,7 @@ def test_a_number_entered_from_anywhere_but_the_vm_is_a_fact_too(state, monkeypa
             (8, "800", "entry", "1", "")]  # fmt: skip
     with ms.Catalogue.open() as cat:
         assert _facts(cat) == want
-        assert [(f["seq"], f["what"]) for f in cat.suffix(BOOT, "800", 8)] == [
+        assert [(f["seq"], f["what"]) for f in cat.prior(BOOT, "800", 8)] == [
             (4, "entry"), (5, "other")
         ]  # fmt: skip
         # as #136's catalogue had it, every segment indexed without facts: the backfill's needle
