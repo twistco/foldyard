@@ -56,6 +56,17 @@ HEADER = b"x-fy-origin"
 STAMP_HEADER = "X-Fy-Origin"
 MAX_HEAD = 64 * 1024
 HEAD_TIMEOUT = 10.0
+# The upstream connect, through Lima's user-mode network to the proxy on your computer: a healthy
+# one takes ~0.2 ms, and one that hasn't answered in 2 s is a SYN gVisor dropped (it reused a tuple
+# still in gVisor's TIME_WAIT, google/gvisor#15013), which a new socket — a new source port —
+# gets past. Bounded, then the client's connection fails as any failed connect does
+# (docs/lima-usernet-freeze.md, Finding 10: 2 s and re-dial bounded a connect at 10 s, not 68 s).
+CONNECT_TIMEOUT = 2.0
+CONNECT_ATTEMPTS = 8
+# How long a close waits for the upstream to acknowledge every byte sent to it before it may
+# reset the connection; past it, the close is a FIN (an RST discards unacknowledged bytes).
+DRAIN_WAIT = 2.0
+SIOCOUTQ = 0x5411  # Linux: bytes in a TCP socket's send queue, unsent or unacknowledged
 CLONE_NEWNET = 0x40000000
 SO_ORIGINAL_DST = 80
 STATE_DIR = "/run/fy-fwd"
@@ -84,6 +95,10 @@ def parse_ports(text: str) -> list[tuple[int, int]]:
             raise ValueError(f"bad port range {part!r}")
         out.append((a, b))
     return out
+
+
+def each_port(ranges: list[tuple[int, int]]) -> list[int]:
+    return [p for a, b in ranges for p in range(a, b + 1)]
 
 
 def in_ranges(port: int | None, ranges: list[tuple[int, int]]) -> bool:
@@ -167,11 +182,14 @@ def bridge_nft(gw: str, ranges: list[tuple[int, int]], listen: int) -> str:
     ])  # fmt: skip
 
 
-def vm_nft(gw: str, ranges: list[tuple[int, int]], walled: str, addr: str, listen: int) -> str:
+def vm_nft(gw: str, ranges: list[tuple[int, int]], walled: str, addr: str) -> str:
     """The VM namespace's table. ``out`` sends the walled principals' connections to the gateway's
-    daemon ports to the VM listener; ``guard`` refuses any of theirs that still names a daemon
-    port after that, so nothing reaches the host around the forwarder. A drop in any table's base
-    chain is final, so this holds whatever the VM firewall's own table accepts."""
+    daemon ports to the VM listener on the SAME port at ``addr``; ``guard`` refuses any of theirs
+    that still names a daemon port after that, so nothing reaches the host around the forwarder. A
+    drop in any table's base chain is final, so this holds whatever the VM firewall's own table
+    accepts. The port is kept on purpose: every port DNATed onto one listener made a client port
+    reused toward another daemon port clash with the earlier connection's conntrack entry, and
+    conntrack remapped the source port — after which sock_diag can't find the client's socket."""
     o, c = "{", "}"
     match = ("meta skuid " + o + " " + walled + " " + c + " ip daddr " + gw + " tcp dport "
              + o + " " + nft_ranges(ranges) + " " + c)  # fmt: skip
@@ -180,7 +198,7 @@ def vm_nft(gw: str, ranges: list[tuple[int, int]], walled: str, addr: str, liste
         "table ip " + TABLE + " " + o,
         "  chain out " + o,
         "    type nat hook output priority dstnat - 10; policy accept;",
-        "    " + match + " dnat to " + addr + ":" + str(listen),
+        "    " + match + " dnat to " + addr,
         "  " + c,
         "  chain guard " + o,
         "    type filter hook output priority filter - 10; policy accept;",
@@ -317,12 +335,17 @@ class Cgroups:
                     rest.append(pid)
         for pid in first + rest:
             try:
-                for fd in os.listdir(f"{proc}/{pid}/fd"):
-                    if os.readlink(f"{proc}/{pid}/fd/{fd}") == target:
-                        with open(f"{proc}/{pid}/comm") as f:
-                            return f.read().strip()
+                fds = os.listdir(f"{proc}/{pid}/fd")
             except OSError:
-                continue
+                continue  # the process exited
+            for fd in fds:
+                try:
+                    if os.readlink(f"{proc}/{pid}/fd/{fd}") != target:
+                        continue
+                    with open(f"{proc}/{pid}/comm") as f:
+                        return f.read().strip()
+                except OSError:
+                    continue  # that one fd closed since the listing: the rest still count
         return None
 
 
@@ -460,21 +483,33 @@ async def read_head(reader: asyncio.StreamReader) -> tuple[bytes, bytes] | None:
     return head + b"\r\n\r\n", rest
 
 
-async def pipe(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+def send_queue(sock) -> int | None:
+    """Bytes ``sock`` still holds for its peer, sent or not (``SIOCOUTQ``); ``None`` where that
+    can't be read — which never counts as drained."""
+    import fcntl
+
     try:
-        while data := await r.read(256 * 1024):
-            w.write(data)
-            await w.drain()
+        raw = fcntl.ioctl(sock.fileno(), SIOCOUTQ, struct.pack("i", 0))
+    except (OSError, ValueError):
+        return None
+    return struct.unpack("i", raw)[0]
+
+
+async def drained(w: asyncio.StreamWriter, wait: float | None = None) -> bool:
+    """Has the peer acknowledged every byte written to ``w``? Waits up to ``wait`` for it."""
+    try:
+        await w.drain()
     except (ConnectionError, OSError):
-        pass
-    finally:
-        try:
-            if w.can_write_eof():
-                w.write_eof()
-            else:
-                w.close()
-        except (OSError, RuntimeError):
-            w.close()
+        return False
+    sock = w.get_extra_info("socket")
+    deadline = time.monotonic() + (DRAIN_WAIT if wait is None else wait)
+    while True:
+        queued = send_queue(sock) if sock is not None else None
+        if queued == 0:
+            return True
+        if queued is None or time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.01)
 
 
 class Forwarder:
@@ -489,7 +524,9 @@ class Forwarder:
         self.walled = [tuple(int(x) for x in r.split("-")) for r in uid_ranges(a.walled)]
         self.ifaces: dict[str, str] = {}
         self.netns_path: str | None = None
-        self.stats = {"bridge": 0, "vm": 0, "refused": 0, "stripped": 0, "upstream_failed": 0}
+        self.stats = {"bridge": 0, "vm": 0, "refused": 0, "stripped": 0, "upstream_failed": 0,
+                      "redials": 0, "aborted": 0}  # fmt: skip
+        self.dial = None  # the upstream connect (a seam): asyncio.open_connection, looked up late
 
     def ports(self) -> list[tuple[int, int]]:
         return self.proxy + self.plain
@@ -515,7 +552,13 @@ class Forwarder:
     async def handle_vm(self, reader, writer) -> None:
         peer = writer.get_extra_info("peername")
         dest = original_dst(writer.get_extra_info("socket"))
-        if dest is None or not in_ranges(dest[1], self.ports()) or dest[0] != self.a.gw:
+        local = writer.get_extra_info("sockname")
+        if (
+            dest is None
+            or not in_ranges(dest[1], self.ports())
+            or dest[0] != self.a.gw
+            or local[1] != dest[1]
+        ):
             return self.refuse(writer, "VM listener dialled directly", peer)
         try:
             who = await asyncio.to_thread(owner, peer, dest, self.a.uid, self.walled, self.cgroups)
@@ -554,25 +597,85 @@ class Forwarder:
                 head, stripped = restamp(head, self.next_stamp(items))
                 self.stats["stripped"] += stripped
             rest = head + rest
-        # No timeout of our own: the kernel's SYN retries decide, as they would for a client that
-        # connected directly (a shorter one turns Lima's user-mode network's long stalls — spike
-        # finding 8 — into closed connections, which clients treat differently from slow ones).
         try:
-            ur, uw = await asyncio.open_connection(*dest)
-        except OSError as e:
+            ur, uw = await self.open_upstream(dest)
+        except (OSError, TimeoutError) as e:
             self.stats["upstream_failed"] += 1
-            log(ev="upstream-failed", port=dest[1], err=str(e))
+            log(ev="upstream-failed", port=dest[1], err=str(e) or type(e).__name__)
             writer.close()
             return
+        # Which side closed first decides how the upstream socket is closed. The upstream closing
+        # first (the proxy after `Connection: close`, an error, a refusal, an idle timeout) is a
+        # host-first close, which leaves gVisor's end of the tuple in TIME_WAIT for 60 s, and a
+        # later SYN reusing it is silently dropped (google/gvisor#15013). So then the forwarder
+        # never sends its FIN: once the client is done too and everything owed upstream is
+        # acknowledged, it closes with an RST, which gVisor takes before it enters TIME_WAIT
+        # (docs/lima-usernet-freeze.md, Finding 6). The client finishing first is a FIN as before:
+        # the guest then holds TIME_WAIT itself, and nothing needs avoiding.
+        upstream_done = False  # the upstream's EOF was read
+        fin_sent = False  # we half-closed upstream (the client finished first)
+
+        async def to_upstream() -> None:
+            nonlocal fin_sent
+            try:
+                if rest:
+                    uw.write(rest)
+                while data := await reader.read(256 * 1024):
+                    uw.write(data)
+                    await uw.drain()
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                if not upstream_done:
+                    try:
+                        uw.write_eof()
+                        fin_sent = True
+                    except (OSError, RuntimeError):
+                        pass
+
+        async def to_client() -> None:
+            nonlocal upstream_done
+            try:
+                while data := await ur.read(256 * 1024):
+                    writer.write(data)
+                    await writer.drain()
+                upstream_done = True
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                try:
+                    if writer.can_write_eof():
+                        writer.write_eof()
+                    else:
+                        writer.close()
+                except (OSError, RuntimeError):
+                    writer.close()
+
         try:
-            if rest:
-                uw.write(rest)
-            await asyncio.gather(pipe(reader, uw), pipe(ur, writer))
+            await asyncio.gather(to_upstream(), to_client())
         finally:
-            # Each pipe only half-closes its direction: close both sockets, or every connection
-            # leaves two descriptors open until a garbage collection reaches them.
+            # Each direction only half-closed: close both sockets, or every connection leaves two
+            # descriptors open until a garbage collection reaches them.
             writer.close()
+            if upstream_done and not fin_sent and await drained(uw):
+                sock = uw.get_extra_info("socket")
+                with contextlib.suppress(OSError):
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    self.stats["aborted"] += 1
             uw.close()
+
+    async def open_upstream(self, dest: tuple[str, int]):
+        """Connect upstream, re-dialling on a new socket when a connect is slow
+        (:data:`CONNECT_TIMEOUT`, at most :data:`CONNECT_ATTEMPTS` tries). A refusal or any other
+        error is an answer, not a lost SYN: it fails at once."""
+        dial = self.dial or asyncio.open_connection
+        for attempt in range(CONNECT_ATTEMPTS):
+            try:
+                return await asyncio.wait_for(dial(*dest), timeout=CONNECT_TIMEOUT)
+            except TimeoutError:
+                if attempt + 1 < CONNECT_ATTEMPTS:
+                    self.stats["redials"] += 1
+        raise TimeoutError(f"no answer to {CONNECT_ATTEMPTS} connects of {CONNECT_TIMEOUT:g}s")
 
 
 class Follower:
@@ -647,8 +750,8 @@ class Follower:
 def setup_vm(a: argparse.Namespace, ports: list[tuple[int, int]]) -> None:
     """The VM namespace's table, then its policy routes (table first: routes without the table
     would route the walled principals' connections to ``lo`` with nothing to catch them)."""
-    res = subprocess.run(["nft", "-f", "-"], input=vm_nft(a.gw, ports, a.walled, a.vm_addr,
-                         a.vm_port), text=True, capture_output=True, timeout=10)  # fmt: skip
+    res = subprocess.run(["nft", "-f", "-"], input=vm_nft(a.gw, ports, a.walled, a.vm_addr),
+                         text=True, capture_output=True, timeout=10)  # fmt: skip
     if res.returncode != 0:
         raise OSError(f"nft: {res.stderr.strip()}")
     for prio in range(RULE_PRIORITY, RULE_PRIORITY + 64):
@@ -667,14 +770,15 @@ async def main(a: argparse.Namespace) -> None:
     ipaddress.IPv4Address(a.vm_addr)  # refuse a malformed address before any rule names it
     fwd = Forwarder(a, key, boot)
     setup_vm(a, fwd.ports())
-    vm = await asyncio.start_server(
-        fwd.handle_vm, sock=listener(a.vm_addr, a.vm_port), backlog=1024
-    )
+    # One listener per daemon port (see vm_nft), on an address Lima's port forwarding ignores.
+    servers = [
+        await asyncio.start_server(fwd.handle_vm, sock=listener(a.vm_addr, port), backlog=1024)
+        for port in each_port(fwd.ports())
+    ]
     follower = Follower(fwd, Netns(a.uid))
     put("state", f"serving {a.id}")
-    log(ev="started", id=a.id, vm=f"{a.vm_addr}:{a.vm_port}", bridge=a.bridge_port)
-    async with vm:
-        await follower.run(a.poll)
+    log(ev="started", id=a.id, vm=f"{a.vm_addr} ({len(servers)} ports)", bridge=a.bridge_port)
+    await follower.run(a.poll)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -688,7 +792,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--key", default="/etc/fy-fwd/forwarder.key")
     p.add_argument("--bridge-port", type=int, default=4748)
     p.add_argument("--vm-addr", default="127.42.0.1")
-    p.add_argument("--vm-port", type=int, default=4747)
     p.add_argument("--poll", type=float, default=0.1)
     return p.parse_args(argv)
 

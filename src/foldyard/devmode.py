@@ -2467,9 +2467,11 @@ def _fwd_stats(report) -> str:
         stats = {}
     if not isinstance(stats, dict) or not any(stats.values()):
         return "no traffic yet"
+    redialled = stats.get("redials", 0)
     return (
         f"{stats.get('bridge', 0)} from bridge containers, {stats.get('vm', 0)} from the VM's "
         f"own namespace, {stats.get('refused', 0)} refused"
+        + (f", {redialled} slow connects re-dialled" if redialled else "")
     )
 
 

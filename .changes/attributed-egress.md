@@ -16,6 +16,9 @@ experimental: true
   `fy machine stop && fy up`. With it on, `podman run` defaults to a bridge network, a container
   on an explicit pasta network can't reach the proxy (its traffic can't be told apart from any
   other container's), and a forwarder that isn't serving makes `fy up` refuse rather than hand over
-  a box that can reach nothing. Why: until now every container in the VM — an eval harness's
+  a box that can reach nothing. On a `vz` VM the forwarder also works round a freeze in Lima's
+  user-mode network (gVisor's netstack drops a SYN that reuses a recently closed connection,
+  google/gvisor#15013): it resets upstream connections the proxy closed first and re-dials a
+  connect that hasn't answered in 2 s. Why: until now every container in the VM — an eval harness's
   sandbox as much as the box — was the same client to the proxy
   ([ADR-0034](https://github.com/twistco/foldyard/blob/main/docs/adrs/0034-the-proxy-knows-which-container-asked.md)).

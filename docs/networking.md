@@ -77,6 +77,12 @@ didn't check out says `forged`. The note is bound to the connection, so every re
 keep-alive, a retry, everything inside a `CONNECT` — is that connection's, and a note a client
 writes itself is removed and never trusted. No note ever leaves the proxy.
 
+The forwarder also works round a freeze in Lima's user-mode network on macOS (`vz`): a new
+connection that reuses one the proxy's side closed less than 60 s earlier can hang for up to a
+minute, for every client of that proxy port at once. The forwarder closes such connections with a
+reset rather than a normal close, so the freeze doesn't arise, and re-dials a connection that
+hasn't answered in 2 s.
+
 The note says where a request came from, not who steered it: the box holds the engine socket, so
 it can act from inside another container. Nothing is decided on the note yet — no grant or
 credential depends on it. Details:

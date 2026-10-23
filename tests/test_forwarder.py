@@ -326,6 +326,12 @@ def test_the_doctor_row_is_red_when_the_forwarder_isnt_serving(monkeypatch):
     good = forwarder.Report(f"applied {want}", f"serving {want}", "1", '{"bridge": 3}', "active")
     [(level, name, text)] = _doctor(monkeypatch, good)
     assert (level, name) == ("ok", "forwarder") and "3 from bridge containers" in text
+    assert "re-dialled" not in text
+    slow = forwarder.Report(
+        f"applied {want}", f"serving {want}", "1", '{"bridge": 3, "redials": 2}', "active"
+    )
+    [(_, _, text)] = _doctor(monkeypatch, slow)
+    assert "2 slow connects re-dialled" in text
     bad = forwarder.Report(f"applied {want}", "failed: boom", "", "", "failed")
     [(level, _, text)] = _doctor(monkeypatch, bad)
     assert level == "fail" and "NOT serving" in text

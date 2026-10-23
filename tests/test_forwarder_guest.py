@@ -201,21 +201,27 @@ def test_both_tables_replace_themselves_whole():
     # a restart must never pile up duplicate rules (spike finding 10)
     for text in (
         fwd.bridge_nft("192.168.5.2", [(41000, 41089)], 4748),
-        fwd.vm_nft("192.168.5.2", [(41000, 41089)], "501, 524288-1074266111", "127.42.0.1", 4747),
+        fwd.vm_nft("192.168.5.2", [(41000, 41089)], "501, 524288-1074266111", "127.42.0.1"),
     ):
         assert text.startswith("table ip fy_fwd\ndelete table ip fy_fwd\ntable ip fy_fwd {")
         assert "{{" not in text and "}}" not in text  # Lima renders the boot script as a template
 
 
 def test_the_vm_table_redirects_and_guards_only_the_walled_principals():
-    text = fwd.vm_nft(
-        "192.168.5.2", [(41000, 41089), (41100, 41189)], "501, 5-9", "127.42.0.1", 4747
-    )
+    text = fwd.vm_nft("192.168.5.2", [(41000, 41089), (41100, 41189)], "501, 5-9", "127.42.0.1")
     match = "meta skuid { 501, 5-9 } ip daddr 192.168.5.2 tcp dport { 41000-41089, 41100-41189 }"
-    assert f"{match} dnat to 127.42.0.1:4747" in text
+    # the port is KEPT: one listener per daemon port. Every port DNATed onto one listener made a
+    # client port reused toward another daemon port clash with the earlier connection's
+    # conntrack entry, conntrack remapped the source port, and sock_diag could no longer find the
+    # client's socket — about a third of connections refused at ~1,400/s (seen live, 2026-10-23)
+    assert f"{match} dnat to 127.42.0.1\n" in text
     # anything of theirs still naming a daemon port after the redirect is refused: never around
     assert f"{match} counter reject with tcp reset" in text
     assert "type filter hook output" in text
+
+
+def test_the_vm_listener_listens_on_every_daemon_port():
+    assert fwd.each_port([(41000, 41002), (41100, 41100)]) == [41000, 41001, 41002, 41100]
 
 
 def test_the_policy_routes_cover_each_uid_range_and_port_span():
@@ -346,3 +352,230 @@ def test_a_finished_relay_closes_both_of_its_sockets():
         return closed
 
     assert asyncio.run(run()) == [True, True]
+
+
+# ── the upstream socket: re-dial a slow connect, close abortively after a host-first close ─────
+#
+# Lima's vz user-mode network (gVisor's netstack in the hostagent) silently drops a SYN that
+# reuses a 4-tuple still in its 60 s TIME_WAIT (google/gvisor#15013), which it holds whenever the
+# host side closed first: connects freeze 7–68 s for every caller of one proxy port at once
+# (docs/lima-usernet-freeze.md, Findings 6 and 10, Mitigations 1–2).
+
+
+async def _run_relay(f, upstream_port, client_actions, kind="plain"):
+    """A client → forwarder.relay → upstream round trip; returns what client_actions returned."""
+
+    async def front(r, w):
+        await f.relay(r, w, ("127.0.0.1", upstream_port), [])
+
+    fr = await asyncio.start_server(front, "127.0.0.1", 0)
+    try:
+        cr, cw = await asyncio.open_connection("127.0.0.1", fr.sockets[0].getsockname()[1])
+        return await client_actions(cr, cw)
+    finally:
+        fr.close()
+
+
+def _upstream_closing_first(seen: list):
+    """An upstream that answers, half-closes FIRST (the host side's FIN), then reports how the
+    forwarder ended its side: ``b""`` for a FIN, ``"reset"`` for an RST."""
+
+    async def handle(r, w):
+        await r.read(65536)
+        w.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        await w.drain()
+        w.write_eof()
+        try:
+            seen.append(await asyncio.wait_for(r.read(65536), 5))
+        except ConnectionResetError:
+            seen.append("reset")
+        w.close()
+
+    return handle
+
+
+async def _ask_and_read_to_eof(cr, cw):
+    cw.write(b"GET /t HTTP/1.1\r\nHost: m\r\n\r\n")
+    await cw.drain()
+    try:
+        body = await asyncio.wait_for(cr.read(), 5)
+    except ConnectionResetError:  # a failed relay closes with the request unread: an RST
+        body = b""
+    cw.close()
+    return body
+
+
+def test_after_the_upstream_closes_first_its_socket_is_closed_with_a_reset(monkeypatch):
+    # An RST instead of a FIN: gVisor never enters TIME_WAIT for the connection (Finding 6:
+    # 0 stalls at 7,398 conn/s, against 22 stalls of up to 68 s with FINs).
+    monkeypatch.setattr(fwd, "send_queue", lambda sock: 0)
+
+    async def run():
+        seen: list = []
+        up = await asyncio.start_server(_upstream_closing_first(seen), "127.0.0.1", 0)
+        f = fwd.Forwarder(_args(1, plain=up.sockets[0].getsockname()[1]), KEY, "b00t")
+        body = await _run_relay(f, up.sockets[0].getsockname()[1], _ask_and_read_to_eof)
+        for _ in range(100):
+            if seen:
+                break
+            await asyncio.sleep(0.02)
+        up.close()
+        return body, seen, f.stats
+
+    body, seen, stats = asyncio.run(run())
+    assert body.endswith(b"ok")
+    assert seen == ["reset"]
+    assert stats["aborted"] == 1
+
+
+def test_bytes_not_yet_acknowledged_are_never_discarded_by_a_reset(monkeypatch):
+    # An RST throws away whatever is still in the send queue: while anything owed upstream is
+    # unacknowledged (SIOCOUTQ > 0), or that can't be read at all, the close stays a FIN.
+    for queued in (5, None):
+        monkeypatch.setattr(fwd, "send_queue", lambda sock, q=queued: q)
+        monkeypatch.setattr(fwd, "DRAIN_WAIT", 0.05)
+
+        async def run():
+            seen: list = []
+            up = await asyncio.start_server(_upstream_closing_first(seen), "127.0.0.1", 0)
+            f = fwd.Forwarder(_args(1, plain=up.sockets[0].getsockname()[1]), KEY, "b00t")
+            await _run_relay(f, up.sockets[0].getsockname()[1], _ask_and_read_to_eof)
+            for _ in range(100):
+                if seen:
+                    break
+                await asyncio.sleep(0.02)
+            up.close()
+            return seen, f.stats
+
+        seen, stats = asyncio.run(run())
+        assert seen == [b""], queued
+        assert stats["aborted"] == 0
+
+
+def test_a_client_that_closes_first_closes_upstream_with_a_fin(monkeypatch):
+    # Then the guest side closed first and holds TIME_WAIT itself: nothing to avoid, so no reset.
+    monkeypatch.setattr(fwd, "send_queue", lambda sock: 0)
+
+    async def run():
+        seen: list = []
+
+        async def upstream(r, w):
+            got = b""
+            while chunk := await r.read(65536):
+                got += chunk
+            seen.append(got)  # the client's EOF arrived as a FIN, before we answered
+            w.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            await w.drain()
+            w.close()
+
+        up = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        f = fwd.Forwarder(_args(1, plain=up.sockets[0].getsockname()[1]), KEY, "b00t")
+
+        async def half_close_then_read(cr, cw):
+            cw.write(b"GET /t HTTP/1.1\r\nHost: m\r\n\r\n")
+            cw.write_eof()
+            return await asyncio.wait_for(cr.read(), 5)
+
+        body = await _run_relay(f, up.sockets[0].getsockname()[1], half_close_then_read)
+        up.close()
+        return body, seen, f.stats
+
+    body, seen, stats = asyncio.run(run())
+    assert body.startswith(b"HTTP/1.1 200") and seen and seen[0].startswith(b"GET /t")
+    assert stats["aborted"] == 0
+
+
+class _Dialler:
+    """Stands in for asyncio.open_connection: hangs the first ``slow`` calls, then connects."""
+
+    def __init__(self, slow: int, refuse: bool = False) -> None:
+        self.slow, self.refuse, self.calls = slow, refuse, 0
+
+    async def __call__(self, host, port):
+        self.calls += 1
+        if self.refuse:
+            raise ConnectionRefusedError("refused")
+        if self.calls <= self.slow:
+            await asyncio.sleep(3600)
+        return await asyncio.open_connection(host, port)
+
+
+def _redial(monkeypatch, dialler):
+    monkeypatch.setattr(fwd, "CONNECT_TIMEOUT", 0.05)
+    monkeypatch.setattr(fwd, "send_queue", lambda sock: None)
+
+    async def run():
+        async def upstream(r, w):
+            await r.read(65536)
+            w.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            await w.drain()
+            w.close()
+
+        up = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        f = fwd.Forwarder(_args(1, plain=up.sockets[0].getsockname()[1]), KEY, "b00t")
+        f.dial = dialler
+        body = await _run_relay(f, up.sockets[0].getsockname()[1], _ask_and_read_to_eof)
+        up.close()
+        return body, f.stats
+
+    return asyncio.run(run())
+
+
+def test_a_slow_connect_is_redialled_on_a_new_socket(monkeypatch):
+    # A frozen SYN waits out gVisor's TIME_WAIT; a new socket has a new source port, a new tuple
+    # (Finding 10: 2 s and re-dial bounded a connect at 10 s instead of 68 s).
+    dialler = _Dialler(slow=2)
+    body, stats = _redial(monkeypatch, dialler)
+    assert body.startswith(b"HTTP/1.1 200")
+    assert dialler.calls == 3 and stats["redials"] == 2 and stats["upstream_failed"] == 0
+
+
+def test_redials_are_bounded_then_the_client_connection_fails(monkeypatch):
+    dialler = _Dialler(slow=10**6)
+    body, stats = _redial(monkeypatch, dialler)
+    assert body == b""  # closed, as any failed upstream connect is
+    assert dialler.calls == fwd.CONNECT_ATTEMPTS and stats["upstream_failed"] == 1
+
+
+def test_a_refused_connect_is_not_redialled(monkeypatch):
+    # Refused is an answer (the proxy isn't listening), not a lost SYN: fail at once, as before.
+    dialler = _Dialler(slow=0, refuse=True)
+    body, stats = _redial(monkeypatch, dialler)
+    assert body == b"" and dialler.calls == 1 and stats["redials"] == 0
+
+
+def test_the_send_queue_reads_where_it_can_and_never_raises():
+    with socket.socket() as s:
+        got = fwd.send_queue(s)
+    assert got is None or got == 0
+
+
+def test_a_descriptor_closed_mid_scan_doesnt_hide_the_rest_of_its_process(tmp_path, monkeypatch):
+    # A busy client opens and closes sockets while the forwarder reads its /proc/<pid>/fd: one fd
+    # gone between the listing and its readlink used to abandon the whole process, and the
+    # connection was refused as "owner unknown" (0.7% at ~600/s from 4 threads, seen live).
+    proc = tmp_path / "proc"
+    (proc / "100" / "fd").mkdir(parents=True)
+    (proc / "100" / "comm").write_text("python3\n")
+    (proc / "100" / "fd" / "3").symlink_to("socket:[1]")
+    (proc / "100" / "fd" / "9").symlink_to("socket:[77]")
+    root = tmp_path / "cg"
+    (root / "s").mkdir(parents=True)
+    (root / "s" / "cgroup.procs").write_text("100\n")
+    real = fwd.os.readlink
+
+    def flaky(path, *a, **k):
+        if path.endswith("/fd/3"):
+            raise FileNotFoundError(path)  # closed after the listing
+        return real(path, *a, **k)
+
+    real_listdir = fwd.os.listdir
+
+    def ordered(path):
+        names = real_listdir(path)
+        return sorted(names) if str(path).endswith("/fd") else names  # the vanished fd first
+
+    monkeypatch.setattr(fwd.os, "readlink", flaky)
+    monkeypatch.setattr(fwd.os, "listdir", ordered)
+    me = (proc / "100").stat().st_uid
+    assert fwd.Cgroups(str(root)).owner_comm("/s", 77, [(me, me)], proc=str(proc)) == "python3"

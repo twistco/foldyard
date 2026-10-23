@@ -20,10 +20,26 @@
   - **The proxy URL containers get is unchanged**: the forwarder's table redirects gateway-port
     traffic to it, as in the spike.
   - **The VM listener binds `127.42.0.1`**, which Lima's default port forwarding doesn't forward
-    ("Not forwarding TCP 127.42.0.1:4747"), so no `portForwards` entry is needed. Pasta helpers
-    are refused there; because pasta opens pooled sockets before podman moves it into its scope,
-    a socket's cgroup can name one pasta has left, so the owner is looked up across the walled
-    uids' processes.
+    ("Not forwarding TCP 127.42.0.1:4747"), so no `portForwards` entry is needed. It listens on
+    every daemon port and the redirect keeps the port: with every port redirected onto one
+    listener, a client port reused toward another daemon port clashed with the earlier
+    connection's conntrack entry, conntrack remapped the source port, and sock_diag could no
+    longer find the client's socket (about a third of connections refused at ~1,400/s). Pasta
+    helpers are refused there; because pasta opens pooled sockets before podman moves it into its
+    scope, a socket's cgroup can name one pasta has left, so the owner is looked up across the
+    walled uids' processes.
+  - **The upstream socket works round Lima's user-mode network freeze.** On vz, gVisor's netstack
+    in the hostagent silently drops a SYN that reuses a 4-tuple still in its 60 s TIME_WAIT
+    ([google/gvisor#15013](https://github.com/google/gvisor/issues/15013)), which it holds
+    whenever the host side closed first: connects freeze 7–68 s for every caller of a proxy port
+    at once (the investigation is `docs/lima-usernet-freeze.md`, Findings 6 and 10, on its own
+    branch). So when the upstream closes first, the forwarder never sends its FIN: once the client
+    is done too and the upstream has acknowledged every byte (`SIOCOUTQ` 0), it closes with an RST
+    (`SO_LINGER {1,0}`), and gVisor never enters TIME_WAIT. A client that closes first gets a FIN
+    as before. A connect that hasn't answered in 2 s is re-dialled on a new socket, at most 8
+    times, then the client's connection fails as before. On the throwaway vz guest, 4 workers
+    through the VM listener: before, 8,000 requests took 77 s with 4 frozen for 68 s; after,
+    30,000 took 53 s with none over 1 s, every upstream reset, no re-dial needed.
   - **Token-service ports are forwarded but not stamped.**
   - **`fy up` refuses a forwarder that isn't serving**, since nothing in the VM reaches the
     proxy without it.
