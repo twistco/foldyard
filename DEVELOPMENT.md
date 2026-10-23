@@ -429,8 +429,8 @@ replayed examples had passed (PR #138, 2026-10). So once a week (Tuesdays 03:17 
 GitHub's runners) one job runs the property tier — every test module that imports hypothesis,
 which `tests/test_property_explore.py` holds the workflow's `PROPERTY_MODULES` list to — under the
 `explore` profile: randomised, `max_examples` 5000 (50× the default; each test's own budget scales
-with it), no deadline, `-n auto`. That took 5.4 min on 4 local workers; the hook-delivery property
-is most of it. The example database lives at `.hypothesis/examples`, which `actions/cache` carries
+with it), no deadline, `-n auto`. The tier took 7.7 min on a hosted runner (5.4 on 4 local
+workers), under the step's 22-minute cap; the hook-delivery property is most of it. The example database lives at `.hypothesis/examples`, which `actions/cache` carries
 from run to run (each run saves under `hypothesis-explore-<run_id>-<attempt>`, the next restores
 the newest by the prefix), so a counterexample found one week is replayed first every week until
 it is fixed. GitHub evicts an entry nobody has read for 7 days, which a weekly run only just
