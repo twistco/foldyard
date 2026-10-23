@@ -261,6 +261,21 @@ def test_set_expr_carries_each_mounts_writable_flag():
     assert '"location": "/s/to-box", "mountPoint": "/s/to-box", "writable": false' in expr
 
 
+def test_set_expr_pins_the_to_box_9p_cache_and_nothing_else():
+    # Lima mounts a READ-ONLY 9p share with cache=fscache, which never revalidates: what your
+    # computer writes into the to-box stayed invisible to the guest (tests/test_mounts_e2e.py).
+    expr = mb.LimaBackend()._set_expr(
+        {"cpus": "4", "memory": "8192", "disk": "60"},
+        [mb.Mount("/r", "/r"), mb.Mount("/s/to-box", "/s/to-box", writable=False, cache="mmap")],
+        "qemu",
+    )
+    assert (
+        '"location": "/s/to-box", "mountPoint": "/s/to-box", "writable": false, '
+        '"9p": {"cache": "mmap"}' in expr
+    )
+    assert expr.count('"9p": {') == 1  # a mount with no cache of foldyard's carries none
+
+
 def _lima_row(monkeypatch, **config):
     rows = _json_lines(
         {"name": "acme", "status": "Stopped", "vmType": "qemu", "config": {**config}}
@@ -276,16 +291,23 @@ def test_lima_mount_set_reads_the_effective_config_with_writable_flags(monkeypat
         mountType="9p",
         mounts=[
             {"location": "/r", "mountPoint": "/r", "writable": True},
-            {"location": "/s/to-box", "mountPoint": "/s/to-box", "writable": False},
+            {
+                "location": "/s/to-box",
+                "mountPoint": "/s/to-box",
+                "writable": False,
+                "9p": {"cache": "fscache"},  # Lima's default for a read-only 9p share
+            },
             {"location": "/x"},  # Lima's defaults: mountPoint = location, read-only
         ],
     )
     be = mb.LimaBackend()
-    assert be.mount_set("acme") == [
+    got = be.mount_set("acme")
+    assert got == [
         mb.Mount("/r", "/r"),
         mb.Mount("/s/to-box", "/s/to-box", writable=False),
         mb.Mount("/x", "/x", writable=False),
     ]
+    assert [m.cache for m in got or []] == ["", "fscache", ""]
     assert be.mount_type("acme") == "9p"
     assert be.vmtype("acme") == "qemu"
 

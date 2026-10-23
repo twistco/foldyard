@@ -2203,7 +2203,7 @@ def test_wall_denies_reads_the_guests_report_without_root(monkeypatch):
 # backend's mounts are fixed at `podman machine init`: nothing about them changes.
 
 
-def _want(tmp_path, *, to_box=True):
+def _want(tmp_path, *, to_box=True, cache=""):
     from foldyard.machine_backend import Mount
 
     state = tmp_path / "state"
@@ -2213,8 +2213,14 @@ def _want(tmp_path, *, to_box=True):
         Mount(str(state / "from-box"), str(state / "from-box")),
     ]
     if to_box:
-        mounts.append(Mount(str(state / "to-box"), str(state / "to-box"), writable=False))
+        to = str(state / "to-box")
+        mounts.append(Mount(to, to, writable=False, cache=cache))
     return mounts
+
+
+def _caches(mounts) -> dict[str, str]:
+    """Each mount's 9p cache by its directory's name (Mount equality leaves the cache out)."""
+    return {Path(m.location).name: m.cache for m in mounts}
 
 
 def test_a_new_lima_vm_shares_the_from_box_and_a_read_only_to_box(lima_env, tmp_path):
@@ -2316,6 +2322,77 @@ def test_every_difference_in_foldyards_own_mounts_is_stale(lima_env, tmp_path, c
     with pytest.raises(SystemExit):
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert "STALE mount set" in capsys.readouterr().err
+
+
+# The to-box on 9p is pinned to cache=mmap: Lima's default for a read-only 9p share (fscache)
+# caches without revalidating, so what your computer writes there stayed invisible to the guest
+# (tests/test_mounts_e2e.py). Compared only where foldyard asks for a cache — Lima's merged config
+# reports fscache for every read-only mount, vz's virtiofs to-box included, where it means nothing.
+
+
+def test_a_new_qemu_vm_pins_the_to_box_9p_cache(lima_env, tmp_path):
+    be, _guest, set_wall, guest_ok = lima_env
+    be._exists, be._state, be._vmtype = False, "stopped", "qemu"
+    set_wall(False)
+    guest_ok()
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert _caches(be.created_with) == {"repo": "", "repo-wt": "", "from-box": "", "to-box": "mmap"}
+
+
+def test_a_new_vz_vm_pins_no_9p_cache(lima_env, tmp_path):
+    be, _guest, set_wall, guest_ok = lima_env
+    be._exists, be._state = False, "stopped"
+    set_wall(False)
+    guest_ok()
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert set(_caches(be.created_with).values()) == {""}
+
+
+def test_a_running_qemu_vm_on_the_default_9p_cache_is_stale(lima_env, tmp_path, capsys):
+    be, _guest, set_wall, _guest_ok = lima_env
+    set_wall(False)
+    be._provision = machine.provision_id()
+    be._vmtype, be._mount_type = "qemu", "9p"
+    be._mount_set = _want(tmp_path, cache="fscache")
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    err = capsys.readouterr().err
+    assert "STALE mount set" in err and "9p cache mmap, not fscache" in err
+
+
+def test_a_stopped_qemu_vm_gets_the_9p_cache_recorded(lima_env, tmp_path):
+    be, _guest, set_wall, guest_ok = lima_env
+    be._state = "stopped"
+    set_wall(False)
+    be._provision = machine.provision_id()
+    guest_ok()
+    be._vmtype, be._mount_type = "qemu", "9p"
+    be._mount_set = _want(tmp_path, cache="fscache")
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == ["mounts", "start:homelab"]
+    assert _caches(be._mount_set)["to-box"] == "mmap"
+
+
+def test_a_running_vz_vm_reporting_limas_default_cache_is_left_alone(lima_env, tmp_path):
+    # Regression guard: comparing the cache everywhere would call every macOS VM stale.
+    be, _guest, set_wall, guest_ok = lima_env
+    set_wall(False)
+    be._provision = machine.provision_id()
+    guest_ok()
+    be._mount_set, be._mount_type = _want(tmp_path, cache="fscache"), "virtiofs"
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == []
+
+
+def test_a_running_qemu_vm_with_the_pin_is_left_alone(lima_env, tmp_path):
+    be, _guest, set_wall, guest_ok = lima_env
+    set_wall(False)
+    be._provision = machine.provision_id()
+    guest_ok()
+    be._vmtype, be._mount_type = "qemu", "9p"
+    be._mount_set = _want(tmp_path, cache="mmap")
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert be.calls == []
 
 
 def test_the_checkout_mounts_are_left_as_the_vm_was_created(lima_env, tmp_path):

@@ -45,6 +45,14 @@ ENV_FROM_BOX = "FY_FROM_BOX"
 # `--readonly`), not krunkit, not reverse-sshfs.
 ENFORCING_MOUNT_TYPE = {"vz": "virtiofs", "qemu": "9p"}
 
+# The guest's 9p cache for the to-box. Lima's default for a READ-ONLY 9p share is `fscache`, which
+# caches data and attributes and never revalidates — right for a share nothing changes, wrong for
+# one your computer keeps writing: on QEMU/9p every append and rename stayed invisible to the
+# guest for the whole 5 s window (tests/test_mounts_e2e.py, 2026-10-22). `mmap` is what Lima gives
+# the writable mounts, fresh on the same runners; it caches nothing for ordinary reads. Guest-side
+# only: QEMU's `readonly=on` still refuses every write. vz's virtiofs takes no cache setting.
+TO_BOX_9P_CACHE = "mmap"
+
 
 def enabled() -> bool:
     """Does this project's VM get the two mounts? The lima backend only (see the module doc)."""

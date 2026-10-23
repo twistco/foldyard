@@ -20,8 +20,9 @@ revalidate, on the assumption that a read-only share never changes; the to-box i
 guest but written by your computer. Harmless for the monitor sink (evidence, read now and then),
 wrong for anything a box POLLS — the posture mirror, a later tenant (ADR-0033 § Freshness). The
 reader is the VM user over `limactl shell`: the box's `:ro` bind goes through the same guest-kernel
-client, so its cache is the box's. On 9p with Lima's default cache the test is a STRICT xfail, so
-it fails if 9p turns out fresh after all, and becomes a plain test once `9p.cache` is pinned.
+client, so its cache is the box's. On 9p it first checks that `fy up` recorded foldyard's pin
+(`9p.cache = mmap`, boxmounts.TO_BOX_9P_CACHE): with Lima's default every round was stale on CI's
+Linux and WSL2 hosts (2026-10-22, the red-first evidence, when this test was a strict xfail).
 
 Host tier (tests/e2e_host.py). In CI this is Lima on QEMU with 9p (QEMU's 9p server refuses every
 write on a `readonly=on` export); on a macOS host it is vz with virtiofs (the ADR's vz test, done
@@ -53,6 +54,7 @@ from e2e_host import (
     lima_shell,
     state_dir,
 )
+from foldyard import boxmounts
 
 pytestmark = host_tier
 
@@ -203,8 +205,8 @@ for line in sys.stdin:
 
 
 class _ReaderBroke(RuntimeError):
-    """The guest reader didn't answer as it should — a harness failure, never the stale read the
-    9p xfail expects (``raises=AssertionError``), so it can't pass for one."""
+    """The guest reader didn't answer as it should — a harness failure, reported as one rather
+    than as a stale read."""
 
 
 def _to_box_cache() -> tuple[str, str]:
@@ -244,17 +246,10 @@ def _rounds(path, write) -> list[str]:
 
 
 @pytest.mark.parametrize("how", ["append", "replace"])
-def test_what_your_computer_writes_to_the_to_box_reaches_the_guest_promptly(repo, request, how):
+def test_what_your_computer_writes_to_the_to_box_reaches_the_guest_promptly(repo, how):
     mount_type, cache = _to_box_cache()
-    if mount_type == "9p" and cache in ("", "fscache", "loose"):
-        request.applymarker(
-            pytest.mark.xfail(
-                strict=True,
-                raises=AssertionError,  # a stale read only; a broken reader is _ReaderBroke
-                reason=f"9p cache={cache or 'fscache (Lima default)'} caches without revalidating; "
-                "pinned with the posture mirror's move to the to-box (ADR-0033 § Freshness)",
-            )
-        )
+    if mount_type == "9p":  # Lima's default (fscache) never revalidates: foldyard pins mmap
+        assert cache == boxmounts.TO_BOX_9P_CACHE, f"the to-box's 9p cache is {cache or 'unset'}"
     path = TO_BOX / f"fy-e2e-fresh-{how}"
     path.write_text("first version\n")
     try:
