@@ -82,6 +82,10 @@ Start at [DEVELOPMENT.md](../DEVELOPMENT.md): the module map, test tiers, CI and
   the score → decide → review pipeline, and hooks.
 - [ebpf-monitoring-spike.md](./ebpf-monitoring-spike.md) — whether Tetragon runs in the Lima
   guest and can attribute events to containers (2026-10-03), with a kit to re-run it.
+- [lima-usernet-freeze.md](./lima-usernet-freeze.md) — why new connections from a `vz` guest to
+  your computer freeze for up to 68 s in bursts (a TIME_WAIT bug in the gVisor netstack Lima's
+  hostagent runs), what else freezes it, the alternatives and the mitigations (2026-10-23), with a
+  kit to re-run it.
 
 **History:** foldyard was extracted from Twist's monorepo as a fresh start
 ([ADR-0013](./adrs/0013-in-repo-carve-out-until-extraction.md)). The pre-extraction run-logs,
