@@ -740,6 +740,16 @@ def test_the_vm_namespace_by_the_snapshots_alone_makes_a_candidate(state):
         assert _crossings(cat) == [(1, 1, BOX)]
 
 
+def test_a_step_into_the_vms_user_namespace_is_one(state):
+    # a mount namespace of its own (systemd's sandboxed services have one) in the VM's user
+    # namespace: the VM's, by Tetragon's is_host — neither a snapshot nor podman says so
+    rec = crossed(1, inode=500, host=False)
+    rec["e"]["process_exec"]["process"]["ns"]["user"] = {"inum": 4026531837, "is_host": True}
+    ms.append([snap(0), rec, snap(2)])
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(1, 1, BOX)]
+
+
 def test_a_lost_catalogue_or_an_older_one_gets_the_crossings_back(state, monkeypatch):
     import sqlite3
 

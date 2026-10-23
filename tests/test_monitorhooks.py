@@ -1095,16 +1095,31 @@ def test_a_crossing_long_before_the_hooks_read_still_unfilters_the_boot(ran, pro
 
 
 def test_a_candidate_the_catalogue_could_not_judge_counts_as_a_crossing(ran, project, monkeypatch):
-    # a busy catalogue left it unjudged though settled: unfiltered rather than missed
+    # a busy catalogue left it unjudged though a snapshot after it is stored, and the hook's cursor
+    # is past it: unfiltered rather than missed
     calls, _ = ran
     _hook(project)
     monkeypatch.setattr(monitorstore.Catalogue, "judge", lambda self: 1 / 0)
-    monitorlog._append([snap(0), ev(1), snap(2)])
+    monitorlog._append([snap(0), crossing(1), snap(2)])
     mh.round_once(now=10)
-    monitorlog._append([crossing(3), ev(4, inode=1), snap(5)])
+    monitorlog._append([ev(3, inode=1), snap(4)])
     mh.round_once(now=20)
-    assert _delivered(calls) == [1, 3, 4]
-    assert calls[-1]["body"]["unfiltered"][0]["since"] == [BOOT, 3]
+    assert _delivered(calls) == [1, 3]
+    assert calls[-1]["body"]["unfiltered"][0]["since"] == [BOOT, 1]
+
+
+def test_an_ambiguous_event_sent_after_a_crossing_is_no_gap(ran):
+    # a container-only hook passes over what the join can't place, and says so in `gaps`; after a
+    # crossing it gets it — sent, so nothing to say
+    calls, _ = ran
+    events = monitorlog.attribute(
+        [snap(0), crossing(1), ev(2), snap(3, mapping={"200": ["b" * 64]})], "fyex"
+    )
+    assert events[1].who == "ambiguous"
+    hook = mh.Hook(name="c", command=("/bin/c",), who=("container",))
+    mh.deliver(hook, mh.HookState(), events, now=1, first_crossed=mh.crossings(events))
+    body = calls[0]["body"]
+    assert [e["seq"] for e in body["events"]] == [1, 2] and body["gaps"] == []
 
 
 def test_keep_who_after_crossing_is_parsed_rendered_and_listed(project):
