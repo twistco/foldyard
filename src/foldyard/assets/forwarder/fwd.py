@@ -60,7 +60,9 @@ CLONE_NEWNET = 0x40000000
 SO_ORIGINAL_DST = 80
 STATE_DIR = "/run/fy-fwd"
 SCOPE = re.compile(r"^libpod-([0-9a-f]{64})\.scope$")
-BUILD_SCOPE = re.compile(r"^crun-buildah-[A-Za-z0-9_.-]+\.scope$")
+# A build step's cgroup: crun's scope when the podman CLI builds (`crun-buildah-buildah<N>.scope`),
+# buildah's own cgroup when the engine API does (`buildah-buildah<N>`: the host's `fy up`, the box).
+BUILD_SCOPE = re.compile(r"^(crun-)?buildah-buildah[0-9]+(\.scope)?$")
 PASTA = {"pasta", "pasta.avx2", "passt", "passt.avx2", "slirp4netns"}
 REQUEST_LINE = re.compile(rb"^[A-Z]+ \S+ HTTP/1\.[01]$")
 # The names nft and the routing table go by: one table per namespace, replaced atomically.
@@ -131,8 +133,9 @@ def classify(path: str, uid: int) -> tuple[str, str]:
     """A socket's cgroup path → ``(who, id)``: ``("container", <64 hex>)`` for the OUTERMOST
     ``libpod-<id>.scope`` under the VM user's ``user@<uid>.service`` (podman names that scope from
     an id it generated; a client can name the sub-cgroups below it and the slices above, so nothing
-    else is read — ADR-0032), ``("build", "")`` for a build step's ``crun-buildah-*.scope`` there,
-    else ``("vm", "")``: the VM user's own processes, the podman service's pulls, anything else."""
+    else is read — ADR-0032), ``("build", "")`` for a build step's cgroup there
+    (:data:`BUILD_SCOPE`), else ``("vm", "")``: the VM user's own processes, the podman service's
+    pulls, anything else."""
     root = f"/user.slice/user-{uid}.slice/user@{uid}.service/"
     if not path.startswith(root):
         return "vm", ""

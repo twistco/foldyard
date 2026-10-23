@@ -77,6 +77,11 @@ def test_only_an_http1_request_head_is_stamped():
         # the OUTERMOST podman scope wins: a nested one is the client's to name (ADR-0032)
         (f"{USER}/user.slice/libpod-{BOX}.scope/libpod-{'b' * 64}.scope", ("container", BOX)),
         (f"{USER}/app.slice/crun-buildah-buildah12.scope/container", ("build", "")),
+        # a build through the engine API (the host's `fy up`, the box's): buildah's own cgroup,
+        # no crun scope (seen live on CI's Linux host and again by hand, 2026-10-23)
+        (f"{USER}/app.slice/buildah-buildah921013546", ("build", "")),
+        (f"{USER}/app.slice/buildah-buildah921013546/x", ("build", "")),
+        (f"{USER}/app.slice/buildah-somethingelse", ("vm", "")),
         (f"{USER}/user.slice/podman-1234.scope", ("vm", "")),
         (f"/user.slice/user-{UID}.slice/session-3.scope", ("vm", "")),
         # outside the VM user's delegated subtree nothing is a container, whatever it is named
@@ -144,7 +149,7 @@ def test_owner_names_a_container_build_or_the_vm_and_refuses_pasta_or_the_unknow
         BOX,
         501,
     )
-    assert _owner(f"{USER}/app.slice/crun-buildah-b1.scope", None) == ("build", "", 501)
+    assert _owner(f"{USER}/app.slice/crun-buildah-buildah1.scope", None) == ("build", "", 501)
     assert _owner(f"{USER}/user.slice/podman.service", "podman") == ("vm", "", 501)
     # some container's traffic re-made by a pasta helper: whose can't be told, so it's refused
     assert _owner(f"{USER}/user.slice/rootless-netns-1.scope", "pasta") == ("pasta", "", 501)

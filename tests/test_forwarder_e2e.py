@@ -38,6 +38,7 @@ import pytest
 
 from e2e_host import (
     LIMA_DIR,
+    VM,
     _adopt_on_host,
     engine,
     ensure_vm,
@@ -189,6 +190,49 @@ def test_a_build_step_is_stamped_as_a_build(repo, tmp_path):
         assert isinstance(origin, dict) and origin["who"] == "build", rows[-1]
     finally:
         engine("rmi", "-f", "fy-e2e-fwd-build", timeout=60)
+
+
+def test_a_token_service_port_is_forwarded_untouched(repo):
+    # Containers call some daemon ports directly (the GCP metadata emulator's token service): those
+    # are behind the forwarder too, or the guard would cut them off — forwarded, never stamped.
+    import socket
+    import threading
+
+    from foldyard import ports
+
+    port = ports.project_base(VM) + ports.MINTER_SLOT + 77  # a worktree offset nobody holds here
+    heads: list[bytes] = []
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind(("127.0.0.1", port))
+    except OSError as e:
+        pytest.skip(f"can't listen on {port} here ({e})")
+    srv.listen()
+
+    def serve() -> None:
+        conn, _ = srv.accept()
+        with conn:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            heads.append(data)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\ntoken")
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        out = engine(
+            "run", "--rm", ALPINE, "sh", "-c",
+            f"wget -q -Y off -T 15 -O- http://{GW}:{port}/token 2>&1",  # busybox ignores no_proxy
+            timeout=180,
+        )  # fmt: skip
+    finally:
+        srv.close()
+    assert "token" in out.stdout, out.stdout + out.stderr
+    assert heads and b"x-fy-origin" not in heads[0].lower(), heads
 
 
 def test_the_listener_dialled_directly_and_an_explicit_pasta_network_never_reach_the_proxy(repo):
