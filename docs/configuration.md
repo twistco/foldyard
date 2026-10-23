@@ -320,10 +320,11 @@ disk_gib = 60
       `~/.foldyard/<project>/logs/`: `monitor.jsonl` is the newest 32 MB, and older events are in
       gzip-compressed `monitor.<id>.jsonl.gz` files (about 30 times smaller: roughly 80 bytes an
       event).
-    - The store keeps **1 GB** on disk by default — about 13 million events: hours of the busiest
-      stack starts measured (520 events a second), days at a steady 30. Set it in
+    - The store keeps **8 GB** on disk by default — about 106 million events: over two days of
+      the busiest stack starts measured (520 events a second), about six weeks at a steady 30.
+      The budget is per project, so each monitored project takes up to that much. Set it in
       `~/.foldyard/<project>/monitor-store.toml` on your computer, never in `foldyard.toml`, so the
-      box can't shorten what is kept about it: `max_mb = 4096` (64 MB–64 GB; read every few
+      box can't shorten what is kept about it: `max_mb = 16384` (64 MB–64 GB; read every few
       seconds). `fy monitor` and `fy doctor` show how much it holds and how far back.
     - Each line is signed in the VM with a key the box's user can't read, so a line that was
       altered on the way is dropped and counted. One that went missing shows as a gap. `fy
