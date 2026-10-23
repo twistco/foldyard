@@ -943,10 +943,10 @@ def between(since: str, until: str, prefix: str, notes: list[str]) -> Iterator[E
 
 
 def _who(e: Event) -> str:
+    label = e.who
     if e.who == "container":
-        where = e.worktree or "?"
-        return f"{where}:{e.name or e.container[:12]}"
-    return e.who
+        label = f"{e.worktree or '?'}:{e.name or e.container[:12]}"
+    return f"⚠ crossed {label}" if e.crossed else label
 
 
 def store_summary() -> str:
@@ -1023,8 +1023,10 @@ def show(
     print(
         f"— last pull {age}; {cur.stored} stored, {cur.gaps} lost in transit, {cur.forged} "
         "failed their signature. Names and worktrees are what the engine reports (claims); "
-        "`unattributed` is a container too short-lived to be seen — the box's own activity. "
-        "Times are UTC."
+        "`build` is an image build's step, `podman` and `vm` the engine's and the VM's own, "
+        "`unattributed` none the kernel's records can name (podman's tools for an instant, a "
+        "container too short-lived to be seen); `⚠ crossed` came out of a container into the "
+        "VM's or podman's namespace. Times are UTC."
     )
     print(f"— {store_summary()}")
     if cur.error:

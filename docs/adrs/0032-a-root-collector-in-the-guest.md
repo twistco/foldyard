@@ -2,7 +2,11 @@
 
 - **Status:** Proposed (2026-10-04). Implemented behind `[machine] monitor = "observe"`, default
   off: slice 1 (the guest service you can see) and slice 2 (the relay, the host pull and the
-  host-side join — `fy monitor`). Enforcement is not decided here.
+  host-side join — `fy monitor`). Enforcement is not decided here. **Amended 2026-10-23:** what
+  isn't a container is named too — `podman`, `build`, `vm` (its own user namespace included) —
+  from kernel facts in the stored events, a container's name holds only within its init's life,
+  and a hook without `who` skips `vm` and `podman`, counting what it passed over (below, and
+  [monitor-pipeline §2.1](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md#21-built-the-store-today)).
 - **Sources:** the eBPF investigation and implementation plan (2026-10-03, not in the repo); the
   slice-0 spike [docs/ebpf-monitoring-spike.md](https://github.com/twistco/foldyard/blob/main/docs/ebpf-monitoring-spike.md) (a real Lima
   `template:podman` guest: Fedora 44, kernel 6.19.10, podman 5.8.7, Tetragon v1.7.1). Related:
@@ -93,7 +97,18 @@ owns attribution: Tetragon is the sensor, the way the proxy is for HTTP.**
   - **Long-lived containers are the case that matters.** The box and the stack keep one
     namespace for hours, and every `podman exec` joins it. A container too short-lived for any
     snapshot comes out `unattributed`, which reads as the box's own activity: the box is what
-    holds the engine socket.
+    holds the engine socket. *(Amended 2026-10-23: most `unattributed` turned out not to be
+    containers — podman's own rootless namespace and image builds, 1.28 M of a busy boot's 1.49 M.
+    The join now names them from facts Tetragon reports per event and the box can't fake, never a
+    binary's name: `podman` is the namespace a process enters straight from the VM's own (only a
+    VM process can be that parent), `build` an init podman itself starts there, `vm` also the VM's
+    own user namespace. A container's name holds only from its init's exec to its exit, paired by
+    the init's pid namespace, and only an init from podman's namespace counts — any container can
+    make one of its own. A process in the VM's or podman's namespace whose parent was in a
+    container's is `crossed`: named after the container, and sent to every hook. Still host-side
+    only: no change in the VM. A hook without `who` skips `vm` and `podman`, which is where an
+    escape to the VM user would land; each batch counts what it skipped (`passed`), so that is a
+    reported default, not a silent one.)*
   - **Container to worktree is a claim.** Names and compose labels are whatever the creator set,
     and anything holding the socket can set another worktree's. `fy monitor` says so. Binding
     containers to foldyard's own record of what it created is later work.

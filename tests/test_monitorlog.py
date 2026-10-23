@@ -774,6 +774,21 @@ def test_show_prints_attributed_events_and_the_pull_state(monkeypatch, tmp_path,
     assert "claims" in out
 
 
+def test_show_labels_what_isnt_a_container_and_a_crossing(monkeypatch, tmp_path, capsys):
+    # `fy monitor` filters nothing: every label shows, a crossing loudest
+    monkeypatch.setattr(monitorlog.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitorlog.config, "in_box", lambda: False)
+    monkeypatch.setattr(monitorlog.config, "project_prefix", lambda: "fyex")
+    crossing = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    stream = [snap({200: [BOX]}), entered(), ev(PODMAN_NS, binary="/usr/bin/pasta"), crossing,
+              snap({200: [BOX]})]  # fmt: skip
+    monitorlog._append([{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)])
+    assert monitorlog.show(limit=10) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "podman" in lines[1] and "/usr/bin/pasta" in lines[1]
+    assert "⚠ crossed ?:aaaaaaaaaaaa" in lines[2]
+
+
 def test_show_refuses_in_the_box(monkeypatch, capsys):
     monkeypatch.setattr(monitorlog.config, "in_box", lambda: True)
     assert monitorlog.show() == 1
