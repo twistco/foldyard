@@ -298,3 +298,51 @@ def test_a_token_service_connection_is_spliced_untouched():
 def test_a_head_that_isnt_http1_is_spliced_unstamped():
     sent = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\nEND"
     assert asyncio.run(_round_trip("proxy", sent)) == sent
+
+
+def test_a_finished_relay_closes_both_of_its_sockets():
+    # Half-closing each direction is not enough: a relay that returns with its sockets still open
+    # leaks two descriptors per connection until a garbage collection happens to reach them.
+    async def run() -> list[bool]:
+        async def upstream(r, w):
+            await r.read(65536)
+            w.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            await w.drain()
+            w.close()
+
+        up = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        port = up.sockets[0].getsockname()[1]
+        f = fwd.Forwarder(_args(1, plain=port), KEY, "b00t")
+        opened: list = []
+        real_open = asyncio.open_connection
+
+        async def tracking_open(*a, **k):
+            pair = await real_open(*a, **k)
+            opened.append(pair[1])
+            return pair
+
+        closed: list[bool] = []
+
+        async def front(r, w):
+            fwd.asyncio.open_connection = tracking_open
+            try:
+                await f.relay(r, w, ("127.0.0.1", port), [])
+            finally:
+                fwd.asyncio.open_connection = real_open
+            closed.extend([w.is_closing(), opened[0].is_closing()])
+
+        fr = await asyncio.start_server(front, "127.0.0.1", 0)
+        cr, cw = await asyncio.open_connection("127.0.0.1", fr.sockets[0].getsockname()[1])
+        cw.write(b"GET /t HTTP/1.1\r\nHost: m\r\n\r\n")
+        await cw.drain()
+        await asyncio.wait_for(cr.read(), 5)  # until the forwarder's side is done
+        cw.close()
+        for _ in range(50):
+            if closed:
+                break
+            await asyncio.sleep(0.02)
+        fr.close()
+        up.close()
+        return closed
+
+    assert asyncio.run(run()) == [True, True]

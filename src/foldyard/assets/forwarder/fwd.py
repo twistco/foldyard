@@ -554,16 +554,25 @@ class Forwarder:
                 head, stripped = restamp(head, self.next_stamp(items))
                 self.stats["stripped"] += stripped
             rest = head + rest
+        # No timeout of our own: the kernel's SYN retries decide, as they would for a client that
+        # connected directly (a shorter one turns Lima's user-mode network's long stalls — spike
+        # finding 8 — into closed connections, which clients treat differently from slow ones).
         try:
-            ur, uw = await asyncio.wait_for(asyncio.open_connection(*dest), timeout=30)
-        except (OSError, TimeoutError) as e:
+            ur, uw = await asyncio.open_connection(*dest)
+        except OSError as e:
             self.stats["upstream_failed"] += 1
             log(ev="upstream-failed", port=dest[1], err=str(e))
             writer.close()
             return
-        if rest:
-            uw.write(rest)
-        await asyncio.gather(pipe(reader, uw), pipe(ur, writer))
+        try:
+            if rest:
+                uw.write(rest)
+            await asyncio.gather(pipe(reader, uw), pipe(ur, writer))
+        finally:
+            # Each pipe only half-closes its direction: close both sockets, or every connection
+            # leaves two descriptors open until a garbage collection reaches them.
+            writer.close()
+            uw.close()
 
 
 class Follower:
