@@ -453,6 +453,35 @@ def test_a_stretch_is_joined_with_the_marks_outside_it(monkeypatch, tmp_path):
     assert (e.who, e.container) == ("container", OTHER)
 
 
+def test_a_stretch_after_retention_reads_the_handover_the_snapshot_kept_before_it_saw(
+    monkeypatch, tmp_path
+):
+    # the snapshot before the oldest stored event is one retention kept from a removed segment,
+    # and so are the marks after it: the old container's exit and the new one's start (from
+    # podman's namespace, entered at boot — and again since, which must not stand in for it)
+    from foldyard import monitorstore
+
+    monkeypatch.setattr(monitorstore.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 10)
+    stream = [entered(), snap({200: [BOX]}, t=T_BEFORE),
+              init(200, "process_exit", start="2026-10-04T09:00:00Z"),
+              init(200, start="2026-10-04T10:00:01Z"), entered(),
+              proc(200, "2026-10-04T10:00:02Z"), snap({200: [OTHER]})]  # fmt: skip
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    monitorstore.append(recs[:5])
+    monitorstore.append(recs[5:])
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        first = monitorstore.segments()[0]
+        first.path.unlink()
+        cat.drop([first.id])
+        (e,) = monitorlog.join([recs[5]], cat, "fyex")
+    finally:
+        cat.close()
+    assert (e.who, e.container) == ("container", OTHER)
+
+
 def entered(inode: int = PODMAN_NS, binary: str = "/usr/bin/conmon") -> dict:
     """podman entering mount namespace ``inode`` straight from the VM's own: a process there, its
     parent in the VM's namespace (Tetragon's ``is_host``), outside the VM's user namespace."""
