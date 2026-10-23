@@ -816,6 +816,18 @@ def test_a_namespace_made_on_a_number_podman_entered_once_takes_it_for_the_inits
     assert [e.who for e in monitorlog.attribute(recs, "fyex")][2:] == ["unattributed"] * 2
 
 
+def test_a_namespace_the_box_made_on_a_number_an_old_container_left_is_the_boxs():
+    # a new namespace on the number ends what held it before: the old container's exit no longer
+    # decides — the box's own processes there are the box's, as the snapshot names them
+    nested = init(300, start="2026-10-04T10:00:01Z", by="/usr/bin/unshare")
+    nested["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 200  # from inside BOX
+    recs = _records(init(300, start="2026-10-04T08:00:00Z"),
+                    init(300, "process_exit", start="2026-10-04T08:00:00Z"),
+                    snap({200: [BOX]}, t=T_BEFORE), nested, proc(300, "2026-10-04T10:00:02Z"),
+                    snap({300: [BOX], 200: [BOX]}))  # fmt: skip
+    assert _who(monitorlog.attribute(recs, "fyex"))[2:] == [("container", "a")] * 2
+
+
 def test_a_step_into_podmans_live_namespace_shaped_like_an_init_is_still_a_step_out():
     # `unshare -p -f nsenter -t <podman's pid> -m sh` from a container: in the init tree, its parent
     # in the container — a mark's shape — but into podman's namespace, which podman's entry still
