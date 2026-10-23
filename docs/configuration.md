@@ -204,8 +204,8 @@ directories of foldyard's own beside them, one per direction
   about a second, and a file your computer replaces reads as missing for that second (measured
   2026-10-22; the Freshness note under
   [ADR-0033's read-only enforcement](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md#read-only-enforcement-by-backend)).
-  Every box of the project can read it, so it never holds a secret. Its first use is the monitor's file sink
-  (`fy monitor hook add NAME --to-box`).
+  Every box of the project can read it, so it never holds a secret. Its first use is the
+  monitor's file sink (`fy monitor hook add NAME --to-box`).
 - **`from-box`** (`~/.foldyard/<project>/from-box/`) — the box writes it: one slot per checkout
   (`main/`, `worktrees/<name>/`), where the agents' transcripts are bound out (see
   [`transcript_sync_seconds`](#claude--codex--vscode)). Your computer reads it as untrusted
