@@ -22,6 +22,16 @@ cap. That cap is a real, separate freeze, and it is also reproduced below.
   SYN retransmission (…, 19, 35, 67 s). That is why the stalls cluster at ~68 s and ~36 s.
 - **Upstream:** google/gvisor#15013 describes this bug, and its fix, PR #15019, is open and
   unreviewed. No Lima or gvisor-tap-vsock release carries a fix, and Lima master doesn't either.
+- **The fix works (Finding 12):** Lima 2.1.3 rebuilt with #15019 backported had **0 stalls in
+  35,000 connections**, where the same build without it stalled ~68 s on every reuse. A 1 s gVisor
+  TIME_WAIT, the quick workaround, only shortens each stall to ~1 s.
+- **Reported:** a measured comment on
+  [google/gvisor#15019](https://github.com/google/gvisor/pull/15019#issuecomment-6362902795), and
+  [containers/gvisor-tap-vsock#757](https://github.com/containers/gvisor-tap-vsock/issues/757) for
+  a configurable TIME_WAIT.
+- **foldyard's workaround:** the ADR-0034 forwarder (#130) closes its connection to the proxy with an
+  RST and re-dials a slow connect (Mitigations 1–2). That only covers VMs with attribution turned
+  on.
 
 Nothing here is product code. The scripts are in [lima-freeze-kit/](./lima-freeze-kit/). The raw
 logs (48 MB of per-connection JSON) aren't kept; a log named below (`pr-def-47324`, …) is the run
@@ -358,6 +368,34 @@ The affected VM's `ha.stderr.log`, 21:10–21:30 local:
 construction, neither freeze logs anything at the hostagent's default (debug) level. A TIME_WAIT
 drop is never logged, an in-flight drop is only a counter, and a dial failure is Trace.
 
+### 12. The upstream fix, measured downstream
+
+Lima v2.1.3 was built from source three ways, all ad-hoc signed with the vz entitlement:
+- **control:** unchanged;
+- **#15019:** both of the PR's commits (head `e503a89`) backported onto the vendored gVisor
+  `a174eb65023f`. The 36-line non-test diff applies with `patch -p1` at line offsets only, wired in
+  with a local `replace gvisor.dev/gvisor`. #15013's reproducer fails on stock `a174eb65023f` and
+  passes with the backport under `-race`;
+- **1 s TIME_WAIT:** gvisor-tap-vsock's `createStack` setting `TCPTimeWaitTimeoutOption` to 1 s.
+
+Each started the same `fy-spike-fwd` VM; the hostagent was checked to be running from the binary
+that started it. Guest sysctls were at defaults, and the host closed first.
+
+| guest→host | control | #15019 | 1 s TIME_WAIT |
+| --- | --- | --- | --- |
+| 8 workers × 500, three runs | 8 / 10 / 8 stalls of ~68 s | 0 over 1 s, max 7 ms | 8 per run, each 1.04 s |
+| 4 × 5,000, unthrottled | 48.6 conn/s, 24 stalls of ~68 s, 412 s | 8,032 conn/s, 0 over 1 s, max 10 ms, 2.5 s | 2,171 conn/s, 24 stalls of ~1.05 s |
+| 1 worker at 10/s, 5 min | 12 stalls (three of ~68 s) | 0 over 1 s, max 15 ms | 0 over 1 s, max 24 ms |
+| SYNs reopening a 4-tuple still in gVisor's TIME_WAIT | 62, every one stalled | 9,506, every one answered | — |
+
+- **The control reproduces the baseline:** 48.6 conn/s, 24 stalls and 412 s, against Finding 6's
+  48.5, 22 and 412.
+- **`ForwardMaxInFlightDrop` stayed 0** in every run, so the in-flight cap played no part.
+- **#15019 keeps TIME_WAIT and changes only the reopen.** `CurrentConnected` still reached 22,784,
+  and `ResetsSent` didn't move.
+- **A short TIME_WAIT shortens, it doesn't remove.** Each stall becomes the wait for the guest's
+  first SYN retransmission.
+
 ## Verdict
 
 **The finding-8 stall: proven.** The evidence:
@@ -368,6 +406,7 @@ drop is never logged, an in-flight drop is only a counter, and a dial failure is
 - **The duration rule** predicts every measured stall.
 - **The source** shows exactly where the SYN is dropped.
 - **Upstream** has an open issue with the same diagnosis.
+- **Its fix, backported,** removes every stall (Finding 12).
 
 It is gVisor's TIME_WAIT handling under gvisor-tap-vsock's `tcp.Forwarder`, inside Lima's
 hostagent. It hits any steady stream of host-closed connections to one destination, at rates as
@@ -396,8 +435,8 @@ What doesn't fit:
   gap was 2.0 s.
 
 The in-flight cap would freeze everything for 75 s per pinned slot, and could chain. But it needs
-host dials that hang, and the wall keeps blackholes in the guest. That holds if the affected VM was walled,
-which wasn't checked read-only.
+host dials that hang, and the wall keeps blackholes in the guest. That holds if the affected VM was
+walled, which wasn't checked read-only.
 
 **Three explanations remain.** A third cause, the proxy's log not recording what it did, or the
 TIME_WAIT bug plus clients that back off for minutes. The logs can't separate them, because both
@@ -430,13 +469,15 @@ freezes are silent. The operator's call on how to settle it is under Mitigations
      - It belongs in `guest-boot.sh`, whose every byte is the provisioning id. So it refuses every
        existing VM until `fy machine stop && fy up`. Batch it with another change.
 4. **Upstream.**
-   - **gVisor:** support or review [google/gvisor#15019](https://github.com/google/gvisor/pull/15019).
-   - **gvisor-tap-vsock:** ask it to set a short `tcpip.TCPTimeWaitTimeoutOption` in `createStack`.
-     That is the one-line workaround #15013 suggests. The guest holds the real TIME_WAIT here, so a
-     1–2 s timer on gVisor's side protects very little.
-   - **Lima:** then a Lima release with either.
-   - **Report it to Lima:** no Lima issue names it yet. Filing one, with this page's pcap and
-     counters, would connect gVisor's issue to the product where users hit it.
+   - **gVisor:** [google/gvisor#15019](https://github.com/google/gvisor/pull/15019) is the fix,
+     measured downstream in Finding 12; the result is posted on the PR.
+   - **gvisor-tap-vsock:** [#757](https://github.com/containers/gvisor-tap-vsock/issues/757) asks for
+     a short `tcpip.TCPTimeWaitTimeoutOption`, configurable beside v0.9.0's `TCPMaxInFlight`. That is
+     the one-line workaround #15013 suggests. The guest holds the real TIME_WAIT here, so a 1–2 s
+     timer on gVisor's side protects very little, but it only shortens each stall to the guest's
+     first SYN retransmission (~1 s, Finding 12). #15019 removes it.
+   - **Lima:** then a Lima release with either, or Lima carrying #15019 with a `replace` until it
+     merges. A Lima issue links the two.
    - **Lima 2.3.0 when released** fixes the in-flight freeze (Finding 8). That matters if any host
      dial behind the gateway can hang.
 5. **A different network path, a bigger change for the operator.**
@@ -467,7 +508,6 @@ freezes are silent. The operator's call on how to settle it is under Mitigations
 - vzNAT and `lima: user-v2`, measured: the loopback-only rule, and user-v2 is the same code.
 - The real proxy (mitmdump), and the share of real box traffic that closes host-first.
 - Lima master / v0.9.0 built from source.
-- A gvisor-tap-vsock patched with a short TIME_WAIT, or with #15019.
 - `tcp_syn_retries=2`.
 - The stopped-listener test on vz (it ran on QEMU, through the same host kernel).
 - DNS during the in-flight freeze.
