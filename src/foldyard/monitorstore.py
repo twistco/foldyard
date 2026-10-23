@@ -110,13 +110,18 @@ _MARK_NEEDLES = (b'"in_init_tree":true', b'"in_init_tree": true')
 # …and every fact's line holds one of those, or a mount namespace that is the VM's and one that
 # isn't (an entry: the parent in the VM's, the process not) — about 1% of cabash's lines
 _HOST_MNT = re.compile(rb'"mnt":\s*\{"inum":\s*\d+,\s*"is_host":\s*true\}')
-_OTHER_MNT = re.compile(rb'"mnt":\s*\{"inum":\s*\d+\s*\}')
+_OTHER_MNT = re.compile(rb'"mnt":\s*\{"inum":\s*(\d+)\s*\}')
+
+
+_RUNS = ("entry", "other")  # facts whose run is kept as its first
 
 
 def _may_hold_fact(line: bytes) -> bool:
     if any(n in line for n in _MARK_NEEDLES):
         return True
-    return bool(_HOST_MNT.search(line)) and bool(_OTHER_MNT.search(line))
+    others = set(_OTHER_MNT.findall(line))
+    # an entry (the VM's and one that isn't), or two that aren't the VM's (`other`)
+    return bool(others) and (len(others) > 1 or bool(_HOST_MNT.search(line)))
 
 
 def store_dir() -> Path:
@@ -568,6 +573,10 @@ def ns_fact(rec: dict) -> dict | None:
       (``is_host``), outside the VM's user namespace — podman entering its rootless namespace, as
       every podman command does. Only a process of the VM's can be that parent: nothing in a
       container has one. ``outside`` is the VM's namespace, ``by`` empty.
+    * ``other``: any other process whose parent was in another mount namespace, neither of them
+      the VM's — the number entered from somewhere other than the VM. An entry never ends and
+      numbers are reused, so this is what says a number the VM once entered has gone to someone
+      else since (a box container that never shows an init, say). ``by`` empty.
 
     ``start`` is the process's start time, as Tetragon wrote it."""
     if rec.get("k") != "ev":
@@ -597,6 +606,8 @@ def ns_fact(rec: dict) -> dict | None:
         and (_ns(proc, "user").get("is_host") is not True)
     ):
         return {**fact, "what": "entry", "by": "", "pidns": ""}
+    if pmnt.get("is_host") is not True and mnt.get("is_host") is not True:
+        return {**fact, "what": "other", "by": "", "pidns": ""}
     return None
 
 
@@ -715,8 +726,9 @@ class Catalogue:
                 fact = r.get("fact") if k == "ev" and "fact" in r else ns_fact(r)
                 if fact is not None and "boot" in r and "seq" in r:
                     key = (r["boot"], fact["inode"])
-                    # a run of entries is kept as its first (podman enters on every command)
-                    if not (fact["what"] == "entry" and run.get(key) == "entry"):
+                    # a run of entries is kept as its first (podman enters on every command), and
+                    # of others the same (a container's runtime enters it again and again)
+                    if not (fact["what"] in _RUNS and run.get(key) == fact["what"]):
                         c.execute(
                             "INSERT INTO nsfact VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT("
                             "boot, seq) DO UPDATE SET seg = excluded.seg",
@@ -812,17 +824,22 @@ class Catalogue:
         c.executemany("DELETE FROM markseg WHERE id = ?", [(g,) for g in gone])
         c.executemany("DELETE FROM nsfactseg WHERE id = ?", [(g,) for g in gone])
         # of everything before what the store still holds, the newest of each kind (an entry, an
-        # init entering, one leaving) — what the oldest records left need to be read by
+        # other, an init entering, one leaving) — what the oldest records left need to be read by
         gone_seg = "seg NOT IN (SELECT id FROM seg)"
         c.execute(
             f"DELETE FROM nsfact WHERE {gone_seg} AND seq < (SELECT MAX(f.seq) FROM nsfact f "
             "WHERE f.boot = nsfact.boot AND f.inode = nsfact.inode AND f.what = nsfact.what "
             f"AND f.{gone_seg})"
         )
-        # …for as long as the store holds anything of that boot
+        # …for as long as the store holds anything of that boot, and always for the running boot:
+        # the one whose fact was indexed last (the store is in boot order — the relay's spool
+        # paths sort by epoch — and the catalogue indexes it in that order). Right after a seal the
+        # live segment may hold no record of the running boot yet, only an engine claim: its facts
+        # are what its next events are read by.
         c.execute(
             "DELETE FROM nsfact WHERE seg NOT IN (SELECT id FROM seg) "
-            "AND boot NOT IN (SELECT boot FROM span)"
+            "AND boot NOT IN (SELECT boot FROM span) "
+            "AND boot IS NOT (SELECT boot FROM nsfact ORDER BY rowid DESC LIMIT 1)"
         )
         orphan = "seg NOT IN (SELECT id FROM seg)"
         c.execute(
@@ -982,7 +999,7 @@ class Catalogue:
                 if f is None or "boot" not in rec or "seq" not in rec:
                     continue
                 key = (rec["boot"], f["inode"])
-                if not (f["what"] == "entry" and run.get(key) == "entry"):
+                if not (f["what"] in _RUNS and run.get(key) == f["what"]):
                     facts.append((rec["boot"], int(rec["seq"]), seg.id, f["inode"], f["what"],
                                   f["start"], f["outside"], f["by"], f["pidns"]))  # fmt: skip
                 run[key] = f["what"]
@@ -1057,13 +1074,13 @@ class Catalogue:
         ]
 
     def latest_facts(self, boot: str, inode: str, below: int) -> list[dict]:
-        """The newest fact of each kind (``entry``, ``start``, ``end``) about namespace ``inode``
+        """The newest fact of each kind (``entry``, ``other``, ``start``, ``end``) about ``inode``
         in ``boot`` before seq ``below`` — what the join needs to know whose it was then: the
         newest one alone may be an init that says nothing about the number (one made inside a
         container)."""
         return [
             self._fact(boot, row)
-            for what in ("entry", "start", "end")
+            for what in ("entry", "other", "start", "end")
             for row in self.conn.execute(
                 f"SELECT {self._FACT_COLS} FROM nsfact WHERE boot = ? AND inode = ? AND what = ? "
                 "AND seq < ? ORDER BY seq DESC LIMIT 1",

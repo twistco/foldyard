@@ -983,6 +983,15 @@ def test_the_categories_no_hook_gets_unless_it_asks_are_the_operators_to_set(pro
     assert hooks[0].unless_asked == mh.SKIP_UNLESS_ASKED  # a typo never widens or narrows it
 
 
+def test_skip_unless_asked_after_a_hook_is_reported_never_silently_ignored(project):
+    # TOML gives a key written after `[[hook]]` to that hook's table: the setting would then do
+    # nothing, without a word — the default stays, and the operator is told where the key belongs
+    hooks, errors = mh.parse('[[hook]]\nname = "a"\ncommand = ["/bin/a"]\nskip_unless_asked = []\n')
+    assert [h.name for h in hooks] == ["a"]  # the hook itself still runs
+    assert hooks[0].unless_asked == mh.SKIP_UNLESS_ASKED
+    assert len(errors) == 1 and "skip_unless_asked" in errors[0] and "top" in errors[0]
+
+
 def test_an_event_that_crossed_out_of_a_container_reaches_every_hook(ran):
     calls, _ = ran
     crossed = monitorlog.attribute(

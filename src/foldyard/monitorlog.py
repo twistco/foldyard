@@ -481,19 +481,26 @@ class _Facts:
     namespace), ``build`` (podman itself there) or ``nested`` (anywhere else: a namespace made
     inside another, which says nothing about who holds a number) — and podman's entries
     (``entry``). Forward, in seq order, so a kind depends only on what came before it: no chain of
-    namespaces made inside each other can make the reading recurse."""
+    namespaces made inside each other can make the reading recurse.
+
+    Every fact, nested inits and ``other`` (a number entered from anywhere but the VM) included, is
+    also kept in order per namespace (``seen``): an entry never ends and numbers are reused, so a
+    namespace is podman's only while nothing else has been seen taking it since (:meth:`podman`)."""
 
     def __init__(self, facts: Iterable[dict]) -> None:
         # inode -> [(seq, kind, what, init start, init pid namespace)]
         self.held: dict[str, list[tuple[int, str, str, int | None, str]]] = {}
         self.seqs: dict[str, list[int]] = {}
+        self.seen: dict[str, list[tuple[int, str]]] = {}  # inode -> [(seq, what)], every fact
         for f in sorted(facts, key=lambda f: int(f["seq"])):
             what, seq = f["what"], int(f["seq"])
+            self.seen.setdefault(str(f["inode"]), []).append((seq, what))
             if what == "entry":
                 kind = "entry"
+            elif what == "other":
+                continue  # says only that the number is no longer podman's
             else:
-                outside = self.holder(str(f["outside"]), seq - 1)
-                if outside is None or outside[1] != "entry":
+                if not self.podman(str(f["outside"]), seq - 1):
                     continue  # nested: never a holder of its number
                 kind = "container" if str(f.get("by") or "").startswith("conmon") else "build"
             fact = (seq, kind, what, _ns(f["start"]), str(f.get("pidns") or ""))
@@ -510,9 +517,22 @@ class _Facts:
         i = bisect_right(seqs, seq)
         return self.held[inode][i - 1] if i else None
 
-    def podman(self, inode: str, seq: int) -> bool:
+    def entered(self, inode: str, seq: int) -> bool:
+        """Whether the newest holder of ``inode`` at ``seq`` is podman's entry — however much has
+        been seen entering it from elsewhere since: where a step out of a container is read."""
         h = self.holder(inode, seq)
         return h is not None and h[1] == "entry"
+
+    def podman(self, inode: str, seq: int) -> bool:
+        """Whether ``inode`` is podman's own namespace at ``seq``: entered from the VM's, and since
+        then nothing seen entering it from anywhere else (an init, or a process from another
+        namespace) — else the namespace podman entered has died and the number gone to someone
+        else (a box container that never shows an init, say), or something stepped in."""
+        seen = self.seen.get(inode)
+        if not seen:
+            return False
+        i = bisect_right(seen, (seq, "\uffff"))
+        return bool(i) and seen[i - 1][1] == "entry"
 
     def start_of(self, inode: str, life: str, below: int) -> tuple | None:
         """The container init start, before ``below``, of the life whose init is in pid namespace
@@ -611,7 +631,7 @@ def _fallback(facts: _Facts, inode: str, seq: int, host_pid: bool) -> str:
     if h is None:
         return "unattributed"
     if h[1] == "entry":
-        return "podman"
+        return "podman" if facts.podman(inode, seq) else "unattributed"
     if h[1] == "build" and (h[2] == "start" or not host_pid):
         return "build"
     return "unattributed"
@@ -645,8 +665,8 @@ def _one(
     def named(i: str) -> tuple[list[str] | None, list[str] | None]:
         return (snap_b["map"].get(i) if snap_b else None, snap_a["map"].get(i) if snap_a else None)
 
-    def system(i: str, obj: dict) -> bool:  # the VM's own namespace, or podman's
-        return i in vm or _is_host(obj, "mnt") or _is_host(obj, "user") or known.podman(i, seq)
+    def system(i: str, obj: dict) -> bool:  # the VM's own namespace, or one podman entered
+        return i in vm or _is_host(obj, "mnt") or _is_host(obj, "user") or known.entered(i, seq)
 
     host_pid = _is_host(proc, "pid")
     before, after = named(inode)

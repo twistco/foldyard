@@ -562,3 +562,85 @@ def test_retention_keeps_the_newest_fact_of_each_kind_about_each_namespace(state
         assert [(f[0], f[2]) for f in _facts(cat) if f[1] == "200"] == [
             (3, "end"), (4, "entry"), (6, "start"), (11, "start")
         ]  # fmt: skip
+
+
+def entered_from(seq: int, inode: int, outside: int, kind: str = "process_exec") -> dict:
+    """A process in mount namespace ``inode`` whose parent was in ``outside``, neither the VM's
+    own, and no init: the number entered from somewhere other than the VM."""
+    e = ev(seq, inode)
+    body = e["e"].pop("process_exec")
+    body["parent"] = {"binary": "/usr/bin/conmon", "ns": {"mnt": {"inum": outside}}}
+    e["e"][kind] = body
+    return e
+
+
+def test_a_number_entered_from_anywhere_but_the_vm_is_a_fact_too(state, monkeypatch):
+    # an `entry` has no end and numbers are reused: what says the number has gone to someone else
+    # since is anything entering it from a namespace that isn't the VM's — kept like an entry (a
+    # run as its first), read back by the backfill and kept by retention
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0), entry(1, inode=800), entered_from(2, 800, 7), entered_from(3, 800, 7),
+               entry(4, inode=800), entered_from(5, 800, 200)])  # fmt: skip
+    ms.append([ev(6, inode=800), entry(7, inode=800)])
+    want = [(1, "800", "entry", "1", ""), (2, "800", "other", "7", ""),
+            (4, "800", "entry", "1", ""), (5, "800", "other", "200", ""),
+            (7, "800", "entry", "1", "")]  # fmt: skip
+    with ms.Catalogue.open() as cat:
+        assert _facts(cat) == want
+        assert [(f["seq"], f["what"]) for f in cat.latest_facts(BOOT, "800", 7)] == [
+            (4, "entry"), (5, "other")
+        ]  # fmt: skip
+        # as #136's catalogue had it, every segment indexed without facts: the backfill's needle
+        # finds these too
+        cat.conn.execute("DELETE FROM nsfact")
+        cat.conn.execute("DELETE FROM nsfactseg")
+        cat.catch_up()
+        assert _facts(cat) == want
+        cat.drop([ms.segments()[0].id])  # of the first segment, the newest of each kind stays
+        assert [(f[0], f[2]) for f in _facts(cat)] == [(4, "entry"), (5, "other"), (7, "entry")]
+
+
+def test_a_process_among_its_own_namespace_or_the_vms_is_no_fact(state):
+    # a container's own child (its parent in the same namespace) says nothing new; a process that
+    # stepped into the VM's own is the VM's, which no number decides
+    into_vm = entered_from(2, 1, 200)
+    into_vm["e"]["process_exec"]["process"]["ns"]["mnt"]["is_host"] = True
+    ms.append([snap(0), entered_from(1, 200, 200), into_vm])
+    with ms.Catalogue.open() as cat:
+        assert _facts(cat) == []
+
+
+def engine() -> dict:
+    return {"k": "engine", "containers": {}, "recv": 1.0}
+
+
+def test_the_running_boots_facts_stay_while_the_store_holds_none_of_its_records(state, monkeypatch):
+    # retention right after a seal: the live segment holds only an engine claim, no record of the
+    # boot that is still running — its facts are what its next events are read by
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0), entry(1)])
+    ms.append([engine()])
+    with ms.Catalogue.open() as cat:
+        cat.drop([ms.segments()[0].id])
+        assert [(f[0], f[2]) for f in _facts(cat)] == [(1, "entry")]
+
+
+def test_the_running_boots_facts_stay_beside_an_older_boot_still_stored(state, monkeypatch):
+    # the same, with an older boot's record still in the store: that boot isn't the running one
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0, boot="old"), {**entry(1), "boot": "old"}])
+    ms.append([snap(0), entry(1)])
+    ms.append([ev(5, boot="old"), engine()])  # no fact in it
+    with ms.Catalogue.open() as cat:
+        cat.drop([s.id for s in ms.segments()[:2]])
+        assert sorted((f["boot"], f["seq"]) for b in ("old", BOOT) for f in cat.facts(b, -1, 99)) \
+            == [(BOOT, 1), ("old", 1)]  # fmt: skip
+
+
+def test_a_finished_boots_facts_go_once_the_store_holds_none_of_its_records(state, monkeypatch):
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0, boot="old"), {**entry(1), "boot": "old"}])
+    ms.append([snap(0), entry(1)])
+    with ms.Catalogue.open() as cat:
+        cat.drop([ms.segments()[0].id])
+        assert cat.facts("old", -1, 99) == [] and [f["seq"] for f in cat.facts(BOOT, -1, 99)] == [1]

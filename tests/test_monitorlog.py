@@ -649,8 +649,53 @@ def test_a_process_crossing_into_the_vms_or_podmans_namespace_is_the_containers_
     into_podman = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
     into_vm = ev(1, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 300}}})
     recs = _records(snap({200: [BOX]}), into_podman, into_vm, ev(PODMAN_NS), snap({200: [BOX]}))
+    # what runs in podman's namespace next is no one's the facts can name, until podman enters it
+    # again (test_podmans_namespace_is_podmans_again_once_podman_enters_it_from_the_vm)
     assert _whos(monitorlog.attribute(recs, "fyex")) == [
-        ("container", "a", True), ("unattributed", "", True), ("podman", "", False)
+        ("container", "a", True), ("unattributed", "", True), ("unattributed", "", False)
+    ]  # fmt: skip
+
+
+def test_a_number_podman_entered_once_is_not_podmans_after_something_else_took_it():
+    # an `entry` has no end, and namespace numbers are reused lowest-free: once the namespace the
+    # VM entered (800: a sandboxed user unit, or podman's own before its pause process went) has
+    # died, a box container that takes the number unseen — `--pid=host` (no init mark), gone before
+    # a snapshot — must not be filed under `podman`, which hooks skip by default. Its first process
+    # came from podman's namespace (conmon), not the VM's: from then on the number isn't podman's.
+    first = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": PODMAN_NS}}})
+    child = ev(800, binary="/usr/bin/curl", parent={"ns": {"mnt": {"inum": 800}}})
+    recs = _records(snap({}), entered(800), snap({}), first, child, ev(800), snap({}))
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")] == [
+        "podman", "unattributed", "unattributed", "unattributed"
+    ]  # fmt: skip
+
+
+def test_a_namespace_made_inside_a_container_on_a_number_podman_entered_once_is_not_podmans():
+    # `unshare -Urpm --fork` in the box on a reused number: its init is no mark of a container or a
+    # build, but it does say the number was taken — by the box, not by podman
+    nested = init(800, start="2026-10-04T10:00:01Z")
+    nested["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 200  # from inside BOX
+    work = ev(800, binary="/usr/bin/curl", parent={"ns": {"mnt": {"inum": 800}}})
+    recs = _records(snap({200: [BOX]}), entered(800), snap({200: [BOX]}), nested, work, ev(800),
+                    snap({200: [BOX]}))  # fmt: skip
+    got = _whos(monitorlog.attribute(recs, "fyex"))
+    assert got[0] == ("podman", "", False)
+    # the init itself reads as a step out of BOX (the number was podman's, last anyone said):
+    # loud, and the safe way to be wrong
+    assert got[1] == ("container", "a", True)
+    assert got[2:] == [("unattributed", "", False)] * 2
+
+
+def test_podmans_namespace_is_podmans_again_once_podman_enters_it_from_the_vm():
+    # after something stepped into podman's namespace from a container (flagged `crossed`), what
+    # runs there is read as no one's — the crossing's descendants among it — until podman next
+    # enters it from the VM's own, as every podman command does; a second step in is still flagged
+    into = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    recs = _records(snap({200: [BOX]}), into, ev(PODMAN_NS), into, entered(), ev(PODMAN_NS),
+                    snap({200: [BOX]}))  # fmt: skip
+    assert _whos(monitorlog.attribute(recs, "fyex")) == [
+        ("container", "a", True), ("unattributed", "", False), ("container", "a", True),
+        ("podman", "", False), ("podman", "", False),
     ]  # fmt: skip
 
 
@@ -670,6 +715,25 @@ def test_a_stretch_knows_podmans_namespace_however_long_ago_it_was_entered(monke
     finally:
         cat.close()
     assert e.who == "podman"
+
+
+def test_a_stretch_knows_a_number_podman_entered_once_was_taken_since(monkeypatch, tmp_path):
+    # the read holds only a later process on the number: the catalogue must hand the join what
+    # took the number after podman's entry, however long ago, not the entry alone
+    from foldyard import monitorstore
+
+    monkeypatch.setattr(monitorstore.config, "state_dir", lambda: tmp_path)
+    took = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": PODMAN_NS}}})
+    stream = [snap({}), entered(800), snap({}), took, snap({}), ev(800), snap({})]
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    monitorstore.append(recs)
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        (e,) = monitorlog.join([recs[5]], cat, "fyex")
+    finally:
+        cat.close()
+    assert e.who == "unattributed"
 
 
 def test_join_vm_and_unattributed():

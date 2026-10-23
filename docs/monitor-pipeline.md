@@ -92,10 +92,12 @@ A first step towards that, stdlib only, in `src/foldyard/monitorstore.py`:
   When a segment goes, its snapshots go too, except the newest of each boot: the one before the
   oldest events still kept. It also keeps each container init's **marks** (below), for the same
   reason it keeps the snapshots: a mark can sit in an earlier read than the event it decides.
-  And each namespace's **facts** (below): the same marks with where each init came from, and
-  podman entering a namespace from the VM's own — once a run, a few thousand rows a boot. When
-  a segment goes, the newest fact of each kind about each namespace stays: podman entered its
-  own once, at boot, and the join must still know it.
+  And each namespace's **facts** (below): the same marks with where each init came from, podman
+  entering a namespace from the VM's own, and anything entering one from elsewhere (an `other`),
+  each kept once a run. The marks and entries were a few thousand rows over cabash's boot; the
+  `other` facts, added after that measurement, add a row each time a run of them starts on a
+  namespace (a container's runtime entering it, `podman exec`). When a segment goes, the newest fact of each kind about each namespace stays: podman
+  entered its own once, at boot, and the join must still know it.
 
 **Why the catalogue (2026-10-21).** The join needs the snapshot before an event and the one after
 it. Readers used to look only within a byte window — a hook 1 MB back and 4 MB on from its
@@ -153,7 +155,14 @@ changed):
 - **`podman`** — the namespace a process enters straight from the VM's own: its parent in the
   VM's mount namespace (Tetragon's `is_host`), itself outside the VM's user namespace. That is
   podman entering its rootless namespace, as every podman command does (63k times a boot on
-  cabash). Nothing in a container has a parent in the VM's namespace.
+  cabash). Nothing in a container has a parent in the VM's namespace. An entry has no end, though,
+  and numbers are reused lowest-free: a namespace is podman's only until something is seen
+  entering it from anywhere but the VM's — an init, or a process whose parent was in another
+  namespace, neither of them the VM's. Otherwise a box container that takes the number of a
+  namespace the VM once entered, and that Tetragon never shows an init for (`--pid=host`), would
+  be read as podman's, which a default hook skips (the review of #138). The price: after a step
+  into podman's namespace from a container (itself `crossed`), what runs there reads
+  `unattributed` until podman next enters it from the VM, seconds on a busy VM.
 - **`build`** — an init (`in_init_tree`, its parent outside its mount namespace) started in
   podman's namespace by podman itself rather than conmon: buildah's `RUN` step. 594 of them on
   cabash's boot, none ever named by a snapshot (builds run outside podman's container scopes). A

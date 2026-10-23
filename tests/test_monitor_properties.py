@@ -314,6 +314,13 @@ EVERYTHING = [([], [], [])]
               ("pull",), ("round",)],
     filters=EVERYTHING, budget="ample",
 )  # fmt: skip
+# retention right after a seal, the live segment holding no record of the running boot yet (an
+# engine-only append): the boot's facts must stay — podman's namespace was forgotten (#138's review)
+@example(
+    scenario=[("entry", 7), ("entry", 7), ("entry", 200), ("pull",), ("upgrade",), ("entry", 7),
+              ("ev", 200, "process_exec"), ("snap", {})],
+    filters=EVERYTHING, budget="tiny",
+)  # fmt: skip
 def test_a_hook_delivers_the_full_store_join_or_says_what_it_could_not(
     monkeypatch, scenario, filters, budget
 ):
@@ -437,12 +444,13 @@ def test_a_hook_delivers_the_full_store_join_or_says_what_it_could_not(
 #
 # The world below is the kernel's, as plain data: containers started and stopped on two numbers
 # handed out lowest-free, podman's own short-lived namespaces taking a free number, snapshots of
-# what is running at any moment (also mid-setup: named before its init's exec reaches the
-# stream), containers whose init Tetragon never shows as one (every life of it, both ends: say one
-# sharing another's pid namespace), and a dead container's event arriving late (never past a
-# snapshot). What it does NOT model is a mark lost at random — Tetragon's ring buffer overflowing:
-# a container's start seen and its exit lost, with an unmarked one taking the number next, would
-# mislead the join. On cabash (2026-10-23) every init exec had its exit; nothing showed a loss.
+# what is running at any moment (also mid-setup: named before its init's exec reaches the stream),
+# containers whose init Tetragon never shows as one (every life of it, both ends: say one sharing
+# another's pid namespace; its exec is there, outside the init tree), and a dead container's event
+# arriving late (never past a snapshot). What it does NOT model is a mark lost at random —
+# Tetragon's ring buffer overflowing: a container's start seen and its exit lost, with an unmarked
+# one taking the number next, would mislead the join. On cabash (2026-10-23) every init exec had its
+# exit; nothing showed a loss.
 # Validated red: before the marks were read (completeness, both directions), and
 # after it against each of: no process-start guard (a late event of the dead container named the
 # new one), no "no init exit after the last start" check, and no "no init start before the first
@@ -454,22 +462,19 @@ NS_CIDS = ("d" * 64, "e" * 64, "f" * 64)
 NS_NUMBERS = (200, 300)
 CONMON_NS = 7  # where conmon runs: outside every container's mount namespace
 
-ns_steps = st.lists(
-    st.one_of(
-        # (container, Tetragon marks its init — fixed at its first start, a snapshot caught it
-        # mid-setup)
-        st.tuples(st.just("start"), st.integers(0, 2), st.booleans(), st.booleans()),
-        st.tuples(st.just("run"), st.integers(0, 2), st.booleans()),  # podman exec, or a child
-        st.tuples(st.just("init"), st.integers(0, 2)),  # its init, still running, does something
-        st.tuples(st.just("stop"), st.integers(0, 2)),
-        st.tuples(st.just("late"), st.integers(0, 2)),
-        st.just(("transient",)),  # podman's own short-lived mount namespace (netavark)
-        st.just(("snap",)),
-        st.just(("snap",)),
-    ),
-    min_size=4,
-    max_size=50,
+_ns_step = st.one_of(
+    # (container, Tetragon marks its init — fixed at its first start, a snapshot caught it
+    # mid-setup)
+    st.tuples(st.just("start"), st.integers(0, 2), st.booleans(), st.booleans()),
+    st.tuples(st.just("run"), st.integers(0, 2), st.booleans()),  # podman exec, or a child
+    st.tuples(st.just("init"), st.integers(0, 2)),  # its init, still running, does something
+    st.tuples(st.just("stop"), st.integers(0, 2)),
+    st.tuples(st.just("late"), st.integers(0, 2)),
+    st.just(("transient",)),  # podman's own short-lived mount namespace (netavark)
+    st.just(("snap",)),
+    st.just(("snap",)),
 )
+ns_steps = st.lists(_ns_step, min_size=4, max_size=50)
 
 
 def _stamp(ns: int) -> str:
@@ -542,10 +547,10 @@ class NsWorld:
             self.cur[cid] = self.lives
             if mid_setup:
                 self._snap()  # its scope already holds the runtime's process in the namespace
+            # its init's exec, from conmon in podman's namespace — in the init tree when Tetragon
+            # shows it as one
+            seq = self._ev("process_exec", number, start, seen, CONMON_NS, cid, "/run/podman-init")
             if seen:
-                seq = self._ev(
-                    "process_exec", number, start, True, CONMON_NS, cid, "/run/podman-init"
-                )
                 self.starts[self.lives] = seq
         elif what == "run" and cid in self.running:
             number, _, _ = self.running[cid]
@@ -571,6 +576,12 @@ class NsWorld:
             self.late.add(self._ev("process_kprobe", number, start, True, CONMON_NS, cid))
         elif what == "transient" and (number := self._free()) is not None:
             self._ev("process_exec", number, self._tick(), False, CONMON_NS, None, "/usr/bin/nft")
+        elif what == "sandbox" and (number := self._free()) is not None:
+            # the VM entering a short-lived namespace of its own (a sandboxed user unit), which
+            # dies at once: its number is free again, with podman's entry still on record
+            seq = len(self.recs)
+            self.recs.append(_entry(seq, "b", _stamp(self._tick()), number))
+            self.truth[seq] = None
         elif what == "snap":
             self._snap()
 
@@ -719,3 +730,34 @@ def test_no_event_is_given_to_a_container_outside_its_life(scenario):
             f"{seq} ({'podman' if true is None else true[:1]}'s) given to {e.container[:1]}, "
             "outside its life"
         )
+
+
+# ── a container's events never filed under what a hook skips ─────────────────────────────
+#
+# The review of #138: an `entry` has no end and numbers are reused lowest-free, so once a namespace
+# the VM entered has died, a box container that takes its number — one Tetragon never shows an init
+# for (`--pid=host`), gone before a snapshot names it — was read as podman's, which every hook
+# without `who` skips (`monitorhooks.SKIP_UNLESS_ASKED`). The world above, with the VM entering a
+# short-lived namespace on a free number now and then (`sandbox`), held to: no event a container
+# caused is ever `podman` or `vm`. Validated red with an entry read as podman's for as long as
+# nothing marked the number since (the first @example: an unmarked container's own process on it).
+
+sandboxed_steps = st.lists(st.one_of(_ns_step, st.just(("sandbox",))), min_size=4, max_size=50)
+
+
+@settings(max_examples=300, deadline=None)
+@given(scenario=sandboxed_steps)
+# an unmarked container on a number the VM entered once: its init's child
+@example(scenario=[("sandbox",), ("start", 0, False, False), ("run", 0, True), ("snap",)])
+# …and its processes killed after its init, gone before any snapshot
+@example(scenario=[("sandbox",), ("start", 0, False, False), ("stop", 0)])
+def test_a_containers_event_is_never_filed_under_what_hooks_skip(scenario):
+    world = NsWorld()
+    for s in scenario:
+        world.step(s)
+    world._snap()
+    events = {e.seq: e for e in monitorlog.attribute(world.recs, "fyex")}
+    for seq, true in world.truth.items():
+        if true is not None:
+            who = events[seq].who
+            assert who not in mh.SKIP_UNLESS_ASKED, f"{seq} ({true[:1]}'s) filed under {who}"

@@ -158,6 +158,11 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
             if not isinstance(name, str) or not name.strip():
                 raise ValueError("needs a `name`")
             label = f"hook '{name}'"
+            if "skip_unless_asked" in raw:  # TOML gives a key after `[[hook]]` to that hook
+                errors.append(
+                    f"{label}: `skip_unless_asked` ignored here, {', '.join(unless_asked)} kept: "
+                    "it belongs at the top of the file, before any [[hook]]"
+                )
             if name in seen:
                 raise ValueError("duplicate name (it keys the hook's cursor)")
             command = _strings(raw.get("command"), "`command`")
