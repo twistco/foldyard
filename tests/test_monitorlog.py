@@ -1065,6 +1065,60 @@ def test_show_and_doctor_say_a_crossing_happened_in_this_boot(monkeypatch, tmp_p
     assert row[0] == "warn" and row[2].startswith(note)
 
 
+def test_a_crossing_is_told_once_on_your_computer_and_again_for_a_new_boot(monkeypatch, tmp_path):
+    # the PUSH surface: a crossing should be rare, and `fy monitor`/doctor only help someone looking
+    monkeypatch.setattr(monitorlog.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitorlog.config, "project", lambda: "fyex")
+    told, logged = [], []
+
+    def tell():
+        monitorlog.tell_crossing(logged.append, lambda title, body: told.append((title, body)))
+
+    monitorlog.Cursor(path=f"{DIR}/000.jsonl").save()
+    monitorlog._append([{**snap({200: [BOX]}), "boot": BOOT, "seq": 0}])
+    tell()
+    assert told == [] and logged == []  # nothing crossed
+    crossing = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    stream = [entered(), crossing, ev(200), snap({200: [BOX]})]
+    monitorlog._append([{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream, 1)]
+                       + [{"k": "engine", "containers": {BOX: {"name": "fyex-api-1"}}}])  # fmt: skip
+    tell()
+    [(title, body)] = told
+    assert "fyex" in title and "crossed out of a container" in title
+    assert "fyex-api-1" in body and "fy monitor" in body
+    assert len(logged) == 1 and "fyex-api-1" in logged[0]
+    tell()  # the same crossing: told once, a supervisor restart included (the cursor holds it)
+    assert len(told) == 1
+    # a crossing in the next boot is a new one
+    cur = monitorlog.Cursor.load()
+    cur.path = "1791200000-boot-2/000.jsonl"
+    cur.save()
+    monitorlog._append([{**r, "boot": "boot-2", "seq": i}
+                        for i, r in enumerate([snap({200: [BOX]}), entered(), crossing,
+                                               snap({200: [BOX]})])])  # fmt: skip
+    tell()
+    assert len(told) == 2
+
+
+def test_the_pull_loop_tells_a_crossing_after_each_pull(monkeypatch):
+    from foldyard import machine, monitor
+
+    monkeypatch.setattr(monitor, "wanted", lambda: True)
+    monkeypatch.setattr(machine, "state", lambda: "running")
+    monkeypatch.setattr(monitor, "relay_key", lambda: "k")
+    monkeypatch.setattr(monitorlog, "pull_once", lambda *a, **k: 0)
+    monkeypatch.setattr(monitorlog.Cursor, "load", classmethod(lambda cls: cls()))
+    asked = []
+    monkeypatch.setattr(monitorlog, "tell_crossing", lambda log, notify: asked.append(notify))
+    rounds = iter([False, True])
+
+    def notify(title: str, body: str) -> None:
+        pass
+
+    monitorlog.run(lambda m: None, lambda: next(rounds, True), notify)
+    assert asked == [notify]
+
+
 def test_show_refuses_in_the_box(monkeypatch, capsys):
     monkeypatch.setattr(monitorlog.config, "in_box", lambda: True)
     assert monitorlog.show() == 1
