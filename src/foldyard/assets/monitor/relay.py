@@ -15,9 +15,9 @@ It does three things and nothing else:
    it; whatever sits between it and the host can drop or delay lines, never forge them.
 3. **Snapshots which container owns which mount namespace**, as kernel facts: at start, every
    ``SNAPSHOT_EVERY`` seconds, and as soon as an event carries a mount namespace the last
-   snapshot didn't have (at most once a second). It never joins events to containers itself —
-   the host does that, so attribution improves with a foldyard upgrade, not a VM restart, and
-   the raw evidence stays re-derivable.
+   snapshot didn't have, or a container's init enters one (at most once a second: :class:`Trigger`).
+   It never joins events to containers itself — the host does that, so attribution improves with
+   a foldyard upgrade, not a VM restart, and the raw evidence stays re-derivable.
 
 The snapshot walks the VM user's delegated cgroup subtree top-down: the OUTERMOST
 ``libpod-<64 hex>.scope`` on each path owns everything below it. podman names that scope from an
@@ -70,6 +70,71 @@ def mnt_inode(event: dict) -> int | None:
             inum = (ns.get("mnt") or {}).get("inum")
             return int(inum) if inum else None
     return None
+
+
+def init_mark(event: dict) -> tuple[int, str] | None:
+    """``(inode, "start"|"end")`` when the event is a container's init entering its mount namespace
+    (its exec) or leaving it (its exit): in the init tree of its pid namespace, its parent
+    (conmon) outside its mount namespace. ``podman exec`` comes from outside but never in the init
+    tree; the init's children are in it, but their parent is inside. The host reads the same marks
+    (``foldyard.monitorstore.init_mark``)."""
+    what = {"process_exec": "start", "process_exit": "end"}
+    for kind, body in event.items():
+        if kind in what and isinstance(body, dict):
+            proc, parent = body.get("process") or {}, body.get("parent") or {}
+            inode = ((proc.get("ns") or {}).get("mnt") or {}).get("inum")
+            outside = ((parent.get("ns") or {}).get("mnt") or {}).get("inum")
+            if proc.get("in_init_tree") is True and inode and outside and outside != inode:
+                return int(inode), what[kind]
+    return None
+
+
+class Trigger:
+    """When to snapshot besides the timer: within a second of a mount namespace the last snapshot
+    didn't have, or of a container's init entering one it did — the kernel hands a freed number to
+    the next namespace made, so a container started right after another died gets a number the
+    last snapshot still gives the dead one (cabash, 2026-10-23: no snapshot until the timer, up to
+    a minute later, and the host couldn't tell the two apart in between). An init leaving makes
+    its number new again, for whatever runs in it next. A number no snapshot found (podman's own
+    short-lived namespaces, a runtime mid-setup) is looked for again only after
+    ``SNAPSHOT_EVERY``."""
+
+    def __init__(self) -> None:
+        self.known: set[str] = set()
+        self.tried: dict[int, float] = {}  # number -> when a snapshot last looked for it
+        self.pending: set[int] = set()
+        self.entered: set[int] = set()  # pending because a container's init entered it
+
+    def saw(self, event: dict, now: float) -> None:
+        inode = mnt_inode(event)
+        if inode is None:
+            return
+        mark = init_mark(event)
+        if mark is not None and mark[1] == "start":
+            self.pending.add(inode)
+            self.entered.add(inode)
+        elif mark is not None:
+            self.known.discard(str(inode))
+            self.tried.pop(inode, None)
+        elif str(inode) not in self.known and now - self.tried.get(inode, -SNAPSHOT_EVERY) >= (
+            SNAPSHOT_EVERY
+        ):
+            self.pending.add(inode)
+
+    def due(self, now: float, last: float) -> str:
+        """The snapshot's ``why`` when one is due (``last``: when the last was taken), else ""."""
+        if not self.pending or now - last < NEW_INODE_MIN_GAP:
+            return ""
+        why = "init" if self.entered else "new"
+        return f"{why} " + " ".join(str(i) for i in sorted(self.pending))
+
+    def took(self, snap: dict, now: float) -> None:
+        self.known = set(snap["map"]) | {str(snap["vm"])}
+        for inode in self.pending:
+            self.tried[inode] = now
+        self.pending.clear()
+        self.entered.clear()
+        self.tried = {i: t for i, t in self.tried.items() if now - t < SNAPSHOT_EVERY}
 
 
 def scopes(user_root: str) -> dict[str, str]:
@@ -226,18 +291,16 @@ def main(uid: int) -> None:
         # between is in a rotated file this relay doesn't read. Say so, never imply continuity.
         spool.write({"k": "gap", "t": time.time(), "why": "tetragon's export rotated unseen"})
 
-    known: set[str] = set()
-    tried: set[int] = set()  # new inodes a snapshot already looked for (cleared by the timer)
-    pending: set[int] = set()  # new inodes waiting for the next snapshot
+    trigger = Trigger()
     last_snap = 0.0
     last_save = time.monotonic()
 
     def take(why: str) -> None:
-        nonlocal known, last_snap
+        nonlocal last_snap
         snap = snapshot(user_root)
         spool.write({"k": "scopes", "t": time.time(), "why": why, **snap})
-        known = set(snap["map"]) | {str(snap["vm"])}
         last_snap = time.monotonic()
+        trigger.took(snap, last_snap)
 
     def save() -> None:
         # Under a steady stream the loop never idles, so the position is saved on a clock too:
@@ -255,11 +318,9 @@ def main(uid: int) -> None:
         # leaving the host nothing to attribute with (seen live, 2026-10-04).
         if time.monotonic() - last_snap >= SNAPSHOT_EVERY:
             take("timer")
-            tried.clear()
-        if pending and time.monotonic() - last_snap >= NEW_INODE_MIN_GAP:
-            take("new " + " ".join(str(i) for i in sorted(pending)))
-            tried.update(pending)  # one look each: an inode no scope owns stays unmapped
-            pending.clear()
+        why = trigger.due(time.monotonic(), last_snap)
+        if why:
+            take(why)
         if time.monotonic() - last_save >= 2.0:
             save()
         line = src.readline()
@@ -285,9 +346,7 @@ def main(uid: int) -> None:
             spool.write({"k": "bad", "t": time.time(), "why": "unparseable tetragon line"})
             continue
         spool.write({"k": "ev", "e": event})
-        inode = mnt_inode(event)
-        if inode is not None and str(inode) not in known and inode not in tried:
-            pending.add(inode)
+        trigger.saw(event, time.monotonic())
 
 
 if __name__ == "__main__":

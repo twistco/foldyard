@@ -18,3 +18,11 @@ bump: patch
   so a coverage check reads those times as "no evidence", not "the container did nothing". They
   are rare once the join reads the containers' inits: 31 namespaces in a busy night's whole boot,
   none outside a container being replaced.
+- **The guest monitor's relay snapshots as soon as a container's init enters a mount namespace,
+  even one its last snapshot already had,** and looks again for a namespace no snapshot found
+  after a minute. Before, a number handed straight from a dead container to the next waited for
+  the minute timer, and under churn a number looked for once was never looked for again (three
+  short-lived containers on one overnight run were never named at all). This changes the monitor's
+  boot script: a VM that records it (`[machine] monitor = "observe"`, or turned off since) is
+  refused as stale until you run
+  `fy machine stop && fy up`.

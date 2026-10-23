@@ -80,7 +80,7 @@ owns attribution: Tetragon is the sensor, the way the proxy is for HTTP.**
     makes the untrusted transport acceptable.
   - **The relay never joins.** It ships raw events and, separately, kernel snapshots of
     mount namespace → container: at start, every 60 s, and within a second of a namespace it
-    hasn't seen. The host joins at read time over the stored evidence, so attribution improves
+    hasn't seen (since 2026-10-23, also of a container's init entering one it has). The host joins at read time over the stored evidence, so attribution improves
     with a foldyard upgrade (no VM restart), and stored history can be re-joined after a fix. An
     event takes the snapshot before it if that still holds its namespace, else the one after;
     disagreement is `ambiguous`. A namespace number is freed with its container and handed on,

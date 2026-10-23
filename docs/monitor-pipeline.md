@@ -128,7 +128,10 @@ short-lived namespaces (netavark) stay `ambiguous`. The same window re-joined: 5
 events left, and all five agents' events from their init's first exec on. Three agents that lived
 under 40 s were never in any snapshot at all — the relay had already looked for their number once
 that minute, and its minute only restarts after 60 s with no snapshot at all — so no join can name
-them: their events stay `unattributed`.
+them: their events stay `unattributed`. The relay now snapshots within a second of a container's
+init entering a number too (the same mark), makes a number new again when an init leaves it, and
+looks for a number no snapshot found again after a minute whatever else it snapshots — which
+changes the monitor's boot script, so a monitored VM takes it at `fy machine stop && fy up`.
 
 ## 3. Tiers and retention
 
