@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import replace
 
 import pytest
 
@@ -1015,3 +1016,171 @@ def test_listing_says_what_a_hook_skips_unless_asked_and_what_it_passed_over(pro
     text = "\n".join(mh.listing(now=10.0))
     assert "all events but vm, podman" in text
     assert "passed over since its last batch: podman 40, vm 2" in text
+
+
+# ── a crossing unfilters the rest of its boot ────────────────────────────────────────────
+
+
+def crossing(seq: int, inode: int = 1, parent: int = 200, boot: str = BOOT) -> dict:
+    """A process in the VM's mount namespace whose parent was in a container's (200)."""
+    rec = ev(seq, inode=inode, binary="/bin/sh", boot=boot)
+    body = rec["e"]["process_exec"]
+    body["process"]["ns"]["mnt"]["is_host"] = True
+    body["parent"] = {"binary": "/bin/sh", "ns": {"mnt": {"inum": parent}}}
+    return rec
+
+
+def _crossed_boot():
+    # the VM's and podman's events before a crossing and after it, in one boot
+    return [snap(0), ev(1, inode=1), entered(2), ev(3), crossing(4), ev(5, inode=1),
+            ev(6, inode=7), ev(7), snap(8)]  # fmt: skip
+
+
+def test_after_a_crossing_a_default_hook_gets_the_vm_and_podman_and_says_why(ran):
+    calls, _ = ran
+    events = monitorlog.attribute(_crossed_boot(), "fyex")
+    first = mh.crossings(events)
+    assert first == {BOOT: mh.Crossing(BOOT, 4, "t4", BOX)}
+    st = mh.HookState()
+    mh.deliver(mh.Hook(name="all", command=("/bin/a",)), st, events, now=1, first_crossed=first)
+    body = calls[0]["body"]
+    assert [e["seq"] for e in body["events"]] == [3, 4, 5, 6, 7]  # before 4: as without it
+    assert body["passed"] == {"vm": 1, "podman": 1}
+    (u,) = body["unfiltered"]
+    assert u["boot"] == BOOT and u["since"] == [BOOT, 4] and u["container"] == BOX
+    assert u["time"] == "t4" and "crossed out of a container" in u["why"]
+
+
+def test_after_a_crossing_an_explicit_who_stops_filtering_unless_the_hook_keeps_it(ran):
+    calls, _ = ran
+    events = monitorlog.attribute(_crossed_boot(), "fyex")
+    first = mh.crossings(events)
+    c = mh.Hook(name="c", command=("/bin/c",), who=("container",))
+    mh.deliver(c, mh.HookState(), events, now=1, first_crossed=first)
+    assert [e["seq"] for e in calls[0]["body"]["events"]] == [3, 4, 5, 6, 7]
+    kept = mh.Hook(name="k", command=("/bin/k",), who=("container",), keep_who_after_crossing=True)
+    mh.deliver(kept, mh.HookState(), events, now=1, first_crossed=first)
+    body = calls[1]["body"]
+    assert [e["seq"] for e in body["events"]] == [3, 4, 7]  # the crossing itself still reaches it
+    assert body["unfiltered"] == [] and body["passed"] == {"vm": 2, "podman": 2}
+
+
+def test_after_a_crossing_a_worktree_filter_lets_through_what_has_no_worktree():
+    # an escaped process's events are the VM's or podman's: no worktree to match, so a hook
+    # watching one worktree would see none of them; one in another worktree's box still isn't its
+    main = mh.Hook(name="m", command=("/bin/m",), worktrees=("main",))
+    vm = monitorlog.Event(
+        time="t",
+        boot=BOOT,
+        seq=5,
+        kind="exec",
+        binary="/bin/sh",
+        args="",
+        detail="",
+        uid=1,
+        pid=9,
+        who="vm",
+    )
+    other = replace(vm, who="container", worktree="other")
+    assert not main.matches(vm) and main.matches(vm, after_crossing=True)
+    assert not main.matches(other, after_crossing=True)
+    kept = replace(main, keep_who_after_crossing=True)
+    assert not kept.matches(vm, after_crossing=True)
+    # the crossing itself, from another worktree's box: never left out
+    assert main.matches(replace(other, crossed=True)) and kept.matches(replace(other, crossed=True))
+
+
+def test_without_a_catalogue_a_round_counts_every_boot_as_crossed_and_says_why():
+    # a crossing earlier in the boot can't be seen without the catalogue: unfiltered, not missed
+    events = monitorlog.attribute([snap(0), ev(1, inode=1), ev(2)], "fyex")
+    first = mh.uncatalogued(events, {})
+    assert first[BOOT].seq == -1 and "catalogue" in first[BOOT].why
+    # one it can see in the read doesn't help: an earlier one still can't be ruled out
+    seen = {BOOT: mh.Crossing(BOOT, 2, "t2", BOX)}
+    assert mh.uncatalogued(events, seen)[BOOT].seq == -1
+
+
+def test_a_round_that_cant_read_the_catalogue_delivers_unfiltered_and_says_why(
+    ran, project, monkeypatch
+):
+    calls, _ = ran
+    _hook(project)
+    monitorlog._append([snap(0), ev(1, inode=1), ev(2), snap(3)])
+    monkeypatch.setattr(monitorlog, "catalogue", lambda segs=None: None)
+    mh.round_once(now=50)
+    body = calls[0]["body"]
+    assert _delivered(calls) == [1, 2]  # the VM's event too
+    (u,) = body["unfiltered"]
+    assert u["since"] == [BOOT, -1] and "catalogue couldn't be read" in u["why"]
+
+
+def test_a_crossing_only_unfilters_its_own_boot(ran):
+    calls, _ = ran
+    events = monitorlog.attribute(
+        [*_crossed_boot(), snap(0, boot=BOOT2), ev(1, inode=1, boot=BOOT2), snap(2, boot=BOOT2)],
+        "fyex",
+    )
+    mh.deliver(mh.Hook(name="all", command=("/bin/a",)), mh.HookState(), events, now=1,
+               first_crossed=mh.crossings(events))  # fmt: skip
+    body = calls[0]["body"]
+    assert [(e["boot"], e["seq"]) for e in body["events"]][-1] == (BOOT, 7)
+    assert [u["boot"] for u in body["unfiltered"]] == [BOOT]
+
+
+def test_a_crossing_long_before_the_hooks_read_still_unfilters_the_boot(ran, project, monkeypatch):
+    # the crossing's record is far behind the hook's window, its segment even gone: the catalogue
+    # holds the boot's first crossing, so every hook agrees whatever it read
+    calls, _ = ran
+    _hook(project)
+    monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 10)
+    monitorlog._append([snap(0), crossing(1), snap(2)])
+    mh.round_once(now=5)  # the hook's cursor is past the crossing: it never reads it again
+    monitorlog._append([ev(3)])
+    with monitorstore.Catalogue.open() as cat:
+        cat.drop([monitorstore.segments()[0].id])
+    monitorlog._append([ev(4, inode=1), snap(5)])
+    mh.round_once(now=10)
+    assert _delivered(calls) == [1, 3, 4]
+    assert calls[-1]["body"]["unfiltered"][0]["since"] == [BOOT, 1]
+
+
+def test_a_candidate_the_catalogue_could_not_judge_counts_as_a_crossing(ran, project, monkeypatch):
+    # a busy catalogue left it unjudged though a snapshot after it is stored, and the hook's cursor
+    # is past it: unfiltered rather than missed
+    calls, _ = ran
+    _hook(project)
+    monkeypatch.setattr(monitorstore.Catalogue, "judge", lambda self: 1 / 0)
+    monitorlog._append([snap(0), crossing(1), snap(2)])
+    mh.round_once(now=10)
+    monitorlog._append([ev(3, inode=1), snap(4)])
+    mh.round_once(now=20)
+    assert _delivered(calls) == [1, 3]
+    assert calls[-1]["body"]["unfiltered"][0]["since"] == [BOOT, 1]
+
+
+def test_an_ambiguous_event_sent_after_a_crossing_is_no_gap(ran):
+    # a container-only hook passes over what the join can't place, and says so in `gaps`; after a
+    # crossing it gets it — sent, so nothing to say
+    calls, _ = ran
+    events = monitorlog.attribute(
+        [snap(0), crossing(1), ev(2), snap(3, mapping={"200": ["b" * 64]})], "fyex"
+    )
+    assert events[1].who == "ambiguous"
+    hook = mh.Hook(name="c", command=("/bin/c",), who=("container",))
+    mh.deliver(hook, mh.HookState(), events, now=1, first_crossed=mh.crossings(events))
+    body = calls[0]["body"]
+    assert [e["seq"] for e in body["events"]] == [1, 2] and body["gaps"] == []
+
+
+def test_keep_who_after_crossing_is_parsed_rendered_and_listed(project):
+    hooks, errors = mh.parse(
+        '[[hook]]\nname = "k"\ncommand = ["/bin/k"]\nwho = ["container"]\n'
+        "keep_who_after_crossing = true\n"
+        '[[hook]]\nname = "bad"\ncommand = ["/bin/b"]\nkeep_who_after_crossing = "yes"\n'
+    )
+    assert [h.name for h in hooks] == ["k"] and hooks[0].keep_who_after_crossing
+    assert "keep_who_after_crossing" in errors[0]
+    assert mh.parse(mh.render(hooks[0])) == (hooks, [])
+    assert "keep_who_after_crossing" not in mh.render(mh.Hook(name="d", command=("/bin/d",)))
+    mh.add(hooks[0])
+    assert "keep_who_after_crossing" in "\n".join(mh.listing(now=1.0))

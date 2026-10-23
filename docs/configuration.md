@@ -353,7 +353,8 @@ disk_gib = 60
       and went before any record of them was taken.
     - **`crossed`** (`true` on an event) means a process ran in the VM's or podman's namespace
       but its parent was in a container's or a build's. Something got out of a container. It is
-      labelled with the container it came from, and every hook gets it.
+      labelled with the container it came from, every hook gets it, and hooks stop filtering by
+      `who` for the rest of that VM boot (see Hooks below).
   - Each event also names the process that started it: `--json` and hooks carry `ppid`, `parent`
     and `parent_args` (that process's id, binary and arguments), plus `exec_id` and
     `parent_exec_id` (the ids of the process's own `exec` event and its parent's), so you can
@@ -384,9 +385,24 @@ disk_gib = 60
       "vm": 2210}`). `fy monitor hook` shows the counts still owed to the next batch.
     - Leaving `vm` and `podman` out has a cost. A process that escaped a container into the VM
       would be labelled `vm` or `podman` from then on, so a hook that skips them would miss
-      everything after the escape. foldyard can't remove that blind spot, but it narrows it:
-      the step out itself is `crossed` and reaches every hook, and a container holding a process
-      in either namespace is `ambiguous`. `fy monitor` always shows everything.
+      everything after the escape. foldyard narrows that blind spot three ways. The step out
+      itself is `crossed` and reaches every hook. A container holding a process in either
+      namespace is `ambiguous`. And from the first `crossed` event of a VM boot on, `who` stops
+      filtering for the rest of that boot (until the VM restarts).
+    - After a crossing, every hook gets every event of that boot that its `kinds` let through:
+      the `vm` and `podman` events a hook without `who` would skip, and also every label a hook's
+      own `who` leaves out. Its `worktrees` still filters events from other worktrees' containers,
+      but no longer the ones with no worktree, which is where an escaped process's land. The
+      `crossed` events themselves reach every hook, whatever its `who` or `worktrees`. If the
+      monitor's catalogue can't be read, a crossing earlier in the boot can't be ruled out, so
+      that round's batches are unfiltered too and say why. Each batch that includes such events says
+      so in `unfiltered`, which names the boot, the crossing's position and time, and the
+      container it came from. A crossing should be rare, and sifting through extra events is
+      better than missing what an escaped process did next. A hook that can't take that, for
+      example a scorer that only understands containers' events, can set
+      `keep_who_after_crossing = true` to keep its filter. It still gets the `crossed` events
+      themselves. `fy monitor` and `fy doctor` say when this VM boot has had a crossing, and
+      `fy monitor` always shows everything.
 
     - `fy monitor hook add` writes this file for you, checking each hook the way the supervisor
       will. Your own edits and comments are kept. For example, to give the box a file of its

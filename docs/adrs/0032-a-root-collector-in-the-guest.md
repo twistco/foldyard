@@ -5,7 +5,9 @@
   host-side join — `fy monitor`). Enforcement is not decided here. **Amended 2026-10-23:** what
   isn't a container is named too — `podman`, `build`, `vm` (its own user namespace included) —
   from kernel facts in the stored events, a container's name holds only within its init's life,
-  and a hook without `who` skips `vm` and `podman`, counting what it passed over (below, and
+  and a hook without `who` skips `vm` and `podman`, counting what it passed over — until a
+  process crosses out of a container: from then on, hooks get the rest of that VM boot unfiltered
+  (below, and
   [monitor-pipeline §2.1](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md#21-built-the-store-today)).
 - **Sources:** the eBPF investigation and implementation plan (2026-10-03, not in the repo); the
   slice-0 spike [docs/ebpf-monitoring-spike.md](https://github.com/twistco/foldyard/blob/main/docs/ebpf-monitoring-spike.md) (a real Lima
@@ -108,7 +110,11 @@ owns attribution: Tetragon is the sensor, the way the proxy is for HTTP.**
     container's is `crossed`: named after the container, and sent to every hook. Still host-side
     only: no change in the VM. A hook without `who` skips `vm` and `podman`, which is where an
     escape to the VM user would land; each batch counts what it skipped (`passed`), so that is a
-    reported default, not a silent one.)*
+    reported default, not a silent one. And from the first `crossed` event of a boot on, `who`
+    filters nothing more of that boot, for every hook that doesn't opt out
+    (`keep_who_after_crossing`): what the escaped process does next is the VM's or podman's by
+    its namespace. The crossing is a catalogue fact, judged once a snapshot after it is stored,
+    so every hook agrees on it and a settled event's delivery never changes.)*
   - **Container to worktree is a claim.** Names and compose labels are whatever the creator set,
     and anything holding the socket can set another worktree's. `fy monitor` says so. Binding
     containers to foldyard's own record of what it created is later work.

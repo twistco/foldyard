@@ -106,6 +106,14 @@ A first step towards that, stdlib only, in `src/foldyard/monitorstore.py`:
   the join over everything ever stored. The first retention, the newest fact of each kind with
   kinds worked out at read time, lost an init's origin to a later entry (randomised runs,
   2026-10-23).
+  And each boot's **crossings**: every event that may be a step out of a container (its parent
+  in another mount namespace, not the VM's, and the process in the VM's or in one podman entered)
+  is noted as it is indexed, and judged by the join once a snapshot after it is stored. From then
+  on nothing that decides it can change, so the verdict is kept and never re-judged. The pull
+  judges right after each append, before retention runs. When a segment goes, a boot's first
+  crossing stays (§6: from it on, hooks get the whole boot), and so does a candidate not judged
+  yet. Over cabash's whole store (4.4 M events, three boots) 7 events were candidates and none
+  was a crossing.
 
 **Why the catalogue (2026-10-21).** The join needs the snapshot before an event and the one after
 it. Readers used to look only within a byte window — a hook 1 MB back and 4 MB on from its
@@ -200,7 +208,8 @@ changed):
   delivering at the first snapshot after an event can't wait for.
 - **Crossing** — a process in the VM's or podman's namespace whose parent was in a container's —
   is the kernel's trace of an escape. It is `crossed`, named after where it came from, and never
-  left out by a hook's filter. None on cabash's boot. A container's scope holding a process in
+  left out by a hook's filter. From the first one in a VM boot on, `who` filters nothing more of
+  that boot for any hook (§6). None on cabash's boot. A container's scope holding a process in
   either namespace (a privileged container can `nsenter` there; crun joins a scope a moment
   before it leaves podman's namespace — once on cabash) is `ambiguous`, never filed under them.
 
@@ -216,9 +225,13 @@ and every batch now counts what it passed over.
 the namespaces a default hook skips. What narrows it: the step out is `crossed` (sent to every
 hook), a container scope holding a process there is `ambiguous`, `passed` counts every skipped
 event per batch (a sudden jump in `vm` or `podman` is visible without the events), and
-`fy monitor` shows everything. What it can't: what that process does next, once it is a VM or
-podman process. Shell commands by the box's uid in the VM's namespace are no signal on their own:
-the box runs as the VM user, and the pull's own ssh runs a shell as that user every few seconds.
+`fy monitor` shows everything. And what that process does next, once it is a VM or podman
+process, is no longer skipped: from a boot's first crossing on, hooks get every event of that
+boot (§6, added 2026-10-23). What is still blind: an escape whose first step isn't a parent in a
+container's namespace starting a process in the VM's or podman's, such as a container writing a
+file that something in the VM later runs. Shell commands by the box's uid in the VM's namespace
+are no signal on their own: the box runs as the VM user, and the pull's own ssh runs a shell as
+that user every few seconds.
 
 ## 3. Tiers and retention
 
@@ -344,15 +357,41 @@ kinds = ["exec", "connect", "file"] # optional filters; omitted = all
 who = ["container", "build", "unattributed"]   # omitted = all but `skip_unless_asked`
 worktrees = ["main"]
 timeout = 15                        # seconds
+# keep_who_after_crossing = true    # `who` still filters after a crossing (see below)
 ```
 
 - **`who`** is one of `container`, `build`, `unattributed`, `ambiguous`, `podman`, `vm` (§2.1). A
   hook without `who` gets all but `vm` and `podman`; `skip_unless_asked = [...]` at the top of the
   file, before any `[[hook]]`, changes that for every such hook (an invalid value is reported and
   the default kept). An event with `crossed: true` reaches every hook whatever its `who`.
+- **After a crossing** (added 2026-10-23): from the first `crossed` event of a VM boot on, `who`
+  filters nothing more of that boot, for every hook. That is both the default skip (`vm`,
+  `podman`) and a hook's own `who`. `kinds` still applies, and `worktrees` to events that have
+  a worktree: an escaped process's have none. A round that can't read the catalogue counts
+  every boot it reads as crossed, and says why. A crossing should be
+  rare; what an escaped process does next is in the VM's or podman's namespace, or in one it
+  makes (`unattributed`), and sifting through it beats missing it. A hook that can't take the
+  volume sets `keep_who_after_crossing = true`: its `who` keeps filtering, and it still gets the
+  `crossed` events. The cost, measured on a copy of cabash's store with a crossing put in at
+  00:30 UTC on its busiest night: for the remaining 7.3 hours of that boot, a hook without `who`
+  gets 1.73 M events instead of 0.81 M, and a `who = ["container"]` hook 1.73 M instead of
+  0.63 M.
+  - **It is the store's fact, never a hook's.** "Boot B first crossed at seq P" comes from the
+    catalogue (§2.1), judged once a snapshot after P is stored. So every hook agrees on it,
+    whatever its cursor, and a re-read or a re-join gives the same answer.
+  - **It never changes a settled event's delivery.** A hook delivers an event once a snapshot
+    after it is stored. That snapshot is also after every earlier event of the boot, so any
+    crossing before the event is settled and judged by then, and an event's decision depends
+    only on crossings before it. An event before P is decided as if P never happened, and one
+    after P, unfiltered. Several hooks at different cursors make the same decision for each
+    event. A hook further behind reaches P's boot later and finds the same P. The one exception
+    is an event released after two minutes with no snapshot after it (the relay stalled), which
+    the batch's `unsettled` gap already says it can't vouch for.
+  - If the catalogue couldn't judge a settled candidate (it was busy), the hook counts it as a
+    crossing: unfiltered rather than missed.
 - **Payload** (stdin for a command, the body for a url): `{"schema": "fy.monitor.events/1",
   "project", "hook", "events": [...], "first": [boot, seq], "last": [boot, seq], "gaps": [...],
-  "passed": {...}}`
+  "passed": {...}, "unfiltered": [...]}`
   — the same `Event` fields `fy monitor --json` prints. Besides the attribution (`who`,
   `container`, `name`, `worktree`), each event carries its ancestry: `ppid`, `parent`,
   `parent_args` (the one hop) and `exec_id`/`parent_exec_id` (the links to rebuild the whole tree
@@ -364,6 +403,11 @@ timeout = 15                        # seconds
   batch retried after a crash may count again), never silently gone: what a batch didn't carry
   and no `gaps` entry covers is in a `passed` count, or owed to the next batch (`fy monitor hook`
   shows it).
+- **Unfiltered** (added 2026-10-23, the same schema): an entry per boot whose events in this
+  batch `who` didn't filter because of a crossing, usually `[]`:
+  `{"boot", "since": [boot, seq], "time", "container", "why"}`, where `since` and `time` are the
+  boot's first crossing and `container` the one it came out of (`""` when the join couldn't name
+  one). A hook with `keep_who_after_crossing = true` never has one.
 - **Gaps** (added 2026-10-21, within the same schema: `gaps` and `mnt` are new keys, nothing
   changed meaning). Every batch carries `gaps`, usually `[]`. Each entry says the batch can't
   vouch for a stretch of the stream:

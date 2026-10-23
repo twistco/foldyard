@@ -35,6 +35,12 @@ mark may sit in an earlier read than the event it decides. Beside them it keeps 
 FACTS (:func:`ns_fact`): the same marks with where the init came from (its parent's namespace and
 binary), and podman entering a namespace straight from the VM's own — how the join tells podman's
 own namespace, an image build and a container apart, however long ago the fact was recorded.
+
+And it keeps each boot's CROSSINGS (:func:`cross_candidate`, :meth:`Catalogue.judge`): an event
+that may be a process stepping out of a container is noted as it is indexed, and judged by the join
+once a snapshot after it is stored — when nothing that decides it can change any more. A crossing
+in a boot makes every hook deliver the rest of that boot unfiltered (:mod:`foldyard.monitorhooks`),
+so the first one is kept for as long as anything of its boot is.
 """
 
 from __future__ import annotations
@@ -88,6 +94,16 @@ _FACT_SQL = (
     "CREATE INDEX IF NOT EXISTS nsfact_seq ON nsfact (boot, inode, seq)",
     "CREATE TABLE IF NOT EXISTS nsfactseg (id TEXT PRIMARY KEY, done INTEGER NOT NULL)",
 )
+# The crossings (:func:`cross_candidate`) the same way again, with their own progress
+# (`crossseg`). `verdict` is NULL until a snapshot after the event is stored
+# (:meth:`Catalogue.judge`), then 1 (it crossed: `container` is where from) or 0; `rec` is what the
+# join needs of the event, emptied once it is judged.
+_CROSS_SQL = (
+    "CREATE TABLE IF NOT EXISTS crossing (boot TEXT NOT NULL, seq INTEGER NOT NULL, "
+    "seg TEXT NOT NULL, time TEXT NOT NULL, rec TEXT NOT NULL, verdict INTEGER, "
+    "container TEXT NOT NULL, PRIMARY KEY (boot, seq))",
+    "CREATE TABLE IF NOT EXISTS crossseg (id TEXT PRIMARY KEY, done INTEGER NOT NULL)",
+)
 _SCHEMA_SQL = (
     "DROP TABLE IF EXISTS seg",
     "DROP TABLE IF EXISTS snap",
@@ -97,6 +113,8 @@ _SCHEMA_SQL = (
     "DROP TABLE IF EXISTS markseg",
     "DROP TABLE IF EXISTS nsfact",
     "DROP TABLE IF EXISTS nsfactseg",
+    "DROP TABLE IF EXISTS crossing",
+    "DROP TABLE IF EXISTS crossseg",
     "CREATE TABLE seg (id TEXT PRIMARY KEY, indexed INTEGER NOT NULL, sealed INTEGER NOT NULL, "
     "t0 TEXT NOT NULL, t1 TEXT NOT NULL)",
     "CREATE TABLE snap (boot TEXT NOT NULL, seq INTEGER NOT NULL, seg TEXT NOT NULL, "
@@ -106,6 +124,7 @@ _SCHEMA_SQL = (
     "hi INTEGER NOT NULL, PRIMARY KEY (seg, boot))",
     *_MARK_SQL,
     *_FACT_SQL,
+    *_CROSS_SQL,
 )
 # every mark's line holds one (the store writes compact JSON; the spaced form, should anything
 # else have): the backfill parses only those — `"in_init_tree"` alone is in nearly every line
@@ -117,6 +136,14 @@ _OTHER_MNT = re.compile(rb'"mnt":\s*\{"inum":\s*(\d+)\s*\}')
 
 
 _RUNS = ("entry", "other")  # kinds whose run (same kind, same taken) is kept as its first
+
+
+# …and a crossing's line holds two different mount namespaces, its process's and its parent's
+_MNT_INUM = re.compile(rb'"mnt":\s*\{\s*"inum":\s*(\d+)')
+
+
+def _may_cross(line: bytes) -> bool:
+    return len(set(_MNT_INUM.findall(line))) > 1
 
 
 def _may_hold_fact(line: bytes) -> bool:
@@ -464,6 +491,11 @@ def append(records: list[dict]) -> None:
                 pass
         with live_path().open("ab") as f:
             f.write(b"".join(lines))
+        if cat is not None:
+            try:
+                cat.judge()  # before retention: what decides a crossing is all still here
+            except Exception:
+                pass  # never stops the store: the next reader judges it (Catalogue.catch_up)
         _compress_sealed()
         _prune(budget(), cat)
     finally:
@@ -760,6 +792,46 @@ class _DbFacts:
         return self._newest_kind(inode, seq, "kind = 'entry' OR taken = 1") == "entry"
 
 
+def _slim(obj: dict) -> dict:
+    """What the join reads of a process (:func:`foldyard.monitorlog.attribute`)."""
+    got = obj.get("ns")
+    ns: dict = got if isinstance(got, dict) else {}
+    keep = ("binary", "pid", "start_time", "in_init_tree")
+    return {
+        **{k: obj[k] for k in keep if k in obj},
+        "ns": {k: ns[k] for k in ("mnt", "user", "pid") if k in ns},
+    }
+
+
+def cross_candidate(rec: dict) -> dict | None:
+    """``{"inode", "host", "rec"}`` when ``rec`` MAY be a process that crossed out of a container
+    (:func:`foldyard.monitorlog.attribute` decides), else ``None``: its parent was in another mount
+    namespace, neither the VM's (``is_host``) nor in the VM's user namespace. ``host``: the process
+    itself is in the VM's; when it isn't, it is a candidate only if its namespace may be podman's or
+    the VM's as the snapshots say (:meth:`Catalogue.add` asks). ``rec`` is what judging it needs —
+    the event's process and parent as the join reads them — a few hundred bytes. On cabash's
+    busiest boot none of 3.8 M events were (2026-10-23): podman's ``exec`` into a container has its
+    parent in podman's namespace, the process not."""
+    if rec.get("k") != "ev" or "boot" not in rec or "seq" not in rec:
+        return None
+    e = rec.get("e") or {}
+    kind = next((k for k in e if k.startswith("process_")), None)
+    if kind is None or not isinstance(e[kind], dict):
+        return None
+    proc, parent = e[kind].get("process") or {}, e[kind].get("parent") or {}
+    mnt, pmnt = _ns(proc, "mnt"), _ns(parent, "mnt")
+    inode, outside = mnt.get("inum"), pmnt.get("inum")
+    if not inode or not outside or outside == inode:
+        return None
+    if pmnt.get("is_host") is True or _ns(parent, "user").get("is_host") is True:
+        return None
+    slim = {"k": "ev", "boot": rec["boot"], "seq": rec["seq"],
+            "e": {kind: {"process": _slim(proc), "parent": _slim(parent)},
+                  "time": str(e.get("time") or "")}}  # fmt: skip
+    host = mnt.get("is_host") is True or _ns(proc, "user").get("is_host") is True
+    return {"inode": str(inode), "host": host, "rec": slim}
+
+
 class Catalogue:
     """The store's index (see the module doc). One connection per use; any number of readers
     beside the one writer (WAL)."""
@@ -833,10 +905,12 @@ class Catalogue:
             for tables, sql in (
                 ({"mark", "markseg"}, _MARK_SQL),
                 ({"nsfact", "nsfactseg"}, _FACT_SQL),
+                ({"crossing", "crossseg"}, _CROSS_SQL),
             ):
                 if tables <= have:
                     continue
-                # a catalogue an older foldyard made (0.6: no marks; #136: no facts): beside it
+                # a catalogue an older foldyard made (0.6: no marks; #136: no facts; #138: no
+                # crossings): beside it
                 conn.execute("BEGIN IMMEDIATE")
                 try:
                     for statement in sql:
@@ -909,6 +983,9 @@ class Catalogue:
                 fact = r.get("fact") if k == "ev" and "fact" in r else ns_fact(r)
                 if fact is not None and "boot" in r and "seq" in r:
                     self._put_fact(r["boot"], int(r["seq"]), sid, fact)
+                cand = r.get("cand") if k == "ev" and "cand" in r else cross_candidate(r)
+                if cand is not None and self._may_cross(r["boot"], int(r["seq"]), cand):
+                    self._note_crossing(sid, cand)
                 mark = r.get("mark") if k == "ev" and "mark" in r else init_mark(r)
                 if mark is not None and "boot" in r and "seq" in r:
                     c.execute(
@@ -934,6 +1011,7 @@ class Catalogue:
             before = c.execute("SELECT indexed FROM seg WHERE id = ?", (sid,)).fetchone()
             marked = c.execute("SELECT marked FROM markseg WHERE id = ?", (sid,)).fetchone()
             done = c.execute("SELECT done FROM nsfactseg WHERE id = ?", (sid,)).fetchone()
+            crossed = c.execute("SELECT done FROM crossseg WHERE id = ?", (sid,)).fetchone()
             c.execute(
                 "INSERT INTO seg VALUES (?, ?, 0, ?, ?) ON CONFLICT(id) DO UPDATE SET "
                 f"indexed = {'excluded.indexed' if exact else 'MAX(indexed, excluded.indexed)'}, "
@@ -957,6 +1035,12 @@ class Catalogue:
                     "done = excluded.done",
                     (sid, now),
                 )
+            if before is None or (crossed is not None and crossed[0] >= before[0]):
+                c.execute(
+                    "INSERT INTO crossseg VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET "
+                    "done = excluded.done",
+                    (sid, now),
+                )
             c.execute(
                 "DELETE FROM claim WHERE n <= (SELECT MAX(n) FROM claim) - ?", (_CLAIMS_KEPT,)
             )
@@ -964,6 +1048,89 @@ class Catalogue:
         except BaseException:
             c.execute("ROLLBACK")
             raise
+
+    def _may_cross(self, boot: str, seq: int, cand: dict) -> bool:
+        """Whether a :func:`cross_candidate` is worth judging: its process is in the VM's mount or
+        user namespace, or in one podman ever entered from the VM's (the join's test is that it
+        held it then), or in the VM's as the snapshot before it says — or no snapshot says yet."""
+        if cand["host"]:
+            return True
+        c = self.conn
+        inode = cand["inode"]
+        if c.execute(
+            "SELECT 1 FROM nsfact WHERE boot = ? AND inode = ? AND what = 'entry' LIMIT 1",
+            (boot, inode),
+        ).fetchone():
+            return True
+        row = c.execute(
+            "SELECT rec FROM snap WHERE boot = ? AND seq < ? ORDER BY seq DESC LIMIT 1", (boot, seq)
+        ).fetchone()
+        return row is None or str(json.loads(row[0]).get("vm")) == inode
+
+    def _note_crossing(self, sid: str, cand: dict) -> None:
+        rec = cand["rec"]
+        self.conn.execute(
+            # a re-read keeps the verdict: it was judged once, on what was stored before it
+            "INSERT INTO crossing VALUES (?, ?, ?, ?, ?, NULL, '') ON CONFLICT(boot, seq) DO "
+            "UPDATE SET seg = excluded.seg",
+            (rec["boot"], int(rec["seq"]), sid, rec["e"].get("time", ""),
+             json.dumps(rec, separators=(",", ":"))),
+        )  # fmt: skip
+
+    def judge(self) -> None:
+        """Judge every crossing candidate with a snapshot after it in its boot — by the join, over
+        this catalogue (:func:`foldyard.monitorlog.join`), exactly as a hook joins it. Never before:
+        until a snapshot after it is stored, a later record can still change what it is; from then
+        on nothing can (records arrive in sequence), so the verdict is kept and never judged again —
+        the same for every reader, and for a re-read. The pull judges right after each append,
+        before retention runs."""
+        from . import monitorlog  # the join; monitorlog imports this module
+
+        c = self.conn
+        pending = c.execute(
+            "SELECT boot, seq, rec FROM crossing WHERE verdict IS NULL AND EXISTS (SELECT 1 FROM "
+            "snap WHERE snap.boot = crossing.boot AND snap.seq > crossing.seq) ORDER BY boot, seq"
+        ).fetchall()
+        for boot, seq, rec in pending:
+            got = [e for e in monitorlog.join([json.loads(rec)], self, "") if e.seq == seq]
+            crossed = bool(got) and got[0].crossed
+            c.execute(
+                "UPDATE crossing SET verdict = ?, container = ?, rec = '' WHERE boot = ? AND "
+                "seq = ? AND verdict IS NULL",
+                (int(crossed), got[0].container if crossed else "", boot, seq),
+            )
+
+    def crossings(self, boot: str) -> list[tuple[int, str, str]]:
+        """``boot``'s judged crossings, ``(seq, time, container)``, oldest first: every one the
+        store still holds, and its first however long ago that was."""
+        return [
+            (int(seq), t, cid)
+            for seq, t, cid in self.conn.execute(
+                "SELECT seq, time, container FROM crossing WHERE boot = ? AND verdict = 1 "
+                "ORDER BY seq",
+                (boot,),
+            )
+        ]
+
+    def first_crossing(self, boot: str) -> tuple[int, str, str] | None:
+        """``boot``'s first judged crossing, ``(seq, time, container)``, or ``None``."""
+        row = self.conn.execute(
+            "SELECT seq, time, container FROM crossing WHERE boot = ? AND verdict = 1 "
+            "ORDER BY seq LIMIT 1",
+            (boot,),
+        ).fetchone()
+        return (int(row[0]), row[1], row[2]) if row else None
+
+    def first_unjudged(self, boot: str) -> tuple[int, str] | None:
+        """``boot``'s first candidate a snapshot after it has settled that :meth:`judge` hasn't
+        judged yet (it failed: a busy catalogue), ``(seq, time)``, or ``None``."""
+        row = self.conn.execute(
+            "SELECT seq, time FROM crossing WHERE boot = ? AND verdict IS NULL AND EXISTS (SELECT "
+            "1 FROM snap WHERE snap.boot = crossing.boot AND snap.seq > crossing.seq) "
+            "ORDER BY seq LIMIT 1",
+            (boot,),
+        ).fetchone()
+        return (int(row[0]), row[1]) if row else None
 
     def sealed(self, sid: str) -> None:
         self.conn.execute("UPDATE seg SET sealed = 1 WHERE id = ?", (sid,))
@@ -980,6 +1147,9 @@ class Catalogue:
         c.execute("UPDATE nsfact SET seg = ? WHERE seg = ?", (new, old))
         c.execute("DELETE FROM nsfactseg WHERE id = ?", (new,))
         c.execute("UPDATE nsfactseg SET id = ? WHERE id = ?", (new, old))
+        c.execute("UPDATE crossing SET seg = ? WHERE seg = ?", (new, old))
+        c.execute("DELETE FROM crossseg WHERE id = ?", (new,))
+        c.execute("UPDATE crossseg SET id = ? WHERE id = ?", (new, old))
         c.execute("DELETE FROM span WHERE seg = ?", (new,))
         c.execute("UPDATE span SET seg = ? WHERE seg = ?", (new, old))
         c.execute("COMMIT")
@@ -997,6 +1167,7 @@ class Catalogue:
         c.executemany("DELETE FROM mark WHERE seg = ?", [(g,) for g in gone])
         c.executemany("DELETE FROM markseg WHERE id = ?", [(g,) for g in gone])
         c.executemany("DELETE FROM nsfactseg WHERE id = ?", [(g,) for g in gone])
+        c.executemany("DELETE FROM crossseg WHERE id = ?", [(g,) for g in gone])
         # a boot's facts go once the store holds nothing of that boot — never the running boot's:
         # the one whose fact was indexed last (the store is in boot order — the relay's spool
         # paths sort by epoch — and the catalogue indexes it in that order). Right after a seal the
@@ -1005,6 +1176,21 @@ class Catalogue:
         c.execute(
             "DELETE FROM nsfact WHERE seg NOT IN (SELECT id FROM seg) "
             "AND boot NOT IN (SELECT boot FROM span) "
+            "AND boot IS NOT (SELECT boot FROM nsfact ORDER BY rowid DESC LIMIT 1)"
+        )
+        # The crossings: what turned out not to be one goes with its segment; of what did, the
+        # first of each boot stays (from it on, every hook has the boot unfiltered) — and one not
+        # yet judged stays to be (its snapshot after may be the next record stored). Each for as
+        # long as the store holds anything of that boot, and always for the running boot (as the
+        # facts above).
+        gone_seg = "seg NOT IN (SELECT id FROM seg)"
+        c.execute(f"DELETE FROM crossing WHERE {gone_seg} AND verdict = 0")
+        c.execute(
+            f"DELETE FROM crossing WHERE {gone_seg} AND verdict = 1 AND seq > (SELECT MIN(f.seq) "
+            "FROM crossing f WHERE f.boot = crossing.boot AND f.verdict = 1)"
+        )
+        c.execute(
+            f"DELETE FROM crossing WHERE {gone_seg} AND boot NOT IN (SELECT boot FROM span) "
             "AND boot IS NOT (SELECT boot FROM nsfact ORDER BY rowid DESC LIMIT 1)"
         )
         orphan = "seg NOT IN (SELECT id FROM seg)"
@@ -1071,6 +1257,7 @@ class Catalogue:
         }
         self._backfill_marks(segs)
         self._backfill_facts(segs)
+        self._backfill_crossings(segs)
         if listing and segs:
             # Gone from the store without this catalogue seeing it go (an older foldyard rotated
             # or removed it): older than every segment listed, or an older foldyard's live file
@@ -1109,13 +1296,14 @@ class Catalogue:
                     if not isinstance(rec, dict):
                         continue
                     if rec.get("k") == "ev":  # all the catalogue keeps of an event
-                        mark, fact = init_mark(rec), ns_fact(rec)
+                        mark, fact, cand = init_mark(rec), ns_fact(rec), cross_candidate(rec)
                         rec = {
                             "k": "ev",
                             **{k: rec[k] for k in ("boot", "seq") if k in rec},
                             "e": {"time": _ev_time(rec)},
                             **({"mark": mark} if mark else {}),
                             **({"fact": fact} if fact else {}),
+                            **({"cand": cand} if cand else {}),
                         }
                     batch.append(rec)
                     if len(batch) >= 20_000:
@@ -1124,6 +1312,10 @@ class Catalogue:
                 self.add(seg.id, batch, end)
             if not seg.live:
                 self.sealed(seg.id)
+        try:
+            self.judge()
+        except Exception:
+            pass  # left unjudged: a hook counts a settled one as crossed (monitorhooks.crossings)
 
     def _backfill_marks(self, segs: list[Segment]) -> None:
         """Read the marks out of what an older catalogue indexed before marks were kept — only the
@@ -1210,6 +1402,52 @@ class Catalogue:
                     self._put_fact(boot, seq, seg.id, f)
                 c.execute(
                     "INSERT INTO nsfactseg VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET "
+                    "done = excluded.done",
+                    (seg.id, indexed),
+                )
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
+
+    def _backfill_crossings(self, segs: list[Segment]) -> None:
+        """Note the crossing candidates in what an older catalogue indexed before crossings were
+        kept (as :meth:`_backfill_facts` does the facts, after them: an entry decides a candidate):
+        only lines with two different mount namespaces are parsed."""
+        owed = {
+            sid: (done, indexed)
+            for sid, done, indexed in self.conn.execute(
+                "SELECT seg.id, COALESCE(crossseg.done, 0), seg.indexed FROM seg "
+                "LEFT JOIN crossseg ON crossseg.id = seg.id "
+                "WHERE COALESCE(crossseg.done, 0) < seg.indexed"
+            )
+        }
+        for seg in segs:
+            if seg.id not in owed:
+                continue
+            done, indexed = owed[seg.id]
+            found: list[dict] = []
+            for line, end in _lines(seg, done):
+                if end > indexed:
+                    break
+                if not _may_cross(line):
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                cand = cross_candidate(rec) if isinstance(rec, dict) else None
+                if cand is not None:
+                    found.append(cand)
+            c = self.conn
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                for cand in found:
+                    rec = cand["rec"]
+                    if self._may_cross(rec["boot"], int(rec["seq"]), cand):
+                        self._note_crossing(seg.id, cand)
+                c.execute(
+                    "INSERT INTO crossseg VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET "
                     "done = excluded.done",
                     (seg.id, indexed),
                 )
