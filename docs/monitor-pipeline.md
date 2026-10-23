@@ -277,7 +277,11 @@ timeout = 15                        # seconds
   them; `transport` — sequence numbers that never reached your computer; `relay` — the relay
   restarted and missed Tetragon's events; `unsettled` — events released after two minutes with
   no snapshot after them in the store (the relay stalled, or the boot ended), attributed from
-  the snapshot before alone; `skipped` — a batch this hook failed to take five times. A gap is
+  the snapshot before alone; `ambiguous` — events the hook's `who` filter passed over because
+  the join couldn't place them (the namespace changed hands between two snapshots and the
+  containers' inits don't say where; the entry adds `mnt`, the namespace, and is sent only to a
+  hook that would have wanted them as `container` events); `skipped` — a batch this hook failed
+  to take five times. A gap is
   sent with the batch whose events the cursor moves past it; when nothing the hook wants comes
   with it, a batch carries the gaps alone (`events` empty, `first`/`last` null). Read those
   times as "no evidence", never "nothing happened".

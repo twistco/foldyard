@@ -19,9 +19,11 @@ events it reads are joined with the catalogue's snapshots around them however fa
 snapshots further apart than it (2026-10-21).
 
 Whatever a hook didn't get, or got without the full evidence, is SAID in the batch: ``gaps``
-(:func:`_record_gaps`, :func:`_unsettled`) — the store rotated past its position, events lost
-between the VM and here, the relay missing Tetragon's, events released without a snapshot after
-them, a batch skipped. A consumer marks those times "no evidence", never "nothing happened".
+(:func:`_record_gaps`, :func:`_unsettled`, :func:`_ambiguous`) — the store rotated past its
+position, events lost between the VM and here, the relay missing Tetragon's, events released
+without a snapshot after them, events its ``who`` filter passed over because the join couldn't
+place them between two containers, a batch skipped. A consumer marks those times "no evidence",
+never "nothing happened".
 
 Commands run with a minimal environment — never the supervisor's, which holds every
 ``host.env`` secret — on their own thread, so a slow hook never delays the pull. A ``file`` hook
@@ -779,7 +781,8 @@ def _to_file(
 #
 # A gap is {"why", "after", "before", "since", "until", "detail"}: evidence is missing, or
 # incomplete, for the records strictly between `after` and `before` ([boot, seq] in store order;
-# null = open), which fall between the event times `since` and `until` ("" = unknown).
+# null = open), which fall between the event times `since` and `until` ("" = unknown). An
+# `ambiguous` gap also names the mount namespace (`mnt`) it is about.
 
 
 def _gap(why: str, after: list | None, before: list | None, since: str, until: str, detail: str):
@@ -837,6 +840,35 @@ def _unsettled(passed: list[monitorlog.Event], aged: set[tuple[str, int]]) -> li
     return out
 
 
+def _ambiguous(hook: Hook, passed: list[monitorlog.Event]) -> list[dict]:
+    """A gap per mount namespace for the ``ambiguous`` events in ``passed`` that ``hook`` is passing
+    over (a worktree filter passes over every one: it has no worktree) but would want were they
+    placed: two snapshots name different containers for the
+    namespace and the containers' inits don't say where it changed hands — either container's,
+    or podman's own short-lived namespace in between (``mnt`` says which; the events around it name
+    the two). Without this a ``who = ["container"]`` hook can't tell lost evidence from a container
+    that did nothing (cabash, 2026-10-23). Rare: on cabash's busiest night, 31 namespaces over the
+    whole boot once the inits are read, none outside a container being replaced. Not for
+    ``unattributed``: podman's own namespace and image builds keep tens of thousands of those an
+    hour coming, a gap for them would say nothing."""
+    runs: dict[tuple[str, int | None], list[monitorlog.Event]] = {}
+    for e in passed:
+        if (
+            e.who == "ambiguous"
+            and not hook.matches(e)
+            and (not hook.kinds or e.kind in hook.kinds)
+            and (not hook.who or "container" in hook.who)
+        ):
+            runs.setdefault((e.boot, e.mnt), []).append(e)
+    out = []
+    for (boot, mnt), run in runs.items():
+        gap = _gap("ambiguous", [boot, run[0].seq - 1], [boot, run[-1].seq + 1], run[0].time,
+                   run[-1].time, f"{len(run)} events in mount namespace {mnt}, which "
+                   "changed hands between two snapshots: the join can't place them")  # fmt: skip
+        out.append({**gap, "mnt": mnt})
+    return out
+
+
 def deliver(
     hook: Hook,
     st: HookState,
@@ -876,7 +908,8 @@ def deliver(
     wanted = [pending[j] for j in picked]
     passed = pending[: end + 1]
     keys = {(e.boot, e.seq) for e in passed}
-    owed = [*st.gaps, *(g for k, g in gaps or [] if k in keys), *_unsettled(passed, aged or set())]
+    owed = [*st.gaps, *(g for k, g in gaps or [] if k in keys), *_unsettled(passed, aged or set()),
+            *_ambiguous(hook, passed)]  # fmt: skip
     if not wanted and not owed:
         if passed:
             move(passed[-1])

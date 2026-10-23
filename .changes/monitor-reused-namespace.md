@@ -12,3 +12,9 @@ bump: patch
   entering the namespace, which the store already holds, to choose between the two containers the
   snapshots named. It applies to stored history: `fy monitor --since … --until …` re-joins it.
   The store's catalogue gains these marks in place on first open (seconds on a 1 GB store).
+- **A monitor hook is told about the events its `who` filter passes over because the join
+  couldn't place them.** Each batch's `gaps` now carries an `ambiguous` entry, with the mount
+  namespace (`mnt`), for the `ambiguous` events a hook would have wanted as `container` events,
+  so a coverage check reads those times as "no evidence", not "the container did nothing". They
+  are rare once the join reads the containers' inits: 31 namespaces in a busy night's whole boot,
+  none outside a container being replaced.

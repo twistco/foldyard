@@ -286,6 +286,11 @@ EVERYTHING = [([], [], [])]
               ("ev", 1, "process_exec"), ("snap", {}), ("pull",), ("behind",)],
     filters=EVERYTHING, budget="ample",
 )  # fmt: skip
+# two snapshots naming different containers, nothing to place the event: a container-only hook
+@example(
+    scenario=[("snap", {200: [A]}), ("ev", 200, "process_exec"), ("snap", {200: [B]}), ("pull",)],
+    filters=[(["container"], [], [])], budget="ample",
+)  # fmt: skip
 # a reused number decided by a container's init mark in an EARLIER read than the event: the hook
 # must join with the catalogue's marks, as it does with its snapshots
 @example(
@@ -364,6 +369,16 @@ def test_a_hook_delivers_the_full_store_join_or_says_what_it_could_not(
                     assert _covered(key, gaps, rank, ("unsettled",)), (
                         f"{hook.name} got {key} attributed {delivered[key]['who']}, "
                         f"the full join says {e['who']}"
+                    )
+            # an event the join couldn't place between two containers, that this hook would want
+            # were it placed: passed over, it must be said — never read as "nothing happened"
+            for key, e in truth.items():
+                could = (not hook.kinds or e["kind"] in hook.kinds) and (
+                    not hook.who or "container" in hook.who
+                )
+                if e["who"] == "ambiguous" and key not in want and could:
+                    assert _covered(key, gaps, rank, ("ambiguous", "rotated", "unsettled")), (
+                        f"{hook.name} passed over ambiguous {key} and no gap says so"
                     )
             for key in delivered:
                 if key not in want:
