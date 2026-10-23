@@ -220,6 +220,16 @@ def test_the_vm_table_redirects_and_guards_only_the_walled_principals():
     assert "type filter hook output" in text
 
 
+def test_the_vm_listener_takes_only_what_the_table_redirected():
+    ranges = [(41000, 41089)]
+    gw = "192.168.5.2"
+    assert fwd.vm_dest_ok((gw, 41005), ("127.42.0.1", 41005), ranges, gw)
+    assert not fwd.vm_dest_ok(None, ("127.42.0.1", 41005), ranges, gw)
+    assert not fwd.vm_dest_ok(("127.42.0.1", 41005), ("127.42.0.1", 41005), ranges, gw)  # direct
+    assert not fwd.vm_dest_ok((gw, 22), ("127.42.0.1", 22), ranges, gw)  # no rule names it
+    assert not fwd.vm_dest_ok((gw, 41005), ("127.42.0.1", 41006), ranges, gw)  # another port's
+
+
 def test_the_vm_listener_listens_on_every_daemon_port():
     assert fwd.each_port([(41000, 41002), (41100, 41100)]) == [41000, 41001, 41002, 41100]
 
@@ -363,15 +373,22 @@ def test_a_finished_relay_closes_both_of_its_sockets():
 
 
 async def _run_relay(f, upstream_port, client_actions, kind="plain"):
-    """A client → forwarder.relay → upstream round trip; returns what client_actions returned."""
+    """A client → forwarder.relay → upstream round trip; returns what client_actions returned,
+    once the relay itself has finished (its close runs after the client has its answer)."""
+    finished = asyncio.Event()
 
     async def front(r, w):
-        await f.relay(r, w, ("127.0.0.1", upstream_port), [])
+        try:
+            await f.relay(r, w, ("127.0.0.1", upstream_port), [])
+        finally:
+            finished.set()
 
     fr = await asyncio.start_server(front, "127.0.0.1", 0)
     try:
         cr, cw = await asyncio.open_connection("127.0.0.1", fr.sockets[0].getsockname()[1])
-        return await client_actions(cr, cw)
+        got = await client_actions(cr, cw)
+        await asyncio.wait_for(finished.wait(), 10)
+        return got
     finally:
         fr.close()
 

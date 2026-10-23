@@ -109,6 +109,19 @@ def nft_ranges(ranges: list[tuple[int, int]]) -> str:
     return ", ".join(f"{a}-{b}" if a != b else str(a) for a, b in ranges)
 
 
+def vm_dest_ok(dest, local, ranges: list[tuple[int, int]], gw: str) -> bool:
+    """A VM-listener connection is one the table redirected: it was bound for a daemon port at the
+    gateway, and arrived on the listener for that same port. Anything else — a direct dial of the
+    listener, a port no rule names — is refused."""
+    return (
+        dest is not None
+        and dest[0] == gw
+        and in_ranges(dest[1], ranges)
+        and local is not None
+        and local[1] == dest[1]
+    )
+
+
 def mac(key: bytes, fields: str) -> str:
     return hmac.new(key, fields.encode(), hashlib.sha256).hexdigest()
 
@@ -552,13 +565,7 @@ class Forwarder:
     async def handle_vm(self, reader, writer) -> None:
         peer = writer.get_extra_info("peername")
         dest = original_dst(writer.get_extra_info("socket"))
-        local = writer.get_extra_info("sockname")
-        if (
-            dest is None
-            or not in_ranges(dest[1], self.ports())
-            or dest[0] != self.a.gw
-            or local[1] != dest[1]
-        ):
+        if not vm_dest_ok(dest, writer.get_extra_info("sockname"), self.ports(), self.a.gw):
             return self.refuse(writer, "VM listener dialled directly", peer)
         try:
             who = await asyncio.to_thread(owner, peer, dest, self.a.uid, self.walled, self.cgroups)
