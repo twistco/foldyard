@@ -467,6 +467,15 @@ def _observing_since() -> str | None:
     return window["since"] if window else None
 
 
+def _origin_settings() -> dict | None:
+    """The live file's ``origin``: the forwarder key's PATH (never the key) and whether rows record
+    whose they were; ``None`` when this project has no key (attribution never turned on)."""
+    key = config.forwarder_key_file()
+    if not key.is_file():
+        return None
+    return {"key_file": str(key), "record": config.machine_attribution() == "record"}
+
+
 def _resolve_passthrough(entries: list[str]) -> list[str]:
     """Expand the ``[proxy] passthrough`` entries into a flat, deduped, order-preserving pattern
     list the daemon matches against: ``@all`` → every built-in bundle, ``@name`` → that bundle,
@@ -594,6 +603,14 @@ class ProxyPlugin(Plugin):
             if self._registry
             else [],
         }
+        # The attributing forwarder's stamp (ADR-0034): verified, bound to its connection and
+        # stripped by the addon whenever this project has a forwarder key — it was turned on at
+        # some point, and a VM still running the forwarder must never have its stamps forwarded
+        # upstream — and recorded on every row (`unattributed` included) while it is on. A
+        # project that never turned it on has no key: the addon reads, strips and records nothing.
+        origin = _origin_settings()
+        if origin is not None:
+            live["origin"] = origin
         if rules:
             names = dict.fromkeys(r.label or r.host for r in rules)  # a rule per path, one name
             label = "egress proxy (" + ", ".join(names) + ")"

@@ -41,8 +41,10 @@ Config via env (read once at startup). foldyard's supervisor sets LIVE_FILE, whi
 rules, the wall switch and the passthrough list out of the env and makes them live:
   LIVE_FILE         a JSON file {"rules": [<rule>, ...], "default_deny": bool, "passthrough":
                     [<pattern>, ...]} (plus "held" and "overlaps": where the proxy answers a
-                    request itself), re-read when it changes (per hook + once a second) with no
-                    restart. When set, INJECT_*, DEFAULT_DENY and PASSTHROUGH_HOSTS are ignored.
+                    request itself, and "origin": {"key_file", "record"} — the attributing
+                    forwarder's stamp, see _verify_origin), re-read when it changes (per hook +
+                    once a second) with no restart. When set, INJECT_*, DEFAULT_DENY and
+                    PASSTHROUGH_HOSTS are ignored.
                     Unreadable/malformed ⇒ fail closed (no rules, the wall enforcing, nothing
                     tunnelled). A change that narrows the policy closes the open connections it no
                     longer allows (see Injector.refresh).
@@ -394,6 +396,11 @@ def _destination(request) -> str | None:
     writes freely (mitmproxy's ``pretty_host`` prefers it, and warns it can be spoofed). Every
     decision — the wall, injection, the log — is made on this."""
     return _norm_host(request.host)
+
+
+def _client_id(flow) -> str | None:
+    """The id of the client connection ``flow`` arrived on (what an origin is bound to)."""
+    return getattr(getattr(flow, "client_conn", None), "id", None)
 
 
 def _claim_mismatch(request) -> bool:
@@ -906,6 +913,46 @@ class _Rule:
             request.headers[self.header] = value
 
 
+# ── the attributing forwarder's stamp (ADR-0034) ──────────────────────────────────────
+#
+# On a walled Lima VM with `[machine] attribution = "record"`, every connection from the VM reaches
+# this proxy through foldyard's forwarder, which writes ONE `X-Fy-Origin` header into the first
+# request head it carries — where the connection came from, under an HMAC keyed by a file only the
+# host and root in the guest can read — and parses nothing after that head. So the stamp is bound
+# to the CLIENT CONNECTION here, never to one request: a 407 retry, a keep-alive request and every
+# request decrypted inside a CONNECT arrive without one and inherit the first head's verdict. Any
+# stamp header on a later head was written by the client (the forwarder strips those and adds its
+# own only to the first), so it is stripped and never trusted. No stamp header ever goes upstream.
+
+_ORIGIN_HEADER = "X-Fy-Origin"
+_UNATTRIBUTED = "unattributed"  # no stamp: not through the forwarder (a host-side client, say)
+_FORGED = "forged"  # a stamp that didn't verify, or more than one on the first head
+
+
+def _verify_origin(values: list[str], key: bytes | None) -> dict | str:
+    """The first head's stamp headers → the verified fields (``mac`` dropped), or why not."""
+    if not values:
+        return _UNATTRIBUTED
+    if len(values) != 1 or key is None:
+        return _FORGED
+    import hashlib
+    import hmac
+
+    fields, sep, mac = values[0].rpartition("; mac=")
+    want = hmac.new(key, fields.encode(), hashlib.sha256).hexdigest()
+    if not sep or not hmac.compare_digest(want, mac.strip()):
+        return _FORGED
+    out = {}
+    for pair in fields.split("; "):
+        k, eq, v = pair.partition("=")
+        if not eq or not k:
+            return _FORGED
+        out[k] = v
+    if out.pop("v", None) != "1":
+        return _FORGED
+    return out
+
+
 class Injector:
     def __init__(self) -> None:
         # The injection rule SET. INJECT_RULES (a JSON list) wins — the multi-injector rules the
@@ -976,6 +1023,16 @@ class Injector:
         # let through on a build-scoped grant — so `server_connect` lets that dial out too.
         self._build_requesters: set[str] = set()
         self._policy_dirty = False
+        # The attributing forwarder's stamp (LIVE_FILE's `origin`; see _verify_origin). Off — no
+        # key file named — nothing is read, stripped or recorded: today's behaviour exactly.
+        self.origin_on = False  # a key file is named: stamps are verified and ALWAYS stripped
+        self.origin_record = False  # …and every row says whose it is, `unattributed` included
+        self._origin_key: bytes | None = None
+        self._origin_key_stamp: tuple | None = None
+        self._origin_key_path: Path | None = None
+        # client connection id → its first head's verdict (fields, or why not). Dropped on
+        # disconnect.
+        self._origins: dict[str, dict | str] = {}
         if self.live_path is not None:
             self.refresh()  # the first read: rules, wall and passthrough all come from the file
 
@@ -1066,6 +1123,12 @@ class Injector:
         self.passthrough_hosts = (
             [str(h) for h in passthrough if h] if isinstance(passthrough, list) else []
         )
+        origin = data.get("origin") if isinstance(data.get("origin"), dict) else {}
+        key_file = origin.get("key_file")
+        self._origin_key_path = Path(key_file) if isinstance(key_file, str) and key_file else None
+        self.origin_on = self._origin_key_path is not None
+        self.origin_record = self.origin_on and origin.get("record") is True
+        self._origin_key_stamp = None  # re-read the key on the next connection
         if not first:
             enforce = "on" if self.default_deny else "off"
             hosts = ", ".join(sorted(r.host for r in rules if r.host)) or "none"
@@ -1279,6 +1342,45 @@ class Injector:
         return None
 
     # ── egress allowlist (the default-deny wall) ───────────────────────────────
+    def _origin_key_now(self) -> bytes | None:
+        """The forwarder's key (its file's text, as the forwarder keys with it), re-read when the
+        file changes. Unreadable ⇒ ``None``: every stamp then reads ``forged``, never trusted."""
+        path = self._origin_key_path
+        if path is None:
+            return None
+        stamp = _file_stamp(path)
+        if stamp != self._origin_key_stamp:
+            self._origin_key_stamp = stamp
+            try:
+                text = path.read_text().strip()
+            except OSError:
+                text = ""
+            self._origin_key = text.encode() if len(text) == 64 else None
+        return self._origin_key
+
+    def _bind_origin(self, flow: http.HTTPFlow) -> None:
+        """Take the stamp off ``flow``'s request head; on the connection's FIRST head, its verdict
+        becomes the connection's. Every head, first or not, leaves without a stamp header."""
+        if not self.origin_on:
+            return
+        values = list(flow.request.headers.get_all(_ORIGIN_HEADER))
+        if values:
+            del flow.request.headers[_ORIGIN_HEADER]
+        client = getattr(flow, "client_conn", None)
+        if client is None or client.id in self._origins:
+            return  # a later head: whatever it carried was the client's
+        self._origins[client.id] = _verify_origin(values, self._origin_key_now())
+
+    def _with_origin(self, entry: dict, client_id: str | None) -> dict:
+        """``entry`` with whose connection it was, when there is something to say: a verified
+        stamp or a forged one always, ``unattributed`` only while recording is on."""
+        verdict = self._origins.get(client_id) if client_id is not None else None
+        if verdict is None and self.origin_record:
+            verdict = _UNATTRIBUTED
+        if verdict is not None and (self.origin_record or verdict != _UNATTRIBUTED):
+            entry["origin"] = verdict
+        return entry
+
     def _refresh_allow(self) -> None:
         """Re-read ALLOW_FILE when its mtime changes, so a host-side `allow` grant takes effect
         with NO daemon restart. Fail toward MORE blocking: a missing/unreadable/malformed file
@@ -1330,11 +1432,13 @@ class Injector:
             except OSError:
                 pass
 
-    def _write_entry(self, entry: dict) -> None:
-        """Append one JSONL row to the egress log, rotating first if it's grown past the cap.
-        Logging must NEVER break the proxy — swallow write errors with a warning."""
+    def _write_entry(self, entry: dict, client_id: str | None = None) -> None:
+        """Append one JSONL row to the egress log, rotating first if it's grown past the cap —
+        with whose connection it was (:meth:`_with_origin`). Logging must NEVER break the proxy —
+        swallow write errors with a warning."""
         if self.log_path is None:
             return
+        entry = self._with_origin(entry, client_id)
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             if self.log_path.exists() and self.log_path.stat().st_size > _LOG_MAX_BYTES:
@@ -1375,7 +1479,7 @@ class Injector:
             snippet = _error_snippet(flow.response)
             if snippet:
                 entry["error_body"] = snippet
-        self._write_entry(entry)
+        self._write_entry(entry, _client_id(flow))
 
     def _logged_path(self, flow: http.HTTPFlow) -> str:
         """The request path as logged: a query-param injector's credential redacted (its rule
@@ -1387,7 +1491,9 @@ class Injector:
                 path = _redact_param(path, name)
         return path
 
-    def _log_passthrough(self, host: str | None, *, build: bool = False) -> None:
+    def _log_passthrough(
+        self, host: str | None, *, build: bool = False, client_id: str | None = None
+    ) -> None:
         """An SNI-level row for a blind-tunnelled (not decrypted) HTTPS connection: host + time
         only — TLS hides method/path/status. The Network Log panel renders `passthrough` rows as
         a `tls tunnel` marker; ``build`` says it was tunnelled because an image build asked, not
@@ -1406,13 +1512,20 @@ class Injector:
         }  # fmt: skip
         if build:
             entry["build"] = True
-        self._write_entry(entry)
+        self._write_entry(entry, client_id)
 
-    def _log_blocked(self, host: str | None, request=None, *, mismatch: bool = False) -> None:
+    def _log_blocked(
+        self,
+        host: str | None,
+        request=None,
+        *,
+        mismatch: bool = False,
+        client_id: str | None = None,
+    ) -> None:
         """A row for a request the proxy REFUSED (:meth:`_blocked_entry`). No host → nothing."""
         entry = self._blocked_entry(host, request, mismatch=mismatch)
         if entry is not None:
-            self._write_entry(entry)
+            self._write_entry(entry, client_id)
 
     def _blocked_entry(self, host: str | None, request=None, *, mismatch: bool = False):
         """The row for a refused request — no upstream is ever contacted, so there's no real
@@ -1456,7 +1569,7 @@ class Injector:
         entry = self._answered.get(client_id)
         if entry is not None:
             self._answered[client_id] = None
-            self._write_entry(entry)
+            self._write_entry(entry, client_id)
 
     def _log_held(self, flow: http.HTTPFlow, axis: str) -> None:
         """A row for a dummy the proxy answered itself (``held``: the axis at rest) —
@@ -1474,9 +1587,9 @@ class Injector:
         ua = _user_agent(flow.request)
         if ua:
             entry["ua"] = ua
-        self._write_entry(entry)
+        self._write_entry(entry, _client_id(flow))
 
-    def _log_would_block(self, key: str | None, request) -> None:
+    def _log_would_block(self, key: str | None, request, client_id: str | None = None) -> None:
         """While the wall only OBSERVES (``fy allow enforce off``, or a learn window): a row for a
         host enforcement WOULD have refused — the same policy check as the wall, so the set
         ``fy allow learn`` offers is exactly what enforcing would need, ports included. Nothing
@@ -1507,7 +1620,7 @@ class Injector:
         ua = _user_agent(request)
         if ua:
             entry["ua"] = ua
-        self._write_entry(entry)
+        self._write_entry(entry, client_id)
 
     # ── mitmproxy hooks ──────────────────────────────────────────────────────────
     def running(self) -> None:
@@ -1552,12 +1665,14 @@ class Injector:
         grant, ``host:port`` (``fy allow add github.com:22``), so the blocked row carries the port
         and the TUI's allow action offers exactly that."""
         self.refresh()
+        self._bind_origin(flow)
+        client_id = _client_id(flow)
         host = _destination(flow.request)
         port = flow.request.port
         if _claim_mismatch(flow.request):
             flow.response = http.Response.make(403, _MISMATCH_BODY)
             key = host if port == _HTTPS_PORT else f"{host}:{port}"
-            self._log_blocked(key, flow.request, mismatch=True)
+            self._log_blocked(key, flow.request, mismatch=True, client_id=client_id)
             return
         build = self._trusted_build(flow.request)
         if self._connect_ok(host, port) or (build and self._build_granted(host, port, _HTTPS_PORT)):
@@ -1569,7 +1684,7 @@ class Injector:
         if not self.default_deny:
             # Observing: let it through, but record that enforcing would refuse it — the CONNECT
             # carries the client's User-Agent even for a host that is then tunnelled blind.
-            self._log_would_block(key, flow.request)
+            self._log_would_block(key, flow.request, client_id)
             self._note_build(flow)
             return
         if (
@@ -1580,7 +1695,7 @@ class Injector:
             self._answer_connect(flow, self._blocked_entry(key, flow.request))
             return
         flow.response = http.Response.make(403, _REFUSED_BODY)
-        self._log_blocked(key, flow.request)
+        self._log_blocked(key, flow.request, client_id=client_id)
 
     def _answer_connect(self, flow: http.HTTPFlow, owed: dict | None) -> None:
         """Establish the tunnel in the proxy, without an upstream: mitmproxy dials eagerly only
@@ -1629,7 +1744,7 @@ class Injector:
         if client_id in self._answered:
             return
         key = host if port == _HTTPS_PORT else f"{host}:{port}"
-        self._log_blocked(key)
+        self._log_blocked(key, client_id=client_id)
         ctx.log.info(f"egress_proxy: refused a connection to {key} (not granted)")
 
     def _trusted_build(self, request) -> bool:
@@ -1684,6 +1799,7 @@ class Injector:
         self._build_clients.discard(client.id)
         self._build_requesters.discard(client.id)
         self._conns.pop(client.id, None)
+        self._origins.pop(client.id, None)
 
     def _tunnel(self, target: str | None, build: bool) -> bool:
         """Would a TLS connection to ``target`` be blind-tunnelled now? (``tls_clienthello``.)"""
@@ -1792,7 +1908,7 @@ class Injector:
         conn = self._conns.get(client.id) if client is not None else None
         if client is not None and client.id in self._build_clients:
             data.ignore_connection = True  # a trusted build: it has no CA to verify ours with
-            self._log_passthrough(target, build=True)
+            self._log_passthrough(target, build=True, client_id=client.id)
             if conn is not None:
                 conn["blind"] = target
             return
@@ -1802,7 +1918,7 @@ class Injector:
         # request/response hooks log the full request — the surprising egress worth scrutinising.
         if self.capture_mode != "full" or _host_matches(target, self.passthrough_hosts):
             data.ignore_connection = True
-            self._log_passthrough(target)
+            self._log_passthrough(target, client_id=client.id if client is not None else None)
             if conn is not None:
                 conn["blind"] = target
 
@@ -1833,6 +1949,8 @@ class Injector:
         await self._on_request(flow)
 
     async def _on_request(self, flow: http.HTTPFlow) -> None:
+        self.refresh()
+        self._bind_origin(flow)  # first, on every head: no stamp header may go upstream
         if flow.metadata.get("egress_proxy_judged"):
             return
         flow.metadata["egress_proxy_judged"] = True
@@ -1848,7 +1966,7 @@ class Injector:
             flow.response = http.Response.make(403, _MISMATCH_BODY)
             flow.metadata["egress_proxy_blocked"] = True
             key = host if port == default else f"{host}:{port}"
-            self._log_blocked(key, flow.request, mismatch=True)
+            self._log_blocked(key, flow.request, mismatch=True, client_id=_client_id(flow))
             self._owe_nothing(flow)
             return
         # Two switches on, both claiming this host and path, so neither injects: answer with the
@@ -1912,12 +2030,12 @@ class Injector:
             if self.default_deny:
                 flow.response = http.Response.make(403, _REFUSED_BODY)
                 flow.metadata["egress_proxy_blocked"] = True  # so `response` doesn't re-log a 403
-                self._log_blocked(key, flow.request)
+                self._log_blocked(key, flow.request, client_id=_client_id(flow))
                 self._owe_nothing(flow)
                 return
             if flow.request.scheme != "https":
                 # Observing, cleartext: record it (HTTPS was already recorded at its CONNECT).
-                self._log_would_block(key, flow.request)
+                self._log_would_block(key, flow.request, _client_id(flow))
         if _is_build_marker(flow.request.headers.get("Proxy-Authorization")):
             del flow.request.headers["Proxy-Authorization"]  # ours, not the upstream's
         rule = self._rule_for(flow)

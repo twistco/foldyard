@@ -2107,6 +2107,13 @@ def build_tokens_file() -> Path:
     return Path(env).expanduser() if env else state_dir() / "build-tokens.json"
 
 
+def forwarder_key_file() -> Path:
+    """The attributing forwarder's HMAC key (ADR-0034, :mod:`foldyard.forwarder`): host-kept,
+    project-wide (one VM per project), embedded root-only into the guest by the forwarder's boot
+    script, and read by the proxy addon by PATH from its live settings — never from its env."""
+    return state_dir() / "forwarder.key"
+
+
 def log_dir() -> Path:
     """This worktree's host-daemon logs (egress proxy, gcp minter, supervisor). Per-worktree so
     each branch's proxy listener logs separately. ``FOLDYARD_LOG_DIR`` wins, else

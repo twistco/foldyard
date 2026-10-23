@@ -3236,3 +3236,27 @@ def test_the_live_file_carries_the_rules_derived_defaults(monkeypatch):
     )
     live = reg.desired_daemons({"github": "on"})["egress-proxy"]["live"]["data"]
     assert live["defaults"] == {"FY_INJECT_GITHUB": "123"}
+
+
+def test_proxy_daemon_names_the_forwarder_key_by_path_only_once_one_exists(monkeypatch, tmp_path):
+    # ADR-0034 + ADR-0030: the key is read by the addon from a FILE its live settings name — never
+    # carried in the launch env (which would restart the proxy on a toggle, and hand a secret to
+    # anything that reads the process's environment). A project that never turned attribution on
+    # has no key, and its proxy's live settings say nothing about origins: nothing changes.
+    monkeypatch.setattr(proxy.config, "proxy_enabled", lambda: True)
+    monkeypatch.setattr(proxy.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(proxy.config, "machine_attribution", lambda: "record")
+    reg = Registry([proxy.ProxyPlugin()])
+    spec = reg.desired_daemons({})["egress-proxy"]
+    assert "origin" not in spec["live"]["data"]
+    key = tmp_path / "forwarder.key"
+    key.write_text("ab" * 32 + "\n")
+    on = reg.desired_daemons({})["egress-proxy"]
+    assert on["live"]["data"]["origin"] == {"key_file": str(key), "record": True}
+    assert on["env"] == spec["env"] and on["cmd"] == spec["cmd"]  # no restart, no key in env
+    assert "ab" * 32 not in json.dumps(on["env"]) + json.dumps(on["cmd"])
+    # turned off again: still verified and stripped (a VM may still run the forwarder until its
+    # restart), no longer recorded as `unattributed` on every row
+    monkeypatch.setattr(proxy.config, "machine_attribution", lambda: "off")
+    off = reg.desired_daemons({})["egress-proxy"]
+    assert off["live"]["data"]["origin"] == {"key_file": str(key), "record": False}

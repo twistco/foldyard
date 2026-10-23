@@ -43,7 +43,6 @@ from .sandbox import SshBackend, _ssh
 # First line after the shebang of the rendered boot script; lima.yaml carries it verbatim. A
 # regex-literal string (set_provision matches entries by it), mentioning no other script's marker.
 MARKER = "# fy-forwarder "
-KEY_NAME = "forwarder.key"
 
 
 def wanted() -> bool:
@@ -55,7 +54,7 @@ def _asset(name: str) -> Path:
 
 
 def key_path() -> Path:
-    return config.state_dir() / KEY_NAME
+    return config.forwarder_key_file()
 
 
 def key() -> str:
