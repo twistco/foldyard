@@ -17,6 +17,7 @@ exclude_docs: |
   talks/
   demo/
   ebpf-spike-kit/
+  lima-freeze-kit/
   archive/lima-network-forcing-kit/
 
 hooks:
@@ -99,3 +100,4 @@ nav:
       - nested-virt.md
       - monitor-pipeline.md
       - ebpf-monitoring-spike.md
+      - lima-usernet-freeze.md

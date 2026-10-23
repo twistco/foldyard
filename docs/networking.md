@@ -378,7 +378,11 @@ own HTTP client, or a program opening raw sockets.
   misses in a row, with the share of a CPU the proxy used since the first miss, then
   `answering again` with how long it lasted. A proxy near 100% was overloaded (fewer parallel
   builds help); an idle one was stuck on something else. No such line while the box saw timeouts
-  points at the VM's network instead.
+  points at the VM's network instead: on a `vz` VM, Lima's user-mode network drops the SYNs of a
+  new connection that reuses a recently closed one's port, for up to 68 s, often catching every
+  caller at once. Established connections are unaffected, and the connect completes on a later
+  SYN retransmission
+  ([the investigation](https://github.com/twistco/foldyard/blob/main/docs/lima-usernet-freeze.md)).
 - **A request gets a 502 from foldyard rather than from the service.** The proxy answers a
   request itself, without sending it, when the credential it should carry can't be had: the
   token service on your computer failed (`mint failed` in the Network Log; the message quotes
