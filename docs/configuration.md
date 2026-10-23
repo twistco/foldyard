@@ -329,16 +329,31 @@ disk_gib = 60
     - Each line is signed in the VM with a key the box's user can't read, so a line that was
       altered on the way is dropped and counted. One that went missing shows as a gap. `fy
       doctor`'s `monitor events` row shows both counts.
-  - How to read the labels:
-    - A **container** is identified from the kernel's own records. Its name and worktree are what
-      the engine reports, which is whatever the container's creator set. Anything holding the
-      engine socket can claim to be another worktree's container.
-    - **`vm`** is the VM itself, for example podman, or pasta making a container's connection.
-    - **`unattributed`** is a container that came and went too fast to be seen. That is usually
-      the box's own throwaway containers.
+  - How to read the labels (`who`). Each one comes from what the VM's kernel reports, never from
+    a process's name, which anything can choose:
+    - A **container** is identified from the kernel's own records, and only between its start and
+      its exit. Its name and worktree are what the engine reports, which is whatever the
+      container's creator set. Anything holding the engine socket can claim to be another
+      worktree's container.
+    - **`build`** is an image build's step (a `RUN` line). It runs what the box wrote, so treat it
+      as the box's activity.
+    - **`podman`** is podman's own: conmon, pasta (a container's connections), crun, netavark and
+      the engine's API service. On a busy VM that is hundreds of thousands of events an hour, and
+      thousands an hour when idle.
+    - **`vm`** is the VM itself: its login sessions, systemd and its services, and the monitor's
+      own transport.
     - **`ambiguous`** means the records disagree, and foldyard doesn't guess. Usually a
       namespace number one container left and the next one took within the same minute, for an
-      event the containers' own start and exit don't place on either side.
+      event the containers' own start and exit don't place on either side. Also a container
+      holding a process in the VM's or podman's own namespace, which a privileged container can
+      do.
+    - **`unattributed`** is none of these. Mostly podman's tools running for an instant in a
+      namespace of their own, which the kernel's records can't tell apart from a container
+      started the same way. Also processes the monitor never saw start, and containers that came
+      and went before any record of them was taken.
+    - **`crossed`** (`true` on an event) means a process ran in the VM's or podman's namespace
+      but its parent was in a container's or a build's. Something got out of a container. It is
+      labelled with the container it came from, and every hook gets it.
   - Each event also names the process that started it: `--json` and hooks carry `ppid`, `parent`
     and `parent_args` (that process's id, binary and arguments), plus `exec_id` and
     `parent_exec_id` (the ids of the process's own `exec` event and its parent's), so you can
@@ -357,8 +372,21 @@ disk_gib = 60
     # url = "https://hooks.example.org/fy"             # or POST each batch as JSON
     # file = "/abs/path/events.jsonl"                  # or append each batch as a signed line
     kinds = ["exec", "connect", "file"]                # optional filters
-    who = ["container", "unattributed"]
+    who = ["container", "build", "unattributed"]
     ```
+
+    - Without `who`, a hook gets every event except `vm` and `podman`. To change that for every
+      such hook, set `skip_unless_asked` at the top of the file, before any `[[hook]]`, for example
+      `skip_unless_asked = ["vm", "podman", "build"]`. A hook whose `who` names a label gets it
+      either way.
+    - What a hook's filters pass over is never dropped silently. Every batch has a `passed` table
+      counting the events left out since the hook's last batch, by label (`{"podman": 41230,
+      "vm": 2210}`). `fy monitor hook` shows the counts still owed to the next batch.
+    - Leaving `vm` and `podman` out has a cost. A process that escaped a container into the VM
+      would be labelled `vm` or `podman` from then on, so a hook that skips them would miss
+      everything after the escape. foldyard can't remove that blind spot, but it narrows it:
+      the step out itself is `crossed` and reaches every hook, and a container holding a process
+      in either namespace is `ambiguous`. `fy monitor` always shows everything.
 
     - `fy monitor hook add` writes this file for you, checking each hook the way the supervisor
       will. Your own edits and comments are kept. For example, to give the box a file of its

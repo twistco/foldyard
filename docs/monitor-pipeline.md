@@ -92,6 +92,20 @@ A first step towards that, stdlib only, in `src/foldyard/monitorstore.py`:
   When a segment goes, its snapshots go too, except the newest of each boot: the one before the
   oldest events still kept. It also keeps each container init's **marks** (below), for the same
   reason it keeps the snapshots: a mark can sit in an earlier read than the event it decides.
+  And each namespace's **facts** (below): the same marks with where each init came from, podman
+  entering a namespace from the VM's own, and anything entering one from elsewhere (an `other`),
+  each kept once a run. The marks and entries were a few thousand rows over cabash's boot; the
+  `other` facts, added after that measurement, add a row each time a run of them starts on a
+  namespace (a container's runtime entering it, `podman exec`). Each fact is classified once,
+  when it is indexed, from the facts before it (`monitorstore.classify`), and stored with its
+  kind: a container's init, a build's, a nested one, a step in. So a read asks only for the newest
+  few facts of some kinds about a namespace, never for the history behind them, and when a
+  segment goes those few stay, with every fact after the snapshot kept from before the oldest
+  stored record (podman entered its own namespace once, at boot, and the join must still know
+  it). A property holds retention to the join: after any drop, any stretch still stored reads as
+  the join over everything ever stored. The first retention, the newest fact of each kind with
+  kinds worked out at read time, lost an init's origin to a later entry (randomised runs,
+  2026-10-23).
 
 **Why the catalogue (2026-10-21).** The join needs the snapshot before an event and the one after
 it. Readers used to look only within a byte window — a hook 1 MB back and 4 MB on from its
@@ -137,6 +151,75 @@ container's init entering a number too (the same mark), makes a number new again
 it, and looks for a number no snapshot found again after a minute whatever else it snapshots — which
 changes the monitor's boot script, so a monitored VM takes it at `fy machine stop && fy up`.
 
+**Why the facts: who isn't a container (2026-10-23, later).** With the marks in, `unattributed`
+was still most of a busy night, and none of it was a container's: in cabash's 00:30–02:10, 403k of
+560k came from podman's own rootless mount namespace (conmon, pasta, rpm, crun, netavark,
+aardvark-dns) and 106k from image builds. Over the boot: podman 1.02 M, builds 258 k, of 1.49 M.
+podman's runs at 7k events an hour on an idle VM and 254k in a busy hour. The docs called it
+"usually the box's own throwaway containers". The join now names them from kernel facts the box
+can't fake, read off the stored events (so stored history re-joins with it, and nothing in the VM
+changed):
+
+- **`podman`** — the namespace a process enters straight from the VM's own: its parent in the
+  VM's mount namespace (Tetragon's `is_host`), itself outside the VM's user namespace. That is
+  podman entering its rootless namespace, as every podman command does (63k times a boot on
+  cabash). Nothing in a container has a parent in the VM's namespace. An entry has no end, though,
+  and numbers are reused lowest-free: a namespace is podman's only until something is seen
+  entering it from anywhere but the VM's — an init, or a process whose parent was in another
+  namespace, neither of them the VM's. Otherwise a box container that takes the number of a
+  namespace the VM once entered, and that Tetragon never shows an init for (`--pid=host`), would
+  be read as podman's, which a default hook skips (the review of #138). The price: after a step
+  into podman's namespace from a container (itself `crossed`), what runs there reads
+  `unattributed` until podman next enters it from the VM — any podman command run in the VM (the
+  API service that starts the box's containers never enters again). A step in doesn't make the
+  namespace someone else's, though: the containers and builds podman starts from it keep their
+  marks. Only a number seen TAKEN (an init on it, or something entering it from podman's or the
+  VM's side) stops counting as where podman starts them. An init from a container into a namespace
+  podman's entry still holds (`unshare -p -f nsenter …`: in the init tree, its parent outside) is
+  no new namespace but a step in shaped like an init: `crossed`, and so is the next step, while
+  podman's own inits from there lose their marks until podman enters again (the review of #138).
+- **`build`** — an init (`in_init_tree`, its parent outside its mount namespace) started in
+  podman's namespace by podman itself rather than conmon: buildah's `RUN` step. 594 of them on
+  cabash's boot, none ever named by a snapshot (builds run outside podman's container scopes). A
+  container's init comes from conmon there: 921 of them.
+- **`vm`** also covers the VM's own user namespace: systemd's sandboxed services
+  (systemd-userwork, coredump, udevadm: 1,643 events), each in a mount namespace of its own. A
+  rootless container is never in it.
+- **An init from anywhere else** — a namespace a process made inside a container (`unshare -Urpm
+  --fork`, which any container can do) — says nothing about whose a number is. Read as a
+  container's mark, it would let the box end its own container's life early, or pass its work off
+  as a build.
+- **A container's life** is bounded by its init's marks, paired by the init's pid namespace: none
+  of a container's events before its init entered or after it left, except its own processes
+  killed after their init (in its pid namespace). That fixes the follow-up #136 left: podman's
+  netavark, nft and crun run for an instant in a namespace of their own carrying the number a
+  container takes next or just left (the lowest free one), and the snapshot naming the container
+  took them in. 6,405 events over the boot, all podman's tools, now no container's. One exception
+  is left: a snapshot taken while the runtime set a container up names it for podman's tools just
+  before, too (157 events): telling those apart needs the next window's marks, which a hook
+  delivering at the first snapshot after an event can't wait for.
+- **Crossing** — a process in the VM's or podman's namespace whose parent was in a container's —
+  is the kernel's trace of an escape. It is `crossed`, named after where it came from, and never
+  left out by a hook's filter. None on cabash's boot. A container's scope holding a process in
+  either namespace (a privileged container can `nsenter` there; crun joins a scope a moment
+  before it leaves podman's namespace — once on cabash) is `ambiguous`, never filed under them.
+
+What stays `unattributed` (212k over the boot): podman's runtime in a namespace of its own for an
+instant (171k: crun re-executing itself, the CA wrapper, netavark), indistinguishable by kernel
+facts from a box container started with `--pid=host` that dies before a snapshot; exits of
+processes Tetragon never saw start (34k: no namespaces at all); and containers no snapshot named
+(8k). Hooks: a hook without `who` now skips `vm` and `podman` (§6), which on that boot is 3.83 M
+events delivered → 1.84 M; a `who = ["container"]` hook gets the same 1.37 M less podman's tools,
+and every batch now counts what it passed over.
+
+**What a skipped label costs.** A process that escapes a container to the VM user lands in exactly
+the namespaces a default hook skips. What narrows it: the step out is `crossed` (sent to every
+hook), a container scope holding a process there is `ambiguous`, `passed` counts every skipped
+event per batch (a sudden jump in `vm` or `podman` is visible without the events), and
+`fy monitor` shows everything. What it can't: what that process does next, once it is a VM or
+podman process. Shell commands by the box's uid in the VM's namespace are no signal on their own:
+the box runs as the VM user, and the pull's own ssh runs a shell as that user every few seconds.
+
 ## 3. Tiers and retention
 
 Budget: **8 GB per project** (configurable), at ~40–70 B/event compressed ≈ 120–215 M events of
@@ -164,11 +247,12 @@ coarsened (hour → day) from the oldest → exemplars beyond their own cap. Nev
 a security-relevant action:
 
 - **dropped:** exits with status 0 and no signal (60% of all events; the exec is kept, so "what
-  ran" survives — only "it finished normally" is lost), and `vm`-namespace plumbing execs whose
-  binary *and* parent are on a short, packaged list (shell init helpers under a login shell,
-  podman/conmon/crun internals).
-- **always kept:** every exec in a container or `unattributed`; every connect; every file event;
-  non-zero exits and signals; snapshots, gaps, forgeries, engine claims.
+  ran" survives — only "it finished normally" is lost), and `vm`- or `podman`-labelled plumbing
+  execs whose binary *and* parent are on a short, packaged list (shell init helpers under a login
+  shell, podman/conmon/crun internals).
+- **always kept:** every exec in a container, a build or `unattributed`; every `crossed` event;
+  every connect; every file event; non-zero exits and signals; snapshots, gaps, forgeries,
+  engine claims.
 
 Expected: roughly a third of the raw volume. To be checked against real sessions before it's
 the default.
@@ -199,9 +283,10 @@ and an invalid filter stops Tetragon — validated in the host-tier e2e like the
   last self-observation loop (~120 events per pull).
 - **`pasta` exits** (14% of events; `pasta` is rootless networking plumbing — its *connects* are
   kept, they are the real egress).
-- **Fields:** keep `process.ns.mnt` (attribution needs it) and drop the other ten namespaces;
-  keep the parent's `exec_id` and `binary`, drop the rest of the parent object. Roughly halves an
-  event before compression.
+- **Fields:** keep `process.ns.mnt`, `.pid` and `.user` and the parent's `ns.mnt` and
+  `ns.user` (attribution needs them: §2.1's facts), drop the other namespaces; keep the parent's
+  `exec_id` and `binary`, drop the rest of the parent object. Roughly halves an event before
+  compression.
 
 Not filtered at source: anything in a container. Source filters are lossy and can't be revisited;
 thinning beyond plumbing belongs to the tiers, where `everything` still has it for 8 h.
@@ -256,19 +341,29 @@ command = ["/usr/local/bin/fy-score", "--json"]   # argv, absolute path, no shel
 # headers = { Authorization = "Bearer …" }      # url hooks only
 stage = "events"                    # the only stage today; later: scored, decided, reviewed
 kinds = ["exec", "connect", "file"] # optional filters; omitted = all
-who = ["container", "unattributed"]
+who = ["container", "build", "unattributed"]   # omitted = all but `skip_unless_asked`
 worktrees = ["main"]
 timeout = 15                        # seconds
 ```
 
+- **`who`** is one of `container`, `build`, `unattributed`, `ambiguous`, `podman`, `vm` (§2.1). A
+  hook without `who` gets all but `vm` and `podman`; `skip_unless_asked = [...]` at the top of the
+  file, before any `[[hook]]`, changes that for every such hook (an invalid value is reported and
+  the default kept). An event with `crossed: true` reaches every hook whatever its `who`.
 - **Payload** (stdin for a command, the body for a url): `{"schema": "fy.monitor.events/1",
-  "project", "hook", "events": [...], "first": [boot, seq], "last": [boot, seq], "gaps": [...]}`
+  "project", "hook", "events": [...], "first": [boot, seq], "last": [boot, seq], "gaps": [...],
+  "passed": {...}}`
   — the same `Event` fields `fy monitor --json` prints. Besides the attribution (`who`,
   `container`, `name`, `worktree`), each event carries its ancestry: `ppid`, `parent`,
   `parent_args` (the one hop) and `exec_id`/`parent_exec_id` (the links to rebuild the whole tree
-  from `exec` events) — how a scorer tells a container's own daemon from what a session ran — and
+  from `exec` events) — how a scorer tells a container's own daemon from what a session ran —
   `mnt`, its mount namespace number (what the join matched; namespace numbers are reused, so
-  never a container id on its own).
+  never a container id on its own), and `crossed`.
+- **Passed** (added 2026-10-23, the same schema): how many events this hook's filters passed over
+  since its last batch, by `who` — `{"podman": 41230, "vm": 2210}`. Counted at least once (a
+  batch retried after a crash may count again), never silently gone: what a batch didn't carry
+  and no `gaps` entry covers is in a `passed` count, or owed to the next batch (`fy monitor hook`
+  shows it).
 - **Gaps** (added 2026-10-21, within the same schema: `gaps` and `mnt` are new keys, nothing
   changed meaning). Every batch carries `gaps`, usually `[]`. Each entry says the batch can't
   vouch for a stretch of the stream:

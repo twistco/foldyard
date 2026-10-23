@@ -593,7 +593,10 @@ def hook_add(
     ),
     url: str = typer.Option("", "--url", help="POST each batch as JSON"),
     who: list[str] | None = typer.Option(
-        None, "--who", help="container, vm, unattributed, ambiguous (repeat or comma-separate)"
+        None,
+        "--who",
+        help="container, build, unattributed, ambiguous, podman, vm (repeat or comma-separate); "
+        "without it, all but vm and podman",
     ),
     kinds: list[str] | None = typer.Option(
         None, "--kinds", help="exec, exit, connect, file, other (repeat or comma-separate)"

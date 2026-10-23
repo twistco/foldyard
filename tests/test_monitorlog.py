@@ -256,8 +256,17 @@ def test_run_idles_while_the_monitor_is_off(monkeypatch):
 # ── the join ────────────────────────────────────────────────────────────────────────────
 
 
+# podman's rootless namespace (where conmon runs: the inits below come from it), as the catalogue
+# records it — podman entering it straight from the VM's own, as every podman command does
+PODMAN_NS = 7
+PODMAN = {"k": "fact", "inode": str(PODMAN_NS), "what": "entry", "start": "", "outside": "1",
+          "by": ""}  # fmt: skip
+
+
 def _records(*recs: dict, boot: str = BOOT) -> list[dict]:
-    return [{**r, "boot": boot, "seq": i} for i, r in enumerate(recs)]
+    return [{**PODMAN, "boot": boot, "seq": -1}] + [
+        {**r, "boot": boot, "seq": i} for i, r in enumerate(recs)
+    ]
 
 
 def _who(events):
@@ -294,17 +303,30 @@ def test_join_calls_disagreeing_snapshots_ambiguous_never_a_guess():
     assert monitorlog.attribute(shared, "fyex")[0].who == "ambiguous"
 
 
-def init(inode: int, kind: str = "process_exec", start: str = "2026-10-04T10:00:00.5Z") -> dict:
+def init(
+    inode: int,
+    kind: str = "process_exec",
+    start: str = "2026-10-04T10:00:00.5Z",
+    by: str = "/usr/bin/conmon",
+) -> dict:
     """A container's init entering (exec) or leaving (exit) its mount namespace: in the init tree,
     its parent (conmon) outside the namespace — the mark the join reads a reused number by."""
-    e = ev(inode, binary="/run/podman-init", kind=kind, parent={"ns": {"mnt": {"inum": 7}}})
+    parent = {"binary": by, "ns": {"mnt": {"inum": PODMAN_NS}}}
+    e = ev(inode, binary="/run/podman-init", kind=kind, parent=parent)
     e["e"][kind]["process"] |= {"in_init_tree": True, "start_time": start}
+    e["e"][kind]["process"]["ns"]["pid"] = {"inum": 5000 + inode}  # its container's own
     return e
 
 
-def proc(inode: int, start: str, kind: str = "process_exec") -> dict:
+HOST_PID = {"inum": 4026531836, "is_host": True}  # the VM's own pid namespace
+
+
+def proc(inode: int, start: str, kind: str = "process_exec", host_pid: bool = False) -> dict:
+    """A process in mount namespace ``inode``: a container's own (its own pid namespace), or —
+    ``host_pid`` — one in the VM's pid namespace, as podman's tools are (netavark, nft, crun)."""
     e = ev(inode, kind=kind)
     e["e"][kind]["process"]["start_time"] = start
+    e["e"][kind]["process"]["ns"]["pid"] = HOST_PID if host_pid else {"inum": 5000 + inode}
     return e
 
 
@@ -408,21 +430,495 @@ def test_a_stretch_is_joined_with_the_marks_outside_it(monkeypatch, tmp_path):
     from foldyard import monitorstore
 
     monkeypatch.setattr(monitorstore.config, "state_dir", lambda: tmp_path)
-    recs = _records(
-        snap({200: [BOX]}, t=T_BEFORE),
-        init(200, "process_exit", start="2026-10-04T09:00:00Z"),
-        init(200, start="2026-10-04T10:00:01Z"),
-        proc(200, "2026-10-04T10:00:02Z"),
-        snap({200: [OTHER]}),
-    )
+    recs = [
+        {**r, "boot": BOOT, "seq": i}
+        for i, r in enumerate(
+            [
+                entered(),  # podman's namespace, where conmon starts the inits from
+                snap({200: [BOX]}, t=T_BEFORE),
+                init(200, "process_exit", start="2026-10-04T09:00:00Z"),
+                init(200, start="2026-10-04T10:00:01Z"),
+                proc(200, "2026-10-04T10:00:02Z"),
+                snap({200: [OTHER]}),
+            ]
+        )
+    ]
     monitorstore.append(recs)
     cat = monitorlog.catalogue()
     assert cat is not None
     try:
-        (e,) = monitorlog.join([recs[3]], cat, "fyex")
+        (e,) = monitorlog.join([recs[4]], cat, "fyex")
     finally:
         cat.close()
     assert (e.who, e.container) == ("container", OTHER)
+
+
+def test_a_stretch_after_retention_reads_the_marks_after_the_snapshot_kept_before_it(
+    monkeypatch, tmp_path
+):
+    # the snapshot before the oldest stored event is one retention kept from a removed segment,
+    # and so must the marks after it be: the old container's exit says the snapshot's container
+    # is not the one that started next (test_a_container_the_snapshot_before_saw_being_set_up…)
+    # — and it came from podman's namespace as entered at boot, not as entered again since (after
+    # a step in, which ends a run of entries)
+    from foldyard import monitorstore
+
+    monkeypatch.setattr(monitorstore.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 10)
+    stepped_in = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 900}}})
+    stream = [entered(), snap({200: [BOX]}, t=T_BEFORE),
+              init(200, "process_exit", start="2026-10-04T09:00:00Z"), stepped_in, entered(),
+              init(200, start="2026-10-04T10:00:01Z"), proc(200, "2026-10-04T10:00:02Z"),
+              snap({})]  # fmt: skip
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    monitorstore.append(recs[:6])
+    monitorstore.append(recs[6:])
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        first = monitorstore.segments()[0]
+        first.path.unlink()
+        cat.drop([first.id])
+        (e,) = monitorlog.join([recs[6]], cat, "fyex")
+    finally:
+        cat.close()
+    assert monitorlog.attribute(recs, "fyex")[-1].who == "unattributed"  # over everything
+    assert e.who == "unattributed"
+
+
+def _stored(monkeypatch, tmp_path, *chunks: list[dict]):
+    """``chunks`` appended to the store one by one (a segment each), the catalogue caught up."""
+    from foldyard import monitorstore
+
+    monkeypatch.setattr(monitorstore.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 10)
+    for chunk in chunks:
+        monitorstore.append(chunk)
+    return monitorstore
+
+
+def test_the_catalogue_classifies_each_fact_as_the_join_over_everything_does(monkeypatch, tmp_path):
+    # each fact's kind is decided once, when indexed, from the facts before it: a number podman
+    # entered once, stepped into from a container (takes nothing), then entered from podman's side
+    # (takes it — not a repeat of the step in, though both are `other`): an init from there is no
+    # build's, read through the catalogue as over everything
+    stepped_in = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    took = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": PODMAN_NS}}})
+    made = init(900, start="2026-10-04T10:00:01Z", by="/bin/sh")
+    made["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 800
+    stream = [entered(), snap({}), entered(800), snap({}), stepped_in, took, made,
+              proc(900, "2026-10-04T10:00:02Z"), snap({})]  # fmt: skip
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    _stored(monkeypatch, tmp_path, recs)
+    truth = {e.seq: e.who for e in monitorlog.attribute(recs, "fyex")}
+    assert truth[6] == truth[7] == "unattributed"
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        got = {
+            e.seq: e.who for r in recs if r["k"] == "ev" for e in monitorlog.join([r], cat, "fyex")
+        }
+    finally:
+        cat.close()
+    assert got == truth
+
+
+def test_retention_keeps_what_the_next_facts_are_classified_by(monkeypatch, tmp_path):
+    # the number was taken from podman's side, then stepped into: retention keeps the fact that
+    # took it as well as the newest one, so an init coming from it after the drop is no build's
+    took = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": PODMAN_NS}}})
+    stepped_in = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    made = init(900, start="2026-10-04T10:00:01Z", by="/bin/sh")
+    made["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 800
+    stream = [entered(), entered(800), took, stepped_in, snap({}), ev(1), made,
+              proc(900, "2026-10-04T10:00:02Z"), snap({})]  # fmt: skip
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    store = _stored(monkeypatch, tmp_path, recs[:5], recs[5:6])
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        first = store.segments()[0]
+        first.path.unlink()
+        cat.drop([first.id])
+        store.append(recs[6:])
+        cat.catch_up()
+        got = [e.who for e in monitorlog.join(recs[6:8], cat, "fyex")]
+    finally:
+        cat.close()
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][-2:] == got == ["unattributed"] * 2
+
+
+def test_a_record_the_catalogue_has_not_classified_yet_is_read_by_what_it_kept(
+    monkeypatch, tmp_path
+):
+    # a read can hold records newer than the catalogue: their facts are classified on the spot,
+    # from the catalogue's newest few about each namespace — the one that took the number included,
+    # not only the newest
+    took = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": PODMAN_NS}}})
+    stepped_in = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    made = init(900, start="2026-10-04T10:00:01Z", by="/bin/sh")
+    made["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 800
+    stream = [entered(), snap({}), entered(800), took, stepped_in, snap({}), made,
+              proc(900, "2026-10-04T10:00:02Z")]  # fmt: skip
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    _stored(monkeypatch, tmp_path, recs[:6])
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        got = [e.who for e in monitorlog.join(recs[6:], cat, "fyex")]
+    finally:
+        cat.close()
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][-2:] == got == ["unattributed"] * 2
+
+
+def entered(inode: int = PODMAN_NS, binary: str = "/usr/bin/conmon") -> dict:
+    """podman entering mount namespace ``inode`` straight from the VM's own: a process there, its
+    parent in the VM's namespace (Tetragon's ``is_host``), outside the VM's user namespace."""
+    parent = {"binary": "/usr/bin/podman", "ns": {"mnt": {"inum": 1, "is_host": True}}}
+    e = ev(inode, binary=binary, parent=parent)
+    e["e"]["process_exec"]["process"]["ns"]["user"] = {"inum": 4026532575}
+    return e
+
+
+def _whos(events):
+    return [(e.who, e.container[:1], e.crossed) for e in events]
+
+
+def test_podmans_own_namespace_is_podman():
+    # the namespace podman enters from the VM's own, on every command: conmon, pasta, crun,
+    # netavark live there — 403k of cabash's 560k `unattributed` events (2026-10-23 00:30–02:10)
+    stream = [snap({}), entered(), ev(PODMAN_NS, "/usr/bin/pasta"), ev(PODMAN_NS, "/usr/bin/rpm"),
+              ev(999), snap({})]  # fmt: skip
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")] == [
+        "podman", "podman", "podman", "unattributed"
+    ]  # fmt: skip
+
+
+def test_a_vm_service_in_a_mount_namespace_of_its_own_is_the_vm():
+    # systemd's sandboxed services (userdbd, coredump, hostnamed): the VM's own user namespace,
+    # which nothing in a rootless container can be in
+    service = ev(400, binary="/usr/lib/systemd/systemd-userwork")
+    service["e"]["process_exec"]["process"]["ns"]["user"] = {"inum": 4026531837, "is_host": True}
+    vm_mnt = ev(4026531832, binary="/usr/bin/grep")
+    vm_mnt["e"]["process_exec"]["process"]["ns"]["mnt"]["is_host"] = True  # no snapshot near it
+    assert [e.who for e in monitorlog.attribute(_records(service, vm_mnt), "fyex")] == ["vm", "vm"]
+
+
+def test_an_image_build_step_is_a_build():
+    # buildah's RUN steps: an init in its own pid namespace, started by podman itself in its own
+    # namespace (not by conmon) — never in a podman scope, so no snapshot names it
+    recs = _records(
+        snap({}),
+        init(500, start="2026-10-04T10:00:01Z", by="/proc/self/exe"),
+        proc(500, "2026-10-04T10:00:02Z"),
+        init(500, "process_exit", start="2026-10-04T10:00:01Z", by="/proc/self/exe"),
+        proc(500, "2026-10-04T10:00:02Z", kind="process_exit"),  # the step's own, dying after it
+        proc(500, "2026-10-04T10:00:03Z", host_pid=True),  # podman's teardown on the number
+        snap({}),
+    )
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")] == [
+        "build", "build", "build", "build", "unattributed"
+    ]  # fmt: skip
+
+
+def test_an_init_from_inside_a_container_is_neither_a_containers_nor_a_builds():
+    # any container can make an init of its own (`unshare -Urpm --fork`): it comes from the
+    # container's namespace, not podman's, so it is no mark of a container or a build — the box
+    # could otherwise end its own container's life early, or pass its work off as a build
+    recs = _records(
+        snap({200: [BOX]}, t=T_BEFORE),
+        init(600, start="2026-10-04T10:00:01Z"),
+        proc(600, "2026-10-04T10:00:02Z"),
+        snap({200: [BOX]}),
+    )
+    recs[2]["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 200
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")] == ["unattributed", "unattributed"]
+    forged_exit = _records(
+        snap({200: [BOX]}, t=T_BEFORE),
+        init(200, "process_exit", start="2026-10-04T10:00:01Z"),
+        proc(200, "2026-10-04T10:00:02Z", host_pid=True),
+        snap({}),
+    )
+    forged_exit[2]["e"]["process_exit"]["parent"]["ns"]["mnt"]["inum"] = 600  # from inside BOX
+    assert _who(monitorlog.attribute(forged_exit, "fyex"))[1] == ("container", "a")
+
+
+def test_podmans_tools_before_a_containers_init_are_not_the_containers():
+    # netavark and nft in a short-lived namespace of their own, carrying the number the container
+    # takes next: the snapshot after names the container, but its init hadn't entered yet
+    recs = _records(
+        snap({}, t=T_BEFORE),
+        proc(300, "2026-10-04T10:00:00Z", host_pid=True),  # netavark's nft
+        init(300, start="2026-10-04T10:00:01Z"),
+        proc(300, "2026-10-04T10:00:02Z"),
+        snap({300: [OTHER]}),
+    )
+    assert _who(monitorlog.attribute(recs, "fyex")) == [
+        ("unattributed", ""), ("container", "c"), ("container", "c")
+    ]  # fmt: skip
+
+
+def test_after_a_containers_init_left_only_its_own_processes_are_its():
+    # the kernel kills the rest of the container when its init exits: their exits are still the
+    # container's (its pid namespace); podman's teardown in the VM's pid namespace is not
+    recs = _records(
+        snap({300: [BOX]}, t=T_BEFORE),
+        proc(300, "2026-10-04T10:00:00Z"),
+        init(300, "process_exit", start="2026-10-04T09:00:00Z"),
+        proc(300, "2026-10-04T10:00:00Z", kind="process_exit"),  # a child killed after it
+        proc(300, "2026-10-04T10:00:03Z", host_pid=True),  # netavark's nft on the freed number
+        snap({}),
+    )
+    assert _who(monitorlog.attribute(recs, "fyex")) == [
+        ("container", "a"), ("container", "a"), ("container", "a"), ("unattributed", "")
+    ]  # fmt: skip
+
+
+def test_a_container_the_snapshot_before_saw_being_set_up_keeps_its_life():
+    # a container's scope holds the runtime in its namespace before its init's exec, and the relay
+    # reads the export a moment behind: its snapshot can name a container whose init's exec comes
+    # after it in the stream (cabash: 31 ms) — that life is the one it saw, even if it's over by the
+    # next snapshot. Not once another init left the number in between: that was someone else's.
+    recs = _records(
+        snap({300: [BOX]}, t=T_BEFORE),
+        init(300, start="2026-10-04T10:00:01Z"),  # after the snapshot was taken
+        proc(300, "2026-10-04T10:00:02Z"),
+        init(300, "process_exit", start="2026-10-04T10:00:01Z"),
+        snap({}),
+    )
+    assert _who(monitorlog.attribute(recs, "fyex")) == [("container", "a")] * 3
+    after_another = _records(
+        snap({300: [BOX]}, t=T_BEFORE),
+        init(300, "process_exit", start="2026-10-04T09:00:00Z"),
+        init(300, start="2026-10-04T10:00:01Z"),
+        proc(300, "2026-10-04T10:00:02Z"),
+        snap({}),
+    )
+    assert _who(monitorlog.attribute(after_another, "fyex"))[1:] == [("unattributed", "")] * 2
+
+
+def test_a_number_free_since_before_the_window_is_never_given_for_podmans_tools():
+    # the old container left long ago; a container Tetragon never marks (say one in the VM's pid
+    # namespace) holds the number now: its own processes are its, podman's tools in the VM's pid
+    # namespace are not
+    recs = _records(
+        snap({}, t=T_BEFORE),
+        init(300, start="2026-10-04T09:00:00Z"),
+        init(300, "process_exit", start="2026-10-04T09:00:00Z"),
+        snap({300: [OTHER]}),
+        proc(300, "2026-10-04T10:00:02Z"),
+        proc(300, "2026-10-04T10:00:03Z", host_pid=True),
+        snap({300: [OTHER]}),
+    )
+    assert _who(monitorlog.attribute(recs, "fyex"))[2:] == [
+        ("container", "c"),
+        ("unattributed", ""),
+    ]
+
+
+def test_a_build_between_two_containers_is_the_builds_not_ambiguous():
+    # the box's number went to an image build step, then to the next container: the step's
+    # events are neither container's, and the facts say whose they are
+    recs = _records(
+        snap({200: [BOX]}, t=T_BEFORE),
+        init(200, "process_exit", start="2026-10-04T09:00:00Z"),
+        init(200, start="2026-10-04T10:00:01Z", by="/proc/self/exe"),
+        proc(200, "2026-10-04T10:00:02Z"),
+        init(200, "process_exit", start="2026-10-04T10:00:01Z", by="/proc/self/exe"),
+        init(200, start="2026-10-04T10:00:03Z"),
+        snap({200: [OTHER]}),
+    )
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][2] == "build"
+
+
+def test_a_stretch_reads_an_old_init_by_where_it_came_from_then(monkeypatch, tmp_path):
+    # a hook's read holds only podman's tool on a number whose last container left before the
+    # snapshot before: the join must fetch where that container's init came from (podman's
+    # namespace, entered long before) to know it was a container's init at all
+    from foldyard import monitorstore
+
+    monkeypatch.setattr(monitorstore.config, "state_dir", lambda: tmp_path)
+    stream = [entered(), snap({}, t=T_BEFORE), init(300, start="2026-10-04T09:00:00Z"),
+              init(300, "process_exit", start="2026-10-04T09:00:00Z"), snap({300: [OTHER]}),
+              proc(300, "2026-10-04T10:00:03Z", host_pid=True), snap({300: [OTHER]})]  # fmt: skip
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    monitorstore.append(recs)
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        (e,) = monitorlog.join([recs[5]], cat, "fyex")
+    finally:
+        cat.close()
+    assert e.who == "unattributed"
+
+
+def test_a_container_holding_a_process_in_the_vms_or_podmans_namespace_is_ambiguous():
+    # a container's scope with a process in podman's own namespace (a privileged container can
+    # `nsenter` there; crun joins a scope a moment before it leaves podman's namespace): neither
+    # side is claimed, and a container-only hook is told — never filed under podman, nor the VM
+    recs = _records(snap({PODMAN_NS: [BOX], 1: [SIB]}), ev(PODMAN_NS), ev(1), snap({}))
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")] == ["ambiguous", "ambiguous"]
+
+
+def test_a_process_crossing_into_the_vms_or_podmans_namespace_is_the_containers_it_came_from():
+    # the kernel fact of an escape: a process in a system namespace whose parent was in a
+    # container's — never filtered with the system's events, named after where it came from
+    into_podman = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    into_vm = ev(1, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 300}}})
+    recs = _records(snap({200: [BOX]}), into_podman, into_vm, ev(PODMAN_NS), snap({200: [BOX]}))
+    # what runs in podman's namespace next is no one's the facts can name, until podman enters it
+    # again (test_podmans_namespace_is_podmans_again_once_podman_enters_it_from_the_vm)
+    assert _whos(monitorlog.attribute(recs, "fyex")) == [
+        ("container", "a", True), ("unattributed", "", True), ("unattributed", "", False)
+    ]  # fmt: skip
+
+
+def test_a_number_podman_entered_once_is_not_podmans_after_something_else_took_it():
+    # an `entry` has no end, and namespace numbers are reused lowest-free: once the namespace the
+    # VM entered (800: a sandboxed user unit, or podman's own before its pause process went) has
+    # died, a box container that takes the number unseen — `--pid=host` (no init mark), gone before
+    # a snapshot — must not be filed under `podman`, which hooks skip by default. Its first process
+    # came from podman's namespace (conmon), not the VM's: from then on the number isn't podman's.
+    first = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": PODMAN_NS}}})
+    child = ev(800, binary="/usr/bin/curl", parent={"ns": {"mnt": {"inum": 800}}})
+    recs = _records(snap({}), entered(800), snap({}), first, child, ev(800), snap({}))
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")] == [
+        "podman", "unattributed", "unattributed", "unattributed"
+    ]  # fmt: skip
+
+
+def test_a_namespace_made_inside_a_container_on_a_number_podman_entered_once_is_not_podmans():
+    # `unshare -Urpm --fork` in the box on a reused number: its init is no mark of a container or a
+    # build, but it does say the number was taken — by the box, not by podman
+    nested = init(800, start="2026-10-04T10:00:01Z")
+    nested["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 200  # from inside BOX
+    work = ev(800, binary="/usr/bin/curl", parent={"ns": {"mnt": {"inum": 800}}})
+    recs = _records(snap({200: [BOX]}), entered(800), snap({200: [BOX]}), nested, work, ev(800),
+                    snap({200: [BOX]}))  # fmt: skip
+    got = _whos(monitorlog.attribute(recs, "fyex"))
+    assert got[0] == ("podman", "", False)
+    # the init itself reads as a step out of BOX — the facts can't tell a new namespace on a
+    # reused number from a step into a live one (the next test): loud, the safe way to be wrong
+    assert got[1] == ("container", "a", True)
+    assert got[2:] == [("unattributed", "", False)] * 2
+
+
+def test_a_namespace_made_on_a_number_podman_entered_once_takes_it_for_the_inits_from_there():
+    # the box's own namespace made on the reused number (`unshare -Urpm --fork`): an init from
+    # there, whatever its parent is called, is no build's
+    nested = init(800, start="2026-10-04T10:00:01Z")
+    nested["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 200  # from inside BOX
+    made = init(900, start="2026-10-04T10:00:02Z", by="/bin/sh")
+    made["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 800
+    recs = _records(snap({200: [BOX]}), entered(800), snap({200: [BOX]}), nested, made,
+                    proc(900, "2026-10-04T10:00:03Z"), snap({200: [BOX]}))  # fmt: skip
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][2:] == ["unattributed"] * 2
+
+
+def test_a_namespace_the_box_made_on_a_number_an_old_container_left_is_the_boxs():
+    # a new namespace on the number ends what held it before: the old container's exit no longer
+    # decides — the box's own processes there are the box's, as the snapshot names them
+    nested = init(300, start="2026-10-04T10:00:01Z", by="/usr/bin/unshare")
+    nested["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 200  # from inside BOX
+    recs = _records(init(300, start="2026-10-04T08:00:00Z"),
+                    init(300, "process_exit", start="2026-10-04T08:00:00Z"),
+                    snap({200: [BOX]}, t=T_BEFORE), nested, proc(300, "2026-10-04T10:00:02Z"),
+                    snap({300: [BOX], 200: [BOX]}))  # fmt: skip
+    assert _who(monitorlog.attribute(recs, "fyex"))[2:] == [("container", "a")] * 2
+
+
+def test_a_step_into_podmans_live_namespace_shaped_like_an_init_is_still_a_step_out():
+    # `unshare -p -f nsenter -t <podman's pid> -m sh` from a container: in the init tree, its parent
+    # in the container — a mark's shape — but into podman's namespace, which podman's entry still
+    # holds: no new namespace, a step out. It and the next one are `crossed`; podman's own inits
+    # from there lose their marks (read by the snapshots) until podman enters it again.
+    setns = init(PODMAN_NS, start="2026-10-04T10:00:01Z", by="/usr/bin/unshare")
+    setns["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 200  # from inside BOX
+    again = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+
+    def build(inode: int, t: str) -> list[dict]:
+        return [init(inode, start=t, by="/proc/self/exe"), proc(inode, t)]
+
+    recs = _records(snap({200: [BOX]}), setns, again, *build(500, "2026-10-04T10:00:02Z"),
+                    entered(), *build(600, "2026-10-04T10:00:03Z"), snap({200: [BOX]}))  # fmt: skip
+    assert _whos(monitorlog.attribute(recs, "fyex")) == [
+        ("container", "a", True), ("container", "a", True),
+        ("unattributed", "", False), ("unattributed", "", False),
+        ("podman", "", False), ("build", "", False), ("build", "", False),
+    ]  # fmt: skip
+
+
+def test_a_step_into_podmans_namespace_leaves_the_inits_podman_starts_there_what_they_are():
+    # a step in from a container (itself `crossed`) says the label is no longer podman's to give,
+    # not that the namespace died: the containers and builds podman goes on starting from it are
+    # still what they are — the API service that starts them never enters it again
+    into = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    recs = _records(snap({200: [BOX]}), into, init(500, start="2026-10-04T10:00:01Z",
+                    by="/proc/self/exe"), proc(500, "2026-10-04T10:00:02Z"), snap({200: [BOX]}))  # fmt: skip
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][1:] == ["build", "build"]
+
+
+def test_an_init_from_a_number_podman_entered_once_is_no_build_once_the_number_was_taken():
+    # where an init came from decides whether it is a build's or a container's — and a number the
+    # VM entered once, then taken by a box container, is not podman's: the box's own namespace
+    # made there is no build
+    took = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": PODMAN_NS}}})
+    made = init(900, start="2026-10-04T10:00:01Z", by="/bin/sh")
+    made["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 800
+    recs = _records(snap({}), entered(800), snap({}), took, made, proc(900, "2026-10-04T10:00:02Z"),
+                    snap({}))  # fmt: skip
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][2:] == ["unattributed"] * 2
+
+
+def test_podmans_namespace_is_podmans_again_once_podman_enters_it_from_the_vm():
+    # after something stepped into podman's namespace from a container (flagged `crossed`), what
+    # runs there is read as no one's — the crossing's descendants among it — until podman next
+    # enters it from the VM's own, as every podman command does; a second step in is still flagged
+    into = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    recs = _records(snap({200: [BOX]}), into, ev(PODMAN_NS), into, entered(), ev(PODMAN_NS),
+                    snap({200: [BOX]}))  # fmt: skip
+    assert _whos(monitorlog.attribute(recs, "fyex")) == [
+        ("container", "a", True), ("unattributed", "", False), ("container", "a", True),
+        ("podman", "", False), ("podman", "", False),
+    ]  # fmt: skip
+
+
+def test_a_stretch_knows_podmans_namespace_however_long_ago_it_was_entered(monkeypatch, tmp_path):
+    from foldyard import monitorstore
+
+    monkeypatch.setattr(monitorstore.config, "state_dir", lambda: tmp_path)
+    recs = [
+        {**r, "boot": BOOT, "seq": i}
+        for i, r in enumerate([snap({}), entered(), snap({}), ev(400), snap({}), ev(PODMAN_NS)])
+    ]
+    monitorstore.append(recs)
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        (e,) = monitorlog.join([recs[5]], cat, "fyex")
+    finally:
+        cat.close()
+    assert e.who == "podman"
+
+
+def test_a_stretch_knows_a_number_podman_entered_once_was_taken_since(monkeypatch, tmp_path):
+    # the read holds only a later process on the number: the catalogue must hand the join what
+    # took the number after podman's entry, however long ago, not the entry alone
+    from foldyard import monitorstore
+
+    monkeypatch.setattr(monitorstore.config, "state_dir", lambda: tmp_path)
+    took = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": PODMAN_NS}}})
+    stream = [snap({}), entered(800), snap({}), took, snap({}), ev(800), snap({})]
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    monitorstore.append(recs)
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        (e,) = monitorlog.join([recs[5]], cat, "fyex")
+    finally:
+        cat.close()
+    assert e.who == "unattributed"
 
 
 def test_join_vm_and_unattributed():
@@ -525,6 +1021,21 @@ def test_show_prints_attributed_events_and_the_pull_state(monkeypatch, tmp_path,
     out = capsys.readouterr().out
     assert "main:fyex-devbox" in out and "unattributed" in out
     assert "claims" in out
+
+
+def test_show_labels_what_isnt_a_container_and_a_crossing(monkeypatch, tmp_path, capsys):
+    # `fy monitor` filters nothing: every label shows, a crossing loudest
+    monkeypatch.setattr(monitorlog.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitorlog.config, "in_box", lambda: False)
+    monkeypatch.setattr(monitorlog.config, "project_prefix", lambda: "fyex")
+    crossing = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    stream = [snap({200: [BOX]}), entered(), ev(PODMAN_NS, binary="/usr/bin/pasta"), crossing,
+              snap({200: [BOX]})]  # fmt: skip
+    monitorlog._append([{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)])
+    assert monitorlog.show(limit=10) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "podman" in lines[1] and "/usr/bin/pasta" in lines[1]
+    assert "⚠ crossed ?:aaaaaaaaaaaa" in lines[2]
 
 
 def test_show_refuses_in_the_box(monkeypatch, capsys):

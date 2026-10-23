@@ -428,3 +428,238 @@ def test_a_mark_without_its_boot_or_seq_is_skipped_by_the_backfill(state):
         cat.conn.execute("DELETE FROM markseg")  # as 0.6 left it: indexed, never read for marks
         cat.catch_up()
         assert [m[0] for m in _marks(cat)] == [1]
+
+
+# ── the namespace facts: who entered a namespace, from where ─────────────────────────────
+
+
+def entry(seq: int, inode: int = 7, kind: str = "process_exec", host_user: bool = False) -> dict:
+    """A process in mount namespace ``inode`` whose parent is in the VM's own (Tetragon's
+    ``is_host``): podman entering its rootless namespace, as a podman command does every time."""
+    e = ev(seq, inode)
+    body = e["e"].pop("process_exec")
+    body["process"]["ns"]["user"] = {"inum": 4026531837, "is_host": True} if host_user else {
+        "inum": 4026532575}  # fmt: skip
+    body["parent"] = {"binary": "/usr/bin/podman",
+                      "ns": {"mnt": {"inum": 1, "is_host": True}}}  # fmt: skip
+    e["e"][kind] = body
+    return e
+
+
+def _facts(cat, lo: int = -1, hi: int = 1 << 40) -> list[tuple]:
+    return [
+        (f["seq"], f["inode"], f["what"], f["outside"], f["by"]) for f in cat.facts(BOOT, lo, hi)
+    ]
+
+
+def test_the_catalogue_keeps_who_entered_each_namespace_from_where(state, monkeypatch):
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    conmon = init(2)
+    conmon["e"]["process_exec"]["parent"]["binary"] = "/usr/bin/conmon"
+    ms.append([snap(0), entry(1), conmon, ev(3)])
+    ms.append([init(4, "process_exit"), entry(5, inode=300, kind="process_exit")])
+    want = [
+        (1, "7", "entry", "1", ""),
+        (2, "200", "start", "7", "conmon"),
+        (4, "200", "end", "7", ""),
+        (5, "300", "entry", "1", ""),
+    ]
+    with ms.Catalogue.open() as cat:
+        assert _facts(cat) == want
+        assert _facts(cat, 1, 5) == want[1:3]  # strictly between the two seqs
+        assert [f["seq"] for f in cat.prior(BOOT, "200", 4)] == [2]  # strictly before
+        assert [f["seq"] for f in cat.prior(BOOT, "200", 9)] == [4]  # the newest holder: the exit
+        assert cat.prior(BOOT, "7", 1) == []
+    for p in (state / "logs").glob("monitor-index.sqlite*"):
+        p.unlink()
+    with ms.Catalogue.open() as cat:  # derived: a lost catalogue gets them back from the segments
+        cat.catch_up()
+        assert _facts(cat) == want
+
+
+def test_a_run_of_entries_is_kept_as_its_first(state):
+    # podman enters its namespace on every command (63,000 times a boot on cabash): what the join
+    # needs is that the namespace was entered, after whatever else happened to the number
+    taken = init(4, inode=7)  # the number taken by a container's init in between
+    taken["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 9
+    ms.append([snap(0), entry(1), entry(2), entry(3), taken, entry(5), entry(6)])
+    with ms.Catalogue.open() as cat:
+        assert [(f[0], f[2]) for f in _facts(cat)] == [(1, "entry"), (4, "start"), (5, "entry")]
+
+
+def test_what_is_not_an_entry(state):
+    vm_service = entry(1, inode=400, host_user=True)  # a VM service in its own mount namespace
+    inside = entry(2)
+    inside["e"]["process_exec"]["parent"]["ns"]["mnt"] = {"inum": 7}  # podman's own child
+    in_vm = entry(3, inode=1)
+    in_vm["e"]["process_exec"]["process"]["ns"]["mnt"] = {"inum": 1, "is_host": True}
+    ms.append([snap(0), vm_service, inside, in_vm, ev(4)])
+    with ms.Catalogue.open() as cat:
+        assert _facts(cat) == []
+
+
+def test_an_older_catalogue_gains_the_facts_from_what_it_already_indexed(state, monkeypatch):
+    # #136's catalogue (marks, no facts), every segment indexed: the facts are read out of what it
+    # indexed, the lines that can hold one only — and the snapshot it kept from a segment
+    # retention removed is still there
+    import sqlite3
+
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(10), entry(11), init(12), ev(13)])
+    ms.append([init(14, "process_exit"), snap(15)])
+    path = state / "logs" / "monitor-index.sqlite"
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.execute("DROP TABLE nsfact")
+    conn.execute("DROP TABLE nsfactseg")
+    conn.execute("INSERT INTO snap VALUES (?, 3, 'gone', ?)", (BOOT, json.dumps(snap(3))))
+    conn.close()
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+        assert [(f[0], f[2]) for f in _facts(cat)] == [(11, "entry"), (12, "start"), (14, "end")]
+        assert _seq(cat.before(BOOT, 10)) == 3  # kept
+
+
+def test_a_supervisor_still_on_the_marks_works_beside_the_facts(state):
+    # #136's supervisor indexes a record without its fact (it knows only the marks): the next
+    # reader reads the fact from what that supervisor indexed
+    import sqlite3
+
+    ms.append([snap(0), entry(1)])
+    (live,) = ms.segments()
+    with (state / "logs" / "monitor.jsonl").open("a") as f:
+        f.write(json.dumps(init(2)) + "\n")
+    conn = sqlite3.connect(state / "logs" / "monitor-index.sqlite", isolation_level=None)
+    conn.execute(
+        "INSERT INTO seg VALUES (?, ?, 0, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+        "indexed = excluded.indexed",
+        (live.id, ms.raw_size(live), "", ""),
+    )
+    conn.close()
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+        assert [(f[0], f[2]) for f in _facts(cat)] == [(1, "entry"), (2, "start")]
+
+
+def test_retention_keeps_what_a_read_of_the_stored_events_needs(state, monkeypatch):
+    # podman entered its namespace once, at boot, in a segment retention has since removed: the
+    # join must still know that namespace is podman's — as the newest snapshot of a boot is kept.
+    # Every fact carries its kind, decided when it was indexed, so what a read asks of the past is
+    # the newest few of some kinds per namespace, and the facts after the kept snapshot.
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0), entry(1), init(2), init(3, "process_exit"), entry(4, inode=200), snap(5)])
+    ms.append([init(6), ev(7), entered_from(8, 7, 900), entry(9)])  # a step in, then podman again
+    ms.append([snap(10), ev(11)])
+    with ms.Catalogue.open() as cat:
+        cat.drop([ms.segments()[0].id])
+        # 200's old life went with the VM's entry there; the rest is still stored
+        assert [(f[0], f[1], f[2]) for f in _facts(cat)] == [
+            (1, "7", "entry"), (4, "200", "entry"), (6, "200", "start"), (8, "7", "other"),
+            (9, "7", "entry"),
+        ]  # fmt: skip
+        cat.drop([ms.segments()[1].id])
+        # podman's entry at boot goes now: the init at 6 that came from it carries its kind
+        assert [(f[0], f[2]) for f in _facts(cat)] == [(6, "start"), (8, "other"), (9, "entry")]
+
+
+def entered_from(seq: int, inode: int, outside: int, kind: str = "process_exec") -> dict:
+    """A process in mount namespace ``inode`` whose parent was in ``outside``, neither the VM's
+    own, and no init: the number entered from somewhere other than the VM."""
+    e = ev(seq, inode)
+    body = e["e"].pop("process_exec")
+    body["parent"] = {"binary": "/usr/bin/conmon", "ns": {"mnt": {"inum": outside}}}
+    e["e"][kind] = body
+    return e
+
+
+def test_a_number_entered_from_anywhere_but_the_vm_is_a_fact_too(state, monkeypatch):
+    # an `entry` has no end and numbers are reused: what says the number has gone to someone else
+    # since is anything entering it from a namespace that isn't the VM's — kept like an entry (a
+    # run as its first), read back by the backfill and kept by retention
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0), entry(1, inode=800), entered_from(2, 800, 7), entered_from(3, 800, 7),
+               entry(4, inode=800), entered_from(5, 800, 200), snap(6)])  # fmt: skip
+    ms.append([ev(7, inode=800), entry(8, inode=800)])
+    want = [(1, "800", "entry", "1", ""), (2, "800", "other", "7", ""),
+            (4, "800", "entry", "1", ""), (5, "800", "other", "200", ""),
+            (8, "800", "entry", "1", "")]  # fmt: skip
+    with ms.Catalogue.open() as cat:
+        assert _facts(cat) == want
+        assert [(f["seq"], f["what"]) for f in cat.prior(BOOT, "800", 8)] == [
+            (4, "entry"), (5, "other")
+        ]  # fmt: skip
+        # as #136's catalogue had it, every segment indexed without facts: the backfill's needle
+        # finds these too
+        cat.conn.execute("DELETE FROM nsfact")
+        cat.conn.execute("DELETE FROM nsfactseg")
+        cat.catch_up()
+        assert _facts(cat) == want
+        cat.drop([ms.segments()[0].id])  # of the first segment, what a read after it needs
+        assert [(f[0], f[2]) for f in _facts(cat)] == [(4, "entry"), (5, "other"), (8, "entry")]
+
+
+def test_a_process_among_its_own_namespace_or_the_vms_is_no_fact(state):
+    # a container's own child (its parent in the same namespace) says nothing new; a process that
+    # stepped into the VM's own is the VM's, which no number decides
+    into_vm = entered_from(2, 1, 200)
+    into_vm["e"]["process_exec"]["process"]["ns"]["mnt"]["is_host"] = True
+    ms.append([snap(0), entered_from(1, 200, 200), into_vm])
+    with ms.Catalogue.open() as cat:
+        assert _facts(cat) == []
+
+
+def engine() -> dict:
+    return {"k": "engine", "containers": {}, "recv": 1.0}
+
+
+def test_the_running_boots_facts_stay_while_the_store_holds_none_of_its_records(state, monkeypatch):
+    # retention right after a seal: the live segment holds only an engine claim, no record of the
+    # boot that is still running — its facts are what its next events are read by
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0), entry(1)])
+    ms.append([engine()])
+    with ms.Catalogue.open() as cat:
+        cat.drop([ms.segments()[0].id])
+        assert [(f[0], f[2]) for f in _facts(cat)] == [(1, "entry")]
+
+
+def test_the_running_boots_facts_stay_beside_an_older_boot_still_stored(state, monkeypatch):
+    # the same, with an older boot's record still in the store: that boot isn't the running one
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0, boot="old"), {**entry(1), "boot": "old"}])
+    ms.append([snap(0), entry(1)])
+    ms.append([ev(5, boot="old"), engine()])  # no fact in it
+    with ms.Catalogue.open() as cat:
+        cat.drop([s.id for s in ms.segments()[:2]])
+        assert sorted((f["boot"], f["seq"]) for b in ("old", BOOT) for f in cat.facts(b, -1, 99)) \
+            == [(BOOT, 1), ("old", 1)]  # fmt: skip
+
+
+def test_a_finished_boots_facts_go_once_the_store_holds_none_of_its_records(state, monkeypatch):
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([snap(0, boot="old"), {**entry(1), "boot": "old"}])
+    ms.append([snap(0), entry(1)])
+    with ms.Catalogue.open() as cat:
+        cat.drop([ms.segments()[0].id])
+        assert cat.facts("old", -1, 99) == [] and [f["seq"] for f in cat.facts(BOOT, -1, 99)] == [1]
+
+
+def test_a_catalogue_holding_facts_without_their_kinds_reads_them_again(state):
+    # facts indexed before kinds were stored (an earlier build of this catalogue): derived, so
+    # dropped and read again from the segments, each classified
+    import sqlite3
+
+    ms.append([snap(0), entry(1), init(2)])
+    conn = sqlite3.connect(state / "logs" / "monitor-index.sqlite", isolation_level=None)
+    conn.execute("DROP TABLE nsfact")
+    conn.execute(
+        "CREATE TABLE nsfact (boot TEXT NOT NULL, seq INTEGER NOT NULL, seg TEXT NOT NULL, "
+        "inode TEXT NOT NULL, what TEXT NOT NULL, start TEXT NOT NULL, outside TEXT NOT NULL, "
+        "by TEXT NOT NULL, pidns TEXT NOT NULL, PRIMARY KEY (boot, seq))"
+    )
+    conn.close()
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+        assert [(f["seq"], f["kind"]) for f in cat.facts(BOOT, -1, 99)] == [
+            (1, "entry"),
+            (2, "build"),
+        ]

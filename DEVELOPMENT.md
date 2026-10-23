@@ -100,19 +100,29 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   namespace numbers are reused, the lowest free one handed to the next namespace made. Where the
   two disagree, the containers' own init marks between them — the old init leaving, the new one
   entering (`monitorstore.init_mark`) — choose between the two containers the snapshots named,
-  never a third (`_handover`; cabash, 2026-10-23). Any stretch is joined with the catalogue's
-  snapshots and marks around it (`join`), never only those inside the bytes read: under load two
-  snapshots are tens of MB apart, and a byte window once silently dropped every event between
-  them (2026-10-21). `fy monitor` prints it (`--since/--until` reads the whole store); doctor's
-  `monitor events` row reads the pull cursor. The relay only signs and snapshots — attribution
-  lives here so it changes with a foldyard upgrade, not a VM restart.
+  never a third (`_handover`; cabash, 2026-10-23). What no container holds is named from kernel
+  facts, never a binary's name (`_Facts`, `monitorstore.ns_fact`): `podman` (the namespace a
+  process enters straight from the VM's), `build` (an init podman itself starts there), `vm`
+  (also the VM's own user namespace); a container's name holds only within its init's life
+  (`_lifetime`, paired by the init's pid namespace), only inits from podman's namespace count (a
+  container can make its own), and a process crossing into the VM's or podman's namespace from a
+  container's is `crossed`. Any stretch is joined with the catalogue's snapshots and facts around
+  it (`join`), never only those inside the bytes read: under load two snapshots are tens of MB
+  apart, and a byte window once silently dropped every event between them (2026-10-21).
+  `fy monitor` prints it (`--since/--until` reads the whole store); doctor's `monitor events` row
+  reads the pull cursor. The relay only signs and snapshots — attribution lives here so it changes
+  with a foldyard upgrade, not a VM restart.
 - `monitorstore.py` — that store on the host: segments named by their first line (a position is
   `[segment id, uncompressed offset]`, surviving the seal and the gzip — never an inode), sealed
   at 32 MB and compressed (~30×), kept within a HOST-ONLY disk budget
   (`<state dir>/monitor-store.toml`, never `foldyard.toml`: the box mustn't shorten the evidence
   about itself), and a SQLite catalogue (derived; rebuilt from the segments) of every snapshot,
-  container-init mark, engine claim and segment span. The marks sit in tables BESIDE schema 2,
-  never in it: a supervisor still on 0.6 after an editable upgrade would drop a catalogue whose
+  container-init mark, namespace fact (`ns_fact`: an init's mark with where it came from and its
+  pid namespace, podman entering a namespace from the VM's, and anything entering one from
+  elsewhere — each classified when indexed and stored with its kind, so a read and retention need
+  only the newest few of some kinds per namespace), engine claim and segment span. The marks and
+  the facts sit in tables BESIDE schema 2, never in it, each with its own progress: a supervisor
+  still on 0.6 (or on the marks alone) after an editable upgrade would drop a catalogue whose
   schema it doesn't know, and fail every write to a table with a column it doesn't know. The pull
   indexes a record before writing it; every reader catches the catalogue up first.
 - `monitorhooks.py` — the operator's hooks over those events: host-only config
@@ -120,7 +130,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   execution for the box, a url an exfiltration channel), settled events only (a later snapshot
   ANYWHERE in the store, else the settle window), at-least-once with a per-hook cursor, backoff and
   a bounded give-up, every batch's `gaps` saying what it can't vouch for (rotated, transport,
-  relay, unsettled, skipped), commands run with a minimal environment (never
+  relay, unsettled, ambiguous, skipped) and `passed` counting by `who` what its filters left out
+  (a hook without `who` skips `vm` and `podman` — `skip_unless_asked`; a `crossed` event reaches
+  every hook), commands run with a minimal environment (never
   the supervisor's: it holds every host.env secret) on their own supervisor thread. The design
   they plug into — storage tiers, source filtering, score → decide → review — is
   [docs/monitor-pipeline.md](./docs/monitor-pipeline.md).

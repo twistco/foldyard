@@ -18,6 +18,12 @@ events it reads are joined with the catalogue's snapshots around them however fa
 (:func:`monitorlog.join`) — a byte window around the position once lost every event between two
 snapshots further apart than it (2026-10-21).
 
+A hook's ``who`` picks the attributions it gets; one without gets every event but the VM's and
+podman's own (:data:`SKIP_UNLESS_ASKED`, the file's ``skip_unless_asked``) — hundreds of thousands
+an hour on a busy VM, none of them the box's. What a hook's filters pass over is never silent:
+each batch counts it by ``who`` (``passed``), and an event that crossed out of a container into
+the VM's or podman's namespace reaches every hook whatever its ``who``.
+
 Whatever a hook didn't get, or got without the full evidence, is SAID in the batch: ``gaps``
 (:func:`_record_gaps`, :func:`_unsettled`, :func:`_ambiguous`) — the store rotated past its
 position, events lost between the VM and here, the relay missing Tetragon's, events released
@@ -64,6 +70,13 @@ ROUND_SECONDS = 2.0  # …for about this long
 STALL_SECONDS = 600.0  # a cursor still this long while the store grows is stuck (`problems`)
 
 
+WHO = ("container", "build", "unattributed", "ambiguous", "podman", "vm")
+# What a hook without `who` passes over (counted in each batch's `passed`): the VM's and podman's
+# own events — none of them the box's, unless one crossed out of a container (always sent). Image
+# builds are NOT here: a build step runs what the box wrote. `skip_unless_asked` in the file.
+SKIP_UNLESS_ASKED = ("vm", "podman")
+
+
 def hooks_file() -> Path:
     return config.state_dir() / "monitor-hooks.toml"
 
@@ -87,11 +100,17 @@ class Hook:
     who: tuple[str, ...] = ()
     worktrees: tuple[str, ...] = ()
     timeout: float = 15.0
+    # what it gets only when its `who` names it — the file's `skip_unless_asked`, not the hook's
+    unless_asked: tuple[str, ...] = field(default=SKIP_UNLESS_ASKED, compare=False)
 
     def matches(self, e: monitorlog.Event) -> bool:
+        if self.who:
+            who = e.who in self.who
+        else:
+            who = e.who not in self.unless_asked
         return (
             (not self.kinds or e.kind in self.kinds)
-            and (not self.who or e.who in self.who)
+            and (who or e.crossed)  # crossed out of a container: never left out by `who`
             and (not self.worktrees or e.worktree in self.worktrees)
         )
 
@@ -118,6 +137,18 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
     errors: list[str] = []
     seen: set[str] = set()
     files: dict[str, str] = {}  # file → the hook writing it
+    unless_asked = SKIP_UNLESS_ASKED
+    if "skip_unless_asked" in doc:
+        try:
+            got = _strings(doc["skip_unless_asked"], "`skip_unless_asked`")
+            bad = [w for w in got if w not in WHO]
+            if bad:
+                raise ValueError(
+                    f"no event has {', '.join(map(repr, bad))} (who: {', '.join(WHO)})"
+                )
+            unless_asked = got
+        except ValueError as e:
+            errors.append(f"`skip_unless_asked` ignored, {', '.join(SKIP_UNLESS_ASKED)} kept: {e}")
     for i, raw in enumerate(doc.get("hook") or []):
         label = f"hook #{i + 1}"
         try:
@@ -127,6 +158,12 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
             if not isinstance(name, str) or not name.strip():
                 raise ValueError("needs a `name`")
             label = f"hook '{name}'"
+            if "skip_unless_asked" in raw:  # TOML gives a key after `[[hook]]` to that hook
+                errors.append(
+                    f"{label}: `skip_unless_asked` ignored here, "
+                    f"{', '.join(unless_asked) or 'nothing skipped'} kept: "
+                    "it belongs at the top of the file, before any [[hook]]"
+                )
             if name in seen:
                 raise ValueError("duplicate name (it keys the hook's cursor)")
             command = _strings(raw.get("command"), "`command`")
@@ -171,6 +208,7 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
                     who=_strings(raw.get("who"), "`who`"),
                     worktrees=_strings(raw.get("worktrees"), "`worktrees`"),
                     timeout=timeout,
+                    unless_asked=unless_asked,
                 )
             )
             seen.add(name)
@@ -203,6 +241,8 @@ _FILE_HEAD = """\
 # Monitor hooks: where the guest monitor's events go — a file, your own program or an endpoint.
 # Host-only: never in foldyard.toml, which anything in the box can write. The supervisor re-reads
 # this every few seconds. `fy monitor hook add|remove` edit it and keep your own edits.
+# A hook without `who` gets every event but these (each batch counts what it passed over):
+# skip_unless_asked = ["vm", "podman"]
 """
 _HOOK_HEADER = re.compile(r"^\s*\[\[\s*hook\s*\]\]\s*(#.*)?$")
 _TABLE = re.compile(r"^\s*\[")
@@ -326,7 +366,6 @@ def remove(name: str) -> None:
     _write(removed(_text(), name))
 
 
-WHO = ("container", "vm", "unattributed", "ambiguous")
 KINDS = ("exec", "exit", "connect", "file", "other")
 
 
@@ -581,10 +620,18 @@ def listing(now: float | None = None) -> list[str]:
     for h in hooks:
         kind, where = target(h)
         picks = [(k, getattr(h, k)) for k in ("kinds", "who", "worktrees")]
-        filters = " ".join(f"{k}={','.join(v)}" for k, v in picks if v) or "all events"
+        filters = " ".join(f"{k}={','.join(v)}" for k, v in picks if v)
+        if not h.who:
+            but = f" but {', '.join(h.unless_asked)}" if h.unless_asked else ""
+            filters = " ".join(x for x in (filters, f"all events{but}") if x)
         out.append(f"{h.name}  {kind}  {where}  [{filters}]")
         st = states.get(h.name)
         out.append(f"  ✓ {progress(h, st, now)}")
+        if st is not None and st.passed:
+            counts = ", ".join(
+                f"{w} {n}" for w, n in sorted(st.passed.items(), key=lambda x: -x[1])
+            )
+            out.append(f"  · passed over since its last batch: {counts}")
         out.extend(f"  ⚠ {why}" for why in problems(st, now, grew))
     out.extend(f"✗ {e}" for e in errors)
     out.append(f"— {hooks_file()}")
@@ -608,6 +655,7 @@ class HookState:
     sink_mac: str = ""  # …and its mac, the next line's `prev`
     sink_file: str = ""  # …in this file: a hook given another `file` starts a new chain there
     gaps: list = field(default_factory=list)  # gaps owed to the hook's next batch (see `gaps`)
+    passed: dict = field(default_factory=dict)  # who -> events passed over, owed to the next batch
     last_time: str = ""  # the time of the event at `last`
     moved_at: float = 0.0  # when `last` last moved — sent or passed over, so progress either way
 
@@ -737,10 +785,18 @@ def _post(hook: Hook, body: bytes) -> str:
     return "" if 200 <= code < 300 else f"HTTP {code}"
 
 
-def batch(hook: Hook, events: list[monitorlog.Event], gaps: list[dict] | None = None) -> dict:
+def batch(
+    hook: Hook,
+    events: list[monitorlog.Event],
+    gaps: list[dict] | None = None,
+    passed: dict[str, int] | None = None,
+) -> dict:
     """One batch. ``gaps`` is always there, usually empty: the stretches of the stream this batch
-    accounts for that it can't vouch for (see :func:`deliver`). A batch can carry only gaps —
-    ``events`` empty, ``first``/``last`` null — when nothing this hook wants came with them."""
+    accounts for that it can't vouch for (see :func:`deliver`). ``passed`` too: how many events
+    the hook's filters passed over since its last batch, by ``who`` — so the VM's and podman's own,
+    which a hook gets only when it asks, are counted, never silently gone. A batch can carry only
+    gaps — ``events`` empty, ``first``/``last`` null — when nothing this hook wants came with
+    them."""
     return {
         "schema": SCHEMA,
         "project": config.project(),
@@ -749,15 +805,25 @@ def batch(hook: Hook, events: list[monitorlog.Event], gaps: list[dict] | None = 
         "last": [events[-1].boot, events[-1].seq] if events else None,
         "events": [asdict(e) for e in events],
         "gaps": list(gaps or []),
+        "passed": dict(passed or {}),
     }
 
 
-def payload(hook: Hook, events: list[monitorlog.Event], gaps: list[dict] | None = None) -> bytes:
-    return json.dumps(batch(hook, events, gaps)).encode()
+def payload(
+    hook: Hook,
+    events: list[monitorlog.Event],
+    gaps: list[dict] | None = None,
+    passed: dict[str, int] | None = None,
+) -> bytes:
+    return json.dumps(batch(hook, events, gaps, passed)).encode()
 
 
 def _to_file(
-    hook: Hook, st: HookState, events: list[monitorlog.Event], gaps: list[dict] | None = None
+    hook: Hook,
+    st: HookState,
+    events: list[monitorlog.Event],
+    gaps: list[dict] | None = None,
+    passed: dict[str, int] | None = None,
 ) -> str:
     """Append the batch as the next signed line of the hook's chain; ``""`` on success. The
     sequence moves only on success, so a retry re-writes the same seq (see monitorsink.verify).
@@ -768,7 +834,7 @@ def _to_file(
         st.sink_seq, st.sink_mac, st.sink_file = 0, "", hook.file
     try:
         key = monitorsink.ensure_key()
-        body = batch(hook, events, gaps)
+        body = batch(hook, events, gaps, passed)
         line, mac = monitorsink.signed_line(key, body, st.sink_seq + 1, st.sink_mac)
         monitorsink.append(hook.file, line)
     except (OSError, monitorsink.Refused) as e:
@@ -910,19 +976,25 @@ def deliver(
     keys = {(e.boot, e.seq) for e in passed}
     owed = [*st.gaps, *(g for k, g in gaps or [] if k in keys), *_unsettled(passed, aged or set()),
             *_ambiguous(hook, passed)]  # fmt: skip
+    sent = set(picked)
+    over = dict(st.passed)  # everything the cursor moves over unsent, by who: never silently
+    for j, e in enumerate(passed):
+        if j not in sent:
+            over[e.who] = over.get(e.who, 0) + 1
     if not wanted and not owed:
         if passed:
             move(passed[-1])
+            st.passed = over  # owed to the next batch
         return ""
     if hook.file:
-        why = _to_file(hook, st, wanted, owed)
+        why = _to_file(hook, st, wanted, owed, over)
     else:
-        body = payload(hook, wanted, owed)
+        body = payload(hook, wanted, owed, over)
         why = _run_command(hook, body) if hook.command else _post(hook, body)
     if not why:
         if passed:
             move(passed[-1])
-        st.gaps = []
+        st.gaps, st.passed = [], {}
         st.attempts, st.next_try, st.error, st.ok_at = 0, 0.0, "", now
         st.delivered += len(wanted)
         return ""
@@ -937,6 +1009,7 @@ def deliver(
         if passed:
             move(passed[-1])
         st.gaps = owed  # the skipped batch's gaps are still owed — to the next one
+        st.passed = over  # …and so is what it passed over
         st.dropped += len(wanted)
         st.attempts, st.next_try = 0, 0.0
         return (

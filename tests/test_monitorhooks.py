@@ -914,3 +914,104 @@ def test_a_hook_making_no_progress_while_events_arrive_says_so(project):
     assert mh.problems(mh.HookState(ok_at=1400.0), now=9000.0, grew=1500.0) == []  # nothing new
     mh._save_state({"s": st})
     assert any("⚠" in line and "no progress" in line for line in mh.listing(now=5001.0))
+
+
+# ── who a hook gets by default, and what it passed over ────────────────────────────────
+
+
+def entered(seq: int, inode: int = 7) -> dict:
+    """podman entering its own namespace from the VM's: every event there after it is podman's."""
+    rec = ev(seq, inode=inode, binary="/usr/bin/conmon")
+    body = rec["e"]["process_exec"]
+    body["process"]["ns"]["user"] = {"inum": 4026532575}
+    body["parent"] = {"binary": "/usr/bin/podman", "ns": {"mnt": {"inum": 1, "is_host": True}}}
+    return rec
+
+
+def _mixed():
+    # a container's event, the VM's, podman's, and one nothing names
+    return monitorlog.attribute(
+        [snap(0), ev(1), ev(2, inode=1), entered(3), ev(4, inode=7), ev(5, inode=999), snap(6)],
+        "fyex",
+    )
+
+
+def test_a_hook_without_who_skips_the_vm_and_podman_and_counts_what_it_passed_over(ran):
+    calls, _ = ran
+    assert [e.who for e in _mixed()] == ["container", "vm", "podman", "podman", "unattributed"]
+    st = mh.HookState()
+    mh.deliver(mh.Hook(name="all", command=("/bin/a",)), st, _mixed(), now=1)
+    body = calls[0]["body"]
+    assert [e["seq"] for e in body["events"]] == [1, 5]
+    assert body["passed"] == {"vm": 1, "podman": 2}  # never silently: said in the batch
+    assert st.passed == {} and st.last == [BOOT, 5]
+
+
+def test_what_a_hook_passed_over_rides_with_its_next_batch(ran):
+    calls, result = ran
+    hook = mh.Hook(name="c", command=("/bin/c",), who=("container",))
+    st = mh.HookState()
+    quiet = [e for e in _mixed() if e.who != "container"]
+    mh.deliver(hook, st, quiet, now=1)
+    assert calls == [] and st.passed == {"vm": 1, "podman": 2, "unattributed": 1}
+    later = monitorlog.attribute([snap(0), ev(6), snap(7)], "fyex")
+    result["rc"] = 1  # a failed attempt counts nothing twice
+    mh.deliver(hook, st, later, now=2)
+    result["rc"] = 0
+    mh.deliver(hook, st, later, now=st.next_try)
+    assert [c["body"]["passed"] for c in calls] == [
+        {"vm": 1, "podman": 2, "unattributed": 1},
+        {"vm": 1, "podman": 2, "unattributed": 1},
+    ]
+    assert st.passed == {}
+
+
+def test_the_categories_no_hook_gets_unless_it_asks_are_the_operators_to_set(project):
+    hooks, errors = mh.parse(
+        'skip_unless_asked = ["vm", "podman", "build"]\n'
+        '[[hook]]\nname = "all"\ncommand = ["/bin/a"]\n'
+        '[[hook]]\nname = "b"\ncommand = ["/bin/b"]\nwho = ["build"]\n'
+    )
+    assert errors == []
+    build = monitorlog.Event(time="t", boot=BOOT, seq=1, kind="exec", binary="/bin/sh", args="",
+                             detail="", uid=0, pid=1, who="build")  # fmt: skip
+    assert not hooks[0].matches(build) and hooks[1].matches(build)
+    hooks, errors = mh.parse(
+        'skip_unless_asked = ["podmen"]\n[[hook]]\nname = "a"\ncommand = ["/bin/a"]\n'
+    )
+    assert "podmen" in errors[0]
+    assert hooks[0].unless_asked == mh.SKIP_UNLESS_ASKED  # a typo never widens or narrows it
+
+
+def test_skip_unless_asked_after_a_hook_is_reported_never_silently_ignored(project):
+    # TOML gives a key written after `[[hook]]` to that hook's table: the setting would then do
+    # nothing, without a word — the default stays, and the operator is told where the key belongs
+    hooks, errors = mh.parse('[[hook]]\nname = "a"\ncommand = ["/bin/a"]\nskip_unless_asked = []\n')
+    assert [h.name for h in hooks] == ["a"]  # the hook itself still runs
+    assert hooks[0].unless_asked == mh.SKIP_UNLESS_ASKED
+    assert len(errors) == 1 and "skip_unless_asked" in errors[0] and "top" in errors[0]
+    _, errors = mh.parse(
+        'skip_unless_asked = []\n[[hook]]\nname = "a"\ncommand = ["/bin/a"]\nskip_unless_asked = []\n'
+    )
+    assert "nothing skipped kept" in errors[0]  # what is in force, said even when it is nothing
+
+
+def test_an_event_that_crossed_out_of_a_container_reaches_every_hook(ran):
+    calls, _ = ran
+    crossed = monitorlog.attribute(
+        [snap(0), entered(1), {**ev(2, inode=7), "e": {"process_exec": {
+            "process": {"binary": "/bin/sh", "pid": 9, "ns": {"mnt": {"inum": 7}}},
+            "parent": {"ns": {"mnt": {"inum": 200}}}}, "time": "t2"}}, snap(3)],
+        "fyex",
+    )  # fmt: skip
+    assert (crossed[1].who, crossed[1].crossed) == ("container", True)
+    mh.deliver(mh.Hook(name="b", command=("/bin/b",), who=("build",)), mh.HookState(), crossed, 1)
+    assert [e["seq"] for e in calls[0]["body"]["events"]] == [2]
+
+
+def test_listing_says_what_a_hook_skips_unless_asked_and_what_it_passed_over(project):
+    (project / "monitor-hooks.toml").write_text('[[hook]]\nname = "all"\ncommand = ["/bin/a"]\n')
+    mh._save_state({"all": mh.HookState(passed={"podman": 40, "vm": 2})})
+    text = "\n".join(mh.listing(now=10.0))
+    assert "all events but vm, podman" in text
+    assert "passed over since its last batch: podman 40, vm 2" in text
