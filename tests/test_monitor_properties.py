@@ -175,10 +175,13 @@ class World:
         elif what == "behind":  # what 0.6.1's false "rotated" left: the oldest record's position
             # (in the cursor's own boot: there, every read was events it already had — a stall;
             # from an older boot's, 0.6.1 re-sent them instead)
+            # — only while the store still held the cursor's event: that is what made the "lost"
+            # false. Once retention had removed it, 0.6.1's "lost" was true and said `rotated`.
             first = next((r for r, _ in monitorstore.scan(None) if r.get("k") == "ev"), None)
             oldest = [monitorstore.segments()[0].id, 0] if first else []
             for h in self._states():
-                if first and h.get("last") and h["last"][0] == first["boot"]:
+                last = h.get("last")
+                if first and last and last[0] == first["boot"] and int(first["seq"]) <= last[1]:
                     h["pos"] = oldest
             self._save()
 
@@ -328,6 +331,13 @@ EVERYTHING = [([], [], [])]
     scenario=[("ev", 1, "process_exec"), ("ev", 1, "process_exec"), ("entry", 7), ("pull",),
               ("entry", 200), ("init", 300, "process_exit"), ("entry", 7), ("pull",),
               ("ev", 300, "process_exec"), ("snap", {300: [A]})],
+    filters=EVERYTHING, budget="tiny",
+)  # fmt: skip
+# 0.6.1's false "lost" only where the cursor's event was still stored: here retention had removed
+# the stretch after it (podman's entry among it), and the hook owes `rotated`, not a silent skip
+@example(
+    scenario=[*[("ev", 1, "process_exec")] * 3, ("snap", {200: [A], 300: [A]}), ("entry", 7),
+              ("upgrade",), ("ev", 1, "process_exec"), ("pull",), ("behind",)],
     filters=EVERYTHING, budget="tiny",
 )  # fmt: skip
 def test_a_hook_delivers_the_full_store_join_or_says_what_it_could_not(
