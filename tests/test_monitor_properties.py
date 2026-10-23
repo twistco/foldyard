@@ -697,7 +697,7 @@ def test_the_join_names_a_reused_namespace_only_by_its_own_container(scenario):
 # path depends on is pinned by unit tests (tests/test_monitorlog.py).
 
 
-@settings(max_examples=300, deadline=None)
+@settings(max_examples=scaled_examples(300), deadline=None)
 @given(scenario=ns_steps)
 # netavark on the number before the container's init entered, only the snapshot after naming it
 @example(scenario=[("snap",), ("transient",), ("start", 0, True, False), ("snap",)])  # fmt: skip
@@ -760,7 +760,7 @@ sandboxed_steps = st.lists(
 )
 
 
-@settings(max_examples=300, deadline=None)
+@settings(max_examples=scaled_examples(300), deadline=None)
 @given(scenario=sandboxed_steps)
 # an unmarked container on a number the VM entered once: its init's child
 @example(scenario=[("sandbox",), ("start", 0, False, False), ("run", 0, True), ("snap",)])
@@ -793,7 +793,7 @@ def test_a_containers_event_is_never_filed_under_what_hooks_skip(scenario):
 retained = st.tuples(sandboxed_steps, st.integers(1, 6), st.integers(0, 40), st.integers(0, 40))
 
 
-@settings(max_examples=300, deadline=None)
+@settings(max_examples=scaled_examples(300), deadline=None)
 @given(case=retained)
 # a container's init exit kept, the entry into podman's namespace before it dropped for a later one:
 # the exit then read as an init from nowhere, and podman's tool on the freed number went to the

@@ -104,6 +104,19 @@ def test_the_workflow_runs_every_module_that_uses_hypothesis():
     assert "$PROPERTY_MODULES" in run["run"] and "--junitxml" in run["run"]
 
 
+def test_no_property_pins_a_budget_the_explore_profile_cannot_grow():
+    # A literal `max_examples=300` overrides the profile, so that test would run its everyday
+    # budget every week too: #138's three new properties did, until they went through
+    # scaled_examples.
+    pinned = {
+        f"{module}:{n}"
+        for module in _hypothesis_modules()
+        for n, line in enumerate((ROOT / module).read_text().splitlines(), 1)
+        if re.search(r"max_examples\s*=\s*\d", line)
+    }
+    assert not pinned, f"use pbt.scaled_examples(n): {sorted(pinned)}"
+
+
 def test_the_cache_holds_the_explore_profiles_database():
     db = settings.get_profile("explore").database
     assert isinstance(db, DirectoryBasedExampleDatabase)
