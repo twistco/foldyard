@@ -78,10 +78,11 @@ A first step towards that, stdlib only, in `src/foldyard/monitorstore.py`:
   survives the rename and the compression; an inode would not (and ext4 reuses them).
 - **A disk budget**, 8 GB per project by default (≈106 M events at 81 B: 57 hours at the
   520 events/s storms of 2026-10-21, 41 days at a steady 30). It was 1 GB until 2026-10-23: a real
-  project's monitor wrote 4.5 MB an hour idle and 21–61 MB an hour in busy experiment batches, so
-  1 GB held only 15–35 hours of batches and evidence was rolling off before it was read; 8 GB
-  holds 5–16 days of those batches. Several monitored projects each get their own budget.
-  Host-only: `max_mb` in `~/.foldyard/<project>/monitor-store.toml`, 64 MB–64 GB. The oldest compressed segments go
+  project's monitor wrote 4.5 MB an hour idle and 21–61 MB an hour in busy experiment batches,
+  and its full 1 GB store was observed to reach back only 15–35 hours (17–49 by that arithmetic
+  alone), so evidence was rolling off before it was read; 8 GB holds 5–16 days of those batches.
+  Several monitored projects each get their own budget. Host-only: `max_mb` in
+  `~/.foldyard/<project>/monitor-store.toml`, 64 MB–64 GB. The oldest compressed segments go
   first; the live one never does. Not `foldyard.toml`: the store is the evidence of what ran in
   the box, and the box can write the checkout.
 - **A SQLite catalogue** (`logs/monitor-index.sqlite`, WAL; derived data, rebuilt from the

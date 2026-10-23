@@ -80,7 +80,7 @@ def test_the_budget_removes_the_oldest_sealed_segments_never_the_live(state, mon
 
 
 def test_the_default_budget_is_8_gb(state):
-    # A busy project writes 21–61 MB an hour; 1 GB held only 15–35 hours of it (2026-10-23).
+    # A busy project writes 21–61 MB an hour; its full 1 GB store reached back 15–35 h (2026-10-23).
     assert not ms.settings_file().exists()
     assert ms.budget_setting() == (8 << 30, "")
 
