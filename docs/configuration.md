@@ -399,6 +399,27 @@ disk_gib = 60
     - The design, and the analysis pipeline hooks are meant for:
       [docs/monitor-pipeline.md](https://github.com/twistco/foldyard/blob/main/docs/monitor-pipeline.md).
   - Details: [ADR-0032](./adrs/0032-a-root-collector-in-the-guest.md).
+- **`attribution`** *(experimental)* — `"record"` makes the egress proxy know which container
+  sent each request. A root forwarder in the VM stands where every container still has its own
+  address and is made the only way from the VM to the proxy and the token services on your
+  computer. It adds a signed note of where each proxy request came from, and the network log keeps
+  it: the Network Log shows who used each host and who was refused. Nothing is decided on it yet —
+  no grant or credential changes. Default: `"off"`; any other value is an error. Lima only, and
+  needs `firewall = true` (preflight enforces both). Env: `MACHINE_ATTRIBUTION`.
+  - *Experimental*: the `origin` field it adds to the network log may change, and it hasn't been
+    used day to day yet.
+  - It is installed by its own root boot script, so changing it means `fy machine stop && fy up`.
+    The VM firewall's own script doesn't change, so turning it on stales nothing else.
+  - Containers keep the proxy address they have. Plain `podman run` containers default to a bridge
+    network instead of a pasta helper of their own, and a container started with `--network pasta`
+    can't reach the proxy at all: its traffic can't be told apart from any other container's.
+  - If the forwarder stops, containers can't reach the proxy, never around it: `fy up` refuses
+    and `fy doctor` shows the row red until it is serving again.
+  - The note is signed with a key that stays on your computer (`~/.foldyard/<project>/forwarder.key`)
+    and is written into the VM where only root can read it, so a container can't claim to be
+    another. The box holds the engine socket, so it can still act from inside another container:
+    the note says where a request came from, not who steered it.
+  - Details: [ADR-0034](./adrs/0034-the-proxy-knows-which-container-asked.md).
 - **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`. Same rule as
   `[project].name`.
 - **`cpus`** / **`memory_mib`** / **`disk_gib`** — sizing at first creation. Defaults: `4` /

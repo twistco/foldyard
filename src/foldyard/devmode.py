@@ -1427,6 +1427,7 @@ def doctor(deep: bool = False):
     yield from _to_box_check()
     yield from _host_wall_check()
     yield from _guest_monitor_check()
+    yield from _forwarder_check()
     yield from _monitor_hooks_check()
     yield from registry().doctor_checks(ctx)
 
@@ -2405,6 +2406,49 @@ def _guest_monitor_check():
         f"NOT observing — {problem}; `fy machine stop && fy up` re-provisions it",
     )
     yield from _monitor_events_check()
+
+
+def _forwarder_check():
+    """The attributing forwarder (`[machine] attribution = "record"`, lima), read from the guest's
+    OWN report over ssh as the VM user. Silent when the option is off. Red when it isn't serving:
+    it is the only way from a container to the proxy, so a forwarder that isn't serving means no
+    egress for anything in the VM (it fails closed)."""
+    if _BACKEND.name != "lima" or config.machine_attribution() == "off":
+        return
+    from . import forwarder  # only this row needs it
+
+    if _BACKEND.state(PODMAN_MACHINE) != "running":
+        yield _result(None, "forwarder", "", "the VM isn't running — `fy up` starts it")
+        return
+    yield ("running", "forwarder", "")  # ssh into the guest — let a live UI spin
+    report = forwarder.guest_report(_BACKEND, PODMAN_MACHINE)
+    if report is None:
+        yield _result(None, "forwarder", "", "can't reach the VM over ssh to read its report")
+        return
+    problem = report.problem(forwarder.render(True)[1])
+    yield _result(
+        not problem,
+        "forwarder",
+        f"serving — proxy requests carry the container they came from ({_fwd_stats(report)})",
+        f"NOT serving — {problem}; nothing in the VM reaches the proxy until it is: "
+        "`fy machine stop && fy up` re-provisions it",
+    )
+
+
+def _fwd_stats(report) -> str:
+    """The forwarder's own counts (``/run/fy-fwd/stats``), in words; ``"no traffic yet"``."""
+    import json
+
+    try:
+        stats = json.loads(report.stats) if report.stats else {}
+    except ValueError:
+        stats = {}
+    if not isinstance(stats, dict) or not any(stats.values()):
+        return "no traffic yet"
+    return (
+        f"{stats.get('bridge', 0)} from bridge containers, {stats.get('vm', 0)} from the VM's "
+        f"own namespace, {stats.get('refused', 0)} refused"
+    )
 
 
 def _monitor_events_check():

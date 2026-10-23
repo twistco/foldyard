@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from foldyard import machine, supervisor
+from foldyard.forwarder import MARKER as FORWARDER_MARKER
 from foldyard.machine_backend import PROVISION_MARKER
 from foldyard.plugins import proxy
 
@@ -48,6 +49,7 @@ class FakeBackend:
         # The boot-provisioning id the backend's stored config carries ("" = none recorded).
         self._provision = ""
         self._monitor = ""  # the guest monitor's recording, under its own marker
+        self._forwarder = ""  # the attributing forwarder's, under its own (ADR-0034)
         # Whether the stored config copies the host's proxy env into the guest; None = the
         # backend has no such setting (every test that doesn't opt in).
         self._propagation: bool | None = None
@@ -140,7 +142,9 @@ class FakeBackend:
         return None  # no VM to ssh into: guestlog skips, sandbox is patched where wanted
 
     def provision_id(self, name, marker=PROVISION_MARKER):
-        return self._provision if marker == PROVISION_MARKER else self._monitor
+        if marker == PROVISION_MARKER:
+            return self._provision
+        return self._forwarder if marker == FORWARDER_MARKER else self._monitor
 
     def set_provision(self, name, script, marker=PROVISION_MARKER):
         # the id rides in the script's marker line, as it does in the real lima.yaml
@@ -150,6 +154,9 @@ class FakeBackend:
             self._provision = ident
             self._provision_script = script
             self.calls.append(f"provision:{ident}")
+        elif marker == FORWARDER_MARKER:
+            self._forwarder = ident
+            self.calls.append(f"forwarder:{ident}")
         else:
             self._monitor = ident
             self.calls.append(f"monitor:{ident}")

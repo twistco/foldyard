@@ -95,6 +95,24 @@ REGISTER: tuple[Feature, ...] = (
         ),
         doc_mark="- **`monitor`** *(experimental)*",
     ),
+    Feature(
+        key="machine.attribution",
+        value="record",
+        reader="machine_attribution",
+        kinds=(MAY_CHANGE, UNPROVEN),
+        unproven=(
+            "the network log's `origin` field may change before step 3 of ADR-0034 builds on it; "
+            "it has been shown working on one macOS (vz, arm64) guest only; no maintainer runs it "
+            "day to day yet, and real image-build load, gVisor and podman 6 haven't been tried "
+            "under it"
+        ),
+        graduates_when=(
+            "the `origin` field is declared stable (or step 3's ADR has settled it), and a "
+            "maintainer has run it on a real project day to day for a month — parallel image "
+            "builds included — with nothing filed against it in that time still open"
+        ),
+        doc_mark="- **`attribution`** *(experimental)*",
+    ),
 )
 
 

@@ -207,8 +207,9 @@ class Backend(ABC):
         """The id of foldyard's boot-provisioning script carrying ``marker`` as RECORDED in the
         VM's stored config (``""`` = none). Only a backend whose guest foldyard provisions at boot
         (Lima) has one; the id is what :mod:`foldyard.machine` compares against the script it
-        wants. foldyard records two such scripts, each under its own marker: the wall/sudo one
-        (:data:`PROVISION_MARKER`) and the guest monitor's (:data:`foldyard.monitor.MARKER`)."""
+        wants. foldyard records up to three such scripts, each under its own marker: the wall/sudo
+        one (:data:`PROVISION_MARKER`), the guest monitor's (:data:`foldyard.monitor.MARKER`) and
+        the attributing forwarder's (:data:`foldyard.forwarder.MARKER`)."""
         return ""
 
     def set_provision(self, name: str, script: str, marker: str = PROVISION_MARKER) -> bool:

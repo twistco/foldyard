@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import boxmounts, config, guestlog, hostwall, monitor, podman_desktop, sandbox
+from . import boxmounts, config, forwarder, guestlog, hostwall, monitor, podman_desktop, sandbox
 from .machine_backend import Mount, default_unavailable_block, get_backend
 
 MACHINE = config.machine_name()
@@ -704,6 +704,79 @@ def _check_monitor() -> None:
         _err(f"✓ guest monitor: Tetragon {monitor.TETRAGON_VERSION}, {monitor.POLICY} loaded")
 
 
+# ── the attributing forwarder's boot script: its own recording, under its own marker (ADR-0034) ─
+#
+# Recorded like the monitor's, beside the wall's and never inside it, for the same reason: every
+# byte of the wall script is in its id. A VM that never turned attribution on records nothing; one
+# that turned it off keeps an `off` rendering, which removes the install at boot. Unlike the
+# monitor, a forwarder that isn't serving is refused, not warned about: it is the only way from a
+# container to the proxy, so a dead one means no egress (it fails closed), and `fy up` says so
+# rather than handing over a box that can reach nothing.
+
+FORWARDER_SETTLE = 15.0  # seconds a freshly started forwarder may take to report "serving"
+
+
+def _forwarder_recording() -> tuple[str, str] | None:
+    """``(script, id)`` the current config wants recorded, or ``None`` when nothing should be."""
+    if BACKEND.name != "lima":
+        return None
+    on = forwarder.wanted()
+    if not on and not BACKEND.provision_id(MACHINE, forwarder.MARKER):
+        return None
+    return forwarder.render(on)
+
+
+def _record_forwarder() -> None:
+    want = _forwarder_recording()
+    if want is None:
+        return
+    script, ident = want
+    if BACKEND.provision_id(MACHINE, forwarder.MARKER) == ident:
+        return
+    level = config.machine_attribution()
+    if state() == "running":
+        _err(f"✗ '{MACHINE}' is running with STALE forwarder provisioning ([machine] attribution")
+        _err(f'  = "{level}", a moved port band, or a new forwarder). It applies at boot, as root,')
+        _err("  so restart:")
+        _err("      fy machine stop && fy up")
+        raise SystemExit(1)
+    _err(f"▶ recording the attributing forwarder's boot provisioning for '{MACHINE}' ({level})…")
+    if not BACKEND.set_provision(MACHINE, script, forwarder.MARKER):
+        _err(f"✗ recording the forwarder into '{MACHINE}' failed (`limactl edit`).")
+        raise SystemExit(1)
+
+
+def _check_forwarder(settle: float = FORWARDER_SETTLE) -> None:
+    """After the guest's own checks: the forwarder must report serving the recorded id. Read from
+    the guest's own report (never the host's memory of what it recorded); refused when it isn't."""
+    if BACKEND.name != "lima" or not forwarder.wanted():
+        return
+    want = _forwarder_recording()
+    if want is None:
+        return
+    deadline = time.monotonic() + settle
+    while True:
+        report = forwarder.guest_report(BACKEND, MACHINE)
+        problem = (
+            "can't reach the VM over ssh to read its report"
+            if report is None
+            else report.problem(want[1])
+        )
+        starting = report is not None and report.state.startswith("starting")
+        if not problem or not starting or time.monotonic() >= deadline:
+            break
+        time.sleep(1)
+    if problem:
+        _err(f"✗ the attributing forwarder is NOT serving: {problem}.")
+        _err("  It is the only way from a container to the proxy, so nothing in the VM can reach")
+        _err("  the egress proxy until it is. Its boot log and journal:")
+        _err(f"      limactl shell {MACHINE} cat /run/fy-fwd/boot.log")
+        _err(f"      limactl shell {MACHINE} journalctl -u fy-fwd --no-pager | tail")
+        _err('  Restart (`fy machine stop && fy up`), or set [machine] attribution = "off".')
+        raise SystemExit(1)
+    _err("✓ attributing forwarder: serving (proxy requests carry the container they came from)")
+
+
 def _check_guest_provisioning() -> None:
     """After a boot, and on the steady-state path: the guest's own report must match what the
     config wants. One `limactl shell` per `fy up` — correctness over speed: a VM reset behind
@@ -874,6 +947,7 @@ def ensure(main: Path, wt_root: Path) -> None:
     _record_mounts(main, wt_root)
     _record_provisioning()
     _record_monitor()
+    _record_forwarder()
     _record_proxy_propagation()
     _pin_ssh_port()
     if state() != "running":
@@ -889,6 +963,7 @@ def ensure(main: Path, wt_root: Path) -> None:
     # fresh boot, a revive, and the steady state alike.
     _check_host_wall()
     _check_guest_provisioning()
+    _check_forwarder()
     # Housekeeping every VM wants (journal cap, API log level): over ssh, best-effort, before the
     # sandbox so its service restarts already see the drop-in.
     guestlog.ensure(BACKEND, MACHINE)
@@ -1100,10 +1175,12 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
         return 1
     _record_provisioning()  # the fresh VM is stopped: record before its first boot
     _record_monitor()
+    _record_forwarder()
     _record_proxy_propagation()
     if not _start():  # one-VM-at-a-time aware on non-concurrent backends
         return 1
     _check_host_wall()
     _check_guest_provisioning()
+    _check_forwarder()
     print(f"✓ machine '{MACHINE}' recreated with foldyard's mount set.")
     return 0

@@ -1125,6 +1125,28 @@ def machine_monitor() -> str:
     return level
 
 
+_MACHINE_ATTRIBUTIONS = ("off", "record")
+
+
+def machine_attribution() -> str:
+    """``[machine].attribution`` — the attributing forwarder (:mod:`foldyard.forwarder`,
+    ADR-0034): ``"off"`` (the default) or ``"record"``, a root forwarder provisioned into the lima
+    VM at boot that stamps every connection to the egress proxy with the container it came from,
+    so the network log can say who asked. It records; nothing is decided on the stamp yet. Only
+    the levels foldyard knows how to provision are accepted. Changing it re-provisions at boot
+    (``fy machine stop && fy up``). ``MACHINE_ATTRIBUTION`` env wins."""
+    raw = os.environ.get("MACHINE_ATTRIBUTION")
+    if raw is None:
+        raw = _table("machine").get("attribution", "off")
+    level = str(raw or "off").strip().lower()
+    if level not in _MACHINE_ATTRIBUTIONS:
+        raise SystemExit(
+            f'✗ [machine].attribution must be "record" or "off" (the default), not {level!r} — '
+            "it names a level foldyard provisions, never a program or a rule."
+        )
+    return level
+
+
 # Lima's documented guest→host address: the user-mode network's host gateway, which the usernet
 # forwards to the host (the same trick gvproxy plays with host.containers.internal, different
 # constant). Lima also writes it into the guest's /etc/hosts as `host.lima.internal`, but that
