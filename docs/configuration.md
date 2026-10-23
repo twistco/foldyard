@@ -198,9 +198,14 @@ directories of foldyard's own beside them, one per direction
   can only read it (the box sees it at `/run/foldyard/to-box`). Read-only is enforced outside
   the guest, so even root in the VM can't change what is there. That holds only for `vz` with
   virtiofs and `qemu` with 9p, so foldyard pins Lima's `mountType` to match the `vmtype` and
-  mounts no to-box on any other pair (`krunkit`, say). Every box of the project can read it, so
-  it never holds a secret. Its first use is the monitor's file sink
-  (`fy monitor hook add NAME --to-box`).
+  mounts no to-box on any other pair (`krunkit`, say). On 9p it also pins the guest's cache to
+  `mmap`: Lima's default for a read-only 9p share caches without ever re-checking, so what your
+  computer writes there could stay invisible to the box. On vz, a write reaches the box after
+  about a second, and a file your computer replaces reads as missing for that second (measured
+  2026-10-22; the Freshness note under
+  [ADR-0033's read-only enforcement](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md#read-only-enforcement-by-backend)).
+  Every box of the project can read it, so it never holds a secret. Its first use is the
+  monitor's file sink (`fy monitor hook add NAME --to-box`).
 - **`from-box`** (`~/.foldyard/<project>/from-box/`) — the box writes it: one slot per checkout
   (`main/`, `worktrees/<name>/`), where the agents' transcripts are bound out (see
   [`transcript_sync_seconds`](#claude--codex--vscode)). Your computer reads it as untrusted

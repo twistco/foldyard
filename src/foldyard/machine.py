@@ -55,8 +55,9 @@ def _volumes(main: Path, wt_root: Path, vmtype: str = "") -> list[Mount]:
         return mounts
     from_box, to_box = str(boxmounts.from_box_dir()), str(boxmounts.to_box_dir())
     mounts.append(Mount(from_box, from_box))
-    if boxmounts.mount_type_for(vmtype):
-        mounts.append(Mount(to_box, to_box, writable=False))
+    if mount_type := boxmounts.mount_type_for(vmtype):
+        cache = boxmounts.TO_BOX_9P_CACHE if mount_type == "9p" else ""
+        mounts.append(Mount(to_box, to_box, writable=False, cache=cache))
     return mounts
 
 
@@ -773,6 +774,10 @@ def _mounts_drift(main: Path, wt_root: Path) -> tuple[list[Mount], str, str] | N
     for m in mine:
         if m not in want:
             problems.append(f"no {m.mount_point} ({'read-write' if m.writable else 'read-only'})")
+    for m in want:  # the cache, only where foldyard asks for one (see Mount.cache)
+        held = next((h for h in mine if h == m), None)
+        if m.cache and held is not None and held.cache != m.cache:
+            problems.append(f"{m.mount_point} 9p cache {m.cache}, not {held.cache or 'unset'}")
     have_type = BACKEND.mount_type(MACHINE)
     if want_type and have_type != want_type:
         problems.append(f"mountType {want_type}, not {have_type or 'unset'}")

@@ -295,9 +295,9 @@ foldyard's surface splits by *where it can be validated*:
      host's seeded file unchanged. The red-first control records it `writable: true` (started with
      `limactl start`, as `fy up` would re-record it read-only): the writes land and `fy verify`
      FAILs its to-box row. First, its FRESHNESS: after the guest has read a to-box file, an append
-     and a rename-over from your computer each reach it within 5 s — a strict xfail on 9p with
-     Lima's default cache (`fscache`, which doesn't revalidate) until `9p.cache` is pinned with the
-     posture mirror's move there.
+     and a rename-over from your computer each reach it within 5 s, and on 9p the to-box carries
+     foldyard's pin (`9p.cache = mmap`; Lima's default `fscache` never revalidates, and left every
+     round stale on CI's 9p hosts before the pin).
    - `test_reclaim_e2e.py` — `fy reclaim` on a real store: a removed worktree's tagged images
      (both provider spellings) swept, the main image + base images kept, the next `up` still
      `Using cache` (the three reclaim properties below, live).

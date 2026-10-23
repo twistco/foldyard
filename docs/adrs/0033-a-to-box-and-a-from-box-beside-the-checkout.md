@@ -136,6 +136,15 @@ So:
   cache (CI's Linux and WSL2 host tiers, Lima 2.2.0, 2026-10-22) both writes stayed STALE: every
   one of ten rounds per shape missed the 5 s window, append and rename-over alike. That is the
   cache the pin has to change.
+  *Changed 2026-10-23, with the operator:* pinned now, on its own, not with the posture mirror —
+  so nobody can be served a stale to-box, whatever reads it. (The reason given above was also
+  wrong: the mirror's move needs no VM restart, since every box since 0.6.1 already binds the
+  whole to-box; only the pin does.) Every 9p to-box gets `9p.cache = mmap` — what Lima gives the
+  writable mounts, fresh on the same runners — recorded like the rest of the mount set, so a
+  running VM still on the default is refused until `fy machine stop && fy up`. Not on vz:
+  virtiofs takes no cache setting, and Lima's merged config reports `fscache` for every read-only
+  mount there, so the check compares the cache only where foldyard asks for one — else every
+  macOS VM would read as stale.
 - **Only the operator can widen it:** Lima merges mounts across default, instance and
   `~/.lima/_config/override.yaml`, and the most permissive `writable` wins
   ([`defaults.go#L139-L141`](https://github.com/lima-vm/lima/blob/v2.2.0/pkg/limayaml/defaults.go#L139-L141)).

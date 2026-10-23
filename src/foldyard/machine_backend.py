@@ -44,7 +44,7 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
 
@@ -108,11 +108,17 @@ def _run(cmd: list[str], timeout: float | None = None) -> subprocess.CompletedPr
 class Mount:
     """One host directory shared into the VM: ``location`` on your computer at ``mount_point`` in
     the guest (foldyard always uses the same path), writable or not. Whether ``writable=False`` is
-    enforced OUTSIDE the guest depends on the backend and its share type (ADR-0033)."""
+    enforced OUTSIDE the guest depends on the backend and its share type (ADR-0033).
+
+    ``cache``: the guest's 9p client cache mode (Lima's ``9p.cache``), ``""`` for none of
+    foldyard's. Left out of equality, so a set is compared by what it shares: Lima's merged config
+    reports a cache for every mount, 9p or not, and only the one foldyard asks for is compared
+    (``machine._mounts_drift``)."""
 
     location: str
     mount_point: str
     writable: bool = True
+    cache: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
@@ -586,7 +592,9 @@ class LimaBackend(Backend):
         for m in cfg.get("mounts") or []:
             if isinstance(m, dict) and isinstance(m.get("location"), str):
                 point = m.get("mountPoint") or m["location"]
-                out.append(Mount(m["location"], str(point), m.get("writable") is True))
+                p9 = m.get("9p")
+                cache = str(p9.get("cache") or "") if isinstance(p9, dict) else ""
+                out.append(Mount(m["location"], str(point), m.get("writable") is True, cache))
         return out
 
     def mount_type(self, name: str) -> str:
@@ -612,7 +620,9 @@ class LimaBackend(Backend):
     def _mounts_yq(mounts: list[Mount]) -> str:
         return ", ".join(
             f'{{"location": {json.dumps(m.location)}, "mountPoint": {json.dumps(m.mount_point)}, '
-            f'"writable": {"true" if m.writable else "false"}}}'
+            f'"writable": {"true" if m.writable else "false"}'
+            + (f', "9p": {{"cache": {json.dumps(m.cache)}}}' if m.cache else "")
+            + "}"
             for m in mounts
         )
 
