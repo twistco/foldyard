@@ -304,7 +304,13 @@ def tell_crossing(
     key = f"{boot}:{seq}"
     if cur.told == key:
         return
-    name = (claims.get(cid) or {}).get("name") or cid[:12] if cid else "a container"
+    # the id is the kernel's (its scope); the name only the engine's claim, which the box chooses
+    claimed = ((claims.get(cid) or {}).get("name") or "") if cid else ""
+    name = (
+        (f"container {cid[:12]}" + (f" (named {claimed})" if claimed else ""))
+        if cid
+        else ("a container")
+    )
     at = when[11:19] if len(when) >= 19 else "?"
     log(
         f"⚠ guest monitor: a process crossed out of {name} at {at} UTC — every monitor hook now "

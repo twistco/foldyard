@@ -1085,7 +1085,8 @@ def test_a_crossing_is_told_once_on_your_computer_and_again_for_a_new_boot(monke
     tell()
     [(title, body)] = told
     assert "fyex" in title and "crossed out of a container" in title
-    assert "fyex-api-1" in body and "fy monitor" in body
+    # the id first (the kernel's), the name as what it is: the engine's claim, the box's choice
+    assert f"container {BOX[:12]} (named fyex-api-1)" in body and "fy monitor" in body
     assert len(logged) == 1 and "fyex-api-1" in logged[0]
     tell()  # the same crossing: told once, a supervisor restart included (the cursor holds it)
     assert len(told) == 1
