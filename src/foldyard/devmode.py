@@ -2433,6 +2433,28 @@ def _forwarder_check():
         f"NOT serving — {problem}; nothing in the VM reaches the proxy until it is: "
         "`fy machine stop && fy up` re-provisions it",
     )
+    yield _snapshots_check()
+
+
+def _snapshots_check():
+    """Whether the supervisor is snapshotting the engine's containers — what a stamp's address is
+    resolved against (:mod:`foldyard.attribution`). Stale: the Network Log can only show raw
+    addresses for what happened since. Never red: the rows themselves are kept either way."""
+    from . import attribution
+
+    age = attribution.snapshots_age()
+    if age is None:
+        why = "none yet — is the supervisor running? `fy host`"
+    elif age > 3 * attribution.SNAPSHOT_EVERY:
+        why = f"the last was {age:.0f}s ago — is the supervisor running? `fy host`"
+    else:
+        why = ""
+    return _result(
+        None if why else True,
+        "container snapshots",
+        f"taken {age or 0:.0f}s ago — what the Network Log names a stamp's container from",
+        f"{why}; until they run, the Network Log shows a stamp's raw address",
+    )
 
 
 def _fwd_stats(report) -> str:

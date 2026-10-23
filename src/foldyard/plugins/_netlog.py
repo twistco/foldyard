@@ -21,9 +21,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import config
+from ..attribution import origin_key
 
 KEEP = 50  # a host's newest rows kept for display; its tallies count everything
 KEEP_BLOCKED = 20  # older refusals kept beyond those — a refusal is the row the operator acts on
+KEEP_ORIGINS = 64  # who used a host (ADR-0034): the most recent this many stamps, per host and file
 _HEAD = 64  # how much of a file's start identifies its content (see _File.head)
 
 
@@ -47,6 +49,8 @@ class _Host:
     last_ts: str = ""
     recent: deque[dict] = field(default_factory=lambda: deque(maxlen=KEEP))  # oldest→newest
     refusals: deque[dict] = field(default_factory=lambda: deque(maxlen=KEEP_BLOCKED))
+    # who used it: a row's stamp identity (attribution.origin_key) → [rows, last ts, refused rows]
+    origins: dict[str, list] = field(default_factory=dict)
 
     def add(self, e: dict) -> None:
         self.requests += 1
@@ -61,6 +65,14 @@ class _Host:
             self.errors += 1
         self.last_ts = max(self.last_ts, str(e.get("ts", "")))
         self.recent.append(e)
+        key = origin_key(e.get("origin"))
+        if key is not None:
+            seen = self.origins.setdefault(key, [0, "", 0])
+            seen[0] += 1
+            seen[1] = max(seen[1], str(e.get("ts", "")))
+            seen[2] += bool(e.get("blocked") and not e.get("mismatch"))
+            if len(self.origins) > KEEP_ORIGINS:  # the box decides how many it makes up
+                del self.origins[min(self.origins, key=lambda k: self.origins[k][1])]
 
 
 def _status(e: dict) -> int:
@@ -105,6 +117,8 @@ class HostView:
     errors: int
     last_ts: str
     rows: list[dict]  # newest first: the newest KEEP, then older refusals not among them
+    # who used it (ADR-0034): stamp identity → (rows, last ts, refused rows), across every file
+    origins: dict[str, tuple[int, str, int]] = field(default_factory=dict)
 
     @property
     def earlier(self) -> int:
@@ -188,6 +202,7 @@ def _merge(files: list[_File]) -> Snapshot:
                 errors=sum(p.errors for p in parts),
                 last_ts=max(p.last_ts for p in parts),
                 rows=rows + refusals[:KEEP_BLOCKED],
+                origins=_merge_origins(parts),
             )
         )
     return Snapshot(
@@ -196,3 +211,12 @@ def _merge(files: list[_File]) -> Snapshot:
         injected=sum(v.injected for v in views),
         since=min((f.first_ts for f in files if f.first_ts), default=""),
     )
+
+
+def _merge_origins(parts: list[_Host]) -> dict[str, tuple[int, str, int]]:
+    out: dict[str, tuple[int, str, int]] = {}
+    for p in parts:
+        for key, (rows, last, refused) in p.origins.items():
+            had = out.get(key, (0, "", 0))
+            out[key] = (had[0] + rows, max(had[1], last), had[2] + refused)
+    return out

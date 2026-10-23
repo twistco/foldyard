@@ -307,11 +307,20 @@ def _launch_addon_path() -> Path:
     return config.state_dir() / "egress_proxy.py"
 
 
-def _net_leaf(e: dict, escape) -> str:
-    """One request as a leaf line under its host group: time · method · path · status · marks.
+def _net_leaf(e: dict, escape, who=None) -> str:
+    """One request as a leaf line under its host group: time · method · path · status · marks,
+    then who sent it when the row carries a stamp (``who``, an :class:`attribution.Who`).
 
     A passthrough row (a trusted host, TLS not decrypted) has no method/path/status — only the SNI
     host + time — so it renders as a dim `tls` tunnel marker instead of a request line."""
+    line = _net_leaf_body(e, escape)
+    if who is not None:
+        asked = "asked by" if e.get("blocked") else "by"
+        line += f"  [dim]{asked} {escape(who.label[:60])}[/dim]"
+    return line
+
+
+def _net_leaf_body(e: dict, escape) -> str:
     ts = escape(e.get("ts", "")[11:19])
     if e.get("blocked"):
         # Refused by the proxy — no upstream contacted. Red so it stands out as the row you act on
@@ -371,6 +380,32 @@ def _net_leaf(e: dict, escape) -> str:
     return line
 
 
+def _who_used(origins: dict, resolver, escape, shown: int = 3) -> str:
+    """The host header's "who": each stamp the index counted for it, resolved at the last time it
+    was seen and summed by what it names (ADR-0034) — the most frequent :data:`shown` of them,
+    then how many more; refusals named apart, since those are the rows the operator acts on."""
+    from .. import attribution
+
+    used: dict[str, list[int]] = {}
+    for key, (rows, last, refused) in origins.items():
+        who = resolver.who(attribution.origin_of_key(key), last)
+        if who is None:
+            continue
+        tally = used.setdefault(who.label, [0, 0])
+        tally[0] += rows
+        tally[1] += refused
+    if not used:
+        return ""
+    ranked = sorted(used.items(), key=lambda kv: -kv[1][0])
+    names = ", ".join(f"{escape(label[:40])} ×{n}" for label, (n, _r) in ranked[:shown])
+    more = f" (+{len(ranked) - shown})" if len(ranked) > shown else ""
+    refused = [label for label, (_n, r) in ranked if r]
+    asked = (
+        f" · [red]refused for {escape(', '.join(refused[:shown])[:80])}[/red]" if refused else ""
+    )
+    return f" · [dim]by {names}{more}[/dim]{asked}"
+
+
 def _network_panel_tree() -> PanelTree:
     """The Network Log tab's data, GROUPED BY HOST into a collapsible tree: one group per domain
     in the whole retained log (:mod:`._netlog` — header = its request count + injected/error
@@ -395,6 +430,9 @@ def _network_panel_tree() -> PanelTree:
     floated = [v for v in recent if v.host in owed][:_NET_FLOATED]
     ordered = floated + [v for v in recent if v.host not in owed][: _NET_GROUPS - len(floated)]
 
+    from .. import attribution  # stdlib-only; the snapshots it resolves stamps against
+
+    resolver = attribution.resolver() if any(v.origins for v in ordered) else None
     groups: list[PanelGroup] = []
     for v in ordered:
         header = f"[bold]{escape(v.host)}[/bold]  [dim]{v.requests} req[/dim]"
@@ -408,7 +446,12 @@ def _network_panel_tree() -> PanelTree:
             header += f" · [yellow]⏸ {v.held} held[/yellow]"
         if v.errors:
             header += f" · [red]{v.errors} err[/red]"
-        children = [_net_leaf(e, escape) for e in v.rows]
+        if resolver is not None and v.origins:
+            header += _who_used(v.origins, resolver, escape)
+        children = [
+            _net_leaf(e, escape, resolver.who(e.get("origin"), e.get("ts")) if resolver else None)
+            for e in v.rows
+        ]
         if v.earlier:
             children.append(f"[dim]… {v.earlier} earlier[/dim]")
         groups.append(PanelGroup(key=v.host, label=header, children=children))

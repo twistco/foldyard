@@ -318,7 +318,7 @@ def _doctor(monkeypatch, report, state="running"):
     be = SimpleNamespace(name="lima", state=lambda n: state)
     monkeypatch.setattr(devmode, "_BACKEND", be)
     monkeypatch.setattr(forwarder, "guest_report", lambda b, n: report)
-    return [r for r in devmode._forwarder_check() if r[0] != "running"]
+    return [r for r in devmode._forwarder_check() if r[0] != "running" and r[1] == "forwarder"]
 
 
 def test_the_doctor_row_is_red_when_the_forwarder_isnt_serving(monkeypatch):

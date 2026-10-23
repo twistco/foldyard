@@ -47,6 +47,7 @@ from shutil import which
 
 from . import (
     allowlist,
+    attribution,
     config,
     configpin,
     credscope,
@@ -2134,6 +2135,9 @@ def main() -> int:
     # …and the operator's hooks (host-only config, ~/.foldyard/<project>/monitor-hooks.toml), on
     # a third thread: a slow webhook or script never delays the pull.
     monitorhooks.start(log, lambda: stopping)
+    # The engine's containers and their addresses, snapshotted for resolving the forwarder's
+    # stamps at read time (ADR-0034): its own thread too, idle while attribution is off.
+    attribution.start(log, lambda: stopping)
 
     while not stopping:
         reconcile_once(children, nagged)
