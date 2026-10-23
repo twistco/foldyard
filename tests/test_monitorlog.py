@@ -686,6 +686,18 @@ def test_a_namespace_made_inside_a_container_on_a_number_podman_entered_once_is_
     assert got[2:] == [("unattributed", "", False)] * 2
 
 
+def test_an_init_from_a_number_podman_entered_once_is_no_build_once_the_number_was_taken():
+    # where an init came from decides whether it is a build's or a container's — and a number the
+    # VM entered once, then taken by a box container, is not podman's: the box's own namespace
+    # made there is no build
+    took = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": PODMAN_NS}}})
+    made = init(900, start="2026-10-04T10:00:01Z", by="/bin/sh")
+    made["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 800
+    recs = _records(snap({}), entered(800), snap({}), took, made, proc(900, "2026-10-04T10:00:02Z"),
+                    snap({}))  # fmt: skip
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][2:] == ["unattributed"] * 2
+
+
 def test_podmans_namespace_is_podmans_again_once_podman_enters_it_from_the_vm():
     # after something stepped into podman's namespace from a container (flagged `crossed`), what
     # runs there is read as no one's — the crossing's descendants among it — until podman next
