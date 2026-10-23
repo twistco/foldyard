@@ -468,8 +468,7 @@ def test_the_catalogue_keeps_who_entered_each_namespace_from_where(state, monkey
         assert _facts(cat) == want
         assert _facts(cat, 1, 5) == want[1:3]  # strictly between the two seqs
         assert [f["seq"] for f in cat.prior(BOOT, "200", 4)] == [2]  # strictly before
-        # the newest holder (the exit) and the start of the life it ends
-        assert sorted(f["seq"] for f in cat.prior(BOOT, "200", 9)) == [2, 4]
+        assert [f["seq"] for f in cat.prior(BOOT, "200", 9)] == [4]  # the newest holder: the exit
         assert cat.prior(BOOT, "7", 1) == []
     for p in (state / "logs").glob("monitor-index.sqlite*"):
         p.unlink()
@@ -642,3 +641,25 @@ def test_a_finished_boots_facts_go_once_the_store_holds_none_of_its_records(stat
     with ms.Catalogue.open() as cat:
         cat.drop([ms.segments()[0].id])
         assert cat.facts("old", -1, 99) == [] and [f["seq"] for f in cat.facts(BOOT, -1, 99)] == [1]
+
+
+def test_a_catalogue_holding_facts_without_their_kinds_reads_them_again(state):
+    # facts indexed before kinds were stored (an earlier build of this catalogue): derived, so
+    # dropped and read again from the segments, each classified
+    import sqlite3
+
+    ms.append([snap(0), entry(1), init(2)])
+    conn = sqlite3.connect(state / "logs" / "monitor-index.sqlite", isolation_level=None)
+    conn.execute("DROP TABLE nsfact")
+    conn.execute(
+        "CREATE TABLE nsfact (boot TEXT NOT NULL, seq INTEGER NOT NULL, seg TEXT NOT NULL, "
+        "inode TEXT NOT NULL, what TEXT NOT NULL, start TEXT NOT NULL, outside TEXT NOT NULL, "
+        "by TEXT NOT NULL, pidns TEXT NOT NULL, PRIMARY KEY (boot, seq))"
+    )
+    conn.close()
+    with ms.Catalogue.open() as cat:
+        cat.catch_up()
+        assert [(f["seq"], f["kind"]) for f in cat.facts(BOOT, -1, 99)] == [
+            (1, "entry"),
+            (2, "build"),
+        ]

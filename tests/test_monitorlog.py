@@ -486,6 +486,91 @@ def test_a_stretch_after_retention_reads_the_marks_after_the_snapshot_kept_befor
     assert e.who == "unattributed"
 
 
+def _stored(monkeypatch, tmp_path, *chunks: list[dict]):
+    """``chunks`` appended to the store one by one (a segment each), the catalogue caught up."""
+    from foldyard import monitorstore
+
+    monkeypatch.setattr(monitorstore.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 10)
+    for chunk in chunks:
+        monitorstore.append(chunk)
+    return monitorstore
+
+
+def test_the_catalogue_classifies_each_fact_as_the_join_over_everything_does(monkeypatch, tmp_path):
+    # each fact's kind is decided once, when indexed, from the facts before it: a number podman
+    # entered once, stepped into from a container (takes nothing), then entered from podman's side
+    # (takes it — not a repeat of the step in, though both are `other`): an init from there is no
+    # build's, read through the catalogue as over everything
+    stepped_in = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    took = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": PODMAN_NS}}})
+    made = init(900, start="2026-10-04T10:00:01Z", by="/bin/sh")
+    made["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 800
+    stream = [entered(), snap({}), entered(800), snap({}), stepped_in, took, made,
+              proc(900, "2026-10-04T10:00:02Z"), snap({})]  # fmt: skip
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    _stored(monkeypatch, tmp_path, recs)
+    truth = {e.seq: e.who for e in monitorlog.attribute(recs, "fyex")}
+    assert truth[6] == truth[7] == "unattributed"
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        got = {
+            e.seq: e.who for r in recs if r["k"] == "ev" for e in monitorlog.join([r], cat, "fyex")
+        }
+    finally:
+        cat.close()
+    assert got == truth
+
+
+def test_retention_keeps_what_the_next_facts_are_classified_by(monkeypatch, tmp_path):
+    # the number was taken from podman's side, then stepped into: retention keeps the fact that
+    # took it as well as the newest one, so an init coming from it after the drop is no build's
+    took = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": PODMAN_NS}}})
+    stepped_in = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    made = init(900, start="2026-10-04T10:00:01Z", by="/bin/sh")
+    made["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 800
+    stream = [entered(), entered(800), took, stepped_in, snap({}), ev(1), made,
+              proc(900, "2026-10-04T10:00:02Z"), snap({})]  # fmt: skip
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    store = _stored(monkeypatch, tmp_path, recs[:5], recs[5:6])
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        first = store.segments()[0]
+        first.path.unlink()
+        cat.drop([first.id])
+        store.append(recs[6:])
+        cat.catch_up()
+        got = [e.who for e in monitorlog.join(recs[6:8], cat, "fyex")]
+    finally:
+        cat.close()
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][-2:] == got == ["unattributed"] * 2
+
+
+def test_a_record_the_catalogue_has_not_classified_yet_is_read_by_what_it_kept(
+    monkeypatch, tmp_path
+):
+    # a read can hold records newer than the catalogue: their facts are classified on the spot,
+    # from the catalogue's newest few about each namespace — the one that took the number included,
+    # not only the newest
+    took = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": PODMAN_NS}}})
+    stepped_in = ev(800, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    made = init(900, start="2026-10-04T10:00:01Z", by="/bin/sh")
+    made["e"]["process_exec"]["parent"]["ns"]["mnt"]["inum"] = 800
+    stream = [entered(), snap({}), entered(800), took, stepped_in, snap({}), made,
+              proc(900, "2026-10-04T10:00:02Z")]  # fmt: skip
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    _stored(monkeypatch, tmp_path, recs[:6])
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        got = [e.who for e in monitorlog.join(recs[6:], cat, "fyex")]
+    finally:
+        cat.close()
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][-2:] == got == ["unattributed"] * 2
+
+
 def entered(inode: int = PODMAN_NS, binary: str = "/usr/bin/conmon") -> dict:
     """podman entering mount namespace ``inode`` straight from the VM's own: a process there, its
     parent in the VM's namespace (Tetragon's ``is_host``), outside the VM's user namespace."""

@@ -1021,16 +1021,16 @@ class Catalogue:
         c.execute("COMMIT")
 
     def _retain_facts(self) -> None:
-        """Of the facts from segments already gone, keep what a read of anything still stored can
-        ask (every fact carries its kind, so no history behind it): per namespace the newest
-        holder, the newest fact, the newest entry or fact that took the number, the newest
-        container start, and the start of the life the newest holder ends — and every fact after
-        the snapshot kept from before the boot's oldest stored record (a read's window starts
-        there). Inside :meth:`drop`'s transaction."""
+        """Of the facts from segments already gone, keep what a read of anything still stored — or
+        the classification of a fact still to come — can ask (every fact carries its kind, so no
+        history behind it): per namespace the newest holder, the newest fact, and the newest entry
+        or fact that took the number; and every fact after the snapshot kept from before the
+        boot's oldest stored record, where a read's window starts (a life's start matters to the
+        join only inside the window). Inside :meth:`drop`'s transaction."""
         c = self.conn
         rows: dict[tuple[str, str], list[tuple]] = {}
         for row in c.execute(
-            "SELECT boot, inode, seq, kind, what, taken, pidns FROM nsfact "
+            "SELECT boot, inode, seq, kind, taken FROM nsfact "
             "WHERE seg NOT IN (SELECT id FROM seg) ORDER BY boot, inode, seq"
         ):
             rows.setdefault((row[0], row[1]), []).append(row[2:])
@@ -1049,16 +1049,11 @@ class Catalogue:
             def newest(test, rows=facts) -> tuple | None:
                 return next((r for r in reversed(rows) if test(r)), None)
 
-            held = newest(lambda r: r[1] in HELD)
             picks = [
-                held,
+                newest(lambda r: r[1] in HELD),
                 facts[-1],
-                newest(lambda r: r[1] == "entry" or r[3]),
-                newest(lambda r: r[1] == "container" and r[2] == "start"),
+                newest(lambda r: r[1] == "entry" or r[2]),  # (seq, kind, taken)
             ]
-            if held and held[1] == "container" and held[2] == "end":
-                picks.append(newest(lambda r, h=held: r[1] == "container" and r[2] == "start"
-                                    and r[4] == h[4] and r[0] < h[0]))  # fmt: skip
             keep |= {r[0] for r in picks if r}
             drop += [(boot, seq) for seq, *_ in facts if seq not in keep]
         c.executemany("DELETE FROM nsfact WHERE boot = ? AND seq = ?", drop)
@@ -1278,30 +1273,23 @@ class Catalogue:
 
     def prior(self, boot: str, inode: str, below: int) -> list[dict]:
         """What :class:`NsFacts` asks about namespace ``inode`` from before seq ``below`` — the
-        facts :meth:`_retain_facts` keeps: the newest holder, the newest fact, the newest entry or
-        fact that took the number, the newest container start, and the start of the life the
-        newest holder ends."""
+        facts :meth:`_retain_facts` keeps: the newest holder, the newest fact, and the newest entry
+        or fact that took the number (for a record the catalogue hasn't classified yet)."""
         held = ", ".join(f"'{k}'" for k in HELD)
         out: dict[int, dict] = {}
 
-        def newest(where: str, args: tuple = ()) -> dict | None:
+        def newest(where: str) -> None:
             row = self.conn.execute(
                 f"SELECT {self._FACT_COLS} FROM nsfact WHERE boot = ? AND inode = ? AND seq < ? "
                 f"AND ({where}) ORDER BY seq DESC LIMIT 1",
-                (boot, inode, below, *args),
+                (boot, inode, below),
             ).fetchone()
-            if row is None:
-                return None
-            f = out[row[0]] = self._fact(boot, row)
-            return f
+            if row is not None:
+                out[row[0]] = self._fact(boot, row)
 
-        h = newest(f"kind IN ({held})")
+        newest(f"kind IN ({held})")
         newest("1")
         newest("kind = 'entry' OR taken = 1")
-        newest("kind = 'container' AND what = 'start'")
-        if h and h["kind"] == "container" and h["what"] == "end":
-            newest("kind = 'container' AND what = 'start' AND pidns = ? AND seq < ?",
-                   (h["pidns"], h["seq"]))  # fmt: skip
         return list(out.values())
 
     def last_snapshot(self, boot: str) -> int:
