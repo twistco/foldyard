@@ -4,6 +4,32 @@
   ([forwarder-spike.md](https://github.com/twistco/foldyard/blob/main/docs/forwarder-spike.md)): the forwarder is **viable with caveats, with no
   measurable performance penalty**. The caveats are carried into the Decision below, and the
   fallback (a per-container secret in each proxy URL) is not preferred. Awaiting acceptance.
+- **Amended (2026-10-23):** step 1 (attribute and record) implemented behind `[machine]
+  attribution = "record"` (experimental, default off, lima with `firewall = true`). Steps 2 and 3
+  are not. Where the implementation differs from the Decision below:
+  - **`machine-wall.sh` and the wall's boot script are unchanged**, so no VM goes stale. The
+    forwarder's own recorded boot script (`# fy-forwarder <id>`) installs its own table, whose
+    guard rejects the walled principals' direct connections to the daemon ports (a reject in any
+    base chain is final, whatever the wall's table accepts), and uid-scoped policy routes that
+    send those principals' gateway-port connections out through `lo`, which the wall's first rule
+    already admits — so no `ip daddr 127.0.0.1 … accept` line is needed either. The wall's own
+    daemon-port rule stays, superseded by the guard.
+  - **The bounded wait is an OCI prestart hook**, not a change to the wall's crun wrapper. It has
+    to live in `/usr/share/containers/oci/hooks.d`: podman 5.8 reads no other hooks directory by
+    default.
+  - **The proxy URL containers get is unchanged**: the forwarder's table redirects gateway-port
+    traffic to it, as in the spike.
+  - **The VM listener binds `127.42.0.1`**, which Lima's default port forwarding doesn't forward
+    ("Not forwarding TCP 127.42.0.1:4747"), so no `portForwards` entry is needed. Pasta helpers
+    are refused there; because pasta opens pooled sockets before podman moves it into its scope,
+    a socket's cgroup can name one pasta has left, so the owner is looked up across the walled
+    uids' processes.
+  - **Token-service ports are forwarded but not stamped.**
+  - **`fy up` refuses a forwarder that isn't serving**, since nothing in the VM reaches the
+    proxy without it.
+  - **Not yet:** `fy monitor`'s join and learn mode naming the service, the hooks' batches
+    resolving stamps, and networks as foldyard's own record (names and labels are still the
+    engine's claims). Untested: gVisor, podman 6, and load from real image builds.
 - **Sources:** the 2026-10-22 investigation of a proxy stall during parallel BashArena image
   builds (the egress log, `lsof` on the host, a replay batch's monitor digest; not in the repo); the
   spike record [forwarder-spike.md](https://github.com/twistco/foldyard/blob/main/docs/forwarder-spike.md) (a real Lima `template:podman` guest:
