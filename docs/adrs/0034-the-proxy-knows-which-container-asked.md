@@ -32,7 +32,8 @@
   - **Not yet:** `fy monitor`'s join of proxy rows, the hooks' batches resolving stamps, and
     networks as foldyard's own record (names and labels are still the engine's claims).
     Untested: gVisor, podman 6, `fy verify` and `fy box up` with it on, and load from real image
-    builds.
+    builds. Tested: the host-tier e2e (`tests/test_forwarder_e2e.py`) on CI's Linux (QEMU/KVM,
+    x86_64) and WSL2 hosts, and by hand on a macOS vz/arm64 guest.
 - **Sources:** the 2026-10-22 investigation of a proxy stall during parallel BashArena image
   builds (the egress log, `lsof` on the host, a replay batch's monitor digest; not in the repo); the
   spike record [forwarder-spike.md](https://github.com/twistco/foldyard/blob/main/docs/forwarder-spike.md) (a real Lima `template:podman` guest:

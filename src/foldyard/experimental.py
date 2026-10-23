@@ -102,8 +102,9 @@ REGISTER: tuple[Feature, ...] = (
         kinds=(MAY_CHANGE, UNPROVEN),
         unproven=(
             "the network log's `origin` field may change before step 3 of ADR-0034 builds on it; "
-            "it has been shown working on one macOS (vz, arm64) guest only; no maintainer runs it "
-            "day to day yet, and real image-build load, gVisor and podman 6 haven't been tried "
+            "it passes the host-tier e2e on Linux and WSL2 hosts and was tried by hand on one "
+            "macOS (vz, arm64) guest, but no maintainer runs it day to day yet, and real "
+            "image-build load, gVisor, podman 6, `fy verify` and `fy box up` haven't been tried "
             "under it"
         ),
         graduates_when=(
