@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
@@ -604,6 +604,52 @@ def _redact_build_args(cmd: list[str]) -> list[str]:
     return shown
 
 
+# How often a running podman build says it is still going. Its output goes to the build log, not
+# the terminal, so without this a cold build is minutes of silence that reads as a hang.
+_BUILD_HEARTBEAT = 30.0
+
+
+def _mmss(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    return f"{m}:{s:02d}"
+
+
+def _await_builds(futures: dict[Future, str], log_path: Path) -> list[tuple[str, int]]:
+    """Wait for every build, returning the failed ones as (service, exit code). Every
+    `_BUILD_HEARTBEAT` seconds with nothing finished it prints one line naming what is still
+    building and whether the log grew since the last line — "no new output" is how a build that
+    really is stuck shows itself."""
+    start = time.monotonic()
+    seen = 0
+    failures: list[tuple[str, int]] = []
+    pending = set(futures)
+    while pending:
+        done, pending = wait(pending, timeout=_BUILD_HEARTBEAT, return_when=FIRST_COMPLETED)
+        failures += [r for f in done if (r := f.result())[1]]
+        if done or not pending:
+            continue
+        try:
+            size = log_path.stat().st_size
+        except OSError:
+            size = seen
+        new = size - seen
+        grew = (
+            "no new output"
+            if new <= 0
+            else f"log +{new} B"
+            if new < 1024
+            else f"log +{new // 1024} KB"
+        )
+        seen = size
+        running = ", ".join(sorted(futures[f] for f in pending))
+        finished = len(futures) - len(pending)
+        _err(
+            f"… still building {running} — {finished}/{len(futures)} done, "
+            f"{_mmss(time.monotonic() - start)} elapsed ({grew})"
+        )
+    return failures
+
+
 def _podman_build(
     ctx: Context,
     build_proxy: str | None,
@@ -758,10 +804,8 @@ def _podman_build(
             key = json.dumps([svc["build"], platform_for(svc)], sort_keys=True)
             groups.setdefault(key, []).append((name, svc))
         with ThreadPoolExecutor(max_workers=len(groups)) as pool:
-            futures = [pool.submit(build_one, group, log) for group in groups.values()]
-            failures = [
-                result for future in as_completed(futures) if (result := future.result())[1]
-            ]
+            futures = {pool.submit(build_one, g, log): g[0][0] for g in groups.values()}
+            failures = _await_builds(futures, log_path)
         if failures:
             log.flush()
             failed = ", ".join(f"{name} (exit {rc})" for name, rc in failures)
