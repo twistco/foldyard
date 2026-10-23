@@ -516,7 +516,11 @@ def _origin_settings() -> dict | None:
     key = config.forwarder_key_file()
     if not key.is_file():
         return None
-    return {"key_file": str(key), "record": config.machine_attribution() == "record"}
+    try:
+        record = config.machine_attribution() == "record"
+    except SystemExit:  # a value preflight refuses: not this tick's to crash on — strip, don't log
+        record = False
+    return {"key_file": str(key), "record": record}
 
 
 def _resolve_passthrough(entries: list[str]) -> list[str]:

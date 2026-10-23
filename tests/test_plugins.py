@@ -3260,3 +3260,13 @@ def test_proxy_daemon_names_the_forwarder_key_by_path_only_once_one_exists(monke
     monkeypatch.setattr(proxy.config, "machine_attribution", lambda: "off")
     off = reg.desired_daemons({})["egress-proxy"]
     assert off["live"]["data"]["origin"] == {"key_file": str(key), "record": False}
+
+
+def test_a_bad_attribution_value_never_crashes_the_proxys_spec(monkeypatch, tmp_path):
+    # The supervisor builds this spec every tick: a value preflight refuses must not kill it.
+    monkeypatch.setattr(proxy.config, "proxy_enabled", lambda: True)
+    monkeypatch.setattr(proxy.config, "state_dir", lambda: tmp_path)
+    (tmp_path / "forwarder.key").write_text("ab" * 32 + "\n")
+    monkeypatch.setenv("MACHINE_ATTRIBUTION", "bogus")
+    spec = Registry([proxy.ProxyPlugin()]).desired_daemons({})["egress-proxy"]
+    assert spec["live"]["data"]["origin"]["record"] is False
