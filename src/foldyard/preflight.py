@@ -176,6 +176,9 @@ def issues() -> list[str]:
             "    root service provisioned into the lima VM at boot), or drop `monitor`."
         )
 
+    # 7c. The attributing forwarder (see _attribution_issues).
+    out.extend(_attribution_issues(backend_name))
+
     # 8. The host-side wall is the tier ABOVE the guest wall (same band, enforced where the guest
     #    has no reach), so it needs `wall` — and a host that can enforce it: nftables + cgroup v2
     #    (Linux). Asked for and undeliverable is a hard stop, never a silent downgrade.
@@ -206,6 +209,29 @@ def issues() -> list[str]:
                 "    Use a kernel built with nft_socket, or drop `host_firewall` (the VM firewall\n"
                 "    still applies)."
             )
+    return out
+
+
+def _attribution_issues(backend_name: str) -> list[str]:
+    """The attributing forwarder is provisioned like the monitor, lima only, and it is built on
+    the walled VM: the firewall is what points every container at the proxy and refuses the ways
+    round it, so without it there is nothing for the forwarder to be the only way to."""
+    level = config.machine_attribution()
+    if level == "off":
+        return []
+    out = []
+    if backend_name != "lima":
+        out.append(
+            f'✗ [machine] attribution = "{level}" needs the lima backend, but backend =\n'
+            f"    '{backend_name}'. Set [machine] backend = \"lima\" (the forwarder is a root\n"
+            "    service provisioned into the lima VM at boot), or drop `attribution`."
+        )
+    if not config.machine_wall():
+        out.append(
+            f'✗ [machine] attribution = "{level}" needs the VM firewall — set [machine]\n'
+            "    firewall = true (it is what sends every container to the proxy, which the\n"
+            "    forwarder then stands in front of), or drop `attribution`."
+        )
     return out
 
 

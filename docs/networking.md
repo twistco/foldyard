@@ -56,6 +56,39 @@ The log is bounded:
   answered first. It reads the files once, then only what was appended, so a big log never slows
   it down.
 
+### Who asked *(experimental)*
+
+Without help, the proxy can't tell one container in the VM from another: by the time a
+connection reaches your computer it has been re-made twice, and every one looks like the VM. With
+`[machine] attribution = "record"` (lima, `firewall = true`), a forwarder in the VM stands where
+each container still has its own address and becomes the only way from the VM to the proxy. It
+adds a signed note to each request saying where it came from, and each row of the log keeps it as
+`origin`:
+
+- a container on a bridge network: its address and the bridge, which your computer matches to a
+  container from the engine's own record of who held that address at the time;
+- a build step, an image pull, a `--network host` container or the VM's own user: which of those,
+  and for a container its id.
+
+The Network Log then shows who used each host and who was refused, and each row who sent it;
+`fy allow learn` names the service that asked for each host it offers. A
+row without a note says `unattributed` (it didn't come through the forwarder), one whose note
+didn't check out says `forged`. The note is bound to the connection, so every request on it —
+keep-alive, a retry, everything inside a `CONNECT` — is that connection's, and a note a client
+writes itself is removed and never trusted. No note ever leaves the proxy.
+
+The forwarder also works round a freeze in Lima's user-mode network on macOS (`vz`): a new
+connection that reuses one the proxy's side closed less than 60 s earlier can hang for up to a
+minute, for every client of that proxy port at once. The forwarder closes such connections with a
+reset rather than a normal close, so the freeze doesn't arise, and re-dials a connection that
+hasn't answered in 2 s.
+
+The note says where a request came from, not who steered it: the box holds the engine socket, so
+it can act from inside another container. Nothing is decided on the note yet — no grant or
+credential depends on it. Details:
+[ADR-0034](./adrs/0034-the-proxy-knows-which-container-asked.md),
+[configuration](./configuration.md#machine).
+
 ## What gets decrypted: everything but the trusted toolchain
 
 The proxy decrypts and logs every request — method, host, path, status — *except* hosts on your

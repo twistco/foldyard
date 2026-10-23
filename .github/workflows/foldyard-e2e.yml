@@ -166,6 +166,7 @@ jobs:
               - tests/test_machine_e2e.py
               - tests/test_verify_e2e.py
               - tests/test_mount_visibility_e2e.py
+              - tests/test_forwarder_e2e.py
               - tests/test_e2e.py
               - tests/test_probes_e2e.py
               - tests/test_monitor_e2e.py
@@ -384,6 +385,7 @@ jobs:
               - tests/test_machine_e2e.py
               - tests/test_verify_e2e.py
               - tests/test_mount_visibility_e2e.py
+              - tests/test_forwarder_e2e.py
           - name: W2
             modules:
               - tests/test_basevm_e2e.py

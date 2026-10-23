@@ -1106,6 +1106,23 @@ def allow_wall(
     print(f"✓ allowlist {'ENFORCING' if eff['default_deny'] else 'observing only'}")
 
 
+def _who_asked():
+    """For the learn review: how a row's attributing-forwarder stamp (ADR-0034) names who asked,
+    resolved against the supervisor's container snapshots; ``None`` when no row could carry one
+    (this project never had attribution on), so the review reads as it always did."""
+    from . import attribution, config
+
+    if not config.forwarder_key_file().is_file():
+        return None
+    resolver = attribution.resolver()
+
+    def name(origin: object, ts: object) -> str | None:
+        who = resolver.who(origin, ts)
+        return who.label if who is not None else None
+
+    return name
+
+
 @allow_app.command("learn")
 def allow_learn(
     yes: bool = typer.Option(
@@ -1138,7 +1155,7 @@ def allow_learn(
     with _config_bound():
         log = proxy._proxy_log()
         rows = allowlist.read_log_rows([*config.rotated_logs(log), log])
-        learned = allowlist.learned_hosts(rows, window)
+        learned = allowlist.learned_hosts(rows, window, who=_who_asked())
     state = "open" if allowlist.learning() else "closed"
     span = f"{_local_hm(window['since'])}–{_local_hm(window['until'])}, {state}"
     allowlist.mark_reviewed()  # shown now: the next window starts fresh instead of carrying this
@@ -1152,6 +1169,8 @@ def allow_learn(
     width = max(len(e["host"]) for e in learned)
     for e in learned:
         print(f"    {e['host']:<{width}}  {e['count']:>4}×  {', '.join(e['uas']) or '(no UA)'}")
+        if e["by"]:
+            print(f"    {'':<{width}}         asked by {', '.join(e['by'])}")
         if e["paths"]:
             more = f" (+{e['more_paths']} more)" if e["more_paths"] else ""
             print(f"    {'':<{width}}         fetched {', '.join(e['paths'])}{more}")

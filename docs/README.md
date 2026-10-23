@@ -82,6 +82,8 @@ Start at [DEVELOPMENT.md](../DEVELOPMENT.md): the module map, test tiers, CI and
   the score → decide → review pipeline, and hooks.
 - [ebpf-monitoring-spike.md](./ebpf-monitoring-spike.md) — whether Tetragon runs in the Lima
   guest and can attribute events to containers (2026-10-03), with a kit to re-run it.
+- [forwarder-spike.md](./forwarder-spike.md) — whether an in-VM forwarder can stamp each proxy
+  connection with the container it came from, and what it costs (2026-10-22, for ADR-0034).
 
 **History:** foldyard was extracted from Twist's monorepo as a fresh start
 ([ADR-0013](./adrs/0013-in-repo-carve-out-until-extraction.md)). The pre-extraction run-logs,
