@@ -265,7 +265,7 @@ def test_the_summary_is_truncated_to_fit_an_issue(tmp_path):
 
 
 def _notify(
-    tmp_path: Path, *, dry_run: bool, existing: str = ""
+    tmp_path: Path, *, dry_run: bool, existing: str = "", labels: str = ""
 ) -> tuple[subprocess.CompletedProcess, str]:
     summary = tmp_path / "summary.md"
     # Untrusted text: it must reach gh as a file and never be run.
@@ -277,6 +277,7 @@ gh() {{
   printf '%s|' "$@" >> {calls}; echo >> {calls}
   for a in "$@"; do [[ $prev == --body-file ]] && cp "$a" {tmp_path}/posted.md; prev=$a; done
   [[ $1 == issue && $2 == list ]] && printf '%s' "{existing}"
+  [[ $1 == label && $2 == list ]] && printf '%s\n' {labels}
   return 0
 }}
 """
@@ -319,6 +320,15 @@ def test_with_no_open_issue_it_opens_one_assigned_and_mentioning_the_login(tmp_p
     assert create[create.index("--assignee") + 1] == "daaain"
     assert create[create.index("--label") + 1] == "property-tests"
     assert (tmp_path / "posted.md").read_text().startswith("@daaain: ")
+
+
+@pytest.mark.spawns("bash")
+def test_an_existing_label_is_used_not_recreated(tmp_path):
+    # --search matches substrings: only the exact name counts as the label being there.
+    out, calls = _notify(tmp_path, dry_run=False, labels="property-tests-old property-tests")
+    assert out.returncode == 0, out.stderr
+    verbs = [c.split("|")[:2] for c in calls.splitlines()]
+    assert verbs == [["issue", "list"], ["label", "list"], ["issue", "create"]]
 
 
 @pytest.mark.spawns("bash")

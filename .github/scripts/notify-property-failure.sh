@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Tells the operator the weekly property run failed, as a PUBLIC issue (the run's log, which holds
 # the same falsifying examples, is public already): a comment on the open issue carrying
-# ISSUE_LABEL if there is one, else a new issue assigned to NOTIFY_LOGIN. Both @-mention the login. The assignment
-# and the mention each email under GitHub's default settings, whoever last edited the cron line —
-# GitHub's own failure email goes to that person, not to the operator.
+# ISSUE_LABEL if there is one, else a new issue assigned to NOTIFY_LOGIN. Both @-mention the
+# login. The assignment and the mention each email under GitHub's default settings, whoever last
+# edited the cron line — GitHub's own failure email goes to that person, not to the operator.
 #
 # The summary (tests/tools/property_failures.py) is untrusted text: it is only ever read from its
 # file into gh's --body-file, never expanded into a command line.
@@ -53,8 +53,10 @@ if [[ -n $existing ]]; then
   exit 0
 fi
 
-if ! gh label list -R "$GITHUB_REPOSITORY" --search "$ISSUE_LABEL" --json name --jq '.[].name' |
-  grep -qxF -- "$ISSUE_LABEL"; then
+# Read whole before matching: `gh … | grep -q` under pipefail can fail on gh's SIGPIPE when grep
+# stops early, and the label would read as missing.
+labels=$(gh label list -R "$GITHUB_REPOSITORY" --search "$ISSUE_LABEL" --json name --jq '.[].name')
+if ! grep -qxF -- "$ISSUE_LABEL" <<<"$labels"; then
   gh label create "$ISSUE_LABEL" -R "$GITHUB_REPOSITORY" --color d93f0b \
     --description "A failure the weekly randomised property run found"
 fi
