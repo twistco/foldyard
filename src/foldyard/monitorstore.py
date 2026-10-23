@@ -27,6 +27,11 @@ only after), and an entry seen twice counts once. Every reader first indexes wha
 (:meth:`Catalogue.catch_up`), so an upgrade or a lost catalogue costs one scan, not wrong answers.
 When a segment leaves the store its snapshots go too, except the newest one of each boot: the
 snapshot before the oldest events still kept.
+
+It also keeps every container init's MARK — its exec into its mount namespace and its exit from it
+(:func:`init_mark`) — for the same reason it keeps the snapshots: the join reads a namespace number
+handed from one container to the next by them (:func:`foldyard.monitorlog.attribute`), and the
+mark may sit in an earlier read than the event it decides.
 """
 
 from __future__ import annotations
@@ -53,20 +58,32 @@ BUDGET_MIN_MB, BUDGET_MAX_MB = 64, 65536
 LEGACY = "legacy"  # an older foldyard's live segment (no first line naming it) is "legacy-<inode>"
 _CLAIMS_KEPT = 10_000  # engine claims, newest first (containers ever described)
 _ORPHANS_KEPT = 64  # snapshots kept from segments already gone (the newest per boot)
-_SCHEMA = 2
+_SCHEMA = 3
+_MARK_SQL = (
+    "CREATE TABLE IF NOT EXISTS mark (boot TEXT NOT NULL, seq INTEGER NOT NULL, seg TEXT NOT NULL, "
+    "inode TEXT NOT NULL, what TEXT NOT NULL, start TEXT NOT NULL, PRIMARY KEY (boot, seq))",
+)
 _SCHEMA_SQL = (
     "DROP TABLE IF EXISTS seg",
     "DROP TABLE IF EXISTS snap",
     "DROP TABLE IF EXISTS claim",
     "DROP TABLE IF EXISTS span",
+    "DROP TABLE IF EXISTS mark",
+    # `marked`: how far the segment has been read for marks — behind `indexed` only in a catalogue
+    # an older foldyard indexed, before marks were kept (:meth:`Catalogue.catch_up` reads them)
     "CREATE TABLE seg (id TEXT PRIMARY KEY, indexed INTEGER NOT NULL, sealed INTEGER NOT NULL, "
-    "t0 TEXT NOT NULL, t1 TEXT NOT NULL)",
+    "t0 TEXT NOT NULL, t1 TEXT NOT NULL, marked INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE snap (boot TEXT NOT NULL, seq INTEGER NOT NULL, seg TEXT NOT NULL, "
     "rec TEXT NOT NULL, PRIMARY KEY (boot, seq))",
     "CREATE TABLE claim (cid TEXT PRIMARY KEY, meta TEXT NOT NULL, n INTEGER NOT NULL)",
     "CREATE TABLE span (seg TEXT NOT NULL, boot TEXT NOT NULL, lo INTEGER NOT NULL, "
     "hi INTEGER NOT NULL, PRIMARY KEY (seg, boot))",
+    *_MARK_SQL,
 )
+# 0.6's catalogue (schema 2) gains the marks in place: its snapshots kept from segments retention
+# removed can't be rebuilt, so it is never dropped for this
+_FROM_2_SQL = (*_MARK_SQL, "ALTER TABLE seg ADD COLUMN marked INTEGER NOT NULL DEFAULT 0")
+_MARK_NEEDLE = b'"in_init_tree":true'  # every mark's line holds it: the backfill parses only those
 
 
 def store_dir() -> Path:
@@ -469,6 +486,33 @@ def _ev_time(rec: dict) -> str:
     return str((rec.get("e") or {}).get("time") or "") if rec.get("k") == "ev" else ""
 
 
+def init_mark(rec: dict) -> dict | None:
+    """``{"inode", "what", "start"}`` when ``rec`` is a container's init entering its mount
+    namespace (``what`` = ``start``: the exec) or leaving it (``end``: the exit), else ``None``.
+
+    A container's init is the one process that is in the init tree of the container's pid
+    namespace (Tetragon's ``in_init_tree``, a kernel fact) AND whose parent is outside its mount
+    namespace: podman's conmon starts it. ``podman exec`` also comes from outside, but never in the
+    init tree; the init's own children are in it, but their parent is inside. ``start`` is the
+    process's start time, as Tetragon wrote it."""
+    if rec.get("k") != "ev":
+        return None
+    e = rec.get("e") or {}
+    what = {"process_exec": "start", "process_exit": "end"}
+    kind = next((k for k in e if k in what), None)
+    if kind is None:
+        return None
+    body = e[kind] if isinstance(e[kind], dict) else {}
+    proc, parent = body.get("process") or {}, body.get("parent") or {}
+    if proc.get("in_init_tree") is not True:
+        return None
+    inode = ((proc.get("ns") or {}).get("mnt") or {}).get("inum")
+    outside = ((parent.get("ns") or {}).get("mnt") or {}).get("inum")
+    if not inode or not outside or outside == inode:
+        return None
+    return {"inode": str(inode), "what": what[kind], "start": str(proc.get("start_time") or "")}
+
+
 class Catalogue:
     """The store's index (see the module doc). One connection per use; any number of readers
     beside the one writer (WAL)."""
@@ -519,7 +563,7 @@ class Catalogue:
                 try:
                     (version,) = conn.execute("PRAGMA user_version").fetchone()
                     if version != _SCHEMA:  # another opener may have just made it
-                        for statement in _SCHEMA_SQL:
+                        for statement in _FROM_2_SQL if version == 2 else _SCHEMA_SQL:
                             conn.execute(statement)
                         conn.execute(f"PRAGMA user_version = {_SCHEMA}")
                     conn.execute("COMMIT")
@@ -564,6 +608,13 @@ class Catalogue:
                 )
             for r in records:
                 k = r.get("k")
+                mark = r.get("mark") if k == "ev" and "mark" in r else init_mark(r)
+                if mark is not None and "boot" in r and "seq" in r:
+                    c.execute(
+                        "INSERT INTO mark VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(boot, seq) DO "
+                        "UPDATE SET seg = excluded.seg",
+                        (r["boot"], int(r["seq"]), sid, mark["inode"], mark["what"], mark["start"]),
+                    )
                 if k == "scopes" and "boot" in r:
                     c.execute(
                         # seen again (a re-read, or a file that changed name): it lives here now
@@ -579,13 +630,17 @@ class Catalogue:
                             "n = excluded.n",
                             (cid, json.dumps(meta)),
                         )
+            new = "excluded.indexed" if exact else "MAX(indexed, excluded.indexed)"
             c.execute(
-                "INSERT INTO seg VALUES (?, ?, 0, ?, ?) ON CONFLICT(id) DO UPDATE SET "
-                f"indexed = {'excluded.indexed' if exact else 'MAX(indexed, excluded.indexed)'}, "
+                "INSERT INTO seg VALUES (?, ?, 0, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                f"indexed = {new}, "
+                # read for marks as far as it is indexed — unless an older catalogue's backfill
+                # is still owed (`marked` behind `indexed`: catch_up reads it first)
+                f"marked = CASE WHEN marked >= indexed THEN {new} ELSE marked END, "
                 "t0 = CASE WHEN t0 = '' OR (excluded.t0 <> '' AND excluded.t0 < t0) "
                 "     THEN excluded.t0 ELSE t0 END, "
                 "t1 = CASE WHEN excluded.t1 > t1 THEN excluded.t1 ELSE t1 END",
-                (sid, indexed, t0, t1),
+                (sid, indexed, t0, t1, indexed),
             )
             c.execute(
                 "DELETE FROM claim WHERE n <= (SELECT MAX(n) FROM claim) - ?", (_CLAIMS_KEPT,)
@@ -604,6 +659,7 @@ class Catalogue:
         c.execute("DELETE FROM seg WHERE id = ?", (new,))
         c.execute("UPDATE seg SET id = ? WHERE id = ?", (new, old))
         c.execute("UPDATE snap SET seg = ? WHERE seg = ?", (new, old))
+        c.execute("UPDATE mark SET seg = ? WHERE seg = ?", (new, old))
         c.execute("DELETE FROM span WHERE seg = ?", (new,))
         c.execute("UPDATE span SET seg = ? WHERE seg = ?", (new, old))
         c.execute("COMMIT")
@@ -615,6 +671,7 @@ class Catalogue:
         c.execute("BEGIN IMMEDIATE")
         c.executemany("DELETE FROM seg WHERE id = ?", [(g,) for g in gone])
         c.executemany("DELETE FROM span WHERE seg = ?", [(g,) for g in gone])
+        c.executemany("DELETE FROM mark WHERE seg = ?", [(g,) for g in gone])
         orphan = "seg NOT IN (SELECT id FROM seg)"
         c.execute(
             f"DELETE FROM snap WHERE {orphan} AND seq < (SELECT MAX(o.seq) FROM snap o "
@@ -638,6 +695,7 @@ class Catalogue:
             sid: (indexed, sealed)
             for sid, indexed, sealed in self.conn.execute("SELECT id, indexed, sealed FROM seg")
         }
+        self._backfill_marks(segs)
         if listing and segs:
             # Gone from the store without this catalogue seeing it go (an older foldyard rotated
             # or removed it): older than every segment listed, or an older foldyard's live file
@@ -676,10 +734,12 @@ class Catalogue:
                     if not isinstance(rec, dict):
                         continue
                     if rec.get("k") == "ev":  # all the catalogue keeps of an event
+                        mark = init_mark(rec)
                         rec = {
                             "k": "ev",
                             **{k: rec[k] for k in ("boot", "seq") if k in rec},
                             "e": {"time": _ev_time(rec)},
+                            **({"mark": mark} if mark else {}),
                         }
                     batch.append(rec)
                     if len(batch) >= 20_000:
@@ -688,6 +748,48 @@ class Catalogue:
                 self.add(seg.id, batch, end)
             if not seg.live:
                 self.sealed(seg.id)
+
+    def _backfill_marks(self, segs: list[Segment]) -> None:
+        """Read the marks out of what an older catalogue indexed before marks were kept — only the
+        lines that can hold one are parsed, so a store of gigabytes costs one pass of gunzip."""
+        owed = {
+            sid: (marked, indexed)
+            for sid, marked, indexed in self.conn.execute(
+                "SELECT id, marked, indexed FROM seg WHERE marked < indexed"
+            )
+        }
+        for seg in segs:
+            if seg.id not in owed:
+                continue
+            marked, indexed = owed[seg.id]
+            batch: list[dict] = []
+            for line, end in _lines(seg, marked):
+                if end > indexed:
+                    break
+                if _MARK_NEEDLE not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and init_mark(rec) is not None:
+                    batch.append(rec)
+            c = self.conn
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                for r in batch:
+                    m = init_mark(r)
+                    assert m is not None
+                    c.execute(
+                        "INSERT INTO mark VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(boot, seq) DO "
+                        "UPDATE SET seg = excluded.seg",
+                        (r["boot"], int(r["seq"]), seg.id, m["inode"], m["what"], m["start"]),
+                    )
+                c.execute("UPDATE seg SET marked = indexed WHERE id = ?", (seg.id,))
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
 
     # ── reading ──
 
@@ -706,6 +808,19 @@ class Catalogue:
         return self._snap(
             "SELECT rec FROM snap WHERE boot = ? AND seq > ? ORDER BY seq LIMIT 1", (boot, seq)
         )
+
+    def marks(self, boot: str, lo: int, hi: int) -> list[dict]:
+        """``boot``'s container-init marks strictly between seqs ``lo`` and ``hi``, as records the
+        join reads (``{"k": "mark", "boot", "seq", "inode", "what", "start"}``)."""
+        rows = self.conn.execute(
+            "SELECT seq, inode, what, start FROM mark WHERE boot = ? AND seq > ? AND seq < ? "
+            "ORDER BY seq",
+            (boot, lo, hi),
+        )
+        return [
+            {"k": "mark", "boot": boot, "seq": seq, "inode": inode, "what": what, "start": start}
+            for seq, inode, what, start in rows
+        ]
 
     def last_snapshot(self, boot: str) -> int:
         (seq,) = self.conn.execute("SELECT MAX(seq) FROM snap WHERE boot = ?", (boot,)).fetchone()

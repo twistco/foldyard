@@ -86,7 +86,8 @@ A first step towards that, stdlib only, in `src/foldyard/monitorstore.py`:
   time range and which boot's sequence numbers it holds. A record's entry is written before the
   record itself, and every reader first indexes whatever isn't yet (an older store, a crash).
   When a segment goes, its snapshots go too, except the newest of each boot: the one before the
-  oldest events still kept.
+  oldest events still kept. It also keeps each container init's **marks** (below), for the same
+  reason it keeps the snapshots: a mark can sit in an earlier read than the event it decides.
 
 **Why the catalogue (2026-10-21).** The join needs the snapshot before an event and the one after
 it. Readers used to look only within a byte window — a hook 1 MB back and 4 MB on from its
@@ -97,6 +98,37 @@ had neither in view: hooks released them after two minutes as `unattributed`, a 
 real hook code reproduced the lost events exactly; the same replay through the catalogue delivered
 every container event the whole-store join finds. Nothing was lost in transport. Events from
 before the fix that the old store rotated out can't be recovered.
+
+**Why the marks (2026-10-23).** The kernel hands a freed mount-namespace number to the next
+namespace made, the lowest free one, so a container started right after another died often gets
+its number. When no snapshot fell between the death and the new container's first events, the
+snapshot before still named the dead container and the one after named the new one, and every
+event in between came out `ambiguous`, which a `who = ["container"]` hook drops without a word. On
+cabash overnight (2026-10-23 00:00–03:00) that cost five agent containers their opening commands
+(6–49 s of them), and the dead containers their last ones: 21,047 events in 00:30–02:10, in 25
+handovers. It needs a fast handover, so it comes and goes with the churn: none from 20:00 to
+24:00 the evening before, when numbers were reused 5–24 minutes after their holder died, and 16,
+7 and 1 handovers an hour from midnight, when a replay's stack replaced the last one within
+seconds. The stream itself says where the number changed hands. A container's init is the one
+process in the init tree of the container's pid namespace (Tetragon's `in_init_tree`) whose parent
+is outside its mount namespace (conmon); `podman exec` comes from outside but never in the init
+tree, the init's children are in it but their parent is inside. Its exec is the container
+entering the namespace and its exit the container leaving it. So between two disagreeing
+snapshots, an event from the last init start on, with no init exit after it, is the next
+container's (and only for a process started no earlier than that init: Tetragon's per-CPU buffers
+can deliver an event of the old container a moment late), and one up to the first init exit, with
+no init start before it, is the old container's. The marks only choose between the two containers
+the kernel snapshots named, never a third; a container that came and went inside one window
+blocks both; and a mark counts only if its init started after the snapshot before was taken (a
+start) or before it (an exit), since the relay reads the export a moment behind and that snapshot
+may already have seen the init. They assume Tetragon delivers a container's marks: an exit lost at
+random, with a container Tetragon can't mark taking the number next, could mislead them. On
+cabash every init exec had its exit. In between, the old container's children dying after its init and podman's own
+short-lived namespaces (netavark) stay `ambiguous`. The same window re-joined: 538 `ambiguous`
+events left, and all five agents' events from their init's first exec on. Three agents that lived
+under 40 s were never in any snapshot at all — the relay had already looked for their number once
+that minute, and its minute only restarts after 60 s with no snapshot at all — so no join can name
+them: their events stay `unattributed`.
 
 ## 3. Tiers and retention
 
@@ -360,7 +392,8 @@ gets the events through is the structural fix, scoped separately.
 4. **Where scoring runs:** in the supervisor (cheap, always on) or as a hook (replaceable)?
    Proposed: the deterministic rules in the supervisor, models behind hooks.
 5. **Snapshot by volume too?** The relay snapshots every 60 s (and ~1 s after a namespace it
-   hasn't seen). The catalogue makes the distance between snapshots harmless to the join, but a
-   minute is also how long a reused namespace number can't be told from its last owner. A
-   snapshot every ~2,000 events or 2 MB of spool would narrow that; it changes the relay, so the
-   monitor boot script's id, so every VM needs `fy machine stop && fy up`.
+   hasn't seen). The catalogue makes the distance between snapshots harmless to the join, and the
+   init marks (§2.1) tell a reused namespace number's two owners apart, but a container that
+   lives and dies between two snapshots is never named. A snapshot every ~2,000 events or 2 MB of
+   spool would narrow that; it changes the relay, so the monitor boot script's id, so every VM
+   needs `fy machine stop && fy up`.

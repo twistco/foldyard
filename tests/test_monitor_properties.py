@@ -43,6 +43,7 @@ import tempfile
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from hypothesis import event, example, given, settings
@@ -73,6 +74,8 @@ steps = st.lists(
         st.tuples(st.just("ev"), st.sampled_from(INODES), st.sampled_from(KINDS)),
         st.tuples(st.just("ev"), st.sampled_from(INODES), st.sampled_from(KINDS)),
         st.tuples(st.just("burst"), st.integers(5, 40), st.sampled_from(INODES)),
+        # a container's init entering (exec) or leaving (exit) its namespace: a mark the join reads
+        st.tuples(st.just("init"), st.sampled_from(INODES[1:]), st.sampled_from(KINDS)),
         st.tuples(st.just("snap"), mappings),
         st.tuples(st.just("engine"), st.sampled_from([A, B, C])),
         st.tuples(st.just("lost"), st.integers(1, 3)),
@@ -122,9 +125,14 @@ class World:
 
     def step(self, s: tuple) -> None:
         what = s[0]
-        if what == "ev":
-            proc = {"binary": f"/bin/b{s[1]}", "pid": 7, "uid": 1, "ns": {"mnt": {"inum": s[1]}}}
-            self._rec({"k": "ev", "e": {s[2]: {"process": proc}, "time": _iso(self.now)}})
+        if what in ("ev", "init"):
+            proc = {"binary": f"/bin/b{s[1]}", "pid": 7, "uid": 1, "ns": {"mnt": {"inum": s[1]}},
+                    "start_time": _iso(self.now)}  # fmt: skip
+            body: dict = {"process": proc}
+            if what == "init":
+                proc["in_init_tree"] = True
+                body["parent"] = {"ns": {"mnt": {"inum": 7}}}  # conmon, outside it
+            self._rec({"k": "ev", "e": {s[2]: body, "time": _iso(self.now)}})
         elif what == "burst":  # a storm: many events, no snapshot among them
             for i in range(s[1]):
                 self.step(("ev", s[2] if i % 3 else INODES[i % len(INODES)], KINDS[i % 2]))
@@ -278,6 +286,14 @@ EVERYTHING = [([], [], [])]
               ("ev", 1, "process_exec"), ("snap", {}), ("pull",), ("behind",)],
     filters=EVERYTHING, budget="ample",
 )  # fmt: skip
+# a reused number decided by a container's init mark in an EARLIER read than the event: the hook
+# must join with the catalogue's marks, as it does with its snapshots
+@example(
+    scenario=[("snap", {200: [A]}), ("wait", 1.0), ("init", 200, "process_exec"),
+              *[("ev", 1, "process_exec")] * 4, ("ev", 200, "process_exec"), ("snap", {200: [B]}),
+              ("pull",), ("round",)],
+    filters=EVERYTHING, budget="ample",
+)  # fmt: skip
 def test_a_hook_delivers_the_full_store_join_or_says_what_it_could_not(
     monkeypatch, scenario, filters, budget
 ):
@@ -361,3 +377,202 @@ def test_a_hook_delivers_the_full_store_join_or_says_what_it_could_not(
                 if hook.name in world.anchorless:
                     rotated = [g for g in rotated if g["after"] is not None]
                 assert not rotated, "rotated, with room to spare"
+
+
+# ── the join over a reused namespace number ─────────────────────────────────────────────
+#
+# The bug (cabash, 2026-10-23, docs/monitor-pipeline.md §3): the kernel hands a freed mount-namespace
+# number straight to the next namespace made (the lowest free one), so a container that starts
+# right after another died often gets its number. The relay's last snapshot still names the dead
+# container for it, the next one names the new container, and every event in between — the new
+# container's opening commands, the old one's last — came out `ambiguous`, which a
+# `who = ["container"]` hook drops. What tells the two apart is in the stream itself: a container's
+# init enters the namespace from outside it (its parent is conmon) as part of the init tree, and
+# leaves the same way. The join reads those marks — and only to choose between the two containers
+# the kernel snapshots named.
+#
+# The world below is the kernel's, as plain data: containers started and stopped on two numbers
+# handed out lowest-free, podman's own short-lived namespaces taking a free number, snapshots of
+# what is running at any moment (also mid-setup: named before its init's exec reaches the
+# stream), containers whose init Tetragon never shows as one (every life of it, both ends: say one
+# sharing another's pid namespace), and a dead container's event arriving late (never past a
+# snapshot). What it does NOT model is a mark lost at random — Tetragon's ring buffer overflowing:
+# a container's start seen and its exit lost, with an unmarked one taking the number next, would
+# mislead the join. On cabash (2026-10-23) every init exec had its exit; nothing showed a loss.
+# Validated red: before the marks were read (completeness, both directions), and
+# after it against each of: no process-start guard (a late event of the dead container named the
+# new one), no "no init exit after the last start" check, and no "no init start before the first
+# exit" check (each a wrong container). The guards against what the model doesn't do — a mark lost
+# at random, the two clocks apart — and what a mark is (tests/test_monitorstore.py) are pinned by
+# unit tests instead.
+
+NS_CIDS = ("d" * 64, "e" * 64, "f" * 64)
+NS_NUMBERS = (200, 300)
+CONMON_NS = 7  # where conmon runs: outside every container's mount namespace
+
+ns_steps = st.lists(
+    st.one_of(
+        # (container, Tetragon marks its init — fixed at its first start, a snapshot caught it
+        # mid-setup)
+        st.tuples(st.just("start"), st.integers(0, 2), st.booleans(), st.booleans()),
+        st.tuples(st.just("run"), st.integers(0, 2), st.booleans()),  # podman exec, or a child
+        st.tuples(st.just("init"), st.integers(0, 2)),  # its init, still running, does something
+        st.tuples(st.just("stop"), st.integers(0, 2)),
+        st.tuples(st.just("late"), st.integers(0, 2)),
+        st.just(("transient",)),  # podman's own short-lived mount namespace (netavark)
+        st.just(("snap",)),
+        st.just(("snap",)),
+    ),
+    min_size=4,
+    max_size=50,
+)
+
+
+def _stamp(ns: int) -> str:
+    """A Tetragon timestamp: RFC 3339, nanoseconds with trailing zeros trimmed (as Go writes)."""
+    secs, frac = divmod(ns, 10**9)
+    head = datetime.fromtimestamp(secs, UTC).strftime("%Y-%m-%dT%H:%M:%S")
+    return head + (f".{frac:09d}".rstrip("0") if frac else "") + "Z"
+
+
+class NsWorld:
+    """Records as the relay writes them, each event with the container that really caused it."""
+
+    def __init__(self) -> None:
+        self.t = 1_800_000_000 * 10**9
+        self.recs: list[dict] = []
+        self.truth: dict[int, str | None] = {}  # seq -> container (None: not a container's)
+        self.running: dict[str, tuple[int, int, bool]] = {}  # cid -> (number, init start, seen)
+        self.dead: dict[str, tuple[int, int, int]] = {}  # cid -> (number, init start, snaps then)
+        self.snaps = 0
+        self.life: dict[int, tuple[str, int]] = {}  # seq -> (cid, life no.)
+        self.lives = 0
+        self.cur: dict[str, int] = {}  # cid -> its current life no.
+        self.exits: dict[int, int] = {}  # life no. -> seq of its init's exit (when seen)
+        self.starts: dict[int, int] = {}  # life no. -> seq of its init's start (when seen)
+        self.late: set[int] = set()  # events the stream delivered after their container died
+        self.marked: dict[str, bool] = {}  # cid -> Tetragon shows its init as one
+
+    def _tick(self) -> int:
+        self.t += 7_340_000  # never a whole second: the stamps keep a fraction
+        return self.t
+
+    def _free(self) -> int | None:
+        used = {n for n, _, _ in self.running.values()}
+        return next((n for n in NS_NUMBERS if n not in used), None)
+
+    def _ev(self, kind, number, pstart, init, parent_ns, cid, binary="/bin/sh") -> int:
+        seq = len(self.recs)
+        proc = {"binary": binary, "pid": 1000 + seq, "uid": 0, "in_init_tree": init,
+                "start_time": _stamp(pstart), "ns": {"mnt": {"inum": number}}}  # fmt: skip
+        body = {"process": proc, "parent": {"binary": "/usr/bin/conmon",
+                                            "ns": {"mnt": {"inum": parent_ns}}}}  # fmt: skip
+        self.recs.append({"k": "ev", "boot": "b", "seq": seq,
+                          "e": {kind: body, "time": _stamp(self._tick())}})  # fmt: skip
+        self.truth[seq] = cid
+        if cid is not None and cid in self.cur:
+            self.life[seq] = (cid, self.cur[cid])
+        return seq
+
+    def _snap(self) -> None:
+        seq = len(self.recs)
+        self.recs.append({"k": "scopes", "boot": "b", "seq": seq, "vm": 1, "t": self._tick() / 1e9,
+                          "map": {str(n): [c] for c, (n, _, _) in self.running.items()}})  # fmt: skip
+        self.snaps += 1
+
+    def step(self, s: tuple[Any, ...]) -> None:
+        what, *args = s
+        cid = NS_CIDS[args[0]] if args else ""
+        if what == "start" and cid not in self.running and (number := self._free()) is not None:
+            seen, mid_setup = self.marked.setdefault(cid, args[1]), args[2]
+            start = self._tick()
+            self.running[cid] = (number, start, seen)
+            self.dead.pop(cid, None)
+            self.lives += 1
+            self.cur[cid] = self.lives
+            if mid_setup:
+                self._snap()  # its scope already holds the runtime's process in the namespace
+            if seen:
+                seq = self._ev(
+                    "process_exec", number, start, True, CONMON_NS, cid, "/run/podman-init"
+                )
+                self.starts[self.lives] = seq
+        elif what == "run" and cid in self.running:
+            number, _, _ = self.running[cid]
+            child = args[1]  # the init's child (in the init tree), or podman exec (from conmon)
+            self._ev(
+                "process_exec", number, self._tick(), child, number if child else CONMON_NS, cid
+            )
+        elif what == "init" and cid in self.running:
+            number, start, _ = self.running[cid]
+            self._ev("process_kprobe", number, start, True, CONMON_NS, cid, "/run/podman-init")
+        elif what == "stop" and cid in self.running:
+            number, start, seen = self.running.pop(cid)
+            child = self._tick()
+            if seen:
+                seq = self._ev(
+                    "process_exit", number, start, True, CONMON_NS, cid, "/run/podman-init"
+                )
+                self.exits[self.cur[cid]] = seq
+            self._ev("process_exit", number, child, True, number, cid)  # a child killed after it
+            self.dead[cid] = (number, start, self.snaps)
+        elif what == "late" and cid in self.dead and self.dead[cid][2] == self.snaps:
+            number, start, _ = self.dead[cid]  # reordered — but never past a snapshot
+            self.late.add(self._ev("process_kprobe", number, start, True, CONMON_NS, cid))
+        elif what == "transient" and (number := self._free()) is not None:
+            self._ev("process_exec", number, self._tick(), False, CONMON_NS, None, "/usr/bin/nft")
+        elif what == "snap":
+            self._snap()
+
+
+def _around(recs: list[dict], seq: int) -> tuple[dict | None, dict | None]:
+    before = next((r for r in reversed(recs[:seq]) if r["k"] == "scopes"), None)
+    after = next((r for r in recs[seq + 1 :] if r["k"] == "scopes"), None)
+    return before, after
+
+
+@settings(max_examples=300, deadline=None)
+@given(scenario=ns_steps)
+# the brief's case: the old container's number handed straight on, no snapshot in between
+@example(scenario=[("start", 0, True, False), ("snap",), ("run", 0, False), ("stop", 0),
+                   ("start", 1, True, False), ("run", 1, False), ("snap",)])  # fmt: skip
+# a container that came and went inside the window, an unmarked one next: neither gets the other's
+@example(scenario=[("start", 0, True, False), ("snap",), ("stop", 0), ("start", 1, True, False),
+                   ("run", 1, False), ("stop", 1), ("start", 2, False, False), ("snap",)])  # fmt: skip
+# a late event of the dead container behind the new one's init (needs the process-start guard)
+@example(scenario=[("start", 0, True, False), ("snap",), ("stop", 0),
+                   ("start", 1, True, False), ("late", 0), ("snap",)])  # fmt: skip
+def test_the_join_names_a_reused_namespace_only_by_its_own_container(scenario):
+    world = NsWorld()
+    for s in scenario:
+        world.step(s)
+    world._snap()
+    events = {e.seq: e for e in monitorlog.attribute(world.recs, "fyex")}
+    for seq, true in world.truth.items():
+        e = events[seq]
+        before, after = _around(world.recs, seq)
+        b = (before or {}).get("map", {}).get(str(e.mnt))
+        a = (after or {}).get("map", {}).get(str(e.mnt))
+        # sound: where the two snapshots name different containers, only the true one, if any
+        if b and a and b != a and e.who == "container":
+            assert e.container == true, f"{seq} named {e.container[:1]}, it was {(true or '-')[:1]}"
+        if seq not in world.life:
+            continue
+        cid, life = world.life[seq]
+        late = seq in world.late
+        # complete, the new holder: an event its own snapshot (the next) names it for, its init
+        # seen entering — in this snapshot window or the one before
+        if a == [cid] and life in world.starts and not late:
+            assert (e.who, e.container) == ("container", cid), f"{seq}: new holder lost"
+        # complete, the old holder: an event before its init's exit, the snapshot before naming it
+        # and not taken mid-setup (its own start mark would come after that snapshot)
+        exit_seq = world.exits.get(life)
+        start_seq = world.starts.get(life, -1)
+        if (
+            b == [cid]
+            and exit_seq is not None
+            and seq <= exit_seq
+            and (before is not None and start_seq < before["seq"])
+            and not any(r["k"] == "scopes" for r in world.recs[seq:exit_seq])
+        ):
+            assert (e.who, e.container) == ("container", cid), f"{seq}: old holder lost"

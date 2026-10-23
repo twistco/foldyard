@@ -51,8 +51,12 @@ def ev(
     return {"k": "ev", "e": {kind: {"process": proc, **extra}, "time": "2026-10-04T10:00:00Z"}}
 
 
-def snap(mapping: dict[int, list[str]], vm: int = 1) -> dict:
-    return {"k": "scopes", "vm": vm, "map": {str(k): v for k, v in mapping.items()}}
+def snap(mapping: dict[int, list[str]], vm: int = 1, t: float | None = None) -> dict:
+    rec = {"k": "scopes", "vm": vm, "map": {str(k): v for k, v in mapping.items()}}
+    return rec if t is None else {**rec, "t": t}
+
+
+T_BEFORE = 1791106200.0  # 2026-10-04T09:30:00Z: after the box's init started, before the next's
 
 
 # ── the fetch ───────────────────────────────────────────────────────────────────────────
@@ -288,6 +292,137 @@ def test_join_calls_disagreeing_snapshots_ambiguous_never_a_guess():
     assert monitorlog.attribute(recs, "fyex")[0].who == "ambiguous"
     shared = _records(snap({200: [BOX, SIB]}), ev(200))
     assert monitorlog.attribute(shared, "fyex")[0].who == "ambiguous"
+
+
+def init(inode: int, kind: str = "process_exec", start: str = "2026-10-04T10:00:00.5Z") -> dict:
+    """A container's init entering (exec) or leaving (exit) its mount namespace: in the init tree,
+    its parent (conmon) outside the namespace — the mark the join reads a reused number by."""
+    e = ev(inode, binary="/run/podman-init", kind=kind, parent={"ns": {"mnt": {"inum": 7}}})
+    e["e"][kind]["process"] |= {"in_init_tree": True, "start_time": start}
+    return e
+
+
+def proc(inode: int, start: str, kind: str = "process_exec") -> dict:
+    e = ev(inode, kind=kind)
+    e["e"][kind]["process"]["start_time"] = start
+    return e
+
+
+def test_a_reused_number_is_read_by_the_containers_inits_leaving_and_entering():
+    # the box's number handed straight to the next container, no snapshot in between (cabash,
+    # 2026-10-23): the box's last commands and the new container's first, told apart by the marks
+    recs = _records(
+        snap({200: [BOX]}, t=T_BEFORE),
+        proc(200, "2026-10-04T09:59:59Z"),  # the box's — before its init left
+        init(200, "process_exit", start="2026-10-04T09:00:00Z"),  # the box's init leaving
+        init(200, start="2026-10-04T10:00:01.25Z"),  # the next container's init entering
+        proc(200, "2026-10-04T10:00:02Z"),  # the new container's first command
+        snap({200: [OTHER]}),
+    )
+    assert _who(monitorlog.attribute(recs, "fyex")) == [
+        ("container", "a"),
+        ("container", "a"),
+        ("container", "c"),
+        ("container", "c"),
+    ]
+
+
+def test_between_the_old_init_leaving_and_the_new_one_entering_its_still_ambiguous():
+    # podman's own short-lived namespace (netavark) can hold the number in between, and the old
+    # container's children die after its init — neither side can be claimed
+    recs = _records(
+        snap({200: [BOX]}, t=T_BEFORE),
+        init(200, "process_exit", start="2026-10-04T09:00:00Z"),
+        proc(200, "2026-10-04T10:00:00.75Z"),
+        init(200, start="2026-10-04T10:00:01Z"),
+        snap({200: [OTHER]}),
+    )
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][1] == "ambiguous"
+
+
+def test_a_late_event_of_the_dead_container_is_never_given_to_the_new_one():
+    # Tetragon's per-CPU buffers can deliver an event a moment late: its process started long
+    # before the new container's init did, so it isn't the new container's
+    recs = _records(
+        snap({200: [BOX]}, t=T_BEFORE),
+        init(200, start="2026-10-04T10:00:01Z"),
+        proc(200, "2026-10-04T09:59:00Z", kind="process_exit"),
+        snap({200: [OTHER]}),
+    )
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")] == ["container", "ambiguous"]
+
+
+def test_the_marks_choose_only_between_the_containers_the_snapshots_name():
+    # a container came and went inside one window, its marks both seen; the box's exit and the
+    # next container's start never reached the stream. Its events are neither the box's (a start
+    # came before the first exit) nor the next one's (an exit came after the last start).
+    recs = _records(
+        snap({200: [BOX]}, t=T_BEFORE),
+        init(200, start="2026-10-04T10:00:01Z"),
+        proc(200, "2026-10-04T10:00:02Z"),
+        init(200, "process_exit", start="2026-10-04T10:00:01Z"),
+        snap({200: [OTHER]}),
+    )
+    assert [e.who for e in monitorlog.attribute(recs, "fyex")][1] == "ambiguous"
+    # one snapshot naming two containers for the number: the marks don't pick between them
+    shared = _records(snap({200: [BOX, SIB]}, t=T_BEFORE), init(200), proc(200, "2026-10-04T10:00:02Z"),
+                      snap({200: [OTHER]}))  # fmt: skip
+    assert [e.who for e in monitorlog.attribute(shared, "fyex")] == ["ambiguous", "ambiguous"]
+
+
+def test_a_mark_the_snapshot_before_could_have_seen_decides_nothing():
+    # the rules assume Tetragon delivers a marked container's marks; when one is lost at random,
+    # an init that started before the snapshot before was taken is the one that snapshot saw (the
+    # relay reads the export a moment behind) — never a new holder
+    seen_start = _records(
+        snap({200: [BOX]}, t=T_BEFORE),
+        init(200, start="2026-10-04T09:29:59.9Z"),  # BOX's own init, read after the snapshot
+        proc(200, "2026-10-04T10:00:02Z"),
+        snap({200: [OTHER]}),  # BOX's exit and OTHER's start both lost
+    )
+    assert [e.who for e in monitorlog.attribute(seen_start, "fyex")][1] == "ambiguous"
+    # …and an init exit is the snapshot before's container's only if that init started before it
+    later_exit = _records(
+        snap({200: [BOX]}, t=T_BEFORE),
+        proc(200, "2026-10-04T10:00:02Z"),
+        init(200, "process_exit", start="2026-10-04T10:00:01Z"),  # someone whose start was lost
+        snap({200: [OTHER]}),
+    )
+    assert monitorlog.attribute(later_exit, "fyex")[0].who == "ambiguous"
+    # Tetragon's clock and the relay's are the guest's, but compared across two processes: an init
+    # that looks older than the snapshot before yet entered after it (a start mark before its
+    # exit, in the window) still isn't that snapshot's container
+    skewed = _records(
+        snap({200: [BOX]}, t=T_BEFORE),
+        init(200, start="2026-10-04T09:29:59Z"),
+        proc(200, "2026-10-04T10:00:02Z"),
+        init(200, "process_exit", start="2026-10-04T09:29:59Z"),
+        snap({200: [OTHER]}),
+    )
+    assert monitorlog.attribute(skewed, "fyex")[1].who == "ambiguous"
+
+
+def test_a_stretch_is_joined_with_the_marks_outside_it(monkeypatch, tmp_path):
+    # the new container's init in an earlier read than its first command: the catalogue keeps the
+    # marks, as it keeps the snapshots, so a hook's window reads it as the whole store does
+    from foldyard import monitorstore
+
+    monkeypatch.setattr(monitorstore.config, "state_dir", lambda: tmp_path)
+    recs = _records(
+        snap({200: [BOX]}, t=T_BEFORE),
+        init(200, "process_exit", start="2026-10-04T09:00:00Z"),
+        init(200, start="2026-10-04T10:00:01Z"),
+        proc(200, "2026-10-04T10:00:02Z"),
+        snap({200: [OTHER]}),
+    )
+    monitorstore.append(recs)
+    cat = monitorlog.catalogue()
+    assert cat is not None
+    try:
+        (e,) = monitorlog.join([recs[3]], cat, "fyex")
+    finally:
+        cat.close()
+    assert (e.who, e.container) == ("container", OTHER)
 
 
 def test_join_vm_and_unattributed():
