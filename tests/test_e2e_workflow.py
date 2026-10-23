@@ -45,10 +45,11 @@ def _host_tier_modules() -> set[str]:
 
 
 def test_the_host_tier_is_what_the_jobs_ran_before_sharding():
-    # The discovery itself, pinned once: the thirteen modules the unsharded jobs listed by name.
+    # The discovery itself, pinned: the thirteen modules the unsharded jobs listed by name, plus
+    # each one added since (forwarder: ADR-0034).
     assert {Path(m).stem.removeprefix("test_").removesuffix("_e2e") for m in _host_tier_modules()} == {
         "e2e", "basevm", "box", "host_daemons", "machine", "monitor", "mount_visibility",
-        "mounts", "probes", "reclaim", "verify", "wall", "worktree",
+        "mounts", "probes", "reclaim", "verify", "wall", "worktree", "forwarder",
     }  # fmt: skip
 
 
