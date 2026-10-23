@@ -48,7 +48,7 @@ from pathlib import Path
 from . import config
 
 SEGMENT_BYTES = 32 << 20  # the live segment is sealed past this (uncompressed)
-BUDGET_MB = 1024  # default disk budget for the whole store
+BUDGET_MB = 8192  # default disk budget for the whole store (per project)
 BUDGET_MIN_MB, BUDGET_MAX_MB = 64, 65536
 LEGACY = "legacy"  # an older foldyard's live segment (no first line naming it) is "legacy-<inode>"
 _CLAIMS_KEPT = 10_000  # engine claims, newest first (containers ever described)

@@ -76,9 +76,12 @@ A first step towards that, stdlib only, in `src/foldyard/monitorstore.py`:
   to `monitor.<id>.jsonl.gz`: 2,443 B a record raw, 81 B compressed on a real 33.7 MB segment
   (30×, 0.1 s). A position is `[segment id, offset]`, the offset in uncompressed bytes, so it
   survives the rename and the compression; an inode would not (and ext4 reuses them).
-- **A disk budget**, 1 GB by default (≈13 M events: 7 hours at the 520 events/s storms of
-  2026-10-21, 5 days at a steady 30). Host-only: `max_mb` in
-  `~/.foldyard/<project>/monitor-store.toml`, 64 MB–64 GB. The oldest compressed segments go
+- **A disk budget**, 8 GB per project by default (≈106 M events at 81 B: 57 hours at the
+  520 events/s storms of 2026-10-21, 41 days at a steady 30). It was 1 GB until 2026-10-23: a real
+  project's monitor wrote 4.5 MB an hour idle and 21–61 MB an hour in busy experiment batches, so
+  1 GB held only 15–35 hours of batches and evidence was rolling off before it was read; 8 GB
+  holds 5–16 days of those batches. Several monitored projects each get their own budget.
+  Host-only: `max_mb` in `~/.foldyard/<project>/monitor-store.toml`, 64 MB–64 GB. The oldest compressed segments go
   first; the live one never does. Not `foldyard.toml`: the store is the evidence of what ran in
   the box, and the box can write the checkout.
 - **A SQLite catalogue** (`logs/monitor-index.sqlite`, WAL; derived data, rebuilt from the
@@ -100,7 +103,7 @@ before the fix that the old store rotated out can't be recovered.
 
 ## 3. Tiers and retention
 
-Budget: **1 GB per project** (configurable), at ~40–70 B/event compressed ≈ 15–25 M events of
+Budget: **8 GB per project** (configurable), at ~40–70 B/event compressed ≈ 120–215 M events of
 full-fidelity history if nothing were thinned. Tiers, each a set of segments:
 
 | tier | keeps | how long |
