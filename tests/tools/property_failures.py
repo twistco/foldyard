@@ -101,12 +101,23 @@ def fence(text: str, lang: str = "text") -> str:
     return f"{ticks}{lang}\n{text}\n{ticks}"
 
 
-def summary(junit: Path | None, log: Path | None, run_url: str, commit: str, budget: str) -> str:
+def profile(log_text: str) -> str:
+    """The settings the run used, from the header pytest prints for hypothesis
+    (``hypothesis profile 'explore' -> deadline=None, …, max_examples=5000, …``), or ``""``."""
+    m = re.search(r"^hypothesis profile '([\w-]+)' -> (.*)$", log_text, re.M)
+    if not m:
+        return ""
+    budget = re.search(r"\bmax_examples=(\d+)", m.group(2))
+    return m.group(1) + (f", max_examples={budget.group(1)}" if budget else "")
+
+
+def summary(junit: Path | None, log: Path | None, run_url: str, commit: str) -> str:
     parts = [f"The randomised property run (property-explore.yml) failed: {run_url}", ""]
     if commit:
         parts.append(f"- commit: `{commit}`")
-    if budget:
-        parts.append(f"- budget: max_examples={budget} (the explore profile, tests/conftest.py)")
+    log_text = log.read_text(errors="replace") if log and log.is_file() else ""
+    if settings := profile(log_text):
+        parts.append(f"- hypothesis profile: {settings}")
     found = failures(junit) if junit and junit.is_file() else []
     if found:
         parts += ["", "### Failing tests", ""]
@@ -123,11 +134,7 @@ def summary(junit: Path | None, log: Path | None, run_url: str, commit: str, bud
             "first. To replay one anywhere, add its `@reproduce_failure` line to the test.",
         ]
     else:
-        tail = (
-            log.read_text(errors="replace").splitlines()[-LOG_TAIL_LINES:]
-            if log and log.is_file()
-            else []
-        )
+        tail = log_text.splitlines()[-LOG_TAIL_LINES:]
         parts += [
             "",
             "pytest left no failing test in its report (a timeout, a crash, or a step before the "
@@ -144,10 +151,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--log", type=Path)
     ap.add_argument("--run-url", required=True)
     ap.add_argument("--commit", default="")
-    ap.add_argument("--budget", default="")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args(argv)
-    args.out.write_text(summary(args.junit, args.log, args.run_url, args.commit, args.budget))
+    args.out.write_text(summary(args.junit, args.log, args.run_url, args.commit))
     return 0
 
 

@@ -110,11 +110,10 @@ jobs:
         if: failure() && steps.inputs.outcome == 'success'
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          BUDGET: ${{ inputs.max_examples }}
         run: |
           python3 tests/tools/property_failures.py --junit "$RUNNER_TEMP/junit.xml" \
             --log "$RUNNER_TEMP/pytest.log" --run-url "$RUN_URL" --commit "$GITHUB_SHA" \
-            --budget "${BUDGET:-default}" --out "$RUNNER_TEMP/summary.md"
+            --out "$RUNNER_TEMP/summary.md"
           cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Tell the operator

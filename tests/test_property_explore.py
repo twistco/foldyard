@@ -222,19 +222,24 @@ def test_the_summary_names_each_failing_test_with_its_examples(tmp_path):
         f'<testcase classname="tests.test_x" name="test_x" time="1">'
         f'<failure message="AssertionError: lost">{escape(PLAIN)}</failure></testcase>',
     )
-    text = pf.summary(junit, None, "https://run/1", "abc", "5000")
+    log = tmp_path / "pytest.log"
+    log.write_text(
+        "platform linux\nhypothesis profile 'explore' -> deadline=None, print_blob=True, "
+        "max_examples=5000, suppress_health_check=()\n"
+    )
+    text = pf.summary(junit, log, "https://run/1", "abc")
     assert text.startswith(
         "The randomised property run (property-explore.yml) failed: https://run/1"
     )
     assert "- `tests.test_x::test_x`" in text and "test_ok" not in text
     assert "```text\nFailing test case: test_x(" in text
-    assert "max_examples=5000" in text
+    assert "- hypothesis profile: explore, max_examples=5000" in text
 
 
 def test_without_a_report_the_summary_carries_the_logs_tail(tmp_path):
     log = tmp_path / "pytest.log"
     log.write_text("\n".join(f"line {i}" for i in range(500)))
-    text = pf.summary(tmp_path / "missing.xml", log, "https://run/1", "", "")
+    text = pf.summary(tmp_path / "missing.xml", log, "https://run/1", "")
     assert "pytest left no failing test" in text
     assert "line 499" in text and "line 0\n" not in text
 
@@ -251,7 +256,7 @@ def test_the_summary_is_truncated_to_fit_an_issue(tmp_path):
         tmp_path,
         f'<testcase classname="tests.test_x" name="test_x"><failure>{huge}</failure></testcase>',
     )
-    text = pf.summary(junit, None, "https://run/1", "", "")
+    text = pf.summary(junit, None, "https://run/1", "")
     assert len(text) < 65536
     assert "more characters in the run's log" in text
 
