@@ -70,7 +70,8 @@ adds a signed note to each request saying where it came from, and each row of th
 - a build step, an image pull, a `--network host` container or the VM's own user: which of those,
   and for a container its id.
 
-The Network Log then shows who used each host and who was refused, and each row who sent it. A
+The Network Log then shows who used each host and who was refused, and each row who sent it;
+`fy allow learn` names the service that asked for each host it offers. A
 row without a note says `unattributed` (it didn't come through the forwarder), one whose note
 didn't check out says `forged`. The note is bound to the connection, so every request on it —
 keep-alive, a retry, everything inside a `CONNECT` — is that connection's, and a note a client

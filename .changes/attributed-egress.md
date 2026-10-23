@@ -10,7 +10,8 @@ experimental: true
   and the token services on your computer; it adds a signed note of where each request came from
   — the container's address and network, or for build steps, pulls and `--network host`
   containers, the container id, `build` or the VM itself. The network log keeps it as each row's
-  `origin`, so a refusal can say who asked. Nothing is decided on it yet. The VM firewall's own
+  `origin`: the Network Log shows who used each host and who was refused, and `fy allow learn`
+  names the service that asked. Nothing is decided on it yet. The VM firewall's own
   boot script doesn't change, so turning it on stales no other VM; changing it is
   `fy machine stop && fy up`. With it on, `podman run` defaults to a bridge network, a container
   on an explicit pasta network can't reach the proxy (its traffic can't be told apart from any
