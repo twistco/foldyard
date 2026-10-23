@@ -799,7 +799,8 @@ class Catalogue:
                     rec = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(rec, dict) and init_mark(rec) is not None:
+                ok = isinstance(rec, dict) and "boot" in rec and "seq" in rec  # as `add` asks
+                if ok and init_mark(rec) is not None:
                     batch.append(rec)
             c = self.conn
             c.execute("BEGIN IMMEDIATE")

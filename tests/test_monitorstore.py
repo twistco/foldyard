@@ -409,3 +409,16 @@ def test_the_marks_move_with_a_sealed_segment_and_go_with_a_removed_one(state, m
     with ms.Catalogue.open() as cat:
         assert _marks(cat) == []
         assert cat.conn.execute("SELECT id FROM markseg").fetchall() == [(live.id,)]
+
+
+def test_a_mark_without_its_boot_or_seq_is_skipped_by_the_backfill(state):
+    # a corrupted or hand-edited line in what 0.6 indexed: the backfill reads past it, as `add`
+    # does, never failing every reader's catch-up on it
+    bad = init(2)
+    del bad["seq"]
+    ms.append([snap(0), init(1), bad])
+    with ms.Catalogue.open() as cat:
+        cat.conn.execute("DELETE FROM mark")
+        cat.conn.execute("DELETE FROM markseg")  # as 0.6 left it: indexed, never read for marks
+        cat.catch_up()
+        assert [m[0] for m in _marks(cat)] == [1]
