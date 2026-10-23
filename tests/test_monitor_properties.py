@@ -532,7 +532,7 @@ def test_after_a_crossing_nothing_of_its_boot_is_skipped_and_before_it_nothing_c
 ):
     with tempfile.TemporaryDirectory() as tmp:
         run = _drive(monkeypatch, Path(tmp), scenario, filters, budget)
-    _check(run, budget)
+        _check(run, budget)  # inside: it reads what each hook still owes from the state dir
     truth, rank = run["truth"], run["rank"]
     event(f"crossed boots={len(run['first'])}")
     for hook in run["hooks"]:
