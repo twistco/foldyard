@@ -459,15 +459,17 @@ def test_a_stretch_after_retention_reads_the_marks_after_the_snapshot_kept_befor
     # the snapshot before the oldest stored event is one retention kept from a removed segment,
     # and so must the marks after it be: the old container's exit says the snapshot's container
     # is not the one that started next (test_a_container_the_snapshot_before_saw_being_set_up…)
-    # — and it came from podman's namespace as entered at boot, not as entered again since
+    # — and it came from podman's namespace as entered at boot, not as entered again since (after
+    # a step in, which ends a run of entries)
     from foldyard import monitorstore
 
     monkeypatch.setattr(monitorstore.config, "state_dir", lambda: tmp_path)
     monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 10)
+    stepped_in = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 900}}})
     stream = [entered(), snap({200: [BOX]}, t=T_BEFORE),
-              init(200, "process_exit", start="2026-10-04T09:00:00Z"), entered(),
-              init(200, start="2026-10-04T10:00:01Z"), entered(),
-              proc(200, "2026-10-04T10:00:02Z"), snap({})]  # fmt: skip
+              init(200, "process_exit", start="2026-10-04T09:00:00Z"), stepped_in, entered(),
+              init(200, start="2026-10-04T10:00:01Z"), proc(200, "2026-10-04T10:00:02Z"),
+              snap({})]  # fmt: skip
     recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
     monitorstore.append(recs[:6])
     monitorstore.append(recs[6:])
