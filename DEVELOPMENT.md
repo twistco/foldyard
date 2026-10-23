@@ -424,19 +424,19 @@ sharded (below):
 
 **The weekly randomised property run (`property-explore.yml`).** Every job above loads the `ci`
 hypothesis profile, which replays the same examples every run and so never finds a new
-counterexample; local randomised runs at about 3,000 examples found two real bugs that CI's
-replayed examples had passed (PR #138, 2026-10). So once a week (Tuesdays 03:17 UTC, kept weekly to go easy on
-GitHub's runners) one job runs the property tier — every test module that imports hypothesis,
+counterexample; local randomised runs at about 3,000 examples found two real bugs that CI's replayed
+examples had passed (PR #138, 2026-10). So once a week (Tuesdays 03:17 UTC, kept weekly to go easy
+on GitHub's runners) one job runs the property tier — every test module that imports hypothesis,
 which `tests/test_property_explore.py` holds the workflow's `PROPERTY_MODULES` list to — under the
 `explore` profile: randomised, `max_examples` 5000 (50× the default; each test's own budget scales
-with it), no deadline, `-n auto`. The tier took 7.7 min on a hosted runner (5.4 on 4 local
-workers), under the step's 22-minute cap; the hook-delivery property is most of it. The example database lives at `.hypothesis/examples`, which `actions/cache` carries
-from run to run (each run saves under `hypothesis-explore-<run_id>-<attempt>`, the next restores
-the newest by the prefix), so a counterexample found one week is replayed first every week until
-it is fixed. GitHub evicts an entry nobody has read for 7 days, which a weekly run only just
-beats; a late start may find it gone and begin a fresh database, which loses nothing the issue
-below doesn't keep. A manual run (Actions → property explore → Run workflow) takes a
-`max_examples` and a `dry_run`.
+with it), no deadline, `-n auto`. The tier took 7.7 min on a hosted runner (5.4 on 4 local workers),
+under the step's 22-minute cap; the hook-delivery property is most of it. The example database lives
+at `.hypothesis/examples`, which `actions/cache` carries from run to run (each run saves under
+`hypothesis-explore-<run_id>-<attempt>`, the next restores the newest by the prefix), so a
+counterexample found one week is replayed first every week until it is fixed. GitHub evicts an entry
+nobody has read for 7 days, which a weekly run only just beats; a late start may find it gone and
+begin a fresh database, which loses nothing the issue below doesn't keep. A manual run (Actions →
+property explore → Run workflow) takes a `max_examples` and a `dry_run`.
 
 **A failure opens a public issue, because GitHub's own failure email does not reach the
 operator.** A failed scheduled run emails whoever last edited the workflow's cron line, so a
