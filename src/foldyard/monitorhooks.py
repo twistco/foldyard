@@ -122,17 +122,21 @@ class Hook:
 
     def matches(self, e: monitorlog.Event, after_crossing: bool = False) -> bool:
         """Whether the hook wants ``e``; ``after_crossing``: ``e`` is at or after its boot's first
-        crossing (:func:`crossings`), so ``who`` no longer filters it (:meth:`unfiltered`)."""
-        if self.unfiltered(after_crossing):
+        crossing (:func:`crossings`), so ``who`` no longer filters it (:meth:`unfiltered`), nor
+        ``worktrees`` an event with no worktree — an escaped process's are the VM's or podman's."""
+        free = self.unfiltered(after_crossing)
+        if free:
             who = True
         elif self.who:
             who = e.who in self.who
         else:
             who = e.who not in self.unless_asked
+        worktree = not self.worktrees or e.worktree in self.worktrees or (free and not e.worktree)
         return (
             (not self.kinds or e.kind in self.kinds)
-            and (who or e.crossed)  # crossed out of a container: never left out by `who`
-            and (not self.worktrees or e.worktree in self.worktrees)
+            # crossed out of a container: never left out by `who` or `worktrees`
+            and (who or e.crossed)
+            and (worktree or e.crossed)
         )
 
 
@@ -779,6 +783,7 @@ class Crossing:
     seq: int
     time: str
     container: str  # where it came from ("" when the join couldn't name one)
+    why: str = ""  # said instead of the crossing's own description (:func:`uncatalogued`)
 
 
 def crossings(events: list[monitorlog.Event], cat=None) -> dict[str, Crossing]:
@@ -816,6 +821,22 @@ def crossings(events: list[monitorlog.Event], cat=None) -> dict[str, Crossing]:
     return out
 
 
+def uncatalogued(events: list[monitorlog.Event], first: dict[str, Crossing]) -> dict[str, Crossing]:
+    """``first`` for a round whose catalogue couldn't be read: a crossing earlier in a boot than
+    what was read can't be seen, so every boot ``events`` touch counts as crossed from before them
+    — delivered unfiltered rather than missed, as for a candidate a busy catalogue couldn't judge
+    — unless a crossing among ``events`` is earlier still."""
+    out = dict(first)
+    for boot in dict.fromkeys(e.boot for e in events):
+        if boot not in out:
+            out[boot] = Crossing(
+                boot, -1, "", "",
+                why="the monitor's catalogue couldn't be read, so a crossing earlier in this boot "
+                    "can't be ruled out: `who` filters nothing in this batch",
+            )  # fmt: skip
+    return out
+
+
 def _unfiltered(
     hook: Hook, passed: list[monitorlog.Event], first: dict[str, Crossing]
 ) -> list[dict]:
@@ -829,8 +850,8 @@ def _unfiltered(
         source = f" from container {c.container[:12]}" if c.container else ""
         out.append({
             "boot": boot, "since": [boot, c.seq], "time": c.time, "container": c.container,
-            "why": f"a process crossed out of a container{source} at {c.time or '?'}: `who` "
-                   "filters nothing more of this boot",
+            "why": c.why or f"a process crossed out of a container{source} at {c.time or '?'}: "
+                   "`who` filters nothing more of this boot",
         })  # fmt: skip
     return out
 
@@ -1157,7 +1178,10 @@ def round_once(now: float | None = None, log: Callable[[str], None] = lambda m: 
                 events = settled(records, now, cat)
                 last_snap = last_snapshots(records, cat)
                 aged = {(e.boot, e.seq) for e in events if e.seq > last_snap.get(e.boot, -1)}
-                msg = deliver(hook, st, events, now, where, gaps, aged, crossings(events, cat))
+                first = crossings(events, cat)
+                if cat is None:
+                    first = uncatalogued(events, first)
+                msg = deliver(hook, st, events, now, where, gaps, aged, first)
                 if msg:
                     log(msg)
                 moved = (list(st.last), list(st.pos), len(st.gaps), st.attempts, st.dropped)

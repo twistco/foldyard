@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import replace
 
 import pytest
 
@@ -1062,6 +1063,54 @@ def test_after_a_crossing_an_explicit_who_stops_filtering_unless_the_hook_keeps_
     body = calls[1]["body"]
     assert [e["seq"] for e in body["events"]] == [3, 4, 7]  # the crossing itself still reaches it
     assert body["unfiltered"] == [] and body["passed"] == {"vm": 2, "podman": 2}
+
+
+def test_after_a_crossing_a_worktree_filter_lets_through_what_has_no_worktree():
+    # an escaped process's events are the VM's or podman's: no worktree to match, so a hook
+    # watching one worktree would see none of them; one in another worktree's box still isn't its
+    main = mh.Hook(name="m", command=("/bin/m",), worktrees=("main",))
+    vm = monitorlog.Event(
+        time="t",
+        boot=BOOT,
+        seq=5,
+        kind="exec",
+        binary="/bin/sh",
+        args="",
+        detail="",
+        uid=1,
+        pid=9,
+        who="vm",
+    )
+    other = replace(vm, who="container", worktree="other")
+    assert not main.matches(vm) and main.matches(vm, after_crossing=True)
+    assert not main.matches(other, after_crossing=True)
+    kept = replace(main, keep_who_after_crossing=True)
+    assert not kept.matches(vm, after_crossing=True)
+    # the crossing itself, from another worktree's box: never left out
+    assert main.matches(replace(other, crossed=True)) and kept.matches(replace(other, crossed=True))
+
+
+def test_without_a_catalogue_a_round_counts_every_boot_as_crossed_and_says_why():
+    # a crossing earlier in the boot can't be seen without the catalogue: unfiltered, not missed
+    events = monitorlog.attribute([snap(0), ev(1, inode=1), ev(2)], "fyex")
+    first = mh.uncatalogued(events, {})
+    assert first[BOOT].seq == -1 and "catalogue" in first[BOOT].why
+    seen = {BOOT: mh.Crossing(BOOT, 0, "t0", BOX)}
+    assert mh.uncatalogued(events, seen) == seen  # one it can see is earlier than any event
+
+
+def test_a_round_that_cant_read_the_catalogue_delivers_unfiltered_and_says_why(
+    ran, project, monkeypatch
+):
+    calls, _ = ran
+    _hook(project)
+    monitorlog._append([snap(0), ev(1, inode=1), ev(2), snap(3)])
+    monkeypatch.setattr(monitorlog, "catalogue", lambda segs=None: None)
+    mh.round_once(now=50)
+    body = calls[0]["body"]
+    assert _delivered(calls) == [1, 2]  # the VM's event too
+    (u,) = body["unfiltered"]
+    assert u["since"] == [BOOT, -1] and "catalogue couldn't be read" in u["why"]
 
 
 def test_a_crossing_only_unfilters_its_own_boot(ran):

@@ -366,7 +366,9 @@ timeout = 15                        # seconds
   the default kept). An event with `crossed: true` reaches every hook whatever its `who`.
 - **After a crossing** (added 2026-10-23): from the first `crossed` event of a VM boot on, `who`
   filters nothing more of that boot, for every hook. That is both the default skip (`vm`,
-  `podman`) and a hook's own `who`. `kinds` and `worktrees` still apply. A crossing should be
+  `podman`) and a hook's own `who`. `kinds` still applies, and `worktrees` to events that have
+  a worktree: an escaped process's have none. A round that can't read the catalogue counts
+  every boot it reads as crossed, and says why. A crossing should be
   rare; what an escaped process does next is in the VM's or podman's namespace, or in one it
   makes (`unattributed`), and sifting through it beats missing it. A hook that can't take the
   volume sets `keep_who_after_crossing = true`: its `who` keeps filtering, and it still gets the

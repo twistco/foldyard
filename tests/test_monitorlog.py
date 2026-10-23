@@ -1053,7 +1053,10 @@ def test_show_and_doctor_say_a_crossing_happened_in_this_boot(monkeypatch, tmp_p
     assert monitorlog.crossing_note() == ""  # nothing pulled: no current boot to speak of
     monitorlog.Cursor(pulled=time.time(), path=f"{DIR}/000.jsonl").save()
     note = monitorlog.crossing_note()
-    assert note.startswith("2 processes crossed out of a container in this VM boot, the first at ")
+    assert note.startswith(
+        "2 processes crossed out of a container in this VM boot (of those the store still holds"
+    )
+    assert ", the first at " in note
     assert "fyex-api-1" in note and "every event of this boot" in note
     assert monitorlog.crossing_note(boot="another-boot") == ""
     assert monitorlog.show(limit=10) == 0

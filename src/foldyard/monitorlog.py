@@ -928,7 +928,8 @@ def crossing_note(boot: str | None = None) -> str:
     source = f" from {meta.get('name') or cid[:12]}" if cid else ""
     n = len(found)
     return (
-        f"{n} process{'es' if n > 1 else ''} crossed out of a container in this VM boot, the "
+        f"{n} process{'es' if n > 1 else ''} crossed out of a container in this VM boot (of "
+        f"those the store still holds: it keeps only the first once its segment goes), the "
         f"first at {t[:19].replace('T', ' ')} UTC{source} — from there on, hooks get every event "
         "of this boot (`who` no longer filters; `fy docs configuration`)"
     )
