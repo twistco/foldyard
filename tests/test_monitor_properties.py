@@ -512,7 +512,7 @@ crossing_hooks = st.lists(
 )
 
 
-@settings(max_examples=150, deadline=None)
+@settings(max_examples=scaled_examples(150), deadline=None)
 @given(scenario=with_a_crossing, filters=crossing_hooks, budget=st.sampled_from(["tiny", "ample"]))
 # the VM's events after a crossing into the VM's namespace: a default hook must get them
 @example(

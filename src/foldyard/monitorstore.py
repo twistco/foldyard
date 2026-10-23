@@ -1183,6 +1183,7 @@ class Catalogue:
         # yet judged stays to be (its snapshot after may be the next record stored). Each for as
         # long as the store holds anything of that boot, and always for the running boot (as the
         # facts above).
+        gone_seg = "seg NOT IN (SELECT id FROM seg)"
         c.execute(f"DELETE FROM crossing WHERE {gone_seg} AND verdict = 0")
         c.execute(
             f"DELETE FROM crossing WHERE {gone_seg} AND verdict = 1 AND seq > (SELECT MIN(f.seq) "
