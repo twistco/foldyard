@@ -36,3 +36,4 @@ HANDOVER-*.md
 **/foldyard.local.toml
 # <<< foldyard (managed) <<<
 docs/talks/why-sandbox.pdf
+docs/talks/why-sandbox.html
