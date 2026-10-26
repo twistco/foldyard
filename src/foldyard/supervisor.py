@@ -1559,18 +1559,23 @@ def _is_our_daemon(pid: int, spec: dict) -> bool:
     return any(marker in cmd for marker in markers)
 
 
-def reap_orphan_listener(name: str, port: int, spec: dict) -> bool:
-    """We hold the singleton lock, so nothing WE manage is on ``port`` — yet it's occupied. That's
-    an ORPHANED daemon from a supervisor that died without reaping its child (SIGKILL/crash): the
-    flock is gone but the mitmdump/minter it spawned still holds the port, which would make our
-    fresh daemon crash-loop on EADDRINUSE forever. Reap it so ``fy host`` is genuinely idempotent.
+def reap_orphan_listener(name: str, port: int, spec: dict, spare: Collection[int] = ()) -> bool:
+    """We hold the singleton lock, so nothing WE manage should be on ``port`` — yet it's occupied.
+    That's an ORPHANED daemon from a supervisor that died without reaping its child
+    (SIGKILL/crash): the flock is gone but the mitmdump/minter it spawned still holds the port,
+    which would make our fresh daemon crash-loop on EADDRINUSE forever. Reap it so ``fy host`` is
+    genuinely idempotent.
+
+    ``spare`` is the pids this supervisor is running: one of those on the port is no orphan, though
+    it looks exactly like one (two worktrees once resolved to one port, and each respawn killed the
+    other's live proxy — ``_port_sharers`` now keeps that case from reaching here).
 
     Returns True if the port is free to bind afterwards, False if we couldn't free it — because a
-    FOREIGN process holds it (we refuse to kill that) or lsof can't see it. The caller then nags
-    with the fix instead of crash-looping."""
+    FOREIGN process or one of our own live daemons holds it (we refuse to kill either) or lsof
+    can't see it. The caller then nags with the fix instead of crash-looping."""
     pids = _port_listener_pids(port)
-    if any(not _is_our_daemon(pid, spec) for pid in pids):
-        return False  # an unrelated service owns the port — never kill it; let the caller nag.
+    if any(pid in spare or not _is_our_daemon(pid, spec) for pid in pids):
+        return False  # not an orphan of ours — never kill it; let the caller nag.
     for pid in pids:
         log(f"reaping orphaned {name} (pid {pid}) holding :{port} from a dead supervisor")
         try:
@@ -1698,7 +1703,13 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
         children.pop(name).stop()
 
     blocked_now: dict[str, str] = {}
+    shared = _port_sharers(desired, children)
     for name, spec in desired.items():
+        if name in shared:
+            if (child := children.pop(name, None)) is not None:
+                child.stop()
+            blocked_now[name] = _sharing_reason(name, spec["port"], shared[name], nagged)
+            continue
         # BEFORE the step: a spawn must find its live settings, and a running daemon picks a
         # change up from the file — the change that used to be a restart (see _sync_live).
         _sync_live(name, spec, running=name in children)
@@ -1726,6 +1737,38 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
             "detail": detail,
         }
     _publish_ready(active, jobs, unserved)
+
+
+def _port_sharers(desired: dict[str, dict], children: dict[str, Child]) -> dict[str, str]:
+    """The desired daemons whose port another desired daemon also wants: each → the one that keeps
+    it. The one already serving keeps it (first come — a running box's proxy is never stopped for
+    a newcomer), else the first by name, so a tick with neither running settles the same way every
+    time. Two worktrees on one port are two worktrees on one port OFFSET: the registry allocates
+    disjoint ones, but a ``[worktree-offsets]`` pin or ``WT_OFFSET`` can still put two together."""
+    by_port: dict[int, list[str]] = {}
+    for name, spec in desired.items():
+        if port := spec.get("port"):
+            by_port.setdefault(port, []).append(name)
+    shared: dict[str, str] = {}
+    for names in by_port.values():
+        if len(names) > 1:
+            keeper = min(names, key=lambda n: (not (n in children and children[n].alive()), n))
+            shared.update({n: keeper for n in names if n != keeper})
+    return shared
+
+
+def _sharing_reason(name: str, port: int, keeper: str, nagged: dict[str, float]) -> str:
+    """Why ``name`` isn't started while ``keeper`` has its port — nagged like the spawn gates."""
+    reason = (
+        f"its port :{port} is {keeper}'s too, and only one can serve it — two worktrees resolve "
+        "to one port offset. A `[worktree-offsets]` pin in the main checkout's "
+        "foldyard.local.toml, or WT_OFFSET, put them together: give one an offset no other "
+        "worktree has"
+    )
+    if time.monotonic() - nagged.get(name, 0.0) > MISSING_ENV_NAG:
+        log(f"✗ {name}: {reason}")
+        nagged[name] = time.monotonic()
+    return reason
 
 
 def _sync_live(name: str, spec: dict, *, running: bool) -> bool:
@@ -1792,7 +1835,7 @@ def _spawn_child(
     """The spawn gates + launch for one desired daemon. Three ways NOT to spawn, each nagged at
     most every MISSING_ENV_NAG seconds: required env still missing (host.env not filled in yet),
     the port held by a FOREIGN process (our own orphan from a dead supervisor is reaped first —
-    we hold the singleton lock, so nothing we manage is on it), or the exec itself failing.
+    never one of the daemons we're running), or the exec itself failing.
     Returns the gate's reason (the same sentence the nag carries, minus "retrying") so the tick
     can publish it for the posture surfaces — or None once the daemon is launched."""
     missing = [k for k in spec["requires"] if not os.environ.get(k)]
@@ -1804,10 +1847,16 @@ def _spawn_child(
         return reason
     # The port we're about to bind is already taken, yet we hold the singleton lock — so it's an
     # orphaned daemon from a dead supervisor. Reap it (idempotent restart); if we can't (a
-    # foreign service holds it), nag with the fix instead of starting a doomed child that would
-    # crash-loop on EADDRINUSE every backoff.
+    # foreign service holds it, or one of our own running daemons does), nag with the fix instead
+    # of starting a doomed child that would crash-loop on EADDRINUSE every backoff.
     port = spec.get("port")
-    if port and devmode.probe(port) and not reap_orphan_listener(name, port, spec):
+    if (
+        port
+        and devmode.probe(port)
+        and not reap_orphan_listener(
+            name, port, spec, spare={c.proc.pid for c in children.values() if c.alive()}
+        )
+    ):
         reason = (
             f"can't bind :{port} — another process is listening (this project's leftover "
             f"daemon would have been reaped, so it's foreign — `lsof -nP -iTCP:{port} "
