@@ -35,3 +35,4 @@ HANDOVER-*.md
 .dev-mode.json
 **/foldyard.local.toml
 # <<< foldyard (managed) <<<
+docs/talks/why-sandbox.pdf

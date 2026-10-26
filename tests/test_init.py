@@ -459,3 +459,94 @@ def test_init_points_at_fy_prereq_for_what_the_computer_needs(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "fy prereq" in out
     assert "brew install lima" not in out
+
+
+# ── `fy init --with <block>` ─────────────────────────────────────────────────────────────────
+# A block named on the command line ships ACTIVE instead of commented — exactly what uncommenting
+# it gives — so the first `fy box up` creates the box with it (an agent and the vscode-server
+# volume are create-time) instead of a later adopt + recreate.
+
+
+def _with(*blocks: str) -> init.InitOptions:
+    return init.InitOptions(name="x", blocks=frozenset(blocks))
+
+
+def _scaffolded_prompt() -> str:
+    body = init.render(init.InitOptions(name="x"))
+    return tomllib.loads(_uncomment(body, "# [claude]", '# """'))["claude"]["system_prompt"]
+
+
+def test_with_claude_is_the_claude_block_uncommented():
+    doc = _parse(_with("claude"))
+    assert doc["claude"]["keyless"] == "oauth"
+    assert doc["claude"]["system_prompt"] == _scaffolded_prompt()
+    assert "settings" not in doc["claude"]  # [claude.settings] is a preference, left commented
+    assert "codex" not in doc and "vscode" not in doc
+
+
+def test_with_codex_carries_the_real_prompt_not_the_placeholder():
+    # The commented [codex] says `system_prompt = """…"""   # paste [claude]'s` — an ACTIVE "…"
+    # would orient the agent with an ellipsis.
+    doc = _parse(_with("codex"))
+    assert doc["codex"]["keyless"] == "api-key"
+    assert doc["codex"]["system_prompt"] == _scaffolded_prompt()
+    assert "config" not in doc["codex"]
+    assert "claude" not in doc
+
+
+def test_with_vscode_is_the_vscode_block_uncommented():
+    doc = _parse(_with("vscode"))
+    assert doc["vscode"]["extensions"] == ["anthropic.claude-code"]
+    assert doc["vscode"]["settings"] == {"remote.autoForwardPorts": False}
+    assert "claude" not in doc and "codex" not in doc
+
+
+def test_with_every_block_at_once_is_valid_toml_and_keeps_the_rest_commented():
+    doc = _parse(_with(*init.BLOCKS))
+    assert {"claude", "codex", "vscode"} <= doc.keys()
+    for table in ("box", "ports", "inject"):
+        assert table not in doc
+
+
+def test_with_only_strips_its_own_blocks_comment_level():
+    # Everything outside the named block is byte-for-byte the default scaffold.
+    default = init.render(init.InitOptions(name="x")).splitlines()
+    active = init.render(_with("vscode")).splitlines()
+    assert len(active) == len(default)
+    changed = [(d, a) for d, a in zip(default, active, strict=True) if d != a]
+    assert changed and all(d.removeprefix("# ") == a for d, a in changed)
+
+
+def test_with_an_agent_step_two_no_longer_says_uncomment_and_recreate():
+    header = init.render(_with("claude")).split("[project]", 1)[0]
+    assert "Uncomment ONE agent" not in header
+    assert "fy box down && fy box up" not in header.split("#   3.", 1)[0]
+    assert "fy mode claude=on" in header and "fy claude" in header
+    both = init.render(_with("claude", "codex")).split("[project]", 1)[0]
+    assert "fy mode claude=on" in both and "fy mode codex=on" in both
+    # …and a non-agent block leaves step 2 as the default teaches it.
+    assert "Uncomment ONE agent" in init.render(_with("vscode"))
+
+
+def test_init_with_accepts_repeats_and_commas_and_says_what_it_declared(tmp_path, capsys):
+    assert init.init(path=str(tmp_path), name="x", blocks=["claude,vscode", "vscode"]) == 0
+    doc = tomllib.loads((tmp_path / "foldyard.toml").read_text())
+    assert "claude" in doc and "vscode" in doc and "codex" not in doc
+    assert "[claude] [vscode]" in capsys.readouterr().out
+
+
+def test_init_with_an_unknown_block_refuses_and_writes_nothing(tmp_path, capsys):
+    assert init.init(path=str(tmp_path), name="x", blocks=["claude", "box"]) == 1
+    out = capsys.readouterr().out
+    assert "'box'" in out and "claude, codex, vscode" in out
+    assert not (tmp_path / "foldyard.toml").exists()
+
+
+def test_cli_init_with_reaches_the_scaffold(tmp_path):
+    from typer.testing import CliRunner
+
+    from foldyard import cli
+
+    result = CliRunner().invoke(cli.app, ["init", str(tmp_path), "--with", "vscode"])
+    assert result.exit_code == 0, result.output
+    assert "vscode" in tomllib.loads((tmp_path / "foldyard.toml").read_text())

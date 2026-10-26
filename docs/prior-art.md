@@ -9,6 +9,8 @@ June sweep was found to have missed [gondolin](./prior-art/gondolin.md) (public 
 deep-dives moved into [prior-art/](./prior-art/) — the competitor library, which carries the
 property-by-property comparison table, the entry template, and the maintenance rules. This file stays
 the landscape: the whole neighbourhood, one row per tool, and the positioning argument.
+**Updated 2026-10-26:** Docker Sandboxes re-checked — its own Docker engine puts the whole stack
+inside, which makes it the closest neighbour.
 
 ## The verdict
 
@@ -17,8 +19,17 @@ the landscape: the whole neighbourhood, one row per tool, and the positioning ar
 - **The exact combination is unoccupied as a tool**: laptop-local, VM-bounded,
   secretless-by-default, whole-compose-stack + dev box + IDE backend, with host-side
   TTL-bound credential posture. Every component exists separately; nobody ships the
-  combination. Notably *nobody* does stack colocation, and nobody does host-enforced
-  credential posture for humans working locally.
+  combination. Nobody does host-enforced credential posture for humans working locally, and
+  nobody open does stack colocation in a VM.
+- **2026-10: Docker Sandboxes is the closest neighbour, and it is close.** A microVM per
+  agent with its own Docker engine holds the whole compose stack, and a host-side proxy keeps
+  credentials outside — the same fence and the same contents as foldyard. What separates them
+  (checked against Docker's docs 2026-10-26): it is closed source and requires signing in
+  with a Docker account (local use is free, commercial included; org-wide policy is a paid
+  subscription); its unit is a sandbox per agent rather than the project and its worktrees;
+  and its docs describe no posture modes and no time-limited credential switches — a
+  credential is either configured for the sandbox or not. Those last two are where foldyard's
+  case now rests, with open source.
 - **Closest five:** (1) the hardened-devcontainer ecosystem — blogs and template repos,
   single container on rootful Docker Desktop, secrets explicitly unhandled, no stack, DIY;
   (2) Citrix Secure Developer Spaces / Gitpod-Ona / Coder — identical value-prop *language*
@@ -68,14 +79,14 @@ the landscape: the whole neighbourhood, one row per tool, and the positioning ar
 
 | Neighbour | What it is | Daylight |
 | --- | --- | --- |
-| **Docker Sandboxes** | microVM per *agent*, own Docker engine, credential proxy; proprietary, Docker Desktop | Unit is the agent, not the stack; closed; no posture system; isolation by hiding (separate engine) vs our visible shared engine |
+| **Docker Sandboxes** (re-checked 2026-10-26) | microVM per *agent*, its own Docker engine — so `docker compose up` runs the **whole stack inside** — with a host-side credential proxy (the agent sees a sentinel value); persists until deleted; proprietary `sbx` CLI, sign-in with a Docker account required; local use free incl. commercial, org-wide policy management a paid subscription | **The closest neighbour overall**: same fence (VM), same contents (the stack), credentials outside. Daylight: closed source and tied to a Docker account; unit is a sandbox per agent, not the project and its worktrees; no posture modes or time-limited credential switches in its docs; isolation by hiding (separate engine) vs our visible shared engine |
 | **Gondolin** (earendil-works, added 2026-07) | per-task Alpine micro-VM (QEMU/libkrun) with the network stack and filesystem implemented as programmable host-side JS: TLS-MITM egress mediation, placeholder secrets substituted in-flight per destination host, FUSE-backed policy filesystem | Closest mechanism neighbour — validates the host-side-injection and host-as-enforcement bets independently. Unit is the agent *task* (one command at a time, VM per turn); no compose stack, no posture ladder, no human operator surface; HTTP/1.x-only egress. Full analysis: [prior-art/gondolin.md](./prior-art/gondolin.md) |
 | **vhrn** (aravind-n, added 2026-09) | agent harness (Claude Code / Codex / Pi) in a container jailed to the current project dir on Apple `container` or Docker; in-container nftables installed before a privilege drop, default-deny egress through a capability-dropped Rust proxy sidecar; five additive host-owned policy layers with per-project scope; no TLS termination | Closest ergonomics neighbour — same user and daily loop as foldyard, and the same operator verbs (`vhrn net allow --project .`, status with provenance, denial log). Unit is one agent *run* in one directory: no stack, no posture ladder, no worktrees, no credential minting or injection (hostname-only policy makes it impossible). **Ahead of foldyard** on address discipline (IANA unicast boundary, DNS-answer pinning, brokered loopback as a separate capability), proxy containment, grant provenance, and a written proxy contract. Full analysis: [prior-art/vhrn.md](./prior-art/vhrn.md) |
 | **matchlock** (added 2026-07; missed by the June sweep) | ephemeral microVMs (Firecracker / Virtualization.framework) for agent runs; nftables/gVisor egress allowlist; transparent proxy injects credentials, guest sees `SANDBOX_SECRET_…` placeholders | MIT, ~600★, active. The placeholder pattern, per-invocation: VM and overlay volumes discarded after each run; no stack, no dev loop |
 | **microsandbox** (added 2026-07; missed — existed since mid-2025) | self-hosted libkrun microVM runtime for agent code execution (~320 ms boot, OCI images, MCP server, SDKs); deny-all egress + domain allowlists; now also ships placeholder substitution | Highest-profile in the genre (6.5k★, YC-backed, cloud beta). Unit is the execution, framing is an SDK/server for agent builders — not a dev environment |
 | **Buildkite Cleanroom** (added 2026-07) | repo-declared policy → warm Firecracker snapshot with deps installed; CoW fork fan-out; deny-by-default egress re-enforced on resume; "secrets never enter the sandbox or its captured artifact" | Closest *policy-philosophy* cousin (repo-declared, deny-by-default, secretless) — but CI/task-shaped ephemeral snapshots, corporate-backed, not a live laptop stack |
 | **agent-vm · nilbox · bromure · shuru** (the placeholder wave, added 2026-07; catalog-sourced — see re-sweep caveats) | per-project or per-task local VMs (Lima / VZ.framework / QEMU), each with a host-side TLS-intercept proxy swapping dummy tokens for real | agent-vm is the closest single match to per-project + proxy-substitution; all are agent-run wrappers — no compose stack, no posture ladder, no human operator surface |
-| **vmoat** (added 2026-07; created 2026-06) | one Colima VM per git worktree, own Docker daemon, **whole compose stack inside** | The only stack-colocation shape-match found anywhere — and it's v0.1.0/0★, isolation-for-parallelism, with *no* secrets or egress story. Watch it; today it proves the niche, not fills it |
+| **vmoat** (added 2026-07; created 2026-06) | one Colima VM per git worktree, own Docker daemon, **whole compose stack inside** | The only open-source stack-colocation shape-match found (Docker Sandboxes is the closed one) — and it's v0.1.0/0★, isolation-for-parallelism, with *no* secrets or egress story. Watch it; today it proves the niche, not fills it |
 | **Microsoft MXC** (added 2026-07; announced 2026-06-02) | unified policy/SDK abstraction over sandbox backends (bubblewrap, seatbelt, microVM, Windows Sandbox, …); adopted at launch by Copilot CLI, Codex, NVIDIA OpenShell | An isolation *abstraction* for agent vendors — Microsoft says profiles are "not yet security boundaries"; no secretless/egress posture, not an environment |
 | **Apple `container`** + ecosystem (CodeRunner, drydock, sand; added 2026-07) | Apache-2.0 per-container lightweight VMs on Apple Silicon (macOS 26); spawned a macOS agent-sandbox wave | Substrate, not product — per-container VM primitive vs one VM around a project; no secrets/egress opinions. A future foldyard backend candidate at most |
 | **AgentFS** (Turso, added 2026-07) | CoW filesystem for agent writes: read-only base + SQLite-backed delta, FUSE/NFS, fork-by-copying-the-delta, file-op audit queryable in SQL | The strongest programmable-FS-view answer in the field (cf. gondolin's VFS); write-isolation and audit, not secret-hiding — complement, not competitor |
@@ -153,7 +164,8 @@ What the re-sweep changes strategically:
 - **The placeholder-proxy pattern is now table stakes in the per-task genre.** At least
   eight shipping tools substitute dummy credentials at a host-side proxy. Launch-post
   framing should not lead with the mechanism; it should lead with the *unit* — the
-  persistent project stack and the human dev loop, which nobody else covers.
+  persistent project stack and the human dev loop, which nobody else covers. (2026-10: Docker
+  Sandboxes now holds a whole stack too — see the verdict.)
 - **First-party sandboxes are absorbing the wrapper niche.** Anthropic's sandbox-runtime,
   Codex's Landlock/Seatbelt defaults, Docker Sandboxes' GA push (microVM + private Docker
   daemon per sandbox, "strongest agent isolation on the market" marketing, 2026-07), and
