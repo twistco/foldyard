@@ -20,7 +20,8 @@ inside, which makes it the closest neighbour.
   secretless-by-default, whole-compose-stack + dev box + IDE backend, with host-side
   TTL-bound credential posture. Every component exists separately; nobody ships the
   combination. Nobody does host-enforced credential posture for humans working locally, and
-  nobody open does stack colocation in a VM.
+  the one open tool that puts the stack in a VM (vmoat, below) has no credential or egress
+  story at all.
 - **2026-10: Docker Sandboxes is the closest neighbour, and it is close.** A microVM per
   agent with its own Docker engine holds the whole compose stack, and a host-side proxy keeps
   credentials outside — the same fence and the same contents as foldyard. What separates them
@@ -28,7 +29,9 @@ inside, which makes it the closest neighbour.
   with a Docker account (local use is free, commercial included; org-wide policy is a paid
   subscription); its unit is a sandbox per agent rather than the project and its worktrees;
   and its docs describe no posture modes and no time-limited credential switches — a
-  credential is either configured for the sandbox or not. Those last two are where foldyard's
+  credential is either configured for the sandbox (or for all of them) or not. Its `--refresh`
+  policy (55 min by default, or `on-demand`) is how long the host caches a value it fetched,
+  not a grant that lapses. Those last two are where foldyard's
   case now rests, with open source.
 - **Closest five:** (1) the hardened-devcontainer ecosystem — blogs and template repos,
   single container on rootful Docker Desktop, secrets explicitly unhandled, no stack, DIY;
@@ -75,7 +78,7 @@ inside, which makes it the closest neighbour.
   2025–26 blog posts hand-rolling partial foldyards with no tool to point at. The vacuum is
   the *tool* layer for individuals and small teams on laptops.
 
-## Positioning table (as of 2026-06)
+## Positioning table (swept 2026-06; later rows and re-checks dated in the row)
 
 | Neighbour | What it is | Daylight |
 | --- | --- | --- |

@@ -130,8 +130,9 @@ running doesn't add the agent: the install and the dummy credential are set when
 created.
 
 **Knowing up front which agent you want?** `foldyard init --with claude` (or `--with codex`)
-writes that table already uncommented, so the first `fy box up` creates the box with it: no
-adopt and no recreate, just `fy mode claude=on` and `fy claude`. `--with vscode` does the same for
+writes that table already uncommented, so the first `fy box up` creates the box with it: the
+adopt it asks for anyway covers it, with no second adopt and no recreate, just
+`fy mode claude=on` and `fy claude`. `--with vscode` does the same for
 `[vscode]` (for `fy code`); combine them as `--with claude,vscode`.
 
 **Keyless** means the real key never enters the box. The box holds a dummy value, and the proxy

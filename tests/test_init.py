@@ -489,9 +489,22 @@ def test_with_codex_carries_the_real_prompt_not_the_placeholder():
     # would orient the agent with an ellipsis.
     doc = _parse(_with("codex"))
     assert doc["codex"]["keyless"] == "api-key"
-    assert doc["codex"]["system_prompt"] == _scaffolded_prompt()
+    assert "…" not in doc["codex"]["system_prompt"]
     assert "config" not in doc["codex"]
     assert "claude" not in doc
+
+
+def test_with_codex_prompt_names_its_own_launcher_and_a_skill_it_can_read():
+    # [claude]'s prompt word for word would tell a Codex session it was started by `fy claude`
+    # and send it to a skill directory only Claude Code discovers. Everything else is shared.
+    claude = _scaffolded_prompt().splitlines()
+    codex = _parse(_with("codex"))["codex"]["system_prompt"].splitlines()
+    assert len(codex) == len(claude)
+    changed = [(c, x) for c, x in zip(claude, codex, strict=True) if c != x]
+    assert len(changed) == 2
+    assert "`fy codex`" in changed[0][1] and "`fy claude`" not in changed[0][1]
+    assert ".claude/skills/foldyard/SKILL.md" in changed[1][1]
+    assert "`fy claude`" not in "\n".join(codex)
 
 
 def test_with_vscode_is_the_vscode_block_uncommented():

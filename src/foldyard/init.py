@@ -195,6 +195,21 @@ _AGENT_PROMPT = [
     '# """',
 ]
 
+
+def _codex_prompt() -> list[str]:
+    """[claude]'s prompt for a Codex session: its own launcher, and the skill as a FILE —
+    Codex doesn't discover .claude/skills/, but it can read what `fy skill install` put there."""
+    swaps = {
+        "`fy claude`": "`fy codex`",
+        "SKILL in .claude/skills/ (the model — modes": "SKILL, .claude/skills/foldyard/SKILL.md (modes",
+    }
+    out = list(_AGENT_PROMPT)
+    for old, new in swaps.items():
+        (i,) = [n for n, ln in enumerate(out) if old in ln]  # exactly one, or the prompt moved
+        out[i] = out[i].replace(old, new)
+    return out
+
+
 # The blocks `fy init --with <name>` can write ACTIVE (BLOCKS), each as written COMMENTED.
 _CLAUDE = [
     "# [claude]",
@@ -239,9 +254,9 @@ def _codex(active: bool) -> list[str]:
         return _CODEX
     return [
         *_activate(_CODEX[:3]),
-        "# The same prompt as [claude]'s: Codex takes it as a developer instruction, not a system",
-        "# prompt.",
-        *_activate(_AGENT_PROMPT),
+        "# [claude]'s prompt, told it's Codex: Codex takes it as a developer instruction, not a",
+        "# system prompt.",
+        *_activate(_codex_prompt()),
     ]
 
 
