@@ -1743,27 +1743,34 @@ def _port_sharers(desired: dict[str, dict], children: dict[str, Child]) -> dict[
     """The desired daemons whose port another desired daemon also wants: each → the one that keeps
     it. The one already serving keeps it (first come — a running box's proxy is never stopped for
     a newcomer), else the first by name, so a tick with neither running settles the same way every
-    time. Two worktrees on one port are two worktrees on one port OFFSET: the registry allocates
-    disjoint ones, but a ``[worktree-offsets]`` pin or ``WT_OFFSET`` can still put two together."""
+    time. Serving means alive ON THAT PORT: a daemon a pin is moving onto it is still alive on its
+    old one until this tick restarts it. Two worktrees on one port are two worktrees on one port
+    OFFSET: the registry allocates disjoint ones, but a ``[worktree-offsets]`` pin, ``WT_OFFSET``
+    or the fake minter's 10-port fold (``config.fakecred_port``) can still put two together."""
     by_port: dict[int, list[str]] = {}
     for name, spec in desired.items():
         if port := spec.get("port"):
             by_port.setdefault(port, []).append(name)
     shared: dict[str, str] = {}
-    for names in by_port.values():
+    for port, names in by_port.items():
         if len(names) > 1:
-            keeper = min(names, key=lambda n: (not (n in children and children[n].alive()), n))
+            keeper = min(names, key=lambda n: (not _serves(children.get(n), port), n))
             shared.update({n: keeper for n in names if n != keeper})
     return shared
+
+
+def _serves(child: Child | None, port: int) -> bool:
+    return child is not None and child.alive() and child.spec.get("port") == port
 
 
 def _sharing_reason(name: str, port: int, keeper: str, nagged: dict[str, float]) -> str:
     """Why ``name`` isn't started while ``keeper`` has its port — nagged like the spawn gates."""
     reason = (
         f"its port :{port} is {keeper}'s too, and only one can serve it — two worktrees resolve "
-        "to one port offset. A `[worktree-offsets]` pin in the main checkout's "
-        "foldyard.local.toml, or WT_OFFSET, put them together: give one an offset no other "
-        "worktree has"
+        "to one port. Your computer gives each worktree its own offset, so look for what overrides "
+        "that: a `[worktree-offsets]` pin in the main checkout's foldyard.local.toml or WT_OFFSET "
+        "(give one an offset no other worktree has); for the fake minter, offsets 10 apart share "
+        "its port"
     )
     if time.monotonic() - nagged.get(name, 0.0) > MISSING_ENV_NAG:
         log(f"✗ {name}: {reason}")
