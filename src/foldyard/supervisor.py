@@ -1769,8 +1769,8 @@ def _sharing_reason(name: str, port: int, keeper: str, nagged: dict[str, float])
         f"its port :{port} is {keeper}'s too, and only one can serve it — two worktrees resolve "
         "to one port. Your computer gives each worktree its own offset, so look for what overrides "
         "that: a `[worktree-offsets]` pin in the main checkout's foldyard.local.toml or WT_OFFSET "
-        "(give one an offset no other worktree has); for the fake minter, offsets 10 apart share "
-        "its port"
+        "(give one an offset no other worktree has); for the fake minter, offsets that differ by a "
+        "multiple of 10 share its port"
     )
     if time.monotonic() - nagged.get(name, 0.0) > MISSING_ENV_NAG:
         log(f"✗ {name}: {reason}")
