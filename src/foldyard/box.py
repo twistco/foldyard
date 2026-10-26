@@ -183,6 +183,18 @@ def _warn_stale_proxy_port(engine: str, box: str, env: dict) -> None:
             f"now serves :{current} (its port range moved). The box's egress — including keyless "
             f"agent auth — will connection-refuse until you recreate it: `fy box down && fy box up`."
         )
+        return
+    # The range held, but this worktree's offset moved: it had shared one with a sibling (their
+    # names hash to one slot) until the host recorded each its own. The proxy URL names the port.
+    was = (_baked_env(engine, box, env, "HTTPS_PROXY") or "").strip().rpartition(":")[2]
+    now = env.get("FY_PROXY", "").rpartition(":")[2]
+    if was and now and was != now:
+        print(
+            f"⚠ dev box {box} was built for proxy port {was}, but this worktree's proxy now serves "
+            f":{now} (its port offset moved: it had shared one with another worktree, or a pin "
+            f"changed). The box's egress will connection-refuse until you recreate it: "
+            f"`fy box down && fy box up`."
+        )
 
 
 def _installed_foldyard(engine: str, box: str, env: dict) -> str | None:
@@ -739,6 +751,10 @@ def _create_env(
         f"FY_PROXY_PORT={config.proxy_port_base()}",
         "-e",
         f"GCP_MINTER_PORT={config.gcp_minter_port_base()}",
+        # …and every worktree's port offset, from the host's record (stack.worktree_offsets): the
+        # box runs `fy` for any checkout it mounts, and two names can hash to one offset.
+        "-e",
+        f"FY_WORKTREE_OFFSETS={json.dumps(stack.worktree_offsets(), sort_keys=True)}",
         # The operator's home, for the in-box `fy verify` mount audit: the box's own HOME is
         # /root or /home/vscode, not the path a leaked host mount would carry.
         "-e",
@@ -796,6 +812,9 @@ _DRIFT_IGNORED = frozenset(
         # The port band: a move is `_warn_stale_proxy_port`'s (one change, one warning).
         "FY_PROXY_PORT",
         "GCP_MINTER_PORT",
+        # Every worktree's offset: it changes whenever a worktree is added, no reason to recreate
+        # this box. Its own offset moving is `_warn_stale_proxy_port`'s too.
+        "FY_WORKTREE_OFFSETS",
         # The runtime: `_warn_stale_runtime`'s.
         sandbox.BAKED_ENV,
         # ADR-0033's two VM paths: facts about the VM's mounts, not config — and a box from before

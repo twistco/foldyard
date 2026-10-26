@@ -140,12 +140,12 @@ def active_worktree() -> str:
     return os.environ.get("WORKTREE", "")
 
 
-@lru_cache(maxsize=256)
 def worktree_offset(name: str) -> int:
-    """Deterministic 1..89 host-port offset for a worktree, 0 for the main checkout (``""``).
-    Reuses ``stack``'s POSIX-cksum offset so a worktree's PER-WORKTREE DAEMON PORTS (proxy listener,
-    gcp minter) line up with its stack/app ports (ADR-0016 — the proxy port is per-worktree).
-    Memoized per name — the supervisor reconcile loop asks for it every tick."""
+    """A worktree's 1..89 host-port offset, 0 for the main checkout (``""``): ``stack``'s, so a
+    worktree's PER-WORKTREE DAEMON PORTS (proxy listener, gcp minter) line up with its stack/app
+    ports (ADR-0016 — the proxy port is per-worktree). Not memoized: the host's record can change
+    under a long-lived supervisor or TUI (a worktree removed and added again, a pin taking its
+    offset), and a stale answer would serve its proxy where its box no longer looks."""
     if not name:
         return 0
     from . import stack  # lazy: stack imports config at module load
@@ -286,7 +286,6 @@ def clear_caches() -> None:
     (the allowlist + tests). A bound :class:`Config` is unaffected — it carries its own snapshot."""
     _repo_root_ambient.cache_clear()
     _toml_ambient.cache_clear()
-    worktree_offset.cache_clear()
     # The two main-checkout resolvers (stack.main_repo, devmode's per-checkout one) are memoized
     # for the same reason and invalidated by the same events (a test relocating the repo, a
     # rewritten foldyard.toml). Lazy + doubly guarded: config must not import either at module

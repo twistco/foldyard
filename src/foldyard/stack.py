@@ -116,25 +116,73 @@ def _pinned_offset(name: str) -> int | None:
     On your computer it comes from main's ADOPTED config, like every other host read of repo
     config (``config._host_toml``) — the file is on the mount. And only a value inside the
     worktree band (1..89) counts: 0 is main's own ports, and past 89 is the next band over."""
-    main = main_repo()
+    return _pins(main_repo()).get(name)
+
+
+def _pins(main: Path) -> dict[str, int]:
+    """Every valid ``[worktree-offsets]`` pin of the main checkout (see :func:`_pinned_offset`)."""
     data = config._tree_toml(main) if config.in_box() else (config._host_toml(main) or {})
     table = data.get("worktree-offsets")
-    val = table.get(name) if isinstance(table, dict) else None
-    ok = isinstance(val, int) and not isinstance(val, bool) and 1 <= val <= 89
-    return val if ok else None
+    return {
+        name: val
+        for name, val in (table.items() if isinstance(table, dict) else [])
+        if isinstance(val, int) and not isinstance(val, bool) and 1 <= val <= 89
+    }
+
+
+@lru_cache(maxsize=256)
+def _hashed_offset(name: str) -> int:
+    """1..89 from the name (cksum; here-string adds a trailing newline for parity with
+    _common.sh). Only 89 slots, so two names share one often (28% odds by 8 worktrees): it is where
+    the host starts a worktree's allocation (:func:`worktree_offsets`), and the answer only for a
+    worktree it doesn't know. Memoized: pure, and the TUI asks every second."""
+    out = _run(["cksum"], input=f"{name}\n")
+    return int(out.stdout.split()[0]) % 89 + 1
+
+
+def _baked_offsets() -> dict[str, int]:
+    """In a box: every worktree's offset as the host had it when it created the box
+    (``FY_WORKTREE_OFFSETS``, ``box._create_env``) — the box can't read the host's record.
+    A worktree registered since isn't in it and gets its hash, which matches the host's unless it
+    collided."""
+    try:
+        data = json.loads(os.environ.get("FY_WORKTREE_OFFSETS") or "{}")
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, int) and not isinstance(v, bool)}
+
+
+def worktree_offsets() -> dict[str, int]:
+    """Every registered worktree's offset, pins included: the host's record
+    (:func:`foldyard.worktree_registry.offsets`), allocating for a worktree that has none yet. In a
+    box, what the host baked into it."""
+    if config.in_box():
+        return _baked_offsets()
+    main = main_repo()
+    return _recorded_offsets(main, _pins(main))
+
+
+def _recorded_offsets(main: Path, pins: dict[str, int]) -> dict[str, int]:
+    from . import worktree_registry  # lazy: stack is on every verb's path
+
+    return worktree_registry.offsets(main, pins, _hashed_offset)
 
 
 def _offset(name: str) -> int:
     """Host-port offset for a worktree. Precedence (explicit wins, then stable-per-worktree):
-    ``WT_OFFSET`` env → a pin in ``foldyard.local.toml`` ``[worktree-offsets]`` → deterministic
-    1..89 from the name (cksum; here-string adds a trailing newline for parity with _common.sh)."""
+    ``WT_OFFSET`` env → a pin in ``foldyard.local.toml`` ``[worktree-offsets]`` → the offset the
+    host recorded for it (:func:`worktree_offsets` — no two registered worktrees share one) → the
+    name's hash, for a worktree the host doesn't know."""
     if os.environ.get("WT_OFFSET"):
         return int(os.environ["WT_OFFSET"])
-    pinned = _pinned_offset(name)
-    if pinned is not None:
-        return pinned
-    out = _run(["cksum"], input=f"{name}\n")
-    return int(out.stdout.split()[0]) % 89 + 1
+    main = main_repo()
+    pins = _pins(main)  # read once: on your computer it parses the adopted config (~1 ms)
+    if name in pins:
+        return pins[name]
+    known = _baked_offsets() if config.in_box() else _recorded_offsets(main, pins)
+    return known[name] if name in known else _hashed_offset(name)
 
 
 def _docker_host(

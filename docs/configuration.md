@@ -511,13 +511,16 @@ WEB_PORT = 3000
 PG_PORT = 5544
 ```
 
-In-container ports never move. Each worktree adds a fixed per-name offset (1–89) to every base,
-so a second stack beside main never collides. No `[ports]` table means worktrees publish no
-offset ports.
+In-container ports never move. Each worktree adds its own offset (1–89) to every base, so a
+second stack beside main never collides. No `[ports]` table means worktrees publish no offset
+ports.
 
 The offset resolves as: `WT_OFFSET` env → a pin in the main checkout's `foldyard.local.toml` →
-a hash of the worktree name. Pin one when a worktree's app must land on a known port (say, one
-a third-party callback allowlist accepts):
+the offset your computer recorded for the worktree. It records one per worktree it knows: a hash
+of the name while no other worktree has that offset, else a free one. Two worktrees never share
+one, and a worktree keeps its offset until it's removed. Pin one when a worktree's app must land
+on a known port (say, one a third-party callback allowlist accepts); a pinned offset is never
+given to another worktree:
 
 ```toml
 # foldyard.local.toml (main checkout, gitignored)

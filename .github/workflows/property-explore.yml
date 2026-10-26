@@ -39,7 +39,7 @@ env:
   ISSUE_LABEL: property-tests
   # The property tier (CLAUDE.md, Test tiers): every module that runs hypothesis.
   # tests/test_property_explore.py holds this list to the modules that import it.
-  PROPERTY_MODULES: tests/test_properties.py tests/test_monitor_properties.py tests/test_reconcile_model.py
+  PROPERTY_MODULES: tests/test_properties.py tests/test_monitor_properties.py tests/test_reconcile_model.py tests/test_worktree_offsets.py
 
 jobs:
   explore:

@@ -11,15 +11,23 @@ remove`` drops the entry. An entry counts while its directory is still the real,
 path that was recorded and still holds a ``.git``. The store is keyed by the MAIN checkout's real
 path — like :func:`foldyard.configpin.pin_dir`, never by anything the config declares.
 
+It also records each registered worktree's PORT OFFSET (:func:`offsets`), in a file beside the
+registry rather than in it: an older supervisor still running after an editable upgrade reads the
+registry as name → path and drops anything else.
+
 Stdlib-only: the supervisor's reconcile tick reads it."""
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
+
+SLOTS = range(1, 90)  # a worktree's offsets: 0 is main's, and past 89 is the next daemon's span
 
 
 def _root() -> Path:
@@ -95,6 +103,100 @@ def checkouts(main: Path) -> dict[str, Path]:
     """The registered worktrees the host may act on: name → recorded path, for every entry whose
     directory is still exactly what was recorded."""
     return {name: Path(p) for name, p in _load(main).items() if _is_real(Path(p))}
+
+
+def allocate(
+    names: Iterable[str],
+    recorded: Mapping[str, int],
+    pinned: Mapping[str, int],
+    hashed: Callable[[str], int],
+) -> dict[str, int]:
+    """The offset each of ``names`` not in ``pinned`` holds: what's ``recorded`` for it while that
+    is still its own, else its ``hashed`` slot while that is free, else a free slot. Pure.
+
+    A worktree's offset was its hashed slot, unrecorded, and two names on one slot shared every
+    port (Tangible, 2026-10-26). Taking the hashed slot first means a worktree that never collided
+    keeps the ports it always had, and a box created before this keeps working; only the second of
+    a colliding pair — by name — moves. Everyone whose slot is free claims it before anyone who
+    has to move picks a slot, so a move never lands on another worktree's hashed slot. Pinned
+    values are never handed out, and a recorded one a pin has since taken moves. Past 89 names
+    some are left out, and the caller falls back to the hash."""
+    unpinned = sorted(n for n in names if n not in pinned)
+    held = set(pinned.values())
+    got: dict[str, int] = {}
+    for name in unpinned:
+        mine = recorded.get(name)
+        if (
+            isinstance(mine, int)
+            and not isinstance(mine, bool)
+            and mine in SLOTS
+            and mine not in held
+        ):
+            got[name] = mine
+            held.add(mine)
+    fresh = [n for n in unpinned if n not in got]
+    want = {n: hashed(n) for n in fresh}
+    for name in fresh:
+        if want[name] in SLOTS and want[name] not in held:
+            got[name] = want[name]
+            held.add(want[name])
+    for name in (n for n in fresh if n not in got):
+        start = want[name] if want[name] in SLOTS else SLOTS[0]
+        ring = [*range(start, SLOTS[-1] + 1), *range(SLOTS[0], start)]
+        free = next((s for s in ring if s not in held), None)
+        if free is None:
+            break
+        got[name] = free
+        held.add(free)
+    return got
+
+
+def offsets_file(main: Path) -> Path:
+    store = store_file(main)
+    return store.with_name(f"{store.stem}.offsets.json")
+
+
+def _read_offsets(text: str) -> dict[str, int]:
+    try:
+        data = json.loads(text or "{}")
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        k: v
+        for k, v in data.items()
+        if isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+    }
+
+
+def offsets(main: Path, pinned: Mapping[str, int], hashed: Callable[[str], int]) -> dict[str, int]:
+    """Every registered worktree's port offset — its pin, else the one recorded for it, recording
+    one (:func:`allocate`) for any that has none: one just registered, or every worktree the first
+    time a foldyard that records them runs. An entry whose worktree was unregistered is dropped,
+    freeing its slot. Read without the lock while nothing needs writing, which is every call but
+    the few that allocate; flock-guarded when something does, so two ``fy`` runs can't hand one
+    slot to two worktrees."""
+    names = sorted(_load(main))
+    path = offsets_file(main)
+    try:
+        recorded = _read_offsets(path.read_text())
+    except OSError:
+        recorded = {}
+    got = allocate(names, recorded, pinned, hashed)
+    if got != recorded:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a+", encoding="utf-8") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            fh.seek(0)
+            recorded = _read_offsets(fh.read())
+            got = allocate(names, recorded, pinned, hashed)
+            if got != recorded:
+                fh.seek(0)
+                fh.truncate()
+                json.dump(got, fh, indent=2, sort_keys=True)
+                fh.write("\n")
+    return {**got, **{n: v for n, v in pinned.items() if n in names}}
 
 
 def unregistered(main: Path, wt_root: Path) -> list[str]:

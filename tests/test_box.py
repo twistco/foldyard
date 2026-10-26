@@ -43,6 +43,9 @@ def fake(tmp_path, monkeypatch):
         worktree="",
     )
     monkeypatch.setattr(box.stack, "resolve", lambda *a, **k: ctx)
+    monkeypatch.setattr(box.stack, "main_repo", lambda: main)  # the worktree offsets' record
+    # A worktree's hashed offset shells out to `cksum`, which would reach the fake engine below.
+    monkeypatch.setattr(box.stack, "_hashed_offset", lambda name: sum(map(ord, name)) % 89 + 1)
     monkeypatch.setattr(
         config, "box_image", lambda: {"dockerfile": "dev-stack/box.Dockerfile", "tag": "img:tag"}
     )
@@ -1005,6 +1008,47 @@ def test_up_no_nag_when_running_box_port_matches(fake, capsys):
     fake["state"]["baked_proxy_port"] = "41000"  # matches the allocated band base
     assert box.main("up") == 0
     assert "recreate" not in capsys.readouterr().out
+
+
+def test_up_nags_when_a_running_boxs_proxy_port_moved_with_its_offset(
+    fake, monkeypatch, tmp_path, capsys
+):
+    # The band stayed put, but this worktree's offset moved (it had shared one with a sibling, and
+    # the host's record gave it another): the box's proxy URL still names the old port.
+    _routed(fake, monkeypatch, tmp_path)  # this worktree's proxy now serves h:41001
+    fake["state"].update(
+        running=True, baked_proxy_port="41000", baked_env={"HTTPS_PROXY": "http://h:41048"}
+    )
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "41048" in out and ":41001" in out and "recreate" in out
+
+
+def test_up_no_offset_nag_when_the_running_boxs_proxy_port_matches(
+    fake, monkeypatch, tmp_path, capsys
+):
+    _routed(fake, monkeypatch, tmp_path)
+    fake["state"].update(
+        running=True, baked_proxy_port="41000", baked_env={"HTTPS_PROXY": "http://h:41001"}
+    )
+    assert box.main("up") == 0
+    assert "built for proxy port" not in capsys.readouterr().out
+
+
+def test_up_bakes_every_worktrees_offset_into_the_box(fake, monkeypatch, register_worktree):
+    # The box can't read the host's record of offsets, and it runs `fy` for its siblings too (every
+    # checkout is mounted): it gets them all, as the host has them at create. The real pair from
+    # Tangible, whose names both hash to 48, gets two.
+    monkeypatch.setattr(box.stack, "_hashed_offset", lambda name: 48)
+    main = fake["main"]
+    for name in ("sec-platform-fixes", "sec-supabase-url"):
+        register_worktree(main, name, main.parent / "repo-worktrees" / name)
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d", "sleep"])[0]
+    [baked] = [t.partition("=")[2] for t in run if t.startswith("FY_WORKTREE_OFFSETS=")]
+    assert (
+        json.loads(baked) == stack.worktree_offsets() and len(set(json.loads(baked).values())) == 2
+    )
 
 
 # The [claude]/[codex] drift rows above fire on the same "recreate" advice, so the foldyard
@@ -2735,6 +2779,19 @@ def test_a_moved_port_band_is_the_proxy_port_rows_alone(fake, monkeypatch, tmp_p
     assert _drift_line(out) == ""
 
 
+def test_a_worktree_added_since_the_box_was_created_is_no_drift(
+    fake, monkeypatch, tmp_path, capsys, register_worktree
+):
+    # Every worktree's offset is baked in, so the set changes whenever one is added — no reason to
+    # recreate this box. Its OWN offset moving is the proxy-port row's.
+    _create_then_run(fake)
+    main = fake["main"]
+    register_worktree(main, "later", main.parent / "repo-worktrees" / "later")
+    capsys.readouterr()
+    assert box.main("up") == 0
+    assert _drift_line(capsys.readouterr().out) == ""
+
+
 def test_a_declared_claude_is_its_own_rows_alone(fake, monkeypatch, tmp_path, capsys):
     # [claude] added under a running box: its dedicated row says more than the env can (the
     # install and the volumes are create-time too), so the env line doesn't repeat its names.
@@ -3242,7 +3299,8 @@ def test_up_says_which_dirs_it_could_not_mask(fake, monkeypatch, register_worktr
     _masked(fake, monkeypatch)
     assert box.main("up") == 0
     run = _find(fake["calls"], has=["run", "-d", "sleep"])[0]
-    assert not [a for a in run if "x:y" in a]
+    # No mount names it (its offset in FY_WORKTREE_OFFSETS is an env value, which a colon can't break)
+    assert not [a for a in run if "x:y" in a and not a.startswith("FY_WORKTREE_OFFSETS=")]
     out = capsys.readouterr().out
     assert f"{wt_root}/x:y/data/.venv" in out and "not masked" in out
 
