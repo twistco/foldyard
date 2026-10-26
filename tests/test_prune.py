@@ -5,6 +5,7 @@ The planner is pure and tested over plain data; ``apply`` runs against a scratch
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -77,7 +78,7 @@ def test_a_merged_clean_claude_worktree_goes_with_its_branch_and_venv():
     wt = Worktree(CLAUDE / "feat", "feat")
     p = _plan([wt], {"feat": "pr_head"}, [PR(7, "feat", "pr_head")], ["dev-venv-feat"])
     assert p.worktrees == [(wt, "#7")]
-    assert p.branches == [("feat", "#7")]
+    assert p.branches == [("feat", "pr_head", "#7")]
     # its venv goes only once git has removed it (``apply``), never as an orphan
     assert p.venvs == []
     assert p.worktree_venvs == {CLAUDE / "feat": Path("/cache/dev-venv-feat")}
@@ -125,7 +126,7 @@ def test_a_detached_worktree_stays():
 
 def test_a_branch_checked_out_nowhere_goes_once_main_holds_its_tip():
     p = _plan([], {"worktree-agent-1": "main_old", "unshipped": "pr_head"})
-    assert p.branches == [("worktree-agent-1", "main")]
+    assert p.branches == [("worktree-agent-1", "main_old", "main")]
 
 
 def test_main_and_the_main_checkouts_branch_are_never_deleted():
@@ -190,8 +191,11 @@ def test_an_lsof_that_lists_nothing_cannot_tell_so_every_worktree_is_busy(monkey
 
 
 def _git(cwd: Path, *args: str) -> str:
+    # a git hook running the suite exports GIT_DIR & co., which win over -C: never the real repo
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env |= {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
     return subprocess.run(
-        ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
+        ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True, env=env
     ).stdout.strip()
 
 
@@ -217,7 +221,7 @@ def test_apply_removes_the_worktree_then_the_branch_then_the_venvs(tmp_path):
     own, orphan = _venvs(tmp_path, "dev-venv-1", "dev-venv-2")
     plan = prune.Plan(
         worktrees=[(Worktree(wt_path, "feat"), "#7")],
-        branches=[("feat", "#7")],
+        branches=[("feat", _git(repo, "rev-parse", "feat"), "#7")],
         venvs=[orphan],
         worktree_venvs={wt_path: own},
     )
@@ -236,7 +240,7 @@ def test_apply_keeps_the_branch_and_venv_when_git_refuses_their_worktree(tmp_pat
     (own,) = _venvs(tmp_path, "dev-venv-1")
     plan = prune.Plan(
         worktrees=[(Worktree(wt_path, "feat"), "#7")],
-        branches=[("feat", "#7")],
+        branches=[("feat", _git(repo, "rev-parse", "feat"), "#7")],
         worktree_venvs={wt_path: own},
     )
 
@@ -245,3 +249,42 @@ def test_apply_keeps_the_branch_and_venv_when_git_refuses_their_worktree(tmp_pat
     assert (wt_path / "new.txt").exists()
     assert _git(repo, "branch", "--list", "feat") != ""
     assert own.exists()
+
+
+def test_apply_keeps_a_branch_that_moved_since_the_plan(tmp_path):
+    repo, _ = _repo_with_worktree(tmp_path)
+    planned = _git(repo, "rev-parse", "main")
+    _git(repo, "branch", "side")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-my")
+    _git(repo, "branch", "-f", "side", "main")  # a commit the plan never saw
+    plan = prune.Plan(branches=[("side", planned, "main")])
+
+    assert prune.apply(plan, repo) == 1
+
+    assert _git(repo, "rev-parse", "side") == _git(repo, "rev-parse", "main")
+
+
+def test_apply_acts_on_the_repo_it_is_given_under_a_git_hooks_env(tmp_path, monkeypatch):
+    repo, wt_path = _repo_with_worktree(tmp_path)
+    plan = prune.Plan(
+        worktrees=[(Worktree(wt_path, "feat"), "#7")],
+        branches=[("feat", _git(repo, "rev-parse", "feat"), "#7")],
+    )
+    elsewhere = tmp_path / "elsewhere"
+    _git(tmp_path, "init", "-q", str(elsewhere))
+    monkeypatch.setenv("GIT_DIR", str(elsewhere / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(elsewhere))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(elsewhere / ".git" / "index"))
+
+    assert prune.apply(plan, repo) == 0
+
+    assert not wt_path.exists()
+    assert _git(repo, "branch", "--list", "feat") == ""
+
+
+def test_a_worktree_git_cannot_read_counts_as_dirty(tmp_path):
+    _, wt_path = _repo_with_worktree(tmp_path)
+    assert not prune._dirty(wt_path)
+    (wt_path / "new.txt").write_text("x\n")
+    assert prune._dirty(wt_path)
+    assert prune._dirty(tmp_path / "no-such-worktree")

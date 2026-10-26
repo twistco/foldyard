@@ -53,7 +53,8 @@ class PR:
 @dataclass
 class Plan:
     worktrees: list[tuple[Worktree, str]] = field(default_factory=list)  # (worktree, merged by)
-    branches: list[tuple[str, str]] = field(default_factory=list)  # (branch, merged by)
+    # (branch, its tip when planned, merged by): a branch that moved since is kept
+    branches: list[tuple[str, str, str]] = field(default_factory=list)
     venvs: list[Path] = field(default_factory=list)  # no checkout at all
     # each removed worktree's venv, deleted only once git has removed the worktree
     worktree_venvs: dict[Path, Path] = field(default_factory=dict)
@@ -113,7 +114,7 @@ def plan(
         if name == MAIN_BRANCH or name in checked_out:
             continue
         if why := merged_by(name, tip, prs, is_ancestor):
-            out.branches.append((name, why))
+            out.branches.append((name, tip, why))
     keep = {venv_name(wt.path) for wt in remaining}
     removing = {venv_name(wt.path): wt.path for wt, _ in out.worktrees}
     for v in venvs:
@@ -136,8 +137,13 @@ def apply(p: Plan, repo: Path) -> int:
             refused.add(wt)
             print(f"✗ kept {wt.path}: {r.stderr.strip()}", file=sys.stderr)
     refused_branches = {wt.branch for wt in refused}
-    for name, _ in p.branches:
+    for name, tip, _ in p.branches:
         if name in refused_branches:
+            continue
+        now = _git(repo, "rev-parse", "-q", "--verify", f"refs/heads/{name}", check=False)
+        if now.stdout.strip() != tip:
+            failed = 1
+            print(f"✗ kept branch {name}: it moved since the plan", file=sys.stderr)
             continue
         r = _git(repo, "branch", "-D", name, check=False)
         if r.returncode:
@@ -180,10 +186,28 @@ def venv_name(checkout: Path) -> str:
     return f"dev-venv-{out.stdout.split()[0]}"
 
 
+# Set by a git hook (and by `git rebase --exec`): each wins over -C, so a `just prune` run from one
+# would read, and delete in, the repo the hook belongs to.
+_REPO_VARS = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
+    "GIT_NAMESPACE", "GIT_PREFIX",
+)  # fmt: skip
+
+
+def _env() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if k not in _REPO_VARS}
+
+
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=check
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=check, env=_env()
     )
+
+
+def _dirty(worktree: Path) -> bool:
+    """Changes in it, or git can't read it (which keeps it too)."""
+    r = _git(worktree, "status", "--porcelain", check=False)
+    return bool(r.returncode or r.stdout)
 
 
 def _cwds(proc: Path = Path("/proc")) -> list[Path] | None:
@@ -211,7 +235,7 @@ def _merged_prs(repo: Path) -> list[PR]:
         r = subprocess.run(
             ["gh", "pr", "list", "--state", "merged", "--limit", "1000",
              "--json", "number,headRefName,headRefOid,isCrossRepository"],
-            cwd=repo, capture_output=True, text=True, check=True,
+            cwd=repo, capture_output=True, text=True, check=True, env=_env(),
         )  # fmt: skip
     except (OSError, subprocess.CalledProcessError) as e:
         print(f"! no PRs from gh ({e}); only branches already on main count", file=sys.stderr)
@@ -227,9 +251,7 @@ def gather(repo: Path, cache: Path) -> Plan:
     if _git(repo, "fetch", "-q", "--prune", "origin", check=False).returncode:
         print(f"! git fetch failed; judging against the {MAIN_REF} already here", file=sys.stderr)
     worktrees = [
-        wt
-        if wt.prunable
-        else replace(wt, dirty=bool(_git(wt.path, "status", "--porcelain").stdout))
+        wt if wt.prunable else replace(wt, dirty=_dirty(wt.path))
         for wt in parse_worktrees(_git(repo, "worktree", "list", "--porcelain").stdout)
     ]
     branches = dict(
@@ -275,7 +297,7 @@ def render(p: Plan, cache: Path) -> str:
             lines.append(f"  … and their {len(p.worktree_venvs)} dev venv(s)")
     if p.branches:
         lines.append("Merged branches:")
-        lines += [f"  {why:5}  {name}" for name, why in p.branches]
+        lines += [f"  {why:5}  {name}" for name, _, why in p.branches]
     if p.venvs:
         lines.append(f"Venvs no checkout uses ({cache}): {len(p.venvs)}")
     if p.kept:
