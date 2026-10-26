@@ -97,7 +97,7 @@ def describe(ids: list[str], ifaces: dict[str, str]) -> dict | None:
         return {"endpoints": [], "containers": {}}
     res = _engine("inspect", *ids)
     if res.returncode != 0:
-        return None  # one stopped between ps and inspect: the next poll asks again
+        return None  # one stopped between ps and inspect, or a real failure: the caller asks ps
     try:
         found = json.loads(res.stdout or "[]")
     except ValueError:
@@ -142,8 +142,15 @@ class Snapshotter:
         if ids == self.ids and t - self.last_described < SNAPSHOT_EVERY:
             return False
         ifaces = interfaces()
-        snap = describe(ids, ifaces) if ifaces is not None else None
+        if ifaces is None:
+            raise OSError("the engine didn't list its networks")
+        snap = describe(ids, ifaces)
         if snap is None:
+            again = running_ids()
+            if again is None:
+                raise OSError("the engine didn't answer `ps`")
+            if again != ids:
+                return False  # one came or went between ps and inspect: the next poll asks again
             raise OSError("the engine didn't describe its containers")
         self.ids, self.last_described = ids, t
         if snap == self.last and t - self.last_written < SNAPSHOT_EVERY:

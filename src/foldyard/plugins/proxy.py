@@ -622,6 +622,10 @@ class ProxyPlugin(Plugin):
             "HOST_ENV_FILE": str(config.host_env_file()),
             # The hashes of the live build secrets (buildgate): what unlocks build-scoped grants.
             "BUILD_TOKENS_FILE": str(config.build_tokens_file()),
+            # mitmdump shares the supervisor's log pipe, which the tee stamps per line as it reads.
+            # Block-buffered, its lines arrived in batches up to an hour late, and a block ending
+            # mid-line took the next [host] line into it.
+            "PYTHONUNBUFFERED": "1",
         }
         live = {
             "rules": [_rule_to_json(r, owner.get(r, "")) for r in rules],

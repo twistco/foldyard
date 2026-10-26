@@ -911,6 +911,9 @@ def test_desired_daemons_offline_runs_only_the_always_on_proxy():
     daemons = devmode.desired_daemons({"gcp": "off", "github": "off"})
     assert set(daemons) == {"egress-proxy"}
     assert daemons["egress-proxy"]["env"]["CAPTURE_MODE"] == "full"
+    # Unbuffered, so each line reaches the supervisor's log when mitmdump writes it: buffered, a
+    # line was stamped up to an hour late, and a block ending mid-line took the next [host] line.
+    assert daemons["egress-proxy"]["env"]["PYTHONUNBUFFERED"] == "1"
 
 
 def test_gh_proxy_app_spec():

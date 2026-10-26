@@ -138,9 +138,12 @@ class Engine:
         self.ids = [A]
         self.calls: list[tuple[str, ...]] = []
         self.fail = ""
+        self.after_inspect: list[str] | None = None  # the running set once an inspect has run
 
     def __call__(self, *args: str) -> subprocess.CompletedProcess:
         self.calls.append(args)
+        if args[0] == "inspect" and self.after_inspect is not None:
+            self.ids, self.after_inspect = self.after_inspect, None
         if self.fail and args[0] == self.fail:
             return subprocess.CompletedProcess(args, 125, "", "boom")
         if args[0] == "ps":
@@ -198,12 +201,41 @@ def test_snapshots_are_written_on_change_and_at_least_every_minute(engine, tmp_p
 def test_an_engine_that_doesnt_answer_writes_nothing(engine, tmp_path):
     snap = attribution.Snapshotter(tmp_path / "s.jsonl", now=lambda: T0)
     engine.fail = "ps"
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="`ps`"):
+        snap.poll()
+    engine.fail = "network"
+    with pytest.raises(OSError, match="networks"):
         snap.poll()
     engine.fail = "inspect"
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="describe"):
         snap.poll()
     assert not (tmp_path / "s.jsonl").exists()
+
+
+def test_a_ps_that_fails_when_asked_again_is_not_taken_for_the_race(engine, monkeypatch, tmp_path):
+    # The race is told apart by a SECOND `ps`; if that one fails too, nothing says a container
+    # went, so it is the engine failing — never a silent skip.
+    answers = iter([[A], None])
+    monkeypatch.setattr(attribution, "running_ids", lambda: next(answers))
+    engine.fail = "inspect"
+    snap = attribution.Snapshotter(tmp_path / "s.jsonl", now=lambda: T0)
+    with pytest.raises(OSError, match="`ps`"):
+        snap.poll()
+
+
+def test_a_container_stopping_between_ps_and_inspect_is_not_a_failure(engine, tmp_path):
+    # A project that churns containers (an eval harness's sandboxes) hits this every few hours:
+    # `inspect` refuses the whole call for the one id that just went. Asking `ps` again tells the
+    # race from an engine that can't describe what it runs, which still raises (above).
+    path = tmp_path / "s.jsonl"
+    snap = attribution.Snapshotter(path, now=lambda: T0)
+    engine.ids, engine.after_inspect, engine.fail = [A, B], [A], "inspect"
+    assert snap.poll() is False
+    assert not path.exists()
+    engine.fail = ""
+    assert snap.poll() is True  # the next poll describes the set that runs now
+    [rec] = [json.loads(x) for x in path.read_text().splitlines()]
+    assert list(rec["containers"]) == [A]
 
 
 def test_the_snapshot_thread_idles_while_attribution_is_off(engine, monkeypatch, tmp_path):
