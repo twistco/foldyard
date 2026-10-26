@@ -27,11 +27,17 @@ whatever fits your own threat model. Foldyard only appears in part 3, as one wor
 ## What you'll leave with
 
 - **Why** a developer laptop is now one of the most valuable targets in a company.
-- **Four questions** to ask any sandbox — about files, credentials, network and control.
+- **Four questions** to ask any sandbox: about files, credentials, network and control.
 - **A checklist** for comparing tools, so you can choose one that fits *your* risks.
 - Then, hands-on: one of those tools running your own project.
 
-> You don't have to pick the tool we use today. You should leave able to tell a real fence from a painted one.
+> You don't have to pick the tool we use today. But you should leave being able to choose a sandbox that works for you.
+
+If you haven't done the setup yet, make sure you have `uv` installed and then in a shell do:
+
+```
+uvx foldyard@latest prereq
+```
 
 ---
 
@@ -71,7 +77,7 @@ All of it readable by **any program you run** — because it runs as *you*.
 
 ## Who actually runs code on your laptop?
 
-- **You.** Hopefully carefully.
+- **You.** Hopefully carefully and not permanently as admin.
 - **Every dependency you install.** `npm install`, `pip install`, `uv sync` run install scripts — code from strangers, with your rights, before you've read a line of it.
 - **Your build tools and dev servers**, and everything *they* pull in.
 - **Your editor's extensions**, updated automatically.
@@ -92,9 +98,15 @@ All of it readable by **any program you run** — because it runs as *you*.
 
 The worm spreads itself. Its fourth generation (2026) also targets CI pipelines and plants persistence in developer tools.
 
+<div class="source">
+
+Sources: [Krebs on Security](https://krebsonsecurity.com/2025/09/self-replicating-worm-hits-180-software-packages/) (Sep 2025) · [ReversingLabs](https://www.reversinglabs.com/blog/faq-shai-hulud-explained) (Sep 2025) · [Tenable, Mini Shai-Hulud FAQ](https://www.tenable.com/blog/mini-shai-hulud-frequently-asked-questions) (2026)
+
+</div>
+
 <!--
-Sources: Krebs on Security, ReversingLabs (first wave from 14–15 Sep 2025; Krebs: at least 187 packages in days);
-Tenable's Mini Shai-Hulud FAQ (2026). Counts differ between sources — quote "hundreds of packages".
+First wave from 14–15 Sep 2025; Krebs: at least 187 packages in days. Counts differ between
+sources — quote "hundreds of packages".
 -->
 
 ---
@@ -104,13 +116,19 @@ Tenable's Mini Shai-Hulud FAQ (2026). Counts differ between sources — quote "h
 **Nx "s1ngularity"** — August 2025.
 
 - Malicious versions of a popular build tool shipped an install script.
-- It looked for AI command-line tools on the laptop — Claude, Gemini, Q — and ran them, safety prompts off, to **search the disk** for it.
+- It looked for AI command-line tools on the laptop — Claude, Gemini, Q — and ran them, safety prompts off, to **search the disk**.
 - Results went to a public repo in the victim's own GitHub account.
 - In a second wave, stolen tokens were used to make thousands of private repos public.
 
 Your AI tools are capable, logged in and *on your laptop*. That makes them part of the attack surface.
 
-<!-- Source: Wiz, StepSecurity write-ups (Aug 2025). Wiz: 400+ users/orgs, 5,500+ private repos exposed. The malware's own collector went for wallets, keystores, .env files and SSH keys; Wiz describes the AI CLIs as used for "reconnaissance" with flags like --dangerously-skip-permissions and --yolo. -->
+<div class="source">
+
+Sources: [Wiz](https://www.wiz.io/blog/s1ngularity-supply-chain-attack) · [StepSecurity](https://www.stepsecurity.io/blog/supply-chain-security-alert-popular-nx-build-system-package-compromised-with-data-stealing-malware) (Aug 2025)
+
+</div>
+
+<!-- Wiz: 400+ users/orgs, 5,500+ private repos exposed. The malware's own collector went for wallets, keystores, .env files and SSH keys; Wiz describes the AI CLIs as used for "reconnaissance" with flags like --dangerously-skip-permissions and --yolo. -->
 
 ---
 
@@ -124,7 +142,11 @@ Your AI tools are capable, logged in and *on your laptop*. That makes them part 
 
 A file your agent reads *is* code your agent runs.
 
-<!-- Source: Socket research, reported by The Hacker News, 25 May 2026. -->
+<div class="source">
+
+Source: Socket research, reported by [The Hacker News](https://thehackernews.com/2026/05/trapdoor-supply-chain-attack-spreads.html) (25 May 2026)
+
+</div>
 
 ---
 
@@ -132,13 +154,19 @@ A file your agent reads *is* code your agent runs.
 
 **A trojanised VS Code extension** — May 2026.
 
-- A backdoored release of a popular extension was live on the marketplace for **minutes**.
+- A backdoored release of a popular extension was live on the marketplace only for **minutes**.
 - Auto-update delivered it to existing users as a routine update.
 - One of the affected laptops belonged to an employee at GitHub; GitHub confirmed internal repositories were taken.
 
 Nobody clicked anything suspicious. The update *was* the attack.
 
-<!-- Sources: BleepingComputer, Cloud Security Alliance research note (May 2026). Window reported as 11–18 minutes. -->
+<div class="source">
+
+Sources: [BleepingComputer](https://bleepingcomputer.com/news/security/github-confirms-breach-of-3-800-repos-via-malicious-vscode-extension) · [Cloud Security Alliance research note](https://labs.cloudsecurityalliance.org/research/csa-research-note-vscode-extension-supply-chain-breach-20260/) (May 2026)
+
+</div>
+
+<!-- Window reported as 11–18 minutes. -->
 
 ---
 
@@ -152,9 +180,44 @@ The 2026 worm generation installs **persistence** on developer machines:
 
 The published advice: find and remove all of it *before* rotating your credentials.
 
-> Rotating keys after an infection is necessary. It isn't a clean-up.
+> Rotating keys after an infection is a must, yes, it's annoying
 
-<!-- Source: Tenable, Mini Shai-Hulud FAQ (2026). -->
+<div class="source">
+
+Source: [Tenable, Mini Shai-Hulud FAQ](https://www.tenable.com/blog/mini-shai-hulud-frequently-asked-questions) (2026)
+
+</div>
+
+---
+
+## Story 6 · The key nobody revoked
+
+**LiteLLM** — the AI gateway, October 2026. Its second supply-chain compromise this year.
+
+1. **May:** a coding agent's config file (`opencode.json`) holding a platform master key is pushed to a public repo. The commit is force-pushed away. The key is **never revoked**.
+2. **October:** the key fetches an org owner's GitHub CLI token from that platform. The token covers the whole account, not scoped down.
+3. With it: CI secrets sent out, two maintainers' tokens, a release built from a lookalike fork.
+4. A backdoored `litellm` is live on PyPI and Docker Hub for about two hours.
+
+> Hiding a leaked key isn't revoking it.
+
+<div class="source">
+
+Sources: [LiteLLM, attack chain](https://docs.litellm.ai/blog/security-incident-oct-21-2026-attack-chain) (23 Oct 2026) · [Datadog Security Labs](https://securitylabs.datadoghq.com/articles/litellm-compromised-pypi-docker/) · [Socket](https://socket.dev/blog/litellm-attack-timeline)
+
+</div>
+
+<!--
+Five months from leak to release. The earlier 2026 compromise (March, 1.82.7/1.82.8, traced to the
+Trivy action in its CI) is a separate incident: Datadog says no connection between the two has been
+established, so don't say "hit again because they didn't rotate after March". The lesson is this
+one key.
+The owner's token is the kind `gh auth login` leaves on every laptop: the whole account, unscoped.
+The release gate had been relaxed that week to "any two engineers"; the attacker held two
+engineers' tokens.
+Datadog: ~23 million weekly downloads. The payload steals credentials on every Python start and
+carries a second-stage RAT.
+-->
 
 ---
 
@@ -200,7 +263,11 @@ Network access — or anything that can *become* network access (a push, a comme
 
 A developer laptop running an agent has **all three by default**. Take away **any one** and the attack falls apart. A sandbox is a way of taking away legs.
 
-<!-- Source: simonwillison.net, "The lethal trifecta for AI agents", 16 June 2025. -->
+<div class="source">
+
+Source: Simon Willison, [The lethal trifecta for AI agents](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/) (16 June 2025)
+
+</div>
 
 ---
 
@@ -249,6 +316,11 @@ Stronger fences cost more. The question is what you need to keep *in*, and what 
 Read it as two questions. Up: how strong is the fence. Right: how much of your work fits inside
 it — one agent run, or the whole dev stack (database, services, tests, editor backend).
 Most agent sandboxes are strong but small. Most dev environments are big but not a security fence.
+Two tools reach the top-right corner. Docker Sandboxes is the closest to foldyard: a microVM with
+its own Docker engine, so the whole stack fits, and credentials added on the way out. The
+differences: it's closed source and needs a Docker account sign-in (local use is free, commercial
+included); a sandbox is per agent, not per project; and there are no modes that switch a
+credential on for a set time.
 -->
 
 ---
@@ -264,7 +336,7 @@ gitleaks git .       # the history
 gitleaks dir .       # every file in the folder, ignored ones too
 ```
 
-> A sandbox can mount a clean repo. It can't clean a dirty one.
+> A sandbox can mount a clean repo only. It can't clean a dirty one.
 
 ---
 
@@ -334,7 +406,7 @@ This used to be rare. In 2026 it became close to standard in agent sandboxes —
 - **Test the test.** One self-check printed *ALL PASS* when its probes had never run; the fix was a control that must succeed first, proving each probe ran.
 - Re-run it after every config change.
 
-> If the only evidence that the fence holds is the vendor's README, you don't know.
+> If the only evidence that the fence holds is the vendor's README, then you don't know.
 
 <!-- Story: docs/archive/verify-false-pass.md -->
 
@@ -404,9 +476,10 @@ This used to be rare. In 2026 it became close to standard in agent sandboxes —
 
 ## If foldyard isn't for you
 
-Good — pick by your threat model, not by ours.
+It was made with a startup's needs in mind — pick by your threat model, not by ours.
 
 - **Just one agent, short tasks?** A per-task agent sandbox (VM- or process-based) may be all you need.
+- **Happy with closed source and a Docker account?** Docker Sandboxes also fits a whole stack in a VM, with credentials kept outside.
 - **Already on dev containers?** Harden them: rootless engine, no home-folder mount, no secrets in env, an egress gate.
 - **Can't run a VM locally?** A remote dev environment moves the whole risk off your laptop.
 - **Whatever you pick:** run it through the eight questions.
@@ -436,10 +509,10 @@ Foldyard's own survey of the landscape: `docs/prior-art.md` in the foldyard repo
 | | Do | Look for |
 | --- | --- | --- |
 | 0 | `fy prereq` | no ✗, base VM ✓ |
-| 1 | `cd your-repo` → `foldyard init` | a `foldyard.toml` to read |
+| 1 | `cd your-repo` → `foldyard init --with vscode` | a `foldyard.toml` to read |
 | 2 | `fy box up` → `fy box shell` | "cloning the base VM" — seconds, not minutes |
 | 3 | `fy verify` (on your computer, then in the box) | ALL PASS |
-| 4 | uncomment `[claude]` or `[codex]` → `fy config diff` → `fy config adopt` → `fy box down && fy box up` → `fy mode claude=on` → `fy claude` | a hidden prompt for your key, once |
+| 4 | `fy code` → uncomment `[claude]` or `[codex]` in the box → `fy config diff` on your computer → `fy config adopt` → `fy box down && fy box up` → `fy code` → `fy mode claude=on` → `fy claude` | the box's edit in the diff, then a hidden prompt for your key, once |
 | 5 | ask the agent to fill in your stack → `fy config diff` → `fy config adopt` → `fy up` → `fy open` | your app, running in the VM |
 
 The allowlist **learns for its first hour**. When it starts refusing, `fy allow learn` grants what it saw, after you've reviewed it.
@@ -464,6 +537,7 @@ The allowlist **learns for its first hour**. When it starts refusing, `fy allow 
 - Nx "s1ngularity": [Wiz](https://www.wiz.io/blog/s1ngularity-supply-chain-attack) (Aug 2025)
 - TrapDoor: [The Hacker News](https://thehackernews.com/2026/05/trapdoor-supply-chain-attack-spreads.html) (May 2026)
 - VS Code extension breach: [BleepingComputer](https://bleepingcomputer.com/news/security/github-confirms-breach-of-3-800-repos-via-malicious-vscode-extension); [CSA research note](https://labs.cloudsecurityalliance.org/research/csa-research-note-vscode-extension-supply-chain-breach-20260/) (May 2026)
+- LiteLLM 1.107.0: [LiteLLM's attack chain write-up](https://docs.litellm.ai/blog/security-incident-oct-21-2026-attack-chain); [Datadog Security Labs](https://securitylabs.datadoghq.com/articles/litellm-compromised-pypi-docker/) (Oct 2026)
 - Foldyard: [github.com/twistco/foldyard](https://github.com/twistco/foldyard) — `docs/archive/lessons.md` has more stories from building it
 
 <!-- Figures in the incident write-ups differ between sources and change as investigations go on. Re-check them the week of the talk. -->
@@ -475,6 +549,3 @@ The allowlist **learns for its first hour**. When it starts refusing, `fy allow 
 
 # Questions?
 
-Then: laptops open.
-
-`uvx foldyard@latest prereq`

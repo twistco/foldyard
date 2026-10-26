@@ -4,8 +4,9 @@ One writer (:func:`render`) emits a single, opinionated starter: a LOCKED-DOWN, 
 Lima dev box you can safely build and poke, with the agents and the full feature set present
 but COMMENTED — so a first run is safe, and growing the config is uncommenting, in the order
 the file itself teaches. There is deliberately no interactive wizard: the template is the guide.
-Only the project name + VM sizing are parameterised (typer flags); everything else is the same
-curated boilerplate every project starts from.
+Only the project name + VM sizing are parameterised (typer flags), plus ``--with``, which writes
+named blocks already uncommented; everything else is the same curated boilerplate every project
+starts from.
 
 A second writer (:func:`render_local`) emits ``foldyard.local.toml.example``, the committed
 template for the gitignored per-developer overlay. It ships WITH the scaffold rather than being
@@ -59,6 +60,21 @@ GITIGNORE_ENTRIES = (
 # The template `init` writes beside the config — committed, unlike what it's a template FOR.
 LOCAL_EXAMPLE = "foldyard.local.toml.example"
 
+# The commented blocks `fy init --with` can write ACTIVE: only those that work exactly as the
+# scaffold writes them. [[inject]] needs your App's ids and [box].image a Dockerfile, so an active
+# copy of either would be a config that fails, not a shortcut.
+BLOCKS = ("claude", "codex", "vscode")
+
+
+def parse_blocks(values: list[str]) -> frozenset[str]:
+    """``--with`` values (repeated and/or comma-separated) as a set of :data:`BLOCKS`. Raises
+    ``ValueError`` naming every unknown one."""
+    names = {n.strip() for v in values for n in v.split(",") if n.strip()}
+    if unknown := sorted(names - set(BLOCKS)):
+        named = ", ".join(map(repr, unknown))
+        raise ValueError(f"--with: no block {named} — one of {', '.join(BLOCKS)}")
+    return frozenset(names)
+
 
 def _running_version() -> str:
     """The foldyard doing the scaffolding — what the file it writes is written FOR."""
@@ -76,6 +92,8 @@ class InitOptions:
     #: The version stamped as the scaffold's floor. Defaults to the ``fy`` running `init`;
     #: a field rather than a lookup inside :func:`render` so the writer stays pure + testable.
     version: str = field(default_factory=_running_version)
+    #: The :data:`BLOCKS` written ACTIVE instead of commented (``fy init --with``).
+    blocks: frozenset[str] = frozenset()
 
 
 #: Stand-in for an unorderable running version in the file's EXAMPLE lines (the commented
@@ -141,6 +159,129 @@ def _slug(name: str) -> str:
     return s or "project"
 
 
+#: The agent prompt the scaffold offers, as written COMMENTED (`system_prompt = """` … `"""`):
+#: [claude]'s, and — only when ``--with codex`` writes it active — [codex]'s too.
+_AGENT_PROMPT = [
+    '# system_prompt = """',
+    "# You are root in this project's foldyard dev box, started by `fy claude` with permission",
+    "# prompts skipped. Orientation, so you don't have to re-derive it:",
+    "#",
+    "# The isolation is REAL but this is not a locked-down shell. `DOCKER_HOST`/`CONTAINER_HOST` are",
+    "# preset and you have FULL engine access through them — `docker`/`podman` run/exec/build,",
+    "# compose, the lot. What bounds you is the machine underneath: a ROOTLESS VM that mounts",
+    "# ONLY this repo, with a VM firewall whose sole way out is the allowlisting proxy on the",
+    "# user's computer. So the blast radius is this repo plus this project's containers — never",
+    "# that computer. Prove it any time with `fy verify` (expect ALL PASS).",
+    "#",
+    "# `fy` works in here for the read and box verbs: `fy verify`, `fy box shell|ps|down`, and",
+    "# `fy mode` to SEE the credential mode — the mode is SET on the user's computer, not in",
+    "# here, and so are egress grants. A second checkout beside this one is `fy worktree add <name>`,",
+    "# then `WORKTREE=<name> fy <verb>`.",
+    "#",
+    "# Git: read and commit locally, but you CANNOT push — no credential in here reaches the",
+    "# origin, by design. The user pushes from their computer.",
+    "#",
+    "# Egress that fails is the allowlist doing its job, not a bug to route around. Report the",
+    "# blocked hostname and ask the user to `fy allow add <hostname>`; the grant store",
+    "# lives outside this box, out of your reach.",
+    "#",
+    "# You may not be alone: several sessions can attach to this one box and checkout. You run",
+    "# as root, so files you create land root-owned.",
+    "#",
+    "# Depth on demand, both version-matched to the foldyard running here — never a web search",
+    "# or a clone of the project, which would describe a different version: the `foldyard`",
+    "# SKILL in .claude/skills/ (the model — modes, egress, why a change didn't take), and",
+    "# `fy docs` for the manual (`fy docs` lists topics; `fy docs modes`, `fy docs adr-0007`).",
+    '# """',
+]
+
+
+def _codex_prompt() -> list[str]:
+    """[claude]'s prompt for a Codex session: its own launcher, and the skill as a FILE —
+    Codex doesn't discover .claude/skills/, but it can read what `fy skill install` put there."""
+    swaps = {
+        "`fy claude`": "`fy codex`",
+        "SKILL in .claude/skills/ (the model — modes": "SKILL, .claude/skills/foldyard/SKILL.md (modes",
+    }
+    out = list(_AGENT_PROMPT)
+    for old, new in swaps.items():
+        (i,) = [n for n, ln in enumerate(out) if old in ln]  # exactly one, or the prompt moved
+        out[i] = out[i].replace(old, new)
+    return out
+
+
+# The blocks `fy init --with <name>` can write ACTIVE (BLOCKS), each as written COMMENTED.
+_CLAUDE = [
+    "# [claude]",
+    '# keyless = "oauth"      # Bearer on api.anthropic.com ← `claude setup-token` on your computer',
+    '# # keyless = "api-key"  # x-api-key on api.anthropic.com ← from console.anthropic.com',
+    "# # (on your own, keyless is fine here; on a team, put it in foldyard.local.toml — which",
+    "# #  subscription you pay for is personal, and a shared one prompts every colleague)",
+    *_AGENT_PROMPT,
+]
+
+_CODEX = [
+    "# [codex]",
+    '# keyless = "api-key"    # Authorization: Bearer ← OPENAI_API_KEY (captured to host.env)',
+    '# # keyless = "chatgpt"  # ChatGPT subscription: a token service refreshes ~/.codex/auth.json',
+    '# system_prompt = """…"""   # same key + same job as [claude]\'s above (paste that one);',
+    "#                          # Codex takes it as a developer instruction, not a system prompt",
+]
+
+_VSCODE = [
+    "# [vscode]",
+    '# extensions = ["anthropic.claude-code"]',
+    "# [vscode.settings]",
+    '# "remote.autoForwardPorts" = false',
+]
+
+
+def _activate(lines: list[str]) -> list[str]:
+    """``lines`` with ONE comment level stripped — what a user gets by uncommenting them: a
+    ``# # …`` guidance line survives as a plain TOML comment, the template's own convention."""
+    return [ln.removeprefix("# ") if ln.startswith("# ") else ln.removeprefix("#") for ln in lines]
+
+
+def _block(lines: list[str], active: bool) -> list[str]:
+    return _activate(lines) if active else lines
+
+
+def _codex(active: bool) -> list[str]:
+    """[codex], which can't simply be uncommented: its commented ``system_prompt`` is a ``"…"``
+    placeholder pointing at [claude]'s, and an ACTIVE one would orient the agent with an ellipsis.
+    So the active block carries the prompt itself."""
+    if not active:
+        return _CODEX
+    return [
+        *_activate(_CODEX[:3]),
+        "# [claude]'s prompt, told it's Codex: Codex takes it as a developer instruction, not a",
+        "# system prompt.",
+        *_activate(_codex_prompt()),
+    ]
+
+
+def _step_two(agents: list[str]) -> list[str]:
+    """The header's step 2: uncomment an agent and recreate the box — or, when ``--with`` already
+    declared one, just turn it on, since the first ``fy box up`` creates the box with it."""
+    if not agents:
+        return [
+            "#   2. Uncomment ONE agent ([claude] or [codex]), `fy config adopt`, then",
+            "#      `fy box down && fy box up` — the agent is installed when the box is CREATED, so a",
+            "#      running box won't pick it up (with `keyless`, then `fy mode claude=on` or",
+            "#      `codex=on`). Now an AI agent runs INSIDE the safe sandbox (it offers that agent's",
+            "#      install hosts the same way). Use it to work out the rest of this config with you.",
+        ]
+    one = len(agents) == 1
+    return [
+        f"#   2. {'The agent' if one else 'Each agent'} below is ALREADY declared (`fy init --with`),"
+        " so the first `fy box up`",
+        "#      installs it, offers its install hosts and asks once (hidden) for its credential.",
+        "#      Then turn its switch on and start it — an AI agent INSIDE the safe sandbox. Use it",
+        "#      to work out the rest of this config with you:",
+        *(f"#          fy mode {a}=on && fy {a}" for a in agents),
+    ]
+
+
 def render(opts: InitOptions) -> str:
     """The commented ``foldyard.toml`` body for ``opts``. Pure — easy to unit-test.
 
@@ -169,11 +310,7 @@ def render(opts: InitOptions) -> str:
         "#      allowlist LEARNING for an hour: setup isn't refused, every host it would have refused",
         "#      is recorded, and then it ENFORCES by itself. `fy allow learn` grants what it saw in",
         "#      one reviewed batch ([proxy] below).",
-        "#   2. Uncomment ONE agent ([claude] or [codex]), `fy config adopt`, then",
-        "#      `fy box down && fy box up` — the agent is installed when the box is CREATED, so a",
-        "#      running box won't pick it up (with `keyless`, then `fy mode claude=on` or",
-        "#      `codex=on`). Now an AI agent runs INSIDE the safe sandbox (it offers that agent's",
-        "#      install hosts the same way). Use it to work out the rest of this config with you.",
+        *_step_two([a for a in ("claude", "codex") if a in opts.blocks]),
         "#   3. Uncomment a stack + the features at the bottom as the project needs them. Box",
         "#      settings are create-time too: adopt, then `fy box down && fy box up`.",
         "# Resolution everywhere: explicit env var wins → foldyard.local.toml (gitignored,",
@@ -272,7 +409,11 @@ def render(opts: InitOptions) -> str:
         '# no_proxy = ["{project}-db", "redis"]  # step 3: your stack\'s service names, reached',
         "#                                    # directly — through the proxy they hang, then 502",
         "",
-        "# ── Agents — uncomment ONE, then `fy box up` (step 2) ────────────────────────────────────",
+        (
+            "# ── Agents (step 2) ──────────────────────────────────────────────────────────────────────"
+            if {"claude", "codex"} & opts.blocks
+            else "# ── Agents — uncomment ONE, then `fy box up` (step 2) ────────────────────────────────────"
+        ),
         "# Claude Code (`fy claude`). Declaring [claude] installs it on box-up + mounts its persisted",
         "# login/transcripts. Keyless: the real token is injected at the proxy on your computer, NEVER",
         "# in the box (`fy box up` prompts once, hidden; stored only on your computer). Then",
@@ -282,42 +423,7 @@ def render(opts: InitOptions) -> str:
         "# written for a BOX-ONLY project — uncomment and go. It says nothing about a stack, so it",
         "# stays true at step 2; when you add compose at step 3, paste the follow-on paragraph",
         "# below it. Same progressive opt-in as the rest of this file.",
-        "# [claude]",
-        '# keyless = "oauth"      # Bearer on api.anthropic.com ← `claude setup-token` on your computer',
-        '# # keyless = "api-key"  # x-api-key on api.anthropic.com ← from console.anthropic.com',
-        "# # (on your own, keyless is fine here; on a team, put it in foldyard.local.toml — which",
-        "# #  subscription you pay for is personal, and a shared one prompts every colleague)",
-        '# system_prompt = """',
-        "# You are root in this project's foldyard dev box, started by `fy claude` with permission",
-        "# prompts skipped. Orientation, so you don't have to re-derive it:",
-        "#",
-        "# The isolation is REAL but this is not a locked-down shell. `DOCKER_HOST`/`CONTAINER_HOST` are",
-        "# preset and you have FULL engine access through them — `docker`/`podman` run/exec/build,",
-        "# compose, the lot. What bounds you is the machine underneath: a ROOTLESS VM that mounts",
-        "# ONLY this repo, with a VM firewall whose sole way out is the allowlisting proxy on the",
-        "# user's computer. So the blast radius is this repo plus this project's containers — never",
-        "# that computer. Prove it any time with `fy verify` (expect ALL PASS).",
-        "#",
-        "# `fy` works in here for the read and box verbs: `fy verify`, `fy box shell|ps|down`, and",
-        "# `fy mode` to SEE the credential mode — the mode is SET on the user's computer, not in",
-        "# here, and so are egress grants. A second checkout beside this one is `fy worktree add <name>`,",
-        "# then `WORKTREE=<name> fy <verb>`.",
-        "#",
-        "# Git: read and commit locally, but you CANNOT push — no credential in here reaches the",
-        "# origin, by design. The user pushes from their computer.",
-        "#",
-        "# Egress that fails is the allowlist doing its job, not a bug to route around. Report the",
-        "# blocked hostname and ask the user to `fy allow add <hostname>`; the grant store",
-        "# lives outside this box, out of your reach.",
-        "#",
-        "# You may not be alone: several sessions can attach to this one box and checkout. You run",
-        "# as root, so files you create land root-owned.",
-        "#",
-        "# Depth on demand, both version-matched to the foldyard running here — never a web search",
-        "# or a clone of the project, which would describe a different version: the `foldyard`",
-        "# SKILL in .claude/skills/ (the model — modes, egress, why a change didn't take), and",
-        "# `fy docs` for the manual (`fy docs` lists topics; `fy docs modes`, `fy docs adr-0007`).",
-        '# """',
+        *_block(_CLAUDE, "claude" in opts.blocks),
         "#",
         "# …and WHEN YOU ADD A COMPOSE STACK (step 3), append this paragraph to that prompt — it is",
         "# the half that only makes sense once there is a stack to drive:",
@@ -339,11 +445,7 @@ def render(opts: InitOptions) -> str:
         "# injects on your computer. Leave `keyless` out for an in-box `codex login --api-key` (the",
         "# ChatGPT browser login can't complete in the box). On a team, `keyless` goes in",
         "# foldyard.local.toml, as for [claude].",
-        "# [codex]",
-        '# keyless = "api-key"    # Authorization: Bearer ← OPENAI_API_KEY (captured to host.env)',
-        '# # keyless = "chatgpt"  # ChatGPT subscription: a token service refreshes ~/.codex/auth.json',
-        '# system_prompt = """…"""   # same key + same job as [claude]\'s above (paste that one);',
-        "#                          # Codex takes it as a developer instruction, not a system prompt",
+        *_codex("codex" in opts.blocks),
         "#",
         "# Codex's config.toml keys, one `-c` per leaf (nested tables flatten to dotted paths):",
         "# [codex.config]",
@@ -416,10 +518,7 @@ def render(opts: InitOptions) -> str:
         "# Extensions install on attach (config, not .vscode/extensions.json — the list decides",
         "# what YOUR COMPUTER installs, so it is read from the adopted copy); settings are applied to",
         "# the box's server.",
-        "# [vscode]",
-        '# extensions = ["anthropic.claude-code"]',
-        "# [vscode.settings]",
-        '# "remote.autoForwardPorts" = false',
+        *_block(_VSCODE, "vscode" in opts.blocks),
     ]
     return "\n".join(lines) + "\n"
 
@@ -616,14 +715,22 @@ def init(
     memory: int = DEFAULT_MEMORY_MIB,
     disk: int = DEFAULT_DISK_GIB,
     force: bool = False,
+    blocks: list[str] | None = None,
 ) -> int:
     """Write ``<path>/foldyard.toml``. Returns a process exit code."""
     target = Path(path).expanduser().resolve()
     dest = target / "foldyard.toml"
+    try:
+        active = parse_blocks(blocks or [])
+    except ValueError as e:
+        print(f"✗ {e}")
+        return 1
     if dest.exists() and not force:
         print(f"✗ {dest} already exists — pass --force to overwrite.")
         return 1
-    opts = InitOptions(name=name or target.name, cpus=cpus, memory_mib=memory, disk_gib=disk)
+    opts = InitOptions(
+        name=name or target.name, cpus=cpus, memory_mib=memory, disk_gib=disk, blocks=active
+    )
     try:
         target.mkdir(parents=True, exist_ok=True)
         dest.write_text(render(opts))
@@ -634,6 +741,10 @@ def init(
         return 1
     floor = f" (floor: foldyard >= {opts.version})" if compat._parse(opts.version) else ""
     print(f"✓ wrote {dest}{floor}")
+    if active:
+        declared = " ".join(f"[{b}]" for b in BLOCKS if b in active)
+        print(f"✓ declared {declared} active (--with): the first `fy box up` creates the box with")
+        print("  them, so there's nothing to uncomment and no box to recreate for them.")
     if local_status == "written":
         print(f"✓ wrote {target / LOCAL_EXAMPLE} (per-developer overrides — commit this template)")
     if gitignore_status != "unchanged":

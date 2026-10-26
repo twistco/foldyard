@@ -197,15 +197,30 @@ def init(
     memory: int = typer.Option(8192, "--memory", help="VM memory in MiB"),
     disk: int = typer.Option(60, "--disk", help="VM disk in GiB"),
     force: bool = typer.Option(False, "--force", "-f", help="overwrite an existing foldyard.toml"),
+    with_: list[str] = typer.Option(
+        None,
+        "--with",
+        help="write these blocks uncommented: claude, codex, vscode (repeat or comma-separate)",
+    ),
 ) -> None:
     """Scaffold a commented, locked-down foldyard.toml (lima, VM firewall on) — then `fy box up`.
 
     The template is the guide: it starts stack-less and safe, with agents + the full feature set
-    commented, and the header explains the order to uncomment them. No interactive wizard."""
+    commented, and the header explains the order to uncomment them. No interactive wizard.
+    `--with claude,vscode` writes those blocks already uncommented, so the first `fy box up`
+    creates the box with them instead of a later adopt + recreate."""
     from . import init as init_mod
 
     raise typer.Exit(
-        init_mod.init(path=path, name=name, cpus=cpus, memory=memory, disk=disk, force=force)
+        init_mod.init(
+            path=path,
+            name=name,
+            cpus=cpus,
+            memory=memory,
+            disk=disk,
+            force=force,
+            blocks=with_ or [],
+        )
     )
 
 

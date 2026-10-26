@@ -262,6 +262,23 @@ section .card {
 }
 section .card h3 { margin: 0 0 0.25em; }
 
+/* a slide's source line, pinned to the bottom-left clear of the page number
+   (use <div class="source">…</div>) */
+section .source {
+  position: absolute;
+  left: 72px;
+  right: 120px;
+  bottom: 22px;
+  font-size: 0.5em;
+  line-height: 1.35;
+  color: var(--fy-ink-500);
+}
+section .source p { margin: 0; }
+section .source a { color: inherit; }
+section.diagram .source { left: 32px; }
+section.lead .source,
+section.section .source { color: var(--fy-yard-faint); }
+
 /* small utility text */
 section .kicker {
   font-family: var(--fy-mono);

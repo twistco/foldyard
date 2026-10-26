@@ -6,7 +6,7 @@ never disagree.
 
 | Deck | For | Length |
 | --- | --- | --- |
-| [why-sandbox.md](./why-sandbox.md) | Opening a hands-on workshop. Why a developer laptop needs a sandbox, what a sandbox must get right, how to compare tools — then foldyard as one worked answer, and the workshop plan. Tool-agnostic for its first two thirds. | ~35 min, 37 slides |
+| [why-sandbox.md](./why-sandbox.md) | Opening a hands-on workshop. Why a developer laptop needs a sandbox, what a sandbox must get right, how to compare tools — then foldyard as one worked answer, and the workshop plan. Tool-agnostic for its first two thirds. | ~35 min, 38 slides |
 
 Speaker notes are the HTML comments under each slide; Marp shows them in presenter view. The
 incident figures quoted come from security write-ups that disagree with each other and get revised;

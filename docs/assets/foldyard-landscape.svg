@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1362" height="752" viewBox="99 99 1362 752" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" width="1362" height="822" viewBox="99 99 1362 822" fill="none">
   <style>
     text { font-family: "Hanken Grotesk", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
            fill: #6e7263; }
@@ -28,100 +28,106 @@
     .dot-fy   { fill: #265629; }
     .halo     { fill: none; stroke: #265629; stroke-width: 1.5; stroke-dasharray: 4 3; }
   </style>
-  <rect class="frame" x="100" y="100" width="1360" height="750" rx="18"/>
+  <rect class="frame" x="100" y="100" width="1360" height="820" rx="18"/>
 
   <!-- header -->
   <text class="title" x="160" y="160">Where foldyard sits</text>
   <text class="tagline" x="160" y="191">Ask any dev sandbox two things: how strong is its fence, and what's inside it? Then ask where the credentials live.</text>
 
   <!-- y axis: fence strength, one band per level -->
-  <text class="band" transform="translate(178 460) rotate(-90)" text-anchor="middle">HOW STRONG THE FENCE IS  →</text>
+  <text class="band" transform="translate(178 495) rotate(-90)" text-anchor="middle">HOW STRONG THE FENCE IS  →</text>
 
-  <rect class="strip" x="330" y="240" width="850" height="176" rx="12"/>
-  <text class="lvl" x="312" y="322">VM</text>
-  <text class="lvl-s" x="312" y="340">its own kernel</text>
+  <rect class="strip" x="330" y="240" width="850" height="246" rx="12"/>
+  <text class="lvl" x="312" y="356">VM</text>
+  <text class="lvl-s" x="312" y="374">its own kernel</text>
 
-  <rect class="strip" x="330" y="422" width="850" height="126" rx="12"/>
-  <text class="lvl" x="312" y="481">container</text>
-  <text class="lvl-s" x="312" y="499">shares a kernel</text>
+  <rect class="strip" x="330" y="492" width="850" height="126" rx="12"/>
+  <text class="lvl" x="312" y="551">container</text>
+  <text class="lvl-s" x="312" y="569">shares a kernel</text>
 
-  <rect class="strip" x="330" y="554" width="850" height="126" rx="12"/>
-  <text class="lvl" x="312" y="613">process sandbox</text>
-  <text class="lvl-s" x="312" y="631">shares your OS</text>
+  <rect class="strip" x="330" y="624" width="850" height="126" rx="12"/>
+  <text class="lvl" x="312" y="683">process sandbox</text>
+  <text class="lvl-s" x="312" y="701">shares your OS</text>
 
-  <line class="guide" x1="613" y1="240" x2="613" y2="680"/>
-  <line class="guide" x1="897" y1="240" x2="897" y2="680"/>
+  <line class="guide" x1="613" y1="240" x2="613" y2="750"/>
+  <line class="guide" x1="897" y1="240" x2="897" y2="750"/>
 
   <!-- x axis: what's inside the fence -->
-  <text class="xlbl" x="471" y="708">one agent run</text>
-  <text class="xlbl-s" x="471" y="725">or one task</text>
-  <text class="xlbl" x="755" y="708">one project's toolchain</text>
-  <text class="xlbl-s" x="755" y="725">a single dev container</text>
-  <text class="xlbl" x="1038" y="708">the whole dev stack</text>
-  <text class="xlbl-s" x="1038" y="725">services, installs, the agent</text>
-  <text class="band" x="755" y="764" text-anchor="middle">WHAT'S INSIDE THE FENCE  →</text>
+  <text class="xlbl" x="471" y="778">one agent run</text>
+  <text class="xlbl-s" x="471" y="795">or one task</text>
+  <text class="xlbl" x="755" y="778">one project's toolchain</text>
+  <text class="xlbl-s" x="755" y="795">a single dev container</text>
+  <text class="xlbl" x="1038" y="778">the whole dev stack</text>
+  <text class="xlbl-s" x="1038" y="795">services, installs, the agent</text>
+  <text class="band" x="755" y="834" text-anchor="middle">WHAT'S INSIDE THE FENCE  →</text>
 
   <!-- one agent run -->
   <circle class="dot-f" cx="354" cy="275" r="8"/>
   <text class="name" x="372" y="280">Per-task microVMs</text>
   <text class="ex" x="372" y="299">
-    <tspan x="372">Docker Sandboxes · gondolin ·</tspan>
-    <tspan x="372" dy="16">matchlock · microsandbox</tspan>
+    <tspan x="372">gondolin · matchlock · microsandbox</tspan>
     <tspan x="372" dy="16">a proxy adds credentials on the</tspan>
     <tspan x="372" dy="16">way out; one agent or task each</tspan>
   </text>
 
-  <circle class="dot-h" cx="354" cy="460" r="7"/>
-  <text class="name" x="372" y="465">Agent in a container</text>
-  <text class="ex" x="372" y="484">container-use · vhrn</text>
+  <circle class="dot-h" cx="354" cy="530" r="7"/>
+  <text class="name" x="372" y="535">Agent in a container</text>
+  <text class="ex" x="372" y="554">container-use · vhrn</text>
 
-  <circle class="dot-h" cx="354" cy="592" r="7"/>
-  <text class="name" x="372" y="597">Agent process sandboxes</text>
-  <text class="ex" x="372" y="616">
+  <circle class="dot-h" cx="354" cy="662" r="7"/>
+  <text class="name" x="372" y="667">Agent process sandboxes</text>
+  <text class="ex" x="372" y="686">
     <tspan x="372">nono · sandbox-runtime ·</tspan>
     <tspan x="372" dy="16">Coder Boundary</tspan>
   </text>
 
   <!-- one project's toolchain -->
-  <circle class="dot-h" cx="637" cy="460" r="7"/>
-  <text class="name" x="655" y="465">Dev containers on a laptop</text>
-  <text class="ex" x="655" y="484">
+  <circle class="dot-h" cx="637" cy="530" r="7"/>
+  <text class="name" x="655" y="535">Dev containers on a laptop</text>
+  <text class="ex" x="655" y="554">
     <tspan x="655">rootful engine; secrets come in</tspan>
     <tspan x="655" dy="16">as env vars or files</tspan>
   </text>
 
-  <circle class="dot-h" cx="637" cy="330" r="7"/>
-  <text class="name" x="655" y="335">Cloud workspaces</text>
-  <text class="ex" x="655" y="354">
+  <circle class="dot-h" cx="637" cy="345" r="7"/>
+  <text class="name" x="655" y="350">Cloud workspaces</text>
+  <text class="ex" x="655" y="369">
     <tspan x="655">Codespaces · Gitpod · Coder: a</tspan>
     <tspan x="655" dy="16">dev container in a VM or container</tspan>
     <tspan x="655" dy="16">on someone else's computer</tspan>
   </text>
 
   <!-- the whole dev stack -->
-  <circle class="halo" cx="921" cy="275" r="17"/>
-  <circle class="dot-fy" cx="921" cy="275" r="10"/>
-  <text class="name-fy" x="946" y="281">foldyard</text>
-  <text class="ex" x="946" y="300">
+  <circle class="halo" cx="921" cy="272" r="17"/>
+  <circle class="dot-fy" cx="921" cy="272" r="10"/>
+  <text class="name-fy" x="946" y="278">foldyard</text>
+  <text class="ex" x="946" y="297">
     <tspan x="946">the stack, the dev box and the</tspan>
     <tspan x="946" dy="16">agent in one VM per project, on</tspan>
     <tspan x="946" dy="16">your computer; credentials stay</tspan>
     <tspan x="946" dy="16">outside, added on the way out</tspan>
   </text>
 
-  <circle class="dot-h" cx="921" cy="375" r="7"/>
-  <text class="name" x="946" y="380">A VM per worktree</text>
-  <text class="ex" x="946" y="399">vmoat (early): no secrets story</text>
+  <circle class="dot-f" cx="921" cy="372" r="8"/>
+  <text class="name" x="946" y="377">Docker Sandboxes</text>
+  <text class="ex" x="946" y="396">
+    <tspan x="946">a microVM per agent with its own</tspan>
+    <tspan x="946" dy="16">Docker engine: compose runs inside</tspan>
+  </text>
 
-  <circle class="dot-h" cx="921" cy="460" r="7"/>
-  <text class="name" x="946" y="465">Compose on a laptop</text>
-  <text class="ex" x="946" y="484">
+  <circle class="dot-h" cx="921" cy="438" r="7"/>
+  <text class="name" x="946" y="443">A VM per worktree</text>
+  <text class="ex" x="946" y="462">vmoat (early): no secrets story</text>
+
+  <circle class="dot-h" cx="921" cy="530" r="7"/>
+  <text class="name" x="946" y="535">Compose on a laptop</text>
+  <text class="ex" x="946" y="554">
     <tspan x="946">the services are fenced; installs</tspan>
     <tspan x="946" dy="16">and the agent usually run as you</tspan>
   </text>
 
   <!-- right panel: how to read it -->
-  <rect class="panel" x="1210" y="228" width="210" height="580" rx="16"/>
+  <rect class="panel" x="1210" y="228" width="210" height="650" rx="16"/>
   <text class="col-h" x="1228" y="258">Reading it</text>
   <text class="idea-h" x="1228" y="286">Up: a stronger fence</text>
   <text class="idea" x="1228" y="304">
@@ -151,14 +157,15 @@
   <line class="rule" x1="1228" y1="598" x2="1402" y2="598"/>
   <text class="idea" x="1228" y="624">
     <tspan x="1228">Every piece exists somewhere.</tspan>
-    <tspan x="1228" dy="15">The top-right corner with a</tspan>
-    <tspan x="1228" dy="15">filled dot, on your own</tspan>
-    <tspan x="1228" dy="15">computer, is the gap foldyard</tspan>
-    <tspan x="1228" dy="15">was built for.</tspan>
+    <tspan x="1228" dy="15">Two tools reach the top-right</tspan>
+    <tspan x="1228" dy="15">corner: Docker Sandboxes (per</tspan>
+    <tspan x="1228" dy="15">agent, closed source) and</tspan>
+    <tspan x="1228" dy="15">foldyard (per project, open</tspan>
+    <tspan x="1228" dy="15">source, timed credentials).</tspan>
   </text>
-  <text class="legend" x="1228" y="738">
+  <text class="legend" x="1228" y="808">
     <tspan x="1228">Placed by category, from</tspan>
-    <tspan x="1228" dy="14">prior-art.md (2026-06 to 09).</tspan>
+    <tspan x="1228" dy="14">prior-art.md (2026-06 to 10).</tspan>
     <tspan x="1228" dy="14">Check a tool's docs before</tspan>
     <tspan x="1228" dy="14">you rely on a placement.</tspan>
   </text>
