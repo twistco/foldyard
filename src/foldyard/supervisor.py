@@ -1752,9 +1752,9 @@ def _port_sharers(desired: dict[str, dict], children: dict[str, Child]) -> dict[
         if port := spec.get("port"):
             by_port.setdefault(port, []).append(name)
     shared: dict[str, str] = {}
-    for port, names in by_port.items():
+    for held, names in by_port.items():
         if len(names) > 1:
-            keeper = min(names, key=lambda n: (not _serves(children.get(n), port), n))
+            keeper = min(names, key=lambda n: (not _serves(children.get(n), held), n))
             shared.update({n: keeper for n in names if n != keeper})
     return shared
 

@@ -1790,7 +1790,7 @@ def test_the_daemon_already_serving_a_shared_port_keeps_it(monkeypatch, tmp_path
 def test_a_daemon_moving_onto_a_served_port_never_takes_it(monkeypatch, tmp_path):
     # Alive is not the same as serving THIS port: @a still runs on its old port when a pin moves
     # it onto @b's, and winning on its name would stop the proxy @b's box is using.
-    spawned, reaped, desired = _two_on_one_port(monkeypatch, tmp_path)
+    spawned, reaped, _ = _two_on_one_port(monkeypatch, tmp_path)
     children: dict = {}
     before = {
         "egress-proxy@a": _spec(port=8100, cmd=["x", "8100"], label="proxy"),
@@ -1800,7 +1800,7 @@ def test_a_daemon_moving_onto_a_served_port_never_takes_it(monkeypatch, tmp_path
     assert sorted(spawned) == ["egress-proxy@a", "egress-proxy@b"]
     after = {**before, "egress-proxy@a": _spec(port=8136, cmd=["x", "8136"], label="proxy")}
     _tick_with(monkeypatch, tmp_path, after, children, {})
-    assert "egress-proxy@b" in children and "egress-proxy@a" not in children
+    assert "egress-proxy@b" in children and "egress-proxy@a" not in children and reaped == []
     why = json.loads((tmp_path / "blocked-daemons.json").read_text())["egress-proxy@a"]["reason"]
     assert "egress-proxy@b" in why
 
