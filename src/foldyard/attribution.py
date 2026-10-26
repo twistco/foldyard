@@ -146,7 +146,10 @@ class Snapshotter:
             raise OSError("the engine didn't list its networks")
         snap = describe(ids, ifaces)
         if snap is None:
-            if running_ids() != ids:
+            again = running_ids()
+            if again is None:
+                raise OSError("the engine didn't answer `ps`")
+            if again != ids:
                 return False  # one came or went between ps and inspect: the next poll asks again
             raise OSError("the engine didn't describe its containers")
         self.ids, self.last_described = ids, t

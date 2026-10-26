@@ -201,12 +201,26 @@ def test_snapshots_are_written_on_change_and_at_least_every_minute(engine, tmp_p
 def test_an_engine_that_doesnt_answer_writes_nothing(engine, tmp_path):
     snap = attribution.Snapshotter(tmp_path / "s.jsonl", now=lambda: T0)
     engine.fail = "ps"
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="`ps`"):
+        snap.poll()
+    engine.fail = "network"
+    with pytest.raises(OSError, match="networks"):
         snap.poll()
     engine.fail = "inspect"
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="describe"):
         snap.poll()
     assert not (tmp_path / "s.jsonl").exists()
+
+
+def test_a_ps_that_fails_when_asked_again_is_not_taken_for_the_race(engine, monkeypatch, tmp_path):
+    # The race is told apart by a SECOND `ps`; if that one fails too, nothing says a container
+    # went, so it is the engine failing — never a silent skip.
+    answers = iter([[A], None])
+    monkeypatch.setattr(attribution, "running_ids", lambda: next(answers))
+    engine.fail = "inspect"
+    snap = attribution.Snapshotter(tmp_path / "s.jsonl", now=lambda: T0)
+    with pytest.raises(OSError, match="`ps`"):
+        snap.poll()
 
 
 def test_a_container_stopping_between_ps_and_inspect_is_not_a_failure(engine, tmp_path):
