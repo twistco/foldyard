@@ -20,6 +20,7 @@ just run <verb>  # run the CLI from source without installing
 just lint        # ruff check + format --check   (auto-fix: just format)
 just typecheck   # pyright + ty (both, run together)
 just check       # lint + typecheck + suite — what CI gates on
+just prune       # list merged .claude/worktrees, local branches, orphaned dev venvs (--apply removes)
 ```
 
 **Tooling (dev deps, in `pyproject.toml`):** ruff (lint+format, line-length 100), pyright +

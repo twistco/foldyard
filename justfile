@@ -73,6 +73,18 @@ census *args:
     PYTHONPATH=tests uv run --project . pytest -q -n auto -p tools.census --census="$out" {{args}} || true
     uv run --project . python tests/tools/census.py "$out" ${CENSUS_TESTS:+--tests}
 
+# Tidy up after merged PRs (tests/tools/prune.py): the Claude Code worktrees under
+# .claude/worktrees/, the local branches a squash merge leaves behind, and the dev venvs no
+# checkout uses any more. Lists them; `just prune --apply` removes them. Merged means nothing on
+# the branch is missing from main — a commit made after the merge keeps it, and so does a dirty,
+# locked or in-use worktree. `--no-project`: it may delete the venv a `uv run` would use.
+prune *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v uv >/dev/null 2>&1 || { echo "✗ uv not found — brew install uv" >&2; exit 1; }
+    cd "{{_dir}}"
+    uv run --no-project python tests/tools/prune.py {{args}}
+
 # Run the foldyard CLI from source (without installing) — handy while iterating.
 # e.g. `just run mode` / `just run doctor`.
 run *args:
