@@ -77,7 +77,9 @@ census *args:
 # .claude/worktrees/, the local branches a squash merge leaves behind, and the dev venvs no
 # checkout uses any more. Lists them; `just prune --apply` removes them. Merged means nothing on
 # the branch is missing from main — a commit made after the merge keeps it, and so does a dirty,
-# locked or in-use worktree. `--no-project`: it may delete the venv a `uv run` would use.
+# locked or in-use worktree. A venv goes when no checkout of THIS repo uses it — another clone of
+# foldyard on this computer loses its own (its next `just test` rebuilds it from uv's cache).
+# `--no-project`: it may delete the venv a `uv run` would use.
 prune *args:
     #!/usr/bin/env bash
     set -euo pipefail

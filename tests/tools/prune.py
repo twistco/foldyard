@@ -26,7 +26,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 MAIN_BRANCH = "main"
@@ -40,6 +40,7 @@ class Worktree:
     branch: str | None  # None: detached
     locked: bool = False
     dirty: bool = False
+    prunable: bool = False  # its directory is gone; git still has the branch checked out there
 
 
 @dataclass(frozen=True)
@@ -53,7 +54,9 @@ class PR:
 class Plan:
     worktrees: list[tuple[Worktree, str]] = field(default_factory=list)  # (worktree, merged by)
     branches: list[tuple[str, str]] = field(default_factory=list)  # (branch, merged by)
-    venvs: list[Path] = field(default_factory=list)
+    venvs: list[Path] = field(default_factory=list)  # no checkout at all
+    # each removed worktree's venv, deleted only once git has removed the worktree
+    worktree_venvs: dict[Path, Path] = field(default_factory=dict)
     kept: list[tuple[str, str]] = field(default_factory=list)  # (what, why) — merged but kept
 
 
@@ -93,6 +96,7 @@ def plan(
             else None
         )
         blocker = (
+            "its directory is gone — run `git worktree prune`" if wt.prunable else
             "uncommitted changes" if wt.dirty else
             "locked" if wt.locked else
             "in use by a running process" if why and busy(wt.path) else
@@ -111,29 +115,37 @@ def plan(
         if why := merged_by(name, tip, prs, is_ancestor):
             out.branches.append((name, why))
     keep = {venv_name(wt.path) for wt in remaining}
-    out.venvs = [v for v in venvs if v.name not in keep]
+    removing = {venv_name(wt.path): wt.path for wt, _ in out.worktrees}
+    for v in venvs:
+        if v.name in removing:
+            out.worktree_venvs[removing[v.name]] = v
+        elif v.name not in keep:
+            out.venvs.append(v)
     return out
 
 
 def apply(p: Plan, repo: Path) -> int:
-    """Worktrees first (git refuses one that changed since the plan, and its branch stays), then
-    branches, then venvs. Returns 1 if anything was refused."""
+    """Worktrees first (git refuses one that changed since the plan, and its branch and venv
+    stay), then branches, then venvs. Returns 1 if anything was refused."""
     failed = 0
-    refused: set[str] = set()
+    refused: set[Worktree] = set()
     for wt, _ in p.worktrees:
         r = _git(repo, "worktree", "remove", str(wt.path), check=False)
         if r.returncode:
             failed = 1
-            refused.add(wt.branch or "")
+            refused.add(wt)
             print(f"✗ kept {wt.path}: {r.stderr.strip()}", file=sys.stderr)
+    refused_branches = {wt.branch for wt in refused}
     for name, _ in p.branches:
-        if name in refused:
+        if name in refused_branches:
             continue
         r = _git(repo, "branch", "-D", name, check=False)
         if r.returncode:
             failed = 1
             print(f"✗ kept branch {name}: {r.stderr.strip()}", file=sys.stderr)
-    for v in p.venvs:
+    refused_paths = {wt.path for wt in refused}
+    gone = [v for path, v in p.worktree_venvs.items() if path not in refused_paths]
+    for v in [*p.venvs, *gone]:
         shutil.rmtree(v, ignore_errors=True)
     return failed
 
@@ -147,7 +159,8 @@ def parse_worktrees(text: str) -> list[Worktree]:
     for block in text.strip().split("\n\n"):
         fields = dict((line + " ").split(" ", 1) for line in block.splitlines())
         branch = fields.get("branch", "").strip().removeprefix("refs/heads/") or None
-        out.append(Worktree(Path(fields["worktree"].strip()), branch, locked="locked" in fields))
+        path = Path(fields["worktree"].strip())
+        out.append(Worktree(path, branch, locked="locked" in fields, prunable="prunable" in fields))
     return out
 
 
@@ -173,14 +186,15 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     )
 
 
-def _cwds() -> list[Path] | None:
-    """Every process's working directory, or None when this computer can't say."""
+def _cwds(proc: Path = Path("/proc")) -> list[Path] | None:
+    """Every process's working directory, or None when this computer can't say. An empty listing
+    is a failure, never "nothing is busy": this very process has a working directory."""
     try:
         r = subprocess.run(["lsof", "-d", "cwd", "-F", "n"], capture_output=True, text=True)
-        return parse_lsof_cwds(r.stdout)
+        if cwds := parse_lsof_cwds(r.stdout):
+            return cwds
     except FileNotFoundError:
         pass
-    proc = Path("/proc")
     if not proc.is_dir():
         return None
     out = []
@@ -189,7 +203,7 @@ def _cwds() -> list[Path] | None:
             out.append(Path(os.readlink(link)))
         except OSError:
             continue
-    return out
+    return out or None
 
 
 def _merged_prs(repo: Path) -> list[PR]:
@@ -213,7 +227,9 @@ def gather(repo: Path, cache: Path) -> Plan:
     if _git(repo, "fetch", "-q", "--prune", "origin", check=False).returncode:
         print(f"! git fetch failed; judging against the {MAIN_REF} already here", file=sys.stderr)
     worktrees = [
-        Worktree(wt.path, wt.branch, wt.locked, bool(_git(wt.path, "status", "--porcelain").stdout))
+        wt
+        if wt.prunable
+        else replace(wt, dirty=bool(_git(wt.path, "status", "--porcelain").stdout))
         for wt in parse_worktrees(_git(repo, "worktree", "list", "--porcelain").stdout)
     ]
     branches = dict(
@@ -255,6 +271,8 @@ def render(p: Plan, cache: Path) -> str:
         w = max(len(wt.path.name) for wt, _ in p.worktrees)
         lines.append(f"Merged worktrees ({CLAUDE_WORKTREES}/):")
         lines += [f"  {wt.path.name:{w}}  {why:5}  {wt.branch}" for wt, why in p.worktrees]
+        if p.worktree_venvs:
+            lines.append(f"  … and their {len(p.worktree_venvs)} dev venv(s)")
     if p.branches:
         lines.append("Merged branches:")
         lines += [f"  {why:5}  {name}" for name, why in p.branches]

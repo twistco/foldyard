@@ -78,7 +78,9 @@ def test_a_merged_clean_claude_worktree_goes_with_its_branch_and_venv():
     p = _plan([wt], {"feat": "pr_head"}, [PR(7, "feat", "pr_head")], ["dev-venv-feat"])
     assert p.worktrees == [(wt, "#7")]
     assert p.branches == [("feat", "#7")]
-    assert p.venvs == [Path("/cache/dev-venv-feat")]
+    # its venv goes only once git has removed it (``apply``), never as an orphan
+    assert p.venvs == []
+    assert p.worktree_venvs == {CLAUDE / "feat": Path("/cache/dev-venv-feat")}
 
 
 @pytest.mark.parametrize(
@@ -87,13 +89,15 @@ def test_a_merged_clean_claude_worktree_goes_with_its_branch_and_venv():
         (Worktree(CLAUDE / "feat", "feat", dirty=True), (), "uncommitted"),
         (Worktree(CLAUDE / "feat", "feat", locked=True), (), "locked"),
         (Worktree(CLAUDE / "feat", "feat"), (CLAUDE / "feat",), "in use"),
+        # its directory deleted by hand: git still has it checked out until `git worktree prune`
+        (Worktree(CLAUDE / "feat", "feat", prunable=True), (), "git worktree prune"),
     ],
 )
 def test_a_merged_worktree_stays_when_removing_it_could_lose_something(wt, busy, why):
     p = _plan([wt], {"feat": "pr_head"}, [PR(7, "feat", "pr_head")], ["dev-venv-feat"], busy)
     assert p.worktrees == []
     assert p.branches == []  # still checked out
-    assert p.venvs == []
+    assert (p.venvs, p.worktree_venvs) == ([], {})
     assert [k for k, _ in p.kept] == [str(wt.path)]
     assert why in p.kept[0][1]
 
@@ -156,11 +160,14 @@ def test_worktree_list_porcelain_parses_branch_detached_and_locked():
         "worktree /src/foldyard/.claude/worktrees/a\nHEAD bbb\ndetached\n\n"
         "worktree /src/foldyard/.claude/worktrees/b\nHEAD ccc\nbranch refs/heads/feat/b\n"
         "locked claude agent\n\n"
+        "worktree /src/foldyard/.claude/worktrees/c\nHEAD ddd\nbranch refs/heads/c\n"
+        "prunable gitdir file points to non-existent location\n\n"
     )
     assert prune.parse_worktrees(text) == [
         Worktree(Path("/src/foldyard"), "main"),
         Worktree(Path("/src/foldyard/.claude/worktrees/a"), None),
         Worktree(Path("/src/foldyard/.claude/worktrees/b"), "feat/b", locked=True),
+        Worktree(Path("/src/foldyard/.claude/worktrees/c"), "c", prunable=True),
     ]
 
 
@@ -169,6 +176,14 @@ def test_lsof_cwds_and_busy_match_whole_path_components():
     assert prune.inside(Path("/src/wt/a"), cwds)
     assert not prune.inside(Path("/src/wt/a-b"), prune.parse_lsof_cwds("p1\nfcwd\nn/src/wt/a\n"))
     assert not prune.inside(Path("/src/wt/b"), cwds)
+
+
+def test_an_lsof_that_lists_nothing_cannot_tell_so_every_worktree_is_busy(monkeypatch, tmp_path):
+    # lsof always lists this very process's cwd: an empty listing is a failure (no permission,
+    # a container), not "nothing is busy"
+    empty = subprocess.CompletedProcess(["lsof"], 1, stdout="", stderr="lsof: no permission\n")
+    monkeypatch.setattr(prune.subprocess, "run", lambda *a, **k: empty)
+    assert prune._cwds(proc=tmp_path / "no-proc") is None
 
 
 # ── apply, against a real repo ────────────────────────────────────────────────────────────────
@@ -180,59 +195,53 @@ def _git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def test_apply_removes_the_worktree_then_the_branch_then_the_venv(tmp_path):
+def _repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main")
-    _git(
-        repo,
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@t",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "x",
-    )
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-mx")
     wt_path = repo / ".claude" / "worktrees" / "feat"
     _git(repo, "worktree", "add", "-q", "-b", "feat", str(wt_path))
-    venv = tmp_path / "cache" / "dev-venv-1"
-    venv.mkdir(parents=True)
+    return repo, wt_path
+
+
+def _venvs(tmp_path: Path, *names: str) -> list[Path]:
+    out = [tmp_path / "cache" / n for n in names]
+    for v in out:
+        v.mkdir(parents=True)
+    return out
+
+
+def test_apply_removes_the_worktree_then_the_branch_then_the_venvs(tmp_path):
+    repo, wt_path = _repo_with_worktree(tmp_path)
+    own, orphan = _venvs(tmp_path, "dev-venv-1", "dev-venv-2")
     plan = prune.Plan(
-        worktrees=[(Worktree(wt_path, "feat"), "#7")], branches=[("feat", "#7")], venvs=[venv]
+        worktrees=[(Worktree(wt_path, "feat"), "#7")],
+        branches=[("feat", "#7")],
+        venvs=[orphan],
+        worktree_venvs={wt_path: own},
     )
 
     assert prune.apply(plan, repo) == 0
 
     assert not wt_path.exists()
     assert _git(repo, "branch", "--list", "feat") == ""
-    assert not venv.exists()
+    assert not own.exists()
+    assert not orphan.exists()
 
 
-def test_apply_keeps_the_branch_when_git_refuses_its_worktree(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-q", "-b", "main")
-    _git(
-        repo,
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@t",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "x",
-    )
-    wt_path = repo / ".claude" / "worktrees" / "feat"
-    _git(repo, "worktree", "add", "-q", "-b", "feat", str(wt_path))
+def test_apply_keeps_the_branch_and_venv_when_git_refuses_their_worktree(tmp_path):
+    repo, wt_path = _repo_with_worktree(tmp_path)
     (wt_path / "new.txt").write_text("written after the plan was made\n")
-    plan = prune.Plan(worktrees=[(Worktree(wt_path, "feat"), "#7")], branches=[("feat", "#7")])
+    (own,) = _venvs(tmp_path, "dev-venv-1")
+    plan = prune.Plan(
+        worktrees=[(Worktree(wt_path, "feat"), "#7")],
+        branches=[("feat", "#7")],
+        worktree_venvs={wt_path: own},
+    )
 
     assert prune.apply(plan, repo) == 1
 
     assert (wt_path / "new.txt").exists()
     assert _git(repo, "branch", "--list", "feat") != ""
+    assert own.exists()
