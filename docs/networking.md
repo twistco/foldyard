@@ -33,9 +33,12 @@ true` **enforces** that all traffic goes through the proxy. Without the VM firew
 **cooperative**: well-behaved software honours the proxy variables, anything that ignores them
 goes around. See [Blocking, not just watching](#blocking-not-just-watching).
 
-Each project — and each worktree — gets its own proxy port from a cross-project port registry
-(`~/.foldyard/ports.json`). Two stacks never share a listener, and a token meant for one worktree
-can't be read through another's proxy.
+Each project gets its own port range from a cross-project port registry
+(`~/.foldyard/ports.json`), and each worktree its own port in it: your computer records an offset
+for every worktree it knows (`fy worktree add`), and never gives two the same one. Two stacks
+don't share a listener, and a token meant for one worktree can't be read through another's proxy.
+If a pin or `WT_OFFSET` puts two worktrees on one port anyway, only one proxy runs there, and
+`fy host logs` names the other.
 
 Traffic between your services (by container name) never touches the proxy: it's on `NO_PROXY`
 and stays inside the VM.

@@ -390,7 +390,7 @@ def test_worktree_offset_and_per_worktree_ports(fresh_config, monkeypatch):
     assert config.worktree_suffix() == ""
 
     monkeypatch.setenv("WT_OFFSET", "7")
-    fresh_config(WORKTREE="feat")  # clears the offset cache
+    fresh_config(WORKTREE="feat")
     assert config.worktree_offset("feat") == 7
     assert config.proxy_port() == 41000 + 7 and config.gcp_minter_port() == 41100 + 7
     assert config.worktree_suffix() == "@feat"

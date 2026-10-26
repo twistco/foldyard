@@ -183,7 +183,13 @@ Core (stdlib-only on the hot path; heavy imports lazy):
 - `worktree_registry.py` — the host's own record of a project's worktrees (name → real path,
   keyed by the main checkout's path). Written only by `fy worktree add`/`remove`; everything
   host-side that enumerates worktrees (supervisor, git heal, `fy mode`, the TUI) reads it, never a
-  listing of the box-writable worktrees root.
+  listing of the box-writable worktrees root. Beside it (never in it — an older supervisor drops
+  an entry it can't read), each registered worktree's PORT OFFSET (`offsets`, via
+  `stack.worktree_offsets`): the name's hashed slot while it's free, else a free one, so no two
+  registered worktrees share ports — the hash alone put two Tangible worktrees on one proxy port
+  (2026-10-26). Pins win and are never handed out; the box gets every offset baked in
+  (`FY_WORKTREE_OFFSETS`). Should two daemons still want one port (a pin, `WT_OFFSET`), the
+  supervisor runs one and blocks the other (`supervisor._port_sharers`) — never reaps its own.
 - `worktree.py` · `transcripts.py` · `tui.py` · `init.py` · `skills.py` · `browser.py` ·
   `vscode.py` · `podman_desktop.py` — worktrees, agent-transcript sync, the Textual TUI,
   `foldyard init`, bundled skills, `fy open`, `fy code`, `fy machine desktop` (an `fy-<machine>`

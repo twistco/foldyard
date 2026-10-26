@@ -387,6 +387,17 @@ def test_reap_refuses_to_kill_a_foreign_listener(monkeypatch):
     assert killed == []
 
 
+def test_reap_never_kills_a_daemon_this_supervisor_is_running(monkeypatch):
+    # Our own LIVE child looks exactly like an orphan (our project's staged addon, our mitmdump):
+    # reaping it once killed a sibling worktree's working proxy (Tangible, 2026-10-26).
+    killed = _patch_reap(
+        monkeypatch, pids=[85283], ours={85283: True}, frees_on=supervisor.signal.SIGTERM
+    )
+    spec = _proxy_spec("/state")
+    assert supervisor.reap_orphan_listener("egress-proxy@b", 8136, spec, spare={85283}) is False
+    assert killed == []
+
+
 @pytest.fixture(autouse=True)
 def every_checkout_adopted(monkeypatch):
     """The tick reconciles only ADOPTED checkouts (``_report_config_drift`` answers that, and an
@@ -1652,6 +1663,7 @@ def _gate_world(monkeypatch, tmp_path):
     class _FakeChild:
         def __init__(self, name, spec):
             self.name, self.spec = name, spec
+            self.signature = repr((spec["cmd"], sorted(spec["env"].items())))
             self.started_at = 0.0
             spawned.append(name)
 
@@ -1678,7 +1690,7 @@ def test_spawn_child_returns_each_gates_reason(monkeypatch, tmp_path):
     why = supervisor._spawn_child("m", _spec(requires=["GCP_KEY"]), {}, nagged)
     assert why and "GCP_KEY" in why and "host.env" in why
     monkeypatch.setattr(supervisor.devmode, "probe", lambda port, host=None: True)
-    monkeypatch.setattr(supervisor, "reap_orphan_listener", lambda name, port, spec: False)
+    monkeypatch.setattr(supervisor, "reap_orphan_listener", lambda name, port, spec, **_: False)
     why = supervisor._spawn_child("m", _spec(), {}, nagged)
     assert why and "another process is listening" in why and "8188" in why
     monkeypatch.setattr(supervisor.devmode, "probe", lambda port, host=None: False)
@@ -1733,6 +1745,64 @@ def test_tick_publishes_blocked_daemons_with_the_reason_and_clears_on_launch(mon
     _tick_with(monkeypatch, tmp_path, desired, children, nagged)
     assert spawned == ["gcp-minter"]
     assert json.loads((tmp_path / "blocked-daemons.json").read_text()) == {}
+
+
+def _two_on_one_port(monkeypatch, tmp_path):
+    """Two worktrees' proxies wanting one port, and a reaper that records instead of killing."""
+    spawned = _gate_world(monkeypatch, tmp_path)
+    monkeypatch.setattr(supervisor, "_blocked", {})
+    monkeypatch.setattr(supervisor, "_notify", lambda t, b: None)
+    reaped: list[str] = []
+    monkeypatch.setattr(
+        supervisor, "reap_orphan_listener", lambda name, *a, **k: reaped.append(name) or True
+    )
+    desired = {f"egress-proxy@{wt}": _spec(port=8136, label="proxy") for wt in ("b", "a")}
+    return spawned, reaped, desired
+
+
+def test_two_daemons_wanting_one_port_run_one_and_block_the_other(monkeypatch, tmp_path):
+    # Tangible, 2026-10-26: two worktrees' offsets collided, so their proxies wanted one port, and
+    # each respawn reaped the other as an "orphan" — they took turns killing each other, and a box
+    # could reach its sibling's proxy. One runs; the other is blocked, naming the one that has it.
+    spawned, reaped, desired = _two_on_one_port(monkeypatch, tmp_path)
+    children: dict = {}
+    _tick_with(monkeypatch, tmp_path, desired, children, {})
+    assert spawned == ["egress-proxy@a"] and reaped == []
+    why = json.loads((tmp_path / "blocked-daemons.json").read_text())["egress-proxy@b"]["reason"]
+    assert ":8136" in why and "egress-proxy@a" in why
+
+    _tick_with(monkeypatch, tmp_path, desired, children, {})  # steady: still one, still no reaping
+    assert spawned == ["egress-proxy@a"] and reaped == []
+
+
+def test_the_daemon_already_serving_a_shared_port_keeps_it(monkeypatch, tmp_path):
+    # First come keeps it: the running one is never stopped for a newcomer, whatever its name.
+    spawned, reaped, desired = _two_on_one_port(monkeypatch, tmp_path)
+    children: dict = {}
+    _tick_with(monkeypatch, tmp_path, {"egress-proxy@b": desired["egress-proxy@b"]}, children, {})
+    assert spawned == ["egress-proxy@b"]
+    _tick_with(monkeypatch, tmp_path, desired, children, {})
+    assert spawned == ["egress-proxy@b"] and reaped == [] and "egress-proxy@b" in children
+    why = json.loads((tmp_path / "blocked-daemons.json").read_text())["egress-proxy@a"]["reason"]
+    assert "egress-proxy@b" in why
+
+
+def test_a_daemon_moving_onto_a_served_port_never_takes_it(monkeypatch, tmp_path):
+    # Alive is not the same as serving THIS port: @a still runs on its old port when a pin moves
+    # it onto @b's, and winning on its name would stop the proxy @b's box is using.
+    spawned, reaped, _ = _two_on_one_port(monkeypatch, tmp_path)
+    children: dict = {}
+    before = {
+        "egress-proxy@a": _spec(port=8100, cmd=["x", "8100"], label="proxy"),
+        "egress-proxy@b": _spec(port=8136, cmd=["x", "8136"], label="proxy"),
+    }
+    _tick_with(monkeypatch, tmp_path, before, children, {})
+    assert sorted(spawned) == ["egress-proxy@a", "egress-proxy@b"]
+    after = {**before, "egress-proxy@a": _spec(port=8136, cmd=["x", "8136"], label="proxy")}
+    _tick_with(monkeypatch, tmp_path, after, children, {})
+    assert "egress-proxy@b" in children and "egress-proxy@a" not in children and reaped == []
+    why = json.loads((tmp_path / "blocked-daemons.json").read_text())["egress-proxy@a"]["reason"]
+    assert "egress-proxy@b" in why
 
 
 def test_blocked_file_is_not_created_while_nothing_is_blocked(monkeypatch, tmp_path):
