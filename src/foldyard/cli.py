@@ -1400,16 +1400,26 @@ def worktree_add(
         "not the primary checkout's current HEAD)",
     ),
     yes: bool = typer.Option(
-        False, "--yes", "-y", help="register an EXISTING worktree without asking"
+        False,
+        "--yes",
+        "-y",
+        help="register an EXISTING worktree without asking (never adopts a config: see below)",
+    ),
+    box_up: bool = typer.Option(
+        False, "--box", help="then bring its box up (`WORKTREE=<name> fy box up`)"
     ),
 ) -> None:
-    """Create a host-sibling worktree + init its per-project config.
+    """Create a host-sibling worktree, init its per-project config, and adopt that config.
+
+    A config identical to the one adopted for main is adopted without asking; one that differs
+    is shown as a diff against main and adopted only if you say so at the prompt. With `--box`,
+    its box comes up next, once its config is adopted.
 
     On a worktree that already exists, registers it with your computer instead (after showing its
     real path), so its daemons run again."""
     from . import worktree
 
-    raise typer.Exit(worktree.add(name, branch, base, assume_yes=yes))
+    raise typer.Exit(worktree.add(name, branch, base, assume_yes=yes, box_up=box_up))
 
 
 @worktree_app.command("init")

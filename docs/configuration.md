@@ -1253,7 +1253,9 @@ Day to day:
   overlaps another, so the proxy injects neither), which agent prompts are shared vs personal, and
   keys that are renamed or no longer honoured. A `fy doctor` row summarises it.
 - Each worktree has its own adopted copy, since a branch may declare different plugins.
-  Switching branches counts as a change and gets asked about.
+  Switching branches counts as a change and gets asked about. `fy worktree add` settles a new
+  worktree's first adoption: identical to main's adopted copy is adopted without asking, anything
+  else is shown as a diff against main and adopted only at the prompt ([git](./git.md#worktrees)).
 
 **Scope:** adoption governs what your computer does — daemons, injection, `passthrough`, and the
 switches `fy mode`/the TUI show. Compose files, `[box]` tools and bootstrap, and ports still read

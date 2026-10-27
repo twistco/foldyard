@@ -104,6 +104,9 @@ def rig(tmp_path_factory):
 def test_add_registers_a_sibling_checkout_on_its_own_branch(rig):
     added = fy_ok(["worktree", "add", NAME], rig.main, timeout=300, env_extra=rig.env)
     assert "worktree ready" in added.out, added.out
+    # The branch carries main's committed config and main is adopted: adopted on the spot, no
+    # prompt (there is no terminal here) — the next `fy up` needs no adoption of its own.
+    assert "adopted — identical to main's" in added.out, added.out
     assert (rig.feat / ".git").exists(), added.out
     assert str(rig.feat) in _worktree_paths(rig.main), added.out
     assert _git(rig.feat, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"wt/{NAME}"

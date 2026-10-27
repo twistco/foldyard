@@ -107,7 +107,8 @@ holding the compose command with every `-f`.
 
 ## Worktrees get their own stack
 
-`fy worktree add <name>` makes a checkout for a branch. Run `fy up` from inside it (or
+`fy worktree add <name>` makes a checkout for a branch and adopts its config
+([git](./git.md#worktrees); `--box` also brings its box up). Run `fy up` from inside it (or
 `WORKTREE=<name> fy up` from anywhere) and it gets a stack of its own, in the same VM:
 
 - **Its own project**, `<prefix>-<name>`: its own containers, network and named volumes, so its
