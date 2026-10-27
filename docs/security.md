@@ -87,9 +87,16 @@ a checkout that isn't on it — `fy worktree list` and `fy doctor` name any that
 channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)):
 
 - **Git's own hooks run on your computer, and foldyard doesn't manage them.** `lefthook.yml`,
-  `.git/hooks/*` and `.git/config` aliases can be written from the box and run on your computer
-  the next time you use git in that checkout. foldyard can't close this without owning your
-  `.git`, so treat a shared checkout's hooks as code you are choosing to run.
+  `.git/hooks/*` and `.git/config` (aliases, and since git 2.54 `[hook]` entries) can be written
+  from the box and run on your computer the next time you use git in that checkout. foldyard can't
+  close this without owning your `.git`, so treat a shared checkout's hooks as code you are
+  choosing to run. foldyard's own git on your computer (`fy worktree add` and `remove`) runs none
+  of them, and no `core.fsmonitor` command either, and `fy worktree add` says when it skipped
+  any. It still checks files out, so a filter driver the shared config names (Git LFS's smudge
+  filter, say) runs there as it would for your own `git checkout`. The `[hook]` entries are
+  switched off by name: foldyard reads every file `.git/config` includes, whatever the include's
+  condition (a git that `fy worktree add` starts meets conditions yours doesn't), and runs no git
+  when one of them can't be read. A hook added while the command runs can still slip past.
 - **The compose client reads your compose files on your computer.** Your stack runs in the VM,
   but the compose client that starts it runs on your computer, and the compose files are editable
   from the box. foldyard gives the client a minimal environment (never `host.env`; add names with

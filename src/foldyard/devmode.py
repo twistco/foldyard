@@ -42,6 +42,7 @@ its main():
 
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import getpass
 import json
@@ -932,7 +933,12 @@ def worktree_config(wt: str) -> config.Config:
         # Not a worktree the host recorded: read NOTHING from it. Resolving its path would follow a
         # box-made symlink to another checkout — and hand this worktree that checkout's adoption.
         return config.Config(repo_root=config.worktrees_root(main) / wt, worktree=wt, toml={})
-    return configpin.effective(config.resolve(worktree=wt, repo=path))
+    cfg = configpin.effective(config.resolve(worktree=wt, repo=path))
+    if cfg.toml:
+        return cfg
+    # Nothing adopted for it: it still runs nothing, but it is still the PROJECT's worktree — its
+    # state dir, port band and machine are main's, not ones named after its directory.
+    return dataclasses.replace(cfg, identity=config.identity_from(main, path))
 
 
 def branches() -> list[str]:

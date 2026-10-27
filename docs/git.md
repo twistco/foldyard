@@ -141,7 +141,13 @@ App was last read to grant.
 
 Git hooks and aliases are a separate matter: the box can write `.git/hooks`, `lefthook.yml` or
 `.git/config`, and they run on your computer the next time you use git there
-([security](./security.md)).
+([security](./security.md)). foldyard's own git on your computer runs none of them: `fy worktree
+add` checks the new worktree out with the repo's hooks off (the hooks directory and `[hook]`
+entries in `.git/config` alike) and says which it skipped. So a `post-checkout` hook that sets a
+checkout up (lefthook's, say) hasn't run in a new worktree; git in that worktree's box runs it at
+the next checkout there, and setup every new worktree needs belongs in `[project].worktree_init`,
+which runs in a container ([configuration](./configuration.md)). Filter drivers are not switched
+off: a Git LFS smudge filter still runs when the worktree is checked out.
 
 ## Worktrees
 

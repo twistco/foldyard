@@ -1256,6 +1256,10 @@ Day to day:
   Switching branches counts as a change and gets asked about. `fy worktree add` settles a new
   worktree's first adoption: identical to main's adopted copy is adopted without asking, anything
   else is shown as a diff against main and adopted only at the prompt ([git](./git.md#worktrees)).
+  Until a worktree you made with `fy worktree add` is adopted, your computer runs nothing for it,
+  but still knows whose it is: its project and machine (`[project] name`/`prefix`,
+  `[machine] name`/`backend`/`worktrees_root`) come from main's adopted copy, not from the
+  worktree's directory name.
 
 **Scope:** adoption governs what your computer does — daemons, injection, `passthrough`, and the
 switches `fy mode`/the TUI show. Compose files, `[box]` tools and bootstrap, and ports still read
