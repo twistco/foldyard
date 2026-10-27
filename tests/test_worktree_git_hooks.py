@@ -165,3 +165,89 @@ def test_a_hook_that_is_not_executable_is_not_reported(real_add, capsys):
         _git(main, "config", "--remove-section", f"hook.{name}")
     assert worktree.add("feat") == 0
     assert "skipped the repo's git hooks" not in capsys.readouterr().out
+
+
+# ── config hooks behind an include the HOST's own git never takes ─────────────────────────
+# `git worktree add`'s child gits run with GIT_DIR=<main>/.git/worktrees/<name> and on the new
+# branch, and evaluate conditional includes THERE. A hook defined behind
+# `[includeIf "gitdir:**/.git/worktrees/**"]` (or `onbranch:`) is invisible to `git -C main config`
+# and so was never disabled by name — the children ran it (PR #148 review). Every include target is
+# read whatever its condition, and a target foldyard can't read refuses the git it was for.
+
+needs_config_hooks = pytest.mark.skipif(
+    not _git_has_config_hooks(), reason="this git has no config hooks (git 2.54+)"
+)
+
+
+def _plant_hidden_hook(main: Path, marker: Path, condition: str, rel: str = "extra.cfg") -> Path:
+    """A config hook in ``.git/<rel>``, included from ``.git/config`` only under ``condition``."""
+    target = main / ".git" / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        f'[hook "hidden"]\n\tevent = reference-transaction\n\tevent = post-checkout\n'
+        f'\tcommand = echo hidden >> "{marker}"\n'
+    )
+    _git(main, "config", f"includeIf.{condition}.path", rel)
+    return target
+
+
+@needs_config_hooks
+@pytest.mark.parametrize("condition", ["gitdir:**/.git/worktrees/**", "onbranch:wt/**"])
+def test_a_hook_behind_a_condition_only_the_new_worktree_meets_does_not_run(
+    real_add, condition, capsys
+):
+    main, marker = real_add["main"], real_add["marker"]
+    for name in ("lint", "we=ird.Na me"):  # only the hidden one, so the marker is its alone
+        _git(main, "config", "--remove-section", f"hook.{name}")
+    _plant_hidden_hook(main, marker, condition)
+    assert worktree.add("feat") == 0
+    assert not marker.exists()
+    assert "post-checkout" in capsys.readouterr().out  # reported, though main's git can't see it
+
+
+@needs_config_hooks
+def test_the_hidden_hook_does_fire_without_disabling_it_by_name(hooked_repo, tmp_path):
+    # The control: hooksPath=/dev/null alone, and the include's condition met only by the child.
+    main, marker = hooked_repo["main"], hooked_repo["marker"]
+    for name in ("lint", "we=ird.Na me"):
+        _git(main, "config", "--remove-section", f"hook.{name}")
+    _plant_hidden_hook(main, marker, "gitdir:**/.git/worktrees/**")
+    wt = tmp_path / "plain"
+    _git(main, "-c", "core.hooksPath=/dev/null", "worktree", "add", "-q", "-b", "p", str(wt))
+    assert "hidden" in marker.read_text()
+
+
+@needs_config_hooks
+def test_a_nested_include_is_followed_from_where_its_includer_lives(real_add):
+    # Relative to the INCLUDING file's directory, as git resolves it — and nested.
+    main, marker = real_add["main"], real_add["marker"]
+    for name in ("lint", "we=ird.Na me"):
+        _git(main, "config", "--remove-section", f"hook.{name}")
+    sub = main / ".git" / "sub"
+    sub.mkdir()
+    (sub / "first.cfg").write_text(
+        '[includeIf "gitdir:**/.git/worktrees/**"]\n\tpath = second.cfg\n'
+    )
+    _plant_hidden_hook(main, marker, "onbranch:nothing-matches", rel="sub/second.cfg")
+    _git(main, "config", "--unset", "includeIf.onbranch:nothing-matches.path")
+    _git(main, "config", "includeIf.gitdir:**/.git/worktrees/**.path", "sub/first.cfg")
+    assert worktree.add("feat") == 0
+    assert not marker.exists()
+
+
+def test_an_include_cycle_ends(real_add):
+    main = real_add["main"]
+    (main / ".git" / "loop.cfg").write_text("[include]\n\tpath = loop.cfg\n")
+    _git(main, "config", "includeIf.onbranch:nothing.path", "loop.cfg")
+    hooks = worktree._config_hooks(main)  # returns, rather than recursing forever
+    assert "lint" in hooks
+
+
+def test_an_include_target_that_cannot_be_read_refuses_the_add(real_add, capsys):
+    # A missing file is one the box can write the moment the check has passed: fail closed.
+    main = real_add["main"]
+    _git(main, "config", "includeIf.gitdir:**/.git/worktrees/**.path", "not-there.cfg")
+    assert worktree.add("feat") != 0
+    assert not (real_add["wt_root"] / "feat").exists()  # git never ran
+    err = capsys.readouterr().err
+    assert "not-there.cfg" in err and "hooks" in err
