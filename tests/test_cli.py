@@ -907,3 +907,20 @@ def test_monitor_hook_verbs_are_host_only(monitor_home, monkeypatch, argv):
     r = runner.invoke(cli.app, argv)
     assert r.exit_code == 1 and "your computer" in r.output
     assert not monitor_home.exists()
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["feat"], {"assume_yes": False, "box_up": False}),
+        (["feat", "--box"], {"assume_yes": False, "box_up": True}),
+        (["feat", "-y", "--box"], {"assume_yes": True, "box_up": True}),
+    ],
+)
+def test_worktree_add_routes_box_and_yes(monkeypatch, argv, expected):
+    from foldyard import worktree
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(worktree, "add", lambda *a, **k: seen.append((a, k)) or 0)
+    assert runner.invoke(cli.app, ["worktree", "add", *argv]).exit_code == 0
+    assert seen == [(("feat", "", ""), expected)]

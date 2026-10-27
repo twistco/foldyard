@@ -318,16 +318,79 @@ def _branch_name_ok(name: str) -> bool:
     )
 
 
-def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -> int:
+def _stdin_is_tty() -> bool:
+    """Whether someone is at a terminal to answer the adoption prompt — the launch gate's test."""
+    return sys.stdin.isatty()
+
+
+def _adopt_config(name: str) -> bool:
+    """Offer the new worktree's config for adoption, so the host runs it from the first
+    ``fy box up`` (:mod:`foldyard.configpin`, ADR-0022). True when the worktree has an adoption
+    afterwards.
+
+    A tree byte-identical to main's ADOPTED copy is adopted without asking: it grants nothing main
+    hasn't already been granted, so there is nothing to decide. Race-free, because every running
+    box binds the whole worktrees root and can write this checkout while it is compared: the
+    adoption carries the digest of the bytes compared AND the main pin they were compared against
+    (``reviewed=``/``baseline=``), so a write landing in between is :class:`ReviewStale`, never
+    adopted on main's say-so. Anything else goes through the first-adoption review the launch gate
+    uses (:func:`configpin.resolve`): the diff against main, and a prompt only on a terminal — no
+    terminal adopts nothing. ``-y`` plays no part: it answers the register question, and a config
+    that differs from main's is only ever adopted by someone who was shown it.
+
+    Best-effort: declining, or a failure here, leaves the worktree made and unadopted, never
+    undone."""
+    from . import configpin, devmode
+
+    try:
+        cfg = devmode.worktree_config(name)
+        drift = configpin.inspect(cfg)
+        if not drift.pinned_exists:
+            base = configpin.main_baseline(drift)
+            if base is not None and base.identical:
+                try:
+                    configpin.adopt(cfg, reviewed=drift.tree_digest(), baseline=base.digest)
+                except configpin.ReviewStale:
+                    pass  # it changed after it was compared: review what is there now, below
+                else:
+                    print(f"✓ config adopted — identical to main's ({base.digest}).", flush=True)
+                    return True
+        configpin.resolve(cfg, interactive=_stdin_is_tty(), prompt=input, echo=_err)
+        return configpin.inspect(cfg).pinned_exists
+    except Exception as e:  # adoption is offered, never what fails the (already-made) worktree
+        _err(f"  (couldn't offer its config for adoption: {e})")
+        return False
+
+
+def _box_up(name: str) -> int:
+    """``WORKTREE=<name> fy box up``, as a FRESH process. Not box code in-process: this process
+    bound its import-time constants (``machine.MACHINE``, ``devmode.AXES``…) and config caches
+    before the adoption, which is exactly what the launch gate's own re-run
+    (:func:`configpin._rerun_with_adopted_config`) exists to shed. Its env drops the gate's re-run
+    marker, so the child's gate keeps its one re-run."""
+    from . import configpin
+
+    env = {k: v for k, v in os.environ.items() if k != configpin.RERUN_ENV}
+    env["WORKTREE"] = name
+    print(f"\n▶ WORKTREE={name} fy box up", flush=True)
+    return subprocess.run([sys.executable, "-m", "foldyard", "box", "up"], env=env).returncode
+
+
+def add(
+    name: str, branch: str = "", base: str = "", assume_yes: bool = False, box_up: bool = False
+) -> int:
     """Create a host-sibling worktree under the worktrees root, record it in the host's
-    worktree registry, and init its config.
+    worktree registry, init its config, offer that config for adoption (:func:`_adopt_config`),
+    and mirror main's keyless posture into it. ``box_up`` then starts its box (:func:`_box_up`) —
+    only once its config is adopted, since the host would run nothing for it otherwise.
 
     A brand-new branch forks off ``base`` (an explicit ``--from``), else the project's default
     branch (:func:`_default_base_ref`) — NOT the primary checkout's current HEAD.
 
     On a worktree that ALREADY exists (one from before the registry, or made with plain ``git
     worktree add``) it registers instead, once the operator has confirmed its real path — the one
-    way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`."""
+    way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`.
+    ``box_up`` starts it there too; that box's own launch gate asks for any adoption still owed."""
     if (rc := _host_only("add")) is not None:
         return rc
     if name == "main":
@@ -370,7 +433,8 @@ def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -
     branch = branch or f"wt/{name}"
     wt_dir = wt_root / name
     if wt_dir.exists() or wt_dir.is_symlink():
-        return _register_existing(main, name, wt_dir, assume_yes)
+        rc = _register_existing(main, name, wt_dir, assume_yes)
+        return _box_up(name) if box_up and rc == 0 else rc
     wt_root.mkdir(parents=True, exist_ok=True)
     # Reproduce the recipe's machine-mount warning: worktree stacks need the rootless
     # machine to mount the worktrees root (no-op in the box / where there's no podman).
@@ -408,14 +472,27 @@ def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -
         return rc
     worktree_registry.register(main, name, wt_dir)
 
-    _init_in_yard(main, wt_dir)
+    _init_in_yard(main, wt_dir)  # first: it copies foldyard.local.toml, which is adopted too
 
-    _seed_keyless_posture(name)
+    adopted = _adopt_config(name)
+    _seed_keyless_posture(name)  # after: it reads the ADOPTED config's `keyless` keys
 
     print(f"\n✓ worktree ready: {wt_dir}  (branch {branch})")
-    print(f"  bring its stack up:  WORKTREE={name} fy up")
+    if adopted:
+        if not box_up:
+            print(f"  bring its box up:    WORKTREE={name} fy box up")
+        print(f"  bring its stack up:  WORKTREE={name} fy up")
+    else:
+        print("  its config isn't adopted, so your computer runs nothing for it yet.")
+        print(f"  Review it with `WORKTREE={name} fy config diff`, then")
+        print(f"  `WORKTREE={name} fy config adopt` — or adopt at `WORKTREE={name} fy box up`.")
     _say_unmasked(main, name, fresh=True)
-    return 0
+    if not box_up:
+        return 0
+    if not adopted:
+        _err(f"✗ --box: not starting '{name}''s box — its config isn't adopted (see above).")
+        return 1
+    return _box_up(name)
 
 
 def _say_unmasked(main: Path, name: str, *, fresh: bool) -> None:
