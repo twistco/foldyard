@@ -4,7 +4,9 @@ touches a real repo; we assert the right git invocations and the config-driven i
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,12 @@ def fake_main(tmp_path, monkeypatch):
     main.mkdir()
     wt_root = tmp_path / "repo-worktrees"
     monkeypatch.setattr(stack, "main_repo", lambda: main)
+    # The adoption step resolves main (its adopted pin is the baseline) through devmode's anchor.
+    from foldyard import devmode
+
+    monkeypatch.setattr(devmode, "main_repo", lambda: main)
+    # No terminal unless a test says so — the adoption prompt is only offered on one.
+    monkeypatch.setattr(worktree, "_stdin_is_tty", lambda: False)
     monkeypatch.setattr(config, "worktrees_root", lambda m: wt_root)
     monkeypatch.setattr(config, "project_prefix", lambda: "proj")
     state_dir = tmp_path / "state"
@@ -83,6 +91,9 @@ def fake_main(tmp_path, monkeypatch):
             wt_dir = next(Path(a) for a in cmd if a.startswith(str(wt_root)))
             wt_dir.mkdir(parents=True, exist_ok=True)
             (wt_dir / ".git").write_text(f"gitdir: {main}/.git/worktrees/{wt_dir.name}\n")
+            # …with the branch's committed foldyard.toml in it (here: main's, as a fork of it).
+            if (main / "foldyard.toml").exists():
+                shutil.copy(main / "foldyard.toml", wt_dir / "foldyard.toml")
             state["registered"].add(str(wt_dir))
             return _Proc(0)
         if g and "worktree" in cmd and "list" in cmd:  # registration probe (orphan detection)
@@ -563,18 +574,143 @@ def test_worktree_init_verb_refuses_an_unknown_worktree(fake_main, monkeypatch, 
     assert "no worktree at" in capsys.readouterr().err
 
 
-def test_add_seeds_keyless_posture_from_main(fake_main, monkeypatch):
-    # A fresh worktree's posture defaults every axis to off, so its proxy wouldn't inject the
-    # keyless Claude/Codex token and codex would 401→fail-to-refresh. `add` mirrors main's keyless
-    # assistant posture into the new worktree so its box comes up injectable. Only the keyless
-    # axes, only main's non-off values (codex=off here is NOT seeded).
+# ── add: the new checkout's config is offered for adoption ──────────────────────────
+#
+# The host runs a checkout's ADOPTED config (configpin, ADR-0022), and a fresh worktree has
+# nothing adopted — so before this, `fy worktree add` left the adoption to the first-run prompt at
+# `fy box up`, and seeded the keyless posture from an adopted config that didn't exist yet.
+
+TOML = '[project]\nname = "acme"\n\n[proxy]\npassthrough = ["trusted.example"]\n'
+EDITED = '[project]\nname = "acme"\n\n[proxy]\npassthrough = ["trusted.example", "evil.example"]\n'
+KEYLESS = (
+    '[project]\nname = "acme"\n\n[claude]\nkeyless = "oauth"\n\n[codex]\nkeyless = "chatgpt"\n'
+)
+
+
+def _adopt_main(fake_main, text: str = TOML) -> None:
+    """Main's foldyard.toml, adopted — the reviewed baseline a worktree is measured against."""
+    from foldyard import configpin
+
+    (fake_main["main"] / "foldyard.toml").write_text(text)
+    configpin.adopt(config.resolve(worktree="", repo=fake_main["main"]))
+
+
+def _wt_adopted(name: str = "feat") -> bool:
+    from foldyard import configpin, devmode
+
+    return configpin.inspect(devmode.worktree_config(name)).pinned_exists
+
+
+def _no_prompt(monkeypatch) -> None:
+    def refuse(_q: str = "") -> str:
+        raise AssertionError("prompted")
+
+    monkeypatch.setattr("builtins.input", refuse)
+
+
+def _branch_declares(monkeypatch, text: str) -> None:
+    """The new branch's foldyard.toml differs from main's — written as the init step runs, i.e.
+    after git made the checkout and before the adoption looks at it."""
+
+    def init(_main: Path, wt_dir: Path) -> int:
+        (wt_dir / "foldyard.toml").write_text(text)
+        return 0
+
+    monkeypatch.setattr(worktree, "_init_in_yard", init)
+
+
+def test_add_adopts_a_config_identical_to_mains_without_asking(fake_main, monkeypatch, capsys):
+    """The common case: the branch declares exactly what main's adopted copy does, so adopting
+    grants nothing new — no prompt, no terminal needed, and one line saying what happened."""
+    _adopt_main(fake_main)
+    _no_prompt(monkeypatch)
+
+    assert worktree.add("feat") == 0
+
+    assert _wt_adopted("feat")
+    out = capsys.readouterr().out
+    assert "adopted — identical to main's" in out
+    assert "WORKTREE=feat fy box up" in out
+
+
+def test_add_never_adopts_what_changed_after_it_was_compared(fake_main, monkeypatch):
+    """Every box binds the whole worktrees root, so the new checkout is writable from a running
+    box while `add` compares it with main. The bytes adopted must be the bytes compared: a write
+    landing between the two is not adopted on main's say-so."""
+    from foldyard import configpin
+
+    _adopt_main(fake_main)
+    real = configpin.main_baseline
+
+    def compare_then_box_writes(drift):
+        base = real(drift)
+        (drift.cfg.repo_root / "foldyard.toml").write_text(EDITED)
+        return base
+
+    monkeypatch.setattr(configpin, "main_baseline", compare_then_box_writes)
+
+    assert worktree.add("feat") == 0
+    assert not _wt_adopted("feat")
+
+
+def test_add_shows_a_differing_config_and_adopts_nothing_without_a_terminal(
+    fake_main, monkeypatch, capsys
+):
+    _adopt_main(fake_main)
+    _branch_declares(monkeypatch, EDITED)
+
+    assert worktree.add("feat") == 0  # the worktree is made either way
+
+    assert not _wt_adopted("feat")
+    io = capsys.readouterr()
+    assert "evil.example" in io.err  # the diff against main is shown
+    assert "WORKTREE=feat fy config adopt" in io.out
+
+
+def test_add_yes_never_adopts_a_differing_config(fake_main, monkeypatch):
+    """`-y` answers the REGISTER question only: it is no licence to adopt a config nobody read."""
+    _adopt_main(fake_main)
+    _branch_declares(monkeypatch, EDITED)
+
+    assert worktree.add("feat", assume_yes=True) == 0
+    assert not _wt_adopted("feat")
+
+
+def test_add_offers_a_differing_config_for_adoption_on_a_terminal(fake_main, monkeypatch, capsys):
+    _adopt_main(fake_main)
+    _branch_declares(monkeypatch, EDITED)
+    monkeypatch.setattr(worktree, "_stdin_is_tty", lambda: True)
+    asked: list[str] = []
+    monkeypatch.setattr("builtins.input", lambda q="": asked.append(q) or "a")
+
+    assert worktree.add("feat") == 0
+
+    assert asked and _wt_adopted("feat")
+    assert "against the config the host runs for main" in capsys.readouterr().err.lower()
+
+
+def test_add_declining_the_adoption_keeps_the_worktree(fake_main, monkeypatch, capsys):
+    _adopt_main(fake_main)
+    _branch_declares(monkeypatch, EDITED)
+    monkeypatch.setattr(worktree, "_stdin_is_tty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda q="": "q")
+
+    assert worktree.add("feat") == 0
+
+    assert not _wt_adopted("feat")
+    assert "feat" in worktree_registry.checkouts(fake_main["main"])
+    assert "WORKTREE=feat fy config adopt" in capsys.readouterr().out
+
+
+def test_add_seeds_keyless_posture_from_the_config_it_just_adopted(fake_main, monkeypatch):
+    """The ordering bug: the seed reads the worktree's ADOPTED config, which a fresh worktree had
+    none of — so it was always a no-op, and the box came up with claude/codex off while main ran
+    both on. Seeding after the adoption sees `[claude]`/`[codex] keyless`."""
     from foldyard import devmode
 
-    monkeypatch.setattr(devmode, "worktree_config", lambda wt: {"wt": wt})
-    monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
-    monkeypatch.setattr(config, "codex_keyless", lambda: "chatgpt")
+    _adopt_main(fake_main, KEYLESS)
     monkeypatch.setattr(
-        devmode, "read", lambda apply_expiry=True: {"mode": {"claude": "on", "codex": "off"}}
+        devmode, "read", lambda apply_expiry=True: {"mode": {"claude": "on", "codex": "on"}}
     )
     seeded: list[tuple] = []
     monkeypatch.setattr(
@@ -582,21 +718,420 @@ def test_add_seeds_keyless_posture_from_main(fake_main, monkeypatch):
     )
 
     assert worktree.add("feat") == 0
-    # codex=off in main is skipped; claude=on is seeded; never reconciles (nothing is up yet).
-    assert seeded == [({"claude": "on"}, {"reconcile": False})]
+    assert seeded == [({"claude": "on", "codex": "on"}, {"reconcile": False})]
 
 
-def test_add_skips_seed_when_not_keyless(fake_main, monkeypatch):
-    # No `[claude]`/`[codex]` keyless configured → nothing to inject, so no posture is written.
-    from foldyard import devmode
+# ── a re-used name never inherits the old checkout's adoption ───────────────────────
+#
+# The pin is keyed by the checkout's PATH, so a worktree removed and re-added under the same name
+# lands on the same key. Before this, `remove` left the pin behind and `add` took it for the new
+# checkout's: no identical-to-main adoption, the seed read the old branch's config, and `--box`
+# started a box the host reconciled from a branch that was gone.
 
-    monkeypatch.setattr(config, "claude_keyless", lambda: "")
-    monkeypatch.setattr(config, "codex_keyless", lambda: "")
-    called: list = []
-    monkeypatch.setattr(devmode, "set_mode", lambda *a, **k: called.append(1))
+EDITED_AGAIN = '[project]\nname = "acme"\n\n[proxy]\npassthrough = ["other.example"]\n'
+
+
+def _git_removes_the_checkout(monkeypatch) -> None:
+    """`git worktree remove` deletes the directory, as for real (the fixture's fake leaves it)."""
+    git = worktree.subprocess.run
+
+    def run(cmd, **kw):
+        if cmd[:1] == ["git"] and "worktree" in cmd and "remove" in cmd:
+            shutil.rmtree(cmd[-1])
+            return _Proc(0)
+        return git(cmd, **kw)
+
+    monkeypatch.setattr(worktree.subprocess, "run", run)
+
+
+def _old_branch_adopted(fake_main, monkeypatch, text: str = EDITED) -> None:
+    """`feat` made, then its branch's config changed and adopted — then the worktree removed."""
+    from foldyard import configpin, devmode
 
     assert worktree.add("feat") == 0
-    assert not called
+    (fake_main["wt_root"] / "feat" / "foldyard.toml").write_text(text)
+    configpin.adopt(devmode.worktree_config("feat"))
+    _git_removes_the_checkout(monkeypatch)
+    assert worktree.remove("feat", assume_yes=True) == 0
+
+
+def test_remove_drops_the_worktrees_adopted_config(fake_main, monkeypatch):
+    from foldyard import configpin
+
+    _adopt_main(fake_main)
+    _old_branch_adopted(fake_main, monkeypatch)
+
+    pin = worktree._pin_config(fake_main["main"], "feat")
+    assert not configpin.pin_dir(pin).exists()
+
+
+def test_re_adding_a_name_adopts_the_new_checkout_identical_to_main(fake_main, monkeypatch, capsys):
+    from foldyard import configpin, devmode
+
+    _adopt_main(fake_main)
+    _old_branch_adopted(fake_main, monkeypatch)
+    capsys.readouterr()
+
+    assert worktree.add("feat") == 0
+
+    assert "adopted — identical to main's" in capsys.readouterr().out
+    drift = configpin.inspect(devmode.worktree_config("feat"))
+    assert drift.pinned_exists and drift.pinned == drift.tree  # main's bytes, not the old branch's
+
+
+def test_re_adding_a_name_with_a_differing_config_adopts_nothing_and_starts_no_box(
+    fake_main, monkeypatch
+):
+    _adopt_main(fake_main)
+    _old_branch_adopted(fake_main, monkeypatch)
+    _branch_declares(monkeypatch, EDITED_AGAIN)
+    runs = _box_runs(monkeypatch)
+
+    assert worktree.add("feat", box_up=True) == 1
+
+    assert not _wt_adopted("feat")
+    assert not runs
+
+
+def test_a_fresh_add_drops_a_pin_left_at_its_path_and_says_so(fake_main, monkeypatch, capsys):
+    """However the old checkout went (deleted by hand, a remove from before this fix), a pin at the
+    path of a checkout that doesn't exist yet can't be this one's."""
+    from foldyard import configpin
+
+    _adopt_main(fake_main)
+    old = fake_main["wt_root"] / "feat"
+    old.mkdir(parents=True)
+    (old / "foldyard.toml").write_text(EDITED)
+    configpin.adopt(worktree._pin_config(fake_main["main"], "feat"))
+    shutil.rmtree(old)
+    capsys.readouterr()
+
+    assert worktree.add("feat") == 0
+
+    out = capsys.readouterr().out
+    assert "dropped" in out and "adopted — identical to main's" in out
+
+
+def test_a_fresh_add_that_cannot_drop_a_left_pin_stops_before_git(fake_main, monkeypatch, capsys):
+    """Going on would hand the new checkout the earlier one's adoption: a `✗`, no traceback, and
+    no checkout made."""
+    from foldyard import configpin
+
+    def unreadable(_cfg):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(configpin, "forget", unreadable)
+
+    assert worktree.add("feat") == 1
+
+    assert "couldn't remove a config adoption" in capsys.readouterr().err
+    assert not (fake_main["wt_root"] / "feat").exists()
+
+
+def test_adopted_only_counts_a_pin_that_matches_the_tree(fake_main, monkeypatch):
+    """A pin that differs from the tree, left unresolved (no terminal) or ignored, is not "ready":
+    the host would reconcile from bytes this checkout doesn't hold."""
+    from foldyard import configpin, devmode
+
+    _adopt_main(fake_main)
+    assert worktree.add("feat") == 0
+    (fake_main["wt_root"] / "feat" / "foldyard.toml").write_text(EDITED)
+    assert configpin.inspect(devmode.worktree_config("feat")).pinned_exists
+
+    assert worktree._adopt_config("feat") is False
+
+
+def test_the_pin_key_never_follows_a_link_the_box_planted(fake_main):
+    """Every box writes the worktrees root: a `feat` swapped for a link to main must not make
+    `remove feat` drop MAIN's adoption."""
+    fake_main["wt_root"].mkdir(parents=True)
+    (fake_main["wt_root"] / "feat").symlink_to(fake_main["main"])
+
+    pin = worktree._pin_config(fake_main["main"], "feat")
+
+    assert pin.repo_root == Path(os.path.realpath(fake_main["wt_root"])) / "feat"
+    assert pin.worktree == "feat"
+
+
+# ── the keyless seed happens at the worktree's FIRST adoption, wherever that is ─────────────
+#
+# A fresh worktree has no posture file, so claude/codex read `off` and its proxy injects nothing:
+# the box's keyless dummy token 401s. The seed mirrors main's keyless axes in — at the first
+# adoption, since only then can the worktree's adopted config say `keyless` at all, and that
+# adoption may happen at `add`, at the launch gate, via `fy config adopt` or from the TUI.
+
+KEYLESS_EDITED = KEYLESS + '\n[proxy]\npassthrough = ["evil.example"]\n'
+
+
+def _main_runs(fake_main, monkeypatch, **mode: str) -> None:
+    """Main adopted KEYLESS, with ``mode`` as its posture (written the way `fy mode` writes it).
+    Real ``set_mode`` derives the proxy's per-worktree port, whose hash shells to ``cksum`` — which
+    the fixture's git fake would answer with nothing — so the hash is pinned."""
+    from foldyard import devmode
+
+    monkeypatch.setattr(stack, "_hashed_offset", lambda name: 7)
+    _adopt_main(fake_main, KEYLESS)
+    if mode:
+        with config.using(devmode.worktree_config("")):
+            devmode.set_mode(mode, reconcile=False)
+
+
+def _wt_mode_file(name: str = "feat") -> Path:
+    from foldyard import devmode
+
+    with config.using(devmode.worktree_config(name)):
+        return config.mode_file()
+
+
+def _wt_posture(name: str = "feat") -> dict | None:
+    """The worktree's posture FILE as written (``None`` when there is none) — not ``read``'s
+    defaults, which can't tell "never set" from "set to off"."""
+    import json
+
+    path = _wt_mode_file(name)
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def _unadopted_keyless_worktree(fake_main, monkeypatch, name: str = "feat") -> None:
+    """A worktree whose config declares keyless but differs from main's, made with no terminal —
+    so `add` adopts (and seeds) nothing, leaving the first adoption to a later door."""
+    _branch_declares(monkeypatch, KEYLESS_EDITED)
+    assert worktree.add(name) == 0
+    assert not _wt_adopted(name)
+    assert _wt_posture(name) is None
+
+
+def _at_a_terminal(monkeypatch, answer: str = "a") -> None:
+    import types
+
+    monkeypatch.setattr("sys.stdin", types.SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda q="": answer)
+
+
+def _gate(monkeypatch, name: str = "feat") -> str:
+    """`WORKTREE=<name> fy box up`'s launch gate, without its re-exec."""
+    from foldyard import configpin
+
+    monkeypatch.setenv("WORKTREE", name)
+    monkeypatch.setattr(configpin, "_rerun_with_adopted_config", lambda verb, rerun: None)
+    return configpin.gate("box up")
+
+
+def test_add_seeds_only_mains_keyless_axes_that_are_on(fake_main, monkeypatch, capsys):
+    """Main's ACTUAL values: codex=off in main stays off here, so nothing escalates past main —
+    and nothing reconciles (set_mode's reconcile=False: nothing of the worktree is up yet)."""
+    _main_runs(fake_main, monkeypatch, claude="on")
+
+    assert worktree.add("feat") == 0
+
+    posture = _wt_posture()
+    assert posture is not None and posture["claude"] == "on" and posture["codex"] == "off"
+    assert "seeded keyless mode from main: claude=on" in capsys.readouterr().err
+
+
+def test_add_seeds_once(fake_main, monkeypatch, capsys):
+    """`add` adopts through the same door as everything else — one seed, one line."""
+    from foldyard import devmode
+
+    _main_runs(fake_main, monkeypatch, claude="on", codex="on")
+    calls: list[dict] = []
+    real = devmode.set_mode
+    monkeypatch.setattr(devmode, "set_mode", lambda u, **kw: calls.append(u) or real(u, **kw))
+
+    assert worktree.add("feat") == 0
+
+    assert calls == [{"claude": "on", "codex": "on"}]
+    assert capsys.readouterr().err.count("seeded keyless mode") == 1
+
+
+def test_a_first_adoption_at_the_launch_gate_seeds(fake_main, monkeypatch, capsys):
+    """Declined (or no terminal) at `add`, adopted at `fy box up`'s gate: the box it then starts
+    must come up injectable, so the seed lands before the gate re-runs the verb."""
+    _main_runs(fake_main, monkeypatch, claude="on", codex="on")
+    _unadopted_keyless_worktree(fake_main, monkeypatch)
+    _at_a_terminal(monkeypatch)
+
+    assert _gate(monkeypatch) == "pinned"
+
+    posture = _wt_posture()
+    assert posture is not None and (posture["claude"], posture["codex"]) == ("on", "on")
+    assert "seeded keyless mode from main: claude=on, codex=on" in capsys.readouterr().err
+
+
+def test_a_first_adoption_via_fy_config_adopt_seeds(fake_main, monkeypatch):
+    from foldyard import cli
+
+    _main_runs(fake_main, monkeypatch, claude="on")
+    _unadopted_keyless_worktree(fake_main, monkeypatch)
+    monkeypatch.setenv("WORKTREE", "feat")
+
+    cli.config_adopt()
+
+    posture = _wt_posture()
+    assert posture is not None and posture["claude"] == "on"
+
+
+def test_a_later_adoption_never_seeds(fake_main, monkeypatch):
+    """Only the FIRST adoption seeds: main turning claude on afterwards is not this worktree's
+    choice, and adopting an unrelated config edit must not make it one."""
+    from foldyard import cli, devmode
+
+    _main_runs(fake_main, monkeypatch)  # main: both off — the first adoption seeds nothing
+    _unadopted_keyless_worktree(fake_main, monkeypatch)
+    monkeypatch.setenv("WORKTREE", "feat")
+    cli.config_adopt()
+    assert _wt_posture() is None
+
+    with config.using(devmode.worktree_config("")):
+        devmode.set_mode({"claude": "on"}, reconcile=False)
+    (fake_main["wt_root"] / "feat" / "foldyard.toml").write_text(KEYLESS_EDITED + "# edited\n")
+    cli.config_adopt()
+
+    assert _wt_posture() is None
+
+
+def test_a_first_adoption_never_overrides_a_posture_already_set(fake_main, monkeypatch):
+    """A posture file that already says claude=off — a lost adoption re-made, say — is the
+    operator's choice; only the axes it doesn't set are seeded."""
+    import json
+
+    _main_runs(fake_main, monkeypatch, claude="on", codex="on")
+    _unadopted_keyless_worktree(fake_main, monkeypatch)
+    path = _wt_mode_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"claude": "off", "expires": {}}))
+    _at_a_terminal(monkeypatch)
+
+    assert _gate(monkeypatch) == "pinned"
+
+    posture = _wt_posture()
+    assert posture is not None and (posture["claude"], posture["codex"]) == ("off", "on")
+
+
+def test_main_off_seeds_nothing(fake_main, monkeypatch):
+    _main_runs(fake_main, monkeypatch)
+    _unadopted_keyless_worktree(fake_main, monkeypatch)
+    _at_a_terminal(monkeypatch)
+
+    assert _gate(monkeypatch) == "pinned"
+    assert _wt_posture() is None
+
+
+def test_a_config_without_keyless_seeds_nothing(fake_main, monkeypatch, capsys):
+    """No `[claude]`/`[codex] keyless` in the worktree's adopted config: nothing to inject, so no
+    posture is written — even with main running claude. Nor TRIED: the seed stays silent, rather
+    than reaching set_mode with a switch this config doesn't have and swallowing its refusal."""
+    _main_runs(fake_main, monkeypatch, claude="on")
+    _branch_declares(monkeypatch, TOML)
+    assert worktree.add("feat") == 0  # differs from main's KEYLESS: not adopted here
+    _at_a_terminal(monkeypatch)
+    capsys.readouterr()
+
+    assert _gate(monkeypatch) == "pinned"
+    assert _wt_posture() is None
+    assert "keyless mode" not in capsys.readouterr().err
+
+
+def test_main_is_never_seeded(fake_main, monkeypatch):
+    """The seed's source is main, so it never writes main's posture — even where main's posture
+    file doesn't set the axis (``read`` reports main as on here to make that observable)."""
+    from foldyard import devmode, keyless
+
+    _adopt_main(fake_main, KEYLESS)
+    monkeypatch.setattr(devmode, "read", lambda apply_expiry=True: {"mode": {"claude": "on"}})
+    calls: list = []
+    monkeypatch.setattr(devmode, "set_mode", lambda *a, **k: calls.append(a))
+
+    assert keyless.seed_posture(devmode.worktree_config("")) == {}
+    assert not calls
+
+
+def test_a_removed_and_re_added_worktree_is_seeded_again(fake_main, monkeypatch):
+    """`remove` drops the worktree's posture (and its adoption), so the re-added worktree is
+    fresh again and its first adoption seeds like the first time."""
+    _main_runs(fake_main, monkeypatch, claude="on")
+    assert worktree.add("feat") == 0
+    assert _wt_posture() is not None
+    _git_removes_the_checkout(monkeypatch)
+    assert worktree.remove("feat", assume_yes=True) == 0
+    assert _wt_posture() is None
+
+    assert worktree.add("feat") == 0
+
+    posture = _wt_posture()
+    assert posture is not None and posture["claude"] == "on"
+
+
+# ── add --box ───────────────────────────────────────────────────────────────────────
+
+
+def _box_runs(monkeypatch, rc: int = 0) -> list[dict]:
+    """Record each `fy box up` add spawns (argv + env), on top of the fixture's git fake."""
+    runs: list[dict] = []
+    git = worktree.subprocess.run
+
+    def run(cmd, **kw):
+        if cmd[1:] == ["-m", "foldyard", "box", "up"]:
+            runs.append({"cmd": cmd, "env": kw.get("env")})
+            return _Proc(rc)
+        return git(cmd, **kw)
+
+    monkeypatch.setattr(worktree.subprocess, "run", run)
+    return runs
+
+
+def test_add_box_brings_the_new_worktrees_box_up_in_a_fresh_process(fake_main, monkeypatch):
+    """A fresh `fy box up`, not box code in-process: this process bound its import-time constants
+    and caches before the adoption, exactly what the gate's own re-run exists to shed."""
+    from foldyard import configpin
+
+    _adopt_main(fake_main)
+    monkeypatch.setenv(configpin.RERUN_ENV, "1")
+    runs = _box_runs(monkeypatch)
+
+    assert worktree.add("feat", box_up=True) == 0
+
+    assert len(runs) == 1
+    assert runs[0]["cmd"] == [sys.executable, "-m", "foldyard", "box", "up"]
+    env = runs[0]["env"]
+    assert env["WORKTREE"] == "feat"
+    assert configpin.RERUN_ENV not in env  # the child's gate keeps its own re-run
+
+
+def test_add_box_passes_on_box_ups_failure(fake_main, monkeypatch):
+    _adopt_main(fake_main)
+    _box_runs(monkeypatch, rc=3)
+    assert worktree.add("feat", box_up=True) == 3
+
+
+def test_add_box_does_not_start_a_box_whose_config_is_not_adopted(fake_main, monkeypatch, capsys):
+    _adopt_main(fake_main)
+    _branch_declares(monkeypatch, EDITED)
+    runs = _box_runs(monkeypatch)
+
+    assert worktree.add("feat", box_up=True) == 1
+
+    assert not runs
+    assert "isn't adopted" in capsys.readouterr().err
+    assert "feat" in worktree_registry.checkouts(fake_main["main"])  # the worktree stays
+
+
+def test_add_box_on_an_already_registered_worktree_brings_it_up(fake_main, monkeypatch):
+    """Re-running `fy worktree add <n> --box` is how a declined or skipped box gets started; its
+    own gate asks for whatever is still unadopted."""
+    _adopt_main(fake_main)
+    assert worktree.add("feat") == 0
+    runs = _box_runs(monkeypatch)
+
+    assert worktree.add("feat", box_up=True) == 0
+    assert len(runs) == 1 and runs[0]["env"]["WORKTREE"] == "feat"
+
+
+def test_add_without_box_starts_nothing(fake_main, monkeypatch):
+    _adopt_main(fake_main)
+    runs = _box_runs(monkeypatch)
+    assert worktree.add("feat") == 0
+    assert not runs
 
 
 def test_list_prints_main_and_worktrees(fake_main, capsys):
@@ -991,3 +1526,19 @@ def test_remove_is_not_blocked_by_a_failed_snapshot(fake_main, monkeypatch):
     monkeypatch.setattr(worktree, "_snapshot_uncommitted", lambda wt_dir, name: None)
     _make_wt(fake_main)
     assert worktree.remove("feat", assume_yes=True) == 0
+
+
+def test_the_git_calls_that_can_run_repo_code_switch_hooks_off(fake_main):
+    # `worktree add` checks out (post-checkout, reference-transaction); `remove` runs `git status`
+    # (core.fsmonitor); `prune` for symmetry. Each through the one hookless helper — see
+    # tests/test_worktree_git_hooks.py for what that does against a real git.
+    def hookless(cmd):
+        return "core.hooksPath=/dev/null" in cmd and "core.fsmonitor=" in cmd
+
+    assert worktree.add("feat") == 0
+    assert hookless(next(c for c in fake_main["calls"] if "worktree" in c and "add" in c))
+    assert worktree.remove("feat", assume_yes=True) == 0
+    assert hookless(next(c for c in fake_main["calls"] if "worktree" in c and "remove" in c))
+    _make_wt(fake_main, name="gone", registered=False)
+    assert worktree.remove("gone", force=True) == 0
+    assert hookless(next(c for c in fake_main["calls"] if c[-2:] == ["worktree", "prune"]))

@@ -47,6 +47,207 @@ def _host_only(verb: str) -> int | None:
     return None
 
 
+# ── foldyard's own git on your computer runs none of the repo's code ──────────────────
+#
+# The repo's hooks live in the SHARED `.git` every box can write: `.git/hooks/*` and, since git
+# 2.54, `[hook "<name>"]` entries in `.git/config`. So a host-side `git worktree add` ran a
+# consumer's post-checkout hooks on the host, in the new checkout, before it was registered.
+# `core.hooksPath=/dev/null` turns off the hooks DIRECTORY only — git's docs still call it "all
+# hooks", but a config hook runs straight through it — so each config hook is also disabled by
+# name (`hook.<name>.enabled=false`) — the names from every included file, whatever its condition
+# (:func:`_config_hooks`). Those go through GIT_CONFIG_COUNT rather than `-c`, whose
+# `key=value` splits at the first `=`, which a hook's name may contain. `core.fsmonitor=` (EMPTY,
+# not `false`: a git before 2.35.2 reads `false` as a hook path, and one before 2.26 then reports
+# no changes, which `worktree remove`'s dirty check would believe) stops the command the shared
+# config can name for every index refresh. Not closed: filter drivers (`filter.<d>.smudge` /
+# `clean` / `process`, LFS's among them) still run when this git checks out or adds — git has no
+# switch for them, and turning them off would change what a checkout contains. See docs/git.md.
+_NO_REPO_CODE = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=")
+
+
+class HookScanError(Exception):
+    """A config file git would read that foldyard couldn't check for hooks — so it runs no git."""
+
+
+_MAX_INCLUDE_DEPTH = 10  # git's own: deeper than this, git itself refuses the config
+_REPO_SCOPES = ("local", "worktree")  # the config files in the repo's .git, which the box writes
+
+
+def _git_config_lines(*args: str) -> list[str]:
+    """``git config -z <args…> --list``'s NUL-separated fields. Plain ``git config`` runs nothing
+    from the config it reads. Raises :class:`HookScanError` when git can't read it."""
+    got = subprocess.run(["git", *args, "-z", "--list"], capture_output=True, text=True)
+    if got.returncode != 0:
+        raise HookScanError(got.stderr.strip() or f"`git {' '.join(args)} --list` failed")
+    return got.stdout.split("\0")
+
+
+def _add_hook(hooks: dict[str, set[str]], key: str, value: str) -> None:
+    if not key.startswith("hook."):
+        return
+    name, _, var = key.removeprefix("hook.").rpartition(".")
+    if not name or var not in ("command", "event"):
+        return
+    events = hooks.setdefault(name, set())
+    if var == "event" and value:
+        events.add(value)
+
+
+def _include_target(raw: str, includer: Path) -> Path | None:
+    """Where git would look for an include's ``path`` value: ``~/`` expanded, a relative path
+    taken from the INCLUDING file's directory. None for a form not resolved here (``%(prefix)/``,
+    an unknown ``~user``)."""
+    path = os.path.expanduser(raw)
+    if path.startswith(("~", "%(")):
+        return None
+    return Path(path) if os.path.isabs(path) else includer.parent / path
+
+
+def _scan_file(
+    path: Path, repo_scope: bool, hooks: dict[str, set[str]], seen: set[str], depth: int = 0
+) -> None:
+    """``path``'s hooks into ``hooks``, then every file it includes, WHATEVER the include's
+    condition: a child git meets conditions the host's own git doesn't (`gitdir:` under
+    ``.git/worktrees/<name>``, ``onbranch:`` on the new branch). A file in the repo's own config
+    chain that can't be read refuses (:class:`HookScanError`): it is one the box could fill in
+    the moment this check has passed. One the operator's own config names is git's to ignore."""
+    real = os.path.realpath(path)
+    if real in seen:
+        return
+    if depth > _MAX_INCLUDE_DEPTH:
+        raise HookScanError(f"git config includes nest deeper than {_MAX_INCLUDE_DEPTH} at {path}")
+    if not os.path.isfile(real) or not os.access(real, os.R_OK):
+        if repo_scope:
+            raise HookScanError(f"the repo's git config includes {path}, which can't be read")
+        return
+    seen.add(real)
+    for entry in _git_config_lines("config", "-f", str(path), "--no-includes"):
+        key, _, value = entry.partition("\n")
+        _add_hook(hooks, key, value)
+        if value and (
+            key == "include.path" or (key.startswith("includeif.") and key.endswith(".path"))
+        ):
+            target = _include_target(value, path)
+            if target is None:
+                if repo_scope:
+                    raise HookScanError(f"the repo's git config includes {value!r}, from {path}")
+                continue
+            _scan_file(target, repo_scope, hooks, seen, depth + 1)
+
+
+def _config_hooks(repo: Path) -> dict[str, set[str]]:
+    """Every config-defined hook git could run for ``repo`` — in its own git, or in a child git it
+    starts in another context (``git worktree add``'s, in the new worktree): name → the events
+    it is set for. Each file git reads there (``--show-origin``), then every include target in
+    them whatever its condition (:func:`_scan_file`). Raises :class:`HookScanError` rather than
+    miss one. Empty on a git without config hooks — and harmless to over-count: disabling a name
+    that never runs changes nothing."""
+    try:
+        fields = _git_config_lines(
+            "-C", str(repo), "config", "--show-scope", "--show-origin", "--name-only"
+        )
+    except HookScanError as e:
+        if "show-scope" not in str(e):
+            raise
+        raise HookScanError(
+            "this git can't say which config files it reads (`--show-scope`), so they can't be "
+            "checked for hooks — it needs git 2.26 or newer"
+        ) from e
+    hooks: dict[str, set[str]] = {}
+    files: dict[Path, bool] = {}
+    for scope, origin, key in zip(fields[0::3], fields[1::3], fields[2::3], strict=False):
+        _add_hook(hooks, key, "")  # names from every scope, the command line's included
+        if origin.startswith("file:"):
+            path = Path(origin.removeprefix("file:"))
+            path = path if path.is_absolute() else repo / path
+            files[path] = files.get(path, False) or scope in _REPO_SCOPES
+    seen: set[str] = set()
+    for path, repo_scope in files.items():
+        _scan_file(path, repo_scope, hooks, seen)
+    return hooks
+
+
+def _hookless_env(repo: Path, hooks: dict[str, set[str]] | None = None) -> dict[str, str]:
+    """The environment for a host git run in ``repo`` with each of its config hooks disabled —
+    appended after any GIT_CONFIG_COUNT entries the caller's own environment already carries.
+    Children inherit it, so a hook only a child would see is off there too."""
+    env = dict(os.environ)
+    count = env.get("GIT_CONFIG_COUNT", "")
+    n = int(count) if count.isdigit() else 0
+    for name in sorted(_config_hooks(repo) if hooks is None else hooks):
+        env[f"GIT_CONFIG_KEY_{n}"] = f"hook.{name}.enabled"
+        env[f"GIT_CONFIG_VALUE_{n}"] = "false"
+        n += 1
+    env["GIT_CONFIG_COUNT"] = str(n)
+    return env
+
+
+def _host_git(
+    repo: Path, *args: str, env: dict[str, str] | None = None, **kw
+) -> subprocess.CompletedProcess:
+    """``git -C repo args…`` with none of the repo's hooks or fsmonitor run (see above). For every
+    host-side git here that can reach one: a checkout, a ref update, an index refresh. ``env``
+    defaults to :func:`_hookless_env`; a caller passing its own builds it from that. When the
+    repo's config can't be checked for hooks, git doesn't run: a failed run (1), the reason said."""
+    if env is None:
+        try:
+            env = _hookless_env(repo)
+        except HookScanError as e:
+            _refuse_unscanned(e)
+            return subprocess.CompletedProcess(args, 1, "", "")
+    return subprocess.run(["git", *_NO_REPO_CODE, "-C", str(repo), *args], env=env, **kw)
+
+
+def _refuse_unscanned(e: HookScanError) -> None:
+    _err(f"✗ not running git on your computer: {e}.")
+    _err("  foldyard checks every git config file it would read for hooks, and couldn't check")
+    _err("  that one. Fix or remove that include in .git/config, then retry.")
+
+
+def _hooks_skipped(repo: Path, events: tuple[str, ...], hooks: dict[str, set[str]]) -> list[str]:
+    """Which of ``events`` git would have run a hook for in ``repo`` — an executable file in its
+    hooks directory, or one of the config ``hooks`` — so skipping them can be SAID. A report."""
+    try:
+        where = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+            capture_output=True,
+            text=True,
+        )
+        hooks_dir = Path(where.stdout.strip()) if where.returncode == 0 else None
+    except OSError:
+        hooks_dir = None
+    configured = set().union(*hooks.values())
+    return [
+        event
+        for event in events
+        if event in configured
+        or (
+            hooks_dir is not None
+            and os.access(hooks_dir / event, os.X_OK)
+            and (hooks_dir / event).is_file()
+        )
+    ]
+
+
+def _git_worktree_add(main: Path, argv: list[str]) -> int:
+    """``git worktree add`` with the repo's hooks off, saying so when it had any."""
+    try:
+        hooks = _config_hooks(main)  # once: what is disabled is what is reported
+    except HookScanError as e:
+        _refuse_unscanned(e)
+        return 1
+    skipped = _hooks_skipped(main, ("post-checkout", "reference-transaction"), hooks)
+    rc = _host_git(main, *argv, env=_hookless_env(main, hooks)).returncode
+    if rc == 0 and skipped:
+        print(
+            f"  skipped the repo's git hooks ({', '.join(skipped)}): they live in the .git every "
+            "box can write, so foldyard's git on your computer runs none of them. Git in the "
+            "worktree's box runs them as usual; setup every new worktree needs belongs in "
+            "[project].worktree_init, which runs in a container."
+        )
+    return rc
+
+
 def _registered_worktree(main: Path, wt_dir: Path) -> bool:
     """True iff git still tracks ``wt_dir`` as a linked worktree of ``main``. False means an
     ORPHAN: the checkout dir survives but its ``.git/worktrees`` metadata is gone (e.g. pruned
@@ -89,17 +290,24 @@ def _snapshot_uncommitted(wt_dir: Path, name: str) -> str | None:
     import tempfile
     from datetime import datetime
 
-    def _git(*args: str, **kw) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["git", "-C", str(wt_dir), *args], capture_output=True, text=True, **kw
-        )
+    try:  # `add -A` refreshes an index, `update-ref` is a ref transaction
+        quiet = _hookless_env(wt_dir)
+    except HookScanError as e:
+        # The scan here is the WORKTREE's context (its config.worktree too), while `git worktree
+        # remove` scans from main — and the orphan path deletes the tree with no git at all — so
+        # a `--force` removal can still go ahead. Say the net isn't there.
+        _err(f"⚠ uncommitted work in '{name}' NOT saved: {e} — foldyard runs no git there.")
+        return None
+
+    def _git(*args: str, env: dict[str, str] = quiet) -> subprocess.CompletedProcess:
+        return _host_git(wt_dir, *args, env=env, capture_output=True, text=True)
 
     head = _git("rev-parse", "HEAD")
     if head.returncode != 0:
         return None
     idx = Path(tempfile.mkdtemp(prefix="fy-wt-snap-")) / "index"
     try:
-        env = {**os.environ, "GIT_INDEX_FILE": str(idx)}
+        env = {**quiet, "GIT_INDEX_FILE": str(idx)}
         if _git("read-tree", "HEAD", env=env).returncode != 0:
             return None
         if _git("add", "-A", env=env).returncode != 0:
@@ -157,18 +365,44 @@ def _local_state_roots() -> tuple[Path, ...]:
     )
 
 
+def _pin_config(main: Path, name: str) -> config.Config:
+    """The handle on worktree ``name``'s ADOPTED-config pin (:func:`configpin.pin_dir`, keyed by
+    checkout path) — the key ``add`` adopts under, without the checkout having to exist.
+
+    The worktrees root is resolved, the last component never: that one is box-writable (every box
+    binds the root), and following a ``feat`` the box swapped for a link to main would make
+    ``remove feat`` drop MAIN's adoption. For a real directory it's the path the registry records
+    (:func:`worktree_registry.register` — the realpath), hence the key ``add`` used."""
+    root = Path(os.path.realpath(config.worktrees_root(main)))
+    return config.Config(repo_root=root / name, worktree=name, toml={})
+
+
 def _has_local_state(name: str) -> bool:
-    return worktree_registry.is_recorded(stack.main_repo(), name) or any(
-        (root / name).exists() for root in _local_state_roots()
+    from . import configpin
+
+    main = stack.main_repo()
+    return (
+        worktree_registry.is_recorded(main, name)
+        or any((root / name).exists() for root in _local_state_roots())
+        or os.path.lexists(configpin.pin_dir(_pin_config(main, name)))
     )
 
 
 def _remove_local_state(name: str) -> bool:
-    """Remove the per-worktree posture and VS Code state — and the host's record of the worktree —
-    after git removes the checkout."""
-    worktree_registry.unregister(stack.main_repo(), name)
+    """Remove the per-worktree posture and VS Code state, the host's record of the worktree, and
+    its adopted config — after git removes the checkout. The adoption goes too because it is keyed
+    by the checkout's path: left behind, the next worktree of this name would inherit it."""
+    from . import configpin
+
+    main = stack.main_repo()
+    worktree_registry.unregister(main, name)
     roots = _local_state_roots()
     ok = True
+    try:
+        configpin.forget(_pin_config(main, name))
+    except OSError as e:
+        _err(f"✗ couldn't remove the worktree's adopted config: {e}")
+        ok = False
     for root in roots:
         path = (root / name).resolve()
         if not path.is_relative_to(root.resolve()) or any(
@@ -259,51 +493,6 @@ def _default_base_ref(repo: Path) -> str | None:
     return None
 
 
-def _seed_keyless_posture(name: str) -> None:
-    """Mirror the main checkout's KEYLESS AI-assistant posture (the ``claude``/``codex`` axes) into
-    the fresh worktree's posture file, so a keyless box comes up injectable right after
-    ``fy worktree add``.
-
-    Why this is needed: posture is per-worktree and a fresh worktree has no ``dev-mode.json``, so
-    every axis reads its rung-0 default (off). With ``claude``/``codex`` off, the worktree's own
-    egress proxy installs NO token-inject rule on its per-worktree port — so codex/claude in the
-    worktree box send the far-future *dummy* token, 401, then try to refresh with the dummy refresh
-    token and fail with *"Your access token could not be refreshed."* The real creds are already
-    project-shared host-side (the proxy mints them from the host's ``~/.codex/auth.json`` /
-    ``host.env``); the only missing piece is this worktree's posture being ON. So we seed posture —
-    NOT creds (copying the rotating ``auth.json`` into the box would spawn a second, unsynchronised
-    refresher and corrupt the token).
-
-    Scope + safety: only the keyless-configured assistant axes, mirroring main's ACTUAL values (off
-    stays off), so this never escalates a worktree beyond what main already runs, and never touches
-    the credentialed cloud axes (gcp/storage/github/…). A non-keyless developer (no ``[claude]``/
-    ``[codex]`` ``keyless`` in their local toml) gets a no-op. Best-effort — a hiccup here must not
-    trap the (already-created) worktree."""
-    from . import devmode
-
-    try:
-        wt_cfg = devmode.worktree_config(name)
-        with config.using(wt_cfg):
-            configured = (("claude", config.claude_keyless()), ("codex", config.codex_keyless()))
-            keyless_axes = [axis for axis, on in configured if on]
-        if not keyless_axes:
-            return
-        with config.using(devmode.worktree_config("")):
-            main_mode = devmode.read(apply_expiry=True)["mode"]
-        updates = {a: main_mode[a] for a in keyless_axes if main_mode.get(a, "off") != "off"}
-        if not updates:
-            return
-        with config.using(wt_cfg):
-            devmode.set_mode(updates, reconcile=False)  # box up applies it; nothing's running yet
-        print(
-            "▶ seeded keyless mode from main: "
-            + ", ".join(f"{a}={v}" for a, v in updates.items())
-            + f"  (its box will inject on `WORKTREE={name} fy box up`)"
-        )
-    except Exception as e:  # posture seeding is a best-effort convenience, never fatal
-        print(f"  (couldn't seed keyless mode — set it manually with `fy mode`: {e})")
-
-
 def _branch_name_ok(name: str) -> bool:
     """Whether git would take ``name`` as a branch (`git check-ref-format --branch`'s rules),
     checked in-process: it only gates a hint, so it costs no git call."""
@@ -318,16 +507,82 @@ def _branch_name_ok(name: str) -> bool:
     )
 
 
-def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -> int:
+def _stdin_is_tty() -> bool:
+    """Whether someone is at a terminal to answer the adoption prompt — the launch gate's test."""
+    return sys.stdin.isatty()
+
+
+def _adopt_config(name: str) -> bool:
+    """Offer the new worktree's config for adoption, so the host runs it from the first
+    ``fy box up`` (:mod:`foldyard.configpin`, ADR-0022). True when the host now runs exactly this
+    tree (the ``resolve`` status says so — not merely that some pin exists).
+
+    A tree byte-identical to main's ADOPTED copy is adopted without asking: it grants nothing main
+    hasn't already been granted, so there is nothing to decide. Race-free, because every running
+    box binds the whole worktrees root and can write this checkout while it is compared: the
+    adoption carries the digest of the bytes compared AND the main pin they were compared against
+    (``reviewed=``/``baseline=``), so a write landing in between is :class:`ReviewStale`, never
+    adopted on main's say-so. Anything else goes through the first-adoption review the launch gate
+    uses (:func:`configpin.resolve`): the diff against main, and a prompt only on a terminal — no
+    terminal adopts nothing. ``-y`` plays no part: it answers the register question, and a config
+    that differs from main's is only ever adopted by someone who was shown it.
+
+    Best-effort: declining, or a failure here, leaves the worktree made and unadopted, never
+    undone."""
+    from . import configpin, devmode
+
+    try:
+        cfg = devmode.worktree_config(name)
+        drift = configpin.inspect(cfg)
+        if not drift.pinned_exists:
+            base = configpin.main_baseline(drift)
+            if base is not None and base.identical:
+                try:
+                    configpin.adopt(cfg, reviewed=drift.tree_digest(), baseline=base.digest)
+                except configpin.ReviewStale:
+                    pass  # it changed after it was compared: review what is there now, below
+                else:
+                    print(f"✓ config adopted — identical to main's ({base.digest}).", flush=True)
+                    return True
+        status = configpin.resolve(cfg, interactive=_stdin_is_tty(), prompt=input, echo=_err)
+        # Ready only when the host would run THIS tree: adopted just now, or a pin matching it.
+        # A pin the tree differs from (left unresolved, ignored) is not this checkout's config.
+        return status in ("clean", "pinned", "adopted")
+    except Exception as e:  # adoption is offered, never what fails the (already-made) worktree
+        _err(f"  (couldn't offer its config for adoption: {e})")
+        return False
+
+
+def _box_up(name: str) -> int:
+    """``WORKTREE=<name> fy box up``, as a FRESH process. Not box code in-process: this process
+    bound its import-time constants (``machine.MACHINE``, ``devmode.AXES``…) and config caches
+    before the adoption, which is exactly what the launch gate's own re-run
+    (:func:`configpin._rerun_with_adopted_config`) exists to shed. Its env drops the gate's re-run
+    marker, so the child's gate keeps its one re-run."""
+    from . import configpin
+
+    env = {k: v for k, v in os.environ.items() if k != configpin.RERUN_ENV}
+    env["WORKTREE"] = name
+    print(f"\n▶ WORKTREE={name} fy box up", flush=True)
+    return subprocess.run([sys.executable, "-m", "foldyard", "box", "up"], env=env).returncode
+
+
+def add(
+    name: str, branch: str = "", base: str = "", assume_yes: bool = False, box_up: bool = False
+) -> int:
     """Create a host-sibling worktree under the worktrees root, record it in the host's
-    worktree registry, and init its config.
+    worktree registry, init its config, and offer that config for adoption (:func:`_adopt_config`)
+    — a first adoption, wherever it happens, mirrors main's keyless posture into the worktree
+    (:func:`foldyard.keyless.seed_posture`). ``box_up`` then starts its box (:func:`_box_up`) —
+    only once its config is adopted, since the host would run nothing for it otherwise.
 
     A brand-new branch forks off ``base`` (an explicit ``--from``), else the project's default
     branch (:func:`_default_base_ref`) — NOT the primary checkout's current HEAD.
 
     On a worktree that ALREADY exists (one from before the registry, or made with plain ``git
     worktree add``) it registers instead, once the operator has confirmed its real path — the one
-    way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`."""
+    way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`.
+    ``box_up`` starts it there too; that box's own launch gate asks for any adoption still owed."""
     if (rc := _host_only("add")) is not None:
         return rc
     if name == "main":
@@ -370,8 +625,21 @@ def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -
     branch = branch or f"wt/{name}"
     wt_dir = wt_root / name
     if wt_dir.exists() or wt_dir.is_symlink():
-        return _register_existing(main, name, wt_dir, assume_yes)
+        rc = _register_existing(main, name, wt_dir, assume_yes)
+        return _box_up(name) if box_up and rc == 0 else rc
     wt_root.mkdir(parents=True, exist_ok=True)
+    # The checkout doesn't exist yet, so an adoption at its path is an earlier checkout's (removed
+    # by hand, or by a `remove` that predates dropping it). Dropped BEFORE git makes the checkout
+    # and it's registered, so the supervisor never serves the new one from the old branch's config.
+    from . import configpin
+
+    try:
+        if configpin.forget(_pin_config(main, name)):
+            print(f"▶ dropped a config adoption left at this path by an earlier '{name}'.")
+    except OSError as e:
+        # Going on would hand the new checkout the earlier one's adopted config.
+        _err(f"✗ couldn't remove a config adoption left at this path by an earlier '{name}': {e}")
+        return 1
     # Reproduce the recipe's machine-mount warning: worktree stacks need the rootless
     # machine to mount the worktrees root (no-op in the box / where there's no podman).
     machine.ensure(main, wt_root)
@@ -402,20 +670,33 @@ def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -
         # turns a routine branch push into a direct push TO main (bitten twice).
         argv = ["worktree", "add", "--no-track", "-b", branch, str(wt_dir)] + ([ref] if ref else [])
         print(f"  new branch off {ref or f'current HEAD ({_branch_of(main)})'}")
-    rc = subprocess.run(["git", "-C", str(main), *argv]).returncode
+    rc = _git_worktree_add(main, argv)
     if rc != 0:
         _err("✗ git worktree add failed")
         return rc
     worktree_registry.register(main, name, wt_dir)
 
-    _init_in_yard(main, wt_dir)
+    _init_in_yard(main, wt_dir)  # first: it copies foldyard.local.toml, which is adopted too
 
-    _seed_keyless_posture(name)
+    # Its first adoption also mirrors main's keyless posture in (configpin.adopt), here or later.
+    adopted = _adopt_config(name)
 
     print(f"\n✓ worktree ready: {wt_dir}  (branch {branch})")
-    print(f"  bring its stack up:  WORKTREE={name} fy up")
+    if adopted:
+        if not box_up:
+            print(f"  bring its box up:    WORKTREE={name} fy box up")
+        print(f"  bring its stack up:  WORKTREE={name} fy up")
+    else:
+        print("  its config isn't adopted, so your computer runs nothing for it yet.")
+        print(f"  Review it with `WORKTREE={name} fy config diff`, then")
+        print(f"  `WORKTREE={name} fy config adopt` — or adopt at `WORKTREE={name} fy box up`.")
     _say_unmasked(main, name, fresh=True)
-    return 0
+    if not box_up:
+        return 0
+    if not adopted:
+        _err(f"✗ --box: not starting '{name}''s box — its config isn't adopted (see above).")
+        return 1
+    return _box_up(name)
 
 
 def _say_unmasked(main: Path, name: str, *, fresh: bool) -> None:
@@ -627,7 +908,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
         print("  4. delete the ORPHANED checkout dir (git no longer tracks it) + worktree prune")
     else:
         print("  4. git worktree remove — the checkout directory is deleted")
-    print("  5. delete its local mode + isolated VS Code state")
+    print("  5. delete its local mode, isolated VS Code state + adopted config")
     if branch:
         print(f"  The branch '{branch}' is KEPT (delete it later with: git branch -D {branch}).")
     if not (assume_yes or force):
@@ -681,7 +962,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
         except OSError as e:
             _err(f"✗ couldn't delete {wt_dir}: {e}")
             return 1
-        rc = subprocess.run(["git", "-C", str(main), "worktree", "prune"]).returncode
+        rc = _host_git(main, "worktree", "prune").returncode
         if rc != 0:
             _err("✗ git worktree prune failed — the checkout dir was deleted, but stale")
             _err(f"  worktree metadata may remain (re-run: git -C {main} worktree prune).")
@@ -689,7 +970,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
     else:
         print(f"▶ git worktree remove {wt_dir}…")
         argv = ["worktree", "remove", *(["--force"] if force else []), str(wt_dir)]
-        rc = subprocess.run(["git", "-C", str(main), *argv]).returncode
+        rc = _host_git(main, *argv).returncode  # its dirty check runs `git status`: fsmonitor
         if rc != 0:
             _err("✗ git worktree remove failed (uncommitted changes? use --force).")
             return rc
