@@ -6,6 +6,309 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.7.0 — 2026-10-27
+
+A security release: upgrade now. A compromised box could get code run on your computer through
+foldyard's own git in `fy worktree add` and `remove` — the repo's hooks, its filter drivers, or a
+planted partial-clone fetch. foldyard's git on your computer now runs none of them: a new worktree
+is checked out, and `remove` checks it for uncommitted work, in a container from your box image,
+so `fy worktree add` needs `fy box build` first. After upgrading, recreate each box once
+(`fy box down && fy box up`); on a VM with the guest monitor, or on a Linux or WSL2 host (9p),
+also `fy machine stop && fy up`.
+
+### Security
+
+- **`fy worktree add` and `fy worktree remove` no longer run the repo's git hooks on your
+  computer.** The hooks live in the shared `.git`, which every box can write, and checking out
+  the new worktree ran its `post-checkout` hooks (a consumer's lefthook ones, for instance) on
+  your computer, in a checkout that wasn't registered or adopted yet. foldyard's own git now runs
+  with the hooks directory off, each `[hook]` entry in `.git/config` or any file it includes
+  disabled (git 2.54's config hooks, which `core.hooksPath=/dev/null` alone doesn't stop) and no
+  `core.fsmonitor` command, and `fy worktree add` says which hooks it skipped. Git in the
+  worktree's box still runs them.
+- **`fy worktree add` no longer checks files out on your computer.** A checkout runs the filter
+  drivers `.git/config` names (Git LFS's smudge filter, or a command a box wrote there), and the
+  shared `.git` is writable from every box, so making a worktree could run box-planted code on
+  your computer. Git there now only records the worktree (its branch and its entry in `.git`), and
+  the files are checked out in a one-off container from your box image, with no network.
+  It therefore needs the box image: before your first `fy box build` it stops with the command to
+  run, having changed nothing. Git LFS files arrive as pointers (`git lfs pull` in the worktree's
+  box fetches them), the first `git status` on your computer in the new worktree re-reads every
+  file once, and a checkout that fails removes the half-made worktree and the branch it made.
+- **`fy worktree remove` no longer reads the worktree's files with git on your computer.** To tell
+  whether a worktree had uncommitted work, and to save that work on `refs/fy/removed/<name>-<time>`
+  under `--force`, git compared or stored every file, and in doing so ran any `clean` filter driver
+  the shared `.git/config` names. A box can write that config, so removing a worktree could run
+  box-planted code on your computer. For a worktree whose files were checked out in the VM, that
+  meant every file. The check and the save now run in a one-off container from your box image,
+  with no network, and git on your computer only writes the ref and deletes the checkout. So
+  `fy worktree remove` now needs the box image and the VM. Without them it stops before it has
+  taken anything down and prints what to run. If you're sure nothing uncommitted in the worktree
+  matters, the new `--discard` removes it without checking or saving anything. A check or save
+  that fails now keeps the worktree instead of removing it unsaved.
+- **foldyard's own git on your computer no longer fetches.** A box can write `.git/config` so that
+  the repo becomes a partial clone, whose missing objects git downloads on demand over a transport
+  that same config chooses, such as an `ssh` command of its own. `fy worktree add` and
+  `fy worktree remove` read objects there, so a missing one could run that command on your
+  computer. Every git they run now has on-demand fetching and every transport switched off. On a
+  git older than 2.44, which can't switch the first off, they refuse to work in a repo with a
+  promisor remote and say to upgrade. That means `extensions.partialClone`, or any
+  `remote.<name>.promisor` or `remote.<name>.partialclonefilter`, including one in an included
+  config file.
+- **`fy worktree remove`'s "uncommitted work" now means files that differ from the last commit
+  once everything is unstaged.** It used to be git's own check, which also counts the stage. Your
+  computer's stage for a worktree goes stale whenever its box commits, so a worktree whose files
+  matched its last commit could still be refused. That no longer happens, and whatever the check
+  does call uncommitted, `--force` saves. An untracked file counts even when
+  `status.showUntrackedFiles` is `no`. A change that exists only in the stage (staged, then undone
+  in the file) isn't counted or saved, just as unstaging would lose it.
+
+### Deprecated
+
+- **The podman backend (`[machine] backend = "podman"`) is deprecated and will be removed in a
+  future release.** Each project gets its own podman machine, but only one of them can run at a
+  time, so two projects can't be up at once; and it can't carry the VM firewall. Nothing built on
+  Lima since reaches it either: no read-only to-box, no from-box (its transcripts stay in the
+  checkout), no guest monitor. Set `backend = "lima"` to move: the next `fy up` creates a new VM,
+  so images are rebuilt there and the podman machine's volumes, agent logins included, don't come
+  along.
+
+### Changed
+
+- **`fy init` writes a config that matches what fy does today.** Step 2 said to uncomment an agent
+  and run `fy box up` again, which does nothing on a running box: an agent is installed when the
+  box is created, so it now says `fy config adopt`, then `fy box down && fy box up`. The scaffold
+  now offers `[proxy] no_proxy` (the step-3 prompt sends the agent to services by container name,
+  which hang under the proxy without it), `[project] worktree_init`, and a commented GitHub block:
+  an App row and your own `gh` token as a `github-user` emergency switch. `runtime = "gvisor"` is
+  marked experimental (a test now holds both scaffolds to the experimental register),
+  `host_firewall` warns that committing it refuses colleagues who aren't on Linux, and `keyless`
+  says it belongs in `foldyard.local.toml` on a team. In the local example, the private injector
+  gets a `box_env` placeholder, loses a wrong "add it to the allowlist" step and warns that a local
+  `[[inject]]` replaces the shared rows; `vmtype`, `[host] notifications` and `[claude.settings]`
+  join it. `fy init` ends by pointing at `fy prereq`. Existing `foldyard.toml` files are unchanged.
+- **`fy tui`'s Network Log now lists every host in the retained egress log, with refusals you
+  haven't answered on top.** It used to group only the last 400 requests, so an agent's own API
+  traffic pushed every other host out within minutes — including the refused ones you had to
+  grant. Each host's tallies now count its whole history (the live log and its rotated backups);
+  its rows are the newest 50, plus any older refusal, then a line saying how many are earlier.
+  A host goes back to its place by recency once you grant or decline it.
+- **On Lima, creating a box now moves the old transcripts out of the checkout.** 0.6.1 started
+  binding new boxes' transcripts into foldyard's from-box, but left the old `.devbox-claude/` and
+  `.devbox-codex/` in the checkout with a note that they could be deleted: still matched by
+  `grep -r`, and missing from `claude --resume` inside the new box. The first `fy box up` that
+  creates a box now copies them into that box's slot and into the archive on your computer, then
+  deletes them from the checkout, never following a link and only when both copies are complete.
+  Anything it can't copy whole stays, with a warning, and the next new box tries again. With
+  `DEVBOX_TRANSCRIPTS` set, the old place is only archived, as before.
+- **The guest monitor's store now keeps 8 GB on your computer by default, up from 1 GB.** A real
+  project's monitor wrote 21–61 MB an hour during busy batches, and its full 1 GB store reached
+  back only 15–35 hours, so evidence rolled off before anyone read it. 8 GB is about 106 million
+  events: 5–16 days of those batches, about six weeks at a steady 30 events a second. The budget
+  is per project, so each monitored project can take up to 8 GB. A `max_mb` in
+  `~/.foldyard/<project>/monitor-store.toml` still wins (64 MB to 64 GB).
+- **The guest monitor names what isn't a container: `podman`, `build` and the VM itself.** Most
+  `unattributed` events were never containers: on a busy overnight run, 1.28 M of 1.49 M were
+  podman's own processes (conmon, pasta, crun, netavark) and image builds. They are now `podman`
+  and `build`, and `vm` also covers the VM's sandboxed systemd services. Each label comes from
+  what the VM's kernel reports and nothing in a container can fake, never from a process's name.
+  It applies to stored history: `fy monitor --since … --until …` re-joins it. The first read after
+  upgrading indexes the new facts from the store (about 20 s on a 330 MB store).
+- **A monitor hook without `who` no longer gets `vm` and `podman` events,** and every batch now
+  counts what the hook's filters passed over, by label (`passed`), so nothing is left out
+  silently. Set `skip_unless_asked` at the top of `monitor-hooks.toml` to change the default for
+  every hook without `who`, or name a label in a hook's `who` to get it. A process that steps out
+  of a container into the VM's or podman's namespace is marked `crossed`, labelled with the
+  container it came from, and sent to every hook whatever its `who`.
+- **The guest monitor no longer gives a container podman's tools that ran on its namespace number
+  just before its start or just after its exit.** netavark, nft and crun run for an instant in a
+  namespace of their own that takes the number a container is about to take or has just left (on
+  one boot, 6,405 events labelled as containers' that weren't). A container's events now run from
+  its init's start to its exit, plus its own processes killed after that.
+- **Once a process crosses out of a container, monitor hooks get the rest of that VM boot
+  unfiltered.** From the first `crossed` event of a boot until the VM restarts, a hook's `who`
+  stops filtering. That covers the `vm` and `podman` events a hook without `who` skips, and
+  whatever a hook's own `who` leaves out. What an escaped process does next is labelled by the
+  VM's or podman's namespace, and missing it is worse than the extra volume (on a busy night,
+  about twice the events). Each batch this affects says so in a new `unfiltered` field, naming the
+  crossing and the container it came from. `fy monitor` and `fy doctor` say when this boot has
+  had a crossing. Set `keep_who_after_crossing = true` on a hook to keep its filter; it still gets
+  the `crossed` events themselves. The first read after upgrading looks for crossings in the store
+  (about 13 s on a 330 MB store).
+- **`fy up` and `fy build` print a line every 30 s while podman images build.** The build's own
+  output goes to the build log, not the terminal, so a long cold build used to be minutes of
+  silence that looked like a hang. Each line names the images still building, how many are done
+  and the time so far, and says whether the log grew since the last line: "no new output" is how
+  a build that really is stuck shows itself.
+
+### Added
+
+- **A new dev box commits as you: it gets your computer's git `user.name` and `user.email`.** The
+  box's home directory is new with every box, so it had no global git config, and an agent in a
+  repo with none of your commits to copy from committed under a made-up name. `fy box up` now
+  writes those two keys from your global git config into the box's, each only where the box has
+  none — so `GIT_AUTHOR_*` in `[box].env` and a repo's own `.git/config` still win, as they do on
+  your computer. Nothing else from your git config is carried, and the checkout's config is never
+  read for it, so an `includeIf` identity isn't followed: when your global config has one, a new
+  box says so as it sets up, unless the repo sets its own email. Applies to boxes created from now
+  on (`fy box down && fy box up`).
+- **The supervisor now notices a proxy that has stopped answering, and logs it.** Each tick it
+  asks the proxy for a reserved address the proxy answers itself (no upstream call, no row in the
+  egress log); two misses in a row log `stopped answering` in `fy host logs` with the proxy's CPU
+  use, and the answer that ends it logs how long it lasted. Before, a proxy that was running but
+  stalled looked healthy (its port still accepted connections), so a box whose requests timed out
+  for minutes left no trace on your computer.
+- **Experimental: `[machine] attribution = "record"` makes the egress proxy know which container sent each
+  request** (Lima, with `firewall = true`; default off). A root forwarder in the VM stands where
+  every container still has its own address, and is made the only way from the VM to the proxy
+  and the token services on your computer; it adds a signed note of where each request came from
+  — the container's address and network, or for build steps, pulls and `--network host`
+  containers, the container id, `build` or the VM itself. The network log keeps it as each row's
+  `origin`: the Network Log shows who used each host and who was refused, and `fy allow learn`
+  names the service that asked. Nothing is decided on it yet. The VM firewall's own
+  boot script doesn't change, so turning it on stales no other VM; changing it is
+  `fy machine stop && fy up`. With it on, `podman run` defaults to a bridge network, a container
+  on an explicit pasta network can't reach the proxy (its traffic can't be told apart from any
+  other container's), and a forwarder that isn't serving makes `fy up` refuse rather than hand over
+  a box that can reach nothing. On a `vz` VM the forwarder also works round a freeze in Lima's
+  user-mode network (gVisor's netstack drops a SYN that reuses a recently closed connection,
+  google/gvisor#15013): it resets upstream connections the proxy closed first and re-dials a
+  connect that hasn't answered in 2 s. Why: until now every container in the VM — an eval harness's
+  sandbox as much as the box — was the same client to the proxy
+  ([ADR-0034](https://github.com/twistco/foldyard/blob/main/docs/adrs/0034-the-proxy-knows-which-container-asked.md)).
+- **A crossing out of a container is told on your computer.** The first time a process crosses
+  out of a container in a monitored VM boot, the supervisor logs it and posts a desktop
+  notification naming the container, once per crossing (a restart doesn't repeat it). Off with
+  `[host] notifications = false`.
+- **`fy init --with claude,vscode` writes those blocks already uncommented.** An agent and the
+  VS Code server volume are set up when the box is created, so turning one on after `fy box up`
+  meant an adopt and a box recreate. Named at `init`, the first `fy box up` creates the box with
+  them, and step 2 of the scaffold's header says to switch the agent on rather than uncomment it.
+  The names are `claude`, `codex` and `vscode` (repeat the flag or comma-separate them): the
+  blocks that work exactly as scaffolded. An active `[codex]` carries the scaffold's agent prompt,
+  naming `fy codex` and the skill's file path, instead of the commented `"…"` placeholder. Without `--with` the scaffold is unchanged.
+- **`fy worktree add <name> --box` brings the new worktree's box up as well**, the same as running
+  `WORKTREE=<name> fy box up` afterwards. It starts the box only once the worktree's config is
+  adopted, and says so when it isn't; on a worktree that already exists it starts the box, and
+  that box's own launch check asks for anything still to adopt.
+- **A worktree added while a dev box runs is now masked in that box straight away, without
+  recreating it.** Each box mounts the dependency dirs (`[box].shadow_volumes`) of every other
+  checkout read-only, so an install there fails instead of writing onto your computer's disk. Those
+  mounts are set when the box is created, so a worktree added later used to stay unmasked in every
+  running box until you recreated it, and `fy worktree add` could only name the boxes. Now
+  `fy worktree add` adds the masks to each running box ("masked '<name>' in <box> without
+  recreating it"), and `fy box up` on a running box adds any it lacks, for example after the box or
+  the VM restarted (which drops them). foldyard does this from your computer, through the VM's ssh
+  as the VM's own user, with no root: it is the same read-only mount a create would make, the box's
+  root can't remove it, and a symlink anywhere on the path is refused, never followed. It can't do
+  this for a box under the gVisor posture, a rootful engine in the VM, or a VM kernel older than
+  Linux 5.12. There, and for a dependency dir that is a symlink, it names the box and the reason,
+  and recreating the box masks it, as before. `fy doctor`'s `box shadowing` row and the
+  already-up `fy box up` now read a running box's real mounts, so they count a mask added this
+  way.
+
+### Fixed
+
+- **An install in another checkout's dependency dir from a dev box now fails, with a note
+  pointing at that checkout's own box, instead of landing on your computer's disk.** Every box
+  sees the main checkout and every worktree, but `[box].shadow_volumes` shadowed only the box's
+  own checkout: a `pnpm install` run in a worktree from main's box (or in main from a worktree's
+  box) wrote real files into the checkout on your computer — about three times slower over the VM
+  mount, and shared with your own tools. Now each box mounts those dirs of every other checkout
+  read-only; the one file in them, `RUN-IT-IN-ITS-OWN-BOX`, says to run the command there with
+  `WORKTREE=<name> fy box exec '<command>'` (`WORKTREE= …` for the main checkout). A box's mounts
+  are fixed when it is created, so this applies after `fy box down && fy box up`; a worktree
+  added later isn't masked in boxes already running, and `fy worktree add` names them. `fy doctor`
+  has a new `box shadowing` row that asks the running box what it actually mounts (the `shadow
+  volumes` row only ever read the config), and `fy box up` on a running box says what it lacks
+  (#91).
+- **On Lima's QEMU driver, a box now sees what your computer writes into the to-box.**
+  Lima mounts a read-only 9p share with a cache that never re-checks the files, on the assumption
+  that nothing changes them, but your computer keeps writing the to-box, so a box could keep
+  reading an old copy indefinitely. foldyard now pins that mount's cache to `mmap`, as Lima already
+  does for the writable mounts. Writes are still refused outside the guest, exactly as before.
+  That's every Linux and WSL2 VM, and a macOS one created with `vmtype = "qemu"`. **Restart each
+  such VM once:** `fy up` refuses a running one with the old setting until
+  `fy machine stop && fy up` (containers and volumes are kept). Nothing changes for macOS's
+  default `vz`.
+- **The guest monitor names a container whose mount-namespace number it took over from one that
+  had just died.** The kernel hands a freed number to the next namespace made, so when no relay
+  snapshot fell between the old container's death and the new one's start, the join read every
+  event in between as `ambiguous` — the new container's opening commands and the old one's last —
+  and a hook with `who = ["container"]` dropped them without a gap (5 agent containers on one
+  overnight run lost 6–49 s each). The join now reads the containers' own inits leaving and
+  entering the namespace, which the store already holds, to choose between the two containers the
+  snapshots named. It applies to stored history: `fy monitor --since … --until …` re-joins it.
+  The store's catalogue gains these marks in place on first open (seconds on a 1 GB store).
+- **A monitor hook is told about the events its `who` filter passes over because the join
+  couldn't place them.** Each batch's `gaps` now carries an `ambiguous` entry, with the mount
+  namespace (`mnt`), for the `ambiguous` events a hook would have wanted as `container` events,
+  so a coverage check reads those times as "no evidence", not "the container did nothing". They
+  are rare once the join reads the containers' inits: 31 namespaces in a busy night's whole boot,
+  none outside a container being replaced.
+- **The guest monitor's relay snapshots as soon as a container's init enters a mount namespace,
+  even one its last snapshot already had,** and looks again for a namespace no snapshot found
+  after a minute. Before, a number handed straight from a dead container to the next waited for
+  the minute timer, and under churn a number looked for once was never looked for again (three
+  short-lived containers on one overnight run were never named at all). This changes the monitor's
+  boot script: a VM that records it (`[machine] monitor = "observe"`, or turned off since) is
+  refused as stale until you run
+  `fy machine stop && fy up`.
+- **The egress proxy's lines in `fy host logs` carry the time they were written.** mitmdump's
+  output was block-buffered into the supervisor's log, which stamps each line as it reads it: lines
+  arrived in batches up to an hour late, and a batch ending mid-line ran the next `[host]` line into
+  it. The proxy now runs unbuffered, so its lines arrive as they are written and run into the next
+  line far more rarely (not never: a line's text and its newline are still two writes). Its launch
+  env changes, so the supervisor restarts it once, when the supervisor first runs the upgraded
+  foldyard.
+- **Two worktrees no longer share ports.** A worktree's port offset was a hash of its name into 89
+  slots, so two names could land on one (28% odds by eight worktrees): their stacks wanted the
+  same ports, and their egress proxies one port, where the supervisor took each proxy for the
+  other's leftover and killed it in turn. `fy box up` failed with the proxy `exited (rc 0)`, and
+  while both boxes were up either could reach the other's proxy and credentials. Your computer
+  now records an offset for each worktree it knows, keeping the hashed one while no other worktree
+  has it, so most worktrees keep their ports. The second of two that shared one moves; if its box
+  is up, `fy box up` says to recreate it. And should two daemons still want one port (a pin, or
+  `WT_OFFSET`), the supervisor runs one and `fy host logs` names the other.
+- **`fy worktree add` now adopts the new worktree's config, and its box gets main's keyless
+  `claude`/`codex` modes.** Copying those modes from main read the worktree's adopted config,
+  which a fresh worktree didn't have yet, so it never copied anything: the worktree's box came up
+  with both off while main had them on, and `fy box up` then asked for the first adoption. A
+  config byte-identical to the one adopted for main is now adopted without a prompt (it grants
+  nothing new) and the modes are copied after it. A config that differs is shown as a diff
+  against main and adopted only if you answer the prompt; with no terminal, or if you decline, the
+  worktree is still made and the message says how to adopt it later. `-y` still only answers the
+  question about registering an existing worktree, and never adopts a config.
+- **A worktree re-added under a removed one's name no longer inherits its adopted config.** The
+  adopted copy is kept per checkout path and `fy worktree remove` left it behind, so your computer
+  ran the new checkout from the old branch's config. `remove` now deletes it, and `add` drops
+  one it finds at a path whose checkout it is about to create, saying so.
+- **In a dev box, `fy doctor`'s `box shadowing` row no longer tells you to recreate the box for a
+  worktree your computer never registered.** A checkout made with plain `git worktree add` (or
+  before the registry existed) is masked in no box, because a box masks only the worktrees
+  registered with your computer. But the box can't read the registry, so its doctor counted every
+  checkout it could see and reported one like that as "added after the box was created", with a
+  recreate that could never fix it — even for a box created seconds earlier. The row now reads the
+  registry your computer baked into the box when it created it, lists unregistered checkouts
+  apart, and gives the real fix: `fy worktree add <name>` on your computer (it asks before
+  registering an existing checkout), then recreate the box. `fy box up` on a running box says the
+  same. A box created by an older foldyard carries no such record, so its row still can't tell the
+  two apart, and now says so.
+- **A worktree that isn't adopted yet is still its project's on your computer.** With nothing
+  adopted your computer reads no config for a checkout, so a fresh worktree was named after its
+  directory: a project of that name (its own `~/.foldyard/` state dir and port band), a machine
+  of that name and the default `lima` backend. A `fy box exec` there was told "lima machine
+  '<worktree>' does not exist" on a podman host, and `fy mode` or `fy allow` wrote state no
+  checkout reads. For a worktree `fy worktree add` registered, `[project] name`/`prefix` and
+  `[machine] name`/`backend`/`worktrees_root` now come from main's adopted config. Nothing else
+  does: your computer still runs nothing for the worktree until it is adopted.
+- **A worktree gets main's keyless `claude`/`codex` modes however its config is first adopted.**
+  They were copied only when `fy worktree add` itself adopted the config, so a worktree adopted
+  later — at the `fy box up` or `fy up` prompt after declining at `add`, with
+  `fy config adopt`, or from the TUI — came up with both off and its box warned. The copy now
+  happens at the first adoption, wherever it is, and only then: a later adoption copies nothing,
+  and a mode the worktree already sets is left as it is.
+
 ## 0.6.2 — 2026-10-22
 
 ### Fixed
