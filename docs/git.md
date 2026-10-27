@@ -156,6 +156,21 @@ checkout and branch (`wt/<name>` by default, forked from the trunk), its own box
 ports, all in the one VM. Don't run `git worktree add` in the box, and `fy worktree add` refuses
 there: it would record paths in the shared `.git` that exist on only one side.
 
+Your computer runs each checkout's *adopted* `foldyard.toml`, never the working tree
+([configuration](./configuration.md#the-adopted-config-what-the-host-actually-runs)), so `fy worktree add`
+settles the new checkout's adoption before it finishes. A worktree whose config is byte-identical
+to the one adopted for main is adopted without a prompt, since it grants nothing main hasn't
+already been granted: it says `✓ config adopted — identical to main's`. One that differs is shown
+as a diff against main and adopted only if you answer the prompt; with no terminal, or if you
+decline, the worktree is still made, nothing is adopted, and `WORKTREE=<name> fy config diff`
+then `WORKTREE=<name> fy config adopt` (or the prompt at `WORKTREE=<name> fy box up`) finishes it.
+`-y` only answers the question about registering an existing worktree; it never adopts a config.
+Once the config is adopted, main's keyless `claude`/`codex` modes are copied into the worktree,
+so its box can use them from the start.
+
+`fy worktree add <name> --box` then brings the worktree's box up, the same as running
+`WORKTREE=<name> fy box up`. If its config wasn't adopted it doesn't start the box, and says so.
+
 Every box sees every checkout: main's box reaches the worktrees, a worktree's box reaches main
 and the other worktrees. Edit and read across them freely, but run installs in a checkout from
 its own box. Each box keeps only its own checkout's `[box].shadow_volumes` dirs in volumes; the
@@ -168,7 +183,8 @@ added after a box was created isn't masked in that box until it's recreated: `fy
 names the boxes it isn't masked in, and `fy doctor`'s `box shadowing` row reports it.
 
 `fy worktree remove <name>` takes down that worktree's box, stack and volumes, deletes the
-checkout and keeps its branch. A worktree with uncommitted work needs `--force`; that work is
+checkout and its adopted config, and keeps its branch, so a worktree added later under the same
+name starts with nothing adopted. A worktree with uncommitted work needs `--force`; that work is
 saved first on a ref in the main checkout (`refs/fy/removed/<name>-<time>`), and the command
 prints how to restore it.
 
