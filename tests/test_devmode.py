@@ -1184,6 +1184,34 @@ def test_box_shadow_row_counts_a_mask_added_while_the_box_ran(
     assert status == "ok" and "2 in other checkouts masked" in detail
 
 
+def test_box_shadow_row_says_when_it_could_not_read_the_live_mounts(
+    tmp_path, monkeypatch, register_worktree
+):
+    # Past the budget (or with no ssh route) the row falls back to the engine's record — and says
+    # that a mask added while the box ran isn't in it, rather than claiming it's missing outright.
+    from foldyard import crossinject
+
+    main = tmp_path / "repo"
+    wt_root = devmode.config.worktrees_root(main)
+    mounts = [_vol(f"{main}/node_modules", "acme-devbox-shadow-node_modules")]
+    _box_row_setup(tmp_path, monkeypatch, register_worktree, inspect=mounts)
+    budgets: list[float] = []
+
+    def slow(*a, timeout, **k):
+        budgets.append(timeout)
+        return None  # what check answers when the VM doesn't in time
+
+    monkeypatch.setattr(crossinject, "check", slow)
+    [(status, _, detail)] = list(devmode._box_shadow_check())
+    assert status == "warn" and f"{wt_root}/a/node_modules" in detail
+    assert "its live mounts couldn't be read just now" in detail
+    assert budgets == [5]
+    # …and read live, no such caveat
+    monkeypatch.setattr(crossinject, "check", lambda *a, **k: set())
+    [(_, _, detail)] = list(devmode._box_shadow_check())
+    assert "couldn't be read just now" not in detail
+
+
 def test_box_shadow_row_flags_own_dirs_that_are_plain_binds(
     tmp_path, monkeypatch, register_worktree
 ):

@@ -315,6 +315,9 @@ class MaskGaps(NamedTuple):
     # In a box only: dirs of checkouts your computer hadn't registered when it created this box
     # (:func:`crossmask.unregistered`). No create masks those until `fy worktree add` registers one.
     unregistered: list[crossmask.Mask]
+    # Whether the masks were read from the box's kernel (crossinject.check). False: from what
+    # `inspect` recorded at create, which never lists a mask added while the box ran.
+    live: bool = True
 
 
 def _own_box(checkout: str) -> bool:
@@ -371,7 +374,12 @@ def _mask_gaps(
             return crossmask.unmasked(mounts, wanted, volume)
         return [m for m in wanted if m.path not in live]
 
-    return MaskGaps(crossmask.unshadowed(mounts, checkout, dirs), lacking(masks), lacking(strays))
+    return MaskGaps(
+        crossmask.unshadowed(mounts, checkout, dirs),
+        lacking(masks),
+        lacking(strays),
+        live=live is not None,
+    )
 
 
 def _checkout_label(name: str) -> str:
@@ -422,7 +430,7 @@ def _warn_mask_gaps(engine: str, box: str, ctx) -> None:
         return
     if not gaps:
         return
-    own, others, unregistered = gaps
+    own, others, unregistered = gaps.own, gaps.others, gaps.unregistered
     if own:
         print(
             f"⚠ dev box {box} doesn't shadow {', '.join(own)} (declared in [box].shadow_volumes "

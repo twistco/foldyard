@@ -44,9 +44,9 @@ _REFUSALS = {
     "no-ssh": "there's no ssh route into the VM",
     "no-box": "its process can't be read from the engine",
     "no-volume": "the note volume can't be created",
-    "rootful": "the VM's engine runs it as root, and adding a mount to it would need root in the "
-    "VM, which foldyard never takes. A rootful engine is no boundary at all (container root is VM "
-    "root): foldyard never makes one, and `fy verify` FAILs it",
+    "rootful": "the VM's engine runs it as root (no boundary at all — container root is VM root — "
+    "which foldyard never makes and `fy verify` FAILs), and adding a mount to it would need root "
+    "in the VM, which foldyard never takes",
     "enosys": "the VM's kernel lacks the new mount API (Linux 5.12 or later)",
     "stale": "it restarted while foldyard was looking",
 }

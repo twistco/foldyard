@@ -255,17 +255,25 @@ def probe(k, target: str) -> str:
     return MASKED if ro else WRITABLE
 
 
-def _probe_waiting(k, target: str) -> str:
-    """:func:`probe`, giving a dir the host has just made a few seconds to reach the guest."""
-    waited = 0.0
-    while (state := probe(k, target)) == MISSING and waited < MISSING_WAIT_S:
+class Budget:
+    """The seconds a run may still spend waiting for missing dirs — ONE allowance shared by every
+    target, so a run with several missing ones stays inside the host's ssh timeout."""
+
+    def __init__(self, seconds: float = MISSING_WAIT_S) -> None:
+        self.left = seconds
+
+
+def _probe_waiting(k, target: str, budget: Budget) -> str:
+    """:func:`probe`, giving a dir the host has just made what's left of ``budget`` to reach the
+    guest (the dirs are made together, so a wait for one is a wait for the rest too)."""
+    while (state := probe(k, target)) == MISSING and budget.left > 0:
         k.sleep(MISSING_STEP_S)
-        waited += MISSING_STEP_S
+        budget.left -= MISSING_STEP_S
     return state
 
 
-def inject_one(k, target: str) -> str:
-    state = _probe_waiting(k, target)
+def inject_one(k, target: str, budget: Budget | None = None) -> str:
+    state = _probe_waiting(k, target, budget or Budget())
     if state not in (UNMASKED, WRITABLE):
         return state
     tree = k.clone()
@@ -298,6 +306,7 @@ def inject_one(k, target: str) -> str:
 
 def run(mode: str, targets: list[str], k) -> dict[str, str]:
     results: dict[str, str] = {}
+    budget = Budget()
     for t in targets:
         if not valid_target(t):
             results[t] = INVALID
@@ -305,7 +314,7 @@ def run(mode: str, targets: list[str], k) -> dict[str, str]:
             results[t] = probe(k, t)
         else:
             try:
-                results[t] = inject_one(k, t)
+                results[t] = inject_one(k, t, budget)
             except OSError as e:
                 results[t] = f"error: {e.strerror or e}"
     return results

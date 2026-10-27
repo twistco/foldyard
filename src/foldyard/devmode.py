@@ -1547,6 +1547,10 @@ def _box_shadow_check():
         worktree = config.active_worktree()
         checkout = str(config.worktrees_root(main) / worktree) if worktree else str(main)
         name = f"{active_project()}-devbox"
+        # 5 s per call, the live read (crossinject.check) included: measured 2026-10-27 at a
+        # median 0.49 s / max 0.51 s on the podman backend (libkrun) and 0.13 / 0.15 s on Lima
+        # (vz) — ssh, the guest's python3 and two engine reads. Past it the row reads the
+        # engine's record and says so (MaskGaps.live).
         gaps = box._mask_gaps(
             config.engine(), name, _engine_env(), checkout=checkout, main=main, timeout=5
         )
@@ -1556,7 +1560,7 @@ def _box_shadow_check():
         return
     from . import crossmask
 
-    own, others, unregistered = gaps
+    own, others, unregistered = gaps.own, gaps.others, gaps.unregistered
     if not (own or others or unregistered):
         dirs = config.box_shadow_volumes()
         n_masks = len(
@@ -1595,6 +1599,13 @@ def _box_shadow_check():
                 " made outside `fy worktree add` stays unmasked after a recreate until"
                 " `fy worktree add <name>` on your computer registers it)"
             )
+    if (others or unregistered) and not gaps.live:
+        # The box's own mounts couldn't be read in time (crossinject.check): this is what the
+        # engine recorded at create, which never lists a mask `fy worktree add`/`fy box up` added.
+        lines.append(
+            f"      (from what the engine recorded when {name} was created: its live mounts"
+            " couldn't be read just now, and a mask added since it started isn't in that record)"
+        )
     if unregistered:
         lines.append(
             f"      not registered with your computer when {name} was created, so not masked"

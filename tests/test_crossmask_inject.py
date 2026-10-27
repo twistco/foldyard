@@ -210,6 +210,19 @@ def test_inject_gives_up_on_a_dir_that_never_appears():
     assert k.slept == pytest.approx(inj.MISSING_WAIT_S)
 
 
+def test_the_wait_is_one_allowance_shared_by_every_target():
+    # Several missing dirs must not add up past the host's ssh timeout (crossinject.TIMEOUT_S):
+    # the run waits MISSING_WAIT_S in all, not per target — and still masks one that's there.
+    targets = [f"/r/wt/{n}/node_modules" for n in "abcdefgh"]
+    k = FakeKernel({"/r/wt/h/node_modules": ((7, 9), False)})
+    got = inj.run("inject", targets, k)
+    assert got == {**dict.fromkeys(targets[:-1], "missing"), targets[-1]: "injected"}
+    assert k.slept == pytest.approx(inj.MISSING_WAIT_S)
+    from foldyard import crossinject
+
+    assert inj.MISSING_WAIT_S < crossinject.TIMEOUT_S / 2  # room for ssh + python start
+
+
 def _rename_after_attach_resolve(kernel, target, n):
     # 1: the probe, 2: the resolve the attach uses — the box renames the dir away right after it
     # and makes a fresh one in its place, which the mount never reaches.

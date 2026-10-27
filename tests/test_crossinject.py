@@ -239,7 +239,7 @@ def test_a_target_the_helper_never_answered_for_is_left(world):
 @pytest.mark.parametrize(
     ("code", "says"),
     [
-        ("rootful", "`fy verify` FAILs it"),
+        ("rootful", "`fy verify` FAILs"),
         ("enosys", "5.12"),
         ("stale", "restarted"),
     ],
@@ -348,3 +348,11 @@ def test_the_helper_ships_in_the_package():
     assert crossinject.HELPER.is_file()
     assert crossinject.HELPER.parent.name == "crossmask"
     assert crossmask.note_volume("acme") == "acme-elsewhere"
+
+
+@pytest.mark.parametrize("code", sorted(crossinject._REFUSALS))
+def test_each_refusal_is_one_clause(code):
+    # `box._left_why` joins reasons with "; " into one sentence: a reason with its own full stop
+    # (or a capital after one) would read as two.
+    why = crossinject._REFUSALS[code]
+    assert ". " not in why and not why.endswith(".") and why[0].islower()
