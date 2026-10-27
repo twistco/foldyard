@@ -1163,7 +1163,25 @@ def test_box_shadow_row_flags_a_late_worktree_the_box_does_not_mask(
     assert f"{wt_root}/b/node_modules" in detail and f"{main}/node_modules" not in detail
     assert "WORKTREE=b fy box exec" in detail
     assert "WORKTREE=a fy box down && WORKTREE=a fy box up" in detail
+    # …and the way that needs no recreate: `fy box up` masks it in the running box
+    assert "`WORKTREE=a fy box up` masks them in the running box" in detail
     assert seen[0][2] == "acme-a-devbox"
+
+
+def test_box_shadow_row_counts_a_mask_added_while_the_box_ran(
+    tmp_path, monkeypatch, register_worktree
+):
+    # `inspect` never lists a mask added after create; the kernel's view (crossinject.check) does.
+    from foldyard import crossinject
+
+    main = tmp_path / "repo"
+    wt_root = devmode.config.worktrees_root(main)
+    mounts = [_vol(f"{main}/node_modules", "acme-devbox-shadow-node_modules")]
+    _box_row_setup(tmp_path, monkeypatch, register_worktree, inspect=mounts)
+    live = {f"{wt_root}/a/node_modules", f"{wt_root}/b/node_modules"}
+    monkeypatch.setattr(crossinject, "check", lambda *a, **k: live)
+    [(status, _, detail)] = list(devmode._box_shadow_check())
+    assert status == "ok" and "2 in other checkouts masked" in detail
 
 
 def test_box_shadow_row_flags_own_dirs_that_are_plain_binds(

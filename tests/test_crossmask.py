@@ -265,3 +265,65 @@ def test_on_the_host_the_snapshot_is_never_read(tmp_path, monkeypatch, register_
     monkeypatch.setenv(crossmask.SNAPSHOT_ENV, '{"planted": 1}')
     assert set(crossmask.registered(main)) == {"real"}
     assert crossmask.unregistered(main) == {}
+
+
+# ── a running box's live mounts, and the dirs the host makes for an added mask ─────────
+
+_VOLROOT = "/home/u.guest/.local/share/containers/storage/volumes/acme-elsewhere/_data"
+
+
+def _mi(mountpoint: str, root: str = _VOLROOT, opts: str = "ro,nosuid,nodev,relatime") -> str:
+    return f"591 590 0:35 {root} {mountpoint} {opts} - btrfs /dev/vda2 rw,seclabel\n"
+
+
+def test_mountinfo_masked_reads_the_note_volume_read_only_at_each_target():
+    text = (
+        "1 0 0:1 / / rw - overlay overlay rw\n"
+        + _mi("/w/a/node_modules")
+        + _mi("/w/b/node_modules", opts="rw,relatime")  # writable: no mask
+        + _mi("/w/c/node_modules", root="/home/u.guest/other/_data")  # another volume
+        # CoreOS shows the ostree deployment's path: still that volume's _data
+        + _mi("/w/d/node_modules", root="/ostree/deploy/fcos/var/home/core" + _VOLROOT[13:])
+        + _mi("/w/with\\040space/node_modules")
+    )
+    paths = [f"/w/{n}/node_modules" for n in ("a", "b", "c", "d", "e", "with space")]
+    assert crossmask.mountinfo_masked(text, paths, "acme-elsewhere") == {
+        "/w/a/node_modules",
+        "/w/d/node_modules",
+        "/w/with space/node_modules",
+    }
+
+
+def test_mountinfo_masked_takes_the_mount_on_top():
+    # A later mount at the same point covers the earlier one; what the box sees is the top one.
+    covered = _mi("/w/a/node_modules") + _mi("/w/a/node_modules", root="/x", opts="rw")
+    assert crossmask.mountinfo_masked(covered, ["/w/a/node_modules"], "acme-elsewhere") == set()
+    uncovered = _mi("/w/a/node_modules", root="/x", opts="rw") + _mi("/w/a/node_modules")
+    assert crossmask.mountinfo_masked(uncovered, ["/w/a/node_modules"], "acme-elsewhere") == {
+        "/w/a/node_modules"
+    }
+
+
+def test_mountinfo_masked_ignores_lines_it_cannot_read():
+    assert crossmask.mountinfo_masked("garbage\n\n1 2\n", ["/w/a"], "acme-elsewhere") == set()
+
+
+def test_host_dir_walks_from_the_bind_root_that_holds_the_mask(tmp_path):
+    main = tmp_path / "repo"
+    wt_root = tmp_path / "repo-worktrees"
+    assert crossmask.host_dir(f"{wt_root}/a/platform/node_modules", main, wt_root) == (
+        wt_root,
+        "a/platform/node_modules",
+    )
+    assert crossmask.host_dir(f"{main}/data/.venv", main, wt_root) == (main, "data/.venv")
+    assert crossmask.host_dir("/elsewhere/x", main, wt_root) is None
+
+
+def test_host_dir_prefers_the_deeper_root_when_the_worktrees_live_in_main(tmp_path):
+    # From the worktrees root, never from main: the walk then checks the worktree's own dir too.
+    main = tmp_path / "repo"
+    wt_root = main / ".worktrees"
+    assert crossmask.host_dir(f"{wt_root}/a/node_modules", main, wt_root) == (
+        wt_root,
+        "a/node_modules",
+    )

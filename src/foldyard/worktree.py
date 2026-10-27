@@ -419,13 +419,13 @@ def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -
 
 
 def _say_unmasked(main: Path, name: str, *, fresh: bool) -> None:
-    """Name the running boxes that don't mask the new worktree's ``[box].shadow_volumes`` dirs
-    (a box's mounts are fixed at create — see :mod:`foldyard.crossmask`), and the two ways out.
-    Says it; never recreates a box. Best-effort: a report must not fail the add."""
+    """Mask the new worktree's ``[box].shadow_volumes`` dirs in the running boxes that lack them
+    (:func:`foldyard.box.mask_running_boxes`, no recreate), then name those it couldn't and the two
+    ways out. Never recreates a box. Best-effort: a report must not fail the add."""
     from . import box
 
     try:
-        late = box.boxes_not_masking(main, name, fresh=fresh)
+        late = box.mask_running_boxes(main, name, fresh=fresh)
     except (Exception, SystemExit):
         return
     if not late:

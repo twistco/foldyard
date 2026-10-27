@@ -146,14 +146,17 @@ def _ssh_argv(target: SshTarget) -> list[str]:
     ]
 
 
-def _ssh(target: SshTarget, script: str, stdin: bytes | None = None) -> subprocess.CompletedProcess:
+def _ssh(
+    target: SshTarget, script: str, stdin: bytes | None = None, timeout: float = 600
+) -> subprocess.CompletedProcess:
     """Run ``script`` in the guest as the VM user (``bash -c``, so stdin stays free for a
-    payload). Output decoded; never raises on a non-zero exit."""
+    payload). Output decoded; never raises on a non-zero exit (a ``timeout`` that runs out
+    raises ``TimeoutExpired``)."""
     out = subprocess.run(
         [*_ssh_argv(target), f"bash -c {shlex.quote(script)}"],
         input=stdin,
         capture_output=True,
-        timeout=600,
+        timeout=timeout,
     )
     return subprocess.CompletedProcess(
         out.args,

@@ -901,9 +901,10 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   in a masked dir, `RUN-IT-IN-ITS-OWN-BOX`, says how to run the command in that checkout's own
   box ([git.md](./git.md#worktrees)). Podman creates a missing mountpoint, so a declared dir that
   doesn't exist yet appears empty in each checkout once a box is created. A box's mounts are
-  fixed when it's created: a dir added here, or a worktree added later, needs
-  `fy box down && fy box up`, and `fy doctor`'s `box shadowing` row says when a running box lacks
-  one. Default: `[]`.
+  fixed when it's created: a dir added here needs `fy box down && fy box up`. A worktree added
+  while a box runs gets its masks in that box without a recreate (`fy worktree add`, and `fy box
+  up` on a running box, add them where the VM allows — see [git.md](./git.md#worktrees)), and
+  `fy doctor`'s `box shadowing` row says when a running box lacks one. Default: `[]`.
 - **`caches`** — shared cache volumes: `[{ volume, path }]`, `path` relative to the box's `HOME`.
   Default: `[]`.
 - **`warmup`** — background steps after box-up: `[{ dir, run }]`, each run in `<checkout>/<dir>`.

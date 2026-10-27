@@ -160,8 +160,22 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   read-only note volume per project (`<prefix>-elsewhere`, holding `RUN-IT-IN-ITS-OWN-BOX`,
   rewritten by `box up`) over each, so an install there fails instead of writing onto your computer;
   the box's own dirs keep their shadow volumes. Worktrees from the host's registry at create, never
-  a listing of the mount. Mounts are create-time, so `fy worktree add`, the already-up `fy box up`
-  and doctor's `box shadowing` row report a box that lacks one — none of them recreates it.
+  a listing of the mount. Mounts are create-time, so for a box already running `crossinject.py`
+  ADDS them (`fy worktree add`, the already-up `fy box up`): foldyard's own helper
+  (`assets/crossmask/inject.py`, sent on stdin to the guest's `python3 -I -` over the backend's
+  ssh, as the VM user — no root, no sudo) joins the BOX's user namespace and its conmon's mount
+  namespace (never `podman unshare`'s: after a `system migrate` the API service's and the CLI's
+  differ), `open_tree`-clones the note volume read-only and private, and `move_mount`s it on a
+  target resolved with `openat2(RESOLVE_NO_SYMLINKS)`; each attach is re-resolved and compared by
+  mount id, and detached again if the box renamed the dir in between. Mount propagation can't do
+  this (crun's binds come up private — the spike, 2026-10-27). The target dirs are made host-side
+  first with `mountwrite.makedirs`. It refuses, falling back to the nag + recreate, in a box, under
+  gVisor (the recorded runtime), for a rootful engine (the box's userns not the VM user's) and on
+  ENOSYS. `inspect`'s `Mounts` never shows an added mask, so `_mask_gaps` (the nag, doctor's
+  `box shadowing` row, `fy worktree add`'s `_late_boxes`) asks the kernel (`crossinject.check`:
+  the helper's `check` mode; in a box, its own `/proc/self/mountinfo`), falling back to `inspect`.
+  An added mask dies with a box or VM restart; the next create carries every mask. None of it
+  recreates a box.
 - `boximage.py` — foldyard's packaged box image: its fingerprint and the build shape a project's
   box and the base VM's share. Imports only `config`, so the project-less bake never imports
   `box` → `machine`, whose `MACHINE` binds at import from the project name (outside a project,

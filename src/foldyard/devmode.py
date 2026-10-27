@@ -1523,10 +1523,12 @@ def _shadow_volume_check():
 def _box_shadow_check():
     """What the RUNNING box serving this checkout actually mounts (#91): each of its own
     ``[box].shadow_volumes`` dirs really a volume, and the same dirs of every other checkout it
-    binds masked read-only (:mod:`foldyard.crossmask`). A box's mounts are fixed at create, so a
-    dir declared — or a worktree added — since then is missing from it until a recreate; nothing
-    else sees that, because the install just goes to your computer's disk. Yields nothing when no
-    dirs are declared or there's no box to ask. WARN, never fail. In the box it asks its own box,
+    binds masked read-only (:mod:`foldyard.crossmask`) — as the box's kernel shows them, since a
+    mask added while it ran never reaches ``inspect`` (:mod:`foldyard.crossinject`). A dir declared
+    since its create is missing until a recreate, and a worktree's masks until `fy worktree add` or
+    `fy box up` adds them to the running box (or a recreate); nothing else sees that, because the
+    install just goes to your computer's disk. Yields nothing when no dirs are declared or
+    there's no box to ask. WARN, never fail. In the box it asks its own box (its mount table),
     and it has no registry: the worktrees it expects are the ones it can see that your computer had
     registered when it created the box (:func:`foldyard.crossmask.registered`); the rest it lists
     apart, since only registering one (`fy worktree add`) lets a recreate mask it."""
@@ -1611,6 +1613,13 @@ def _box_shadow_check():
         )
     elif unregistered:
         fix = f"\n      → on your computer, {box._RENAME_FIRST}; then recreate {name}: {recreate}"
+    elif not own:
+        # Other checkouts' masks only: `fy box up` adds them to the running box (crossinject),
+        # where the VM lets it; the recreate is the remedy that always works.
+        fix = (
+            f"\n      → `{pin}fy box up`{where} masks them in the running box, or recreate it"
+            f"{where}: {recreate}"
+        )
     else:
         fix = f"\n      → recreate it{where}: {recreate}"
     yield _result(
