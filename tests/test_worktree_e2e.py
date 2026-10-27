@@ -1,6 +1,7 @@
 """`fy worktree add` / `remove`, live on a Linux host: `add` registers a sibling checkout on its
 own branch (one made with plain git: a NEW worktree's checkout runs in the box image, which is
-test_box_e2e's — see the first test); its stack comes up beside main's in the one VM (`WORKTREE=<name> fy up`); `remove`
+test_box_e2e's — see the first test); its stack comes up beside main's in the one VM
+(`WORKTREE=<name> fy up`); `remove`
 tears that stack down (containers AND the worktree's volumes), archives the worktree's bound-out
 agent transcripts to the durable store BEFORE git deletes the tree, removes the checkout, drops
 its local state, and leaves main's stack and the branch alone.

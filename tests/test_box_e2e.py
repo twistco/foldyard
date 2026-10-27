@@ -137,6 +137,9 @@ def test_worktree_add_checks_the_files_out_in_the_yard(repo):
     added = fy_ok(["worktree", "add", FRESH], repo, timeout=300)
     assert "checking the worktree out in the VM" in added.out, added.out
     assert "worktree ready" in added.out, added.out
+    # The branch carries main's committed config and main is adopted: adopted on the spot, no
+    # prompt (there is no terminal here) — the next `fy up` needs no adoption of its own.
+    assert "adopted — identical to main's" in added.out, added.out
     assert _git(fresh, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"wt/{FRESH}"
     assert (fresh / "compose.yml").read_text() == (repo / "compose.yml").read_text()
     # Written as the box writes the checkout — owned by you on your computer, like the rest.

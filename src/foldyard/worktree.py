@@ -347,9 +347,10 @@ def _checkout_in_yard(
 def _checkout_cmd(engine: str, image: str, main: Path, wt_dir: Path, oid: str) -> list[str]:
     """The one-off container that writes ``wt_dir``'s files and index from ``oid``: the image's
     own git, the two mounts ``worktree_init`` gets (at the paths your computer uses, which the
-    worktree's ``.git`` file names), the box's uid (the VM user, so the files are owned as the
-    box's are), no capabilities, no network. ``read-tree --reset -u`` moves no ref and runs no
-    checkout hook — it writes the files and the index, nothing else."""
+    worktree's ``.git`` file names), the box's uid (container root, which rootless podman maps to
+    the VM user, so the files are owned as the box's are), no capabilities, no network.
+    ``read-tree --reset -u`` moves no ref and runs no checkout hook — it writes the files and the
+    index, nothing else."""
     wt_root = config.worktrees_root(main)
     return [
         engine,
@@ -551,18 +552,44 @@ def _local_state_roots() -> tuple[Path, ...]:
     )
 
 
+def _pin_config(main: Path, name: str) -> config.Config:
+    """The handle on worktree ``name``'s ADOPTED-config pin (:func:`configpin.pin_dir`, keyed by
+    checkout path) — the key ``add`` adopts under, without the checkout having to exist.
+
+    The worktrees root is resolved, the last component never: that one is box-writable (every box
+    binds the root), and following a ``feat`` the box swapped for a link to main would make
+    ``remove feat`` drop MAIN's adoption. For a real directory it's the path the registry records
+    (:func:`worktree_registry.register` — the realpath), hence the key ``add`` used."""
+    root = Path(os.path.realpath(config.worktrees_root(main)))
+    return config.Config(repo_root=root / name, worktree=name, toml={})
+
+
 def _has_local_state(name: str) -> bool:
-    return worktree_registry.is_recorded(stack.main_repo(), name) or any(
-        (root / name).exists() for root in _local_state_roots()
+    from . import configpin
+
+    main = stack.main_repo()
+    return (
+        worktree_registry.is_recorded(main, name)
+        or any((root / name).exists() for root in _local_state_roots())
+        or os.path.lexists(configpin.pin_dir(_pin_config(main, name)))
     )
 
 
 def _remove_local_state(name: str) -> bool:
-    """Remove the per-worktree posture and VS Code state — and the host's record of the worktree —
-    after git removes the checkout."""
-    worktree_registry.unregister(stack.main_repo(), name)
+    """Remove the per-worktree posture and VS Code state, the host's record of the worktree, and
+    its adopted config — after git removes the checkout. The adoption goes too because it is keyed
+    by the checkout's path: left behind, the next worktree of this name would inherit it."""
+    from . import configpin
+
+    main = stack.main_repo()
+    worktree_registry.unregister(main, name)
     roots = _local_state_roots()
     ok = True
+    try:
+        configpin.forget(_pin_config(main, name))
+    except OSError as e:
+        _err(f"✗ couldn't remove the worktree's adopted config: {e}")
+        ok = False
     for root in roots:
         path = (root / name).resolve()
         if not path.is_relative_to(root.resolve()) or any(
@@ -653,51 +680,6 @@ def _default_base_ref(repo: Path) -> str | None:
     return None
 
 
-def _seed_keyless_posture(name: str) -> None:
-    """Mirror the main checkout's KEYLESS AI-assistant posture (the ``claude``/``codex`` axes) into
-    the fresh worktree's posture file, so a keyless box comes up injectable right after
-    ``fy worktree add``.
-
-    Why this is needed: posture is per-worktree and a fresh worktree has no ``dev-mode.json``, so
-    every axis reads its rung-0 default (off). With ``claude``/``codex`` off, the worktree's own
-    egress proxy installs NO token-inject rule on its per-worktree port — so codex/claude in the
-    worktree box send the far-future *dummy* token, 401, then try to refresh with the dummy refresh
-    token and fail with *"Your access token could not be refreshed."* The real creds are already
-    project-shared host-side (the proxy mints them from the host's ``~/.codex/auth.json`` /
-    ``host.env``); the only missing piece is this worktree's posture being ON. So we seed posture —
-    NOT creds (copying the rotating ``auth.json`` into the box would spawn a second, unsynchronised
-    refresher and corrupt the token).
-
-    Scope + safety: only the keyless-configured assistant axes, mirroring main's ACTUAL values (off
-    stays off), so this never escalates a worktree beyond what main already runs, and never touches
-    the credentialed cloud axes (gcp/storage/github/…). A non-keyless developer (no ``[claude]``/
-    ``[codex]`` ``keyless`` in their local toml) gets a no-op. Best-effort — a hiccup here must not
-    trap the (already-created) worktree."""
-    from . import devmode
-
-    try:
-        wt_cfg = devmode.worktree_config(name)
-        with config.using(wt_cfg):
-            configured = (("claude", config.claude_keyless()), ("codex", config.codex_keyless()))
-            keyless_axes = [axis for axis, on in configured if on]
-        if not keyless_axes:
-            return
-        with config.using(devmode.worktree_config("")):
-            main_mode = devmode.read(apply_expiry=True)["mode"]
-        updates = {a: main_mode[a] for a in keyless_axes if main_mode.get(a, "off") != "off"}
-        if not updates:
-            return
-        with config.using(wt_cfg):
-            devmode.set_mode(updates, reconcile=False)  # box up applies it; nothing's running yet
-        print(
-            "▶ seeded keyless mode from main: "
-            + ", ".join(f"{a}={v}" for a, v in updates.items())
-            + f"  (its box will inject on `WORKTREE={name} fy box up`)"
-        )
-    except Exception as e:  # posture seeding is a best-effort convenience, never fatal
-        print(f"  (couldn't seed keyless mode — set it manually with `fy mode`: {e})")
-
-
 def _branch_name_ok(name: str) -> bool:
     """Whether git would take ``name`` as a branch (`git check-ref-format --branch`'s rules),
     checked in-process: it only gates a hint, so it costs no git call."""
@@ -712,16 +694,82 @@ def _branch_name_ok(name: str) -> bool:
     )
 
 
-def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -> int:
+def _stdin_is_tty() -> bool:
+    """Whether someone is at a terminal to answer the adoption prompt — the launch gate's test."""
+    return sys.stdin.isatty()
+
+
+def _adopt_config(name: str) -> bool:
+    """Offer the new worktree's config for adoption, so the host runs it from the first
+    ``fy box up`` (:mod:`foldyard.configpin`, ADR-0022). True when the host now runs exactly this
+    tree (the ``resolve`` status says so — not merely that some pin exists).
+
+    A tree byte-identical to main's ADOPTED copy is adopted without asking: it grants nothing main
+    hasn't already been granted, so there is nothing to decide. Race-free, because every running
+    box binds the whole worktrees root and can write this checkout while it is compared: the
+    adoption carries the digest of the bytes compared AND the main pin they were compared against
+    (``reviewed=``/``baseline=``), so a write landing in between is :class:`ReviewStale`, never
+    adopted on main's say-so. Anything else goes through the first-adoption review the launch gate
+    uses (:func:`configpin.resolve`): the diff against main, and a prompt only on a terminal — no
+    terminal adopts nothing. ``-y`` plays no part: it answers the register question, and a config
+    that differs from main's is only ever adopted by someone who was shown it.
+
+    Best-effort: declining, or a failure here, leaves the worktree made and unadopted, never
+    undone."""
+    from . import configpin, devmode
+
+    try:
+        cfg = devmode.worktree_config(name)
+        drift = configpin.inspect(cfg)
+        if not drift.pinned_exists:
+            base = configpin.main_baseline(drift)
+            if base is not None and base.identical:
+                try:
+                    configpin.adopt(cfg, reviewed=drift.tree_digest(), baseline=base.digest)
+                except configpin.ReviewStale:
+                    pass  # it changed after it was compared: review what is there now, below
+                else:
+                    print(f"✓ config adopted — identical to main's ({base.digest}).", flush=True)
+                    return True
+        status = configpin.resolve(cfg, interactive=_stdin_is_tty(), prompt=input, echo=_err)
+        # Ready only when the host would run THIS tree: adopted just now, or a pin matching it.
+        # A pin the tree differs from (left unresolved, ignored) is not this checkout's config.
+        return status in ("clean", "pinned", "adopted")
+    except Exception as e:  # adoption is offered, never what fails the (already-made) worktree
+        _err(f"  (couldn't offer its config for adoption: {e})")
+        return False
+
+
+def _box_up(name: str) -> int:
+    """``WORKTREE=<name> fy box up``, as a FRESH process. Not box code in-process: this process
+    bound its import-time constants (``machine.MACHINE``, ``devmode.AXES``…) and config caches
+    before the adoption, which is exactly what the launch gate's own re-run
+    (:func:`configpin._rerun_with_adopted_config`) exists to shed. Its env drops the gate's re-run
+    marker, so the child's gate keeps its one re-run."""
+    from . import configpin
+
+    env = {k: v for k, v in os.environ.items() if k != configpin.RERUN_ENV}
+    env["WORKTREE"] = name
+    print(f"\n▶ WORKTREE={name} fy box up", flush=True)
+    return subprocess.run([sys.executable, "-m", "foldyard", "box", "up"], env=env).returncode
+
+
+def add(
+    name: str, branch: str = "", base: str = "", assume_yes: bool = False, box_up: bool = False
+) -> int:
     """Create a host-sibling worktree under the worktrees root, record it in the host's
-    worktree registry, and init its config.
+    worktree registry, init its config, and offer that config for adoption (:func:`_adopt_config`)
+    — a first adoption, wherever it happens, mirrors main's keyless posture into the worktree
+    (:func:`foldyard.keyless.seed_posture`). ``box_up`` then starts its box (:func:`_box_up`) —
+    only once its config is adopted, since the host would run nothing for it otherwise.
 
     A brand-new branch forks off ``base`` (an explicit ``--from``), else the project's default
     branch (:func:`_default_base_ref`) — NOT the primary checkout's current HEAD.
 
     On a worktree that ALREADY exists (one from before the registry, or made with plain ``git
     worktree add``) it registers instead, once the operator has confirmed its real path — the one
-    way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`."""
+    way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`.
+    ``box_up`` starts it there too; that box's own launch gate asks for any adoption still owed."""
     if (rc := _host_only("add")) is not None:
         return rc
     if name == "main":
@@ -765,8 +813,21 @@ def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -
     branch = branch or f"wt/{name}"
     wt_dir = wt_root / name
     if wt_dir.exists() or wt_dir.is_symlink():
-        return _register_existing(main, name, wt_dir, assume_yes)
+        rc = _register_existing(main, name, wt_dir, assume_yes)
+        return _box_up(name) if box_up and rc == 0 else rc
     wt_root.mkdir(parents=True, exist_ok=True)
+    # The checkout doesn't exist yet, so an adoption at its path is an earlier checkout's (removed
+    # by hand, or by a `remove` that predates dropping it). Dropped BEFORE git makes the checkout
+    # and it's registered, so the supervisor never serves the new one from the old branch's config.
+    from . import configpin
+
+    try:
+        if configpin.forget(_pin_config(main, name)):
+            print(f"▶ dropped a config adoption left at this path by an earlier '{name}'.")
+    except OSError as e:
+        # Going on would hand the new checkout the earlier one's adopted config.
+        _err(f"✗ couldn't remove a config adoption left at this path by an earlier '{name}': {e}")
+        return 1
     # Reproduce the recipe's machine-mount warning: worktree stacks need the rootless
     # machine to mount the worktrees root (no-op in the box / where there's no podman).
     machine.ensure(main, wt_root)
@@ -807,14 +868,27 @@ def add(name: str, branch: str = "", base: str = "", assume_yes: bool = False) -
         return rc
     worktree_registry.register(main, name, wt_dir)
 
-    _init_in_yard(main, wt_dir)
+    _init_in_yard(main, wt_dir)  # first: it copies foldyard.local.toml, which is adopted too
 
-    _seed_keyless_posture(name)
+    # Its first adoption also mirrors main's keyless posture in (configpin.adopt), here or later.
+    adopted = _adopt_config(name)
 
     print(f"\n✓ worktree ready: {wt_dir}  (branch {branch})")
-    print(f"  bring its stack up:  WORKTREE={name} fy up")
+    if adopted:
+        if not box_up:
+            print(f"  bring its box up:    WORKTREE={name} fy box up")
+        print(f"  bring its stack up:  WORKTREE={name} fy up")
+    else:
+        print("  its config isn't adopted, so your computer runs nothing for it yet.")
+        print(f"  Review it with `WORKTREE={name} fy config diff`, then")
+        print(f"  `WORKTREE={name} fy config adopt` — or adopt at `WORKTREE={name} fy box up`.")
     _say_unmasked(main, name, fresh=True)
-    return 0
+    if not box_up:
+        return 0
+    if not adopted:
+        _err(f"✗ --box: not starting '{name}''s box — its config isn't adopted (see above).")
+        return 1
+    return _box_up(name)
 
 
 def _say_unmasked(main: Path, name: str, *, fresh: bool) -> None:
@@ -1026,7 +1100,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
         print("  4. delete the ORPHANED checkout dir (git no longer tracks it) + worktree prune")
     else:
         print("  4. git worktree remove — the checkout directory is deleted")
-    print("  5. delete its local mode + isolated VS Code state")
+    print("  5. delete its local mode, isolated VS Code state + adopted config")
     if branch:
         print(f"  The branch '{branch}' is KEPT (delete it later with: git branch -D {branch}).")
     if not (assume_yes or force):

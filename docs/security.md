@@ -100,7 +100,9 @@ channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-moun
   meets conditions yours doesn't), and runs no git when one of them can't be read. Two gaps
   remain. A hook added to `.git/config` while the command runs can still slip past. And
   `fy worktree remove` still asks git on your computer whether the worktree has uncommitted work,
-  which runs a `clean` filter the config names for any file whose timestamps changed.
+  which runs a `clean` filter the config names for any file whose timestamps changed — on a
+  worktree whose files were checked out in the VM, every file, until your own first `git status`
+  there refreshes the index.
 - **The compose client reads your compose files on your computer.** Your stack runs in the VM,
   but the compose client that starts it runs on your computer, and the compose files are editable
   from the box. foldyard gives the client a minimal environment (never `host.env`; add names with

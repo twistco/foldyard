@@ -113,7 +113,6 @@ def real_add(filtered_repo, tmp_path, monkeypatch):
     monkeypatch.setattr(config, "worktree_base", lambda: None)
     monkeypatch.setattr(config, "worktree_init", lambda: None)
     monkeypatch.setattr(machine, "ensure", lambda *a, **k: None)
-    monkeypatch.setattr(worktree, "_seed_keyless_posture", lambda name: None)
     monkeypatch.setattr(worktree, "_say_unmasked", lambda *a, **k: None)
     monkeypatch.delenv("WORKTREE", raising=False)
     yard = yard_stub.install(monkeypatch, mode="none")
