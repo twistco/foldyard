@@ -543,42 +543,6 @@ def test_worktree_init_verb_refuses_an_unknown_worktree(fake_main, monkeypatch, 
     assert "no worktree at" in capsys.readouterr().err
 
 
-def test_add_seeds_keyless_posture_from_main(fake_main, monkeypatch):
-    # A fresh worktree's posture defaults every axis to off, so its proxy wouldn't inject the
-    # keyless Claude/Codex token and codex would 401→fail-to-refresh. `add` mirrors main's keyless
-    # assistant posture into the new worktree so its box comes up injectable. Only the keyless
-    # axes, only main's non-off values (codex=off here is NOT seeded).
-    from foldyard import devmode
-
-    monkeypatch.setattr(devmode, "worktree_config", lambda wt: {"wt": wt})
-    monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
-    monkeypatch.setattr(config, "codex_keyless", lambda: "chatgpt")
-    monkeypatch.setattr(
-        devmode, "read", lambda apply_expiry=True: {"mode": {"claude": "on", "codex": "off"}}
-    )
-    seeded: list[tuple] = []
-    monkeypatch.setattr(
-        devmode, "set_mode", lambda updates, **kw: seeded.append((updates, kw)) or {}
-    )
-
-    assert worktree.add("feat") == 0
-    # codex=off in main is skipped; claude=on is seeded; never reconciles (nothing is up yet).
-    assert seeded == [({"claude": "on"}, {"reconcile": False})]
-
-
-def test_add_skips_seed_when_not_keyless(fake_main, monkeypatch):
-    # No `[claude]`/`[codex]` keyless configured → nothing to inject, so no posture is written.
-    from foldyard import devmode
-
-    monkeypatch.setattr(config, "claude_keyless", lambda: "")
-    monkeypatch.setattr(config, "codex_keyless", lambda: "")
-    called: list = []
-    monkeypatch.setattr(devmode, "set_mode", lambda *a, **k: called.append(1))
-
-    assert worktree.add("feat") == 0
-    assert not called
-
-
 # ── add: the new checkout's config is offered for adoption ──────────────────────────
 #
 # The host runs a checkout's ADOPTED config (configpin, ADR-0022), and a fresh worktree has
@@ -856,6 +820,215 @@ def test_the_pin_key_never_follows_a_link_the_box_planted(fake_main):
 
     assert pin.repo_root == Path(os.path.realpath(fake_main["wt_root"])) / "feat"
     assert pin.worktree == "feat"
+
+
+# ── the keyless seed happens at the worktree's FIRST adoption, wherever that is ─────────────
+#
+# A fresh worktree has no posture file, so claude/codex read `off` and its proxy injects nothing:
+# the box's keyless dummy token 401s. The seed mirrors main's keyless axes in — at the first
+# adoption, since only then can the worktree's adopted config say `keyless` at all, and that
+# adoption may happen at `add`, at the launch gate, via `fy config adopt` or from the TUI.
+
+KEYLESS_EDITED = KEYLESS + '\n[proxy]\npassthrough = ["evil.example"]\n'
+
+
+def _main_runs(fake_main, monkeypatch, **mode: str) -> None:
+    """Main adopted KEYLESS, with ``mode`` as its posture (written the way `fy mode` writes it).
+    Real ``set_mode`` derives the proxy's per-worktree port, whose hash shells to ``cksum`` — which
+    the fixture's git fake would answer with nothing — so the hash is pinned."""
+    from foldyard import devmode
+
+    monkeypatch.setattr(stack, "_hashed_offset", lambda name: 7)
+    _adopt_main(fake_main, KEYLESS)
+    if mode:
+        with config.using(devmode.worktree_config("")):
+            devmode.set_mode(mode, reconcile=False)
+
+
+def _wt_mode_file(name: str = "feat") -> Path:
+    from foldyard import devmode
+
+    with config.using(devmode.worktree_config(name)):
+        return config.mode_file()
+
+
+def _wt_posture(name: str = "feat") -> dict | None:
+    """The worktree's posture FILE as written (``None`` when there is none) — not ``read``'s
+    defaults, which can't tell "never set" from "set to off"."""
+    import json
+
+    path = _wt_mode_file(name)
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def _unadopted_keyless_worktree(fake_main, monkeypatch, name: str = "feat") -> None:
+    """A worktree whose config declares keyless but differs from main's, made with no terminal —
+    so `add` adopts (and seeds) nothing, leaving the first adoption to a later door."""
+    _branch_declares(monkeypatch, KEYLESS_EDITED)
+    assert worktree.add(name) == 0
+    assert not _wt_adopted(name)
+    assert _wt_posture(name) is None
+
+
+def _at_a_terminal(monkeypatch, answer: str = "a") -> None:
+    import types
+
+    monkeypatch.setattr("sys.stdin", types.SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda q="": answer)
+
+
+def _gate(monkeypatch, name: str = "feat") -> str:
+    """`WORKTREE=<name> fy box up`'s launch gate, without its re-exec."""
+    from foldyard import configpin
+
+    monkeypatch.setenv("WORKTREE", name)
+    monkeypatch.setattr(configpin, "_rerun_with_adopted_config", lambda verb, rerun: None)
+    return configpin.gate("box up")
+
+
+def test_add_seeds_only_mains_keyless_axes_that_are_on(fake_main, monkeypatch, capsys):
+    """Main's ACTUAL values: codex=off in main stays off here, so nothing escalates past main —
+    and nothing reconciles (set_mode's reconcile=False: nothing of the worktree is up yet)."""
+    _main_runs(fake_main, monkeypatch, claude="on")
+
+    assert worktree.add("feat") == 0
+
+    posture = _wt_posture()
+    assert posture is not None and posture["claude"] == "on" and posture["codex"] == "off"
+    assert "seeded keyless mode from main: claude=on" in capsys.readouterr().err
+
+
+def test_add_seeds_once(fake_main, monkeypatch, capsys):
+    """`add` adopts through the same door as everything else — one seed, one line."""
+    from foldyard import devmode
+
+    _main_runs(fake_main, monkeypatch, claude="on", codex="on")
+    calls: list[dict] = []
+    real = devmode.set_mode
+    monkeypatch.setattr(devmode, "set_mode", lambda u, **kw: calls.append(u) or real(u, **kw))
+
+    assert worktree.add("feat") == 0
+
+    assert calls == [{"claude": "on", "codex": "on"}]
+    assert capsys.readouterr().err.count("seeded keyless mode") == 1
+
+
+def test_a_first_adoption_at_the_launch_gate_seeds(fake_main, monkeypatch, capsys):
+    """Declined (or no terminal) at `add`, adopted at `fy box up`'s gate: the box it then starts
+    must come up injectable, so the seed lands before the gate re-runs the verb."""
+    _main_runs(fake_main, monkeypatch, claude="on", codex="on")
+    _unadopted_keyless_worktree(fake_main, monkeypatch)
+    _at_a_terminal(monkeypatch)
+
+    assert _gate(monkeypatch) == "pinned"
+
+    posture = _wt_posture()
+    assert posture is not None and (posture["claude"], posture["codex"]) == ("on", "on")
+    assert "seeded keyless mode from main: claude=on, codex=on" in capsys.readouterr().err
+
+
+def test_a_first_adoption_via_fy_config_adopt_seeds(fake_main, monkeypatch):
+    from foldyard import cli
+
+    _main_runs(fake_main, monkeypatch, claude="on")
+    _unadopted_keyless_worktree(fake_main, monkeypatch)
+    monkeypatch.setenv("WORKTREE", "feat")
+
+    cli.config_adopt()
+
+    posture = _wt_posture()
+    assert posture is not None and posture["claude"] == "on"
+
+
+def test_a_later_adoption_never_seeds(fake_main, monkeypatch):
+    """Only the FIRST adoption seeds: main turning claude on afterwards is not this worktree's
+    choice, and adopting an unrelated config edit must not make it one."""
+    from foldyard import cli, devmode
+
+    _main_runs(fake_main, monkeypatch)  # main: both off — the first adoption seeds nothing
+    _unadopted_keyless_worktree(fake_main, monkeypatch)
+    monkeypatch.setenv("WORKTREE", "feat")
+    cli.config_adopt()
+    assert _wt_posture() is None
+
+    with config.using(devmode.worktree_config("")):
+        devmode.set_mode({"claude": "on"}, reconcile=False)
+    (fake_main["wt_root"] / "feat" / "foldyard.toml").write_text(KEYLESS_EDITED + "# edited\n")
+    cli.config_adopt()
+
+    assert _wt_posture() is None
+
+
+def test_a_first_adoption_never_overrides_a_posture_already_set(fake_main, monkeypatch):
+    """A posture file that already says claude=off — a lost adoption re-made, say — is the
+    operator's choice; only the axes it doesn't set are seeded."""
+    import json
+
+    _main_runs(fake_main, monkeypatch, claude="on", codex="on")
+    _unadopted_keyless_worktree(fake_main, monkeypatch)
+    path = _wt_mode_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"claude": "off", "expires": {}}))
+    _at_a_terminal(monkeypatch)
+
+    assert _gate(monkeypatch) == "pinned"
+
+    posture = _wt_posture()
+    assert posture is not None and (posture["claude"], posture["codex"]) == ("off", "on")
+
+
+def test_main_off_seeds_nothing(fake_main, monkeypatch):
+    _main_runs(fake_main, monkeypatch)
+    _unadopted_keyless_worktree(fake_main, monkeypatch)
+    _at_a_terminal(monkeypatch)
+
+    assert _gate(monkeypatch) == "pinned"
+    assert _wt_posture() is None
+
+
+def test_a_config_without_keyless_seeds_nothing(fake_main, monkeypatch, capsys):
+    """No `[claude]`/`[codex] keyless` in the worktree's adopted config: nothing to inject, so no
+    posture is written — even with main running claude. Nor TRIED: the seed stays silent, rather
+    than reaching set_mode with a switch this config doesn't have and swallowing its refusal."""
+    _main_runs(fake_main, monkeypatch, claude="on")
+    _branch_declares(monkeypatch, TOML)
+    assert worktree.add("feat") == 0  # differs from main's KEYLESS: not adopted here
+    _at_a_terminal(monkeypatch)
+    capsys.readouterr()
+
+    assert _gate(monkeypatch) == "pinned"
+    assert _wt_posture() is None
+    assert "keyless mode" not in capsys.readouterr().err
+
+
+def test_main_is_never_seeded(fake_main, monkeypatch):
+    """The seed's source is main, so it never writes main's posture — even where main's posture
+    file doesn't set the axis (``read`` reports main as on here to make that observable)."""
+    from foldyard import devmode, keyless
+
+    _adopt_main(fake_main, KEYLESS)
+    monkeypatch.setattr(devmode, "read", lambda apply_expiry=True: {"mode": {"claude": "on"}})
+    calls: list = []
+    monkeypatch.setattr(devmode, "set_mode", lambda *a, **k: calls.append(a))
+
+    assert keyless.seed_posture(devmode.worktree_config("")) == {}
+    assert not calls
+
+
+def test_a_removed_and_re_added_worktree_is_seeded_again(fake_main, monkeypatch):
+    """`remove` drops the worktree's posture (and its adoption), so the re-added worktree is
+    fresh again and its first adoption seeds like the first time."""
+    _main_runs(fake_main, monkeypatch, claude="on")
+    assert worktree.add("feat") == 0
+    assert _wt_posture() is not None
+    _git_removes_the_checkout(monkeypatch)
+    assert worktree.remove("feat", assume_yes=True) == 0
+    assert _wt_posture() is None
+
+    assert worktree.add("feat") == 0
+
+    posture = _wt_posture()
+    assert posture is not None and posture["claude"] == "on"
 
 
 # ── add --box ───────────────────────────────────────────────────────────────────────

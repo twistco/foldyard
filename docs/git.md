@@ -165,8 +165,11 @@ as a diff against main and adopted only if you answer the prompt; with no termin
 decline, the worktree is still made, nothing is adopted, and `WORKTREE=<name> fy config diff`
 then `WORKTREE=<name> fy config adopt` (or the prompt at `WORKTREE=<name> fy box up`) finishes it.
 `-y` only answers the question about registering an existing worktree; it never adopts a config.
-Once the config is adopted, main's keyless `claude`/`codex` modes are copied into the worktree,
-so its box can use them from the start.
+When a worktree's config is adopted for the first time, main's keyless `claude`/`codex` modes are
+copied into the worktree, so its box can use them from the start. That happens wherever the first
+adoption is: at `fy worktree add`, at the prompt from `WORKTREE=<name> fy box up` or `fy up`, from
+`WORKTREE=<name> fy config adopt`, or in the TUI. Only modes main has on are copied, never one
+the worktree's mode already sets, and a later adoption copies nothing.
 
 `fy worktree add <name> --box` then brings the worktree's box up, the same as running
 `WORKTREE=<name> fy box up`. If its config wasn't adopted it doesn't start the box, and says so.

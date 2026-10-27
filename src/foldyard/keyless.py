@@ -19,6 +19,10 @@ registry hot path:
     token", classify it by prefix (no need to ask which — ``sk-ant-api`` → Claude key,
     ``sk-ant-oat`` → Claude OAuth, ``sk-`` → OpenAI/Codex key), and append it to host.env. The
     I/O (prompt/echo) is injected so the logic is pure + unit-testable.
+
+And one posture convenience beside them, :func:`seed_posture`: a worktree's FIRST adoption mirrors
+main's keyless axes into its posture, so its box comes up injectable. It reaches into devmode only
+when called (lazily), keeping the import above stdlib-only.
 """
 
 from __future__ import annotations
@@ -27,8 +31,13 @@ import base64
 import fcntl
 import json
 import os
+import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import Config
 
 # ── the keyless credential taxonomy ────────────────────────────────────────────────────────────
 
@@ -442,3 +451,81 @@ def ensure_cred(
         f"✓ stored your {expected_label} in {host_env} (0600). The proxy will inject it in flight."
     )
     return "stored"
+
+
+# ── the worktree's keyless posture, seeded from main ───────────────────────────────────────────
+
+
+def seed_posture(wt_cfg: Config) -> dict[str, str]:
+    """Mirror the main checkout's KEYLESS AI-assistant posture (the ``claude``/``codex`` axes) into
+    a worktree's posture file, so its keyless box comes up injectable. Called by
+    :func:`foldyard.configpin.adopt` at the worktree's FIRST adoption — wherever that happens
+    (``fy worktree add``, the launch gate, ``fy config adopt``, the TUI) — with ``wt_cfg`` being
+    what was just adopted. Returns the axes it set (``{}`` for none).
+
+    Why this is needed: posture is per-worktree and a fresh worktree has no ``dev-mode.json``, so
+    every axis reads its rung-0 default (off). With ``claude``/``codex`` off, the worktree's own
+    egress proxy installs NO token-inject rule on its per-worktree port — so codex/claude in the
+    worktree box send the far-future *dummy* token, 401, then try to refresh with the dummy refresh
+    token and fail with *"Your access token could not be refreshed."* The real creds are already
+    project-shared host-side (the proxy mints them from the host's ``~/.codex/auth.json`` /
+    ``host.env``); the only missing piece is this worktree's posture being ON. So we seed posture —
+    NOT creds (copying the rotating ``auth.json`` into the box would spawn a second, unsynchronised
+    refresher and corrupt the token). And at the first ADOPTION, not at ``add``: the ``keyless``
+    keys are read from the worktree's adopted config, which a worktree has none of until then.
+
+    Scope + safety: a worktree only, never main (main is the source). Only the keyless-configured
+    assistant axes, mirroring main's ACTUAL values (off stays off), so this never escalates a
+    worktree beyond what main already runs, and never touches the credentialed cloud axes
+    (gcp/storage/github/…). An axis the worktree's posture file already sets is the operator's
+    choice (a lost adoption re-made finds one) and is left alone. That includes an ``off`` the
+    operator never chose: ``set_mode`` writes EVERY axis into the file, so any earlier write to the
+    worktree's posture leaves explicit offs behind. Fail-safe by design — the guard can only keep
+    an axis off, never turn one on. A non-keyless developer (no
+    ``[claude]``/``[codex]`` ``keyless`` in their local toml) gets a no-op. Written with
+    ``reconcile=False``: nothing of the worktree is up before its first adoption (the launch verbs
+    refuse an unadopted checkout), and the supervisor reconciles from the posture file. Best-effort
+    — a hiccup here must not fail the adoption that called it."""
+    from . import config, devmode
+
+    name = wt_cfg.worktree
+    if not name:
+        return {}
+    try:
+        with config.using(wt_cfg):
+            configured = (("claude", config.claude_keyless()), ("codex", config.codex_keyless()))
+            keyless_axes = [axis for axis, on in configured if on]
+            if not keyless_axes:
+                return {}
+            try:
+                already = json.loads(config.mode_file().read_text())
+            except (OSError, ValueError):
+                already = {}
+            if not isinstance(already, dict):
+                already = {}
+        with config.using(devmode.worktree_config("")):
+            main_mode = devmode.read(apply_expiry=True)["mode"]
+        updates = {
+            a: main_mode[a]
+            for a in keyless_axes
+            if a not in already and main_mode.get(a, "off") != "off"
+        }
+        if not updates:
+            return {}
+        with config.using(wt_cfg):
+            devmode.set_mode(updates, reconcile=False)
+        print(
+            "▶ seeded keyless mode from main: "
+            + ", ".join(f"{a}={v}" for a, v in updates.items())
+            + f"  (its box will inject on `WORKTREE={name} fy box up`)",
+            file=sys.stderr,
+            flush=True,
+        )
+        return updates
+    except (Exception, SystemExit) as e:  # a convenience, never fatal: set_mode can refuse too
+        print(
+            f"  (couldn't seed keyless mode — set it manually with `fy mode`: {e})",
+            file=sys.stderr,
+            flush=True,
+        )
+        return {}

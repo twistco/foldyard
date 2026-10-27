@@ -653,7 +653,12 @@ def adopt(cfg: config.Config, *, reviewed: str | None = None, baseline: str | No
     that no reader can see yet, the directory is renamed into place, and only then does the marker
     move. Absence stays state for free — a file the tree doesn't have is simply never written into
     the generation, so it can't be inherited from the copy this one replaces. An interrupted adopt
-    leaves an orphan staging dir and the PREVIOUS generation still selected, never a mixture."""
+    leaves an orphan staging dir and the PREVIOUS generation still selected, never a mixture.
+
+    A worktree's FIRST adoption (no pin before this one) then seeds its keyless posture from main
+    (:func:`_after_first_adoption`). Here rather than in each caller because every first adoption
+    comes through here — ``add``, the launch gate's prompt, ``fy config adopt``, the TUI — and a
+    door that forgot to seed left a box with ``claude``/``codex`` off."""
     _require_host()
     drift = inspect(cfg)
     if reviewed is not None and drift.tree_digest() != reviewed:
@@ -701,6 +706,8 @@ def adopt(cfg: config.Config, *, reviewed: str | None = None, baseline: str | No
         + b"\n",
     )
     _prune_generations(gens, keep=gen)
+    if not drift.pinned_exists:
+        _after_first_adoption(dataclasses.replace(cfg, toml=merged_toml(drift.tree)))
     return inspect(cfg)
 
 
@@ -723,6 +730,17 @@ def forget(cfg: config.Config) -> bool:
     (target / ADOPTED_MARKER).unlink(missing_ok=True)
     shutil.rmtree(target)
     return True
+
+
+def _after_first_adoption(adopted: config.Config) -> None:
+    """What a checkout's first adoption sets going, with ``adopted`` its just-adopted config: for a
+    worktree, its keyless posture mirrored from main (:func:`foldyard.keyless.seed_posture`, which
+    skips main and never raises). In this process, before the gate's re-run: the seed writes the
+    posture FILE, which the re-run ``fy box up`` and the supervisor read fresh. Lazy: keyless
+    reaches devmode, which imports this module."""
+    from . import keyless
+
+    keyless.seed_posture(adopted)
 
 
 def revert(cfg: config.Config) -> list[str]:
