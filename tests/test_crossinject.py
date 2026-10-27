@@ -239,7 +239,7 @@ def test_a_target_the_helper_never_answered_for_is_left(world):
 @pytest.mark.parametrize(
     ("code", "says"),
     [
-        ("rootful", "root"),
+        ("rootful", "`fy verify` FAILs it"),
         ("enosys", "5.12"),
         ("stale", "restarted"),
     ],
