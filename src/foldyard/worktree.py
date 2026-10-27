@@ -157,18 +157,44 @@ def _local_state_roots() -> tuple[Path, ...]:
     )
 
 
+def _pin_config(main: Path, name: str) -> config.Config:
+    """The handle on worktree ``name``'s ADOPTED-config pin (:func:`configpin.pin_dir`, keyed by
+    checkout path) — the key ``add`` adopts under, without the checkout having to exist.
+
+    The worktrees root is resolved, the last component never: that one is box-writable (every box
+    binds the root), and following a ``feat`` the box swapped for a link to main would make
+    ``remove feat`` drop MAIN's adoption. For a real directory it's the path the registry records
+    (:func:`worktree_registry.register` — the realpath), hence the key ``add`` used."""
+    root = Path(os.path.realpath(config.worktrees_root(main)))
+    return config.Config(repo_root=root / name, worktree=name, toml={})
+
+
 def _has_local_state(name: str) -> bool:
-    return worktree_registry.is_recorded(stack.main_repo(), name) or any(
-        (root / name).exists() for root in _local_state_roots()
+    from . import configpin
+
+    main = stack.main_repo()
+    return (
+        worktree_registry.is_recorded(main, name)
+        or any((root / name).exists() for root in _local_state_roots())
+        or os.path.lexists(configpin.pin_dir(_pin_config(main, name)))
     )
 
 
 def _remove_local_state(name: str) -> bool:
-    """Remove the per-worktree posture and VS Code state — and the host's record of the worktree —
-    after git removes the checkout."""
-    worktree_registry.unregister(stack.main_repo(), name)
+    """Remove the per-worktree posture and VS Code state, the host's record of the worktree, and
+    its adopted config — after git removes the checkout. The adoption goes too because it is keyed
+    by the checkout's path: left behind, the next worktree of this name would inherit it."""
+    from . import configpin
+
+    main = stack.main_repo()
+    worktree_registry.unregister(main, name)
     roots = _local_state_roots()
     ok = True
+    try:
+        configpin.forget(_pin_config(main, name))
+    except OSError as e:
+        _err(f"✗ couldn't remove the worktree's adopted config: {e}")
+        ok = False
     for root in roots:
         path = (root / name).resolve()
         if not path.is_relative_to(root.resolve()) or any(
@@ -325,8 +351,8 @@ def _stdin_is_tty() -> bool:
 
 def _adopt_config(name: str) -> bool:
     """Offer the new worktree's config for adoption, so the host runs it from the first
-    ``fy box up`` (:mod:`foldyard.configpin`, ADR-0022). True when the worktree has an adoption
-    afterwards.
+    ``fy box up`` (:mod:`foldyard.configpin`, ADR-0022). True when the host now runs exactly this
+    tree (the ``resolve`` status says so — not merely that some pin exists).
 
     A tree byte-identical to main's ADOPTED copy is adopted without asking: it grants nothing main
     hasn't already been granted, so there is nothing to decide. Race-free, because every running
@@ -355,8 +381,10 @@ def _adopt_config(name: str) -> bool:
                 else:
                     print(f"✓ config adopted — identical to main's ({base.digest}).", flush=True)
                     return True
-        configpin.resolve(cfg, interactive=_stdin_is_tty(), prompt=input, echo=_err)
-        return configpin.inspect(cfg).pinned_exists
+        status = configpin.resolve(cfg, interactive=_stdin_is_tty(), prompt=input, echo=_err)
+        # Ready only when the host would run THIS tree: adopted just now, or a pin matching it.
+        # A pin the tree differs from (left unresolved, ignored) is not this checkout's config.
+        return status in ("clean", "pinned", "adopted")
     except Exception as e:  # adoption is offered, never what fails the (already-made) worktree
         _err(f"  (couldn't offer its config for adoption: {e})")
         return False
@@ -436,6 +464,13 @@ def add(
         rc = _register_existing(main, name, wt_dir, assume_yes)
         return _box_up(name) if box_up and rc == 0 else rc
     wt_root.mkdir(parents=True, exist_ok=True)
+    # The checkout doesn't exist yet, so an adoption at its path is an earlier checkout's (removed
+    # by hand, or by a `remove` that predates dropping it). Dropped BEFORE git makes the checkout
+    # and it's registered, so the supervisor never serves the new one from the old branch's config.
+    from . import configpin
+
+    if configpin.forget(_pin_config(main, name)):
+        print(f"▶ dropped a config adoption left at this path by an earlier '{name}'.")
     # Reproduce the recipe's machine-mount warning: worktree stacks need the rootless
     # machine to mount the worktrees root (no-op in the box / where there's no podman).
     machine.ensure(main, wt_root)
@@ -704,7 +739,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
         print("  4. delete the ORPHANED checkout dir (git no longer tracks it) + worktree prune")
     else:
         print("  4. git worktree remove — the checkout directory is deleted")
-    print("  5. delete its local mode + isolated VS Code state")
+    print("  5. delete its local mode, isolated VS Code state + adopted config")
     if branch:
         print(f"  The branch '{branch}' is KEPT (delete it later with: git branch -D {branch}).")
     if not (assume_yes or force):

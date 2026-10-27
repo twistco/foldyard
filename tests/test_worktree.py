@@ -726,6 +726,122 @@ def test_add_seeds_keyless_posture_from_the_config_it_just_adopted(fake_main, mo
     assert seeded == [({"claude": "on", "codex": "on"}, {"reconcile": False})]
 
 
+# ── a re-used name never inherits the old checkout's adoption ───────────────────────
+#
+# The pin is keyed by the checkout's PATH, so a worktree removed and re-added under the same name
+# lands on the same key. Before this, `remove` left the pin behind and `add` took it for the new
+# checkout's: no identical-to-main adoption, the seed read the old branch's config, and `--box`
+# started a box the host reconciled from a branch that was gone.
+
+EDITED_AGAIN = '[project]\nname = "acme"\n\n[proxy]\npassthrough = ["other.example"]\n'
+
+
+def _git_removes_the_checkout(monkeypatch) -> None:
+    """`git worktree remove` deletes the directory, as for real (the fixture's fake leaves it)."""
+    git = worktree.subprocess.run
+
+    def run(cmd, **kw):
+        if cmd[:1] == ["git"] and "worktree" in cmd and "remove" in cmd:
+            shutil.rmtree(cmd[-1])
+            return _Proc(0)
+        return git(cmd, **kw)
+
+    monkeypatch.setattr(worktree.subprocess, "run", run)
+
+
+def _old_branch_adopted(fake_main, monkeypatch, text: str = EDITED) -> None:
+    """`feat` made, then its branch's config changed and adopted — then the worktree removed."""
+    from foldyard import configpin, devmode
+
+    assert worktree.add("feat") == 0
+    (fake_main["wt_root"] / "feat" / "foldyard.toml").write_text(text)
+    configpin.adopt(devmode.worktree_config("feat"))
+    _git_removes_the_checkout(monkeypatch)
+    assert worktree.remove("feat", assume_yes=True) == 0
+
+
+def test_remove_drops_the_worktrees_adopted_config(fake_main, monkeypatch):
+    from foldyard import configpin
+
+    _adopt_main(fake_main)
+    _old_branch_adopted(fake_main, monkeypatch)
+
+    pin = worktree._pin_config(fake_main["main"], "feat")
+    assert not configpin.pin_dir(pin).exists()
+
+
+def test_re_adding_a_name_adopts_the_new_checkout_identical_to_main(fake_main, monkeypatch, capsys):
+    from foldyard import configpin, devmode
+
+    _adopt_main(fake_main)
+    _old_branch_adopted(fake_main, monkeypatch)
+    capsys.readouterr()
+
+    assert worktree.add("feat") == 0
+
+    assert "adopted — identical to main's" in capsys.readouterr().out
+    drift = configpin.inspect(devmode.worktree_config("feat"))
+    assert drift.pinned_exists and drift.pinned == drift.tree  # main's bytes, not the old branch's
+
+
+def test_re_adding_a_name_with_a_differing_config_adopts_nothing_and_starts_no_box(
+    fake_main, monkeypatch
+):
+    _adopt_main(fake_main)
+    _old_branch_adopted(fake_main, monkeypatch)
+    _branch_declares(monkeypatch, EDITED_AGAIN)
+    runs = _box_runs(monkeypatch)
+
+    assert worktree.add("feat", box_up=True) == 1
+
+    assert not _wt_adopted("feat")
+    assert not runs
+
+
+def test_a_fresh_add_drops_a_pin_left_at_its_path_and_says_so(fake_main, monkeypatch, capsys):
+    """However the old checkout went (deleted by hand, a remove from before this fix), a pin at the
+    path of a checkout that doesn't exist yet can't be this one's."""
+    from foldyard import configpin
+
+    _adopt_main(fake_main)
+    old = fake_main["wt_root"] / "feat"
+    old.mkdir(parents=True)
+    (old / "foldyard.toml").write_text(EDITED)
+    configpin.adopt(worktree._pin_config(fake_main["main"], "feat"))
+    shutil.rmtree(old)
+    capsys.readouterr()
+
+    assert worktree.add("feat") == 0
+
+    out = capsys.readouterr().out
+    assert "dropped" in out and "adopted — identical to main's" in out
+
+
+def test_adopted_only_counts_a_pin_that_matches_the_tree(fake_main, monkeypatch):
+    """A pin that differs from the tree, left unresolved (no terminal) or ignored, is not "ready":
+    the host would reconcile from bytes this checkout doesn't hold."""
+    from foldyard import configpin, devmode
+
+    _adopt_main(fake_main)
+    assert worktree.add("feat") == 0
+    (fake_main["wt_root"] / "feat" / "foldyard.toml").write_text(EDITED)
+    assert configpin.inspect(devmode.worktree_config("feat")).pinned_exists
+
+    assert worktree._adopt_config("feat") is False
+
+
+def test_the_pin_key_never_follows_a_link_the_box_planted(fake_main):
+    """Every box writes the worktrees root: a `feat` swapped for a link to main must not make
+    `remove feat` drop MAIN's adoption."""
+    fake_main["wt_root"].mkdir(parents=True)
+    (fake_main["wt_root"] / "feat").symlink_to(fake_main["main"])
+
+    pin = worktree._pin_config(fake_main["main"], "feat")
+
+    assert pin.repo_root == Path(os.path.realpath(fake_main["wt_root"])) / "feat"
+    assert pin.worktree == "feat"
+
+
 # ── add --box ───────────────────────────────────────────────────────────────────────
 
 

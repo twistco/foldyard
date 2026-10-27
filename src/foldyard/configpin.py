@@ -704,6 +704,27 @@ def adopt(cfg: config.Config, *, reviewed: str | None = None, baseline: str | No
     return inspect(cfg)
 
 
+def forget(cfg: config.Config) -> bool:
+    """Drop ``cfg``'s adoption entirely — for a checkout that is GONE (``fy worktree remove``), or
+    a pin found at the path of one that doesn't exist yet. True when there was one to drop.
+
+    The pin is keyed by checkout path (:func:`pin_dir`), so a later checkout at the same path — a
+    worktree re-added under the same name — would otherwise inherit an adoption nobody made for
+    it. The marker goes FIRST, in one unlink: from that moment a reader sees "never adopted" (and
+    fails closed) rather than a generation half-deleted under it. The pin dir is host state under
+    ``~/.foldyard/adopted/``, outside every mount; a link there is unlinked, never followed."""
+    _require_host()
+    target = pin_dir(cfg)
+    if not os.path.lexists(target):
+        return False
+    if target.is_symlink():
+        target.unlink()
+        return True
+    (target / ADOPTED_MARKER).unlink(missing_ok=True)
+    shutil.rmtree(target)
+    return True
+
+
 def revert(cfg: config.Config) -> list[str]:
     """Restore the working tree to the adopted copy — the answer to "I didn't write this". Returns
     one human line per file acted on.

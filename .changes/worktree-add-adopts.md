@@ -12,3 +12,7 @@ bump: patch
   against main and adopted only if you answer the prompt; with no terminal, or if you decline, the
   worktree is still made and the message says how to adopt it later. `-y` still only answers the
   question about registering an existing worktree, and never adopts a config.
+- **A worktree re-added under a removed one's name no longer inherits its adopted config.** The
+  adopted copy is kept per checkout path and `fy worktree remove` left it behind, so your computer
+  ran the new checkout from the old branch's config. `remove` now deletes it, and `add` drops
+  one it finds at a path whose checkout it is about to create, saying so.

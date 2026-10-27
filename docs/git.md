@@ -177,7 +177,8 @@ added after a box was created isn't masked in that box until it's recreated: `fy
 names the boxes it isn't masked in, and `fy doctor`'s `box shadowing` row reports it.
 
 `fy worktree remove <name>` takes down that worktree's box, stack and volumes, deletes the
-checkout and keeps its branch. A worktree with uncommitted work needs `--force`; that work is
+checkout and its adopted config, and keeps its branch, so a worktree added later under the same
+name starts with nothing adopted. A worktree with uncommitted work needs `--force`; that work is
 saved first on a ref in the main checkout (`refs/fy/removed/<name>-<time>`), and the command
 prints how to restore it.
 
