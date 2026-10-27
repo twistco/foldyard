@@ -20,7 +20,25 @@
   --no-checkout` (the branch, HEAD, the admin dir) and the files + index are written in a
   one-off container from the box image (`worktree._checkout_in_yard`). Unlike `worktree_init`,
   a worktree with no files is useless, so a missing image REFUSES before any git runs, with the
-  command to run first — still never a host fallback.
+  command to run first — still never a host fallback. The same day, `fy worktree remove`'s
+  HASHING joined it: its check for uncommitted work (`git worktree remove`'s own `git status`)
+  and the parking of that work on `refs/fy/removed/…` (`add -A`) ran every `clean` filter the
+  shared config names. Both run in a one-off container now (`worktree._uncommitted_in_yard`); the
+  host checks the commit id it is handed (`cat-file -t`), writes the ref and deletes the checkout
+  with `--force`. No image refuses before anything is torn down; `--discard` is the operator's
+  explicit way to remove without checking or parking — never a check on the host. foldyard's own
+  host git now runs no filter driver. Its review found a third door: the shared config can make
+  the repo a partial clone, and reading a missing object (an id the yard names, a ref a box
+  pointed at a deleted one) made git fetch it over a transport that config picks
+  (`core.sshCommand`, `ext::`). Every host git in `worktree.py` now runs with `GIT_NO_LAZY_FETCH=1`
+  and every transport's policy set to `never` on the command line (which outranks a repo-level
+  per-protocol `always`; a bare `protocol.allow=never` doesn't), and on a git older than 2.44 a
+  repo with a promisor remote is refused: every key git 2.43's `promisor-remote.c` registers one
+  for — `extensions.partialClone`, `remote.<name>.promisor` (true), `remote.<name>.partialclonefilter`
+  (any value) — plus the older `core.partialclonefilter`, found in every config file and include
+  whatever its condition, as the hook scan reads them. Requiring 2.44 isn't an option: Ubuntu
+  24.04 ships 2.43. `remove` also re-scans the config for hooks after the yard (which
+  mounts main's `.git` writable) has run.
 - **Sources:** the review of the finalised `github=app` PR-bot minter — "does the consumer-side
   minter hand the box a code-execution path to the Mac?"; five review rounds against the
   implementation. Related: [0007](./0007-credential-injection-at-egress-proxy.md) (where minting

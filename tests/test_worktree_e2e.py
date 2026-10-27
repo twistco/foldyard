@@ -4,7 +4,9 @@ test_box_e2e's — see the first test); its stack comes up beside main's in the 
 (`WORKTREE=<name> fy up`); `remove`
 tears that stack down (containers AND the worktree's volumes), archives the worktree's bound-out
 agent transcripts to the durable store BEFORE git deletes the tree, removes the checkout, drops
-its local state, and leaves main's stack and the branch alone.
+its local state, and leaves main's stack and the branch alone. It removes with `--discard`: its
+check for uncommitted work runs in the box image too, over the VM's mount of this copy, which
+this module has neither of — test_box_e2e drives that check.
 
 Host tier (tests/e2e_host.py). The verbs are host-only (`worktree._host_only`: in-box they would
 edit the shared .git against a box-local worktrees dir). The example stack has no bind mounts, so
@@ -99,7 +101,7 @@ def rig(tmp_path_factory):
     r = Rig(main=main, wt_root=wt_root, archive=archive, env=env)
     yield r
     if r.feat.exists():  # whatever a failing test left
-        fy(["worktree", "remove", NAME, "--yes", "--force"], main, timeout=600, env_extra=env)
+        fy(["worktree", "remove", NAME, "--force", "--discard"], main, timeout=600, env_extra=env)
     fy(["down"], main, timeout=180, env_extra=env)
 
 
@@ -152,8 +154,11 @@ def test_remove_tears_down_archives_and_drops_the_checkout_but_not_main_or_the_b
     volumes_before = engine("volume", "ls", "-q", "--filter", f"name={WT_PROJECT}_").stdout.split()
     assert volumes_before, "the worktree stack should own the named db volume (fixture)"
 
-    removed = fy_ok(["worktree", "remove", NAME, "--yes"], rig.main, timeout=600, env_extra=rig.env)
+    removed = fy_ok(
+        ["worktree", "remove", NAME, "--yes", "--discard"], rig.main, timeout=600, env_extra=rig.env
+    )
     assert f"worktree '{NAME}' removed" in removed.out, removed.out
+    assert "NOT checked for" in removed.out, removed.out  # the plan says what --discard skips
 
     # 1+2. its box (none here) and its stack: containers AND its prefixed volumes gone …
     leftover = engine(

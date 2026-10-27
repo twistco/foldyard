@@ -109,13 +109,14 @@ def test_host_git_does_not_run_the_repos_fsmonitor(hooked_repo, tmp_path):
     assert not seen.exists()
 
 
-def test_the_uncommitted_work_snapshot_fires_no_hook(hooked_repo, tmp_path):
-    # Its `update-ref` is a ref transaction, and `git add -A` refreshes the index.
+def test_parking_uncommitted_work_fires_no_hook(hooked_repo):
+    # The host's half of the parking (the commit itself is the yard's): `update-ref` is a ref
+    # transaction.
     main, marker = hooked_repo["main"], hooked_repo["marker"]
-    wt = tmp_path / "wt"
-    worktree._host_git(main, "worktree", "add", "-q", "-b", "feat", str(wt), capture_output=True)
-    (wt / "new.txt").write_text("work\n")
-    assert worktree._snapshot_uncommitted(wt, "feat")
+    tree = _git(main, "rev-parse", "HEAD^{tree}").stdout.strip()
+    oid = _git(main, "commit-tree", tree, "-p", "HEAD", "-m", "parked").stdout.strip()
+    ref = worktree._park(main, "feat", oid, worktree._hookless_env(main))
+    assert ref and _git(main, "rev-parse", ref).stdout.strip() == oid
     assert not marker.exists()
 
 
@@ -294,14 +295,10 @@ def test_a_git_too_old_to_name_scopes_refuses_with_the_version_it_needs(hooked_r
         worktree._config_hooks(hooked_repo["main"])
 
 
-def test_a_snapshot_it_cannot_take_says_so(hooked_repo, tmp_path, capsys):
-    # Skipped because the worktree's config can't be checked for hooks: nobody should go looking
-    # for a refs/fy/removed/… ref that was never written.
+def test_parking_refuses_a_config_it_cannot_check_for_hooks(hooked_repo):
+    # The ref write is a ref transaction: with an include it can't read, no git runs and no ref is
+    # claimed (`remove` refuses before the yard is even asked — tests/test_worktree_remove.py).
     main = hooked_repo["main"]
-    wt = tmp_path / "wt"
-    worktree._host_git(main, "worktree", "add", "-q", "-b", "feat", str(wt), capture_output=True)
-    (wt / "new.txt").write_text("work\n")
     _git(main, "config", "include.path", "not-there.cfg")
-    assert worktree._snapshot_uncommitted(wt, "feat") is None
-    err = capsys.readouterr().err
-    assert "NOT saved" in err and "not-there.cfg" in err
+    with pytest.raises(worktree.HookScanError, match=r"not-there\.cfg"):
+        worktree._hookless_env(main)

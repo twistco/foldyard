@@ -10,5 +10,4 @@ bump: patch
   with the hooks directory off, each `[hook]` entry in `.git/config` or any file it includes
   disabled (git 2.54's config hooks, which `core.hooksPath=/dev/null` alone doesn't stop) and no
   `core.fsmonitor` command, and `fy worktree add` says which hooks it skipped. Git in the
-  worktree's box still runs them. Filter drivers such as Git LFS's still run on checkout; see the
-  security page.
+  worktree's box still runs them.

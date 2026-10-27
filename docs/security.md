@@ -92,17 +92,24 @@ channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-moun
   close this without owning your `.git`, so treat a shared checkout's hooks as code you are
   choosing to run. foldyard's own git on your computer (`fy worktree add` and `remove`) runs none
   of them, and no `core.fsmonitor` command either, and `fy worktree add` says when it skipped
-  any. Nor does it check files out on your computer, since a checkout runs the filter drivers the
-  shared config names (Git LFS's smudge filter, or one planted from a box): `fy worktree add`
-  only records the worktree there and checks its files out in a container
-  ([git](./git.md)). The `[hook]` entries are switched off by name: foldyard reads every file
-  `.git/config` includes, whatever the include's condition (a git that `fy worktree add` starts
-  meets conditions yours doesn't), and runs no git when one of them can't be read. Two gaps
-  remain. A hook added to `.git/config` while the command runs can still slip past. And
-  `fy worktree remove` still asks git on your computer whether the worktree has uncommitted work,
-  which runs a `clean` filter the config names for any file whose timestamps changed — on a
-  worktree whose files were checked out in the VM, every file, until your own first `git status`
-  there refreshes the index.
+  any. Nor does it check files out or read them on your computer, since git runs the filter
+  drivers the shared config names (Git LFS's, or one planted from a box) for every file it checks
+  out or compares: `fy worktree add` only records the worktree there and checks its files out in a
+  container, and `fy worktree remove` checks for uncommitted work, and saves it, in a container
+  too ([git](./git.md)). So foldyard's git on your computer runs no filter driver at all. It
+  fetches nothing either. `.git/config` can turn the repo into a partial clone, whose missing
+  objects git downloads on demand over a transport that same config chooses, such as an
+  `ssh` command of its own. So every git `fy worktree add` and `remove` run on your computer has
+  on-demand fetching and every transport switched off; the rest of foldyard's git there reads
+  only refs and config, never an object, so it has nothing to fetch. On a git older than 2.44,
+  which can't switch the first off, `fy worktree add` and `remove` refuse to work in a repo with
+  a promisor remote: `extensions.partialClone`, or any `remote.<name>.promisor` or
+  `remote.<name>.partialclonefilter`, in `.git/config` or any file it includes. The
+  `[hook]` entries are switched off by name: foldyard reads every file `.git/config` includes,
+  whatever the include's condition (a git that `fy worktree add` starts meets conditions yours
+  doesn't), and runs no git when one of them can't be read. One gap remains: a hook added to
+  `.git/config` while the command runs can still slip past. Your own git on your computer runs
+  all of this, filters included, as it always has.
 - **The compose client reads your compose files on your computer.** Your stack runs in the VM,
   but the compose client that starts it runs on your computer, and the compose files are editable
   from the box. foldyard gives the client a minimal environment (never `host.env`; add names with

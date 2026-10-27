@@ -1240,7 +1240,7 @@ def test_remove_tears_down_then_git_remove(fake_main):
     # Box down BEFORE nuke (the box holds the mount), then its shadow volumes — all aimed at
     # the named worktree.
     assert fake_main["teardown"] == ["box:down:feat", "nuke:feat", "volumes:feat"]
-    assert _wt_remove_argv(fake_main["calls"]) == ["worktree", "remove", str(wt)]
+    assert _wt_remove_argv(fake_main["calls"]) == ["worktree", "remove", "--force", str(wt)]
     assert not posture.exists()
     assert not vscode.exists()
     assert not legacy_vscode.exists()
@@ -1259,7 +1259,7 @@ def test_remove_proceeds_on_yes(fake_main, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda *a: "y")
     assert worktree.remove("feat") == 0
     assert fake_main["teardown"] == ["box:down:feat", "nuke:feat", "volumes:feat"]
-    assert _wt_remove_argv(fake_main["calls"]) == ["worktree", "remove", str(wt)]
+    assert _wt_remove_argv(fake_main["calls"]) == ["worktree", "remove", "--force", str(wt)]
 
 
 def test_remove_missing_worktree_errors(fake_main, capsys):
@@ -1459,109 +1459,20 @@ def test_init_refuses_a_script_outside_the_repo(fake_main, monkeypatch, capsys):
     assert not any(c[:2] == ["podman", "run"] for c in fake_main["calls"])
 
 
-# ── the uncommitted-work snapshot taken before a worktree is destroyed ────────────────
+# ── uncommitted work, asked of the yard before the checkout is deleted ──────────────────────
 #
-# These drive REAL git (no mock): the whole point is the plumbing — a throwaway index, and a
-# ref in the SHARED store that outlives the checkout. A mocked git would assert nothing.
+# What the check and the parking commit DO is tests/test_worktree_remove.py's, against real git;
+# here, only where they sit in the removal.
 
 
-@pytest.fixture
-def real_worktree(tmp_path):
-    """A real main repo with a real linked worktree, and a helper to run git in either."""
-    import subprocess
-
-    main, wt = tmp_path / "main", tmp_path / "wt"
-
-    def git(repo, *args, **kw):
-        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, **kw)
-
-    subprocess.run(["git", "init", "-q", str(main)], check=True)
-    git(main, "config", "user.email", "t@example.com")
-    git(main, "config", "user.name", "t")
-    (main / "f.txt").write_text("base\n")
-    git(main, "add", "-A")
-    git(main, "commit", "-qm", "base")
-    git(main, "worktree", "add", "-q", str(wt), "-b", "feat")
-    return {"main": main, "wt": wt, "git": git}
-
-
-def test_snapshot_saves_tracked_and_untracked_work(real_worktree):
-    wt, main, git = real_worktree["wt"], real_worktree["main"], real_worktree["git"]
-    (wt / "f.txt").write_text("EDITED\n")
-    (wt / "new.txt").write_text("BRAND NEW\n")
-
-    ref = worktree._snapshot_uncommitted(wt, "feat")
-    assert ref and ref.startswith("refs/fy/removed/feat-")
-    assert git(main, "show", f"{ref}:f.txt").stdout == "EDITED\n"
-    # The untracked file is the one `git stash create` would silently drop — and the one that
-    # is unrecoverable, since nothing ever wrote it to the object database.
-    assert git(main, "show", f"{ref}:new.txt").stdout == "BRAND NEW\n"
-
-
-def test_snapshot_outlives_the_worktree_it_describes(real_worktree):
-    wt, main, git = real_worktree["wt"], real_worktree["main"], real_worktree["git"]
-    (wt / "new.txt").write_text("BRAND NEW\n")
-    ref = worktree._snapshot_uncommitted(wt, "feat")
-
-    # The destruction it exists for, plus the two sweeps that would collect an unreferenced
-    # object. Linked worktrees share objects AND refs with main, so the ref keeps it reachable.
-    git(main, "worktree", "remove", "--force", str(wt))
-    git(main, "worktree", "prune")
-    git(main, "gc", "-q", "--prune=now")
-    assert not wt.exists()
-    assert git(main, "show", f"{ref}:new.txt").stdout == "BRAND NEW\n"
-
-
-def test_snapshot_does_not_disturb_what_it_is_snapshotting(real_worktree):
-    # It runs on the way OUT of a checkout, so it must not be able to change what is removed:
-    # the tree is built through a throwaway index, never the worktree's own.
-    wt, git = real_worktree["wt"], real_worktree["git"]
-    (wt / "f.txt").write_text("EDITED\n")
-    (wt / "new.txt").write_text("BRAND NEW\n")
-    before = (git(wt, "status", "--porcelain").stdout, git(wt, "rev-parse", "HEAD").stdout)
-
-    worktree._snapshot_uncommitted(wt, "feat")
-
-    assert (git(wt, "status", "--porcelain").stdout, git(wt, "rev-parse", "HEAD").stdout) == before
-    assert (wt / "f.txt").read_text() == "EDITED\n"  # and the files themselves are untouched
-
-
-def test_snapshot_is_silent_when_there_is_nothing_to_save(real_worktree):
-    # A clean tree has nothing to lose — no ref, no noise on the way out.
-    assert worktree._snapshot_uncommitted(real_worktree["wt"], "feat") is None
-
-
-def test_snapshot_ignores_what_gitignore_ignores(real_worktree):
-    # What keeps it cheap (no node_modules) is also its blind spot — pin the behaviour so the
-    # tradeoff is a decision rather than a surprise.
-    wt, main, git = real_worktree["wt"], real_worktree["main"], real_worktree["git"]
-    (wt / ".gitignore").write_text("junk/\n")
-    (wt / "junk").mkdir()
-    (wt / "junk" / "big.bin").write_text("x" * 1000)
-    ref = worktree._snapshot_uncommitted(wt, "feat")
-    assert ref
-    assert "junk/big.bin" not in git(main, "ls-tree", "-r", "--name-only", ref).stdout
-
-
-def test_snapshot_returns_none_when_git_cannot_be_driven(tmp_path):
-    # A pruned orphan's `.git` file dangles. That case genuinely cannot be rescued, so it must
-    # report nothing rather than raise on the way out of a removal already under way.
-    orphan = tmp_path / "not-a-repo"
-    orphan.mkdir()
-    assert worktree._snapshot_uncommitted(orphan, "feat") is None
-
-
-def test_remove_snapshots_before_git_takes_the_checkout(fake_main, monkeypatch, capsys):
+def test_remove_asks_the_yard_before_git_takes_the_checkout(fake_main, monkeypatch):
     # Ordering is the whole point: after `git worktree remove` there is nothing left to read.
     order: list[str] = []
-    monkeypatch.setattr(
-        worktree,
-        "_snapshot_uncommitted",
-        lambda wt_dir, name: order.append("snapshot") or "refs/fy/removed/feat-x",
-    )
     real_run = worktree.subprocess.run
 
     def spy(cmd, **kw):
+        if cmd[:2] == ["podman", "run"]:
+            order.append("yard")
         if cmd[:1] == ["git"] and "worktree" in cmd and "remove" in cmd:
             order.append("git-remove")
         return real_run(cmd, **kw)
@@ -1569,22 +1480,25 @@ def test_remove_snapshots_before_git_takes_the_checkout(fake_main, monkeypatch, 
     monkeypatch.setattr(worktree.subprocess, "run", spy)
     _make_wt(fake_main)
     assert worktree.remove("feat", assume_yes=True) == 0
-    assert order == ["snapshot", "git-remove"]
-    assert "refs/fy/removed/feat-x" in capsys.readouterr().out  # and it says where it went
+    assert order == ["yard", "git-remove"]
+    (check,) = fake_main["yard"]["checks"]
+    assert check[check.index("-w") + 1] == str(fake_main["wt_root"] / "feat")
 
 
-def test_remove_is_not_blocked_by_a_failed_snapshot(fake_main, monkeypatch):
-    # Unlike the transcript archive above it, this must never refuse: both paths that still
-    # carry work at this point are explicit --force, so the loss was already accepted. A net
-    # under the operator, not a promise made to them.
-    monkeypatch.setattr(worktree, "_snapshot_uncommitted", lambda wt_dir, name: None)
+def test_remove_refuses_when_the_yard_cannot_answer(fake_main, capsys):
+    # A net the operator relies on under --force is a promise now, so a check that fails keeps
+    # the checkout (and says how to go on without it).
     _make_wt(fake_main)
-    assert worktree.remove("feat", assume_yes=True) == 0
+    fake_main["yard"]["rc"] = 3
+    assert worktree.remove("feat", force=True) == 1
+    assert not any("worktree" in c and "remove" in c for c in fake_main["calls"])
+    assert "--discard" in capsys.readouterr().err
 
 
 def test_the_git_calls_that_can_run_repo_code_switch_hooks_off(fake_main):
-    # `worktree add` checks out (post-checkout, reference-transaction); `remove` runs `git status`
-    # (core.fsmonitor); `prune` for symmetry. Each through the one hookless helper — see
+    # `worktree add` records the worktree (post-checkout, reference-transaction); `remove` deletes
+    # it (and parks work on a ref: reference-transaction); `prune` for symmetry. Each through the
+    # one hookless helper — see
     # tests/test_worktree_git_hooks.py for what that does against a real git.
     def hookless(cmd):
         return "core.hooksPath=/dev/null" in cmd and "core.fsmonitor=" in cmd

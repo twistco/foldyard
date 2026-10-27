@@ -154,14 +154,20 @@ could add its own). So `fy worktree add` doesn't check files out on your compute
 there makes the branch and the worktree's entry in `.git`, and the files are checked out in a
 one-off container from your box image, with no network. What that means for you:
 
-- **It needs the box image.** Before your first `fy box build`, `fy worktree add` stops with the
-  command to run first, and has changed nothing.
+- **It needs the box image**, with `git` and `sh` in it (any image a box runs in has both).
+  Before your first `fy box build`, `fy worktree add` stops with the command to run first, and
+  has changed nothing.
 - **Git LFS files arrive as pointers.** Run `git lfs pull` in the worktree's box to fetch them;
   `fy worktree add` says so when the repo uses LFS.
 - **The first `git status` on your computer in a new worktree is slower** while git re-reads each
   file once (the checkout's index was written in the VM); after that it's as fast as anywhere.
 - **If the checkout fails, nothing is kept**: the worktree and the branch `fy worktree add` made
   are removed, and it prints the command to run again.
+
+Comparing files runs them too: to tell whether a file changed, git reads it through its `clean`
+filter. So `fy worktree remove` doesn't ask git on your computer whether a worktree has
+uncommitted work, or have it save that work. Both happen in the same kind of container, and git
+on your computer then saves the result on a ref and deletes the checkout.
 
 ## Worktrees
 
@@ -212,6 +218,24 @@ checkout and its adopted config, and keeps its branch, so a worktree added later
 name starts with nothing adopted. A worktree with uncommitted work needs `--force`; that work is
 saved first on a ref in the main checkout (`refs/fy/removed/<name>-<time>`), and the command
 prints how to restore it.
+
+Uncommitted work here means files that differ from the worktree's last commit once everything
+is unstaged: changed, deleted or untracked files that aren't gitignored, and changes inside a
+submodule. What's staged doesn't count. So a stale stage, such as the one your computer's side
+of a worktree shows after commits made in its box, doesn't stop a plain remove. Two things are
+not protected:
+
+- **Gitignored files** are neither counted nor saved.
+- **Changes that exist only in the stage** are lost: a change you staged and then undid in the
+  file itself. Unstaging everything would discard them too, and the save keeps files, not the
+  stage.
+
+The check for uncommitted work, and the save, run in a container from your box image (see above),
+so `fy worktree remove` needs the image and the VM. Without them it stops before it has taken
+anything down, and says what to run first. If you can't provide them and you're sure nothing
+uncommitted in the worktree matters, `--discard` removes it without checking or saving anything
+(a worktree with submodules still needs `--force` as well, as without `--discard`).
+If the check or the save fails, the worktree is kept.
 
 ## What `fy doctor` checks
 

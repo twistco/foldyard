@@ -216,5 +216,25 @@ def test_worktree_add_checks_the_files_out_in_the_yard(repo):
     )
     inside = fy_ok(["box", "exec", probe], repo, timeout=300)
     assert "FY-CLEAN" in inside.out, inside.out
-    removed = fy_ok(["worktree", "remove", FRESH, "--yes"], repo, timeout=600)
+    # `remove` asks a container from the same image whether there's uncommitted work, never git on
+    # your computer (which would run the shared config's `clean` filters for every file it
+    # compares): an edit and an untracked file keep the worktree…
+    (fresh / "compose.yml").write_text((fresh / "compose.yml").read_text() + "# edited\n")
+    (fresh / "notes.txt").write_text("not committed\n")
+    kept = fy(["worktree", "remove", FRESH, "--yes"], repo, timeout=600)
+    assert kept.rc == 1, kept.out
+    assert f"checking '{FRESH}' for uncommitted work in the VM" in kept.out, kept.out
+    assert f"'{FRESH}' has uncommitted work" in kept.out, kept.out
+    assert (fresh / "notes.txt").is_file()
+    # …and --force parks them on a ref the container's commit and your computer's ref write make
+    # between them (the object written in the VM, read here), then removes it.
+    removed = fy_ok(["worktree", "remove", FRESH, "--force"], repo, timeout=600)
     assert f"worktree '{FRESH}' removed" in removed.out, removed.out
+    assert not fresh.exists()
+    (ref,) = _git(repo, "for-each-ref", "--format=%(refname)", f"refs/fy/removed/{FRESH}-*").split()
+    assert ref in removed.out, removed.out
+    assert _git(repo, "show", f"{ref}:notes.txt") == "not committed\n"
+    assert _git(repo, "show", f"{ref}:compose.yml").endswith("# edited\n")
+    assert (
+        _git(repo, "rev-parse", f"{ref}^").strip() == _git(repo, "rev-parse", f"wt/{FRESH}").strip()
+    )
