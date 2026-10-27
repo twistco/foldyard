@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import yard_stub
 from foldyard import config, machine, stack, worktree
 
 
@@ -120,7 +121,8 @@ def test_the_uncommitted_work_snapshot_fires_no_hook(hooked_repo, tmp_path):
 
 @pytest.fixture
 def real_add(hooked_repo, tmp_path, monkeypatch):
-    """``worktree.add`` against the real repo, with everything but git stubbed."""
+    """``worktree.add`` against the real repo, with everything but git stubbed — the yard's
+    checkout included, which runs its git here (:mod:`yard_stub`'s ``local``)."""
     main = hooked_repo["main"]
     wt_root = tmp_path / "main-worktrees"
     monkeypatch.setattr(stack, "main_repo", lambda: main)
@@ -132,6 +134,7 @@ def real_add(hooked_repo, tmp_path, monkeypatch):
     monkeypatch.setattr(worktree, "_seed_keyless_posture", lambda name: None)
     monkeypatch.setattr(worktree, "_say_unmasked", lambda *a, **k: None)
     monkeypatch.delenv("WORKTREE", raising=False)
+    yard_stub.install(monkeypatch, mode="local")
     yield {**hooked_repo, "wt_root": wt_root}
     os.environ.pop("WORKTREE", None)
 

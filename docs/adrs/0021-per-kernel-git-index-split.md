@@ -18,6 +18,13 @@
 - **Amended 2026-09-27:** the host's heal of the SHARED index runs no git — the box proposes the
   healed index, the host only renames it into place (Consequences, "The shared index's heal").
   Cross-kernel visibility measured to support it, and the direction that does NOT hold recorded.
+- **Amended 2026-10-27:** a NEW worktree's shared index is now written in the VM:
+  `fy worktree add` checks the files out in a container (ADR-0023's amendment of that date) with
+  the image's own git, which writes `<main>/.git/worktrees/<name>/index` — nothing else writes
+  it yet, so there is no race, and the shim seeds `index-box` from it as from any shared index.
+  The container is handed the commit the host resolved and runs `read-tree --reset -u`, which
+  moves no ref and writes no config: the VM never reads a ref the host may just have replaced,
+  and `.git/config` (the branch's upstream) is written on the host.
 - **Amended 2026-09-29:** refs are not safe either — the box can read a branch the host just
   moved as older or absent, and a box commit then rewound or re-rooted the host's branch. Ref moves
   are now checked under git's own ref lock, and the shared index's heal is sealed to the box's ref

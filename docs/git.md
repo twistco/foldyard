@@ -142,12 +142,26 @@ App was last read to grant.
 Git hooks and aliases are a separate matter: the box can write `.git/hooks`, `lefthook.yml` or
 `.git/config`, and they run on your computer the next time you use git there
 ([security](./security.md)). foldyard's own git on your computer runs none of them: `fy worktree
-add` checks the new worktree out with the repo's hooks off (the hooks directory and `[hook]`
-entries in `.git/config` alike) and says which it skipped. So a `post-checkout` hook that sets a
-checkout up (lefthook's, say) hasn't run in a new worktree; git in that worktree's box runs it at
-the next checkout there, and setup every new worktree needs belongs in `[project].worktree_init`,
-which runs in a container ([configuration](./configuration.md)). Filter drivers are not switched
-off: a Git LFS smudge filter still runs when the worktree is checked out.
+add` records the new worktree with the repo's hooks off (the hooks directory and `[hook]` entries
+in `.git/config` alike) and says which it skipped. So a `post-checkout` hook that sets a checkout
+up (lefthook's, say) hasn't run in a new worktree; git in that worktree's box runs it at the next
+checkout there, and setup every new worktree needs belongs in `[project].worktree_init`, which
+runs in a container ([configuration](./configuration.md)).
+
+Filter drivers can't be switched off like that, and a checkout runs them: `.git/config` can name a
+command for each file `.gitattributes` routes through it (Git LFS's smudge filter is one; a box
+could add its own). So `fy worktree add` doesn't check files out on your computer at all. Git
+there makes the branch and the worktree's entry in `.git`, and the files are checked out in a
+one-off container from your box image, with no network. What that means for you:
+
+- **It needs the box image.** Before your first `fy box build`, `fy worktree add` stops with the
+  command to run first, and has changed nothing.
+- **Git LFS files arrive as pointers.** Run `git lfs pull` in the worktree's box to fetch them;
+  `fy worktree add` says so when the repo uses LFS.
+- **The first `git status` on your computer in a new worktree is slower** while git re-reads each
+  file once (the checkout's index was written in the VM); after that it's as fast as anywhere.
+- **If the checkout fails, nothing is kept**: the worktree and the branch `fy worktree add` made
+  are removed, and it prints the command to run again.
 
 ## Worktrees
 
