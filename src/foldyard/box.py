@@ -390,14 +390,22 @@ def _warn_mask_gaps(engine: str, box: str, ctx) -> None:
             f"⚠ dev box {box} doesn't mask the dependency dirs of checkouts your computer hadn't "
             f"registered when it created the box: {', '.join(m.path for m in unregistered)}. "
             "A box masks only registered worktrees, so a recreate alone won't: register each on "
-            f"your computer first ({_register_hint(unregistered)}), then recreate this box there."
+            f"your computer first ({_register_hint(unregistered) or _RENAME_FIRST}), then "
+            "recreate this box there."
         )
 
 
+# For a checkout whose directory name `fy worktree add` can't take (crossmask.registrable).
+_RENAME_FIRST = "rename its directory to a name `fy worktree add` takes, then `fy worktree add` it"
+
+
 def _register_hint(masks: list[crossmask.Mask]) -> str:
-    """``fy worktree add <name>`` for each checkout in ``masks`` — it asks before taking in a
-    checkout that already exists, and says so when one is already registered."""
-    return ", ".join(f"`fy worktree add {n}`" for n in sorted({m.checkout for m in masks}))
+    """``fy worktree add <name>`` for each checkout in ``masks`` whose name it would take — it asks
+    before taking in a checkout that already exists, and says so when one is already registered.
+    The names are box-writable directory names and the command is run on your computer, so each is
+    quoted and one it would refuse gets none (:func:`crossmask.registrable`). ``""`` when none."""
+    names = sorted({m.checkout for m in masks if crossmask.registrable(m.checkout)})
+    return ", ".join(f"`fy worktree add {shlex.quote(n)}`" for n in names)
 
 
 def boxes_not_masking(main: Path, worktree: str, *, fresh: bool) -> list[str]:

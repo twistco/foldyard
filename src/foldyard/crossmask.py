@@ -164,6 +164,21 @@ def registered(main: Path) -> dict[str, Path]:
     return found if names is None else {n: p for n, p in found.items() if n in names}
 
 
+def registrable(name: str) -> bool:
+    """Would ``fy worktree add <name>`` take ``name``? Its rules (``worktree.add``): a single plain
+    path component, neither of the two names it reserves — and here also nothing an argument parser
+    reads as an option or a terminal as a control sequence. The names reaching a hint come from the
+    box-writable worktrees root, and the hint is a command to run on your computer, so one that
+    fails isn't suggested at all (and the rest are ``shlex.quote``d)."""
+    return (
+        bool(name)
+        and name not in ("main", "worktrees", ".", "..")
+        and "/" not in name
+        and not name.startswith("-")
+        and name.isprintable()
+    )
+
+
 def unregistered(main: Path) -> dict[str, Path]:
     """In a box: the checkouts under the worktrees root your computer had NOT registered when it
     created this box (a plain `git worktree add`, say). A box masks only registered worktrees, so

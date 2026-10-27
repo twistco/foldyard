@@ -1565,6 +1565,8 @@ def _box_shadow_check():
             "",
         )
         return
+    import shlex  # the names below can be box-writable dir names, in commands run on your computer
+
     lines = []
     if own:
         lines.append(f"      not shadowed (declared after {name} was created): {', '.join(own)}")
@@ -1572,7 +1574,8 @@ def _box_shadow_check():
         lines.append(
             f"      other checkouts' dirs not masked (added after {name} was created):\n"
             + "\n".join(
-                f"          {m.path}  →  run there with: WORKTREE={m.checkout} fy box exec '<cmd>'"
+                f"          {m.path}  →  run there with: WORKTREE={shlex.quote(m.checkout)} "
+                "fy box exec '<cmd>'"
                 for m in others
             )
         )
@@ -1588,18 +1591,26 @@ def _box_shadow_check():
         lines.append(
             f"      not registered with your computer when {name} was created, so not masked"
             " (a box masks only registered worktrees):\n"
-            + "\n".join(f"          {m.path}  ({m.checkout})" for m in unregistered)
+            + "\n".join(
+                f"          {m.path}  ({m.checkout})"
+                if crossmask.registrable(m.checkout)
+                else f"          {m.path}  ({m.checkout!r} can't be registered under that name:"
+                " rename the directory)"
+                for m in unregistered
+            )
         )
-    pin = f"WORKTREE={worktree} " if worktree else ""
+    pin = f"WORKTREE={shlex.quote(worktree)} " if worktree else ""
     where = " on your computer" if in_box() else ""
     recreate = f"`{pin}fy box down && {pin}fy box up`"
-    if unregistered:
+    if unregistered and (hint := box._register_hint(unregistered)):
         # Registering comes first: a recreate before it masks them no better than this box does.
         fix = (
-            f"\n      → on your computer, register each ({box._register_hint(unregistered)} —"
-            " it asks before taking in an existing checkout, and says so if one already is),"
-            f" then recreate {name}: {recreate}"
+            f"\n      → on your computer, register each ({hint} — it asks before taking in an"
+            " existing checkout, and says so if one already is), then recreate"
+            f" {name}: {recreate}"
         )
+    elif unregistered:
+        fix = f"\n      → on your computer, {box._RENAME_FIRST}; then recreate {name}: {recreate}"
     else:
         fix = f"\n      → recreate it{where}: {recreate}"
     yield _result(

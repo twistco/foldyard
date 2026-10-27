@@ -242,6 +242,20 @@ def test_an_unreadable_snapshot_reads_as_an_older_box(tmp_path, monkeypatch, raw
     assert crossmask.unregistered(main) == {}
 
 
+@pytest.mark.parametrize("name", ["feat", "x$(touch pwned)", "a b", "it's", "v1.2_rc"])
+def test_a_name_fy_worktree_add_takes_is_registrable(name):
+    assert crossmask.registrable(name)
+
+
+@pytest.mark.parametrize(
+    "name", ["", "main", "worktrees", ".", "..", "a/b", "-rf", "--yes", "x\x1b[2J"]
+)
+def test_a_name_fy_worktree_add_refuses_or_reads_as_an_option_is_not(name):
+    # The names come from the box-writable worktrees root, and the hint is a command to RUN on your
+    # computer: never suggest one that can't succeed, or that isn't what it looks like.
+    assert not crossmask.registrable(name)
+
+
 def test_on_the_host_the_snapshot_is_never_read(tmp_path, monkeypatch, register_worktree):
     # Your computer has the registry itself: the env var (an operator's shell, say) changes
     # nothing, and its doctor names unregistered checkouts in its own `worktrees` row.

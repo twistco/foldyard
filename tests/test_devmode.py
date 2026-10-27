@@ -1264,6 +1264,45 @@ def test_box_shadow_row_in_the_box_tells_the_two_apart(tmp_path, monkeypatch, re
     assert "`fy worktree add c`" in unregistered and "`fy worktree add d`" in unregistered
 
 
+def test_box_shadow_row_never_hands_your_computer_a_command_a_dir_name_can_subvert(
+    tmp_path, monkeypatch, register_worktree
+):
+    # The names are box-writable dirs, and the fix is pasted into a host shell: a name with shell
+    # syntax is quoted, and one `fy worktree add` would refuse gets no command at all.
+    evil, reserved = "x$(touch pwned)", "-rf"
+    mounts = _box_mounts(tmp_path, "a", "b")
+    [(_, _, detail)] = _in_box_row(
+        tmp_path, monkeypatch, register_worktree, {"a": 1, "b": 2}, mounts, stray=(evil, reserved)
+    )
+    assert "`fy worktree add 'x$(touch pwned)'`" in detail
+    assert "fy worktree add x$(" not in detail
+    assert "fy worktree add -rf" not in detail and "fy worktree add '-rf'" not in detail
+    assert "'-rf' can't be registered under that name" in detail
+
+
+def test_box_shadow_row_with_only_unregistrable_names_says_to_rename(
+    tmp_path, monkeypatch, register_worktree
+):
+    mounts = _box_mounts(tmp_path, "a", "b")
+    [(_, _, detail)] = _in_box_row(
+        tmp_path, monkeypatch, register_worktree, {"a": 1, "b": 2}, mounts, stray=("main",)
+    )
+    assert "fy worktree add main" not in detail
+    assert "rename" in detail and "fy box down && fy box up" in detail
+
+
+def test_box_shadow_row_in_an_older_box_quotes_an_on_disk_name_in_its_exec_hint(
+    tmp_path, monkeypatch, register_worktree
+):
+    # Without the snapshot the "added after" names are the box-writable listing.
+    mounts = _box_mounts(tmp_path, "a", "b")
+    [(_, _, detail)] = _in_box_row(
+        tmp_path, monkeypatch, register_worktree, None, mounts, stray=("x$(touch pwned)",)
+    )
+    assert "WORKTREE='x$(touch pwned)' fy box exec" in detail
+    assert "WORKTREE=x$(" not in detail
+
+
 def test_box_shadow_row_in_the_box_is_ok_only_without_unregistered_checkouts(
     tmp_path, monkeypatch, register_worktree
 ):
