@@ -495,8 +495,10 @@ def _registered_worktree(main: Path, wt_dir: Path) -> bool:
 # uncommitted?) or `save` (park it, too); $2: the parking commit's message — both ARGUMENTS, never
 # spliced in. `--untracked-files=normal` and `--ignore-submodules=none` pin what counts (git's own
 # check honours `status.showUntrackedFiles`, which the box-writable config can set to `no`), and
-# `--no-optional-locks` leaves the worktree's index as it is. The throwaway index lives in the
-# container's own /tmp, which no box reaches. An unborn HEAD, or any git failure, is exit 3.
+# `--no-optional-locks` leaves the worktree's index as it is. The parking commit's tree is built
+# through a throwaway index in the container's own /tmp, which no box reaches, so neither the
+# worktree's index nor its HEAD changes on the way out; `add -A` honours .gitignore, which keeps it
+# cheap (no node_modules) and is its one blind spot. An unborn HEAD, or any git failure, is exit 3.
 _UNCOMMITTED_SH = """\
 g() { git -c filter.lfs.required=false "$@"; }
 head=$(g rev-parse --verify --quiet 'HEAD^{commit}') || exit 3
@@ -605,10 +607,12 @@ def _park(main: Path, name: str, oid: str, env: dict[str, str]) -> str | None:
     return ref
 
 
-def _say_parked(main: Path, name: str, ref: str) -> None:
+def _say_parked(name: str, ref: str) -> None:
+    # The commands are for a box: git on your computer runs the filter and diff drivers the
+    # shared .git names over what it checks out or shows.
     print(f"▶ uncommitted work in '{name}' saved to {ref}")
-    print(f"     inspect:  git -C {main} show --stat {ref}")
-    print(f"     restore:  git -C {main} checkout {ref} -- .")
+    print(f"     inspect, in a box:  git show --stat {ref}")
+    print(f"     restore, in a box:  git checkout {ref} -- .")
 
 
 def _remove_command(name: str, force: bool, assume_yes: bool) -> str:
@@ -639,7 +643,13 @@ def _remove_yard(name: str, again: str) -> tuple[str, dict, str] | None:
 
 
 def _remove_checkout(
-    main: Path, wt_dir: Path, name: str, yard: tuple[str, dict, str] | None, *, force: bool
+    main: Path,
+    wt_dir: Path,
+    name: str,
+    yard: tuple[str, dict, str] | None,
+    *,
+    force: bool,
+    again: str,
 ) -> tuple[int, str | None]:
     """Delete the registered checkout ``wt_dir`` — ``(rc, the ref its uncommitted work was parked
     on, if any)``. With ``yard``, first ask it whether there is uncommitted work: refuse if so,
@@ -650,7 +660,6 @@ def _remove_checkout(
     except HookScanError as e:
         _refuse_unscanned(e)
         return 1, None
-    again = _remove_command(name, force, False)
     ref = None
     if yard is not None:
         admin = _admin_dir(wt_dir)
@@ -674,7 +683,7 @@ def _remove_checkout(
             _say_discard(again)
             return 1, None
         if ref:
-            _say_parked(main, name, ref)
+            _say_parked(name, ref)
     print(f"▶ git worktree remove --force {wt_dir}…")
     rc = _host_git(main, "worktree", "remove", "--force", str(wt_dir), env=quiet).returncode
     if rc != 0:
@@ -1257,9 +1266,10 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
         return 1
     # Asked BEFORE the plan and the teardown: with no yard to ask about uncommitted work, nothing
     # is torn down (an orphan has nothing git could check, and --discard says not to ask).
+    again = _remove_command(name, force, assume_yes)
     yard = None
     if not (orphaned or discard):
-        if (yard := _remove_yard(name, _remove_command(name, force, assume_yes))) is None:
+        if (yard := _remove_yard(name, again)) is None:
             return 1
 
     print(f"This PERMANENTLY removes worktree '{name}' at {wt_dir}:")
@@ -1332,7 +1342,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
             _err(f"  worktree metadata may remain (re-run: git -C {main} worktree prune).")
             return rc
     else:
-        rc, saved = _remove_checkout(main, wt_dir, name, yard, force=force)
+        rc, saved = _remove_checkout(main, wt_dir, name, yard, force=force, again=again)
         if rc != 0:
             if saved:
                 _err(f"  Its uncommitted work is on {saved} all the same.")
