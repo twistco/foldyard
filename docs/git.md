@@ -154,8 +154,9 @@ could add its own). So `fy worktree add` doesn't check files out on your compute
 there makes the branch and the worktree's entry in `.git`, and the files are checked out in a
 one-off container from your box image, with no network. What that means for you:
 
-- **It needs the box image.** Before your first `fy box build`, `fy worktree add` stops with the
-  command to run first, and has changed nothing.
+- **It needs the box image**, with `git` and `sh` in it (any image a box runs in has both).
+  Before your first `fy box build`, `fy worktree add` stops with the command to run first, and
+  has changed nothing.
 - **Git LFS files arrive as pointers.** Run `git lfs pull` in the worktree's box to fetch them;
   `fy worktree add` says so when the repo uses LFS.
 - **The first `git status` on your computer in a new worktree is slower** while git re-reads each
