@@ -20,7 +20,14 @@
   --no-checkout` (the branch, HEAD, the admin dir) and the files + index are written in a
   one-off container from the box image (`worktree._checkout_in_yard`). Unlike `worktree_init`,
   a worktree with no files is useless, so a missing image REFUSES before any git runs, with the
-  command to run first — still never a host fallback.
+  command to run first — still never a host fallback. The same day, `fy worktree remove`'s
+  HASHING joined it: its check for uncommitted work (`git worktree remove`'s own `git status`)
+  and the parking of that work on `refs/fy/removed/…` (`add -A`) ran every `clean` filter the
+  shared config names. Both run in a one-off container now (`worktree._uncommitted_in_yard`); the
+  host checks the commit id it is handed (`cat-file -t`), writes the ref and deletes the checkout
+  with `--force`. No image refuses before anything is torn down; `--discard` is the operator's
+  explicit way to remove without checking or parking — never a check on the host. foldyard's own
+  host git now runs no filter driver.
 - **Sources:** the review of the finalised `github=app` PR-bot minter — "does the consumer-side
   minter hand the box a code-execution path to the Mac?"; five review rounds against the
   implementation. Related: [0007](./0007-credential-injection-at-egress-proxy.md) (where minting

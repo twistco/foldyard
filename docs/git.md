@@ -163,6 +163,11 @@ one-off container from your box image, with no network. What that means for you:
 - **If the checkout fails, nothing is kept**: the worktree and the branch `fy worktree add` made
   are removed, and it prints the command to run again.
 
+Comparing files runs them too: to tell whether a file changed, git reads it through its `clean`
+filter. So `fy worktree remove` doesn't ask git on your computer whether a worktree has
+uncommitted work, or have it save that work. Both happen in the same kind of container, and git
+on your computer then saves the result on a ref and deletes the checkout.
+
 ## Worktrees
 
 For parallel work, make a worktree on your computer with `fy worktree add <name>`: its own
@@ -209,9 +214,16 @@ masked in no box, recreated or not, until `fy worktree add <name>` on your compu
 
 `fy worktree remove <name>` takes down that worktree's box, stack and volumes, deletes the
 checkout and its adopted config, and keeps its branch, so a worktree added later under the same
-name starts with nothing adopted. A worktree with uncommitted work needs `--force`; that work is
-saved first on a ref in the main checkout (`refs/fy/removed/<name>-<time>`), and the command
-prints how to restore it.
+name starts with nothing adopted. A worktree with uncommitted work (changed or untracked files
+that aren't gitignored) needs `--force`; that work is saved first on a ref in the main checkout
+(`refs/fy/removed/<name>-<time>`), and the command prints how to restore it. Gitignored files
+aren't saved.
+
+The check for uncommitted work, and the save, run in a container from your box image (see above),
+so `fy worktree remove` needs the image and the VM. Without them it stops before it has taken
+anything down, and says what to run first. If you can't provide them and you're sure nothing
+uncommitted in the worktree matters, `--discard` removes it without checking or saving anything.
+If the check or the save fails, the worktree is kept.
 
 ## What `fy doctor` checks
 
