@@ -960,3 +960,19 @@ def test_remove_is_not_blocked_by_a_failed_snapshot(fake_main, monkeypatch):
     monkeypatch.setattr(worktree, "_snapshot_uncommitted", lambda wt_dir, name: None)
     _make_wt(fake_main)
     assert worktree.remove("feat", assume_yes=True) == 0
+
+
+def test_the_git_calls_that_can_run_repo_code_switch_hooks_off(fake_main):
+    # `worktree add` checks out (post-checkout, reference-transaction); `remove` runs `git status`
+    # (core.fsmonitor); `prune` for symmetry. Each through the one hookless helper — see
+    # tests/test_worktree_git_hooks.py for what that does against a real git.
+    def hookless(cmd):
+        return "core.hooksPath=/dev/null" in cmd and "core.fsmonitor=" in cmd
+
+    assert worktree.add("feat") == 0
+    assert hookless(next(c for c in fake_main["calls"] if "worktree" in c and "add" in c))
+    assert worktree.remove("feat", assume_yes=True) == 0
+    assert hookless(next(c for c in fake_main["calls"] if "worktree" in c and "remove" in c))
+    _make_wt(fake_main, name="gone", registered=False)
+    assert worktree.remove("gone", force=True) == 0
+    assert hookless(next(c for c in fake_main["calls"] if c[-2:] == ["worktree", "prune"]))

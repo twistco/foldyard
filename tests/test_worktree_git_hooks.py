@@ -1,0 +1,167 @@
+"""foldyard's own git on your computer runs none of the repo's hooks.
+
+The hooks live in the shared ``.git`` — ``.git/hooks/*`` and, since git 2.54, ``[hook "<name>"]``
+entries in ``.git/config`` — and every box can write both. A ``fy worktree add`` on the host once
+ran a consumer's lefthook ``post-checkout`` hooks there, in the new checkout, before it was even
+registered. These drive REAL git (no mock): what is under test is what git itself honours.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from foldyard import config, machine, stack, worktree
+
+
+def _git(repo: Path, *args: str, **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, **kw)
+
+
+def _git_has_config_hooks() -> bool:
+    """Does this git read ``[hook "<name>"]`` from config (git 2.54+)? ``git hook list`` came with
+    them; an older git doesn't know the subcommand."""
+    probe = subprocess.run(["git", "hook", "list", "-h"], capture_output=True, text=True)
+    return "usage: git hook list" in probe.stdout + probe.stderr
+
+
+def _hook_script(marker: Path, label: str) -> str:
+    return f'#!/bin/sh\necho "{label} $*" >> "{marker}"\n'
+
+
+@pytest.fixture
+def hooked_repo(tmp_path):
+    """A real main repo whose shared ``.git`` carries every kind of hook a box could plant:
+    hookdir scripts for ``post-checkout`` and ``reference-transaction``, and config hooks — one
+    with a name that a ``-c key=value`` argument could not address (``=``, dots, case)."""
+    main, marker = tmp_path / "main", tmp_path / "marker"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(main)], check=True)
+    _git(main, "config", "user.email", "t@example.com")
+    _git(main, "config", "user.name", "t")
+    (main / "f.txt").write_text("base\n")
+    _git(main, "add", "-A")
+    _git(main, "commit", "-qm", "base")
+    hooks = main / ".git" / "hooks"
+    for event in ("post-checkout", "reference-transaction"):
+        (hooks / event).write_text(_hook_script(marker, f"hookdir-{event}"))
+        (hooks / event).chmod(0o755)
+    for name in ("lint", "we=ird.Na me"):
+        _git(main, "config", f"hook.{name}.event", "post-checkout")
+        _git(main, "config", "--add", f"hook.{name}.event", "reference-transaction")
+        _git(main, "config", f"hook.{name}.command", f'echo "config-{name}" >> "{marker}"')
+    return {"main": main, "marker": marker}
+
+
+def test_the_rig_hooks_do_fire_under_plain_git(hooked_repo, tmp_path):
+    # The control: without it, "no marker" below would prove nothing about foldyard.
+    main, marker = hooked_repo["main"], hooked_repo["marker"]
+    assert (
+        _git(main, "worktree", "add", "-q", "-b", "plain", str(tmp_path / "plain")).returncode == 0
+    )
+    fired = marker.read_text()
+    assert "hookdir-post-checkout" in fired
+    assert "hookdir-reference-transaction" in fired
+    if _git_has_config_hooks():
+        assert "config-lint" in fired
+        assert "config-we=ird.Na me" in fired
+
+
+def test_host_git_runs_no_hook_of_either_kind(hooked_repo, tmp_path):
+    main, marker = hooked_repo["main"], hooked_repo["marker"]
+    wt = tmp_path / "quiet"
+    got = worktree._host_git(
+        main, "worktree", "add", "-q", "-b", "quiet", str(wt), capture_output=True
+    )
+    assert got.returncode == 0, got.stderr
+    assert (wt / "f.txt").read_text() == "base\n"  # the checkout itself still happened
+    assert not marker.exists()
+
+
+def test_host_git_keeps_the_callers_own_runtime_config(hooked_repo, tmp_path, monkeypatch):
+    # The hooks are switched off through GIT_CONFIG_COUNT, which the operator may already be
+    # using: theirs must survive, numbered ahead of ours.
+    main = hooked_repo["main"]
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "fy.test")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "kept")
+    got = worktree._host_git(main, "config", "fy.test", capture_output=True, text=True)
+    assert got.stdout.strip() == "kept"
+    assert not hooked_repo["marker"].exists()
+
+
+def test_host_git_does_not_run_the_repos_fsmonitor(hooked_repo, tmp_path):
+    # core.fsmonitor in the shared config names a command git runs on every index refresh —
+    # `worktree remove`'s dirty check (`git status`) and the snapshot's `git add -A` among them.
+    main = hooked_repo["main"]
+    probe, seen = tmp_path / "fsmonitor.sh", tmp_path / "fsmonitor-ran"
+    probe.write_text(f'#!/bin/sh\necho ran >> "{seen}"\nexit 1\n')
+    probe.chmod(0o755)
+    _git(main, "config", "core.fsmonitor", str(probe))
+    assert _git(main, "status", "--porcelain").returncode == 0
+    assert seen.exists()  # the control: plain git runs it
+    seen.unlink()
+    got = worktree._host_git(main, "status", "--porcelain", capture_output=True, text=True)
+    assert got.returncode == 0
+    assert not seen.exists()
+
+
+def test_the_uncommitted_work_snapshot_fires_no_hook(hooked_repo, tmp_path):
+    # Its `update-ref` is a ref transaction, and `git add -A` refreshes the index.
+    main, marker = hooked_repo["main"], hooked_repo["marker"]
+    wt = tmp_path / "wt"
+    worktree._host_git(main, "worktree", "add", "-q", "-b", "feat", str(wt), capture_output=True)
+    (wt / "new.txt").write_text("work\n")
+    assert worktree._snapshot_uncommitted(wt, "feat")
+    assert not marker.exists()
+
+
+@pytest.fixture
+def real_add(hooked_repo, tmp_path, monkeypatch):
+    """``worktree.add`` against the real repo, with everything but git stubbed."""
+    main = hooked_repo["main"]
+    wt_root = tmp_path / "main-worktrees"
+    monkeypatch.setattr(stack, "main_repo", lambda: main)
+    monkeypatch.setattr(config, "worktrees_root", lambda m: wt_root)
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(config, "worktree_base", lambda: None)
+    monkeypatch.setattr(config, "worktree_init", lambda: None)
+    monkeypatch.setattr(machine, "ensure", lambda *a, **k: None)
+    monkeypatch.setattr(worktree, "_seed_keyless_posture", lambda name: None)
+    monkeypatch.setattr(worktree, "_say_unmasked", lambda *a, **k: None)
+    monkeypatch.delenv("WORKTREE", raising=False)
+    yield {**hooked_repo, "wt_root": wt_root}
+    os.environ.pop("WORKTREE", None)
+
+
+def test_worktree_add_runs_none_of_the_repos_hooks(real_add, capsys):
+    assert worktree.add("feat") == 0
+    assert (real_add["wt_root"] / "feat" / "f.txt").read_text() == "base\n"
+    assert not real_add["marker"].exists()
+    out = capsys.readouterr().out
+    # Reporting is part of the fix: skipping them silently would leave "my post-checkout setup
+    # never ran" a mystery.
+    assert "skipped the repo's git hooks (post-checkout, reference-transaction)" in out
+
+
+def test_worktree_add_says_nothing_about_hooks_when_there_are_none(real_add, capsys):
+    main = real_add["main"]
+    for event in ("post-checkout", "reference-transaction"):
+        (main / ".git" / "hooks" / event).unlink()
+    for name in ("lint", "we=ird.Na me"):
+        _git(main, "config", "--remove-section", f"hook.{name}")
+    assert worktree.add("feat") == 0
+    assert "skipped the repo's git hooks" not in capsys.readouterr().out
+
+
+def test_a_hook_that_is_not_executable_is_not_reported(real_add, capsys):
+    # git skips a hookdir file without the x bit (it only warns), so it wasn't "skipped" by us.
+    main = real_add["main"]
+    (main / ".git" / "hooks" / "reference-transaction").unlink()
+    (main / ".git" / "hooks" / "post-checkout").chmod(0o644)
+    for name in ("lint", "we=ird.Na me"):
+        _git(main, "config", "--remove-section", f"hook.{name}")
+    assert worktree.add("feat") == 0
+    assert "skipped the repo's git hooks" not in capsys.readouterr().out
