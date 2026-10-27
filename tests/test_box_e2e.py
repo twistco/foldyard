@@ -231,7 +231,7 @@ def test_worktree_add_checks_the_files_out_in_the_yard(repo):
     removed = fy_ok(["worktree", "remove", FRESH, "--force"], repo, timeout=600)
     assert f"worktree '{FRESH}' removed" in removed.out, removed.out
     assert not fresh.exists()
-    (ref,) = _git(repo, "for-each-ref", "--format=%(refname)", f"refs/fy/removed/{FRESH}-").split()
+    (ref,) = _git(repo, "for-each-ref", "--format=%(refname)", f"refs/fy/removed/{FRESH}-*").split()
     assert ref in removed.out, removed.out
     assert _git(repo, "show", f"{ref}:notes.txt") == "not committed\n"
     assert _git(repo, "show", f"{ref}:compose.yml").endswith("# edited\n")
