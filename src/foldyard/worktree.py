@@ -673,7 +673,9 @@ def _remove_checkout(
             return 1, None
         verdict = _uncommitted_in_yard(main, wt_dir, name, yard, save=force)
         if verdict is not None and verdict[0] == "dirty":
-            _err(f"✗ '{name}' has uncommitted changes or untracked files — nothing removed.")
+            _err(f"✗ '{name}' has uncommitted work — nothing removed: files that differ from its")
+            _err("  last commit (changed, deleted or untracked, not gitignored; a change only in")
+            _err("  the stage doesn't count).")
             _err("  Commit them in its box, or re-run with --force to save them on a ref first:")
             _err(f"  {_remove_command(name, True, False)}")
             return 1, None

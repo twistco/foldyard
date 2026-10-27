@@ -215,10 +215,20 @@ masked in no box, recreated or not, until `fy worktree add <name>` on your compu
 
 `fy worktree remove <name>` takes down that worktree's box, stack and volumes, deletes the
 checkout and its adopted config, and keeps its branch, so a worktree added later under the same
-name starts with nothing adopted. A worktree with uncommitted work (changed or untracked files
-that aren't gitignored) needs `--force`; that work is saved first on a ref in the main checkout
-(`refs/fy/removed/<name>-<time>`), and the command prints how to restore it. Gitignored files
-aren't saved.
+name starts with nothing adopted. A worktree with uncommitted work needs `--force`; that work is
+saved first on a ref in the main checkout (`refs/fy/removed/<name>-<time>`), and the command
+prints how to restore it.
+
+Uncommitted work here means files that differ from the worktree's last commit once everything
+is unstaged: changed, deleted or untracked files that aren't gitignored, and changes inside a
+submodule. What's staged doesn't count. So a stale stage, such as the one your computer's side
+of a worktree shows after commits made in its box, doesn't stop a plain remove. Two things are
+not protected:
+
+- **Gitignored files** are neither counted nor saved.
+- **Changes that exist only in the stage** are lost: a change you staged and then undid in the
+  file itself. Unstaging everything would discard them too, and the save keeps files, not the
+  stage.
 
 The check for uncommitted work, and the save, run in a container from your box image (see above),
 so `fy worktree remove` needs the image and the VM. Without them it stops before it has taken

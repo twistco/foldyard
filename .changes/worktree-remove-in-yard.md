@@ -13,5 +13,11 @@ bump: minor
   `fy worktree remove` now needs the box image and the VM. Without them it stops before it has
   taken anything down and prints what to run. If you're sure nothing uncommitted in the worktree
   matters, the new `--discard` removes it without checking or saving anything. A check or save
-  that fails now keeps the worktree instead of removing it unsaved. An untracked file now counts
-  as uncommitted work even when `status.showUntrackedFiles` is `no`.
+  that fails now keeps the worktree instead of removing it unsaved.
+- **`fy worktree remove`'s "uncommitted work" now means files that differ from the last commit
+  once everything is unstaged.** It used to be git's own check, which also counts the stage. Your
+  computer's stage for a worktree goes stale whenever its box commits, so a worktree whose files
+  matched its last commit could still be refused. That no longer happens, and whatever the check
+  does call uncommitted, `--force` saves. An untracked file counts even when
+  `status.showUntrackedFiles` is `no`. A change that exists only in the stage (staged, then undone
+  in the file) isn't counted or saved, just as unstaging would lose it.

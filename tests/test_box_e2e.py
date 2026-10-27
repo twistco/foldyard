@@ -224,7 +224,7 @@ def test_worktree_add_checks_the_files_out_in_the_yard(repo):
     kept = fy(["worktree", "remove", FRESH, "--yes"], repo, timeout=600)
     assert kept.rc == 1, kept.out
     assert f"checking '{FRESH}' for uncommitted work in the VM" in kept.out, kept.out
-    assert "uncommitted changes or untracked files" in kept.out, kept.out
+    assert f"'{FRESH}' has uncommitted work" in kept.out, kept.out
     assert (fresh / "notes.txt").is_file()
     # …and --force parks them on a ref the container's commit and your computer's ref write make
     # between them (the object written in the VM, read here), then removes it.
