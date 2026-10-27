@@ -14,12 +14,15 @@ checkout keeps its real shadow volumes, unchanged. One volume per project serves
 Which checkouts exist comes from the host's worktree registry when the box is created (never a
 listing of the box-writable worktrees root). A box's mounts are fixed at creation, so a worktree
 added later isn't masked in a box that was already running: ``fy worktree add``, ``fy box up``
-and ``fy doctor`` say so (:func:`unmasked`) and never recreate a box themselves.
+and ``fy doctor`` say so (:func:`unmasked`) and never recreate a box themselves. A checkout the
+host never registered (a plain ``git worktree add``) is masked in no box; the box's own doctor tells
+it apart by the registry the host baked in at create (:func:`unregistered`).
 
 Stdlib + ``config`` + ``worktree_registry`` only: the doctor row imports it."""
 
 from __future__ import annotations
 
+import json
 import os
 import posixpath
 from collections.abc import Iterable, Mapping
@@ -35,6 +38,9 @@ FILL_AT = "/fy-note"
 # A mount target the engine can't parse unambiguously: `-v src:dst:ro` splits on ':', and an engine
 # that reads mount options comma-separated (`--mount`) on ','. A worktree name may hold either.
 _UNSAFE = frozenset(":,\n\r\x00")
+# What the host bakes into every box at create: each registered worktree's port offset
+# (``box._create_env``). Its names are the registry the box itself can't read (:func:`baked_names`).
+SNAPSHOT_ENV = "FY_WORKTREE_OFFSETS"
 
 
 def note_volume(prefix: str | None = None) -> str:
@@ -122,18 +128,67 @@ def run_args(volume: str, masks: Iterable[Mask]) -> list[str]:
     return out
 
 
-def registered(main: Path) -> dict[str, Path]:
-    """The worktrees a box created now would mask: the host's registry (name → path). In the box
-    there is no registry, so the checkouts under the worktrees root stand in — for REPORTING only
-    (the doctor row); nothing is created from that list."""
-    if not config.in_box():
-        return worktree_registry.checkouts(main)
+def baked_names() -> frozenset[str] | None:
+    """In a box: the worktrees your computer's registry held when it created this box — the names
+    in :data:`SNAPSHOT_ENV` (``box._create_env`` bakes every registered worktree's port offset).
+    None when the box carries none, or none that parses: one created by a foldyard from before it.
+    The host set it; nothing in the box re-reads the registry. For REPORTING only."""
+    try:
+        data = json.loads(os.environ.get(SNAPSHOT_ENV) or "null")
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return frozenset(k for k in data if isinstance(k, str))
+
+
+def _on_disk(main: Path) -> dict[str, Path]:
+    """The checkouts under the worktrees root as the box sees them. Box-writable: REPORTING only."""
     wt_root = config.worktrees_root(main)
     try:
         entries = list(wt_root.iterdir()) if wt_root.is_dir() else []
     except OSError:
         return {}
     return {d.name: d for d in entries if d.is_dir() and (d / ".git").exists()}
+
+
+def registered(main: Path) -> dict[str, Path]:
+    """The worktrees a box created now would mask: the host's registry (name → path). In the box
+    there is no registry, so the checkouts under the worktrees root that the host had registered
+    when it created this box (:func:`baked_names`) stand in — every one of them in a box from
+    before that snapshot. For REPORTING only (the doctor row); nothing is created from it."""
+    if not config.in_box():
+        return worktree_registry.checkouts(main)
+    found = _on_disk(main)
+    names = baked_names()
+    return found if names is None else {n: p for n, p in found.items() if n in names}
+
+
+def registrable(name: str) -> bool:
+    """Would ``fy worktree add <name>`` take ``name``? Its rules (``worktree.add``): a single plain
+    path component, neither of the two names it reserves — and here also nothing an argument parser
+    reads as an option or a terminal as a control sequence. The names reaching a hint come from the
+    box-writable worktrees root, and the hint is a command to run on your computer, so one that
+    fails isn't suggested at all (and the rest are ``shlex.quote``d)."""
+    return (
+        bool(name)
+        and name not in ("main", "worktrees", ".", "..")
+        and "/" not in name
+        and not name.startswith("-")
+        and name.isprintable()
+    )
+
+
+def unregistered(main: Path) -> dict[str, Path]:
+    """In a box: the checkouts under the worktrees root your computer had NOT registered when it
+    created this box (a plain `git worktree add`, say). A box masks only registered worktrees, so
+    this box doesn't mask them and a recreate alone wouldn't either: `fy worktree add <name>` on
+    your computer registers one first. ``{}`` on your computer (its doctor's `worktrees` row names
+    them) and in a box without the snapshot, which can't tell. REPORTING only, like
+    :func:`registered`."""
+    if not config.in_box() or (names := baked_names()) is None:
+        return {}
+    return {n: p for n, p in _on_disk(main).items() if n not in names}
 
 
 def unmasked(mounts: object, masks: Iterable[Mask], volume: str) -> list[Mask]:

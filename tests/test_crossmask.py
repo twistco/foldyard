@@ -187,13 +187,81 @@ def test_registered_on_the_host_is_the_registry_never_a_listing(
     assert set(crossmask.registered(main)) == {"real"}
 
 
-def test_registered_in_the_box_lists_the_worktrees_root_for_reporting(tmp_path, monkeypatch):
+def _on_disk(tmp_path, *names):
     main = tmp_path / "repo"
     main.mkdir()
     wt_root = config.worktrees_root(main)
-    for name in ("a", "b"):
+    for name in names:
         (wt_root / name).mkdir(parents=True)
         (wt_root / name / ".git").write_text("gitdir: x\n")
-    (wt_root / "not-a-checkout").mkdir()
+    (wt_root / "not-a-checkout").mkdir(parents=True)
+    return main, wt_root
+
+
+def test_registered_in_an_older_box_lists_the_worktrees_root_for_reporting(tmp_path, monkeypatch):
+    # A box created before the host baked its registry in (no FY_WORKTREE_OFFSETS): the checkouts
+    # on disk stand in, and none can be told apart as unregistered.
+    main, _ = _on_disk(tmp_path, "a", "b")
     monkeypatch.setattr(config, "in_box", lambda: True)
+    monkeypatch.delenv(crossmask.SNAPSHOT_ENV, raising=False)
+    assert crossmask.baked_names() is None
     assert set(crossmask.registered(main)) == {"a", "b"}
+    assert crossmask.unregistered(main) == {}
+
+
+def test_registered_in_the_box_is_what_the_host_had_registered_at_create(tmp_path, monkeypatch):
+    # The real report: two checkouts made with plain `git worktree add`, in a box created seconds
+    # earlier. The host never masks those, so they aren't "added after the box was created".
+    main, wt_root = _on_disk(tmp_path, "a", "refresh-curated-orgs", "sec-data-deps")
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    monkeypatch.setenv(crossmask.SNAPSHOT_ENV, '{"a": 7, "gone": 12}')
+    assert crossmask.registered(main) == {"a": wt_root / "a"}  # never a name not on disk
+    assert crossmask.unregistered(main) == {
+        "refresh-curated-orgs": wt_root / "refresh-curated-orgs",
+        "sec-data-deps": wt_root / "sec-data-deps",
+    }
+
+
+def test_an_empty_snapshot_registers_nothing_in_the_box(tmp_path, monkeypatch):
+    # `{}` is the host saying "no worktrees registered", not an older box.
+    main, _ = _on_disk(tmp_path, "a")
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    monkeypatch.setenv(crossmask.SNAPSHOT_ENV, "{}")
+    assert crossmask.baked_names() == frozenset()
+    assert crossmask.registered(main) == {}
+    assert set(crossmask.unregistered(main)) == {"a"}
+
+
+@pytest.mark.parametrize("raw", ["", "not json", "[1, 2]", '"a"'])
+def test_an_unreadable_snapshot_reads_as_an_older_box(tmp_path, monkeypatch, raw):
+    main, _ = _on_disk(tmp_path, "a")
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    monkeypatch.setenv(crossmask.SNAPSHOT_ENV, raw)
+    assert crossmask.baked_names() is None
+    assert set(crossmask.registered(main)) == {"a"}
+    assert crossmask.unregistered(main) == {}
+
+
+@pytest.mark.parametrize("name", ["feat", "x$(touch pwned)", "a b", "it's", "v1.2_rc"])
+def test_a_name_fy_worktree_add_takes_is_registrable(name):
+    assert crossmask.registrable(name)
+
+
+@pytest.mark.parametrize(
+    "name", ["", "main", "worktrees", ".", "..", "a/b", "-rf", "--yes", "x\x1b[2J"]
+)
+def test_a_name_fy_worktree_add_refuses_or_reads_as_an_option_is_not(name):
+    # The names come from the box-writable worktrees root, and the hint is a command to RUN on your
+    # computer: never suggest one that can't succeed, or that isn't what it looks like.
+    assert not crossmask.registrable(name)
+
+
+def test_on_the_host_the_snapshot_is_never_read(tmp_path, monkeypatch, register_worktree):
+    # Your computer has the registry itself: the env var (an operator's shell, say) changes
+    # nothing, and its doctor names unregistered checkouts in its own `worktrees` row.
+    main, wt_root = _on_disk(tmp_path, "planted")
+    register_worktree(main, "real", wt_root / "real")
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setenv(crossmask.SNAPSHOT_ENV, '{"planted": 1}')
+    assert set(crossmask.registered(main)) == {"real"}
+    assert crossmask.unregistered(main) == {}
