@@ -105,22 +105,39 @@ def _git_can_refuse_lazy_fetch() -> bool:
     return got.returncode == 0
 
 
-def _fetch_refusal(repo: Path) -> str | None:
-    """Why git can't run in ``repo`` here without risking a fetch, or None: a partial clone on a
-    git older than 2.44, for which a remote helper no transport policy names stays reachable.
-    Reading config runs nothing from it."""
-    got = subprocess.run(
-        ["git", "-C", str(repo), "config", "--get", "extensions.partialclone"],
-        capture_output=True,
-        text=True,
+def _note_fetchy(fetchy: set[str], key: str, value: str) -> None:
+    """Record ``key`` if it makes git fetch missing objects on demand: ``extensions.partialClone``,
+    or ``remote.<name>.promisor`` (on its own enough to register a promisor remote) set to anything
+    but an explicit false. Over-counting only refuses an old git."""
+    if key == "extensions.partialclone" and value.strip():
+        fetchy.add(key)
+    elif (
+        key.startswith("remote.")
+        and key.endswith(".promisor")
+        and value.strip().lower() not in ("false", "no", "off", "0")
+    ):
+        fetchy.add(key)
+
+
+def _lazy_fetch_error(fetchy: set[str]) -> LazyFetchError:
+    return LazyFetchError(
+        f"this repo can fetch missing objects on demand ({', '.join(sorted(fetchy))}), and this "
+        "git can't be told not to — over a transport the shared config chooses. It needs git "
+        "2.44 or newer"
     )
-    if got.returncode != 0 or not got.stdout.strip() or _git_can_refuse_lazy_fetch():
-        return None
-    return (
-        "this repo is a partial clone (extensions.partialClone), and this git can't be told not "
-        "to fetch a missing object from its promisor remote — over a transport the shared config "
-        "chooses. It needs git 2.44 or newer"
-    )
+
+
+def _check_fetch(repo: Path) -> None:
+    """Raise unless git can run in ``repo`` here without risking a fetch: on a git older than
+    2.44 (no ``GIT_NO_LAZY_FETCH``, so a remote helper no transport policy names stays reachable),
+    a repo whose config — every file and include git could read, whatever the include's condition
+    (:func:`_scan_config`) — names a promisor remote raises :class:`LazyFetchError`, and one that
+    can't be checked :class:`HookScanError`. Free on a newer git."""
+    if _git_can_refuse_lazy_fetch():
+        return
+    _, fetchy = _scan_config(repo)
+    if fetchy:
+        raise _lazy_fetch_error(fetchy)
 
 
 def _no_fetch_env(base: dict[str, str] | None = None) -> dict[str, str]:
@@ -129,10 +146,12 @@ def _no_fetch_env(base: dict[str, str] | None = None) -> dict[str, str]:
 
 def _git_read(repo: Path, *args: str, **kw) -> subprocess.CompletedProcess:
     """``git -C repo args…`` for a READ here (a ref, an object, config): no fetch
-    (:data:`_NO_FETCH_CONFIG`). A partial clone this git can't keep from fetching runs nothing:
-    a failed run (1), the reason said."""
-    if why := _fetch_refusal(repo):
-        _refuse_unscanned(LazyFetchError(why))
+    (:data:`_NO_FETCH_CONFIG`). A repo this git can't keep from fetching (:func:`_check_fetch`)
+    runs nothing: a failed run (1), the reason said."""
+    try:
+        _check_fetch(repo)
+    except HookScanError as e:
+        _refuse_unscanned(e)
         return subprocess.CompletedProcess(args, 1, "", "")
     return subprocess.run(
         ["git", *_NO_FETCH_CONFIG, "-C", str(repo), *args], env=_no_fetch_env(), **kw
@@ -174,9 +193,15 @@ def _include_target(raw: str, includer: Path) -> Path | None:
 
 
 def _scan_file(
-    path: Path, repo_scope: bool, hooks: dict[str, set[str]], seen: set[str], depth: int = 0
+    path: Path,
+    repo_scope: bool,
+    hooks: dict[str, set[str]],
+    seen: set[str],
+    depth: int = 0,
+    fetchy: set[str] | None = None,
 ) -> None:
-    """``path``'s hooks into ``hooks``, then every file it includes, WHATEVER the include's
+    """``path``'s hooks into ``hooks`` (and its fetch-enabling keys into ``fetchy``,
+    :func:`_note_fetchy`), then every file it includes, WHATEVER the include's
     condition: a child git meets conditions the host's own git doesn't (`gitdir:` under
     ``.git/worktrees/<name>``, ``onbranch:`` on the new branch). A file in the repo's own config
     chain that can't be read refuses (:class:`HookScanError`): it is one the box could fill in
@@ -194,6 +219,8 @@ def _scan_file(
     for entry in _git_config_lines("config", "-f", str(path), "--no-includes"):
         key, _, value = entry.partition("\n")
         _add_hook(hooks, key, value)
+        if fetchy is not None:
+            _note_fetchy(fetchy, key, value)
         if value and (
             key == "include.path" or (key.startswith("includeif.") and key.endswith(".path"))
         ):
@@ -202,19 +229,26 @@ def _scan_file(
                 if repo_scope:
                     raise HookScanError(f"the repo's git config includes {value!r}, from {path}")
                 continue
-            _scan_file(target, repo_scope, hooks, seen, depth + 1)
+            _scan_file(target, repo_scope, hooks, seen, depth + 1, fetchy)
 
 
 def _config_hooks(repo: Path) -> dict[str, set[str]]:
     """Every config-defined hook git could run for ``repo`` — in its own git, or in a child git it
     starts in another context (``git worktree add``'s, in the new worktree): name → the events
-    it is set for. Each file git reads there (``--show-origin``), then every include target in
-    them whatever its condition (:func:`_scan_file`). Raises :class:`HookScanError` rather than
-    miss one. Empty on a git without config hooks — and harmless to over-count: disabling a name
-    that never runs changes nothing. A partial clone this git can't keep from fetching raises
-    :class:`LazyFetchError` (:func:`_fetch_refusal`): every git run on this scan is refused."""
-    if why := _fetch_refusal(repo):
-        raise LazyFetchError(why)
+    it is set for (:func:`_scan_config`). Raises :class:`HookScanError` rather than miss one.
+    Empty on a git without config hooks — and harmless to over-count: disabling a name that never
+    runs changes nothing. A repo this git can't keep from fetching raises :class:`LazyFetchError`
+    (:func:`_check_fetch`): every git run on this scan is refused."""
+    hooks, fetchy = _scan_config(repo)
+    if fetchy and not _git_can_refuse_lazy_fetch():
+        raise _lazy_fetch_error(fetchy)
+    return hooks
+
+
+def _scan_config(repo: Path) -> tuple[dict[str, set[str]], set[str]]:
+    """``(hooks, fetch-enabling keys)`` from each config file git reads for ``repo``
+    (``--show-origin``), then every include target in them whatever its condition
+    (:func:`_scan_file`). Raises :class:`HookScanError` when one can't be read."""
     try:
         fields = _git_config_lines(
             "-C", str(repo), "config", "--show-scope", "--show-origin", "--name-only"
@@ -235,9 +269,10 @@ def _config_hooks(repo: Path) -> dict[str, set[str]]:
             path = path if path.is_absolute() else repo / path
             files[path] = files.get(path, False) or scope in _REPO_SCOPES
     seen: set[str] = set()
+    fetchy: set[str] = set()
     for path, repo_scope in files.items():
-        _scan_file(path, repo_scope, hooks, seen)
-    return hooks
+        _scan_file(path, repo_scope, hooks, seen, fetchy=fetchy)
+    return hooks, fetchy
 
 
 def _hookless_env(repo: Path, hooks: dict[str, set[str]] | None = None) -> dict[str, str]:

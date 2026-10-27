@@ -99,9 +99,11 @@ channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-moun
   too ([git](./git.md)). So foldyard's git on your computer runs no filter driver at all. It
   fetches nothing either. `.git/config` can turn the repo into a partial clone, whose missing
   objects git downloads on demand over a transport that same config chooses, such as an
-  `ssh` command of its own. So every git foldyard runs on your computer has on-demand fetching
-  and every transport switched off. On a git older than 2.44, which can't switch the first off,
-  foldyard refuses to work in a partial clone. The
+  `ssh` command of its own. So every git `fy worktree add` and `remove` run on your computer has
+  on-demand fetching and every transport switched off; the rest of foldyard's git there reads
+  only refs and config, never an object, so it has nothing to fetch. On a git older than 2.44,
+  which can't switch the first off, `fy worktree add` and `remove` refuse to work in a repo with
+  a promisor remote. The
   `[hook]` entries are switched off by name: foldyard reads every file `.git/config` includes,
   whatever the include's condition (a git that `fy worktree add` starts meets conditions yours
   doesn't), and runs no git when one of them can't be read. One gap remains: a hook added to

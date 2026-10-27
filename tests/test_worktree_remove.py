@@ -591,9 +591,43 @@ def test_a_partial_clone_on_a_git_that_cannot_be_told_not_to_fetch_is_refused(
     assert worktree.remove(NAME, force=True) == 1
     assert rig["wt"].exists() and rig["yard"]["checks"] == []
     err = capsys.readouterr().err
-    assert "partial clone" in err and "2.44" in err
+    assert "on demand" in err and "2.44" in err
     # …and a plain read there says so too, rather than run.
     assert worktree._git_read(rig["main"], "cat-file", "-t", MISSING).returncode == 1
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        # A promisor remote alone is enough for a lazy fetch: no extensions.partialClone needed.
+        lambda main, cfg: _git(main, "config", "remote.origin.promisor", "true"),
+        # …and the box can hide it behind an include, even one whose condition isn't met here.
+        lambda main, cfg: (
+            _git(main, "config", "-f", str(cfg), "remote.origin.promisor", "true"),
+            _git(main, "config", "include.path", str(cfg)),
+        ),
+        lambda main, cfg: (
+            _git(main, "config", "-f", str(cfg), "remote.Other.promisor", "yes"),
+            _git(main, "config", "includeIf.onbranch:never-this-one.path", str(cfg)),
+        ),
+    ],
+    ids=["promisor", "included", "included-unmet-condition"],
+)
+def test_a_promisor_remote_on_a_git_that_cannot_be_told_not_to_fetch_is_refused(
+    rig, tmp_path, monkeypatch, capsys, plant
+):
+    plant(rig["main"], tmp_path / "hidden.cfg")
+    monkeypatch.setattr(worktree, "_git_can_refuse_lazy_fetch", lambda: False)
+    assert worktree._git_read(rig["main"], "cat-file", "-t", MISSING).returncode == 1
+    assert worktree.remove(NAME, force=True) == 1
+    assert rig["wt"].exists() and rig["yard"]["checks"] == []
+    assert "promisor" in capsys.readouterr().err
+
+
+def test_a_remote_that_is_not_a_promisor_is_not_refused(rig, monkeypatch):
+    _git(rig["main"], "config", "remote.origin.promisor", "false")
+    monkeypatch.setattr(worktree, "_git_can_refuse_lazy_fetch", lambda: False)
+    assert worktree.remove(NAME, assume_yes=True) == 0
 
 
 def test_a_partial_clone_on_a_git_that_can_is_not_refused(rig, tmp_path):

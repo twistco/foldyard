@@ -32,8 +32,10 @@
   pointed at a deleted one) made git fetch it over a transport that config picks
   (`core.sshCommand`, `ext::`). Every host git in `worktree.py` now runs with `GIT_NO_LAZY_FETCH=1`
   and every transport's policy set to `never` on the command line (which outranks a repo-level
-  per-protocol `always`; a bare `protocol.allow=never` doesn't), and a partial clone on a git
-  older than 2.44 is refused. `remove` also re-scans the config for hooks after the yard (which
+  per-protocol `always`; a bare `protocol.allow=never` doesn't), and on a git older than 2.44 a
+  repo with a promisor remote is refused (`extensions.partialClone`, or a `remote.<name>.promisor`
+  alone, found in every config file and include whatever its condition, as the hook scan reads
+  them). `remove` also re-scans the config for hooks after the yard (which
   mounts main's `.git` writable) has run.
 - **Sources:** the review of the finalised `github=app` PR-bot minter — "does the consumer-side
   minter hand the box a code-execution path to the Mac?"; five review rounds against the

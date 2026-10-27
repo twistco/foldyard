@@ -19,8 +19,9 @@ bump: minor
   that same config chooses, such as an `ssh` command of its own. `fy worktree add` and
   `fy worktree remove` read objects there, so a missing one could run that command on your
   computer. Every git they run now has on-demand fetching and every transport switched off. On a
-  git older than 2.44, which can't switch the first off, they refuse to work in a partial clone
-  and say to upgrade.
+  git older than 2.44, which can't switch the first off, they refuse to work in a repo with a
+  promisor remote (a partial clone, or any `remote.<name>.promisor`, including one in an included
+  config file) and say to upgrade.
 - **`fy worktree remove`'s "uncommitted work" now means files that differ from the last commit
   once everything is unstaged.** It used to be git's own check, which also counts the stage. Your
   computer's stage for a worktree goes stale whenever its box commits, so a worktree whose files
