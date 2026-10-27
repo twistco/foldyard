@@ -195,9 +195,14 @@ same dirs of every other checkout are read-only in it, so `pnpm install` or `uv 
 instead of writing onto your computer's disk. The note in each of those dirs,
 `RUN-IT-IN-ITS-OWN-BOX`, gives the command: from that directory, `WORKTREE=<name> fy box exec
 '<command>'` runs it in the worktree's own box (`WORKTREE= fy box exec '<command>'` in main's), as
-long as that box is running — `WORKTREE=<name> fy box up` on your computer starts it. A worktree
-added after a box was created isn't masked in that box until it's recreated: `fy worktree add`
-names the boxes it isn't masked in, and `fy doctor`'s `box shadowing` row reports it. Only
+long as that box is running — `WORKTREE=<name> fy box up` on your computer starts it. A box's
+mounts are set when it's created, so a worktree added while a box runs isn't in them:
+`fy worktree add` adds its masks to each running box instead, without recreating it ("masked
+'<name>' in <box> without recreating it"), and `fy box up` on a running box adds any it lacks
+(after a restart of the box or the VM, which drops them). Where it can't — a box under the gVisor
+posture, a rootful engine in the VM, a kernel older than Linux 5.12, or a dependency dir that's a
+symlink — it names the box and says why, and recreating that box masks it; `fy doctor`'s `box
+shadowing` row reports a box that still lacks one. Only
 worktrees registered with your computer are masked: one made with plain `git worktree add` is
 masked in no box, recreated or not, until `fy worktree add <name>` on your computer registers it
 (it asks first). The row lists those apart, with that fix.

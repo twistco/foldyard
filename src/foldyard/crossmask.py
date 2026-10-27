@@ -13,9 +13,10 @@ checkout keeps its real shadow volumes, unchanged. One volume per project serves
 
 Which checkouts exist comes from the host's worktree registry when the box is created (never a
 listing of the box-writable worktrees root). A box's mounts are fixed at creation, so a worktree
-added later isn't masked in a box that was already running: ``fy worktree add``, ``fy box up``
-and ``fy doctor`` say so (:func:`unmasked`) and never recreate a box themselves. A checkout the
-host never registered (a plain ``git worktree add``) is masked in no box; the box's own doctor tells
+added later isn't among them: ``fy worktree add`` and ``fy box up`` add its masks to a running box
+(:mod:`foldyard.crossinject`), and where they can't, they and ``fy doctor`` say so
+(:func:`unmasked`, :func:`mountinfo_masked`) — none of them recreates a box. A checkout the host
+never registered (a plain ``git worktree add``) is masked in no box; the box's own doctor tells
 it apart by the registry the host baked in at create (:func:`unregistered`).
 
 Stdlib + ``config`` + ``worktree_registry`` only: the doctor row imports it."""
@@ -25,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import posixpath
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -205,6 +207,40 @@ def unmasked(mounts: object, masks: Iterable[Mask], volume: str) -> list[Mask]:
         and m.get("RW") is False
     }
     return [m for m in masks if m.path not in have]
+
+
+def _unescape(field: str) -> str:
+    """A mountinfo path field: the kernel writes space, tab, newline and backslash as octal."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def mountinfo_masked(text: str, paths: Iterable[str], volume: str) -> set[str]:
+    """Of ``paths``, those a box's ``/proc/self/mountinfo`` (``text``) shows masked: the TOP mount
+    at that point is ``volume``'s ``_data``, read-only. What a box reads of its own mounts, where
+    ``inspect`` would miss one added while it ran (:mod:`foldyard.crossinject`). REPORTING only."""
+    wanted = set(paths)
+    top: dict[str, bool] = {}
+    suffix = f"/volumes/{volume}/_data"
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 6:
+            continue
+        point = _unescape(fields[4])
+        if point in wanted:  # later lines are mounted on top of earlier ones
+            top[point] = _unescape(fields[3]).endswith(suffix) and "ro" in fields[5].split(",")
+    return {p for p, masked in top.items() if masked}
+
+
+def host_dir(path: str, main: Path, wt_root: Path) -> tuple[Path, str] | None:
+    """``(root, rel)`` for a mask's ``path``: the bind root (the main checkout or the worktrees
+    root, the deeper when one holds the other) and the path below it — so a host-side walk
+    (:func:`foldyard.mountwrite.makedirs`) starts where nothing the box writes can be a link, and
+    checks the checkout's own dir on the way. None for a path under neither."""
+    for root in sorted((main, wt_root), key=lambda r: len(str(r)), reverse=True):
+        base = str(root).rstrip("/") + "/"
+        if path.startswith(base):
+            return root, path[len(base) :]
+    return None
 
 
 def unshadowed(mounts: object, checkout: str, dirs: Iterable[str]) -> list[str]:

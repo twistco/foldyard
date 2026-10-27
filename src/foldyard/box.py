@@ -50,6 +50,7 @@ from . import (
     boximage,
     boxmounts,
     config,
+    crossinject,
     crossmask,
     hostclock,
     hostgit,
@@ -314,6 +315,16 @@ class MaskGaps(NamedTuple):
     # In a box only: dirs of checkouts your computer hadn't registered when it created this box
     # (:func:`crossmask.unregistered`). No create masks those until `fy worktree add` registers one.
     unregistered: list[crossmask.Mask]
+    # Whether the masks were read from the box's kernel (crossinject.check). False: from what
+    # `inspect` recorded at create, which never lists a mask added while the box ran.
+    live: bool = True
+
+
+def _own_box(checkout: str) -> bool:
+    """In a box: whether ``checkout`` is the one this box was created for (its baked
+    ``FOLDYARD_CHECKOUT``) — the only box whose mount table it can read."""
+    baked = os.environ.get("FOLDYARD_CHECKOUT", "")
+    return bool(baked) and os.path.realpath(baked) == os.path.realpath(checkout)
 
 
 def _mask_gaps(
@@ -322,7 +333,9 @@ def _mask_gaps(
     """What the running ``box`` lacks of what a create would give it now (:mod:`crossmask`): its
     OWN ``[box].shadow_volumes`` dirs that aren't a volume, and other checkouts' dirs that aren't
     masked (a worktree added after it was created) — in a box, apart from those of checkouts your
-    computer hadn't registered when it created the box. None when its mounts can't be read."""
+    computer hadn't registered when it created the box. Masked means what the box's kernel shows
+    (:func:`crossinject.check` — ``inspect`` never lists a mask added while it ran), else what
+    ``inspect`` recorded at create. None when its mounts can't be read."""
     dirs = config.box_shadow_volumes()
     if not dirs:
         return MaskGaps([], [], [])
@@ -347,16 +360,63 @@ def _mask_gaps(
     unreg = crossmask.unregistered(main)
     # `targets` always adds the main checkout's masks; those are `masks`', not an unregistered one's.
     strays = [m for m in crossmask.targets(checkout, main, wt_root, unreg, dirs)[0] if m.checkout]
+    live = crossinject.check(
+        engine,
+        box,
+        env,
+        [m.path for m in masks + strays],
+        timeout=timeout or crossinject.TIMEOUT_S,
+        mine=_own_box(checkout),
+    )
+
+    def lacking(wanted: list[crossmask.Mask]) -> list[crossmask.Mask]:
+        if live is None:
+            return crossmask.unmasked(mounts, wanted, volume)
+        return [m for m in wanted if m.path not in live]
+
     return MaskGaps(
         crossmask.unshadowed(mounts, checkout, dirs),
-        crossmask.unmasked(mounts, masks, volume),
-        crossmask.unmasked(mounts, strays, volume),
+        lacking(masks),
+        lacking(strays),
+        live=live is not None,
     )
 
 
+def _checkout_label(name: str) -> str:
+    return f"'{name}'" if name else "the main checkout"
+
+
+def _inject_masks(
+    engine: str, box: str, env: dict, masks: list[crossmask.Mask], main: Path
+) -> crossinject.Injected:
+    """:func:`crossinject.inject` for ``box``, saying one line per checkout it masked; the note
+    volume made with the box's own image when there is none yet."""
+    wt_root = config.worktrees_root(main)
+    got = crossinject.inject(
+        engine,
+        box,
+        env,
+        masks,
+        main=main,
+        wt_root=wt_root,
+        ensure_note=lambda image: _ensure_note(engine, image, env, main, wt_root),
+    )
+    left = {m.checkout for m, _ in got.left}
+    for name in sorted({m.checkout for m in got.done} - left):
+        print(f"✓ masked {_checkout_label(name)} in {box} without recreating it")
+    return got
+
+
+def _left_why(got: crossinject.Injected) -> str:
+    """Why :func:`_inject_masks` left what it left, once per distinct reason."""
+    return "; ".join(dict.fromkeys(why for _, why in got.left))
+
+
 def _warn_mask_gaps(engine: str, box: str, ctx) -> None:
-    """The already-up nag for :func:`_mask_gaps`: a box's mounts are fixed at create, so only a
-    recreate adds what it lacks. Best-effort, like the other nags."""
+    """The already-up pass over :func:`_mask_gaps`: other checkouts' dirs the running box lacks
+    are masked in it now (:func:`_inject_masks` — a box restarted outside foldyard, a worktree
+    added while the VM was down); what that can't do, and its own dirs declared since its create
+    (a shadow volume IS create-time), it names with the recreate. Best-effort, like the nags."""
     try:
         gaps = _mask_gaps(
             engine,
@@ -370,20 +430,28 @@ def _warn_mask_gaps(engine: str, box: str, ctx) -> None:
         return
     if not gaps:
         return
-    own, others, unregistered = gaps
+    own, others, unregistered = gaps.own, gaps.others, gaps.unregistered
     if own:
         print(
             f"⚠ dev box {box} doesn't shadow {', '.join(own)} (declared in [box].shadow_volumes "
             "after it was created), so an install there lands on your computer's disk. "
             "Recreate it: `fy box down && fy box up`."
         )
+    why = ""
+    if others and not config.in_box():
+        try:
+            got = _inject_masks(engine, box, ctx.env, others, ctx.main)
+        except (Exception, SystemExit) as e:
+            got = crossinject.Injected([], [(m, str(e)) for m in others], str(e))
+        others, why = [m for m, _ in got.left], _left_why(got)
     if others:
         print(
             f"⚠ dev box {box} doesn't mask the dependency dirs of checkouts added after it was "
-            f"created: {', '.join(m.path for m in others)}. An install there from this box lands "
-            "on your computer's disk — run it in that checkout's own box "
-            "(`WORKTREE=<name> fy box exec '<command>'`), or recreate this one to mask them: "
-            "`fy box down && fy box up`."
+            f"created: {', '.join(m.path for m in others)}"
+            + (f" (not while it runs: {why})" if why else "")
+            + ". An install there from this box lands on your computer's disk — run it in that "
+            "checkout's own box (`WORKTREE=<name> fy box exec '<command>'`), or recreate this one "
+            "to mask them: `fy box down && fy box up`."
         )
     if unregistered:  # only ever in a box: on your computer the registry is the whole list
         print(
@@ -408,18 +476,20 @@ def _register_hint(masks: list[crossmask.Mask]) -> str:
     return ", ".join(f"`fy worktree add {shlex.quote(n)}`" for n in names)
 
 
-def boxes_not_masking(main: Path, worktree: str, *, fresh: bool) -> list[str]:
-    """The project's RUNNING boxes that don't mask worktree ``worktree``'s dependency dirs, for
-    `fy worktree add` to name (it never recreates them). ``fresh``: the checkout was just made, so
-    every box already running predates it and can't cover it — even one holding a mask at that
-    path from an earlier worktree of the same name, which is pinned to the directory that was
-    removed. Otherwise each box's mounts are asked. Read-only, never provisions the VM."""
-    dirs = config.box_shadow_volumes()
-    if not dirs:
-        return []
+def _late_boxes(
+    main: Path, worktree: str, *, fresh: bool
+) -> tuple[str, dict, list[tuple[str, list[crossmask.Mask]]]]:
+    """``(engine, env, late)``: each RUNNING box of the project that doesn't mask worktree
+    ``worktree``'s dependency dirs, with the masks it lacks. ``fresh``: the checkout was just made,
+    so every box already running predates it — even one holding a mask at that path from an
+    earlier worktree of the same name, which is pinned to the directory that was removed.
+    Otherwise each box is asked (:func:`_mask_gaps`). Read-only, never provisions the VM."""
     from . import devmode  # lazy: devmode imports box lazily too
 
     engine, env = config.engine(), devmode._engine_env()
+    dirs = config.box_shadow_volumes()
+    if not dirs:
+        return engine, env, []
     prefix = config.project_prefix()
     wt_root = config.worktrees_root(main)
     registered = crossmask.registered(main)
@@ -448,10 +518,27 @@ def boxes_not_masking(main: Path, worktree: str, *, fresh: bool) -> list[str]:
             gaps = _mask_gaps(
                 engine, name, env, checkout=checkout, main=main, timeout=_DRIFT_TIMEOUT_S
             )
-            if gaps is None or not set(wanted) & set(gaps.others):
-                continue  # masks it (or its mounts can't be read: no claim either way)
-        late.append(name)
-    return late
+            if gaps is None:
+                continue  # its mounts can't be read: no claim either way
+            wanted = [m for m in wanted if m in set(gaps.others)]
+            if not wanted:
+                continue  # masks it
+        late.append((name, wanted))
+    return engine, env, late
+
+
+def mask_running_boxes(main: Path, worktree: str, *, fresh: bool) -> list[str]:
+    """Mask worktree ``worktree``'s dependency dirs in each running box that lacks them, without
+    recreating it (:func:`_inject_masks`), for `fy worktree add`. Returns the boxes it couldn't,
+    having said why, for the caller's recreate hint. Host-side: in a box it masks nothing."""
+    engine, env, late = _late_boxes(main, worktree, fresh=fresh)
+    still = []
+    for name, wanted in late:
+        got = _inject_masks(engine, name, env, wanted, main)
+        if got.left:
+            still.append(name)
+            print(f"⚠ couldn't mask '{worktree}' in {name} while it runs: {_left_why(got)}")
+    return still
 
 
 def _ensure_note(engine: str, img: str, env: dict, main: Path, wt_root: Path) -> bool:

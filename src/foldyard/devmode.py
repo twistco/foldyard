@@ -1529,10 +1529,12 @@ def _shadow_volume_check():
 def _box_shadow_check():
     """What the RUNNING box serving this checkout actually mounts (#91): each of its own
     ``[box].shadow_volumes`` dirs really a volume, and the same dirs of every other checkout it
-    binds masked read-only (:mod:`foldyard.crossmask`). A box's mounts are fixed at create, so a
-    dir declared — or a worktree added — since then is missing from it until a recreate; nothing
-    else sees that, because the install just goes to your computer's disk. Yields nothing when no
-    dirs are declared or there's no box to ask. WARN, never fail. In the box it asks its own box,
+    binds masked read-only (:mod:`foldyard.crossmask`) — as the box's kernel shows them, since a
+    mask added while it ran never reaches ``inspect`` (:mod:`foldyard.crossinject`). A dir declared
+    since its create is missing until a recreate, and a worktree's masks until `fy worktree add` or
+    `fy box up` adds them to the running box (or a recreate); nothing else sees that, because the
+    install just goes to your computer's disk. Yields nothing when no dirs are declared or
+    there's no box to ask. WARN, never fail. In the box it asks its own box (its mount table),
     and it has no registry: the worktrees it expects are the ones it can see that your computer had
     registered when it created the box (:func:`foldyard.crossmask.registered`); the rest it lists
     apart, since only registering one (`fy worktree add`) lets a recreate mask it."""
@@ -1545,6 +1547,10 @@ def _box_shadow_check():
         worktree = config.active_worktree()
         checkout = str(config.worktrees_root(main) / worktree) if worktree else str(main)
         name = f"{active_project()}-devbox"
+        # 5 s per call, the live read (crossinject.check) included: measured 2026-10-27 at a
+        # median 0.49 s / max 0.51 s on the podman backend (libkrun) and 0.13 / 0.15 s on Lima
+        # (vz) — ssh, the guest's python3 and two engine reads. Past it the row reads the
+        # engine's record and says so (MaskGaps.live).
         gaps = box._mask_gaps(
             config.engine(), name, _engine_env(), checkout=checkout, main=main, timeout=5
         )
@@ -1554,7 +1560,7 @@ def _box_shadow_check():
         return
     from . import crossmask
 
-    own, others, unregistered = gaps
+    own, others, unregistered = gaps.own, gaps.others, gaps.unregistered
     if not (own or others or unregistered):
         dirs = config.box_shadow_volumes()
         n_masks = len(
@@ -1593,6 +1599,13 @@ def _box_shadow_check():
                 " made outside `fy worktree add` stays unmasked after a recreate until"
                 " `fy worktree add <name>` on your computer registers it)"
             )
+    if (others or unregistered) and not gaps.live:
+        # The box's own mounts couldn't be read in time (crossinject.check): this is what the
+        # engine recorded at create, which never lists a mask `fy worktree add`/`fy box up` added.
+        lines.append(
+            f"      (from what the engine recorded when {name} was created: its live mounts"
+            " couldn't be read just now, and a mask added since it started isn't in that record)"
+        )
     if unregistered:
         lines.append(
             f"      not registered with your computer when {name} was created, so not masked"
@@ -1617,6 +1630,13 @@ def _box_shadow_check():
         )
     elif unregistered:
         fix = f"\n      → on your computer, {box._RENAME_FIRST}; then recreate {name}: {recreate}"
+    elif not own:
+        # Other checkouts' masks only: `fy box up` adds them to the running box (crossinject),
+        # where the VM lets it; the recreate is the remedy that always works.
+        fix = (
+            f"\n      → `{pin}fy box up`{where} masks them in the running box, or recreate it"
+            f"{where}: {recreate}"
+        )
     else:
         fix = f"\n      → recreate it{where}: {recreate}"
     yield _result(

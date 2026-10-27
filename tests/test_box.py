@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 import foldyard
-from foldyard import box, boximage, config, crossmask, stack, supervisor
+from foldyard import box, boximage, config, crossinject, crossmask, stack, supervisor
 
 
 class _Proc:
@@ -3442,6 +3442,120 @@ def test_up_already_up_is_quiet_when_the_mounts_cannot_be_read(fake, monkeypatch
     _masked(fake, monkeypatch, mounts=None)
     assert box.main("up") == 0
     assert "shadow" not in capsys.readouterr().out
+
+
+# ── masks added to a box that is already running (crossinject) ────────────────────────
+
+
+def _late_box(fake, monkeypatch, register_worktree):
+    """main's box running, masking a's dirs but created before `late` was registered."""
+    main = fake["main"]
+    wt_root = config.worktrees_root(main)
+    register_worktree(main, "a", wt_root / "a")
+    register_worktree(main, "late", wt_root / "late")
+    mounts = _box_mounts(f"{wt_root}/a/data/.venv", f"{wt_root}/a/platform/node_modules")
+    mounts += _box_mounts(f"{main}/data/.venv", f"{main}/platform/node_modules", name="own")
+    fake["state"]["running"] = True
+    _masked(fake, monkeypatch, mounts=mounts)
+    late = [
+        crossmask.Mask("late", f"{wt_root}/late/data/.venv"),
+        crossmask.Mask("late", f"{wt_root}/late/platform/node_modules"),
+    ]
+    return main, wt_root, late
+
+
+def test_up_already_up_masks_a_late_worktree_in_the_running_box(
+    fake, monkeypatch, register_worktree, capsys
+):
+    main, wt_root, late = _late_box(fake, monkeypatch, register_worktree)
+    asked: list[tuple] = []
+
+    def inject(engine, box_name, env, masks, *, main, wt_root, ensure_note):
+        asked.append((box_name, list(masks), main, wt_root))
+        return crossinject.Injected(list(masks), [], "")
+
+    monkeypatch.setattr(crossinject, "inject", inject)
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert asked == [("tangible-podman-devbox", late, main, wt_root)]
+    assert "✓ masked 'late' in tangible-podman-devbox without recreating it" in out
+    assert "doesn't mask" not in out  # nothing left to nag about
+    assert not _find(fake["calls"], has=["rm", "-f"])  # never recreated
+
+
+def test_up_already_up_names_what_it_could_not_mask_and_why(
+    fake, monkeypatch, register_worktree, capsys
+):
+    _, wt_root, _ = _late_box(fake, monkeypatch, register_worktree)
+
+    def inject(engine, box_name, env, masks, **kw):
+        masks = list(masks)
+        return crossinject.Injected(
+            [masks[0]], [(masks[1], "a symlink on the path (refused, never followed)")], ""
+        )
+
+    monkeypatch.setattr(crossinject, "inject", inject)
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "✓ masked" not in out  # 'late' is only half masked: no claim it is
+    assert f"{wt_root}/late/platform/node_modules" in out
+    assert f"{wt_root}/late/data/.venv" not in out
+    assert "not while it runs: a symlink on the path" in out and "fy box down && fy box up" in out
+
+
+def test_up_already_up_falls_back_to_the_recreate_when_it_cannot_inject(
+    fake, monkeypatch, register_worktree, capsys
+):
+    # In the hermetic suite there's no ssh route into a VM: the real crossinject refuses, and the
+    # nag is today's, with the reason.
+    _, wt_root, _ = _late_box(fake, monkeypatch, register_worktree)
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert f"{wt_root}/late/data/.venv" in out and "no ssh route into the VM" in out
+    assert "fy box down && fy box up" in out
+
+
+def test_mask_gaps_believes_the_kernel_over_the_engines_record(
+    fake, monkeypatch, register_worktree
+):
+    # `inspect` lists only create-time mounts: an injected mask is absent from it, and a recorded
+    # one may be gone (its dir removed). What `check` reads in the VM wins when it can be read.
+    main, wt_root, late = _late_box(fake, monkeypatch, register_worktree)
+    a = f"{wt_root}/a/data/.venv"
+    seen: list[dict] = []
+
+    def check(engine, box_name, env, paths, *, timeout, mine):
+        seen.append({"paths": list(paths), "timeout": timeout, "mine": mine})
+        return {late[0].path, late[1].path, f"{wt_root}/a/platform/node_modules"}
+
+    monkeypatch.setattr(crossinject, "check", check)
+    gaps = box._mask_gaps(
+        "podman", "tangible-podman-devbox", {}, checkout=str(main), main=main, timeout=7
+    )
+    assert gaps is not None
+    assert gaps.others == [crossmask.Mask("a", a)]
+    assert seen[0]["timeout"] == 7 and seen[0]["mine"] is False
+    assert set(seen[0]["paths"]) == {
+        a,
+        f"{wt_root}/a/platform/node_modules",
+        *(m.path for m in late),
+    }
+
+
+def test_mask_gaps_in_a_box_reads_its_own_box_only(fake, monkeypatch, register_worktree):
+    # A box can read only its own mount table: the box created for the checkout it was baked with.
+    main, wt_root, _ = _late_box(fake, monkeypatch, register_worktree)
+    monkeypatch.setenv("FOLDYARD_CHECKOUT", str(main))
+    seen: list[bool] = []
+
+    def record(*a, mine, **k):
+        seen.append(mine)
+        return None
+
+    monkeypatch.setattr(crossinject, "check", record)
+    box._mask_gaps("podman", "x", {}, checkout=str(main), main=main)
+    box._mask_gaps("podman", "x", {}, checkout=str(wt_root / "a"), main=main)
+    assert seen == [True, False]
 
 
 def test_exec_from_inside_a_box_says_where_to_start_the_missing_box(fake, monkeypatch, capsys):

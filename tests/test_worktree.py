@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 import yard_stub
-from foldyard import box, config, machine, stack, worktree, worktree_registry
+from foldyard import box, config, crossmask, machine, stack, worktree, worktree_registry
 
 BRANCH_OID = "1" * 40  # what every refs/heads/<branch> resolves to here
 
@@ -341,6 +341,37 @@ def test_add_names_running_boxes_that_do_not_mask_the_new_worktree(fake_main, mo
     assert "WORKTREE=feat fy box up" in out and "fy box down && fy box up" in out
     assert not [c for c in calls if c[1] == "inspect"]
     assert not [c for c in calls if c[1] in ("rm", "run", "stop")]  # never recreates a box
+
+
+def test_add_masks_the_new_worktree_in_running_boxes_and_names_only_the_rest(
+    fake_main, monkeypatch, capsys
+):
+    from foldyard import crossinject
+
+    _existing_git_worktree(fake_main, "other")
+    worktree_registry.register(fake_main["main"], "other", fake_main["wt_root"] / "other")
+    _engine_with(monkeypatch, fake_main, ["proj-devbox", "proj-other-devbox"])
+    asked: list[tuple[str, list]] = []
+
+    def inject(engine, box_name, env, masks, **kw):
+        masks = list(masks)
+        asked.append((box_name, masks))
+        if box_name == "proj-other-devbox":  # say, a gVisor box
+            return crossinject.Injected([], [(m, "it runs under gVisor") for m in masks], "x")
+        return crossinject.Injected(masks, [], "")
+
+    monkeypatch.setattr(crossinject, "inject", inject)
+    assert worktree.add("feat") == 0
+    out = capsys.readouterr().out
+    wt = fake_main["wt_root"] / "feat"
+    assert sorted(asked) == [
+        ("proj-devbox", [crossmask.Mask("feat", f"{wt}/node_modules")]),
+        ("proj-other-devbox", [crossmask.Mask("feat", f"{wt}/node_modules")]),
+    ]
+    assert "✓ masked 'feat' in proj-devbox without recreating it" in out
+    assert "couldn't mask 'feat' in proj-other-devbox while it runs: it runs under gVisor" in out
+    # the recreate hint names only the box it couldn't mask
+    assert "don't mask its dependency dirs ([box].shadow_volumes): proj-other-devbox." in out
 
 
 def test_add_says_nothing_about_boxes_without_declared_dirs(fake_main, monkeypatch, capsys):

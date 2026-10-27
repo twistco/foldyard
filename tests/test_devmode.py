@@ -1163,7 +1163,53 @@ def test_box_shadow_row_flags_a_late_worktree_the_box_does_not_mask(
     assert f"{wt_root}/b/node_modules" in detail and f"{main}/node_modules" not in detail
     assert "WORKTREE=b fy box exec" in detail
     assert "WORKTREE=a fy box down && WORKTREE=a fy box up" in detail
+    # …and the way that needs no recreate: `fy box up` masks it in the running box
+    assert "`WORKTREE=a fy box up` masks them in the running box" in detail
     assert seen[0][2] == "acme-a-devbox"
+
+
+def test_box_shadow_row_counts_a_mask_added_while_the_box_ran(
+    tmp_path, monkeypatch, register_worktree
+):
+    # `inspect` never lists a mask added after create; the kernel's view (crossinject.check) does.
+    from foldyard import crossinject
+
+    main = tmp_path / "repo"
+    wt_root = devmode.config.worktrees_root(main)
+    mounts = [_vol(f"{main}/node_modules", "acme-devbox-shadow-node_modules")]
+    _box_row_setup(tmp_path, monkeypatch, register_worktree, inspect=mounts)
+    live = {f"{wt_root}/a/node_modules", f"{wt_root}/b/node_modules"}
+    monkeypatch.setattr(crossinject, "check", lambda *a, **k: live)
+    [(status, _, detail)] = list(devmode._box_shadow_check())
+    assert status == "ok" and "2 in other checkouts masked" in detail
+
+
+def test_box_shadow_row_says_when_it_could_not_read_the_live_mounts(
+    tmp_path, monkeypatch, register_worktree
+):
+    # Past the budget (or with no ssh route) the row falls back to the engine's record — and says
+    # that a mask added while the box ran isn't in it, rather than claiming it's missing outright.
+    from foldyard import crossinject
+
+    main = tmp_path / "repo"
+    wt_root = devmode.config.worktrees_root(main)
+    mounts = [_vol(f"{main}/node_modules", "acme-devbox-shadow-node_modules")]
+    _box_row_setup(tmp_path, monkeypatch, register_worktree, inspect=mounts)
+    budgets: list[float] = []
+
+    def slow(*a, timeout, **k):
+        budgets.append(timeout)
+        return None  # what check answers when the VM doesn't in time
+
+    monkeypatch.setattr(crossinject, "check", slow)
+    [(status, _, detail)] = list(devmode._box_shadow_check())
+    assert status == "warn" and f"{wt_root}/a/node_modules" in detail
+    assert "its live mounts couldn't be read just now" in detail
+    assert budgets == [5]
+    # …and read live, no such caveat
+    monkeypatch.setattr(crossinject, "check", lambda *a, **k: set())
+    [(_, _, detail)] = list(devmode._box_shadow_check())
+    assert "couldn't be read just now" not in detail
 
 
 def test_box_shadow_row_flags_own_dirs_that_are_plain_binds(

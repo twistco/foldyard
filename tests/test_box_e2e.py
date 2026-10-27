@@ -39,6 +39,10 @@ BOX = f"{PROJECT}-devbox"
 # A sibling worktree registered BEFORE the box is created: main's box masks its declared
 # dependency dir (`[box].shadow_volumes`, the example's `api/.venv`) read-only (#91).
 OTHER = "other"
+# Worktrees added while the box RUNS: `fy worktree add` masks LATE's dir in it without a recreate
+# (crossinject); LINKED's dir is a symlink the box could have planted, which nothing follows.
+LATE = "late"
+LINKED = "linked"
 # One `fy worktree add` makes for real, once the box image exists: its files are checked out in a
 # container from that image, never on your computer.
 FRESH = "fresh"
@@ -65,13 +69,14 @@ def repo(tmp_path_factory):
     fy_ok(["box", "up"], r, timeout=1500)
     yield r
     fy(["box", "down"], r, timeout=300)
-    fy(["worktree", "remove", FRESH, "--yes", "--force"], r, timeout=600)  # if its test failed
-    fy(["worktree", "remove", OTHER, "--yes", "--force"], r, timeout=600)
+    for name in (FRESH, OTHER, LATE, LINKED):  # FRESH: if its test failed
+        if _other(r, name).exists():
+            fy(["worktree", "remove", name, "--yes", "--force"], r, timeout=600)
     fy(["down"], r, timeout=180)
 
 
-def _other(repo):
-    return repo.parent / f"{repo.name}-worktrees" / OTHER
+def _other(repo, name=OTHER):
+    return repo.parent / f"{repo.name}-worktrees" / name
 
 
 def test_box_ps_shows_the_running_box(repo):
@@ -122,6 +127,55 @@ def test_in_box_box_exec_reaches_a_sibling_box_and_says_where_to_start_it(repo):
     assert sibling.rc != 0, sibling.out
     assert f"{PROJECT}-{OTHER}-devbox not running" in sibling.out, sibling.out
     assert "on your computer" in sibling.out, sibling.out
+
+
+def test_a_worktree_added_while_the_box_runs_is_masked_in_it_without_a_recreate(repo):
+    # Its mounts were fixed at create, before LATE existed: `fy worktree add` adds the mask to the
+    # running box (foldyard's helper in the VM, as the VM user) — same read-only mount, same note.
+    added = fy_ok(["worktree", "add", LATE], repo, timeout=300)
+    assert f"masked '{LATE}' in {BOX} without recreating it" in added.out, added.out
+    assert "don't mask its dependency dirs" not in added.out, added.out
+    _adopt_on_host(_other(repo, LATE))  # so the teardown's `worktree remove` can resolve its stack
+    venv = _other(repo, LATE) / "api" / ".venv"
+    note = fy_ok(["box", "exec", f"cat {venv}/RUN-IT-IN-ITS-OWN-BOX"], repo, timeout=120)
+    assert "WORKTREE=<name> fy box exec '<command>'" in note.out, note.out
+    write = fy(["box", "exec", f"touch {venv}/x"], repo, timeout=120)
+    assert write.rc != 0 and "Read-only file system" in write.out, write.out
+    # The box's root can't take it off — no CAP_SYS_ADMIN in its namespace, as for a create-time
+    # mask — and it's still read-only after every attempt.
+    for attempt in (f"umount {venv}", f"umount -l {venv}", f"mount -o remount,rw {venv}"):
+        tried = fy(["box", "exec", attempt], repo, timeout=120)
+        assert tried.rc != 0, f"{attempt}: {tried.out}"
+    again = fy(["box", "exec", f"touch {venv}/x"], repo, timeout=120)
+    assert again.rc != 0 and "Read-only file system" in again.out, again.out
+    assert not (venv / "x").exists()  # nothing reached your computer's disk
+    # Reading it back agrees, though `inspect` never lists it: the already-up `fy box up` has
+    # nothing to add or nag about, and the box's own doctor reads its mount table.
+    up = fy_ok(["box", "up"], repo, timeout=600)
+    assert "doesn't mask" not in up.out and "without recreating it" not in up.out, up.out
+    doctor = fy(["box", "exec", "fy doctor"], repo, timeout=600)
+    assert "box shadowing" in doctor.out, doctor.out
+    assert "lets an install land on your computer's disk" not in doctor.out, doctor.out
+
+
+def test_a_symlinked_dir_in_an_added_worktree_is_never_masked_through(repo):
+    # A dependency dir that's a link (the box writes the worktrees root, so it could plant one) is
+    # refused on your computer's walk before anything reaches the VM, and the box is named with the
+    # recreate instead.
+    wt = _other(repo, LINKED)
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", f"wt/{LINKED}", str(wt)], cwd=str(repo), check=True
+    )
+    elsewhere = repo.parent / "linked-elsewhere"
+    elsewhere.mkdir()
+    (wt / "api" / ".venv").symlink_to(elsewhere)
+    added = fy_ok(["worktree", "add", LINKED, "--yes"], repo, timeout=300)
+    _adopt_on_host(wt)
+    assert f"couldn't mask '{LINKED}' in {BOX}" in added.out and "symlink" in added.out, added.out
+    assert f"don't mask its dependency dirs ([box].shadow_volumes): {BOX}." in added.out
+    assert list(elsewhere.iterdir()) == []  # nothing made through the link
+    mounted = fy(["box", "exec", f"grep -c ' {wt}/' /proc/self/mountinfo"], repo, timeout=120)
+    assert mounted.out.strip().splitlines()[-1] == "0", mounted.out
 
 
 def _git(repo, *args: str) -> str:
