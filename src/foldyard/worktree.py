@@ -493,34 +493,37 @@ def _registered_worktree(main: Path, wt_dir: Path) -> bool:
 
 # The script the container runs (its image's own `sh` and git). $1: `check` (is anything
 # uncommitted?) or `save` (park it, too); $2: the parking commit's message — both ARGUMENTS, never
-# spliced in. `--untracked-files=normal` and `--ignore-submodules=none` pin what counts (git's own
-# check honours `status.showUntrackedFiles`, which the box-writable config can set to `no`), and
-# `--no-optional-locks` leaves the worktree's index as it is. The parking commit's tree is built
-# through a throwaway index in the container's own /tmp, which no box reaches, so neither the
-# worktree's index nor its HEAD changes on the way out; `add -A` honours .gitignore, which keeps it
-# cheap (no node_modules) and is its one blind spot. An unborn HEAD, or any git failure, is exit 3.
+# spliced in. "Uncommitted" means: after unstaging everything, is anything different from HEAD?
+# The worktree's own index is deleted with it, so it isn't asked (git's check reads it, so a stale
+# one — a box's commits leave the shared index behind, ADR-0021 — read as dirty). The files are
+# compared with HEAD through a throwaway index in the container's own /tmp, which no box reaches:
+# `read-tree HEAD`, `add -A` (every file not gitignored, untracked ones whatever
+# `status.showUntrackedFiles` says), then `diff --cached` against HEAD — and, for a submodule's own
+# uncommitted content, `diff` against that index (`--ignore-submodules=none` both times). So the
+# real index and HEAD never change, and the tree compared is the tree the save commits: whatever
+# the check calls uncommitted, `--force` parks. Work that is ONLY in the index (staged, then put
+# back on disk) isn't counted or kept — unstaging discards it too. Gitignored files are left out,
+# which keeps it cheap (no node_modules) and is its blind spot. An unborn HEAD, or any git failure,
+# is exit 3.
 _UNCOMMITTED_SH = """\
 g() { git -c filter.lfs.required=false "$@"; }
 head=$(g rev-parse --verify --quiet 'HEAD^{commit}') || exit 3
-st=$(g --no-optional-locks status --porcelain --ignore-submodules=none \\
-  --untracked-files=normal) || exit 3
-if [ -z "$st" ]; then echo fy-clean; exit 0; fi
-if [ "$1" != save ]; then echo fy-dirty; exit 0; fi
 GIT_INDEX_FILE="${TMPDIR:-/tmp}/fy-uncommitted-index.$$"
 export GIT_INDEX_FILE
 g read-tree "$head" || exit 3
 g add -A || exit 3
+g diff --cached --quiet --no-ext-diff --ignore-submodules=none "$head"; rc=$?
+if [ "$rc" = 0 ]; then g diff --quiet --no-ext-diff --ignore-submodules=none; rc=$?; fi
+case "$rc" in 0) echo fy-clean; exit 0 ;; 1) ;; *) exit 3 ;; esac
+if [ "$1" != save ]; then echo fy-dirty; exit 0; fi
 tree=$(g write-tree) || exit 3
-if [ "$tree" = "$(g rev-parse --verify --quiet "$head^{tree}")" ]; then
-  echo fy-unchanged; exit 0
-fi
 oid=$(g commit-tree --no-gpg-sign -p "$head" -m "$2" "$tree") || exit 3
 echo "fy-saved $oid"
 """
 _PARKED_BY = ("foldyard", "foldyard@localhost")  # commit-tree needs one; the work isn't theirs
 _OID = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"  # sha1 or sha256
-_VERDICT = re.compile(rf"fy-(clean|dirty|unchanged)|fy-(saved) ({_OID})")
-_SAYS = {False: ("clean", "dirty"), True: ("clean", "unchanged", "saved")}  # what each mode prints
+_VERDICT = re.compile(rf"fy-(clean|dirty)|fy-(saved) ({_OID})")
+_SAYS = {False: ("clean", "dirty"), True: ("clean", "saved")}  # what each mode prints
 
 
 def _uncommitted_cmd(
@@ -567,9 +570,8 @@ def _uncommitted_in_yard(
     main: Path, wt_dir: Path, name: str, yard: tuple[str, dict, str], *, save: bool
 ) -> tuple[str, str] | None:
     """Ask the yard about ``wt_dir``'s uncommitted work (:func:`_uncommitted_cmd`):
-    ``("clean"|"dirty"|"unchanged"|"saved", commit id or "")`` — ``unchanged`` is uncommitted to
-    git (its index differs) with files that are HEAD's, so nothing to park. None, said, when it
-    can't be asked or its answer isn't one foldyard can read."""
+    ``("clean"|"dirty"|"saved", commit id or "")``. None, said, when it can't be asked or its
+    answer isn't one foldyard can read."""
     engine, env, image = yard
     cmd = _uncommitted_cmd(engine, image, main, wt_dir, name, save=save)
     script = cmd.index(_UNCOMMITTED_SH)

@@ -256,6 +256,7 @@ def _blob(main: Path) -> str:
         ("fy-clean\nfy-clean\n", 0),
         ("fy-clean", 3),
         ("fy-dirty\n", 0),  # a check never asked to save says dirty; asked, it must save
+        ("fy-unchanged\n", 0),  # no longer an answer: dirty always has something to park
         ("fy-saved deadbeef\n", 0),
         ("fy-saved " + "a" * 40 + "\n", 0),  # no such object
         ("fy-saved BLOB\n", 0),  # an object, not a commit
@@ -374,8 +375,8 @@ _YARD = ("podman", {"DOCKER_HOST": "unix:///nonexistent/fy-test"}, yard_stub.IMA
 @pytest.mark.spawns("sh")
 def test_the_parking_commit_does_not_disturb_what_it_parks(rig):
     # It runs on the way OUT of a checkout, so it must not be able to change what is removed: the
-    # tree is built through a throwaway index in the container, never the worktree's own, and the
-    # check takes no index lock (`--no-optional-locks`), so it doesn't rewrite that index either.
+    # check and the tree both go through a throwaway index in the container, never the worktree's
+    # own, so neither that index nor HEAD changes.
     rig["yard"]["mode"] = "local"
     wt = rig["wt"]
     _dirty(rig)
@@ -415,15 +416,88 @@ def test_the_parked_work_outlives_the_worktree_and_a_gc(rig):
     assert _git(main, "show", f"{ref}:new.txt").stdout == "BRAND NEW\n"
 
 
+# ── what counts as uncommitted: "after unstaging everything, is anything different?" ─────────
+#
+# The worktree's index is deleted with it, so what it says is not the question; the files are.
+# The check compares the working tree with HEAD through a throwaway index — the same tree the
+# save would commit — so a stale index (the one dirty state seen on a real host, cleared by
+# unstaging) reads clean, and a `--force` on anything it calls dirty always parks something.
+
+
+def _commit_behind_the_index(wt: Path, name: str, text: str) -> None:
+    """Move the worktree's branch to a commit of ``name`` = ``text`` (on disk too) WITHOUT the
+    shared index learning of it — what a box's commit (its own index-box, ADR-0021) leaves behind
+    on your computer's side."""
+    (wt / name).write_text(text)
+    env = {**os.environ, "GIT_INDEX_FILE": str(wt.parent / "other-index")}
+    git = ["git", "-C", str(wt), "-c", "core.hooksPath=/dev/null", "-c", "filter.x.clean="]
+    _real_run([*git, "read-tree", "HEAD"], env=env, check=True)
+    _real_run([*git, "add", "-A"], env=env, check=True)
+    tree = _real_run([*git, "write-tree"], env=env, capture_output=True, text=True).stdout.strip()
+    oid = _real_run(
+        [*git, "commit-tree", tree, "-p", "HEAD", "-m", "from the box"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _real_run([*git, "update-ref", f"refs/heads/wt/{NAME}", oid], check=True)
+
+
 @pytest.mark.spawns("sh")
-def test_a_dirty_index_with_nothing_new_on_disk_parks_nothing(rig):
-    # Staged, then put back on disk: git calls it uncommitted (the index differs from HEAD), but
-    # the files are HEAD's — so --force removes it with nothing to park.
+def test_a_stale_index_is_not_uncommitted_work(rig):
+    rig["yard"]["mode"] = "local"
+    wt = rig["wt"]
+    _commit_behind_the_index(wt, "y", "committed in the box\n")
+    # The control: git's own definition calls it dirty (the index still holds the old `y`).
+    assert _git(wt, "-c", "filter.x.clean=", "status", "--porcelain").stdout.strip()
+    assert worktree.remove(NAME, assume_yes=True) == 0
+    assert _gone(rig) and _refs(rig["main"]) == []
+
+
+@pytest.mark.spawns("sh")
+def test_a_real_edit_behind_a_stale_index_still_counts(rig):
+    rig["yard"]["mode"] = "local"
+    wt = rig["wt"]
+    _commit_behind_the_index(wt, "y", "committed in the box\n")
+    (wt / "x").write_text("EDITED\n")
+    assert worktree.remove(NAME, assume_yes=True) == 1
+    assert (wt / "x").read_text() == "EDITED\n"
+    assert worktree.remove(NAME, force=True) == 0
+    (ref,) = _refs(rig["main"])
+    assert _git(rig["main"], "show", f"{ref}:x").stdout == "EDITED\n"
+    assert _git(rig["main"], "show", f"{ref}:y").stdout == "committed in the box\n"
+
+
+@pytest.mark.spawns("sh")
+def test_an_ignored_file_is_not_uncommitted_work(rig):
+    rig["yard"]["mode"] = "local"
+    (rig["main"] / ".git" / "info" / "exclude").write_text("junk/\n")
+    (rig["wt"] / "junk").mkdir()
+    (rig["wt"] / "junk" / "big.bin").write_text("x" * 1000)
+    assert worktree.remove(NAME, assume_yes=True) == 0
+    assert _gone(rig) and _refs(rig["main"]) == []
+
+
+@pytest.mark.spawns("sh")
+def test_work_only_in_the_index_is_not_protected(rig):
+    # Staged, then put back on disk: unstaging everything discards it, and the save never kept it
+    # (it commits the files). Documented in docs/git.md — pinned so it stays a decision.
     rig["yard"]["mode"] = "local"
     wt = rig["wt"]
     (wt / "y").write_text("staged\n")
     _git(wt, "-c", "core.hooksPath=/dev/null", "-c", "filter.x.clean=", "add", "y")
     (wt / "y").write_text("plain\n")
-    assert worktree.remove(NAME, assume_yes=True) == 1  # uncommitted, as git says
-    assert worktree.remove(NAME, force=True) == 0
-    assert _refs(rig["main"]) == []
+    assert worktree.remove(NAME, assume_yes=True) == 0
+    assert _gone(rig) and _refs(rig["main"]) == []
+
+
+@pytest.mark.spawns("sh")
+def test_the_check_leaves_the_worktrees_index_alone(rig):
+    rig["yard"]["mode"] = "local"
+    _dirty(rig)
+    index = rig["main"] / ".git" / "worktrees" / NAME / "index"
+    before = index.read_bytes()
+    assert worktree._uncommitted_in_yard(rig["main"], rig["wt"], NAME, _YARD, save=False) == (
+        "dirty",
+        "",
+    )
+    assert index.read_bytes() == before
