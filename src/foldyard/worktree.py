@@ -47,6 +47,207 @@ def _host_only(verb: str) -> int | None:
     return None
 
 
+# ── foldyard's own git on your computer runs none of the repo's code ──────────────────
+#
+# The repo's hooks live in the SHARED `.git` every box can write: `.git/hooks/*` and, since git
+# 2.54, `[hook "<name>"]` entries in `.git/config`. So a host-side `git worktree add` ran a
+# consumer's post-checkout hooks on the host, in the new checkout, before it was registered.
+# `core.hooksPath=/dev/null` turns off the hooks DIRECTORY only — git's docs still call it "all
+# hooks", but a config hook runs straight through it — so each config hook is also disabled by
+# name (`hook.<name>.enabled=false`) — the names from every included file, whatever its condition
+# (:func:`_config_hooks`). Those go through GIT_CONFIG_COUNT rather than `-c`, whose
+# `key=value` splits at the first `=`, which a hook's name may contain. `core.fsmonitor=` (EMPTY,
+# not `false`: a git before 2.35.2 reads `false` as a hook path, and one before 2.26 then reports
+# no changes, which `worktree remove`'s dirty check would believe) stops the command the shared
+# config can name for every index refresh. Not closed: filter drivers (`filter.<d>.smudge` /
+# `clean` / `process`, LFS's among them) still run when this git checks out or adds — git has no
+# switch for them, and turning them off would change what a checkout contains. See docs/git.md.
+_NO_REPO_CODE = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=")
+
+
+class HookScanError(Exception):
+    """A config file git would read that foldyard couldn't check for hooks — so it runs no git."""
+
+
+_MAX_INCLUDE_DEPTH = 10  # git's own: deeper than this, git itself refuses the config
+_REPO_SCOPES = ("local", "worktree")  # the config files in the repo's .git, which the box writes
+
+
+def _git_config_lines(*args: str) -> list[str]:
+    """``git config -z <args…> --list``'s NUL-separated fields. Plain ``git config`` runs nothing
+    from the config it reads. Raises :class:`HookScanError` when git can't read it."""
+    got = subprocess.run(["git", *args, "-z", "--list"], capture_output=True, text=True)
+    if got.returncode != 0:
+        raise HookScanError(got.stderr.strip() or f"`git {' '.join(args)} --list` failed")
+    return got.stdout.split("\0")
+
+
+def _add_hook(hooks: dict[str, set[str]], key: str, value: str) -> None:
+    if not key.startswith("hook."):
+        return
+    name, _, var = key.removeprefix("hook.").rpartition(".")
+    if not name or var not in ("command", "event"):
+        return
+    events = hooks.setdefault(name, set())
+    if var == "event" and value:
+        events.add(value)
+
+
+def _include_target(raw: str, includer: Path) -> Path | None:
+    """Where git would look for an include's ``path`` value: ``~/`` expanded, a relative path
+    taken from the INCLUDING file's directory. None for a form not resolved here (``%(prefix)/``,
+    an unknown ``~user``)."""
+    path = os.path.expanduser(raw)
+    if path.startswith(("~", "%(")):
+        return None
+    return Path(path) if os.path.isabs(path) else includer.parent / path
+
+
+def _scan_file(
+    path: Path, repo_scope: bool, hooks: dict[str, set[str]], seen: set[str], depth: int = 0
+) -> None:
+    """``path``'s hooks into ``hooks``, then every file it includes, WHATEVER the include's
+    condition: a child git meets conditions the host's own git doesn't (`gitdir:` under
+    ``.git/worktrees/<name>``, ``onbranch:`` on the new branch). A file in the repo's own config
+    chain that can't be read refuses (:class:`HookScanError`): it is one the box could fill in
+    the moment this check has passed. One the operator's own config names is git's to ignore."""
+    real = os.path.realpath(path)
+    if real in seen:
+        return
+    if depth > _MAX_INCLUDE_DEPTH:
+        raise HookScanError(f"git config includes nest deeper than {_MAX_INCLUDE_DEPTH} at {path}")
+    if not os.path.isfile(real) or not os.access(real, os.R_OK):
+        if repo_scope:
+            raise HookScanError(f"the repo's git config includes {path}, which can't be read")
+        return
+    seen.add(real)
+    for entry in _git_config_lines("config", "-f", str(path), "--no-includes"):
+        key, _, value = entry.partition("\n")
+        _add_hook(hooks, key, value)
+        if value and (
+            key == "include.path" or (key.startswith("includeif.") and key.endswith(".path"))
+        ):
+            target = _include_target(value, path)
+            if target is None:
+                if repo_scope:
+                    raise HookScanError(f"the repo's git config includes {value!r}, from {path}")
+                continue
+            _scan_file(target, repo_scope, hooks, seen, depth + 1)
+
+
+def _config_hooks(repo: Path) -> dict[str, set[str]]:
+    """Every config-defined hook git could run for ``repo`` — in its own git, or in a child git it
+    starts in another context (``git worktree add``'s, in the new worktree): name → the events
+    it is set for. Each file git reads there (``--show-origin``), then every include target in
+    them whatever its condition (:func:`_scan_file`). Raises :class:`HookScanError` rather than
+    miss one. Empty on a git without config hooks — and harmless to over-count: disabling a name
+    that never runs changes nothing."""
+    try:
+        fields = _git_config_lines(
+            "-C", str(repo), "config", "--show-scope", "--show-origin", "--name-only"
+        )
+    except HookScanError as e:
+        if "show-scope" not in str(e):
+            raise
+        raise HookScanError(
+            "this git can't say which config files it reads (`--show-scope`), so they can't be "
+            "checked for hooks — it needs git 2.26 or newer"
+        ) from e
+    hooks: dict[str, set[str]] = {}
+    files: dict[Path, bool] = {}
+    for scope, origin, key in zip(fields[0::3], fields[1::3], fields[2::3], strict=False):
+        _add_hook(hooks, key, "")  # names from every scope, the command line's included
+        if origin.startswith("file:"):
+            path = Path(origin.removeprefix("file:"))
+            path = path if path.is_absolute() else repo / path
+            files[path] = files.get(path, False) or scope in _REPO_SCOPES
+    seen: set[str] = set()
+    for path, repo_scope in files.items():
+        _scan_file(path, repo_scope, hooks, seen)
+    return hooks
+
+
+def _hookless_env(repo: Path, hooks: dict[str, set[str]] | None = None) -> dict[str, str]:
+    """The environment for a host git run in ``repo`` with each of its config hooks disabled —
+    appended after any GIT_CONFIG_COUNT entries the caller's own environment already carries.
+    Children inherit it, so a hook only a child would see is off there too."""
+    env = dict(os.environ)
+    count = env.get("GIT_CONFIG_COUNT", "")
+    n = int(count) if count.isdigit() else 0
+    for name in sorted(_config_hooks(repo) if hooks is None else hooks):
+        env[f"GIT_CONFIG_KEY_{n}"] = f"hook.{name}.enabled"
+        env[f"GIT_CONFIG_VALUE_{n}"] = "false"
+        n += 1
+    env["GIT_CONFIG_COUNT"] = str(n)
+    return env
+
+
+def _host_git(
+    repo: Path, *args: str, env: dict[str, str] | None = None, **kw
+) -> subprocess.CompletedProcess:
+    """``git -C repo args…`` with none of the repo's hooks or fsmonitor run (see above). For every
+    host-side git here that can reach one: a checkout, a ref update, an index refresh. ``env``
+    defaults to :func:`_hookless_env`; a caller passing its own builds it from that. When the
+    repo's config can't be checked for hooks, git doesn't run: a failed run (1), the reason said."""
+    if env is None:
+        try:
+            env = _hookless_env(repo)
+        except HookScanError as e:
+            _refuse_unscanned(e)
+            return subprocess.CompletedProcess(args, 1, "", "")
+    return subprocess.run(["git", *_NO_REPO_CODE, "-C", str(repo), *args], env=env, **kw)
+
+
+def _refuse_unscanned(e: HookScanError) -> None:
+    _err(f"✗ not running git on your computer: {e}.")
+    _err("  foldyard checks every git config file it would read for hooks, and couldn't check")
+    _err("  that one. Fix or remove that include in .git/config, then retry.")
+
+
+def _hooks_skipped(repo: Path, events: tuple[str, ...], hooks: dict[str, set[str]]) -> list[str]:
+    """Which of ``events`` git would have run a hook for in ``repo`` — an executable file in its
+    hooks directory, or one of the config ``hooks`` — so skipping them can be SAID. A report."""
+    try:
+        where = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+            capture_output=True,
+            text=True,
+        )
+        hooks_dir = Path(where.stdout.strip()) if where.returncode == 0 else None
+    except OSError:
+        hooks_dir = None
+    configured = set().union(*hooks.values())
+    return [
+        event
+        for event in events
+        if event in configured
+        or (
+            hooks_dir is not None
+            and os.access(hooks_dir / event, os.X_OK)
+            and (hooks_dir / event).is_file()
+        )
+    ]
+
+
+def _git_worktree_add(main: Path, argv: list[str]) -> int:
+    """``git worktree add`` with the repo's hooks off, saying so when it had any."""
+    try:
+        hooks = _config_hooks(main)  # once: what is disabled is what is reported
+    except HookScanError as e:
+        _refuse_unscanned(e)
+        return 1
+    skipped = _hooks_skipped(main, ("post-checkout", "reference-transaction"), hooks)
+    rc = _host_git(main, *argv, env=_hookless_env(main, hooks)).returncode
+    if rc == 0 and skipped:
+        print(
+            f"  skipped the repo's git hooks ({', '.join(skipped)}): they live in the .git every "
+            "box can write, so foldyard's git on your computer runs none of them. Git in the "
+            "worktree's box runs them as usual; setup every new worktree needs belongs in "
+            "[project].worktree_init, which runs in a container."
+        )
+    return rc
+
+
 def _registered_worktree(main: Path, wt_dir: Path) -> bool:
     """True iff git still tracks ``wt_dir`` as a linked worktree of ``main``. False means an
     ORPHAN: the checkout dir survives but its ``.git/worktrees`` metadata is gone (e.g. pruned
@@ -89,17 +290,24 @@ def _snapshot_uncommitted(wt_dir: Path, name: str) -> str | None:
     import tempfile
     from datetime import datetime
 
-    def _git(*args: str, **kw) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["git", "-C", str(wt_dir), *args], capture_output=True, text=True, **kw
-        )
+    try:  # `add -A` refreshes an index, `update-ref` is a ref transaction
+        quiet = _hookless_env(wt_dir)
+    except HookScanError as e:
+        # The scan here is the WORKTREE's context (its config.worktree too), while `git worktree
+        # remove` scans from main — and the orphan path deletes the tree with no git at all — so
+        # a `--force` removal can still go ahead. Say the net isn't there.
+        _err(f"⚠ uncommitted work in '{name}' NOT saved: {e} — foldyard runs no git there.")
+        return None
+
+    def _git(*args: str, env: dict[str, str] = quiet) -> subprocess.CompletedProcess:
+        return _host_git(wt_dir, *args, env=env, capture_output=True, text=True)
 
     head = _git("rev-parse", "HEAD")
     if head.returncode != 0:
         return None
     idx = Path(tempfile.mkdtemp(prefix="fy-wt-snap-")) / "index"
     try:
-        env = {**os.environ, "GIT_INDEX_FILE": str(idx)}
+        env = {**quiet, "GIT_INDEX_FILE": str(idx)}
         if _git("read-tree", "HEAD", env=env).returncode != 0:
             return None
         if _git("add", "-A", env=env).returncode != 0:
@@ -506,7 +714,7 @@ def add(
         # turns a routine branch push into a direct push TO main (bitten twice).
         argv = ["worktree", "add", "--no-track", "-b", branch, str(wt_dir)] + ([ref] if ref else [])
         print(f"  new branch off {ref or f'current HEAD ({_branch_of(main)})'}")
-    rc = subprocess.run(["git", "-C", str(main), *argv]).returncode
+    rc = _git_worktree_add(main, argv)
     if rc != 0:
         _err("✗ git worktree add failed")
         return rc
@@ -798,7 +1006,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
         except OSError as e:
             _err(f"✗ couldn't delete {wt_dir}: {e}")
             return 1
-        rc = subprocess.run(["git", "-C", str(main), "worktree", "prune"]).returncode
+        rc = _host_git(main, "worktree", "prune").returncode
         if rc != 0:
             _err("✗ git worktree prune failed — the checkout dir was deleted, but stale")
             _err(f"  worktree metadata may remain (re-run: git -C {main} worktree prune).")
@@ -806,7 +1014,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
     else:
         print(f"▶ git worktree remove {wt_dir}…")
         argv = ["worktree", "remove", *(["--force"] if force else []), str(wt_dir)]
-        rc = subprocess.run(["git", "-C", str(main), *argv]).returncode
+        rc = _host_git(main, *argv).returncode  # its dirty check runs `git status`: fsmonitor
         if rc != 0:
             _err("✗ git worktree remove failed (uncommitted changes? use --force).")
             return rc
