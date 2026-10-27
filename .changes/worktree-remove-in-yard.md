@@ -14,6 +14,13 @@ bump: minor
   taken anything down and prints what to run. If you're sure nothing uncommitted in the worktree
   matters, the new `--discard` removes it without checking or saving anything. A check or save
   that fails now keeps the worktree instead of removing it unsaved.
+- **foldyard's own git on your computer no longer fetches.** A box can write `.git/config` so that
+  the repo becomes a partial clone, whose missing objects git downloads on demand over a transport
+  that same config chooses, such as an `ssh` command of its own. `fy worktree add` and
+  `fy worktree remove` read objects there, so a missing one could run that command on your
+  computer. Every git they run now has on-demand fetching and every transport switched off. On a
+  git older than 2.44, which can't switch the first off, they refuse to work in a partial clone
+  and say to upgrade.
 - **`fy worktree remove`'s "uncommitted work" now means files that differ from the last commit
   once everything is unstaged.** It used to be git's own check, which also counts the stage. Your
   computer's stage for a worktree goes stale whenever its box commits, so a worktree whose files

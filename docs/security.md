@@ -96,7 +96,12 @@ channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-moun
   drivers the shared config names (Git LFS's, or one planted from a box) for every file it checks
   out or compares: `fy worktree add` only records the worktree there and checks its files out in a
   container, and `fy worktree remove` checks for uncommitted work, and saves it, in a container
-  too ([git](./git.md)). So foldyard's git on your computer runs no filter driver at all. The
+  too ([git](./git.md)). So foldyard's git on your computer runs no filter driver at all. It
+  fetches nothing either. `.git/config` can turn the repo into a partial clone, whose missing
+  objects git downloads on demand over a transport that same config chooses, such as an
+  `ssh` command of its own. So every git foldyard runs on your computer has on-demand fetching
+  and every transport switched off. On a git older than 2.44, which can't switch the first off,
+  foldyard refuses to work in a partial clone. The
   `[hook]` entries are switched off by name: foldyard reads every file `.git/config` includes,
   whatever the include's condition (a git that `fy worktree add` starts meets conditions yours
   doesn't), and runs no git when one of them can't be read. One gap remains: a hook added to

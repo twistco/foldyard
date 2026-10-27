@@ -233,7 +233,8 @@ not protected:
 The check for uncommitted work, and the save, run in a container from your box image (see above),
 so `fy worktree remove` needs the image and the VM. Without them it stops before it has taken
 anything down, and says what to run first. If you can't provide them and you're sure nothing
-uncommitted in the worktree matters, `--discard` removes it without checking or saving anything.
+uncommitted in the worktree matters, `--discard` removes it without checking or saving anything
+(a worktree with submodules still needs `--force` as well, as without `--discard`).
 If the check or the save fails, the worktree is kept.
 
 ## What `fy doctor` checks
