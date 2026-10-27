@@ -596,32 +596,51 @@ def test_a_partial_clone_on_a_git_that_cannot_be_told_not_to_fetch_is_refused(
     assert worktree._git_read(rig["main"], "cat-file", "-t", MISSING).returncode == 1
 
 
-@pytest.mark.parametrize(
-    "plant",
-    [
-        # A promisor remote alone is enough for a lazy fetch: no extensions.partialClone needed.
-        lambda main, cfg: _git(main, "config", "remote.origin.promisor", "true"),
-        # …and the box can hide it behind an include, even one whose condition isn't met here.
-        lambda main, cfg: (
-            _git(main, "config", "-f", str(cfg), "remote.origin.promisor", "true"),
-            _git(main, "config", "include.path", str(cfg)),
-        ),
-        lambda main, cfg: (
-            _git(main, "config", "-f", str(cfg), "remote.Other.promisor", "yes"),
-            _git(main, "config", "includeIf.onbranch:never-this-one.path", str(cfg)),
-        ),
-    ],
-    ids=["promisor", "included", "included-unmet-condition"],
-)
+# Each key that registers a promisor remote in git 2.43's promisor-remote.c: `remote.<n>.promisor`
+# (true), `remote.<n>.partialclonefilter` (ANY value — the remote is made before the value is
+# read), `extensions.partialClone`. `core.partialclonefilter` is an older git's spelling, counted
+# to be safe.
+PROMISOR_KEYS = {
+    "promisor": ("remote.Other.promisor", "yes"),
+    "promisor-bare": ("remote.origin.promisor", None),  # a key with no value is true
+    "filter": ("remote.origin.partialclonefilter", "blob:none"),
+    "filter-empty": ("remote.origin.partialclonefilter", ""),
+    "extension": ("extensions.partialClone", "origin"),
+    "core-filter": ("core.partialclonefilter", "blob:none"),
+}
+
+
+def _set(path: Path, key: str, value: str | None) -> None:
+    """``key = value`` in the config file ``path`` — written by hand, since `git config` can't
+    write a key with no value."""
+    section, _, var = key.rpartition(".")
+    head, _, sub = section.partition(".")
+    header = f'[{head} "{sub}"]' if sub else f"[{head}]"
+    line = f"\t{var}" if value is None else f"\t{var} = {value}"
+    with path.open("a") as fh:
+        fh.write(f"{header}\n{line}\n")
+
+
+@pytest.mark.parametrize("where", ["bare", "included", "included-unmet-condition"])
+@pytest.mark.parametrize("kind", sorted(PROMISOR_KEYS))
 def test_a_promisor_remote_on_a_git_that_cannot_be_told_not_to_fetch_is_refused(
-    rig, tmp_path, monkeypatch, capsys, plant
+    rig, tmp_path, monkeypatch, capsys, kind, where
 ):
-    plant(rig["main"], tmp_path / "hidden.cfg")
+    # Without extensions.partialClone too, and hidden behind an include — even one whose
+    # condition isn't met here (a child git elsewhere may meet it).
+    main, cfg = rig["main"], tmp_path / "hidden.cfg"
+    key, value = PROMISOR_KEYS[kind]
+    if where == "bare":
+        _set(main / ".git" / "config", key, value)
+    else:
+        _set(cfg, key, value)
+        include = "include.path" if where == "included" else "includeIf.onbranch:no-such.path"
+        _git(main, "config", include, str(cfg))
     monkeypatch.setattr(worktree, "_git_can_refuse_lazy_fetch", lambda: False)
-    assert worktree._git_read(rig["main"], "cat-file", "-t", MISSING).returncode == 1
+    assert worktree._git_read(main, "cat-file", "-t", MISSING).returncode == 1
     assert worktree.remove(NAME, force=True) == 1
     assert rig["wt"].exists() and rig["yard"]["checks"] == []
-    assert "promisor" in capsys.readouterr().err
+    assert key.lower() in capsys.readouterr().err.lower()
 
 
 def test_a_remote_that_is_not_a_promisor_is_not_refused(rig, monkeypatch):

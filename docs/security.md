@@ -103,7 +103,8 @@ channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-moun
   on-demand fetching and every transport switched off; the rest of foldyard's git there reads
   only refs and config, never an object, so it has nothing to fetch. On a git older than 2.44,
   which can't switch the first off, `fy worktree add` and `remove` refuse to work in a repo with
-  a promisor remote. The
+  a promisor remote: `extensions.partialClone`, or any `remote.<name>.promisor` or
+  `remote.<name>.partialclonefilter`, in `.git/config` or any file it includes. The
   `[hook]` entries are switched off by name: foldyard reads every file `.git/config` includes,
   whatever the include's condition (a git that `fy worktree add` starts meets conditions yours
   doesn't), and runs no git when one of them can't be read. One gap remains: a hook added to

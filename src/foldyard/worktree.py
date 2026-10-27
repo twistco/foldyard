@@ -106,10 +106,15 @@ def _git_can_refuse_lazy_fetch() -> bool:
 
 
 def _note_fetchy(fetchy: set[str], key: str, value: str) -> None:
-    """Record ``key`` if it makes git fetch missing objects on demand: ``extensions.partialClone``,
-    or ``remote.<name>.promisor`` (on its own enough to register a promisor remote) set to anything
-    but an explicit false. Over-counting only refuses an old git."""
-    if key == "extensions.partialclone" and value.strip():
+    """Record ``key`` if it registers a promisor remote, whose missing objects git fetches on
+    demand — every way git 2.43's ``promisor-remote.c`` makes one: ``extensions.partialClone``
+    (``repository_format_partial_clone``), ``remote.<name>.partialclonefilter`` with ANY value (the
+    remote is made before the value is read), and ``remote.<name>.promisor`` set to anything but
+    an explicit false (a key with no value is true). ``core.partialclonefilter``, an older git's
+    spelling, is counted too. Over-counting only refuses an old git."""
+    if key in ("extensions.partialclone", "core.partialclonefilter") or (
+        key.startswith("remote.") and key.endswith(".partialclonefilter")
+    ):
         fetchy.add(key)
     elif (
         key.startswith("remote.")
