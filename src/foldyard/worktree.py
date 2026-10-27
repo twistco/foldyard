@@ -285,51 +285,6 @@ def _default_base_ref(repo: Path) -> str | None:
     return None
 
 
-def _seed_keyless_posture(name: str) -> None:
-    """Mirror the main checkout's KEYLESS AI-assistant posture (the ``claude``/``codex`` axes) into
-    the fresh worktree's posture file, so a keyless box comes up injectable right after
-    ``fy worktree add``.
-
-    Why this is needed: posture is per-worktree and a fresh worktree has no ``dev-mode.json``, so
-    every axis reads its rung-0 default (off). With ``claude``/``codex`` off, the worktree's own
-    egress proxy installs NO token-inject rule on its per-worktree port — so codex/claude in the
-    worktree box send the far-future *dummy* token, 401, then try to refresh with the dummy refresh
-    token and fail with *"Your access token could not be refreshed."* The real creds are already
-    project-shared host-side (the proxy mints them from the host's ``~/.codex/auth.json`` /
-    ``host.env``); the only missing piece is this worktree's posture being ON. So we seed posture —
-    NOT creds (copying the rotating ``auth.json`` into the box would spawn a second, unsynchronised
-    refresher and corrupt the token).
-
-    Scope + safety: only the keyless-configured assistant axes, mirroring main's ACTUAL values (off
-    stays off), so this never escalates a worktree beyond what main already runs, and never touches
-    the credentialed cloud axes (gcp/storage/github/…). A non-keyless developer (no ``[claude]``/
-    ``[codex]`` ``keyless`` in their local toml) gets a no-op. Best-effort — a hiccup here must not
-    trap the (already-created) worktree."""
-    from . import devmode
-
-    try:
-        wt_cfg = devmode.worktree_config(name)
-        with config.using(wt_cfg):
-            configured = (("claude", config.claude_keyless()), ("codex", config.codex_keyless()))
-            keyless_axes = [axis for axis, on in configured if on]
-        if not keyless_axes:
-            return
-        with config.using(devmode.worktree_config("")):
-            main_mode = devmode.read(apply_expiry=True)["mode"]
-        updates = {a: main_mode[a] for a in keyless_axes if main_mode.get(a, "off") != "off"}
-        if not updates:
-            return
-        with config.using(wt_cfg):
-            devmode.set_mode(updates, reconcile=False)  # box up applies it; nothing's running yet
-        print(
-            "▶ seeded keyless mode from main: "
-            + ", ".join(f"{a}={v}" for a, v in updates.items())
-            + f"  (its box will inject on `WORKTREE={name} fy box up`)"
-        )
-    except Exception as e:  # posture seeding is a best-effort convenience, never fatal
-        print(f"  (couldn't seed keyless mode — set it manually with `fy mode`: {e})")
-
-
 def _branch_name_ok(name: str) -> bool:
     """Whether git would take ``name`` as a branch (`git check-ref-format --branch`'s rules),
     checked in-process: it only gates a hint, so it costs no git call."""
@@ -408,8 +363,9 @@ def add(
     name: str, branch: str = "", base: str = "", assume_yes: bool = False, box_up: bool = False
 ) -> int:
     """Create a host-sibling worktree under the worktrees root, record it in the host's
-    worktree registry, init its config, offer that config for adoption (:func:`_adopt_config`),
-    and mirror main's keyless posture into it. ``box_up`` then starts its box (:func:`_box_up`) —
+    worktree registry, init its config, and offer that config for adoption (:func:`_adopt_config`)
+    — a first adoption, wherever it happens, mirrors main's keyless posture into the worktree
+    (:func:`foldyard.keyless.seed_posture`). ``box_up`` then starts its box (:func:`_box_up`) —
     only once its config is adopted, since the host would run nothing for it otherwise.
 
     A brand-new branch forks off ``base`` (an explicit ``--from``), else the project's default
@@ -509,8 +465,8 @@ def add(
 
     _init_in_yard(main, wt_dir)  # first: it copies foldyard.local.toml, which is adopted too
 
+    # Its first adoption also mirrors main's keyless posture in (configpin.adopt), here or later.
     adopted = _adopt_config(name)
-    _seed_keyless_posture(name)  # after: it reads the ADOPTED config's `keyless` keys
 
     print(f"\n✓ worktree ready: {wt_dir}  (branch {branch})")
     if adopted:
