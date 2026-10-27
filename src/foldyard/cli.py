@@ -1439,14 +1439,28 @@ def worktree_init(
 def worktree_remove(
     name: str = typer.Argument(..., help="worktree dir name to remove (under the worktrees root)"),
     force: bool = typer.Option(
-        False, "--force", "-f", help="remove even if archiving fails or the tree is dirty"
+        False,
+        "--force",
+        "-f",
+        help="remove even if archiving fails or the tree is dirty (its uncommitted work is "
+        "saved on refs/fy/removed/<name>-<time> first)",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="skip the confirmation prompt"),
+    discard: bool = typer.Option(
+        False,
+        "--discard",
+        help="don't check for or save uncommitted work — for when the VM or the box image isn't "
+        "there to check it in; anything uncommitted is LOST",
+    ),
 ) -> None:
-    """Tear down the worktree's dev box + stack, archive agent transcripts, then remove it."""
+    """Tear down the worktree's dev box + stack, archive agent transcripts, then remove it.
+
+    Uncommitted work is looked for in a container from the box image, never on your computer (git
+    there would run the filter drivers the shared .git names), so this needs the box image and the
+    VM — or --discard."""
     from . import worktree
 
-    raise typer.Exit(worktree.remove(name, force, assume_yes=yes))
+    raise typer.Exit(worktree.remove(name, force, assume_yes=yes, discard=discard))
 
 
 @worktree_app.command("list")

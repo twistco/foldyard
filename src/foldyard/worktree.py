@@ -59,12 +59,12 @@ def _host_only(verb: str) -> int | None:
 # (:func:`_config_hooks`). Those go through GIT_CONFIG_COUNT rather than `-c`, whose
 # `key=value` splits at the first `=`, which a hook's name may contain. `core.fsmonitor=` (EMPTY,
 # not `false`: a git before 2.35.2 reads `false` as a hook path, and one before 2.26 then reports
-# no changes, which `worktree remove`'s dirty check would believe) stops the command the shared
-# config can name for every index refresh. Filter drivers (`filter.<d>.smudge` / `clean` /
-# `process`, LFS's among them) have no such switch, and turning them off would change what a
-# checkout contains — so this git never checks files out: `add` does the metadata step here and
-# the checkout in a container (`_checkout_in_yard`). They still run wherever this git HASHES a
-# file of the checkout (`remove`'s dirty check, the snapshot's `add -A`). See docs/git.md.
+# no changes, which a dirty check would believe) stops the command the shared config can name for
+# every index refresh. Filter drivers (`filter.<d>.smudge` / `clean` / `process`, LFS's among
+# them) have no such switch, and turning them off would change what a checkout contains (or what
+# a hash says) — so this git never checks a file out or hashes one: `add` does the metadata step
+# here and the checkout in a container (`_checkout_in_yard`), and `remove` asks a container
+# whether there is uncommitted work, and to park it (`_uncommitted_in_yard`). See docs/git.md.
 _NO_REPO_CODE = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=")
 
 
@@ -288,15 +288,22 @@ def _add_command(name: str, branch: str, base: str) -> str:
     )
 
 
-def _checkout_yard(again: str) -> tuple[str, dict, str] | None:
-    """``(engine, env, image)`` to run the checkout in — or None, said, when there is no image to
-    run it in yet. Asked BEFORE any git runs, so a refusal leaves nothing behind. Deliberately not a
-    fallback to a checkout here: that is the filter drivers running on your computer again."""
+def _yard() -> tuple[str, dict, str, bool]:
+    """``(engine, env, image, present)``: the one-off container git runs in for ``add`` and
+    ``remove``, and whether its image is there to run (no image yet, or the VM is down)."""
     from . import box
 
     engine, env = box.engine_env()
     image = config.box_image()["tag"]
-    if box.image_exists(engine, image, env):
+    return engine, env, image, box.image_exists(engine, image, env)
+
+
+def _checkout_yard(again: str) -> tuple[str, dict, str] | None:
+    """``(engine, env, image)`` to run the checkout in — or None, said, when there is no image to
+    run it in yet. Asked BEFORE any git runs, so a refusal leaves nothing behind. Deliberately not a
+    fallback to a checkout here: that is the filter drivers running on your computer again."""
+    engine, env, image, present = _yard()
+    if present:
         return engine, env, image
     _err(f"✗ no {image} image in the VM to check the new worktree out in.")
     _err("  foldyard checks a worktree's files out in a container, never on your computer: the")
@@ -346,11 +353,31 @@ def _checkout_in_yard(
 
 def _checkout_cmd(engine: str, image: str, main: Path, wt_dir: Path, oid: str) -> list[str]:
     """The one-off container that writes ``wt_dir``'s files and index from ``oid``: the image's
-    own git, the two mounts ``worktree_init`` gets (at the paths your computer uses, which the
-    worktree's ``.git`` file names), the box's uid (container root, which rootless podman maps to
-    the VM user, so the files are owned as the box's are), no capabilities, no network.
-    ``read-tree --reset -u`` moves no ref and runs no checkout hook — it writes the files and the
-    index, nothing else."""
+    own git, in :func:`_yard_run`'s container. ``read-tree --reset -u`` moves no ref and runs no
+    checkout hook — it writes the files and the index, nothing else."""
+    return [
+        *_yard_run(engine, main, wt_dir),
+        # No network, so Git LFS writes its pointer files (`git lfs pull` in the box fetches the
+        # content), and an image without git-lfs doesn't fail the checkout.
+        "-e",
+        "GIT_LFS_SKIP_SMUDGE=1",
+        "--entrypoint",
+        "git",
+        image,
+        "-c",
+        "filter.lfs.required=false",
+        "read-tree",
+        "--reset",
+        "-u",
+        oid,
+    ]
+
+
+def _yard_run(engine: str, main: Path, wt_dir: Path) -> list[str]:
+    """``<engine> run`` up to the container's own settings, for a git run in ``wt_dir``: the two
+    mounts ``worktree_init`` gets (at the paths your computer uses, which the worktree's ``.git``
+    file names), the box's uid (container root, which rootless podman maps to the VM user, so what
+    it writes is owned as the box's files are), no capabilities, no network."""
     wt_root = config.worktrees_root(main)
     return [
         engine,
@@ -370,38 +397,31 @@ def _checkout_cmd(engine: str, image: str, main: Path, wt_dir: Path, oid: str) -
         f"{wt_root}:{wt_root}",
         "-w",
         str(wt_dir),
-        # No network, so Git LFS writes its pointer files (`git lfs pull` in the box fetches the
-        # content), and an image without git-lfs doesn't fail the checkout.
-        "-e",
-        "GIT_LFS_SKIP_SMUDGE=1",
-        "--entrypoint",
-        "git",
-        image,
-        "-c",
-        "filter.lfs.required=false",
-        "read-tree",
-        "--reset",
-        "-u",
-        oid,
     ]
+
+
+def _admin_dir(wt_dir: Path) -> Path | None:
+    """The worktree's admin dir in the shared ``.git``, from its ``.git`` file, read without
+    following a link or blocking (the worktrees root is box-writable: a FIFO there must not hang a
+    verb). None when that file isn't a regular file there."""
+    try:
+        fd = os.open(wt_dir / ".git", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        text = os.read(fd, 4096).decode(errors="replace")
+    finally:
+        os.close(fd)
+    return wt_dir / Path(text.removeprefix("gitdir:").strip())  # `/` keeps an absolute one as is
 
 
 def _index_on_host(wt_dir: Path) -> bool:
     """Whether the worktree's index — the checkout's last write — is there on YOUR side of the
-    mount. Its admin dir comes from the ``.git`` file git just wrote, read without following a
-    link or blocking (the worktrees root is box-writable: a FIFO there must not hang the add)."""
-    try:
-        fd = os.open(wt_dir / ".git", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return False
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return False
-        text = os.read(fd, 4096).decode(errors="replace")
-    finally:
-        os.close(fd)
-    gitdir = Path(text.removeprefix("gitdir:").strip())
-    return (wt_dir / gitdir / "index").is_file()  # `/` keeps an absolute gitdir as it is
+    mount (:func:`_admin_dir`, from the ``.git`` file git just wrote)."""
+    admin = _admin_dir(wt_dir)
+    return admin is not None and (admin / "index").is_file()
 
 
 def _undo_add(main: Path, wt_dir: Path, branch: str, made_at: str) -> None:
@@ -455,72 +475,211 @@ def _registered_worktree(main: Path, wt_dir: Path) -> bool:
     return str(wt_dir) in trees or str(wt_dir.resolve()) in trees
 
 
-def _snapshot_uncommitted(wt_dir: Path, name: str) -> str | None:
-    """Park a worktree's uncommitted work on a ref in MAIN before the checkout is deleted.
+# ── `remove` reads the worktree in the yard ───────────────────────────────────────────────────
+#
+# Whether a worktree holds uncommitted work is a `git status`, and parking that work on a ref is an
+# `add -A`: both HASH the worktree's files, and git runs every `clean` filter the shared config
+# names for each file it hashes — on a worktree checked out in the VM, whose stat data your
+# computer never matches, every file. So both run in the same one-off container as the checkout
+# (`_uncommitted_cmd`), and git on your computer does only what hashes nothing: check that the id
+# it was handed names a commit (`cat-file -t` reads an object), write the ref, and delete the
+# checkout with `--force` (which skips git's own `git status`; a lock still holds). Refs and
+# `.git/config` are written only on your computer, as for the checkout (ADR-0021, issue #6).
+#
+# What the container prints is the box's to influence (it runs the box's filters over files the
+# box writes), so it is DATA: one line, matched whole, an id by its shape and then by git. A lie
+# there can only misreport the box's own work. A yard that can't be asked is never replaced by a
+# check here: `remove` refuses, and `--discard` is the operator's explicit way past.
 
-    ``worktree remove --force`` (and the orphan path's ``rmtree``, which ALWAYS needs --force)
-    discard tracked edits and untracked files with no trace: nothing was ever written to the
-    object database, so there is not even a dangling blob to recover. Transcripts are archived
-    one step above precisely because destruction is coming; the code they describe was not.
+# The script the container runs (its image's own `sh` and git). $1: `check` (is anything
+# uncommitted?) or `save` (park it, too); $2: the parking commit's message — both ARGUMENTS, never
+# spliced in. `--untracked-files=normal` and `--ignore-submodules=none` pin what counts (git's own
+# check honours `status.showUntrackedFiles`, which the box-writable config can set to `no`), and
+# `--no-optional-locks` leaves the worktree's index as it is. The throwaway index lives in the
+# container's own /tmp, which no box reaches. An unborn HEAD, or any git failure, is exit 3.
+_UNCOMMITTED_SH = """\
+g() { git -c filter.lfs.required=false "$@"; }
+head=$(g rev-parse --verify --quiet 'HEAD^{commit}') || exit 3
+st=$(g --no-optional-locks status --porcelain --ignore-submodules=none \\
+  --untracked-files=normal) || exit 3
+if [ -z "$st" ]; then echo fy-clean; exit 0; fi
+if [ "$1" != save ]; then echo fy-dirty; exit 0; fi
+GIT_INDEX_FILE="${TMPDIR:-/tmp}/fy-uncommitted-index.$$"
+export GIT_INDEX_FILE
+g read-tree "$head" || exit 3
+g add -A || exit 3
+tree=$(g write-tree) || exit 3
+if [ "$tree" = "$(g rev-parse --verify --quiet "$head^{tree}")" ]; then
+  echo fy-unchanged; exit 0
+fi
+oid=$(g commit-tree --no-gpg-sign -p "$head" -m "$2" "$tree") || exit 3
+echo "fy-saved $oid"
+"""
+_PARKED_BY = ("foldyard", "foldyard@localhost")  # commit-tree needs one; the work isn't theirs
+_OID = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"  # sha1 or sha256
+_VERDICT = re.compile(rf"fy-(clean|dirty|unchanged)|fy-(saved) ({_OID})")
+_SAYS = {False: ("clean", "dirty"), True: ("clean", "unchanged", "saved")}  # what each mode prints
 
-    Written as a commit whose tree is built through a THROWAWAY index, so neither the worktree's
-    index nor its HEAD is touched on the way out — this must not be able to change what is being
-    removed. ``git add -A`` honours .gitignore, which is what keeps it cheap (no node_modules)
-    and is also its one blind spot: a gitignored-but-precious file is not in here.
 
-    The ref lands in the SHARED store (linked worktrees share objects and refs with main), so it
-    outlives ``worktree remove``, ``worktree prune`` and a ``gc --prune=now`` — the ref keeps the
-    objects reachable. Returns the ref name, or None when there was nothing to save or git could
-    not be driven (a pruned orphan's ``.git`` file dangles, and that is exactly the case that
-    cannot be rescued — say so rather than pretend).
-    """
-    import tempfile
+def _uncommitted_cmd(
+    engine: str, image: str, main: Path, wt_dir: Path, name: str, *, save: bool
+) -> list[str]:
+    """The one-off container that tells whether ``wt_dir`` holds uncommitted work — and, with
+    ``save``, parks it in a commit (objects only: no ref, no index of the worktree's): the image's
+    own ``sh`` and git running :data:`_UNCOMMITTED_SH`, in :func:`_yard_run`'s container."""
+    who, email = _PARKED_BY
+    return [
+        *_yard_run(engine, main, wt_dir),
+        "-e",
+        f"GIT_AUTHOR_NAME={who}",
+        "-e",
+        f"GIT_AUTHOR_EMAIL={email}",
+        "-e",
+        f"GIT_COMMITTER_NAME={who}",
+        "-e",
+        f"GIT_COMMITTER_EMAIL={email}",
+        "--entrypoint",
+        "sh",
+        image,
+        "-c",
+        _UNCOMMITTED_SH,
+        "fy-uncommitted",
+        "save" if save else "check",
+        f"fy: uncommitted work in worktree '{name}' at removal",
+    ]
+
+
+def _verdict(out: bytes, *, save: bool) -> tuple[str, str] | None:
+    """The container's one line, ``(kind, commit id or "")`` — None for anything else, or for a
+    kind the mode it was asked in never prints (a ``save`` that says ``dirty`` saved nothing)."""
+    text = out.decode("ascii", errors="replace")
+    if text.count("\n") != 1 or not text.endswith("\n"):
+        return None
+    m = _VERDICT.fullmatch(text[:-1])
+    if m is None or (kind := m[1] or m[2]) not in _SAYS[save]:
+        return None
+    return kind, m[3] or ""
+
+
+def _uncommitted_in_yard(
+    main: Path, wt_dir: Path, name: str, yard: tuple[str, dict, str], *, save: bool
+) -> tuple[str, str] | None:
+    """Ask the yard about ``wt_dir``'s uncommitted work (:func:`_uncommitted_cmd`):
+    ``("clean"|"dirty"|"unchanged"|"saved", commit id or "")`` — ``unchanged`` is uncommitted to
+    git (its index differs) with files that are HEAD's, so nothing to park. None, said, when it
+    can't be asked or its answer isn't one foldyard can read."""
+    engine, env, image = yard
+    cmd = _uncommitted_cmd(engine, image, main, wt_dir, name, save=save)
+    script = cmd.index(_UNCOMMITTED_SH)
+    shown = [*cmd[:script], "<foldyard's check>", *cmd[script + 1 :]]
+    print(f"▶ checking '{name}' for uncommitted work in the VM ({image})…")
+    print("  $ " + shlex.join(shown))
+    got = subprocess.run(cmd, env=env, stdout=subprocess.PIPE)
+    verdict = _verdict(got.stdout or b"", save=save) if got.returncode == 0 else None
+    if verdict is not None:
+        return verdict
+    if got.returncode in (126, 127):
+        _err(f"✗ the check couldn't start sh in {image}: [box].image must provide sh and git.")
+    elif got.returncode != 0:
+        _err("✗ checking the worktree for uncommitted work in the VM failed (above).")
+    else:
+        _err("✗ the check in the VM answered something foldyard can't read.")
+    return None
+
+
+def _park(main: Path, name: str, oid: str, env: dict[str, str]) -> str | None:
+    """Point a new ``refs/fy/removed/<name>-<time>`` in MAIN at ``oid``, the commit the yard made
+    of the worktree's uncommitted work — once git here says ``oid`` names a commit. The ref lands
+    in the SHARED store, so it outlives ``worktree remove``, ``prune`` and a ``gc --prune=now``.
+    Create-only (an existing ref of that name is never moved). None, said, when it can't."""
     from datetime import datetime
 
-    try:  # `add -A` refreshes an index, `update-ref` is a ref transaction
-        quiet = _hookless_env(wt_dir)
+    kind = _host_git(main, "cat-file", "-t", oid, env=env, capture_output=True, text=True)
+    if kind.returncode != 0 or kind.stdout.strip() != "commit":
+        _err(f"✗ the check in the VM named {oid} as the parked work, which isn't a commit here.")
+        return None
+    ref = f"refs/fy/removed/{name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    if _host_git(main, "update-ref", ref, oid, "", env=env).returncode != 0:
+        _err(f"✗ couldn't write {ref} (above).")
+        return None
+    return ref
+
+
+def _say_parked(main: Path, name: str, ref: str) -> None:
+    print(f"▶ uncommitted work in '{name}' saved to {ref}")
+    print(f"     inspect:  git -C {main} show --stat {ref}")
+    print(f"     restore:  git -C {main} checkout {ref} -- .")
+
+
+def _remove_command(name: str, force: bool, assume_yes: bool) -> str:
+    """The ``fy worktree remove`` the operator ran, to say how to run it again."""
+    flags = [*(["--force"] if force else []), *(["--yes"] if assume_yes and not force else [])]
+    return shlex.join(["fy", "worktree", "remove", name, *flags])
+
+
+def _say_discard(again: str) -> None:
+    _err("  Or remove it WITHOUT checking for or saving uncommitted work (anything uncommitted in")
+    _err(f"  it is lost):  {again} --discard")
+
+
+def _remove_yard(name: str, again: str) -> tuple[str, dict, str] | None:
+    """``(engine, env, image)`` to ask about the worktree's uncommitted work in — or None, said,
+    when there is no image to run it in. Asked BEFORE anything is torn down, so a refusal leaves
+    the worktree, its box and its stack as they were. Never a fallback to a check here: that is
+    the filter drivers running on your computer again."""
+    engine, env, image, present = _yard()
+    if present:
+        return engine, env, image
+    _err(f"✗ no {image} image in the VM to check '{name}' for uncommitted work in.")
+    _err("  foldyard reads a worktree's files in a container, never on your computer: the shared")
+    _err("  .git can name filter drivers, and git runs them for every file it reads to compare.")
+    _err(f"  Build the image (or start the VM: fy machine ensure), then:  fy box build && {again}")
+    _say_discard(again)
+    return None
+
+
+def _remove_checkout(
+    main: Path, wt_dir: Path, name: str, yard: tuple[str, dict, str] | None, *, force: bool
+) -> tuple[int, str | None]:
+    """Delete the registered checkout ``wt_dir`` — ``(rc, the ref its uncommitted work was parked
+    on, if any)``. With ``yard``, first ask it whether there is uncommitted work: refuse if so,
+    unless ``force``, which parks it (:func:`_park`) and refuses if that fails. ``yard`` None is
+    ``--discard``: nothing asked, nothing parked. Then ``git worktree remove --force`` here."""
+    try:  # the ref write is a ref transaction; scanned once, right before the git here runs
+        quiet = _hookless_env(main)
     except HookScanError as e:
-        # The scan here is the WORKTREE's context (its config.worktree too), while `git worktree
-        # remove` scans from main — and the orphan path deletes the tree with no git at all — so
-        # a `--force` removal can still go ahead. Say the net isn't there.
-        _err(f"⚠ uncommitted work in '{name}' NOT saved: {e} — foldyard runs no git there.")
-        return None
-
-    def _git(*args: str, env: dict[str, str] = quiet) -> subprocess.CompletedProcess:
-        return _host_git(wt_dir, *args, env=env, capture_output=True, text=True)
-
-    head = _git("rev-parse", "HEAD")
-    if head.returncode != 0:
-        return None
-    idx = Path(tempfile.mkdtemp(prefix="fy-wt-snap-")) / "index"
-    try:
-        env = {**quiet, "GIT_INDEX_FILE": str(idx)}
-        if _git("read-tree", "HEAD", env=env).returncode != 0:
-            return None
-        if _git("add", "-A", env=env).returncode != 0:
-            return None
-        tree = _git("write-tree", env=env)
-        if tree.returncode != 0:
-            return None
-        # An unchanged tree means there was nothing uncommitted to lose — no ref, no noise.
-        if tree.stdout.strip() == _git("rev-parse", "HEAD^{tree}").stdout.strip():
-            return None
-        made = _git(
-            "commit-tree",
-            tree.stdout.strip(),
-            "-p",
-            head.stdout.strip(),
-            "-m",
-            f"fy: uncommitted work in worktree '{name}' at removal",
-        )
-        if made.returncode != 0:
-            return None
-        ref = f"refs/fy/removed/{name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        if _git("update-ref", ref, made.stdout.strip()).returncode != 0:
-            return None
-        return ref
-    finally:
-        shutil.rmtree(idx.parent, ignore_errors=True)
+        _refuse_unscanned(e)
+        return 1, None
+    again = _remove_command(name, force, False)
+    ref = None
+    if yard is not None:
+        admin = _admin_dir(wt_dir)
+        if not force and admin is not None and (admin / "modules").is_dir():
+            # Git's own rule, which the --force below would skip: the admin dir holds the
+            # submodules' repos, and removing it deletes their unpushed commits.
+            _err("✗ working trees containing submodules cannot be moved or removed — nothing")
+            _err("  removed. --force removes it with its submodules' repos.")
+            return 1, None
+        verdict = _uncommitted_in_yard(main, wt_dir, name, yard, save=force)
+        if verdict is not None and verdict[0] == "dirty":
+            _err(f"✗ '{name}' has uncommitted changes or untracked files — nothing removed.")
+            _err("  Commit them in its box, or re-run with --force to save them on a ref first:")
+            _err(f"  {_remove_command(name, True, False)}")
+            return 1, None
+        if verdict is not None and verdict[0] == "saved":
+            ref = _park(main, name, verdict[1], quiet)
+        if verdict is None or (verdict[0] == "saved" and ref is None):
+            _err(f"  '{name}' was NOT removed: its uncommitted work couldn't be checked or saved.")
+            _err(f"  Once that's fixed, run it again:  {again}")
+            _say_discard(again)
+            return 1, None
+        if ref:
+            _say_parked(main, name, ref)
+    print(f"▶ git worktree remove --force {wt_dir}…")
+    rc = _host_git(main, "worktree", "remove", "--force", str(wt_dir), env=quiet).returncode
+    if rc != 0:
+        _err("✗ git worktree remove failed (above).")
+    return rc, ref
 
 
 def _git_has_ref(repo: Path, ref: str) -> bool:
@@ -1024,18 +1183,24 @@ def _init_in_yard(main: Path, wt_dir: Path) -> int:
     return 0
 
 
-def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
+def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bool = False) -> int:
     """Remove a host-sibling worktree and ALL its local state: tear down its dev box and its
     stack (compose down + drop the worktree's volumes; shared caches kept), archive its configured
-    agents' transcripts to the durable host store, then ``git worktree remove`` the checkout.
-    Interactive confirmation unless ``assume_yes``/``force``. ``--force`` also removes when
-    archiving fails or the tree is dirty/locked (passed through to git). Transcripts are archived
-    BEFORE git deletes the worktree, since that takes the fragile bound-out transcript dirs with it.
+    agents' transcripts to the durable host store, then delete the checkout
+    (:func:`_remove_checkout`). Interactive confirmation unless ``assume_yes``/``force``.
+    Transcripts are archived BEFORE the checkout goes, since that takes the fragile bound-out
+    transcript dirs with it.
+
+    Uncommitted work is looked for in the yard, never on your computer (see "`remove` reads the
+    worktree in the yard"): a worktree with any is refused, unless ``force``, which parks it on
+    ``refs/fy/removed/<name>-<time>`` first. ``force`` also removes when archiving fails. With no
+    yard to ask, it refuses before anything is torn down; ``discard`` removes it without asking or
+    parking anything — the operator's explicit acceptance that uncommitted work is lost.
 
     Also handles the ORPHANED shape (checkout dir present, git metadata gone — see
     :func:`_registered_worktree`): under ``--force`` the dir is deleted directly +
     ``git worktree prune``, since ``git worktree remove`` can't remove what git no longer
-    tracks."""
+    tracks. Git has nothing there to check or park, so no yard is needed."""
     from . import box, transcripts
 
     if (rc := _host_only("remove")) is not None:
@@ -1090,6 +1255,12 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
         _err("  take it. Re-run with --force to delete the directory instead (any uncommitted")
         _err("  changes in it are lost).")
         return 1
+    # Asked BEFORE the plan and the teardown: with no yard to ask about uncommitted work, nothing
+    # is torn down (an orphan has nothing git could check, and --discard says not to ask).
+    yard = None
+    if not (orphaned or discard):
+        if (yard := _remove_yard(name, _remove_command(name, force, assume_yes))) is None:
+            return 1
 
     print(f"This PERMANENTLY removes worktree '{name}' at {wt_dir}:")
     print(f"  1. stop + remove its dev box container ({project}-devbox) + its shadow volumes")
@@ -1097,9 +1268,18 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
     print("       (postgres + GCS/BigQuery emulator data; SHARED pnpm/Playwright caches are kept)")
     print("  3. archive its configured agent transcripts to the durable store on your computer")
     if orphaned:
-        print("  4. delete the ORPHANED checkout dir (git no longer tracks it) + worktree prune")
+        print("  4. delete the ORPHANED checkout dir (git no longer tracks it, so nothing")
+        print("       uncommitted in it can be saved) + worktree prune")
+    elif discard:
+        print("  4. git worktree remove — the checkout directory is deleted, NOT checked for")
+        print("       uncommitted work first, nor any saved (--discard): anything uncommitted")
+        print("       in it is lost")
+    elif force:
+        print("  4. save any uncommitted work on refs/fy/removed/<name>-<time> (looked for in the")
+        print("       VM), then git worktree remove — the checkout directory is deleted")
     else:
-        print("  4. git worktree remove — the checkout directory is deleted")
+        print("  4. check it has no uncommitted work (in the VM), then git worktree remove — the")
+        print("       checkout directory is deleted")
     print("  5. delete its local mode, isolated VS Code state + adopted config")
     if branch:
         print(f"  The branch '{branch}' is KEPT (delete it later with: git branch -D {branch}).")
@@ -1135,18 +1315,10 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
         _err("  Resolve the issue, or re-run with --force to remove anyway (loses them).")
         return rc
 
-    # 3b. Park any uncommitted work on a ref in main BEFORE the checkout is deleted. Best-effort
-    #     and never blocking, unlike the transcript archive above: both paths that reach step 4
-    #     with work still in the tree are explicit --force (git itself refuses the non-force
-    #     removal of a dirty worktree), so the operator has already accepted the loss — this is a
-    #     net under them, not a promise they were given.
-    saved = _snapshot_uncommitted(wt_dir, name)
-    if saved:
-        print(f"▶ uncommitted work in '{name}' saved to {saved}")
-        print(f"     inspect:  git -C {main} show --stat {saved}")
-        print(f"     restore:  git -C {main} checkout {saved} -- .")
-    # 4. git worktree remove — or, for an orphan git no longer tracks, delete the dir + prune
-    #    the stale metadata so a re-add of the same name starts clean.
+    # 4. Delete the checkout — asking the yard about uncommitted work right before (after the
+    #    teardown, so its own box can't add more), parking it under --force — or, for an orphan
+    #    git no longer tracks, delete the dir + prune the stale metadata so a re-add starts clean.
+    saved = None
     if orphaned:
         print(f"▶ deleting orphaned checkout {wt_dir} + git worktree prune…")
         try:
@@ -1160,11 +1332,10 @@ def remove(name: str, force: bool = False, assume_yes: bool = False) -> int:
             _err(f"  worktree metadata may remain (re-run: git -C {main} worktree prune).")
             return rc
     else:
-        print(f"▶ git worktree remove {wt_dir}…")
-        argv = ["worktree", "remove", *(["--force"] if force else []), str(wt_dir)]
-        rc = _host_git(main, *argv).returncode  # its dirty check runs `git status`: fsmonitor
+        rc, saved = _remove_checkout(main, wt_dir, name, yard, force=force)
         if rc != 0:
-            _err("✗ git worktree remove failed (uncommitted changes? use --force).")
+            if saved:
+                _err(f"  Its uncommitted work is on {saved} all the same.")
             return rc
     # 5. The checkout is gone, so its posture and isolated VS Code process state are stale too —
     # and its from-box slot (ADR-0033), whose transcripts step 3 archived. Keep shared
