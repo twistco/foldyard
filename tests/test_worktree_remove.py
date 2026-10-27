@@ -491,6 +491,25 @@ def test_work_only_in_the_index_is_not_protected(rig):
 
 
 @pytest.mark.spawns("sh")
+def test_uncommitted_work_inside_a_submodule_counts(rig, tmp_path):
+    # As strict as git's own `--ignore-submodules=none`: the submodule's HEAD is the commit's, but
+    # its files aren't — the tree holds only the gitlink, so the second `diff` is what sees it.
+    rig["yard"]["mode"] = "local"
+    wt, sub = rig["wt"], tmp_path / "sub"
+    quiet = ["-c", "core.hooksPath=/dev/null", "-c", "filter.x.clean="]
+    _real_run(["git", "init", "-q", "-b", "main", str(sub)], check=True)
+    (sub / "s.txt").write_text("sub\n")
+    _git(sub, "add", "-A")
+    _git(sub, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "sub")
+    _real_run(["git", "clone", "-q", str(sub), str(wt / "s")], check=True)
+    _git(wt, *quiet, "add", "s")
+    _git(wt, *quiet, "commit", "-qm", "gitlink")
+    assert worktree._uncommitted_in_yard(rig["main"], wt, NAME, _YARD, save=False) == ("clean", "")
+    (wt / "s" / "s.txt").write_text("edited inside\n")
+    assert worktree._uncommitted_in_yard(rig["main"], wt, NAME, _YARD, save=False) == ("dirty", "")
+
+
+@pytest.mark.spawns("sh")
 def test_the_check_leaves_the_worktrees_index_alone(rig):
     rig["yard"]["mode"] = "local"
     _dirty(rig)
