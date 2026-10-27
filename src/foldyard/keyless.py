@@ -31,6 +31,7 @@ import base64
 import fcntl
 import json
 import os
+import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -477,7 +478,10 @@ def seed_posture(wt_cfg: Config) -> dict[str, str]:
     assistant axes, mirroring main's ACTUAL values (off stays off), so this never escalates a
     worktree beyond what main already runs, and never touches the credentialed cloud axes
     (gcp/storage/github/…). An axis the worktree's posture file already sets is the operator's
-    choice (a lost adoption re-made finds one) and is left alone. A non-keyless developer (no
+    choice (a lost adoption re-made finds one) and is left alone. That includes an ``off`` the
+    operator never chose: ``set_mode`` writes EVERY axis into the file, so any earlier write to the
+    worktree's posture leaves explicit offs behind. Fail-safe by design — the guard can only keep
+    an axis off, never turn one on. A non-keyless developer (no
     ``[claude]``/``[codex]`` ``keyless`` in their local toml) gets a no-op. Written with
     ``reconcile=False``: nothing of the worktree is up before its first adoption (the launch verbs
     refuse an unadopted checkout), and the supervisor reconciles from the posture file. Best-effort
@@ -514,9 +518,14 @@ def seed_posture(wt_cfg: Config) -> dict[str, str]:
             "▶ seeded keyless mode from main: "
             + ", ".join(f"{a}={v}" for a, v in updates.items())
             + f"  (its box will inject on `WORKTREE={name} fy box up`)",
+            file=sys.stderr,
             flush=True,
         )
         return updates
     except (Exception, SystemExit) as e:  # a convenience, never fatal: set_mode can refuse too
-        print(f"  (couldn't seed keyless mode — set it manually with `fy mode`: {e})", flush=True)
+        print(
+            f"  (couldn't seed keyless mode — set it manually with `fy mode`: {e})",
+            file=sys.stderr,
+            flush=True,
+        )
         return {}

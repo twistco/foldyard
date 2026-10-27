@@ -879,7 +879,7 @@ def test_add_seeds_only_mains_keyless_axes_that_are_on(fake_main, monkeypatch, c
 
     posture = _wt_posture()
     assert posture is not None and posture["claude"] == "on" and posture["codex"] == "off"
-    assert "seeded keyless mode from main: claude=on" in capsys.readouterr().out
+    assert "seeded keyless mode from main: claude=on" in capsys.readouterr().err
 
 
 def test_add_seeds_once(fake_main, monkeypatch, capsys):
@@ -894,7 +894,7 @@ def test_add_seeds_once(fake_main, monkeypatch, capsys):
     assert worktree.add("feat") == 0
 
     assert calls == [{"claude": "on", "codex": "on"}]
-    assert capsys.readouterr().out.count("seeded keyless mode") == 1
+    assert capsys.readouterr().err.count("seeded keyless mode") == 1
 
 
 def test_a_first_adoption_at_the_launch_gate_seeds(fake_main, monkeypatch, capsys):
@@ -908,7 +908,7 @@ def test_a_first_adoption_at_the_launch_gate_seeds(fake_main, monkeypatch, capsy
 
     posture = _wt_posture()
     assert posture is not None and (posture["claude"], posture["codex"]) == ("on", "on")
-    assert "seeded keyless mode from main: claude=on, codex=on" in capsys.readouterr().out
+    assert "seeded keyless mode from main: claude=on, codex=on" in capsys.readouterr().err
 
 
 def test_a_first_adoption_via_fy_config_adopt_seeds(fake_main, monkeypatch):
@@ -982,7 +982,7 @@ def test_a_config_without_keyless_seeds_nothing(fake_main, monkeypatch, capsys):
 
     assert _gate(monkeypatch) == "pinned"
     assert _wt_posture() is None
-    assert "keyless mode" not in capsys.readouterr().out
+    assert "keyless mode" not in capsys.readouterr().err
 
 
 def test_main_is_never_seeded(fake_main, monkeypatch):
