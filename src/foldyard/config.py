@@ -37,7 +37,7 @@ import re
 import subprocess
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -87,6 +87,9 @@ class Config:
     repo_root: Path
     worktree: str  # "" = the main checkout; otherwise the worktree dir name
     toml: dict
+    # What NAMES the project for a registered worktree with nothing adopted: main's adopted
+    # identity keys (:func:`identity_from`), never config. Empty for every other checkout.
+    identity: dict = field(default_factory=dict)
 
     def has_table(self, name: str) -> bool:
         """Does this config DECLARE the top-level table ``name`` (even empty)? The opt-in
@@ -286,6 +289,7 @@ def clear_caches() -> None:
     (the allowlist + tests). A bound :class:`Config` is unaffected — it carries its own snapshot."""
     _repo_root_ambient.cache_clear()
     _toml_ambient.cache_clear()
+    _identity_ambient.cache_clear()
     # The two main-checkout resolvers (stack.main_repo, devmode's per-checkout one) are memoized
     # for the same reason and invalidated by the same events (a test relocating the repo, a
     # rewritten foldyard.toml). Lazy + doubly guarded: config must not import either at module
@@ -507,6 +511,81 @@ def unadopted_notice() -> str | None:
     )
 
 
+# ── a registered worktree with nothing adopted is still its project's ───────────────────
+# On your computer an unadopted checkout reads an EMPTY config, so a fresh worktree was named
+# after its directory: its own project (and `~/.foldyard/<project>/` state dir and port band), a
+# machine of that name, the default backend. Every host verb run there before its adoption — a
+# git hook calling `fy box exec`, `fy mode`, `fy allow` — acted on a project that doesn't exist.
+# What NAMES the project is a fact about main, so these keys (and these only) come from main's
+# ADOPTED snapshot. `worktrees_root` with them: without it, a project that moved its worktrees
+# leaves the CLI's worktree inference reading the checkout as main.
+
+_IDENTITY = {"project": ("name", "prefix"), "machine": ("name", "backend", "worktrees_root")}
+
+
+def _git_main(root: Path) -> Path | None:
+    """The main checkout git links ``root`` to (its common dir's parent). The link is the
+    worktree's ``.git`` file, which the box can write — :func:`identity_from` never trusts it
+    alone. A read-only ``rev-parse``: it runs nothing from the repo."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    common = out.stdout.strip()
+    return Path(common).parent if out.returncode == 0 and common else None
+
+
+def identity_from(main: Path, root: Path) -> dict:
+    """The identity keys (:data:`_IDENTITY`) the checkout at ``root`` takes from ``main``'s
+    adopted config, or ``{}``. Only on your computer, only for a checkout the host REGISTERED as a
+    worktree of ``main`` (:mod:`foldyard.worktree_registry` — the host's own record, so a box that
+    rewrites the worktree's ``.git`` or plants a directory gains nothing), only while that
+    checkout has nothing adopted itself (its own adoption, once made, is all it reads), and only
+    from main's ADOPTED copy, never a tree."""
+    if in_box():
+        return {}
+    from . import worktree_registry  # lazy, and stdlib-only: it imports nothing of ours
+
+    main, root = Path(main).resolve(), Path(root).resolve()
+    if root == main or root not in worktree_registry.checkouts(main).values():
+        return {}
+    if _host_toml(root) is not None:
+        return {}
+    adopted = _host_toml(main) or {}
+    got: dict[str, dict] = {}
+    for table, keys in _IDENTITY.items():
+        source = adopted.get(table)
+        if isinstance(source, dict):
+            if picked := {k: source[k] for k in keys if k in source}:
+                got[table] = picked
+    return got
+
+
+@lru_cache(maxsize=1)
+def _identity_ambient() -> dict:
+    """:func:`identity_from` for the ambient checkout: ``{}`` when it is adopted, or in the box."""
+    if in_box() or ambient_adopted():
+        return {}
+    root = _repo_root_ambient()
+    main = _git_main(root)
+    return identity_from(main, root) if main is not None else {}
+
+
+def _identity_value(table: str, key: str) -> object:
+    """``[table].key`` from the config, else from the inherited identity (bound or ambient)."""
+    value = _table(table).get(key)
+    if value:
+        return value
+    bound = _BOUND.get()
+    inherited = bound.identity if bound is not None else _identity_ambient()
+    return inherited.get(table, {}).get(key)
+
+
 def _toml() -> dict:
     """The resolved ``foldyard.toml`` (+ local override). Consults a bound :class:`Config`
     context first — so building/reading a registry for a specific consumer or worktree sees
@@ -549,7 +628,7 @@ def project() -> str:
     agree on one state dir. Held to :func:`_safe_name` whichever source it came from."""
     if env := os.environ.get("FOLDYARD_PROJECT"):
         return _safe_name(env, "FOLDYARD_PROJECT")
-    if declared := _project_table().get("name"):
+    if declared := _identity_value("project", "name"):
         return _safe_name(declared, "[project].name")
     return _safe_name(
         repo_root().name.lower(), "the checkout's directory name (set [project].name instead)"
@@ -692,7 +771,11 @@ def project_prefix() -> str:
     """Prefix for container/volume/network names. ``FOLDYARD_PROJECT_PREFIX`` wins,
     then ``[project].prefix``, then the project name (a worktree appends its own
     suffix — see ``foldyard.stack``)."""
-    return os.environ.get("FOLDYARD_PROJECT_PREFIX") or _project_table().get("prefix") or project()
+    return str(
+        os.environ.get("FOLDYARD_PROJECT_PREFIX")
+        or _identity_value("project", "prefix")
+        or project()
+    )
 
 
 def app_service() -> str:
@@ -982,7 +1065,7 @@ def worktrees_root(default_base: Path) -> Path:
     env = os.environ.get("FOLDYARD_WORKTREES_ROOT")
     if env:
         return Path(env).expanduser()
-    toml = _table("machine").get("worktrees_root")
+    toml = _identity_value("machine", "worktrees_root")
     if toml:
         p = Path(str(toml)).expanduser()
         return p if p.is_absolute() else (Path(default_base) / p).resolve()
@@ -1006,7 +1089,7 @@ def machine_name() -> str:
     ``[machine].name``, then the project name — each held to :func:`_safe_name`."""
     if env := os.environ.get("PODMAN_MACHINE"):
         return _safe_name(env, "PODMAN_MACHINE")
-    if declared := _table("machine").get("name"):
+    if declared := _identity_value("machine", "name"):
         return _safe_name(declared, "[machine].name")
     return project()
 
@@ -1019,7 +1102,9 @@ def machine_backend_explicit() -> str:
     a backend nobody chose is "this host doesn't do VMs" (skip quietly — a Linux/CI host, or the
     box managing its own VM), while one missing for a backend somebody NAMED is a misconfiguration
     that must fail loudly rather than silently fall back to a weaker profile."""
-    return str(os.environ.get("MACHINE_BACKEND") or _table("machine").get("backend") or "").lower()
+    return str(
+        os.environ.get("MACHINE_BACKEND") or _identity_value("machine", "backend") or ""
+    ).lower()
 
 
 def machine_backend() -> str:
