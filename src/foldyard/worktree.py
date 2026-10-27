@@ -142,9 +142,17 @@ def _config_hooks(repo: Path) -> dict[str, set[str]]:
     them whatever its condition (:func:`_scan_file`). Raises :class:`HookScanError` rather than
     miss one. Empty on a git without config hooks — and harmless to over-count: disabling a name
     that never runs changes nothing."""
-    fields = _git_config_lines(
-        "-C", str(repo), "config", "--show-scope", "--show-origin", "--name-only"
-    )
+    try:
+        fields = _git_config_lines(
+            "-C", str(repo), "config", "--show-scope", "--show-origin", "--name-only"
+        )
+    except HookScanError as e:
+        if "show-scope" not in str(e):
+            raise
+        raise HookScanError(
+            "this git can't say which config files it reads (`--show-scope`), so they can't be "
+            "checked for hooks — it needs git 2.26 or newer"
+        ) from e
     hooks: dict[str, set[str]] = {}
     files: dict[Path, bool] = {}
     for scope, origin, key in zip(fields[0::3], fields[1::3], fields[2::3], strict=False):
@@ -284,8 +292,12 @@ def _snapshot_uncommitted(wt_dir: Path, name: str) -> str | None:
 
     try:  # `add -A` refreshes an index, `update-ref` is a ref transaction
         quiet = _hookless_env(wt_dir)
-    except HookScanError:
-        return None  # nothing git may run here — and what removes the tree refuses too
+    except HookScanError as e:
+        # The scan here is the WORKTREE's context (its config.worktree too), while `git worktree
+        # remove` scans from main — and the orphan path deletes the tree with no git at all — so
+        # a `--force` removal can still go ahead. Say the net isn't there.
+        _err(f"⚠ uncommitted work in '{name}' NOT saved: {e} — foldyard runs no git there.")
+        return None
 
     def _git(*args: str, env: dict[str, str] = quiet) -> subprocess.CompletedProcess:
         return _host_git(wt_dir, *args, env=env, capture_output=True, text=True)

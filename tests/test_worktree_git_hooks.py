@@ -251,3 +251,55 @@ def test_an_include_target_that_cannot_be_read_refuses_the_add(real_add, capsys)
     assert not (real_add["wt_root"] / "feat").exists()  # git never ran
     err = capsys.readouterr().err
     assert "not-there.cfg" in err and "hooks" in err
+
+
+# The WALK needs no config-hook support (`git config --list` lists any `hook.*` key), so these run
+# on every git — CI's 2.43 included — where the execution tests above are skipped.
+
+
+@pytest.mark.parametrize("condition", ["gitdir:**/.git/worktrees/**", "onbranch:wt/**"])
+def test_the_scan_finds_a_hook_behind_a_condition_main_does_not_meet(hooked_repo, condition):
+    main = hooked_repo["main"]
+    _plant_hidden_hook(main, hooked_repo["marker"], condition)
+    assert "hidden" not in _git(main, "config", "--get-regexp", r"^hook\.").stdout  # main can't
+    assert worktree._config_hooks(main)["hidden"] == {"reference-transaction", "post-checkout"}
+
+
+def test_the_scan_follows_a_nested_include_from_its_includers_directory(hooked_repo):
+    main = hooked_repo["main"]
+    sub = main / ".git" / "sub"
+    sub.mkdir()
+    (sub / "first.cfg").write_text(
+        '[includeIf "gitdir:**/.git/worktrees/**"]\n\tpath = second.cfg\n'
+    )
+    _plant_hidden_hook(main, hooked_repo["marker"], "onbranch:nothing-matches", "sub/second.cfg")
+    _git(main, "config", "--unset", "includeIf.onbranch:nothing-matches.path")
+    _git(main, "config", "includeIf.gitdir:**/.git/worktrees/**.path", "sub/first.cfg")
+    assert "hidden" in worktree._config_hooks(main)
+
+
+def test_a_git_too_old_to_name_scopes_refuses_with_the_version_it_needs(hooked_repo, monkeypatch):
+    # `--show-scope` came in git 2.26: fail closed, but say what fixes it.
+    real = subprocess.run
+
+    def old_git(cmd, **kw):
+        if "--show-scope" in cmd:
+            return subprocess.CompletedProcess(cmd, 129, "", "error: unknown option `show-scope'\n")
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(worktree.subprocess, "run", old_git)
+    with pytest.raises(worktree.HookScanError, match=r"git 2\.26"):
+        worktree._config_hooks(hooked_repo["main"])
+
+
+def test_a_snapshot_it_cannot_take_says_so(hooked_repo, tmp_path, capsys):
+    # Skipped because the worktree's config can't be checked for hooks: nobody should go looking
+    # for a refs/fy/removed/… ref that was never written.
+    main = hooked_repo["main"]
+    wt = tmp_path / "wt"
+    worktree._host_git(main, "worktree", "add", "-q", "-b", "feat", str(wt), capture_output=True)
+    (wt / "new.txt").write_text("work\n")
+    _git(main, "config", "include.path", "not-there.cfg")
+    assert worktree._snapshot_uncommitted(wt, "feat") is None
+    err = capsys.readouterr().err
+    assert "NOT saved" in err and "not-there.cfg" in err
