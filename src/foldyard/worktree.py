@@ -54,7 +54,8 @@ def _host_only(verb: str) -> int | None:
 # consumer's post-checkout hooks on the host, in the new checkout, before it was registered.
 # `core.hooksPath=/dev/null` turns off the hooks DIRECTORY only — git's docs still call it "all
 # hooks", but a config hook runs straight through it — so each config hook is also disabled by
-# name (`hook.<name>.enabled=false`). Those go through GIT_CONFIG_COUNT rather than `-c`, whose
+# name (`hook.<name>.enabled=false`) — the names from every included file, whatever its condition
+# (:func:`_config_hooks`). Those go through GIT_CONFIG_COUNT rather than `-c`, whose
 # `key=value` splits at the first `=`, which a hook's name may contain. `core.fsmonitor=` (EMPTY,
 # not `false`: a git before 2.35.2 reads `false` as a hook path, and one before 2.26 then reports
 # no changes, which `worktree remove`'s dirty check would believe) stops the command the shared
