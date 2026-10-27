@@ -425,8 +425,13 @@ def add(
     # and it's registered, so the supervisor never serves the new one from the old branch's config.
     from . import configpin
 
-    if configpin.forget(_pin_config(main, name)):
-        print(f"▶ dropped a config adoption left at this path by an earlier '{name}'.")
+    try:
+        if configpin.forget(_pin_config(main, name)):
+            print(f"▶ dropped a config adoption left at this path by an earlier '{name}'.")
+    except OSError as e:
+        # Going on would hand the new checkout the earlier one's adopted config.
+        _err(f"✗ couldn't remove a config adoption left at this path by an earlier '{name}': {e}")
+        return 1
     # Reproduce the recipe's machine-mount warning: worktree stacks need the rootless
     # machine to mount the worktrees root (no-op in the box / where there's no podman).
     machine.ensure(main, wt_root)
