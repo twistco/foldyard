@@ -41,7 +41,7 @@ Windows, not the credentials, so the VM is required inside the distro too. Both 
 | the proxy on the host: CA, box routing, egress log | ✅ | 2026-09-13, CI | as above |
 | config-adopt gate: first adoption, drift, revert | ✅ | 2026-09-13 | [ADR-0022](./adrs/0022-host-runs-the-adopted-config.md) |
 | `fy box up` / `down` + in-box `fy verify` | ✅ ([3](#3-the-box)) | CI (`test_box_e2e.py`) | [archive/verify-false-pass.md](./archive/verify-false-pass.md#a-false-fail-2026-09-13-the-options-field) |
-| `fy worktree add` / `remove` | ✅ | CI (`test_worktree_e2e.py`) | [DEVELOPMENT.md](../DEVELOPMENT.md#test-tiers) |
+| `fy worktree add` / `remove` | ✅ | CI (`test_worktree_e2e.py`; a new worktree's checkout: `test_box_e2e.py`) | [DEVELOPMENT.md](../DEVELOPMENT.md#test-tiers) |
 | `fy reclaim` on a real store | ✅ | CI (`test_reclaim_e2e.py`) | as above |
 | engine probes on host podman 4.9 (`fy state`, `fy doctor`) | ✅ after a fix ([4](#4-podman-49-labels)) | CI (`test_probes_e2e.py`) | as above |
 | gVisor as the box runtime (`[machine] runtime = "gvisor"`) | ✅ works; overhead measured ([5](#5-gvisor)) | 2026-09-11 – 13, rig | [ADR-0025](./adrs/0025-gvisor-machine-posture-and-socket-narrowing.md) |

@@ -745,7 +745,10 @@ minutes, and the `e2e` job is the single status to check.
   mechanism = a new kind, or an
   entry-point plugin. Consumer scripts run in a CONTAINER, never on the host —
   `[project].worktree_init` via `worktree._init_in_yard` (skips with a retry hint when the yard
-  isn't ready, never falls back). The VS Code attached-container config is AUTHORED by foldyard
+  isn't ready, never falls back). So does `fy worktree add`'s CHECKOUT (`worktree._checkout_in_yard`:
+  a host checkout runs the filter drivers the shared `.git/config` names): the host runs only
+  `git worktree add --no-checkout`, and with no box image it refuses before any git runs —
+  never a host checkout with the filters "neutralised by name". The VS Code attached-container config is AUTHORED by foldyard
   (`vscode._attached_config`) from the ADOPTED `[vscode]` table — `fy code` runs `configpin.gate`
   and reads through `devmode.worktree_config()` like every other host-consequence verb — with
   `remoteUser` and the daemon-port pin as foldyard facts

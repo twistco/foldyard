@@ -18,6 +18,7 @@ that proves it. Lima 2.2.0, Fedora 44 guest.
 from __future__ import annotations
 
 import subprocess
+import time
 
 import pytest
 
@@ -42,6 +43,9 @@ OTHER = "other"
 # (crossinject); LINKED's dir is a symlink the box could have planted, which nothing follows.
 LATE = "late"
 LINKED = "linked"
+# One `fy worktree add` makes for real, once the box image exists: its files are checked out in a
+# container from that image, never on your computer.
+FRESH = "fresh"
 
 
 @pytest.fixture(scope="module")
@@ -65,7 +69,7 @@ def repo(tmp_path_factory):
     fy_ok(["box", "up"], r, timeout=1500)
     yield r
     fy(["box", "down"], r, timeout=300)
-    for name in (OTHER, LATE, LINKED):
+    for name in (FRESH, OTHER, LATE, LINKED):  # FRESH: if its test failed
         if _other(r, name).exists():
             fy(["worktree", "remove", name, "--yes", "--force"], r, timeout=600)
     fy(["down"], r, timeout=180)
@@ -172,3 +176,45 @@ def test_a_symlinked_dir_in_an_added_worktree_is_never_masked_through(repo):
     assert list(elsewhere.iterdir()) == []  # nothing made through the link
     mounted = fy(["box", "exec", f"grep -c ' {wt}/' /proc/self/mountinfo"], repo, timeout=120)
     assert mounted.out.strip().splitlines()[-1] == "0", mounted.out
+
+
+def _git(repo, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    ).stdout
+
+
+def test_worktree_add_checks_the_files_out_in_the_yard(repo):
+    # The host records the worktree (`--no-checkout`); a one-off container from the box image
+    # writes the files and the index, over the same mount the box uses (#148's follow-up).
+    fresh = _other(repo).parent / FRESH
+    added = fy_ok(["worktree", "add", FRESH], repo, timeout=300)
+    assert "checking the worktree out in the VM" in added.out, added.out
+    assert "worktree ready" in added.out, added.out
+    # The branch carries main's committed config and main is adopted: adopted on the spot, no
+    # prompt (there is no terminal here) — the next `fy up` needs no adoption of its own.
+    assert "adopted — identical to main's" in added.out, added.out
+    assert _git(fresh, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"wt/{FRESH}"
+    assert (fresh / "compose.yml").read_text() == (repo / "compose.yml").read_text()
+    # Written as the box writes the checkout — owned by you on your computer, like the rest.
+    assert (fresh / "compose.yml").stat().st_uid == (repo / "compose.yml").stat().st_uid
+    index = repo / ".git" / "worktrees" / FRESH / "index"
+    before = _git(fresh, "ls-files", "--debug", "compose.yml")
+    started = time.monotonic()
+    status = _git(fresh, "status", "--porcelain")
+    took = time.monotonic() - started
+    # The VM-written index against your computer's view of the files: printed for the record
+    # (does your kernel's stat data match the VM's?), asserted only for what matters — clean.
+    print(f"first host `git status`: {took:.2f}s\n index entry before:\n{before}")
+    print(f" after:\n{_git(fresh, 'ls-files', '--debug', 'compose.yml')}")
+    assert status == "", status
+    assert index.is_file()
+    # …and from main's box (which mounts the worktrees root), through foldyard's git shim, which
+    # seeds its own index-box from that index on first use (ADR-0021): clean too.
+    probe = (
+        f'out=$(git -C {fresh} status --porcelain) && [ -z "$out" ] && echo FY-CLEAN || echo "$out"'
+    )
+    inside = fy_ok(["box", "exec", probe], repo, timeout=300)
+    assert "FY-CLEAN" in inside.out, inside.out
+    removed = fy_ok(["worktree", "remove", FRESH, "--yes"], repo, timeout=600)
+    assert f"worktree '{FRESH}' removed" in removed.out, removed.out
