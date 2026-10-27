@@ -817,6 +817,22 @@ def test_a_fresh_add_drops_a_pin_left_at_its_path_and_says_so(fake_main, monkeyp
     assert "dropped" in out and "adopted — identical to main's" in out
 
 
+def test_a_fresh_add_that_cannot_drop_a_left_pin_stops_before_git(fake_main, monkeypatch, capsys):
+    """Going on would hand the new checkout the earlier one's adoption: a `✗`, no traceback, and
+    no checkout made."""
+    from foldyard import configpin
+
+    def unreadable(_cfg):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(configpin, "forget", unreadable)
+
+    assert worktree.add("feat") == 1
+
+    assert "couldn't remove a config adoption" in capsys.readouterr().err
+    assert not (fake_main["wt_root"] / "feat").exists()
+
+
 def test_adopted_only_counts_a_pin_that_matches_the_tree(fake_main, monkeypatch):
     """A pin that differs from the tree, left unresolved (no terminal) or ignored, is not "ready":
     the host would reconcile from bytes this checkout doesn't hold."""
