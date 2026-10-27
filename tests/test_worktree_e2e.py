@@ -1,5 +1,6 @@
 """`fy worktree add` / `remove`, live on a Linux host: `add` registers a sibling checkout on its
-own branch; its stack comes up beside main's in the one VM (`WORKTREE=<name> fy up`); `remove`
+own branch (one made with plain git: a NEW worktree's checkout runs in the box image, which is
+test_box_e2e's — see the first test); its stack comes up beside main's in the one VM (`WORKTREE=<name> fy up`); `remove`
 tears that stack down (containers AND the worktree's volumes), archives the worktree's bound-out
 agent transcripts to the durable store BEFORE git deletes the tree, removes the checkout, drops
 its local state, and leaves main's stack and the branch alone.
@@ -102,8 +103,14 @@ def rig(tmp_path_factory):
 
 
 def test_add_registers_a_sibling_checkout_on_its_own_branch(rig):
-    added = fy_ok(["worktree", "add", NAME], rig.main, timeout=300, env_extra=rig.env)
-    assert "worktree ready" in added.out, added.out
+    # Made with plain git, then registered by `fy worktree add` (it asks first; --yes answers).
+    # A NEW one is checked out in a container from the box image over the VM's mount of the
+    # worktrees root — and this module's VM mounts another module's copy and has no box image of
+    # its own, so test_box_e2e (which recreates the VM for its copy and builds the image) drives
+    # that path; this module's subject is the worktree's stack and its removal.
+    _git(rig.main, "worktree", "add", "-q", "-b", f"wt/{NAME}", str(rig.feat))
+    added = fy_ok(["worktree", "add", NAME, "--yes"], rig.main, timeout=300, env_extra=rig.env)
+    assert f"worktree '{NAME}' registered" in added.out, added.out
     assert (rig.feat / ".git").exists(), added.out
     assert str(rig.feat) in _worktree_paths(rig.main), added.out
     assert _git(rig.feat, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"wt/{NAME}"

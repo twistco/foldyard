@@ -283,7 +283,7 @@ def _add_command(name: str, branch: str, base: str) -> str:
             "add",
             name,
             *([branch] if branch else []),
-            *(["--from", base] * bool(base)),
+            *(["--from", base] if base else []),
         ]
     )
 
