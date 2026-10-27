@@ -520,3 +520,129 @@ def test_the_check_leaves_the_worktrees_index_alone(rig):
         "",
     )
     assert index.read_bytes() == before
+
+
+# ── git on your computer fetches nothing (PR #153 review) ─────────────────────────────────────
+#
+# The shared config can make the repo a PARTIAL CLONE, whose missing objects git fetches on demand
+# from its promisor remote — over a transport the same config chooses, `core.sshCommand` among
+# them. The yard hands the host an id, and the host reads it (`cat-file -t`, `update-ref`): a
+# missing one ran that command on your computer.
+
+MISSING = "1234567890123456789012345678901234567890"
+
+
+def _promisor(main: Path, marker: Path) -> None:
+    for key, value in (
+        ("core.repositoryformatversion", "1"),
+        ("extensions.partialClone", "origin"),
+        ("remote.origin.url", "ssh://example.invalid/x"),
+        ("remote.origin.promisor", "true"),
+        ("protocol.ssh.allow", "always"),  # a repo-level policy outranks a bare protocol.allow
+        ("core.sshCommand", f'echo ssh >> "{marker}"; exit 1 #'),
+    ):
+        _git(main, "config", key, value)
+
+
+def test_the_rig_fetches_a_missing_object_under_plain_git(rig, tmp_path):
+    marker = tmp_path / "fetched"
+    _promisor(rig["main"], marker)
+    _git(rig["main"], "cat-file", "-t", MISSING)
+    assert marker.exists()  # the control: without it, "no marker" proves nothing
+
+
+def test_parking_a_missing_object_fetches_nothing(rig, tmp_path, capsys):
+    marker = tmp_path / "fetched"
+    _promisor(rig["main"], marker)
+    _dirty(rig)
+    rig["yard"]["out"] = f"fy-saved {MISSING}\n"
+    assert worktree.remove(NAME, force=True) == 1
+    assert not marker.exists()
+    assert rig["wt"].exists() and _refs(rig["main"]) == []
+    assert "isn't a commit here" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("cat-file", "-t", MISSING),
+        ("rev-parse", "--verify", "--quiet", f"{MISSING}^{{commit}}"),
+        ("update-ref", "refs/fy/x", MISSING, ""),
+    ],
+)
+def test_no_host_git_fetches_a_missing_object(rig, tmp_path, args):
+    # Both helpers, and each switch on its own: the variable (git 2.44+), and the transport policy
+    # on the command line (every git), which outranks the repo's per-protocol `always`.
+    marker = tmp_path / "fetched"
+    _promisor(rig["main"], marker)
+    worktree._host_git(rig["main"], *args, capture_output=True)
+    worktree._git_read(rig["main"], *args, capture_output=True)
+    _real_run(["git", *worktree._NO_FETCH_CONFIG, "-C", str(rig["main"]), *args])
+    env = {**os.environ, **worktree._NO_FETCH_ENV}
+    _real_run(["git", "-C", str(rig["main"]), *args], env=env, capture_output=True)
+    assert not marker.exists()
+
+
+def test_a_partial_clone_on_a_git_that_cannot_be_told_not_to_fetch_is_refused(
+    rig, tmp_path, monkeypatch, capsys
+):
+    _promisor(rig["main"], tmp_path / "fetched")
+    monkeypatch.setattr(worktree, "_git_can_refuse_lazy_fetch", lambda: False)
+    assert worktree.remove(NAME, force=True) == 1
+    assert rig["wt"].exists() and rig["yard"]["checks"] == []
+    err = capsys.readouterr().err
+    assert "partial clone" in err and "2.44" in err
+    # …and a plain read there says so too, rather than run.
+    assert worktree._git_read(rig["main"], "cat-file", "-t", MISSING).returncode == 1
+
+
+def test_a_partial_clone_on_a_git_that_can_is_not_refused(rig, tmp_path):
+    _promisor(rig["main"], tmp_path / "fetched")
+    assert worktree.remove(NAME, assume_yes=True) == 0
+
+
+# ── the hooks are scanned again after the yard has run ───────────────────────────────────────
+
+
+def _has_config_hooks() -> bool:
+    probe = _real_run(["git", "hook", "list", "-h"], capture_output=True, text=True)
+    return "usage: git hook list" in probe.stdout + probe.stderr
+
+
+@pytest.mark.skipif(not _has_config_hooks(), reason="git before 2.54 has no config hooks")
+def test_a_hook_the_yard_adds_while_it_runs_does_not_run_here(rig, tmp_path):
+    # The container mounts main's .git writable (the save writes objects) and runs the box's
+    # filters: a config hook it adds must be disabled for the ref write that follows.
+    marker = tmp_path / "hook"
+    main = rig["main"]
+    _dirty(rig)
+    tree = _git(main, "rev-parse", "HEAD^{tree}").stdout.strip()
+    oid = _git(main, "commit-tree", tree, "-p", "HEAD", "-m", "parked").stdout.strip()
+    rig["yard"]["out"] = f"fy-saved {oid}\n"
+
+    def plant() -> None:
+        _git(main, "config", "hook.late.event", "reference-transaction")
+        _git(main, "config", "hook.late.command", f'echo late >> "{marker}"')
+
+    rig["yard"]["then"] = plant
+    assert worktree.remove(NAME, force=True) == 0
+    assert _refs(main) and not marker.exists()
+
+
+def test_an_include_the_yard_breaks_while_it_runs_refuses(rig, capsys):
+    rig["yard"]["then"] = lambda: _git(rig["main"], "config", "include.path", "gone.cfg")
+    assert worktree.remove(NAME, assume_yes=True) == 1
+    assert rig["wt"].exists()
+    assert "gone.cfg" in capsys.readouterr().err
+
+
+# ── the submodule rule holds under --discard too ───────────────────────────────────────────
+
+
+def test_discard_still_refuses_a_worktree_with_submodules(rig, capsys):
+    (rig["main"] / ".git" / "worktrees" / NAME / "modules").mkdir()
+    assert worktree.remove(NAME, assume_yes=True, discard=True) == 1
+    assert rig["wt"].exists()
+    assert "submodules" in capsys.readouterr().err
+    assert worktree.remove(NAME, force=True, discard=True) == 0
+    assert _gone(rig)

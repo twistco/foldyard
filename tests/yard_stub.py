@@ -19,6 +19,9 @@ What it then does is ``yard["mode"]``:
   program under ``sh``, so it is marked ``@pytest.mark.spawns("sh")``;
 * ``"partial"`` — the checkout writes a file into the ``-w`` dir, then fails.
 
+``yard["then"]``, when set, is called after a check has run, in either mode: what the container
+(running the box's filters over a box-writable mount) wrote to the shared ``.git`` meanwhile.
+
 ``yard["image"]`` is what ``box.image_exists`` answers. Every other ``subprocess.run`` goes
 through to whatever ran before (the real one, or a test's own fake installed earlier).
 """
@@ -53,6 +56,7 @@ def install(monkeypatch, *, mode: str = "local") -> dict:
         "image": True,
         "index": True,
         "out": "fy-clean\n",
+        "then": None,
         "runs": [],
         "checks": [],
         "seen": {},
@@ -74,9 +78,12 @@ def install(monkeypatch, *, mode: str = "local") -> dict:
             yard["checks"].append(list(cmd))
             if yard["mode"] == "local":  # the engine's env (a dead socket) is the engine's own
                 kw = {k: v for k, v in kw.items() if k not in ("env", "cwd")}
-                return before(["sh", *argv], *a, cwd=workdir, env=_env(cmd), **kw)
-            out = yard["out"]
-            return subprocess.CompletedProcess(cmd, yard["rc"], out.encode(), None)
+                got = before(["sh", *argv], *a, cwd=workdir, env=_env(cmd), **kw)
+            else:
+                got = subprocess.CompletedProcess(cmd, yard["rc"], yard["out"].encode(), None)
+            if yard["then"] is not None:  # what the container (the box's filters) wrote meanwhile
+                yard["then"]()
+            return got
         if entrypoint != "git":
             return before(cmd, *a, **kw)  # not the checkout (worktree_init's run, say)
         yard["runs"].append(list(cmd))

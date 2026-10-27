@@ -19,6 +19,7 @@ Host-side: touches git + the rootless machine. Stdlib only.
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shlex
@@ -65,11 +66,77 @@ def _host_only(verb: str) -> int | None:
 # a hash says) — so this git never checks a file out or hashes one: `add` does the metadata step
 # here and the checkout in a container (`_checkout_in_yard`), and `remove` asks a container
 # whether there is uncommitted work, and to park it (`_uncommitted_in_yard`). See docs/git.md.
-_NO_REPO_CODE = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=")
+#
+# Nor does it FETCH. The shared config can make the repo a partial clone
+# (`extensions.partialClone` + a promisor remote), whose missing objects git fetches on demand
+# over a transport that config chooses — `core.sshCommand`, `ext::` — so reading an object the
+# box deleted, or an id the yard handed over, ran a command on your computer (PR #153's review).
+# Two switches, both on every git here: `GIT_NO_LAZY_FETCH` (git 2.44+), and every transport's
+# policy set to `never` on the command line, which outranks the repo's own (a bare
+# `protocol.allow=never` doesn't: a repo-level `protocol.ssh.allow=always` beats it). Nothing
+# foldyard runs here needs the network. A remote helper no policy names (`foo::…`) is the variable's
+# alone, so on a git too old for it a partial clone is refused (:func:`_fetch_refusal`).
+_PROTOCOLS = ("file", "git", "ssh", "http", "https", "ext")
+_NO_FETCH_CONFIG = (
+    "-c",
+    "protocol.allow=never",
+    *(arg for p in _PROTOCOLS for arg in ("-c", f"protocol.{p}.allow=never")),
+)
+_NO_FETCH_ENV = {"GIT_NO_LAZY_FETCH": "1", "GIT_PROTOCOL_FROM_USER": "0"}
+_NO_REPO_CODE = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=", *_NO_FETCH_CONFIG)
 
 
 class HookScanError(Exception):
     """A config file git would read that foldyard couldn't check for hooks — so it runs no git."""
+
+
+class LazyFetchError(HookScanError):
+    """A partial clone, on a git that can't be told not to fetch its missing objects."""
+
+
+@functools.cache
+def _git_can_refuse_lazy_fetch() -> bool:
+    """Whether this git honours ``GIT_NO_LAZY_FETCH`` — it came with ``git --no-lazy-fetch``
+    (2.44), so that option is the probe. Asked only of a repo that is a partial clone."""
+    try:
+        got = subprocess.run(["git", "--no-lazy-fetch", "version"], capture_output=True)
+    except OSError:
+        return False
+    return got.returncode == 0
+
+
+def _fetch_refusal(repo: Path) -> str | None:
+    """Why git can't run in ``repo`` here without risking a fetch, or None: a partial clone on a
+    git older than 2.44, for which a remote helper no transport policy names stays reachable.
+    Reading config runs nothing from it."""
+    got = subprocess.run(
+        ["git", "-C", str(repo), "config", "--get", "extensions.partialclone"],
+        capture_output=True,
+        text=True,
+    )
+    if got.returncode != 0 or not got.stdout.strip() or _git_can_refuse_lazy_fetch():
+        return None
+    return (
+        "this repo is a partial clone (extensions.partialClone), and this git can't be told not "
+        "to fetch a missing object from its promisor remote — over a transport the shared config "
+        "chooses. It needs git 2.44 or newer"
+    )
+
+
+def _no_fetch_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    return {**(os.environ if base is None else base), **_NO_FETCH_ENV}
+
+
+def _git_read(repo: Path, *args: str, **kw) -> subprocess.CompletedProcess:
+    """``git -C repo args…`` for a READ here (a ref, an object, config): no fetch
+    (:data:`_NO_FETCH_CONFIG`). A partial clone this git can't keep from fetching runs nothing:
+    a failed run (1), the reason said."""
+    if why := _fetch_refusal(repo):
+        _refuse_unscanned(LazyFetchError(why))
+        return subprocess.CompletedProcess(args, 1, "", "")
+    return subprocess.run(
+        ["git", *_NO_FETCH_CONFIG, "-C", str(repo), *args], env=_no_fetch_env(), **kw
+    )
 
 
 _MAX_INCLUDE_DEPTH = 10  # git's own: deeper than this, git itself refuses the config
@@ -144,7 +211,10 @@ def _config_hooks(repo: Path) -> dict[str, set[str]]:
     it is set for. Each file git reads there (``--show-origin``), then every include target in
     them whatever its condition (:func:`_scan_file`). Raises :class:`HookScanError` rather than
     miss one. Empty on a git without config hooks — and harmless to over-count: disabling a name
-    that never runs changes nothing."""
+    that never runs changes nothing. A partial clone this git can't keep from fetching raises
+    :class:`LazyFetchError` (:func:`_fetch_refusal`): every git run on this scan is refused."""
+    if why := _fetch_refusal(repo):
+        raise LazyFetchError(why)
     try:
         fields = _git_config_lines(
             "-C", str(repo), "config", "--show-scope", "--show-origin", "--name-only"
@@ -173,8 +243,9 @@ def _config_hooks(repo: Path) -> dict[str, set[str]]:
 def _hookless_env(repo: Path, hooks: dict[str, set[str]] | None = None) -> dict[str, str]:
     """The environment for a host git run in ``repo`` with each of its config hooks disabled —
     appended after any GIT_CONFIG_COUNT entries the caller's own environment already carries.
-    Children inherit it, so a hook only a child would see is off there too."""
-    env = dict(os.environ)
+    Children inherit it, so a hook only a child would see is off there too — and so is a fetch
+    (:data:`_NO_FETCH_ENV`)."""
+    env = _no_fetch_env()
     count = env.get("GIT_CONFIG_COUNT", "")
     n = int(count) if count.isdigit() else 0
     for name in sorted(_config_hooks(repo) if hooks is None else hooks):
@@ -188,21 +259,28 @@ def _hookless_env(repo: Path, hooks: dict[str, set[str]] | None = None) -> dict[
 def _host_git(
     repo: Path, *args: str, env: dict[str, str] | None = None, **kw
 ) -> subprocess.CompletedProcess:
-    """``git -C repo args…`` with none of the repo's hooks or fsmonitor run (see above). For every
-    host-side git here that can reach one: a checkout, a ref update, an index refresh. ``env``
-    defaults to :func:`_hookless_env`; a caller passing its own builds it from that. When the
-    repo's config can't be checked for hooks, git doesn't run: a failed run (1), the reason said."""
+    """``git -C repo args…`` with none of the repo's hooks or fsmonitor run, and no fetch (see
+    above). For every host-side git here that can reach one: a checkout, a ref update, an index
+    refresh. ``env`` defaults to :func:`_hookless_env`; a caller passing its own builds it from
+    that (the no-fetch variables are set on it whatever it holds). When the repo's config can't be
+    checked for hooks, git doesn't run: a failed run (1), the reason said."""
     if env is None:
         try:
             env = _hookless_env(repo)
         except HookScanError as e:
             _refuse_unscanned(e)
             return subprocess.CompletedProcess(args, 1, "", "")
-    return subprocess.run(["git", *_NO_REPO_CODE, "-C", str(repo), *args], env=env, **kw)
+    cmd = ["git", *_NO_REPO_CODE, "-C", str(repo), *args]
+    return subprocess.run(cmd, env=_no_fetch_env(env), **kw)
 
 
 def _refuse_unscanned(e: HookScanError) -> None:
     _err(f"✗ not running git on your computer: {e}.")
+    if isinstance(e, LazyFetchError):
+        _err(
+            "  Upgrade git on your computer (`git --no-lazy-fetch version` must work), then retry."
+        )
+        return
     _err("  foldyard checks every git config file it would read for hooks, and couldn't check")
     _err("  that one. Fix or remove that include in .git/config, then retry.")
 
@@ -319,11 +397,7 @@ def _checkout_in_yard(
     (see above). On failure, undo the metadata step (and the branch, when ``made`` by it)."""
     engine, env, image = yard
     ref = f"refs/heads/{branch}^{{commit}}"
-    got = subprocess.run(
-        ["git", "-C", str(main), "rev-parse", "--verify", "--quiet", ref],
-        capture_output=True,
-        text=True,
-    )
+    got = _git_read(main, "rev-parse", "--verify", "--quiet", ref, capture_output=True, text=True)
     oid = got.stdout.strip() if got.returncode == 0 else ""
     rc = 1
     if oid:
@@ -433,8 +507,12 @@ def _undo_add(main: Path, wt_dir: Path, branch: str, made_at: str) -> None:
         _err(f"    git -C {main} worktree remove --force {wt_dir}")
     if not made_at:
         return
-    now = subprocess.run(
-        ["git", "-C", str(main), "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+    now = _git_read(
+        main,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        f"refs/heads/{branch}",
         capture_output=True,
         text=True,
     ).stdout.strip()
@@ -445,10 +523,8 @@ def _undo_add(main: Path, wt_dir: Path, branch: str, made_at: str) -> None:
 def _say_lfs(main: Path, oid: str) -> None:
     """Name the Git LFS pointers the checkout left (it had no network), when the commit's root
     ``.gitattributes`` routes anything through LFS. Read as a blob: ``cat-file`` runs no filter."""
-    attrs = subprocess.run(
-        ["git", "-C", str(main), "cat-file", "blob", f"{oid}:.gitattributes"],
-        capture_output=True,
-        text=True,
+    attrs = _git_read(
+        main, "cat-file", "blob", f"{oid}:.gitattributes", capture_output=True, text=True
     )
     if attrs.returncode == 0 and "filter=lfs" in attrs.stdout:
         print("  Git LFS files are pointers for now (the checkout ran without network): fetch them")
@@ -656,22 +732,33 @@ def _remove_checkout(
     """Delete the registered checkout ``wt_dir`` — ``(rc, the ref its uncommitted work was parked
     on, if any)``. With ``yard``, first ask it whether there is uncommitted work: refuse if so,
     unless ``force``, which parks it (:func:`_park`) and refuses if that fails. ``yard`` None is
-    ``--discard``: nothing asked, nothing parked. Then ``git worktree remove --force`` here."""
-    try:  # the ref write is a ref transaction; scanned once, right before the git here runs
+    ``--discard``: nothing asked, nothing parked. Then ``git worktree remove --force`` here.
+
+    The repo's config is scanned for hooks before the yard is asked (a refusal then runs no
+    container) and AGAIN once it has answered: the container mounts main's ``.git`` writable (the
+    save writes objects there) and runs the box's filters, so a hook or include it adds must be
+    seen by the scan that the ref write and the removal run under."""
+    try:  # the ref write is a ref transaction
         quiet = _hookless_env(main)
     except HookScanError as e:
         _refuse_unscanned(e)
         return 1, None
+    admin = _admin_dir(wt_dir)
+    if not force and admin is not None and (admin / "modules").is_dir():
+        # Git's own rule, which the --force below would skip — under --discard too: the admin dir
+        # holds the submodules' repos, and removing it deletes their unpushed commits.
+        _err("✗ working trees containing submodules cannot be moved or removed — nothing")
+        _err("  removed. --force removes it with its submodules' repos.")
+        return 1, None
     ref = None
     if yard is not None:
-        admin = _admin_dir(wt_dir)
-        if not force and admin is not None and (admin / "modules").is_dir():
-            # Git's own rule, which the --force below would skip: the admin dir holds the
-            # submodules' repos, and removing it deletes their unpushed commits.
-            _err("✗ working trees containing submodules cannot be moved or removed — nothing")
-            _err("  removed. --force removes it with its submodules' repos.")
-            return 1, None
         verdict = _uncommitted_in_yard(main, wt_dir, name, yard, save=force)
+        try:
+            quiet = _hookless_env(main)
+        except HookScanError as e:
+            _refuse_unscanned(e)
+            _err(f"  '{name}' was NOT removed.")
+            return 1, None
         if verdict is not None and verdict[0] == "dirty":
             _err(f"✗ '{name}' has uncommitted work — nothing removed: files that differ from its")
             _err("  last commit (changed, deleted or untracked, not gitignored; a change only in")
@@ -696,10 +783,7 @@ def _remove_checkout(
 
 
 def _git_has_ref(repo: Path, ref: str) -> bool:
-    return (
-        subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet", ref]).returncode
-        == 0
-    )
+    return _git_read(repo, "show-ref", "--verify", "--quiet", ref).returncode == 0
 
 
 def _branch_of(path: Path) -> str:
@@ -808,9 +892,8 @@ def _git_resolves(repo: Path, ref: str) -> bool:
     """True iff ``ref`` names an existing commit in ``repo`` (any form: ``main``, ``origin/main``,
     a sha …). Distinct from :func:`_git_has_ref`, which needs a full refname to ``show-ref``."""
     return (
-        subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
-            capture_output=True,
+        _git_read(
+            repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", capture_output=True
         ).returncode
         == 0
     )
@@ -837,10 +920,8 @@ def _default_base_ref(repo: Path) -> str | None:
             "auto-detecting the default branch instead "
             "(fix [machine].worktree_base / FOLDYARD_WORKTREE_BASE to silence this)."
         )
-    head = subprocess.run(
-        ["git", "-C", str(repo), "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-        capture_output=True,
-        text=True,
+    head = _git_read(
+        repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD", capture_output=True, text=True
     )
     if head.returncode == 0:
         ref = head.stdout.strip().removeprefix("refs/remotes/")
