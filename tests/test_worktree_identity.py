@@ -93,6 +93,11 @@ def test_the_bound_worktree_config_stays_empty_but_named(project):
     assert cfg.project() == "acme"
     assert cfg.machine_name() == "acme-vm"
     assert cfg.machine_wall() is False
+    # Exactly the naming keys: anything else main declares is config, and stays main's.
+    assert cfg.identity == {
+        "project": {"name": "acme", "prefix": "ac"},
+        "machine": {"name": "acme-vm", "backend": "podman", "worktrees_root": "../trees"},
+    }
 
 
 def test_an_unregistered_worktree_inherits_nothing(project):
