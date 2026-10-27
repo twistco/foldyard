@@ -12,7 +12,10 @@ from typing import Any
 
 import pytest
 
+import yard_stub
 from foldyard import box, config, machine, stack, worktree, worktree_registry
+
+BRANCH_OID = "1" * 40  # what every refs/heads/<branch> resolves to here
 
 
 class _Proc:
@@ -105,12 +108,16 @@ def fake_main(tmp_path, monkeypatch):
             return _Proc(0, head + "\n") if head else _Proc(1)
         if g and "rev-parse" in cmd and "--verify" in cmd:  # base-branch resolution
             target = cmd[-1].removesuffix("^{commit}")
+            if target.startswith("refs/heads/"):  # the commit the yard checks out
+                return _Proc(0, BRANCH_OID + "\n")
             return _Proc(0 if target in state["resolves"] else 1)
         if g and "rev-parse" in cmd:  # --abbrev-ref HEAD (current branch)
             return _Proc(0, "main")
         return _Proc(0)
 
     monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    # The checkout's container: recorded in yard["runs"] and answered, never run.
+    yard = yard_stub.install(monkeypatch, mode="none")
     yield {
         "main": main,
         "wt_root": wt_root,
@@ -118,6 +125,7 @@ def fake_main(tmp_path, monkeypatch):
         "calls": calls,
         "state": state,
         "teardown": teardown,
+        "yard": yard,
     }
     os.environ.pop("WORKTREE", None)  # remove() sets it directly; don't leak into other tests
 
@@ -133,7 +141,7 @@ def test_add_new_branch_default_name(fake_main):
     argv = _worktree_add_argv(fake_main["calls"])
     # No existing ref → create a new branch named wt/<name>, forked off the DEFAULT branch
     # (local `main` here) — NOT the primary checkout's current HEAD. The wt dir precedes the base.
-    assert argv[:5] == ["worktree", "add", "--no-track", "-b", "wt/feat"]
+    assert argv[:6] == ["worktree", "add", "--no-checkout", "--no-track", "-b", "wt/feat"]
     assert argv[-2] == str(fake_main["wt_root"] / "feat")
     assert argv[-1] == "main"
 
@@ -146,7 +154,7 @@ def test_add_new_branch_prefers_origin_head(fake_main):
     fake_main["state"]["resolves"].add("origin/main")
     assert worktree.add("feat") == 0
     argv = _worktree_add_argv(fake_main["calls"])
-    assert argv[:5] == ["worktree", "add", "--no-track", "-b", "wt/feat"]
+    assert argv[:6] == ["worktree", "add", "--no-checkout", "--no-track", "-b", "wt/feat"]
     assert argv[-1] == "origin/main"
 
 
@@ -170,7 +178,7 @@ def test_add_new_branch_falls_back_to_head_when_no_default(fake_main):
     fake_main["state"]["resolves"].clear()
     assert worktree.add("feat") == 0
     argv = _worktree_add_argv(fake_main["calls"])
-    assert argv[:5] == ["worktree", "add", "--no-track", "-b", "wt/feat"]
+    assert argv[:6] == ["worktree", "add", "--no-checkout", "--no-track", "-b", "wt/feat"]
     assert argv[-1] == str(fake_main["wt_root"] / "feat")
 
 
@@ -291,6 +299,10 @@ def test_add_refuses_to_register_a_symlink(fake_main, tmp_path):
     assert worktree_registry.checkouts(fake_main["main"]) == {}
 
 
+def _is_checkout(cmd: list[str]) -> bool:
+    return "--entrypoint" in cmd and cmd[cmd.index("--entrypoint") + 1] == "git"
+
+
 def _engine_with(monkeypatch, fake_main, running: list[str], mounts: dict[str, list] | None = None):
     """The golden engine for the late-worktree report: `ps` lists ``running``; a box's
     ``{{json .Mounts}}`` is ``mounts[box]``. Dead socket in the env, every call recorded."""
@@ -304,8 +316,8 @@ def _engine_with(monkeypatch, fake_main, running: list[str], mounts: dict[str, l
     engine_calls: list[list[str]] = []
 
     def run(cmd, **kw):
-        if cmd[0] != "podman":
-            return inner(cmd, **kw)
+        if cmd[0] != "podman" or cmd in fake_main["yard"]["runs"] or _is_checkout(cmd):
+            return inner(cmd, **kw)  # the add's own checkout: yard_stub's
         engine_calls.append(cmd)
         assert kw["env"]["DOCKER_HOST"] == "unix:///nonexistent/x"
         if cmd[1] == "ps":
@@ -496,11 +508,7 @@ def _init_hook(monkeypatch, main, *, image: bool = True):
     (main / "scripts").mkdir(parents=True, exist_ok=True)
     (main / "scripts" / "init-worktree.sh").write_text("#!/bin/sh\necho hi\n")
     monkeypatch.setattr(config, "worktree_init", lambda: "scripts/init-worktree.sh")
-    monkeypatch.setattr(config, "box_image", lambda: {"tag": "proj:devbox"})
-    monkeypatch.setattr(
-        box, "engine_env", lambda: ("podman", {"DOCKER_HOST": "unix:///nonexistent"})
-    )
-    monkeypatch.setattr(box, "image_exists", lambda *a: image)
+    monkeypatch.setattr(box, "image_exists", lambda *a: image)  # engine + image: yard_stub's
 
 
 def test_add_runs_the_init_hook_in_a_container_not_on_the_host(fake_main, monkeypatch):
@@ -510,6 +518,7 @@ def test_add_runs_the_init_hook_in_a_container_not_on_the_host(fake_main, monkey
     # (ADR-0023).
     _init_hook(monkeypatch, fake_main["main"])
     assert worktree.add("feat") == 0
+    assert len(fake_main["yard"]["runs"]) == 1  # the checkout's run, before the hook's below
     assert not any(c[:1] == ["sh"] for c in fake_main["calls"])  # never `sh <repo script>` directly
     (run,) = [c for c in fake_main["calls"] if c[:2] == ["podman", "run"]]
     assert "--rm" in run  # one-off: no container left behind
@@ -522,13 +531,58 @@ def test_add_runs_the_init_hook_in_a_container_not_on_the_host(fake_main, monkey
     assert run[-2:] == ["--source", str(fake_main["main"])]
 
 
-def test_add_skips_the_hook_when_the_box_image_is_missing(fake_main, monkeypatch, capsys):
+def test_init_skips_the_hook_when_the_box_image_is_missing(fake_main, monkeypatch, capsys):
     # No image to run it in ⇒ SKIP with the command to run later. Deliberately NOT a host fallback:
-    # "the yard wasn't ready" must never silently become "so we ran it on the Mac".
+    # "the yard wasn't ready" must never silently become "so we ran it on your computer". (`add`
+    # itself refuses earlier without an image: its checkout needs one too.)
+    _make_wt(fake_main)
     _init_hook(monkeypatch, fake_main["main"], image=False)
-    assert worktree.add("feat") == 0
+    assert worktree.init_config("feat") == 0
     assert not any(c[:2] == ["podman", "run"] for c in fake_main["calls"])
     assert "fy worktree init feat" in capsys.readouterr().err
+
+
+def test_add_refuses_without_an_image_to_check_out_in(fake_main, monkeypatch, capsys):
+    fake_main["yard"]["image"] = False
+    assert worktree.add("feat", "topic") == 1
+    assert not any("worktree" in c and "add" in c for c in fake_main["calls"])  # no git ran
+    assert worktree_registry.checkouts(fake_main["main"]) == {}
+    err = capsys.readouterr().err
+    assert "fy box build && fy worktree add feat topic" in err
+
+
+def test_the_checkout_runs_in_a_one_off_container_with_nothing_but_the_mount(fake_main):
+    assert worktree.add("feat") == 0
+    (run,) = fake_main["yard"]["runs"]
+    image = run.index(yard_stub.IMAGE)
+    opts, git_argv = run[2:image], run[image + 1 :]
+    assert "--rm" in opts
+    # The box's own uid (the VM user), every capability dropped, no network, the same two mounts
+    # worktree_init gets, at the paths your computer uses (the worktree's .git file names them).
+    assert opts[opts.index("--user") + 1] == "0"
+    assert opts[opts.index("--cap-drop") + 1] == "ALL"
+    assert opts[opts.index("--network") + 1] == "none"
+    assert opts[opts.index("--security-opt") + 1] == "label=disable"
+    main, wt_root = fake_main["main"], fake_main["wt_root"]
+    assert [opts[i + 1] for i, o in enumerate(opts) if o == "-v"] == [
+        f"{main}:{main}",
+        f"{wt_root}:{wt_root}",
+    ]
+    assert opts[opts.index("-w") + 1] == str(wt_root / "feat")
+    assert [opts[i + 1] for i, o in enumerate(opts) if o == "-e"] == ["GIT_LFS_SKIP_SMUDGE=1"]
+    assert opts[opts.index("--entrypoint") + 1] == "git"
+    # The image's own git (never the box's shim, which is not in the image): files + the worktree's
+    # index from the commit resolved on your computer — no ref, no HEAD, no config written there.
+    assert git_argv == ["-c", "filter.lfs.required=false", "read-tree", "--reset", "-u", BRANCH_OID]
+
+
+def test_the_host_git_step_is_metadata_only_in_every_shape(fake_main):
+    fake_main["state"]["refs"].update({"refs/heads/mine", "refs/remotes/origin/theirs"})
+    for name, branch in (("a", ""), ("b", "mine"), ("c", "theirs")):
+        assert worktree.add(name, branch) == 0
+    adds = [c[c.index("worktree") :] for c in fake_main["calls"] if "worktree" in c and "add" in c]
+    assert len(adds) == 3
+    assert all(argv[:3] == ["worktree", "add", "--no-checkout"] for argv in adds)
 
 
 def test_add_skips_hook_when_unset(fake_main):

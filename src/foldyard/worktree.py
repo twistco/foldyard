@@ -23,6 +23,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -59,9 +60,11 @@ def _host_only(verb: str) -> int | None:
 # `key=value` splits at the first `=`, which a hook's name may contain. `core.fsmonitor=` (EMPTY,
 # not `false`: a git before 2.35.2 reads `false` as a hook path, and one before 2.26 then reports
 # no changes, which `worktree remove`'s dirty check would believe) stops the command the shared
-# config can name for every index refresh. Not closed: filter drivers (`filter.<d>.smudge` /
-# `clean` / `process`, LFS's among them) still run when this git checks out or adds — git has no
-# switch for them, and turning them off would change what a checkout contains. See docs/git.md.
+# config can name for every index refresh. Filter drivers (`filter.<d>.smudge` / `clean` /
+# `process`, LFS's among them) have no such switch, and turning them off would change what a
+# checkout contains — so this git never checks files out: `add` does the metadata step here and
+# the checkout in a container (`_checkout_in_yard`). They still run wherever this git HASHES a
+# file of the checkout (`remove`'s dirty check, the snapshot's `add -A`). See docs/git.md.
 _NO_REPO_CODE = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=")
 
 
@@ -230,7 +233,11 @@ def _hooks_skipped(repo: Path, events: tuple[str, ...], hooks: dict[str, set[str
 
 
 def _git_worktree_add(main: Path, argv: list[str]) -> int:
-    """``git worktree add`` with the repo's hooks off, saying so when it had any."""
+    """``git worktree add --no-checkout`` with the repo's hooks off, saying so when it had any:
+    the METADATA alone — the branch (and its upstream, for a remote one), the worktree's admin dir
+    and HEAD. No file is written, no index, so no filter driver can run; the checkout is
+    :func:`_checkout_in_yard`'s."""
+    argv = [*argv[:2], "--no-checkout", *argv[2:]]
     try:
         hooks = _config_hooks(main)  # once: what is disabled is what is reported
     except HookScanError as e:
@@ -246,6 +253,186 @@ def _git_worktree_add(main: Path, argv: list[str]) -> int:
             "[project].worktree_init, which runs in a container."
         )
     return rc
+
+
+# ── the checkout runs in the yard ─────────────────────────────────────────────────────────────
+#
+# A checkout writes files, and git runs the filter drivers the shared config names (through
+# `.gitattributes` or `.git/info/attributes`) for each one it writes — a command the box can plant,
+# which no switch turns off. So the host's `git worktree add` stops at the metadata
+# (`_git_worktree_add`) and the files + index come from the box image's own git in a one-off
+# container, where those commands are the yard's to run — the same yard `[project].worktree_init`
+# runs in. The image's git, not foldyard's shim (that is installed into a running box, never into
+# the image): it writes the worktree's SHARED index, `<main>/.git/worktrees/<name>/index`, the one
+# the box's shim seeds its own index-box from on first use (ADR-0021). That index carries the VM's
+# stat data, so the first `git status` on your computer re-reads each file once and refreshes it;
+# the box starts with an index that already matches its view of the files.
+#
+# The commit is resolved HERE and handed over: the VM can read a ref your computer just replaced
+# as older or absent (ADR-0021's visibility record), and `read-tree` moves no ref at all, so the
+# container never decides what is checked out and never writes a ref or `.git/config`. A checkout
+# that fails takes the worktree (and a branch `add` just made) with it: nothing is half-made.
+
+
+def _add_command(name: str, branch: str, base: str) -> str:
+    """The ``fy worktree add`` the operator ran, to say how to run it again."""
+    return shlex.join(
+        [
+            "fy",
+            "worktree",
+            "add",
+            name,
+            *([branch] if branch else []),
+            *(["--from", base] if base else []),
+        ]
+    )
+
+
+def _checkout_yard(again: str) -> tuple[str, dict, str] | None:
+    """``(engine, env, image)`` to run the checkout in — or None, said, when there is no image to
+    run it in yet. Asked BEFORE any git runs, so a refusal leaves nothing behind. Deliberately not a
+    fallback to a checkout here: that is the filter drivers running on your computer again."""
+    from . import box
+
+    engine, env = box.engine_env()
+    image = config.box_image()["tag"]
+    if box.image_exists(engine, image, env):
+        return engine, env, image
+    _err(f"✗ no {image} image in the VM to check the new worktree out in.")
+    _err("  foldyard checks a worktree's files out in a container, never on your computer: the")
+    _err("  shared .git can name filter drivers, and git runs them for every file it checks out.")
+    _err(f"  Build the image (or start the VM), then re-run:  fy box build && {again}")
+    return None
+
+
+def _checkout_in_yard(
+    main: Path, wt_dir: Path, branch: str, yard: tuple[str, dict, str], again: str, *, made: bool
+) -> int:
+    """Populate ``wt_dir`` — its files and its index — from ``branch``'s commit, in a container
+    (see above). On failure, undo the metadata step (and the branch, when ``made`` by it)."""
+    engine, env, image = yard
+    ref = f"refs/heads/{branch}^{{commit}}"
+    got = subprocess.run(
+        ["git", "-C", str(main), "rev-parse", "--verify", "--quiet", ref],
+        capture_output=True,
+        text=True,
+    )
+    oid = got.stdout.strip() if got.returncode == 0 else ""
+    rc = 1
+    if oid:
+        cmd = _checkout_cmd(engine, image, main, wt_dir, oid)
+        print(f"▶ checking the worktree out in the VM ({image}, commit {oid[:12]})…")
+        print("  $ " + shlex.join(cmd))
+        rc = subprocess.run(cmd, env=env).returncode
+    if rc == 0 and _index_on_host(wt_dir):
+        _say_lfs(main, oid)
+        return 0
+    if not oid:
+        _err(f"✗ couldn't read the commit branch '{branch}' points at")
+    elif rc in (126, 127):
+        _err(f"✗ the checkout couldn't start git in {image}: no git there? [box].image must")
+        _err("  provide git — the box needs it too (ADR-0014).")
+    elif rc == 0:
+        # An engine that makes a missing bind source (Docker's does) checked out onto the VM's
+        # own disk: nothing reached your computer.
+        _err(f"✗ the checkout ran in the VM, but its files never reached {wt_dir}: does the VM")
+        _err(f"  mount {config.worktrees_root(main)}? (`fy doctor` says; `fy machine recreate`)")
+    else:
+        _err("✗ checking the worktree out in the VM failed (above).")
+    _undo_add(main, wt_dir, branch, oid if made else "")
+    _err(f"  Nothing was kept. Once that's fixed, run it again:  {again}")
+    return 1
+
+
+def _checkout_cmd(engine: str, image: str, main: Path, wt_dir: Path, oid: str) -> list[str]:
+    """The one-off container that writes ``wt_dir``'s files and index from ``oid``: the image's
+    own git, the two mounts ``worktree_init`` gets (at the paths your computer uses, which the
+    worktree's ``.git`` file names), the box's uid (container root, which rootless podman maps to
+    the VM user, so the files are owned as the box's are), no capabilities, no network.
+    ``read-tree --reset -u`` moves no ref and runs no checkout hook — it writes the files and the
+    index, nothing else."""
+    wt_root = config.worktrees_root(main)
+    return [
+        engine,
+        "run",
+        "--rm",
+        "--user",
+        "0",
+        "--cap-drop",
+        "ALL",
+        "--network",
+        "none",
+        "--security-opt",
+        "label=disable",
+        "-v",
+        f"{main}:{main}",
+        "-v",
+        f"{wt_root}:{wt_root}",
+        "-w",
+        str(wt_dir),
+        # No network, so Git LFS writes its pointer files (`git lfs pull` in the box fetches the
+        # content), and an image without git-lfs doesn't fail the checkout.
+        "-e",
+        "GIT_LFS_SKIP_SMUDGE=1",
+        "--entrypoint",
+        "git",
+        image,
+        "-c",
+        "filter.lfs.required=false",
+        "read-tree",
+        "--reset",
+        "-u",
+        oid,
+    ]
+
+
+def _index_on_host(wt_dir: Path) -> bool:
+    """Whether the worktree's index — the checkout's last write — is there on YOUR side of the
+    mount. Its admin dir comes from the ``.git`` file git just wrote, read without following a
+    link or blocking (the worktrees root is box-writable: a FIFO there must not hang the add)."""
+    try:
+        fd = os.open(wt_dir / ".git", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
+        text = os.read(fd, 4096).decode(errors="replace")
+    finally:
+        os.close(fd)
+    gitdir = Path(text.removeprefix("gitdir:").strip())
+    return (wt_dir / gitdir / "index").is_file()  # `/` keeps an absolute gitdir as it is
+
+
+def _undo_add(main: Path, wt_dir: Path, branch: str, made_at: str) -> None:
+    """Drop the worktree the metadata step made — ``--force``, which skips the dirty check (a
+    ``git status``, which would hash files) — and the branch it made, while that is still where it
+    was made (``made_at``). Says what it couldn't."""
+    if _host_git(main, "worktree", "remove", "--force", str(wt_dir)).returncode != 0:
+        _err("  ✗ couldn't remove the half-made worktree:")
+        _err(f"    git -C {main} worktree remove --force {wt_dir}")
+    if not made_at:
+        return
+    now = subprocess.run(
+        ["git", "-C", str(main), "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if now != made_at or _host_git(main, "branch", "-q", "-D", branch).returncode != 0:
+        _err(f"  ✗ kept the branch '{branch}' it had made (delete it: git branch -D {branch})")
+
+
+def _say_lfs(main: Path, oid: str) -> None:
+    """Name the Git LFS pointers the checkout left (it had no network), when the commit's root
+    ``.gitattributes`` routes anything through LFS. Read as a blob: ``cat-file`` runs no filter."""
+    attrs = subprocess.run(
+        ["git", "-C", str(main), "cat-file", "blob", f"{oid}:.gitattributes"],
+        capture_output=True,
+        text=True,
+    )
+    if attrs.returncode == 0 and "filter=lfs" in attrs.stdout:
+        print("  Git LFS files are pointers for now (the checkout ran without network): fetch them")
+        print("  in the worktree's box with `git lfs pull`.")
 
 
 def _registered_worktree(main: Path, wt_dir: Path) -> bool:
@@ -622,6 +809,7 @@ def add(
         return 1
     main = stack.main_repo()
     wt_root = config.worktrees_root(main)
+    again = _add_command(name, branch, base)
     branch = branch or f"wt/{name}"
     wt_dir = wt_root / name
     if wt_dir.exists() or wt_dir.is_symlink():
@@ -643,8 +831,10 @@ def add(
     # Reproduce the recipe's machine-mount warning: worktree stacks need the rootless
     # machine to mount the worktrees root (no-op in the box / where there's no podman).
     machine.ensure(main, wt_root)
+    if (yard := _checkout_yard(again)) is None:
+        return 1
 
-    print(f"▶ git worktree add {wt_dir} (branch {branch})…")
+    print(f"▶ git worktree add --no-checkout {wt_dir} (branch {branch})…")
     # New branch if it doesn't exist yet, else check out the existing one (local or remote).
     # `--from`/base only applies to the new-branch path; if the branch already exists we're
     # checking it out, so a passed base can't take effect — say so instead of dropping it silently.
@@ -673,6 +863,8 @@ def add(
     rc = _git_worktree_add(main, argv)
     if rc != 0:
         _err("✗ git worktree add failed")
+        return rc
+    if (rc := _checkout_in_yard(main, wt_dir, branch, yard, again, made="-b" in argv)) != 0:
         return rc
     worktree_registry.register(main, name, wt_dir)
 

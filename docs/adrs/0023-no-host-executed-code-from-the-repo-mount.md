@@ -13,6 +13,14 @@
   is gone (GitHub is `[[inject]]` kinds now), the minter asks for no `permissions`, and the App
   installation's own permissions are the scope. The kinds below are now named by an `[[inject]]`
   row's `kind`; the rest of this ADR stands.
+  **Amended 2026-10-27:** `fy worktree add`'s CHECKOUT joins branch 1. A checkout runs the filter
+  drivers the shared `.git/config` names (`filter.<d>.smudge`/`process`, applied through
+  `.gitattributes` or `.git/info/attributes`), so a host `git worktree add` was host execution
+  for anything that can write the checkout. The host now runs only `git worktree add
+  --no-checkout` (the branch, HEAD, the admin dir) and the files + index are written in a
+  one-off container from the box image (`worktree._checkout_in_yard`). Unlike `worktree_init`,
+  a worktree with no files is useless, so a missing image REFUSES before any git runs, with the
+  command to run first — still never a host fallback.
 - **Sources:** the review of the finalised `github=app` PR-bot minter — "does the consumer-side
   minter hand the box a code-execution path to the Mac?"; five review rounds against the
   implementation. Related: [0007](./0007-credential-injection-at-egress-proxy.md) (where minting
