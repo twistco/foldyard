@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 import foldyard
-from foldyard import box, boximage, config, stack, supervisor
+from foldyard import box, boximage, config, crossmask, stack, supervisor
 
 
 class _Proc:
@@ -3404,6 +3404,28 @@ def test_up_already_up_names_worktrees_its_box_does_not_mask(
     out = capsys.readouterr().out
     assert f"{wt_root}/late/data/.venv" in out and f"{wt_root}/a/" not in out
     assert "fy box down && fy box up" in out
+
+
+def test_up_already_up_in_a_box_tells_an_unregistered_checkout_from_a_late_one(
+    fake, monkeypatch, register_worktree, capsys
+):
+    # In a box the registry is what the host baked in at create: `stray` (a plain `git worktree
+    # add`) was never registered, so the fix is registering it, not "added after it was created".
+    main = fake["main"]
+    wt_root = config.worktrees_root(main)
+    register_worktree(main, "a", wt_root / "a")
+    (wt_root / "stray").mkdir(parents=True)
+    (wt_root / "stray" / ".git").write_text("gitdir: x\n")
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    monkeypatch.setenv(crossmask.SNAPSHOT_ENV, '{"a": 1}')
+    mounts = _box_mounts(f"{wt_root}/a/data/.venv", f"{wt_root}/a/platform/node_modules")
+    mounts += _box_mounts(f"{main}/data/.venv", f"{main}/platform/node_modules", name="own")
+    fake["state"]["running"] = True
+    _masked(fake, monkeypatch, mounts=mounts)
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert f"{wt_root}/stray/data/.venv" in out and "`fy worktree add stray`" in out
+    assert "added after" not in out and f"{wt_root}/a/" not in out
 
 
 def test_up_already_up_says_when_its_own_dirs_are_not_shadowed(fake, monkeypatch, capsys):

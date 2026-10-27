@@ -159,7 +159,10 @@ instead of writing onto your computer's disk. The note in each of those dirs,
 '<command>'` runs it in the worktree's own box (`WORKTREE= fy box exec '<command>'` in main's), as
 long as that box is running — `WORKTREE=<name> fy box up` on your computer starts it. A worktree
 added after a box was created isn't masked in that box until it's recreated: `fy worktree add`
-names the boxes it isn't masked in, and `fy doctor`'s `box shadowing` row reports it.
+names the boxes it isn't masked in, and `fy doctor`'s `box shadowing` row reports it. Only
+worktrees registered with your computer are masked: one made with plain `git worktree add` is
+masked in no box, recreated or not, until `fy worktree add <name>` on your computer registers it
+(it asks first). The row lists those apart, with that fix.
 
 `fy worktree remove <name>` takes down that worktree's box, stack and volumes, deletes the
 checkout and keeps its branch. A worktree with uncommitted work needs `--force`; that work is

@@ -1527,7 +1527,9 @@ def _box_shadow_check():
     dir declared — or a worktree added — since then is missing from it until a recreate; nothing
     else sees that, because the install just goes to your computer's disk. Yields nothing when no
     dirs are declared or there's no box to ask. WARN, never fail. In the box it asks its own box,
-    and the worktrees it expects are the ones it can see (it has no registry)."""
+    and it has no registry: the worktrees it expects are the ones it can see that your computer had
+    registered when it created the box (:func:`foldyard.crossmask.registered`); the rest it lists
+    apart, since only registering one (`fy worktree add`) lets a recreate mask it."""
     if not config.box_shadow_volumes():
         return
     try:
@@ -1544,10 +1546,10 @@ def _box_shadow_check():
         return
     if gaps is None:
         return
-    own, others = gaps
-    if not (own or others):
-        from . import crossmask
+    from . import crossmask
 
+    own, others, unregistered = gaps
+    if not (own or others or unregistered):
         dirs = config.box_shadow_volumes()
         n_masks = len(
             crossmask.targets(
@@ -1574,15 +1576,37 @@ def _box_shadow_check():
                 for m in others
             )
         )
+        if in_box() and crossmask.baked_names() is None:
+            # An older box: every checkout it can see stands in for the registry, so one your
+            # computer never registered reads as late — and a recreate alone won't mask it.
+            lines.append(
+                f"      ({name} predates being told which worktrees your computer registered: one"
+                " made outside `fy worktree add` stays unmasked after a recreate until"
+                " `fy worktree add <name>` on your computer registers it)"
+            )
+    if unregistered:
+        lines.append(
+            f"      not registered with your computer when {name} was created, so not masked"
+            " (a box masks only registered worktrees):\n"
+            + "\n".join(f"          {m.path}  ({m.checkout})" for m in unregistered)
+        )
     pin = f"WORKTREE={worktree} " if worktree else ""
     where = " on your computer" if in_box() else ""
+    recreate = f"`{pin}fy box down && {pin}fy box up`"
+    if unregistered:
+        # Registering comes first: a recreate before it masks them no better than this box does.
+        fix = (
+            f"\n      → on your computer, register each ({box._register_hint(unregistered)} —"
+            " it asks before taking in an existing checkout, and says so if one already is),"
+            f" then recreate {name}: {recreate}"
+        )
+    else:
+        fix = f"\n      → recreate it{where}: {recreate}"
     yield _result(
         None,
         "box shadowing",
         "",
-        f"{name} lets an install land on your computer's disk:\n"
-        + "\n".join(lines)
-        + f"\n      → recreate it{where}: `{pin}fy box down && {pin}fy box up`",
+        f"{name} lets an install land on your computer's disk:\n" + "\n".join(lines) + fix,
     )
 
 

@@ -44,7 +44,7 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
-from typing import IO
+from typing import IO, NamedTuple
 
 from . import (
     boximage,
@@ -304,15 +304,28 @@ def _start_it(worktree: str) -> str:
     return f"start it{where}: {_start_hint(worktree)}"
 
 
+class MaskGaps(NamedTuple):
+    """What a running box lacks (:func:`_mask_gaps`)."""
+
+    # Its own declared dirs that aren't a volume: declared after its create.
+    own: list[str]
+    # Registered checkouts' dirs it doesn't mask: a recreate adds them.
+    others: list[crossmask.Mask]
+    # In a box only: dirs of checkouts your computer hadn't registered when it created this box
+    # (:func:`crossmask.unregistered`). No create masks those until `fy worktree add` registers one.
+    unregistered: list[crossmask.Mask]
+
+
 def _mask_gaps(
     engine: str, box: str, env: dict, *, checkout: str, main: Path, timeout: float | None = None
-) -> tuple[list[str], list[crossmask.Mask]] | None:
+) -> MaskGaps | None:
     """What the running ``box`` lacks of what a create would give it now (:mod:`crossmask`): its
     OWN ``[box].shadow_volumes`` dirs that aren't a volume, and other checkouts' dirs that aren't
-    masked (a worktree added after it was created). None when its mounts can't be read."""
+    masked (a worktree added after it was created) — in a box, apart from those of checkouts your
+    computer hadn't registered when it created the box. None when its mounts can't be read."""
     dirs = config.box_shadow_volumes()
     if not dirs:
-        return [], []
+        return MaskGaps([], [], [])
     out = subprocess.run(
         [engine, "inspect", box, "--format", "{{json .Mounts}}"],
         env=env,
@@ -329,10 +342,15 @@ def _mask_gaps(
     if not isinstance(mounts, list):
         return None
     wt_root = config.worktrees_root(main)
+    volume = crossmask.note_volume()
     masks, _ = crossmask.targets(checkout, main, wt_root, crossmask.registered(main), dirs)
-    return (
+    unreg = crossmask.unregistered(main)
+    # `targets` always adds the main checkout's masks; those are `masks`', not an unregistered one's.
+    strays = [m for m in crossmask.targets(checkout, main, wt_root, unreg, dirs)[0] if m.checkout]
+    return MaskGaps(
         crossmask.unshadowed(mounts, checkout, dirs),
-        crossmask.unmasked(mounts, masks, crossmask.note_volume()),
+        crossmask.unmasked(mounts, masks, volume),
+        crossmask.unmasked(mounts, strays, volume),
     )
 
 
@@ -352,7 +370,7 @@ def _warn_mask_gaps(engine: str, box: str, ctx) -> None:
         return
     if not gaps:
         return
-    own, others = gaps
+    own, others, unregistered = gaps
     if own:
         print(
             f"⚠ dev box {box} doesn't shadow {', '.join(own)} (declared in [box].shadow_volumes "
@@ -367,6 +385,19 @@ def _warn_mask_gaps(engine: str, box: str, ctx) -> None:
             "(`WORKTREE=<name> fy box exec '<command>'`), or recreate this one to mask them: "
             "`fy box down && fy box up`."
         )
+    if unregistered:  # only ever in a box: on your computer the registry is the whole list
+        print(
+            f"⚠ dev box {box} doesn't mask the dependency dirs of checkouts your computer hadn't "
+            f"registered when it created the box: {', '.join(m.path for m in unregistered)}. "
+            "A box masks only registered worktrees, so a recreate alone won't: register each on "
+            f"your computer first ({_register_hint(unregistered)}), then recreate this box there."
+        )
+
+
+def _register_hint(masks: list[crossmask.Mask]) -> str:
+    """``fy worktree add <name>`` for each checkout in ``masks`` — it asks before taking in a
+    checkout that already exists, and says so when one is already registered."""
+    return ", ".join(f"`fy worktree add {n}`" for n in sorted({m.checkout for m in masks}))
 
 
 def boxes_not_masking(main: Path, worktree: str, *, fresh: bool) -> list[str]:
@@ -409,7 +440,7 @@ def boxes_not_masking(main: Path, worktree: str, *, fresh: bool) -> list[str]:
             gaps = _mask_gaps(
                 engine, name, env, checkout=checkout, main=main, timeout=_DRIFT_TIMEOUT_S
             )
-            if gaps is None or not set(wanted) & set(gaps[1]):
+            if gaps is None or not set(wanted) & set(gaps.others):
                 continue  # masks it (or its mounts can't be read: no claim either way)
         late.append(name)
     return late

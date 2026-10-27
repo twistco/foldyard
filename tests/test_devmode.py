@@ -1188,6 +1188,106 @@ def test_box_shadow_row_says_nothing_without_a_box_or_declared_dirs(
     assert list(devmode._box_shadow_check()) == []
 
 
+def _in_box_row(tmp_path, monkeypatch, register_worktree, snapshot, mounts, *, stray=("c",)):
+    """The row as the box's own doctor sees it: a, b on disk (registered on the host) plus each of
+    ``stray`` (a checkout made with plain `git worktree add`), and ``snapshot`` as the box's
+    FY_WORKTREE_OFFSETS (None → a box created before the host baked it in)."""
+    from foldyard import crossmask
+
+    _, wt_root, _ = _box_row_setup(tmp_path, monkeypatch, register_worktree, inspect=mounts)
+    for name in stray:
+        (wt_root / name).mkdir(parents=True)
+        (wt_root / name / ".git").write_text("gitdir: x\n")
+    monkeypatch.setattr(devmode.config, "in_box", lambda: True)
+    monkeypatch.setattr(devmode, "in_box", lambda: True)
+    if snapshot is None:
+        monkeypatch.delenv(crossmask.SNAPSHOT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(crossmask.SNAPSHOT_ENV, json.dumps(snapshot))
+    return list(devmode._box_shadow_check())
+
+
+def _box_mounts(tmp_path, *masked):
+    main = tmp_path / "repo"
+    wt_root = devmode.config.worktrees_root(main)
+    own = _vol(f"{main}/node_modules", "acme-devbox-shadow-node_modules")
+    return [own, *(_vol(f"{wt_root}/{n}/node_modules") for n in masked)]
+
+
+def test_box_shadow_row_in_the_box_names_an_unregistered_checkout_with_its_real_fix(
+    tmp_path, monkeypatch, register_worktree
+):
+    # The real report: c was made with plain `git worktree add`, so the host masked it in no box,
+    # and a recreate never would. It is NOT "added after the box was created".
+    wt_root = devmode.config.worktrees_root(tmp_path / "repo")
+    mounts = _box_mounts(tmp_path, "a", "b")
+    [(status, name, detail)] = _in_box_row(
+        tmp_path, monkeypatch, register_worktree, {"a": 1, "b": 2}, mounts
+    )
+    assert (status, name) == ("warn", "box shadowing")
+    assert f"{wt_root}/c/node_modules" in detail
+    assert "not registered with your computer when acme-devbox was created" in detail
+    assert "`fy worktree add c`" in detail and "on your computer" in detail
+    assert "added after" not in detail
+    assert "WORKTREE=c fy box exec" not in detail  # its own box can't start until it's registered
+    assert "fy box down && fy box up" in detail  # …and then this one needs a recreate
+
+
+def test_box_shadow_row_in_the_box_keeps_added_after_for_a_registered_worktree(
+    tmp_path, monkeypatch, register_worktree
+):
+    # b was registered when the box was created but it lacks b's mask: a recreate does fix that.
+    wt_root = devmode.config.worktrees_root(tmp_path / "repo")
+    mounts = _box_mounts(tmp_path, "a")
+    [(status, _, detail)] = _in_box_row(
+        tmp_path, monkeypatch, register_worktree, {"a": 1, "b": 2}, mounts, stray=()
+    )
+    assert status == "warn"
+    assert "added after acme-devbox was created" in detail
+    assert f"{wt_root}/b/node_modules" in detail and "WORKTREE=b fy box exec" in detail
+    assert "not registered" not in detail and "fy worktree add" not in detail
+    assert "recreate it on your computer: `fy box down && fy box up`" in detail
+
+
+def test_box_shadow_row_in_the_box_tells_the_two_apart(tmp_path, monkeypatch, register_worktree):
+    wt_root = devmode.config.worktrees_root(tmp_path / "repo")
+    mounts = _box_mounts(tmp_path, "a")
+    [(_, _, detail)] = _in_box_row(
+        tmp_path, monkeypatch, register_worktree, {"a": 1, "b": 2}, mounts, stray=("c", "d")
+    )
+    added, _, unregistered = detail.partition("not registered")
+    assert f"{wt_root}/b/node_modules" in added and f"{wt_root}/c/" not in added
+    assert (
+        f"{wt_root}/c/node_modules" in unregistered and f"{wt_root}/d/node_modules" in unregistered
+    )
+    assert f"{wt_root}/b/" not in unregistered
+    assert "`fy worktree add c`" in unregistered and "`fy worktree add d`" in unregistered
+
+
+def test_box_shadow_row_in_the_box_is_ok_only_without_unregistered_checkouts(
+    tmp_path, monkeypatch, register_worktree
+):
+    mounts = _box_mounts(tmp_path, "a", "b")
+    [(status, _, detail)] = _in_box_row(
+        tmp_path, monkeypatch, register_worktree, {"a": 1, "b": 2}, mounts, stray=()
+    )
+    assert status == "ok" and "2 in other checkouts masked" in detail
+
+
+def test_box_shadow_row_in_an_older_box_falls_back_and_says_what_it_cannot_tell(
+    tmp_path, monkeypatch, register_worktree
+):
+    # No FY_WORKTREE_OFFSETS: every checkout on disk stands in for the registry, as before, and
+    # the row says a recreate won't mask one your computer never registered.
+    wt_root = devmode.config.worktrees_root(tmp_path / "repo")
+    mounts = _box_mounts(tmp_path, "a", "b")
+    [(status, _, detail)] = _in_box_row(tmp_path, monkeypatch, register_worktree, None, mounts)
+    assert status == "warn"
+    assert "added after acme-devbox was created" in detail
+    assert f"{wt_root}/c/node_modules" in detail
+    assert "fy worktree add <name>" in detail  # the limitation, and its way out
+
+
 def test_doctor_asks_the_box_on_either_side(monkeypatch):
     for check in (
         "_version_window_check",
