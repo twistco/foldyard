@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import logging
 import sys
 import threading
 import time
@@ -3343,3 +3344,212 @@ async def test_a_401_is_never_re_issued_with_a_rule_the_request_did_not_name(sha
     await shared.inj.response(flow)
     assert gh.requests == [] and not shared.oauth.calls.exists()
     assert flow.response.status_code == 401
+
+
+# ── local addresses: refused in every mode, unless a grant names the address ─────────────────────
+# The proxy runs on your computer, so a dial it makes to loopback, your network or link-local
+# reaches a service that was never offered to the box (a dev server on localhost, a router, a
+# cloud's metadata endpoint). Observing must not mean open: the learn window used to let a box
+# reach every service on the operator's loopback through the proxy.
+
+_LOCAL = (
+    "127.0.0.1", "127.8.9.10", "10.0.0.5", "172.16.0.1", "192.168.1.1", "100.64.0.1",
+    "169.254.169.254", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1",
+    "2002:7f00:1::",  # 6to4, carrying 127.0.0.1
+)  # fmt: skip
+_PUBLIC = ("1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "::ffff:1.1.1.1")
+
+
+@pytest.mark.parametrize("address", _LOCAL)
+def test_a_local_address_is_refused_while_observing(observing, address):
+    inj, _allow, log = observing
+    error = _dial(inj, address, 8123)
+    assert error is not None and "a local address" in error, (address, error)
+    row = _rows(log)[-1]
+    assert row["blocked"] is True and row["local"] is True
+
+
+@pytest.mark.parametrize("address", _PUBLIC)
+def test_a_public_address_still_goes_out_while_observing(observing, address):
+    inj, _allow, _log = observing
+    assert _dial(inj, address, 8123) is None
+
+
+def test_the_refusal_names_the_one_grant_that_allows_it(observing):
+    inj, allow, log = observing
+    error = _dial(inj, "127.0.0.1", 8123)
+    assert error is not None and "`fy allow add 127.0.0.1:8123`" in error
+    assert _rows(log)[-1]["host"] == "127.0.0.1:8123"  # what the grant is keyed by
+    _write_allow(allow, ["granted.example.com", "127.0.0.1:8123"], default_deny=False)
+    assert _dial(inj, "127.0.0.1", 8123) is None
+    assert _dial(inj, "127.0.0.1", 8124) is not None  # that port, and only it
+    # An IPv6 address can't be spelt as a grant, so it is never let through — and says so.
+    error = _dial(inj, "::1", 8123)
+    assert error is not None and "only an IPv4 address can be granted" in error
+
+
+def test_a_local_grant_follows_the_port_rule_of_every_grant(walled):
+    # A bare address covers :443 and cleartext :80; address:port that port.
+    inj, allow, _log = walled
+    _write_allow(allow, ["10.0.0.5"])
+    assert _dial(inj, "10.0.0.5", 443) is None
+    assert _dial(inj, "10.0.0.5", 80) is None
+    assert _dial(inj, "10.0.0.5", 22) is not None
+
+
+def test_only_a_grant_naming_the_address_lets_a_local_dial_out(walled):
+    # The wall's own match takes a wildcard; a local address doesn't: `*.0.0.1` is a pattern
+    # nobody wrote meaning "my loopback". Nor does an injector's exemption count.
+    inj, allow, log = walled
+    _write_allow(allow, ["*.0.0.1", "*.example.com"])
+    error = _dial(inj, "127.0.0.1", 443)
+    assert error is not None and "a local address" in error
+    assert _rows(log)[-1]["local"] is True
+
+
+def test_a_build_scoped_local_grant_counts_for_a_build_only(walled):
+    inj, allow, _log = walled
+    allow.write_text(
+        json.dumps({"default_deny": True, "allow": [], "build_allow": ["10.0.0.5:3128"]})
+    )
+    inj._build_clients.add("a-build")
+    assert _dial(inj, "10.0.0.5", 3128, client_id="a-build") is None
+    assert _dial(inj, "10.0.0.5", 3128, client_id="the-box") is not None
+
+
+def test_mitmproxys_lines_for_a_local_refusal_are_dropped_like_the_walls(gh):
+    module = gh.module
+    msg = f"server connection to 127.0.0.1:8123 killed before connect: {module._LOCAL_REFUSED} — …"
+    record = logging.LogRecord("mitmproxy.proxy.server", logging.INFO, __file__, 0, msg, (), None)
+    assert module._DropRefusedDial().filter(record) is False
+
+
+# The resolver guard: a NAME is judged by the answer mitmproxy connects to. These run a real event
+# loop and a real `asyncio.open_connection` — mitmproxy's own dial — against a listener on
+# loopback, with the loop's resolver standing in for DNS (a test can't make a real name rebind).
+
+
+class _Listener:
+    """A loopback listener that counts what it accepts."""
+
+    def __init__(self) -> None:
+        import socket
+
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen()
+        self.sock.settimeout(0.2)
+        self.port = self.sock.getsockname()[1]
+
+    def accepted(self) -> int:
+        n = 0
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return n
+            conn.close()
+            n += 1
+
+
+async def _resolving_to(inj, answers: list[str]):
+    """Point the running loop's resolver at ``answers`` (the name's DNS), then let the injector
+    guard it, as its first dial would. Returns the names looked up."""
+    import socket
+
+    loop = asyncio.get_running_loop()
+    asked: list[str] = []
+
+    async def fake_dns(host, port, *args, **kwargs):
+        asked.append(host)
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (answer, int(port))) for answer in answers
+        ]
+
+    setattr(loop, "getaddrinfo", fake_dns)  # noqa: B010 — assigning a method is a type error
+    assert inj._guard_resolver() is True
+    return asked
+
+
+async def test_a_name_resolving_to_loopback_never_reaches_it(observing):
+    inj, _allow, log = observing
+    listener = _Listener()
+    try:
+        asked = await _resolving_to(inj, ["127.0.0.1"])
+        with pytest.raises(OSError, match="a local address"):
+            await asyncio.open_connection("127.0.0.1.nip.io", listener.port)
+        assert asked == ["127.0.0.1.nip.io"]  # asyncio's dial resolved through the guard
+        assert listener.accepted() == 0
+        row = _rows(log)[-1]
+        assert row["local"] is True and row["name"] == "127.0.0.1.nip.io"
+        assert row["host"] == f"127.0.0.1:{listener.port}"
+    finally:
+        listener.sock.close()
+
+
+async def test_a_local_answer_is_dropped_and_the_rest_dialled(observing):
+    # The dial tries only what the resolver returns, so dropping the local answers is enough —
+    # a name with a public one still works, and a granted 127.0.0.1 is reached by a name whose
+    # ::1 answer can't be granted.
+    inj, allow, _log = observing
+    await _resolving_to(inj, ["127.0.0.1", "1.1.1.1", "10.0.0.5"])
+    infos = await asyncio.get_running_loop().getaddrinfo("mixed.example.com", 443)
+    assert [info[4][0] for info in infos] == ["1.1.1.1"]
+    _write_allow(allow, ["127.0.0.1:8123"], default_deny=False)
+    await _resolving_to(inj, ["::1", "127.0.0.1"])
+    infos = await asyncio.get_running_loop().getaddrinfo("localhost", 8123)
+    assert [info[4][0] for info in infos] == ["127.0.0.1"]
+
+
+async def test_a_granted_local_address_is_reached_by_name_too(observing):
+    inj, allow, _log = observing
+    listener = _Listener()
+    try:
+        _write_allow(allow, [f"127.0.0.1:{listener.port}"], default_deny=False)
+        await _resolving_to(inj, ["127.0.0.1"])
+        _reader, writer = await asyncio.open_connection("dev.example.com", listener.port)
+        writer.close()
+        assert listener.accepted() == 1
+    finally:
+        listener.sock.close()
+
+
+async def test_the_first_dial_installs_the_guard_once(observing):
+    inj, _allow, _log = observing
+    loop = asyncio.get_running_loop()
+    assert _dial(inj, "granted.example.com") is None
+    guarded = loop.getaddrinfo
+    assert guarded is inj._guard
+    assert _dial(inj, "other.example.com") is None
+    assert loop.getaddrinfo is guarded  # not wrapped twice
+    # Replaced underneath it, the guard is put back at the next dial rather than assumed.
+    setattr(loop, "getaddrinfo", lambda *a, **k: None)  # noqa: B010 — assigning a method is a type error
+    assert _dial(inj, "other.example.com") is None
+    assert loop.getaddrinfo is inj._guard and loop.getaddrinfo is not guarded
+
+
+async def test_a_loop_that_wont_take_the_guard_dials_no_name(observing, monkeypatch):
+    # Fail closed: a name the proxy can't judge is not dialled at all.
+    inj, _allow, _log = observing
+
+    class _Sealed:
+        __slots__ = ()
+
+        def getaddrinfo(self, *a, **k):  # pragma: no cover — never resolved
+            raise AssertionError
+
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: _Sealed())
+    error = _dial(inj, "granted.example.com")
+    assert error is not None and "dials no name" in error
+    assert _dial(inj, "1.1.1.1") is None  # an address needs no resolution
+
+
+@pytest.mark.parametrize("address", (*_LOCAL, *_PUBLIC, "224.0.0.1", "203.0.113.9", "198.18.0.1"))
+def test_the_host_and_the_proxy_agree_on_what_is_local(gh, address):
+    # The proxy can't import foldyard (it runs standalone under mitmdump), so the host's
+    # judgement — what it never offers as a grant — is a copy. This holds the two equal.
+    from foldyard import allowlist
+
+    ip = gh.module._address(address)
+    assert ip is not None
+    assert gh.module._is_local(ip) is allowlist.local_key(address), address
