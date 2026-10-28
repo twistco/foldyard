@@ -212,6 +212,49 @@ kernel still can't get out. foldyard never installs it for you: `fy machine host
 the rules and the `sudo` commands, you run them once, and every `fy up` checks they are in effect
 ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)).
 
+### Services on your computer
+
+A dev server, database or model server listening on your computer's loopback was never offered to
+the box, and stays out of its reach in two ways:
+
+- **Directly.** Lima gives the VM your computer's loopback at `192.168.5.2`. With the VM firewall,
+  a container reaches only this project's proxy ports there. Without it, a container reaches every
+  service on your loopback that way.
+- **Through the proxy.** The proxy runs on your computer, so whatever it dials, it dials from
+  there. It refuses loopback, the private ranges, CGNAT (a tailnet) and link-local (a cloud's
+  metadata service), in every mode, learning included. That holds whether the box names an
+  address or a name that resolves to one. Names are judged by the answer the proxy then connects
+  to, so a name that resolves somewhere public for a check and to `127.0.0.1` for the connection
+  (DNS rebinding) gets nowhere.
+
+`fy verify`, run on your computer with the VM firewall on, proves both: a probe container tries a
+throwaway service on your loopback each way, and the service must see no connection.
+
+**To offer one service on purpose**, grant its exact address:
+
+```bash
+fy allow add 127.0.0.1:8123
+```
+
+Only this command makes such a grant. The Network Log's allow key, `fy allow learn` and `[proxy]
+recommend` never offer one, because a grant here opens a service on your computer to the box.
+A wildcard or the name the box asked by never counts, and an IPv6 address can't be granted. The
+box's `NO_PROXY` keeps `127.0.0.1` local to the box, so a client there has to send the request
+through the proxy explicitly:
+
+```bash
+curl --noproxy '' --proxy "$HTTP_PROXY" http://127.0.0.1:8123/
+```
+
+Remove the grant when you're done (`fy allow remove 127.0.0.1:8123`): until then the box reaches
+whatever listens on that port.
+
+A host on your network or VPN reached by name (an internal registry, say) resolves to a private
+address, so it is refused the same way; the refusal names the address to grant.
+
+One gap remains. The VM firewall lets DNS (port 53) through to private addresses, `192.168.5.2`
+included, so a DNS server on your computer's loopback is reachable from the box.
+
 ### Stack containers trust the proxy too
 
 **Only with the VM firewall on** (`[machine] firewall = true`, lima backend). Everything in this
