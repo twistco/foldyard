@@ -1057,6 +1057,19 @@ def test_the_engine_pin_wins_over_an_edit_in_the_instance(fake):
     assert settings["a"] == 1
 
 
+def test_an_unwritable_instance_settings_says_the_engine_pin_is_missing(fake, capsys):
+    # A `//` note in the instance's settings keeps foldyard from rewriting it — and the engine pin
+    # rides in that write, so the window would attach with `docker`. Said, with the value to set.
+    fake["state"]["running"] = True
+    _settings(fake).parent.mkdir(parents=True)
+    _settings(fake).write_text('{\n  // mine\n  "a": 1\n}\n')
+    assert vscode.code() == 0
+    err = capsys.readouterr().err
+    assert "dev.containers.dockerPath isn't set either" in err
+    assert '"dev.containers.dockerPath": "/opt/homebrew/bin/podman"' in err
+    assert "// mine" in _settings(fake).read_text()
+
+
 def test_an_engine_cli_off_the_path_is_pinned_by_name(fake):
     fake["state"]["running"] = True
     del fake["tools"]["podman"]

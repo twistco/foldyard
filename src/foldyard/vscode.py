@@ -806,6 +806,11 @@ def code() -> int:
     if _write_local_terminal_cwd(udd, host_checkout, env.get("ZDOTDIR"), engine_cli):
         print(f"▶ local terminal cwd: {host_checkout}")
         print(f"▶ Dev Containers attaches with: {engine_cli}")
+    else:
+        # The same unwritten file carries the engine pin, and without it the attach falls back to
+        # `docker` — on a podman-only computer, the "install Docker" dialog this pin exists for.
+        _err(f"⚠ so {_DOCKER_PATH} isn't set either: without `docker` on your computer the attach")
+        _err(f'  fails. Set "{_DOCKER_PATH}": "{engine_cli}" in {_user_settings(udd)}.')
 
     # Auto-apply extensions + settings on attach (Attach to Running Container ignores
     # devcontainer.json — the supported lever is an attached-container config, keyed by the box
