@@ -76,6 +76,7 @@ def fake(tmp_path, monkeypatch):
         "code": "/usr/local/bin/code",
         "ssh-agent": "/usr/bin/ssh-agent",
         "ssh-add": "/usr/bin/ssh-add",
+        "podman": "/opt/homebrew/bin/podman",
     }
     monkeypatch.setattr(vscode.shutil, "which", lambda name: tools.get(name))
 
@@ -83,9 +84,17 @@ def fake(tmp_path, monkeypatch):
     box_state = {"running": False, "installed": ""}
 
     agent_state = {"rc": 2}  # `ssh-add -l` against the fy agent: 2 = not answering, 1 = empty
+    # The host VS Code's extensions, as `code --list-extensions` prints them (`rc` its exit), and
+    # what `code --install-extension` exits with.
+    host_exts = {"listed": "anthropic.claude-code\nms-vscode-remote.remote-containers\n", "rc": 0}
+    host_exts["install_rc"] = 0
 
     def fake_run(cmd, **kw):
         calls.append({"cmd": cmd, "env": kw.get("env")})
+        if cmd[0] == "/usr/local/bin/code" and "--list-extensions" in cmd:
+            return _Proc(host_exts["rc"], host_exts["listed"])
+        if cmd[0] == "/usr/local/bin/code" and "--install-extension" in cmd:
+            return _Proc(host_exts["install_rc"])
         if cmd[0] == "/usr/bin/ssh-add":
             return _Proc(agent_state["rc"])
         if cmd[0] == "/usr/bin/ssh-agent":
@@ -106,6 +115,8 @@ def fake(tmp_path, monkeypatch):
         "gated": gated,
         "pin": pin,
         "agent": agent_state,
+        "host_exts": host_exts,
+        "tools": tools,
         "ctx": ctx,
         "udd": state / "vscode" / "main",
         "sock": sock,
@@ -114,7 +125,11 @@ def fake(tmp_path, monkeypatch):
 
 
 def _launch(calls):
-    return [c for c in calls if c["cmd"][0] == "/usr/local/bin/code"]
+    return [c for c in calls if c["cmd"][0] == "/usr/local/bin/code" and "--folder-uri" in c["cmd"]]
+
+
+def _installs(calls):
+    return [c for c in calls if "--install-extension" in c["cmd"]]
 
 
 def _recommend(main: Path, sub: str, ids: list, text: str | None = None) -> None:
@@ -788,7 +803,9 @@ def test_the_in_box_harden_is_ensured_before_the_attach(fake):
     assert vscode.code() == 0
     cmds = [c["cmd"] for c in fake["calls"]]
     harden = [i for i, c in enumerate(cmds) if "exec" in c and "harden.sh" in c[-1]]
-    launch = [i for i, c in enumerate(cmds) if c[0] == "/usr/local/bin/code"]
+    launch = [
+        i for i, c in enumerate(cmds) if c[0] == "/usr/local/bin/code" and "--folder-uri" in c
+    ]
     assert harden and launch and harden[0] < launch[0]
 
 
@@ -1013,6 +1030,78 @@ def test_instance_settings_pin_daemon_ports(fake, monkeypatch):
     assert vscode._TERMINAL_ENV_OSX in settings
 
 
+def test_the_attach_runs_foldyards_own_engine_cli(fake, capsys):
+    # Dev Containers execs `dev.containers.dockerPath` (`docker` unset) for every engine call; a
+    # podman-only host has no `docker`, and the extension offers Docker Desktop instead of
+    # attaching. The instance is pinned to the CLI foldyard drives the box with, by absolute path,
+    # and the launch env points that CLI at the box's socket under the name it reads.
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    settings = json.loads(_settings(fake).read_text())
+    assert settings["dev.containers.dockerPath"] == "/opt/homebrew/bin/podman"
+    assert _launch(fake["calls"])[0]["env"]["CONTAINER_HOST"] == fake["sock"]
+    assert "attaches with: /opt/homebrew/bin/podman" in capsys.readouterr().out
+    # Application-scoped: VS Code reads it from user settings only, so it is not machine policy.
+    assert "dev.containers.dockerPath" not in _written(fake)["settings"]
+
+
+def test_the_engine_pin_wins_over_an_edit_in_the_instance(fake):
+    # An instance pointed at another engine CLI would attach through another engine's socket
+    # rules — the cross-engine leak the isolated instance exists to prevent.
+    fake["state"]["running"] = True
+    _settings(fake).parent.mkdir(parents=True)
+    _settings(fake).write_text(json.dumps({"dev.containers.dockerPath": "docker", "a": 1}))
+    assert vscode.code() == 0
+    settings = json.loads(_settings(fake).read_text())
+    assert settings["dev.containers.dockerPath"] == "/opt/homebrew/bin/podman"
+    assert settings["a"] == 1
+
+
+def test_an_engine_cli_off_the_path_is_pinned_by_name(fake):
+    fake["state"]["running"] = True
+    del fake["tools"]["podman"]
+    assert vscode.code() == 0
+    assert json.loads(_settings(fake).read_text())["dev.containers.dockerPath"] == "podman"
+
+
+def test_dev_containers_already_installed_installs_nothing(fake):
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    assert not _installs(fake["calls"])
+    listing = next(c["cmd"] for c in fake["calls"] if "--list-extensions" in c["cmd"])
+    # Asked of THIS instance, whose extension state is its own.
+    assert listing[listing.index("--user-data-dir") + 1] == str(fake["udd"])
+
+
+def test_a_missing_dev_containers_is_installed_before_the_launch(fake, capsys):
+    fake["state"]["running"] = True
+    fake["host_exts"]["listed"] = "anthropic.claude-code\n"
+    assert vscode.code() == 0
+    install = _installs(fake["calls"])
+    assert len(install) == 1
+    assert install[0]["cmd"][-2:] == ["--install-extension", "ms-vscode-remote.remote-containers"]
+    assert fake["calls"].index(install[0]) < fake["calls"].index(_launch(fake["calls"])[0])
+    assert "your everyday VS Code gets it too" in capsys.readouterr().out
+
+
+def test_a_failed_dev_containers_install_refuses_the_launch(fake, capsys):
+    fake["state"]["running"] = True
+    fake["host_exts"]["listed"] = ""
+    fake["host_exts"]["install_rc"] = 1
+    assert vscode.code() == 1
+    assert "couldn't install ms-vscode-remote.remote-containers" in capsys.readouterr().err
+    assert not _launch(fake["calls"])
+
+
+def test_an_unlistable_extensions_dir_still_launches(fake, capsys):
+    fake["state"]["running"] = True
+    fake["host_exts"]["rc"] = 1
+    assert vscode.code() == 0
+    assert not _installs(fake["calls"])
+    assert "couldn't list VS Code's extensions" in capsys.readouterr().err
+    assert _launch(fake["calls"])
+
+
 def _global(fake, settings: str | None = None) -> Path:
     """Populate the fake operator's VS Code User folder."""
     g = fake["global"]
@@ -1080,6 +1169,8 @@ def test_the_seed_drops_settings_that_point_at_another_engine(fake):
     assert "DOCKER_HOST" not in osx
     assert settings["terminal.integrated.env.linux"] == {}
     assert settings["terminal.integrated.env.windows"] == {}
+    # The one engine setting the instance carries is foldyard's own pin, never the seed's value.
+    assert settings.pop("dev.containers.dockerPath") == "/opt/homebrew/bin/podman"
     assert not [k for k in settings if k.startswith(("dev.containers", "remote.containers"))]
     assert not [k for k in settings if k.startswith(("docker.", "containers."))]
 
