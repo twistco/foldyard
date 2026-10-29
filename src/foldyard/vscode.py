@@ -604,15 +604,18 @@ def _empty_agent(udd: Path) -> str | None:
     return str(sock)
 
 
-def _ensure_dev_containers(code_cli: str, udd: Path) -> bool:
+def _ensure_dev_containers(code_cli: str, udd: Path, env: dict) -> bool:
     """Make sure the Dev Containers extension — the one that resolves the attach URI — is installed
     where this instance loads extensions from. Without it VS Code opens a window that can't resolve
     `attached-container+…`, and nothing says why. A foldyard-named id, never one from config, so
     the install is not the channel ADR-0026 closed. It lands in the SHARED ~/.vscode/extensions,
     so the operator's own VS Code gets it too; said so before it happens. Proceeds when the listing
-    itself fails (the attach then reports for itself); refuses only on a failed install."""
+    itself fails (the attach then reports for itself); refuses only on a failed install. Run with
+    the LAUNCH env, not ours: that one is clamped (`stack._host_passthrough`), so a variable such
+    as `VSCODE_EXTENSIONS` the operator exports would point the check at another folder than the
+    one the launched instance loads from."""
     base = [code_cli, "--user-data-dir", str(udd)]
-    listed = subprocess.run([*base, "--list-extensions"], capture_output=True, text=True)
+    listed = subprocess.run([*base, "--list-extensions"], env=env, capture_output=True, text=True)
     if listed.returncode != 0:
         _err(f"⚠ couldn't list VS Code's extensions to check for {_REMOTE_CONTAINERS}; going on.")
         return True
@@ -620,7 +623,7 @@ def _ensure_dev_containers(code_cli: str, udd: Path) -> bool:
         return True
     print(f"▶ installing Dev Containers ({_REMOTE_CONTAINERS}), which the attach runs through —")
     print("  into ~/.vscode/extensions, so your everyday VS Code gets it too.")
-    if subprocess.run([*base, "--install-extension", _REMOTE_CONTAINERS]).returncode != 0:
+    if subprocess.run([*base, "--install-extension", _REMOTE_CONTAINERS], env=env).returncode:
         _err(f"✗ couldn't install {_REMOTE_CONTAINERS}. Install Dev Containers from VS Code's")
         _err("  Extensions view, then re-run `fy code`.")
         return False
@@ -847,7 +850,7 @@ def code() -> int:
         _err("  and re-run `fy code`. Manual fallback: in VS Code, Cmd-Shift-P →")
         _err(f"  'Dev Containers: Attach to Running Container…' → {box}.")
         return 1
-    if not _ensure_dev_containers(code_cli, udd):
+    if not _ensure_dev_containers(code_cli, udd, env):
         return 1
 
     # The attach is about to forward the host's SSH agent + git credentials into the box (Dev

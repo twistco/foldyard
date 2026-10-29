@@ -1086,6 +1086,21 @@ def test_dev_containers_already_installed_installs_nothing(fake):
     assert listing[listing.index("--user-data-dir") + 1] == str(fake["udd"])
 
 
+def test_the_extension_check_runs_with_the_launch_env(fake, monkeypatch):
+    # The launch env is clamped (`stack._host_passthrough`); a check under `fy`'s own environment
+    # would follow a `VSCODE_EXTENSIONS` the launched instance never sees, and look elsewhere.
+    monkeypatch.setenv("VSCODE_EXTENSIONS", "/elsewhere")
+    fake["state"]["running"] = True
+    fake["host_exts"]["listed"] = ""
+    assert vscode.code() == 0
+    for call in (
+        next(c for c in fake["calls"] if "--list-extensions" in c["cmd"]),
+        _installs(fake["calls"])[0],
+    ):
+        assert call["env"] == fake["ctx"].env
+        assert "VSCODE_EXTENSIONS" not in call["env"]
+
+
 def test_a_missing_dev_containers_is_installed_before_the_launch(fake, capsys):
     fake["state"]["running"] = True
     fake["host_exts"]["listed"] = "anthropic.claude-code\n"
