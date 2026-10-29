@@ -59,6 +59,8 @@ _GENERATED_MARKER = "foldyard fy code"
 # files and agent/root ones, and made VS Code tooling hit permission errors on the root-owned
 # socket and volumes. A foldyard fact, so a pin — not a consumer key.
 _REMOTE_USER = "root"
+# The proxy variables a Marketplace download honours, in either case (`_ensure_dev_containers`).
+_PROXY_VARS = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"})
 # A marketplace extension id: `<publisher>.<name>`. Anything else in a recommendations file is
 # dropped rather than handed to VS Code.
 _EXT_ID = re.compile(r"^[A-Za-z0-9][\w-]*\.[A-Za-z0-9][\w-]*$")
@@ -623,7 +625,11 @@ def _ensure_dev_containers(code_cli: str, udd: Path, env: dict) -> bool:
         return True
     print(f"▶ installing Dev Containers ({_REMOTE_CONTAINERS}), which the attach runs through —")
     print("  into ~/.vscode/extensions, so your everyday VS Code gets it too.")
-    if subprocess.run([*base, "--install-extension", _REMOTE_CONTAINERS], env=env).returncode:
+    # The install reaches the Marketplace, so it gets the operator's proxy settings back on top of
+    # the clamped env — those alone: the extensions folder must stay the launch's.
+    proxies = {k: v for k, v in os.environ.items() if k.upper() in _PROXY_VARS}
+    install = [*base, "--install-extension", _REMOTE_CONTAINERS]
+    if subprocess.run(install, env={**env, **proxies}).returncode:
         _err(f"✗ couldn't install {_REMOTE_CONTAINERS}. Install Dev Containers from VS Code's")
         _err("  Extensions view, then re-run `fy code`.")
         return False

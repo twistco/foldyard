@@ -1101,6 +1101,23 @@ def test_the_extension_check_runs_with_the_launch_env(fake, monkeypatch):
         assert "VSCODE_EXTENSIONS" not in call["env"]
 
 
+def test_the_install_alone_gets_the_operators_proxy(fake, monkeypatch):
+    # The clamped launch env drops the proxy variables, so a Marketplace download behind a proxy
+    # would fail and refuse the launch. The install gets them back — the listing and launch don't.
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp:3128")
+    monkeypatch.setenv("no_proxy", "localhost")
+    fake["state"]["running"] = True
+    fake["host_exts"]["listed"] = ""
+    assert vscode.code() == 0
+    install = _installs(fake["calls"])[0]["env"]
+    assert install["HTTPS_PROXY"] == "http://proxy.corp:3128"
+    assert install["no_proxy"] == "localhost"
+    assert {k: v for k, v in install.items() if k not in ("HTTPS_PROXY", "no_proxy")} == (
+        fake["ctx"].env
+    )
+    assert "HTTPS_PROXY" not in _launch(fake["calls"])[0]["env"]
+
+
 def test_a_missing_dev_containers_is_installed_before_the_launch(fake, capsys):
     fake["state"]["running"] = True
     fake["host_exts"]["listed"] = "anthropic.claude-code\n"
