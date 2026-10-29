@@ -1600,14 +1600,82 @@ def claude_keyless() -> str:
         ``api.anthropic.com`` from the real key in host.env.
       - ``"oauth"`` — dummy ``CLAUDE_CODE_OAUTH_TOKEN``; rewrite ``authorization`` with ``Bearer ``
         + the real ``sk-ant-oat…`` token (≈1yr, static — no refresh-minter needed).
+      - ``"bedrock"`` — dummy ``AWS_BEARER_TOKEN_BEDROCK``; rewrite ``authorization`` on the
+        ``[claude.bedrock]`` region's Bedrock hosts with a Bedrock API key (see
+        :func:`claude_bedrock`).
 
     Absent/false/unrecognised ⇒ ``""`` (off — a normal login: real creds in the box's ~/.claude)."""
     raw = _table("claude").get("keyless")
     if raw is True or raw == "api-key":
         return "api-key"
-    if raw == "oauth":
-        return "oauth"
+    if raw in ("oauth", "bedrock"):
+        return str(raw)
     return ""
+
+
+# A commercial AWS region: it becomes part of a hostname. China's (`cn-…`) are served from
+# `amazonaws.com.cn`, which the Bedrock hosts below don't name: refused rather than wrong.
+_AWS_REGION = re.compile(r"^(?!cn-)[a-z]{2}(-[a-z]+)+-[0-9]{1,2}$")
+
+
+def claude_bedrock() -> dict[str, str]:
+    """``[claude.bedrock]`` — Claude Code talks to Amazon Bedrock instead of Anthropic's API.
+    ``{}`` when the table is absent; otherwise ``{"region", "profile"}``, each ``""`` when missing
+    or malformed (:func:`claude_bedrock_problems` says which, and preflight refuses the launch).
+
+      - ``region`` — the Bedrock region: the box's ``AWS_REGION``, and where the proxy injects.
+      - ``profile`` — under ``keyless = "bedrock"``, an AWS profile ON YOUR COMPUTER to mint
+        short-term API keys from (``plugins.bedrock_token``); without it the proxy injects a
+        long-term key from host.env.
+
+    The provider and the credential are separate on purpose: without ``keyless``, the box resolves
+    AWS credentials itself — an in-box ``/setup-bedrock`` today, an AWS metadata emulator later
+    (docs/adrs/0035)."""
+    raw = _table("claude").get("bedrock")
+    if not isinstance(raw, dict):
+        return {}
+    from .awsauth import PROFILE  # lazy: config stays import-light
+
+    region, profile = raw.get("region"), raw.get("profile")
+    return {
+        "region": region if isinstance(region, str) and _AWS_REGION.match(region) else "",
+        "profile": profile if isinstance(profile, str) and PROFILE.match(profile) else "",
+    }
+
+
+def claude_bedrock_problems() -> list[str]:
+    """What's wrong with ``[claude.bedrock]`` / ``keyless = "bedrock"`` together, one line each —
+    for preflight, which refuses a launch on any of them."""
+    claude = _table("claude")
+    raw, kind = claude.get("bedrock"), claude_keyless()
+    if raw is None:
+        if kind == "bedrock":
+            return ['keyless = "bedrock" needs a [claude.bedrock] table naming its region']
+        return []
+    if not isinstance(raw, dict):
+        return ["[claude.bedrock] must be a table"]
+    out: list[str] = []
+    resolved = claude_bedrock()
+    unknown = sorted(set(raw) - {"region", "profile"})
+    if unknown:
+        out.append(
+            f"[claude.bedrock] takes region and profile, not {', '.join(map(repr, unknown))}"
+        )
+    if not resolved["region"]:
+        out.append(
+            f"[claude.bedrock].region = {raw.get('region')!r} isn't an AWS region "
+            "(e.g. \"eu-west-2\"; China's aren't supported)"
+        )
+    if "profile" in raw and not resolved["profile"]:
+        out.append(f"[claude.bedrock].profile = {raw.get('profile')!r} isn't an AWS profile name")
+    if kind in ("api-key", "oauth"):
+        out.append(
+            f'keyless = "{kind}" is an Anthropic API credential, but [claude.bedrock] sends Claude '
+            'to Bedrock — use keyless = "bedrock", or remove the table'
+        )
+    if "profile" in raw and kind != "bedrock":
+        out.append('[claude.bedrock].profile only applies with keyless = "bedrock"')
+    return out
 
 
 def _transcript_sync_seconds(table: str) -> float:

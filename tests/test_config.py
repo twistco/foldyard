@@ -1057,6 +1057,7 @@ def test_claude_keyless_modes(fresh_config, tmp_path):
         "keyless = true": "api-key",
         'keyless = "api-key"': "api-key",
         'keyless = "oauth"': "oauth",
+        'keyless = "bedrock"': "bedrock",
         'keyless = "nope"': "",
         "": "",
     }
@@ -1064,6 +1065,52 @@ def test_claude_keyless_modes(fresh_config, tmp_path):
         (tmp_path / "foldyard.toml").write_text(f'[project]\nname = "x"\n[claude]\n{line}\n')
         fresh_config(FOLDYARD_REPO=tmp_path)
         assert config.claude_keyless() == expected, line
+
+
+@pytest.mark.parametrize(
+    ("claude", "bedrock", "resolved", "problems"),
+    [
+        ("", None, {}, []),
+        ('keyless = "bedrock"', None, {}, ["needs a [claude.bedrock] table"]),
+        (
+            'keyless = "bedrock"',
+            'region = "eu-west-2"\nprofile = "my-sso"',
+            {"region": "eu-west-2", "profile": "my-sso"},
+            [],
+        ),
+        ("", 'region = "us-gov-west-1"', {"region": "us-gov-west-1", "profile": ""}, []),
+        ("", "", {"region": "", "profile": ""}, ["isn't an AWS region"]),
+        ("", 'region = "cn-north-1"', {"region": "", "profile": ""}, ["China"]),
+        ("", 'region = "eu-west-2.evil.com/x"', {"region": "", "profile": ""}, ["AWS region"]),
+        (
+            'keyless = "bedrock"',
+            'region = "eu-west-2"\nprofile = "--debug"',
+            {"region": "eu-west-2", "profile": ""},
+            ["isn't an AWS profile name"],
+        ),
+        ('keyless = "oauth"', 'region = "eu-west-2"', None, ["Anthropic API credential"]),
+        (
+            "",
+            'region = "eu-west-2"\nprofile = "p"',
+            None,
+            ['only applies with keyless = "bedrock"'],
+        ),
+        ("", 'region = "eu-west-2"\nmodel = "x"', None, ["not 'model'"]),
+    ],
+)
+def test_claude_bedrock_resolves_and_says_whats_wrong(
+    fresh_config, tmp_path, claude, bedrock, resolved, problems
+):
+    toml = f'[project]\nname = "x"\n[claude]\n{claude}\n'
+    if bedrock is not None:
+        toml += f"[claude.bedrock]\n{bedrock}\n"
+    (tmp_path / "foldyard.toml").write_text(toml)
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    if resolved is not None:
+        assert config.claude_bedrock() == resolved
+    found = config.claude_bedrock_problems()
+    assert len(found) == len(problems), found
+    assert all(want in got for want, got in zip(problems, found, strict=True)), found
 
 
 def test_transcript_sync_seconds(fresh_config, tmp_path):

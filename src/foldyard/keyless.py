@@ -72,7 +72,30 @@ CLAUDE_KEYLESS: dict[str, dict[str, str]] = {
         "how": "run `claude setup-token` on your computer to mint one",
         "prefix": "sk-ant-oat",
     },
+    #   bedrock  — Claude Code on Amazon Bedrock with ``AWS_BEARER_TOKEN_BEDROCK`` set sends
+    #              ``authorization: Bearer <key>`` and resolves no AWS credentials. Its hosts are
+    #              the region's (:func:`bedrock_hosts`), not CLAUDE_KEYLESS_HOST. host.env holds a
+    #              long-term key (``ABSK…`` — observed, not documented by AWS) unless
+    #              ``[claude.bedrock].profile`` mints short-term ones.
+    "bedrock": {
+        "env": "AWS_BEARER_TOKEN_BEDROCK",
+        "header": "authorization",
+        "dummy": "bedrock-api-key-fy-dummy",
+        "value_prefix": "Bearer ",
+        "how": (
+            "create a long-term API key in the Amazon Bedrock console (API keys), or set "
+            "[claude.bedrock].profile to mint short-term ones from your AWS login instead"
+        ),
+        "prefix": "ABSK",
+    },
 }
+
+
+def bedrock_hosts(region: str) -> tuple[str, str]:
+    """Where Claude Code on Bedrock goes in ``region``: the runtime (invoke, count-tokens) and the
+    control plane (the inference-profile lookups it makes at startup). Both take the same key."""
+    return f"bedrock-runtime.{region}.amazonaws.com", f"bedrock.{region}.amazonaws.com"
+
 
 # The OpenAI host whose Authorization header the Codex keyless injector rewrites, and the Codex
 # modes. ``api-key``: the box bakes a dummy ``OPENAI_API_KEY``; the client sends ``Authorization:
@@ -227,6 +250,7 @@ _CLASSIFY: list[tuple[str, tuple[str, str]]] = [
     ("sk-ant-api", ("ANTHROPIC_API_KEY", "Claude API key")),
     ("sk-ant-oat", ("CLAUDE_CODE_OAUTH_TOKEN", "Claude OAuth token")),
     ("sk-", ("OPENAI_API_KEY", "OpenAI / Codex API key")),
+    ("ABSK", ("AWS_BEARER_TOKEN_BEDROCK", "Amazon Bedrock API key (long-term)")),
 ]
 
 

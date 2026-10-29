@@ -2054,9 +2054,17 @@ def _capture_keyless() -> None:
         ("Claude", config.claude_keyless(), keyless.CLAUDE_KEYLESS),
         ("Codex", config.codex_keyless(), keyless.CODEX_KEYLESS),
     )
+    profile = config.claude_bedrock().get("profile", "")
+    if config.claude_keyless() == "bedrock" and profile:
+        _err(
+            f"✓ keyless Claude (Bedrock): short-term keys minted from AWS profile {profile!r} on "
+            "your computer (never in the box)."
+        )
     for provider, mode, taxonomy in agents:
         if not mode or mode == "chatgpt":  # chatgpt handled above (auth.json, not host.env)
             continue
+        if provider == "Claude" and mode == "bedrock" and profile:
+            continue  # nothing to paste: the minter asks the AWS CLI
         spec = taxonomy.get(mode)
         if not spec:  # a mode with no host.env var (shouldn't happen for the api-key shapes)
             _err(f"⚠ {provider} keyless = {mode!r} isn't supported yet — no credential captured.")

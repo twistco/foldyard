@@ -1003,7 +1003,51 @@ tui = { raw_output_mode = false }
     as the bearer; `"api-key"` (or `true`) injects `x-api-key` on `api.anthropic.com`. Default:
     off — a normal login, real credentials in the box's `~/.claude`, kept across recreation and
     `fy nuke`. Without `keyless` there's no switch, and the login and API hosts join the
-    `recommend` offer instead.
+    `recommend` offer instead. `"bedrock"` is for Amazon Bedrock, below.
+  - **`[claude.bedrock]`** *(experimental)* — run Claude Code on Amazon Bedrock instead of
+    Anthropic's API. The table sets `CLAUDE_CODE_USE_BEDROCK=1` and `AWS_REGION` in the box (a
+    change needs `fy box down && fy box up`). The credential is chosen separately:
+
+    ```toml
+    [claude]
+    keyless = "bedrock"     # the proxy injects a Bedrock API key; the box holds a dummy
+
+    [claude.bedrock]
+    region = "eu-west-2"    # required: where Claude Code calls, and where the key is injected
+    profile = "my-sso"      # optional: mint short-term keys from this AWS profile on your computer
+    ```
+
+    - **`keyless = "bedrock"`** — the box gets a dummy `AWS_BEARER_TOKEN_BEDROCK`, and with
+      `fy mode claude=on` the proxy writes `Authorization: Bearer <key>` on the region's two
+      Bedrock hosts (`bedrock-runtime.<region>.amazonaws.com` for model calls,
+      `bedrock.<region>.amazonaws.com` for the inference-profile lookups Claude Code makes at
+      startup). Where the key comes from:
+      - **with `profile`** — a short-term key, minted on your computer from that profile with
+        the AWS CLI v2 (`aws configure export-credentials`, so SSO, `aws login`, roles and
+        static profiles all work). It carries the profile's permissions and lapses with its
+        session: each key is signed for an hour and re-minted before that or the session ends.
+        When the session lapses, `fy mode` shows the switch degraded with the fix
+        (`aws sso login --profile …`). Nothing goes in `host.env`.
+      - **without `profile`** — a long-term key (`ABSK…`) from `host.env`, pasted once like
+        the Anthropic ones. AWS recommends these for exploration only, and each works in the
+        region it was made in.
+
+      Either way the identity needs `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream`,
+      `bedrock:ListInferenceProfiles`, `bedrock:GetInferenceProfile` and
+      `bedrock:CallWithBearerToken` (an organisation policy that denies the last one rules
+      bearer keys out). In the box, `fy verify` checks that the variable is still the dummy and
+      that no `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` is set.
+    - **no `keyless`** — the box resolves AWS credentials itself, like a bare `[claude]` logging
+      in: run `/setup-bedrock` in the box. The two Bedrock hosts join the `recommend` offer (an
+      SSO login in the box reaches more than these). A later AWS metadata emulator would give
+      the box short-lived role credentials here instead
+      ([ADR-0035](./adrs/0035-claude-on-bedrock-provider-apart-from-credential.md)).
+
+    Pin the models, since an unpinned session runs on Opus: `[box].env` takes Claude Code's own
+    variables, with the region's inference-profile prefix — in a US region, e.g.
+    `ANTHROPIC_DEFAULT_SONNET_MODEL = "us.anthropic.claude-sonnet-4-6"`. On
+    Bedrock, Claude Code has no WebSearch, and its WebFetch domain check still calls
+    `api.anthropic.com` (`skipWebFetchPreflight` in `[claude.settings]` turns it off).
   - **`system_prompt`** — text `fy claude` passes via `--append-system-prompt`. `init` seeds a
     generic one. Default: `""`.
   - **`[claude.settings]`** — a settings table `fy claude` passes as JSON to `--settings`; Claude

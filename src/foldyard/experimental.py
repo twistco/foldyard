@@ -114,6 +114,23 @@ REGISTER: tuple[Feature, ...] = (
         ),
         doc_mark="- **`attribution`** *(experimental)*",
     ),
+    Feature(
+        key="claude.keyless",
+        value="bedrock",
+        reader="claude_keyless",
+        kinds=(UNPROVEN,),
+        unproven=(
+            "built to Claude Code's and AWS's documented behaviour (the short-term key matches "
+            "AWS's own generator byte for byte), but no session has run against a real Bedrock "
+            "account through it yet"
+        ),
+        graduates_when=(
+            "a maintainer has used Claude Code on Bedrock through it, with both a long-term key "
+            "and an SSO profile, for two weeks with nothing filed against it in that time still "
+            "open"
+        ),
+        doc_mark="- **`[claude.bedrock]`** *(experimental)*",
+    ),
 )
 
 

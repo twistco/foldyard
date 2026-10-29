@@ -217,6 +217,8 @@ _CLAUDE = [
     '# # keyless = "api-key"  # x-api-key on api.anthropic.com ← from console.anthropic.com',
     "# # (on your own, keyless is fine here; on a team, put it in foldyard.local.toml — which",
     "# #  subscription you pay for is personal, and a shared one prompts every colleague)",
+    '# # keyless = "bedrock"  # Amazon Bedrock instead (experimental) — needs a [claude.bedrock]',
+    "# #                      # table naming its region: `fy docs configuration`",
     *_AGENT_PROMPT,
 ]
 

@@ -191,6 +191,11 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   `zoneinfo/`, else `/etc/timezone`) and time locale (`LC_TIME`), each pattern-checked, which
   `fy box up` passes to the BOX only (`box._clock_env`; the stack stays on UTC). Host facts, not
   repo config; `[box].env` overrides either.
+- `awsauth.py` — AWS auth on your computer, apart from any one service: a profile's credentials
+  through the AWS CLI v2 (`aws configure export-credentials` — a fixed command; config names only
+  the profile) and stdlib SigV4 query presigning, pinned by a known-answer test against AWS's own
+  token generator. Today only the Bedrock short-term key minter uses it; it is the host half an AWS
+  metadata emulator (the gcp one's twin) would reuse ([ADR-0035](./docs/adrs/0035-claude-on-bedrock-provider-apart-from-credential.md)).
 - `hostgit.py` — your computer's git `user.name` / `user.email`, from the GLOBAL config only
   (run from `/`, never the box-writable checkout's), which the box bootstrap writes into the box's
   own global config where it has none (`box._git_identity_step`) — the layer the box's fresh HOME
@@ -253,7 +258,8 @@ asking for no `permissions` — the installation's are the scope — + the kind'
 `gh-cli` → `gh_cli_token.py` (`gh auth token`, emergency-only); minters are packaged because the
 mint path runs host-side beside the credentials —
 [ADR-0023](./docs/adrs/0023-no-host-executed-code-from-the-repo-mount.md). There is no github
-plugin: a `[plugins.github]` table is refused at launch with its replacement rows. `claude.py`,
+plugin: a `[plugins.github]` table is refused at launch with its replacement rows. `claude.py` +
+`bedrock_token.py` (`keyless = "bedrock"`'s short-term key minter, ADR-0035),
 `codex.py` + `codex_chatgpt_token.py`, `vscode.py`, and the Tangible-bound declared pair
 `auth0_sim.py` + `llm.py` (both slated for DELETION, not migration — see
 [ADR-0024](./docs/adrs/0024-declarative-consumer-axes-no-repo-path-plugins.md): they turned out to

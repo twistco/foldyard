@@ -2719,6 +2719,114 @@ def test_claude_keyless_oauth_rule_carries_bearer_prefix(monkeypatch):
     assert not any("ANTHROPIC_API_KEY" in a for a in args)  # not the api-key var
 
 
+_BEDROCK_HOSTS = ["bedrock-runtime.eu-west-2.amazonaws.com", "bedrock.eu-west-2.amazonaws.com"]
+
+
+def _bedrock(monkeypatch, keyless_kind="bedrock", profile=""):
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    monkeypatch.setattr(config, "claude_keyless", lambda: keyless_kind)
+    monkeypatch.setattr(
+        config, "claude_bedrock", lambda: {"region": "eu-west-2", "profile": profile}
+    )
+    return claude.ClaudePlugin()
+
+
+def test_claude_bedrock_keyless_injects_the_bearer_on_both_hosts(monkeypatch):
+    # Claude Code on Bedrock calls the runtime for the model and the control plane for its
+    # inference-profile lookups, both with the one key; without a profile it's host.env's.
+    p = _bedrock(monkeypatch)
+    assert p.proxy_rules({"claude": "off"}) == []
+    rules = p.proxy_rules({"claude": "on"})
+    assert [r.host for r in rules] == _BEDROCK_HOSTS
+    for rule in rules:
+        assert rule.header == "authorization" and rule.value_prefix == "Bearer "
+        assert "foldyard.plugins.static_token" in rule.minter
+        assert rule.env == ("AWS_BEARER_TOKEN_BEDROCK",)
+        assert rule.dummies == ("Bearer bedrock-api-key-fy-dummy",)
+    (secret,) = p.secrets({"claude": "on"})
+    assert secret.var == "AWS_BEARER_TOKEN_BEDROCK" and secret.pattern == "ABSK*"
+    assert p.capability_probes({"claude": "on"}) == []  # nothing to probe in a pasted key
+
+
+def test_claude_bedrock_with_a_profile_mints_short_term_keys(monkeypatch):
+    p = _bedrock(monkeypatch, profile="my-sso")
+    for rule in p.proxy_rules({"claude": "on"}):
+        assert "foldyard.plugins.bedrock_token" in rule.minter
+        assert "--region eu-west-2 --profile my-sso" in rule.minter
+        assert rule.env == ("AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE")  # never a secret
+    assert p.secrets({"claude": "on"}) == []  # the AWS CLI holds it, not host.env
+    (probe,) = p.capability_probes({"claude": "on"})
+    assert probe.switch == "claude" and probe.name == "claude-bedrock-profile"
+    assert p.capability_probes({"claude": "off"}) == []
+
+
+def test_claude_bedrock_at_rest_is_answered_on_both_hosts(monkeypatch):
+    p = _bedrock(monkeypatch)
+    assert p.held_credentials({"claude": "on"}) == []
+    held = p.held_credentials({"claude": "off"})
+    assert [h.host for h in held] == _BEDROCK_HOSTS
+    for h in held:
+        assert (h.header, h.dummy) == ("authorization", "Bearer bedrock-api-key-fy-dummy")
+        assert "`fy mode claude=on`" in json.loads(h.body)["message"]
+
+
+def test_claude_bedrock_is_the_provider_whatever_the_credential(monkeypatch):
+    # The table alone points Claude at Bedrock; the dummy rides keyless and the proxy substrate.
+    p = _bedrock(monkeypatch)
+    args = p.box_args({**_BOX_ENV, "FY_PROXY": "1"})
+    assert "CLAUDE_CODE_USE_BEDROCK=1" in args and "AWS_REGION=eu-west-2" in args
+    assert "AWS_BEARER_TOKEN_BEDROCK=bedrock-api-key-fy-dummy" in args
+    assert [h["host"] for h in p.egress_recommend()] == ["claude.ai", "downloads.claude.ai"]
+
+    bare = _bedrock(monkeypatch, keyless_kind="")
+    args = bare.box_args({**_BOX_ENV, "FY_PROXY": "1"})
+    assert "CLAUDE_CODE_USE_BEDROCK=1" in args
+    assert not any("AWS_BEARER_TOKEN_BEDROCK" in a for a in args)  # its own AWS login wins
+    offered = [h["host"] for h in bare.egress_recommend()]
+    assert _BEDROCK_HOSTS[0] in offered and _BEDROCK_HOSTS[1] in offered
+    assert "api.anthropic.com" not in offered
+    assert bare.switches() == [] and bare.proxy_rules({"claude": "on"}) == []
+
+
+def test_claude_on_anthropic_gets_no_bedrock_env(monkeypatch):
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
+    monkeypatch.setattr(config, "claude_bedrock", lambda: {})
+    args = claude.ClaudePlugin().box_args({**_BOX_ENV, "FY_PROXY": "1"})
+    assert not any("BEDROCK" in a or "AWS_REGION" in a for a in args)
+
+
+@pytest.mark.parametrize(
+    ("env", "failing"),
+    [
+        ({}, []),
+        ({"AWS_BEARER_TOKEN_BEDROCK": "bedrock-api-key-fy-dummy"}, []),
+        ({"AWS_BEARER_TOKEN_BEDROCK": "ABSKreal"}, ["AWS_BEARER_TOKEN_BEDROCK"]),
+        ({"AWS_SECRET_ACCESS_KEY": "s", "AWS_SESSION_TOKEN": "t"}, ["AWS_SECRET", "AWS_SESSION"]),
+    ],
+)
+def test_verify_holds_a_keyless_bedrock_box_to_its_dummy(monkeypatch, env, failing):
+    p = _bedrock(monkeypatch)
+    for name in ("AWS_BEARER_TOKEN_BEDROCK", *claude._AWS_KEY_ENV):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    ctx = VerifyContext(in_box=True, env={}, which=lambda _: True)
+    rows = list(p.verify_checks(ctx))
+    assert len(rows) == 4
+    fails = [msg for status, msg in rows if status == "fail"]
+    assert len(fails) == len(failing) and all(any(f in m for m in fails) for f in failing)
+    assert list(p.verify_checks(VerifyContext(in_box=False, env={}, which=lambda _: True))) == []
+
+
+def test_claude_bedrock_rules_reach_the_proxy_without_overlap(monkeypatch):
+    p = _bedrock(monkeypatch)
+    reg = Registry([p, proxy.ProxyPlugin()])
+    assert reg.inject_overlaps({"claude": "on"}) == [] and reg.mode_issues({"claude": "on"}) == []
+    live = reg.desired_daemons({"claude": "on"})["egress-proxy"]["live"]["data"]
+    assert sorted(r["host"] for r in live["rules"]) == sorted(_BEDROCK_HOSTS)
+
+
 def test_claude_keyless_oauth_value_prefix_reaches_the_daemon(monkeypatch):
     # End-to-end through the registry: the oauth rule's value_prefix reaches the egress-proxy
     # daemon's rule, so egress_proxy.py prepends "Bearer " to the minted token.

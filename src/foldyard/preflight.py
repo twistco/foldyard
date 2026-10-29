@@ -71,7 +71,7 @@ def issues() -> list[str]:
     # 3. An unrecognised keyless value normalises to "" — keyless SILENTLY off, a real footgun. Flag
     #    the raw value so a typo (`keyless = "oath"`) fails loudly instead of shipping a login box.
     for table, normalised, allowed in (
-        ("claude", config.claude_keyless(), "api-key | oauth | true"),
+        ("claude", config.claude_keyless(), "api-key | oauth | bedrock | true"),
         ("codex", config.codex_keyless(), "api-key | chatgpt | true"),
     ):
         raw = config._table(table).get("keyless")
@@ -80,6 +80,13 @@ def issues() -> list[str]:
                 f"✗ [{table}].keyless = {raw!r} isn't recognised — keyless would be OFF.\n"
                 f"    Use one of: {allowed} (or remove the line)."
             )
+
+    # 3a. `[claude.bedrock]` names a region that becomes a hostname and the box's AWS_REGION, and
+    #     a keyless credential for one provider can't serve another: refuse rather than half-wire.
+    for problem in config.claude_bedrock_problems():
+        out.append(
+            f"✗ {problem}.\n    Fix it in foldyard.toml (`fy docs configuration`, [claude])."
+        )
 
     # 3b. `[plugins.github]` was REMOVED (ADR-0031) — a clean break, as `[[inject]] minter` was
     #     (ADR-0023): nothing loads the table, so letting the launch through would leave the box's

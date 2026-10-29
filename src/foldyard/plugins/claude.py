@@ -26,6 +26,14 @@ the proxy then overwrites. The real key/token never enters the box. Two modes: `
 ``CLAUDE_CODE_OAUTH_TOKEN``, via the rule's ``value_prefix``). It rides the shared proxy's
 multi-injector rule set, so it can be ``on`` alongside github / other injectors.
 
+AMAZON BEDROCK (``[claude.bedrock]``, experimental) — the PROVIDER, separate from the credential.
+The table points Claude Code at Bedrock (``CLAUDE_CODE_USE_BEDROCK`` + ``AWS_REGION`` in the box).
+With ``keyless = "bedrock"`` the credential is a Bedrock API key the proxy writes as the bearer on
+the region's two Bedrock hosts: a long-term key from host.env, or — with ``profile`` — short-term
+keys minted from your AWS login (:mod:`~foldyard.plugins.bedrock_token`). Without ``keyless`` the
+box resolves AWS credentials itself, which is where an AWS metadata emulator would plug in
+(docs/adrs/0035-claude-on-bedrock-provider-apart-from-credential.md).
+
 The volume TARGETS are resolved from the image's HOME (``FY_BOX_HOME``/``FY_CLAUDE_HOME`` that
 ``box._up`` injects into the box env before calling ``box_args`` — Claude resolves ``~`` against
 that HOME, ``/home/vscode`` even as root). Stdlib only; loads on the recipe hot path.
@@ -35,12 +43,73 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import shlex
+import sys
+from collections.abc import Iterator
+from dataclasses import replace
+from datetime import UTC, datetime
 
 from .. import boxmounts, config, keyless
 from ..keyless import CLAUDE_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CLAUDE_KEYLESS_HOST as _KEYLESS_HOST
-from . import HeldCredential, InjectRule, Plugin, Secret, Switch
+from . import CapabilityProbe, HeldCredential, InjectRule, Plugin, Secret, Switch, VerifyContext
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
+
+# What the short-term minter's `aws` may read beyond the base env: where the operator keeps ~/.aws.
+_AWS_FILES_ENV = ("AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE")
+# AWS's own credential variables: under keyless Bedrock the box needs none of them, so any value is
+# a credential that reached the box some other way.
+_AWS_KEY_ENV = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")
+
+
+def _bedrock() -> tuple[str, str]:
+    """``(region, profile)`` from ``[claude.bedrock]``; ``("", "")`` without the table."""
+    bedrock = config.claude_bedrock()
+    return bedrock.get("region", ""), bedrock.get("profile", "")
+
+
+def _bedrock_source(profile: str) -> str:
+    if profile:
+        return f"short-term keys from AWS profile {profile!r}"
+    return f"long-term key from host.env (${_KEYLESS['bedrock']['env']})"
+
+
+def _bedrock_rules() -> list[InjectRule]:
+    """One rule per Bedrock host of the region, all writing the same bearer."""
+    region, profile = _bedrock()
+    if not region:
+        return []
+    label = f"Claude on Bedrock, keyless ({region}: {_bedrock_source(profile)})"
+    rules = []
+    for host in keyless.bedrock_hosts(region):
+        spec = keyless.inject_spec(_KEYLESS, host, "bedrock", label)
+        rule = _spec_to_rule(spec) if spec else None
+        if rule is None:
+            continue
+        if profile:
+            minter = [sys.executable, "-m", "foldyard.plugins.bedrock_token"]
+            minter += ["--region", region, "--profile", profile]
+            rule = replace(rule, minter=shlex.join(minter), env=_AWS_FILES_ENV)
+        rules.append(rule)
+    return rules
+
+
+def _profile_check(profile: str) -> tuple[bool, str]:
+    """The short-term minter's precondition: the profile still gives credentials worth a key."""
+    from .. import awsauth  # lazy: off the hot path
+    from . import bedrock_token
+
+    now = datetime.now(UTC)
+    try:
+        creds = awsauth.profile_credentials(profile)
+        bedrock_token.ttl(creds, now)
+    except awsauth.CredentialError as e:
+        return False, str(e)
+    left = creds.remaining(now)
+    lasts = "long-lived keys" if left is None else f"its session has {int(left // 60)} min left"
+    return True, f"AWS profile {profile!r} gives credentials ({lasts})"
+
 
 # Remove a stale npm/global Claude so the native installer's ~/.local/bin copy wins on PATH (an
 # npm install pins the stale prefix). Then link the newest cached native version, or install it.
@@ -77,14 +146,16 @@ class ClaudePlugin(Plugin):
         # Only when keyless is configured: a github-shaped on/off injector axis. Off (the
         # zero-secret default) → the box holds only a dummy key and can't reach Claude; on → the
         # proxy injects the real key/token host-side. Maps to the shared "egress-proxy" daemon.
-        if not config.claude_keyless():
+        kind = config.claude_keyless()
+        if not kind:
             return []
+        where = "Bedrock" if kind == "bedrock" else "Anthropic"
         return [
             Switch(
                 name="claude",
                 levels=("off", "on"),
                 blurb={
-                    "off": "no Claude credential reaches Anthropic (box holds only a dummy)",
+                    "off": f"no Claude credential reaches {where} (box holds only a dummy)",
                     "on": "keyless Claude: proxy injects your key/token host-side (none in box)",
                 },
                 daemon="egress-proxy",
@@ -99,19 +170,27 @@ class ClaudePlugin(Plugin):
         kind = config.claude_keyless()
         if not kind or mode.get("claude", "off") == "off":
             return []
+        if kind == "bedrock":
+            return _bedrock_rules()
         spec = keyless.inject_spec(_KEYLESS, _KEYLESS_HOST, kind, f"Claude keyless proxy ({kind})")
         rule = _spec_to_rule(spec) if spec else None
         return [rule] if rule else []
 
     def held_credentials(self, mode: dict) -> list[HeldCredential]:
         # At rest the box still sends its dummy (box_args bakes it whenever keyless is configured);
-        # the proxy answers it in Anthropic's error shape, which Claude Code prints as the reason.
-        held = keyless.held_dummy(_KEYLESS, config.claude_keyless() or "")
+        # the proxy answers it in the provider's error shape, which Claude Code prints as the cause.
+        kind = config.claude_keyless() or ""
+        held = keyless.held_dummy(_KEYLESS, kind)
         if held is None or mode.get("claude", "off") != "off":
             return []
         message = keyless.at_rest_message("Claude", "claude")
-        body = {"type": "error", "error": {"type": "authentication_error", "message": message}}
         header, dummy = held
+        if kind == "bedrock":
+            region, _ = _bedrock()
+            body = json.dumps({"message": message})  # AWS's JSON error shape
+            hosts = keyless.bedrock_hosts(region) if region else ()
+            return [HeldCredential(host, header, dummy, "claude", body) for host in hosts]
+        body = {"type": "error", "error": {"type": "authentication_error", "message": message}}
         return [HeldCredential(_KEYLESS_HOST, header, dummy, "claude", json.dumps(body))]
 
     def secrets(self, mode: dict) -> list[Secret]:
@@ -121,6 +200,8 @@ class ClaudePlugin(Plugin):
         spec = _KEYLESS.get(kind)
         if not spec or mode.get("claude", "off") == "off":
             return []
+        if kind == "bedrock" and _bedrock()[1]:
+            return []  # minted from the AWS profile: nothing to keep in host.env
         return [
             Secret(
                 var=spec["env"],
@@ -129,6 +210,41 @@ class ClaudePlugin(Plugin):
                 pattern=spec["prefix"] + "*",
             )
         ]
+
+    def capability_probes(self, mode: dict) -> list[CapabilityProbe]:
+        # A lapsed SSO session otherwise shows only as Claude's own errors in the box, while
+        # `fy mode` says claude=on: the probe puts the fix (log in again) on the switch.
+        _, profile = _bedrock()
+        if config.claude_keyless() != "bedrock" or not profile or mode.get("claude") == "off":
+            return []
+        return [
+            CapabilityProbe(
+                switch="claude",
+                name="claude-bedrock-profile",
+                check=lambda: _profile_check(profile),
+                interval=300.0,
+            )
+        ]
+
+    def verify_checks(self, ctx: VerifyContext) -> Iterator[tuple[str, str]]:
+        # Keyless Bedrock only: the box holds the dummy key and no AWS keys of any kind.
+        if not ctx.in_box or config.claude_keyless() != "bedrock":
+            return
+        spec = _KEYLESS["bedrock"]
+        value = os.environ.get(spec["env"], "")
+        if value in ("", spec["dummy"]):
+            state = "the dummy" if value else "unset"
+            yield (
+                "pass",
+                f"claude: {spec['env']} is {state} (the real key stays on your computer)",
+            )
+        else:
+            yield ("fail", f"claude: {spec['env']} isn't the dummy — possible real key in the box")
+        for name in _AWS_KEY_ENV:
+            if os.environ.get(name):
+                yield ("fail", f"claude: {name} is set — AWS credentials in a keyless Bedrock box")
+            else:
+                yield ("pass", f"claude: {name} unset (no AWS credentials in the box)")
 
     def derive_env(self, mode: dict) -> dict[str, str]:
         # A claude-owned marker so the box's DUMMY key is baked ONLY when the injector is active —
@@ -172,6 +288,10 @@ class ClaudePlugin(Plugin):
         # logs in for real and a dummy would take precedence over the token it obtains.
         if env.get("FY_PROXY") and config.claude_keyless():
             args += keyless.dummy_box_args(_KEYLESS, config.claude_keyless())
+        # Bedrock is the provider whatever the credential, so it rides the table, not keyless.
+        region, _ = _bedrock()
+        if region:
+            args += ["-e", "CLAUDE_CODE_USE_BEDROCK=1", "-e", f"AWS_REGION={region}"]
         return args
 
     def egress_recommend(self) -> list[dict]:
@@ -186,7 +306,16 @@ class ClaudePlugin(Plugin):
             {"host": "claude.ai", "why": "Claude Code installer (install.sh)"},
             {"host": "downloads.claude.ai", "why": "Claude Code release binaries + updates"},
         ]
-        if not config.claude_keyless():
+        if config.claude_keyless():
+            return hosts
+        region, _ = _bedrock()
+        if region:
+            runtime, control = keyless.bedrock_hosts(region)
+            hosts += [
+                {"host": runtime, "why": "Claude Code on Bedrock (model calls)"},
+                {"host": control, "why": "Claude Code on Bedrock (inference-profile lookups)"},
+            ]
+        else:
             hosts += [
                 {"host": "api.anthropic.com", "why": "Claude Code API (manual in-box login)"},
                 {"host": "console.anthropic.com", "why": "Claude Code login (Console account)"},

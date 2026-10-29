@@ -186,6 +186,15 @@ def test_recognised_keyless_value_does_not_block(monkeypatch):
     assert not any("isn't recognised" in p for p in preflight.issues())
 
 
+def test_bedrock_keyless_needs_its_region(monkeypatch):
+    # keyless = "bedrock" with nowhere to inject would boot a box whose Claude can reach nothing.
+    claude: dict[str, object] = {"keyless": "bedrock"}
+    _wire(monkeypatch, claude_keyless="bedrock", tables={"claude": claude})
+    assert any("[claude.bedrock]" in p and "region" in p for p in preflight.issues())
+    claude["bedrock"] = {"region": "eu-west-2"}
+    assert preflight.issues() == []
+
+
 def test_nested_project_inside_another_git_repo_blocks(monkeypatch, tmp_path):
     # A foldyard.toml INSIDE a bigger repo (running an example in-place from the foldyard
     # checkout) would bind the ENCLOSING repo as the checkout — abort with the copy-out recipe.
