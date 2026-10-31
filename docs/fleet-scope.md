@@ -38,9 +38,12 @@ Four capabilities, each with a different direction of trust:
   `--resume <uuid>` keeps that uuid. Codex has no such flag, so its id is foldyard's own.
 - **Observation is the transcripts, read by a viewer.** foldyard serves no page.
   [claude-code-log](https://github.com/daaain/claude-code-log) escapes rendered HTML
-  (`escape=True`, Jinja autoescape), binds to loopback and checks `Host`. Pointed at the archive
-  the supervisor's no-follow sync writes (`transcript_sync_seconds`), it is the browser view. It
-  must never read the from-box directly: both its conversion and its file server follow links.
+  (`escape=True`, Jinja autoescape). Its static output (`claude-code-log`, kept current by
+  `claude-code-log watch`), opened as files over the archive the supervisor's no-follow sync
+  writes (`transcript_sync_seconds`), is the browser view. Not `serve`: it binds loopback and
+  checks `Host`, but an unwalled box reaches your loopback through the VM's gateway, and would read
+  the whole archive, your own sessions from other projects included. It must never read the
+  from-box directly: both its conversion and its file server follow links.
 - **No listener anywhere.** The host reaches boxes over `podman exec` on the VM's socket, as
   every other host verb does.
 - **Aggregation by the host's own record.** The project list is the adopted main checkouts

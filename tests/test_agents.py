@@ -514,6 +514,11 @@ def test_a_package_planted_in_a_checkout_never_runs(tmp_path, monkeypatch):
     (planted / "__main__.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
     agents._list_checkout(tmp_path)
     assert not marker.exists()
+    # The control: the same child WITHOUT -I does run the planted code, so the assertion above is
+    # one the test can fail (the review's positive control on #156).
+    argv = agents._self("--version")
+    subprocess.run([a for a in argv if a != "-I"], cwd=tmp_path, capture_output=True, timeout=60)
+    assert marker.exists()
 
 
 def test_a_handle_starting_with_a_dash_reaches_attach_after_the_separator(monkeypatch):

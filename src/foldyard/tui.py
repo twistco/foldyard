@@ -872,9 +872,18 @@ class DevModeTui(App):
         if not ws["devbox"]:
             self._start_devbox(ws)
             return
-        from . import agents
 
-        live = agents.live_in_workspace(ws["project"])
+        def work() -> None:
+            # Off the UI thread: the lookup is a `podman exec` into the box (up to its timeout).
+            from . import agents
+
+            live = agents.live_in_workspace(ws["project"])
+            self.call_from_thread(self._confirm_stop_devbox, ws, live)
+
+        self.run_worker(work, thread=True, exclusive=True, group="devbox-confirm")
+
+    def _confirm_stop_devbox(self, ws: dict, live: list) -> None:
+        """The stop-box confirmation, naming the agent sessions still running in it."""
         named = (
             f"\n\n[b]{len(live)} agent session(s) still running[/b] (`fy agent ls`): "
             + ", ".join(escape(s.name) for s in live)

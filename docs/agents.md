@@ -22,8 +22,11 @@ fy agent clean --older-than 7d       # remove sessions that exited over a week a
 
 `fy agent start` prints the session's **id**. For Claude it's Claude's own session id: foldyard
 passes it as `--session-id`, so it's the id the transcript is named after, and the one a
-transcript browser shows you. `fy agent attach` and `fy agent stop` take that id, its first 8 or
-more characters, or the session's name.
+transcript browser shows you. `--resume <id>` keeps that id. The exception is when Claude picks
+the session itself, with `--continue`, a bare `--resume` or `--fork-session`: the id is then
+foldyard's own, and the transcript's id won't attach to it (`fy agent ls` shows foldyard's).
+`fy agent attach` and `fy agent stop` take the id, its first 8 or more characters, or the
+session's name.
 
 Detach with **Ctrl-B d**. The agent keeps running.
 
@@ -58,8 +61,10 @@ age.
   turns tmux's extended keys on for this, and your terminal has to send them too.
 - **A second attach doesn't shrink the first.** The window follows whichever terminal used it
   last.
-- **Pasting images doesn't work in the box**, with or without tmux: Claude reads an image from the
-  clipboard or a file path, and the box has neither your clipboard nor your files.
+- **Pasting an image doesn't work in the box**, with or without tmux: Claude reads a pasted image
+  from the clipboard, and the box doesn't have yours. A file works: save the image inside the
+  checkout (the box sees it at the same path; a gitignored folder keeps it out of commits) and
+  give Claude its path.
 
 ## Two settings that cut down what reaches your terminal
 
@@ -99,21 +104,32 @@ Then `fy box up`. `fy agent start` says so if it's missing.
 
 `fy agent` has no web interface of its own. To read what your agents are doing in a browser, use a
 transcript viewer such as [claude-code-log](https://github.com/daaain/claude-code-log) over the
-archive the supervisor keeps on your computer:
+archive the supervisor keeps on your computer. First have the supervisor keep that archive
+current:
 
 ```toml
 [claude]
 transcript_sync_seconds = 10   # copy the box's transcripts to ~/.claude/projects every 10 s
 ```
 
+Then `fy config adopt`: your computer runs the config you adopted, not the file as edited. Then
+turn the archive into pages and open them as files:
+
 ```bash
-claude-code-log serve --watch --open-browser
+claude-code-log --open-browser   # writes HTML beside the transcripts, opens index.html
+claude-code-log watch            # keeps the pages current as transcripts arrive
 ```
 
-Point it at the archive (`~/.claude/projects`, its default), never at the box's transcripts
-directly. The box writes those, and a link it plants there could point a viewer at any file on
-your computer; the archive is copied without following links. The session ids it shows are the
-ones `fy agent attach` takes.
+**Use the files, not `claude-code-log serve`.** A server on your computer's loopback is reachable
+from the box unless the VM firewall is on (`[machine] firewall = true`): the VM's network hands
+its gateway to your computer's loopback, and a `Host` check doesn't stop a box that sends the
+right one. `serve` would show it the whole archive, including your own Claude sessions from every
+other project. Files opened in your browser have no listener for the box to reach.
+
+Point the viewer at the archive (`~/.claude/projects`, its default), never at the box's
+transcripts directly. The box writes those, and a link it plants there could point a viewer at
+any file on your computer; the archive is copied without following links. The session ids it
+shows are the ones `fy agent attach` takes.
 
 ## Why it's built this way
 
