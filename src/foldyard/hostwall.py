@@ -90,7 +90,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config
+from . import config, selfspawn
 
 PROC = Path("/proc")
 # The top byte of every foldyard ct mark — a namespace, so the per-project value below can
@@ -533,11 +533,11 @@ def probe_argv(slice_name: str, targets: dict[str, tuple[str, int]]) -> list[str
         "--slice",
         slice_name,
         "--",
-        sys.executable,
-        "-m",
-        "foldyard.hostwall",
-        "--probe",
-        *(f"{name}={host}:{port}" for name, (host, port) in targets.items()),
+        *selfspawn.python_m(
+            "foldyard.hostwall",
+            "--probe",
+            *(f"{name}={host}:{port}" for name, (host, port) in targets.items()),
+        ),
     ]
 
 

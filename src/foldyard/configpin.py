@@ -935,7 +935,9 @@ def _rerun_with_adopted_config(verb: str, rerun: bool) -> None:
     print(f"▶ {verb}: continuing with the adopted config…", file=sys.stderr, flush=True)
     sys.stdout.flush()
     os.environ[RERUN_ENV] = "1"
-    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+    # -P: a re-run of a `python -m foldyard …` (from a checkout) must not pick up a planted
+    # `foldyard/` there either (selfspawn); for a console-script run it changes nothing.
+    os.execv(sys.executable, [sys.executable, "-P", *sys.orig_argv[1:]])
 
 
 def gate(verb: str) -> str:

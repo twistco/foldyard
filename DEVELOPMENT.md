@@ -211,6 +211,14 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   podman connection per VM, which Podman Desktop lists side by side; where Podman Desktop is
   installed, `machine.ensure` keeps it current and pins the ssh port — `FOLDYARD_PODMAN_DESKTOP`
   `0`/`1` overrides the detection).
+- `selfspawn.py` — how foldyard runs its own modules as a child: `python -P -m <module>`
+  (`python_m`), never plain `-m`, which puts the WORKING DIRECTORY first on `sys.path` — and those
+  children run in a box-writable checkout (the supervisor keeps `fy up`'s directory, the proxy's
+  minters keep the supervisor's). `-P`, not `-I`: a `PYTHONPATH=src` source-tree run must keep
+  working. A child run in ANOTHER directory than its parent (`confighash`, in the main checkout)
+  takes `selfspawn.env()`: a relative `PYTHONPATH` entry is resolved against the child's directory,
+  so it is pinned where the parent resolved it. `tests/test_selfspawn.py` plants a `foldyard/` and
+  runs the real child, and fails on any new `sys.executable, "-m"` argv in the package.
 - `docs.py` — `fy docs [topic]`: the manual served from THIS install (the consumer subset is
   force-included into the wheel; see pyproject). Version-matched by construction, works with no
   egress — the reason an agent should never clone the project to read about it.
@@ -743,7 +751,11 @@ minutes, and the `e2e` job is the single status to check.
   `dev_vm_dir()` — that is host code execution for anything that can write the checkout, which is
   what [ADR-0023](./docs/adrs/0023-no-host-executed-code-from-the-repo-mount.md) closed. A new
   mechanism = a new kind, or an
-  entry-point plugin. Consumer scripts run in a CONTAINER, never on the host —
+  entry-point plugin. foldyard's OWN children are part of this: run them through
+  `selfspawn.python_m` (`python -P -m`), never `[sys.executable, "-m", …]` — their working directory
+  is usually a checkout, and plain `-m` imports a `foldyard/` the box planted there first; one run
+  in ANOTHER directory takes `selfspawn.env()`, which pins relative `PYTHONPATH` entries.
+  Consumer scripts run in a CONTAINER, never on the host —
   `[project].worktree_init` via `worktree._init_in_yard` (skips with a retry hint when the yard
   isn't ready, never falls back). So does `fy worktree add`'s CHECKOUT (`worktree._checkout_in_yard`:
   a host checkout runs the filter drivers the shared `.git/config` names): the host runs only

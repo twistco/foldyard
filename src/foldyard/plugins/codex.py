@@ -41,9 +41,8 @@ from __future__ import annotations
 import base64
 import json
 import shlex
-import sys
 
-from .. import boxmounts, config, keyless
+from .. import boxmounts, config, keyless, selfspawn
 from ..keyless import CODEX_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CODEX_KEYLESS_HOST as _KEYLESS_HOST
 from . import HeldCredential, InjectRule, Plugin, Secret, Switch
@@ -105,9 +104,7 @@ class CodexPlugin(Plugin):
             return []
         if kind == "chatgpt":
             auth = str(keyless.codex_auth_json_path())
-            minter = shlex.join(
-                [sys.executable, "-m", "foldyard.plugins.codex_chatgpt_token", auth]
-            )
+            minter = shlex.join(selfspawn.python_m("foldyard.plugins.codex_chatgpt_token", auth))
             # One rule per path, one minter: it serialises its refresh under a lock.
             return [
                 InjectRule(
