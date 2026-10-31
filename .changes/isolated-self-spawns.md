@@ -11,4 +11,6 @@ bump: patch
   `fy box up` that `fy worktree add` starts, the launch gate's re-run, the host-firewall probe, and
   the credential minters the proxy runs, which a planted package would have run beside the
   credential they were handed. All of them now run as `python -P -m`, which leaves the working
-  directory off the import path and changes nothing else.
+  directory off the import path and changes nothing else. The config-hash check, which runs in
+  the main checkout rather than where you ran `fy up`, also resolves a relative `PYTHONPATH` entry
+  where you ran it, not inside the checkout.

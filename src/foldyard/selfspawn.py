@@ -10,14 +10,36 @@ beside the credential it was handed. ``-P`` (Python 3.11+, the floor) leaves the
 off ``sys.path`` and changes nothing else: ``PYTHONPATH`` and the user site still apply, so a
 source-tree run (``PYTHONPATH=src``) keeps working, which ``-I`` would break.
 
+``PYTHONPATH`` is the operator's, but a RELATIVE entry (``src``, or an empty one, which means the
+working directory) is resolved against the CHILD's working directory. Where that differs from the
+parent's (``confighash`` runs in the main checkout), the entry silently moves into the checkout. A
+child that runs elsewhere takes its environment from :func:`env`, which pins each entry where the
+parent resolved it.
+
 Stdlib-only and import-free: the plugins and the hot path use it.
 """
 
 from __future__ import annotations
 
+import os
 import sys
+from collections.abc import Mapping
 
 
 def python_m(module: str, *args: str) -> list[str]:
     """``[this interpreter, -P, -m, module, *args]``: the argv that runs ``module`` as a child."""
     return [sys.executable, "-P", "-m", module, *args]
+
+
+def env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """``base`` (default: this process's environment) for a child run in ANOTHER directory: each
+    ``PYTHONPATH`` entry made absolute against THIS process's working directory, so the child
+    imports from where this process would, never from wherever the child happens to run."""
+    out = dict(os.environ if base is None else base)
+    raw = out.get("PYTHONPATH")
+    if raw:
+        cwd = os.getcwd()
+        out["PYTHONPATH"] = os.pathsep.join(
+            p if os.path.isabs(p) else os.path.join(cwd, p) for p in raw.split(os.pathsep)
+        )
+    return out
