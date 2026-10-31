@@ -931,12 +931,13 @@ async def test_a_superseded_stop_lookup_never_opens_a_second_dialog(monkeypatch)
 
     from foldyard import agents
 
-    release = threading.Event()
+    started, release = threading.Event(), threading.Event()
     calls: list[int] = []
 
     def lookup(project):
         calls.append(1)
         if len(calls) == 1:
+            started.set()
             release.wait(10)  # the first lookup is slow
         return []
 
@@ -950,7 +951,13 @@ async def test_a_superseded_stop_lookup_never_opens_a_second_dialog(monkeypatch)
         lv.index = 1
         await pilot.pause()
         await pilot.press("d")
-        await pilot.pause()
+        for _ in range(
+            100
+        ):  # the first lookup must be RUNNING before the second press supersedes it
+            if started.is_set():
+                break
+            await pilot.pause(0.02)
+        assert started.is_set()
         await pilot.press("d")  # supersedes the first, which is still blocked
         for _ in range(50):
             if isinstance(app.screen, tui.ConfirmScreen):

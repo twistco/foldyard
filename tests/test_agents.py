@@ -512,8 +512,11 @@ def test_a_package_planted_in_a_checkout_never_runs(tmp_path, monkeypatch):
     marker = tmp_path / "planted-code-ran"
     (planted / "__init__.py").write_text("")
     (planted / "__main__.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
-    agents._list_checkout(tmp_path)
+    listing = agents._list_checkout(tmp_path)
     assert not marker.exists()
+    # …and the child got as far as the INSTALLED foldyard: its own refusal (no project here) is
+    # what came back, so the absence above isn't a child that never started.
+    assert "needs a foldyard project" in listing.unavailable
     # The control: the same child WITHOUT -I does run the planted code, so the assertion above is
     # one the test can fail (the review's positive control on #156).
     argv = agents._self("--version")

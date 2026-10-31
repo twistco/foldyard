@@ -882,9 +882,16 @@ class DevModeTui(App):
 
             from . import agents
 
+            worker = get_current_worker()
             live = agents.live_in_workspace(ws["project"])
-            if not get_current_worker().is_cancelled:
-                self.call_from_thread(self._confirm_stop_devbox, ws, live)
+
+            def show() -> None:
+                # Checked HERE, on the UI thread, where a newer `d` is handled: a check on the
+                # worker thread could pass just before that press cancelled this worker.
+                if not worker.is_cancelled:
+                    self._confirm_stop_devbox(ws, live)
+
+            self.call_from_thread(show)
 
         self.run_worker(work, thread=True, exclusive=True, group="devbox-confirm")
 
