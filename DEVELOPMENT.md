@@ -205,7 +205,7 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   (2026-10-26). Pins win and are never handed out; the box gets every offset baked in
   (`FY_WORKTREE_OFFSETS`). Should two daemons still want one port (a pin, `WT_OFFSET`), the
   supervisor runs one and blocks the other (`supervisor._port_sharers`) — never reaps its own.
-- `agents.py` — `fy agent start|ls|attach|stop` (docs/agents.md): `fy claude`/`fy codex` in a
+- `agents.py` — `fy agent start|ls|attach|stop|clean` (docs/agents.md): `fy claude`/`fy codex` in a
   detached tmux session in the box, on foldyard's own server (`tmux -L fy -f /dev/null`, its
   options set by argv on every start — `allow-passthrough off` and `set-clipboard external` keep an
   agent's ordinary output off your terminal and clipboard, so tmux < 3.3 is refused; a DEFAULT,
