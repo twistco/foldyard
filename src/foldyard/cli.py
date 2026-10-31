@@ -68,6 +68,11 @@ _PROJECT_FREE = (
     ("init",),
     ("machine", "base"),
     ("skill", "list"),
+    # Every local project's agents, from anywhere on your computer (`fy agent start` needs one).
+    ("agent", "ls"),
+    ("agent", "attach"),
+    ("agent", "stop"),
+    ("agent", "clean"),
 )
 
 _NOT_A_PROJECT = (
@@ -164,7 +169,7 @@ def _resolve_worktree(
 # it in their own UI/log), and the launch verbs, whose gate asks or refuses on its own.
 _NO_UNADOPTED_NOTICE = frozenset(
     {"config", "docs", "changelog", "init", "prereq", "doctor", "tui", "host", "up", "code"}
-    | {"claude", "codex"}
+    | {"claude", "codex", "agent"}
 )
 
 
@@ -861,6 +866,86 @@ def machine_delete(
     machine_rm(yes=yes)  # single source of the exit logic; keep the hidden alias thin
 
 
+agent_app = typer.Typer(
+    rich_markup_mode="markdown",
+    name="agent",
+    help="agents in tmux sessions in the dev box: start, list, attach, stop (`fy docs agents`)",
+    no_args_is_help=True,
+)
+app.add_typer(agent_app)
+
+
+@agent_app.command(
+    "start",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def agent_start(
+    ctx: typer.Context,
+    agent: str = typer.Argument("claude", help="claude or codex"),
+    name: str = typer.Option("", "--name", "-n", help="the session's name (default: <agent>-<id>)"),
+    attach: bool = typer.Option(False, "--attach", "-a", help="attach to it once started"),
+) -> None:
+    """Start `fy claude` (or `fy codex`) in a detached tmux session in this checkout's box, so it
+    keeps running with no terminal attached. Args after `--` pass to the agent
+    (`fy agent start claude -- --model opus`). Prints the session id `fy agent attach` takes —
+    for Claude, its own session id."""
+    from . import agents
+
+    raise typer.Exit(agents.start(agent, name, list(ctx.args), attach_after=attach))
+
+
+@agent_app.command("ls")
+def agent_ls(
+    here: bool = typer.Option(False, "--here", help="only this project's boxes"),
+    as_json: bool = typer.Option(False, "--json", help="print JSON instead of a table"),
+) -> None:
+    """List agent sessions: on your computer every local project's (each project you adopted a
+    config for, whose VM is running — none is started), in a box that box's own."""
+    from . import agents
+
+    raise typer.Exit(agents.ls(here=here, as_json=as_json))
+
+
+@agent_app.command("attach")
+def agent_attach(
+    session: str = typer.Argument(..., help="a session id (or its first 8+ characters) or name"),
+    here: bool = typer.Option(False, "--here", help="only look in this project"),
+) -> None:
+    """Attach this terminal to an agent's session, from anywhere on your computer. Ctrl-B d
+    detaches and leaves the agent running."""
+    from . import agents
+
+    raise typer.Exit(agents.attach(session, here=here))
+
+
+@agent_app.command("clean")
+def agent_clean(
+    older_than: str = typer.Option(
+        "1d",
+        "--older-than",
+        help="remove sessions that exited longer ago than this (30m, 12h, 7d, 2w)",
+    ),
+    here: bool = typer.Option(False, "--here", help="only this project's boxes"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="list what would be removed"),
+) -> None:
+    """Remove EXITED agent sessions older than `--older-than` (default 1d), across every local
+    project (in a box, that box's). A running agent is never removed, whatever its age."""
+    from . import agents
+
+    raise typer.Exit(agents.clean(older_than, here=here, dry_run=dry_run))
+
+
+@agent_app.command("stop")
+def agent_stop(
+    session: str = typer.Argument(..., help="a session id (or its first 8+ characters) or name"),
+    here: bool = typer.Option(False, "--here", help="only look in this project"),
+) -> None:
+    """Stop an agent's session (the agent with it) and remove it from `fy agent ls`."""
+    from . import agents
+
+    raise typer.Exit(agents.stop(session, here=here))
+
+
 box_app = typer.Typer(
     rich_markup_mode="markdown",
     name="box",
@@ -919,11 +1004,16 @@ def box_exec(ctx: typer.Context) -> None:
 
 
 @box_app.command("down")
-def box_down() -> None:
-    """Stop + remove the dev box (login/CLI volumes kept)."""
+def box_down(
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="don't ask before stopping agents still running in the box"
+    ),
+) -> None:
+    """Stop + remove the dev box (login/CLI volumes kept). Agents still running in it
+    (`fy agent ls`) are named first, and on a terminal it asks before stopping them."""
     from . import box
 
-    raise typer.Exit(box.main("down"))
+    raise typer.Exit(box.main("down", ["--yes"] if yes else []))
 
 
 @box_app.command("ps")

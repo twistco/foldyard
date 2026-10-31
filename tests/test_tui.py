@@ -864,6 +864,8 @@ async def test_devbox_stop_asks_for_confirmation_then_runs(monkeypatch):
         lv.index = 1
         await pilot.pause()
         await pilot.press("d")
+        await app.workers.wait_for_complete()  # the live-agent lookup runs on a worker
+        await pilot.pause()
         assert isinstance(app.screen, tui.ConfirmScreen)
         await pilot.press("y")  # confirm → `fy box down` runs on a worker thread
         await app.workers.wait_for_complete()
@@ -887,12 +889,129 @@ async def test_devbox_stop_cancel_does_nothing_and_never_hits_the_mode_handler(m
         lv.index = 1
         await pilot.pause()
         await pilot.press("d")
+        await app.workers.wait_for_complete()  # the live-agent lookup runs on a worker
+        await pilot.pause()
         assert isinstance(app.screen, tui.ConfirmScreen)
         await pilot.click("#cf-no")  # the Cancel Button, not the n/esc binding
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert not isinstance(app.screen, tui.ConfirmScreen)
         assert downs == [] and mode_sets == []
+
+
+async def test_devbox_stop_names_the_live_agents_it_would_kill(monkeypatch):
+    # The lookup (a `podman exec` into the box) runs on a worker, then the dialog names them.
+    from foldyard import agents
+
+    asked: list[str] = []
+    live = [agents.Session("claude-3f2c9a1e", "", "claude", "", "", 0, True, None)]
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces_feat_box_up)
+    monkeypatch.setattr(agents, "live_in_workspace", lambda project: asked.append(project) or live)
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.focus()
+        lv.index = 1
+        await pilot.pause()
+        await pilot.press("d")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert isinstance(app.screen, tui.ConfirmScreen)
+        body = str(app.screen.query_one("#cf-body", tui.Static).render())
+        assert "1 agent session(s) still running" in body and "claude-3f2c9a1e" in body
+        assert asked == [_two_workspaces_feat_box_up()[1]["project"]]
+        await pilot.press("escape")
+
+
+async def test_a_superseded_stop_lookup_never_opens_a_second_dialog(monkeypatch):
+    # `d` twice while the first lookup is still in its `podman exec`: the first worker is only
+    # marked cancelled (a thread can't be interrupted), and must not stack its dialog too.
+    import threading
+
+    from foldyard import agents
+
+    started, release = threading.Event(), threading.Event()
+    calls: list[int] = []
+
+    def lookup(project):
+        calls.append(1)
+        if len(calls) == 1:
+            started.set()
+            release.wait(10)  # the first lookup is slow
+        return []
+
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces_feat_box_up)
+    monkeypatch.setattr(agents, "live_in_workspace", lookup)
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.focus()
+        lv.index = 1
+        await pilot.pause()
+        await pilot.press("d")
+        for _ in range(
+            100
+        ):  # the first lookup must be RUNNING before the second press supersedes it
+            if started.is_set():
+                break
+            await pilot.pause(0.02)
+        assert started.is_set()
+        await pilot.press("d")  # supersedes the first, which is still blocked
+        for _ in range(50):
+            if isinstance(app.screen, tui.ConfirmScreen):
+                break
+            await pilot.pause(0.05)
+        release.set()  # now the stale lookup finishes
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        dialogs = [s for s in app.screen_stack if isinstance(s, tui.ConfirmScreen)]
+        assert len(calls) == 2 and len(dialogs) == 1
+        await pilot.press("escape")
+
+
+async def test_a_start_supersedes_a_stop_lookup_still_in_flight(monkeypatch):
+    # `d` on a running box (its lookup still in its `podman exec`), then `d` on a STOPPED one: that
+    # start must not get the first box's stop question popping up over it once the lookup returns.
+    import threading
+
+    from foldyard import agents
+
+    started, release = threading.Event(), threading.Event()
+
+    def lookup(project):
+        started.set()
+        release.wait(10)
+        return []
+
+    ups: list[str] = []
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces_feat_box_up)
+    monkeypatch.setattr(tui.configpin, "inspect", lambda cfg: _CleanDrift())  # adopted: no modal
+    monkeypatch.setattr(devmode, "box_up", lambda name: ups.append(name) or (0, ""))
+    monkeypatch.setattr(agents, "live_in_workspace", lookup)
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.focus()
+        lv.index = 1  # feat: box up
+        await pilot.pause()
+        await pilot.press("d")
+        for _ in range(100):
+            if started.is_set():
+                break
+            await pilot.pause(0.02)
+        assert started.is_set()
+        lv.index = 0  # main: no box
+        await pilot.pause()
+        await pilot.press("d")  # the start path
+        await pilot.pause()
+        release.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert not any(isinstance(s, tui.ConfirmScreen) for s in app.screen_stack)
+        assert ups == ["main"], ups  # …and the start it superseded the lookup for did happen
 
 
 async def test_machine_stop_asks_for_confirmation(monkeypatch):

@@ -107,6 +107,32 @@ def _pin_root() -> Path:
     return base / "adopted"
 
 
+def adopted_checkouts() -> list[Path]:
+    """Every MAIN checkout this computer has adopted a config for — the nearest thing the host
+    has to a list of its projects (`fy agent ls` asks each). Read from the markers adoption writes
+    under :func:`_pin_root` (host state, never the mount), so nothing in a checkout can add one;
+    a checkout that no longer holds a ``foldyard.toml`` is left out. Worktrees' markers are
+    skipped: each project lists its own worktrees from its registry."""
+    try:
+        pins = sorted(_pin_root().iterdir())
+    except OSError:
+        return []
+    found: set[Path] = set()
+    for pin in pins:
+        try:
+            doc = json.loads((pin / ADOPTED_MARKER).read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict) or doc.get("worktree"):
+            continue
+        checkout = doc.get("checkout")
+        if isinstance(checkout, str) and checkout:
+            path = Path(checkout)
+            if path.is_dir() and (path / "foldyard.toml").is_file():
+                found.add(path)
+    return sorted(found)
+
+
 def pin_dir(cfg: config.Config) -> Path:
     """Where ``cfg``'s adopted copy lives — keyed by the CHECKOUT PATH (see :func:`_pin_root`),
     which the box cannot change, rather than by anything the config declares. Per checkout, so a

@@ -31,9 +31,11 @@ FROM debian:trixie-slim
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 # podman = the engine client for the mounted socket (CONTAINER_HOST is injected at box-up);
-# ca-certificates so git/uv/curl verify TLS; curl for the static-binary bootstrap steps.
+# ca-certificates so git/uv/curl verify TLS; curl for the static-binary bootstrap steps; tmux
+# for `fy agent` (an agent in a session that outlives its terminal — not part of the image
+# contract, so a consumer's own image adds it with `[box].packages`).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git podman ca-certificates curl \
+ && apt-get install -y --no-install-recommends git podman ca-certificates curl tmux \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
