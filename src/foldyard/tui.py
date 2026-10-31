@@ -1302,6 +1302,8 @@ class DevModeTui(App):
             # below rebinds `host` — never reached after this return, but one refactor away from
             # the picker granting a different row than it named.
             _kind, sel_host = sel
+            if self._typed_only(sel_host):
+                return
             self.push_screen(
                 AllowHostScreen(sel_host), lambda level: self._after_allow(sel_host, level)
             )
@@ -1315,7 +1317,21 @@ class DevModeTui(App):
                 severity="warning",
             )
             return
+        if self._typed_only(host):
+            return
         self.push_screen(AllowHostScreen(host), lambda level: self._after_allow(host, level))
+
+    def _typed_only(self, host: str) -> bool:
+        """A local address (allowlist.local_key) is never granted from a keypress: it opens a
+        service on your computer or its network to the box, so it takes the typed command."""
+        if not allowlist.local_key(host):
+            return False
+        self.notify(
+            f"{host} is on your computer or its network — grant it by typing "
+            f"`fy allow add {host}` if you mean to",
+            severity="warning",
+        )
+        return True
 
     def _after_allow(self, host: str, level: str | None) -> None:
         if not level:

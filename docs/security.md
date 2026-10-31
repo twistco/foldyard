@@ -228,6 +228,12 @@ the box only the VM-boundary checks run. What it checks:
 - **Firewall probes** (Lima with `[machine] firewall = true`): direct connections from the box
   that ignore the proxy — to a public IP on port 443 *and* on 53, the DNS-tunnel case — must be
   refused. A reachable proxy is checked first, so a box that is simply offline doesn't pass.
+- **Your computer's loopback** (on your computer, Lima with `[machine] firewall = true`): verify
+  opens a throwaway service on your loopback, and a probe container tries to reach it directly at
+  the address Lima gives the VM *and* through the proxy, which runs on your computer. The service
+  must see no connection. The probe's request to the proxy's own liveness address is the positive
+  control, so a container with no way out doesn't pass
+  ([networking](./networking.md#services-on-your-computer)).
 
 ### When a check fails
 
@@ -287,6 +293,14 @@ Each row names *what* failed. What it usually means, and what to do:
   - `direct egress … CONNECTED` — the firewall isn't enforcing in the VM. It is installed at
     boot, so run `fy machine stop`, then `fy up`, which also checks the VM's own firewall report
     and refuses on a mismatch, printing where the boot log is.
+- **Loopback rows:**
+  - `a container REACHED a service on your computer's loopback` — either the VM firewall isn't
+    enforcing (the row above, from inside the box, says which) or the proxy dialled your loopback
+    for it. `fy allow list` shows the grants: one naming `127.0.0.1` with this port can't exist for
+    a port verify picked just now, so suspect the foldyard install the supervisor runs
+    (`fy host restart` after an upgrade).
+  - `the probe couldn't reach the proxy through the gateway either` — no way out at all, so the
+    refusal proves nothing: `fy host` shows whether the supervisor runs.
 - **Health `WARN`s** are advisory (`fy logs <service>`) and never change the result.
 
 #### Editor-attach credential bridges

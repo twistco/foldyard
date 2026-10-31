@@ -85,13 +85,16 @@ def rig(tmp_path):
     httpd = _upstream(uport, cert, key)
     live = tmp_path / "proxy-live.json"
     _write_live(live)
+    # The upstream is on loopback: dialled only on a grant naming it (see test_proxy_e2e).
+    allow = tmp_path / "allow-effective.json"
+    allow.write_text(json.dumps({"allow": [f"{HOST}:{uport}"]}))
     confdir, mitm_log = tmp_path / "mitm", tmp_path / "mitmdump.log"
     proc = subprocess.Popen(
         ["mitmdump", "-s", str(ADDON), "--listen-host", HOST, "--listen-port", str(pport),
          "--set", f"confdir={confdir}", "--set", "ssl_insecure=true",
          "--set", "stream_large_bodies=1m", "--set", "termlog_verbosity=info"],
         env={**os.environ, "PYTHONUNBUFFERED": "1", "LIVE_FILE": str(live),
-             "PROXY_LOG_FILE": str(tmp_path / "e.jsonl")},
+             "ALLOW_FILE": str(allow), "PROXY_LOG_FILE": str(tmp_path / "e.jsonl")},
         stdout=mitm_log.open("w"), stderr=subprocess.STDOUT,
     )  # fmt: skip
 

@@ -37,6 +37,15 @@ The injector host (api.github.com) is ALWAYS decrypted, whatever CAPTURE_MODE is
 read + rewrite its Authorization header. Plain HTTP is always logged in full (it's cleartext, so
 there's nothing to passthrough).
 
+LOCAL ADDRESSES are refused in every mode, observing included. This proxy runs on your computer,
+so whatever it dials is dialled FROM there: a name or address that leads to loopback, your network
+(the private ranges, a tailnet's CGNAT range, IPv6 unique-local) or link-local reaches services
+that were never offered to the box — a dev server on localhost, a router, a cloud's metadata
+endpoint. Such a dial goes out only on a grant naming that exact address (``fy allow add
+127.0.0.1:8123``), never on a wildcard or the name it was asked by. Names are judged by the answer
+mitmproxy connects to, not a lookup of ours, so DNS rebinding can't split the two (see
+``Injector.server_connect``).
+
 Config via env (read once at startup). foldyard's supervisor sets LIVE_FILE, which moves the
 rules, the wall switch and the passthrough list out of the env and makes them live:
   LIVE_FILE         a JSON file {"rules": [<rule>, ...], "default_deny": bool, "passthrough":
@@ -128,6 +137,7 @@ metadata, so nothing minter-specific lives in this proxy's environment.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -216,11 +226,15 @@ class _DropRefusedDial(logging.Filter):
     Matched on the refusal's own text, so a real connection failure is never swallowed."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return _DIAL_REFUSED not in record.getMessage()
+        message = record.getMessage()
+        return _DIAL_REFUSED not in message and _LOCAL_REFUSED not in message
 
 
 # The error `server_connect` sets on a dial it refuses — and so what _DropRefusedDial matches.
 _DIAL_REFUSED = "refused by the foldyard allowlist (no grant covers this host)"
+# The start of the error a dial to a LOCAL address gets (`Injector._refuse_local`), whichever way
+# it was refused — the box's client is shown the rest: the address, and the grant that allows it.
+_LOCAL_REFUSED = "refused by the foldyard proxy: a local address"
 
 logging.getLogger("mitmproxy.proxy.server").addFilter(_DropRefusedDial())
 
@@ -388,6 +402,31 @@ _MISMATCH_BODY = (
 def _norm_host(host: str | None) -> str | None:
     """Hostnames compare case-insensitively and without a trailing root dot."""
     return host.lower().rstrip(".") if host else host
+
+
+def _address(text: object) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """``text`` as an IP address (a bracketed or zone-scoped v6 one too), or None for a name."""
+    try:
+        return ipaddress.ip_address(str(text).strip("[]").split("%", 1)[0])
+    except ValueError:
+        return None
+
+
+def _is_local(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Is ``ip`` somewhere other than the public internet — the proxy's own computer (loopback),
+    its network (the private ranges, CGNAT's — a tailnet's — and IPv6's unique-local), link-local
+    (a cloud's metadata service at 169.254.169.254), or nowhere routable at all? The proxy runs ON
+    your computer, so a dial to any of these reaches a service there, or beside it, that was never
+    offered to the box. A v6 address that carries a v4 one (mapped, 6to4, Teredo) is judged by
+    what it carries as well."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return _is_local(ip.ipv4_mapped)
+        if (ip.sixtofour is not None and _is_local(ip.sixtofour)) or (
+            ip.teredo is not None and _is_local(ip.teredo[1])
+        ):
+            return True
+    return not ip.is_global or ip.is_multicast
 
 
 def _destination(request) -> str | None:
@@ -1022,6 +1061,8 @@ class Injector:
         # Client connections that presented a live build secret on a cleartext request the wall
         # let through on a build-scoped grant — so `server_connect` lets that dial out too.
         self._build_requesters: set[str] = set()
+        # The resolver `_guard_resolver` put on the event loop (at the first dial), to vet names.
+        self._guard = None
         self._policy_dirty = False
         # The attributing forwarder's stamp (LIVE_FILE's `origin`; see _verify_origin). Off — no
         # key file named — nothing is read, stripped or recorded: today's behaviour exactly.
@@ -1714,7 +1755,8 @@ class Injector:
         tunnel through, whichever hook judged it — the union of the CONNECT policy, the
         cleartext one (a bare grant on :80), and, for a build, its build-scoped grants — so this
         never refuses what the hooks allow, and never allows a host nothing grants. With the
-        wall observing, anything."""
+        wall observing, anything — by name; where it LEADS is judged apart, in every mode (a
+        local address: ``server_connect``)."""
         if not self.default_deny:
             return True
         if self._allowed_connect(host, port) or (port == _HTTP_PORT and self._granted(host)):
@@ -1730,7 +1772,14 @@ class Injector:
         whichever layer asked for it. Inside a tunnel the proxy answered (``http_connect``) a dial
         is expected — the ClientHello asks for one — and refused quietly: the connection's row is
         the refused request's, or its CONNECT's when it ends without one. Anywhere else a hook
-        should have refused first, so the dial is logged as a refusal of its own."""
+        should have refused first, so the dial is logged as a refusal of its own.
+
+        A dial the grants allow is then judged by where it LEADS, observing or enforcing alike: a
+        local address (:func:`_is_local` — your computer, its network) only on a grant naming that
+        address (:meth:`_local_granted`). An address is judged here; a name where it resolves, by
+        the guard this installs (:meth:`_guard_resolver`) — the answer mitmproxy then connects to,
+        so a name that resolves somewhere public for a check and to loopback for the dial can't
+        slip between the two."""
         self.refresh()
         address = getattr(data.server, "address", None)
         if not address:
@@ -1739,6 +1788,15 @@ class Injector:
         client_id = getattr(getattr(data, "client", None), "id", None)
         build = client_id in self._build_clients or client_id in self._build_requesters
         if self._dial_ok(host, port, build):
+            ip = _address(host)
+            if ip is None:
+                if not self._guard_resolver():
+                    data.server.error = (
+                        f"{_LOCAL_REFUSED} can't be told apart from a public one here: this "
+                        "proxy can't vet name resolution, so it dials no name"
+                    )
+            elif _is_local(ip) and not self._local_granted(ip, port, build):
+                data.server.error = self._refuse_local(host, ip, port, client_id)
             return
         data.server.error = _DIAL_REFUSED
         if client_id in self._answered:
@@ -1746,6 +1804,101 @@ class Injector:
         key = host if port == _HTTPS_PORT else f"{host}:{port}"
         self._log_blocked(key, client_id=client_id)
         ctx.log.info(f"egress_proxy: refused a connection to {key} (not granted)")
+
+    def _local_granted(
+        self, ip: ipaddress.IPv4Address | ipaddress.IPv6Address, port: int, build: bool
+    ) -> bool:
+        """Is there a grant for exactly this local address? Only one that NAMES it — never a
+        wildcard, never the name it was reached by, never an injector's exemption: the operator
+        wrote ``fy allow add 127.0.0.1:8123`` meaning that service and nothing else. The port rule
+        is every grant's — a bare address covers :443 and cleartext :80, ``address:port`` that
+        port — and a build-scoped grant counts for a build. An IPv6 address can't be granted (a
+        grant can't spell one), so it is always refused."""
+        self._refresh_allow()
+        bare = str(ip)
+        keys = {bare if port == _HTTPS_PORT else f"{bare}:{port}"}
+        if port == _HTTP_PORT:
+            keys.add(bare)
+        patterns = self._allow_patterns + (self._build_patterns if build else [])
+        return any(key in patterns for key in keys)
+
+    def _refuse_local(
+        self,
+        name: str | None,
+        ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+        port: int,
+        client_id: str | None,
+    ) -> str:
+        """Log the refusal of a dial to a local address and return the error the box is shown.
+        The row's host is the grant that would allow it (what was REACHED, not the name asked
+        for), marked ``local`` so no one-click or batch path offers it (allowlist.local_key):
+        that grant is typed on purpose or not at all."""
+        key = str(ip) if port == _HTTPS_PORT else f"{ip}:{port}"
+        entry = self._blocked_entry(key)
+        assert entry is not None  # key is never empty
+        entry["local"] = True
+        if name and name != str(ip):
+            entry["name"] = name
+        self._write_entry(entry, client_id)
+        target = f"{name} ({ip})" if name and name != str(ip) else str(ip)
+        how = (
+            "only an IPv4 address can be granted"
+            if ip.version == 6
+            else f"to let the box reach exactly it, on your computer: `fy allow add {key}`"
+        )
+        ctx.log.info(f"egress_proxy: refused a connection to {target}:{port} (a local address)")
+        return f"{_LOCAL_REFUSED} — {target} is on your computer or its network; {how}"
+
+    def _guard_resolver(self) -> bool:
+        """Make the running event loop vet every name it resolves (:meth:`_vet`) — what mitmproxy
+        dials an upstream NAME through (``asyncio.open_connection`` → ``loop.getaddrinfo``; an
+        address skips it, which is why ``server_connect`` judges those itself). Vetting the very
+        answer it connects to is what makes the check hold: a name resolving to a public address
+        for a lookup of ours and to loopback for mitmproxy's (DNS rebinding: TTL 0 and a second
+        answer — there are public services that hand out exactly that) never reaches the second.
+        Installed at the first dial, and again at any dial that finds it no longer the loop's
+        resolver (it is ours to keep in place, not to assume). Its cost: anything else this process
+        resolves on the loop is vetted too, so the proxy listens on an ADDRESS (``--listen-host
+        127.0.0.1``, which never resolves). False where the loop won't take it (none here does):
+        the caller then dials no name at all rather than one it can't judge."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return True  # no event loop (the unit tests drive the hooks directly): nothing dials
+        resolve = loop.getaddrinfo
+        if resolve is self._guard:
+            return True
+
+        async def getaddrinfo(host, port, *args, **kwargs):
+            return self._vet(host, port, await resolve(host, port, *args, **kwargs))
+
+        try:
+            # An instance attribute shadows the method base_events calls as self.getaddrinfo.
+            setattr(loop, "getaddrinfo", getaddrinfo)  # noqa: B010 — assigning a method is a type error
+        except (AttributeError, TypeError) as e:
+            ctx.log.warn(f"egress_proxy: can't vet name resolution on this event loop ({e!r})")
+            return False
+        self._guard = getaddrinfo
+        return True
+
+    def _vet(self, host: object, port: object, infos: list) -> list:
+        """A resolution without the local addresses the grants don't name — what the dial may then
+        try, since it tries only what this returns — or, when that leaves nothing, the OSError
+        mitmproxy reports as the dial's error. So a name with a public and a local answer reaches
+        only the public one, and ``localhost`` on a granted ``127.0.0.1`` skips its ``::1``.
+        Runtime grants only — a lookup can't tell whose it is — so a build reaches a local
+        service by its address."""
+        number = int(port) if str(port).isdigit() else 0
+        kept, refused = [], None
+        for info in infos:
+            ip = _address(info[4][0])
+            if ip is not None and _is_local(ip) and not self._local_granted(ip, number, False):
+                refused = refused or ip
+            else:
+                kept.append(info)
+        if not kept and refused is not None:
+            raise OSError(self._refuse_local(_norm_host(str(host)), refused, number, None))
+        return kept
 
     def _trusted_build(self, request) -> bool:
         """Did this request present a LIVE build secret (not just the public marker)?"""
