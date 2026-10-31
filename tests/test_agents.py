@@ -502,11 +502,23 @@ def test_box_calls_never_read_your_terminal(monkeypatch):
     assert seen and seen[0]["stdin"] is subprocess.DEVNULL
 
 
-def test_a_package_planted_in_a_checkout_never_runs(tmp_path, monkeypatch):
+def test_a_package_planted_in_a_checkout_never_runs(monkeypatch):
     # The children run IN a checkout, which the box can write. Plain `python -m` would import a
     # planted `foldyard/` from the working directory before the installed one (the review
     # finding on #156); `-I` drops that entry. This runs the real child (the interpreter is
-    # allowlisted), not a stub.
+    # allowlisted), not a stub. Its directory must be outside every project (pytest's tmp_path
+    # can sit inside this checkout under --basetemp), or the child finds a foldyard.toml above it
+    # and never gives the refusal asserted below.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        tmp_path = Path(d)
+        if any((p / "foldyard.toml").exists() for p in (tmp_path, *tmp_path.parents)):
+            pytest.skip("the system temp dir is inside a foldyard project")
+        _planted_never_runs(tmp_path)
+
+
+def _planted_never_runs(tmp_path: Path) -> None:
     planted = tmp_path / "foldyard"
     planted.mkdir()
     marker = tmp_path / "planted-code-ran"

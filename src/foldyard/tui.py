@@ -869,6 +869,9 @@ class DevModeTui(App):
         """Start the highlighted workspace's dev box, or — after a confirmation, since an agent
         session (`fy claude` / `fy codex`) may be running inside it — stop it. Both directions
         shell out to `fy box up|down` off the UI thread (up warms deps, down is teardown)."""
+        # Any stop-lookup still in flight is superseded by THIS press, whichever way it goes: a
+        # start must not have an earlier box's stop question pop up over it.
+        self.workers.cancel_group(self, "devbox-confirm")
         if not ws["devbox"]:
             self._start_devbox(ws)
             return

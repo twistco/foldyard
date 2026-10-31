@@ -128,9 +128,11 @@ other project. Files opened in your browser have no listener for the box to reac
 
 Point the viewer at the archive (`~/.claude/projects`, its default), never at the box's
 transcripts directly. The box writes those, and a link it plants there could point a viewer at
-any file on your computer; the archive is copied without following links. The session ids it
-shows are the ones `fy agent attach` takes, except for a session Claude picked itself (see
-[the exception above](#start-list-attach-stop)).
+any file on your computer; the archive is copied without following links. For a session started
+with `fy agent start`, the id it shows is the one `fy agent attach` takes, except for a session
+Claude picked itself (see [the exception above](#start-list-attach-stop)). The archive also holds
+sessions started some other way, such as a plain `fy claude`; those have no tmux session to attach
+to.
 
 ## Why it's built this way
 
