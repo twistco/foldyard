@@ -69,11 +69,10 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import sys
 from collections.abc import Iterator
 from dataclasses import replace
 
-from .. import config
+from .. import config, selfspawn
 from . import (
     CapabilityProbe,
     DoctorContext,
@@ -375,7 +374,7 @@ def _spec_to_rule(spec: dict) -> InjectRule | None:
         return None  # no token source declared — nothing to inject
     # Build the static-token minter command from foldyard's OWN interpreter (the supervisor
     # runs the daemon under it), passing only the env var NAME — never the secret.
-    cmd = [sys.executable, "-m", "foldyard.plugins.static_token", str(token_env)]
+    cmd = [*selfspawn.python_m("foldyard.plugins.static_token"), str(token_env)]
     ttl = spec.get("ttl")
     if ttl:
         cmd.append(str(int(ttl)))

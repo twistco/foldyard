@@ -153,7 +153,7 @@ def test_github_app_rule_mints_with_the_identity_on_argv_and_the_pem_by_name(mon
     assert plugin.proxy_rules({"github": "off"}) == []
     (rule,) = plugin.proxy_rules({"github": "on"})
     argv = _argv(rule)
-    assert argv[1:3] == ["-m", "foldyard.plugins.github_app_token"]
+    assert argv[1:4] == ["-P", "-m", "foldyard.plugins.github_app_token"]
     assert argv[argv.index("--app-id") + 1] == "4008762"
     assert argv[argv.index("--installation-id") + 1] == "139125083"
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--repository"] == ["Tangible", "docs"]
@@ -181,7 +181,7 @@ def test_replay_on_401_keeps_its_per_kind_default_and_can_be_turned_off(monkeypa
 
 def test_gh_cli_rule_reads_nothing_from_host_env(monkeypatch):
     (rule,) = _plugin(monkeypatch, [_USER]).proxy_rules({"github-user": "on"})
-    assert _argv(rule)[1:3] == ["-m", "foldyard.plugins.gh_cli_token"]
+    assert _argv(rule)[1:4] == ["-P", "-m", "foldyard.plugins.gh_cli_token"]
     assert rule.env == () and rule.requires == ()  # `gh` holds its own credential
     assert rule.replay_on_401 is True
 

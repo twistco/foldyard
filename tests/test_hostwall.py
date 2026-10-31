@@ -12,6 +12,7 @@ import random
 import re
 import socket
 import subprocess
+import sys
 
 import pytest
 
@@ -348,7 +349,8 @@ def test_probe_argv_runs_this_interpreter_under_the_slice():
     ]
     assert argv[7:] == [
         "--",
-        hostwall.sys.executable,
+        sys.executable,
+        "-P",
         "-m",
         "foldyard.hostwall",
         "--probe",
