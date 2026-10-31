@@ -319,7 +319,7 @@ def test_attach_by_id_from_outside_a_project_hands_over_to_its_project(host):
     calls, a, _ = host
     assert agents.attach(SID, here=False) == 0
     cmd, kw = calls[-1]
-    assert cmd[1:] == ["-I", "-m", "foldyard", "agent", "attach", "--here", SID]
+    assert cmd[1:] == ["-I", "-m", "foldyard", "agent", "attach", "--here", "--", SID]
     assert str(kw["cwd"]) == str(a) and "WORKTREE" not in kw["env"]
 
 
@@ -514,3 +514,13 @@ def test_a_package_planted_in_a_checkout_never_runs(tmp_path, monkeypatch):
     (planted / "__main__.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
     agents._list_checkout(tmp_path)
     assert not marker.exists()
+
+
+def test_a_handle_starting_with_a_dash_reaches_attach_after_the_separator(monkeypatch):
+    # The hand-over passes a box-written name; `--` keeps a leading `-` from parsing as an option.
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    got: list = []
+    monkeypatch.setattr(agents, "attach", lambda t, **k: got.append((t, k)) or 0)
+    result = CliRunner().invoke(cli.app, ["agent", "attach", "--here", "--", "-sneaky"])
+    assert result.exit_code == 0, result.output
+    assert got == [("-sneaky", {"here": True})]

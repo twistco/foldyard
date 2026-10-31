@@ -207,8 +207,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   supervisor runs one and blocks the other (`supervisor._port_sharers`) — never reaps its own.
 - `agents.py` — `fy agent start|ls|attach|stop` (docs/agents.md): `fy claude`/`fy codex` in a
   detached tmux session in the box, on foldyard's own server (`tmux -L fy -f /dev/null`, its
-  options set by argv on every start — `allow-passthrough off` and `set-clipboard external` are
-  posture, so tmux < 3.3 is refused). One UUID per session, passed to Claude as `--session-id`, so
+  options set by argv on every start — `allow-passthrough off` and `set-clipboard external` keep an
+  agent's ordinary output off your terminal and clipboard, so tmux < 3.3 is refused; a DEFAULT,
+  not a boundary: the server and the binary are the box's, which can turn them back on). One UUID per session, passed to Claude as `--session-id`, so
   a transcript viewer's id is the attach handle. The host reaches boxes over `podman exec` only (no
   listener); every field a box's tmux reports is box-written — sanitised, never acted on beyond the
   session named. `ls` with no project fans out to each ADOPTED main checkout

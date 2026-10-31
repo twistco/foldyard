@@ -15,11 +15,14 @@ from anything that names the session. Codex takes no such flag, so its id is fol
 as every other host verb does; no listener is opened anywhere. tmux runs on foldyard's own socket
 (`tmux -L fy`, with `-f /dev/null`), so it never meets a tmux the box's user runs for themselves,
 and foldyard sets its options on every start (:data:`_SERVER_OPTIONS`) rather than reading a
-config file the box could edit. Two of those options are posture, not taste: tmux re-draws the
-screen itself, so with `allow-passthrough off` and `set-clipboard external` an agent can't write
-raw escape sequences through to your terminal, nor set your clipboard (it can today, without
-tmux). tmux older than 3.3 has no `allow-passthrough` — it passes them always — so start refuses
-it.
+config file. Two of those options are a DEFAULT, not a boundary: tmux re-draws the screen
+itself, so with `allow-passthrough off` and `set-clipboard external` an agent's ordinary output
+can't write raw escape sequences through to your terminal or set your clipboard (without tmux it
+can). But the server, its socket and the `tmux` binary are all the box's: anything in the box can
+`tmux -L fy set -g allow-passthrough on`, and a hostile box reaches your terminal on attach exactly
+as it does through `fy box shell`. The same goes for the 3.3 floor (tmux older than 3.3 passes
+escape sequences always), which is checked on a binary the box chose. A boundary would filter the
+byte stream on your computer instead — docs/fleet-scope.md.
 
 **Everything a box reports is box-written.** Session names, ids and timestamps come from a tmux
 server the box controls, and any box can reach a sibling's: they are shown, never acted on beyond
@@ -59,7 +62,8 @@ MIN_TMUX = (3, 3)  # `allow-passthrough` (off by default) arrived in 3.3; before
 # Applied on every start, server-wide, before the session is made. A tmux command list, so one
 # argv carries them all (`;` is tmux's separator, passed as its own argument — no shell).
 _SERVER_OPTIONS: tuple[tuple[str, ...], ...] = (
-    # Posture: no raw escape sequences through to your terminal, no clipboard writes from the box.
+    # A default, not a boundary (see the module docstring): an agent's escape sequences stay off
+    # your terminal and its clipboard writes are ignored — until something in the box turns them on.
     ("set-option", "-g", "allow-passthrough", "off"),
     ("set-option", "-s", "set-clipboard", "external"),
     # Papercuts: Esc interrupts Claude, so no half-second wait on it (tmux < 3.5 defaults to
@@ -648,7 +652,7 @@ def _hand_over(verb: str, found: Session, checkout: str) -> int:
     if not checkout or not Path(checkout).is_dir():
         _err(f"✗ {found.handle} is in {found.project}, whose checkout can't be found.")
         return 1
-    argv = _self("agent", verb, "--here", found.handle)
+    argv = _self("agent", verb, "--here", "--", found.handle)  # a box-made name may start with -
     return subprocess.run(argv, cwd=checkout, env=_child_env()).returncode
 
 
@@ -807,6 +811,6 @@ def _tmux_ok(b: Box) -> bool:
     version = tmux_version(out.stdout)
     if version is not None and version < MIN_TMUX:
         _err(f"✗ the box's tmux is {out.stdout.strip()}; `fy agent` needs 3.3 or newer (older tmux")
-        _err("  passes an agent's raw escape sequences through to your terminal).")
+        _err("  passes an agent's escape sequences through to your terminal by default).")
         return False
     return True

@@ -24,10 +24,14 @@ Four capabilities, each with a different direction of trust:
   someone who chose sessions, and a regression for someone who didn't.
 - **tmux in the box, on foldyard's own server.** The server is `tmux -L fy -f /dev/null`. Its
   options are passed as argv on every start (`agents._SERVER_OPTIONS`), so no file in the box
-  configures them. `allow-passthrough off` and `set-clipboard external` are posture: tmux redraws
-  the screen, so an agent's raw escape sequences don't reach your terminal, and it can't set your
-  clipboard. Today `fy box shell` passes both through unfiltered. tmux < 3.3 is refused because
-  it always passes escape sequences through. The packaged image installs tmux. It isn't added to
+  configures them. `allow-passthrough off` and `set-clipboard external` keep an agent's ordinary
+  output from writing escape sequences to your terminal or setting your clipboard, which
+  `fy box shell` passes through unfiltered. **They are a default, not a boundary:** the server, its
+  socket and the `tmux` binary are the box's, so anything in the box can turn them back on, and a
+  hostile box reaches your terminal on attach as it does through `fy box shell`. tmux < 3.3 is
+  refused because it always passes escape sequences through, but that is checked on a binary the
+  box chose. A real boundary filters the attach's byte stream on your computer (below). The
+  packaged image installs tmux. It isn't added to
   the image contract (ADR-0014): a consumer's own image adds `packages = ["tmux"]`.
 - **One id per session.** foldyard makes a UUID and gives it to Claude as `--session-id`, so the
   transcript's id, the id a viewer shows and the `fy agent attach` handle are the same string.
@@ -53,6 +57,12 @@ Four capabilities, each with a different direction of trust:
   confirmation, passes `--yes`.
 
 ### Left out of v1, knowingly
+
+- **A terminal boundary.** v1's tmux settings are a default the box can undo (above). Making them
+  hold against a hostile box means filtering what reaches your terminal on YOUR side of the
+  attach: drop DCS passthrough and OSC 52 (clipboard) from the stream `podman exec` hands back,
+  before your terminal sees it. The same filter would serve `fy box shell`, and the web view needs
+  the equivalent in the browser.
 
 - **Agent state in `fy agent ls`** (waiting for you, working, idle). The viewer shows it from the
   transcript. `ls` shows only tmux liveness: running, attached, exited. A transcript can't tell a

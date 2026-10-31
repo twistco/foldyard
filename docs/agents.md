@@ -61,18 +61,25 @@ age.
 - **Pasting images doesn't work in the box**, with or without tmux: Claude reads an image from the
   clipboard or a file path, and the box has neither your clipboard nor your files.
 
-## Two settings that are about safety
+## Two settings that cut down what reaches your terminal
 
 foldyard runs its own tmux server in each box (`tmux -L fy`, never the one you might start
-yourself) and sets its options every time it starts a session, instead of reading a config file
-the box could edit. Two of those options are there to keep the box from reaching your terminal:
+yourself) and sets its options every time it starts a session, instead of reading a config file.
+Two of those options limit what an agent's output can do to your terminal:
 
 - **`allow-passthrough off`**. tmux redraws the screen itself, so an agent's raw escape sequences
   don't reach your terminal. Without tmux, everything the box prints goes to your terminal as it
   is.
-- **`set-clipboard external`**. Programs in the box can't set your clipboard.
+- **`set-clipboard external`**. tmux ignores a program's request to set your clipboard.
 
-tmux older than 3.3 passes escape sequences through regardless of the first setting, so
+**These are defaults, not a boundary.** The tmux server and the `tmux` program both run in the
+box, so anything in the box can turn the settings back on. Code that means to attack your terminal
+can reach it when you attach, just as it can through `fy box shell`. What the settings stop is an
+agent's ordinary output doing it: a tool that prints an escape sequence, or a README with a
+clipboard-setting sequence in it, passed through to your terminal while you watch. Use a terminal
+that asks before letting a program set the clipboard.
+
+tmux older than 3.3 passes escape sequences through whatever the first setting says, so
 `fy agent start` refuses it. The rest of the settings are papercuts: no delay after Esc (which
 interrupts Claude), Shift-Enter, the window size and a 50,000-line scrollback.
 
