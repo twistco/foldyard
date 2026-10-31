@@ -450,6 +450,15 @@ def from_json(raw: str) -> ProjectListing | None:
         return None
 
 
+def _self(*args: str) -> list[str]:
+    """This same foldyard, run as a child in another checkout: ``python -I -m foldyard <args>``.
+    ``-I`` is load-bearing. Plain ``-m`` puts the working directory first on ``sys.path``, and the
+    children run IN a checkout, which the box can write: a planted ``foldyard/__main__.py`` (or a
+    stdlib-named ``json.py``) there would run as you, on your computer (ADR-0023). Isolated mode
+    drops that entry, and ignores ``PYTHON*`` variables and the user site too."""
+    return [sys.executable, "-I", "-m", "foldyard", *args]
+
+
 def _child_env() -> dict[str, str]:
     """This process's env for a child run in another checkout: without the worktree this one
     pinned, nor a ``FOLDYARD_REPO`` that would point every child at the same project."""
@@ -461,7 +470,7 @@ def _list_checkout(checkout: Path) -> ProjectListing:
     name = checkout.name
     try:
         out = subprocess.run(
-            [sys.executable, "-m", "foldyard", "agent", "ls", "--here", "--json"],
+            _self("agent", "ls", "--here", "--json"),
             cwd=checkout,
             env=_child_env(),
             capture_output=True,
@@ -639,7 +648,7 @@ def _hand_over(verb: str, found: Session, checkout: str) -> int:
     if not checkout or not Path(checkout).is_dir():
         _err(f"✗ {found.handle} is in {found.project}, whose checkout can't be found.")
         return 1
-    argv = [sys.executable, "-m", "foldyard", "agent", verb, "--here", found.handle]
+    argv = _self("agent", verb, "--here", found.handle)
     return subprocess.run(argv, cwd=checkout, env=_child_env()).returncode
 
 
@@ -713,7 +722,7 @@ def clean(older_than: str, *, here: bool, dry_run: bool) -> int:
     rc = 0
     flags = ["--older-than", older_than, *(["--dry-run"] if dry_run else [])]
     for checkout in _adopted_with_here():
-        argv = [sys.executable, "-m", "foldyard", "agent", "clean", "--here", *flags]
+        argv = _self("agent", "clean", "--here", *flags)
         rc |= subprocess.run(argv, cwd=checkout, env=_child_env()).returncode
     return rc
 

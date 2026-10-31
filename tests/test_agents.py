@@ -295,7 +295,7 @@ def test_ls_on_the_host_asks_every_adopted_project_in_its_own_checkout(host, cap
     assert agents.ls(here=False, as_json=False) == 0
     out = capsys.readouterr().out
     for cmd, kw in calls:
-        assert cmd[1:] == ["-m", "foldyard", "agent", "ls", "--here", "--json"]
+        assert cmd[1:] == ["-I", "-m", "foldyard", "agent", "ls", "--here", "--json"]
         # Neither the parent's worktree pin nor an explicit repo may follow the child elsewhere.
         assert "WORKTREE" not in kw["env"] and "FOLDYARD_REPO" not in kw["env"]
     assert {str(kw["cwd"]) for _, kw in calls} == {str(a), str(b)}
@@ -319,7 +319,7 @@ def test_attach_by_id_from_outside_a_project_hands_over_to_its_project(host):
     calls, a, _ = host
     assert agents.attach(SID, here=False) == 0
     cmd, kw = calls[-1]
-    assert cmd[1:] == ["-m", "foldyard", "agent", "attach", "--here", SID]
+    assert cmd[1:] == ["-I", "-m", "foldyard", "agent", "attach", "--here", SID]
     assert str(kw["cwd"]) == str(a) and "WORKTREE" not in kw["env"]
 
 
@@ -401,7 +401,7 @@ def test_clean_on_the_host_runs_in_each_project(host):
     calls, a, b = host
     assert agents.clean("7d", here=False, dry_run=True) == 1  # b's child failed: said so
     argvs = [(cmd[1:], str(kw["cwd"])) for cmd, kw in calls]
-    want = ["-m", "foldyard", "agent", "clean", "--here", "--older-than", "7d", "--dry-run"]
+    want = ["-I", "-m", "foldyard", "agent", "clean", "--here", "--older-than", "7d", "--dry-run"]
     assert argvs == [(want, str(a)), (want, str(b))]
 
 
@@ -500,3 +500,17 @@ def test_box_calls_never_read_your_terminal(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: seen.append(kw) or _Proc(0, ""))
     agents.sessions_in(agents.Box("p-devbox", "", "podman", {}))
     assert seen and seen[0]["stdin"] is subprocess.DEVNULL
+
+
+def test_a_package_planted_in_a_checkout_never_runs(tmp_path, monkeypatch):
+    # The children run IN a checkout, which the box can write. Plain `python -m` would import a
+    # planted `foldyard/` from the working directory before the installed one (the review
+    # finding on #156); `-I` drops that entry. This runs the real child (the interpreter is
+    # allowlisted), not a stub.
+    planted = tmp_path / "foldyard"
+    planted.mkdir()
+    marker = tmp_path / "planted-code-ran"
+    (planted / "__init__.py").write_text("")
+    (planted / "__main__.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
+    agents._list_checkout(tmp_path)
+    assert not marker.exists()
