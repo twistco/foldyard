@@ -31,7 +31,7 @@ session's name.
 Detach with **Ctrl-B d**. The agent keeps running.
 
 **Where `fy agent ls` looks.** On your computer it lists every project you've adopted a config for
-(with `fy config adopt`, or when `fy up` or `fy box up` asked you to), and in each one the boxes of the main
+(with `fy config adopt`, or when a launch command such as `fy up` asked you to), and in each one the boxes of the main
 checkout and its registered worktrees. A project whose VM isn't running is listed under *Not
 listed* with the reason. foldyard never starts a VM to answer. `--here` lists only the project
 you're in, and `--json` prints the listing as JSON. Inside a box, `fy agent ls` lists that box's
