@@ -295,7 +295,7 @@ def test_ls_on_the_host_asks_every_adopted_project_in_its_own_checkout(host, cap
     assert agents.ls(here=False, as_json=False) == 0
     out = capsys.readouterr().out
     for cmd, kw in calls:
-        assert cmd[1:] == ["-I", "-m", "foldyard", "agent", "ls", "--here", "--json"]
+        assert cmd[1:] == ["-P", "-m", "foldyard", "agent", "ls", "--here", "--json"]
         # Neither the parent's worktree pin nor an explicit repo may follow the child elsewhere.
         assert "WORKTREE" not in kw["env"] and "FOLDYARD_REPO" not in kw["env"]
     assert {str(kw["cwd"]) for _, kw in calls} == {str(a), str(b)}
@@ -319,7 +319,7 @@ def test_attach_by_id_from_outside_a_project_hands_over_to_its_project(host):
     calls, a, _ = host
     assert agents.attach(SID, here=False) == 0
     cmd, kw = calls[-1]
-    assert cmd[1:] == ["-I", "-m", "foldyard", "agent", "attach", "--here", "--", SID]
+    assert cmd[1:] == ["-P", "-m", "foldyard", "agent", "attach", "--here", "--", SID]
     assert str(kw["cwd"]) == str(a) and "WORKTREE" not in kw["env"]
 
 
@@ -401,7 +401,7 @@ def test_clean_on_the_host_runs_in_each_project(host):
     calls, a, b = host
     assert agents.clean("7d", here=False, dry_run=True) == 1  # b's child failed: said so
     argvs = [(cmd[1:], str(kw["cwd"])) for cmd, kw in calls]
-    want = ["-I", "-m", "foldyard", "agent", "clean", "--here", "--older-than", "7d", "--dry-run"]
+    want = ["-P", "-m", "foldyard", "agent", "clean", "--here", "--older-than", "7d", "--dry-run"]
     assert argvs == [(want, str(a)), (want, str(b))]
 
 
@@ -505,7 +505,7 @@ def test_box_calls_never_read_your_terminal(monkeypatch):
 def test_a_package_planted_in_a_checkout_never_runs(monkeypatch):
     # The children run IN a checkout, which the box can write. Plain `python -m` would import a
     # planted `foldyard/` from the working directory before the installed one (the review
-    # finding on #156); `-I` drops that entry. This runs the real child (the interpreter is
+    # finding on #156); `-P` drops that entry. This runs the real child (the interpreter is
     # allowlisted), not a stub. Its directory must be outside every project (pytest's tmp_path
     # can sit inside this checkout under --basetemp), or the child finds a foldyard.toml above it
     # and never gives the refusal asserted below.
@@ -529,10 +529,13 @@ def _planted_never_runs(tmp_path: Path) -> None:
     # …and the child got as far as the INSTALLED foldyard: its own refusal (no project here) is
     # what came back, so the absence above isn't a child that never started.
     assert "needs a foldyard project" in listing.unavailable
-    # The control: the same child WITHOUT -I does run the planted code, so the assertion above is
+    # The control: the same child WITHOUT -P does run the planted code, so the assertion above is
     # one the test can fail (the review's positive control on #156).
     argv = agents._self("--version")
-    subprocess.run([a for a in argv if a != "-I"], cwd=tmp_path, capture_output=True, timeout=60)
+    env = agents._child_env()
+    env.pop("PYTHONSAFEPATH", None)  # it would leave the working directory off too
+    control = [a for a in argv if a != "-P"]
+    subprocess.run(control, cwd=tmp_path, env=env, capture_output=True, timeout=60)
     assert marker.exists()
 
 
@@ -544,3 +547,15 @@ def test_a_handle_starting_with_a_dash_reaches_attach_after_the_separator(monkey
     result = CliRunner().invoke(cli.app, ["agent", "attach", "--here", "--", "-sneaky"])
     assert result.exit_code == 0, result.output
     assert got == [("-sneaky", {"here": True})]
+
+
+def test_a_childs_env_pins_relative_pythonpath_where_this_process_resolves_it(
+    monkeypatch, tmp_path
+):
+    # The children run in ANOTHER checkout: a relative entry left as is would resolve there.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", "src")
+    monkeypatch.setenv("WORKTREE", "feat")
+    env = agents._child_env()
+    assert env["PYTHONPATH"] == str(tmp_path / "src")
+    assert "WORKTREE" not in env

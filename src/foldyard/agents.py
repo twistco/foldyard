@@ -455,18 +455,23 @@ def from_json(raw: str) -> ProjectListing | None:
 
 
 def _self(*args: str) -> list[str]:
-    """This same foldyard, run as a child in another checkout: ``python -I -m foldyard <args>``.
-    ``-I`` is load-bearing. Plain ``-m`` puts the working directory first on ``sys.path``, and the
-    children run IN a checkout, which the box can write: a planted ``foldyard/__main__.py`` (or a
-    stdlib-named ``json.py``) there would run as you, on your computer (ADR-0023). Isolated mode
-    drops that entry, and ignores ``PYTHON*`` variables and the user site too."""
-    return [sys.executable, "-I", "-m", "foldyard", *args]
+    """This same foldyard, run as a child in another checkout: ``python -P -m foldyard <args>``
+    (``selfspawn.python_m``). The children run IN a checkout, which the box can write, and plain
+    ``-m`` would import a ``foldyard/`` planted there first (ADR-0023)."""
+    from . import selfspawn
+
+    return selfspawn.python_m("foldyard", *args)
 
 
 def _child_env() -> dict[str, str]:
     """This process's env for a child run in another checkout: without the worktree this one
-    pinned, nor a ``FOLDYARD_REPO`` that would point every child at the same project."""
-    return {k: v for k, v in os.environ.items() if k not in ("WORKTREE", "FOLDYARD_REPO")}
+    pinned, nor a ``FOLDYARD_REPO`` that would point every child at the same project, and with
+    any relative ``PYTHONPATH`` entry pinned where THIS process resolves it (``selfspawn.env``),
+    since the child runs in another directory."""
+    from . import selfspawn
+
+    keep = {k: v for k, v in os.environ.items() if k not in ("WORKTREE", "FOLDYARD_REPO")}
+    return selfspawn.env(keep)
 
 
 def _list_checkout(checkout: Path) -> ProjectListing:

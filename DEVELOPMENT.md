@@ -213,7 +213,8 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   a transcript viewer's id is the attach handle. The host reaches boxes over `podman exec` only (no
   listener); every field a box's tmux reports is box-written — sanitised, never acted on beyond the
   session named. `ls` with no project fans out to each ADOPTED main checkout
-  (`configpin.adopted_checkouts`) as `fy agent ls --here --json` in its own process, so each
+  (`configpin.adopted_checkouts`) as `fy agent ls --here --json` in its own process (spawned through
+  `selfspawn`: `python -P -m`, relative `PYTHONPATH` pinned, since it runs in another checkout), so each
   project resolves its own VM/prefix/worktrees; a stopped VM is reported, never booted.
   `fy box down` (and the TUI's stop confirm) names live sessions first. Next phase:
   docs/fleet-scope.md.

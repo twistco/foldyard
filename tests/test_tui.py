@@ -987,6 +987,7 @@ async def test_a_start_supersedes_a_stop_lookup_still_in_flight(monkeypatch):
 
     ups: list[str] = []
     monkeypatch.setattr(devmode, "workspaces", _two_workspaces_feat_box_up)
+    monkeypatch.setattr(tui.configpin, "inspect", lambda cfg: _CleanDrift())  # adopted: no modal
     monkeypatch.setattr(devmode, "box_up", lambda name: ups.append(name) or (0, ""))
     monkeypatch.setattr(agents, "live_in_workspace", lookup)
     async with tui.DevModeTui().run_test() as pilot:
@@ -1010,6 +1011,7 @@ async def test_a_start_supersedes_a_stop_lookup_still_in_flight(monkeypatch):
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert not any(isinstance(s, tui.ConfirmScreen) for s in app.screen_stack)
+        assert ups == ["main"], ups  # …and the start it superseded the lookup for did happen
 
 
 async def test_machine_stop_asks_for_confirmation(monkeypatch):
