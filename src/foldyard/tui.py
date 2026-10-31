@@ -875,10 +875,16 @@ class DevModeTui(App):
 
         def work() -> None:
             # Off the UI thread: the lookup is a `podman exec` into the box (up to its timeout).
+            # A thread worker can't be interrupted — `exclusive` only marks the older one
+            # cancelled — so a superseded lookup (`d` pressed again meanwhile) must not open its
+            # dialog under the newer one.
+            from textual.worker import get_current_worker
+
             from . import agents
 
             live = agents.live_in_workspace(ws["project"])
-            self.call_from_thread(self._confirm_stop_devbox, ws, live)
+            if not get_current_worker().is_cancelled:
+                self.call_from_thread(self._confirm_stop_devbox, ws, live)
 
         self.run_worker(work, thread=True, exclusive=True, group="devbox-confirm")
 

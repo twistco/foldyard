@@ -924,6 +924,46 @@ async def test_devbox_stop_names_the_live_agents_it_would_kill(monkeypatch):
         await pilot.press("escape")
 
 
+async def test_a_superseded_stop_lookup_never_opens_a_second_dialog(monkeypatch):
+    # `d` twice while the first lookup is still in its `podman exec`: the first worker is only
+    # marked cancelled (a thread can't be interrupted), and must not stack its dialog too.
+    import threading
+
+    from foldyard import agents
+
+    release = threading.Event()
+    calls: list[int] = []
+
+    def lookup(project):
+        calls.append(1)
+        if len(calls) == 1:
+            release.wait(10)  # the first lookup is slow
+        return []
+
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces_feat_box_up)
+    monkeypatch.setattr(agents, "live_in_workspace", lookup)
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.focus()
+        lv.index = 1
+        await pilot.pause()
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.press("d")  # supersedes the first, which is still blocked
+        for _ in range(50):
+            if isinstance(app.screen, tui.ConfirmScreen):
+                break
+            await pilot.pause(0.05)
+        release.set()  # now the stale lookup finishes
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        dialogs = [s for s in app.screen_stack if isinstance(s, tui.ConfirmScreen)]
+        assert len(calls) == 2 and len(dialogs) == 1
+        await pilot.press("escape")
+
+
 async def test_machine_stop_asks_for_confirmation(monkeypatch):
     # Stopping the machine takes every workspace down at once → confirm; cancel is a no-op.
     toggled: list[bool] = []
