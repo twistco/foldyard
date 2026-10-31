@@ -462,3 +462,33 @@ def test_agent_start_passes_args_after_the_separator(monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert got == [(("codex", "rev", ["--model", "x"]), {"attach_after": True})]
+
+
+@pytest.mark.parametrize(
+    "verb",
+    [
+        lambda: agents.ls(here=False, as_json=False),
+        lambda: agents.attach(OTHER, here=False),
+        lambda: agents.stop(OTHER, here=False),
+        lambda: agents.clean("1d", here=False, dry_run=True),
+    ],
+)
+def test_outside_a_project_no_verb_imports_stack(host, monkeypatch, verb):
+    # Importing stack imports devmode, which binds the machine name from the working directory:
+    # from `/` (an empty name) that refused `fy agent attach` outright (seen live). Outside a
+    # project nothing here may need it.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def guarded(name, globals=None, locals=None, fromlist=(), level=0):
+        if (
+            level
+            and "stack" in (fromlist or ())
+            and (globals or {}).get("__name__") == "foldyard.agents"
+        ):
+            raise AssertionError("agents imported stack outside a project")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded)
+    verb()

@@ -541,11 +541,15 @@ def ls(*, here: bool, as_json: bool) -> int:
 
 
 def _same(checkout: str) -> bool:
-    """Is ``checkout`` this project's main checkout? (Never true outside a project.)"""
-    from . import stack
+    """Is ``checkout`` this project's main checkout? (Never true outside a project.)
 
+    ``stack`` is imported only past the project check: it imports ``devmode``, which binds the
+    machine name from the working directory at import, and outside a project (``/``, whose name
+    is empty) that refuses the whole command."""
     if not config.in_project():
         return False
+    from . import stack
+
     try:
         return bool(checkout) and Path(checkout).resolve() == stack.main_repo().resolve()
     except (OSError, SystemExit):
@@ -706,10 +710,12 @@ def clean(older_than: str, *, here: bool, dry_run: bool) -> int:
 
 def _adopted_with_here() -> list[Path]:
     """The adopted main checkouts, plus this project's when it hasn't been adopted yet."""
-    from . import configpin, stack
+    from . import configpin
 
     checkouts = configpin.adopted_checkouts()
     if config.in_project() and not any(_same(str(c)) for c in checkouts):
+        from . import stack  # in a project only — see _same
+
         checkouts.insert(0, stack.main_repo())
     return checkouts
 
