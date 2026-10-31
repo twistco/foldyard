@@ -1398,7 +1398,8 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
             return 1
 
     print(f"This PERMANENTLY removes worktree '{name}' at {wt_dir}:")
-    print(f"  1. stop + remove its dev box container ({project}-devbox) + its shadow volumes")
+    print(f"  1. stop + remove its dev box container ({project}-devbox) + its shadow volumes,")
+    print("       and any agent session still running in it (`fy agent ls`)")
     print(f"  2. tear down its stack ({project}): compose down + drop its volumes")
     print("       (postgres + GCS/BigQuery emulator data; SHARED pnpm/Playwright caches are kept)")
     print("  3. archive its configured agent transcripts to the durable store on your computer")
@@ -1433,7 +1434,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
 
     # 1. Dev box first: it holds the worktree's bind mount, so git can't remove the tree out
     #    from under a running box. Best-effort — a teardown hiccup shouldn't trap the worktree.
-    box.main("down")
+    box.main("down", ["--yes"])  # the removal was confirmed above; box down still names agents
     # 2. Stack: compose down + drop this worktree's prefixed volumes (keeps the shared caches).
     stack.nuke()
     # The box's per-box shadow volumes survive `box down` by design (warm restarts) and carry

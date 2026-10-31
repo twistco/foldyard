@@ -872,6 +872,15 @@ class DevModeTui(App):
         if not ws["devbox"]:
             self._start_devbox(ws)
             return
+        from . import agents
+
+        live = agents.live_in_workspace(ws["project"])
+        named = (
+            f"\n\n[b]{len(live)} agent session(s) still running[/b] (`fy agent ls`): "
+            + ", ".join(escape(s.name) for s in live)
+            if live
+            else ""
+        )
         self.push_screen(
             ConfirmScreen(
                 title=f"Stop the dev box for [b]{escape(ws['name'])}[/b]?",
@@ -879,8 +888,8 @@ class DevModeTui(App):
                     f"Stops + removes [dim]{escape(ws['project'])}-devbox[/dim]. Anything "
                     "running inside it — including a live `fy claude` / `fy codex` agent "
                     "session — is killed; the stack's other containers keep running and "
-                    "login/CLI volumes are kept.\n\nStart it again with [b]d[/b] "
-                    "(or `fy box up`)."
+                    "login/CLI volumes are kept."
+                    f"{named}\n\nStart it again with [b]d[/b] (or `fy box up`)."
                 ),
                 confirm_label="Stop box",
             ),

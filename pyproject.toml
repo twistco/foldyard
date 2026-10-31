@@ -205,6 +205,7 @@ packages = ["src/foldyard"]
 "docs/gcp.md" = "foldyard/assets/docs/gcp.md"
 "docs/stack.md" = "foldyard/assets/docs/stack.md"
 "docs/workshop.md" = "foldyard/assets/docs/workshop.md"
+"docs/agents.md" = "foldyard/assets/docs/agents.md"
 "docs/adrs" = "foldyard/assets/docs/adrs"
 # Not a `fy docs` topic: `fy changelog` slices it by version (outside assets/docs, so the
 # shipped-page link guard, which it would fail with its repo-relative links, never sees it).

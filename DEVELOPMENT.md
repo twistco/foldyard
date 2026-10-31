@@ -205,6 +205,17 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   (2026-10-26). Pins win and are never handed out; the box gets every offset baked in
   (`FY_WORKTREE_OFFSETS`). Should two daemons still want one port (a pin, `WT_OFFSET`), the
   supervisor runs one and blocks the other (`supervisor._port_sharers`) — never reaps its own.
+- `agents.py` — `fy agent start|ls|attach|stop` (docs/agents.md): `fy claude`/`fy codex` in a
+  detached tmux session in the box, on foldyard's own server (`tmux -L fy -f /dev/null`, its
+  options set by argv on every start — `allow-passthrough off` and `set-clipboard external` are
+  posture, so tmux < 3.3 is refused). One UUID per session, passed to Claude as `--session-id`, so
+  a transcript viewer's id is the attach handle. The host reaches boxes over `podman exec` only (no
+  listener); every field a box's tmux reports is box-written — sanitised, never acted on beyond the
+  session named. `ls` with no project fans out to each ADOPTED main checkout
+  (`configpin.adopted_checkouts`) as `fy agent ls --here --json` in its own process, so each
+  project resolves its own VM/prefix/worktrees; a stopped VM is reported, never booted.
+  `fy box down` (and the TUI's stop confirm) names live sessions first. Next phase:
+  docs/fleet-scope.md.
 - `worktree.py` · `transcripts.py` · `tui.py` · `init.py` · `skills.py` · `browser.py` ·
   `vscode.py` · `podman_desktop.py` — worktrees, agent-transcript sync, the Textual TUI,
   `foldyard init`, bundled skills, `fy open`, `fy code`, `fy machine desktop` (an `fy-<machine>`

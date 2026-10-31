@@ -2545,6 +2545,9 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
             [engine, "exec", "-it", *_terminal_env(), box, "bash", "-lc", script], env=env
         ).returncode
     if cmd == "down":
+        if _running(engine, box, env) and not _agents_may_stop(engine, box, env, args or []):
+            print("Aborted — the box is still running.")
+            return 1
         # Belt-and-suspenders: promote this box's transcripts to the durable host store before
         # we drop the container. The bound-out dir survives `box down`, but archiving here keeps
         # the host's `claude --resume` in sync. Best-effort — never block a teardown. Lazy import
@@ -2577,6 +2580,26 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         ).returncode
     _err("usage: foldyard box {build|up|shell|exec|down|ps}")
     return 2
+
+
+def _agents_may_stop(engine: str, box: str, env: dict, args: list[str]) -> bool:
+    """Before `box down` removes a running box: name the `fy agent` sessions still running in it,
+    which go with it, and on a terminal ask (``--yes``, or no terminal — the TUI, which asks for
+    itself, a script, `fy worktree remove` after its own confirm — says so and carries on)."""
+    from . import agents
+
+    live = agents.live_in(engine, box, env)
+    if not live:
+        return True
+    _err(f"⚠ {len(live)} agent session(s) still running in {box} will be stopped with it:")
+    for s in live:
+        _err(f"    {s.name}  ({s.agent or '?'}, {s.state}){f'  id {s.id}' if s.id else ''}")
+    if "--yes" in args or not sys.stdin.isatty():
+        return True
+    try:
+        return input("Stop them and remove the box? (y/N): ").strip() in ("y", "Y")
+    except EOFError:
+        return False
 
 
 def _exec(engine: str, box: str, ctx, env: dict, args: list[str]) -> int:
