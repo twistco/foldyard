@@ -492,3 +492,11 @@ def test_outside_a_project_no_verb_imports_stack(host, monkeypatch, verb):
 
     monkeypatch.setattr(builtins, "__import__", guarded)
     verb()
+
+
+def test_box_calls_never_read_your_terminal(monkeypatch):
+    # Inherited, a child took the answer typed at `fy box down`'s question (seen live).
+    seen: list[dict] = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: seen.append(kw) or _Proc(0, ""))
+    agents.sessions_in(agents.Box("p-devbox", "", "podman", {}))
+    assert seen and seen[0]["stdin"] is subprocess.DEVNULL

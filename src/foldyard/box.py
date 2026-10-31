@@ -27,6 +27,7 @@ running box). The command assembly is golden-tested (engine mocked) + faithful t
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import getpass
 import hashlib
@@ -2596,6 +2597,12 @@ def _agents_may_stop(engine: str, box: str, env: dict, args: list[str]) -> bool:
         _err(f"    {s.name}  ({s.agent or '?'}, {s.state}){f'  id {s.id}' if s.id else ''}")
     if "--yes" in args or not sys.stdin.isatty():
         return True
+    # Drop anything typed before the question was on screen: an early keystroke isn't an answer,
+    # and a stray "y" mustn't confirm a teardown.
+    with contextlib.suppress(Exception):
+        import termios
+
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
     try:
         return input("Stop them and remove the box? (y/N): ").strip() in ("y", "Y")
     except EOFError:

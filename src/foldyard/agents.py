@@ -300,8 +300,15 @@ class Box:
         ]
 
     def run(self, cmd: list[str], timeout: float = _LIST_TIMEOUT) -> subprocess.CompletedProcess:
+        # stdin=DEVNULL: a listing never reads your terminal. Inherited, a child took the answer
+        # typed at `fy box down`'s question (seen live).
         return subprocess.run(
-            self.argv(cmd), env=self.env, capture_output=True, text=True, timeout=timeout
+            self.argv(cmd),
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
 
 
@@ -661,11 +668,12 @@ def _stale(s: Session, cutoff: datetime) -> bool:
 
 
 def _clean_boxes(boxes: list[Box], cutoff: datetime, *, dry_run: bool, label: str) -> int:
-    rc = 0
+    rc, found = 0, False
     for b in boxes:
         for s in sessions_in(b):
             if not _stale(s, cutoff):
                 continue
+            found = True
             where = f"{label} / {b.worktree or 'main'} / {s.name}"
             if dry_run:
                 print(f"  would remove {where}  ({s.state}, {s.exited or s.activity})")
@@ -676,6 +684,8 @@ def _clean_boxes(boxes: list[Box], cutoff: datetime, *, dry_run: bool, label: st
             else:
                 _err(f"  ✗ couldn't remove {where}: {_printable(out.stderr.strip(), 200)}")
                 rc = 1
+    if not found:
+        print(f"  {label}: no session exited before {cutoff.isoformat(timespec='seconds')}")
     return rc
 
 
