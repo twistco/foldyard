@@ -22,8 +22,11 @@ class _Proc:
         self.returncode, self.stdout, self.stderr = rc, out, err
 
 
-def _pane(name="claude-3f2c9a1e", sid=SID, agent="claude", dead="0", status="", attached="0"):
-    return "\t".join([name, sid, agent, "1761900000", "1761900600", attached, dead, status])
+def _pane(
+    name="claude-3f2c9a1e", sid=SID, agent="claude", dead="0", status="", attached="0", ended=""
+):
+    fields = [name, sid, agent, "1761900000", "1761900600", attached, dead, status, ended]
+    return "\t".join(fields)
 
 
 # ── the tmux argv ────────────────────────────────────────────────────────────────────────────────
@@ -339,6 +342,60 @@ def test_adopted_checkouts_reads_the_host_markers(monkeypatch, tmp_path):
     pin("bare-4", bare)  # no foldyard.toml any more
     (state / "adopted" / "junk").mkdir()
     assert configpin.adopted_checkouts() == [main]
+
+
+# ── clean: exited sessions past an age, never a running one ───────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("text", "seconds"), [("30m", 1800), ("12h", 43200), ("7d", 604800), ("2W", 1209600)]
+)
+def test_parse_age(text, seconds):
+    assert agents.parse_age(text) == seconds
+
+
+@pytest.mark.parametrize("text", ["7", "0d", "-1d", "1y", "", "1.5h"])
+def test_parse_age_wants_a_unit_and_a_positive_count(text):
+    # A bare number would read as seconds, and `--older-than 7` would remove everything exited.
+    with pytest.raises(ValueError):
+        agents.parse_age(text)
+
+
+def test_clean_in_a_box_removes_only_exited_sessions_past_the_age(in_box, capsys):
+    calls, replies = in_box
+    now = int(agents.datetime.now(agents.UTC).timestamp())
+    replies["list-panes"] = _Proc(
+        0,
+        "\n".join(
+            [
+                _pane(name="old", dead="1", status="0", ended=str(now - 3 * 86400)),
+                _pane(name="recent", dead="1", status="1", ended=str(now - 600)),
+                _pane(name="running"),  # its activity is years ago: still never removed
+                _pane(name="old-no-dead-time", dead="1"),  # falls back to the activity (2025)
+                _pane(name="unreadable", dead="1", ended="soon"),  # → its activity
+            ]
+        ),
+    )
+    assert agents.clean("1d", here=False, dry_run=True) == 0
+    assert "would remove" in capsys.readouterr().out
+    assert not any("kill-session" in c for c in calls)
+    assert agents.clean("1d", here=False, dry_run=False) == 0
+    killed = [c[-1] for c in calls if "kill-session" in c]
+    # An unreadable exit time falls back to the last activity, as a tmux without it does.
+    assert killed == ["=old", "=old-no-dead-time", "=unreadable"]
+
+
+def test_clean_refuses_a_bare_number(in_box, capsys):
+    assert agents.clean("7", here=False, dry_run=False) == 2
+    assert "isn't an age" in capsys.readouterr().err
+
+
+def test_clean_on_the_host_runs_in_each_project(host):
+    calls, a, b = host
+    assert agents.clean("7d", here=False, dry_run=True) == 1  # b's child failed: said so
+    argvs = [(cmd[1:], str(kw["cwd"])) for cmd, kw in calls]
+    want = ["-m", "foldyard", "agent", "clean", "--here", "--older-than", "7d", "--dry-run"]
+    assert argvs == [(want, str(a)), (want, str(b))]
 
 
 # ── teardown names what it kills ──────────────────────────────────────────────────────────────────

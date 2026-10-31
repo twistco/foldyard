@@ -17,6 +17,7 @@ fy agent start claude -a -- --model opus   # attach straight away; args after --
 fy agent ls                          # every local project's agents
 fy agent attach 3f2c9a1e             # reattach, from anywhere on your computer
 fy agent stop 3f2c9a1e               # stop the agent and remove its session
+fy agent clean --older-than 7d       # remove sessions that exited over a week ago
 ```
 
 `fy agent start` prints the session's **id**. For Claude it's Claude's own session id: foldyard
@@ -42,7 +43,10 @@ old, exited session first if the box still holds it).
 
 **An agent that exits leaves its session behind.** `fy agent ls` shows it as `exited`, and
 attaching to it shows its last screen, which is usually the reason it stopped. `fy agent stop`
-removes it.
+removes one. `fy agent clean --older-than <age>` removes every session that exited longer ago than
+`<age>` (`30m`, `12h`, `7d`, `2w`; 1 day by default), across your local projects or, with
+`--here`, this one. `--dry-run` lists them first. A running agent is never removed, whatever its
+age.
 
 ## What changes under tmux
 

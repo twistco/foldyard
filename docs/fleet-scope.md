@@ -73,6 +73,30 @@ Four capabilities, each with a different direction of trust:
 The direction: the control plane runs in a small cloud VM, foldyard instances run in VMs sized to
 each project, and one browser session (password, long-lived) watches and drives all of them.
 
+### One control plane, two placements: local first
+
+If the control plane is a reader rather than a daemon, so that it pulls state when someone looks
+and caches what it pulled, it doesn't care where it runs. It can run on your computer beside the
+hosts, or in a cloud VM in front of them. So the local one is the first increment, not a separate
+product:
+
+- **Local:** run on demand (`fy agent …` today; a page later, served only while you have it open).
+  The transport is the one v1 has, `podman exec` per box, and there is nothing to keep running.
+  Its one new exposure is the page's listener, which the box can reach on loopback until the
+  loopback fix lands. That is why the page waits for that fix, and why it needs the password from
+  the start.
+- **Cloud:** the same reader and the same page, with a different transport. A cloud VM can't
+  reach a host behind NAT, so each host keeps an outbound connection open to it (the relay below).
+  That relay is the one long-running piece, and only the cloud placement needs it.
+- **What keeps them one design:** the reader asks the transport for a fixed verb set (list,
+  attach, send keys, send a file, stop). Locally that set is `podman exec` calls. In the cloud
+  it is the relay's protocol. Build the verbs as an interface in the local version, and the cloud
+  version only adds a transport.
+
+Caching is where "no daemon" gets tested. A cache is only as fresh as the last pull, so a "needs
+you" signal needs someone polling. That means the page while it's open, or the supervisor, which
+already runs per project and already notifies.
+
 ### Topology: the question to settle first
 
 Today **the host is your computer**. It holds the credentials, runs the supervisor and the proxy,

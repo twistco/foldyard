@@ -47,7 +47,7 @@ import uuid
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import config
@@ -83,6 +83,7 @@ _FIELDS = (
     "session_attached",
     "pane_dead",
     "pane_dead_status",
+    "pane_dead_time",  # tmux ≥ 3.3; `clean` falls back to the last activity without it
 )
 _FORMAT = "\t".join(f"#{{{f}}}" for f in _FIELDS)
 
@@ -123,6 +124,7 @@ class Session:
     worktree: str = ""  # "" = the main checkout
     box: str = ""
     checkout: str = ""  # the project's MAIN checkout, where `fy agent … --here` runs
+    exited: str = ""  # when the agent exited (ISO 8601), "" while it runs or when unreadable
 
     @property
     def state(self) -> str:
@@ -151,7 +153,7 @@ def parse_panes(stdout: str) -> list[Session]:
         parts = line.split("\t")
         if len(parts) != len(_FIELDS):
             continue
-        name, sid, agent, created, activity, attached, dead, status = parts
+        name, sid, agent, created, activity, attached, dead, status, dead_time = parts
         name = _printable(name, 64)
         if not name or name in out:
             continue
@@ -164,6 +166,7 @@ def parse_panes(stdout: str) -> list[Session]:
             attached=int(attached) if attached.isdigit() else 0,
             alive=dead != "1",
             exit_status=int(status) if dead == "1" and status.isdigit() else None,
+            exited=_iso(dead_time) if dead == "1" else "",
         )
     return list(out.values())
 
@@ -421,6 +424,7 @@ def from_json(raw: str) -> ProjectListing | None:
                     worktree=_printable(row.get("worktree"), 64),
                     box=_printable(row.get("box"), 128),
                     checkout=str(row.get("checkout") or ""),
+                    exited=_printable(row.get("exited"), 32),
                 )
             )
         return ProjectListing(
@@ -620,6 +624,88 @@ def _hand_over(verb: str, found: Session, checkout: str) -> int:
         return 1
     argv = [sys.executable, "-m", "foldyard", "agent", verb, "--here", found.handle]
     return subprocess.run(argv, cwd=checkout, env=_child_env()).returncode
+
+
+_AGE_UNITS = {"m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
+
+
+def parse_age(text: str) -> int:
+    """'30m' / '12h' / '7d' / '2w' → seconds. A unit is required: `clean --older-than 7` would
+    otherwise read as seven seconds and remove every exited session."""
+    m = re.fullmatch(r"\s*(\d+)\s*([mhdw])\s*", text.lower())
+    if not m or int(m.group(1)) <= 0:
+        raise ValueError(f"{text!r} isn't an age — a number and m, h, d or w (`7d`)")
+    return int(m.group(1)) * _AGE_UNITS[m.group(2)]
+
+
+def _stale(s: Session, cutoff: datetime) -> bool:
+    """An exited session whose exit (else, from a tmux older than `pane_dead_time`, its last
+    activity) is before ``cutoff``. A running one never is, nor one whose time can't be read."""
+    if s.alive:
+        return False
+    try:
+        when = datetime.fromisoformat(s.exited or s.activity)
+    except ValueError:
+        return False
+    return when < cutoff
+
+
+def _clean_boxes(boxes: list[Box], cutoff: datetime, *, dry_run: bool, label: str) -> int:
+    rc = 0
+    for b in boxes:
+        for s in sessions_in(b):
+            if not _stale(s, cutoff):
+                continue
+            where = f"{label} / {b.worktree or 'main'} / {s.name}"
+            if dry_run:
+                print(f"  would remove {where}  ({s.state}, {s.exited or s.activity})")
+                continue
+            out = b.run(stop_argv(s.name))
+            if out.returncode == 0:
+                print(f"  ✓ removed {where}")
+            else:
+                _err(f"  ✗ couldn't remove {where}: {_printable(out.stderr.strip(), 200)}")
+                rc = 1
+    return rc
+
+
+def clean(older_than: str, *, here: bool, dry_run: bool) -> int:
+    """`fy agent clean`: remove EXITED sessions that ended longer than ``older_than`` ago — every
+    local project's on your computer (``here``: this one), this box's in a box. A running agent is
+    never touched, whatever its age."""
+    try:
+        age = parse_age(older_than)
+    except ValueError as e:
+        _err(f"✗ {e}")
+        return 2
+    cutoff = datetime.now(UTC) - timedelta(seconds=age)
+    if config.in_box():
+        return _clean_boxes([this_box()], cutoff, dry_run=dry_run, label=config.project())
+    if here:
+        if not config.in_project():
+            _err("✗ --here needs a foldyard project — run it in one, or drop --here.")
+            return 1
+        boxes, reason = project_boxes()
+        if reason is not None:
+            print(f"  {config.project()}: {reason}")
+            return 0
+        return _clean_boxes(boxes, cutoff, dry_run=dry_run, label=config.project())
+    rc = 0
+    flags = ["--older-than", older_than, *(["--dry-run"] if dry_run else [])]
+    for checkout in _adopted_with_here():
+        argv = [sys.executable, "-m", "foldyard", "agent", "clean", "--here", *flags]
+        rc |= subprocess.run(argv, cwd=checkout, env=_child_env()).returncode
+    return rc
+
+
+def _adopted_with_here() -> list[Path]:
+    """The adopted main checkouts, plus this project's when it hasn't been adopted yet."""
+    from . import configpin, stack
+
+    checkouts = configpin.adopted_checkouts()
+    if config.in_project() and not any(_same(str(c)) for c in checkouts):
+        checkouts.insert(0, stack.main_repo())
+    return checkouts
 
 
 def attach(target: str, *, here: bool) -> int:

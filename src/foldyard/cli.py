@@ -72,6 +72,7 @@ _PROJECT_FREE = (
     ("agent", "ls"),
     ("agent", "attach"),
     ("agent", "stop"),
+    ("agent", "clean"),
 )
 
 _NOT_A_PROJECT = (
@@ -915,6 +916,23 @@ def agent_attach(
     from . import agents
 
     raise typer.Exit(agents.attach(session, here=here))
+
+
+@agent_app.command("clean")
+def agent_clean(
+    older_than: str = typer.Option(
+        "1d",
+        "--older-than",
+        help="remove sessions that exited longer ago than this (30m, 12h, 7d, 2w)",
+    ),
+    here: bool = typer.Option(False, "--here", help="only this project's boxes"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="list what would be removed"),
+) -> None:
+    """Remove EXITED agent sessions older than `--older-than` (default 1d), across every local
+    project (in a box, that box's). A running agent is never removed, whatever its age."""
+    from . import agents
+
+    raise typer.Exit(agents.clean(older_than, here=here, dry_run=dry_run))
 
 
 @agent_app.command("stop")
