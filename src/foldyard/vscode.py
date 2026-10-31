@@ -18,9 +18,12 @@ Each worktree gets its own isolated instance. Besides preventing settings (notab
 terminal's host checkout) from bleeding between worktrees, that keeps each window bound to the
 environment and attached-container config it was launched with.
 
-RUN ON THE HOST. The attach is over the Docker API ("Attach to Running Container"), so the
-launched VS Code's `DOCKER_HOST` must point at the same machine socket — which is exactly,
-and only, this isolated instance's env.
+RUN ON THE HOST. The attach ("Attach to Running Container") runs a container CLI — the Dev
+Containers extension execs `dev.containers.dockerPath`, `docker` by default — so the instance is
+pinned to foldyard's OWN engine CLI (podman), and the launched VS Code's `DOCKER_HOST` /
+`CONTAINER_HOST` point that CLI at the same machine socket — which is exactly, and only, this
+isolated instance's env. Without the pin a podman-only host has no `docker` at all, and the
+extension offers to install Docker Desktop instead of attaching.
 """
 
 from __future__ import annotations
@@ -56,6 +59,8 @@ _GENERATED_MARKER = "foldyard fy code"
 # files and agent/root ones, and made VS Code tooling hit permission errors on the root-owned
 # socket and volumes. A foldyard fact, so a pin — not a consumer key.
 _REMOTE_USER = "root"
+# The proxy variables a Marketplace download honours, in either case (`_ensure_dev_containers`).
+_PROXY_VARS = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"})
 # A marketplace extension id: `<publisher>.<name>`. Anything else in a recommendations file is
 # dropped rather than handed to VS Code.
 _EXT_ID = re.compile(r"^[A-Za-z0-9][\w-]*\.[A-Za-z0-9][\w-]*$")
@@ -202,6 +207,14 @@ def _user_settings(udd: Path) -> Path:
 # the SSH side is by construction (`_empty_agent`): no setting chooses what agent is forwarded.
 _PORTS_ATTRIBUTES = "remote.portsAttributes"
 _GIT_BRIDGE_PINS = {"git.terminalAuthentication": False, "git.useIntegratedAskPass": False}
+# `dev.containers.dockerPath` — the program the Dev Containers extension execs for every engine
+# call (`-v`, `version`, `inspect`, `exec`…), `docker` when unset. A podman-only host has no
+# `docker`, and the extension reads the missing binary as "Docker version 17.12.0 or later
+# required" with a button that installs Docker Desktop (Dev Containers 0.471.0). Pinned to the
+# CLI foldyard itself drives the box with (`config.engine()`, by absolute path: VS Code resolves a
+# bare name on the PATH it was started with), which the launch env already points at the box's
+# socket. The extension tells podman apart by `<cli> -v` and adapts its calls to it.
+_DOCKER_PATH = "dev.containers.dockerPath"
 # Widest default worktree offset (`stack._offset`: cksum % 89 + 1).
 _MAX_WORKTREE_OFFSET = 89
 
@@ -238,12 +251,17 @@ def _pin_ports(settings: dict) -> dict:
     return {**settings, _PORTS_ATTRIBUTES: merged}
 
 
-def _pinned_settings(settings: dict) -> dict:
-    """The isolated instance's pins: the port guard and the git bridge. Applied to the
-    user-data-dir's own settings.json, which foldyard always writes — the attached config carries
-    them too, but that file is skipped once an operator takes ownership of it, and a protection
-    that disappears when someone customises an unrelated key is not a protection."""
-    return {**_pin_ports(settings), **_GIT_BRIDGE_PINS}
+def _pinned_settings(settings: dict, engine_cli: str | None = None) -> dict:
+    """The isolated instance's pins: the port guard, the git bridge and — given ``engine_cli`` —
+    the CLI the attach runs. Applied to the user-data-dir's own settings.json, which foldyard
+    always writes — the attached config carries the first two too, but that file is skipped once
+    an operator takes ownership of it, and a protection that disappears when someone customises an
+    unrelated key is not a protection. The engine pin is user-settings-only by necessity:
+    `dev.containers.dockerPath` is `application`-scoped, so VS Code ignores it anywhere else."""
+    pinned = {**_pin_ports(settings), **_GIT_BRIDGE_PINS}
+    if engine_cli:
+        pinned[_DOCKER_PATH] = engine_cli
+    return pinned
 
 
 # Seeding a NEW instance from the operator's own VS Code. `--user-data-dir` isolates everything but
@@ -407,7 +425,10 @@ def _local_terminal_zdotdir(udd: Path) -> Path:
 
 
 def _write_local_terminal_cwd(
-    udd: Path, host_checkout: Path, original_zdotdir: str | None = None
+    udd: Path,
+    host_checkout: Path,
+    original_zdotdir: str | None = None,
+    engine_cli: str | None = None,
 ) -> bool:
     """Make VS Code's explicit *local terminal* command enter the host checkout.
 
@@ -461,7 +482,7 @@ def _write_local_terminal_cwd(
     settings[_TERMINAL_ENV_OSX] = terminal_env
     # This is the one writer of the isolated instance's settings.json, so the instance pins ride
     # along with it rather than racing a second read-modify-write of the same file.
-    settings = _pinned_settings(settings)
+    settings = _pinned_settings(settings, engine_cli)
 
     # Migrate both ineffective approaches written by earlier versions. Preserve any unrelated
     # profiles the user added to this isolated settings file.
@@ -583,6 +604,36 @@ def _empty_agent(udd: Path) -> str | None:
         sock.unlink(missing_ok=True)
         subprocess.run([agent, "-a", str(sock)], stdout=subprocess.DEVNULL, check=False)
     return str(sock)
+
+
+def _ensure_dev_containers(code_cli: str, udd: Path, env: dict) -> bool:
+    """Make sure the Dev Containers extension — the one that resolves the attach URI — is installed
+    where this instance loads extensions from. Without it VS Code opens a window that can't resolve
+    `attached-container+…`, and nothing says why. A foldyard-named id, never one from config, so
+    the install is not the channel ADR-0026 closed. It lands in the SHARED ~/.vscode/extensions,
+    so the operator's own VS Code gets it too; said so before it happens. Proceeds when the listing
+    itself fails (the attach then reports for itself); refuses only on a failed install. Run with
+    the LAUNCH env, not ours: that one is clamped (`stack._host_passthrough`), so a variable such
+    as `VSCODE_EXTENSIONS` the operator exports would point the check at another folder than the
+    one the launched instance loads from."""
+    base = [code_cli, "--user-data-dir", str(udd)]
+    listed = subprocess.run([*base, "--list-extensions"], env=env, capture_output=True, text=True)
+    if listed.returncode != 0:
+        _err(f"⚠ couldn't list VS Code's extensions to check for {_REMOTE_CONTAINERS}; going on.")
+        return True
+    if _REMOTE_CONTAINERS in {line.strip().lower() for line in listed.stdout.splitlines()}:
+        return True
+    print(f"▶ installing Dev Containers ({_REMOTE_CONTAINERS}), which the attach runs through —")
+    print("  into ~/.vscode/extensions, so your everyday VS Code gets it too.")
+    # The install reaches the Marketplace, so it gets the operator's proxy settings back on top of
+    # the clamped env — those alone: the extensions folder must stay the launch's.
+    proxies = {k: v for k, v in os.environ.items() if k.upper() in _PROXY_VARS}
+    install = [*base, "--install-extension", _REMOTE_CONTAINERS]
+    if subprocess.run(install, env={**env, **proxies}).returncode:
+        _err(f"✗ couldn't install {_REMOTE_CONTAINERS}. Install Dev Containers from VS Code's")
+        _err("  Extensions view, then re-run `fy code`.")
+        return False
+    return True
 
 
 class _Unreadable:
@@ -760,8 +811,15 @@ def code() -> int:
     print(f"▶ uri:    {uri}")
     print(f"▶ isolated VS Code: --user-data-dir {udd}  (your default VS Code is untouched)")
     _seed_from_global(udd)
-    if _write_local_terminal_cwd(udd, host_checkout, env.get("ZDOTDIR")):
+    engine_cli = shutil.which(engine) or engine
+    if _write_local_terminal_cwd(udd, host_checkout, env.get("ZDOTDIR"), engine_cli):
         print(f"▶ local terminal cwd: {host_checkout}")
+        print(f"▶ Dev Containers attaches with: {engine_cli}")
+    else:
+        # The same unwritten file carries the engine pin, and without it the attach falls back to
+        # `docker` — on a podman-only computer, the "install Docker" dialog this pin exists for.
+        _err(f"⚠ so {_DOCKER_PATH} isn't set either: without `docker` on your computer the attach")
+        _err(f'  fails. Set "{_DOCKER_PATH}": "{engine_cli}" in {_user_settings(udd)}.')
 
     # Auto-apply extensions + settings on attach (Attach to Running Container ignores
     # devcontainer.json — the supported lever is an attached-container config, keyed by the box
@@ -798,6 +856,8 @@ def code() -> int:
         _err("  and re-run `fy code`. Manual fallback: in VS Code, Cmd-Shift-P →")
         _err(f"  'Dev Containers: Attach to Running Container…' → {box}.")
         return 1
+    if not _ensure_dev_containers(code_cli, udd, env):
+        return 1
 
     # The attach is about to forward the host's SSH agent + git credentials into the box (Dev
     # Containers does, unswitchably); make sure the in-box hygiene that neutralises them is in
@@ -820,6 +880,6 @@ def code() -> int:
         [code_cli, "--user-data-dir", str(udd), "--folder-uri", uri],
         env={**env, "SSH_AUTH_SOCK": agent},
     )
-    print("✓ launched. If it didn't attach, check that VS Code's Docker context points at the")
-    print("  same socket as DOCKER_HOST (`fy docs quickstart`).")
+    print("✓ launched. If it didn't attach, the error's Show Log button has Dev Containers' own")
+    print(f"  account; that window's {_DOCKER_PATH} should read {engine_cli}.")
     return 0
