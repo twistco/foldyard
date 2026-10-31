@@ -53,10 +53,23 @@ def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0)
     if docker:
         cmd = [*ctx.compose, *flags, "config", "--hash", "*"]
     else:
-        cmd = [sys.executable, "-m", __name__, *ctx.compose[2:], *flags]
+        from . import selfspawn
+
+        # -P: the child runs with cwd=the checkout, where plain -m would import a planted
+        # `foldyard/` first (selfspawn).
+        cmd = [*selfspawn.python_m(__name__), *ctx.compose[2:], *flags]
     try:
+        from . import selfspawn
+
+        # selfspawn.env: this child runs in the main checkout, not here — a relative PYTHONPATH
+        # entry must keep pointing where it does for this process, not move into the checkout.
         proc = subprocess.run(
-            cmd, env=ctx.env, cwd=str(ctx.main), capture_output=True, text=True, timeout=timeout
+            cmd,
+            env=selfspawn.env(ctx.env),
+            cwd=str(ctx.main),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"{type(e).__name__}: {e}"

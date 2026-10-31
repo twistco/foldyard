@@ -1112,7 +1112,12 @@ redeclaring the team's. `fy config widenings` lists their keys under **agent ste
   Each worktree gets its own VS Code instance. The first `fy code` for a worktree copies your own
   VS Code's user settings, keybindings and snippets into it, leaving out settings that point at
   another container engine (Docker Desktop's socket or context). After that the instance's
-  settings are its own; delete its `User/settings.json` to copy yours again.
+  settings are its own; delete its `User/settings.json` to copy yours again. One setting is
+  foldyard's on every `fy code`: `dev.containers.dockerPath`, the program Dev Containers runs to
+  reach containers, is set to foldyard's own engine CLI (podman), so the attach needs no `docker`
+  on your computer. `fy code` also installs the Dev Containers extension
+  (`ms-vscode-remote.remote-containers`) when it's missing; it goes into `~/.vscode/extensions`,
+  so your everyday VS Code gets it too.
 
   ```toml
   [vscode]

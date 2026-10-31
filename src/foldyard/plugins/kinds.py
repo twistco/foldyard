@@ -29,10 +29,9 @@ import json
 import os
 import re
 import shlex
-import sys
 from collections.abc import Iterator
 
-from .. import config
+from .. import config, selfspawn
 from . import CapabilityProbe, CredentialScope, DoctorContext, InjectRule, Secret
 
 # Fields every kind takes. `replay_on_401` is generic because whether a 401 is worth a re-mint is a
@@ -214,9 +213,7 @@ class GithubAppKind(_GithubKind):
 
     def rule(self, spec: dict, var: str) -> InjectRule:
         cmd = [
-            sys.executable,
-            "-m",
-            "foldyard.plugins.github_app_token",
+            *selfspawn.python_m("foldyard.plugins.github_app_token"),
             "--app-id",
             str(spec["app_id"]),
             "--installation-id",
@@ -345,7 +342,7 @@ class GhCliKind(_GithubKind):
         return InjectRule(
             host=GITHUB_API,
             header="Authorization",
-            minter=shlex.join([sys.executable, "-m", "foldyard.plugins.gh_cli_token"]),
+            minter=shlex.join(selfspawn.python_m("foldyard.plugins.gh_cli_token")),
             replay_on_401=bool(spec.get("replay_on_401", self.replay_on_401)),
             env=(),  # `gh` holds its own credential; nothing from host.env
             label=self.label(spec),

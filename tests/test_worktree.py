@@ -1125,7 +1125,7 @@ def _box_runs(monkeypatch, rc: int = 0) -> list[dict]:
     git = worktree.subprocess.run
 
     def run(cmd, **kw):
-        if cmd[1:] == ["-m", "foldyard", "box", "up"]:
+        if cmd[1:] == ["-P", "-m", "foldyard", "box", "up"]:
             runs.append({"cmd": cmd, "env": kw.get("env")})
             return _Proc(rc)
         return git(cmd, **kw)
@@ -1146,7 +1146,7 @@ def test_add_box_brings_the_new_worktrees_box_up_in_a_fresh_process(fake_main, m
     assert worktree.add("feat", box_up=True) == 0
 
     assert len(runs) == 1
-    assert runs[0]["cmd"] == [sys.executable, "-m", "foldyard", "box", "up"]
+    assert runs[0]["cmd"] == [sys.executable, "-P", "-m", "foldyard", "box", "up"]
     env = runs[0]["env"]
     assert env["WORKTREE"] == "feat"
     assert configpin.RERUN_ENV not in env  # the child's gate keeps its own re-run

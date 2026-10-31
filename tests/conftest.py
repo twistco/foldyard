@@ -480,9 +480,11 @@ def scrubbed_box_session_env(monkeypatch):
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
+        "ALL_PROXY",
         "http_proxy",
         "https_proxy",
         "no_proxy",
+        "all_proxy",
     ):
         monkeypatch.delenv(var, raising=False)
 

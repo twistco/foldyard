@@ -100,8 +100,17 @@ def test_an_adoption_at_the_gate_reruns_the_command_with_it(adopting_gate):
     # Import-time constants (machine.MACHINE/BACKEND, devmode.AXES…) were bound from the config
     # BEFORE the adoption; only a fresh process sees the adopted one everywhere.
     configpin.gate("fy up")
-    assert adopting_gate == [[sys.executable, "/opt/bin/fy", "up"]]
+    # -P: a re-run never puts the working directory (a checkout) on sys.path (selfspawn).
+    assert adopting_gate == [[sys.executable, "-P", "/opt/bin/fy", "up"]]
     assert os.environ[configpin.RERUN_ENV] == "1"
+
+
+def test_a_python_dash_m_launch_reruns_without_the_working_directory(adopting_gate, monkeypatch):
+    # `python -m foldyard up` from a checkout (how `fy worktree add` once launched `box up`): the
+    # re-run must not import a `foldyard/` planted there.
+    monkeypatch.setattr(sys, "orig_argv", [sys.executable, "-m", "foldyard", "up"])
+    configpin.gate("fy up")
+    assert adopting_gate == [[sys.executable, "-P", "-m", "foldyard", "up"]]
 
 
 def test_the_rerun_never_reruns_again(adopting_gate, monkeypatch):

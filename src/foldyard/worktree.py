@@ -29,7 +29,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import boxmounts, config, machine, stack, worktree_registry
+from . import boxmounts, config, machine, selfspawn, stack, worktree_registry
 
 
 def _err(*a: object) -> None:
@@ -1044,7 +1044,8 @@ def _box_up(name: str) -> int:
     env = {k: v for k, v in os.environ.items() if k != configpin.RERUN_ENV}
     env["WORKTREE"] = name
     print(f"\n▶ WORKTREE={name} fy box up", flush=True)
-    return subprocess.run([sys.executable, "-m", "foldyard", "box", "up"], env=env).returncode
+    # -P: this runs in the checkout, where plain -m would import a planted `foldyard/` (selfspawn).
+    return subprocess.run(selfspawn.python_m("foldyard", "box", "up"), env=env).returncode
 
 
 def add(
