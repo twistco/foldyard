@@ -26,7 +26,7 @@ def _pane(
     name="claude-3f2c9a1e", sid=SID, agent="claude", dead="0", status="", attached="0", ended=""
 ):
     fields = [name, sid, agent, "1761900000", "1761900600", attached, dead, status, ended]
-    return "\t".join(fields)
+    return agents._SEP.join(fields)
 
 
 # ── the tmux argv ────────────────────────────────────────────────────────────────────────────────
@@ -44,8 +44,8 @@ def test_start_argv_sets_posture_before_the_session_and_tags_it():
     assert all(c.startswith("set-option -") for c in commands[1:new])
     assert argv[argv.index("new-session") :][:6] == ["new-session", "-d", "-s", "s1", "-c", "/repo"]
     assert commands[new + 1 :] == [
-        f"set-option -t =s1 @fy_session {SID}",
-        "set-option -t =s1 @fy_agent claude",
+        f"set-option -t =s1: @fy_session {SID}",
+        "set-option -t =s1: @fy_agent claude",
     ]
     # The pane's command is argv (tmux runs it, no shell): the script stays ONE argument.
     assert "exec fy claude" in argv
@@ -112,6 +112,7 @@ def test_parse_panes_reads_state_and_validates_what_the_box_wrote():
             _pane(name="dead", sid="not-a-uuid", agent="sh", dead="1", status="2"),
             _pane(name="two", attached="2"),
             "short\tline",
+            _pane(name=f"forged{agents._SEP}{SID}"),  # the separator in a name: too many fields
             _pane(name="\x1b]52;c;cGF3bmVk\x07evil\x1b[2J"),
         ]
     )
@@ -123,7 +124,13 @@ def test_parse_panes_reads_state_and_validates_what_the_box_wrote():
     # Escape sequences can't reach your terminal through a session name.
     evil = next(n for n in got if "evil" in n)
     assert "\x1b" not in evil and "\x07" not in evil
-    assert len(got) == 4
+    assert len(got) == 4  # the forged line skipped, not shifted into another session's fields
+
+
+def test_the_format_is_printable():
+    # tmux writes a control character in `-F` output as `_`: a tab separator came back as one
+    # field per line, and `ls` listed nothing (seen live, tmux 3.5a).
+    assert all(c.isprintable() for c in agents._FORMAT)
 
 
 def test_sessions_in_a_box_without_tmux_or_server_is_empty(monkeypatch):

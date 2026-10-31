@@ -73,7 +73,10 @@ _SERVER_OPTIONS: tuple[tuple[str, ...], ...] = (
     ("set-option", "-g", "remain-on-exit", "on"),
 )
 
-# What `ls` reads per pane: one tab-separated line each (our sessions have one pane).
+# What `ls` reads per pane: one line each (our sessions have one pane), fields joined by _SEP.
+# Printable on purpose: tmux writes a control character in `-F` output as `_`, so a tab joined
+# every field into one (seen live, tmux 3.5a). A name that contains _SEP gives the line too many
+# fields, and it is skipped like any other malformed line.
 _FIELDS = (
     "session_name",
     "@fy_session",
@@ -85,7 +88,8 @@ _FIELDS = (
     "pane_dead_status",
     "pane_dead_time",  # tmux ≥ 3.3; `clean` falls back to the last activity without it
 )
-_FORMAT = "\t".join(f"#{{{f}}}" for f in _FIELDS)
+_SEP = "|:fy:|"
+_FORMAT = _SEP.join(f"#{{{f}}}" for f in _FIELDS)
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -147,10 +151,10 @@ def _iso(epoch: str) -> str:
 
 def parse_panes(stdout: str) -> list[Session]:
     """`tmux list-panes -a -F` output → sessions, one per session name. A line that doesn't have
-    exactly the fields asked for (a name with a tab in it) is skipped, never guessed at."""
+    exactly the fields asked for (a name with the separator in it) is skipped, never guessed at."""
     out: dict[str, Session] = {}
     for line in stdout.splitlines():
-        parts = line.split("\t")
+        parts = line.split(_SEP)
         if len(parts) != len(_FIELDS):
             continue
         name, sid, agent, created, activity, attached, dead, status, dead_time = parts
@@ -197,8 +201,10 @@ def _chain(*commands: Iterable[str]) -> list[str]:
 
 def start_argv(name: str, sid: str, agent: str, cwd: str, command: list[str]) -> list[str]:
     """Start the server if needed, set foldyard's options, make the detached session running
-    ``command`` (an argv — tmux runs it directly, no shell) and tag it with its id and agent."""
-    target = f"={name}"
+    ``command`` (an argv — tmux runs it directly, no shell) and tag it with its id and agent. The
+    tag's ``-t`` is a PANE target, where an exact session is ``=name:`` — a bare ``=name`` there
+    names no session (unlike `attach-session`/`kill-session`, whose ``-t`` is a session)."""
+    target = f"={name}:"
     return _tmux(
         *_chain(
             ["start-server"],
