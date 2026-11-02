@@ -11,10 +11,12 @@ repo_name: twistco/foldyard
 edit_uri: edit/main/docs/
 docs_dir: docs
 
-# Not pages of the site: the workshop slides (not published yet), the demo tape + its setup script,
-# and the runnable kits' scripts (their write-ups are pages; the kits stay on GitHub).
+# Not pages of the site: a talk's Marp source (MkDocs can't render slides — the site serves the
+# deck's committed HTML and PDF beside its README instead), the demo tape + its setup script, and
+# the runnable kits' scripts (their write-ups are pages; the kits stay on GitHub).
 exclude_docs: |
-  talks/
+  talks/*.md
+  !talks/README.md
   demo/
   ebpf-spike-kit/
   archive/lima-network-forcing-kit/
@@ -85,6 +87,7 @@ nav:
       - stack.md
       - compose-overlays.md
       - testing-modes.md
+  - Talks: talks/README.md
   - The design record:
       - Decisions (ADRs): adrs/README.md
       - prior-art.md

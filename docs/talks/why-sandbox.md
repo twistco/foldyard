@@ -33,10 +33,52 @@ whatever fits your own threat model. Foldyard only appears in part 3, as one wor
 
 > You don't have to pick the tool we use today. But you should leave being able to choose a sandbox that works for you.
 
-If you haven't done the setup yet, make sure you have `uv` installed and then in a shell do:
+---
 
+## Setting up
+
+<div class="cols">
+<div>
+
+If you're on Windows you have to use WSL2: in Powershell `wsl --install -d Ubuntu-24.04`.
+
+Otherwise, these are the tools we'll need to install first:
+- `uv`, a Python runtime and package manager
+- `lima`, or Linux Machines, the virtual machine manager
+- `podman`, an open source, daemonless alternative to Docker with safer defaults
+
+</div>
+<div>
+
+Find all the commands on: https://twistco.github.io/foldyard/workshop/#before-the-day
+
+![QR code for the workshop page w:240](./workshop-qr.png)
+
+</div>
+</div>
+
+---
+
+
+
+In a terminal shell:
+
+```sh
+# macOS - if you don't have Homebrew, see how to install at https://brew.sh/
+brew install uv lima podman
+
+# Linux / WSL2 (Debian/Ubuntu shown; x86-64 with KVM)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+sudo apt-get update && sudo apt-get install qemu-system-x86 qemu-utils ovmf podman
+curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.0/lima-2.2.0-Linux-x86_64.tar.gz \
+  | sudo tar Cxz /usr/local
 ```
-uvx foldyard@latest prereq
+
+Then install the sandbox `foldyard` itself and start downloading the VM image:
+
+```sh
+uv tool install foldyard
+foldyard prereq --fetch
 ```
 
 ---

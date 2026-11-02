@@ -7,7 +7,9 @@ waiting on downloads, so the day itself goes on your project rather than on prog
 At the workshop, each attendee runs their own project's dev stack, and optionally a coding agent,
 inside an isolated VM on their own computer. The VM mounts only their repo, so their keys, home
 directory and other projects stay out of reach. New words (box, VM, mode, allowlist, adopted
-config…) are defined in the [glossary](./glossary.md).
+config…) are defined in the [glossary](./glossary.md). The talk that opens the day, *Fencing the
+yard*, is on the docs site as [slides](https://twistco.github.io/foldyard/talks/why-sandbox.html)
+and a [PDF](https://twistco.github.io/foldyard/talks/why-sandbox.pdf).
 
 ![From nothing to a walled box: before the day, install uv, check the computer with foldyard
 prereq, install foldyard and bake the base VM; on the day, foldyard init and fy box up clone a
