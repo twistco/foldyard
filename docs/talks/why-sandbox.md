@@ -35,7 +35,7 @@ whatever fits your own threat model. Foldyard only appears in part 3, as one wor
 
 ---
 
-## Setting up
+## Setting up (1/2)
 
 <div class="cols">
 <div>
@@ -59,16 +59,14 @@ Find all the commands on: https://twistco.github.io/foldyard/workshop/#before-th
 
 ---
 
-
-
-In a terminal shell:
+## Setting up (2/2): in a terminal
 
 ```sh
 # macOS - if you don't have Homebrew, see how to install at https://brew.sh/
 brew install uv lima podman
 
-# Linux / WSL2 (Debian/Ubuntu shown; x86-64 with KVM)
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# Linux / WSL2 (Debian/Ubuntu; x86-64 with KVM) — plus the KVM and WSL steps on the workshop page
+curl -LsSf https://astral.sh/uv/install.sh | sh    # then open a new terminal
 sudo apt-get update && sudo apt-get install qemu-system-x86 qemu-utils ovmf podman
 curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.0/lima-2.2.0-Linux-x86_64.tar.gz \
   | sudo tar Cxz /usr/local
