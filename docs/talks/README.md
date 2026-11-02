@@ -6,7 +6,7 @@ never disagree.
 
 | Deck | For | Length |
 | --- | --- | --- |
-| **Fencing the yard** — [slides](./why-sandbox.html) · [PDF](./why-sandbox.pdf) · [source](./why-sandbox.md) | Opening a hands-on workshop. Why a developer laptop needs a sandbox, what a sandbox must get right, how to compare tools — then foldyard as one worked answer, and the workshop plan. Tool-agnostic for its first two thirds. | ~35 min, 40 slides |
+| **Fencing the yard** — [slides](https://twistco.github.io/foldyard/talks/why-sandbox.html) · [PDF](./why-sandbox.pdf) · [source](./why-sandbox.md) | Opening a hands-on workshop. Why a developer laptop needs a sandbox, what a sandbox must get right, how to compare tools — then foldyard as one worked answer, and the workshop plan. Tool-agnostic for its first two thirds. | ~35 min, 40 slides |
 
 In the HTML slides, arrow keys move between slides, `f` goes full screen and `p` opens the
 presenter view with the speaker notes.
