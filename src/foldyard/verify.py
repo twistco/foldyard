@@ -648,7 +648,9 @@ def _host_loopback(rep: _Report, engine: str, env: dict, probe: str) -> None:
         script = (
             f"if wget -q -T 10 -O /dev/null {LIVENESS_URL}; "
             "then echo control=ok; else echo control=failed; fi; "
-            f"wget -q -T 5 -O /dev/null -Y off http://{gateway}:{listener.port}/; "
+            # Unset, not wget's -Y: only busybox has it, and a usage error would try nothing.
+            "(unset http_proxy HTTP_PROXY; "
+            f"wget -q -T 5 -O /dev/null http://{gateway}:{listener.port}/); "
             f"wget -q -T 10 -O /dev/null http://127.0.0.1:{listener.port}/; true"
         )
         out = _run(

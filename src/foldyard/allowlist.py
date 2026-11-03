@@ -107,6 +107,8 @@ def local_key(key: str) -> bool:
     recommend`` list, whose text the box can write."""
     import ipaddress
 
+    # A bracketed v6 key with a port ("[::1]:8123") isn't parsed and reads as not local; harmless,
+    # since valid_host refuses that spelling and no v6 grant can be made.
     host = key.rpartition(":")[0] if key.count(":") == 1 else key
     try:
         ip = ipaddress.ip_address(host.strip("[]").split("%", 1)[0])

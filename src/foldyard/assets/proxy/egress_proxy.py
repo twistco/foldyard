@@ -44,7 +44,10 @@ that were never offered to the box — a dev server on localhost, a router, a cl
 endpoint. Such a dial goes out only on a grant naming that exact address (``fy allow add
 127.0.0.1:8123``), never on a wildcard or the name it was asked by. Names are judged by the answer
 mitmproxy connects to, not a lookup of ours, so DNS rebinding can't split the two (see
-``Injector.server_connect``).
+``Injector.server_connect``). The one dial that isn't mitmproxy's is a 401 re-issue
+(``Injector._reissue_401``), which ``requests`` resolves on its own and the guard doesn't see. It
+only re-sends to an ``[[inject]]`` host from the adopted config, whose DNS the box doesn't control,
+after mitmproxy's own dial to that name was allowed.
 
 Config via env (read once at startup). foldyard's supervisor sets LIVE_FILE, which moves the
 rules, the wall switch and the passthrough list out of the env and makes them live:
@@ -1893,7 +1896,10 @@ class Injector:
         for info in infos:
             ip = _address(info[4][0])
             if ip is not None and _is_local(ip) and not self._local_granted(ip, number, False):
-                refused = refused or ip
+                # Name a v4 answer when there is one: only that can be granted (`localhost`'s ::1
+                # often comes first).
+                if refused is None or (refused.version == 6 and ip.version == 4):
+                    refused = ip
             else:
                 kept.append(info)
         if not kept and refused is not None:

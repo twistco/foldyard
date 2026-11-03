@@ -783,7 +783,10 @@ def test_host_loopback_out_of_reach_passes(monkeypatch, capsys):
     # Both paths are tried from one probe: direct at the gateway, and through the proxy (whose
     # URL is set explicitly, with NO_PROXY emptied so loopback isn't kept local in the container).
     assert "http_proxy=http://192.168.5.2:41800" in cmd and "no_proxy=" in cmd
-    assert "-Y off http://192.168.5.2:" in cmd[-1] and "http://127.0.0.1:" in cmd[-1]
+    # The direct leg drops the proxy by unsetting it, not by a flag only busybox's wget has (one
+    # that rejected it would try nothing there, and the row would pass on the proxy leg alone).
+    assert "(unset http_proxy HTTP_PROXY; wget -q -T 5 -O /dev/null http://192.168.5.2:" in cmd[-1]
+    assert "-Y" not in cmd[-1] and "http://127.0.0.1:" in cmd[-1]
 
 
 def test_host_loopback_reached_fails(monkeypatch, capsys):

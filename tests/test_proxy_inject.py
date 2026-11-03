@@ -3501,6 +3501,20 @@ async def test_a_local_answer_is_dropped_and_the_rest_dialled(observing):
     assert [info[4][0] for info in infos] == ["127.0.0.1"]
 
 
+async def test_a_refused_name_names_its_grantable_answer(observing):
+    # `localhost` often answers ::1 first, which no grant can spell: the refusal names the
+    # 127.0.0.1 grant that would work instead. A name with only a v6 answer still says why not.
+    inj, _allow, log = observing
+    await _resolving_to(inj, ["::1", "127.0.0.1"])
+    with pytest.raises(OSError, match=r"`fy allow add 127\.0\.0\.1:8123`"):
+        await asyncio.get_running_loop().getaddrinfo("localhost", 8123)
+    assert _rows(log)[-1]["host"] == "127.0.0.1:8123"
+    await _resolving_to(inj, ["::1"])
+    with pytest.raises(OSError, match="only an IPv4 address can be granted"):
+        await asyncio.get_running_loop().getaddrinfo("ip6-localhost", 8123)
+    assert _rows(log)[-1]["host"] == "::1:8123"
+
+
 async def test_a_granted_local_address_is_reached_by_name_too(observing):
     inj, allow, _log = observing
     listener = _Listener()
