@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import os
 import pathlib
-from typing import Any
+import types
+from typing import Any, ClassVar
 
 import pytest
 
@@ -45,6 +46,17 @@ def secure_engine(monkeypatch, tmp_path):
         # ADR-0033's to-box write probe: what the --privileged container binding it rw reports
         "to_box_probe": "remount=refused\nwrite=refused\n",
         "to_box_rc": 0,
+        # `git config --show-origin --get-regexp <credential helpers>`: 1 = none configured
+        "config_rc": 1,
+        "config_out": "",
+        # Asked only when the proxy refused the dry-run push as a push: origin's push URL, and
+        # what `git credential fill` finds for it (128 + "terminal prompts disabled" = nothing).
+        "push_url": "https://github.com/acme/app.git\n",
+        "push_url_rc": 0,
+        "cred_rc": 128,
+        "cred_out": "",
+        "cred_err": "fatal: could not read Username for 'https://github.com': terminal prompts "
+        "disabled\n",
     }
 
     def fake_run(cmd, **kw):
@@ -53,6 +65,18 @@ def secure_engine(monkeypatch, tmp_path):
             if results["has_commits"] is None:
                 raise verify.subprocess.TimeoutExpired(cmd, kw.get("timeout") or 0)
             return _Proc(0 if results["has_commits"] else 1)
+        if cmd[0] == "git" and "config" in cmd:  # the credential-helper read, not the push
+            results["config_cmd"], results["config_env"] = cmd, kw.get("env")
+            return _Proc(results["config_rc"], results["config_out"])
+        if cmd[0] == "git" and "get-url" in cmd:
+            results["url_cmd"] = cmd
+            return _Proc(results["push_url_rc"], results["push_url"])
+        if cmd[0] == "git" and "credential" in cmd:
+            if results["cred_rc"] is None:
+                raise verify.subprocess.TimeoutExpired(cmd, kw.get("timeout") or 0)
+            results["cred_cmd"], results["cred_input"] = cmd, kw.get("input")
+            results["cred_env"] = kw.get("env")
+            return _Proc(results["cred_rc"], results["cred_out"], results["cred_err"])
         if cmd[0] == "git":
             results["git_env"] = kw.get("env")
             results["git_cmd"] = cmd
@@ -95,6 +119,9 @@ def secure_engine(monkeypatch, tmp_path):
     # The engine is faked, so the machine gate passes (the stopped-VM refusal is tested below).
     monkeypatch.setattr(verify.stack, "engine_reachable", lambda *a, **k: True)
     monkeypatch.setattr(verify.config, "in_box", lambda: False)  # VM-boundary only by default
+    # On your computer the firewall adds the loopback row, a subject with its own tests below.
+    # Unpinned it reads the repo's own foldyard.toml (firewall on) — see _enter_box's note.
+    monkeypatch.setattr(verify.config, "machine_wall", lambda: False)
     # A real dev box bakes the operator's home; the tests build their tables from Path.home().
     monkeypatch.delenv("FY_HOST_HOME", raising=False)
     # No to-box unless a test gives one (the repo's own foldyard.toml would otherwise decide).
@@ -115,6 +142,10 @@ def _enter_box(monkeypatch, tmp_path):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setattr(verify, "_BRIDGE_SOCKET_DIR", tmp_path / "tmp")
     (tmp_path / "tmp").mkdir(exist_ok=True)
+    # The socket row also reads $TMPDIR and $XDG_RUNTIME_DIR — on a macOS host TMPDIR is the
+    # operator's own temp dir, where their VS Code keeps real `vscode-ipc-*.sock` files.
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(verify, "which", lambda c: None)
@@ -126,7 +157,20 @@ def _enter_box(monkeypatch, tmp_path):
     # where a dev box exports HTTPS_PROXY ambiently, red in CI where nothing does. The `== 1` tests
     # kept passing throughout, on the wall's failure rather than their own subject's.
     monkeypatch.setattr(verify.config, "machine_wall", lambda: False)
+    # The push-refusal row talks to the box's proxy over the network: stubbed to the proxy's
+    # refusal (its own tests are below), and with no proxy in the env unless a test sets one.
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.setattr(verify, "_probe_push", lambda host, port: _REFUSED_ANSWER)
     return home
+
+
+_REFUSED_ANSWER = verify._PushAnswer(
+    status=403,
+    body=b"refused by the foldyard proxy - the box doesn't push; push from your computer\n",
+    allowed=False,
+    decrypted=True,
+)
 
 
 # ── VM boundary ────────────────────────────────────────────────────────────────────────
@@ -542,6 +586,108 @@ def test_a_bridge_socket_on_disk_is_fail_even_with_the_vars_unset(
     assert "bridge sockets" in out and "vscode-ssh-auth-deadbeef.sock" in out
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "vscode-ssh-auth-a1.sock",
+        "vscode-git-b2.sock",
+        # Dev Containers' own IPC: its host side runs `git credential fill` for any caller
+        "vscode-remote-containers-ipc-c3.sock",
+        # the `code` CLI's IPC: drives the host's VS Code (URL opens too — around the proxy)
+        "vscode-ipc-d4.sock",
+    ],
+)
+@pytest.mark.parametrize("where", ["tmp", "tmp/user/1000", "xdg", "tmpdir"])
+def test_every_attach_bridge_socket_is_fail_wherever_it_lands(
+    secure_engine, monkeypatch, tmp_path, capsys, name, where
+):
+    # The same names and dirs the reaper covers (box._REAPER_PASS; the two globs tuples are
+    # pinned equal in test_box): /tmp, the per-user /tmp/user/<uid>/, $XDG_RUNTIME_DIR, $TMPDIR.
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg"))
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmpdir"))
+    for d in ("xdg", "tmpdir", "tmp/user/1000"):
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+    assert verify.verify() == 0  # all four dirs read, all empty
+    assert "no editor-attach bridge sockets" in capsys.readouterr().out
+    (tmp_path / where / name).write_text("")
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "bridge sockets" in out and str(tmp_path / where / name) in out
+
+
+_DEVCONTAINERS_HELPER = (
+    "!f() { /root/.vscode-server/bin/abc/node /tmp/vscode-remote-containers-1f2e.js "
+    "git-credential-helper $*; }; f"
+)
+
+
+def test_a_credential_helper_pointing_at_the_host_is_fail_and_names_the_setting(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # Dev Containers writes this into the box's ~/.gitconfig on every attach unless
+    # dev.containers.gitCredentialHelperConfigLocation is "none": git then asks the HOST's
+    # `git credential fill` over the IPC socket — an HTTPS push path the env scrub doesn't close
+    # (any process can point REMOTE_CONTAINERS_IPC back at the socket while it exists).
+    _, results = secure_engine
+    _enter_box(monkeypatch, tmp_path)
+    results["config_rc"] = 0
+    results["config_out"] = (
+        "file:/etc/gitconfig\tcredential.helper store\n"
+        f"file:/root/.gitconfig\tcredential.helper {_DEVCONTAINERS_HELPER}\n"
+    )
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "credential helper that asks the host" in out
+    assert "/root/.gitconfig" in out and "/etc/gitconfig" not in out  # names only the offender
+    assert "dev.containers.gitCredentialHelperConfigLocation" in out
+    # Every scope the box's git reads: run IN the checkout (local + worktree config), no scope
+    # flag (system + global + XDG), with the box's own env (GIT_CONFIG_* / GIT_CONFIG_GLOBAL).
+    cmd = results["config_cmd"]
+    assert cmd[:3] == ["git", "-C", str(tmp_path)]
+    assert not {"--global", "--system", "--local", "--file", "-f"} & set(cmd)
+    assert results["config_env"]["HOME"] == os.environ["HOME"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # a URL-scoped helper reaches the host just the same
+        f"file:/root/.gitconfig\tcredential.https://github.com.helper {_DEVCONTAINERS_HELPER}",
+        # the script renamed, the subcommand still the host bridge's
+        "command line:\tcredential.helper !node /opt/x.js git-credential-helper $*",
+    ],
+)
+def test_every_shape_of_the_host_credential_helper_is_fail(
+    secure_engine, monkeypatch, tmp_path, capsys, line
+):
+    _, results = secure_engine
+    _enter_box(monkeypatch, tmp_path)
+    results["config_rc"], results["config_out"] = 0, line + "\n"
+    assert verify.verify() == 1
+    assert "credential helper that asks the host" in capsys.readouterr().out
+
+
+def test_an_ordinary_credential_helper_passes(secure_engine, monkeypatch, tmp_path, capsys):
+    _, results = secure_engine
+    _enter_box(monkeypatch, tmp_path)
+    results["config_rc"] = 0
+    results["config_out"] = "file:/etc/gitconfig\tcredential.helper store\n"
+    assert verify.verify() == 0
+    assert "no git credential helper asks the host" in capsys.readouterr().out
+
+
+def test_an_unreadable_git_config_leaves_the_helper_row_unproven(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # rc 1 is "no such key"; anything else (a bad config line is 128) proved nothing either way.
+    _, results = secure_engine
+    _enter_box(monkeypatch, tmp_path)
+    results["config_rc"] = 128
+    assert verify.verify() == 1
+    assert "credential helpers UNPROVEN" in capsys.readouterr().out
+
+
 def test_workspace_settings_re_enabling_the_git_bridge_is_fail(
     secure_engine, monkeypatch, tmp_path, capsys
 ):
@@ -561,6 +707,20 @@ def test_workspace_settings_re_enabling_the_git_bridge_is_fail(
     (checkout / ".vscode" / "settings.json").write_text('{"git.terminalAuthentication": false}')
     assert verify.verify() == 0
     assert "leave the git-credential bridge off" in capsys.readouterr().out
+
+
+def test_workspace_settings_re_enabling_github_git_authentication_is_fail(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # The GitHub extension's silent-token path: with it on, VS Code answers the box's git with
+    # the host's GitHub session token — the same re-arm by mount data as the git.* keys.
+    _enter_box(monkeypatch, tmp_path)
+    (tmp_path / ".vscode").mkdir(parents=True)
+    (tmp_path / ".vscode" / "settings.json").write_text('{ "github.gitAuthentication" : true }')
+    assert verify.verify() == 1
+    assert "re-enable the git-credential bridge: github.gitAuthentication" in (
+        capsys.readouterr().out
+    )
 
 
 def test_ssh_only_known_hosts_passes(secure_engine, monkeypatch, tmp_path, capsys):
@@ -731,6 +891,44 @@ def test_wall_posture_direct_egress_connecting_fails(monkeypatch, capsys):
     assert "NOT enforcing" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("proxy", "expected"),
+    [
+        ("http://[fd00::2]:41800", ("fd00::2", 41800)),  # a bracketed IPv6 literal
+        ("http://192.168.5.2", ("192.168.5.2", 80)),  # no port: the scheme's default
+        ("http://u:secret@192.168.5.2:41800", ("192.168.5.2", 41800)),  # userinfo
+    ],
+)
+def test_wall_posture_reads_the_proxy_the_way_the_push_row_does(monkeypatch, proxy, expected):
+    # The permitted path is the positive control, so the wall row parses HTTPS_PROXY with the
+    # same `_proxy_address` as the push row: the old regex missed IPv6 and port-less values and
+    # called the firewall UNPROVEN for a proxy that was there. (Review on #160.)
+    monkeypatch.setenv("HTTPS_PROXY", proxy)
+    dialled = []
+
+    def connect(addr, *a, **kw):
+        dialled.append(addr)
+        if addr == expected:
+            return _Sock()
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(verify.socket, "create_connection", connect)
+    rep = verify._Report()
+    verify._wall_posture(rep)
+    assert dialled[0] == expected
+    assert rep.fails == 0
+
+
+def test_wall_posture_an_unreadable_proxy_is_unproven_without_leaking_it(monkeypatch, capsys):
+    monkeypatch.setenv("HTTPS_PROXY", "http://u:secret@[broken:41800")
+    rep = verify._Report()
+    verify._wall_posture(rep)
+    out = capsys.readouterr().out
+    assert rep.fails == 1
+    assert "UNPROVEN" in out
+    assert "secret" not in out
+
+
 def test_wall_posture_flags_port_53_exfil_hole(monkeypatch, capsys):
     """The #2 regression, in isolation: 443 correctly refused but a public-IP :53 connect SUCCEEDS
     (the wall allows :53 to any destination) — the port-53 probe must catch it as one fail."""
@@ -740,6 +938,91 @@ def test_wall_posture_flags_port_53_exfil_hole(monkeypatch, capsys):
     assert rep.fails == 1
     out = capsys.readouterr().out
     assert "53" in out and "NOT enforcing" in out
+
+
+# ── your computer's loopback (from your computer, with the VM firewall) ─────────────────────
+
+
+def _loopback_probe(
+    monkeypatch, *, control: bool = True, reaches: bool = False, direct_unknown: bool = False
+) -> list:
+    """Stand in for the probe container: answer the liveness control (or not), say its wget is
+    one the direct leg can't trust (or not), and — when the path is open — connect to the listener
+    the check opened, as a container reaching it would. Returns the commands run."""
+    import re
+    import socket
+    import types
+
+    monkeypatch.setattr(verify.config, "host_alias", lambda: "192.168.5.2")
+    monkeypatch.setattr(verify.config, "proxy_port", lambda: 41800)
+    ran: list = []
+
+    def run(cmd, env, *, capture=False):
+        ran.append(cmd)
+        script = cmd[-1]
+        if reaches:
+            found = re.search(r"127\.0\.0\.1:(\d+)/", script)
+            assert found is not None
+            socket.create_connection(("127.0.0.1", int(found.group(1))), timeout=2).close()
+        out = ("control=ok\n" if control else "control=failed\n") + (
+            "direct=unknown\n" if direct_unknown else ""
+        )
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+    monkeypatch.setattr(verify, "_run", run)
+    return ran
+
+
+def test_host_loopback_out_of_reach_passes(monkeypatch, capsys):
+    ran = _loopback_probe(monkeypatch)
+    rep = verify._Report()
+    verify._host_loopback(rep, "podman", {}, "alpine")
+    assert rep.fails == 0 and "out of reach" in capsys.readouterr().out
+    (cmd,) = ran
+    # Both paths are tried from one probe: direct at the gateway, and through the proxy (whose
+    # URL is set explicitly, with NO_PROXY emptied so loopback isn't kept local in the container).
+    assert "http_proxy=http://192.168.5.2:41800" in cmd and "no_proxy=" in cmd
+    # The direct leg must not use the proxy, which would refuse the gateway as a local address and
+    # read as the wall's refusal. The env is unset AND each wget's own switch is used — busybox's
+    # `-Y off`, GNU Wget 1.x's `--no-config --no-proxy` (a wgetrc can set a proxy too). Any other
+    # wget says so, and the row can't pass (below).
+    # A wgetrc's proxy also beats the env for the control and the proxy leg, so GNU Wget runs every
+    # leg with --no-config: each then reaches THIS checkout's proxy (the -e above), or nothing.
+    script = cmd[-1]
+    assert script.index("case ") < script.index("wget -q")  # the switches are known before any leg
+    assert "*BusyBox*) cfg=; off='-Y off'" in script
+    assert "*'GNU Wget 1.'*) cfg=--no-config; off=--no-proxy" in script
+    assert "echo direct=unknown" in script
+    assert "wget -q -T 10 -O /dev/null $cfg http://foldyard-liveness" in script
+    assert (
+        "(unset http_proxy HTTP_PROXY; wget -q -T 5 -O /dev/null $cfg $off http://192.168.5.2:"
+        in script
+    )
+    assert "wget -q -T 10 -O /dev/null $cfg http://127.0.0.1:" in script
+
+
+def test_host_loopback_with_an_unknown_wget_proves_nothing(monkeypatch, capsys):
+    # A wget the row can't tell to skip every proxy: its direct leg might have gone through one.
+    _loopback_probe(monkeypatch, direct_unknown=True)
+    rep = verify._Report()
+    verify._host_loopback(rep, "podman", {}, "alpine")
+    out = capsys.readouterr().out
+    assert rep.fails == 1 and "UNPROVEN" in out and "wget" in out
+
+
+def test_host_loopback_reached_fails(monkeypatch, capsys):
+    _loopback_probe(monkeypatch, reaches=True)
+    rep = verify._Report()
+    verify._host_loopback(rep, "podman", {}, "alpine")
+    assert rep.fails == 1 and "REACHED a service on your computer" in capsys.readouterr().out
+
+
+def test_host_loopback_without_the_control_proves_nothing(monkeypatch, capsys):
+    # Nothing reached the listener — but nothing reached the proxy either: no egress at all.
+    _loopback_probe(monkeypatch, control=False)
+    rep = verify._Report()
+    verify._host_loopback(rep, "podman", {}, "alpine")
+    assert rep.fails == 1 and "UNPROVEN" in capsys.readouterr().out
 
 
 # ── the manual pointer ───────────────────────────────────────────────────────────────────
@@ -925,3 +1208,274 @@ def test_a_write_that_lands_and_cant_be_removed_still_names_the_file(with_to_box
     assert verify.verify() == 1
     out = capsys.readouterr().out
     assert "CREATED" in out and "LEFT there" in out and "UNPROVEN" not in out
+
+
+# ── the push refusal: the proxy refuses a git push by its URL ────────────────────────────────
+
+_PROXY = "http://192.168.5.2:41000"
+
+
+def _push_row(monkeypatch, answer, proxy: str | None = _PROXY) -> tuple[verify._Report, list]:
+    asked: list = []
+
+    def probe(host, port):
+        asked.append((host, port))
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(verify, "_probe_push", probe)
+    for var in ("HTTPS_PROXY", "https_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    if proxy is not None:
+        monkeypatch.setenv("HTTPS_PROXY", proxy)
+    rep = verify._Report()
+    verify._push_refusal(rep)
+    return rep, asked
+
+
+def test_a_push_the_proxy_refuses_passes(monkeypatch, capsys):
+    rep, asked = _push_row(monkeypatch, _REFUSED_ANSWER)
+    assert asked == [("192.168.5.2", 41000)]  # through the box's own proxy
+    assert rep.fails == rep.warns == 0
+    assert "git push over HTTPS refused by the foldyard proxy" in capsys.readouterr().out
+
+
+def test_a_push_the_active_mode_allows_is_reported_not_failed(monkeypatch, capsys):
+    allowed = verify._PushAnswer(status=401, body=b"", allowed=True, decrypted=True)
+    rep, _ = _push_row(monkeypatch, allowed)
+    assert rep.fails == rep.warns == 0
+    out = capsys.readouterr().out
+    assert "allowed by the active mode" in out and "PASS" not in out
+    # The lift is per host — where a push-capable switch injects — so the row names the probe's.
+    assert "to github.com" in out and "injects on github.com" in out
+
+
+def test_a_push_the_proxy_let_through_unrefused_fails(monkeypatch, capsys):
+    # Decrypted (the proxy's certificate), no refusal and no "allowed" word: GitHub answered.
+    forwarded = verify._PushAnswer(status=401, body=b"Unauthorized", allowed=False, decrypted=True)
+    rep, _ = _push_row(monkeypatch, forwarded)
+    assert rep.fails == 1
+    out = capsys.readouterr().out
+    assert "NOT refused" in out and "401" in out
+
+
+def test_another_refusal_is_not_the_push_refusal(monkeypatch, capsys):
+    # The allowlist's 403, with no word that a mode let the push past: a proxy that predates the
+    # push refusal (a running addon not yet restarted). Unproven, so a FAIL.
+    wall = verify._PushAnswer(
+        status=403,
+        body=b"refused by the foldyard allowlist - grant it on your computer",
+        allowed=False,
+        decrypted=True,
+    )
+    rep, _ = _push_row(monkeypatch, wall)
+    assert rep.fails == 1
+    assert "fy host restart" in capsys.readouterr().out
+
+
+def test_a_blind_tunnel_is_a_warning_naming_passthrough(monkeypatch, capsys):
+    # GitHub's own certificate: github.com is tunnelled (`[proxy] passthrough`), so the proxy
+    # can't see the push. A declared decision (`fy config widenings` says so), not a breach.
+    blind = verify._PushAnswer(status=401, body=b"", allowed=False, decrypted=False)
+    rep, _ = _push_row(monkeypatch, blind)
+    assert rep.fails == 0 and rep.warns == 1
+    out = capsys.readouterr().out
+    assert "passthrough" in out and "fy config widenings" in out
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError("timed out"), OSError("connection refused"), verify.ssl.SSLError("bad cert")],
+    ids=["timeout", "refused", "tls"],
+)
+def test_a_probe_that_got_no_answer_proves_nothing(monkeypatch, capsys, error):
+    rep, _ = _push_row(monkeypatch, error)
+    assert rep.fails == 1
+    assert "UNPROVEN" in capsys.readouterr().out
+
+
+def test_no_proxy_in_the_box_skips_the_row(monkeypatch, capsys):
+    rep, asked = _push_row(monkeypatch, _REFUSED_ANSWER, proxy=None)
+    assert asked == [] and rep.fails == rep.warns == 0
+    assert "skipped" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("proxy", "address"),
+    [
+        ("http://[::1]:41000", ("::1", 41000)),  # a bracketed IPv6 literal
+        ("http://[fd00::2]:41000/", ("fd00::2", 41000)),
+        ("http://192.168.5.2", ("192.168.5.2", 80)),  # no port: the scheme's default
+        ("https://proxy.example", ("proxy.example", 443)),
+        ("http://user:s3cret@192.168.5.2:41000", ("192.168.5.2", 41000)),
+        ("192.168.5.2:41000", ("192.168.5.2", 41000)),  # no scheme: http, as curl reads it
+    ],
+)
+def test_the_probe_goes_through_any_spelling_of_the_proxy(monkeypatch, capsys, proxy, address):
+    rep, asked = _push_row(monkeypatch, _REFUSED_ANSWER, proxy=proxy)
+    assert asked == [address]
+    assert rep.fails == rep.warns == 0
+    assert "s3cret" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        "http://user:s3cret@[::1:41000",  # an unclosed bracket
+        "http://user:s3cret@192.168.5.2:port",  # a port that isn't a number
+        "http://user:s3cret@192.168.5.2:99999",  # …or isn't a port
+        "http://user:s3cret@:41000",  # no host
+        "socks5://user:s3cret@192.168.5.2:1080",  # a scheme the probe can't speak
+    ],
+)
+def test_a_proxy_that_cant_be_read_is_unproven_not_skipped(monkeypatch, capsys, proxy):
+    # Set, so the box routes somewhere: a row that read it as "no proxy" would skip the check
+    # exactly where it can't tell what the box does.
+    rep, asked = _push_row(monkeypatch, _REFUSED_ANSWER, proxy=proxy)
+    assert asked == [] and rep.fails == 1
+    out = capsys.readouterr().out
+    assert "UNPROVEN" in out and "HTTPS_PROXY" in out and "skipped" not in out
+    # Its shape is named, so the operator can see what's wrong — never the credential in it.
+    assert "s3cret" not in out and "user" not in out
+    assert proxy.rpartition("@")[2] in out
+
+
+def test_the_push_refusal_row_runs_in_the_box(secure_engine, monkeypatch, tmp_path, capsys):
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.setenv("HTTPS_PROXY", _PROXY)
+    assert verify.verify() == 0
+    assert "git push over HTTPS refused by the foldyard proxy" in capsys.readouterr().out
+
+
+class _FakeConn:
+    made: ClassVar[list] = []
+
+    def __init__(self, host, port, *, timeout, context):
+        self.args = {"host": host, "port": port, "timeout": timeout, "context": context}
+        self.tunnel = None
+        self.sent = None
+        _FakeConn.made.append(self)
+        self.sock: Any = types.SimpleNamespace(
+            getpeercert=lambda: {
+                "issuer": ((("commonName", "mitmproxy"),), (("organizationName", "mitmproxy"),))
+            }
+        )
+
+    def set_tunnel(self, host, port):
+        self.tunnel = (host, port)
+
+    def request(self, method, path, headers):
+        self.sent = (method, path, headers)
+
+    def getresponse(self):
+        # A response that closes the connection: http.client drops the socket once it's read, so
+        # the certificate must already have been taken (found by the proxy e2e).
+        self.sock = None
+        return types.SimpleNamespace(
+            status=403,
+            read=lambda n: b"refused by the foldyard proxy - the box doesn't push",
+            getheader=lambda name, default=None: default,
+        )
+
+    def close(self):
+        pass
+
+
+def test_the_probe_sends_a_push_discovery_through_the_proxy(monkeypatch, tmp_path):
+    bundle = tmp_path / "bundle.pem"
+    loaded: list = []
+    monkeypatch.setenv("SSL_CERT_FILE", str(bundle))
+    monkeypatch.setattr(
+        verify.ssl, "create_default_context", lambda cafile=None: loaded.append(cafile) or "ctx"
+    )
+    _FakeConn.made = []
+    monkeypatch.setattr(verify.http.client, "HTTPSConnection", _FakeConn)
+    answer = verify._probe_push("192.168.5.2", 41000)
+    [conn] = _FakeConn.made
+    assert (conn.args["host"], conn.args["port"], conn.args["context"]) == (
+        "192.168.5.2",
+        41000,
+        "ctx",
+    )
+    assert loaded == [str(bundle)]  # the box's combined bundle: the proxy CA + system roots
+    assert conn.args["timeout"] == 12
+    assert conn.tunnel == ("github.com", 443)
+    method, path, _headers = conn.sent
+    assert method == "GET" and path.endswith("/info/refs?service=git-receive-pack")
+    assert answer == verify._PushAnswer(
+        status=403,
+        body=b"refused by the foldyard proxy - the box doesn't push",
+        allowed=False,
+        decrypted=True,
+    )
+
+
+# ── the dry-run push, when the proxy refused it as a push ────────────────────────────────────
+# The proxy answers git's first request (the discovery GET) with its 403 before origin is asked,
+# so git never offers a credential and the probe no longer says whether one would reach origin.
+# git is asked directly instead: `git credential fill` for origin's push URL.
+
+_PROXY_REFUSED_STDERR = (
+    "remote: refused by the foldyard proxy - the box doesn't push; push from your computer\n"
+    "fatal: unable to access 'https://github.com/acme/app.git/': The requested URL returned"
+    " error: 403\n"
+)
+
+
+def _proxy_refused(secure_engine, monkeypatch, tmp_path):
+    _enter_box(monkeypatch, tmp_path)
+    _, results = secure_engine
+    results["git_rc"] = 128
+    results["git_stderr"] = _PROXY_REFUSED_STDERR
+    return results
+
+
+def test_a_push_the_proxy_refused_asks_git_for_a_credential_and_finds_none(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    results = _proxy_refused(secure_engine, monkeypatch, tmp_path)
+    assert verify.verify() == 0
+    out = capsys.readouterr().out
+    assert "git push refused by the foldyard proxy, and git has no credential for origin" in out
+    assert results["url_cmd"][-3:] == ["get-url", "--push", "origin"]
+    assert results["cred_cmd"][-2:] == ["credential", "fill"]
+    assert results["cred_input"] == "url=https://github.com/acme/app.git\n\n"
+    assert results["cred_env"]["GIT_TERMINAL_PROMPT"] == "0"  # never prompts
+
+
+def test_a_credential_git_would_send_fails_even_though_the_proxy_refused(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    results = _proxy_refused(secure_engine, monkeypatch, tmp_path)
+    results["cred_rc"], results["cred_err"] = 0, ""
+    results["cred_out"] = "protocol=https\nhost=github.com\nusername=x\npassword=ghp_REALTOKEN\n"
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "git HOLDS a credential for origin" in out
+    assert "ghp_REALTOKEN" not in out  # never echoed
+
+
+def test_a_credential_lookup_that_hangs_leaves_it_unproven(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    results = _proxy_refused(secure_engine, monkeypatch, tmp_path)
+    results["cred_rc"] = None  # times out
+    assert verify.verify() == 1
+    assert "UNPROVEN" in capsys.readouterr().out
+
+
+def test_a_credential_lookup_failing_otherwise_leaves_it_unproven(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    results = _proxy_refused(secure_engine, monkeypatch, tmp_path)
+    results["cred_err"] = "fatal: bad config line 3 in file .git/config\n"
+    assert verify.verify() == 1
+    assert "UNPROVEN" in capsys.readouterr().out
+
+
+def test_no_push_url_leaves_it_unproven(secure_engine, monkeypatch, tmp_path, capsys):
+    results = _proxy_refused(secure_engine, monkeypatch, tmp_path)
+    results["push_url_rc"], results["push_url"] = 2, ""
+    assert verify.verify() == 1
+    assert "UNPROVEN" in capsys.readouterr().out

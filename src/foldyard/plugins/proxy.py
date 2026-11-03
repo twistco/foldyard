@@ -332,7 +332,13 @@ def _net_leaf_body(e: dict, escape) -> str:
         method = escape(e.get("method", ""))
         target = escape((e.get("host", "") if method == "CONNECT" else e.get("path", ""))[:80])
         asked = f"{method:<6} {target} " if method else ""
-        why = "its Host header names another host" if e.get("mismatch") else "not on the allowlist"
+        why = (
+            "its Host header names another host"
+            if e.get("mismatch")
+            else "a git push — the box doesn't push"
+            if e.get("push")
+            else "not on the allowlist"
+        )
         return f"[dim]{ts}[/dim] {asked}[red]403 ⛔ blocked — {why}[/red]"
     if e.get("held"):
         # The box sent a dummy (an agent's keyless one, or an [[inject]] row's box_env) with its
@@ -632,6 +638,14 @@ class ProxyPlugin(Plugin):
             # From the HOST-owned allow-store, never straight from the repo's `[proxy]`.
             "default_deny": _default_deny(),
             "passthrough": _resolve_passthrough(config.proxy_passthrough()),
+            # The proxy refuses a git push (`git-receive-pack`, any host it decrypts) except on
+            # the hosts a push-capable credential is being INJECTED on now (a kind's `grants_push`
+            # — the emergency gh-cli switch), spelled as the rules' `host`, which the addon matches
+            # exactly as it matches a rule. Only there: elsewhere a credential that reached the
+            # box some other way could push while the switch is on. From `rules`, the injecting
+            # ones: a switch held back by an overlap delivers nothing, so it lifts nothing either.
+            # Absent or malformed → refused everywhere (the old boolean `allow_push` is gone).
+            "push_hosts": sorted({r.host for r in rules if r.grants_push}),
             # The open learn window's start: a new window resets the addon's per-host would-block
             # rate limit, or a host seen just before it would get no row inside it.
             "observing_since": _observing_since(),

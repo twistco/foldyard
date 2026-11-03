@@ -491,7 +491,9 @@ def _yard_run(engine: str, main: Path, wt_dir: Path) -> list[str]:
     """``<engine> run`` up to the container's own settings, for a git run in ``wt_dir``: the two
     mounts ``worktree_init`` gets (at the paths your computer uses, which the worktree's ``.git``
     file names), the box's uid (container root, which rootless podman maps to the VM user, so what
-    it writes is owned as the box's files are), no capabilities, no network."""
+    it writes is owned as the box's files are), no capabilities, no network, and no HOME: the
+    image user's is unreadable to root without capabilities, and git warned on every run that it
+    couldn't open the global ignore and attributes files there."""
     wt_root = config.worktrees_root(main)
     return [
         engine,
@@ -511,6 +513,10 @@ def _yard_run(engine: str, main: Path, wt_dir: Path) -> list[str]:
         f"{wt_root}:{wt_root}",
         "-w",
         str(wt_dir),
+        "-e",
+        "HOME=/nonexistent",
+        "-e",
+        "XDG_CONFIG_HOME=/nonexistent",
     ]
 
 

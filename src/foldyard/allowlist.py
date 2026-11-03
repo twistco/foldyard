@@ -98,6 +98,32 @@ def valid_host(host: str) -> bool:
     return "." in bare and all(part for part in bare.split("."))
 
 
+def local_key(key: str) -> bool:
+    """Does a grant key (``host`` or ``host:port``) name a LOCAL address — your computer, its
+    network, link-local — the kind the proxy dials only on a grant naming it (egress_proxy's
+    ``_is_local``; a test holds the two equal)? Such a grant lets the box reach a service that was
+    never offered to it, so it is made by typing it (``fy allow add``) and never OFFERED: not by
+    the Network Log's allow action, a learn window's batch, a build's refusals or a ``[proxy]
+    recommend`` list, whose text the box can write."""
+    import ipaddress
+
+    # A bracketed v6 key with a port ("[::1]:8123") isn't parsed and reads as not local; harmless,
+    # since valid_host refuses that spelling and no v6 grant can be made.
+    host = key.rpartition(":")[0] if key.count(":") == 1 else key
+    try:
+        ip = ipaddress.ip_address(host.strip("[]").split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return local_key(str(ip.ipv4_mapped))
+        if (ip.sixtofour is not None and local_key(str(ip.sixtofour))) or (
+            ip.teredo is not None and local_key(str(ip.teredo[1]))
+        ):
+            return True
+    return not ip.is_global or ip.is_multicast
+
+
 # ── the live store (once / session) ──────────────────────────────────────────────────
 
 
@@ -484,7 +510,7 @@ def learned_hosts(
             continue
         if not isinstance(key, str) or not valid_host(key) or key.startswith("*."):
             continue
-        if _matches(key, granted) or key in refused or "*" in refused:
+        if local_key(key) or _matches(key, granted) or key in refused or "*" in refused:
             continue
         entry = out.setdefault(
             key, {"host": key, "count": 0, "first": row["ts"], "uas": [], "by": []}
@@ -519,9 +545,9 @@ def refused_hosts(rows: list[dict]) -> list[str]:
         key = row.get("host")
         if not (row.get("blocked") or row.get("would_block")) or not isinstance(key, str):
             continue
-        if row.get("mismatch"):  # refused for its Host header: a grant would not let it through
-            continue
-        if not valid_host(key) or key.startswith("*.") or key in out:
+        if row.get("mismatch") or row.get("push"):  # a Host-header claim, a git push: no grant
+            continue  # would let it through
+        if not valid_host(key) or key.startswith("*.") or key in out or local_key(key):
             continue
         if _matches(key, granted) or key in refused or "*" in refused:
             continue
@@ -544,6 +570,8 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
         if not (row.get("blocked") and row.get("build")) or ts is None or ts < since:
             continue
         if not isinstance(key, str) or not valid_host(key) or _matches(key, granted):
+            continue
+        if local_key(key):
             continue
         entry = out.setdefault(
             key, {"host": key, "count": 0, "uas": [], "paths": [], "more_paths": 0}
@@ -888,13 +916,14 @@ def recommendations() -> list[dict]:
 
     Two sources, one consent path, because they differ only in who WROTE the list: the repo's is
     box-writable and travels with the branch, a plugin's ships with the tool. Neither grants
-    anything — both land in :func:`offer_recommendations`, which asks the operator host by host."""
-    out = list(config.proxy_recommend())
+    anything — both land in :func:`offer_recommendations`, which asks the operator host by host.
+    A local address is never offered (:func:`local_key`), whoever asks."""
+    out = [e for e in config.proxy_recommend() if not local_key(e["host"])]
     seen = {e["host"] for e in out}
     from .plugins import registry  # lazy: allowlist is on the import-light hot path
 
     for entry in registry().egress_recommend():
-        if entry["host"] not in seen and valid_host(entry["host"]):
+        if entry["host"] not in seen and valid_host(entry["host"]) and not local_key(entry["host"]):
             seen.add(entry["host"])
             out.append(entry)
     return out

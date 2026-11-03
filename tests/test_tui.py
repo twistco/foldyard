@@ -1275,6 +1275,44 @@ async def test_allow_host_grants_the_picked_level(monkeypatch):
         assert grants == [("evil.example.com", "permanent")]
 
 
+async def test_allow_host_never_grants_a_local_address_from_a_keypress(monkeypatch):
+    # A refused 127.0.0.1:<port> row in the Network Log: `a` opens no picker and grants nothing —
+    # a local grant opens a service on your computer to the box, so it takes the typed command.
+    def local_tree():
+        return plugins.PanelTree(
+            summary="1 blocked",
+            groups=[
+                plugins.PanelGroup(
+                    key="127.0.0.1:8123",
+                    label="[b]127.0.0.1:8123[/b] · ⛔ 1 blocked",
+                    children=["⛔ a local address"],
+                )
+            ],
+        )
+
+    monkeypatch.setattr(tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(local_tree)))
+    grants: list = []
+    monkeypatch.setattr(tui.allowlist, "grant", lambda host, level: grants.append((host, level)))
+    notes: list[str] = []
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        monkeypatch.setattr(app, "notify", lambda msg, **kw: notes.append(str(msg)))
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        tree = app.query_one("#network-tree", tui.Tree)
+        tree.focus()
+        tree.cursor_line = 0
+        await pilot.pause()
+        assert tree.cursor_node is not None and tree.cursor_node.data == "127.0.0.1:8123"
+        await pilot.press("a")
+        await pilot.pause()
+        assert not isinstance(app.screen, tui.AllowHostScreen)
+        await app.workers.wait_for_complete()
+        assert grants == []
+        assert any("`fy allow add 127.0.0.1:8123`" in n for n in notes)
+
+
 async def test_allow_host_picker_cancels_without_granting(monkeypatch):
     monkeypatch.setattr(
         tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))

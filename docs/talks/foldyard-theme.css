@@ -118,6 +118,12 @@ section pre {
   padding: 0.85em 1em;
   box-shadow: 0 8px 24px rgba(20, 22, 15, 0.14);
 }
+/* Chrome prints a blurred box-shadow into a PDF as a bitmap, which viewers such as macOS Preview
+   colour-manage differently from the vector page around it: a visible box round the code block.
+   The PDF goes without the shadow. */
+@media print {
+  section pre { box-shadow: none; }
+}
 section pre code {
   background: transparent;
   color: var(--fy-yard-text);

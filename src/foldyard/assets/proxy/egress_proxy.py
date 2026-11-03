@@ -37,17 +37,34 @@ The injector host (api.github.com) is ALWAYS decrypted, whatever CAPTURE_MODE is
 read + rewrite its Authorization header. Plain HTTP is always logged in full (it's cleartext, so
 there's nothing to passthrough).
 
+LOCAL ADDRESSES are refused in every mode, observing included. This proxy runs on your computer,
+so whatever it dials is dialled FROM there: a name or address that leads to loopback, your network
+(the private ranges, a tailnet's CGNAT range, IPv6 unique-local) or link-local reaches services
+that were never offered to the box — a dev server on localhost, a router, a cloud's metadata
+endpoint. Such a dial goes out only on a grant naming that exact address (``fy allow add
+127.0.0.1:8123``), never on a wildcard or the name it was asked by. Names are judged by the answer
+mitmproxy connects to, not a lookup of ours, so DNS rebinding can't split the two (see
+``Injector.server_connect``). The one dial that isn't mitmproxy's is a 401 re-issue
+(``Injector._reissue_401``), which ``requests`` resolves on its own and the guard doesn't see. It
+only re-sends to an ``[[inject]]`` host from the adopted config, whose DNS the box doesn't control,
+after mitmproxy's own dial to that name was allowed.
+
 Config via env (read once at startup). foldyard's supervisor sets LIVE_FILE, which moves the
 rules, the wall switch and the passthrough list out of the env and makes them live:
   LIVE_FILE         a JSON file {"rules": [<rule>, ...], "default_deny": bool, "passthrough":
-                    [<pattern>, ...]} (plus "held" and "overlaps": where the proxy answers a
-                    request itself, and "origin": {"key_file", "record"} — the attributing
-                    forwarder's stamp, see _verify_origin), re-read when it changes (per hook +
-                    once a second) with no restart. When set, INJECT_*, DEFAULT_DENY and
-                    PASSTHROUGH_HOSTS are ignored.
+                    [<pattern>, ...], "push_hosts": [<host>, ...]} (plus "held" and "overlaps":
+                    where the proxy answers a request itself, and "origin": {"key_file",
+                    "record"} — the attributing forwarder's stamp, see _verify_origin), re-read
+                    when it changes (per hook + once a second) with no restart. When set,
+                    INJECT_*, DEFAULT_DENY, PASSTHROUGH_HOSTS and PUSH_HOSTS are ignored.
+                    "push_hosts": the hosts a push-capable credential is being injected on now,
+                    spelled as its rules' "host" — a git push SENT to one of them is forwarded
+                    rather than refused (see _is_git_push), matched as a rule matches
+                    (_injects_on). Anything but a list of non-empty strings lifts nothing; an old
+                    supervisor's "allow_push" is ignored.
                     Unreadable/malformed ⇒ fail closed (no rules, the wall enforcing, nothing
-                    tunnelled). A change that narrows the policy closes the open connections it no
-                    longer allows (see Injector.refresh).
+                    tunnelled, pushes refused everywhere). A change that narrows the policy
+                    closes the open connections it no longer allows (see Injector.refresh).
   HOST_ENV_FILE     host.env: where a live rule's declared `env` names are resolved (this
                     process's env first — the operator's exports — then the file), re-read when it
                     changes.
@@ -111,10 +128,15 @@ Without LIVE_FILE:
                     → system trust (correct for api.github.com). A path pins a specific
                     cert (used by the e2e to trust its self-signed upstream). TLS is never
                     disabled.
+  PUSH_HOSTS        comma-list of hosts a git push is forwarded to instead of refused (the
+                    standalone spelling of LIVE_FILE's "push_hosts"; exact hosts, as a rule's).
+                    Empty (default) → refused on any host the proxy decrypts — a blind tunnel
+                    (passthrough) can't be seen into.
   PROXY_LOG_FILE    JSONL network log of every proxied response (ts, method, host,
                     path, status, injected, replayed; passthrough/blocked/mint_failed rows
-                    add a flag). Default ~/.foldyard/logs/egress.jsonl (foldyard's supervisor
-                    overrides this with the per-project ~/.foldyard/<project>/logs path) —
+                    add a flag; a refused git push is a blocked row with `push`). Default
+                    ~/.foldyard/logs/egress.jsonl (foldyard's supervisor overrides this with
+                    the per-project ~/.foldyard/<project>/logs path) —
                     OUTSIDE the repo on purpose (the shared mount must not carry an
                     egress log the box can read-write). "" disables. Rotated to dated
                     backups (<name>.<UTC-stamp>.jsonl) past PROXY_LOG_MAX_BYTES.
@@ -128,9 +150,11 @@ metadata, so nothing minter-specific lives in this proxy's environment.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import posixpath
 import re
 import shlex
 import subprocess
@@ -138,6 +162,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import parse_qsl, unquote
 
 # mitmproxy is provided at runtime by mitmdump (and stubbed in tests); a bare static-analysis env
 # without it shouldn't surface a missing-import error for this standalone, out-of-tree addon.
@@ -216,11 +241,15 @@ class _DropRefusedDial(logging.Filter):
     Matched on the refusal's own text, so a real connection failure is never swallowed."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return _DIAL_REFUSED not in record.getMessage()
+        message = record.getMessage()
+        return _DIAL_REFUSED not in message and _LOCAL_REFUSED not in message
 
 
 # The error `server_connect` sets on a dial it refuses — and so what _DropRefusedDial matches.
 _DIAL_REFUSED = "refused by the foldyard allowlist (no grant covers this host)"
+# The start of the error a dial to a LOCAL address gets (`Injector._refuse_local`), whichever way
+# it was refused — the box's client is shown the rest: the address, and the grant that allows it.
+_LOCAL_REFUSED = "refused by the foldyard proxy: a local address"
 
 logging.getLogger("mitmproxy.proxy.server").addFilter(_DropRefusedDial())
 
@@ -379,15 +408,101 @@ def _host_matches(host: str | None, patterns: list[str]) -> bool:
     return False
 
 
+def _injects_on(dest: str | None, host: str | None) -> bool:
+    """Does a rule naming ``host`` inject on a request sent to ``dest`` (its :func:`_destination`)?
+    That one host exactly: a rule has no wildcard form. The ONE host match for injection
+    (:meth:`_Rule.matches`) and for the push lift (``Injector._push_lifted``), so the lift can't
+    reach a host the push-capable credential doesn't."""
+    return bool(host) and dest == host
+
+
+def _push_hosts(value: object) -> list[str]:
+    """LIVE_FILE's ``push_hosts``, failing closed: anything but a list of non-empty strings — one
+    bad entry included — lifts the push refusal NOWHERE, rather than on the entries that parse."""
+    if not isinstance(value, list) or not all(isinstance(h, str) and h for h in value):
+        return []
+    return list(value)
+
+
 _MISMATCH_BODY = (
     b"refused by the foldyard proxy - the request's Host header names a different host than the"
     b" one it is sent to\n"
 )
 
+# The 403 body for a git push (`_is_git_push`) while no push-capable mode is on. text/plain, so git
+# prints it: its smart-HTTP client shows a text/plain error body as `remote: …` lines.
+_PUSH_REFUSED_BODY = (
+    b"refused by the foldyard proxy - the box doesn't push; push from your computer\n"
+)
+# On the response to a push the proxy let through because a push-capable mode is on: how the box
+# (`fy verify`) tells "allowed by the mode" from "not refused because the proxy couldn't see it".
+_PUSH_HEADER = "x-foldyard-push"
+_PUSH_ALLOWED = "allowed by the active mode"
+_RECEIVE_PACK = "git-receive-pack"
+
+
+def _is_git_push(path: str) -> bool:
+    """Is this request (its origin-form path, query included) half of a git smart-HTTP push?
+
+    A push is ``GET <repo>/info/refs?service=git-receive-pack`` (discovery), then
+    ``POST <repo>/git-receive-pack``; a fetch is the same with ``git-upload-pack``. So the URL
+    alone tells them apart, whatever the host and whatever credential rides along: the path's
+    last segment IS ``git-receive-pack``, or a ``service`` parameter is that.
+
+    The client this is for is NOT git — it's a box process holding a credential, writing its own
+    HTTP and picking its own host — so the spellings that count are the ones a SERVER still routes
+    to receive-pack, not the one git sends. Compared after percent-decoding, case-insensitively
+    (ASP.NET/IIS routing ignores case), with a backslash read as a slash (IIS), ``;params`` cut
+    from every segment (servlet containers strip them: Bitbucket DC, Gerrit), then dot segments
+    resolved (servlet containers and IIS do, before routing: ``x/git-receive-pack/.`` and
+    ``…/git-receive-pack/y/..`` are receive-pack; ``…/git-receive-pack/..`` is its parent) and
+    trailing slashes dropped (Spring MVC's old trailing-slash match); ``;`` also separates query
+    parameters. None of that can turn a fetch into a match: nothing a fetch sends ends in
+    receive-pack under any spelling. Split on ``?`` by hand: ``urlsplit`` reads a ``//x`` path as
+    an authority. (``normpath`` keeps a leading ``//``, and leaves ``..`` past the root at the
+    root — both harmless here: only the last segment is read.)"""
+    route, _, query = path.partition("?")
+    route = unquote(route.partition("#")[0]).replace("\\", "/")
+    route = "/".join(segment.split(";", 1)[0] for segment in route.split("/"))
+    last = posixpath.normpath(route).rsplit("/", 1)[-1] if route else ""
+    if last.lower() == _RECEIVE_PACK:
+        return True
+    return any(
+        name.strip().lower() == "service" and value.strip().lower() == _RECEIVE_PACK
+        for name, value in parse_qsl(
+            query.partition("#")[0].replace(";", "&"), keep_blank_values=True
+        )
+    )
+
 
 def _norm_host(host: str | None) -> str | None:
     """Hostnames compare case-insensitively and without a trailing root dot."""
     return host.lower().rstrip(".") if host else host
+
+
+def _address(text: object) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """``text`` as an IP address (a bracketed or zone-scoped v6 one too), or None for a name."""
+    try:
+        return ipaddress.ip_address(str(text).strip("[]").split("%", 1)[0])
+    except ValueError:
+        return None
+
+
+def _is_local(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Is ``ip`` somewhere other than the public internet — the proxy's own computer (loopback),
+    its network (the private ranges, CGNAT's — a tailnet's — and IPv6's unique-local), link-local
+    (a cloud's metadata service at 169.254.169.254), or nowhere routable at all? The proxy runs ON
+    your computer, so a dial to any of these reaches a service there, or beside it, that was never
+    offered to the box. A v6 address that carries a v4 one (mapped, 6to4, Teredo) is judged by
+    what it carries as well."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return _is_local(ip.ipv4_mapped)
+        if (ip.sixtofour is not None and _is_local(ip.sixtofour)) or (
+            ip.teredo is not None and _is_local(ip.teredo[1])
+        ):
+            return True
+    return not ip.is_global or ip.is_multicast
 
 
 def _destination(request) -> str | None:
@@ -768,7 +883,7 @@ class _Rule:
     def matches(self, host: str | None, path: str) -> bool:
         """True when this rule should inject on a request: its host, and — if a path prefix is set —
         a path under it. Lets one host serve both an app and a separately-injected endpoint."""
-        if host != self.host:
+        if not _injects_on(host, self.host):
             return False
         return not self.path_prefix or path.startswith(self.path_prefix)
 
@@ -992,6 +1107,9 @@ class Injector:
         # switch is read once (toggling it restarts the daemon); the `allow` patterns live in
         # ALLOW_FILE, re-read per request (mtime-cached) so a host-side grant lands with no restart.
         self.default_deny = os.environ.get("DEFAULT_DENY", "") == "1"
+        # A git push is refused except on the hosts a push-capable credential is injected on
+        # (LIVE_FILE's `push_hosts`; standalone, PUSH_HOSTS). None by default, like a missing file.
+        self.push_hosts = [h for h in os.environ.get("PUSH_HOSTS", "").split(",") if h]
         allow_file = os.environ.get("ALLOW_FILE", "")
         self.allow_path = Path(allow_file) if allow_file else None
         self._allow_mtime: float = -1.0
@@ -1022,6 +1140,8 @@ class Injector:
         # Client connections that presented a live build secret on a cleartext request the wall
         # let through on a build-scoped grant — so `server_connect` lets that dial out too.
         self._build_requesters: set[str] = set()
+        # The resolver `_guard_resolver` put on the event loop (at the first dial), to vet names.
+        self._guard = None
         self._policy_dirty = False
         # The attributing forwarder's stamp (LIVE_FILE's `origin`; see _verify_origin). Off — no
         # key file named — nothing is read, stripped or recorded: today's behaviour exactly.
@@ -1109,6 +1229,10 @@ class Injector:
             self._would_block_seen = {}
         self._observing_since = observing
         self.default_deny = data.get("default_deny", True) is not False
+        # Fail closed the other way round: only a well-formed host list lifts the push refusal,
+        # and only on those hosts — an absent field, a malformed one, a malformed file or a missing
+        # one all refuse everywhere. An old supervisor's every-host `allow_push` lifts nothing.
+        self.push_hosts = _push_hosts(data.get("push_hosts"))
         held = data.get("held")
         self.held = [h for h in held if _valid_held(h)] if isinstance(held, list) else []
         self.held_hosts = {h["host"] for h in self.held}
@@ -1132,8 +1256,10 @@ class Injector:
         if not first:
             enforce = "on" if self.default_deny else "off"
             hosts = ", ".join(sorted(r.host for r in rules if r.host)) or "none"
+            lifted = f" except on {', '.join(self.push_hosts)}" if self.push_hosts else ""
             ctx.log.info(
-                f"egress_proxy: settings reloaded — injecting {hosts}; allowlist enforce {enforce}"
+                f"egress_proxy: settings reloaded — injecting {hosts}; allowlist enforce {enforce};"
+                f" git push refused{lifted}"
             )
         if self._running:
             self._warm([r for r in fresh if r.active])
@@ -1520,14 +1646,17 @@ class Injector:
         request=None,
         *,
         mismatch: bool = False,
+        push: bool = False,
         client_id: str | None = None,
     ) -> None:
         """A row for a request the proxy REFUSED (:meth:`_blocked_entry`). No host → nothing."""
-        entry = self._blocked_entry(host, request, mismatch=mismatch)
+        entry = self._blocked_entry(host, request, mismatch=mismatch, push=push)
         if entry is not None:
             self._write_entry(entry, client_id)
 
-    def _blocked_entry(self, host: str | None, request=None, *, mismatch: bool = False):
+    def _blocked_entry(
+        self, host: str | None, request=None, *, mismatch: bool = False, push: bool = False
+    ):
         """The row for a refused request — no upstream is ever contacted, so there's no real
         status (we synthesise a 403). The Network Log panel keys off ``blocked`` to paint it red
         and offer an 'allow' action. With the refused ``request``, the row carries what was asked
@@ -1536,7 +1665,8 @@ class Injector:
         and, when it carried a live build secret, ``build``: what `fy box build`/`fy up` read back
         to offer the host (never the bare marker, or the box could put its own hosts in that
         offer). ``mismatch``: refused for naming another host in its Host header, not by the
-        allowlist — granting the host is not the fix. No host → None."""
+        allowlist — granting the host is not the fix. ``push``: refused for being a git push
+        (:func:`_is_git_push`) — nor is it then. No host → None."""
         if not host:
             return None
         entry = {
@@ -1551,6 +1681,8 @@ class Injector:
         }  # fmt: skip
         if mismatch:
             entry["mismatch"] = True
+        if push:
+            entry["push"] = True
         if request is not None:
             entry["method"] = str(request.method)
             if request.method != "CONNECT":
@@ -1714,7 +1846,8 @@ class Injector:
         tunnel through, whichever hook judged it — the union of the CONNECT policy, the
         cleartext one (a bare grant on :80), and, for a build, its build-scoped grants — so this
         never refuses what the hooks allow, and never allows a host nothing grants. With the
-        wall observing, anything."""
+        wall observing, anything — by name; where it LEADS is judged apart, in every mode (a
+        local address: ``server_connect``)."""
         if not self.default_deny:
             return True
         if self._allowed_connect(host, port) or (port == _HTTP_PORT and self._granted(host)):
@@ -1730,7 +1863,14 @@ class Injector:
         whichever layer asked for it. Inside a tunnel the proxy answered (``http_connect``) a dial
         is expected — the ClientHello asks for one — and refused quietly: the connection's row is
         the refused request's, or its CONNECT's when it ends without one. Anywhere else a hook
-        should have refused first, so the dial is logged as a refusal of its own."""
+        should have refused first, so the dial is logged as a refusal of its own.
+
+        A dial the grants allow is then judged by where it LEADS, observing or enforcing alike: a
+        local address (:func:`_is_local` — your computer, its network) only on a grant naming that
+        address (:meth:`_local_granted`). An address is judged here; a name where it resolves, by
+        the guard this installs (:meth:`_guard_resolver`) — the answer mitmproxy then connects to,
+        so a name that resolves somewhere public for a check and to loopback for the dial can't
+        slip between the two."""
         self.refresh()
         address = getattr(data.server, "address", None)
         if not address:
@@ -1739,6 +1879,15 @@ class Injector:
         client_id = getattr(getattr(data, "client", None), "id", None)
         build = client_id in self._build_clients or client_id in self._build_requesters
         if self._dial_ok(host, port, build):
+            ip = _address(host)
+            if ip is None:
+                if not self._guard_resolver():
+                    data.server.error = (
+                        f"{_LOCAL_REFUSED} can't be told apart from a public one here: this "
+                        "proxy can't vet name resolution, so it dials no name"
+                    )
+            elif _is_local(ip) and not self._local_granted(ip, port, build):
+                data.server.error = self._refuse_local(host, ip, port, client_id)
             return
         data.server.error = _DIAL_REFUSED
         if client_id in self._answered:
@@ -1746,6 +1895,104 @@ class Injector:
         key = host if port == _HTTPS_PORT else f"{host}:{port}"
         self._log_blocked(key, client_id=client_id)
         ctx.log.info(f"egress_proxy: refused a connection to {key} (not granted)")
+
+    def _local_granted(
+        self, ip: ipaddress.IPv4Address | ipaddress.IPv6Address, port: int, build: bool
+    ) -> bool:
+        """Is there a grant for exactly this local address? Only one that NAMES it — never a
+        wildcard, never the name it was reached by, never an injector's exemption: the operator
+        wrote ``fy allow add 127.0.0.1:8123`` meaning that service and nothing else. The port rule
+        is every grant's — a bare address covers :443 and cleartext :80, ``address:port`` that
+        port — and a build-scoped grant counts for a build. An IPv6 address can't be granted (a
+        grant can't spell one), so it is always refused."""
+        self._refresh_allow()
+        bare = str(ip)
+        keys = {bare if port == _HTTPS_PORT else f"{bare}:{port}"}
+        if port == _HTTP_PORT:
+            keys.add(bare)
+        patterns = self._allow_patterns + (self._build_patterns if build else [])
+        return any(key in patterns for key in keys)
+
+    def _refuse_local(
+        self,
+        name: str | None,
+        ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+        port: int,
+        client_id: str | None,
+    ) -> str:
+        """Log the refusal of a dial to a local address and return the error the box is shown.
+        The row's host is the grant that would allow it (what was REACHED, not the name asked
+        for), marked ``local`` so no one-click or batch path offers it (allowlist.local_key):
+        that grant is typed on purpose or not at all."""
+        key = str(ip) if port == _HTTPS_PORT else f"{ip}:{port}"
+        entry = self._blocked_entry(key)
+        assert entry is not None  # key is never empty
+        entry["local"] = True
+        if name and name != str(ip):
+            entry["name"] = name
+        self._write_entry(entry, client_id)
+        target = f"{name} ({ip})" if name and name != str(ip) else str(ip)
+        how = (
+            "only an IPv4 address can be granted"
+            if ip.version == 6
+            else f"to let the box reach exactly it, on your computer: `fy allow add {key}`"
+        )
+        ctx.log.info(f"egress_proxy: refused a connection to {target}:{port} (a local address)")
+        return f"{_LOCAL_REFUSED} — {target} is on your computer or its network; {how}"
+
+    def _guard_resolver(self) -> bool:
+        """Make the running event loop vet every name it resolves (:meth:`_vet`) — what mitmproxy
+        dials an upstream NAME through (``asyncio.open_connection`` → ``loop.getaddrinfo``; an
+        address skips it, which is why ``server_connect`` judges those itself). Vetting the very
+        answer it connects to is what makes the check hold: a name resolving to a public address
+        for a lookup of ours and to loopback for mitmproxy's (DNS rebinding: TTL 0 and a second
+        answer — there are public services that hand out exactly that) never reaches the second.
+        Installed at the first dial, and again at any dial that finds it no longer the loop's
+        resolver (it is ours to keep in place, not to assume). Its cost: anything else this process
+        resolves on the loop is vetted too, so the proxy listens on an ADDRESS (``--listen-host
+        127.0.0.1``, which never resolves). False where the loop won't take it (none here does):
+        the caller then dials no name at all rather than one it can't judge."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return True  # no event loop (the unit tests drive the hooks directly): nothing dials
+        resolve = loop.getaddrinfo
+        if resolve is self._guard:
+            return True
+
+        async def getaddrinfo(host, port, *args, **kwargs):
+            return self._vet(host, port, await resolve(host, port, *args, **kwargs))
+
+        try:
+            # An instance attribute shadows the method base_events calls as self.getaddrinfo.
+            setattr(loop, "getaddrinfo", getaddrinfo)  # noqa: B010 — assigning a method is a type error
+        except (AttributeError, TypeError) as e:
+            ctx.log.warn(f"egress_proxy: can't vet name resolution on this event loop ({e!r})")
+            return False
+        self._guard = getaddrinfo
+        return True
+
+    def _vet(self, host: object, port: object, infos: list) -> list:
+        """A resolution without the local addresses the grants don't name — what the dial may then
+        try, since it tries only what this returns — or, when that leaves nothing, the OSError
+        mitmproxy reports as the dial's error. So a name with a public and a local answer reaches
+        only the public one, and ``localhost`` on a granted ``127.0.0.1`` skips its ``::1``.
+        Runtime grants only — a lookup can't tell whose it is — so a build reaches a local
+        service by its address."""
+        number = int(port) if str(port).isdigit() else 0
+        kept, refused = [], None
+        for info in infos:
+            ip = _address(info[4][0])
+            if ip is not None and _is_local(ip) and not self._local_granted(ip, number, False):
+                # Name a v4 answer when there is one: only that can be granted (`localhost`'s ::1
+                # often comes first).
+                if refused is None or (refused.version == 6 and ip.version == 4):
+                    refused = ip
+            else:
+                kept.append(info)
+        if not kept and refused is not None:
+            raise OSError(self._refuse_local(_norm_host(str(host)), refused, number, None))
+        return kept
 
     def _trusted_build(self, request) -> bool:
         """Did this request present a LIVE build secret (not just the public marker)?"""
@@ -1926,8 +2173,26 @@ class Injector:
         """Decide, once the upstream's headers are in, whether to relay the body as it arrives
         (:func:`_relays_as_it_arrives`). mitmproxy reads ``response.stream`` right after this hook;
         a response the proxy answered itself (a refusal, a held or failed mint) never reaches it."""
+        self._mark_push_allowed(flow)
         if flow.response is not None and _relays_as_it_arrives(flow.response.status_code):
             flow.response.stream = True
+
+    def _push_lifted(self, dest: str | None) -> bool:
+        """Is a git push SENT to ``dest`` (a :func:`_destination`, never the Host header) let
+        through? Only on a ``push_hosts`` entry, matched exactly as a rule's host. Host-wide: a
+        rule's ``path_prefix`` isn't carried, so a FUTURE push-capable kind scoped to a path would
+        lift the whole host — carry the prefix in the live file before adding one. (gh-cli has no
+        prefix, and its host, ``api.github.com``, serves no receive-pack.)"""
+        return any(_injects_on(dest, host) for host in self.push_hosts)
+
+    @staticmethod
+    def _mark_push_allowed(flow: http.HTTPFlow) -> None:
+        """Say on the response that a push went past the refusal because a push-capable mode is on
+        (``_PUSH_HEADER``). Upstream answers get it in ``responseheaders`` — before a streamed body
+        relays the headers — and the proxy's own answers (the wall, a held dummy) in
+        ``response``."""
+        if flow.metadata.get("egress_proxy_push_allowed") and flow.response is not None:
+            flow.response.headers[_PUSH_HEADER] = _PUSH_ALLOWED
 
     async def requestheaders(self, flow: http.HTTPFlow) -> None:
         """Where a request is judged and its credential written: the headers are in, the body
@@ -1969,6 +2234,23 @@ class Injector:
             self._log_blocked(key, flow.request, mismatch=True, client_id=_client_id(flow))
             self._owe_nothing(flow)
             return
+        # A git push, on any host and whatever credential it carries: refused unless it is sent
+        # to a host a push-capable credential is injected on right now — the box's "never push"
+        # posture shouldn't rest on no credential ever reaching it, and the emergency switch's
+        # token reaches only its own host(s). Before everything below, the wall included: granting
+        # the host is not the fix, and nothing leaves either way. In `requestheaders`, so a push
+        # body never streams.
+        if _is_git_push(flow.request.path):
+            if not self._push_lifted(host):
+                flow.response = http.Response.make(
+                    403, _PUSH_REFUSED_BODY, {"content-type": "text/plain; charset=utf-8"}
+                )
+                flow.metadata["egress_proxy_blocked"] = True
+                key = host if port == default else f"{host}:{port}"
+                self._log_blocked(key, flow.request, push=True, client_id=_client_id(flow))
+                self._owe_nothing(flow)
+                return
+            flow.metadata["egress_proxy_push_allowed"] = True
         # Two switches on, both claiming this host and path, so neither injects: answer with the
         # fix rather than send the dummy to draw a 401. Before the wall, like the held answer
         # below — nothing leaves — and before it too: the switches here are on, not at rest.
@@ -2100,6 +2382,7 @@ class Injector:
             and not flow.metadata.get("egress_proxy_retried")  # at most once — loop guard
         ):
             await self._reissue_401(flow, rule)
+        self._mark_push_allowed(flow)
         if flow.metadata.get("egress_proxy_liveness"):
             return  # the supervisor's probe, every tick: nothing went anywhere
         if flow.metadata.get("egress_proxy_blocked") or flow.metadata.get("egress_proxy_held"):

@@ -885,3 +885,44 @@ def test_learned_hosts_name_who_asked_when_the_rows_say(env):
     # without a resolver (attribution off), nothing changes
     (plain,) = allowlist.learned_hosts(rows, window)
     assert plain["by"] == [] and allowlist.recommend_why(plain) == "observed: pip/24 — edit me"
+
+
+# ── local addresses are granted by typing them, never offered ────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["127.0.0.1", "127.0.0.1:8123", "10.1.2.3:5432", "192.168.5.2:3000", "169.254.169.254",
+     "100.100.1.1:22", "::1", "fd00::1"],
+)  # fmt: skip
+def test_a_local_key_is_local(key):
+    assert allowlist.local_key(key)
+
+
+@pytest.mark.parametrize("key", ["1.1.1.1", "1.1.1.1:8080", "pypi.org", "github.com:22", "*.x.dev"])
+def test_a_public_or_named_key_is_not(key):
+    assert not allowlist.local_key(key)
+
+
+def test_no_offer_path_hands_out_a_local_address(env):
+    # The proxy refuses a local dial in every mode and logs it, keyed by the grant that would
+    # allow it; while observing, the CONNECT before it also leaves a would-block row. Neither
+    # may come back as a one-click grant, a learn batch or a build's offer — and the repo can't
+    # recommend one either: a grant to a service on your computer is typed, or not made.
+    window = {"since": "2026-09-22T10:00:00+00:00", "until": "2026-09-22T11:00:00+00:00"}
+    ts = "2026-09-22T10:01:00+00:00"
+    rows = [
+        _row("127.0.0.1:8123", ts),
+        {"ts": ts, "host": "127.0.0.1:8123", "status": 403, "blocked": True, "local": True},
+        {"ts": ts, "host": "10.0.0.5", "status": 403, "blocked": True, "build": True},
+        _row("pypi.org", ts),
+    ]
+    assert [e["host"] for e in allowlist.learned_hosts(rows, window)] == ["pypi.org"]
+    assert allowlist.refused_hosts(rows) == ["pypi.org"]
+    since = allowlist._parse("2026-09-22T10:00:00+00:00")
+    assert since is not None and allowlist.build_refusals(rows, since) == []
+    _recommend(env, '["127.0.0.1:8123", "pypi.org", { host = "10.0.0.5", when = "build" }]')
+    assert [e["host"] for e in allowlist.recommendations()] == ["pypi.org"]
+    # Typed, it is made — the one way in.
+    allowlist.grant("127.0.0.1:8123", "once")
+    assert "127.0.0.1:8123" in allowlist.effective()["allow"]

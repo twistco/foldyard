@@ -272,6 +272,18 @@ def test_allow_verbs_are_the_replacement_for_a_committed_allowlist(monkeypatch, 
     assert runner.invoke(cli.app, ["allow", "remove", "x.test"]).exit_code == 0
 
 
+def test_allow_add_warns_when_the_grant_opens_a_local_address(monkeypatch):
+    from foldyard import allowlist
+
+    monkeypatch.setattr(allowlist, "grant", lambda h, lvl, ttl, build=False: {"allow": [h]})
+    out = runner.invoke(cli.app, ["allow", "add", "127.0.0.1:8123"])
+    assert out.exit_code == 0
+    assert "127.0.0.1:8123 is on your computer or its network" in out.output
+    assert "fy allow remove" in out.output
+    out = runner.invoke(cli.app, ["allow", "add", "x.test"])
+    assert out.exit_code == 0 and "on your computer" not in out.output
+
+
 def test_allow_sync_reports_nothing_pending(tmp_path, monkeypatch):
     # A project with neither `[proxy] recommend` nor a declared agent has nothing to offer. Pinned
     # against a SCRATCH checkout + state dir: foldyard's own config declares [claude]/[codex],

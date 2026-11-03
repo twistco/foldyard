@@ -1094,7 +1094,8 @@ redeclaring the team's. `fy config widenings` lists their keys under **agent ste
   `.vscode/extensions.json`) feeds it. The table is read from the *adopted* config, and `fy code`
   runs the adopt gate first, because extensions can install into your own `~/.vscode/extensions`
   ([ADR-0026](./adrs/0026-vscode-attach-config-is-declarative.md)). `fy code` also starts VS Code
-  with an empty SSH agent and the git credential bridge off; what a manual attach still brings is
+  with an empty SSH agent, an empty git config and the editor's credential forwarders pinned off
+  ([security](./security.md#editor-attach-credential-bridges)); what a manual attach still brings is
   removed in the box, and `fy verify` reports what's left
   ([security](./security.md#fy-verify-prove-it-dont-trust-it)).
   - **`extensions`** — marketplace ids (`publisher.name`) installed on attach, without a click.
@@ -1112,10 +1113,14 @@ redeclaring the team's. `fy config widenings` lists their keys under **agent ste
   Each worktree gets its own VS Code instance. The first `fy code` for a worktree copies your own
   VS Code's user settings, keybindings and snippets into it, leaving out settings that point at
   another container engine (Docker Desktop's socket or context). After that the instance's
-  settings are its own; delete its `User/settings.json` to copy yours again. One setting is
-  foldyard's on every `fy code`: `dev.containers.dockerPath`, the program Dev Containers runs to
-  reach containers, is set to foldyard's own engine CLI (podman), so the attach needs no `docker`
-  on your computer. `fy code` also installs the Dev Containers extension
+  settings are its own; delete its `User/settings.json` to copy yours again. Some settings are
+  foldyard's on every `fy code`, whatever the instance or this table says:
+  `dev.containers.dockerPath`, the program Dev Containers runs to reach containers, is set to
+  foldyard's own engine CLI (podman), so the attach needs no `docker` on your computer; and the
+  credential forwarders listed in [security](./security.md#editor-attach-credential-bridges) are
+  switched off. Because those pins have to land, `fy code` refuses to launch when it can't rewrite
+  the instance's `settings.json` (comments or invalid JSON in it): fix the file or delete it.
+  `fy code` also installs the Dev Containers extension
   (`ms-vscode-remote.remote-containers`) when it's missing; it goes into `~/.vscode/extensions`,
   so your everyday VS Code gets it too.
 
@@ -1125,7 +1130,6 @@ redeclaring the team's. `fy config widenings` lists their keys under **agent ste
 
   [vscode.settings]
   "remote.autoForwardPorts" = false
-  "github.gitAuthentication" = false
   ```
 
 ## `[reclaim]`

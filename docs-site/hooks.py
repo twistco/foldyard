@@ -23,20 +23,12 @@ link `#degraded--the-switch-is-on-…` (an em dash dropped, both spaces kept) an
 from __future__ import annotations
 
 import html
-import logging
 import posixpath
 import re
 from pathlib import Path
 
-log = logging.getLogger("mkdocs.hooks.docs_site")
-
 REPO = "https://github.com/twistco/foldyard"
 BRANCH = "main"
-
-# In the repo, deliberately not on the site yet (mkdocs.yml's exclude_docs keeps them out). A link
-# into one is a warning — a failed --strict build — rather than a quiet GitHub link, so publishing
-# them stays a decision: drop the entry here and in exclude_docs, and link them.
-UNPUBLISHED = ("talks/",)
 
 # [text](target), and `![alt](target)`, for which the same rewrite is right (an image outside the
 # site is served from GitHub raw). The text may span lines and hold bracketed spans one or two
@@ -73,9 +65,6 @@ def _rewrite(
 
     inside_docs = not in_docs.startswith("../")
     if inside_docs:
-        if (in_docs + "/").startswith(UNPUBLISHED):
-            log.warning("%s links %s, which isn't published on the site yet", page_src, target)
-            return target
         if _on_site(files, in_docs):
             return target  # a page or asset on the site
         index = posixpath.join(in_docs, "README.md")

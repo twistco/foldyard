@@ -658,8 +658,9 @@ minutes, and the `e2e` job is the single status to check.
   [twistco.github.io/foldyard](https://twistco.github.io/foldyard/); `just docs-site` locally).
   Write pages for GitHub and `fy docs` as before — `docs-site/hooks.py` adapts them at build time:
   a link out of `docs/` goes to GitHub, a GitHub URL for something the site holds comes back to
-  the site, and heading ids are GitHub's, so `#anchor` links work in both. `talks/` is in the repo
-  but not on the site yet (the hook's `UNPUBLISHED`): a link into it fails the build.
+  the site, and heading ids are GitHub's, so `#anchor` links work in both. A talk's Marp source
+  isn't a page (`exclude_docs`): the site serves the HTML and PDF committed beside it, so after
+  editing a deck, render both again (`docs/talks/README.md`) and commit them with the change.
 - **Three surfaces TEACH, and none of them fails when it lies:** the bundled skills
   (`assets/skills/`, installed into a consumer's `.claude/skills/`), the `fy init` scaffold, and
   the docs `fy docs` ships. `tests/test_agent_guide.py` is the mechanical guard — every ``fy …``
@@ -674,7 +675,9 @@ minutes, and the `e2e` job is the single status to check.
 - **Write "host", not "Mac" — in new code, docstrings, messages and docs.** foldyard's split is
   host vs box, and the host being a Mac is a fact about today's users, not about the design (there
   is no platform branching in the package: no `sys.platform`, no `Darwin` test; Linux and WSL2
-  hosts are validated in CI, see the two host-tier jobs). User-facing text says *your computer*
+  hosts are validated in CI, see the two host-tier jobs). The one exception is
+  `vscode._write_local_terminal_cwd`: which `terminal.integrated.env.<os>` key VS Code reads IS
+  the OS name, so no capability probe can stand in for it. User-facing text says *your computer*
   (see [docs/glossary.md](./docs/glossary.md)); `tests/test_docs_shipped.py` refuses "Mac" in the
   shipped docs, the skills and `--help`. Say **macOS** only
   where the claim really is macOS-only — `brew`, the login keychain, `security add-trusted-cert`,

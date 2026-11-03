@@ -1317,25 +1317,59 @@ def _terminal_env() -> list[str]:
 
 # The host bridges an editor attach injects, neutralised in-box. VS Code's Dev Containers attach
 # (`fy code`, or a manual "Attach to Running Container") runs its server IN the box and, with no
-# setting to stop it, forwards the host's SSH agent (`/tmp/vscode-ssh-auth-*.sock`) and its
-# git-credential store (`GIT_ASKPASS` over `/tmp/vscode-git-*.sock`) into every terminal it opens
-# — two push paths in a box whose posture is "never push" — plus a host command channel
-# (`VSCODE_IPC_HOOK_CLI`, `BROWSER`/--openExternal). `fy code` defuses both at the SOURCE, race-free:
-# it launches VS Code with foldyard's own EMPTY ssh-agent (the attach forwards whatever the process
-# holds, verbatim — only an unset var makes it find the host's real one; `vscode._empty_agent`),
-# and pins `git.terminalAuthentication` off so the git bridge is never installed. This snippet is
-# the second layer, for what the source can't reach — a manual "Attach to Running Container" from
-# an operator's own VS Code, an instance launched before this shipped — image-agnostic, in two
-# parts. ENV hygiene: `harden.sh` unsets the vars, sourced at ~/.bashrc line 1 — BEFORE the
-# interactive guard — so every bash (the attach's terminals, `fy claude`, `box shell`, a
-# `bash -c`) inherits their absence. SOCKET removal: the sockets are usable by PATH regardless of
-# the env, so a reaper unlinks them as they appear; (re)started from harden.sh — every shell —
-# and from `fy code` before the attach. The window between a socket appearing and the reaper's
-# next pass is real, which is why it is the second layer and not the first; the egress wall's
-# :443 fence makes it moot for SSH regardless (`github.com:22` needs its own grant). `fy verify`
-# reports both the vars and the sockets. Generalised from the harden script a consumer image
-# carried — a load-bearing part of the posture that only one consumer had.
-_HARDEN_SNIPPET = r"""
+# setting to stop it, forwards the host's SSH agent (`vscode-ssh-auth-*.sock`) and its
+# git-credential store (`GIT_ASKPASS` over `vscode-git-*.sock`) into every terminal it opens — two
+# push paths in a box whose posture is "never push" — plus Dev Containers' own IPC
+# (`vscode-remote-containers-ipc-*.sock`, whose HOST side runs `git credential fill` and the docker
+# credential helpers for whoever asks, no setting consulted) and a host command channel
+# (`VSCODE_IPC_HOOK_CLI` over `vscode-ipc-*.sock`, `BROWSER`/--openExternal: it drives the host's
+# VS Code, URL opens included — an egress path around the proxy). `fy code` defuses what it can at
+# the SOURCE, race-free: it launches VS Code with foldyard's own EMPTY ssh-agent (the attach
+# forwards whatever the process holds, verbatim — only an unset var makes it find the host's real
+# one; `vscode._empty_agent`), launches it with an empty git config so the host side of Dev
+# Containers' IPC has no credential helper to run, pins `git.terminalAuthentication` off so
+# `GIT_ASKPASS` isn't injected (the git extension's askpass socket is still created and still
+# answers — hence the reaper), and keeps Dev Containers from writing its host credential helper
+# into the box's git config. This snippet is the second layer, for what the source can't reach — a manual "Attach to
+# Running Container" from an operator's own VS Code, an instance launched before this shipped, the
+# IPC sockets nothing host-side can switch off — image-agnostic, in two parts. ENV hygiene:
+# `harden.sh` unsets the vars, sourced at ~/.bashrc line 1 — BEFORE the interactive guard — so
+# every bash (the attach's terminals, `fy claude`, `box shell`, a `bash -c`) inherits their
+# absence. SOCKET removal: the sockets are usable by PATH regardless of the env, so a reaper
+# unlinks them as they appear; (re)started from harden.sh — every shell — and from `fy code`
+# before the attach. That is a MITIGATION, not a wall: the window between a socket appearing and
+# the reaper's next pass is real, and a process already in the box can watch for one (inotify)
+# and hard-link it to a name the reaper doesn't know before the unlink — which is why it is the
+# second layer and not the first. The egress wall's :443 fence makes it moot for SSH regardless
+# (`github.com:22` needs its own grant). Nothing foldyard ships uses the `code` CLI from inside the
+# box (`fy open` refuses in-box), and the env scrub already unsets its var, so reaping its socket
+# takes away nothing the scrub hadn't: `code <file>` in an attached terminal stops working either way.
+# `fy verify` reports the vars and the sockets (verify._BRIDGE_SOCKET_GLOBS: the same names).
+# Generalised from the harden script a consumer image carried — a load-bearing part of the posture
+# that only one consumer had.
+_BRIDGE_SOCKET_GLOBS = (
+    "vscode-ssh-auth-*.sock",
+    "vscode-git-*.sock",
+    "vscode-remote-containers-ipc-*.sock",
+    "vscode-ipc-*.sock",
+)
+# Where they land: /tmp; the per-user /tmp/user/<uid>/ (the git socket has been seen there);
+# $XDG_RUNTIME_DIR, which VS Code prefers for its IPC handles on Linux; $TMPDIR, Dev Containers'
+# choice when set. Read in the REAPER's env; the attach's server starts from the same container env,
+# so the two normally agree — a server given its own XDG_RUNTIME_DIR/TMPDIR would not be covered.
+_REAPER_PASS = (
+    'for d in /tmp /tmp/user/* "${XDG_RUNTIME_DIR:-/tmp}" "${TMPDIR:-/tmp}"; do rm -f '
+    + " ".join(f'"$d"/{g}' for g in _BRIDGE_SOCKET_GLOBS)
+    + "; done"
+)
+_REAPER_LOOP = f"while :; do {_REAPER_PASS}; sleep 1; done"
+# The running reaper's identity: `sh -c <loop> <name>` puts the name in its argv, derived from the
+# loop text, so a box still running an OLDER loop (fewer globs) is recognised and replaced on the
+# next harden.sh — "a live pid in the pidfile" alone would keep the old loop forever. Anything else
+# at that pid is a recycled one (a restarted box) and is neither trusted nor killed.
+_REAPER_NAME = "fy-bridge-reaper-" + hashlib.sha256(_REAPER_LOOP.encode()).hexdigest()[:12]
+_HARDEN_SNIPPET = (
+    r"""
 mkdir -p "$HOME/.config/foldyard" && touch ~/.bashrc
 cat > "$HOME/.config/foldyard/harden.sh" <<'FYHARDEN'
 # foldyard: neutralise the host bridges an editor attach injects (fy docs security, § fy verify).
@@ -1344,10 +1378,23 @@ unset VSCODE_IPC_HOOK_CLI
 unset VSCODE_GIT_IPC_HANDLE GIT_ASKPASS VSCODE_GIT_ASKPASS_MAIN VSCODE_GIT_ASKPASS_NODE VSCODE_GIT_ASKPASS_EXTRA_ARGS
 unset REMOTE_CONTAINERS_IPC REMOTE_CONTAINERS_SOCKETS REMOTE_CONTAINERS_DISPLAY_SOCK WAYLAND_DISPLAY
 export BROWSER= SSH_AUTH_SOCK= GPG_AGENT_INFO=
-fy_bridge_reaper() {  # unlink the attach's agent + git-IPC sockets as they appear; one per box
-  local pid="$HOME/.config/foldyard/bridge-reaper.pid"
-  [ -r "$pid" ] && kill -0 "$(cat "$pid" 2>/dev/null)" 2>/dev/null && return 0
-  nohup sh -c 'while :; do rm -f /tmp/vscode-ssh-auth-*.sock /tmp/vscode-git-*.sock; sleep 1; done' >/dev/null 2>&1 </dev/null &
+fy_bridge_reaper() {  # unlink the attach's host-bridge sockets as they appear; one per box
+  local pid="$HOME/.config/foldyard/bridge-reaper.pid" p args
+  p=$(cat "$pid" 2>/dev/null)
+  if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+    args=$({ cat "/proc/$p/cmdline" 2>/dev/null || ps -ww -o args= -p "$p" 2>/dev/null; } | tr '\0' ' ')
+    case "$args" in
+      *"""
+    + _REAPER_NAME
+    + r"""*) return 0 ;;  # this snippet's reaper: already running
+      *"while :; do "*vscode-ssh-auth-*) kill "$p" 2>/dev/null ;;  # an older loop: replace it
+    esac  # anything else is a recycled pid (a restarted box), not a reaper: leave it be
+  fi
+  nohup sh -c '"""
+    + _REAPER_LOOP
+    + "' "
+    + _REAPER_NAME
+    + r""" >/dev/null 2>&1 </dev/null &
   echo $! > "$pid"
 }
 fy_bridge_reaper
@@ -1355,6 +1402,7 @@ FYHARDEN
 grep -q "foldyard/harden.sh" ~/.bashrc || { printf '%s\n' 'source "$HOME/.config/foldyard/harden.sh" 2>/dev/null || true' | cat - ~/.bashrc > ~/.bashrc.fy && mv ~/.bashrc.fy ~/.bashrc; }
 . "$HOME/.config/foldyard/harden.sh"
 """
+)
 
 # Base scaffolding the bootstrap runs FIRST (idempotent shell config, not an install): CA
 # system-trust, the PATH + persisted-history ~/.bashrc edits, and the `run_step` helper that the
