@@ -216,8 +216,11 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   (`configpin.adopted_checkouts`) as `fy agent ls --here --json` in its own process (spawned through
   `selfspawn`: `python -P -m`, relative `PYTHONPATH` pinned, since it runs in another checkout), so each
   project resolves its own VM/prefix/worktrees; a stopped VM is reported, never booted.
-  `fy box down` (and the TUI's stop confirm) names live sessions first. Next phase:
-  docs/fleet-scope.md.
+  `fy box down` (and the TUI's stop confirm) names live sessions first. A box without tmux: on the
+  packaged image (which has it) or one whose `[box].packages` lists it, "recreate the box"; only an
+  own image that doesn't list it gets a y/N offer, made by `boxpackages.py` — a textual edit of
+  `[box].packages` proven by re-parsing, the file read `O_NOFOLLOW` and written via `mountwrite`.
+  Never added unasked. Next phase: docs/fleet-scope.md.
 - `worktree.py` · `transcripts.py` · `tui.py` · `init.py` · `skills.py` · `browser.py` ·
   `vscode.py` · `podman_desktop.py` — worktrees, agent-transcript sync, the Textual TUI,
   `foldyard init`, bundled skills, `fy open`, `fy code`, `fy machine desktop` (an `fy-<machine>`

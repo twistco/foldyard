@@ -213,8 +213,78 @@ def test_start_refuses_an_old_or_missing_tmux(in_box, capsys):
     assert "3.3 or newer" in capsys.readouterr().err
     replies["-V"] = _Proc(127, "", "not found")
     assert agents.start("claude", "", [], attach_after=False) == 1
-    assert 'packages = ["tmux"]' in capsys.readouterr().err
+    assert "fy box down && fy box up" in capsys.readouterr().err
     assert not any("new-session" in c for c in calls)
+
+
+@pytest.fixture
+def no_tmux(in_box, monkeypatch, tmp_path):
+    """A box with no tmux, in a checkout at ``tmp_path``; returns the questions asked."""
+    _, replies = in_box
+    replies["-V"] = _Proc(127, "", "not found")
+    monkeypatch.setattr(config, "repo_root", lambda: tmp_path)
+    asked: list[str] = []
+    monkeypatch.setattr(agents, "_ask", lambda q: asked.append(q) or False)
+    return asked
+
+
+def _own_image(monkeypatch):
+    monkeypatch.setattr(config, "box_image", lambda: {"dockerfile": "box.Dockerfile", "tag": "t"})
+
+
+def test_a_stock_image_without_tmux_is_an_old_box_never_an_offer(no_tmux, capsys):
+    assert agents.start("claude", "", [], attach_after=False) == 1
+    err = capsys.readouterr().err
+    assert "packaged box image has it" in err
+    assert "on your computer, `fy box down && fy box up`" in err  # in a box: the host's verb
+    assert no_tmux == []
+
+
+def test_an_own_image_that_already_lists_tmux_is_an_old_box_never_an_offer(
+    no_tmux, monkeypatch, capsys, tmp_path
+):
+    _own_image(monkeypatch)
+    (tmp_path / "foldyard.toml").write_text('[box]\npackages = ["tmux"]\n')
+    assert agents.start("claude", "", [], attach_after=False) == 1
+    assert "[box].packages lists it" in capsys.readouterr().err
+    assert no_tmux == []
+
+
+def test_an_own_image_without_tmux_is_offered_and_a_no_changes_nothing(
+    no_tmux, monkeypatch, capsys, tmp_path
+):
+    _own_image(monkeypatch)
+    (tmp_path / "foldyard.toml").write_text('[box]\npackages = ["just"]\n')
+    assert agents.start("claude", "", [], attach_after=False) == 1
+    assert len(no_tmux) == 1 and "(y/N)" in no_tmux[0]
+    assert 'packages = ["tmux"]' in capsys.readouterr().err  # the line to add by hand
+    assert (tmp_path / "foldyard.toml").read_text() == '[box]\npackages = ["just"]\n'
+
+
+def test_a_yes_adds_it_and_says_what_comes_next(no_tmux, monkeypatch, capsys, tmp_path):
+    _own_image(monkeypatch)
+    (tmp_path / "foldyard.toml").write_text('[box]\npackages = ["just"]\n')
+    monkeypatch.setattr(agents, "_ask", lambda q: True)
+    assert agents.start("claude", "", [], attach_after=False) == 1  # still no tmux in THIS box
+    err = capsys.readouterr().err
+    assert (tmp_path / "foldyard.toml").read_text() == '[box]\npackages = ["just", "tmux"]\n'
+    assert "✓ added tmux" in err and "adopt the config when asked" in err
+
+
+def test_a_yes_the_edit_cant_make_falls_back_to_the_hint(no_tmux, monkeypatch, capsys, tmp_path):
+    _own_image(monkeypatch)
+    (tmp_path / "foldyard.toml").write_text('box.packages = ["just"]\n')
+    monkeypatch.setattr(agents, "_ask", lambda q: True)
+    assert agents.start("claude", "", [], attach_after=False) == 1
+    err = capsys.readouterr().err
+    assert "couldn't add it" in err and 'packages = ["tmux"]' in err
+    assert (tmp_path / "foldyard.toml").read_text() == 'box.packages = ["just"]\n'
+
+
+def test_the_question_is_never_asked_without_a_terminal(monkeypatch):
+    monkeypatch.setattr(agents.sys.stdin, "isatty", lambda: False, raising=False)
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("read the terminal"))
+    assert agents._ask("? ") is False
 
 
 def test_start_refuses_bad_names_and_agents(in_box):

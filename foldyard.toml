@@ -118,6 +118,9 @@ recommend = [
 [claude]
 keyless = "oauth"      # Bearer on api.anthropic.com ← `claude setup-token` on the host
 # # keyless = "api-key"  # x-api-key on api.anthropic.com ← from console.anthropic.com
+# Copy the box's transcripts to ~/.claude/projects every 10 s while the box is up (default 0:
+# only at `fy box down`), so a transcript viewer stays current and a crashed box loses nothing.
+transcript_sync_seconds = 10
 system_prompt = """
 You are root in foldyars's own foldyard dev box, started by `fy claude` with permission
 prompts skipped.

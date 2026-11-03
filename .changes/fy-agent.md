@@ -14,8 +14,9 @@ bump: minor
   default keeps an agent's escape sequences and clipboard writes off your terminal (a default,
   not a boundary: the box can turn it off). `fy claude` is unchanged. See `fy docs agents`.
 - **The packaged box image now includes tmux.** Its fingerprint changes, so the next `fy box up`
-  rebuilds the image, and `fy prereq --fetch` re-bakes the base VM. On your own `[box].image`, add
-  `packages = ["tmux"]` to use `fy agent`.
+  rebuilds the image, and `fy prereq --fetch` re-bakes the base VM; `fy agent start` in a box made
+  before it says to recreate the box. On your own `[box].image`, `fy agent start` offers to add
+  `"tmux"` to `[box].packages` for you (asked, never done unasked).
 - **`fy box down` names the agent sessions still running in the box before removing it**, and
   asks first on a terminal (`--yes` skips the question). The TUI's stop-box confirmation lists
   them too.

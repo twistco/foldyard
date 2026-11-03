@@ -40,6 +40,7 @@ Stdlib-only; imported lazily by the CLI.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -810,8 +811,7 @@ def _tmux_ok(b: Box) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         out = None
     if out is None or out.returncode != 0:
-        _err("✗ tmux isn't installed in the box. foldyard's packaged box image has it; on your own")
-        _err('  image add `packages = ["tmux"]` under [box] in foldyard.toml, then `fy box up`.')
+        _tmux_missing()
         return False
     version = tmux_version(out.stdout)
     if version is not None and version < MIN_TMUX:
@@ -819,3 +819,60 @@ def _tmux_ok(b: Box) -> bool:
         _err("  passes an agent's escape sequences through to your terminal by default).")
         return False
     return True
+
+
+def _recreate_hint() -> str:
+    where = "on your computer, " if config.in_box() else ""
+    return f"{where}`fy box down && fy box up`"
+
+
+def _tmux_missing() -> None:
+    """Why the box has no tmux, and the fix. Only a box image of the project's own that doesn't
+    list it gets the offer to add it to ``[box].packages`` — asked, never done unasked. Foldyard's
+    packaged image has tmux, and a box built before the list named it just needs recreating."""
+    from . import boxpackages
+
+    packaged = config.packaged_box_image("")["dockerfile"]
+    if config.box_image().get("dockerfile") == packaged:
+        _err("✗ tmux isn't in this box, though foldyard's packaged box image has it: the box was")
+        _err(f"  built from an older one. Recreate it: {_recreate_hint()}.")
+        return
+    root = config.repo_root()
+    if "tmux" in boxpackages.listed(root):
+        _err("✗ tmux isn't in this box, though [box].packages lists it: the box predates that.")
+        _err(f"  Recreate it: {_recreate_hint()} (adopt the config when asked).")
+        return
+    _err("✗ tmux isn't installed in the box, and its image (your [box].image) doesn't include it.")
+    manual = '  Add `packages = ["tmux"]` under [box] in foldyard.toml, then '
+    if not _ask('  Add "tmux" to [box].packages in foldyard.toml? (y/N): '):
+        _err(f"{manual}{_recreate_hint()}.")
+        return
+    try:
+        written = boxpackages.add(root, "tmux")
+    except boxpackages.Refused as e:
+        _err(f"  ✗ couldn't add it: {e}")
+        _err(f"{manual}{_recreate_hint()}.")
+        return
+    except OSError as e:
+        _err(f"  ✗ couldn't write it: {e}")
+        _err(f"{manual}{_recreate_hint()}.")
+        return
+    _err(f"  ✓ added tmux to [box].packages in {written.name}. It's baked into the box image at")
+    _err(f"  the next box create: {_recreate_hint()} (adopt the config when asked), then")
+    _err("  `fy agent start` again.")
+
+
+def _ask(question: str) -> bool:
+    """A y/N on a terminal; no terminal is a no. Typed-ahead input is dropped first, so a stray
+    keystroke from before the question isn't an answer."""
+    if not sys.stdin.isatty():
+        return False
+    with contextlib.suppress(Exception):
+        import termios
+
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    try:
+        print(question, end="", file=sys.stderr, flush=True)
+        return input().strip() in ("y", "Y")
+    except EOFError:
+        return False

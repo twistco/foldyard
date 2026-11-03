@@ -98,7 +98,12 @@ let foldyard install it:
 packages = ["tmux"]
 ```
 
-Then `fy box up`. `fy agent start` says so if it's missing.
+Then `fy box down && fy box up` (adopt the config when asked). When tmux is missing,
+`fy agent start` offers to add that line for you: it asks first, edits only `[box].packages`
+(in `foldyard.local.toml` if that file sets the list, else `foldyard.toml`), keeps the file's
+comments and layout, and refuses an edit it can't make exactly. On foldyard's packaged image
+tmux is already there, so a box without it was built from an older image: `fy agent start`
+says to recreate it instead.
 
 ## Reading transcripts in a browser
 
