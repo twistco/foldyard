@@ -1,11 +1,12 @@
 """Add a package to ``[box].packages`` in a checkout's own config — `fy agent start`'s offer when
 the box's image has no tmux, never anything foldyard does unasked.
 
-**Textual, and proven by re-parsing.** The file keeps its comments and layout: the name is inserted
-into the existing array, or a ``packages = [...]`` line goes under the ``[box]`` header, or a
-``[box]`` table is appended. The result is written only when it parses to exactly the old document
-with the package appended, and the checkout's merged config then lists it; anything else is
-:class:`Refused` with the reason, and the caller prints the line to add by hand.
+**Textual, and proven by re-parsing** (the stdlib's ``tomllib`` only reads). The file keeps its
+comments and layout: the name is appended inside a one-line ``packages = [...]``, or such a line
+goes under the ``[box]`` header, or a ``[box]`` table is appended; a multi-line array is refused.
+The result is written only when it parses to exactly the old document with the package appended,
+and the checkout's merged config then lists it; anything else is :class:`Refused` with the
+reason, and the caller prints the line to add by hand.
 
 **Which file.** ``foldyard.local.toml`` when it sets ``[box].packages`` (an array in the local file
 replaces the shared one wholesale, so an edit to ``foldyard.toml`` would change nothing), else
@@ -35,6 +36,10 @@ _MAX_BYTES = 1 << 20  # a config file, not a place to stream something large fro
 _BOX_HEADER = re.compile(r"^[ \t]*\[[ \t]*box[ \t]*\][ \t]*(#.*)?$", re.MULTILINE)
 _ANY_HEADER = re.compile(r"^[ \t]*\[", re.MULTILINE)
 _PACKAGES_KEY = re.compile(r"^[ \t]*packages[ \t]*=[ \t]*\[", re.MULTILINE)
+# The whole array on its key's line, a comment after it allowed. Only that shape is edited: a
+# multi-line array is refused with the line to add by hand (a `]` in a string or the comment
+# that fools the match makes an edit the re-parse in :func:`add` refuses too).
+_ONE_LINE = re.compile(r"[ \t]*packages[ \t]*=[ \t]*\[(?P<items>[^\n]*?)\][ \t]*(#[^\n]*)?$", re.M)
 
 
 class Refused(Exception):
@@ -88,52 +93,6 @@ def listed(root: Path) -> list[str]:
     return [p for p in found if isinstance(p, str)] if isinstance(found, list) else []
 
 
-def _insert_at(text: str, start: int) -> int:
-    """For the array whose ``[`` is at ``start``: the index just past its last value or comma —
-    where a new element goes. Strings and comments are skipped; an unclosed array is refused."""
-    depth, i, last = 0, start, start + 1
-    while i < len(text):
-        c = text[i]
-        if c == "#":
-            nl = text.find("\n", i)
-            i = len(text) if nl < 0 else nl
-            continue
-        if c in "\"'":
-            quote = c * 3 if text.startswith(c * 3, i) else c
-            j = i + len(quote)
-            while True:
-                k = text.find(quote, j)
-                if k < 0:
-                    raise Refused("an unterminated string in [box].packages.")
-                if c == '"' and len(quote) == 1 and _escaped(text, k):
-                    j = k + 1
-                    continue
-                break
-            i = k + len(quote)
-            last = i
-            continue
-        if c == "[":
-            depth += 1
-            if depth > 1:
-                last = i + 1
-        elif c == "]":
-            depth -= 1
-            if depth == 0:
-                return last
-            last = i + 1
-        elif not c.isspace():
-            last = i + 1
-        i += 1
-    raise Refused("[box].packages has no closing ].")
-
-
-def _escaped(text: str, k: int) -> bool:
-    backslashes = 0
-    while k - 1 - backslashes >= 0 and text[k - 1 - backslashes] == "\\":
-        backslashes += 1
-    return backslashes % 2 == 1
-
-
 def _edited(text: str, package: str) -> str:
     """``text`` with ``package`` added to ``[box].packages`` — unproven; :func:`add` checks it."""
     item = f'"{package}"'
@@ -143,11 +102,13 @@ def _edited(text: str, package: str) -> str:
         section_end = nxt.start() if nxt else len(text)
         key = _PACKAGES_KEY.search(text, header.end(), section_end)
         if key:
-            last = _insert_at(text, key.end() - 1)
-            before = text[key.end() - 1 : last].rstrip()
-            sep = "" if before.endswith(("[", ",")) else ", "
-            lead = " " if before.endswith(",") else ""
-            return text[:last] + sep + lead + item + text[last:]
+            line = _ONE_LINE.match(text, key.start(), section_end)
+            if not line:
+                raise Refused("[box].packages spans several lines.")
+            items = line["items"].rstrip()
+            at = line.start("items") + len(items)
+            sep = "" if not items else " " if items.endswith(",") else ", "
+            return text[:at] + sep + item + text[at:]
         line_end = text.find("\n", header.end())
         line_end = len(text) if line_end < 0 else line_end + 1
         newline = "" if text[:line_end].endswith("\n") else "\n"

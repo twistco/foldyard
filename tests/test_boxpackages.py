@@ -30,18 +30,10 @@ def _add(tmp_path, shared: str | None, local: str | None = None, pkg: str = "tmu
         ),
         ("[box]\npackages = []\n", '[box]\npackages = ["tmux"]\n'),
         ('[box]\npackages = ["a",]\n', '[box]\npackages = ["a", "tmux"]\n'),
+        # A `]` inside a string or the comment is not the array's end.
         (
-            '[box]\npackages = [\n  "a",  # one\n  "b"  # two\n]\n',
-            '[box]\npackages = [\n  "a",  # one\n  "b", "tmux"  # two\n]\n',
-        ),
-        (
-            '[box]\npackages = [\n  "a",\n]\n',
-            '[box]\npackages = [\n  "a", "tmux"\n]\n',
-        ),
-        # A `]` inside a comment or a string is not the array's end.
-        (
-            '[box]\npackages = ["a]"  # x]\n]\n',
-            '[box]\npackages = ["a]", "tmux"  # x]\n]\n',
+            '[box]\npackages = ["a]"]  # x]\n',
+            '[box]\npackages = ["a]", "tmux"]  # x]\n',
         ),
         # No packages key: a line straight under the header, the rest of the table kept.
         (
@@ -97,6 +89,8 @@ def test_a_local_file_without_the_list_leaves_it_to_the_shared_one(tmp_path):
         'x = """\n[box]\n"""\n',  # the only "[box]" is inside a string
         "[box]\npackages = 3\n",  # not a list
         "[box\n",  # doesn't parse
+        '[box]\npackages = [\n  "a",  # one\n]\n',  # multi-line: added by hand
+        '[box]\npackages = [\n  "a",\n  "b"\n]\n',
     ],
 )
 def test_what_it_cant_change_exactly_is_refused_untouched(tmp_path, text):
