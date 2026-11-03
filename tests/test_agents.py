@@ -239,6 +239,55 @@ def test_attach_from_inside_an_agent_pane_switches_instead_of_nesting(in_box, mo
     assert calls[-1] == agents.switch_argv("claude-3f2c9a1e")
 
 
+def _resumed(start: list[str]) -> tuple[str, str, str]:
+    """(session name, @fy_session, the pane's script) of a start argv."""
+    new = start.index("new-session")
+    script = next(a for a in start if "exec fy" in a)
+    return start[new + 3], start[start.index("@fy_session") + 1], script
+
+
+def test_resume_with_no_session_left_takes_the_full_id(in_box, monkeypatch, tmp_path):
+    calls, replies = in_box
+    monkeypatch.chdir(tmp_path)
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
+    assert agents.resume(SID, "", ["--model", "opus"], attach_after=False) == 0
+    name, sid, script = _resumed(calls[-1])
+    assert (name, sid) == (f"claude-{SID[:8]}", SID)
+    assert script.endswith(f"exec fy claude --resume {SID} --model opus")
+    assert not any("kill-session" in c for c in calls)
+
+
+def test_resume_replaces_the_exited_session_that_held_the_id(in_box, tmp_path, monkeypatch):
+    calls, replies = in_box
+    monkeypatch.chdir(tmp_path)
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
+    replies["list-panes"] = _Proc(0, _pane(name="mine", dead="1") + "\n")
+    assert agents.resume(SID[:8], "", [], attach_after=False) == 0  # a prefix finds it
+    kill = calls.index(agents.stop_argv("mine"))
+    assert kill < len(calls) - 1  # removed BEFORE the new one, which takes its name
+    assert _resumed(calls[-1])[:2] == ("mine", SID)
+
+
+def test_resume_leaves_a_running_session_alone(in_box, capsys):
+    calls, replies = in_box
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
+    replies["list-panes"] = _Proc(0, _pane() + "\n")
+    assert agents.resume(SID, "", [], attach_after=False) == 1
+    assert f"fy agent attach {SID}" in capsys.readouterr().err
+    assert not any("kill-session" in c or "new-session" in c for c in calls)
+
+
+def test_resume_refuses_a_short_id_with_nothing_to_match_or_a_codex_session(in_box, capsys):
+    calls, replies = in_box
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
+    assert agents.resume(SID[:8], "", [], attach_after=False) == 1
+    assert "full" in capsys.readouterr().err
+    replies["list-panes"] = _Proc(0, _pane(agent="codex", dead="1") + "\n")
+    assert agents.resume(SID, "", [], attach_after=False) == 1
+    assert "isn't a Claude session" in capsys.readouterr().err
+    assert not any("kill-session" in c or "new-session" in c for c in calls)
+
+
 def test_start_refuses_an_old_or_missing_tmux(in_box, capsys):
     calls, replies = in_box
     replies["-V"] = _Proc(0, "tmux 3.2a\n")

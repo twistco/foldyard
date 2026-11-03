@@ -869,7 +869,8 @@ def machine_delete(
 agent_app = typer.Typer(
     rich_markup_mode="markdown",
     name="agent",
-    help="agents in tmux sessions in the dev box: start, list, attach, stop (`fy docs agents`)",
+    help="agents in tmux sessions in the dev box: start, list, attach, resume, stop "
+    "(`fy docs agents`)",
     no_args_is_help=True,
 )
 app.add_typer(agent_app)
@@ -892,6 +893,28 @@ def agent_start(
     from . import agents
 
     raise typer.Exit(agents.start(agent, name, list(ctx.args), attach_after=attach))
+
+
+@agent_app.command(
+    "resume",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def agent_resume(
+    ctx: typer.Context,
+    session: str = typer.Argument(
+        ..., help="a Claude session id (or an exited session's prefix or name)"
+    ),
+    name: str = typer.Option(
+        "", "--name", "-n", help="the session's name (default: the old one's)"
+    ),
+    attach: bool = typer.Option(False, "--attach", "-a", help="attach to it once started"),
+) -> None:
+    """Pick a Claude session up again in this checkout's box — after the agent exited, or after
+    the box it ran in was recreated. Removes the exited session that held the id first. Args after
+    `--` pass to Claude (`fy agent resume <id> -- --model opus`)."""
+    from . import agents
+
+    raise typer.Exit(agents.resume(session, name, list(ctx.args), attach_after=attach))
 
 
 @agent_app.command("ls")

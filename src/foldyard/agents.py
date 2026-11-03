@@ -796,15 +796,57 @@ def start(agent: str, name: str, args: list[str], *, attach_after: bool) -> int:
     if agent not in AGENTS:
         _err(f"✗ unknown agent {agent!r} — one of: {', '.join(AGENTS)}.")
         return 2
+    if _bad_name(name):
+        return 2
+    b, cwd = _start_target()
+    if b is None or not _tmux_ok(b):
+        return 1
+    return _launch(b, cwd, agent, name, args, attach_after=attach_after)
+
+
+def resume(target: str, name: str, args: list[str], *, attach_after: bool) -> int:
+    """`fy agent resume`: Claude's session ``target`` again, in a new session in this checkout's
+    box (`fy agent start claude -- --resume <id>`). An exited session in the box that holds it is
+    removed first (keeping its name), a running one is left alone; with none left, ``target``
+    must be the full id."""
+    if _bad_name(name):
+        return 2
+    b, cwd = _start_target()
+    if b is None or not _tmux_ok(b):
+        return 1
+    held = [s for s in sessions_in(b) if _matches(s, target)]
+    old = _one(held, target)
+    if held and old is None:
+        return 1  # ambiguous: _one listed them
+    if old is not None and old.alive:
+        _err(f"✗ {old.name} is still running — `fy agent attach {old.handle}`.")
+        return 1
+    if old is not None and (old.agent != "claude" or not old.id):
+        _err(f"✗ {old.name} isn't a Claude session with an id — only those resume by id.")
+        return 1
+    sid = old.id if old is not None else target.lower()
+    if not _UUID.fullmatch(sid):
+        _err(f"✗ no session {target!r} in this box — with none left, resume takes Claude's full "
+             "session id (`fy agent ls`, or the transcript's).")  # fmt: skip
+        return 1
+    if old is not None:
+        out = b.run(stop_argv(old.name))
+        if out.returncode != 0:
+            _err(f"✗ couldn't remove {old.name}: {_printable(out.stderr.strip(), 200)}")
+            return 1
+    name = name or (old.name if old is not None else "")
+    return _launch(b, cwd, "claude", name, ["--resume", sid, *args], attach_after=attach_after)
+
+
+def _bad_name(name: str) -> bool:
     if name and not _NAME.fullmatch(name):
         _err("✗ a session name is letters, digits, '-' and '_' (at most 64, starting with a letter "
              "or digit).")  # fmt: skip
-        return 2
-    b, cwd = _start_target()
-    if b is None:
-        return 1
-    if not _tmux_ok(b):
-        return 1
+        return True
+    return False
+
+
+def _launch(b: Box, cwd: str, agent: str, name: str, args: list[str], *, attach_after: bool) -> int:
     sid, agent_args = session_args(agent, args)
     name = name or f"{agent}-{sid[:8]}"
     out = b.run(start_argv(name, sid, agent, cwd, pane_command(agent, agent_args)))

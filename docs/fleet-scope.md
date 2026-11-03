@@ -72,7 +72,7 @@ Four capabilities, each with a different direction of trust:
   dead agent from an idle one, so a later "needs you" signal must join the two: the transcript for
   the meaning, tmux for whether anything is alive.
 - **Sessions outliving the box.** They die with a box recreate or VM stop.
-  `fy agent start claude -- --resume <id>` picks a Claude session up again.
+  `fy agent resume <id>` picks a Claude session up again.
 - **Images.** Claude reads an image from the clipboard or a path, and the box has neither yours.
 - **Codex's transcript ↔ session link.**
 - **Freshness.** The viewer is as current as `transcript_sync_seconds`.
