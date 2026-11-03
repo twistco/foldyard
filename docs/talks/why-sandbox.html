@@ -35,7 +35,7 @@
 <h2 id="setting-up-12">Setting up (1/2)</h2>
 <div class="cols">
 <div>
-<p>If you're on Windows you have to use WSL2: in Powershell <code>wsl --install -d Ubuntu-24.04</code>.</p>
+<p>If you're on Windows you have to use WSL2: in PowerShell <strong>as Administrator</strong>, <code>wsl --install -d Ubuntu-24.04</code>, then reboot when asked.</p>
 <p>Otherwise, these are the tools we'll need to install first:</p>
 <ul>
 <li><code>uv</code>, a Python runtime and package manager</li>
@@ -55,8 +55,8 @@
 brew install uv lima podman
 
 <span class="hljs-comment"># Linux / WSL2 (Debian/Ubuntu; x86-64 with KVM) — plus the KVM and WSL steps on the workshop page</span>
+<span class="hljs-built_in">sudo</span> apt-get update &amp;&amp; <span class="hljs-built_in">sudo</span> apt-get install curl qemu-system-x86 qemu-utils ovmf podman
 curl -LsSf https://astral.sh/uv/install.sh | sh    <span class="hljs-comment"># then open a new terminal</span>
-<span class="hljs-built_in">sudo</span> apt-get update &amp;&amp; <span class="hljs-built_in">sudo</span> apt-get install qemu-system-x86 qemu-utils ovmf podman
 curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.0/lima-2.2.0-Linux-x86_64.tar.gz \
   | <span class="hljs-built_in">sudo</span> tar Cxz /usr/local
 </code></pre>

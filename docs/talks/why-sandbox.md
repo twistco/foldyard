@@ -40,7 +40,7 @@ whatever fits your own threat model. Foldyard only appears in part 3, as one wor
 <div class="cols">
 <div>
 
-If you're on Windows you have to use WSL2: in Powershell `wsl --install -d Ubuntu-24.04`.
+If you're on Windows you have to use WSL2: in PowerShell **as Administrator**, `wsl --install -d Ubuntu-24.04`, then reboot when asked.
 
 Otherwise, these are the tools we'll need to install first:
 - `uv`, a Python runtime and package manager
@@ -66,8 +66,8 @@ Find all the commands on: https://twistco.github.io/foldyard/workshop/#before-th
 brew install uv lima podman
 
 # Linux / WSL2 (Debian/Ubuntu; x86-64 with KVM) — plus the KVM and WSL steps on the workshop page
+sudo apt-get update && sudo apt-get install curl qemu-system-x86 qemu-utils ovmf podman
 curl -LsSf https://astral.sh/uv/install.sh | sh    # then open a new terminal
-sudo apt-get update && sudo apt-get install qemu-system-x86 qemu-utils ovmf podman
 curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.0/lima-2.2.0-Linux-x86_64.tar.gz \
   | sudo tar Cxz /usr/local
 ```
