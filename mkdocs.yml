@@ -98,6 +98,7 @@ nav:
       - releasing.md
       - linux-support.md
       - isolation-layers.md
+      - compose-in-vm-scope.md
       - fleet-scope.md
       - lima-backend-scope.md
       - lima-wall-machine-integration.md
