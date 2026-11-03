@@ -273,8 +273,8 @@ extensions = [
 #   auto-forward would bind host ports for each. Manual "Forward a Port" still works.
 # - claudeCode.allowDangerouslySkipPermissions: the in-box extension runs as `fy claude`
 #   does — inside the cage, prompts off.
-# - github.gitAuthentication: the GitHub extension must not act as git's credential provider
-#   in the box — no push credential here, from any direction.
+# - (`fy code` pins the credential forwarders itself — `github.gitAuthentication` and friends,
+#   docs/security.md § Editor-attach credential bridges — so they don't belong here.)
 # - the rest: ruff formats + fixes + sorts imports on save (the `I` rules are selected in
 #   pyproject), with the interpreter at the box's own shadowed .venv — so the ruff/ty
 #   extensions pick up the PINNED ruff/ty from it, matching CI, not their bundled versions.
@@ -285,7 +285,6 @@ extensions = [
 [vscode.settings]
 "remote.autoForwardPorts" = false
 "claudeCode.allowDangerouslySkipPermissions" = true
-"github.gitAuthentication" = false
 "editor.formatOnSave" = true
 "editor.formatOnSaveMode" = "file"
 "files.trimTrailingWhitespace" = true

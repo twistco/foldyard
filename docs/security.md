@@ -197,6 +197,26 @@ even that reaches no credential. On Linux, `[machine] host_firewall` adds the sa
 computer around the VM process, which survives even that. Without the firewall, QUIC (UDP 443)
 can bypass the proxy. Details are in [networking.md](./networking.md).
 
+**The proxy refuses git pushes over HTTPS.** "The box doesn't push" rests first on there being no
+credential in it, but a token can still turn up (one in a `.env`, a pasted token, a credential
+bridge nobody has found yet). So the proxy also refuses a push by its URL alone, whatever
+credential rides along: git's smart-HTTP push is a `GET …/info/refs?service=git-receive-pack`
+then a `POST …/git-receive-pack`, and the proxy answers either with a `403` that git shows as
+`remote: refused by the foldyard proxy - the box doesn't push …`. It does this on any host, not
+just GitHub, and logs a blocked row (`fy allow` doesn't offer it: no grant lets a push through).
+Fetches are untouched. It recognises those two URLs in the spellings a server still routes to
+receive-pack (case, `;params`, trailing and dot segments, backslashes), but a server that exposes
+push under some other URL altogether — a custom CGI gateway, say — isn't covered. Two more limits:
+it is git's protocol only — a write through an API
+(`api.github.com`'s contents or refs endpoints) is the injected credential's own scope, as above —
+and the proxy can't see inside a [`passthrough`](./networking.md) tunnel, so a push to a host
+listed there isn't refused (`fy config widenings` names the well-known git hosts that are). The
+refusal lifts while a mode that can push is on — today the emergency `gh-cli` switch ("push
+possible") — but only on the hosts that switch injects its token on (`api.github.com` for
+`gh-cli`), and comes back when it turns off. Everywhere else a push is still refused while it is
+on: a credential that reached the box some other way can't use the switch to push to GitLab,
+Bitbucket or even `github.com`.
+
 ## `fy verify`: prove it, don't trust it
 
 `fy verify` is the isolation self-test: run it any time; it exits non-zero on any failure, so CI
@@ -213,11 +233,21 @@ the box only the VM-boundary checks run. What it checks:
   own `ro` flag is one remount away for root in the VM. Inside the box, the box's own
   `/run/foldyard/to-box` must refuse a write too.
 - **Credential checks** (inside the box): no SSH agent forwarded, no git-credential bridge to your
-  computer (`GIT_ASKPASS`), no editor-attach bridge sockets in `/tmp`, no `~/.ssh` private keys,
+  computer (`GIT_ASKPASS`, or a git `credential.helper` that calls back through Dev Containers),
+  no editor-attach bridge sockets in `/tmp`, `/tmp/user/*`, `$XDG_RUNTIME_DIR` or `$TMPDIR`, no
+  `~/.ssh` private keys,
   no `~/.netrc`, and a dry-run push to `origin` (`git push --dry-run`, which sends nothing) is
   **refused** for lack of a credential — the push handshake needs write access, so this holds for a
-  public origin too. These
+  public origin too. Where the proxy refuses that push itself (an HTTPS origin it decrypts), git
+  never gets as far as offering a credential, so verify asks git directly instead
+  (`git credential fill` for origin's push URL) and fails if it finds one. These
   are built into foldyard's core, so a missing or broken plugin can't weaken them.
+- **Push refusal** (inside a box that routes through the proxy): a push's first request
+  (`GET https://github.com/…/info/refs?service=git-receive-pack`) sent through the box's proxy must
+  come back as the proxy's own `403`. The emergency `gh-cli` switch doesn't change that (it lifts
+  the refusal only on `api.github.com`, where its token goes); were a push-capable switch to
+  inject on `github.com` itself, the row would say so instead of passing or failing. A
+  `github.com` tunnelled blind by `passthrough` is a `WARN`.
 - **Dummy checks** (from the credential plugins): each `[[inject]]` row's `box_env` dummies must
   still hold their dummy value, in *any* mode, and the variables a known client reads a token
   from (`GH_TOKEN`, `GITHUB_TOKEN`) must be unset or a declared dummy in every box; the real
@@ -272,9 +302,12 @@ Each row names *what* failed. What it usually means, and what to do:
     same causes as the probe-image row above.
   - `/run/foldyard/to-box took a write` (in the box) — the box's own bind isn't `:ro`: recreate
     the box (`fy box down && fy box up`).
-- **`SSH_AUTH_SOCK set` / `git-credential bridge to the host` / `editor-attach bridge sockets`**
-  — a VS Code attach forwarded your computer's credentials into the box. See
-  [below](#editor-attach-credential-bridges).
+- **`SSH_AUTH_SOCK set` / `git-credential bridge to the host` / `git has a credential helper that
+  asks the host` / `editor-attach bridge sockets`** — a VS Code attach forwarded your computer's
+  credentials into the box. See [below](#editor-attach-credential-bridges).
+- **`git credential helpers UNPROVEN`** — `git config` couldn't read the box's config (or timed
+  out), so verify can't say no helper calls back to your computer. Run
+  `git config --show-origin --get-regexp '^credential\..*helper$'` in the box to see why.
 - **`~/.ssh key material` / `~/.netrc present`** — a credential is in the box. foldyard doesn't
   put it there: find the mount or `[box]`/bootstrap step that copies it in, remove it, then
   `fy box down` and `fy box up`.
@@ -282,10 +315,30 @@ Each row names *what* failed. What it usually means, and what to do:
   to `origin` reached it from the box. `fy state` shows what the mode grants and
   `fy config widenings` where credentials are delivered. A network timeout does *not* pass this
   row; an unreachable remote proves nothing.
+- **`git push refused by the foldyard proxy, but git HOLDS a credential for origin`** — the proxy
+  stopped the push, but git has a credential it would have sent: a credential helper's, a stored
+  one, one written into the remote's URL (`git remote get-url --push origin`), or an askpass.
+  Remove it — the proxy's refusal is a backstop, not the boundary. **`… a credential for origin is
+  UNPROVEN`** means `git credential fill` timed out or failed for another reason (the row says
+  which), or origin's push URL couldn't be read.
 - **`git remote UNREACHABLE for non-credential reasons`** — the push never got as far as asking
   for a credential: no egress, or a blocked host. Under the VM firewall git goes through the
   proxy like everything else in the box, so a refused `github.com` is the allowlist's
   (`fy allow add github.com`).
+- **Push refusal rows:**
+  - `a git push through the proxy was NOT refused` — the proxy decrypted the request and let it
+    reach GitHub. Check `fy mode` on your computer (a push-capable switch injecting on `github.com`
+    reads as "allowed by the active mode", not this), then `fy host restart`.
+  - `a git push was refused, but not as a push` — the running proxy predates the push refusal:
+    `fy host restart` on your computer.
+  - `github.com is tunnelled blind` (`WARN`) — it is in `[proxy] passthrough` (the `@vcs` bundle
+    has it), so the proxy can't see a push to it. A decision, not a breach; take it out of
+    `passthrough` if you want pushes refused there too.
+  - `git push refusal by the proxy UNPROVEN` — no answer came back through the proxy (not
+    running, a timeout, or a TLS failure: the box doesn't trust the proxy's CA), or the box's
+    `HTTPS_PROXY` is set but isn't an `http(s)://host[:port]` URL verify can read (the row names
+    its shape, without any `user:password@`). `fy host` on your
+    computer shows whether the proxy runs.
 - **`… possible real credential in the box`** (e.g. `GH_TOKEN` is more than its dummy) — the
   box's environment carries a real credential. `fy mode` shows the mode, `fy state` desired against
   observed; a box created under older config is recreated with `fy box down` and `fy box up`.
@@ -311,18 +364,48 @@ Each row names *what* failed. What it usually means, and what to do:
 #### Editor-attach credential bridges
 
 VS Code's Dev Containers attach (`fy code`, or a manual "Attach to Running Container") runs its
-server in the box and, by default, forwards your computer's SSH agent
-(`/tmp/vscode-ssh-auth-*.sock`) and git credentials (`GIT_ASKPASS` over `/tmp/vscode-git-*.sock`)
-into every terminal it opens. foldyard blocks both:
+server in the box and, by default, opens several channels back to your computer:
+
+- your SSH agent (`vscode-ssh-auth-*.sock`), forwarded into every terminal;
+- the git extension's askpass (`GIT_ASKPASS` over `vscode-git-*.sock`), which for github.com hands
+  over the GitHub session VS Code is signed in with;
+- Dev Containers' own IPC (`vscode-remote-containers-ipc-*.sock`). Its host side runs
+  `git credential fill` and the Docker credential helpers on your computer for whatever asks,
+  without consulting any setting. By default it also writes a `credential.helper` into the box's
+  `~/.gitconfig` that calls it;
+- the `code` CLI's IPC (`VSCODE_IPC_HOOK_CLI` over `vscode-ipc-*.sock`), which drives the
+  host's VS Code, including opening URLs there — a way around the egress proxy.
+
+Settings only switch off the *container* end of these: a process that finds a socket can still
+ask the host directly. So `fy code` removes the credentials at the source where it can, and treats
+the rest as defaults:
 
 - **SSH:** `fy code` starts VS Code with foldyard's own *empty* ssh-agent, so there is nothing to
   forward.
-- **Git:** `fy code` turns `git.terminalAuthentication` and `git.useIntegratedAskPass` off, but
-  `.vscode/settings.json` in the repo can turn them back on, and `fy verify` fails a checkout that
-  does (`workspace settings re-enable the git-credential bridge`).
+- **Git, on your computer:** `fy code` starts VS Code with an empty git config
+  (`GIT_CONFIG_GLOBAL` pointing at an empty file, `GIT_CONFIG_NOSYSTEM=1`, the rest of `GIT_*`
+  dropped), so the host side of Dev Containers' IPC finds no credential helper to run — not your
+  `~/.gitconfig`'s, nor the Xcode gitconfig's `osxkeychain`. VS Code is also started from the
+  instance's own state directory, with `GIT_CEILING_DIRECTORIES` above it, never from your
+  checkout: the checkout's `.git/config` is writable from the box, and a `credential.helper =
+  !cmd` there would otherwise run on your computer. The instance's local terminals get
+  your git config back. Each worktree's instance is also a fresh VS Code profile with no GitHub
+  sign-in; signing in there (for Copilot, say) gives the askpass socket a token to hand out again.
+- **Settings:** `fy code` pins, at user and machine scope, `git.terminalAuthentication` and
+  `git.useIntegratedAskPass` off, `github.gitAuthentication` off, and
+  `dev.containers.gitCredentialHelperConfigLocation` to `"none"`, with
+  `dev.containers.dockerCredentialHelper`, `copyGitConfig` and `githubCLILoginWithToken` off. If
+  the instance's own `settings.json` can't be rewritten (comments, invalid JSON), `fy code`
+  refuses to launch rather than run unpinned. `.vscode/settings.json` in the repo can turn the
+  `git.*` and `github.*` keys back on, and `fy verify` fails a checkout that does
+  (`workspace settings re-enable the git-credential bridge`).
 - **In the box:** `~/.config/foldyard/harden.sh`, sourced on the first line of `~/.bashrc`,
-  unsets the bridge variables in every bash shell and starts a reaper that deletes the sockets as
-  they appear. This also covers a manual attach that didn't go through `fy code`.
+  unsets the bridge variables in every bash shell and starts a reaper that deletes all four kinds
+  of socket as they appear, in `/tmp`, `/tmp/user/*`, `$XDG_RUNTIME_DIR` and `$TMPDIR`. A box
+  still running an older reaper gets the new one the next time `harden.sh` runs. This also covers
+  a manual attach that didn't go through `fy code`, but it is a mitigation, not a wall: a
+  process already in the box can watch for a socket and hard-link it before the reaper's next
+  pass. That's why the credentials are removed on your computer first.
 
 If a row still fails:
 

@@ -3,7 +3,8 @@
 Faithful port of the `verify` recipe. Proves the VM boundary over the engine socket
 (rootless, the `--privileged --pid=host` escape refused, the VM's own mount table — PID 1's —
 free of host home/paths) and — INSIDE the box only — the credential-less dev-box posture (no
-SSH key material, the injectors' box dummies, git push refused). Each check prints PASS/FAIL;
+SSH key material, the injectors' box dummies, git push refused — by origin for want of a
+credential, and by the egress proxy for being a push). Each check prints PASS/FAIL;
 returns non-zero on any FAIL (CI-usable). One ADVISORY section rides along at the end —
 unhealthy containers in the stack — printed as WARN so it can never move the isolation verdict.
 
@@ -19,14 +20,18 @@ plugin being absent or broken.
 from __future__ import annotations
 
 import contextlib
+import http.client
 import os
 import re
 import secrets
 import socket
+import ssl
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
+from urllib.parse import urlsplit
 
 from . import boxmounts, config, machine, stack
 from .plugins import VerifyContext, registry
@@ -156,10 +161,43 @@ _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # (asserted beside it) that absence is the refusal — no credential can travel a transport that
 # does not exist — not an "unreachable for network reasons" that leaves the claim unproven.
 # The env an editor attach sets so the box's git asks the HOST for credentials — a push path over
-# HTTPS the same way a forwarded agent is over SSH. And the sockets it drops in /tmp, which are
-# reachable by path regardless of the env: the agent proxy and the git-IPC the askpass goes over.
+# HTTPS the same way a forwarded agent is over SSH. And the sockets it drops, which are reachable
+# by path regardless of the env (below). The workspace settings that turn VS Code's credential
+# paths back on: the git extension's askpass, and the GitHub extension's silent session token —
+# `fy code` pins them off at user + machine scope (vscode._GIT_BRIDGE_PINS — keep the two in step),
+# but `.vscode/settings.json` outranks both.
 _GIT_BRIDGE_VARS = ("GIT_ASKPASS", "VSCODE_GIT_IPC_HANDLE", "VSCODE_GIT_ASKPASS_MAIN")
-_GIT_BRIDGE_SETTINGS = ("git.terminalAuthentication", "git.useIntegratedAskPass")
+_GIT_BRIDGE_SETTINGS = (
+    "git.terminalAuthentication",
+    "git.useIntegratedAskPass",
+    "github.gitAuthentication",
+)
+
+
+# The egress proxy refuses a git push by its URL (egress_proxy._is_git_push), on any host it
+# decrypts, except a host a push-capable credential is injected on now (the emergency gh-cli
+# switch: api.github.com, so a push to github.com stays refused even then). The probe sends what
+# git sends first — the push's discovery request — through the box's proxy to a repo that needn't
+# exist: refused, nothing leaves.
+_PUSH_PROBE_HOST = "github.com"
+_PUSH_PROBE_PORT = 443
+_PUSH_PROBE_PATH = "/foldyard/fy-verify-push-probe.git/info/refs?service=git-receive-pack"
+# The start of the proxy's refusal body (egress_proxy._PUSH_REFUSED_BODY), which git prints as a
+# `remote:` line, and the header the proxy sets on a push a mode let through
+# (egress_proxy._PUSH_HEADER). A test pins both to the addon's.
+_PUSH_REFUSED = "refused by the foldyard proxy - the box doesn't push"
+_PUSH_ALLOWED_HEADER = "x-foldyard-push"
+# The issuer of every certificate the proxy makes: present ⇒ the proxy decrypted the connection
+# (and so saw the request); absent ⇒ a blind tunnel (`[proxy] passthrough`) with the real one.
+_PROXY_ISSUER = "mitmproxy"
+
+
+@dataclass(frozen=True)
+class _PushAnswer:
+    status: int
+    body: bytes  # its first bytes
+    allowed: bool  # the proxy's word that a push-capable mode let it through
+    decrypted: bool  # the proxy's certificate: it saw the request
 
 
 def _workspace_rearms_git_bridge(settings: Path) -> list[str]:
@@ -173,8 +211,33 @@ def _workspace_rearms_git_bridge(settings: Path) -> list[str]:
     return [k for k in _GIT_BRIDGE_SETTINGS if re.search(rf'"{re.escape(k)}"\s*:\s*true\b', text)]
 
 
+# The attach's sockets: the SSH agent, the git askpass IPC, Dev Containers' own IPC (its host side
+# runs `git credential fill` and the docker credential helpers for any caller) and the `code` CLI's
+# IPC (drives the host's VS Code — URL opens too, around the proxy). The same names box.py's reaper
+# unlinks (box._BRIDGE_SOCKET_GLOBS; a test pins the two equal), in the same places: /tmp, the
+# per-user /tmp/user/<uid>/, $XDG_RUNTIME_DIR, $TMPDIR.
 _BRIDGE_SOCKET_DIR = Path("/tmp")
-_BRIDGE_SOCKET_GLOBS = ("vscode-ssh-auth-*.sock", "vscode-git-*.sock")
+_BRIDGE_SOCKET_GLOBS = (
+    "vscode-ssh-auth-*.sock",
+    "vscode-git-*.sock",
+    "vscode-remote-containers-ipc-*.sock",
+    "vscode-ipc-*.sock",
+)
+
+
+def _bridge_socket_dirs() -> list[Path]:
+    """Every directory an attach's bridge socket can land in, as the box's own env names them."""
+    dirs = [_BRIDGE_SOCKET_DIR, *sorted(_BRIDGE_SOCKET_DIR.glob("user/*"))]
+    dirs += [Path(v) for k in ("XDG_RUNTIME_DIR", "TMPDIR") if (v := os.environ.get(k))]
+    return list(dict.fromkeys(dirs))  # $TMPDIR is often /tmp itself: read it once
+
+
+# A git credential helper that asks the HOST: what Dev Containers writes into the box's git config
+# (`!f() { <node> /tmp/vscode-remote-containers-<id>.js git-credential-helper $*; }; f`) unless
+# dev.containers.gitCredentialHelperConfigLocation is "none". Any key shape (`credential.helper`,
+# `credential.<url>.helper`), matched on the script's name or on its subcommand.
+_HOST_CRED_HELPER_KEYS = r"^credential\..*helper$"
+_HOST_CRED_HELPER = re.compile(r"vscode-remote-containers|git-credential-helper")
 _GIT_NO_SSH = re.compile(r"cannot run ssh|ssh: (command )?not found", re.I)
 _GIT_NO_ORIGIN = re.compile(r"'origin' does not appear to be a git repository", re.I)
 _GIT_AUTH_DENIED = re.compile(
@@ -414,6 +477,47 @@ def _kernel_release() -> str:
     return os.uname().release
 
 
+def _host_credential_helper(rep: _Report, checkout: Path) -> None:
+    """No git credential helper the box's git would run asks the HOST. Read the way that git
+    reads it — in the checkout (local + worktree config), no scope flag (system, global, XDG), the
+    box's own env (``GIT_CONFIG_*``) — so every scope it would consult is covered. Not covered by
+    the push probe: that runs with ``REMOTE_CONTAINERS_IPC`` unset (harden.sh scrubs it), so the
+    helper fails there and the push reads as refused — yet any process can point the variable
+    back at Dev Containers' socket while one exists. The entry is the arming; this row finds it."""
+    try:
+        got = subprocess.run(
+            [
+                "git", "-C", str(checkout), "config", "--show-origin",
+                "--get-regexp", _HOST_CRED_HELPER_KEYS,
+            ],
+            env=dict(os.environ),
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )  # fmt: skip
+    except subprocess.TimeoutExpired:
+        rep.bad("git credential helpers UNPROVEN — reading the box's git config timed out")
+        return
+    if got.returncode not in (0, 1):  # 1 = no such key; anything else read nothing
+        why = (got.stderr or "").strip().splitlines()
+        rep.bad(
+            "git credential helpers UNPROVEN — `git config` could not read the box's config "
+            f"({why[-1] if why else f'exit {got.returncode}'})"
+        )
+        return
+    hits = [ln for ln in (got.stdout or "").splitlines() if _HOST_CRED_HELPER.search(ln)]
+    if not hits:
+        rep.ok("no git credential helper asks the host (credential.*helper)")
+        return
+    origins = sorted({ln.split("\t", 1)[0].removeprefix("file:") for ln in hits})
+    rep.bad(
+        f"git has a credential helper that asks the host, in {' '.join(origins)} — Dev Containers "
+        'writes it on attach unless dev.containers.gitCredentialHelperConfigLocation is "none" '
+        "(`fy code` pins it); remove it: git config --file <that file> --unset-all "
+        "credential.helper vscode-remote-containers"
+    )
+
+
 def _box_posture(rep: _Report, env: dict) -> None:
     print("▶ dev-box checks (credential-less: read+commit, never push)")
     home = Path(os.environ.get("HOME") or str(Path.home()))
@@ -444,24 +548,27 @@ def _box_posture(rep: _Report, env: dict) -> None:
         rep.ok("no git-credential bridge to the host (GIT_ASKPASS unset)")
     else:
         rep.bad(f"git-credential bridge to the host: {' '.join(bridged)} set (an editor attach's)")
-    # The sockets themselves, not just the vars: a socket left in /tmp is usable by PATH, so an
+    checkout_dir = Path(env.get("FOLDYARD_CHECKOUT") or str(stack.main_repo()))
+    _host_credential_helper(rep, checkout_dir)
+    # The sockets themselves, not just the vars: a socket left behind is usable by PATH, so an
     # unset var is hygiene and a missing socket is the boundary.
-    socks = sorted(p.name for g in _BRIDGE_SOCKET_GLOBS for p in _BRIDGE_SOCKET_DIR.glob(g))
+    dirs = _bridge_socket_dirs()
+    socks = sorted(str(p) for d in dirs for g in _BRIDGE_SOCKET_GLOBS for p in d.glob(g))
+    where = ", ".join(str(d) for d in dirs)
     if not socks:
-        rep.ok(f"no editor-attach bridge sockets in {_BRIDGE_SOCKET_DIR}")
+        rep.ok(f"no editor-attach bridge sockets ({where})")
     else:
         rep.bad(
-            f"editor-attach bridge sockets in {_BRIDGE_SOCKET_DIR}: {' '.join(socks)} — usable "
-            "by path even with the vars unset (foldyard's reaper removes these; a box shell "
-            "restarts it)"
+            f"editor-attach bridge sockets: {' '.join(socks)} — usable by path even with the "
+            "vars unset (foldyard's reaper removes these; a box shell restarts it)"
         )
 
-    # `fy code` pins the git bridge OFF (git.terminalAuthentication / useIntegratedAskPass) at
-    # user + machine scope — but WORKSPACE settings win, and `.vscode/settings.json` is mount
-    # data the box can write. A checkout flipping either back on is asking VS Code to hand its
-    # git a host credential: the in-box unset + reaper still neutralise it (with their window),
-    # so this is the row that says the mount is trying.
-    checkout_dir = Path(env.get("FOLDYARD_CHECKOUT") or str(stack.main_repo()))
+    # `fy code` pins VS Code's credential paths OFF (git.terminalAuthentication /
+    # useIntegratedAskPass, github.gitAuthentication) at user + machine scope — but WORKSPACE
+    # settings win, and `.vscode/settings.json` is mount data the box can write. A checkout
+    # flipping one back on is asking VS Code to hand its git a host credential: the in-box unset +
+    # reaper still neutralise it (with their window), so this is the row that says the mount is
+    # trying.
     rearmed = _workspace_rearms_git_bridge(checkout_dir / ".vscode" / "settings.json")
     if not rearmed:
         rep.ok("workspace settings leave the git-credential bridge off")
@@ -534,6 +641,10 @@ def _box_posture(rep: _Report, env: dict) -> None:
         reachable, why = False, "timed out"
     if reachable:
         rep.bad("a dry-run push to origin was ACCEPTED — the box can push (credential leaked?)")
+    elif _PUSH_REFUSED in why:
+        # Refused by the egress proxy before origin was asked, so git never offered a credential:
+        # whether one would reach origin is asked of git directly instead.
+        _origin_credential(rep, checkout, git_env)
     elif _GIT_AUTH_DENIED.search(why):
         rep.ok("git push refused (no credential reaches origin)")
     elif _GIT_NO_SSH.search(why):
@@ -551,6 +662,178 @@ def _box_posture(rep: _Report, env: dict) -> None:
         rep.bad(
             "git remote UNREACHABLE for non-credential reasons — push refusal UNPROVEN "
             f"({why.strip().splitlines()[-1] if why.strip() else 'no error output'})"
+        )
+
+
+def _origin_credential(rep: _Report, checkout: str, git_env: dict) -> None:
+    """The proxy refused the dry-run push for being a push — its first request, before origin
+    could answer 401 and git could look for a credential to send — so the push probe no longer
+    says whether one would have reached origin. Ask git what it would have sent: ``git credential
+    fill`` for origin's push URL, with the probe's env (prompts off, any askpass still consulted).
+    That finds a helper's or stored credential, one embedded in the URL, and an askpass bridge.
+    A credential found FAILS: the proxy's refusal is defence in depth, not a reason for git to
+    hold one. Never printed."""
+    try:
+        got = subprocess.run(
+            ["git", "-C", checkout, "remote", "get-url", "--push", "origin"],
+            env=git_env,
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+        url = (got.stdout or "").strip() if got.returncode == 0 else ""
+    except subprocess.TimeoutExpired:
+        url = ""
+    if not url:
+        rep.bad(
+            "git push refused by the foldyard proxy — but origin's push URL couldn't be read, so "
+            "whether git holds a credential for it is UNPROVEN"
+        )
+        return
+    try:
+        got = subprocess.run(
+            ["git", "-C", checkout, "credential", "fill"],
+            input=f"url={url}\n\n",
+            env=git_env,
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+    except subprocess.TimeoutExpired:
+        rep.bad(
+            "git push refused by the foldyard proxy — `git credential fill` for origin timed out "
+            "(a helper that hangs?), so a credential for origin is UNPROVEN"
+        )
+        return
+    if got.returncode == 0 and re.search(r"^password=.", got.stdout or "", re.M):
+        rep.bad(
+            "git push refused by the foldyard proxy, but git HOLDS a credential for origin "
+            "(`git credential fill` returned one: a helper, a stored credential or one in the "
+            "remote's URL) — remove it; the refusal is a backstop, not the boundary"
+        )
+    elif _GIT_AUTH_DENIED.search(got.stderr or ""):
+        rep.ok("git push refused by the foldyard proxy, and git has no credential for origin")
+    else:
+        why = (got.stderr or "").strip().splitlines()
+        rep.bad(
+            "git push refused by the foldyard proxy — `git credential fill` failed for another "
+            f"reason, so a credential for origin is UNPROVEN ({why[-1] if why else 'no output'})"
+        )
+
+
+def _probe_push(proxy_host: str, proxy_port: int) -> _PushAnswer:
+    """Send a git push's discovery request to ``_PUSH_PROBE_HOST`` through the box's proxy, as
+    git would: CONNECT, then TLS trusting the box's bundle (``SSL_CERT_FILE``: the proxy CA plus
+    the system roots, so a passthrough host's real certificate verifies too). Raises on no
+    answer."""
+    context = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE") or None)
+    conn = http.client.HTTPSConnection(proxy_host, proxy_port, timeout=12, context=context)
+    try:
+        conn.set_tunnel(_PUSH_PROBE_HOST, _PUSH_PROBE_PORT)
+        conn.request(
+            "GET", _PUSH_PROBE_PATH, headers={"User-Agent": "git/fy-verify", "Accept": "*/*"}
+        )
+        # The certificate now, while the socket is open: http.client drops it once a response
+        # that closes the connection has been read (an upstream's, typically).
+        cert = conn.sock.getpeercert() if conn.sock is not None else None
+        issuer = {v for rdn in (cert or {}).get("issuer", ()) for _k, v in rdn}
+        resp = conn.getresponse()
+        body = resp.read(512)
+        return _PushAnswer(
+            status=resp.status,
+            body=body,
+            allowed=resp.getheader(_PUSH_ALLOWED_HEADER) is not None,
+            decrypted=_PROXY_ISSUER in issuer,
+        )
+    finally:
+        conn.close()
+
+
+# The schemes an HTTPS_PROXY may name, and the port each implies when the URL names none. The probe
+# speaks plain CONNECT, as to the box's own proxy; an https:// one that wants TLS first gets no
+# answer, which the row reports as UNPROVEN rather than passing.
+_PROXY_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _redacted(value: str) -> str:
+    """``value`` with any userinfo cut: an HTTPS_PROXY can carry ``user:password@``. Everything up
+    to the LAST ``@`` goes (a password may hold one), but the scheme stays: it's the shape."""
+    if "@" not in value:
+        return value
+    scheme, sep, _rest = value.partition("://")
+    return f"{scheme if sep else ''}{sep}…@{value.rpartition('@')[2]}"
+
+
+def _proxy_address(value: str) -> tuple[str, int]:
+    """The (host, port) an ``HTTPS_PROXY`` value names: a bracketed IPv6 literal unwrapped, a
+    missing port the scheme's default, a missing scheme ``http`` (as curl reads one). Raises
+    ``ValueError`` naming the value's shape — userinfo cut — for anything the probe can't use."""
+    url = value.strip()
+    try:
+        parts = urlsplit(url if "://" in url else f"http://{url}")  # raises on a broken bracket
+        port = parts.port  # …and here on a port that isn't a number, or isn't a port
+        host = parts.hostname
+    except ValueError:
+        raise ValueError(_redacted(url)) from None
+    scheme = parts.scheme.lower()
+    if not host or scheme not in _PROXY_DEFAULT_PORTS:
+        raise ValueError(_redacted(url))
+    return host, _PROXY_DEFAULT_PORTS[scheme] if port is None else port
+
+
+def _push_refusal(rep: _Report) -> None:
+    """The egress proxy refuses a git push over HTTPS — the box's "never push" posture without
+    relying on no credential ever reaching it. An ACTIVE probe through the box's own proxy: the
+    proxy's refusal passes; a push-capable mode letting it through is reported, not failed; a
+    blind tunnel (`[proxy] passthrough`) WARNs, since the proxy can't see into it by design;
+    GitHub answering a request the proxy decrypted FAILS, and so does no answer — unproven is not
+    a pass."""
+    print("▶ git push over HTTPS (the egress proxy refuses it, whatever credential the box holds)")
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
+    if not proxy.strip():
+        print("  no egress proxy in this box (HTTPS_PROXY unset) — skipped")
+        return
+    try:
+        host, port = _proxy_address(proxy)
+    except ValueError as e:
+        # Set, so the box routes SOMEWHERE: reading it as "no proxy" would skip the row exactly
+        # where verify can't tell what the box's traffic does.
+        rep.bad(
+            f"git push refusal by the proxy UNPROVEN — HTTPS_PROXY is set but can't be read as "
+            f"an http(s)://host[:port] proxy ({e})"
+        )
+        return
+    where = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    try:
+        answer = _probe_push(host, port)
+    except (OSError, http.client.HTTPException) as e:  # ssl.SSLError and timeouts are OSErrors
+        rep.bad(
+            f"git push refusal by the proxy UNPROVEN — no answer through {where} "
+            f"({type(e).__name__}: {e})"
+        )
+        return
+    if answer.status == 403 and answer.body.decode("utf-8", "replace").startswith(_PUSH_REFUSED):
+        rep.ok(f"git push over HTTPS refused by the foldyard proxy ({_PUSH_PROBE_HOST})")
+    elif answer.allowed:
+        print(
+            f"  ⚠ git push over HTTPS to {_PUSH_PROBE_HOST} allowed by the active mode — a "
+            f"push-capable switch injects on {_PUSH_PROBE_HOST} (`fy mode` on your computer); "
+            "refused again once it is off"
+        )
+    elif not answer.decrypted:
+        rep.warn(
+            f"{_PUSH_PROBE_HOST} is tunnelled blind ([proxy] passthrough), so the proxy can't see "
+            "a push to it, nor refuse one — `fy config widenings`"
+        )
+    elif answer.status == 403:
+        rep.bad(
+            "a git push was refused, but not as a push — the proxy predates the push refusal "
+            "(`fy host restart` on your computer)"
+        )
+    else:
+        rep.bad(
+            f"a git push through the proxy was NOT refused — {_PUSH_PROBE_HOST} answered HTTP "
+            f"{answer.status}"
         )
 
 
@@ -573,20 +856,29 @@ def _wall_posture(rep: _Report) -> None:
     print("▶ VM firewall ([machine] firewall — direct egress from the box must be refused)")
 
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
-    m = re.search(r"//(?:[^@/]*@)?([^:/]+):(\d+)", proxy)
-    if not m:
+    if not proxy.strip():
         rep.bad(
             "no HTTPS_PROXY in the box — the VM firewall's permitted path is unknown, "
             "VM firewall UNPROVEN"
         )
         return
     try:
-        with socket.create_connection((m.group(1), int(m.group(2))), timeout=5):
+        # The same reading as the push row: IPv6 literals, a port-less URL, userinfo cut.
+        proxy_host, proxy_port = _proxy_address(proxy)
+    except ValueError as e:
+        rep.bad(
+            f"HTTPS_PROXY is set but can't be read as an http(s)://host[:port] proxy ({e}) — the "
+            "VM firewall's permitted path is unknown, VM firewall UNPROVEN"
+        )
+        return
+    where = f"[{proxy_host}]:{proxy_port}" if ":" in proxy_host else f"{proxy_host}:{proxy_port}"
+    try:
+        with socket.create_connection((proxy_host, proxy_port), timeout=5):
             pass
     except OSError:
         # No egress AT ALL. The refusals below would pass for the wrong reason.
         rep.bad(
-            f"the permitted path ({m.group(1)}:{m.group(2)}) is unreachable too — this box has "
+            f"the permitted path ({where}) is unreachable too — this box has "
             "no egress at all, so a refused direct connect proves nothing. VM firewall UNPROVEN "
             "(is the host supervisor running? `fy host` on the host)"
         )
@@ -768,6 +1060,7 @@ def verify() -> int:
 
     if config.in_box():
         _box_posture(rep, ctx.env)
+        _push_refusal(rep)
         if config.machine_backend() == "lima" and config.machine_wall():
             _wall_posture(rep)
     else:

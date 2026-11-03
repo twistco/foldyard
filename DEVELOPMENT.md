@@ -662,7 +662,9 @@ minutes, and the `e2e` job is the single status to check.
 - **Write "host", not "Mac" — in new code, docstrings, messages and docs.** foldyard's split is
   host vs box, and the host being a Mac is a fact about today's users, not about the design (there
   is no platform branching in the package: no `sys.platform`, no `Darwin` test; Linux and WSL2
-  hosts are validated in CI, see the two host-tier jobs). User-facing text says *your computer*
+  hosts are validated in CI, see the two host-tier jobs). The one exception is
+  `vscode._write_local_terminal_cwd`: which `terminal.integrated.env.<os>` key VS Code reads IS
+  the OS name, so no capability probe can stand in for it. User-facing text says *your computer*
   (see [docs/glossary.md](./docs/glossary.md)); `tests/test_docs_shipped.py` refuses "Mac" in the
   shipped docs, the skills and `--help`. Say **macOS** only
   where the claim really is macOS-only — `brew`, the login keychain, `security add-trusted-cert`,

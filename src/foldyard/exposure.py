@@ -43,6 +43,12 @@ from dataclasses import dataclass, field
 
 from . import config, configpin
 
+# Well-known hosts that serve git over HTTPS. The proxy refuses a git push by its URL
+# (`egress_proxy._is_git_push`), which it can't see inside a passthrough tunnel — so one of these
+# tunnelled blind is named. Any other tunnelled host is covered by the general line: a self-hosted
+# git server is a literal like any other.
+_GIT_HOSTS = ("github.com", "gist.github.com", "gitlab.com", "bitbucket.org")
+
 # Config keys foldyard once honoured and now IGNORES, with the replacement to print. A stale
 # config that still carries one reads as a control that isn't there — naming it is the whole point
 # of this table, so an entry stays here permanently rather than being cleaned up a release later.
@@ -117,6 +123,8 @@ class Exposure:
     hosts: int = 0  # resolved passthrough patterns
     wildcards: int = 0  # …of which `*.suffix` globs
     passthrough_origin: str = DEFAULT
+    # Well-known git hosts the passthrough tunnels blind: the proxy can't refuse a push to them.
+    blind_git_hosts: list[str] = field(default_factory=list)
     targets: list[Target] = field(default_factory=list)
     prompts: list[tuple[str, int, str]] = field(default_factory=list)  # (key, lines, origin)
     # (key, the setting keys it declares, origin) for the CLI-config tables the launchers pass on
@@ -208,6 +216,14 @@ def _passthrough_parts(entries: list[str]) -> tuple[list[str], list[str], list[s
         else:
             unknown.append(entry[1:])
     return refs, unknown, literals
+
+
+def _covers(patterns: list[str], host: str) -> bool:
+    """Does a passthrough list tunnel ``host``? The proxy's matching: exact, or ``*.suffix`` for
+    subdomains only (``allowlist._matches``)."""
+    from .allowlist import _matches  # lazy, as collect's other allowlist reads
+
+    return _matches(host, patterns)
 
 
 def _targets(
@@ -510,6 +526,7 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
         declared=isinstance(proxy, dict) and proxy.get("passthrough") is not None,
         hosts=len(resolved),
         wildcards=sum(1 for h in resolved if h.startswith("*.")),
+        blind_git_hosts=[h for h in _GIT_HOSTS if _covers(resolved, h)],
         passthrough_origin=_origin(shared, local, "proxy", "passthrough"),
         targets=_targets(cfg, mode, _origin(shared, local, "inject"), shared, local),
         prompts=_prompts(shared, local),
@@ -565,6 +582,13 @@ def render(exp: Exposure) -> list[str]:
     )
     if exp.hosts:
         out.append("    These are TLS-tunnelled: SNI only, no method/path/body logged.")
+        out.append("    Nor is a git push through one refused: the proxy sees a push only where it")
+        out.append("    decrypts.")
+    if exp.blind_git_hosts:
+        out.append(
+            f"    ⚠ git pushes to {', '.join(exp.blind_git_hosts)} can't be refused: a credential "
+            "that reaches the box could push there."
+        )
     out.append(
         f"    Declared literally here: {', '.join(exp.literals)}"
         if exp.literals

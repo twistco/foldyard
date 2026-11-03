@@ -264,6 +264,12 @@ class InjectRule:
     # A dummy may also follow ONE auth-scheme word (`token x`, `Bearer x`) — for a dummy handed to
     # a client the mechanism doesn't control, as :class:`HeldCredential`'s ``any_scheme``.
     any_scheme: bool = False
+    # The credential this rule delivers can push (the operator's own gh token). While a rule with
+    # it is injecting, the proxy stops refusing git pushes sent to THIS rule's host (its live
+    # file's ``push_hosts``) — where the token goes, the mode already says a push is possible —
+    # and keeps refusing them everywhere else. Set by a credential KIND, never by repo config — a
+    # row that could set it would lift the refusal.
+    grants_push: bool = False
 
 
 def _rule_host(rule: InjectRule) -> str:

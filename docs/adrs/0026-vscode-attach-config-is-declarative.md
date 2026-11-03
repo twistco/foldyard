@@ -167,5 +167,17 @@ mount-wide overlay.
   also covers a manual attach, plus `fy verify` failing a checkout that re-arms the setting. The
   egress wall fences CONNECT to `:443`. The gate is still what stops the box; this is what stops
   the attach.
+- Follow-up (2026-11-03): the git side was weaker than the paragraph above says. Reading VS Code's
+  source and the Dev Containers 0.469.0 bundle showed the settings only switch off the container
+  end. The git extension still creates and answers its askpass socket with
+  `git.terminalAuthentication` off. Dev Containers' own IPC socket, created on every attach, has a
+  host side that runs `git credential fill` (and the Docker credential helpers) for any caller,
+  with no setting consulted. So `fy code` now takes the same route as the SSH agent: it launches
+  VS Code with an empty git config, so the host side has no helper to run whoever asks. It also
+  pins the rest of the forwarders off (`dev.containers.gitCredentialHelperConfigLocation`,
+  `dockerCredentialHelper`, `copyGitConfig`, `githubCLILoginWithToken`,
+  `github.gitAuthentication`), refuses to launch when it can't write those pins, and reaps the
+  Dev Containers and `code` CLI sockets too. `fy verify` gains a row for a box `credential.helper`
+  that calls back to the host. See `docs/security.md` § Editor-attach credential bridges.
 - A future surface that genuinely needs *computed* output from the yard should reach for ADR-0023
   §2's split again — this ADR removes one instance of it, not the pattern.
