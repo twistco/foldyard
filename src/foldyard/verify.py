@@ -18,11 +18,13 @@ plugin being absent or broken.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import secrets
 import socket
 import subprocess
+import time
 from pathlib import Path
 from shutil import which
 
@@ -600,6 +602,96 @@ def _wall_posture(rep: _Report) -> None:
             rep.ok(f"direct egress to a public IP:{what} rejected")
 
 
+class _Listener:
+    """A service on your computer's loopback that nothing offered the box: it counts the
+    connections it accepts and answers none."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen()
+        self.port = self.sock.getsockname()[1]
+        self.accepted = 0
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self.accepted += 1
+            conn.close()
+
+    def close(self) -> None:
+        with contextlib.suppress(OSError):
+            self.sock.shutdown(socket.SHUT_RDWR)  # wakes the accept() blocked in the thread
+        self.sock.close()
+
+
+def _host_loopback(rep: _Report, engine: str, env: dict, probe: str) -> None:
+    """On your computer, with the VM firewall: a container can't reach a service on your
+    computer's loopback — directly at the gateway Lima hands to it, or through the proxy, which
+    runs there and so would dial it from there. Proven by a listener of our own on a port nothing
+    granted: a probe container tries both, and the listener must accept NOTHING (a refusal and an
+    empty port look alike from inside; the count doesn't). The positive control: the same
+    container gets the proxy's liveness answer through the same gateway, so the two attempts
+    really left it. Run from your computer because only it can open the listener."""
+    from .plugins.proxy import LIVENESS_URL
+
+    print("▶ your computer's loopback ([machine] firewall — a container must not reach it)")
+    gateway, proxy = config.host_alias(), f"{config.host_alias()}:{config.proxy_port()}"
+    listener = _Listener()
+    try:
+        script = (
+            # A wgetrc can name a proxy, and it beats the env: GNU Wget runs every leg without one,
+            # so the control and the proxy leg reach THIS checkout's proxy (the env) or nothing.
+            # The direct leg must skip every proxy: one would refuse the gateway as a local
+            # address, which reads as the wall refusing it. A wget we don't know is reported.
+            'case "$(wget --help 2>&1)" in '
+            "*BusyBox*) cfg=; off='-Y off' ;; "
+            "*'GNU Wget 1.'*) cfg=--no-config; off=--no-proxy ;; "
+            "*) cfg=; off=; echo direct=unknown ;; esac; "
+            f"if wget -q -T 10 -O /dev/null $cfg {LIVENESS_URL}; "
+            "then echo control=ok; else echo control=failed; fi; "
+            '[ -z "$off" ] || (unset http_proxy HTTP_PROXY; '
+            f"wget -q -T 5 -O /dev/null $cfg $off http://{gateway}:{listener.port}/); "
+            f"wget -q -T 10 -O /dev/null $cfg http://127.0.0.1:{listener.port}/; true"
+        )
+        out = _run(
+            [engine, "run", "--rm",
+             "-e", f"http_proxy=http://{proxy}", "-e", f"HTTP_PROXY=http://{proxy}",
+             "-e", "no_proxy=", "-e", "NO_PROXY=",
+             probe, "sh", "-c", script],
+            env,
+            capture=True,
+        )  # fmt: skip
+        time.sleep(0.5)  # a connection the probe opened last is accepted by now
+    finally:
+        listener.close()
+    if listener.accepted:
+        rep.bad(
+            f"a container REACHED a service on your computer's loopback (127.0.0.1:"
+            f"{listener.port}, {listener.accepted} connection(s)) — directly or through the proxy"
+        )
+    elif "control=ok" not in out.stdout:
+        rep.bad(
+            "the probe couldn't reach the proxy through the gateway either, so a refused "
+            "connection proves nothing. Your computer's loopback UNPROVEN (is the host "
+            "supervisor running? `fy host`)"
+        )
+    elif "direct=unknown" in out.stdout:
+        rep.bad(
+            f"the probe image's wget ({probe}) is neither busybox's nor GNU Wget 1.x, so its "
+            "direct attempt may have gone through a proxy. Your computer's loopback UNPROVEN (set "
+            "VERIFY_IMG to an alpine or busybox image)"
+        )
+    else:
+        rep.ok("a service on your computer's loopback is out of reach (directly and by the proxy)")
+
+
 def _stack_health(rep: _Report, engine: str, env: dict, project: str) -> None:
     """Advisory: any container in this project sitting at `unhealthy`.
 
@@ -679,6 +771,8 @@ def verify() -> int:
         if config.machine_backend() == "lima" and config.machine_wall():
             _wall_posture(rep)
     else:
+        if config.machine_backend() == "lima" and config.machine_wall():
+            _host_loopback(rep, engine, ctx.env, probe)
         print(
             "▶ dev-box checks — skipped (not inside the box; run via 'fy box shell' "
             "then 'fy verify')"

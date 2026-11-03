@@ -964,6 +964,9 @@ def allow_add(
     Grants live in the allow-store on your computer at every level, deliberately NOT in
     foldyard.toml: repo config travels with the branch and the box can write it, so a committed
     allowlist would let the VM widen its own allowlist.
+
+    A local address (loopback, your network, link-local) is refused in every mode unless a grant
+    names it exactly, e.g. 127.0.0.1:8123 — and only this command makes one.
     """
     from . import allowlist
 
@@ -971,6 +974,11 @@ def allow_add(
     scope = "for builds, " if build else ""
     listed = ", ".join(eff["allow"]) or "empty"
     print(f"✓ {host} allowed ({scope}{level}). Effective allowlist: {listed}")
+    if allowlist.local_key(host):
+        print(
+            f"  ⚠ {host} is on your computer or its network: the box can now reach whatever "
+            "listens there, through the proxy. `fy allow remove` it when you're done."
+        )
 
 
 @allow_app.command("list")

@@ -225,6 +225,11 @@ def _running_proxy(tmp_path: Path, minter_code: str, env: dict[str, str] | None 
     log = tmp_path / "egress.jsonl"
     confdir = tmp_path / "mitm"
     mitm_log = tmp_path / "mitmdump.log"
+    # The upstream is on loopback, which the proxy dials only on a grant naming it, whatever the
+    # wall's mode — so the rig grants it, as an operator would (`fy allow add 127.0.0.1:<port>`).
+    # A caller passing its own ALLOW_FILE writes its own grants.
+    allow = tmp_path / "allow-effective.json"
+    allow.write_text(json.dumps({"default_deny": False, "allow": [f"{HOST}:{uport}"]}))
 
     cmd = [
         "mitmdump", "-s", str(ADDON),
@@ -246,6 +251,7 @@ def _running_proxy(tmp_path: Path, minter_code: str, env: dict[str, str] | None 
             # just pinned to the test's CA instead of the system store (api.github.com in prod).
             "INJECT_RETRY_CA_BUNDLE": str(cert),
             "PROXY_LOG_FILE": str(log),
+            "ALLOW_FILE": str(allow),
             **(env or {}),
         },
         stdout=mitm_log.open("w"),

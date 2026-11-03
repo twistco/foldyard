@@ -236,6 +236,16 @@ def test_the_proxy_is_the_way_out(repo):
     assert issuer and "mitmproxy" in issuer[0], decrypted.stderr
 
 
+def test_your_computers_loopback_is_out_of_a_containers_reach(repo):
+    # `fy verify` on your computer, walled: a probe container tries a throwaway service on this
+    # computer's loopback directly at the gateway and through the proxy (which runs here), and
+    # the service must see no connection — with the proxy's liveness answer as the control.
+    run = fy(["verify"], repo, timeout=600, env_extra=WALL)
+    rows = [ln for ln in run.out.splitlines() if "loopback" in ln]
+    assert any("out of reach" in ln for ln in rows), run.out
+    assert not any("REACHED" in ln or "UNPROVEN" in ln for ln in rows), run.out
+
+
 def test_the_api_is_still_served_through_the_walled_stack(repo):
     # Under the wall podman propagates the VM's proxy env into every container, so the probe
     # container's wget would ask the host proxy for `api` — a compose name the proxy cannot
