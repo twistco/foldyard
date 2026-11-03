@@ -876,8 +876,9 @@ def _tmux_missing() -> None:
         _err(f"  Recreate it: {_recreate_hint()} (adopt the config when asked).")
         return
     _err("✗ tmux isn't installed in the box, and its image (your [box].image) doesn't include it.")
-    manual = '  Add `packages = ["tmux"]` under [box] in foldyard.toml, then '
-    if not _ask('  Add "tmux" to [box].packages in foldyard.toml? (y/N): '):
+    file = boxpackages.target(root)
+    manual = f'  Add `packages = ["tmux"]` under [box] in {file}, then '
+    if not _ask(f'  Add "tmux" to [box].packages in {file}? (y/N): '):
         _err(f"{manual}{_recreate_hint()}.")
         return
     try:

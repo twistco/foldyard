@@ -294,6 +294,19 @@ def test_an_own_image_without_tmux_is_offered_and_a_no_changes_nothing(
     assert (tmp_path / "foldyard.toml").read_text() == '[box]\npackages = ["just"]\n'
 
 
+def test_the_question_names_the_local_file_when_that_is_the_one_edited(
+    no_tmux, monkeypatch, capsys, tmp_path
+):
+    # An array in foldyard.local.toml replaces the shared one, so that's the file a yes edits —
+    # and the one the question and the hand-edit hint have to name.
+    _own_image(monkeypatch)
+    (tmp_path / "foldyard.toml").write_text('[box]\npackages = ["just"]\n')
+    (tmp_path / "foldyard.local.toml").write_text('[box]\npackages = ["git"]\n')
+    assert agents.start("claude", "", [], attach_after=False) == 1
+    assert len(no_tmux) == 1 and "foldyard.local.toml?" in no_tmux[0]
+    assert "under [box] in foldyard.local.toml" in capsys.readouterr().err
+
+
 def test_a_yes_adds_it_and_says_what_comes_next(no_tmux, monkeypatch, capsys, tmp_path):
     _own_image(monkeypatch)
     (tmp_path / "foldyard.toml").write_text('[box]\npackages = ["just"]\n')

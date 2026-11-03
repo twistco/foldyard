@@ -75,6 +75,15 @@ def test_a_local_file_that_sets_the_list_is_the_one_edited(tmp_path):
     assert boxpackages.listed(tmp_path) == ["b", "tmux"]
 
 
+def test_target_names_the_file_add_edits(tmp_path):
+    (tmp_path / "foldyard.toml").write_text('[box]\npackages = ["a"]\n')
+    assert boxpackages.target(tmp_path) == "foldyard.toml"
+    (tmp_path / "foldyard.local.toml").write_text('[box]\npackages = ["b"]\n')
+    assert boxpackages.target(tmp_path) == "foldyard.local.toml"
+    (tmp_path / "foldyard.local.toml").write_text("not toml [")
+    assert boxpackages.target(tmp_path) == "foldyard.toml"  # add refuses it with the reason
+
+
 def test_a_local_file_without_the_list_leaves_it_to_the_shared_one(tmp_path):
     written = _add(tmp_path, '[box]\npackages = ["a"]\n', '[claude]\nkeyless = "oauth"\n')
     assert written.name == "foldyard.toml"

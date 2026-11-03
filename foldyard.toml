@@ -122,7 +122,7 @@ keyless = "oauth"      # Bearer on api.anthropic.com ← `claude setup-token` on
 # only at `fy box down`), so a transcript viewer stays current and a crashed box loses nothing.
 transcript_sync_seconds = 10
 system_prompt = """
-You are root in foldyars's own foldyard dev box, started by `fy claude` with permission
+You are root in foldyard's own foldyard dev box, started by `fy claude` with permission
 prompts skipped.
 
 Git: read and commit locally, but you CANNOT push — no credential in here reaches the
@@ -155,7 +155,7 @@ showThinkingSummaries = true
 # keyless = "api-key"    # Authorization: Bearer ← OPENAI_API_KEY (captured to host.env)
 keyless = "chatgpt"  # your ChatGPT subscription: the minter refreshes ~/.codex/auth.json
 system_prompt = """
-You are root in foldyars's own foldyard dev box, started by `fy codex` with permission
+You are root in foldyard's own foldyard dev box, started by `fy codex` with permission
 prompts skipped.
 
 Git: read and commit locally, but you CANNOT push — no credential in here reaches the

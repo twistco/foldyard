@@ -117,6 +117,19 @@ def _edited(text: str, package: str) -> str:
     return text + tail + ("\n" if text else "") + f"[box]\npackages = [{item}]\n"
 
 
+def _target(docs: dict[str, dict]) -> str:
+    return LOCAL if _packages(docs[LOCAL]) is not None else SHARED
+
+
+def target(root: Path) -> str:
+    """The file :func:`add` would edit in ``root`` — for the question that asks first. The shared
+    file when the local one can't be read: :func:`add` then refuses with the reason anyway."""
+    try:
+        return _target({name: _parse(name, _read(root, name)) for name in (SHARED, LOCAL)})
+    except Refused:
+        return SHARED
+
+
 def add(root: Path, package: str) -> Path:
     """Add ``package`` to ``[box].packages`` in ``root``'s config; the file written. Raises
     :class:`Refused` when the edit can't be made exactly, leaving every file as it was."""
@@ -124,7 +137,7 @@ def add(root: Path, package: str) -> Path:
         raise Refused(f"{package!r} isn't a package name.")
     texts = {name: _read(root, name) for name in (SHARED, LOCAL)}
     docs = {name: _parse(name, text) for name, text in texts.items()}
-    name = LOCAL if _packages(docs[LOCAL]) is not None else SHARED
+    name = _target(docs)
     old_doc, old_text = docs[name], texts[name] or ""
     current = _packages(old_doc)
     if current is not None and not isinstance(current, list):
