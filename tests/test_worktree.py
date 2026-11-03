@@ -600,7 +600,13 @@ def test_the_checkout_runs_in_a_one_off_container_with_nothing_but_the_mount(fak
         f"{wt_root}:{wt_root}",
     ]
     assert opts[opts.index("-w") + 1] == str(wt_root / "feat")
-    assert [opts[i + 1] for i, o in enumerate(opts) if o == "-e"] == ["GIT_LFS_SKIP_SMUDGE=1"]
+    # No HOME for git to read: the image user's is unreadable to capability-less root, and git
+    # warned on every run that it couldn't open its global ignore/attributes there.
+    assert [opts[i + 1] for i, o in enumerate(opts) if o == "-e"] == [
+        "HOME=/nonexistent",
+        "XDG_CONFIG_HOME=/nonexistent",
+        "GIT_LFS_SKIP_SMUDGE=1",
+    ]
     assert opts[opts.index("--entrypoint") + 1] == "git"
     # The image's own git (never the box's shim, which is not in the image): files + the worktree's
     # index from the commit resolved on your computer — no ref, no HEAD, no config written there.
