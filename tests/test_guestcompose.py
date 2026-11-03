@@ -238,7 +238,8 @@ services:
 
 @pytest.fixture
 def checkout(tmp_path):
-    (tmp_path / "compose.yml").write_text(COMPOSE)
+    # Not a name compose finds by itself, so a run that dropped the `-f` list would fail.
+    (tmp_path / "stack.yml").write_text(COMPOSE)
     (tmp_path / "web.env").write_text("FROM_FILE=1\n")
     # podman-compose asks `podman version` before most commands; the guest has podman. This one
     # only answers that, so the payload runs with no engine at all.
@@ -269,7 +270,7 @@ def test_the_payload_renders_from_the_request_env_alone(checkout):
     proc = _run_payload(
         checkout,
         "compose",
-        ["-f", str(checkout / "compose.yml"), "config"],
+        ["-f", str(checkout / "stack.yml"), "config"],
         {"A_VAR": "from-the-request", "COMPOSE_PROJECT_NAME": "acme"},
     )
     assert proc.returncode == 0, proc.stderr.decode()
@@ -281,7 +282,7 @@ def test_the_payload_hashes_as_the_host_child_does(checkout, monkeypatch):
     """Parity: the guest's hash is the one `fy state` compared before — podman-compose's own,
     over the same render."""
     env = {"A_VAR": "v1", "COMPOSE_PROJECT_NAME": "acme"}
-    argv = ["-f", str(checkout / "compose.yml")]
+    argv = ["-f", str(checkout / "stack.yml")]
     proc = _run_payload(checkout, "hash", argv, env)
     assert proc.returncode == 0, proc.stderr.decode()
     guest = json.loads(proc.stdout)
