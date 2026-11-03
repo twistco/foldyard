@@ -16,7 +16,7 @@ fy agent start codex --name review   # Codex, with a name of your choosing
 fy agent start claude -a -- --model opus   # attach straight away; args after -- go to the agent
 fy agent ls                          # every local project's agents
 fy agent attach 3f2c9a1e             # reattach, from anywhere on your computer
-fy agent resume 3f2c9a1e             # pick an exited Claude session up again
+fy agent resume 3f2c9a1e             # pick an exited agent's conversation up again
 fy agent stop 3f2c9a1e               # stop the agent and remove its session
 fy agent clean --older-than 7d       # remove sessions that exited over a week ago
 ```
@@ -48,15 +48,24 @@ before removing it, and asks first when run in a terminal (`--yes` skips the que
 stop-box confirmation lists them too. The same holds for anything that recreates the box or stops
 the VM: the sessions go with it.
 
-**Resuming a Claude session.** `fy agent resume <id>` picks a Claude conversation up again from
-its transcript, in a new session in this checkout's box under the same id. If the box still holds
-the old session and it has exited, resume removes it first and the new session keeps its name;
-the id's first 8 characters or the name find it. If it's still running, resume says so and leaves
-it alone: attach instead. With no session left (after the box was recreated, say), give the full
-id, from `fy agent ls` beforehand or the transcript. Arguments after `--` go to Claude, as with
-`start`. It's `fy agent start claude -- --resume <id>` without the bookkeeping, and works only for
-Claude sessions with an id of Claude's own (not one started with `--continue`, a bare `--resume`
-or `--fork-session`).
+**Resuming a conversation.** `fy agent resume <id>` picks an agent's conversation up again, in a
+new session in this checkout's box: Claude's by `--resume`, Codex's by `codex resume`. If the box
+still holds the old session and it has exited, resume removes it first, and the new session keeps
+its name and id; the id's first 8 characters or the name find it. If it's still running, resume
+says so and leaves it alone: attach instead. Arguments after `--` go to the agent, as with
+`start`.
+
+- **Claude** resumes by its own session id, which is the session's id (unless Claude picked the
+  session itself, with `--continue`, a bare `--resume` or `--fork-session`).
+- **Codex** takes no session id from outside, so foldyard records Codex's own thread id on the
+  session once Codex has one. Codex saves a thread at your first message, so a session you never
+  typed in has nothing to resume. `fy agent ls --json` shows it as `conversation`, and its full id
+  finds the session too.
+
+With no session left (after the box was recreated, say), give the agent's own full id: from
+`fy agent ls --json` beforehand, the transcript, or what Codex prints when it quits. Add
+`--agent codex` for a Codex one (Claude is the default), which also takes a name you gave the
+thread with Codex's `/rename`.
 
 **An agent that exits leaves its session behind.** `fy agent ls` shows it as `exited`, and
 attaching to it shows its last screen, which is usually the reason it stopped. `fy agent stop`

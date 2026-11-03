@@ -902,19 +902,23 @@ def agent_start(
 def agent_resume(
     ctx: typer.Context,
     session: str = typer.Argument(
-        ..., help="a Claude session id (or an exited session's prefix or name)"
+        ..., help="an exited session's id, prefix or name, or the agent's own full id"
+    ),
+    agent: str = typer.Option(
+        "", "--agent", help="claude or codex, when no session is left to say (default: claude)"
     ),
     name: str = typer.Option(
         "", "--name", "-n", help="the session's name (default: the old one's)"
     ),
     attach: bool = typer.Option(False, "--attach", "-a", help="attach to it once started"),
 ) -> None:
-    """Pick a Claude session up again in this checkout's box — after the agent exited, or after
-    the box it ran in was recreated. Removes the exited session that held the id first. Args after
-    `--` pass to Claude (`fy agent resume <id> -- --model opus`)."""
+    """Pick an agent's conversation up again in this checkout's box — after the agent exited, or
+    after the box it ran in was recreated: Claude's by its session id, Codex's by its thread id
+    (recorded once Codex saves the thread, at your first message). Removes the exited session that
+    held it first. Args after `--` pass to the agent (`fy agent resume <id> -- --model opus`)."""
     from . import agents
 
-    raise typer.Exit(agents.resume(session, name, list(ctx.args), attach_after=attach))
+    raise typer.Exit(agents.resume(session, name, list(ctx.args), agent=agent, attach_after=attach))
 
 
 @agent_app.command("ls")

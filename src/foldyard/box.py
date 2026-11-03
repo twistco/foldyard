@@ -1800,6 +1800,9 @@ def _codex_overrides(table: dict, prefix: str = "") -> list[str]:
     return out
 
 
+_CODEX_NO_DAEMON = "features.daemon_auto_start=false"
+
+
 def _codex_argv(prompt: str, overrides: dict, args: list[str]) -> list[str]:
     """The `codex` argv: bypass approvals + its own sandbox (the box's rootless isolation IS the
     safety boundary) + the inline orientation prompt (when set) + the `[codex.config]` overrides
@@ -1820,8 +1823,16 @@ def _codex_argv(prompt: str, overrides: dict, args: list[str]) -> list[str]:
     The overrides land AFTER the prompt and BEFORE the caller's args, because a repeated `-c` on
     the same key is LAST-WINS (verified with `codex debug prompt-input`, 0.150.1): so an explicit
     `[codex.config] developer_instructions` deliberately beats `system_prompt`, and a
-    `fy codex -c …` on the command line beats both."""
-    argv = ["codex", "--dangerously-bypass-approvals-and-sandbox"]
+    `fy codex -c …` on the command line beats both.
+
+    First of all, Codex's shared background server is turned off (:data:`_CODEX_NO_DAEMON`).
+    Codex 0.166 starts one by default and manages it with `ps`, which a box needn't have (the
+    packaged image doesn't): there `codex` exits at once. And with the server the agent's turns
+    run in it, not in the terminal's Codex — so stopping an `fy agent` session wouldn't stop its
+    agent, and the thread file `fy agent resume` reads is the server's. As a `-c`, which an older
+    Codex without the feature accepts (`--disable` and `--no-daemon` it refuses, 0.154), and
+    first, so `[codex.config]` or the command line can turn it back on."""
+    argv = ["codex", "--dangerously-bypass-approvals-and-sandbox", "-c", _CODEX_NO_DAEMON]
     if prompt.strip():
         argv += ["-c", f"developer_instructions={json.dumps(prompt)}"]
     for override in _codex_overrides(overrides):

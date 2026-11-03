@@ -1781,11 +1781,14 @@ def test_claude_execs_with_env_when_ready(monkeypatch, tmp_path):
 def test_codex_argv_bypasses_the_sandbox_and_carries_the_prompt():
     argv = box._codex_argv("be grounded", {}, ["resume"])
     assert argv[:2] == ["codex", "--dangerously-bypass-approvals-and-sandbox"]
+    # Codex's shared background server off, FIRST: anything after it can turn it back on.
+    assert argv[2:4] == ["-c", "features.daemon_auto_start=false"]
     # Codex has no --append-system-prompt; `-c developer_instructions=…` is its analogue (it ADDS
     # a developer-message item, unlike base_instructions, which would replace the base prompt).
-    assert argv[2] == "-c" and argv[3] == 'developer_instructions="be grounded"'
+    assert argv[4] == "-c" and argv[5] == 'developer_instructions="be grounded"'
     assert argv[-1] == "resume"  # caller args passed through
-    assert "-c" not in box._codex_argv("  ", {}, [])  # no prompt, no config → no override at all
+    # No prompt, no config → no override but the server's.
+    assert box._codex_argv("  ", {}, [])[2:] == ["-c", "features.daemon_auto_start=false"]
 
 
 def test_codex_prompt_is_emitted_as_a_quoted_toml_string():
@@ -1796,7 +1799,7 @@ def test_codex_prompt_is_emitted_as_a_quoted_toml_string():
     import tomllib
 
     for prompt in ('Be terse. "Ship it"', "true", "line one\nline two\\end", "[not a table]"):
-        override = box._codex_argv(prompt, {}, [])[3]
+        override = box._codex_argv(prompt, {}, [])[5]
         key, _, value = override.partition("=")
         assert key == "developer_instructions"
         assert tomllib.loads(f"x = {value}")["x"] == prompt  # …reaches codex intact
@@ -1826,6 +1829,8 @@ def test_codex_config_flattens_to_dotted_overrides_with_toml_values():
     )
     assert argv[1:] == [
         "--dangerously-bypass-approvals-and-sandbox",
+        "-c",
+        "features.daemon_auto_start=false",
         "-c",
         "hide_agent_reasoning=false",
         "-c",

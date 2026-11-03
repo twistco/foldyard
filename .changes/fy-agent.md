@@ -8,8 +8,8 @@ bump: minor
   computer or the box. `fy agent ls` lists every local project's sessions without starting any
   VM. `fy agent attach <id>` reattaches from anywhere on your computer, and
   `fy agent clean --older-than 7d` removes sessions that exited longer ago than that (never a
-  running one). `fy agent resume <id>` picks an exited Claude session up again, or one whose box
-  was recreated. For Claude the id is Claude's own session id (unless Claude picks the session
+  running one). `fy agent resume <id>` picks an exited agent's conversation up again (Claude's or
+  Codex's), or one whose box was recreated. For Claude the id is Claude's own session id (unless Claude picks the session
   itself, with `--continue`, a bare `--resume` or `--fork-session`), so the id a transcript viewer such as
   claude-code-log shows is the one to attach with. foldyard runs its own tmux server, which by
   default keeps an agent's escape sequences and clipboard writes off your terminal (a default,

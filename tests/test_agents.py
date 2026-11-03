@@ -23,9 +23,16 @@ class _Proc:
 
 
 def _pane(
-    name="claude-3f2c9a1e", sid=SID, agent="claude", dead="0", status="", attached="0", ended=""
+    name="claude-3f2c9a1e",
+    sid=SID,
+    agent="claude",
+    dead="0",
+    status="",
+    attached="0",
+    ended="",
+    conv="",
 ):
-    fields = [name, sid, agent, "1761900000", "1761900600", attached, dead, status, ended]
+    fields = [name, sid, agent, "1761900000", "1761900600", attached, dead, status, ended, conv]
     return agents._SEP.join(fields)
 
 
@@ -277,15 +284,111 @@ def test_resume_leaves_a_running_session_alone(in_box, capsys):
     assert not any("kill-session" in c or "new-session" in c for c in calls)
 
 
-def test_resume_refuses_a_short_id_with_nothing_to_match_or_a_codex_session(in_box, capsys):
+def test_resume_refuses_a_short_id_with_nothing_to_match(in_box, capsys):
     calls, replies = in_box
     replies["-V"] = _Proc(0, "tmux 3.5a\n")
     assert agents.resume(SID[:8], "", [], attach_after=False) == 1
-    assert "full" in capsys.readouterr().err
+    assert "full id" in capsys.readouterr().err
+    assert agents.resume("a-name", "", [], attach_after=False) == 1  # Claude has no names
+    assert not any("kill-session" in c or "new-session" in c for c in calls)
+
+
+THREAD = "01a1a283-e253-7d51-b1d9-68916285c824"  # Codex's (a UUIDv7, as 0.166 makes them)
+
+
+def test_resume_a_codex_session_by_its_thread_keeping_its_name_and_id(
+    in_box, monkeypatch, tmp_path
+):
+    calls, replies = in_box
+    monkeypatch.chdir(tmp_path)
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
+    replies["list-panes"] = _Proc(0, _pane(name="rev", agent="codex", dead="1", conv=THREAD) + "\n")
+    assert agents.resume(SID[:8], "", ["--model", "o9"], attach_after=False) == 0
+    assert agents.stop_argv("rev") in calls
+    name, sid, script = _resumed(calls[-1])
+    assert (name, sid) == ("rev", SID)  # `fy agent attach <the same id>` still finds it
+    assert script.endswith(f"exec fy codex resume {THREAD} --model o9")
+    assert "fy_codex_thread $$" in script  # the new session records its thread too
+    # Codex's own id finds the session as well — in full only (its ids are time-ordered).
+    assert agents.resume(THREAD, "", [], attach_after=False) == 0
+    assert agents.resume(THREAD[:8], "", [], attach_after=False) == 1
+
+
+def test_resume_a_codex_session_with_no_thread_yet_says_why(in_box, capsys):
+    calls, replies = in_box
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
     replies["list-panes"] = _Proc(0, _pane(agent="codex", dead="1") + "\n")
     assert agents.resume(SID, "", [], attach_after=False) == 1
-    assert "isn't a Claude session" in capsys.readouterr().err
+    assert "first message" in capsys.readouterr().err
+    assert agents.resume(SID, "", [], agent="claude", attach_after=False) == 1  # not a Claude one
+    assert "not claude" in capsys.readouterr().err
     assert not any("kill-session" in c or "new-session" in c for c in calls)
+
+
+def test_resume_codex_with_no_session_left_takes_its_id_or_a_name(in_box, monkeypatch, tmp_path):
+    calls, replies = in_box
+    monkeypatch.chdir(tmp_path)
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
+    assert agents.resume(THREAD, "", [], agent="codex", attach_after=False) == 0
+    assert _resumed(calls[-1])[2].endswith(f"exec fy codex resume {THREAD}")
+    assert agents.resume("my thread", "", [], agent="codex", attach_after=False) == 0  # /rename's
+    assert _resumed(calls[-1])[2].endswith("exec fy codex resume 'my thread'")
+    assert agents.resume("--last", "", [], agent="codex", attach_after=False) == 1  # not a flag
+    assert agents.resume(THREAD, "", [], agent="gemini", attach_after=False) == 2
+
+
+def test_parse_panes_keeps_only_a_uuid_thread():
+    rows = agents.parse_panes(
+        "\n".join([_pane(name="a", conv=THREAD), _pane(name="b", conv="../../etc/passwd")])
+    )
+    assert [s.conversation for s in rows] == [THREAD, ""]
+    assert rows[0].resumes == SID  # a Claude session resumes by its own id…
+    codex = agents.parse_panes(_pane(agent="codex", conv=THREAD))[0]
+    assert codex.resumes == THREAD  # …a Codex one by its thread
+    listing = agents.ProjectListing("acme", "/w/acme", [codex], "")
+    back = agents.from_json(agents.to_json(listing))
+    assert back is not None and back.sessions[0].conversation == THREAD
+
+
+def test_only_a_codex_pane_starts_the_thread_watcher():
+    assert "fy_codex_thread" not in agents.pane_command("claude", [])[2]
+    assert "fy_codex_thread $$" in agents.pane_command("codex", [])[2]
+
+
+@pytest.mark.spawns("bash")
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="reads /proc, as in the box")
+def test_the_thread_watcher_tags_the_session_with_the_rollout_codex_holds(tmp_path):
+    """The watcher, under real bash against a real /proc: this shell plays Codex, holding fd 8
+    open; `readlink` reports a rollout for it (the suite's PATH has no coreutils, so `readlink`,
+    `sleep` and `tmux` are functions). Tagged once with the thread id, whatever else is open, and
+    never with a rollout whose name doesn't end in one."""
+    import subprocess
+
+    out = tmp_path / "tmux"
+    stubs = f"""
+readlink() {{ case $1 in
+  */fd/8) echo /h/.codex/sessions/2026/11/03/rollout-2026-11-03T17-45-14-{THREAD}.jsonl ;;
+  */fd/9) echo /h/.codex/sessions/rollout-2026-11-03T17-45-14-not-a-thread-id-at-all-x.jsonl ;;
+  *) echo /dev/null ;;
+esac; }}
+sleep() {{ :; }}
+tmux() {{ printf '%s\n' "$*" >> {out}; }}
+"""
+    # This shell holds fds 8 and 9, then waits (≤ 10 s, builtins only: a read on a pipe that
+    # never delivers) for the watcher it started to tag the session.
+    wait = f"""
+exec 8</dev/null 9</dev/null 7<> <(:)
+for ((i = 0; i < 200; i++)); do [ -s {out} ] && break; read -t 0.05 -u 7 || :; done
+"""
+    proc = subprocess.run(
+        ["bash", "-c", stubs + agents._CODEX_THREAD_SNIPPET + wait],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "TMUX_PANE": "%9"},
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_text().splitlines() == [f"set-option -t %9 @fy_conversation {THREAD}"]
 
 
 def test_start_refuses_an_old_or_missing_tmux(in_box, capsys):
