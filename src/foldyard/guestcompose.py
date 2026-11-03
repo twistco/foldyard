@@ -80,10 +80,10 @@ def _sources() -> list[tuple[str, Path]]:
 
     files = [
         (f"{_RUNNER}.py", Path(__file__).resolve().parent / "assets" / "compose" / "runner.py"),
-        ("podman_compose.py", Path(podman_compose.__file__)),
+        ("podman_compose.py", Path(str(podman_compose.__file__))),
     ]
     for pkg in (yaml, dotenv):
-        root = Path(pkg.__file__).parent
+        root = Path(str(pkg.__file__)).parent
         files += [(f"{pkg.__name__}/{f.relative_to(root)}", f) for f in sorted(root.rglob("*.py"))]
     return files
 
