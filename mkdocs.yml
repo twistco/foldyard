@@ -79,6 +79,7 @@ nav:
       - base-vm.md
       - configuration.md
       - modes.md
+      - agents.md
       - networking.md
       - github-app.md
       - gcp.md
@@ -97,6 +98,7 @@ nav:
       - releasing.md
       - linux-support.md
       - isolation-layers.md
+      - fleet-scope.md
       - lima-backend-scope.md
       - lima-wall-machine-integration.md
       - nested-virt.md

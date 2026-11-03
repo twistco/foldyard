@@ -869,9 +869,43 @@ class DevModeTui(App):
         """Start the highlighted workspace's dev box, or — after a confirmation, since an agent
         session (`fy claude` / `fy codex`) may be running inside it — stop it. Both directions
         shell out to `fy box up|down` off the UI thread (up warms deps, down is teardown)."""
+        # Any stop-lookup still in flight is superseded by THIS press, whichever way it goes: a
+        # start must not have an earlier box's stop question pop up over it.
+        self.workers.cancel_group(self, "devbox-confirm")
         if not ws["devbox"]:
             self._start_devbox(ws)
             return
+
+        def work() -> None:
+            # Off the UI thread: the lookup is a `podman exec` into the box (up to its timeout).
+            # A thread worker can't be interrupted — `exclusive` only marks the older one
+            # cancelled — so a superseded lookup (`d` pressed again meanwhile) must not open its
+            # dialog under the newer one.
+            from textual.worker import get_current_worker
+
+            from . import agents
+
+            worker = get_current_worker()
+            live = agents.live_in_workspace(ws["project"])
+
+            def show() -> None:
+                # Checked HERE, on the UI thread, where a newer `d` is handled: a check on the
+                # worker thread could pass just before that press cancelled this worker.
+                if not worker.is_cancelled:
+                    self._confirm_stop_devbox(ws, live)
+
+            self.call_from_thread(show)
+
+        self.run_worker(work, thread=True, exclusive=True, group="devbox-confirm")
+
+    def _confirm_stop_devbox(self, ws: dict, live: list) -> None:
+        """The stop-box confirmation, naming the agent sessions still running in it."""
+        named = (
+            f"\n\n[b]{len(live)} agent session(s) still running[/b] (`fy agent ls`): "
+            + ", ".join(escape(s.name) for s in live)
+            if live
+            else ""
+        )
         self.push_screen(
             ConfirmScreen(
                 title=f"Stop the dev box for [b]{escape(ws['name'])}[/b]?",
@@ -879,8 +913,8 @@ class DevModeTui(App):
                     f"Stops + removes [dim]{escape(ws['project'])}-devbox[/dim]. Anything "
                     "running inside it — including a live `fy claude` / `fy codex` agent "
                     "session — is killed; the stack's other containers keep running and "
-                    "login/CLI volumes are kept.\n\nStart it again with [b]d[/b] "
-                    "(or `fy box up`)."
+                    "login/CLI volumes are kept."
+                    f"{named}\n\nStart it again with [b]d[/b] (or `fy box up`)."
                 ),
                 confirm_label="Stop box",
             ),

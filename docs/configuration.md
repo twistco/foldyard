@@ -1032,6 +1032,11 @@ tui = { raw_output_mode = false }
     becomes one `-c key=value`, nested tables flattened to dotted paths, so one knob is
     overridden without replacing its table. Default: `{}`. Later `-c` wins: `[codex.config]`
     beats `system_prompt` on `developer_instructions`, and `fy codex -c …` beats both.
+  - `fy codex` runs Codex without its shared background server
+    (`-c features.daemon_auto_start=false`, before every other `-c`). Codex starts that server
+    by default, and needs `ps` to manage it, which a box needn't have. With the server, an
+    agent's work would also run outside its terminal, so stopping an `fy agent` session wouldn't
+    stop the agent. `features.daemon_auto_start = true` in `[codex.config]` turns it back on.
 - **`transcript_sync_seconds`** (both tables) — while the box is up, the supervisor copies that
   agent's transcripts into their archive on your computer (`~/.claude/projects` /
   `~/.foldyard/<project>/transcripts/codex/sessions`) at this interval, so a crashed box or a

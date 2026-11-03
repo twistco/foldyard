@@ -21,6 +21,8 @@ For using foldyard. These pages also ship with the install — `fy docs` prints 
   overrides, environment variables, the adopted config, and what lives in `~/.foldyard/`.
 - [modes.md](./modes.md) — switching credentials on and off: switches and levels, time limits,
   keyless agents, and what enforces them on your computer.
+- [agents.md](./agents.md) — `fy agent`: agents in tmux sessions that outlive their terminal,
+  listed across your projects and reattached by session id.
 - [networking.md](./networking.md) — the egress proxy, the traffic log, the allowlist, and the
   VM and host firewalls.
 - [github-app.md](./github-app.md) — give the box scoped GitHub access with a GitHub App:
@@ -71,6 +73,8 @@ Start at [DEVELOPMENT.md](../DEVELOPMENT.md): the module map, test tiers, CI and
   and what hasn't yet.
 - [isolation-layers.md](./isolation-layers.md) — which layer carries the boundary on each host
   (macOS, Linux, WSL2), with measurements.
+- [fleet-scope.md](./fleet-scope.md) — the agent control plane: what `fy agent` is as a first
+  version, and the next phase (a hosted control plane, interaction, sizing).
 - [lima-backend-scope.md](./lima-backend-scope.md) — the VM-backend contract (lima and podman)
   and the tricky parts of the Lima backend.
 - [lima-wall-machine-integration.md](./lima-wall-machine-integration.md) — how the box reaches

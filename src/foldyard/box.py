@@ -27,6 +27,7 @@ running box). The command assembly is golden-tested (engine mocked) + faithful t
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import getpass
 import hashlib
@@ -1799,6 +1800,9 @@ def _codex_overrides(table: dict, prefix: str = "") -> list[str]:
     return out
 
 
+_CODEX_NO_DAEMON = "features.daemon_auto_start=false"
+
+
 def _codex_argv(prompt: str, overrides: dict, args: list[str]) -> list[str]:
     """The `codex` argv: bypass approvals + its own sandbox (the box's rootless isolation IS the
     safety boundary) + the inline orientation prompt (when set) + the `[codex.config]` overrides
@@ -1819,8 +1823,16 @@ def _codex_argv(prompt: str, overrides: dict, args: list[str]) -> list[str]:
     The overrides land AFTER the prompt and BEFORE the caller's args, because a repeated `-c` on
     the same key is LAST-WINS (verified with `codex debug prompt-input`, 0.150.1): so an explicit
     `[codex.config] developer_instructions` deliberately beats `system_prompt`, and a
-    `fy codex -c …` on the command line beats both."""
-    argv = ["codex", "--dangerously-bypass-approvals-and-sandbox"]
+    `fy codex -c …` on the command line beats both.
+
+    First of all, Codex's shared background server is turned off (:data:`_CODEX_NO_DAEMON`).
+    Codex 0.166 starts one by default and manages it with `ps`, which a box needn't have (the
+    packaged image doesn't): there `codex` exits at once. And with the server the agent's turns
+    run in it, not in the terminal's Codex — so stopping an `fy agent` session wouldn't stop its
+    agent, and the thread file `fy agent resume` reads is the server's. As a `-c`, which an older
+    Codex without the feature accepts (`--disable` and `--no-daemon` it refuses, 0.154), and
+    first, so `[codex.config]` or the command line can turn it back on."""
+    argv = ["codex", "--dangerously-bypass-approvals-and-sandbox", "-c", _CODEX_NO_DAEMON]
     if prompt.strip():
         argv += ["-c", f"developer_instructions={json.dumps(prompt)}"]
     for override in _codex_overrides(overrides):
@@ -2593,6 +2605,9 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
             [engine, "exec", "-it", *_terminal_env(), box, "bash", "-lc", script], env=env
         ).returncode
     if cmd == "down":
+        if _running(engine, box, env) and not _agents_may_stop(engine, box, env, args or []):
+            print("Aborted — the box is still running.")
+            return 1
         # Belt-and-suspenders: promote this box's transcripts to the durable host store before
         # we drop the container. The bound-out dir survives `box down`, but archiving here keeps
         # the host's `claude --resume` in sync. Best-effort — never block a teardown. Lazy import
@@ -2625,6 +2640,32 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         ).returncode
     _err("usage: foldyard box {build|up|shell|exec|down|ps}")
     return 2
+
+
+def _agents_may_stop(engine: str, box: str, env: dict, args: list[str]) -> bool:
+    """Before `box down` removes a running box: name the `fy agent` sessions still running in it,
+    which go with it, and on a terminal ask (``--yes``, or no terminal — the TUI, which asks for
+    itself, a script, `fy worktree remove` after its own confirm — says so and carries on)."""
+    from . import agents
+
+    live = agents.live_in(engine, box, env)
+    if not live:
+        return True
+    _err(f"⚠ {len(live)} agent session(s) still running in {box} will be stopped with it:")
+    for s in live:
+        _err(f"    {s.name}  ({s.agent or '?'}, {s.state}){f'  id {s.id}' if s.id else ''}")
+    if "--yes" in args or not sys.stdin.isatty():
+        return True
+    # Drop anything typed before the question was on screen: an early keystroke isn't an answer,
+    # and a stray "y" mustn't confirm a teardown.
+    with contextlib.suppress(Exception):
+        import termios
+
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    try:
+        return input("Stop them and remove the box? (y/N): ").strip() in ("y", "Y")
+    except EOFError:
+        return False
 
 
 def _exec(engine: str, box: str, ctx, env: dict, args: list[str]) -> int:

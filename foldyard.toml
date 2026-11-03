@@ -20,12 +20,12 @@
 name = "foldyard"
 # Container/volume/network name prefix (a worktree appends `-<name>`).
 prefix = "foldyard"
-# The version window for foldyard's OWN checkout — we eat the dogfood. The floor is 0.2.0
-# because that is the first `fy` that READS these keys at all: below it the declaration is
-# ignored and the old behaviour runs silently, so a lower number would look like protection
-# and be none. The recommendation is where contributors should actually be; raise the floor
-# to meet it once everyone has moved.
-min_foldyard_version = "0.2.0"
+# The version window for foldyard's OWN checkout — we eat the dogfood. The floor is the
+# recommendation: this file needs 0.3.2 for `firewall`/`enforce` (an older `fy` ignores them,
+# and the VM comes up unwalled), 0.4.0 for its `[[inject]]` kinds and 0.5.0 for
+# `[box].packages`, and 0.7.0 is a security release. When the recommendation moves past it,
+# raise the floor to meet it once everyone has moved.
+min_foldyard_version = "0.7.0"
 recommended_foldyard_version = "0.7.0"
 # A compose stack to drive alongside the box — uncomment when you have one (step 3), add
 # its host ports under [ports] below, and extend [claude].system_prompt with the stack
@@ -41,54 +41,43 @@ recommended_foldyard_version = "0.7.0"
 # are unreachable. Cutting a release? Write the CHANGELOG entry first, then lift its point
 # into one line here — this ledger is what a consumer reads to decide whether to bump.
 [project.foldyard_version_reasons]
-"0.2.0" = "the version window itself — the first fy that reads these keys instead of ignoring them"
-"0.2.1" = "`fy init` stamps a version floor; `fy tui` lists every workspace from inside a worktree"
-"0.3.0" = "the `native` backend is gone (always a VM); gVisor as a machine posture; the host-side wall on Linux; `fy reclaim`; engine probes work on podman 4.9 (Ubuntu 24.04)"
-"0.3.1" = "the host wall is the operator's install (`fy machine host-wall`, never sudo); the floor's upgrade advice no longer drops the [host] extra; quickstart → Upgrading"
-"0.3.2" = "security release (four advisories) — adopt each checkout's config with `fy up`, register existing worktrees with `fy worktree add`"
-"0.4.0" = "credentials are `[[inject]]` kinds; the proxy decrypts the toolchain too and the stack, guest pulls and build steps trust its CA; `[box].env` refuses foldyard's own names — `fy machine stop && fy up` once after upgrading"
-"0.5.0" = "`fy prereq` + base-VM clones (seconds, not minutes); `[box].packages`; `fy changelog`; Node/npm through the proxy by default; launches wait for the supervisor's daemons — `fy machine stop && fy up` once after upgrading"
-"0.6.0" = "security release: the box can no longer steer what your computer archives from its transcripts; the guest monitor (experimental) with signed hook files; a box whose env drifted says what — on Lima `fy machine stop && fy up`, then `fy box down && fy box up`, once after upgrading"
-"0.6.1" = "monitor hooks no longer drop container events under load; `fy monitor --since/--until`; a read-only to-box (`fy monitor hook add NAME --to-box`) and transcripts out of the checkout — on Lima `fy machine stop && fy up`, then `fy box down && fy box up`, once after upgrading"
-"0.6.2" = "a monitor hook stalled silently by the 0.6.1 upgrade resumes where it stopped — `fy host restart` after upgrading"
 "0.7.0" = "security release: foldyard's git on your computer runs no repo hooks, filters or fetches (new worktrees check out in the box image, so `fy box build` first); `fy worktree add` adopts the config, copies keyless mode and takes `--box`; new worktrees masked in running boxes; podman backend deprecated — `fy box down && fy box up` once after upgrading (plus `fy machine stop && fy up` for a guest-monitor or 9p VM)"
 
 [machine]
 # A rootless VM that mounts ONLY this repo. Default here is the Lima backend + an in-VM
-# egress WALL: fail-closed, so the box's only way out is the host's allowlisting proxy
+# egress FIREWALL: fail-closed, so the box's only way out is the host's allowlisting proxy
 # (below). Sizing applies at FIRST creation; to resize later: `foldyard machine recreate`.
-#   backend = "podman"  # the single shared podman machine — no concurrent per-project
-#                       # VMs, and no in-VM wall (egress is the host-side proxy + gvproxy)
-#   backend = "native"  # host podman directly (no VM) — weakest isolation, shared kernel
-#   wall = false        # lima but COOPERATIVE-only: the box uses the proxy, but nothing
-#                       # stops a process that ignores it (the wall makes it fail-closed)
+#   backend = "podman"  # DEPRECATED (0.7.0): the single shared podman machine — no
+#                       # concurrent per-project VMs, and no in-VM firewall
+#   firewall = false    # lima but COOPERATIVE-only: the box uses the proxy, but nothing
+#                       # stops a process that ignores it (the firewall makes it fail-closed)
 backend = "lima"
-wall = true
+firewall = true
 name = "foldyard"
 cpus = 4
 memory_mib = 8192   # MiB — any whole number
 disk_gib = 60
 
 # Egress proxy. Declaring [proxy] routes the box's egress through the host proxy — REQUIRED
-# by the wall (which otherwise leaves the box with no way out). ENFORCING from the start:
+# by the firewall (which otherwise leaves the box with no way out). ENFORCING from the start:
 # a host you haven't granted is refused, and the recommendations below are how the box
 # still builds anyway (you're offered them, one yes each, before the first build). To watch
 # rather than block while you discover a new dependency's egress:
-#     fy allow wall off                     # observe only — everything through, all logged
-#     fy allow wall on                      # back to enforcing
+#     fy allow enforce off                  # observe only — everything through, all logged
+#     fy allow enforce on                   # back to enforcing
 # Grants are deliberately NOT config: they live in the host-side allow-store, outside the
-# repo mount, so the box can't widen its own wall by editing a file it can write. Blocked
-# hosts show live in `fy tui`, where one keypress grants them (and its Network Log's wall
-# pane manages grants + these offers). `default_deny` here only SEEDS the first answer —
-# `fy allow wall` is the switch from then on. Any keyless host (below) is ALWAYS allowed
+# repo mount, so the box can't widen its own allowlist by editing a file it can write. Blocked
+# hosts show live in `fy tui`, where one keypress grants them (and the table under its
+# Network Log manages grants + these offers). `enforce` here only SEEDS the first answer —
+# `fy allow enforce` is the switch from then on. Any keyless host (below) is ALWAYS allowed
 # implicitly — never list it.
 [proxy]
-default_deny = true
+enforce = true
 # The repo can RECOMMEND hosts (this is how a team SHARES its allowlist): each entry is
 # OFFERED per host at `fy up`/`fy box up`/`fy allow sync`, and nothing is granted without
 # that yes — repo config asks, the host answers. (`fy allow sync --yes` takes them all at
 # once, for an unattended setup with no terminal to answer on.) These cover box bootstrap,
-# so the wall above comes up working after one round of consented yeses; the agents below
+# so the firewall above comes up working after one round of consented yeses; the agents below
 # add their own install hosts to the same offer when you uncomment one. Add your project's
 # own hosts WITH a why (the why is shown at the decision moment).
 recommend = [
@@ -118,8 +107,11 @@ recommend = [
 [claude]
 keyless = "oauth"      # Bearer on api.anthropic.com ← `claude setup-token` on the host
 # # keyless = "api-key"  # x-api-key on api.anthropic.com ← from console.anthropic.com
+# Copy the box's transcripts to ~/.claude/projects every 5 s while the box is up (default 0:
+# only at `fy box down`), so a transcript viewer stays current and a crashed box loses nothing.
+transcript_sync_seconds = 5
 system_prompt = """
-You are root in foldyars's own foldyard dev box, started by `fy claude` with permission
+You are root in foldyard's own foldyard dev box, started by `fy claude` with permission
 prompts skipped.
 
 Git: read and commit locally, but you CANNOT push — no credential in here reaches the
@@ -152,7 +144,7 @@ showThinkingSummaries = true
 # keyless = "api-key"    # Authorization: Bearer ← OPENAI_API_KEY (captured to host.env)
 keyless = "chatgpt"  # your ChatGPT subscription: the minter refreshes ~/.codex/auth.json
 system_prompt = """
-You are root in foldyars's own foldyard dev box, started by `fy codex` with permission
+You are root in foldyard's own foldyard dev box, started by `fy codex` with permission
 prompts skipped.
 
 Git: read and commit locally, but you CANNOT push — no credential in here reaches the
