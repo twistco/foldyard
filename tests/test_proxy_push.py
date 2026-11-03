@@ -44,6 +44,19 @@ PUSH_REFUSED = (
         "/acme/app.git/info/refs?service=git%2Dreceive-pack",  # percent-encoded, as decoded
         "/acme/app.git/git%2Dreceive-pack",  # …in the path too
         "/scm/proj/app.git/git-receive-pack?x=y",  # with a query of its own
+        # The refusal is for a box process that writes its own HTTP, not for git, so what counts
+        # is what a SERVER still routes to receive-pack (review on #160):
+        "/org/proj/_git/app/GIT-RECEIVE-PACK",  # case-insensitive routing (ASP.NET / IIS)
+        "/acme/app.git/info/refs?service=GIT-RECEIVE-PACK",
+        "/acme/app.git/info/refs?SERVICE=git-receive-pack",
+        "/acme/app.git/info/refs?service=%20git-receive-pack%20",
+        "/scm/proj/app.git/git-receive-pack;jsessionid=1",  # path parameters (servlet containers)
+        "/acme/app.git/info/refs;x=1?service=git-receive-pack",
+        "/acme/app.git/info/refs?x=1;service=git-receive-pack",  # `;` as a query separator
+        "/acme/app.git/git-receive-pack/",  # trailing-slash matching (Spring MVC before 6)
+        "/acme/app.git/git-receive-pack//",
+        "/acme/app.git\\git-receive-pack",  # a backslash, which IIS reads as a slash
+        "/acme/app.git%2Fgit-receive-pack",  # an encoded slash, as decoded
     ],
 )
 def test_a_git_push_is_recognised(gh, path):
@@ -63,8 +76,8 @@ def test_a_git_push_is_recognised(gh, path):
         "/search?q=git-receive-pack",  # the word in another parameter's value
         "/acme/app.git/info/refs?xservice=git-receive-pack",  # another parameter's name
         "/acme/app.git/info/refs?service=git-receive-pack-x",
-        "/acme/app.git/info/refs?service=GIT-RECEIVE-PACK",  # git sends it lower-case
-        "/acme/app.git/GIT-RECEIVE-PACK",
+        "/acme/git-receive-pack;x/readme",  # a path parameter on a NON-final segment
+        "/acme/app.git/GIT-UPLOAD-PACK",  # a fetch, in any spelling
         "/",
         "",
     ],

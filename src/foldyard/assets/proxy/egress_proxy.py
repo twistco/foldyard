@@ -427,16 +427,26 @@ def _is_git_push(path: str) -> bool:
     A push is ``GET <repo>/info/refs?service=git-receive-pack`` (discovery), then
     ``POST <repo>/git-receive-pack``; a fetch is the same with ``git-upload-pack``. So the URL
     alone tells them apart, whatever the host and whatever credential rides along: the path's
-    last segment IS ``git-receive-pack``, or a ``service`` parameter is exactly that. Compared
-    after percent-decoding (what the server acts on) and case-sensitively (as git sends it).
-    Split on ``?`` by hand: ``urlsplit`` reads a ``//x`` path as an authority."""
+    last segment IS ``git-receive-pack``, or a ``service`` parameter is that.
+
+    The client this is for is NOT git — it's a box process holding a credential, writing its own
+    HTTP and picking its own host — so the spellings that count are the ones a SERVER still routes
+    to receive-pack, not the one git sends. Compared after percent-decoding, case-insensitively
+    (ASP.NET/IIS routing ignores case), with a backslash read as a slash (IIS), trailing slashes
+    dropped (Spring MVC's old trailing-slash match) and ``;params`` cut from the last segment
+    (servlet containers strip them: Bitbucket DC, Gerrit); ``;`` also separates query parameters.
+    None of that can turn a fetch into a match: nothing a fetch sends ends in receive-pack under
+    any spelling. Split on ``?`` by hand: ``urlsplit`` reads a ``//x`` path as an authority."""
     route, _, query = path.partition("?")
-    route = route.partition("#")[0]
-    if unquote(route).endswith("/" + _RECEIVE_PACK):
+    route = unquote(route.partition("#")[0]).replace("\\", "/").rstrip("/")
+    last = route.rsplit("/", 1)[-1].split(";", 1)[0]
+    if last.lower() == _RECEIVE_PACK:
         return True
     return any(
-        name == "service" and value == _RECEIVE_PACK
-        for name, value in parse_qsl(query.partition("#")[0], keep_blank_values=True)
+        name.strip().lower() == "service" and value.strip().lower() == _RECEIVE_PACK
+        for name, value in parse_qsl(
+            query.partition("#")[0].replace(";", "&"), keep_blank_values=True
+        )
     )
 
 
