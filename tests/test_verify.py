@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import os
 import pathlib
-from typing import Any
+import types
+from typing import Any, ClassVar
 
 import pytest
 
@@ -48,6 +49,14 @@ def secure_engine(monkeypatch, tmp_path):
         # `git config --show-origin --get-regexp <credential helpers>`: 1 = none configured
         "config_rc": 1,
         "config_out": "",
+        # Asked only when the proxy refused the dry-run push as a push: origin's push URL, and
+        # what `git credential fill` finds for it (128 + "terminal prompts disabled" = nothing).
+        "push_url": "https://github.com/acme/app.git\n",
+        "push_url_rc": 0,
+        "cred_rc": 128,
+        "cred_out": "",
+        "cred_err": "fatal: could not read Username for 'https://github.com': terminal prompts "
+        "disabled\n",
     }
 
     def fake_run(cmd, **kw):
@@ -59,6 +68,15 @@ def secure_engine(monkeypatch, tmp_path):
         if cmd[0] == "git" and "config" in cmd:  # the credential-helper read, not the push
             results["config_cmd"], results["config_env"] = cmd, kw.get("env")
             return _Proc(results["config_rc"], results["config_out"])
+        if cmd[0] == "git" and "get-url" in cmd:
+            results["url_cmd"] = cmd
+            return _Proc(results["push_url_rc"], results["push_url"])
+        if cmd[0] == "git" and "credential" in cmd:
+            if results["cred_rc"] is None:
+                raise verify.subprocess.TimeoutExpired(cmd, kw.get("timeout") or 0)
+            results["cred_cmd"], results["cred_input"] = cmd, kw.get("input")
+            results["cred_env"] = kw.get("env")
+            return _Proc(results["cred_rc"], results["cred_out"], results["cred_err"])
         if cmd[0] == "git":
             results["git_env"] = kw.get("env")
             results["git_cmd"] = cmd
@@ -139,7 +157,21 @@ def _enter_box(monkeypatch, tmp_path):
     # where a dev box exports HTTPS_PROXY ambiently, red in CI where nothing does. The `== 1` tests
     # kept passing throughout, on the wall's failure rather than their own subject's.
     monkeypatch.setattr(verify.config, "machine_wall", lambda: False)
+    # The push-refusal row talks to the box's proxy over the network: stubbed to the proxy's
+    # refusal (its own tests are below), and with no proxy in the env unless a test sets one.
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.setattr(verify, "_probe_push", lambda host, port: _REFUSED_ANSWER)
     return home
+
+
+_REFUSED_ANSWER = verify._PushAnswer(
+    status=403,
+    body=b"refused by the foldyard proxy - the box doesn't push; push from your computer"
+    b" (or turn on a mode that allows it)\n",
+    allowed=False,
+    decrypted=True,
+)
 
 
 # ── VM boundary ────────────────────────────────────────────────────────────────────────
@@ -1139,3 +1171,233 @@ def test_a_write_that_lands_and_cant_be_removed_still_names_the_file(with_to_box
     assert verify.verify() == 1
     out = capsys.readouterr().out
     assert "CREATED" in out and "LEFT there" in out and "UNPROVEN" not in out
+
+
+# ── the push refusal: the proxy refuses a git push by its URL ────────────────────────────────
+
+_PROXY = "http://192.168.5.2:41000"
+
+
+def _push_row(monkeypatch, answer, proxy: str | None = _PROXY) -> tuple[verify._Report, list]:
+    asked: list = []
+
+    def probe(host, port):
+        asked.append((host, port))
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(verify, "_probe_push", probe)
+    for var in ("HTTPS_PROXY", "https_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    if proxy is not None:
+        monkeypatch.setenv("HTTPS_PROXY", proxy)
+    rep = verify._Report()
+    verify._push_refusal(rep)
+    return rep, asked
+
+
+def test_a_push_the_proxy_refuses_passes(monkeypatch, capsys):
+    rep, asked = _push_row(monkeypatch, _REFUSED_ANSWER)
+    assert asked == [("192.168.5.2", 41000)]  # through the box's own proxy
+    assert rep.fails == rep.warns == 0
+    assert "git push over HTTPS refused by the foldyard proxy" in capsys.readouterr().out
+
+
+def test_a_push_the_active_mode_allows_is_reported_not_failed(monkeypatch, capsys):
+    allowed = verify._PushAnswer(status=401, body=b"", allowed=True, decrypted=True)
+    rep, _ = _push_row(monkeypatch, allowed)
+    assert rep.fails == rep.warns == 0
+    out = capsys.readouterr().out
+    assert "allowed by the active mode" in out and "PASS" not in out
+
+
+def test_a_push_the_proxy_let_through_unrefused_fails(monkeypatch, capsys):
+    # Decrypted (the proxy's certificate), no refusal and no "allowed" word: GitHub answered.
+    forwarded = verify._PushAnswer(status=401, body=b"Unauthorized", allowed=False, decrypted=True)
+    rep, _ = _push_row(monkeypatch, forwarded)
+    assert rep.fails == 1
+    out = capsys.readouterr().out
+    assert "NOT refused" in out and "401" in out
+
+
+def test_another_refusal_is_not_the_push_refusal(monkeypatch, capsys):
+    # The allowlist's 403, with no word that a mode let the push past: a proxy that predates the
+    # push refusal (a running addon not yet restarted). Unproven, so a FAIL.
+    wall = verify._PushAnswer(
+        status=403,
+        body=b"refused by the foldyard allowlist - grant it on your computer",
+        allowed=False,
+        decrypted=True,
+    )
+    rep, _ = _push_row(monkeypatch, wall)
+    assert rep.fails == 1
+    assert "fy host restart" in capsys.readouterr().out
+
+
+def test_a_blind_tunnel_is_a_warning_naming_passthrough(monkeypatch, capsys):
+    # GitHub's own certificate: github.com is tunnelled (`[proxy] passthrough`), so the proxy
+    # can't see the push. A declared decision (`fy config widenings` says so), not a breach.
+    blind = verify._PushAnswer(status=401, body=b"", allowed=False, decrypted=False)
+    rep, _ = _push_row(monkeypatch, blind)
+    assert rep.fails == 0 and rep.warns == 1
+    out = capsys.readouterr().out
+    assert "passthrough" in out and "fy config widenings" in out
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError("timed out"), OSError("connection refused"), verify.ssl.SSLError("bad cert")],
+    ids=["timeout", "refused", "tls"],
+)
+def test_a_probe_that_got_no_answer_proves_nothing(monkeypatch, capsys, error):
+    rep, _ = _push_row(monkeypatch, error)
+    assert rep.fails == 1
+    assert "UNPROVEN" in capsys.readouterr().out
+
+
+def test_no_proxy_in_the_box_skips_the_row(monkeypatch, capsys):
+    rep, asked = _push_row(monkeypatch, _REFUSED_ANSWER, proxy=None)
+    assert asked == [] and rep.fails == rep.warns == 0
+    assert "skipped" in capsys.readouterr().out
+
+
+def test_the_push_refusal_row_runs_in_the_box(secure_engine, monkeypatch, tmp_path, capsys):
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.setenv("HTTPS_PROXY", _PROXY)
+    assert verify.verify() == 0
+    assert "git push over HTTPS refused by the foldyard proxy" in capsys.readouterr().out
+
+
+class _FakeConn:
+    made: ClassVar[list] = []
+
+    def __init__(self, host, port, *, timeout, context):
+        self.args = {"host": host, "port": port, "timeout": timeout, "context": context}
+        self.tunnel = None
+        self.sent = None
+        _FakeConn.made.append(self)
+        self.sock: Any = types.SimpleNamespace(
+            getpeercert=lambda: {
+                "issuer": ((("commonName", "mitmproxy"),), (("organizationName", "mitmproxy"),))
+            }
+        )
+
+    def set_tunnel(self, host, port):
+        self.tunnel = (host, port)
+
+    def request(self, method, path, headers):
+        self.sent = (method, path, headers)
+
+    def getresponse(self):
+        # A response that closes the connection: http.client drops the socket once it's read, so
+        # the certificate must already have been taken (found by the proxy e2e).
+        self.sock = None
+        return types.SimpleNamespace(
+            status=403,
+            read=lambda n: b"refused by the foldyard proxy - the box doesn't push",
+            getheader=lambda name, default=None: default,
+        )
+
+    def close(self):
+        pass
+
+
+def test_the_probe_sends_a_push_discovery_through_the_proxy(monkeypatch, tmp_path):
+    bundle = tmp_path / "bundle.pem"
+    loaded: list = []
+    monkeypatch.setenv("SSL_CERT_FILE", str(bundle))
+    monkeypatch.setattr(
+        verify.ssl, "create_default_context", lambda cafile=None: loaded.append(cafile) or "ctx"
+    )
+    _FakeConn.made = []
+    monkeypatch.setattr(verify.http.client, "HTTPSConnection", _FakeConn)
+    answer = verify._probe_push("192.168.5.2", 41000)
+    [conn] = _FakeConn.made
+    assert (conn.args["host"], conn.args["port"], conn.args["context"]) == (
+        "192.168.5.2",
+        41000,
+        "ctx",
+    )
+    assert loaded == [str(bundle)]  # the box's combined bundle: the proxy CA + system roots
+    assert conn.args["timeout"] == 12
+    assert conn.tunnel == ("github.com", 443)
+    method, path, _headers = conn.sent
+    assert method == "GET" and path.endswith("/info/refs?service=git-receive-pack")
+    assert answer == verify._PushAnswer(
+        status=403,
+        body=b"refused by the foldyard proxy - the box doesn't push",
+        allowed=False,
+        decrypted=True,
+    )
+
+
+# ── the dry-run push, when the proxy refused it as a push ────────────────────────────────────
+# The proxy answers git's first request (the discovery GET) with its 403 before origin is asked,
+# so git never offers a credential and the probe no longer says whether one would reach origin.
+# git is asked directly instead: `git credential fill` for origin's push URL.
+
+_PROXY_REFUSED_STDERR = (
+    "remote: refused by the foldyard proxy - the box doesn't push; push from your computer"
+    " (or turn on a mode that allows it)\n"
+    "fatal: unable to access 'https://github.com/acme/app.git/': The requested URL returned"
+    " error: 403\n"
+)
+
+
+def _proxy_refused(secure_engine, monkeypatch, tmp_path):
+    _enter_box(monkeypatch, tmp_path)
+    _, results = secure_engine
+    results["git_rc"] = 128
+    results["git_stderr"] = _PROXY_REFUSED_STDERR
+    return results
+
+
+def test_a_push_the_proxy_refused_asks_git_for_a_credential_and_finds_none(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    results = _proxy_refused(secure_engine, monkeypatch, tmp_path)
+    assert verify.verify() == 0
+    out = capsys.readouterr().out
+    assert "git push refused by the foldyard proxy, and git has no credential for origin" in out
+    assert results["url_cmd"][-3:] == ["get-url", "--push", "origin"]
+    assert results["cred_cmd"][-2:] == ["credential", "fill"]
+    assert results["cred_input"] == "url=https://github.com/acme/app.git\n\n"
+    assert results["cred_env"]["GIT_TERMINAL_PROMPT"] == "0"  # never prompts
+
+
+def test_a_credential_git_would_send_fails_even_though_the_proxy_refused(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    results = _proxy_refused(secure_engine, monkeypatch, tmp_path)
+    results["cred_rc"], results["cred_err"] = 0, ""
+    results["cred_out"] = "protocol=https\nhost=github.com\nusername=x\npassword=ghp_REALTOKEN\n"
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "git HOLDS a credential for origin" in out
+    assert "ghp_REALTOKEN" not in out  # never echoed
+
+
+def test_a_credential_lookup_that_hangs_leaves_it_unproven(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    results = _proxy_refused(secure_engine, monkeypatch, tmp_path)
+    results["cred_rc"] = None  # times out
+    assert verify.verify() == 1
+    assert "UNPROVEN" in capsys.readouterr().out
+
+
+def test_a_credential_lookup_failing_otherwise_leaves_it_unproven(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    results = _proxy_refused(secure_engine, monkeypatch, tmp_path)
+    results["cred_err"] = "fatal: bad config line 3 in file .git/config\n"
+    assert verify.verify() == 1
+    assert "UNPROVEN" in capsys.readouterr().out
+
+
+def test_no_push_url_leaves_it_unproven(secure_engine, monkeypatch, tmp_path, capsys):
+    results = _proxy_refused(secure_engine, monkeypatch, tmp_path)
+    results["push_url_rc"], results["push_url"] = 2, ""
+    assert verify.verify() == 1
+    assert "UNPROVEN" in capsys.readouterr().out

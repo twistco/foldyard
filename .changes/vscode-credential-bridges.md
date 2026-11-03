@@ -24,3 +24,14 @@ bump: patch
   reaper for the new one the next time `harden.sh` runs. `fy verify` checks the same places, and
   gains a row that fails when the box's git has a `credential.helper` calling back through Dev
   Containers.
+- **The egress proxy refuses git pushes over HTTPS, on any host.** A push's two requests
+  (`…/info/refs?service=git-receive-pack`, then `POST …/git-receive-pack`) get a `403` that git
+  shows as `remote: refused by the foldyard proxy - the box doesn't push …`; fetches are untouched.
+  "The box doesn't push" no longer depends on no credential ever reaching it — a token in a
+  `.env`, a pasted one, or a bridge like the ones above. The refusal lifts while a push-capable
+  mode is on (the emergency `gh-cli` switch) and returns when it turns off. The proxy can't see
+  inside a `passthrough` tunnel, so `fy config widenings` now names the git hosts (`github.com`,
+  `gitlab.com`, … — the `@vcs` bundle has them) where a push can't be refused. `fy verify` gains a
+  row that sends a push's first request through the proxy and expects the refusal, and, where the
+  proxy refuses its dry-run push, asks git for a credential for `origin` directly (`git credential
+  fill`) and fails if one is there.

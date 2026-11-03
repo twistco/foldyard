@@ -545,8 +545,8 @@ def refused_hosts(rows: list[dict]) -> list[str]:
         key = row.get("host")
         if not (row.get("blocked") or row.get("would_block")) or not isinstance(key, str):
             continue
-        if row.get("mismatch"):  # refused for its Host header: a grant would not let it through
-            continue
+        if row.get("mismatch") or row.get("push"):  # a Host-header claim, a git push: no grant
+            continue  # would let it through
         if not valid_host(key) or key.startswith("*.") or key in out or local_key(key):
             continue
         if _matches(key, granted) or key in refused or "*" in refused:

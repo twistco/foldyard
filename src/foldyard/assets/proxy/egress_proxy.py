@@ -52,14 +52,16 @@ after mitmproxy's own dial to that name was allowed.
 Config via env (read once at startup). foldyard's supervisor sets LIVE_FILE, which moves the
 rules, the wall switch and the passthrough list out of the env and makes them live:
   LIVE_FILE         a JSON file {"rules": [<rule>, ...], "default_deny": bool, "passthrough":
-                    [<pattern>, ...]} (plus "held" and "overlaps": where the proxy answers a
-                    request itself, and "origin": {"key_file", "record"} — the attributing
-                    forwarder's stamp, see _verify_origin), re-read when it changes (per hook +
-                    once a second) with no restart. When set, INJECT_*, DEFAULT_DENY and
-                    PASSTHROUGH_HOSTS are ignored.
+                    [<pattern>, ...], "allow_push": bool} (plus "held" and "overlaps": where the
+                    proxy answers a request itself, and "origin": {"key_file", "record"} — the
+                    attributing forwarder's stamp, see _verify_origin), re-read when it changes
+                    (per hook + once a second) with no restart. When set, INJECT_*, DEFAULT_DENY,
+                    PASSTHROUGH_HOSTS and ALLOW_PUSH are ignored. "allow_push": a push-capable
+                    mode is on, so a git push is forwarded rather than refused (see _is_git_push);
+                    only a JSON true lifts the refusal.
                     Unreadable/malformed ⇒ fail closed (no rules, the wall enforcing, nothing
-                    tunnelled). A change that narrows the policy closes the open connections it no
-                    longer allows (see Injector.refresh).
+                    tunnelled, pushes refused). A change that narrows the policy closes the open
+                    connections it no longer allows (see Injector.refresh).
   HOST_ENV_FILE     host.env: where a live rule's declared `env` names are resolved (this
                     process's env first — the operator's exports — then the file), re-read when it
                     changes.
@@ -123,10 +125,14 @@ Without LIVE_FILE:
                     → system trust (correct for api.github.com). A path pins a specific
                     cert (used by the e2e to trust its self-signed upstream). TLS is never
                     disabled.
+  ALLOW_PUSH        "1" → forward a git push instead of refusing it (the standalone spelling of
+                    LIVE_FILE's "allow_push"). Anything else → refused, on any host the proxy
+                    decrypts — a blind tunnel (passthrough) can't be seen into.
   PROXY_LOG_FILE    JSONL network log of every proxied response (ts, method, host,
                     path, status, injected, replayed; passthrough/blocked/mint_failed rows
-                    add a flag). Default ~/.foldyard/logs/egress.jsonl (foldyard's supervisor
-                    overrides this with the per-project ~/.foldyard/<project>/logs path) —
+                    add a flag; a refused git push is a blocked row with `push`). Default
+                    ~/.foldyard/logs/egress.jsonl (foldyard's supervisor overrides this with
+                    the per-project ~/.foldyard/<project>/logs path) —
                     OUTSIDE the repo on purpose (the shared mount must not carry an
                     egress log the box can read-write). "" disables. Rotated to dated
                     backups (<name>.<UTC-stamp>.jsonl) past PROXY_LOG_MAX_BYTES.
@@ -151,6 +157,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import parse_qsl, unquote
 
 # mitmproxy is provided at runtime by mitmdump (and stubbed in tests); a bare static-analysis env
 # without it shouldn't surface a missing-import error for this standalone, out-of-tree addon.
@@ -400,6 +407,37 @@ _MISMATCH_BODY = (
     b"refused by the foldyard proxy - the request's Host header names a different host than the"
     b" one it is sent to\n"
 )
+
+# The 403 body for a git push (`_is_git_push`) while no push-capable mode is on. text/plain, so git
+# prints it: its smart-HTTP client shows a text/plain error body as `remote: …` lines.
+_PUSH_REFUSED_BODY = (
+    b"refused by the foldyard proxy - the box doesn't push; push from your computer"
+    b" (or turn on a mode that allows it)\n"
+)
+# On the response to a push the proxy let through because a push-capable mode is on: how the box
+# (`fy verify`) tells "allowed by the mode" from "not refused because the proxy couldn't see it".
+_PUSH_HEADER = "x-foldyard-push"
+_PUSH_ALLOWED = "allowed by the active mode"
+_RECEIVE_PACK = "git-receive-pack"
+
+
+def _is_git_push(path: str) -> bool:
+    """Is this request (its origin-form path, query included) half of a git smart-HTTP push?
+
+    A push is ``GET <repo>/info/refs?service=git-receive-pack`` (discovery), then
+    ``POST <repo>/git-receive-pack``; a fetch is the same with ``git-upload-pack``. So the URL
+    alone tells them apart, whatever the host and whatever credential rides along: the path's
+    last segment IS ``git-receive-pack``, or a ``service`` parameter is exactly that. Compared
+    after percent-decoding (what the server acts on) and case-sensitively (as git sends it).
+    Split on ``?`` by hand: ``urlsplit`` reads a ``//x`` path as an authority."""
+    route, _, query = path.partition("?")
+    route = route.partition("#")[0]
+    if unquote(route).endswith("/" + _RECEIVE_PACK):
+        return True
+    return any(
+        name == "service" and value == _RECEIVE_PACK
+        for name, value in parse_qsl(query.partition("#")[0], keep_blank_values=True)
+    )
 
 
 def _norm_host(host: str | None) -> str | None:
@@ -1034,6 +1072,9 @@ class Injector:
         # switch is read once (toggling it restarts the daemon); the `allow` patterns live in
         # ALLOW_FILE, re-read per request (mtime-cached) so a host-side grant lands with no restart.
         self.default_deny = os.environ.get("DEFAULT_DENY", "") == "1"
+        # A git push is refused unless a push-capable mode is on (LIVE_FILE's `allow_push`;
+        # standalone, ALLOW_PUSH=1). Off by default, like a missing live file.
+        self.allow_push = os.environ.get("ALLOW_PUSH", "") == "1"
         allow_file = os.environ.get("ALLOW_FILE", "")
         self.allow_path = Path(allow_file) if allow_file else None
         self._allow_mtime: float = -1.0
@@ -1153,6 +1194,9 @@ class Injector:
             self._would_block_seen = {}
         self._observing_since = observing
         self.default_deny = data.get("default_deny", True) is not False
+        # Fail closed the other way round: only a JSON true lifts the push refusal, so an absent
+        # field, a malformed file or a missing one all refuse.
+        self.allow_push = data.get("allow_push") is True
         held = data.get("held")
         self.held = [h for h in held if _valid_held(h)] if isinstance(held, list) else []
         self.held_hosts = {h["host"] for h in self.held}
@@ -1176,8 +1220,10 @@ class Injector:
         if not first:
             enforce = "on" if self.default_deny else "off"
             hosts = ", ".join(sorted(r.host for r in rules if r.host)) or "none"
+            push = "allowed" if self.allow_push else "refused"
             ctx.log.info(
-                f"egress_proxy: settings reloaded — injecting {hosts}; allowlist enforce {enforce}"
+                f"egress_proxy: settings reloaded — injecting {hosts}; allowlist enforce {enforce};"
+                f" git push {push}"
             )
         if self._running:
             self._warm([r for r in fresh if r.active])
@@ -1564,14 +1610,17 @@ class Injector:
         request=None,
         *,
         mismatch: bool = False,
+        push: bool = False,
         client_id: str | None = None,
     ) -> None:
         """A row for a request the proxy REFUSED (:meth:`_blocked_entry`). No host → nothing."""
-        entry = self._blocked_entry(host, request, mismatch=mismatch)
+        entry = self._blocked_entry(host, request, mismatch=mismatch, push=push)
         if entry is not None:
             self._write_entry(entry, client_id)
 
-    def _blocked_entry(self, host: str | None, request=None, *, mismatch: bool = False):
+    def _blocked_entry(
+        self, host: str | None, request=None, *, mismatch: bool = False, push: bool = False
+    ):
         """The row for a refused request — no upstream is ever contacted, so there's no real
         status (we synthesise a 403). The Network Log panel keys off ``blocked`` to paint it red
         and offer an 'allow' action. With the refused ``request``, the row carries what was asked
@@ -1580,7 +1629,8 @@ class Injector:
         and, when it carried a live build secret, ``build``: what `fy box build`/`fy up` read back
         to offer the host (never the bare marker, or the box could put its own hosts in that
         offer). ``mismatch``: refused for naming another host in its Host header, not by the
-        allowlist — granting the host is not the fix. No host → None."""
+        allowlist — granting the host is not the fix. ``push``: refused for being a git push
+        (:func:`_is_git_push`) — nor is it then. No host → None."""
         if not host:
             return None
         entry = {
@@ -1595,6 +1645,8 @@ class Injector:
         }  # fmt: skip
         if mismatch:
             entry["mismatch"] = True
+        if push:
+            entry["push"] = True
         if request is not None:
             entry["method"] = str(request.method)
             if request.method != "CONNECT":
@@ -2085,8 +2137,18 @@ class Injector:
         """Decide, once the upstream's headers are in, whether to relay the body as it arrives
         (:func:`_relays_as_it_arrives`). mitmproxy reads ``response.stream`` right after this hook;
         a response the proxy answered itself (a refusal, a held or failed mint) never reaches it."""
+        self._mark_push_allowed(flow)
         if flow.response is not None and _relays_as_it_arrives(flow.response.status_code):
             flow.response.stream = True
+
+    @staticmethod
+    def _mark_push_allowed(flow: http.HTTPFlow) -> None:
+        """Say on the response that a push went past the refusal because a push-capable mode is on
+        (``_PUSH_HEADER``). Upstream answers get it in ``responseheaders`` — before a streamed body
+        relays the headers — and the proxy's own answers (the wall, a held dummy) in
+        ``response``."""
+        if flow.metadata.get("egress_proxy_push_allowed") and flow.response is not None:
+            flow.response.headers[_PUSH_HEADER] = _PUSH_ALLOWED
 
     async def requestheaders(self, flow: http.HTTPFlow) -> None:
         """Where a request is judged and its credential written: the headers are in, the body
@@ -2128,6 +2190,21 @@ class Injector:
             self._log_blocked(key, flow.request, mismatch=True, client_id=_client_id(flow))
             self._owe_nothing(flow)
             return
+        # A git push, on any host and whatever credential it carries: refused unless a
+        # push-capable mode is on — the box's "never push" posture shouldn't rest on no credential
+        # ever reaching it. Before everything below, the wall included: granting the host is not
+        # the fix, and nothing leaves either way. In `requestheaders`, so a push body never streams.
+        if _is_git_push(flow.request.path):
+            if not self.allow_push:
+                flow.response = http.Response.make(
+                    403, _PUSH_REFUSED_BODY, {"content-type": "text/plain; charset=utf-8"}
+                )
+                flow.metadata["egress_proxy_blocked"] = True
+                key = host if port == default else f"{host}:{port}"
+                self._log_blocked(key, flow.request, push=True, client_id=_client_id(flow))
+                self._owe_nothing(flow)
+                return
+            flow.metadata["egress_proxy_push_allowed"] = True
         # Two switches on, both claiming this host and path, so neither injects: answer with the
         # fix rather than send the dummy to draw a 401. Before the wall, like the held answer
         # below — nothing leaves — and before it too: the switches here are on, not at rest.
@@ -2259,6 +2336,7 @@ class Injector:
             and not flow.metadata.get("egress_proxy_retried")  # at most once — loop guard
         ):
             await self._reissue_401(flow, rule)
+        self._mark_push_allowed(flow)
         if flow.metadata.get("egress_proxy_liveness"):
             return  # the supervisor's probe, every tick: nothing went anywhere
         if flow.metadata.get("egress_proxy_blocked") or flow.metadata.get("egress_proxy_held"):

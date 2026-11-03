@@ -197,6 +197,20 @@ even that reaches no credential. On Linux, `[machine] host_firewall` adds the sa
 computer around the VM process, which survives even that. Without the firewall, QUIC (UDP 443)
 can bypass the proxy. Details are in [networking.md](./networking.md).
 
+**The proxy refuses git pushes over HTTPS.** "The box doesn't push" rests first on there being no
+credential in it, but a token can still turn up (one in a `.env`, a pasted token, a credential
+bridge nobody has found yet). So the proxy also refuses a push by its URL alone, whatever
+credential rides along: git's smart-HTTP push is a `GET …/info/refs?service=git-receive-pack`
+then a `POST …/git-receive-pack`, and the proxy answers either with a `403` that git shows as
+`remote: refused by the foldyard proxy - the box doesn't push …`. It does this on any host, not
+just GitHub, and logs a blocked row (`fy allow` doesn't offer it: no grant lets a push through).
+Fetches are untouched. Two limits: it is git's protocol only — a write through an API
+(`api.github.com`'s contents or refs endpoints) is the injected credential's own scope, as above —
+and the proxy can't see inside a [`passthrough`](./networking.md) tunnel, so a push to a host
+listed there isn't refused (`fy config widenings` names the well-known git hosts that are). The
+refusal lifts while a mode that can push is on — today the emergency `gh-cli` switch ("push
+possible") — and comes back when it turns off.
+
 ## `fy verify`: prove it, don't trust it
 
 `fy verify` is the isolation self-test: run it any time; it exits non-zero on any failure, so CI
@@ -218,8 +232,14 @@ the box only the VM-boundary checks run. What it checks:
   `~/.ssh` private keys,
   no `~/.netrc`, and a dry-run push to `origin` (`git push --dry-run`, which sends nothing) is
   **refused** for lack of a credential — the push handshake needs write access, so this holds for a
-  public origin too. These
+  public origin too. Where the proxy refuses that push itself (an HTTPS origin it decrypts), git
+  never gets as far as offering a credential, so verify asks git directly instead
+  (`git credential fill` for origin's push URL) and fails if it finds one. These
   are built into foldyard's core, so a missing or broken plugin can't weaken them.
+- **Push refusal** (inside a box that routes through the proxy): a push's first request
+  (`GET https://github.com/…/info/refs?service=git-receive-pack`) sent through the box's proxy must
+  come back as the proxy's own `403`. While a push-capable mode is on the row says so instead of
+  passing or failing; a `github.com` tunnelled blind by `passthrough` is a `WARN`.
 - **Dummy checks** (from the credential plugins): each `[[inject]]` row's `box_env` dummies must
   still hold their dummy value, in *any* mode, and the variables a known client reads a token
   from (`GH_TOKEN`, `GITHUB_TOKEN`) must be unset or a declared dummy in every box; the real
@@ -287,10 +307,28 @@ Each row names *what* failed. What it usually means, and what to do:
   to `origin` reached it from the box. `fy state` shows what the mode grants and
   `fy config widenings` where credentials are delivered. A network timeout does *not* pass this
   row; an unreachable remote proves nothing.
+- **`git push refused by the foldyard proxy, but git HOLDS a credential for origin`** — the proxy
+  stopped the push, but git has a credential it would have sent: a credential helper's, a stored
+  one, one written into the remote's URL (`git remote get-url --push origin`), or an askpass.
+  Remove it — the proxy's refusal is a backstop, not the boundary. **`… a credential for origin is
+  UNPROVEN`** means `git credential fill` timed out or failed for another reason (the row says
+  which), or origin's push URL couldn't be read.
 - **`git remote UNREACHABLE for non-credential reasons`** — the push never got as far as asking
   for a credential: no egress, or a blocked host. Under the VM firewall git goes through the
   proxy like everything else in the box, so a refused `github.com` is the allowlist's
   (`fy allow add github.com`).
+- **Push refusal rows:**
+  - `a git push through the proxy was NOT refused` — the proxy decrypted the request and let it
+    reach GitHub. Check `fy mode` on your computer (a push-capable switch reads as "allowed by the
+    active mode", not this), then `fy host restart`.
+  - `a git push was refused, but not as a push` — the running proxy predates the push refusal:
+    `fy host restart` on your computer.
+  - `github.com is tunnelled blind` (`WARN`) — it is in `[proxy] passthrough` (the `@vcs` bundle
+    has it), so the proxy can't see a push to it. A decision, not a breach; take it out of
+    `passthrough` if you want pushes refused there too.
+  - `git push refusal by the proxy UNPROVEN` — no answer came back through the proxy (not
+    running, a timeout, or a TLS failure: the box doesn't trust the proxy's CA). `fy host` on your
+    computer shows whether the proxy runs.
 - **`… possible real credential in the box`** (e.g. `GH_TOKEN` is more than its dummy) — the
   box's environment carries a real credential. `fy mode` shows the mode, `fy state` desired against
   observed; a box created under older config is recreated with `fy box down` and `fy box up`.

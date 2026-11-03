@@ -3,7 +3,8 @@
 Faithful port of the `verify` recipe. Proves the VM boundary over the engine socket
 (rootless, the `--privileged --pid=host` escape refused, the VM's own mount table — PID 1's —
 free of host home/paths) and — INSIDE the box only — the credential-less dev-box posture (no
-SSH key material, the injectors' box dummies, git push refused). Each check prints PASS/FAIL;
+SSH key material, the injectors' box dummies, git push refused — by origin for want of a
+credential, and by the egress proxy for being a push). Each check prints PASS/FAIL;
 returns non-zero on any FAIL (CI-usable). One ADVISORY section rides along at the end —
 unhealthy containers in the stack — printed as WARN so it can never move the isolation verdict.
 
@@ -19,12 +20,15 @@ plugin being absent or broken.
 from __future__ import annotations
 
 import contextlib
+import http.client
 import os
 import re
 import secrets
 import socket
+import ssl
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
 
@@ -167,6 +171,30 @@ _GIT_BRIDGE_SETTINGS = (
     "git.useIntegratedAskPass",
     "github.gitAuthentication",
 )
+
+
+# The egress proxy refuses a git push by its URL (egress_proxy._is_git_push), on any host it
+# decrypts, unless a push-capable mode is on. The probe sends what git sends first — the push's
+# discovery request — through the box's proxy to a repo that needn't exist: refused, nothing leaves.
+_PUSH_PROBE_HOST = "github.com"
+_PUSH_PROBE_PORT = 443
+_PUSH_PROBE_PATH = "/foldyard/fy-verify-push-probe.git/info/refs?service=git-receive-pack"
+# The start of the proxy's refusal body (egress_proxy._PUSH_REFUSED_BODY), which git prints as a
+# `remote:` line, and the header the proxy sets on a push a mode let through
+# (egress_proxy._PUSH_HEADER). A test pins both to the addon's.
+_PUSH_REFUSED = "refused by the foldyard proxy - the box doesn't push"
+_PUSH_ALLOWED_HEADER = "x-foldyard-push"
+# The issuer of every certificate the proxy makes: present ⇒ the proxy decrypted the connection
+# (and so saw the request); absent ⇒ a blind tunnel (`[proxy] passthrough`) with the real one.
+_PROXY_ISSUER = "mitmproxy"
+
+
+@dataclass(frozen=True)
+class _PushAnswer:
+    status: int
+    body: bytes  # its first bytes
+    allowed: bool  # the proxy's word that a push-capable mode let it through
+    decrypted: bool  # the proxy's certificate: it saw the request
 
 
 def _workspace_rearms_git_bridge(settings: Path) -> list[str]:
@@ -610,6 +638,10 @@ def _box_posture(rep: _Report, env: dict) -> None:
         reachable, why = False, "timed out"
     if reachable:
         rep.bad("a dry-run push to origin was ACCEPTED — the box can push (credential leaked?)")
+    elif _PUSH_REFUSED in why:
+        # Refused by the egress proxy before origin was asked, so git never offered a credential:
+        # whether one would reach origin is asked of git directly instead.
+        _origin_credential(rep, checkout, git_env)
     elif _GIT_AUTH_DENIED.search(why):
         rep.ok("git push refused (no credential reaches origin)")
     elif _GIT_NO_SSH.search(why):
@@ -627,6 +659,135 @@ def _box_posture(rep: _Report, env: dict) -> None:
         rep.bad(
             "git remote UNREACHABLE for non-credential reasons — push refusal UNPROVEN "
             f"({why.strip().splitlines()[-1] if why.strip() else 'no error output'})"
+        )
+
+
+def _origin_credential(rep: _Report, checkout: str, git_env: dict) -> None:
+    """The proxy refused the dry-run push for being a push — its first request, before origin
+    could answer 401 and git could look for a credential to send — so the push probe no longer
+    says whether one would have reached origin. Ask git what it would have sent: ``git credential
+    fill`` for origin's push URL, with the probe's env (prompts off, any askpass still consulted).
+    That finds a helper's or stored credential, one embedded in the URL, and an askpass bridge.
+    A credential found FAILS: the proxy's refusal is defence in depth, not a reason for git to
+    hold one. Never printed."""
+    try:
+        got = subprocess.run(
+            ["git", "-C", checkout, "remote", "get-url", "--push", "origin"],
+            env=git_env,
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+        url = (got.stdout or "").strip() if got.returncode == 0 else ""
+    except subprocess.TimeoutExpired:
+        url = ""
+    if not url:
+        rep.bad(
+            "git push refused by the foldyard proxy — but origin's push URL couldn't be read, so "
+            "whether git holds a credential for it is UNPROVEN"
+        )
+        return
+    try:
+        got = subprocess.run(
+            ["git", "-C", checkout, "credential", "fill"],
+            input=f"url={url}\n\n",
+            env=git_env,
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+    except subprocess.TimeoutExpired:
+        rep.bad(
+            "git push refused by the foldyard proxy — `git credential fill` for origin timed out "
+            "(a helper that hangs?), so a credential for origin is UNPROVEN"
+        )
+        return
+    if got.returncode == 0 and re.search(r"^password=.", got.stdout or "", re.M):
+        rep.bad(
+            "git push refused by the foldyard proxy, but git HOLDS a credential for origin "
+            "(`git credential fill` returned one: a helper, a stored credential or one in the "
+            "remote's URL) — remove it; the refusal is a backstop, not the boundary"
+        )
+    elif _GIT_AUTH_DENIED.search(got.stderr or ""):
+        rep.ok("git push refused by the foldyard proxy, and git has no credential for origin")
+    else:
+        why = (got.stderr or "").strip().splitlines()
+        rep.bad(
+            "git push refused by the foldyard proxy — `git credential fill` failed for another "
+            f"reason, so a credential for origin is UNPROVEN ({why[-1] if why else 'no output'})"
+        )
+
+
+def _probe_push(proxy_host: str, proxy_port: int) -> _PushAnswer:
+    """Send a git push's discovery request to ``_PUSH_PROBE_HOST`` through the box's proxy, as
+    git would: CONNECT, then TLS trusting the box's bundle (``SSL_CERT_FILE``: the proxy CA plus
+    the system roots, so a passthrough host's real certificate verifies too). Raises on no
+    answer."""
+    context = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE") or None)
+    conn = http.client.HTTPSConnection(proxy_host, proxy_port, timeout=12, context=context)
+    try:
+        conn.set_tunnel(_PUSH_PROBE_HOST, _PUSH_PROBE_PORT)
+        conn.request(
+            "GET", _PUSH_PROBE_PATH, headers={"User-Agent": "git/fy-verify", "Accept": "*/*"}
+        )
+        # The certificate now, while the socket is open: http.client drops it once a response
+        # that closes the connection has been read (an upstream's, typically).
+        cert = conn.sock.getpeercert() if conn.sock is not None else None
+        issuer = {v for rdn in (cert or {}).get("issuer", ()) for _k, v in rdn}
+        resp = conn.getresponse()
+        body = resp.read(512)
+        return _PushAnswer(
+            status=resp.status,
+            body=body,
+            allowed=resp.getheader(_PUSH_ALLOWED_HEADER) is not None,
+            decrypted=_PROXY_ISSUER in issuer,
+        )
+    finally:
+        conn.close()
+
+
+def _push_refusal(rep: _Report) -> None:
+    """The egress proxy refuses a git push over HTTPS — the box's "never push" posture without
+    relying on no credential ever reaching it. An ACTIVE probe through the box's own proxy: the
+    proxy's refusal passes; a push-capable mode letting it through is reported, not failed; a
+    blind tunnel (`[proxy] passthrough`) WARNs, since the proxy can't see into it by design;
+    GitHub answering a request the proxy decrypted FAILS, and so does no answer — unproven is not
+    a pass."""
+    print("▶ git push over HTTPS (the egress proxy refuses it, whatever credential the box holds)")
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
+    m = re.search(r"//(?:[^@/]*@)?([^:/]+):(\d+)", proxy)
+    if not m:
+        print("  no egress proxy in this box (HTTPS_PROXY unset) — skipped")
+        return
+    try:
+        answer = _probe_push(m.group(1), int(m.group(2)))
+    except (OSError, http.client.HTTPException) as e:  # ssl.SSLError and timeouts are OSErrors
+        rep.bad(
+            f"git push refusal by the proxy UNPROVEN — no answer through {m.group(1)}:"
+            f"{m.group(2)} ({type(e).__name__}: {e})"
+        )
+        return
+    if answer.status == 403 and answer.body.decode("utf-8", "replace").startswith(_PUSH_REFUSED):
+        rep.ok(f"git push over HTTPS refused by the foldyard proxy ({_PUSH_PROBE_HOST})")
+    elif answer.allowed:
+        print(
+            "  ⚠ git push over HTTPS allowed by the active mode — a push-capable switch is on "
+            "(`fy mode` on your computer); refused again once it is off"
+        )
+    elif not answer.decrypted:
+        rep.warn(
+            f"{_PUSH_PROBE_HOST} is tunnelled blind ([proxy] passthrough), so the proxy can't see "
+            "a push to it, nor refuse one — `fy config widenings`"
+        )
+    elif answer.status == 403:
+        rep.bad(
+            "a git push was refused, but not as a push — the proxy predates the push refusal "
+            "(`fy host restart` on your computer)"
+        )
+    else:
+        rep.bad(
+            f"a git push through the proxy was NOT refused — {_PUSH_PROBE_HOST} answered HTTP "
+            f"{answer.status}"
         )
 
 
@@ -844,6 +1005,7 @@ def verify() -> int:
 
     if config.in_box():
         _box_posture(rep, ctx.env)
+        _push_refusal(rep)
         if config.machine_backend() == "lima" and config.machine_wall():
             _wall_posture(rep)
     else:

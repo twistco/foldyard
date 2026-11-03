@@ -43,6 +43,7 @@ class _Host:
     injected: int = 0
     blocked: int = 0
     refused: int = 0  # the blocked rows the WALL refused — a grant's to answer, unlike a mismatch
+    # or a git push (both refused whatever the allowlist says)
     would_block: int = 0
     held: int = 0
     errors: int = 0  # 4xx/5xx the proxy didn't answer itself (a refusal or a held dummy is not one)
@@ -59,7 +60,7 @@ class _Host:
         self.held += bool(e.get("held"))
         if e.get("blocked"):
             self.blocked += 1
-            self.refused += not e.get("mismatch")
+            self.refused += not _not_the_walls(e)
             self.refusals.append(e)
         elif not e.get("held") and _status(e) >= 400:
             self.errors += 1
@@ -70,9 +71,15 @@ class _Host:
             seen = self.origins.setdefault(key, [0, "", 0])
             seen[0] += 1
             seen[1] = max(seen[1], str(e.get("ts", "")))
-            seen[2] += bool(e.get("blocked") and not e.get("mismatch"))
+            seen[2] += bool(e.get("blocked") and not _not_the_walls(e))
             if len(self.origins) > KEEP_ORIGINS:  # the box decides how many it makes up
                 del self.origins[min(self.origins, key=lambda k: self.origins[k][1])]
+
+
+def _not_the_walls(e: dict) -> bool:
+    """A blocked row the proxy refuses whatever the allowlist says — a Host header naming another
+    host, or a git push — so no grant answers it."""
+    return bool(e.get("mismatch") or e.get("push"))
 
 
 def _status(e: dict) -> int:

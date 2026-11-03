@@ -1990,7 +1990,13 @@ async def test_a_refused_cleartext_build_request_is_attributed_too(building):
 
 
 def _write_live(
-    path: Path, rules=(), default_deny=False, passthrough=(), held=(), overlaps=()
+    path: Path,
+    rules=(),
+    default_deny=False,
+    passthrough=(),
+    held=(),
+    overlaps=(),
+    allow_push=None,
 ) -> None:
     """Write the live file the way the supervisor does: whole, then renamed into place."""
     tmp = path.with_suffix(".tmp")
@@ -1999,6 +2005,8 @@ def _write_live(
         data["held"] = list(held)
     if overlaps:
         data["overlaps"] = list(overlaps)
+    if allow_push is not None:
+        data["allow_push"] = allow_push
     tmp.write_text(json.dumps(data))
     tmp.replace(path)
 

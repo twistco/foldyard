@@ -76,6 +76,41 @@ def test_literal_hosts_are_named_because_they_are_the_repo_controlled_ones(check
     assert "Declared literally here: exfil.example, *.corp.example" in rendered(cfg)
 
 
+def test_a_git_host_tunnelled_blind_says_its_pushes_cannot_be_refused(checkout):
+    # The proxy refuses a git push by its URL, which it can't see inside a blind tunnel. `@vcs`
+    # tunnels github.com, gitlab.com and bitbucket.org: name them, so the gap is a known decision.
+    cfg = checkout(BASE + 'passthrough = ["@vcs"]\n')
+    exp = collect(cfg)
+    assert exp.blind_git_hosts == ["github.com", "gist.github.com", "gitlab.com", "bitbucket.org"]
+    body = rendered(cfg)
+    assert (
+        "⚠ git pushes to github.com, gist.github.com, gitlab.com, bitbucket.org can't be refused"
+        in body
+    )
+    # A posture choice the report names, not a misconfiguration: no doctor WARN for it.
+    assert exp.concerns == []
+
+
+def test_a_wildcard_covers_a_git_host_as_the_proxy_matches_it(checkout):
+    # `*.github.com` is subdomains only (the proxy's semantics): gist, not github.com itself.
+    assert collect(checkout(BASE + 'passthrough = ["*.github.com"]\n')).blind_git_hosts == [
+        "gist.github.com"
+    ]
+
+
+def test_every_tunnelled_host_says_a_push_through_it_is_not_refused(checkout):
+    # A self-hosted git server is a literal like any other: the general line covers it.
+    cfg = checkout(BASE + 'passthrough = ["git.corp.example"]\n')
+    assert collect(cfg).blind_git_hosts == []
+    body = rendered(cfg)
+    assert "Nor is a git push through one refused" in body
+    assert "⚠ git pushes" not in body
+
+
+def test_nothing_tunnelled_says_nothing_about_pushes(checkout):
+    assert "git push" not in rendered(checkout(BASE + "passthrough = []\n"))
+
+
 def test_an_unknown_bundle_ref_is_a_concern_because_it_silently_expands_to_nothing(checkout):
     cfg = checkout(BASE + 'passthrough = ["@pyton"]\n')
     exp = collect(cfg)

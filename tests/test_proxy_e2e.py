@@ -530,3 +530,68 @@ def test_two_credentials_on_one_host_are_routed_by_the_dummy_each_request_carrie
         rows = _log_entries(proxy.log)
     assert sum(bool(r.get("unnamed")) for r in rows) == 2
     assert sum(bool(r.get("injected")) for r in rows) == 2
+
+
+# ── a git push is refused on the wire ────────────────────────────────────────────────────────
+
+
+def _git(tmp_path: Path, proxy: _Proxy, *args: str) -> subprocess.CompletedProcess:
+    """Real git, through the proxy, trusting its CA, with none of the operator's config."""
+    home = tmp_path / "git-home"
+    home.mkdir(exist_ok=True)
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(home),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    via = ["-c", f"http.proxy=http://{HOST}:{proxy.pport}", "-c", f"http.sslCAInfo={proxy.ca}"]
+    return subprocess.run(
+        ["git", *via, *args], env=env, capture_output=True, text=True, timeout=60, cwd=tmp_path
+    )
+
+
+def test_a_git_push_is_refused_and_git_shows_why(proxy, tmp_path):
+    repo = f"https://{HOST}:{proxy.uport}/acme/app.git"
+    _git(tmp_path, proxy, "init", "-q", "work")
+    ident = ["-c", "user.name=fy", "-c", "user.email=fy@example.invalid"]
+    _git(tmp_path, proxy, *ident, "-C", "work", "commit", "-q", "--allow-empty", "-m", "x")
+    pushed = _git(tmp_path, proxy, "-C", "work", "push", repo, "HEAD:refs/heads/x")
+    assert pushed.returncode != 0
+    # git prints a text/plain error body as `remote:` lines: the operator reads the reason.
+    assert "remote: refused by the foldyard proxy - the box doesn't push" in pushed.stderr, (
+        pushed.stderr
+    )
+    assert "403" in pushed.stderr
+    rows = [e for e in _log_entries(proxy.log) if e.get("push")]
+    assert rows and rows[0]["blocked"] is True
+    assert rows[0]["path"] == "/acme/app.git/info/refs?service=git-receive-pack"
+
+    # A fetch's discovery is forwarded (the echo upstream is no git server, so git fails — but
+    # not on the proxy's refusal).
+    fetched = _git(tmp_path, proxy, "ls-remote", repo)
+    assert "refused by the foldyard proxy" not in fetched.stderr
+
+
+def test_fy_verify_reads_the_refusal_and_the_proxy_certificate(proxy, monkeypatch):
+    from foldyard import verify
+
+    monkeypatch.setattr(verify, "_PUSH_PROBE_HOST", HOST)
+    monkeypatch.setattr(verify, "_PUSH_PROBE_PORT", proxy.uport)
+    monkeypatch.setenv("SSL_CERT_FILE", str(proxy.ca))
+    answer = verify._probe_push(HOST, proxy.pport)
+    assert answer.status == 403 and answer.decrypted is True and answer.allowed is False
+    assert answer.body.decode().startswith(verify._PUSH_REFUSED)
+
+
+def test_with_allow_push_the_push_goes_through_and_says_so(tmp_path, monkeypatch):
+    from foldyard import verify
+
+    with _running_proxy(tmp_path, _MINTER, env={"ALLOW_PUSH": "1"}) as proxy:
+        monkeypatch.setattr(verify, "_PUSH_PROBE_HOST", HOST)
+        monkeypatch.setattr(verify, "_PUSH_PROBE_PORT", proxy.uport)
+        monkeypatch.setenv("SSL_CERT_FILE", str(proxy.ca))
+        answer = verify._probe_push(HOST, proxy.pport)
+    # The echo upstream answered (200), and the proxy marked it allowed by the mode.
+    assert answer.status == 200 and answer.allowed is True and answer.decrypted is True

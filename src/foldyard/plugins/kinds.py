@@ -79,6 +79,9 @@ class Kind:
     # even where no `box_env` dummy names them: a real token there is exactly the leak to catch.
     credential_env: tuple[str, ...] = ()
     default_label = ""
+    # The token can push (see ``InjectRule.grants_push``): while its switch injects, the proxy lets
+    # git pushes through. A property of the protocol, so it lives here and no row can claim it.
+    grants_push = False
 
     def allowed(self) -> tuple[str, ...]:
         return (*GENERIC_FIELDS, *self.fields)
@@ -333,6 +336,7 @@ class GhCliKind(_GithubKind):
 
     name = "gh-cli"
     emergency_only = True
+    grants_push = True
     default_label = "EMERGENCY: your own gh token injected (push possible)"
 
     def source(self, var: str) -> str:
@@ -346,6 +350,7 @@ class GhCliKind(_GithubKind):
             replay_on_401=bool(spec.get("replay_on_401", self.replay_on_401)),
             env=(),  # `gh` holds its own credential; nothing from host.env
             label=self.label(spec),
+            grants_push=self.grants_push,
         )
 
     def doctor_checks(
