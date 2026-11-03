@@ -535,7 +535,9 @@ def _write_local_terminal_cwd(
     # A local terminal is your own shell on your computer: undo the launch's empty git config
     # (:data:`_GIT_CONFIG_LAUNCH_ENV`) there. `null` is VS Code's "unset this variable". VS Code
     # applies only the key for the host's platform, so a Linux host needs it in `.linux` too (the
-    # zsh shims above stay macOS-only).
+    # zsh shims above stay macOS-only). Unlike `.osx`, `.linux` is NOT local-only: VS Code picks the
+    # key by the OS the terminal runs on, so the attached window's BOX terminals read it too. Put
+    # only unsets there that are harmless in the box — never a host path or socket.
     terminal_env.update(dict.fromkeys(_GIT_CONFIG_LAUNCH_ENV))
     settings[_TERMINAL_ENV_OSX] = terminal_env
     settings[_TERMINAL_ENV_LINUX] = {
