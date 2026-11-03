@@ -648,9 +648,15 @@ def _host_loopback(rep: _Report, engine: str, env: dict, probe: str) -> None:
         script = (
             f"if wget -q -T 10 -O /dev/null {LIVENESS_URL}; "
             "then echo control=ok; else echo control=failed; fi; "
-            # Unset, not wget's -Y: only busybox has it, and a usage error would try nothing.
-            "(unset http_proxy HTTP_PROXY; "
-            f"wget -q -T 5 -O /dev/null http://{gateway}:{listener.port}/); "
+            # The direct leg must skip every proxy: one would refuse the gateway as a local
+            # address, which reads as the wall refusing it. A wgetrc can name one as well as the
+            # env, so each wget gets its own switch, and one we don't know is reported.
+            'case "$(wget --help 2>&1)" in '
+            "*BusyBox*) direct='-Y off' ;; "
+            "*'GNU Wget 1.'*) direct='--no-config --no-proxy' ;; "
+            "*) direct=; echo direct=unknown ;; esac; "
+            '[ -z "$direct" ] || (unset http_proxy HTTP_PROXY; '
+            f"wget -q -T 5 -O /dev/null $direct http://{gateway}:{listener.port}/); "
             f"wget -q -T 10 -O /dev/null http://127.0.0.1:{listener.port}/; true"
         )
         out = _run(
@@ -674,6 +680,12 @@ def _host_loopback(rep: _Report, engine: str, env: dict, probe: str) -> None:
             "the probe couldn't reach the proxy through the gateway either, so a refused "
             "connection proves nothing. Your computer's loopback UNPROVEN (is the host "
             "supervisor running? `fy host`)"
+        )
+    elif "direct=unknown" in out.stdout:
+        rep.bad(
+            f"the probe image's wget ({probe}) is neither busybox's nor GNU Wget 1.x, so its "
+            "direct attempt may have gone through a proxy. Your computer's loopback UNPROVEN (set "
+            "VERIFY_IMG to an alpine or busybox image)"
         )
     else:
         rep.ok("a service on your computer's loopback is out of reach (directly and by the proxy)")

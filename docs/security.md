@@ -244,6 +244,11 @@ Each row names *what* failed. What it usually means, and what to do:
   reach the VM: with the firewall on, the proxy must be up (`fy host restart`, or `fy up`), or
   pre-pull the image, or point `VERIFY_IMG` at one already in the VM. Not an isolation failure —
   an unproven result.
+- **`the probe image's wget … is neither busybox's nor GNU Wget 1.x`** — the loopback row's
+  direct attempt must skip every proxy, which is known only for those two (an environment
+  variable or a wgetrc can name one; the proxy would refuse the gateway and read as the wall
+  refusing it). `VERIFY_IMG` points at an image with another wget, or none: use an alpine or
+  busybox one. An unproven result, not an isolation failure.
 - **`engine is NOT reported rootless`** — the VM was created rootful, or verify reached a socket
   that isn't foldyard's. Check which socket the section header names, then `fy doctor`; rebuild a
   rootful VM with `fy machine recreate`.

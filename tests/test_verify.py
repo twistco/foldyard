@@ -748,10 +748,12 @@ def test_wall_posture_flags_port_53_exfil_hole(monkeypatch, capsys):
 # ── your computer's loopback (from your computer, with the VM firewall) ─────────────────────
 
 
-def _loopback_probe(monkeypatch, *, control: bool = True, reaches: bool = False) -> list:
-    """Stand in for the probe container: answer the liveness control (or not), and — when the
-    path is open — connect to the listener the check opened, as a container reaching it would.
-    Returns the commands run."""
+def _loopback_probe(
+    monkeypatch, *, control: bool = True, reaches: bool = False, direct_unknown: bool = False
+) -> list:
+    """Stand in for the probe container: answer the liveness control (or not), say its wget is
+    one the direct leg can't trust (or not), and — when the path is open — connect to the listener
+    the check opened, as a container reaching it would. Returns the commands run."""
     import re
     import socket
     import types
@@ -767,7 +769,9 @@ def _loopback_probe(monkeypatch, *, control: bool = True, reaches: bool = False)
             found = re.search(r"127\.0\.0\.1:(\d+)/", script)
             assert found is not None
             socket.create_connection(("127.0.0.1", int(found.group(1))), timeout=2).close()
-        out = "control=ok\n" if control else "control=failed\n"
+        out = ("control=ok\n" if control else "control=failed\n") + (
+            "direct=unknown\n" if direct_unknown else ""
+        )
         return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
 
     monkeypatch.setattr(verify, "_run", run)
@@ -783,10 +787,24 @@ def test_host_loopback_out_of_reach_passes(monkeypatch, capsys):
     # Both paths are tried from one probe: direct at the gateway, and through the proxy (whose
     # URL is set explicitly, with NO_PROXY emptied so loopback isn't kept local in the container).
     assert "http_proxy=http://192.168.5.2:41800" in cmd and "no_proxy=" in cmd
-    # The direct leg drops the proxy by unsetting it, not by a flag only busybox's wget has (one
-    # that rejected it would try nothing there, and the row would pass on the proxy leg alone).
-    assert "(unset http_proxy HTTP_PROXY; wget -q -T 5 -O /dev/null http://192.168.5.2:" in cmd[-1]
-    assert "-Y" not in cmd[-1] and "http://127.0.0.1:" in cmd[-1]
+    # The direct leg must not use the proxy, which would refuse the gateway as a local address and
+    # read as the wall's refusal. The env is unset AND each wget's own switch is used — busybox's
+    # `-Y off`, GNU Wget 1.x's `--no-config --no-proxy` (a wgetrc can set a proxy too). Any other
+    # wget says so, and the row can't pass (below).
+    script = cmd[-1]
+    assert "unset http_proxy HTTP_PROXY" in script and "http://192.168.5.2:" in script
+    assert "*BusyBox*) direct='-Y off'" in script
+    assert "*'GNU Wget 1.'*) direct='--no-config --no-proxy'" in script
+    assert "echo direct=unknown" in script and "http://127.0.0.1:" in script
+
+
+def test_host_loopback_with_an_unknown_wget_proves_nothing(monkeypatch, capsys):
+    # A wget the row can't tell to skip every proxy: its direct leg might have gone through one.
+    _loopback_probe(monkeypatch, direct_unknown=True)
+    rep = verify._Report()
+    verify._host_loopback(rep, "podman", {}, "alpine")
+    out = capsys.readouterr().out
+    assert rep.fails == 1 and "UNPROVEN" in out and "wget" in out
 
 
 def test_host_loopback_reached_fails(monkeypatch, capsys):
