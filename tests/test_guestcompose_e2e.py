@@ -8,9 +8,10 @@ VM and checks what the scope doc's phase 0 asks:
 - **what one call costs** — the ssh round trip plus the payload, measured, printed, and written to
   the run's step summary in CI, where the hosts differ (vz, qemu/9p, WSL2);
 - the guest's config hash is the one the host's child computes (``fy state``'s verdict unchanged);
-- **a compose file can't read your computer from there**: an ``env_file:`` naming a file that exists
-  only on your computer is read by the host's client (the red-first control: today's channel, the
-  one the path guard clamps) and not by the guest's;
+- **a compose file can't read your computer from there**: an ``env_file:`` (read at create) and an
+  ``include:`` (read at render) naming files that exist only on your computer are read by the
+  host's client (the red-first controls: today's channel, the one the path guard clamps) and not
+  by the guest's;
 - a build with ``additional_contexts`` works through the guest's own podman — a client of the
   server's own version (a podman-remote 5.4 client against a 5.8 server refused the flag);
 - **the premise**: whatever the VM user can read among the guest's sensitive paths, a rootless
@@ -23,7 +24,6 @@ leaves the VM running and un-walled.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import statistics
@@ -36,8 +36,10 @@ import pytest
 from e2e_host import (
     LIMA_SOCK,
     VM,
+    engine,
     ensure_vm,
     example_copy,
+    export_vm_socket,
     host_tier,
     lima_list,
     lima_shell,
@@ -62,6 +64,7 @@ def shared(tmp_path_factory):
     """A writable VM mount at the same path on both sides, and a fresh scratch dir in it."""
     if "Running" not in lima_status():
         ensure_vm(example_copy(tmp_path_factory.mktemp("guestcompose")))
+    export_vm_socket()  # the tests' own engine calls: ensure_vm only does this when it ran
     mounts = lima_list(VM)[0].get("config", {}).get("mounts") or []
     roots = [
         Path(m["location"]).expanduser()
@@ -176,33 +179,76 @@ def test_the_guests_config_hash_is_the_hosts(shared, bound, monkeypatch):
     assert changed and changed["web"] != guest["web"]
 
 
-def test_an_env_file_on_your_computer_is_read_here_and_not_in_the_vm(
-    shared, bound, tmp_path_factory, monkeypatch
-):
-    from foldyard import guestcompose, stack
+SECRET = "only-on-your-computer"
 
-    scratch, mounts = shared
-    secret_dir = tmp_path_factory.mktemp("host-only")
-    assert not any(secret_dir.resolve().is_relative_to(m.resolve()) for m in mounts), (
+
+@pytest.fixture
+def host_only(shared, tmp_path_factory):
+    """A directory on your computer that the VM can't see, holding a secret."""
+    _, mounts = shared
+    d = tmp_path_factory.mktemp("host-only")
+    assert not any(d.resolve().is_relative_to(m.resolve()) for m in mounts), (
         "the host-only dir is inside a VM mount; the test needs one the VM can't see"
     )
-    secret = secret_dir / "secret.env"
-    secret.write_text("FY_HOST_ONLY_SECRET=only-on-your-computer\n")
+    return d
+
+
+def _host_client(ctx, args: list[str]) -> subprocess.CompletedProcess:
+    """The compose client on your computer, asked directly: `fy up` would refuse these files with
+    the path guard, and this is what the guard stands in front of."""
+    from foldyard import stack
+
+    env = {**stack._host_passthrough(), **ctx.env, "CONTAINER_HOST": f"unix://{LIMA_SOCK}"}
+    return stack._run([*ctx.compose, *args], env=env, cwd=str(ctx.main), timeout=300)
+
+
+def test_an_env_file_on_your_computer_reaches_a_container_only_from_the_hosts_client(
+    shared, bound, host_only
+):
+    """The channel itself: the client reads `env_file` at create (podman-compose turns it into
+    `-e` flags), and the box can `inspect` the container it lands in."""
+    from foldyard import guestcompose
+
+    scratch, _ = shared
+    secret = host_only / "secret.env"
+    secret.write_text(f"FY_HOST_ONLY={SECRET}\n")
     (scratch / "leak.yml").write_text(
         f"services:\n  web:\n    image: docker.io/library/alpine\n    env_file: [{secret}]\n"
     )
     ctx = _ctx(scratch, files=("leak.yml",))
-    # The control: the host's client reads it (today's channel — `fy up` refuses it with the
-    # guard; here the client is asked directly, as the guard's render is).
-    monkeypatch.setenv("MACHINE_COMPOSE", "host")
-    host_env = {**stack._host_passthrough(), **ctx.env, "CONTAINER_HOST": f"unix://{LIMA_SOCK}"}
-    here = stack._run([*ctx.compose, "config"], env=host_env, cwd=str(scratch), timeout=120)
-    assert "only-on-your-computer" in here.stdout, (
-        f"red-first control: the host's client didn't read {secret}:\n{here.stdout}{here.stderr}"
+    try:
+        made = _host_client(ctx, ["up", "--no-start"])
+        assert made.returncode == 0, made.stdout + made.stderr
+        seen = engine("inspect", "--format", "{{json .Config.Env}}", "fygc_web_1", timeout=60)
+        assert SECRET in seen.stdout, f"red-first control: it never reached the container: {seen}"
+    finally:
+        _host_client(ctx, ["down"])
+    there = guestcompose.compose(ctx, ["up", "--no-start"], timeout=300)
+    try:
+        assert there.returncode != 0
+        assert "does not exist" in there.stdout + there.stderr
+        assert engine("inspect", "fygc_web_1", timeout=60).returncode != 0
+    finally:
+        guestcompose.compose(ctx, ["down"], timeout=120)
+
+
+def test_a_compose_file_on_your_computer_is_rendered_only_by_the_hosts_client(
+    shared, bound, host_only
+):
+    """The same channel at render time: `include` pulls another file's contents into `config`."""
+    from foldyard import guestcompose
+
+    scratch, _ = shared
+    other = host_only / "other.yml"
+    other.write_text(f"services:\n  other:\n    environment:\n      FY_HOST_ONLY: {SECRET}\n")
+    (scratch / "inc.yml").write_text(
+        f"include:\n  - {other}\nservices:\n  web:\n    image: docker.io/library/alpine\n"
     )
-    monkeypatch.setenv("MACHINE_COMPOSE", "vm")
+    ctx = _ctx(scratch, files=("inc.yml",))
+    here = _host_client(ctx, ["config"])
+    assert SECRET in here.stdout, f"red-first control: {here.stdout}{here.stderr}"
     there = guestcompose.compose(ctx, ["config"], timeout=120)
-    assert "only-on-your-computer" not in there.stdout + there.stderr
+    assert SECRET not in there.stdout + there.stderr
 
 
 def test_a_build_with_an_additional_context_runs_in_the_guest(shared, bound):
@@ -229,59 +275,71 @@ def test_a_build_with_an_additional_context_runs_in_the_guest(shared, bound):
         guestcompose.call("podman", ["rmi", "-f", tag], {}, str(scratch), timeout=60)
 
 
-# The guest's paths worth knowing about: what Lima's boot data and foldyard's root-only files
-# would give away (boot scripts carry the monitor's and the forwarder's keys when those are on).
+# The guest's paths worth knowing about: what Lima's boot data and foldyard's root-only files would
+# give away (the boot scripts carry the monitor's and the forwarder's keys when those are on), and
+# the journal, which the VM user reads through its `systemd-journal` group.
 _SENSITIVE = (
     "/mnt/lima-cidata",
     "/mnt/lima-cidata/user-data",
-    "/mnt/lima-cidata/provision.system",
     "/var/lib/cloud/instance/user-data.txt",
-    "/var/lib/cloud/instance/scripts",
+    "/var/log/cloud-init-output.log",
     "/etc/fy-monitor/relay.key",
-    "/etc/fy-forwarder",
-    "/run/fy-wall",
+    "/etc/fy-fwd/forwarder.key",
     "/etc/sudoers.d",
+    "/run/fy-wall",
+    "/var/log/journal",
+    "/run/log/journal",
 )
 
-_PROBE = r"""
-import json, os, sys
-out = {}
-for p in sys.argv[1:]:
-    try:
-        if os.path.isdir(p):
-            os.listdir(p); out[p] = "readable"
-        else:
-            open(p, "rb").read(1); out[p] = "readable"
-    except FileNotFoundError:
-        out[p] = "absent"
-    except OSError as e:
-        out[p] = type(e).__name__
-print(json.dumps(out))
-"""
+# One probe, the same on both sides: a file's first byte, else the first file under a directory
+# (its listing alone proves little: the journal's directories are world-readable, its files aren't).
+_READ = (
+    'f="$(find "$1" -type f 2>/dev/null | head -1)"; '
+    'if [ -n "$f" ]; then head -c1 "$f" >/dev/null 2>&1; else ls "$1" >/dev/null 2>&1; fi'
+)
+
+
+def _vm_user_reads(path: str) -> str:
+    if lima_shell("test", "-e", path).returncode != 0:
+        # `test -e` can't see under a directory it can't enter, which is also "can't read".
+        missing = lima_shell("sh", "-c", f'ls -d "{path}" 2>&1').stdout
+        return "absent" if "No such file" in missing else "refused"
+    return "readable" if lima_shell("sh", "-c", _READ, "-", path).returncode == 0 else "refused"
+
+
+def _box_reads(path: str, *, keep_groups: bool = True) -> bool:
+    """Through the engine socket, as a box asks: a rootless container bind-mounting ``path``. A
+    remote client refuses `--group-add keep-groups`, but that is the client's check: the annotation
+    it sets reaches crun from any client, and the API service holds the VM user's groups."""
+    groups = ["--annotation", "run.oci.keep_original_groups=1"] if keep_groups else []
+    r = engine(
+        "run", "--rm", *groups, "--security-opt", "label=disable",
+        "-v", f"{path}:/probe:ro", "docker.io/library/alpine", "sh", "-c", _READ, "-", "/probe",
+        timeout=120,
+    )  # fmt: skip
+    return r.returncode == 0
+
+
+def test_the_box_probe_can_tell_a_refused_read_from_a_granted_one(shared, bound):
+    """The control: without the VM user's groups the journal's files stay shut, so a "readable"
+    below means the box really read one, not that the probe can't fail."""
+    if not any(_box_reads(p) for p in ("/var/log/journal", "/run/log/journal")):
+        pytest.skip("no journal file readable by the VM user on this guest")
+    assert not _box_reads("/var/log/journal", keep_groups=False)
 
 
 def test_the_vm_user_reads_nothing_a_box_cant(shared, bound):
     """The premise of running compose as the VM user: a box can create a rootless container that
-    bind-mounts any path the VM user can read, so the VM user's reads add nothing. A path the VM
-    user can read and a container can't is a finding (docs/compose-in-vm-scope.md)."""
-    user = lima_shell("python3", "-I", "-c", _PROBE, *_SENSITIVE, timeout=60)
-    assert user.returncode == 0, user.stderr
-    as_user = json.loads(user.stdout)
-    as_box = {}
-    for path, seen in as_user.items():
-        if seen != "readable":
-            continue
-        r = lima_shell(
-            "podman", "run", "--rm", "--security-opt", "label=disable",
-            "-v", f"{path}:/probe:ro", "docker.io/library/alpine",
-            "sh", "-c", "if [ -d /probe ]; then ls /probe; else head -c1 /probe; fi >/dev/null",
-            timeout=120,
-        )  # fmt: skip
-        as_box[path] = "readable" if r.returncode == 0 else f"refused ({r.stderr.strip()[-80:]})"
+    bind-mounts anything the VM user can read, so running there adds nothing. A path the VM user
+    reads and a box can't is a finding (docs/compose-in-vm-scope.md)."""
+    widened = []
     for path in _SENSITIVE:
+        user = _vm_user_reads(path)
+        box = _box_reads(path) if user == "readable" else None
+        if user == "readable" and not box:
+            widened.append(path)
         _summary(
-            f"compose-in-vm premise: {path}: VM user {as_user[path]}"
-            + (f", box {as_box[path]}" if path in as_box else "")
+            f"compose-in-vm premise: {path}: VM user {user}"
+            + ("" if box is None else f", box {'readable' if box else 'REFUSED'}")
         )
-    widened = [p for p, v in as_box.items() if v != "readable"]
     assert not widened, f"the VM user reads what a box can't: {widened}"
