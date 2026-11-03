@@ -302,7 +302,10 @@ def stop_argv(name: str) -> list[str]:
 # its id when it changes (a `/new` in Codex starts another thread), until Codex is gone. The
 # pane's direct children are read too: npm's `codex`, which an image may bake in (the plugin
 # installs the native one only when there's none), is a Node wrapper that runs the binary as its
-# child. `tmux` reaches the pane's own server through $TMUX.
+# child. The pane's own match wins, and the children are read only without one: a native Codex's
+# children are its tools, and one reading another rollout (a `grep` over ~/.codex/sessions) would
+# otherwise retag the session with that thread for a tick. `tmux` reaches the pane's own server
+# through $TMUX.
 _CODEX_THREAD_SNIPPET = r"""
 fy_codex_thread() {
   local pid=$1 seen= id f p t kids procs
@@ -317,6 +320,7 @@ fy_codex_thread() {
         case $f in */rollout-*.jsonl) f=${f%.jsonl}; f=${f: -36} ;; *) continue ;; esac
         [[ $f =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] && id=$f
       done
+      [ -n "$id" ] && break
     done
     if [ -n "$id" ] && [ "$id" != "$seen" ]; then
       tmux set-option -t "$TMUX_PANE" @fy_conversation "$id" && seen=$id

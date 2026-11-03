@@ -385,31 +385,43 @@ def test_only_a_codex_pane_starts_the_thread_watcher():
 
 @pytest.mark.spawns("bash")
 @pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="reads /proc, as in the box")
-@pytest.mark.parametrize("holder", ["itself", "a child"])  # a child: npm's codex, a Node wrapper
+# a child: npm's codex, a Node wrapper; both: a native Codex and a tool reading another rollout
+@pytest.mark.parametrize("holder", ["itself", "a child", "both"])
 def test_the_thread_watcher_tags_the_session_with_the_rollout_codex_holds(tmp_path, holder):
     """The watcher, under real bash against a real /proc: this shell plays Codex, holding fd 8
     open; `readlink` reports a rollout for it (the suite's PATH has no coreutils, so `readlink`,
     `sleep` and `tmux` are functions). Tagged once with the thread id, whatever else is open, and
-    never with a rollout whose name doesn't end in one."""
+    never with a rollout whose name doesn't end in one. With "both", a child (one of a native
+    Codex's tools) holds ANOTHER thread's rollout, and Codex's own still wins."""
     import subprocess
 
     out = tmp_path / "tmux"
+    OTHER = "01a1a283-0000-7000-8000-000000000000"
     stubs = f"""
 readlink() {{ case $1 in
   */fd/8) echo /h/.codex/sessions/2026/11/03/rollout-2026-11-03T17-45-14-{THREAD}.jsonl ;;
   */fd/9) echo /h/.codex/sessions/rollout-2026-11-03T17-45-14-not-a-thread-id-at-all-x.jsonl ;;
+  */fd/6) echo /h/.codex/sessions/2026/11/02/rollout-2026-11-02T09-00-00-{OTHER}.jsonl ;;
   *) echo /dev/null ;;
 esac; }}
 sleep() {{ :; }}
 tmux() {{ printf '%s\n' "$*" >> {out}; }}
 """
+
     # The holder opens fds 8 and 9, then waits (≤ 10 s, builtins only: a read on a pipe that
     # never delivers) for the watcher this shell started to tag the session.
-    hold = f"""
-exec 8</dev/null 9</dev/null 7<> <(:)
+    def hold(fds: str) -> str:
+        return f"""
+exec {fds} 7<> <(:)
 for ((i = 0; i < 200; i++)); do [ -s {out} ] && break; read -t 0.05 -u 7 || :; done
 """
-    wait = hold if holder == "itself" else f"( {hold} ) & wait"
+
+    wait = {
+        "itself": hold("8</dev/null 9</dev/null"),
+        "a child": f"( {hold('8</dev/null 9</dev/null')} ) & wait",
+        # The child closes the 8 it inherits, so only Codex holds THREAD, the child OTHER.
+        "both": f"exec 8</dev/null; ( exec 8<&-; {hold('6</dev/null 9</dev/null')} ) & wait",
+    }[holder]
     proc = subprocess.run(
         ["bash", "-c", stubs + agents._CODEX_THREAD_SNIPPET + wait],
         capture_output=True,
