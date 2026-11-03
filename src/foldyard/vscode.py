@@ -207,6 +207,56 @@ def _user_settings(udd: Path) -> Path:
 # the SSH side is by construction (`_empty_agent`): no setting chooses what agent is forwarded.
 _PORTS_ATTRIBUTES = "remote.portsAttributes"
 _GIT_BRIDGE_PINS = {"git.terminalAuthentication": False, "git.useIntegratedAskPass": False}
+# The other forwarders an attach runs, each handing the box a credential (or the git config) of
+# your computer's — off, beside the git bridge, at both scopes:
+# - `dev.containers.gitCredentialHelperConfigLocation` "none": Dev Containers otherwise writes a
+#   `credential.helper` into the box's gitconfig that asks its in-box IPC socket, whose HOST side
+#   runs `git credential fill` on your computer. "none" stops it being installed; it does not stop
+#   the host answering whatever reaches the socket — that is the launch env's job
+#   (:data:`_GIT_CONFIG_LAUNCH_ENV`).
+# - `dev.containers.dockerCredentialHelper`: a docker credential helper in the box that asks the
+#   host for your registry logins.
+# - `dev.containers.copyGitConfig`: your ~/.gitconfig copied into the box.
+# - `dev.containers.githubCLILoginWithToken`: `gh` in the box logged in with VS Code's GitHub
+#   session.
+# - `github.gitAuthentication`: the GitHub extension unregisters as git's credential provider. The
+#   git extension creates its askpass socket whatever `git.useIntegratedAskPass` says (that only
+#   controls the env it injects), and for github.com the handler asks this provider for a session —
+#   silently, when you're signed in.
+# The `dev.containers.*` keys are machine-scoped in the extension's manifest and read from user
+# settings AND the attached config's `settings`; `github.gitAuthentication` is read where the git
+# extension runs (the box's server). A default, like the git bridge: workspace settings still win.
+_CREDENTIAL_BRIDGE_PINS = {
+    **_GIT_BRIDGE_PINS,
+    "dev.containers.gitCredentialHelperConfigLocation": "none",
+    "dev.containers.dockerCredentialHelper": False,
+    "dev.containers.copyGitConfig": False,
+    "dev.containers.githubCLILoginWithToken": False,
+    "github.gitAuthentication": False,
+}
+# The git config the launched VS Code reads: none of yours. Dev Containers creates
+# `/tmp/vscode-remote-containers-ipc-*.sock` in the box unconditionally, and its HOST-side handler
+# answers `{"args": ["git-credential-helper", "get"], …}` by running `git credential fill` on your
+# computer, in the extension host's environment — this launch's — and checks no setting first
+# (0.469.0). So anything in the box that reaches the socket gets whatever the host's git config
+# names as `credential.helper` (on macOS, Apple git's own system-level gitconfig names
+# osxkeychain). With an empty global file and no system layer the fill finds no helper, and with
+# prompts off (the handler sets GIT_TERMINAL_PROMPT=0) it fails and returns nothing — no setting
+# needed, the same by-construction shape as :func:`_empty_agent`. The instance's LOCAL terminals
+# get git's normal config back (`_write_local_terminal_cwd`); they are your own shell.
+#
+# Neither variable touches REPOSITORY config, and the fill is spawned with no `cwd` of its own, so
+# it runs in the extension host's working directory — which may be inherited from the `code` CLI's,
+# and `fy code` is usually run from the checkout. Its `.git/config` is box-writable (the box mounts
+# the checkout), and `credential.helper = !<cmd>` there would make the fill run <cmd> ON YOUR
+# COMPUTER — host code execution for anything in the box that reaches the socket. Whether the
+# extension host really inherits the CLI's cwd is unverified (running instances here showed `/`),
+# so both ends are closed: `code` is launched FROM the instance's own user-data-dir (foldyard-
+# owned, never a repo), and GIT_CEILING_DIRECTORIES stops git searching above it — a dotfiles
+# repo at ~ would otherwise be found from ~/.foldyard/…. The ceiling is the dir's PARENT: git
+# ignores a ceiling equal to its working directory and walks straight past it (checked against
+# git 2.54; `test_git_where_vscode_runs_finds_neither_a_repo_nor_a_helper` holds it).
+_GIT_CONFIG_LAUNCH_ENV = ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_CEILING_DIRECTORIES")
 # `dev.containers.dockerPath` — the program the Dev Containers extension execs for every engine
 # call (`-v`, `version`, `inspect`, `exec`…), `docker` when unset. A podman-only host has no
 # `docker`, and the extension reads the missing binary as "Docker version 17.12.0 or later
@@ -252,13 +302,15 @@ def _pin_ports(settings: dict) -> dict:
 
 
 def _pinned_settings(settings: dict, engine_cli: str | None = None) -> dict:
-    """The isolated instance's pins: the port guard, the git bridge and — given ``engine_cli`` —
-    the CLI the attach runs. Applied to the user-data-dir's own settings.json, which foldyard
-    always writes — the attached config carries the first two too, but that file is skipped once
-    an operator takes ownership of it, and a protection that disappears when someone customises an
-    unrelated key is not a protection. The engine pin is user-settings-only by necessity:
-    `dev.containers.dockerPath` is `application`-scoped, so VS Code ignores it anywhere else."""
-    pinned = {**_pin_ports(settings), **_GIT_BRIDGE_PINS}
+    """The isolated instance's pins: the port guard, the credential bridges and — given
+    ``engine_cli`` — the CLI the attach runs. Applied to the user-data-dir's own settings.json,
+    which foldyard always writes (`fy code` refuses to launch when it can't) — the attached config
+    carries the first two too, but that file is skipped once an operator takes ownership of it, and
+    a protection that disappears when someone customises an unrelated key is not a protection. The
+    pins WIN over what the file says, the seed from your own VS Code included. The engine pin is
+    user-settings-only by necessity: `dev.containers.dockerPath` is `application`-scoped, so VS
+    Code ignores it anywhere else."""
+    pinned = {**_pin_ports(settings), **_CREDENTIAL_BRIDGE_PINS}
     if engine_cli:
         pinned[_DOCKER_PATH] = engine_cli
     return pinned
@@ -439,37 +491,34 @@ def _write_local_terminal_cwd(
     ``ZDOTDIR`` at generated startup shims. They source the user's real dotfiles, restore our
     ``ZDOTDIR`` after each one, then cd after .zshrc. Everything stays in foldyard's isolated
     ``--user-data-dir``; the user's dotfiles are untouched.
+
+    The same write carries every user-scope pin (:func:`_pinned_settings`), so returning False —
+    having said why — means the caller must not launch.
     """
     path = _user_settings(udd)
+
+    def cannot(reason: str) -> bool:
+        _err(f"✗ fy code: can't write foldyard's settings into {path}: {reason}.")
+        return False
+
     settings: dict[str, object] = {}
     if path.exists() and path.stat().st_size:
         try:
             loaded, had_comments = _loads_jsonc(path.read_text())
         except json.JSONDecodeError as e:
-            _err(f"⚠ couldn't configure local terminal cwd in {path}:")
-            _err("  settings.json is not valid JSON")
-            _err(f"  ({e.msg} at line {e.lineno}, column {e.colno}).")
-            _err(f"  Make Terminal: Create New Integrated Terminal (Local) cd to: {host_checkout}")
-            return False
+            return cannot(f"it isn't valid JSON ({e.msg} at line {e.lineno}, column {e.colno})")
         except (OSError, UnicodeDecodeError) as e:
-            _err(f"⚠ couldn't read {path}: {e}")
-            return False
+            return cannot(f"couldn't read it ({e})")
         if not isinstance(loaded, dict):
-            _err(f"⚠ couldn't configure local terminal cwd in {path}:")
-            _err("  top-level JSON is not an object")
-            return False
+            return cannot("its top level isn't a JSON object")
         if had_comments:
             # Trailing commas are noise a rewrite may drop; comments are the operator's words.
-            _err(f"⚠ couldn't configure local terminal cwd in {path}:")
-            _err("  settings.json has comments, which rewriting it would lose.")
-            _err(f"  Make Terminal: Create New Integrated Terminal (Local) cd to: {host_checkout}")
-            return False
+            return cannot("it has comments, which rewriting it would lose")
         settings = loaded
 
     loaded_terminal_env = settings.get(_TERMINAL_ENV_OSX, {})
     if not isinstance(loaded_terminal_env, dict):
-        _err(f"⚠ couldn't configure local terminal cwd: {_TERMINAL_ENV_OSX} is not an object")
-        return False
+        return cannot(f"its {_TERMINAL_ENV_OSX} isn't an object")
     terminal_env: dict[str, object] = {
         str(key): value for key, value in loaded_terminal_env.items()
     }
@@ -479,6 +528,9 @@ def _write_local_terminal_cwd(
     terminal_env[_FOLDYARD_ZDOTDIR_ENV] = str(zdotdir)
     terminal_env[_LOCAL_TERMINAL_CWD_ENV] = str(host_checkout)
     terminal_env[_ORIGINAL_ZDOTDIR_ENV] = original_zdotdir or ""
+    # A local terminal is your own shell on your computer: undo the launch's empty git config
+    # (:data:`_GIT_CONFIG_LAUNCH_ENV`) there. `null` is VS Code's "unset this variable".
+    terminal_env.update(dict.fromkeys(_GIT_CONFIG_LAUNCH_ENV))
     settings[_TERMINAL_ENV_OSX] = terminal_env
     # This is the one writer of the isolated instance's settings.json, so the instance pins ride
     # along with it rather than racing a second read-modify-write of the same file.
@@ -524,8 +576,7 @@ fi
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(settings, indent=2) + "\n")
     except OSError as e:
-        _err(f"⚠ couldn't write {path}: {e}")
-        return False
+        return cannot(f"couldn't write it ({e})")
     return True
 
 
@@ -564,11 +615,12 @@ def _valid_extensions(ids: list[str]) -> list[str]:
 
 def _attached_config(checkout: str, exts: list[str], settings: dict) -> dict:
     """The attached-container config for ``checkout``: the consumer's `[vscode.settings]` table
-    with the daemon-port pin merged in (the pin WINS — same rule as ``workspaceFolder``), and the
+    with the daemon-port and credential-bridge pins merged in (the pins WIN — same rule as
+    ``workspaceFolder``), and the
     extensions in BOTH schemas so they are *installed* on attach, not merely recommended —
     ``customizations.vscode.{extensions,settings}`` is the unified form newer Dev Containers
     versions honour, top-level ``extensions``/``settings`` the legacy one older versions read."""
-    pinned = {**_pin_ports(settings), **_GIT_BRIDGE_PINS}
+    pinned = {**_pin_ports(settings), **_CREDENTIAL_BRIDGE_PINS}
     return {
         _GENERATED_MARKER_KEY: _GENERATED_MARKER,
         "workspaceFolder": checkout,
@@ -604,6 +656,41 @@ def _empty_agent(udd: Path) -> str | None:
         sock.unlink(missing_ok=True)
         subprocess.run([agent, "-a", str(sock)], stdout=subprocess.DEVNULL, check=False)
     return str(sock)
+
+
+def _empty_gitconfig(udd: Path) -> Path | None:
+    """The global git config the launched VS Code gets (:data:`_GIT_CONFIG_LAUNCH_ENV`): foldyard's
+    own, EMPTY file beside :func:`_empty_agent`'s socket. Emptied on every launch — nothing should
+    write it, and whatever did would be the config the host-side credential fill reads. ``None``
+    (said why) when it can't be written: the launch must not go ahead with your git config."""
+    path = udd / "fy-empty-gitconfig"
+    try:
+        udd.mkdir(parents=True, exist_ok=True)
+        if path.is_file() and path.stat().st_size:
+            _err(f"⚠ {path} wasn't empty (VS Code's git config must stay empty); emptied it.")
+        path.write_bytes(b"")
+    except OSError as e:
+        _err(f"✗ couldn't write the isolated VS Code's empty git config at {path}: {e}")
+        return None
+    return path
+
+
+def _launch_env(env: dict, agent: str, gitconfig: Path, udd: Path) -> dict:
+    """What the `code` launch runs with (from ``udd`` as its working directory): the clamped stack
+    env with no ``GIT_*`` variable of its own (``GIT_CONFIG_COUNT``/``GIT_CONFIG_PARAMETERS`` would
+    put a ``credential.helper`` back past the empty config, ``GIT_ASKPASS`` names a program to
+    ask), then foldyard's empty agent, empty git config and a git search ceiling just above
+    ``udd`` (:data:`_GIT_CONFIG_LAUNCH_ENV`). Explicit here rather than via
+    ``stack._host_passthrough``: that clamp decides what of YOUR environment passes, and these are
+    values foldyard sets."""
+    kept = {k: v for k, v in env.items() if not k.startswith("GIT_")}
+    return {
+        **kept,
+        "SSH_AUTH_SOCK": agent,
+        "GIT_CONFIG_GLOBAL": str(gitconfig),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CEILING_DIRECTORIES": str(udd.parent),
+    }
 
 
 def _ensure_dev_containers(code_cli: str, udd: Path, env: dict) -> bool:
@@ -812,14 +899,17 @@ def code() -> int:
     print(f"▶ isolated VS Code: --user-data-dir {udd}  (your default VS Code is untouched)")
     _seed_from_global(udd)
     engine_cli = shutil.which(engine) or engine
-    if _write_local_terminal_cwd(udd, host_checkout, env.get("ZDOTDIR"), engine_cli):
-        print(f"▶ local terminal cwd: {host_checkout}")
-        print(f"▶ Dev Containers attaches with: {engine_cli}")
-    else:
-        # The same unwritten file carries the engine pin, and without it the attach falls back to
-        # `docker` — on a podman-only computer, the "install Docker" dialog this pin exists for.
-        _err(f"⚠ so {_DOCKER_PATH} isn't set either: without `docker` on your computer the attach")
-        _err(f'  fails. Set "{_DOCKER_PATH}": "{engine_cli}" in {_user_settings(udd)}.')
+    if not _write_local_terminal_cwd(udd, host_checkout, env.get("ZDOTDIR"), engine_cli):
+        # That file carries every user-scope pin — the credential bridges off, the attach's engine
+        # CLI — and the window would launch without any of them. It used to, with a warning: a
+        # `//` note on an unrelated setting silently dropped the lot. Refused before anything
+        # reaches the box (no attached config written, no marker reset).
+        _err("  It holds the settings that keep your credentials out of the box and point the")
+        _err(f"  attach at {engine_cli}, so not launching. Fix it, or delete it (a new one starts")
+        _err("  again from your own VS Code's settings), then re-run `fy code`.")
+        return 1
+    print(f"▶ local terminal cwd: {host_checkout}")
+    print(f"▶ Dev Containers attaches with: {engine_cli}")
 
     # Auto-apply extensions + settings on attach (Attach to Running Container ignores
     # devcontainer.json — the supported lever is an attached-container config, keyed by the box
@@ -872,13 +962,21 @@ def code() -> int:
     agent = _empty_agent(udd)
     if agent is None:
         return 1
+    gitconfig = _empty_gitconfig(udd)
+    if gitconfig is None:
+        return 1
     print(f"▶ launching VS Code (DOCKER_HOST={env.get('DOCKER_HOST', '')})…")
     # `env` (incl. DOCKER_HOST) reaches ONLY this launched, isolated instance — never the
     # user's shell or their default VS Code. `|| true` parity: a non-zero `code` is non-fatal.
-    # SSH_AUTH_SOCK is foldyard's empty agent (`_empty_agent`), never the operator's.
+    # SSH_AUTH_SOCK is foldyard's empty agent (`_empty_agent`), never the operator's, and git
+    # reads none of your config (`_GIT_CONFIG_LAUNCH_ENV`: Dev Containers' host-side credential
+    # fill), run from `udd` rather than your current directory — never the box-writable checkout.
+    # Both were reasoned about for a NEW instance; whether one already running for this
+    # user-data-dir (started by an older foldyard) takes a later launch's env is unverified.
     subprocess.run(
         [code_cli, "--user-data-dir", str(udd), "--folder-uri", uri],
-        env={**env, "SSH_AUTH_SOCK": agent},
+        env=_launch_env(env, agent, gitconfig, udd),
+        cwd=str(udd),
     )
     print("✓ launched. If it didn't attach, the error's Show Log button has Dev Containers' own")
     print(f"  account; that window's {_DOCKER_PATH} should read {engine_cli}.")

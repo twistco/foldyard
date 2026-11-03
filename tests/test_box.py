@@ -2456,16 +2456,13 @@ def test_path_prepend_is_wired_into_every_prepend_site(fake, monkeypatch):
 def _run_harden(home, env_in: dict[str, str]) -> dict[str, str]:
     """Run the REAL `_HARDEN_SNIPPET` under bash with ``home`` as $HOME, then source the file it
     wrote in a shell that starts with ``env_in`` and print the bridge vars as they end up. The
-    reaper is kept from spawning by seeding its pidfile with the running shell's own pid (its
-    liveness probe is `kill -0`), so nothing is left behind and no real /tmp is touched."""
+    reaper is kept from spawning by a `nohup` function shadowing the real one (the snippet
+    launches the loop through it), so nothing is left behind and no real /tmp is touched."""
     import subprocess
 
-    cfg = home / ".config" / "foldyard"
-    cfg.mkdir(parents=True, exist_ok=True)
-    (cfg / "bridge-reaper.pid").write_text("$$")  # rewritten with the real pid below
     script = "\n".join(
         [
-            'echo $$ > "$HOME/.config/foldyard/bridge-reaper.pid"',
+            "nohup() { :; }",
             box._HARDEN_SNIPPET,
             "for v in SSH_AUTH_SOCK GIT_ASKPASS VSCODE_GIT_IPC_HANDLE VSCODE_IPC_HOOK_CLI BROWSER; do",
             '  printf "%s=%s\\n" "$v" "${!v-<unset>}"',
@@ -2507,7 +2504,120 @@ def test_harden_unsets_the_attach_bridges_and_hooks_bashrc_once(tmp_path):
     assert rc[0].startswith('source "$HOME/.config/foldyard/harden.sh"')
     assert rc.count(rc[0]) == 1 and rc[-1] == "# existing rc"
     harden = (home / ".config" / "foldyard" / "harden.sh").read_text()
-    assert "rm -f /tmp/vscode-ssh-auth-*.sock /tmp/vscode-git-*.sock" in harden  # the reaper
+    assert box._REAPER_PASS in harden  # the reaper (what it reaps: the test below)
+
+
+_REAPED_DIRS = ("tmp", "tmp/user/1000", "xdg", "tmpdir")
+
+
+@pytest.mark.spawns("sh")  # runs one REAL pass of the reaper's loop under sh
+def test_reaper_unlinks_every_attach_bridge_socket_in_every_dir_it_can_land_in(tmp_path):
+    # The four host bridges an attach drops — the SSH agent, the git askpass IPC, Dev Containers'
+    # own IPC (its host side answers `git credential fill` and docker credential requests without
+    # checking any setting) and the `code` CLI's IPC (it drives the host's VS Code, URL opens
+    # included: an egress path around the proxy) — wherever they land: /tmp, the per-user
+    # /tmp/user/<uid>/ the git socket has been seen in, $XDG_RUNTIME_DIR (VS Code prefers it for
+    # its IPC handles on Linux) and $TMPDIR (Dev Containers' choice when set). One pass, with
+    # /tmp rewritten to a scratch root so the real /tmp is never touched.
+    root = tmp_path / "r"
+    reaped = (
+        "vscode-ssh-auth-a1.sock",
+        "vscode-git-b2.sock",
+        "vscode-remote-containers-ipc-c3.sock",
+        "vscode-ipc-d4.sock",
+    )
+    kept = ("vscode-remote-containers-c3.js", "other.sock", "vscode-git-b2.txt")
+    for d in _REAPED_DIRS:
+        (root / d).mkdir(parents=True, exist_ok=True)
+        for name in (*reaped, *kept):
+            (root / d / name).write_text("")
+    out = subprocess.run(
+        ["sh", "-c", box._REAPER_PASS.replace("/tmp", str(root / "tmp"))],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "XDG_RUNTIME_DIR": str(root / "xdg"),
+            "TMPDIR": str(root / "tmpdir"),
+        },
+    )
+    assert out.returncode == 0, out.stderr
+    for d in _REAPED_DIRS:
+        left = sorted(p.name for p in (root / d).iterdir() if p.is_file())
+        assert left == sorted(kept), (d, left)
+    # verify's socket row looks for exactly what the reaper removes.
+    from foldyard import verify
+
+    assert set(verify._BRIDGE_SOCKET_GLOBS) == set(box._BRIDGE_SOCKET_GLOBS)
+
+
+def _harden_with_stub_nohup(home: Path) -> None:
+    """Run the REAL snippet with `nohup` shadowed by a function that logs each launch and starts a
+    harmless stand-in with the real launch's argv shape (`sh -c <loop> <name>`, the loop swapped
+    for a sleep) — so the one-reaper-per-box logic runs for real and nothing reaps /tmp."""
+    stub = (
+        'nohup() { printf "%s\\n" "$4" >> "$HOME/launched"; exec "$1" "$2" \'sleep 30; :\' "$4"; }'
+    )
+    out = subprocess.run(
+        ["bash", "-c", f"{stub}\n{box._HARDEN_SNIPPET}"],
+        capture_output=True,
+        text=True,
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+    )
+    assert out.returncode == 0, out.stderr
+
+
+_SH_ENV = {"PATH": "/usr/bin:/bin"}  # the suite scrubs PATH; these stand-ins need `sleep`
+
+
+def _kill_launched(home: Path) -> None:
+    pid = int((home / ".config" / "foldyard" / "bridge-reaper.pid").read_text().split()[0])
+    try:
+        os.kill(pid, 15)
+    except ProcessLookupError:
+        pass
+
+
+@pytest.mark.spawns("bash", "sh")  # the REAL snippet + stand-in reaper processes
+def test_an_older_reaper_is_replaced_so_a_running_box_picks_up_new_globs(tmp_path):
+    # "One reaper per box" used to mean "any live pid in the pidfile": a box already running the
+    # older loop (two globs, /tmp only) would keep it forever — every `box up` / `fy code`
+    # re-apply saw it alive and never started the wider one. Now the running reaper must be THIS
+    # snippet's (its argv carries a name derived from the loop text); an older one is killed and
+    # replaced, and a recycled pid that isn't a reaper at all is left alone and not trusted.
+    home = tmp_path / "home"
+    (home / ".config" / "foldyard").mkdir(parents=True)
+    (home / ".bashrc").write_text("")
+    pidfile = home / ".config" / "foldyard" / "bridge-reaper.pid"
+    # The pre-widening loop's argv shape, with the rm made inert (`:`) — never reap the real /tmp.
+    old_loop = (
+        "while :; do : rm -f /tmp/vscode-ssh-auth-*.sock /tmp/vscode-git-*.sock; sleep 1; done"
+    )
+    old = subprocess.Popen(["sh", "-c", old_loop], env=_SH_ENV)
+    try:
+        pidfile.write_text(f"{old.pid}\n")
+        _harden_with_stub_nohup(home)
+        assert old.wait(timeout=5) != 0  # the old loop was killed…
+        assert (home / "launched").read_text().split() == [box._REAPER_NAME]  # …and replaced
+        _harden_with_stub_nohup(home)  # every shell re-sources harden.sh: still exactly one
+        assert (home / "launched").read_text().split() == [box._REAPER_NAME]
+    finally:
+        old.kill()
+        old.wait()
+        _kill_launched(home)
+
+    (home / "launched").unlink()
+    # A restarted box: the pidfile survived, its pid now belongs to something else.
+    stranger = subprocess.Popen(["sh", "-c", "sleep 30; :"], env=_SH_ENV)
+    try:
+        pidfile.write_text(f"{stranger.pid}\n")
+        _harden_with_stub_nohup(home)
+        assert stranger.poll() is None  # not ours: never killed…
+        assert (home / "launched").read_text().split() == [box._REAPER_NAME]  # …nor trusted
+    finally:
+        stranger.kill()
+        stranger.wait()
+        _kill_launched(home)
 
 
 def test_harden_is_in_the_bootstrap_and_reapplied_to_an_already_up_box(fake, monkeypatch):

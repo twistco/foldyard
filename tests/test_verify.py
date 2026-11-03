@@ -45,6 +45,9 @@ def secure_engine(monkeypatch, tmp_path):
         # ADR-0033's to-box write probe: what the --privileged container binding it rw reports
         "to_box_probe": "remount=refused\nwrite=refused\n",
         "to_box_rc": 0,
+        # `git config --show-origin --get-regexp <credential helpers>`: 1 = none configured
+        "config_rc": 1,
+        "config_out": "",
     }
 
     def fake_run(cmd, **kw):
@@ -53,6 +56,9 @@ def secure_engine(monkeypatch, tmp_path):
             if results["has_commits"] is None:
                 raise verify.subprocess.TimeoutExpired(cmd, kw.get("timeout") or 0)
             return _Proc(0 if results["has_commits"] else 1)
+        if cmd[0] == "git" and "config" in cmd:  # the credential-helper read, not the push
+            results["config_cmd"], results["config_env"] = cmd, kw.get("env")
+            return _Proc(results["config_rc"], results["config_out"])
         if cmd[0] == "git":
             results["git_env"] = kw.get("env")
             results["git_cmd"] = cmd
@@ -118,6 +124,10 @@ def _enter_box(monkeypatch, tmp_path):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setattr(verify, "_BRIDGE_SOCKET_DIR", tmp_path / "tmp")
     (tmp_path / "tmp").mkdir(exist_ok=True)
+    # The socket row also reads $TMPDIR and $XDG_RUNTIME_DIR — on a macOS host TMPDIR is the
+    # operator's own temp dir, where their VS Code keeps real `vscode-ipc-*.sock` files.
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(verify, "which", lambda c: None)
@@ -545,6 +555,108 @@ def test_a_bridge_socket_on_disk_is_fail_even_with_the_vars_unset(
     assert "bridge sockets" in out and "vscode-ssh-auth-deadbeef.sock" in out
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "vscode-ssh-auth-a1.sock",
+        "vscode-git-b2.sock",
+        # Dev Containers' own IPC: its host side runs `git credential fill` for any caller
+        "vscode-remote-containers-ipc-c3.sock",
+        # the `code` CLI's IPC: drives the host's VS Code (URL opens too — around the proxy)
+        "vscode-ipc-d4.sock",
+    ],
+)
+@pytest.mark.parametrize("where", ["tmp", "tmp/user/1000", "xdg", "tmpdir"])
+def test_every_attach_bridge_socket_is_fail_wherever_it_lands(
+    secure_engine, monkeypatch, tmp_path, capsys, name, where
+):
+    # The same names and dirs the reaper covers (box._REAPER_PASS; the two globs tuples are
+    # pinned equal in test_box): /tmp, the per-user /tmp/user/<uid>/, $XDG_RUNTIME_DIR, $TMPDIR.
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg"))
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmpdir"))
+    for d in ("xdg", "tmpdir", "tmp/user/1000"):
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+    assert verify.verify() == 0  # all four dirs read, all empty
+    assert "no editor-attach bridge sockets" in capsys.readouterr().out
+    (tmp_path / where / name).write_text("")
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "bridge sockets" in out and str(tmp_path / where / name) in out
+
+
+_DEVCONTAINERS_HELPER = (
+    "!f() { /root/.vscode-server/bin/abc/node /tmp/vscode-remote-containers-1f2e.js "
+    "git-credential-helper $*; }; f"
+)
+
+
+def test_a_credential_helper_pointing_at_the_host_is_fail_and_names_the_setting(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # Dev Containers writes this into the box's ~/.gitconfig on every attach unless
+    # dev.containers.gitCredentialHelperConfigLocation is "none": git then asks the HOST's
+    # `git credential fill` over the IPC socket — an HTTPS push path the env scrub doesn't close
+    # (any process can point REMOTE_CONTAINERS_IPC back at the socket while it exists).
+    _, results = secure_engine
+    _enter_box(monkeypatch, tmp_path)
+    results["config_rc"] = 0
+    results["config_out"] = (
+        "file:/etc/gitconfig\tcredential.helper store\n"
+        f"file:/root/.gitconfig\tcredential.helper {_DEVCONTAINERS_HELPER}\n"
+    )
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "credential helper that asks the host" in out
+    assert "/root/.gitconfig" in out and "/etc/gitconfig" not in out  # names only the offender
+    assert "dev.containers.gitCredentialHelperConfigLocation" in out
+    # Every scope the box's git reads: run IN the checkout (local + worktree config), no scope
+    # flag (system + global + XDG), with the box's own env (GIT_CONFIG_* / GIT_CONFIG_GLOBAL).
+    cmd = results["config_cmd"]
+    assert cmd[:3] == ["git", "-C", str(tmp_path)]
+    assert not {"--global", "--system", "--local", "--file", "-f"} & set(cmd)
+    assert results["config_env"]["HOME"] == os.environ["HOME"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # a URL-scoped helper reaches the host just the same
+        f"file:/root/.gitconfig\tcredential.https://github.com.helper {_DEVCONTAINERS_HELPER}",
+        # the script renamed, the subcommand still the host bridge's
+        "command line:\tcredential.helper !node /opt/x.js git-credential-helper $*",
+    ],
+)
+def test_every_shape_of_the_host_credential_helper_is_fail(
+    secure_engine, monkeypatch, tmp_path, capsys, line
+):
+    _, results = secure_engine
+    _enter_box(monkeypatch, tmp_path)
+    results["config_rc"], results["config_out"] = 0, line + "\n"
+    assert verify.verify() == 1
+    assert "credential helper that asks the host" in capsys.readouterr().out
+
+
+def test_an_ordinary_credential_helper_passes(secure_engine, monkeypatch, tmp_path, capsys):
+    _, results = secure_engine
+    _enter_box(monkeypatch, tmp_path)
+    results["config_rc"] = 0
+    results["config_out"] = "file:/etc/gitconfig\tcredential.helper store\n"
+    assert verify.verify() == 0
+    assert "no git credential helper asks the host" in capsys.readouterr().out
+
+
+def test_an_unreadable_git_config_leaves_the_helper_row_unproven(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # rc 1 is "no such key"; anything else (a bad config line is 128) proved nothing either way.
+    _, results = secure_engine
+    _enter_box(monkeypatch, tmp_path)
+    results["config_rc"] = 128
+    assert verify.verify() == 1
+    assert "credential helpers UNPROVEN" in capsys.readouterr().out
+
+
 def test_workspace_settings_re_enabling_the_git_bridge_is_fail(
     secure_engine, monkeypatch, tmp_path, capsys
 ):
@@ -564,6 +676,20 @@ def test_workspace_settings_re_enabling_the_git_bridge_is_fail(
     (checkout / ".vscode" / "settings.json").write_text('{"git.terminalAuthentication": false}')
     assert verify.verify() == 0
     assert "leave the git-credential bridge off" in capsys.readouterr().out
+
+
+def test_workspace_settings_re_enabling_github_git_authentication_is_fail(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # The GitHub extension's silent-token path: with it on, VS Code answers the box's git with
+    # the host's GitHub session token — the same re-arm by mount data as the git.* keys.
+    _enter_box(monkeypatch, tmp_path)
+    (tmp_path / ".vscode").mkdir(parents=True)
+    (tmp_path / ".vscode" / "settings.json").write_text('{ "github.gitAuthentication" : true }')
+    assert verify.verify() == 1
+    assert "re-enable the git-credential bridge: github.gitAuthentication" in (
+        capsys.readouterr().out
+    )
 
 
 def test_ssh_only_known_hosts_passes(secure_engine, monkeypatch, tmp_path, capsys):

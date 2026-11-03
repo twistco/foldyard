@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -90,7 +91,7 @@ def fake(tmp_path, monkeypatch):
     host_exts["install_rc"] = 0
 
     def fake_run(cmd, **kw):
-        calls.append({"cmd": cmd, "env": kw.get("env")})
+        calls.append({"cmd": cmd, "env": kw.get("env"), "cwd": kw.get("cwd")})
         if cmd[0] == "/usr/local/bin/code" and "--list-extensions" in cmd:
             return _Proc(host_exts["rc"], host_exts["listed"])
         if cmd[0] == "/usr/local/bin/code" and "--install-extension" in cmd:
@@ -310,6 +311,12 @@ def test_launch_stamps_local_terminal_zdotdir_in_isolated_user_settings(fake):
         "FOLDYARD_ZDOTDIR": str(zdotdir),
         "FOLDYARD_LOCAL_TERMINAL_CWD": str(fake["ctx"].main),
         "FOLDYARD_ORIGINAL_ZDOTDIR": "",
+        # The launch hides the host's git config from VS Code (see the launch-env tests); a LOCAL
+        # terminal is your own shell on your computer, so it gets git's normal config back.
+        # `null` is VS Code's "unset this variable".
+        "GIT_CONFIG_GLOBAL": None,
+        "GIT_CONFIG_NOSYSTEM": None,
+        "GIT_CEILING_DIRECTORIES": None,
     }
     for name in (".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout"):
         assert (zdotdir / name).is_file()
@@ -361,16 +368,36 @@ def test_local_terminal_preserves_original_zdotdir(fake):
     )
 
 
-def test_invalid_settings_json_is_not_overwritten(fake, capsys):
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("{ // jsonc comment that stdlib json will not parse\n}", "has comments"),
+        ('{"a": }', "isn't valid JSON"),
+        ("[1, 2]", "isn't a JSON object"),
+        ('{"terminal.integrated.env.osx": "nope"}', "terminal.integrated.env.osx isn't an object"),
+    ],
+)
+def test_instance_settings_foldyard_cant_rewrite_refuse_the_launch(fake, capsys, text, reason):
+    # The instance's settings.json carries the pins that keep your credentials out of the box. A
+    # file foldyard can't rewrite (comments it would lose, or not a settings object at all) used
+    # to skip EVERY pin with a warning and launch anyway — a protection that disappears when
+    # someone annotates an unrelated setting. Now nothing launches, the file is untouched, and the
+    # message says what to do.
     fake["state"]["running"] = True
     path = _settings(fake)
     path.parent.mkdir(parents=True)
-    original = "{ // jsonc comment that stdlib json will not parse\n}"
-    path.write_text(original)
-    assert vscode.code() == 0
-    # Rewriting would drop the comment, so a commented file is left alone and the step said.
-    assert path.read_text() == original
-    assert "has comments" in capsys.readouterr().err
+    path.write_text(text)
+    assert vscode.code() == 1
+    assert path.read_text() == text
+    assert not _launch(fake["calls"])
+    # Refused before anything reaches the box: no attached config written, no marker reset.
+    assert not _cfg_path(fake).exists()
+    assert not _execs(fake["calls"], ".writeMachineSettingsMarker")
+    err = capsys.readouterr().err
+    assert reason in err
+    assert str(path) in err
+    assert "not launching" in err
+    assert "then re-run `fy code`" in err
 
 
 def test_settings_json_with_trailing_commas_is_configured(fake):
@@ -853,6 +880,159 @@ def test_the_git_credential_bridge_is_switched_off_at_both_scopes(fake):
         assert doc["git.useIntegratedAskPass"] is False
 
 
+# Dev Containers' own credential forwarders and the GitHub extension's git credential provider.
+_FORWARDERS_OFF = {
+    "dev.containers.gitCredentialHelperConfigLocation": "none",
+    "dev.containers.dockerCredentialHelper": False,
+    "dev.containers.copyGitConfig": False,
+    "dev.containers.githubCLILoginWithToken": False,
+    "github.gitAuthentication": False,
+}
+
+
+def test_the_credential_forwarders_are_switched_off_at_both_scopes(fake):
+    # Each of these hands a host credential (or the host's git config) to the box on attach.
+    # Pinned in the instance's own settings and in the attached config, beside the git bridge.
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    for doc in (json.loads(_settings(fake).read_text()), _written(fake)["settings"]):
+        assert {k: doc.get(k) for k in _FORWARDERS_OFF} == _FORWARDERS_OFF
+    custom = _written(fake)["customizations"]["vscode"]["settings"]
+    assert {k: custom.get(k) for k in _FORWARDERS_OFF} == _FORWARDERS_OFF
+
+
+def test_the_credential_pins_win_over_the_seed_an_edit_and_the_consumer(fake):
+    # Your own VS Code's settings (copied into a new instance), an edit in the instance, and the
+    # adopted `[vscode.settings]` can each say the opposite; the pins win over all three.
+    fake["state"]["running"] = True
+    flipped = {
+        "dev.containers.gitCredentialHelperConfigLocation": "global",
+        "dev.containers.dockerCredentialHelper": True,
+        "dev.containers.copyGitConfig": True,
+        "dev.containers.githubCLILoginWithToken": True,
+        "github.gitAuthentication": True,
+        "git.terminalAuthentication": True,
+        "git.useIntegratedAskPass": True,
+    }
+    _global(fake, json.dumps({**flipped, "editor.fontSize": 15}))
+    fake["vscode"]["settings"] = dict(flipped)
+    assert vscode.code() == 0
+    settings = json.loads(_settings(fake).read_text())
+    assert settings["editor.fontSize"] == 15  # the seed did happen
+    for doc in (settings, _written(fake)["settings"]):
+        assert {k: doc[k] for k in flipped} == {
+            **_FORWARDERS_OFF,
+            "git.terminalAuthentication": False,
+            "git.useIntegratedAskPass": False,
+        }
+    # …and on the next run, against an instance whose own file says the opposite.
+    _settings(fake).write_text(json.dumps(flipped))
+    assert vscode.code() == 0
+    settings = json.loads(_settings(fake).read_text())
+    assert {k: settings[k] for k in _FORWARDERS_OFF} == _FORWARDERS_OFF
+
+
+def test_vscode_is_launched_without_your_git_config(fake):
+    # Dev Containers' host side answers a `git-credential-helper get` on its in-box IPC socket by
+    # running `git credential fill` on your computer, in VS Code's own environment, consulting no
+    # setting. So the launched VS Code sees NO git config of yours: an empty global file foldyard
+    # owns, and no system layer (on macOS that is where Apple git names osxkeychain).
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    env = _launch(fake["calls"])[0]["env"]
+    empty = fake["udd"] / "fy-empty-gitconfig"
+    assert env["GIT_CONFIG_GLOBAL"] == str(empty)
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert empty.is_file()
+    assert empty.read_bytes() == b""
+
+
+def test_the_empty_gitconfig_is_emptied_again(fake, capsys):
+    # Nothing should ever write it; if something did (a `git config --global` from inside that
+    # VS Code), it would be the git config the credential fill reads. Emptied every launch.
+    fake["state"]["running"] = True
+    empty = fake["udd"] / "fy-empty-gitconfig"
+    empty.parent.mkdir(parents=True)
+    empty.write_text("[credential]\n\thelper = osxkeychain\n")
+    assert vscode.code() == 0
+    assert empty.read_bytes() == b""
+    assert str(empty) in capsys.readouterr().err
+
+
+def test_no_other_git_variable_reaches_the_launched_vscode(fake):
+    # GIT_CONFIG_COUNT/_KEY_n/_VALUE_n (or GIT_CONFIG_PARAMETERS) would put a credential.helper
+    # straight back past an empty global config, and GIT_ASKPASS names a program to ask. The launch
+    # env is clamped already; anything git-shaped that got into it (an adopted `compose_env` name,
+    # a stack default) is dropped for VS Code all the same.
+    fake["ctx"].env.update(
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "osxkeychain",
+            "GIT_ASKPASS": "/usr/local/bin/askpass",
+        }
+    )
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    env = _launch(fake["calls"])[0]["env"]
+    assert sorted(k for k in env if k.startswith("GIT_")) == [
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+    ]
+
+
+def test_vscode_is_launched_from_its_own_state_dir_not_your_checkout(fake, monkeypatch):
+    # The host-side credential fill runs in the extension host's working directory, and `fy code`
+    # is usually run from the checkout — whose `.git/config` the box can write. So the launch runs
+    # from the instance's own user-data-dir, and git may not search above it.
+    monkeypatch.chdir(fake["ctx"].main)
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    launch = _launch(fake["calls"])[0]
+    assert launch["cwd"] == str(fake["udd"])
+    # The PARENT, not the dir itself: git ignores a ceiling equal to its working directory.
+    assert launch["env"]["GIT_CEILING_DIRECTORIES"] == str(fake["udd"].parent)
+
+
+def _fill(env: dict, cwd: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "credential", "fill"],
+        input="protocol=https\nhost=github.com\n\n",
+        env={**env, "GIT_TERMINAL_PROMPT": "0"},
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_git_where_vscode_runs_finds_neither_a_repo_nor_a_helper(tmp_path):
+    # The real git, the way Dev Containers' host side runs it (`git credential fill`, prompts
+    # off), in the launch's working directory with the launch's env — under a repo whose config
+    # names a helper, as a checkout the box wrote (or a dotfiles repo at ~) would.
+    above = tmp_path / "above"
+    subprocess.run(["git", "init", "-q", str(above)], check=True)
+    helper = "!f() { echo username=u; echo password=pwned; }; f"
+    subprocess.run(["git", "-C", str(above), "config", "credential.helper", helper], check=True)
+    udd = above / "state" / "vscode" / "main"
+    gitconfig = vscode._empty_gitconfig(udd)
+    assert gitconfig is not None
+    # What else lives in a user-data-dir, so none of it makes the dir read as a repo itself.
+    (udd / "fy-empty-agent.sock").touch()
+    (udd / "User").mkdir()
+    (udd / "logs").mkdir()
+    env = vscode._launch_env({"PATH": os.environ["PATH"]}, "/nonexistent/a.sock", gitconfig, udd)
+
+    filled = _fill(env, udd)
+    assert filled.returncode != 0
+    assert "pwned" not in filled.stdout
+    found = subprocess.run(["git", "rev-parse", "--git-dir"], env=env, cwd=udd, capture_output=True)
+    assert found.returncode != 0
+    # The control: a ceiling AT the working directory is ignored, and the repo above answers.
+    leaky = _fill({**env, "GIT_CEILING_DIRECTORIES": str(udd)}, udd)
+    assert "password=pwned" in leaky.stdout
+
+
 def test_a_failed_harden_refuses_the_attach(fake, monkeypatch, capsys):
     # If the in-box hygiene can't be applied, attaching would forward host credentials into an
     # unguarded box — so it doesn't.
@@ -1057,17 +1237,26 @@ def test_the_engine_pin_wins_over_an_edit_in_the_instance(fake):
     assert settings["a"] == 1
 
 
-def test_an_unwritable_instance_settings_says_the_engine_pin_is_missing(fake, capsys):
-    # A `//` note in the instance's settings keeps foldyard from rewriting it — and the engine pin
-    # rides in that write, so the window would attach with `docker`. Said, with the value to set.
+def test_an_unwritable_instance_settings_refuses_rather_than_launching_unpinned(
+    fake, capsys, monkeypatch
+):
+    # The write itself failing (a read-only file, a full disk) is the same gap as a commented
+    # file: the pins ride in that write, so nothing launches without them.
     fake["state"]["running"] = True
-    _settings(fake).parent.mkdir(parents=True)
-    _settings(fake).write_text('{\n  // mine\n  "a": 1\n}\n')
-    assert vscode.code() == 0
+    target = _settings(fake)
+    real_write = Path.write_text
+
+    def write_text(self, *a, **k):
+        if self == target:
+            raise PermissionError(13, "Permission denied")
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    assert vscode.code() == 1
+    assert not _launch(fake["calls"])
     err = capsys.readouterr().err
-    assert "dev.containers.dockerPath isn't set either" in err
-    assert '"dev.containers.dockerPath": "/opt/homebrew/bin/podman"' in err
-    assert "// mine" in _settings(fake).read_text()
+    assert "Permission denied" in err
+    assert "not launching" in err
 
 
 def test_an_engine_cli_off_the_path_is_pinned_by_name(fake):
@@ -1216,6 +1405,9 @@ def test_the_seed_drops_settings_that_point_at_another_engine(fake):
     assert settings["terminal.integrated.env.windows"] == {}
     # The one engine setting the instance carries is foldyard's own pin, never the seed's value.
     assert settings.pop("dev.containers.dockerPath") == "/opt/homebrew/bin/podman"
+    # (foldyard's credential-forwarder pins are `dev.containers.*` too; not engine settings.)
+    for key, value in vscode._CREDENTIAL_BRIDGE_PINS.items():
+        assert settings.pop(key, value) == value
     assert not [k for k in settings if k.startswith(("dev.containers", "remote.containers"))]
     assert not [k for k in settings if k.startswith(("docker.", "containers."))]
 

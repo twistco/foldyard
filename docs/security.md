@@ -213,7 +213,9 @@ the box only the VM-boundary checks run. What it checks:
   own `ro` flag is one remount away for root in the VM. Inside the box, the box's own
   `/run/foldyard/to-box` must refuse a write too.
 - **Credential checks** (inside the box): no SSH agent forwarded, no git-credential bridge to your
-  computer (`GIT_ASKPASS`), no editor-attach bridge sockets in `/tmp`, no `~/.ssh` private keys,
+  computer (`GIT_ASKPASS`, or a git `credential.helper` that calls back through Dev Containers),
+  no editor-attach bridge sockets in `/tmp`, `/tmp/user/*`, `$XDG_RUNTIME_DIR` or `$TMPDIR`, no
+  `~/.ssh` private keys,
   no `~/.netrc`, and a dry-run push to `origin` (`git push --dry-run`, which sends nothing) is
   **refused** for lack of a credential — the push handshake needs write access, so this holds for a
   public origin too. These
@@ -272,9 +274,12 @@ Each row names *what* failed. What it usually means, and what to do:
     same causes as the probe-image row above.
   - `/run/foldyard/to-box took a write` (in the box) — the box's own bind isn't `:ro`: recreate
     the box (`fy box down && fy box up`).
-- **`SSH_AUTH_SOCK set` / `git-credential bridge to the host` / `editor-attach bridge sockets`**
-  — a VS Code attach forwarded your computer's credentials into the box. See
-  [below](#editor-attach-credential-bridges).
+- **`SSH_AUTH_SOCK set` / `git-credential bridge to the host` / `git has a credential helper that
+  asks the host` / `editor-attach bridge sockets`** — a VS Code attach forwarded your computer's
+  credentials into the box. See [below](#editor-attach-credential-bridges).
+- **`git credential helpers UNPROVEN`** — `git config` couldn't read the box's config (or timed
+  out), so verify can't say no helper calls back to your computer. Run
+  `git config --show-origin --get-regexp '^credential\..*helper$'` in the box to see why.
 - **`~/.ssh key material` / `~/.netrc present`** — a credential is in the box. foldyard doesn't
   put it there: find the mount or `[box]`/bootstrap step that copies it in, remove it, then
   `fy box down` and `fy box up`.
@@ -311,18 +316,48 @@ Each row names *what* failed. What it usually means, and what to do:
 #### Editor-attach credential bridges
 
 VS Code's Dev Containers attach (`fy code`, or a manual "Attach to Running Container") runs its
-server in the box and, by default, forwards your computer's SSH agent
-(`/tmp/vscode-ssh-auth-*.sock`) and git credentials (`GIT_ASKPASS` over `/tmp/vscode-git-*.sock`)
-into every terminal it opens. foldyard blocks both:
+server in the box and, by default, opens several channels back to your computer:
+
+- your SSH agent (`vscode-ssh-auth-*.sock`), forwarded into every terminal;
+- the git extension's askpass (`GIT_ASKPASS` over `vscode-git-*.sock`), which for github.com hands
+  over the GitHub session VS Code is signed in with;
+- Dev Containers' own IPC (`vscode-remote-containers-ipc-*.sock`). Its host side runs
+  `git credential fill` and the Docker credential helpers on your computer for whatever asks,
+  without consulting any setting. By default it also writes a `credential.helper` into the box's
+  `~/.gitconfig` that calls it;
+- the `code` CLI's IPC (`VSCODE_IPC_HOOK_CLI` over `vscode-ipc-*.sock`), which drives the
+  host's VS Code, including opening URLs there — a way around the egress proxy.
+
+Settings only switch off the *container* end of these: a process that finds a socket can still
+ask the host directly. So `fy code` removes the credentials at the source where it can, and treats
+the rest as defaults:
 
 - **SSH:** `fy code` starts VS Code with foldyard's own *empty* ssh-agent, so there is nothing to
   forward.
-- **Git:** `fy code` turns `git.terminalAuthentication` and `git.useIntegratedAskPass` off, but
-  `.vscode/settings.json` in the repo can turn them back on, and `fy verify` fails a checkout that
-  does (`workspace settings re-enable the git-credential bridge`).
+- **Git, on your computer:** `fy code` starts VS Code with an empty git config
+  (`GIT_CONFIG_GLOBAL` pointing at an empty file, `GIT_CONFIG_NOSYSTEM=1`, the rest of `GIT_*`
+  dropped), so the host side of Dev Containers' IPC finds no credential helper to run — not your
+  `~/.gitconfig`'s, nor the Xcode gitconfig's `osxkeychain`. VS Code is also started from the
+  instance's own state directory, with `GIT_CEILING_DIRECTORIES` above it, never from your
+  checkout: the checkout's `.git/config` is writable from the box, and a `credential.helper =
+  !cmd` there would otherwise run on your computer. The instance's local terminals get
+  your git config back. Each worktree's instance is also a fresh VS Code profile with no GitHub
+  sign-in; signing in there (for Copilot, say) gives the askpass socket a token to hand out again.
+- **Settings:** `fy code` pins, at user and machine scope, `git.terminalAuthentication` and
+  `git.useIntegratedAskPass` off, `github.gitAuthentication` off, and
+  `dev.containers.gitCredentialHelperConfigLocation` to `"none"`, with
+  `dev.containers.dockerCredentialHelper`, `copyGitConfig` and `githubCLILoginWithToken` off. If
+  the instance's own `settings.json` can't be rewritten (comments, invalid JSON), `fy code`
+  refuses to launch rather than run unpinned. `.vscode/settings.json` in the repo can turn the
+  `git.*` and `github.*` keys back on, and `fy verify` fails a checkout that does
+  (`workspace settings re-enable the git-credential bridge`).
 - **In the box:** `~/.config/foldyard/harden.sh`, sourced on the first line of `~/.bashrc`,
-  unsets the bridge variables in every bash shell and starts a reaper that deletes the sockets as
-  they appear. This also covers a manual attach that didn't go through `fy code`.
+  unsets the bridge variables in every bash shell and starts a reaper that deletes all four kinds
+  of socket as they appear, in `/tmp`, `/tmp/user/*`, `$XDG_RUNTIME_DIR` and `$TMPDIR`. A box
+  still running an older reaper gets the new one the next time `harden.sh` runs. This also covers
+  a manual attach that didn't go through `fy code`, but it is a mitigation, not a wall: a
+  process already in the box can watch for a socket and hard-link it before the reaper's next
+  pass. That's why the credentials are removed on your computer first.
 
 If a row still fails:
 

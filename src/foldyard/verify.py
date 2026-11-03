@@ -156,10 +156,17 @@ _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # (asserted beside it) that absence is the refusal — no credential can travel a transport that
 # does not exist — not an "unreachable for network reasons" that leaves the claim unproven.
 # The env an editor attach sets so the box's git asks the HOST for credentials — a push path over
-# HTTPS the same way a forwarded agent is over SSH. And the sockets it drops in /tmp, which are
-# reachable by path regardless of the env: the agent proxy and the git-IPC the askpass goes over.
+# HTTPS the same way a forwarded agent is over SSH. And the sockets it drops, which are reachable
+# by path regardless of the env (below). The workspace settings that turn VS Code's credential
+# paths back on: the git extension's askpass, and the GitHub extension's silent session token —
+# `fy code` pins them off at user + machine scope (vscode._GIT_BRIDGE_PINS — keep the two in step),
+# but `.vscode/settings.json` outranks both.
 _GIT_BRIDGE_VARS = ("GIT_ASKPASS", "VSCODE_GIT_IPC_HANDLE", "VSCODE_GIT_ASKPASS_MAIN")
-_GIT_BRIDGE_SETTINGS = ("git.terminalAuthentication", "git.useIntegratedAskPass")
+_GIT_BRIDGE_SETTINGS = (
+    "git.terminalAuthentication",
+    "git.useIntegratedAskPass",
+    "github.gitAuthentication",
+)
 
 
 def _workspace_rearms_git_bridge(settings: Path) -> list[str]:
@@ -173,8 +180,33 @@ def _workspace_rearms_git_bridge(settings: Path) -> list[str]:
     return [k for k in _GIT_BRIDGE_SETTINGS if re.search(rf'"{re.escape(k)}"\s*:\s*true\b', text)]
 
 
+# The attach's sockets: the SSH agent, the git askpass IPC, Dev Containers' own IPC (its host side
+# runs `git credential fill` and the docker credential helpers for any caller) and the `code` CLI's
+# IPC (drives the host's VS Code — URL opens too, around the proxy). The same names box.py's reaper
+# unlinks (box._BRIDGE_SOCKET_GLOBS; a test pins the two equal), in the same places: /tmp, the
+# per-user /tmp/user/<uid>/, $XDG_RUNTIME_DIR, $TMPDIR.
 _BRIDGE_SOCKET_DIR = Path("/tmp")
-_BRIDGE_SOCKET_GLOBS = ("vscode-ssh-auth-*.sock", "vscode-git-*.sock")
+_BRIDGE_SOCKET_GLOBS = (
+    "vscode-ssh-auth-*.sock",
+    "vscode-git-*.sock",
+    "vscode-remote-containers-ipc-*.sock",
+    "vscode-ipc-*.sock",
+)
+
+
+def _bridge_socket_dirs() -> list[Path]:
+    """Every directory an attach's bridge socket can land in, as the box's own env names them."""
+    dirs = [_BRIDGE_SOCKET_DIR, *sorted(_BRIDGE_SOCKET_DIR.glob("user/*"))]
+    dirs += [Path(v) for k in ("XDG_RUNTIME_DIR", "TMPDIR") if (v := os.environ.get(k))]
+    return list(dict.fromkeys(dirs))  # $TMPDIR is often /tmp itself: read it once
+
+
+# A git credential helper that asks the HOST: what Dev Containers writes into the box's git config
+# (`!f() { <node> /tmp/vscode-remote-containers-<id>.js git-credential-helper $*; }; f`) unless
+# dev.containers.gitCredentialHelperConfigLocation is "none". Any key shape (`credential.helper`,
+# `credential.<url>.helper`), matched on the script's name or on its subcommand.
+_HOST_CRED_HELPER_KEYS = r"^credential\..*helper$"
+_HOST_CRED_HELPER = re.compile(r"vscode-remote-containers|git-credential-helper")
 _GIT_NO_SSH = re.compile(r"cannot run ssh|ssh: (command )?not found", re.I)
 _GIT_NO_ORIGIN = re.compile(r"'origin' does not appear to be a git repository", re.I)
 _GIT_AUTH_DENIED = re.compile(
@@ -414,6 +446,47 @@ def _kernel_release() -> str:
     return os.uname().release
 
 
+def _host_credential_helper(rep: _Report, checkout: Path) -> None:
+    """No git credential helper the box's git would run asks the HOST. Read the way that git
+    reads it — in the checkout (local + worktree config), no scope flag (system, global, XDG), the
+    box's own env (``GIT_CONFIG_*``) — so every scope it would consult is covered. Not covered by
+    the push probe: that runs with ``REMOTE_CONTAINERS_IPC`` unset (harden.sh scrubs it), so the
+    helper fails there and the push reads as refused — yet any process can point the variable
+    back at Dev Containers' socket while one exists. The entry is the arming; this row finds it."""
+    try:
+        got = subprocess.run(
+            [
+                "git", "-C", str(checkout), "config", "--show-origin",
+                "--get-regexp", _HOST_CRED_HELPER_KEYS,
+            ],
+            env=dict(os.environ),
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )  # fmt: skip
+    except subprocess.TimeoutExpired:
+        rep.bad("git credential helpers UNPROVEN — reading the box's git config timed out")
+        return
+    if got.returncode not in (0, 1):  # 1 = no such key; anything else read nothing
+        why = (got.stderr or "").strip().splitlines()
+        rep.bad(
+            "git credential helpers UNPROVEN — `git config` could not read the box's config "
+            f"({why[-1] if why else f'exit {got.returncode}'})"
+        )
+        return
+    hits = [ln for ln in (got.stdout or "").splitlines() if _HOST_CRED_HELPER.search(ln)]
+    if not hits:
+        rep.ok("no git credential helper asks the host (credential.*helper)")
+        return
+    origins = sorted({ln.split("\t", 1)[0].removeprefix("file:") for ln in hits})
+    rep.bad(
+        f"git has a credential helper that asks the host, in {' '.join(origins)} — Dev Containers "
+        'writes it on attach unless dev.containers.gitCredentialHelperConfigLocation is "none" '
+        "(`fy code` pins it); remove it: git config --file <that file> --unset-all "
+        "credential.helper vscode-remote-containers"
+    )
+
+
 def _box_posture(rep: _Report, env: dict) -> None:
     print("▶ dev-box checks (credential-less: read+commit, never push)")
     home = Path(os.environ.get("HOME") or str(Path.home()))
@@ -444,24 +517,27 @@ def _box_posture(rep: _Report, env: dict) -> None:
         rep.ok("no git-credential bridge to the host (GIT_ASKPASS unset)")
     else:
         rep.bad(f"git-credential bridge to the host: {' '.join(bridged)} set (an editor attach's)")
-    # The sockets themselves, not just the vars: a socket left in /tmp is usable by PATH, so an
+    checkout_dir = Path(env.get("FOLDYARD_CHECKOUT") or str(stack.main_repo()))
+    _host_credential_helper(rep, checkout_dir)
+    # The sockets themselves, not just the vars: a socket left behind is usable by PATH, so an
     # unset var is hygiene and a missing socket is the boundary.
-    socks = sorted(p.name for g in _BRIDGE_SOCKET_GLOBS for p in _BRIDGE_SOCKET_DIR.glob(g))
+    dirs = _bridge_socket_dirs()
+    socks = sorted(str(p) for d in dirs for g in _BRIDGE_SOCKET_GLOBS for p in d.glob(g))
+    where = ", ".join(str(d) for d in dirs)
     if not socks:
-        rep.ok(f"no editor-attach bridge sockets in {_BRIDGE_SOCKET_DIR}")
+        rep.ok(f"no editor-attach bridge sockets ({where})")
     else:
         rep.bad(
-            f"editor-attach bridge sockets in {_BRIDGE_SOCKET_DIR}: {' '.join(socks)} — usable "
-            "by path even with the vars unset (foldyard's reaper removes these; a box shell "
-            "restarts it)"
+            f"editor-attach bridge sockets: {' '.join(socks)} — usable by path even with the "
+            "vars unset (foldyard's reaper removes these; a box shell restarts it)"
         )
 
-    # `fy code` pins the git bridge OFF (git.terminalAuthentication / useIntegratedAskPass) at
-    # user + machine scope — but WORKSPACE settings win, and `.vscode/settings.json` is mount
-    # data the box can write. A checkout flipping either back on is asking VS Code to hand its
-    # git a host credential: the in-box unset + reaper still neutralise it (with their window),
-    # so this is the row that says the mount is trying.
-    checkout_dir = Path(env.get("FOLDYARD_CHECKOUT") or str(stack.main_repo()))
+    # `fy code` pins VS Code's credential paths OFF (git.terminalAuthentication /
+    # useIntegratedAskPass, github.gitAuthentication) at user + machine scope — but WORKSPACE
+    # settings win, and `.vscode/settings.json` is mount data the box can write. A checkout
+    # flipping one back on is asking VS Code to hand its git a host credential: the in-box unset +
+    # reaper still neutralise it (with their window), so this is the row that says the mount is
+    # trying.
     rearmed = _workspace_rearms_git_bridge(checkout_dir / ".vscode" / "settings.json")
     if not rearmed:
         rep.ok("workspace settings leave the git-credential bridge off")
