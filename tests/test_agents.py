@@ -39,6 +39,7 @@ def test_start_argv_sets_posture_before_the_session_and_tags_it():
     assert commands[0] == "start-server"
     assert "set-option -g allow-passthrough off" in commands
     assert "set-option -s set-clipboard external" in commands
+    assert "set-option -s focus-events on" in commands
     new = next(i for i, c in enumerate(commands) if c.startswith("new-session"))
     # Every option lands before the session exists, so the agent never runs without them.
     assert all(c.startswith("set-option -") for c in commands[1:new])

@@ -69,9 +69,11 @@ _SERVER_OPTIONS: tuple[tuple[str, ...], ...] = (
     ("set-option", "-s", "set-clipboard", "external"),
     # Papercuts: Esc interrupts Claude, so no half-second wait on it (tmux < 3.5 defaults to
     # 500 ms); Shift-Enter reaches the agent as its own key; the newest client sets the size, so a
-    # second attach doesn't shrink the first; scrollback worth scrolling.
+    # second attach doesn't shrink the first; scrollback worth scrolling; focus in/out reaches
+    # the agent (Claude Code tracks it, and says so when tmux swallows it — off by default).
     ("set-option", "-s", "escape-time", "10"),
     ("set-option", "-s", "extended-keys", "on"),
+    ("set-option", "-s", "focus-events", "on"),
     ("set-option", "-g", "window-size", "latest"),
     ("set-option", "-g", "history-limit", "50000"),
     # An agent that exits leaves its pane, so `fy agent attach` can show why and `ls` says so.

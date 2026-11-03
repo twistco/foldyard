@@ -86,7 +86,8 @@ that asks before letting a program set the clipboard.
 
 tmux older than 3.3 passes escape sequences through whatever the first setting says, so
 `fy agent start` refuses it. The rest of the settings are papercuts: no delay after Esc (which
-interrupts Claude), Shift-Enter, the window size and a 50,000-line scrollback.
+interrupts Claude), Shift-Enter, the window size, focus events (so Claude knows when its pane
+gains or loses focus) and a 50,000-line scrollback.
 
 ## Your own box image
 
