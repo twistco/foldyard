@@ -4,8 +4,9 @@ posture, whatever credential the box might be holding.
 Git's smart-HTTP push is ``GET <repo>/info/refs?service=git-receive-pack`` then
 ``POST <repo>/git-receive-pack``; a fetch is the same with ``git-upload-pack``. So the proxy tells
 a push from a fetch by the URL alone, on any host, and answers it with a 403 that names the fix —
-unless the host-side live file says a push-capable mode is on (``allow_push``). Drives the REAL
-addon over the stubbed mitmproxy of test_proxy_inject."""
+except on the hosts the host-side live file names in ``push_hosts`` — where a push-capable
+credential is being injected right now. Drives the REAL addon over the stubbed mitmproxy of
+test_proxy_inject."""
 
 from __future__ import annotations
 
@@ -24,10 +25,7 @@ _Resp = t._Resp
 _write_live = t._write_live
 _rows = t._rows
 
-PUSH_REFUSED = (
-    b"refused by the foldyard proxy - the box doesn't push; push from your computer"
-    b" (or turn on a mode that allows it)\n"
-)
+PUSH_REFUSED = b"refused by the foldyard proxy - the box doesn't push; push from your computer\n"
 
 
 # ── the matcher ─────────────────────────────────────────────────────────────────────────────
@@ -51,12 +49,21 @@ PUSH_REFUSED = (
         "/acme/app.git/info/refs?SERVICE=git-receive-pack",
         "/acme/app.git/info/refs?service=%20git-receive-pack%20",
         "/scm/proj/app.git/git-receive-pack;jsessionid=1",  # path parameters (servlet containers)
+        "/scm/proj/app.git/git-receive-pack/;jsessionid=1",  # …on an empty trailing segment
         "/acme/app.git/info/refs;x=1?service=git-receive-pack",
         "/acme/app.git/info/refs?x=1;service=git-receive-pack",  # `;` as a query separator
         "/acme/app.git/git-receive-pack/",  # trailing-slash matching (Spring MVC before 6)
         "/acme/app.git/git-receive-pack//",
         "/acme/app.git\\git-receive-pack",  # a backslash, which IIS reads as a slash
         "/acme/app.git%2Fgit-receive-pack",  # an encoded slash, as decoded
+        # Dot segments, which servlet containers and IIS resolve before routing (review on #160):
+        "/acme/app.git/git-receive-pack/.",
+        "/acme/app.git/git-receive-pack/x/..",
+        "/a/./git-receive-pack",
+        "/a;p/git-receive-pack;q/./",  # `;params` cut from every segment, then the dots resolved
+        "/acme/app.git/info/refs/./?service=git-receive-pack",
+        "/../../git-receive-pack",  # `..` past the root stays at the root
+        "/acme/app.git/x;y/../git-receive-pack",  # a param on the segment `..` removes
     ],
 )
 def test_a_git_push_is_recognised(gh, path):
@@ -78,8 +85,14 @@ def test_a_git_push_is_recognised(gh, path):
         "/acme/app.git/info/refs?service=git-receive-pack-x",
         "/acme/git-receive-pack;x/readme",  # a path parameter on a NON-final segment
         "/acme/app.git/GIT-UPLOAD-PACK",  # a fetch, in any spelling
+        "/git-receive-pack/..",  # resolves to the PARENT: the root, not receive-pack
+        "/acme/git-receive-pack/../app.git/git-upload-pack",
+        "/acme/git-upload-pack/.",  # a fetch, dots and all
+        "/acme/git-receive-pack/../../",
         "/",
         "",
+        ".",
+        "..",
     ],
 )
 def test_anything_else_is_not_a_push(gh, path):
@@ -88,8 +101,10 @@ def test_anything_else_is_not_a_push(gh, path):
 
 def test_a_path_that_parses_as_an_authority_is_still_judged_by_its_end(gh):
     # urlsplit would read `//git-receive-pack` as a netloc with an empty path — a miss. The
-    # matcher splits on `?` itself.
+    # matcher splits on `?` itself. (normpath keeps a leading `//`, and a `//x/..` too.)
     assert gh.module._is_git_push("//git-receive-pack") is True
+    assert gh.module._is_git_push("//git-receive-pack/.") is True
+    assert gh.module._is_git_push("//git-receive-pack/..") is False
 
 
 # ── the hook ────────────────────────────────────────────────────────────────────────────────
@@ -160,8 +175,8 @@ async def test_a_fetch_goes_through(live):
     assert _rows(live.log) == []  # logged on the way back, like any request
 
 
-async def test_allow_push_lets_a_push_through_and_says_so_on_the_response(live):
-    _write_live(live.live, allow_push=True)
+async def test_a_push_host_lets_a_push_through_and_says_so_on_the_response(live):
+    _write_live(live.live, push_hosts=["github.com"])
     inj = live.Injector()
     flow = _push()
     await inj.requestheaders(flow)
@@ -177,7 +192,7 @@ async def test_allow_push_lets_a_push_through_and_says_so_on_the_response(live):
 
 
 async def test_the_allowed_header_is_only_on_a_push(live):
-    _write_live(live.live, allow_push=True)
+    _write_live(live.live, push_hosts=["github.com"])
     inj = live.Injector()
     flow = _push(path="/acme/app.git/git-upload-pack")
     await inj.requestheaders(flow)
@@ -187,18 +202,87 @@ async def test_the_allowed_header_is_only_on_a_push(live):
     assert "x-foldyard-push" not in flow.response.headers
 
 
+async def test_the_lift_is_only_on_the_push_hosts(live):
+    # The operator's token reaches only the hosts its rule injects on, so that is where the
+    # refusal lifts: a credential smuggled into the box can't push anywhere else meanwhile.
+    _write_live(live.live, push_hosts=["api.github.com"])
+    inj = live.Injector()
+    for host in ("github.com", "gitlab.com", "bitbucket.org", "git.example.com"):
+        flow = _push(host)
+        await inj.requestheaders(flow)
+        assert _refused(flow), host
+    lifted = _push("api.github.com")
+    await inj.requestheaders(lifted)
+    assert lifted.response is None
+    assert all(r["push"] for r in _rows(live.log))  # the four refusals, each its own row
+
+
+async def test_the_lift_is_judged_on_the_destination(live, gh):
+    # The destination is normalised as for the rules: case and a trailing root dot don't matter...
+    _write_live(live.live, push_hosts=["github.com"])
+    inj = live.Injector()
+    flow = _push("GitHub.com.")
+    await inj.requestheaders(flow)
+    assert flow.response is None
+    # ...and a Host header naming a push host doesn't lift it elsewhere (refused as a mismatch,
+    # before the push check ever reads a host).
+    named = _push("gitlab.com", claimed="github.com")
+    await inj.requestheaders(named)
+    assert named.response is not None and named.response.status_code == 403
+    assert named.response.content == gh.module._MISMATCH_BODY
+
+
+@pytest.mark.parametrize(
+    ("dest", "host"),
+    [
+        ("api.github.com", "api.github.com"),
+        ("github.com", "api.github.com"),
+        ("api.github.com", "github.com"),
+        ("api.github.com", "*.github.com"),  # the rules name one host: no wildcard form
+        ("x.api.github.com", "api.github.com"),
+        ("api.github.com", "API.github.com"),  # as the rule's spelling: matched exactly
+    ],
+)
+async def test_the_lift_matches_hosts_exactly_as_injection_does(live, gh, dest, host):
+    # One matcher for both: a host a rule wouldn't inject on is never a host the lift covers.
+    rule = gh.module._Rule({"host": host, "command": "true"})
+    injects = rule.matches(dest, "/acme/app.git/git-receive-pack")
+    _write_live(live.live, push_hosts=[host])
+    inj = live.Injector()
+    flow = _push(dest)
+    await inj.requestheaders(flow)
+    assert (flow.response is None) is injects
+
+
 @pytest.mark.parametrize(
     "live_data",
     [
-        {},  # absent: the field predates nothing — absence is "no push-capable mode"
-        {"allow_push": False},
-        {"allow_push": "true"},  # only a JSON true lifts it
-        {"allow_push": 1},
-        {"allow_push": None},
+        {},  # absent: no push-capable credential is being injected
+        {"push_hosts": []},
+        {"push_hosts": "github.com"},  # a string, not a list
+        {"push_hosts": {"github.com": True}},
+        {"push_hosts": None},
+        {"push_hosts": ["github.com", 1]},  # one bad entry: the whole field is distrusted
+        {"push_hosts": ["github.com", ""]},
+        {"push_hosts": ["github.com", None]},
+        {"push_hosts": [["github.com"]]},
+        # An old supervisor's boolean lifted the refusal on every host. It lifts nothing now.
+        {"allow_push": True},
     ],
-    ids=["absent", "false", "string", "one", "null"],
+    ids=[
+        "absent",
+        "empty",
+        "string",
+        "object",
+        "null",
+        "number-entry",
+        "empty-entry",
+        "null-entry",
+        "nested",
+        "old-allow-push",
+    ],
 )
-async def test_anything_but_a_literal_true_refuses(live, live_data):
+async def test_anything_but_a_list_of_hosts_refuses_everywhere(live, live_data):
     live.live.write_text(json.dumps({"rules": [], "default_deny": False, **live_data}))
     inj = live.Injector()
     flow = _push()
@@ -219,16 +303,16 @@ async def test_an_unreadable_live_file_refuses_pushes(live):
     assert _refused(again)
 
 
-async def test_allow_push_switches_live_both_ways(live):
+async def test_the_push_hosts_switch_live_both_ways(live):
     inj = live.Injector()
     first = _push()
     await inj.requestheaders(first)
     assert _refused(first)
-    _write_live(live.live, allow_push=True)
+    _write_live(live.live, push_hosts=["github.com"])
     second = _push()
     await inj.requestheaders(second)
     assert second.response is None  # the next request, same process: lifted
-    _write_live(live.live, allow_push=False)
+    _write_live(live.live, push_hosts=[])
     third = _push()
     await inj.requestheaders(third)
     assert _refused(third)  # and back, with no restart
@@ -261,9 +345,9 @@ async def test_a_push_in_a_tunnel_the_proxy_answered_owes_no_connect_row(live):
     assert [r["method"] for r in _rows(live.log)] == ["POST"]
 
 
-async def test_with_allow_push_a_push_still_meets_the_wall(live, gh):
+async def test_on_a_push_host_a_push_still_meets_the_wall(live, gh):
     # Lifting the push refusal is not a grant: an ungranted host is refused by the allowlist.
-    _write_live(live.live, default_deny=True, allow_push=True)
+    _write_live(live.live, default_deny=True, push_hosts=["git.example.com"])
     inj = live.Injector()
     flow = _push("git.example.com")
     await inj.requestheaders(flow)
@@ -276,17 +360,26 @@ async def test_with_allow_push_a_push_still_meets_the_wall(live, gh):
     assert flow.response.headers["x-foldyard-push"] == "allowed by the active mode"
 
 
-async def test_without_a_live_file_pushes_are_refused_unless_allow_push(gh, monkeypatch, tmp_path):
-    # The standalone addon (no LIVE_FILE): refused by default too; ALLOW_PUSH=1 lifts it.
+async def test_without_a_live_file_pushes_are_refused_off_the_push_hosts(gh, monkeypatch, tmp_path):
+    # The standalone addon (no LIVE_FILE): refused by default too; PUSH_HOSTS lifts it on the
+    # hosts it lists, and only there. The old ALLOW_PUSH=1 lifts nothing.
     monkeypatch.setenv("INJECT_HOST", "")
     monkeypatch.setenv("INJECT_COMMAND", "")
     monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
     monkeypatch.delenv("LIVE_FILE", raising=False)
+    monkeypatch.delenv("PUSH_HOSTS", raising=False)
     flow = _push()
     await gh.Injector().requestheaders(flow)
     assert _refused(flow)
     monkeypatch.setenv("ALLOW_PUSH", "1")
     flow = _push()
+    await gh.Injector().requestheaders(flow)
+    assert _refused(flow)
+    monkeypatch.setenv("PUSH_HOSTS", "gitlab.com,git.example.com")
+    flow = _push()
+    await gh.Injector().requestheaders(flow)
+    assert _refused(flow)
+    flow = _push("git.example.com")
     await gh.Injector().requestheaders(flow)
     assert flow.response is None
 

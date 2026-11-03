@@ -533,17 +533,20 @@ def _write_local_terminal_cwd(
     terminal_env[_LOCAL_TERMINAL_CWD_ENV] = str(host_checkout)
     terminal_env[_ORIGINAL_ZDOTDIR_ENV] = original_zdotdir or ""
     # A local terminal is your own shell on your computer: undo the launch's empty git config
-    # (:data:`_GIT_CONFIG_LAUNCH_ENV`) there. `null` is VS Code's "unset this variable". VS Code
-    # applies only the key for the host's platform, so a Linux host needs it in `.linux` too (the
-    # zsh shims above stay macOS-only). Unlike `.osx`, `.linux` is NOT local-only: VS Code picks the
-    # key by the OS the terminal runs on, so the attached window's BOX terminals read it too. Put
-    # only unsets there that are harmless in the box — never a host path or socket.
+    # (:data:`_GIT_CONFIG_LAUNCH_ENV`) there. `null` is VS Code's "unset this variable".
     terminal_env.update(dict.fromkeys(_GIT_CONFIG_LAUNCH_ENV))
     settings[_TERMINAL_ENV_OSX] = terminal_env
-    settings[_TERMINAL_ENV_LINUX] = {
-        **{str(key): value for key, value in loaded_linux_env.items()},
-        **dict.fromkeys(_GIT_CONFIG_LAUNCH_ENV),
-    }
+    # VS Code applies only the key for the OS a terminal RUNS on, so a Linux host's local terminals
+    # need the unset in `.linux` (the zsh shims above stay macOS-only). But `.linux` is not
+    # local-only: the attached window's BOX terminals read it too, and `[box].env` may set
+    # GIT_CONFIG_GLOBAL there. So it's written only on a Linux host, where the trade-off is
+    # unavoidable (box terminals lose a `[box].env` git config override), and left alone on macOS.
+    # Never put a host path or socket there.
+    if sys.platform.startswith("linux"):
+        settings[_TERMINAL_ENV_LINUX] = {
+            **{str(key): value for key, value in loaded_linux_env.items()},
+            **dict.fromkeys(_GIT_CONFIG_LAUNCH_ENV),
+        }
     # This is the one writer of the isolated instance's settings.json, so the instance pins ride
     # along with it rather than racing a second read-modify-write of the same file.
     settings = _pinned_settings(settings, engine_cli)

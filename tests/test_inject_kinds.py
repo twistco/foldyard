@@ -214,7 +214,7 @@ def test_kind_rules_flow_into_the_proxy_daemon(monkeypatch):
     assert rule["env"] == ["FY_INJECT_GITHUB"]
 
 
-# ── allow_push: which credential lifts the proxy's git-push refusal ───────────────────
+# ── push_hosts: which credential lifts the proxy's git-push refusal, and where ─────────
 
 
 def test_only_the_gh_cli_kind_grants_push(monkeypatch):
@@ -235,20 +235,28 @@ def test_a_row_cannot_claim_push_by_config(monkeypatch):
         _plugin(monkeypatch, [{**_APP, "grants_push": True}]).switches()
 
 
-def _allow_push(reg: Registry, mode: dict) -> object:
-    return reg.desired_daemons(mode)["egress-proxy"]["live"]["data"]["allow_push"]
+def _push_hosts(reg: Registry, mode: dict) -> object:
+    data = reg.desired_daemons(mode)["egress-proxy"]["live"]["data"]
+    assert "allow_push" not in data  # the old every-host boolean is gone
+    return data["push_hosts"]
 
 
-def test_the_live_file_allows_push_exactly_while_a_push_capable_switch_injects(monkeypatch):
-    reg = Registry([_plugin(monkeypatch, [_APP, _USER]), proxy.ProxyPlugin()])
-    assert _allow_push(reg, {}) is False  # at rest
-    assert _allow_push(reg, {"github": "on"}) is False  # an App token: still refused
-    assert _allow_push(reg, {"github-user": "on"}) is True  # the emergency switch
-    assert _allow_push(reg, {"github-user": "off"}) is False  # and back
+def test_the_live_file_names_the_push_hosts_exactly_while_a_push_capable_switch_injects(
+    monkeypatch,
+):
+    static = {"switch": "svc", "host": "api.svc.test"}
+    reg = Registry([_plugin(monkeypatch, [_APP, _USER, static]), proxy.ProxyPlugin()])
+    assert _push_hosts(reg, {}) == []  # at rest
+    assert _push_hosts(reg, {"github": "on"}) == []  # an App token: still refused
+    assert _push_hosts(reg, {"svc": "on"}) == []  # a static token: refused too
+    # The emergency switch: the lift is where ITS token goes, spelled as its rule's host — not
+    # every host the proxy decrypts (review on #160).
+    assert _push_hosts(reg, {"github-user": "on", "svc": "on"}) == ["api.github.com"]
+    assert _push_hosts(reg, {"github-user": "off"}) == []  # and back
     # Both on claim the same host and path with nothing to tell them apart, so the proxy holds
     # both back (Registry.injecting_rules): the push-capable token isn't delivered, and pushes
     # stay refused. (`fy mode` reports the overlap as an error with its fix.)
-    assert _allow_push(reg, {"github": "on", "github-user": "on"}) is False
+    assert _push_hosts(reg, {"github": "on", "github-user": "on"}) == []
 
 
 # ── box_env: the dummies the box holds ────────────────────────────────────────────────

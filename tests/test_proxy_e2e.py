@@ -585,13 +585,31 @@ def test_fy_verify_reads_the_refusal_and_the_proxy_certificate(proxy, monkeypatc
     assert answer.body.decode().startswith(verify._PUSH_REFUSED)
 
 
-def test_with_allow_push_the_push_goes_through_and_says_so(tmp_path, monkeypatch):
+def test_on_a_push_host_the_push_goes_through_and_says_so(tmp_path, monkeypatch):
     from foldyard import verify
 
-    with _running_proxy(tmp_path, _MINTER, env={"ALLOW_PUSH": "1"}) as proxy:
+    with _running_proxy(tmp_path, _MINTER, env={"PUSH_HOSTS": f"other.example,{HOST}"}) as proxy:
         monkeypatch.setattr(verify, "_PUSH_PROBE_HOST", HOST)
         monkeypatch.setattr(verify, "_PUSH_PROBE_PORT", proxy.uport)
         monkeypatch.setenv("SSL_CERT_FILE", str(proxy.ca))
         answer = verify._probe_push(HOST, proxy.pport)
     # The echo upstream answered (200), and the proxy marked it allowed by the mode.
     assert answer.status == 200 and answer.allowed is True and answer.decrypted is True
+
+
+def test_off_the_push_hosts_the_push_is_still_refused_while_the_lift_is_on(tmp_path, monkeypatch):
+    # The lift is where the push-capable credential is injected, never every host: a credential
+    # smuggled into the box can't push to another host while the emergency switch is on. (The old
+    # every-host ALLOW_PUSH=1 lifts nothing any more.)
+    from foldyard import verify
+
+    env = {"PUSH_HOSTS": "api.github.com,other.example", "ALLOW_PUSH": "1"}
+    with _running_proxy(tmp_path, _MINTER, env=env) as proxy:
+        monkeypatch.setattr(verify, "_PUSH_PROBE_HOST", HOST)
+        monkeypatch.setattr(verify, "_PUSH_PROBE_PORT", proxy.uport)
+        monkeypatch.setenv("SSL_CERT_FILE", str(proxy.ca))
+        answer = verify._probe_push(HOST, proxy.pport)
+        rows = [e for e in _log_entries(proxy.log) if e.get("push")]
+    assert answer.status == 403 and answer.allowed is False and answer.decrypted is True
+    assert answer.body.decode().startswith(verify._PUSH_REFUSED)
+    assert rows and rows[0]["blocked"] is True

@@ -204,12 +204,18 @@ credential rides along: git's smart-HTTP push is a `GET …/info/refs?service=gi
 then a `POST …/git-receive-pack`, and the proxy answers either with a `403` that git shows as
 `remote: refused by the foldyard proxy - the box doesn't push …`. It does this on any host, not
 just GitHub, and logs a blocked row (`fy allow` doesn't offer it: no grant lets a push through).
-Fetches are untouched. Two limits: it is git's protocol only — a write through an API
+Fetches are untouched. It recognises those two URLs in the spellings a server still routes to
+receive-pack (case, `;params`, trailing and dot segments, backslashes), but a server that exposes
+push under some other URL altogether — a custom CGI gateway, say — isn't covered. Two more limits:
+it is git's protocol only — a write through an API
 (`api.github.com`'s contents or refs endpoints) is the injected credential's own scope, as above —
 and the proxy can't see inside a [`passthrough`](./networking.md) tunnel, so a push to a host
 listed there isn't refused (`fy config widenings` names the well-known git hosts that are). The
 refusal lifts while a mode that can push is on — today the emergency `gh-cli` switch ("push
-possible") — and comes back when it turns off.
+possible") — but only on the hosts that switch injects its token on (`api.github.com` for
+`gh-cli`), and comes back when it turns off. Everywhere else a push is still refused while it is
+on: a credential that reached the box some other way can't use the switch to push to GitLab,
+Bitbucket or even `github.com`.
 
 ## `fy verify`: prove it, don't trust it
 
@@ -238,8 +244,10 @@ the box only the VM-boundary checks run. What it checks:
   are built into foldyard's core, so a missing or broken plugin can't weaken them.
 - **Push refusal** (inside a box that routes through the proxy): a push's first request
   (`GET https://github.com/…/info/refs?service=git-receive-pack`) sent through the box's proxy must
-  come back as the proxy's own `403`. While a push-capable mode is on the row says so instead of
-  passing or failing; a `github.com` tunnelled blind by `passthrough` is a `WARN`.
+  come back as the proxy's own `403`. The emergency `gh-cli` switch doesn't change that (it lifts
+  the refusal only on `api.github.com`, where its token goes); were a push-capable switch to
+  inject on `github.com` itself, the row would say so instead of passing or failing. A
+  `github.com` tunnelled blind by `passthrough` is a `WARN`.
 - **Dummy checks** (from the credential plugins): each `[[inject]]` row's `box_env` dummies must
   still hold their dummy value, in *any* mode, and the variables a known client reads a token
   from (`GH_TOKEN`, `GITHUB_TOKEN`) must be unset or a declared dummy in every box; the real
@@ -319,15 +327,17 @@ Each row names *what* failed. What it usually means, and what to do:
   (`fy allow add github.com`).
 - **Push refusal rows:**
   - `a git push through the proxy was NOT refused` — the proxy decrypted the request and let it
-    reach GitHub. Check `fy mode` on your computer (a push-capable switch reads as "allowed by the
-    active mode", not this), then `fy host restart`.
+    reach GitHub. Check `fy mode` on your computer (a push-capable switch injecting on `github.com`
+    reads as "allowed by the active mode", not this), then `fy host restart`.
   - `a git push was refused, but not as a push` — the running proxy predates the push refusal:
     `fy host restart` on your computer.
   - `github.com is tunnelled blind` (`WARN`) — it is in `[proxy] passthrough` (the `@vcs` bundle
     has it), so the proxy can't see a push to it. A decision, not a breach; take it out of
     `passthrough` if you want pushes refused there too.
   - `git push refusal by the proxy UNPROVEN` — no answer came back through the proxy (not
-    running, a timeout, or a TLS failure: the box doesn't trust the proxy's CA). `fy host` on your
+    running, a timeout, or a TLS failure: the box doesn't trust the proxy's CA), or the box's
+    `HTTPS_PROXY` is set but isn't an `http(s)://host[:port]` URL verify can read (the row names
+    its shape, without any `user:password@`). `fy host` on your
     computer shows whether the proxy runs.
 - **`… possible real credential in the box`** (e.g. `GH_TOKEN` is more than its dummy) — the
   box's environment carries a real credential. `fy mode` shows the mode, `fy state` desired against

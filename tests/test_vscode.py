@@ -358,10 +358,11 @@ def test_local_terminal_env_merge_preserves_settings_and_migrates_old_attempts(f
     assert "terminal.integrated.cwd" not in settings
 
 
-def test_local_terminals_on_a_linux_host_get_your_git_config_back_too(fake):
+def test_local_terminals_on_a_linux_host_get_your_git_config_back_too(fake, monkeypatch):
     # VS Code applies only the env key for the host's platform, so the unset of the launch's
     # empty git config must be in `.linux` as well as `.osx` — on a Linux host a local terminal
     # would otherwise keep ignoring ~/.gitconfig. Existing entries there are kept. (Review on #160.)
+    monkeypatch.setattr(vscode.sys, "platform", "linux")
     fake["state"]["running"] = True
     path = _settings(fake)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -374,6 +375,21 @@ def test_local_terminals_on_a_linux_host_get_your_git_config_back_too(fake):
         "GIT_CONFIG_NOSYSTEM": None,
         "GIT_CEILING_DIRECTORIES": None,
     }
+
+
+def test_on_a_macos_host_the_box_terminals_keep_their_git_config(fake, monkeypatch):
+    # `.linux` also reaches the attached window's BOX terminals (VS Code picks the key by the OS
+    # the terminal runs on), and `[box].env` may set GIT_CONFIG_GLOBAL there. On a macOS host
+    # nothing local reads `.linux`, so foldyard leaves it exactly as it was. (Review on #160.)
+    monkeypatch.setattr(vscode.sys, "platform", "darwin")
+    fake["state"]["running"] = True
+    path = _settings(fake)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"terminal.integrated.env.linux": {"EXISTING": "kept"}}))
+    assert vscode.code() == 0
+    settings = json.loads(path.read_text())
+    assert settings["terminal.integrated.env.linux"] == {"EXISTING": "kept"}
+    assert settings["terminal.integrated.env.osx"]["GIT_CONFIG_GLOBAL"] is None
 
 
 def test_local_terminal_preserves_original_zdotdir(fake):
@@ -1391,9 +1407,10 @@ def test_a_new_instance_is_seeded_from_the_operators_vscode(fake, capsys):
     assert "seeded" in capsys.readouterr().out
 
 
-def test_the_seed_drops_settings_that_point_at_another_engine(fake):
+def test_the_seed_drops_settings_that_point_at_another_engine(fake, monkeypatch):
     # A global Dev Containers / Docker setting naming Docker Desktop's socket would send the attach
     # to the wrong engine — the leak the isolated instance exists to prevent.
+    monkeypatch.setattr(vscode.sys, "platform", "darwin")  # `.linux` is left alone on macOS
     fake["state"]["running"] = True
     _global(
         fake,
@@ -1423,8 +1440,7 @@ def test_the_seed_drops_settings_that_point_at_another_engine(fake):
     osx = settings["terminal.integrated.env.osx"]
     assert osx["A"] == "1"
     assert "DOCKER_HOST" not in osx
-    # The seed's engine key is gone; what's left is foldyard's own unset of the launch's git config.
-    assert settings["terminal.integrated.env.linux"] == dict.fromkeys(vscode._GIT_CONFIG_LAUNCH_ENV)
+    assert settings["terminal.integrated.env.linux"] == {}
     assert settings["terminal.integrated.env.windows"] == {}
     # The one engine setting the instance carries is foldyard's own pin, never the seed's value.
     assert settings.pop("dev.containers.dockerPath") == "/opt/homebrew/bin/podman"

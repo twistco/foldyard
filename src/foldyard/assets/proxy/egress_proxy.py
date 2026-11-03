@@ -52,16 +52,19 @@ after mitmproxy's own dial to that name was allowed.
 Config via env (read once at startup). foldyard's supervisor sets LIVE_FILE, which moves the
 rules, the wall switch and the passthrough list out of the env and makes them live:
   LIVE_FILE         a JSON file {"rules": [<rule>, ...], "default_deny": bool, "passthrough":
-                    [<pattern>, ...], "allow_push": bool} (plus "held" and "overlaps": where the
-                    proxy answers a request itself, and "origin": {"key_file", "record"} — the
-                    attributing forwarder's stamp, see _verify_origin), re-read when it changes
-                    (per hook + once a second) with no restart. When set, INJECT_*, DEFAULT_DENY,
-                    PASSTHROUGH_HOSTS and ALLOW_PUSH are ignored. "allow_push": a push-capable
-                    mode is on, so a git push is forwarded rather than refused (see _is_git_push);
-                    only a JSON true lifts the refusal.
+                    [<pattern>, ...], "push_hosts": [<host>, ...]} (plus "held" and "overlaps":
+                    where the proxy answers a request itself, and "origin": {"key_file",
+                    "record"} — the attributing forwarder's stamp, see _verify_origin), re-read
+                    when it changes (per hook + once a second) with no restart. When set,
+                    INJECT_*, DEFAULT_DENY, PASSTHROUGH_HOSTS and PUSH_HOSTS are ignored.
+                    "push_hosts": the hosts a push-capable credential is being injected on now,
+                    spelled as its rules' "host" — a git push SENT to one of them is forwarded
+                    rather than refused (see _is_git_push), matched as a rule matches
+                    (_injects_on). Anything but a list of non-empty strings lifts nothing; an old
+                    supervisor's "allow_push" is ignored.
                     Unreadable/malformed ⇒ fail closed (no rules, the wall enforcing, nothing
-                    tunnelled, pushes refused). A change that narrows the policy closes the open
-                    connections it no longer allows (see Injector.refresh).
+                    tunnelled, pushes refused everywhere). A change that narrows the policy
+                    closes the open connections it no longer allows (see Injector.refresh).
   HOST_ENV_FILE     host.env: where a live rule's declared `env` names are resolved (this
                     process's env first — the operator's exports — then the file), re-read when it
                     changes.
@@ -125,9 +128,10 @@ Without LIVE_FILE:
                     → system trust (correct for api.github.com). A path pins a specific
                     cert (used by the e2e to trust its self-signed upstream). TLS is never
                     disabled.
-  ALLOW_PUSH        "1" → forward a git push instead of refusing it (the standalone spelling of
-                    LIVE_FILE's "allow_push"). Anything else → refused, on any host the proxy
-                    decrypts — a blind tunnel (passthrough) can't be seen into.
+  PUSH_HOSTS        comma-list of hosts a git push is forwarded to instead of refused (the
+                    standalone spelling of LIVE_FILE's "push_hosts"; exact hosts, as a rule's).
+                    Empty (default) → refused on any host the proxy decrypts — a blind tunnel
+                    (passthrough) can't be seen into.
   PROXY_LOG_FILE    JSONL network log of every proxied response (ts, method, host,
                     path, status, injected, replayed; passthrough/blocked/mint_failed rows
                     add a flag; a refused git push is a blocked row with `push`). Default
@@ -150,6 +154,7 @@ import ipaddress
 import json
 import logging
 import os
+import posixpath
 import re
 import shlex
 import subprocess
@@ -403,6 +408,22 @@ def _host_matches(host: str | None, patterns: list[str]) -> bool:
     return False
 
 
+def _injects_on(dest: str | None, host: str | None) -> bool:
+    """Does a rule naming ``host`` inject on a request sent to ``dest`` (its :func:`_destination`)?
+    That one host exactly: a rule has no wildcard form. The ONE host match for injection
+    (:meth:`_Rule.matches`) and for the push lift (``Injector._push_lifted``), so the lift can't
+    reach a host the push-capable credential doesn't."""
+    return bool(host) and dest == host
+
+
+def _push_hosts(value: object) -> list[str]:
+    """LIVE_FILE's ``push_hosts``, failing closed: anything but a list of non-empty strings — one
+    bad entry included — lifts the push refusal NOWHERE, rather than on the entries that parse."""
+    if not isinstance(value, list) or not all(isinstance(h, str) and h for h in value):
+        return []
+    return list(value)
+
+
 _MISMATCH_BODY = (
     b"refused by the foldyard proxy - the request's Host header names a different host than the"
     b" one it is sent to\n"
@@ -411,8 +432,7 @@ _MISMATCH_BODY = (
 # The 403 body for a git push (`_is_git_push`) while no push-capable mode is on. text/plain, so git
 # prints it: its smart-HTTP client shows a text/plain error body as `remote: …` lines.
 _PUSH_REFUSED_BODY = (
-    b"refused by the foldyard proxy - the box doesn't push; push from your computer"
-    b" (or turn on a mode that allows it)\n"
+    b"refused by the foldyard proxy - the box doesn't push; push from your computer\n"
 )
 # On the response to a push the proxy let through because a push-capable mode is on: how the box
 # (`fy verify`) tells "allowed by the mode" from "not refused because the proxy couldn't see it".
@@ -432,14 +452,19 @@ def _is_git_push(path: str) -> bool:
     The client this is for is NOT git — it's a box process holding a credential, writing its own
     HTTP and picking its own host — so the spellings that count are the ones a SERVER still routes
     to receive-pack, not the one git sends. Compared after percent-decoding, case-insensitively
-    (ASP.NET/IIS routing ignores case), with a backslash read as a slash (IIS), trailing slashes
-    dropped (Spring MVC's old trailing-slash match) and ``;params`` cut from the last segment
-    (servlet containers strip them: Bitbucket DC, Gerrit); ``;`` also separates query parameters.
-    None of that can turn a fetch into a match: nothing a fetch sends ends in receive-pack under
-    any spelling. Split on ``?`` by hand: ``urlsplit`` reads a ``//x`` path as an authority."""
+    (ASP.NET/IIS routing ignores case), with a backslash read as a slash (IIS), ``;params`` cut
+    from every segment (servlet containers strip them: Bitbucket DC, Gerrit), then dot segments
+    resolved (servlet containers and IIS do, before routing: ``x/git-receive-pack/.`` and
+    ``…/git-receive-pack/y/..`` are receive-pack; ``…/git-receive-pack/..`` is its parent) and
+    trailing slashes dropped (Spring MVC's old trailing-slash match); ``;`` also separates query
+    parameters. None of that can turn a fetch into a match: nothing a fetch sends ends in
+    receive-pack under any spelling. Split on ``?`` by hand: ``urlsplit`` reads a ``//x`` path as
+    an authority. (``normpath`` keeps a leading ``//``, and leaves ``..`` past the root at the
+    root — both harmless here: only the last segment is read.)"""
     route, _, query = path.partition("?")
-    route = unquote(route.partition("#")[0]).replace("\\", "/").rstrip("/")
-    last = route.rsplit("/", 1)[-1].split(";", 1)[0]
+    route = unquote(route.partition("#")[0]).replace("\\", "/")
+    route = "/".join(segment.split(";", 1)[0] for segment in route.split("/"))
+    last = posixpath.normpath(route).rsplit("/", 1)[-1] if route else ""
     if last.lower() == _RECEIVE_PACK:
         return True
     return any(
@@ -858,7 +883,7 @@ class _Rule:
     def matches(self, host: str | None, path: str) -> bool:
         """True when this rule should inject on a request: its host, and — if a path prefix is set —
         a path under it. Lets one host serve both an app and a separately-injected endpoint."""
-        if host != self.host:
+        if not _injects_on(host, self.host):
             return False
         return not self.path_prefix or path.startswith(self.path_prefix)
 
@@ -1082,9 +1107,9 @@ class Injector:
         # switch is read once (toggling it restarts the daemon); the `allow` patterns live in
         # ALLOW_FILE, re-read per request (mtime-cached) so a host-side grant lands with no restart.
         self.default_deny = os.environ.get("DEFAULT_DENY", "") == "1"
-        # A git push is refused unless a push-capable mode is on (LIVE_FILE's `allow_push`;
-        # standalone, ALLOW_PUSH=1). Off by default, like a missing live file.
-        self.allow_push = os.environ.get("ALLOW_PUSH", "") == "1"
+        # A git push is refused except on the hosts a push-capable credential is injected on
+        # (LIVE_FILE's `push_hosts`; standalone, PUSH_HOSTS). None by default, like a missing file.
+        self.push_hosts = [h for h in os.environ.get("PUSH_HOSTS", "").split(",") if h]
         allow_file = os.environ.get("ALLOW_FILE", "")
         self.allow_path = Path(allow_file) if allow_file else None
         self._allow_mtime: float = -1.0
@@ -1204,9 +1229,10 @@ class Injector:
             self._would_block_seen = {}
         self._observing_since = observing
         self.default_deny = data.get("default_deny", True) is not False
-        # Fail closed the other way round: only a JSON true lifts the push refusal, so an absent
-        # field, a malformed file or a missing one all refuse.
-        self.allow_push = data.get("allow_push") is True
+        # Fail closed the other way round: only a well-formed host list lifts the push refusal,
+        # and only on those hosts — an absent field, a malformed one, a malformed file or a missing
+        # one all refuse everywhere. An old supervisor's every-host `allow_push` lifts nothing.
+        self.push_hosts = _push_hosts(data.get("push_hosts"))
         held = data.get("held")
         self.held = [h for h in held if _valid_held(h)] if isinstance(held, list) else []
         self.held_hosts = {h["host"] for h in self.held}
@@ -1230,10 +1256,10 @@ class Injector:
         if not first:
             enforce = "on" if self.default_deny else "off"
             hosts = ", ".join(sorted(r.host for r in rules if r.host)) or "none"
-            push = "allowed" if self.allow_push else "refused"
+            lifted = f" except on {', '.join(self.push_hosts)}" if self.push_hosts else ""
             ctx.log.info(
                 f"egress_proxy: settings reloaded — injecting {hosts}; allowlist enforce {enforce};"
-                f" git push {push}"
+                f" git push refused{lifted}"
             )
         if self._running:
             self._warm([r for r in fresh if r.active])
@@ -2151,6 +2177,11 @@ class Injector:
         if flow.response is not None and _relays_as_it_arrives(flow.response.status_code):
             flow.response.stream = True
 
+    def _push_lifted(self, dest: str | None) -> bool:
+        """Is a git push SENT to ``dest`` (a :func:`_destination`, never the Host header) let
+        through? Only on a ``push_hosts`` entry, matched exactly as a rule's host."""
+        return any(_injects_on(dest, host) for host in self.push_hosts)
+
     @staticmethod
     def _mark_push_allowed(flow: http.HTTPFlow) -> None:
         """Say on the response that a push went past the refusal because a push-capable mode is on
@@ -2200,12 +2231,14 @@ class Injector:
             self._log_blocked(key, flow.request, mismatch=True, client_id=_client_id(flow))
             self._owe_nothing(flow)
             return
-        # A git push, on any host and whatever credential it carries: refused unless a
-        # push-capable mode is on — the box's "never push" posture shouldn't rest on no credential
-        # ever reaching it. Before everything below, the wall included: granting the host is not
-        # the fix, and nothing leaves either way. In `requestheaders`, so a push body never streams.
+        # A git push, on any host and whatever credential it carries: refused unless it is sent
+        # to a host a push-capable credential is injected on right now — the box's "never push"
+        # posture shouldn't rest on no credential ever reaching it, and the emergency switch's
+        # token reaches only its own host(s). Before everything below, the wall included: granting
+        # the host is not the fix, and nothing leaves either way. In `requestheaders`, so a push
+        # body never streams.
         if _is_git_push(flow.request.path):
-            if not self.allow_push:
+            if not self._push_lifted(host):
                 flow.response = http.Response.make(
                     403, _PUSH_REFUSED_BODY, {"content-type": "text/plain; charset=utf-8"}
                 )

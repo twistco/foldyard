@@ -80,7 +80,8 @@ class Kind:
     credential_env: tuple[str, ...] = ()
     default_label = ""
     # The token can push (see ``InjectRule.grants_push``): while its switch injects, the proxy lets
-    # git pushes through. A property of the protocol, so it lives here and no row can claim it.
+    # git pushes through on the host it injects on. A property of the protocol, so it lives here
+    # and no row can claim it.
     grants_push = False
 
     def allowed(self) -> tuple[str, ...]:

@@ -23,8 +23,9 @@ when you ask. (`fy docs glossary` defines each.)
   per host on their own computer (after reviewing your edit at the adoption gate) instead of
   rediscovering the block, and nothing is granted without their yes.
 - **`403` "refused by the foldyard proxy - the box doesn't push"** (git shows it as a `remote:`
-  line) — the proxy refuses every git push over HTTPS, whatever credential you have. Not a grant
-  to ask for: commit, and the human pushes from their computer.
+  line) — the proxy refuses git pushes over HTTPS, whatever credential you have (an emergency
+  switch that can push lifts that only on the host its own token goes to). Not a grant to ask
+  for: commit, and the human pushes from their computer.
 - **A certificate error on one host only** (unknown CA, `certificate verify failed`) from a client
   that keeps its own trust store — the same refusal, before the `403` could reach it: the proxy
   doesn't open a connection to an ungranted host, so a client that doesn't trust the proxy's CA

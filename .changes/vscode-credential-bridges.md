@@ -29,7 +29,11 @@ bump: patch
   shows as `remote: refused by the foldyard proxy - the box doesn't push …`; fetches are untouched.
   "The box doesn't push" no longer depends on no credential ever reaching it — a token in a
   `.env`, a pasted one, or a bridge like the ones above. The refusal lifts while a push-capable
-  mode is on (the emergency `gh-cli` switch) and returns when it turns off. The proxy can't see
+  mode is on (the emergency `gh-cli` switch), but only on the hosts that switch injects its token
+  on (`api.github.com`), and returns when it turns off: a push to any other host is refused even
+  then. Mixed versions across an upgrade fail closed: the new proxy ignores an older supervisor's
+  every-host `allow_push`, and an older proxy finds none in a new supervisor's settings, so either
+  way pushes are refused everywhere until `fy host restart`. The proxy can't see
   inside a `passthrough` tunnel, so `fy config widenings` now names the git hosts (`github.com`,
   `gitlab.com`, … — the `@vcs` bundle has them) where a push can't be refused. `fy verify` gains a
   row that sends a push's first request through the proxy and expects the refusal, and, where the

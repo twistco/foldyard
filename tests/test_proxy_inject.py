@@ -1996,7 +1996,7 @@ def _write_live(
     passthrough=(),
     held=(),
     overlaps=(),
-    allow_push=None,
+    push_hosts=None,
 ) -> None:
     """Write the live file the way the supervisor does: whole, then renamed into place."""
     tmp = path.with_suffix(".tmp")
@@ -2005,8 +2005,8 @@ def _write_live(
         data["held"] = list(held)
     if overlaps:
         data["overlaps"] = list(overlaps)
-    if allow_push is not None:
-        data["allow_push"] = allow_push
+    if push_hosts is not None:
+        data["push_hosts"] = push_hosts
     tmp.write_text(json.dumps(data))
     tmp.replace(path)
 

@@ -167,8 +167,7 @@ def _enter_box(monkeypatch, tmp_path):
 
 _REFUSED_ANSWER = verify._PushAnswer(
     status=403,
-    body=b"refused by the foldyard proxy - the box doesn't push; push from your computer"
-    b" (or turn on a mode that allows it)\n",
+    body=b"refused by the foldyard proxy - the box doesn't push; push from your computer\n",
     allowed=False,
     decrypted=True,
 )
@@ -892,6 +891,44 @@ def test_wall_posture_direct_egress_connecting_fails(monkeypatch, capsys):
     assert "NOT enforcing" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("proxy", "expected"),
+    [
+        ("http://[fd00::2]:41800", ("fd00::2", 41800)),  # a bracketed IPv6 literal
+        ("http://192.168.5.2", ("192.168.5.2", 80)),  # no port: the scheme's default
+        ("http://u:secret@192.168.5.2:41800", ("192.168.5.2", 41800)),  # userinfo
+    ],
+)
+def test_wall_posture_reads_the_proxy_the_way_the_push_row_does(monkeypatch, proxy, expected):
+    # The permitted path is the positive control, so the wall row parses HTTPS_PROXY with the
+    # same `_proxy_address` as the push row: the old regex missed IPv6 and port-less values and
+    # called the firewall UNPROVEN for a proxy that was there. (Review on #160.)
+    monkeypatch.setenv("HTTPS_PROXY", proxy)
+    dialled = []
+
+    def connect(addr, *a, **kw):
+        dialled.append(addr)
+        if addr == expected:
+            return _Sock()
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(verify.socket, "create_connection", connect)
+    rep = verify._Report()
+    verify._wall_posture(rep)
+    assert dialled[0] == expected
+    assert rep.fails == 0
+
+
+def test_wall_posture_an_unreadable_proxy_is_unproven_without_leaking_it(monkeypatch, capsys):
+    monkeypatch.setenv("HTTPS_PROXY", "http://u:secret@[broken:41800")
+    rep = verify._Report()
+    verify._wall_posture(rep)
+    out = capsys.readouterr().out
+    assert rep.fails == 1
+    assert "UNPROVEN" in out
+    assert "secret" not in out
+
+
 def test_wall_posture_flags_port_53_exfil_hole(monkeypatch, capsys):
     """The #2 regression, in isolation: 443 correctly refused but a public-IP :53 connect SUCCEEDS
     (the wall allows :53 to any destination) — the port-53 probe must catch it as one fail."""
@@ -1210,6 +1247,8 @@ def test_a_push_the_active_mode_allows_is_reported_not_failed(monkeypatch, capsy
     assert rep.fails == rep.warns == 0
     out = capsys.readouterr().out
     assert "allowed by the active mode" in out and "PASS" not in out
+    # The lift is per host — where a push-capable switch injects — so the row names the probe's.
+    assert "to github.com" in out and "injects on github.com" in out
 
 
 def test_a_push_the_proxy_let_through_unrefused_fails(monkeypatch, capsys):
@@ -1260,6 +1299,46 @@ def test_no_proxy_in_the_box_skips_the_row(monkeypatch, capsys):
     rep, asked = _push_row(monkeypatch, _REFUSED_ANSWER, proxy=None)
     assert asked == [] and rep.fails == rep.warns == 0
     assert "skipped" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("proxy", "address"),
+    [
+        ("http://[::1]:41000", ("::1", 41000)),  # a bracketed IPv6 literal
+        ("http://[fd00::2]:41000/", ("fd00::2", 41000)),
+        ("http://192.168.5.2", ("192.168.5.2", 80)),  # no port: the scheme's default
+        ("https://proxy.example", ("proxy.example", 443)),
+        ("http://user:s3cret@192.168.5.2:41000", ("192.168.5.2", 41000)),
+        ("192.168.5.2:41000", ("192.168.5.2", 41000)),  # no scheme: http, as curl reads it
+    ],
+)
+def test_the_probe_goes_through_any_spelling_of_the_proxy(monkeypatch, capsys, proxy, address):
+    rep, asked = _push_row(monkeypatch, _REFUSED_ANSWER, proxy=proxy)
+    assert asked == [address]
+    assert rep.fails == rep.warns == 0
+    assert "s3cret" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        "http://user:s3cret@[::1:41000",  # an unclosed bracket
+        "http://user:s3cret@192.168.5.2:port",  # a port that isn't a number
+        "http://user:s3cret@192.168.5.2:99999",  # …or isn't a port
+        "http://user:s3cret@:41000",  # no host
+        "socks5://user:s3cret@192.168.5.2:1080",  # a scheme the probe can't speak
+    ],
+)
+def test_a_proxy_that_cant_be_read_is_unproven_not_skipped(monkeypatch, capsys, proxy):
+    # Set, so the box routes somewhere: a row that read it as "no proxy" would skip the check
+    # exactly where it can't tell what the box does.
+    rep, asked = _push_row(monkeypatch, _REFUSED_ANSWER, proxy=proxy)
+    assert asked == [] and rep.fails == 1
+    out = capsys.readouterr().out
+    assert "UNPROVEN" in out and "HTTPS_PROXY" in out and "skipped" not in out
+    # Its shape is named, so the operator can see what's wrong — never the credential in it.
+    assert "s3cret" not in out and "user" not in out
+    assert proxy.rpartition("@")[2] in out
 
 
 def test_the_push_refusal_row_runs_in_the_box(secure_engine, monkeypatch, tmp_path, capsys):
@@ -1338,8 +1417,7 @@ def test_the_probe_sends_a_push_discovery_through_the_proxy(monkeypatch, tmp_pat
 # git is asked directly instead: `git credential fill` for origin's push URL.
 
 _PROXY_REFUSED_STDERR = (
-    "remote: refused by the foldyard proxy - the box doesn't push; push from your computer"
-    " (or turn on a mode that allows it)\n"
+    "remote: refused by the foldyard proxy - the box doesn't push; push from your computer\n"
     "fatal: unable to access 'https://github.com/acme/app.git/': The requested URL returned"
     " error: 403\n"
 )

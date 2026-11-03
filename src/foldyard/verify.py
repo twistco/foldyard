@@ -31,6 +31,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
+from urllib.parse import urlsplit
 
 from . import boxmounts, config, machine, stack
 from .plugins import VerifyContext, registry
@@ -174,8 +175,10 @@ _GIT_BRIDGE_SETTINGS = (
 
 
 # The egress proxy refuses a git push by its URL (egress_proxy._is_git_push), on any host it
-# decrypts, unless a push-capable mode is on. The probe sends what git sends first — the push's
-# discovery request — through the box's proxy to a repo that needn't exist: refused, nothing leaves.
+# decrypts, except a host a push-capable credential is injected on now (the emergency gh-cli
+# switch: api.github.com, so a push to github.com stays refused even then). The probe sends what
+# git sends first — the push's discovery request — through the box's proxy to a repo that needn't
+# exist: refused, nothing leaves.
 _PUSH_PROBE_HOST = "github.com"
 _PUSH_PROBE_PORT = 443
 _PUSH_PROBE_PATH = "/foldyard/fy-verify-push-probe.git/info/refs?service=git-receive-pack"
@@ -746,6 +749,38 @@ def _probe_push(proxy_host: str, proxy_port: int) -> _PushAnswer:
         conn.close()
 
 
+# The schemes an HTTPS_PROXY may name, and the port each implies when the URL names none. The probe
+# speaks plain CONNECT, as to the box's own proxy; an https:// one that wants TLS first gets no
+# answer, which the row reports as UNPROVEN rather than passing.
+_PROXY_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _redacted(value: str) -> str:
+    """``value`` with any userinfo cut: an HTTPS_PROXY can carry ``user:password@``. Everything up
+    to the LAST ``@`` goes (a password may hold one), but the scheme stays: it's the shape."""
+    if "@" not in value:
+        return value
+    scheme, sep, _rest = value.partition("://")
+    return f"{scheme if sep else ''}{sep}…@{value.rpartition('@')[2]}"
+
+
+def _proxy_address(value: str) -> tuple[str, int]:
+    """The (host, port) an ``HTTPS_PROXY`` value names: a bracketed IPv6 literal unwrapped, a
+    missing port the scheme's default, a missing scheme ``http`` (as curl reads one). Raises
+    ``ValueError`` naming the value's shape — userinfo cut — for anything the probe can't use."""
+    url = value.strip()
+    try:
+        parts = urlsplit(url if "://" in url else f"http://{url}")  # raises on a broken bracket
+        port = parts.port  # …and here on a port that isn't a number, or isn't a port
+        host = parts.hostname
+    except ValueError:
+        raise ValueError(_redacted(url)) from None
+    scheme = parts.scheme.lower()
+    if not host or scheme not in _PROXY_DEFAULT_PORTS:
+        raise ValueError(_redacted(url))
+    return host, _PROXY_DEFAULT_PORTS[scheme] if port is None else port
+
+
 def _push_refusal(rep: _Report) -> None:
     """The egress proxy refuses a git push over HTTPS — the box's "never push" posture without
     relying on no credential ever reaching it. An ACTIVE probe through the box's own proxy: the
@@ -755,24 +790,35 @@ def _push_refusal(rep: _Report) -> None:
     a pass."""
     print("▶ git push over HTTPS (the egress proxy refuses it, whatever credential the box holds)")
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
-    m = re.search(r"//(?:[^@/]*@)?([^:/]+):(\d+)", proxy)
-    if not m:
+    if not proxy.strip():
         print("  no egress proxy in this box (HTTPS_PROXY unset) — skipped")
         return
     try:
-        answer = _probe_push(m.group(1), int(m.group(2)))
+        host, port = _proxy_address(proxy)
+    except ValueError as e:
+        # Set, so the box routes SOMEWHERE: reading it as "no proxy" would skip the row exactly
+        # where verify can't tell what the box's traffic does.
+        rep.bad(
+            f"git push refusal by the proxy UNPROVEN — HTTPS_PROXY is set but can't be read as "
+            f"an http(s)://host[:port] proxy ({e})"
+        )
+        return
+    where = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    try:
+        answer = _probe_push(host, port)
     except (OSError, http.client.HTTPException) as e:  # ssl.SSLError and timeouts are OSErrors
         rep.bad(
-            f"git push refusal by the proxy UNPROVEN — no answer through {m.group(1)}:"
-            f"{m.group(2)} ({type(e).__name__}: {e})"
+            f"git push refusal by the proxy UNPROVEN — no answer through {where} "
+            f"({type(e).__name__}: {e})"
         )
         return
     if answer.status == 403 and answer.body.decode("utf-8", "replace").startswith(_PUSH_REFUSED):
         rep.ok(f"git push over HTTPS refused by the foldyard proxy ({_PUSH_PROBE_HOST})")
     elif answer.allowed:
         print(
-            "  ⚠ git push over HTTPS allowed by the active mode — a push-capable switch is on "
-            "(`fy mode` on your computer); refused again once it is off"
+            f"  ⚠ git push over HTTPS to {_PUSH_PROBE_HOST} allowed by the active mode — a "
+            f"push-capable switch injects on {_PUSH_PROBE_HOST} (`fy mode` on your computer); "
+            "refused again once it is off"
         )
     elif not answer.decrypted:
         rep.warn(
@@ -810,20 +856,29 @@ def _wall_posture(rep: _Report) -> None:
     print("▶ VM firewall ([machine] firewall — direct egress from the box must be refused)")
 
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
-    m = re.search(r"//(?:[^@/]*@)?([^:/]+):(\d+)", proxy)
-    if not m:
+    if not proxy.strip():
         rep.bad(
             "no HTTPS_PROXY in the box — the VM firewall's permitted path is unknown, "
             "VM firewall UNPROVEN"
         )
         return
     try:
-        with socket.create_connection((m.group(1), int(m.group(2))), timeout=5):
+        # The same reading as the push row: IPv6 literals, a port-less URL, userinfo cut.
+        proxy_host, proxy_port = _proxy_address(proxy)
+    except ValueError as e:
+        rep.bad(
+            f"HTTPS_PROXY is set but can't be read as an http(s)://host[:port] proxy ({e}) — the "
+            "VM firewall's permitted path is unknown, VM firewall UNPROVEN"
+        )
+        return
+    where = f"[{proxy_host}]:{proxy_port}" if ":" in proxy_host else f"{proxy_host}:{proxy_port}"
+    try:
+        with socket.create_connection((proxy_host, proxy_port), timeout=5):
             pass
     except OSError:
         # No egress AT ALL. The refusals below would pass for the wrong reason.
         rep.bad(
-            f"the permitted path ({m.group(1)}:{m.group(2)}) is unreachable too — this box has "
+            f"the permitted path ({where}) is unreachable too — this box has "
             "no egress at all, so a refused direct connect proves nothing. VM firewall UNPROVEN "
             "(is the host supervisor running? `fy host` on the host)"
         )
