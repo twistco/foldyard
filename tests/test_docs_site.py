@@ -49,14 +49,3 @@ def test_heading_ids_are_githubs(heading, github_id):
 )
 def test_the_link_pattern_reads_the_manuals_links(markdown, target):
     assert [m.group(2) for m in hooks._LINK.finditer(markdown)] == [target]
-
-
-def test_every_unpublished_path_is_kept_out_of_the_site():
-    """UNPUBLISHED makes a link into a path fail the build; exclude_docs is what keeps the path's
-    pages off the site. One without the other publishes it (pages built, nothing links them) or
-    leaves a link into a hole."""
-    config = (ROOT / "mkdocs.yml").read_text()
-    excluded = config.split("exclude_docs: |", 1)[1].split("\n\n", 1)[0].split()
-    assert hooks.UNPUBLISHED, "nothing unpublished — drop this test with the mechanism"
-    for path in hooks.UNPUBLISHED:
-        assert path in excluded, f"{path} is UNPUBLISHED but mkdocs.yml still builds it"

@@ -6,13 +6,20 @@ never disagree.
 
 | Deck | For | Length |
 | --- | --- | --- |
-| [why-sandbox.md](./why-sandbox.md) | Opening a hands-on workshop. Why a developer laptop needs a sandbox, what a sandbox must get right, how to compare tools — then foldyard as one worked answer, and the workshop plan. Tool-agnostic for its first two thirds. | ~35 min, 38 slides |
+| **Fencing the yard** — [slides](https://twistco.github.io/foldyard/talks/why-sandbox.html) · [PDF](./why-sandbox.pdf) · [source](./why-sandbox.md) | Opening a hands-on workshop. Why a developer laptop needs a sandbox, what a sandbox must get right, how to compare tools — then foldyard as one worked answer, and the workshop plan. Tool-agnostic for its first two thirds. | ~35 min, 40 slides |
+
+In the HTML slides, arrow keys move between slides, `f` goes full screen and `p` opens the
+presenter view with the speaker notes.
 
 Speaker notes are the HTML comments under each slide; Marp shows them in presenter view. The
 incident figures quoted come from security write-ups that disagree with each other and get revised;
 re-check them the week you give the talk (the sources are on the last content slide).
 
 ## Render
+
+The rendered HTML and PDF are committed beside each deck, and the docs site serves them as they
+are (it can't render Marp itself). After editing a deck, render both again and commit them with the
+change; the site otherwise keeps showing the old slides.
 
 The theme is [`foldyard-theme.css`](./foldyard-theme.css), Marp's built-in Gaia restyled with the
 diagrams' palette and type.
