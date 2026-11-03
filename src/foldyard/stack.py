@@ -557,6 +557,23 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
 _CREATES = frozenset({"up", "run", "create", "build"})
 
 
+def _compose_read(
+    ctx: Context, args: list[str], *, timeout: float | None = None
+) -> subprocess.CompletedProcess:
+    """A compose call that only READS (``config --services``, ``ps``), its output captured as
+    text: in the guest under ``[machine] compose = "vm"`` (:mod:`foldyard.guestcompose`), else
+    here. ``args`` follow the ``-f`` list (profile flags first, where the caller wants them).
+
+    Not the full render (:func:`_render_config`): while ``up`` and the builds still run here, the
+    path guard must judge what THIS client will read, and an answer from the guest is the box's
+    to shape (the VM user's home is box-writable). It moves with them (phase 2)."""
+    from . import guestcompose
+
+    if guestcompose.wanted():
+        return guestcompose.compose(ctx, args, timeout=timeout)
+    return _run([*ctx.compose, *args], env=ctx.env, cwd=str(ctx.main), timeout=timeout)
+
+
 def _render_config(
     ctx: Context, extra_profiles: list[str] | None = None, deadline: float | None = None
 ) -> dict | None:
@@ -1115,10 +1132,8 @@ def _remove_orphan_containers(
     a container with no service label all mean "remove nothing" (stale-but-running beats
     swept-by-accident); named volumes are never touched."""
     try:
-        rendered = _run(
-            [*ctx.compose, *_profile_flags(ctx, extra_profiles), "config", "--services"],
-            env=ctx.env,
-            cwd=str(ctx.main),
+        rendered = _compose_read(
+            ctx, [*_profile_flags(ctx, extra_profiles), "config", "--services"]
         )
         services = {s.strip() for s in rendered.stdout.splitlines() if s.strip()}
         if rendered.returncode != 0 or not services:
@@ -1555,12 +1570,7 @@ def _left(deadline: float | None) -> float | None:
 def _running_services(ctx: Context, deadline: float | None = None) -> set[str] | None:
     """The project's RUNNING compose services (``compose ps``); None when the engine can't say."""
     try:
-        out = _run(
-            [*ctx.compose, "ps", "--format", "json"],
-            env=ctx.env,
-            cwd=str(ctx.main),
-            timeout=_left(deadline),
-        )
+        out = _compose_read(ctx, ["ps", "--format", "json"], timeout=_left(deadline))
     except Exception:
         return None
     return _compose_ps_services(out.stdout) if out.returncode == 0 else None
@@ -1573,12 +1583,7 @@ def _crashed_services(ctx: Context, deadline: float | None = None) -> set[str]:
     empty set on any error — the heal then refreshes only what runs, never reviving a guess."""
     flags = [] if _podman_compose_active(ctx) else ["-a"]
     try:
-        out = _run(
-            [*ctx.compose, "ps", *flags, "--format", "json"],
-            env=ctx.env,
-            cwd=str(ctx.main),
-            timeout=_left(deadline),
-        )
+        out = _compose_read(ctx, ["ps", *flags, "--format", "json"], timeout=_left(deadline))
     except Exception:
         return set()
     return _compose_ps_crashed(out.stdout) if out.returncode == 0 else set()
@@ -2048,11 +2053,8 @@ def _rendered_services(
 ) -> set[str]:
     """The compose config's service names (``set()`` on any render failure — callers then
     decompose no image names at all, which keeps everything). ``deadline`` bounds the render."""
-    proc = _run(
-        [*ctx.compose, *_profile_flags(ctx, extra_profiles), "config", "--services"],
-        env=ctx.env,
-        cwd=str(ctx.main),
-        timeout=_left(deadline),
+    proc = _compose_read(
+        ctx, [*_profile_flags(ctx, extra_profiles), "config", "--services"], timeout=_left(deadline)
     )
     if proc.returncode != 0:
         return set()

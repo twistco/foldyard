@@ -466,6 +466,17 @@ disk_gib = 60
     another. The box holds the engine socket, so it can still act from inside another container:
     the note says where a request came from, not who steered it.
   - Details: [ADR-0034](./adrs/0034-the-proxy-knows-which-container-asked.md).
+- **`compose`** *(experimental)* — where the stack's compose client runs. `"host"` (the default)
+  runs it on your computer, which refuses compose files that name paths outside the checkout
+  ([stack](./stack.md#which-paths-compose-may-read)). `"vm"` runs foldyard's own podman-compose in
+  the VM instead, over the VM's ssh route, so a path in a compose file reads the VM, which holds
+  nothing of yours. Any other value is an error. Env: `MACHINE_COMPOSE`.
+  - *Experimental*, and arriving in steps: so far only the calls that read (`config`, `ps` and
+    the config hash `fy state` compares) run in the VM. `fy up`, the builds, `fy logs` and
+    `fy shell` still run on your computer, under the path check.
+  - Only podman-compose runs there: a `PODMAN_COMPOSE_PROVIDER` naming docker-compose is refused.
+  - Inside the box nothing changes: the client there already runs in the VM.
+  - The plan: [compose-in-vm-scope.md](https://github.com/twistco/foldyard/blob/main/docs/compose-in-vm-scope.md).
 - **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`. Same rule as
   `[project].name`.
 - **`cpus`** / **`memory_mib`** / **`disk_gib`** — sizing at first creation. Defaults: `4` /

@@ -114,6 +114,23 @@ REGISTER: tuple[Feature, ...] = (
         ),
         doc_mark="- **`attribution`** *(experimental)*",
     ),
+    Feature(
+        key="machine.compose",
+        value="vm",
+        reader="machine_compose",
+        kinds=(MAY_CHANGE, UNPROVEN),
+        unproven=(
+            "only the read-only compose calls (`config`, `ps`, the config hash) run in the VM so "
+            "far; `up`, the builds and the interactive verbs still run on your computer, and the "
+            "spike (docs/compose-in-vm-scope.md) hasn't measured the ssh cost on every host yet"
+        ),
+        graduates_when=(
+            "every compose call and both builds run in the VM, the host tiers pass with it on, "
+            "and it becomes the default with the host path and composeguard deleted (phase 4 of "
+            "docs/compose-in-vm-scope.md)"
+        ),
+        doc_mark="- **`compose`** *(experimental)*",
+    ),
 )
 
 
