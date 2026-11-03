@@ -646,18 +646,19 @@ def _host_loopback(rep: _Report, engine: str, env: dict, probe: str) -> None:
     listener = _Listener()
     try:
         script = (
-            f"if wget -q -T 10 -O /dev/null {LIVENESS_URL}; "
-            "then echo control=ok; else echo control=failed; fi; "
+            # A wgetrc can name a proxy, and it beats the env: GNU Wget runs every leg without one,
+            # so the control and the proxy leg reach THIS checkout's proxy (the env) or nothing.
             # The direct leg must skip every proxy: one would refuse the gateway as a local
-            # address, which reads as the wall refusing it. A wgetrc can name one as well as the
-            # env, so each wget gets its own switch, and one we don't know is reported.
+            # address, which reads as the wall refusing it. A wget we don't know is reported.
             'case "$(wget --help 2>&1)" in '
-            "*BusyBox*) direct='-Y off' ;; "
-            "*'GNU Wget 1.'*) direct='--no-config --no-proxy' ;; "
-            "*) direct=; echo direct=unknown ;; esac; "
-            '[ -z "$direct" ] || (unset http_proxy HTTP_PROXY; '
-            f"wget -q -T 5 -O /dev/null $direct http://{gateway}:{listener.port}/); "
-            f"wget -q -T 10 -O /dev/null http://127.0.0.1:{listener.port}/; true"
+            "*BusyBox*) cfg=; off='-Y off' ;; "
+            "*'GNU Wget 1.'*) cfg=--no-config; off=--no-proxy ;; "
+            "*) cfg=; off=; echo direct=unknown ;; esac; "
+            f"if wget -q -T 10 -O /dev/null $cfg {LIVENESS_URL}; "
+            "then echo control=ok; else echo control=failed; fi; "
+            '[ -z "$off" ] || (unset http_proxy HTTP_PROXY; '
+            f"wget -q -T 5 -O /dev/null $cfg $off http://{gateway}:{listener.port}/); "
+            f"wget -q -T 10 -O /dev/null $cfg http://127.0.0.1:{listener.port}/; true"
         )
         out = _run(
             [engine, "run", "--rm",

@@ -791,11 +791,19 @@ def test_host_loopback_out_of_reach_passes(monkeypatch, capsys):
     # read as the wall's refusal. The env is unset AND each wget's own switch is used — busybox's
     # `-Y off`, GNU Wget 1.x's `--no-config --no-proxy` (a wgetrc can set a proxy too). Any other
     # wget says so, and the row can't pass (below).
+    # A wgetrc's proxy also beats the env for the control and the proxy leg, so GNU Wget runs every
+    # leg with --no-config: each then reaches THIS checkout's proxy (the -e above), or nothing.
     script = cmd[-1]
-    assert "unset http_proxy HTTP_PROXY" in script and "http://192.168.5.2:" in script
-    assert "*BusyBox*) direct='-Y off'" in script
-    assert "*'GNU Wget 1.'*) direct='--no-config --no-proxy'" in script
-    assert "echo direct=unknown" in script and "http://127.0.0.1:" in script
+    assert script.index("case ") < script.index("wget -q")  # the switches are known before any leg
+    assert "*BusyBox*) cfg=; off='-Y off'" in script
+    assert "*'GNU Wget 1.'*) cfg=--no-config; off=--no-proxy" in script
+    assert "echo direct=unknown" in script
+    assert "wget -q -T 10 -O /dev/null $cfg http://foldyard-liveness" in script
+    assert (
+        "(unset http_proxy HTTP_PROXY; wget -q -T 5 -O /dev/null $cfg $off http://192.168.5.2:"
+        in script
+    )
+    assert "wget -q -T 10 -O /dev/null $cfg http://127.0.0.1:" in script
 
 
 def test_host_loopback_with_an_unknown_wget_proves_nothing(monkeypatch, capsys):
