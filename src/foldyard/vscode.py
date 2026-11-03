@@ -84,6 +84,7 @@ _LOCAL_TERMINAL_PROFILE = "Foldyard Local"
 _TERMINAL_PROFILES_OSX = "terminal.integrated.profiles.osx"
 _TERMINAL_DEFAULT_PROFILE_OSX = "terminal.integrated.defaultProfile.osx"
 _TERMINAL_ENV_OSX = "terminal.integrated.env.osx"
+_TERMINAL_ENV_LINUX = "terminal.integrated.env.linux"
 _OBSOLETE_TERMINAL_CWD = "terminal.integrated.cwd"
 _LOCAL_TERMINAL_CWD_ENV = "FOLDYARD_LOCAL_TERMINAL_CWD"
 # A Unix-domain socket path is capped by `sockaddr_un.sun_path` — 104 bytes on macOS, so 103
@@ -519,6 +520,9 @@ def _write_local_terminal_cwd(
     loaded_terminal_env = settings.get(_TERMINAL_ENV_OSX, {})
     if not isinstance(loaded_terminal_env, dict):
         return cannot(f"its {_TERMINAL_ENV_OSX} isn't an object")
+    loaded_linux_env = settings.get(_TERMINAL_ENV_LINUX, {})
+    if not isinstance(loaded_linux_env, dict):
+        return cannot(f"its {_TERMINAL_ENV_LINUX} isn't an object")
     terminal_env: dict[str, object] = {
         str(key): value for key, value in loaded_terminal_env.items()
     }
@@ -529,9 +533,15 @@ def _write_local_terminal_cwd(
     terminal_env[_LOCAL_TERMINAL_CWD_ENV] = str(host_checkout)
     terminal_env[_ORIGINAL_ZDOTDIR_ENV] = original_zdotdir or ""
     # A local terminal is your own shell on your computer: undo the launch's empty git config
-    # (:data:`_GIT_CONFIG_LAUNCH_ENV`) there. `null` is VS Code's "unset this variable".
+    # (:data:`_GIT_CONFIG_LAUNCH_ENV`) there. `null` is VS Code's "unset this variable". VS Code
+    # applies only the key for the host's platform, so a Linux host needs it in `.linux` too (the
+    # zsh shims above stay macOS-only).
     terminal_env.update(dict.fromkeys(_GIT_CONFIG_LAUNCH_ENV))
     settings[_TERMINAL_ENV_OSX] = terminal_env
+    settings[_TERMINAL_ENV_LINUX] = {
+        **{str(key): value for key, value in loaded_linux_env.items()},
+        **dict.fromkeys(_GIT_CONFIG_LAUNCH_ENV),
+    }
     # This is the one writer of the isolated instance's settings.json, so the instance pins ride
     # along with it rather than racing a second read-modify-write of the same file.
     settings = _pinned_settings(settings, engine_cli)

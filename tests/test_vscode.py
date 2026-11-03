@@ -358,6 +358,24 @@ def test_local_terminal_env_merge_preserves_settings_and_migrates_old_attempts(f
     assert "terminal.integrated.cwd" not in settings
 
 
+def test_local_terminals_on_a_linux_host_get_your_git_config_back_too(fake):
+    # VS Code applies only the env key for the host's platform, so the unset of the launch's
+    # empty git config must be in `.linux` as well as `.osx` — on a Linux host a local terminal
+    # would otherwise keep ignoring ~/.gitconfig. Existing entries there are kept. (Review on #160.)
+    fake["state"]["running"] = True
+    path = _settings(fake)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"terminal.integrated.env.linux": {"EXISTING": "kept"}}))
+    assert vscode.code() == 0
+    linux = json.loads(path.read_text())["terminal.integrated.env.linux"]
+    assert linux == {
+        "EXISTING": "kept",
+        "GIT_CONFIG_GLOBAL": None,
+        "GIT_CONFIG_NOSYSTEM": None,
+        "GIT_CEILING_DIRECTORIES": None,
+    }
+
+
 def test_local_terminal_preserves_original_zdotdir(fake):
     fake["state"]["running"] = True
     fake["ctx"].env["ZDOTDIR"] = "/Users/dain/.config/zsh"
@@ -375,6 +393,10 @@ def test_local_terminal_preserves_original_zdotdir(fake):
         ('{"a": }', "isn't valid JSON"),
         ("[1, 2]", "isn't a JSON object"),
         ('{"terminal.integrated.env.osx": "nope"}', "terminal.integrated.env.osx isn't an object"),
+        (
+            '{"terminal.integrated.env.linux": "nope"}',
+            "terminal.integrated.env.linux isn't an object",
+        ),
     ],
 )
 def test_instance_settings_foldyard_cant_rewrite_refuse_the_launch(fake, capsys, text, reason):
@@ -1401,7 +1423,8 @@ def test_the_seed_drops_settings_that_point_at_another_engine(fake):
     osx = settings["terminal.integrated.env.osx"]
     assert osx["A"] == "1"
     assert "DOCKER_HOST" not in osx
-    assert settings["terminal.integrated.env.linux"] == {}
+    # The seed's engine key is gone; what's left is foldyard's own unset of the launch's git config.
+    assert settings["terminal.integrated.env.linux"] == dict.fromkeys(vscode._GIT_CONFIG_LAUNCH_ENV)
     assert settings["terminal.integrated.env.windows"] == {}
     # The one engine setting the instance carries is foldyard's own pin, never the seed's value.
     assert settings.pop("dev.containers.dockerPath") == "/opt/homebrew/bin/podman"
