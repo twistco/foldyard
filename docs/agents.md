@@ -55,12 +55,15 @@ its name and id; the id's first 8 characters or the name find it. If it's still 
 says so and leaves it alone: attach instead. Arguments after `--` go to the agent, as with
 `start`.
 
-- **Claude** resumes by its own session id, which is the session's id (unless Claude picked the
-  session itself, with `--continue`, a bare `--resume` or `--fork-session`).
+- **Claude** resumes by its own session id, which is the session's id. Not when Claude picked the
+  session itself, with `--continue`, a bare `--resume` or `--fork-session`: foldyard doesn't know
+  that id, so resume refuses and leaves the session as it is (`fy agent start claude -- --resume`
+  opens Claude's own list).
 - **Codex** takes no session id from outside, so foldyard records Codex's own thread id on the
   session once Codex has one. Codex saves a thread at your first message, so a session you never
-  typed in has nothing to resume. `fy agent ls --json` shows it as `conversation`, and its full id
-  finds the session too.
+  typed in has nothing to resume. Its full id finds the session too.
+
+`fy agent ls --json` shows the id each session resumes by as `conversation`.
 
 With no session left (after the box was recreated, say), give the agent's own full id: from
 `fy agent ls --json` beforehand, the transcript, or what Codex prints when it quits. Add

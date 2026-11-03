@@ -13,7 +13,10 @@ from anything that names the session. Codex takes no such flag, so its id is fol
 Codex's thread id — what `codex resume` takes — is recorded beside it once Codex has one: a watcher
 in the pane reads which `rollout-<ts>-<thread id>.jsonl` the Codex process holds open (Codex makes
 it at the first message, not at start) and tags the session (`@fy_conversation`). Codex runs
-without its shared background server (`box._codex_argv`), so that file is the pane's own process's.
+without its shared background server (`box._codex_argv`), so that file is the pane's own process's
+(or its child's, under npm's wrapper). Claude sessions get the same tag at start — their id, or
+:data:`NO_CONVERSATION` when Claude picks the session itself — so `fy agent resume` refuses what it
+couldn't resume before it removes anything.
 
 **The transport is the engine socket, nothing else.** The host reaches each box with `podman exec`,
 as every other host verb does; no listener is opened anywhere. tmux runs on foldyard's own socket
@@ -146,18 +149,13 @@ class Session:
     box: str = ""
     checkout: str = ""  # the project's MAIN checkout, where `fy agent … --here` runs
     exited: str = ""  # when the agent exited (ISO 8601), "" while it runs or when unreadable
-    conversation: str = ""  # Codex's thread id once it has saved one ("" for Claude: it's `id`)
+    conversation: str = ""  # the id the agent resumes by: Claude's session id, Codex's thread
 
     @property
     def state(self) -> str:
         if not self.alive:
             return "exited" if self.exit_status is None else f"exited ({self.exit_status})"
         return f"attached ×{self.attached}" if self.attached else "running"
-
-    @property
-    def resumes(self) -> str:
-        """The id the agent itself resumes this conversation by; "" when there's none yet."""
-        return self.id if self.agent == "claude" else self.conversation
 
     @property
     def handle(self) -> str:
@@ -194,9 +192,25 @@ def parse_panes(stdout: str) -> list[Session]:
             alive=dead != "1",
             exit_status=int(status) if dead == "1" and status.isdigit() else None,
             exited=_iso(dead_time) if dead == "1" else "",
-            conversation=conv if _UUID.fullmatch(conv) else "",
+            conversation=_conversation(agent, sid, conv),
         )
     return list(out.values())
+
+
+# What a Claude session started by `fy agent start` is tagged with when Claude picked its own
+# session (`--continue`, a bare `--resume`, `--fork-session`): foldyard doesn't know its id.
+NO_CONVERSATION = "none"
+
+
+def _conversation(agent: str, sid: str, tag: str) -> str:
+    """The id the agent resumes this session's conversation by, "" when there's none (yet).
+    A Claude session WITHOUT the tag predates it (every start tags Claude now): its id is taken
+    as Claude's, which held unless Claude picked the session itself."""
+    if _UUID.fullmatch(tag):
+        return tag
+    if agent == "claude" and not tag and _UUID.fullmatch(sid):
+        return sid
+    return ""
 
 
 # ── tmux argv (shared by the box, which runs them, and the host, which wraps them in an exec) ─────
@@ -223,12 +237,17 @@ def _chain(*commands: Iterable[str]) -> list[str]:
     return out
 
 
-def start_argv(name: str, sid: str, agent: str, cwd: str, command: list[str]) -> list[str]:
+def start_argv(
+    name: str, sid: str, agent: str, cwd: str, command: list[str], conversation: str = ""
+) -> list[str]:
     """Start the server if needed, set foldyard's options, make the detached session running
-    ``command`` (an argv — tmux runs it directly, no shell) and tag it with its id and agent. The
-    tag's ``-t`` is a PANE target, where an exact session is ``=name:`` — a bare ``=name`` there
-    names no session (unlike `attach-session`/`kill-session`, whose ``-t`` is a session)."""
+    ``command`` (an argv — tmux runs it directly, no shell) and tag it with its id and agent, and
+    with ``conversation`` when given (Claude's: :data:`NO_CONVERSATION` when Claude picks its own
+    session; Codex's is tagged later, by the pane's watcher). The tag's ``-t`` is a PANE target,
+    where an exact session is ``=name:`` — a bare ``=name`` there names no session (unlike
+    `attach-session`/`kill-session`, whose ``-t`` is a session)."""
     target = f"={name}:"
+    tag = [["set-option", "-t", target, "@fy_conversation", conversation]] if conversation else []
     return _tmux(
         *_chain(
             ["start-server"],
@@ -236,6 +255,7 @@ def start_argv(name: str, sid: str, agent: str, cwd: str, command: list[str]) ->
             ["new-session", "-d", "-s", name, "-c", cwd, *_PANE_ENV, *command],
             ["set-option", "-t", target, "@fy_session", sid],
             ["set-option", "-t", target, "@fy_agent", agent],
+            *tag,
         ),
         start=True,
     )
@@ -279,17 +299,24 @@ def stop_argv(name: str) -> list[str]:
 # runs. So the pane starts this beside it, detached (double fork, stdio closed, so it holds neither
 # the pane's terminal nor a child slot in Codex): every 2 s it reads which rollout Codex ($1, the
 # pane's pid — `exec` keeps it through `fy codex` to Codex) holds open and tags the session with
-# its id when it changes (a `/new` in Codex starts another thread), until Codex is gone. `tmux`
-# reaches the pane's own server through $TMUX.
+# its id when it changes (a `/new` in Codex starts another thread), until Codex is gone. The
+# pane's direct children are read too: npm's `codex`, which an image may bake in (the plugin
+# installs the native one only when there's none), is a Node wrapper that runs the binary as its
+# child. `tmux` reaches the pane's own server through $TMUX.
 _CODEX_THREAD_SNIPPET = r"""
 fy_codex_thread() {
-  local pid=$1 seen= id f
+  local pid=$1 seen= id f p t kids procs
   while [ -d "/proc/$pid" ]; do
-    id=
-    for f in /proc/"$pid"/fd/*; do
-      f=$(readlink "$f" 2>/dev/null) || continue
-      case $f in */rollout-*.jsonl) f=${f%.jsonl}; f=${f: -36} ;; *) continue ;; esac
-      [[ $f =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] && id=$f
+    id= procs=$pid
+    for t in /proc/"$pid"/task/*/children; do
+      kids=; read -r kids < "$t"; procs="$procs $kids"
+    done 2>/dev/null
+    for p in $procs; do
+      for f in /proc/"$p"/fd/*; do
+        f=$(readlink "$f" 2>/dev/null) || continue
+        case $f in */rollout-*.jsonl) f=${f%.jsonl}; f=${f: -36} ;; *) continue ;; esac
+        [[ $f =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] && id=$f
+      done
     done
     if [ -n "$id" ] && [ "$id" != "$seen" ]; then
       tmux set-option -t "$TMUX_PANE" @fy_conversation "$id" && seen=$id
@@ -315,16 +342,17 @@ def pane_command(agent: str, args: list[str]) -> list[str]:
     return ["bash", "-lc", script]
 
 
-def session_args(agent: str, args: list[str]) -> tuple[str, list[str]]:
-    """``(id, the agent's args)``. Claude gets ``--session-id <id>`` so the two ids are one —
-    unless the caller already names the session: ``--resume <uuid>`` (or ``--session-id <uuid>``)
-    makes that uuid the id; ``--continue``, a bare ``--resume`` or ``--fork-session`` leave
-    foldyard's id its own, since Claude picks the session then."""
+def session_args(agent: str, args: list[str]) -> tuple[str, list[str], bool]:
+    """``(id, the agent's args, whether the id is Claude's own)``. Claude gets
+    ``--session-id <id>`` so the two ids are one — unless the caller already names the session:
+    ``--resume <uuid>`` (or ``--session-id <uuid>``) makes that uuid the id; ``--continue``, a
+    bare ``--resume`` or ``--fork-session`` leave foldyard's id its own, since Claude picks the
+    session then (and `fy agent resume` can't resume it by that id)."""
     own = str(uuid.uuid4())
     if agent != "claude":
-        return own, args
+        return own, args, False
     if any(a.partition("=")[0] == "--fork-session" for a in args):
-        return own, args
+        return own, args, False
     for i, arg in enumerate(args):
         flag, eq, value = arg.partition("=")
         if flag not in _RESUME_FLAGS:
@@ -332,8 +360,8 @@ def session_args(agent: str, args: list[str]) -> tuple[str, list[str]]:
         if not eq and flag in ("--resume", "-r", "--session-id") and i + 1 < len(args):
             value = args[i + 1]
         value = value.lower()
-        return (value if _UUID.fullmatch(value) else own), args
-    return own, ["--session-id", own, *args]
+        return (value, args, True) if _UUID.fullmatch(value) else (own, args, False)
+    return own, ["--session-id", own, *args], True
 
 
 def tmux_version(stdout: str) -> tuple[int, int] | None:
@@ -879,10 +907,14 @@ def resume(target: str, name: str, args: list[str], *, agent: str = "", attach_a
         if agent and old.agent != agent:
             _err(f"✗ {old.name} is a {old.agent or 'foreign'} session, not {agent}.")
             return 1
-        agent, conversation = old.agent, old.resumes
+        agent, conversation = old.agent, old.conversation
         if not conversation:
-            why = " (Codex saves one at your first message)" if agent == "codex" else ""
-            _err(f"✗ {old.name} has no conversation to resume{why}.")
+            why = {
+                "codex": "Codex saves one at your first message",
+                "claude": "Claude picked it itself, so its id isn't known here — "
+                "`fy agent start claude -- --resume` opens Claude's own list",
+            }.get(agent, "")
+            _err(f"✗ {old.name} has no conversation to resume{f' ({why})' if why else ''}.")
             return 1
     else:
         agent = agent or "claude"
@@ -922,10 +954,11 @@ def _launch(
     b: Box, cwd: str, agent: str, name: str, args: list[str], *, sid: str = "", attach_after: bool
 ) -> int:
     """``sid``: keep this foldyard id (a resumed Codex session's) rather than make one."""
-    own, agent_args = session_args(agent, args)
+    own, agent_args, claudes = session_args(agent, args)
     sid = sid or own
+    conversation = (sid if claudes else NO_CONVERSATION) if agent == "claude" else ""
     name = name or f"{agent}-{sid[:8]}"
-    out = b.run(start_argv(name, sid, agent, cwd, pane_command(agent, agent_args)))
+    out = b.run(start_argv(name, sid, agent, cwd, pane_command(agent, agent_args), conversation))
     if out.returncode != 0:
         _err(f"✗ couldn't start {name}: {_printable(out.stderr.strip(), 200)}")
         return 1

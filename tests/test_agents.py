@@ -97,13 +97,14 @@ def test_pane_command_is_a_login_shell_execing_fy():
     ],
 )
 def test_session_args(agent, args, passed_id, same_id):
-    sid, out = agents.session_args(agent, args)
+    sid, out, claudes = agents.session_args(agent, args)
     assert agents._UUID.fullmatch(sid)
     if passed_id:
         assert out == ["--session-id", sid, *args]
     else:
         assert out == args
     assert (sid == SID) is same_id
+    assert claudes is (passed_id or same_id)  # Claude resumes the session by this id
 
 
 @pytest.mark.parametrize(
@@ -216,6 +217,26 @@ def test_start_in_a_box(in_box, monkeypatch, capsys, tmp_path):
     assert start[new + 4 : new + 6] == ["-c", str(tmp_path)]
     assert f"exec fy claude --session-id {sid}" in next(a for a in start if "exec fy" in a)
     assert sid in capsys.readouterr().out
+    assert start[-5:] == ["set-option", "-t", f"={name}:", "@fy_conversation", sid]
+
+
+def test_start_tags_a_session_claude_picks_as_having_no_conversation(in_box, monkeypatch, tmp_path):
+    calls, replies = in_box
+    monkeypatch.chdir(tmp_path)
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
+    assert agents.start("claude", "", ["--continue"], attach_after=False) == 0
+    assert calls[-1][-2:] == ["@fy_conversation", agents.NO_CONVERSATION]
+    assert agents.start("codex", "", [], attach_after=False) == 0
+    assert "@fy_conversation" not in calls[-1]  # Codex's comes from the pane's watcher
+
+
+def test_resume_refuses_a_session_claude_picked_and_removes_nothing(in_box, capsys):
+    calls, replies = in_box
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
+    replies["list-panes"] = _Proc(0, _pane(dead="1", conv=agents.NO_CONVERSATION) + "\n")
+    assert agents.resume(SID, "", [], attach_after=False) == 1
+    assert "Claude picked it itself" in capsys.readouterr().err
+    assert not any("kill-session" in c or "new-session" in c for c in calls)
 
 
 def test_truecolor_and_own_tmux_read_the_environment():
@@ -337,14 +358,21 @@ def test_resume_codex_with_no_session_left_takes_its_id_or_a_name(in_box, monkey
     assert agents.resume(THREAD, "", [], agent="gemini", attach_after=False) == 2
 
 
-def test_parse_panes_keeps_only_a_uuid_thread():
+def test_parse_panes_reads_the_conversation_tag():
     rows = agents.parse_panes(
-        "\n".join([_pane(name="a", conv=THREAD), _pane(name="b", conv="../../etc/passwd")])
+        "\n".join(
+            [
+                _pane(name="tagged", conv=SID),
+                _pane(name="picked", conv=agents.NO_CONVERSATION),  # Claude chose the session
+                _pane(name="older"),  # untagged: started before the tag, its id taken as Claude's
+                _pane(name="forged", conv="../../etc/passwd"),
+                _pane(name="codex-new", agent="codex"),  # no thread saved yet
+            ]
+        )
     )
-    assert [s.conversation for s in rows] == [THREAD, ""]
-    assert rows[0].resumes == SID  # a Claude session resumes by its own id…
+    assert [s.conversation for s in rows] == [SID, "", SID, "", ""]
     codex = agents.parse_panes(_pane(agent="codex", conv=THREAD))[0]
-    assert codex.resumes == THREAD  # …a Codex one by its thread
+    assert codex.conversation == THREAD
     listing = agents.ProjectListing("acme", "/w/acme", [codex], "")
     back = agents.from_json(agents.to_json(listing))
     assert back is not None and back.sessions[0].conversation == THREAD
@@ -357,7 +385,8 @@ def test_only_a_codex_pane_starts_the_thread_watcher():
 
 @pytest.mark.spawns("bash")
 @pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="reads /proc, as in the box")
-def test_the_thread_watcher_tags_the_session_with_the_rollout_codex_holds(tmp_path):
+@pytest.mark.parametrize("holder", ["itself", "a child"])  # a child: npm's codex, a Node wrapper
+def test_the_thread_watcher_tags_the_session_with_the_rollout_codex_holds(tmp_path, holder):
     """The watcher, under real bash against a real /proc: this shell plays Codex, holding fd 8
     open; `readlink` reports a rollout for it (the suite's PATH has no coreutils, so `readlink`,
     `sleep` and `tmux` are functions). Tagged once with the thread id, whatever else is open, and
@@ -374,12 +403,13 @@ esac; }}
 sleep() {{ :; }}
 tmux() {{ printf '%s\n' "$*" >> {out}; }}
 """
-    # This shell holds fds 8 and 9, then waits (≤ 10 s, builtins only: a read on a pipe that
-    # never delivers) for the watcher it started to tag the session.
-    wait = f"""
+    # The holder opens fds 8 and 9, then waits (≤ 10 s, builtins only: a read on a pipe that
+    # never delivers) for the watcher this shell started to tag the session.
+    hold = f"""
 exec 8</dev/null 9</dev/null 7<> <(:)
 for ((i = 0; i < 200; i++)); do [ -s {out} ] && break; read -t 0.05 -u 7 || :; done
 """
+    wait = hold if holder == "itself" else f"( {hold} ) & wait"
     proc = subprocess.run(
         ["bash", "-c", stubs + agents._CODEX_THREAD_SNIPPET + wait],
         capture_output=True,
