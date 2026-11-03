@@ -2179,7 +2179,10 @@ class Injector:
 
     def _push_lifted(self, dest: str | None) -> bool:
         """Is a git push SENT to ``dest`` (a :func:`_destination`, never the Host header) let
-        through? Only on a ``push_hosts`` entry, matched exactly as a rule's host."""
+        through? Only on a ``push_hosts`` entry, matched exactly as a rule's host. Host-wide: a
+        rule's ``path_prefix`` isn't carried, so a FUTURE push-capable kind scoped to a path would
+        lift the whole host — carry the prefix in the live file before adding one. (gh-cli has no
+        prefix, and its host, ``api.github.com``, serves no receive-pack.)"""
         return any(_injects_on(dest, host) for host in self.push_hosts)
 
     @staticmethod
