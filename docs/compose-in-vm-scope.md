@@ -1,6 +1,7 @@
 # Compose in the VM: scope
 
-Status: **proposed, for sign-off**, 2026-11-03. Nothing is built. Related:
+Status: **accepted, phase 1 built** (experimental), 2026-11-03. The four decisions below were taken as
+recommended. Related:
 [ADR-0022](./adrs/0022-host-runs-the-adopted-config.md) (its 0.3.2 amendment names this as the
 structural fix), [ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md),
 [ADR-0010](./adrs/0010-podman-everywhere-container-host.md) (why builds use native `podman build`),
@@ -123,9 +124,18 @@ at a time.
 ## Phases
 
 0. **Spike** on `foldyard-example`: the open questions, vz locally, qemu/9p and WSL2 through a CI
-   dispatch.
-1. **Read-only, behind an experimental switch** (an `experimental.REGISTER` entry): the `config`
-   render, the config hash and `ps` run in the guest.
+   dispatch. It is a host-tier module, `tests/test_guestcompose_e2e.py` (shards L1 and W1), which
+   writes the call cost and the premise table to the run's step summary. Already seen from a dev
+   box: the payload (the runner, podman-compose 1.6.0, PyYAML 6.0.3, python-dotenv 1.2.2) is a
+   96 KB zip, which loads from a memfd under `python3 -I` and renders on PyYAML's pure-Python
+   parser.
+1. **Read-only, behind an experimental switch** (`[machine] compose = "vm"`, in
+   `experimental.REGISTER`): `ps`, `config --services` and the config hash run in the guest
+   (`foldyard.guestcompose`). **Built.** The full `config` render does NOT move yet: while `up`
+   and the builds run on your computer, the path guard must judge what THAT client will read, and
+   a render from the guest is the box's to shape (the VM user's home is box-writable). A guard fed
+   a clean render from the guest while the client on your computer reads the real files would be
+   worse than today. So the render moves with `up`, in phase 2.
 2. **Mutating verbs:** build, `up`, `down`, the supervisor's recreate, `logs`, `shell`, `run`.
 3. **`fy box build`** in the guest too.
 4. **Default on, then the host path deleted** with `composeguard`, the docs section, and a new ADR
