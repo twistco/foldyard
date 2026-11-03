@@ -48,7 +48,7 @@ import shlex
 import subprocess
 import sys
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -79,6 +79,11 @@ _SERVER_OPTIONS: tuple[tuple[str, ...], ...] = (
     # An agent that exits leaves its pane, so `fy agent attach` can show why and `ls` says so.
     ("set-option", "-g", "remain-on-exit", "on"),
 )
+
+# The pane's own environment. tmux never sets COLORTERM, so without it Claude Code sees only
+# `tmux-256color` and draws its palette in 256 colours. Saying truecolor is safe whoever attaches:
+# tmux converts 24-bit colour to the nearest one a client without RGB can show.
+_PANE_ENV = ("-e", "COLORTERM=truecolor")
 
 # What `ls` reads per pane: one line each (our sessions have one pane), fields joined by _SEP.
 # Printable on purpose: tmux writes a control character in `-F` output as `_`, so a tab joined
@@ -216,7 +221,7 @@ def start_argv(name: str, sid: str, agent: str, cwd: str, command: list[str]) ->
         *_chain(
             ["start-server"],
             *_SERVER_OPTIONS,
-            ["new-session", "-d", "-s", name, "-c", cwd, *command],
+            ["new-session", "-d", "-s", name, "-c", cwd, *_PANE_ENV, *command],
             ["set-option", "-t", target, "@fy_session", sid],
             ["set-option", "-t", target, "@fy_agent", agent],
         ),
@@ -228,8 +233,29 @@ def list_argv() -> list[str]:
     return _tmux("list-panes", "-a", "-F", _FORMAT)
 
 
-def attach_argv(name: str) -> list[str]:
-    return _tmux("attach-session", "-t", f"={name}")
+def attach_argv(name: str, *, rgb: bool = False) -> list[str]:
+    """``-u``: the client draws UTF-8. tmux decides that from LC_ALL/LC_CTYPE/LANG, which a box
+    usually has none of, and then writes every non-ASCII character as ``_``. ``rgb``: this
+    terminal shows 24-bit colour (tmux ignores the client's COLORTERM, so it has to be told — per
+    client, so a 256-colour terminal attaching later isn't sent what it can't show)."""
+    return [*_tmux("-u", *(["-T", "RGB"] if rgb else [])), "attach-session", "-t", f"={name}"]
+
+
+def switch_argv(name: str) -> list[str]:
+    """From inside one of foldyard's own panes: move that client to ``name``. An attach there
+    would nest tmux in itself, which tmux refuses."""
+    return _tmux("switch-client", "-t", f"={name}")
+
+
+def truecolor(env: Mapping[str, str] = os.environ) -> bool:
+    """Whether the attaching terminal says it shows 24-bit colour."""
+    return env.get("COLORTERM", "").lower() in ("truecolor", "24bit")
+
+
+def in_own_tmux(env: Mapping[str, str] = os.environ) -> bool:
+    """Inside a pane of foldyard's server (``$TMUX`` is ``<socket path>,<pid>,<session>``)."""
+    socket = env.get("TMUX", "").rsplit(",", 2)[0]
+    return bool(socket) and Path(socket).name == SOCKET
 
 
 def stop_argv(name: str) -> list[str]:
@@ -649,7 +675,12 @@ def _do(verb: str, b: Box, found: Session | None, target: str) -> int:
     if not found.alive:
         _err(f"(the agent in {found.name} has exited — its last screen follows; `fy agent stop "
              f"{found.handle}` removes it)")  # fmt: skip
-    argv = b.argv(attach_argv(found.name), tty=True)
+    if b.engine is None and in_own_tmux():
+        out = b.run(switch_argv(found.name))
+        if out.returncode != 0:
+            _err(f"✗ couldn't switch to {found.name}: {_printable(out.stderr.strip(), 200)}")
+        return out.returncode
+    argv = b.argv(attach_argv(found.name, rgb=truecolor()), tty=True)
     if b.engine is None:
         os.execvp(argv[0], argv)
     return subprocess.run(argv, env=b.env).returncode

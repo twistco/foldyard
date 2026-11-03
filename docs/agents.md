@@ -30,6 +30,11 @@ session's name.
 
 Detach with **Ctrl-B d**. The agent keeps running.
 
+**From inside a box**, `fy agent attach` and `fy agent stop` reach that box's own sessions: in a
+`fy box shell` the attach takes over the shell's terminal, and from inside another agent's session
+it switches that terminal over to the one you named (Ctrl-B d still detaches). A session in
+another worktree's box is attached from your computer.
+
 **Where `fy agent ls` looks.** On your computer it lists every project you've adopted a config for
 (with `fy config adopt`, or when a launch command such as `fy up` asked you to), and in each one the boxes of the main
 checkout and its registered worktrees. A project whose VM isn't running is listed under *Not
@@ -87,7 +92,10 @@ that asks before letting a program set the clipboard.
 tmux older than 3.3 passes escape sequences through whatever the first setting says, so
 `fy agent start` refuses it. The rest of the settings are papercuts: no delay after Esc (which
 interrupts Claude), Shift-Enter, the window size, focus events (so Claude knows when its pane
-gains or loses focus) and a 50,000-line scrollback.
+gains or loses focus) and a 50,000-line scrollback. An attach also tells tmux that your terminal
+draws UTF-8 (without it, every non-ASCII character showed as `_`) and, when your terminal sets
+`COLORTERM=truecolor`, that it shows 24-bit colour. Claude draws in 24-bit colour under tmux, and
+tmux picks the nearest colours for a terminal that can't show them.
 
 ## Your own box image
 

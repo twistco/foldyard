@@ -43,7 +43,9 @@ def test_start_argv_sets_posture_before_the_session_and_tags_it():
     new = next(i for i, c in enumerate(commands) if c.startswith("new-session"))
     # Every option lands before the session exists, so the agent never runs without them.
     assert all(c.startswith("set-option -") for c in commands[1:new])
-    assert argv[argv.index("new-session") :][:6] == ["new-session", "-d", "-s", "s1", "-c", "/repo"]
+    assert argv[argv.index("new-session") :][:8] == [
+        "new-session", "-d", "-s", "s1", "-c", "/repo", "-e", "COLORTERM=truecolor",
+    ]  # fmt: skip
     assert commands[new + 1 :] == [
         f"set-option -t =s1: @fy_session {SID}",
         "set-option -t =s1: @fy_agent claude",
@@ -59,7 +61,9 @@ def test_a_tmux_argument_ending_in_a_semicolon_is_refused():
 
 
 def test_attach_and_stop_target_the_exact_session_name():
-    assert agents.attach_argv("s1") == ["tmux", "-L", "fy", "attach-session", "-t", "=s1"]
+    assert agents.attach_argv("s1") == ["tmux", "-L", "fy", "-u", "attach-session", "-t", "=s1"]
+    assert agents.attach_argv("s1", rgb=True)[3:6] == ["-u", "-T", "RGB"]
+    assert agents.switch_argv("s1") == ["tmux", "-L", "fy", "switch-client", "-t", "=s1"]
     assert agents.stop_argv("s1") == ["tmux", "-L", "fy", "kill-session", "-t", "=s1"]
     assert agents.list_argv()[:5] == ["tmux", "-L", "fy", "list-panes", "-a"]
 
@@ -153,7 +157,7 @@ def test_host_box_argv_wraps_in_exec(monkeypatch):
     tty = b.argv(agents.attach_argv("s1"), tty=True)
     assert tty[:6] == ["podman", "exec", "-it", "-e", "COLORTERM=truecolor", "p-devbox"]
     assert tty[6:8] == ["bash", "-lc"]
-    assert tty[8].rstrip().endswith("exec tmux -L fy attach-session -t =s1")
+    assert tty[8].rstrip().endswith("exec tmux -L fy -u attach-session -t =s1")
     # In the box itself there's nothing to wrap.
     assert agents.Box("p-devbox", "").argv(["tmux", "-V"]) == ["tmux", "-V"]
 
@@ -205,6 +209,34 @@ def test_start_in_a_box(in_box, monkeypatch, capsys, tmp_path):
     assert start[new + 4 : new + 6] == ["-c", str(tmp_path)]
     assert f"exec fy claude --session-id {sid}" in next(a for a in start if "exec fy" in a)
     assert sid in capsys.readouterr().out
+
+
+def test_truecolor_and_own_tmux_read_the_environment():
+    assert agents.truecolor({"COLORTERM": "truecolor"}) and agents.truecolor({"COLORTERM": "24bit"})
+    assert not agents.truecolor({}) and not agents.truecolor({"COLORTERM": "yes"})
+    assert agents.in_own_tmux({"TMUX": "/tmp/tmux-0/fy,1678,0"})
+    assert not agents.in_own_tmux({"TMUX": "/tmp/tmux-0/default,1678,0"})
+    assert not agents.in_own_tmux({})
+
+
+def test_attach_in_a_box_execs_tmux_with_utf8_and_the_terminals_colour(in_box, monkeypatch):
+    _, replies = in_box
+    replies["list-panes"] = _Proc(0, _pane() + "\n")
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    execs: list[list[str]] = []
+    monkeypatch.setattr(agents.os, "execvp", lambda f, argv: execs.append(argv))
+    agents.attach(SID, here=False)
+    assert execs == [agents.attach_argv("claude-3f2c9a1e", rgb=True)]
+
+
+def test_attach_from_inside_an_agent_pane_switches_instead_of_nesting(in_box, monkeypatch):
+    calls, replies = in_box
+    replies["list-panes"] = _Proc(0, _pane() + "\n")
+    monkeypatch.setenv("TMUX", "/tmp/tmux-0/fy,1678,0")
+    monkeypatch.setattr(agents.os, "execvp", lambda *a: pytest.fail("attached inside tmux"))
+    assert agents.attach(SID, here=False) == 0
+    assert calls[-1] == agents.switch_argv("claude-3f2c9a1e")
 
 
 def test_start_refuses_an_old_or_missing_tmux(in_box, capsys):
