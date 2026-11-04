@@ -241,6 +241,28 @@ def test_a_pin_inside_the_repo_is_refused(repo, uv, installed):
     assert installed == []
 
 
+def test_a_pin_inside_a_linked_worktree_is_refused(repo, tmp_path, uv, installed):
+    """A worktree can live outside the repo, and a box can write it all the same."""
+    wt = tmp_path / "elsewhere" / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "wt", str(wt))
+    with pytest.raises(pin.Refused, match="outside"):
+        pin.pin(
+            _git(repo, "rev-parse", "HEAD"),
+            repo,
+            wt / "pin",
+            install=uv.install,
+            installed_from=uv.installed_from,
+        )
+    assert not (wt / "pin").exists()
+    assert installed == []
+
+
+def test_a_sibling_of_a_worktree_is_fine(repo, tmp_path, pin_dir, run):
+    _git(repo, "worktree", "add", "-q", "-b", "wt", str(tmp_path / "fy-pin-wt"))
+    assert run(_git(repo, "rev-parse", "HEAD")).commit
+    assert _pinned(pin_dir) == "good\n"
+
+
 # ── a failed install ──────────────────────────────────────────────────────────────────────────
 
 

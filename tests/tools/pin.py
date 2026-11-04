@@ -198,6 +198,14 @@ def installed_from(directory: Path) -> bool:
         return False  # TOMLDecodeError is a ValueError; the last two are a malformed receipt
 
 
+def _checkouts(repo: Path) -> list[Path]:
+    """The repo and its linked worktrees, which can live anywhere. An empty `worktrees_root` isn't
+    among them: that's `[machine]` config, which this has no business reading."""
+    listed = _must(_git(repo, "worktree", "list", "--porcelain"), f"list {repo}'s worktrees")
+    prefix = "worktree "
+    return [repo, *(Path(ln[len(prefix) :]) for ln in listed.splitlines() if ln.startswith(prefix))]
+
+
 def pin(
     commit: str,
     repo: Path,
@@ -205,8 +213,11 @@ def pin(
     install: Callable[[Path], None] = install,
     installed_from: Callable[[Path], bool] = installed_from,
 ) -> Pinned:
-    if directory.resolve().is_relative_to(repo.resolve()):
-        raise Refused(f"{directory} is inside {repo}: a pin has to be outside what a box can write")
+    for checkout in _checkouts(repo):
+        if directory.resolve().is_relative_to(checkout.resolve()):
+            raise Refused(
+                f"{directory} is inside {checkout}: a pin has to be outside what a box can write"
+            )
     full = resolve(repo, commit)
     _ensure_clone(directory, repo)
     previous = _head(directory) if installed_from(directory) else None
