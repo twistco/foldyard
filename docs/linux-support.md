@@ -147,7 +147,8 @@ the firewall fails closed. `test_wall_e2e.py` probes for this and skips. A custo
   mount/endpoint allowlist is deferred (ADR-0025 §Decision 4). Not a Linux blocker: without gVisor
   the Linux claim is the same as macOS's.
 - **What CI can't reach:** arm64 (no KVM) and nested virtualisation inside the guest. For those
-  the nested-KVM recipe in [nested-virt.md](./nested-virt.md) remains.
+  the nested-KVM recipe in [nested-virt.md](./nested-virt.md) remains. The host tier has passed on
+  arm64 Linux there, in a nested VM on an Apple M3 Max (2026-11-04), by hand rather than as a gate.
 
 ## Recording a new validation
 

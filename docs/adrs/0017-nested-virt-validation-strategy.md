@@ -10,6 +10,11 @@
   ([ADR-0027](./0027-always-a-vm-native-backend-retired.md)); real-engine coverage of the machine
   lifecycle now comes from the host tier (`tests/test_*_e2e.py`) on Lima VMs in CI, on Linux and
   inside WSL2. `podman machine` itself still has no CI gate.
+  **Amended 2026-11-04:** the "operationally fragile" scoping and the deferral of a full nested
+  e2e no longer hold on Apple silicon. With `kvm-arm.vgic_v3_*_trap=1` on the L1 kernel, the Linux
+  host tier ran in a nested Lima VM, with the Lima VM as the L1 rather than a container playing the
+  host. Without those arguments, no L2 boots on the software measured (docs/nested-virt.md,
+  Rig 2).
 - **Sources:** DEVELOPMENT.md (test tiers, nested-virt architecture, confirmations),
   docs/history/nested-podman-in-devbox.md, docs/history/lima-network-forcing-spike.md
 
@@ -46,6 +51,10 @@ by a *container*, not a second VM — and keep CI on containers, with no KVM job
   create the single L2 VM. ARM nested KVM supports **one** nesting level reliably; a third VM as
   the "Mac" would be L1→L2→L3 triple nesting. Keeping the host role in a container stays at one
   VM level while still faithfully exercising `podman machine`.
+
+  *(Correction, 2026-11-04: on Apple silicon the Linux host tier has since run with a Lima VM as the
+  L1 and no container in the host role, `just nested-test`, one nesting level all the same; see
+  docs/nested-virt.md, Rig 2. It doesn't exercise `podman machine`.)*
 - **Prerequisites are pinned:** M3+ CPU, macOS 15+ (EL2 nested virt), podman ≥ 5.6.0 on the
   libkrun provider selected persistently in `containers.conf` (the default applehv provider does
   **not** expose `/dev/kvm`), machine sized ≤ physical cores.
@@ -65,10 +74,18 @@ by a *container*, not a second VM — and keep CI on containers, with no KVM job
   rig is for `KVM_CREATE_VM` smoke and thin `machine`-wrapper validation — not for running a
   full guest workload. The complete `machine ensure/recreate`/`box up`/`host` nested e2e stays
   deferred.
+
+  *(Correction, 2026-11-04: on macOS 27.0.1 with the L1 kernel's GIC traps on, neither the
+  fragility nor the need to defer reproduced: the host tier ran nested, and the L1 answered in
+  8–11 ms during a CPU and disk burn in the L2. Without the traps the L2 doesn't boot at all, from
+  lost interrupts rather than starvation. The recipe and results are in docs/nested-virt.md.)*
 - **Graceful teardown is a hard rule.** SIGKILL of the inner VMM (or `docker rm -f` of a
   container running a nested guest) can wedge the L1 machine. Tear down inside-out: ACPI
   `poweroff` the guest → stop the container → `podman machine stop`/`rm` the nested machine.
   Treat nested machines as disposable; if L1 goes sluggish, recreate it from the Mac.
+
+  *(Correction, 2026-11-04: this no longer holds as a hard rule. A Lima L1 survived the host tier's
+  SIGKILL of the hypervisor. Inside-out remains the sensible default.)*
 - **CI runs tiers 1–3 on containers, none on KVM.** The `live-e2e` job runs inside a docker-CLI
   container that mirrors the dev box: docker CLI only (so `engine()` picks docker, ADR-0010),
   the runner's socket mounted + `DOCKER_HOST` set (so `in_box()` is true and `machine.ensure`
