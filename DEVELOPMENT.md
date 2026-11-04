@@ -387,7 +387,10 @@ foldyard's surface splits by *where it can be validated*:
      `fy ps` over `CONTAINER_HOST`, in-box `fy verify` ALL PASS, `box down`.
    On a Lima host these run against the example's own VM (creating, restarting, recreating it),
    never a consumer's. What the runner cannot reach — nested virtualisation for the gVisor
-   posture — stays the recipe in [docs/nested-virt.md](./docs/nested-virt.md).
+   posture — stays the recipe in [docs/nested-virt.md](./docs/nested-virt.md). That page's M3+ rig
+   also runs this tier on arm64 Linux in a VM of its own, so it can't collide with the
+   `foldyard-example` on your computer; **its L1 kernel needs the GIC traps the page names, or no
+   L2 boots** — while `/dev/kvm` and `KVM_CREATE_VM` still look fine.
    From a Claude Code cloud session (root, no `/dev/kvm`, an egress proxy that re-signs TLS) the
    tier runs under QEMU's TCG, slowly: [`.claude/skills/cloud-host/`](./.claude/skills/cloud-host/SKILL.md)
    sets that host up in one script and lists what breaks there and why.
