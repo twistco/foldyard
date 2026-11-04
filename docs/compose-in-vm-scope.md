@@ -126,7 +126,14 @@ Consequences of running as the VM user:
 - **Registry logins on your computer don't reach the VM.** A client on your computer read
   `auth.json` and sent the credentials with each pull and build, which is itself a host secret the
   compose files could spend. In the VM there is no such file, so a private base image needs another
-  route. **Open:** what that route should be before phase 4.
+  route. None of the maintainers' projects uses one today, so this stays a documented limit for now,
+  and it **blocks phase 4**: other projects need a route before the host path goes. The two options:
+  an adopted list of images pulled by `podman pull` from your computer (small, and needs no new tool,
+  but the named registry's login reaches the VM during that pull), or by `skopeo` on your computer
+  and `podman load` (the login never enters the VM, but it needs `skopeo`, and your computer then
+  parses registry data and fetches outside the wall). Either way the list is adopted config, never
+  what a compose file names, or the box chooses what your login fetches. An image already in the VM
+  needs no registry, in or out of the box. A new one fails at the pull from the box, which is right.
 - **`${HOME}`, `~` and `$USER` in a compose file are the guest's.** Your computer's home was never in
   the VM, so a bind mount from it found nothing there anyway.
 - **Your own recipes aren't moved.** A recipe that runs `"$ENGINE" compose` after `eval "$(fy
