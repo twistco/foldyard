@@ -499,14 +499,19 @@ def _host_passthrough() -> dict[str, str]:
     """The slice of ``os.environ`` a compose/engine subprocess starts from: the fixed passthrough
     minus anything host.env declares, plus the names the adopted ``[project].compose_env`` opts
     into (those pass even from host.env — the operator named them)."""
+    from . import registrylogins
+
     declared = set(config.compose_env())
     secret = _host_env_keys()
-    return {
+    out = {
         k: v
         for k, v in os.environ.items()
         if k in declared
         or ((k in _PASSTHROUGH or k.startswith(_PASSTHROUGH_PREFIXES)) and k not in secret)
     }
+    if not config.in_box():  # the client's auth file: see registrylogins
+        out[registrylogins.AUTH] = registrylogins.for_compose(declared)
+    return out
 
 
 # ── engine verbs (compose passthroughs) ───────────────────────────────────────────────
@@ -861,6 +866,7 @@ def _podman_build(
             for line in log_path.read_text().splitlines()[-25:]:
                 _err("  " + line)
             _err(f"  full log: cat {log_path}")
+            _say_registry_logins()
             return failures[0][1]
     if superseded is not None:
         after = {image: _image_id(engine, image, ctx.env) for image in images}
@@ -868,6 +874,13 @@ def _podman_build(
             {old for image, old in before.items() if old and old != after.get(image)}
         )
     return 0
+
+
+def _say_registry_logins() -> None:
+    from . import registrylogins
+
+    for line in registrylogins.failure_hint():
+        _err(line)
 
 
 def _image_id(engine: str, image: str, env: dict[str, str]) -> str | None:
@@ -1003,6 +1016,8 @@ def up() -> int:
         # Build has already selected the engine-appropriate implementation; compose only starts
         # the resulting images, never re-enters a provider build path.
         rc = _compose(ctx, ["up", "-d", "--no-build"], extra_profiles=extra, rendered=rendered)
+        if rc != 0:  # after a failed build, _podman_build has said it
+            _say_registry_logins()
     if rc != 0:
         return rc
     # Containers are on the new images now; the ones the build replaced can go.

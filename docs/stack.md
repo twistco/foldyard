@@ -159,6 +159,33 @@ or give it a credential through a mode ([below](#keep-secrets-out-of-compose)).
 Run from inside the box, the compose client runs in the VM, where none of your files are, so
 these checks don't apply.
 
+## Private images
+
+A compose client doesn't pull on your computer: it asks the VM to, and sends your logins along. So
+foldyard gives the clients it starts on your computer **no registry logins**, whatever `podman login`
+has stored, and images come from a registry anonymously. Your logins would otherwise sit in the VM
+during a build, where a box can read them, all of them, not only the one that build needs.
+
+For a private image, opt in for that project:
+
+```bash
+podman login --authfile ~/.foldyard/acme-registry.json ghcr.io
+export REGISTRY_AUTH_FILE=~/.foldyard/acme-registry.json
+```
+
+```toml
+[project]
+compose_env = ["REGISTRY_AUTH_FILE"]
+```
+
+**A box can read what's in that file** while a build runs, so give it one login, read-only and
+scoped to what this project pulls. `fy config widenings` lists it. Naming it without exporting one
+means no logins, never your default `auth.json`.
+
+An image already in the VM needs no registry, so `fy up` in the box finds it. A new one fails at the
+pull: the box has no login, and an agent can't make your logins fetch something new by editing a
+compose file. An anonymous pull also means Docker Hub's lower rate limit.
+
 ## podman-compose differences that bite
 
 As of podman-compose 1.6.0:
