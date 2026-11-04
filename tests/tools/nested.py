@@ -6,8 +6,8 @@ The tier drives one VM with a fixed name, so on your computer it collides with a
 docs/adrs/0035-the-box-asks-for-a-test-run.md says why this stays outside the box.
 
 What runs in the L1 is treated as code you wouldn't run on your computer: a dependency's install
-script, or a test an agent was steered into writing. So the L1 mounts nothing and holds no
-credentials, the commit reaches it as a pack over stdin, a wall stops it reaching your computer's
+script, or a test an agent was steered into writing. So the L1 mounts and forwards nothing and holds
+no credentials, the commit reaches it as a pack over stdin, a wall stops it reaching your computer's
 localhost through the gateway, and the tier runs as a user with no ``sudo`` to remove that wall
 (``--with-sudo`` grants it, for ``test_wall_e2e``, and since root can't be taken back that L1 is
 stopped straight after and has to be replaced before another run). Every run checks all of that first and refuses
@@ -30,6 +30,7 @@ import shlex
 import socket
 import subprocess
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +49,12 @@ TRAP_ARGS = (
     "kvm-arm.vgic_v3_group1_trap",
     "kvm-arm.vgic_v3_common_trap",
 )
+
+# Off, spelled out. `.portForwards=[]` isn't: Lima appends a default rule to whatever's listed, and
+# a listener in the guest appeared on your computer's localhost within seconds.
+FORWARD_NOTHING = [{"guestIP": "0.0.0.0", "proto": "any", "ignore": True}]
+FORWARD_WAIT_S = 6  # longer than Lima takes to notice a listener: it took under 4
+WALL_TABLE = "fy_nested_wall"
 
 _VM_NAME = re.compile(r"fy-nested(-[a-z0-9][a-z0-9-]*)?")
 _MODULE = re.compile(r"tests/test_(?:[a-z0-9_]+_)?e2e\.py")
@@ -116,8 +123,10 @@ def _show(done: subprocess.CompletedProcess) -> None:
 
 def _stop(vm: str) -> None:
     """Stop the L1 from outside, by force if the guest won't: a VM left up is the risk."""
-    if _run(["limactl", "stop", vm], capture=False).returncode != 0:
-        _run(["limactl", "stop", "--force", vm], capture=False)
+    if _run(["limactl", "stop", vm], capture=False).returncode == 0:
+        return
+    if _run(["limactl", "stop", "--force", vm], capture=False).returncode != 0:
+        print(f"⚠ couldn't stop {vm}, even by force: it's still running. See `limactl list`.")
 
 
 def _stream(argv: Sequence[str]) -> int:
@@ -161,6 +170,27 @@ def reaches_your_computer(vm: str) -> bool:
         return _run(_shell_argv(vm, "timeout", "5", "bash", "-c", probe)).returncode == 0
 
 
+def _port_answers(port: int) -> bool:
+    with socket.socket() as client:
+        client.settimeout(1)
+        return client.connect_ex(("127.0.0.1", port)) == 0
+
+
+def forwards_to_your_computer(vm: str) -> bool:
+    """Does a listener in the L1 show up on this computer's localhost? Code there could otherwise
+    squat a port a local tool or browser trusts. Asked of the real path, as with the wall."""
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+    listen = (
+        "import socket,time;s=socket.socket();"
+        f"s.bind(('127.0.0.1',{port}));s.listen();time.sleep({FORWARD_WAIT_S + 8})"
+    )
+    _run(_tester_argv(vm, f"(nohup python3 -c {shlex.quote(listen)} >/dev/null 2>&1 &)"))
+    time.sleep(FORWARD_WAIT_S)
+    return _port_answers(port)
+
+
 # ── what makes an L1 fit to run in ───────────────────────────────────────────────────────
 
 
@@ -183,6 +213,8 @@ def _tainted(vm: str) -> bool:
 
 def _refuse_tainted(vm: str) -> None:
     if _tainted(vm):
+        if _status(vm) == "Running":  # a killed run never got to stop it
+            _stop(vm)
         raise Refused(
             f"{vm} had root in a `--with-sudo` run, and that can't be taken back: anything could "
             "be left in it. `just nested-down --delete && just nested-up` replaces it."
@@ -204,8 +236,21 @@ def _check_contained(vm: str) -> None:
     mounts = _run(["limactl", "list", vm, "--format", "{{json .Config.Mounts}}"]).stdout.strip()
     if json.loads(mounts or "null"):
         raise Refused(f"{vm} has mounts, so code in it could reach your files. Recreate it.")
+    forwards = _run(["limactl", "list", vm, "--format", "{{json .Config.PortForwards}}"]).stdout
+    if (json.loads(forwards.strip() or "null") or [{}])[0] != FORWARD_NOTHING[0]:
+        raise Refused(
+            f"{vm} isn't set to forward nothing, so a listener in it could appear on your "
+            "computer. `just nested-down --delete && just nested-up` replaces it."
+        )
+    wall = _run(_shell_argv(vm, "sudo", "nft", "list", "table", "inet", WALL_TABLE))
+    if wall.returncode != 0 or "100.64.0.0/10" not in wall.stdout:
+        raise Refused(f"{vm}'s wall isn't loaded as it should be. Run `just nested-up`.")
     if reaches_your_computer(vm):
         raise Refused(f"{vm} can reach your computer's localhost: its wall is down.")
+    if forwards_to_your_computer(vm):
+        raise Refused(
+            f"a listener in {vm} appears on your computer's localhost, whatever its config says."
+        )
     # `-l`, not `true`: a rule allowing only `nft` refuses `true` and can still remove the wall.
     if _run(_tester_argv(vm, "sudo -n -l")).returncode == 0:
         raise Refused(
@@ -232,14 +277,16 @@ def up(cfg: Config) -> None:
     if fresh:
         _create(cfg)
         if not reaches_your_computer(cfg.vm):
-            print(
-                f"⚠ {cfg.vm} couldn't reach your computer even before its wall, so the wall "
-                "probe can't be told from a network problem. Has Lima's gateway moved?"
+            _stop(cfg.vm)
+            _run(["limactl", "delete", cfg.vm])
+            raise Refused(
+                f"{cfg.vm} couldn't reach your computer even before its wall, so the wall's probe "
+                "would prove nothing. Has Lima's gateway moved? The new VM has been deleted."
             )
     elif status != "Running":
         _start(cfg.vm)
     script = (ASSETS / "provision.sh").read_text()
-    print(f"▶ provisioning {cfg.vm}")
+    print(f"▶ provisioning {cfg.vm} (about a minute the first time)")
     provisioned = _run(
         _shell_argv(cfg.vm, "sudo", "env", f"LIMA_VERSION={LIMA_VERSION}", "bash", "-s"),
         input=script,
@@ -255,6 +302,11 @@ def up(cfg: Config) -> None:
     print(f"✓ {cfg.vm} is ready: `just nested-test`")
 
 
+def _create_set_expr() -> str:
+    forwards = json.dumps(FORWARD_NOTHING)
+    return f".nestedVirtualization=true | .mounts=[] | .portForwards={forwards}"
+
+
 def _create(cfg: Config) -> None:
     print(f"▶ creating {cfg.vm}")
     created = _run(
@@ -268,7 +320,7 @@ def _create(cfg: Config) -> None:
             f"--memory={cfg.memory_gib}",
             f"--disk={cfg.disk_gib}",
             "--set",
-            ".nestedVirtualization=true | .mounts=[] | .portForwards=[]",
+            _create_set_expr(),
             "template:podman",
         ],
         capture=False,

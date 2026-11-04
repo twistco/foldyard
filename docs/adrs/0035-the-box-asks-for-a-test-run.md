@@ -38,6 +38,8 @@ and runs the tier, and `just nested-down` stops it inside-out. What runs in the 
 hostile:
 
 - **Nothing shared:** no mounts, no forwards, no credentials. A commit arrives as a pack over stdin.
+  Forwards take an explicit `ignore` rule to turn off, or a listener in the L1 appears on your
+  computer's localhost, where it could squat a port something local trusts.
 - **A wall at boot** keeps the L1 off your computer's localhost and off private addresses, CGNAT's
   included, DNS aside. Without it, code in a Lima guest reaches the computer's loopback through the
   gateway, and any address the computer holds: Lima's network dials from the computer's own sockets.
@@ -45,8 +47,9 @@ hostile:
   needs `sudo` on its "host" and skips without it. `--with-sudo` gives it root, which can't be taken
   back: a narrow `sudo` rule or a timer left behind would pass any check from outside. So an L1 gets
   one such run: marked from outside it first, stopped straight after, and refused until replaced.
-- **Every run checks first:** the traps in the running kernel, no mounts, no `sudo` rule of any
-  kind, and a real connection attempt to a socket on your computer. It refuses otherwise.
+- **Every run checks first:** the traps in the running kernel, no mounts, no forwards, no `sudo`
+  rule of any kind, the wall's rules, a real connection attempt to a socket on your computer, and a
+  real listener in the L1 that must not appear there. It refuses otherwise.
 - **Your computer's git reads the box-writable repo** under the same no-repo-code flags as
   `worktree.py`. It writes no ref and checks nothing out, so no hook or filter driver has a turn.
 - **What comes back** reaches the terminal with its control sequences stripped.
@@ -123,4 +126,5 @@ run anything rather than the tier.
   no new exposure, and don't remove it. A steered agent could edit `tests/tools/nested.py` before
   you next run it. To tighten this, run the recipes and `fy` from a clean clone or a frozen install.
 - The wall's rules live in `tests/tools/nested_l1/provision.sh`. If Lima's gateway moves, the probe
-  could pass for the wrong reason: `nested-up` tries it before the wall on a fresh L1 and warns.
+  could pass for the wrong reason: `nested-up` tries it before the wall on a fresh L1, and deletes
+  that L1 and refuses if it fails.

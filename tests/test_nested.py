@@ -6,6 +6,7 @@ trip uses real git. The live proof is running the recipes on an M3+ (docs/nested
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -44,13 +45,21 @@ class FakeL1:
         self.sent_pack = False
         self.git_can_refuse_lazy_fetch = True
         self.stops_refused = 0
+        self.port_forwards = json.dumps(nested.FORWARD_NOTHING)
+        self.forward_answers = False
+        self.wall_rules = "ip daddr { 100.64.0.0/10 } drop"
         self.inner_says = ""
 
     def run(self, argv, *, stdin=None, input=None, capture=True):
         self.calls.append(list(argv))
         joined = " ".join(argv)
         out, rc = "", 0
-        if argv[:2] == ["git", "--no-lazy-fetch"]:
+        if ".Config.PortForwards" in joined:
+            out = self.port_forwards
+        elif "nft list table" in joined:
+            out = self.wall_rules
+            rc = 0 if self.wall_rules else 1
+        elif argv[:2] == ["git", "--no-lazy-fetch"]:
             rc = 0 if self.git_can_refuse_lazy_fetch else 129
         elif argv[:2] == ["limactl", "list"] and ".Config.Mounts" in joined:
             out = self.mounts
@@ -106,6 +115,8 @@ def l1(monkeypatch, tmp_path):
 
     monkeypatch.setattr(nested, "_send_pack", _send)
     monkeypatch.setattr(nested, "_rev_parse", lambda repo, ref: "a" * 40)
+    monkeypatch.setattr(nested, "_port_answers", lambda port: fake.forward_answers)
+    monkeypatch.setattr(nested, "FORWARD_WAIT_S", 0)
     monkeypatch.delenv("IN_DEVBOX", raising=False)
     return fake
 
@@ -125,15 +136,25 @@ def test_a_fresh_l1_has_nesting_and_nothing_shared(l1):
     expr = create[create.index("--set") + 1]
     assert ".nestedVirtualization=true" in expr
     assert ".mounts=[]" in expr
-    assert ".portForwards=[]" in expr
 
 
-def test_the_probe_is_proven_against_a_fresh_l1_before_the_wall(l1, capsys):
+def test_a_fresh_l1_forwards_nothing_explicitly():
+    # An empty list isn't off: Lima appends a default rule, and a listener in the guest appeared on
+    # this computer's localhost within seconds (live). Only a rule with `ignore` turns it off.
+    rule = nested.FORWARD_NOTHING[0]
+    assert (rule["guestIP"], rule["proto"], rule["ignore"]) == ("0.0.0.0", "any", True)
+    assert json.dumps(nested.FORWARD_NOTHING) in nested._create_set_expr()
+
+
+def test_a_probe_that_fails_before_the_wall_rejects_the_fresh_vm(l1):
+    # Unreachable even BEFORE the wall: later failures would prove nothing about the wall.
     l1.status = ""
     l1.cmdline = "BOOT_IMAGE=x ro"
-    l1.reaches = [False, False]  # unreachable even BEFORE the wall: the probe proves nothing
-    nested.up(CFG)
-    assert "probe" in capsys.readouterr().out
+    l1.reaches = [False]
+    with pytest.raises(nested.Refused, match="before its wall"):
+        nested.up(CFG)
+    assert not l1.sent("bash -s")
+    assert ["limactl", "delete", "fy-nested"] in l1.calls
 
 
 def test_up_restarts_only_when_the_traps_are_not_in_the_running_kernel(l1):
@@ -182,6 +203,11 @@ def test_up_sends_the_provisioning_script_to_root(l1):
         (lambda f: setattr(f, "reaches", [True]), "your computer"),
         (lambda f: setattr(f, "tester_has_sudo", True), "sudo"),
         (lambda f: setattr(f, "mounts", '[{"location":"~"}]'), "mount"),
+        (lambda f: setattr(f, "port_forwards", "null"), "forward"),
+        (lambda f: setattr(f, "port_forwards", '[{"guestPort":80,"hostPort":80}]'), "forward"),
+        (lambda f: setattr(f, "forward_answers", True), "localhost"),
+        (lambda f: setattr(f, "wall_rules", ""), "wall"),
+        (lambda f: setattr(f, "wall_rules", "table inet other {}"), "wall"),
         (lambda f: setattr(f, "status", "Stopped"), "nested-up"),
         (lambda f: setattr(f, "status", ""), "nested-up"),
         (lambda f: setattr(f, "run_active", True), "running"),
@@ -374,6 +400,29 @@ def test_down_on_a_vm_that_had_root_runs_nothing_in_it(l1):
     assert not l1.sent("limactl shell")
     assert l1.sent("limactl stop")
     assert ["limactl", "delete", "fy-nested"] in l1.calls
+
+
+def test_refusing_a_tainted_vm_left_running_also_stops_it(l1):
+    # A killed run never reaches its `finally`, so the next verb is what stops it.
+    (l1.vm_dir / nested.HAD_ROOT).touch()
+    with pytest.raises(nested.Refused, match="had root"):
+        nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=False)
+    assert l1.status == "Stopped"
+    assert not l1.sent("limactl shell")
+
+
+def test_up_on_a_tainted_vm_left_running_also_stops_it(l1):
+    (l1.vm_dir / nested.HAD_ROOT).touch()
+    with pytest.raises(nested.Refused, match="had root"):
+        nested.up(CFG)
+    assert l1.status == "Stopped"
+
+
+def test_a_vm_that_wont_stop_at_all_is_reported(l1, capsys):
+    l1.stops_refused = 2
+    (l1.vm_dir / nested.HAD_ROOT).touch()
+    nested.down(CFG, delete=False)
+    assert "couldn't stop" in capsys.readouterr().out
 
 
 def test_a_vm_refusing_to_stop_is_forced(l1):
