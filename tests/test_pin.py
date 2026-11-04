@@ -257,6 +257,21 @@ def test_a_pin_inside_a_linked_worktree_is_refused(repo, tmp_path, uv, installed
     assert installed == []
 
 
+def test_a_worktree_path_with_a_newline_is_still_recognised(repo, tmp_path, uv, installed):
+    """Git doesn't quote paths in `--porcelain`, so without `-z` this is read as two lines."""
+    wt = tmp_path / "odd\nname" / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "wt", str(wt))
+    with pytest.raises(pin.Refused, match="outside"):
+        pin.pin(
+            _git(repo, "rev-parse", "HEAD"),
+            repo,
+            wt / "pin",
+            install=uv.install,
+            installed_from=uv.installed_from,
+        )
+    assert installed == []
+
+
 def test_a_sibling_of_a_worktree_is_fine(repo, tmp_path, pin_dir, run):
     _git(repo, "worktree", "add", "-q", "-b", "wt", str(tmp_path / "fy-pin-wt"))
     assert run(_git(repo, "rev-parse", "HEAD")).commit

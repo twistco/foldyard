@@ -199,11 +199,13 @@ def installed_from(directory: Path) -> bool:
 
 
 def _checkouts(repo: Path) -> list[Path]:
-    """The repo and its linked worktrees, which can live anywhere. An empty `worktrees_root` isn't
-    among them: that's `[machine]` config, which this has no business reading."""
-    listed = _must(_git(repo, "worktree", "list", "--porcelain"), f"list {repo}'s worktrees")
+    """The repo and its linked worktrees, which can live anywhere. This catches the operator's own
+    mistake with `FY_PIN_DIR` and isn't a boundary: a box can write `.git/worktrees`, so it can hide
+    a worktree from this list, and a directory in `[machine].worktrees_root` that no worktree holds
+    isn't on it. `-z`, since git doesn't quote a path here and one can hold a newline."""
+    listed = _must(_git(repo, "worktree", "list", "--porcelain", "-z"), f"list {repo}'s worktrees")
     prefix = "worktree "
-    return [repo, *(Path(ln[len(prefix) :]) for ln in listed.splitlines() if ln.startswith(prefix))]
+    return [repo, *(Path(f[len(prefix) :]) for f in listed.split("\0") if f.startswith(prefix))]
 
 
 def pin(
