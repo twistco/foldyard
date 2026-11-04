@@ -91,7 +91,8 @@ prune *args:
 # it can't collide with the VMs on your computer, and what it runs can't reach your computer.
 # Run these on your computer. A foldyard-only tool, so these aren't `fy` verbs.
 #   just nested-up
-#   just nested-test [--ref REF] [--with-sudo] [tests/test_*_e2e.py …]   # default: HEAD, CI's shards
+#   just nested-test [--ref REF] [tests/test_*_e2e.py …]   # default: HEAD, CI's shards
+#   just nested-test --with-sudo tests/test_wall_e2e.py    # root: the VM must be replaced after
 #   just nested-down [--delete]
 nested-up:
     #!/usr/bin/env bash

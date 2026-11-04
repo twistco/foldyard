@@ -93,7 +93,7 @@ On your computer:
 just nested-up                     # create or repair the L1, and check it
 just nested-test                   # HEAD, all of CI's shards
 just nested-test --ref my-branch tests/test_box_e2e.py
-just nested-test --with-sudo tests/test_wall_e2e.py
+just nested-test --with-sudo tests/test_wall_e2e.py   # the VM must be replaced afterwards
 just nested-down                   # stop inside-out; --delete removes the L1 too
 ```
 
@@ -118,16 +118,21 @@ Fedora's mirrors and the registries directly. So `just nested-up` sets up its ow
 ([provision.sh](../tests/tools/nested_l1/provision.sh)):
 
 - **A wall loaded at boot**, exempting no user: DNS is allowed, then every private address is
-  dropped. DNS has to come first, because the resolver is on the gateway.
+  dropped, CGNAT's `100.64.0.0/10` included. DNS has to come first, because the resolver is on the
+  gateway. Lima's network dials out from your computer's own sockets, so an address your computer
+  holds is reachable too: on a computer with a `100.64` address (Tailscale, some VPNs), a listener
+  on it answered the L1 until that range was added. A VPN that gives your computer a public address
+  isn't covered.
 - **An unprivileged user, `fytest`**, runs the tier, so what it runs can't remove the wall.
-  `test_wall_e2e` needs `sudo` on its "host" and skips without it; `--with-sudo` grants it for that
-  one run.
+  `test_wall_e2e` needs `sudo` on its "host" and skips without it. `--with-sudo` gives it root, and
+  **root can't be taken back**: a narrow `sudo` rule or a timer left behind would pass any check
+  from outside. So that run marks the L1 from outside it, and an ordinary run or `just nested-up`
+  refuses it until `just nested-down --delete && just nested-up` replaces it.
 - **No mounts, forwards or credentials.** A commit arrives as a `git pack-objects` stream.
 
-Every run checks the traps, the mounts, `sudo` and the wall first, the wall by a real connection
-attempt to a socket on your computer, and refuses if any of them is wrong. `just nested-up` repairs
-what it can. Both refusals were seen live: with the wall's table deleted, and with a stale `sudo`
-grant in place, a run stopped before sending anything, and `just nested-up` put each right.
+Every run checks the traps, the mounts, any `sudo` rule and the wall first, the wall by a real
+connection attempt to a socket on your computer, and refuses if any of them is wrong. The probe only
+tries the gateway: the other ranges rest on the rules.
 
 This keeps your computer out of reach. It doesn't limit what leaves the L1 over the public internet,
 and a run's verdict is only what the code under test reports.
@@ -143,7 +148,7 @@ With an 8 vCPU, 16 GiB L1 on `vz`, and `MACHINE_CPUS=2` as in CI:
 | L1 response during a 60 s CPU and disk burn in the L2 | 8–11 ms, no stalls in either kernel |
 | `just nested-test`: shard `L1`, including the hypervisor SIGKILL in `test_machine_e2e` | 39 passed, 10:19 |
 | `just nested-test`: shard `L2`, including the box | 23 passed, 12 skipped (`test_wall_e2e`, no `sudo`), 6:03 |
-| `just nested-test --with-sudo tests/test_wall_e2e.py`: both firewalls | 12 passed, 2:11 |
+| `just nested-test --with-sudo tests/test_wall_e2e.py`: both firewalls, then replacing the VM | 12 passed, 2:11 |
 | rootless container, box-style flags plus `--device /dev/kvm`: Lima L2 inside | 46 s, `accel=kvm`, with egress |
 
 The earlier warning that this rig is fragile under load, with an L2 starving the L1's control plane

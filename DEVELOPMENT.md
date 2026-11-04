@@ -22,7 +22,7 @@ just typecheck   # pyright + ty (both, run together)
 just check       # lint + typecheck + suite — what CI gates on
 just prune       # list merged .claude/worktrees, local branches, orphaned dev venvs (--apply removes)
 just nested-up   # Apple M3+: a VM of its own for the host tier (docs/nested-virt.md)
-just nested-test [--ref REF] [--with-sudo] [modules]   # send a commit in, run the tier (default: CI's shards)
+just nested-test [--ref REF] [modules]   # send a commit in, run the tier (default: CI's shards)
 just nested-down [--delete]
 ```
 

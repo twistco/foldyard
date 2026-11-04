@@ -28,8 +28,9 @@ TRAPS = " ".join(f"{arg}=1" for arg in nested.TRAP_ARGS)
 class FakeL1:
     """What the tool can observe of an L1, and every command it was sent."""
 
-    def __init__(self, status: str = "Running"):
+    def __init__(self, vm_dir: Path, status: str = "Running"):
         self.status = status
+        self.vm_dir = vm_dir
         self.cmdline = f"BOOT_IMAGE=x ro {TRAPS}"
         self.traps_after_restart = True
         self.reaches = [False]  # successive answers of the probe; the last repeats
@@ -47,6 +48,8 @@ class FakeL1:
         out, rc = "", 0
         if argv[:2] == ["limactl", "list"] and ".Config.Mounts" in joined:
             out = self.mounts
+        elif argv[:2] == ["limactl", "list"] and ".Dir" in joined:
+            out = f"{self.vm_dir}\n" if self.status else ""
         elif argv[:2] == ["limactl", "list"]:
             out = f"fy-nested {self.status}\nother Running\n" if self.status else "other Running\n"
         elif argv[:2] == ["limactl", "info"]:
@@ -59,12 +62,12 @@ class FakeL1:
                 self.cmdline = f"BOOT_IMAGE=x ro {TRAPS}"
         elif "/proc/cmdline" in joined:
             out = self.cmdline
-        elif "dmesg" in joined:
+        elif "journalctl -k -b" in joined:
             out = "kvm [1]: GICv3 sysreg trapping enabled" if TRAPS in self.cmdline else ""
         elif "/dev/tcp/" in joined:
             answer = self.reaches.pop(0) if len(self.reaches) > 1 else self.reaches[0]
             rc = 0 if answer else 1
-        elif "sudo -n true" in joined:
+        elif "sudo -n -l" in joined:
             rc = 0 if self.tester_has_sudo else 1
         elif "is-active" in joined:
             rc = 0 if self.run_active else 3
@@ -79,8 +82,10 @@ class FakeL1:
 
 
 @pytest.fixture
-def l1(monkeypatch):
-    fake = FakeL1()
+def l1(monkeypatch, tmp_path):
+    vm_dir = tmp_path / "lima-instance"
+    vm_dir.mkdir()
+    fake = FakeL1(vm_dir)
     monkeypatch.setattr(nested, "_run", fake.run)
     monkeypatch.setattr(nested, "_stream", fake.stream)
 
@@ -204,6 +209,64 @@ def test_sudo_is_granted_for_one_run_and_taken_back_even_when_it_fails(l1, monke
     grant, revoke = l1.sent("sudoers.d")
     assert "NOPASSWD" in " ".join(grant)
     assert "rm -f" in " ".join(revoke)
+
+
+def test_root_in_the_l1_cant_be_taken_back_so_it_taints_the_vm(l1):
+    # A run with root can leave a narrow sudo rule or a timer that no check here would find.
+    assert nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=True) == 0
+    with pytest.raises(nested.Refused, match="had root"):
+        nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=False)
+    assert len(l1.streamed) == 1
+
+
+def test_an_interrupted_root_run_taints_it_too(l1, monkeypatch):
+    def boom(argv):
+        assert nested._tainted(CFG.vm), "the mark must be there before the grant's code runs"
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(nested, "_stream", boom)
+    with pytest.raises(KeyboardInterrupt):
+        nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=True)
+    assert nested._tainted(CFG.vm)
+
+
+def test_another_root_run_is_allowed_on_a_tainted_vm(l1):
+    nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=True)
+    assert nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=True) == 0
+
+
+def test_up_cant_repair_a_tainted_vm_and_doesnt_try(l1):
+    nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=True)
+    l1.calls.clear()
+    with pytest.raises(nested.Refused, match="had root"):
+        nested.up(CFG)
+    assert not l1.sent("bash -s")  # root in there has no business being asked to provision
+
+
+def test_the_taint_lives_outside_the_vm_and_goes_when_it_is_deleted(l1):
+    nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=True)
+    marks = list(l1.vm_dir.iterdir())
+    assert len(marks) == 1  # Lima's own instance directory: `limactl delete` removes it
+
+
+def test_a_vm_with_no_directory_counts_as_tainted(l1, monkeypatch):
+    real = l1.run
+
+    def no_dir(argv, **kw):
+        if ".Dir" in " ".join(argv):
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return real(argv, **kw)
+
+    monkeypatch.setattr(nested, "_run", no_dir)
+    with pytest.raises(nested.Refused, match="had root"):
+        nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=False)
+
+
+def test_any_sudo_rule_counts_not_only_a_full_grant(l1):
+    # `sudo -n true` passes a rule that allows only `nft`; `-l` lists it.
+    nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=False)
+    assert l1.sent("sudo -n -l")
+    assert not l1.sent("sudo -n true")
 
 
 @pytest.mark.parametrize(
@@ -405,6 +468,37 @@ def test_the_wall_lets_dns_out_before_it_drops_private_addresses():
     assert [("dport 53" in r) for r in rules] == [True, True, False]
     assert rules[-1].endswith("drop")
     assert "192.168.0.0/16" in rules[-1]
+
+
+@pytest.mark.parametrize(
+    "block",
+    # CGNAT is Tailscale's and some VPNs': Lima's network dials from your computer's own sockets.
+    [
+        "100.64.0.0/10",
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "169.254.0.0/16",
+    ],
+)
+def test_the_wall_drops_every_range_your_computer_might_answer_on(block):
+    drop = next(
+        ln
+        for ln in PROVISION.splitlines()
+        if ln.strip().startswith("ip daddr") and ln.strip().endswith("drop")
+    )
+    assert block in drop
+
+
+def test_the_wall_covers_ipv6_without_breaking_neighbour_discovery():
+    lines = [ln.strip() for ln in PROVISION.splitlines()]
+    drop = next(
+        i for i, ln in enumerate(lines) if ln.startswith("ip6 daddr") and ln.endswith("drop")
+    )
+    assert "fc00::/7" in lines[drop] and "fe80::/10" in lines[drop]
+    icmp = next(i for i, ln in enumerate(lines) if "icmpv6" in ln and ln.endswith("accept"))
+    assert icmp < drop
 
 
 def test_the_wall_comes_up_at_boot_and_exempts_nobody():

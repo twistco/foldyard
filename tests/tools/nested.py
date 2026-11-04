@@ -9,8 +9,9 @@ What runs in the L1 is treated as code you wouldn't run on your computer: a depe
 script, or a test an agent was steered into writing. So the L1 mounts nothing and holds no
 credentials, the commit reaches it as a pack over stdin, a wall stops it reaching your computer's
 localhost through the gateway, and the tier runs as a user with no ``sudo`` to remove that wall
-(``--with-sudo`` grants it for one run, for ``test_wall_e2e``). Every run checks all of that first
-and refuses otherwise. It keeps your computer out of reach; it isn't a bound on egress, and the L1
+(``--with-sudo`` grants it, for ``test_wall_e2e``, and since root can't be taken back that L1 is
+replaced before an ordinary run uses it again). Every run checks all of that first and refuses
+otherwise. It keeps your computer out of reach; it isn't a bound on egress, and the L1
 has the public internet, since the tier needs Fedora's mirrors and the registries. A test's verdict
 is also only what the code under test reports.
 
@@ -39,6 +40,7 @@ REPO = Path(__file__).resolve().parents[2]
 LIMA_VERSION = "2.2.0"  # CI's (tests/test_nested.py holds them equal)
 TESTER = "fytest"  # its home isn't /home/<user>.guest, which Lima reserves in the L2
 SUDO_GRANT = "90-fy-nested-test"
+HAD_ROOT = "fy-nested-had-root"  # beside the VM's Lima files: out of its reach, deleted with it
 UNIT = "fy-nested-run"
 GATEWAY = "192.168.5.2"  # Lima's user-mode network: your computer's localhost, from a guest
 TRAP_ARGS = (
@@ -156,24 +158,50 @@ def _traps_missing(vm: str) -> list[str]:
     return [arg for arg in TRAP_ARGS if f"{arg}=1" not in words]
 
 
-def _check_contained(vm: str) -> None:
+def _had_root_mark(vm: str) -> Path | None:
+    got = _run(["limactl", "list", vm, "--format", "{{.Dir}}"]).stdout.strip()
+    return Path(got) / HAD_ROOT if got else None
+
+
+def _tainted(vm: str) -> bool:
+    """Did code in this L1 ever have root? A run with it can leave a narrow sudo rule, or a timer
+    that drops the wall later, and no check from outside would find those. Unknown counts as yes."""
+    mark = _had_root_mark(vm)
+    return mark is None or mark.exists()
+
+
+def _refuse_tainted(vm: str) -> None:
+    if _tainted(vm):
+        raise Refused(
+            f"{vm} had root in a `--with-sudo` run, and that can't be taken back: anything could "
+            "be left in it. `just nested-down --delete && just nested-up` replaces it."
+        )
+
+
+def _check_contained(vm: str, *, with_sudo: bool = False) -> None:
+    if not with_sudo:
+        _refuse_tainted(vm)
     missing = _traps_missing(vm)
     if missing:
         raise Refused(
             f"{vm}'s kernel lacks the GIC trap arguments ({', '.join(missing)}), and without them "
             "no nested VM boots. Run `just nested-up`."
         )
-    if "sysreg trapping" not in _run(_shell_argv(vm, "sudo", "dmesg")).stdout:
+    # The journal, not dmesg: this is printed once at boot, and a run's containers can push it
+    # out of the ring buffer. Then every run would refuse, with nothing able to repair it.
+    log = _shell_argv(vm, "sudo", "journalctl", "-k", "-b", "-g", "sysreg trapping", "--no-pager")
+    if "sysreg trapping" not in _run(log).stdout:
         raise Refused(f"{vm}'s KVM doesn't report GICv3 sysreg trapping: no nested VM would boot.")
     mounts = _run(["limactl", "list", vm, "--format", "{{json .Config.Mounts}}"]).stdout.strip()
     if json.loads(mounts or "null"):
         raise Refused(f"{vm} has mounts, so code in it could reach your files. Recreate it.")
     if reaches_your_computer(vm):
         raise Refused(f"{vm} can reach your computer's localhost: its wall is down.")
-    if _run(_tester_argv(vm, "sudo -n true")).returncode == 0:
+    # `-l`, not `true`: a rule allowing only `nft` refuses `true` and can still remove the wall.
+    if _run(_tester_argv(vm, "sudo -n -l")).returncode == 0:
         raise Refused(
-            f"{TESTER} in {vm} has sudo, so code it runs could remove the wall. A run that was "
-            "interrupted can leave that; `just nested-up` takes it away."
+            f"{TESTER} in {vm} has sudo, so code it runs could remove the wall. Nothing here should "
+            "have given it that. `just nested-down --delete && just nested-up` replaces the VM."
         )
 
 
@@ -190,6 +218,8 @@ def up(cfg: Config) -> None:
         )
     status = _status(cfg.vm)
     fresh = not status
+    if not fresh:
+        _refuse_tainted(cfg.vm)
     if fresh:
         _create(cfg)
         if not reaches_your_computer(cfg.vm):
@@ -253,7 +283,7 @@ def run_tests(cfg: Config, repo: Path, ref: str, modules: Sequence[str], *, with
             raise Refused(f"not a host-tier module: {module!r} (tests/test_*_e2e.py).")
     if _status(cfg.vm) != "Running":
         raise Refused(f"{cfg.vm} isn't running. Run `just nested-up`.")
-    _check_contained(cfg.vm)
+    _check_contained(cfg.vm, with_sudo=with_sudo)
     if _run(_tester_argv(cfg.vm, f"systemctl --user is-active -q {UNIT}")).returncode == 0:
         raise Refused(f"a run is still running in {cfg.vm}. `just nested-down` stops it.")
     sha = _rev_parse(repo, ref)
@@ -281,7 +311,14 @@ def run_tests(cfg: Config, repo: Path, ref: str, modules: Sequence[str], *, with
     )
     grant = f"/etc/sudoers.d/{SUDO_GRANT}"
     if with_sudo:
-        print(f"⚠ {TESTER} has sudo for this run, so this code could remove the wall")
+        mark = _had_root_mark(cfg.vm)
+        if mark is None:
+            raise Refused(f"couldn't find {cfg.vm}'s Lima directory, to mark that it had root.")
+        mark.touch()  # first: an interrupted run has had root as well
+        print(
+            f"⚠ {TESTER} has root for this run, so this code could remove the wall. "
+            f"{cfg.vm} is replaced before an ordinary run uses it again."
+        )
         line = shlex.quote(f"{TESTER} ALL=(ALL) NOPASSWD: ALL")
         _run(_shell_argv(cfg.vm, "sudo", "bash", "-c", f"echo {line} > {grant}; chmod 440 {grant}"))
     try:
@@ -375,7 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     test.add_argument(
         "--with-sudo",
         action="store_true",
-        help="grant the tester sudo for this run, for test_wall_e2e: this code could drop the wall",
+        help="give the tester root, for test_wall_e2e: the VM must be replaced afterwards",
     )
     test.add_argument("modules", nargs="*", help="tests/test_*_e2e.py (default: CI's shards)")
     stop = verbs.add_parser("down", help="stop everything, inside-out")

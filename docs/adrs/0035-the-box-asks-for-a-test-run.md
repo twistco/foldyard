@@ -38,12 +38,15 @@ and runs the tier, and `just nested-down` stops it inside-out. What runs in the 
 hostile:
 
 - **Nothing shared:** no mounts, no forwards, no credentials. A commit arrives as a pack over stdin.
-- **A wall at boot** keeps the L1 off your computer's localhost and off private addresses, DNS
-  aside. Without it, code in a Lima guest reaches the computer's loopback through the gateway.
+- **A wall at boot** keeps the L1 off your computer's localhost and off private addresses, CGNAT's
+  included, DNS aside. Without it, code in a Lima guest reaches the computer's loopback through the
+  gateway, and any address the computer holds: Lima's network dials from the computer's own sockets.
 - **An unprivileged user** runs the tier, so what it runs can't remove the wall. `test_wall_e2e`
-  needs `sudo` on its "host" and skips without it; `--with-sudo` grants it for one run.
-- **Every run checks first:** the traps in the running kernel, no mounts, no `sudo`, and a real
-  connection attempt to a socket on your computer. It refuses otherwise.
+  needs `sudo` on its "host" and skips without it. `--with-sudo` gives it root, which can't be taken
+  back: a narrow `sudo` rule or a timer left behind would pass any check from outside. So that L1
+  is marked from outside it, and refused for ordinary runs until it's replaced.
+- **Every run checks first:** the traps in the running kernel, no mounts, no `sudo` rule of any
+  kind, and a real connection attempt to a socket on your computer. It refuses otherwise.
 - **Your computer's git reads the box-writable repo** under the same no-repo-code flags as
   `worktree.py`. It writes no ref and checks nothing out, so no hook or filter driver has a turn.
 - **What comes back** reaches the terminal with its control sequences stripped.
@@ -113,7 +116,8 @@ run anything rather than the tier.
 - An agent in a box still can't run the tier itself until part 3 is built. Someone runs it for them.
 - The arm64 Linux host tier gets a way to run, by hand; CI's arm runners have no KVM.
 - It isn't a boundary against a hypervisor escape from the L1, and doesn't try to be. Nor does it
-  bound what leaves the L1 over the public internet.
+  bound what leaves the L1 over the public internet, or cover a VPN that gives your computer a public
+  address.
 - **The recipes read from the box-writable checkout.** With an editable `fy` that is true of `fy`
   itself on foldyard's own project ([security.md](../security.md) names the exception), so these add
   no new exposure, and don't remove it. A steered agent could edit `tests/tools/nested.py` before

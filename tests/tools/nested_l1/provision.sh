@@ -22,8 +22,9 @@ if ! /usr/local/bin/limactl --version 2>/dev/null | grep -qxF "limactl version $
   curl -fsSL "$url" | tar xz -C /usr/local
 fi
 
-# The tier's user: no sudo, so what it runs can't remove the wall below. `--with-sudo` grants it
-# for one run, and an interrupted run can leave that behind.
+# The tier's user: no sudo, so what it runs can't remove the wall below. `--with-sudo` grants it;
+# nested.py then refuses this VM until it's replaced, so a grant found here is left from an
+# interrupted run on a VM that nested.py won't use anyway.
 #
 # Its subordinate ids are named: Lima's own user holds the whole default range in this image, and a
 # plain useradd then fails ("Can't get unique subordinate UID range").
@@ -44,8 +45,11 @@ grubby --update-kernel=ALL \
   --args="kvm-arm.vgic_v3_group0_trap=1 kvm-arm.vgic_v3_group1_trap=1 kvm-arm.vgic_v3_common_trap=1"
 
 # Nothing in the L1 reaches your computer, or any other private address: DNS only, and DNS first,
-# since the resolver is on the gateway. The public internet stays open, which the tier needs. No
-# user is exempt. Replies to what your computer started (`limactl shell`) pass as established.
+# since the resolver is on the gateway. Lima's network dials out from your computer's own sockets,
+# so the range is whatever your computer might answer on or route to, CGNAT included (Tailscale's,
+# and some VPNs'). The public internet stays open, which the tier needs. No user is exempt. Replies
+# to what your computer started (`limactl shell`) pass as established. Lima gives the L1 no routable
+# IPv6 today; the IPv6 rules are there if that changes, and leave neighbour discovery working.
 cat >/etc/fy-nested-wall.nft <<'NFT'
 table inet fy_nested_wall {}
 delete table inet fy_nested_wall
@@ -56,7 +60,9 @@ table inet fy_nested_wall {
     ct state established,related accept
     ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } udp dport 53 accept
     ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } tcp dport 53 accept
-    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } drop
+    ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } drop
+    icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
+    ip6 daddr { fc00::/7, fe80::/10 } drop
   }
 }
 NFT
