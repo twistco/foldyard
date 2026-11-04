@@ -1230,11 +1230,12 @@ def _run_stream_fed(
     import threading
 
     assert proc.stdin is not None and proc.stdout is not None
+    pipe = proc.stdin
 
     def feed() -> None:
         try:
-            proc.stdin.write(stdin)  # type: ignore[union-attr]
-            proc.stdin.close()  # type: ignore[union-attr]
+            pipe.write(stdin)
+            pipe.close()
         except OSError:  # it already exited: its code says why
             pass
 

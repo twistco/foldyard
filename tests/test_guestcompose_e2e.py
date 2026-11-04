@@ -18,16 +18,23 @@ VM and checks what the scope doc's phase 0 asks:
   container (anything a box can create through the engine socket) can read too. The table is
   printed either way.
 
-Host tier (tests/e2e_host.py). Works in a scratch dir inside one of the VM's writable mounts and
-leaves the VM running and un-walled.
+The second half is the whole flow with ``[machine] compose = "vm"`` adopted: the module RECREATES
+the VM from its own example copy, since the client now reads the checkout in the VM (the other
+modules' stacks ship their build context over the socket from your computer). A logging ``podman``
+first on the CLI's PATH makes "no compose client ran on your computer" an assertion over what ran.
+
+Host tier (tests/e2e_host.py). The spike works in a scratch dir inside one of the VM's writable
+mounts. The VM is left running and un-walled.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import signal
 import statistics
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -35,15 +42,24 @@ import pytest
 
 from e2e_host import (
     LIMA_SOCK,
+    PROJECT,
     VM,
+    _adopt_on_host,
+    _engine,
+    _engine_env,
+    _probe_db,
+    _service_is_listed,
     engine,
     ensure_vm,
     example_copy,
     export_vm_socket,
+    fy,
+    fy_ok,
     host_tier,
     lima_list,
     lima_shell,
     lima_status,
+    wait_for,
 )
 
 pytestmark = host_tier
@@ -106,6 +122,13 @@ def _ctx(scratch: Path, files: tuple[str, ...] = ("compose.yml",), **env: str):
         **env,
     }
     return stack.Context(scratch, full, compose, "web", "fygc", "")
+
+
+def _foldyard_env(repo: Path) -> dict[str, str]:
+    """The environment `_foldyard` gives the CLI, for the verbs driven by hand here."""
+    env = _engine_env()
+    env.pop("CONTAINER_HOST", None)
+    return {**env, "FOLDYARD_REPO": str(repo), "FOLDYARD_ENGINE": _engine()}
 
 
 def _summary(line: str) -> None:
@@ -343,3 +366,168 @@ def test_the_vm_user_reads_nothing_a_box_cant(shared, bound):
             + ("" if box is None else f", box {'readable' if box else 'REFUSED'}")
         )
     assert not widened, f"the VM user reads what a box can't: {widened}"
+
+
+# ── the whole flow, with `[machine] compose = "vm"` adopted ───────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def flow(tmp_path_factory):
+    """``(repo, env)``: an example copy that turned it on, the VM recreated to mount it, and a
+    ``podman`` on the CLI's PATH that logs every argv before running the real one."""
+    base = tmp_path_factory.mktemp("flow")
+    repo = example_copy(base)
+    toml = repo / "foldyard.toml"
+    text = toml.read_text()
+    assert text.count("\n[machine]\n") == 1
+    toml.write_text(text.replace("\n[machine]\n", '\n[machine]\ncompose = "vm"\n'))
+    subprocess.run(
+        ["git", "-c", "user.email=e2e@foldyard", "-c", "user.name=e2e", "commit", "-qam", "vm"],
+        cwd=str(repo),
+        check=True,
+    )
+    shim = base / "bin"
+    shim.mkdir()
+    log = base / "podman.log"
+    real = shutil.which("podman")
+    assert real
+    (shim / "podman").write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexec "{real}" "$@"\n')
+    (shim / "podman").chmod(0o755)
+    env = {"PATH": f"{shim}{os.pathsep}{os.environ['PATH']}"}
+    _adopt_on_host(repo, env)
+    fy_ok(["machine", "recreate", "--yes"], repo, timeout=900, env_extra=env)
+    export_vm_socket()
+    fy_ok(["up"], repo, env_extra=env)
+    yield repo, env, log
+    fy(["down"], repo, timeout=180, env_extra=env)
+
+
+def test_flow_up_serves_from_the_guests_client(flow):
+    repo, env, _ = flow
+    assert _probe_db() and "reachable" in _probe_db()
+    ps = fy_ok(["ps"], repo, timeout=120, env_extra=env)
+    assert "(in the VM)" in ps.out
+    assert _service_is_listed(ps.out, PROJECT, "api"), ps.out
+
+
+def test_flow_state_sees_no_drift_through_the_guests_hash(flow):
+    repo, env, _ = flow
+    state = fy(["state"], repo, timeout=120, env_extra=env)
+    assert "match the rendered config" in state.out, state.out
+
+
+def test_flow_doctor_has_no_failing_row(flow):
+    repo, env, _ = flow
+    doctor = fy(["doctor"], repo, timeout=300, env_extra=env)
+    assert doctor.rc == 0, doctor.out
+    assert "machine.compose" in doctor.out or "compose" in doctor.out
+
+
+def test_flow_fy_shell_enters_the_running_container(flow):
+    """`exec` needs a terminal: a real pty, the engine's exec, a real shell at the other end."""
+    import pty
+    import select
+
+    repo, env, _ = flow
+    leader, follower = pty.openpty()
+    full = {**_foldyard_env(repo), **env}
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "foldyard", "shell"],
+        cwd=str(repo),
+        env=full,
+        stdin=follower,
+        stdout=follower,
+        stderr=follower,
+    )
+    os.close(follower)
+    seen = b""
+    try:
+        os.write(leader, b"echo marker-$((40+2)); exit\n")
+        deadline = time.monotonic() + 60
+        while b"marker-42" not in seen and time.monotonic() < deadline:
+            if select.select([leader], [], [], 1)[0]:
+                try:
+                    seen += os.read(leader, 4096)
+                except OSError:
+                    break
+        assert b"marker-42" in seen, seen.decode(errors="replace")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=30)
+        os.close(leader)
+
+
+def _clients_in_the_guest() -> str:
+    """The compose runner's processes in the guest, and what they started."""
+    found = lima_shell("pgrep", "-af", "python3 -I -|podman logs|podman-compose")
+    return "\n".join(
+        line for line in found.stdout.splitlines() if "pgrep" not in line and "sh -c" not in line
+    )
+
+
+def test_flow_an_interrupted_fy_logs_leaves_nothing_in_the_guest(flow):
+    repo, env, _ = flow
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "foldyard", "logs"],
+        cwd=str(repo),
+        env={**_foldyard_env(repo), **env},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        wait_for(lambda: bool(_clients_in_the_guest()), timeout=30, what="the client in the guest")
+    finally:
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=30)
+    wait_for(lambda: not _clients_in_the_guest(), timeout=20, what="the guest's client to end")
+
+
+def _with_env_file(repo: Path, env_file: str):
+    """``repo``'s compose.yml with the api taking ``env_file``, committed nowhere; undone by the
+    caller's ``restore()``."""
+    compose = repo / "compose.yml"
+    before = compose.read_text()
+    assert "\n  api:\n" in before
+    compose.write_text(before.replace("\n  api:\n", f"\n  api:\n    env_file: [{env_file}]\n"))
+    return lambda: compose.write_text(before)
+
+
+@pytest.mark.parametrize("kind", ["absolute", "planted link"])
+def test_flow_a_host_file_never_reaches_a_container(flow, host_only, kind):
+    """The channel the path guard narrows, against the real verb. The planted link is what the
+    guard can't close (the client re-opens each path after the check): in the VM it dangles."""
+    repo, env, _ = flow
+    secret = host_only / "secret.env"
+    secret.write_text(f"FY_HOST_ONLY={SECRET}\n")
+    link = repo / "linked.env"
+    if kind == "planted link":
+        link.symlink_to(secret)
+    restore = _with_env_file(repo, str(secret) if kind == "absolute" else "linked.env")
+    try:
+        up = fy(["up"], repo, env_extra=env)
+        assert up.rc != 0, f"it was meant to fail, in the VM:\n{up.out}"
+        assert SECRET not in up.out
+        assert "does not exist" in up.out, up.out
+        assert "outside the checkout" not in up.out  # the VM said so, not the guard
+    finally:
+        restore()
+        link.unlink(missing_ok=True)
+    seen = engine("inspect", "--format", "{{json .Config.Env}}", f"{PROJECT}_api_1", timeout=60)
+    assert SECRET not in seen.stdout
+    fy_ok(["up"], repo, env_extra=env)  # and the stack comes back
+
+
+def test_flow_a_projects_box_image_builds_in_the_guest(flow):
+    repo, env, _ = flow
+    built = fy(["box", "build"], repo, timeout=1500, env_extra=env)
+    assert built.rc == 0, built.out
+
+
+def test_flow_no_compose_client_or_build_ran_on_your_computer(flow):
+    """Last, over everything above: what really ran here. The engine is asked plenty (`ps`,
+    `inspect`, `exec`), and none of that parses a compose file or packs a context."""
+    _, _, log = flow
+    argvs = log.read_text().splitlines()
+    assert any(a.startswith("ps") or a.startswith("inspect") for a in argvs), "the shim saw nothing"
+    ran_here = [a for a in argvs if a.split()[:1] in (["compose"], ["build"])]
+    assert not ran_here, f"on your computer:\n{chr(10).join(ran_here)}"

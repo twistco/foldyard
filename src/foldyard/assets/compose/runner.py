@@ -142,8 +142,10 @@ def main(request: dict) -> int:
     try:
         os.chdir(str(request.get("cwd") or "/"))
     except OSError as e:
+        # The compose files and build contexts are read in the VM, so the checkout must be there.
         print(
-            f"✗ foldyard's compose runner: can't enter {request.get('cwd')!r} in the VM ({e})",
+            f"✗ foldyard's compose client can't enter {request.get('cwd')!r} in the VM ({e}): does "
+            "the VM mount this checkout? (`fy doctor` says; `fy machine recreate`)",
             file=sys.stderr,
         )
         return 125
