@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -41,12 +42,15 @@ class FakeL1:
         self.calls: list[list[str]] = []
         self.streamed: list[list[str]] = []
         self.sent_pack = False
+        self.git_can_refuse_lazy_fetch = True
 
     def run(self, argv, *, stdin=None, input=None, capture=True):
         self.calls.append(list(argv))
         joined = " ".join(argv)
         out, rc = "", 0
-        if argv[:2] == ["limactl", "list"] and ".Config.Mounts" in joined:
+        if argv[:2] == ["git", "--no-lazy-fetch"]:
+            rc = 0 if self.git_can_refuse_lazy_fetch else 129
+        elif argv[:2] == ["limactl", "list"] and ".Config.Mounts" in joined:
             out = self.mounts
         elif argv[:2] == ["limactl", "list"] and ".Dir" in joined:
             out = f"{self.vm_dir}\n" if self.status else ""
@@ -194,6 +198,21 @@ def test_a_run_sends_the_commit_then_runs_the_tier_as_the_tester(l1):
     assert not l1.sent("sudoers.d")
 
 
+def test_a_git_that_could_fetch_while_reading_is_refused(l1):
+    # A remote helper no protocol policy names is GIT_NO_LAZY_FETCH's alone, and the repo's
+    # config, which the box can write, can make it a partial clone. git 2.44 has the switch.
+    l1.git_can_refuse_lazy_fetch = False
+    with pytest.raises(nested.Refused, match=r"git 2\.44"):
+        nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=False)
+    assert not l1.sent_pack
+
+
+def test_nothing_a_run_can_write_comes_first_on_path():
+    # The tester's home outlives a run, so a planted `uv` there would run in the next one.
+    assert ".local/bin" not in RUN_TIER
+    assert ".local/bin" not in " ".join(nested._tester_argv("fy-nested", "true"))
+
+
 def test_a_run_returns_the_tiers_exit_code(l1):
     l1.tier_exit = 3
     assert nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=False) == 3
@@ -230,9 +249,32 @@ def test_an_interrupted_root_run_taints_it_too(l1, monkeypatch):
     assert nested._tainted(CFG.vm)
 
 
-def test_another_root_run_is_allowed_on_a_tainted_vm(l1):
+def test_a_vm_gets_one_root_run(l1):
     nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=True)
-    assert nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=True) == 0
+    with pytest.raises(nested.Refused, match="had root"):
+        nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=True)
+    assert len(l1.streamed) == 1
+
+
+def test_a_vm_that_had_root_is_stopped_at_once(l1):
+    # What root left behind could otherwise act on your computer between runs.
+    nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=True)
+    assert l1.status == "Stopped"
+
+
+def test_a_vm_that_had_root_is_stopped_even_if_the_run_is_interrupted(l1, monkeypatch):
+    def boom(argv):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(nested, "_stream", boom)
+    with pytest.raises(KeyboardInterrupt):
+        nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=True)
+    assert l1.status == "Stopped"
+
+
+def test_an_ordinary_run_leaves_the_vm_running(l1):
+    nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=False)
+    assert l1.status == "Running"
 
 
 def test_up_cant_repair_a_tainted_vm_and_doesnt_try(l1):
@@ -513,6 +555,35 @@ def test_the_tester_is_not_given_sudo_and_a_stale_grant_goes():
     assert nested.SUDO_GRANT in PROVISION
     assert re.search(rf"rm -f \S*{re.escape(nested.SUDO_GRANT)}", PROVISION)
     assert "NOPASSWD" not in PROVISION
+
+
+def _shard_parser() -> str:
+    found = re.search(r"<<'PY'\n(.*?)\nPY\n", RUN_TIER, re.S)
+    assert found
+    return found[1]
+
+
+def test_the_shard_parser_reads_cis_real_layout():
+    # It's a regex over YAML: if the layout moves, this says so rather than a run finding nothing.
+    got = subprocess.run(
+        [sys.executable, "-c", _shard_parser()],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert [line.split()[0] for line in got] == ["L1", "L2"]
+    for line in got:
+        modules = line.split()[1:]
+        assert modules
+        assert all((ROOT / module).is_file() for module in modules)
+
+
+def test_finding_no_shards_stops_the_run():
+    # A bare `pytest` would run the whole unit suite and look like a passing host tier.
+    assert "|| {\n    say \"couldn't read CI's shards" in RUN_TIER
+    assert '[ -n "$groups" ] ||' in RUN_TIER
+    assert RUN_TIER.index('[ -n "$groups" ] ||') < RUN_TIER.index("while read -r group modules")
 
 
 def test_the_lima_in_the_l1_is_cis():

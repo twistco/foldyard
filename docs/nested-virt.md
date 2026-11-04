@@ -93,15 +93,15 @@ On your computer:
 just nested-up                     # create or repair the L1, and check it
 just nested-test                   # HEAD, all of CI's shards
 just nested-test --ref my-branch tests/test_box_e2e.py
-just nested-test --with-sudo tests/test_wall_e2e.py   # the VM must be replaced afterwards
+just nested-test --with-sudo tests/test_wall_e2e.py   # stops the VM; it must then be replaced
 just nested-down                   # stop inside-out; --delete removes the L1 too
 ```
 
 The tier runs on your computer's committed `--ref`, as `lima-host-e2e` runs it in
 [foldyard-e2e.yml](../.github/workflows/foldyard-e2e.yml): the same settings, a base VM baked for
-the run, and CI's shards unless you name modules. Each run starts from no VMs and no state. A full
-run takes about 19 minutes, and naming one module about 2 more than that module. Uncommitted work
-isn't sent.
+the run, and CI's shards unless you name modules. Each run starts with no VMs and an empty state
+directory. A full run takes about 19 minutes, and naming one module about 2 more than that module.
+Uncommitted work isn't sent.
 
 `FY_NESTED_VM` names the L1 (`fy-nested-<name>`, one run at a time in each), and `FY_NESTED_CPUS`,
 `FY_NESTED_MEMORY_GIB` and `FY_NESTED_DISK_GIB` size a new one (default 8, 16, 60). Each L1 has its
@@ -126,8 +126,9 @@ Fedora's mirrors and the registries directly. So `just nested-up` sets up its ow
 - **An unprivileged user, `fytest`**, runs the tier, so what it runs can't remove the wall.
   `test_wall_e2e` needs `sudo` on its "host" and skips without it. `--with-sudo` gives it root, and
   **root can't be taken back**: a narrow `sudo` rule or a timer left behind would pass any check
-  from outside. So that run marks the L1 from outside it, and an ordinary run or `just nested-up`
-  refuses it until `just nested-down --delete && just nested-up` replaces it.
+  from outside. So an L1 gets one such run. It's marked from outside before the run and stopped
+  straight after, so what root left can't act on your computer between runs, and every run and
+  `just nested-up` refuse it until `just nested-down --delete && just nested-up` replaces it.
 - **No mounts, forwards or credentials.** A commit arrives as a `git pack-objects` stream.
 
 Every run checks the traps, the mounts, any `sudo` rule and the wall first, the wall by a real
@@ -135,7 +136,8 @@ connection attempt to a socket on your computer, and refuses if any of them is w
 tries the gateway: the other ranges rest on the rules.
 
 This keeps your computer out of reach. It doesn't limit what leaves the L1 over the public internet,
-and a run's verdict is only what the code under test reports.
+and a run's verdict is only what the code under test reports. `fytest`'s home also outlives a run,
+so one run's code could affect the next's result. `just nested-down --delete` starts clean.
 
 ### Results
 

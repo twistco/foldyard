@@ -10,7 +10,7 @@ script, or a test an agent was steered into writing. So the L1 mounts nothing an
 credentials, the commit reaches it as a pack over stdin, a wall stops it reaching your computer's
 localhost through the gateway, and the tier runs as a user with no ``sudo`` to remove that wall
 (``--with-sudo`` grants it, for ``test_wall_e2e``, and since root can't be taken back that L1 is
-replaced before an ordinary run uses it again). Every run checks all of that first and refuses
+stopped straight after and has to be replaced before another run). Every run checks all of that first and refuses
 otherwise. It keeps your computer out of reach; it isn't a bound on egress, and the L1
 has the public internet, since the tier needs Fedora's mirrors and the registries. A test's verdict
 is also only what the code under test reports.
@@ -126,7 +126,7 @@ def _shell_argv(vm: str, *cmd: str) -> list[str]:
 
 def _tester_argv(vm: str, script: str) -> list[str]:
     env = (
-        'export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" '
+        'export PATH="/usr/local/bin:/usr/bin:/bin" '
         'XDG_RUNTIME_DIR="/run/user/$(id -u)" '
         'DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"; '
     )
@@ -178,9 +178,8 @@ def _refuse_tainted(vm: str) -> None:
         )
 
 
-def _check_contained(vm: str, *, with_sudo: bool = False) -> None:
-    if not with_sudo:
-        _refuse_tainted(vm)
+def _check_contained(vm: str) -> None:
+    _refuse_tainted(vm)
     missing = _traps_missing(vm)
     if missing:
         raise Refused(
@@ -281,11 +280,19 @@ def run_tests(cfg: Config, repo: Path, ref: str, modules: Sequence[str], *, with
     for module in modules:
         if not _MODULE.fullmatch(module):
             raise Refused(f"not a host-tier module: {module!r} (tests/test_*_e2e.py).")
-    if _status(cfg.vm) != "Running":
+    status = _status(cfg.vm)
+    if status:
+        _refuse_tainted(cfg.vm)
+    if status != "Running":
         raise Refused(f"{cfg.vm} isn't running. Run `just nested-up`.")
-    _check_contained(cfg.vm, with_sudo=with_sudo)
+    _check_contained(cfg.vm)
     if _run(_tester_argv(cfg.vm, f"systemctl --user is-active -q {UNIT}")).returncode == 0:
         raise Refused(f"a run is still running in {cfg.vm}. `just nested-down` stops it.")
+    if _run(["git", "--no-lazy-fetch", "version"]).returncode != 0:
+        raise Refused(
+            "reading this repo needs git 2.44+ on your computer: the repo's config can make it a "
+            "partial clone, and an older git could then run what that config names."
+        )
     sha = _rev_parse(repo, ref)
     print(f"▶ sending {sha[:12]} to {cfg.vm} (commits only: uncommitted work stays here)")
     script = (ASSETS / "run-tier.sh").read_text()
@@ -316,8 +323,8 @@ def run_tests(cfg: Config, repo: Path, ref: str, modules: Sequence[str], *, with
             raise Refused(f"couldn't find {cfg.vm}'s Lima directory, to mark that it had root.")
         mark.touch()  # first: an interrupted run has had root as well
         print(
-            f"⚠ {TESTER} has root for this run, so this code could remove the wall. "
-            f"{cfg.vm} is replaced before an ordinary run uses it again."
+            f"⚠ {TESTER} has root for this run, so this code could remove the wall. {cfg.vm} is "
+            "stopped afterwards: `just nested-down --delete && just nested-up` replaces it."
         )
         line = shlex.quote(f"{TESTER} ALL=(ALL) NOPASSWD: ALL")
         _run(_shell_argv(cfg.vm, "sudo", "bash", "-c", f"echo {line} > {grant}; chmod 440 {grant}"))
@@ -325,7 +332,9 @@ def run_tests(cfg: Config, repo: Path, ref: str, modules: Sequence[str], *, with
         return _stream(_tester_argv(cfg.vm, f"{command} </dev/null"))
     finally:
         if with_sudo:
+            # Not a repair: what root left behind stays. Stopped, it can't act on your computer.
             _run(_shell_argv(cfg.vm, "sudo", "rm", "-f", grant))
+            down(cfg, delete=False)
 
 
 def down(cfg: Config, *, delete: bool) -> None:
@@ -412,7 +421,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     test.add_argument(
         "--with-sudo",
         action="store_true",
-        help="give the tester root, for test_wall_e2e: the VM must be replaced afterwards",
+        help="give the tester root, for test_wall_e2e: the VM is stopped after, and must be replaced",
     )
     test.add_argument("modules", nargs="*", help="tests/test_*_e2e.py (default: CI's shards)")
     stop = verbs.add_parser("down", help="stop everything, inside-out")

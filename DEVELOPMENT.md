@@ -392,9 +392,9 @@ foldyard's surface splits by *where it can be validated*:
    never a consumer's. What the runner cannot reach — nested virtualisation for the gVisor
    posture — stays the recipe in [docs/nested-virt.md](./docs/nested-virt.md). That page's M3+ rig
    (`just nested-up`, `just nested-test`, tests/tools/nested.py) also runs this tier on arm64 Linux
-   in a VM of its own, so it can't collide with the `foldyard-example` on your computer; **its L1
-   kernel needs the GIC traps the page names, or no L2 boots**, while `/dev/kvm` and `KVM_CREATE_VM`
-   still look fine. Why a box doesn't get `/dev/kvm` itself:
+   in a VM of its own, so it can't collide with the `foldyard-example` on your computer. **On the M3
+   Max and macOS 27.0.1 where this was measured, the L1 kernel needs the GIC traps the page names, or
+   no L2 boots**, while `/dev/kvm` and `KVM_CREATE_VM` still look fine. Why a box doesn't get `/dev/kvm` itself:
    [ADR-0035](./docs/adrs/0035-the-box-asks-for-a-test-run.md).
    From a Claude Code cloud session (root, no `/dev/kvm`, an egress proxy that re-signs TLS) the
    tier runs under QEMU's TCG, slowly: [`.claude/skills/cloud-host/`](./.claude/skills/cloud-host/SKILL.md)

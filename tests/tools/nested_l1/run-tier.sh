@@ -10,7 +10,7 @@ shift
 
 N="$HOME/nested"
 src="$N/src"
-export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+export PATH="/usr/local/bin:/usr/bin:/bin" # nothing a run can write: its home outlives it
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 export FOLDYARD_E2E=1
@@ -79,7 +79,15 @@ job = t[t.index("lima-host-e2e:") : t.index("wsl2-host-e2e:")]
 for name, body in re.findall(r"- name: (L\d)\s+modules:\n((?:\s+- tests/\S+\n)+)", job):
     print(name, " ".join(re.findall(r"tests/\S+", body)))
 PY
-)"
+)" || {
+    say "couldn't read CI's shards from foldyard-e2e.yml"
+    exit 1
+  }
+  # A bare `pytest` below would run the whole unit suite and look like a passing host tier.
+  [ -n "$groups" ] || {
+    say "found no shards in foldyard-e2e.yml's lima-host-e2e"
+    exit 1
+  }
 fi
 
 rc=0

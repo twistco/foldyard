@@ -51,6 +51,10 @@ by a *container*, not a second VM — and keep CI on containers, with no KVM job
   create the single L2 VM. ARM nested KVM supports **one** nesting level reliably; a third VM as
   the "Mac" would be L1→L2→L3 triple nesting. Keeping the host role in a container stays at one
   VM level while still faithfully exercising `podman machine`.
+
+  *(Correction, 2026-11-04: on Apple silicon the Linux host tier has since run with a Lima VM as the
+  L1 and no container in the host role, `just nested-test`, one nesting level all the same; see
+  docs/nested-virt.md, Rig 2. It doesn't exercise `podman machine`.)*
 - **Prerequisites are pinned:** M3+ CPU, macOS 15+ (EL2 nested virt), podman ≥ 5.6.0 on the
   libkrun provider selected persistently in `containers.conf` (the default applehv provider does
   **not** expose `/dev/kvm`), machine sized ≤ physical cores.

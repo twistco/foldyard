@@ -22,9 +22,8 @@ if ! /usr/local/bin/limactl --version 2>/dev/null | grep -qxF "limactl version $
   curl -fsSL "$url" | tar xz -C /usr/local
 fi
 
-# The tier's user: no sudo, so what it runs can't remove the wall below. `--with-sudo` grants it;
-# nested.py then refuses this VM until it's replaced, so a grant found here is left from an
-# interrupted run on a VM that nested.py won't use anyway.
+# The tier's user: no sudo, so what it runs can't remove the wall below. `--with-sudo` grants it,
+# and nested.py then stops this VM and refuses it until it's replaced.
 #
 # Its subordinate ids are named: Lima's own user holds the whole default range in this image, and a
 # plain useradd then fails ("Can't get unique subordinate UID range").

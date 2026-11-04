@@ -43,8 +43,8 @@ hostile:
   gateway, and any address the computer holds: Lima's network dials from the computer's own sockets.
 - **An unprivileged user** runs the tier, so what it runs can't remove the wall. `test_wall_e2e`
   needs `sudo` on its "host" and skips without it. `--with-sudo` gives it root, which can't be taken
-  back: a narrow `sudo` rule or a timer left behind would pass any check from outside. So that L1
-  is marked from outside it, and refused for ordinary runs until it's replaced.
+  back: a narrow `sudo` rule or a timer left behind would pass any check from outside. So an L1 gets
+  one such run: marked from outside it first, stopped straight after, and refused until replaced.
 - **Every run checks first:** the traps in the running kernel, no mounts, no `sudo` rule of any
   kind, and a real connection attempt to a socket on your computer. It refuses otherwise.
 - **Your computer's git reads the box-writable repo** under the same no-repo-code flags as
