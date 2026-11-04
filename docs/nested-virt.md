@@ -148,9 +148,9 @@ With an 8 vCPU, 16 GiB L1 on `vz`, and `MACHINE_CPUS=2` as in CI:
 | raw QEMU boot to a login prompt, 2 vCPUs | 6/6 at about 25 s (TCG, as a control: 84 s) |
 | Lima L2 from `template:podman` | 37 s |
 | L1 response during a 60 s CPU and disk burn in the L2 | 8–11 ms, no stalls in either kernel |
-| `just nested-test`: shard `L1`, including the hypervisor SIGKILL in `test_machine_e2e` | 39 passed, 10:19 |
-| `just nested-test`: shard `L2`, including the box | 23 passed, 12 skipped (`test_wall_e2e`, no `sudo`), 6:03 |
-| `just nested-test --with-sudo tests/test_wall_e2e.py`: both firewalls, then replacing the VM | 12 passed, 2:11 |
+| `just nested-test`: shard `L1`, including the hypervisor SIGKILL in `test_machine_e2e` | 39 passed, 10:04 |
+| `just nested-test`: shard `L2`, including the box | 23 passed, 12 skipped (`test_wall_e2e`, no `sudo`), 6:42 |
+| `just nested-test --with-sudo tests/test_wall_e2e.py`: both firewalls, then replacing the VM | 12 passed, 2:10 |
 | rootless container, box-style flags plus `--device /dev/kvm`: Lima L2 inside | 46 s, `accel=kvm`, with egress |
 
 The earlier warning that this rig is fragile under load, with an L2 starving the L1's control plane
