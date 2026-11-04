@@ -120,14 +120,16 @@ REGISTER: tuple[Feature, ...] = (
         reader="machine_compose",
         kinds=(MAY_CHANGE, UNPROVEN),
         unproven=(
-            "only the read-only compose calls (`config`, `ps`, the config hash) run in the VM so "
-            "far; `up`, the builds and the interactive verbs still run on your computer, and the "
-            "spike (docs/compose-in-vm-scope.md) hasn't measured the ssh cost on every host yet"
+            "every compose call and a project's own box image run in the VM, and the host-tier "
+            "modules pass with it on under vz with and without the firewall, but it hasn't run "
+            "on 9p or WSL2 hosts, the podman-machine backend or under gVisor, and no maintainer "
+            "uses it day to day yet. Registry logins on your computer don't reach the VM"
         ),
         graduates_when=(
-            "every compose call and both builds run in the VM, the host tiers pass with it on, "
-            "and it becomes the default with the host path and composeguard deleted (phase 4 of "
-            "docs/compose-in-vm-scope.md)"
+            "the host tiers pass with it on in CI on Linux and WSL2, a maintainer has run a real "
+            "project on it day to day for a month with nothing filed against it in that time "
+            "still open, and it becomes the default with the host path and composeguard deleted "
+            "(phase 4 of docs/compose-in-vm-scope.md)"
         ),
         doc_mark="- **`compose`** *(experimental)*",
     ),
