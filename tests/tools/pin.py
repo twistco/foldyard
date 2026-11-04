@@ -182,17 +182,20 @@ def installed_from(directory: Path) -> bool:
         return False
     if asked.returncode != 0:
         return False
-    try:
-        receipt = Path(asked.stdout.strip()) / "foldyard" / "uv-receipt.toml"
-        requirements = tomllib.loads(receipt.read_text())["tool"]["requirements"]
-    except (OSError, ValueError, KeyError):  # TOMLDecodeError is a ValueError
+    tools = Path(asked.stdout.strip())
+    if not tools.is_absolute():  # it would be read from here, a checkout a box can write
         return False
-    return any(
-        req.get("name") == "foldyard"
-        and req.get("editable")
-        and Path(req["editable"]).resolve() == directory.resolve()
-        for req in requirements
-    )
+    try:
+        receipt = tools / "foldyard" / "uv-receipt.toml"
+        requirements = tomllib.loads(receipt.read_text())["tool"]["requirements"]
+        return any(
+            req.get("name") == "foldyard"
+            and req.get("editable")
+            and Path(req["editable"]).resolve() == directory.resolve()
+            for req in requirements
+        )
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False  # TOMLDecodeError is a ValueError; the last two are a malformed receipt
 
 
 def pin(

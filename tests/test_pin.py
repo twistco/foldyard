@@ -385,6 +385,26 @@ def test_a_failed_uv_doesnt_read_a_receipt_from_where_we_are(tmp_path, pin_dir, 
     assert not pin.installed_from(pin_dir)
 
 
+@pytest.mark.parametrize("answer", ["", "\n", "relative/tools\n"])
+def test_an_answer_that_isnt_an_absolute_path_isnt_followed(answer, tmp_path, pin_dir, monkeypatch):
+    """It would be read from where we are, which is a checkout a box can write."""
+    root = tmp_path if not answer.strip() else tmp_path / answer.strip()
+    _receipt(root, f'[{{ name = "foldyard", editable = "{pin_dir}" }}]')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        pin.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, answer, "")
+    )
+    assert not pin.installed_from(pin_dir)
+
+
+@pytest.mark.parametrize(
+    "requirements", ['["foldyard"]', '"foldyard"', "1", '[{ name = "foldyard", editable = 1 }]']
+)
+def test_a_malformed_receipt_isnt_a_pin(tool_dir, pin_dir, requirements):
+    _receipt(tool_dir, requirements)
+    assert not pin.installed_from(pin_dir)
+
+
 def test_a_missing_uv_isnt_a_pin(pin_dir, monkeypatch):
     def missing(_argv, **_kw):
         raise FileNotFoundError("uv")
@@ -623,7 +643,7 @@ def test_main_finds_the_repo_from_a_worktree_and_reports(
     assert os.path.realpath(_git(pin_dir, "remote", "get-url", "origin")) == os.path.realpath(repo)
 
 
-def test_main_asks_the_real_receipt(repo, pin_dir, monkeypatch, capsys):
+def test_main_passes_the_receipt_check_through(repo, pin_dir, monkeypatch, capsys):
     monkeypatch.delenv("IN_DEVBOX", raising=False)
     monkeypatch.setenv("FY_PIN_DIR", str(pin_dir))
     monkeypatch.setattr(pin, "install", lambda _d: None)
