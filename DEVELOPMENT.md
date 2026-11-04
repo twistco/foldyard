@@ -69,6 +69,16 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   default paths. `stack.resolve` applies it again after its merges: `[ports]` can name anything. What
   foldyard launches for you (the editor) gets `operators_env`. The docker CLI has no such switch
   (`config.json`, the keychain, `DOCKER_AUTH_CONFIG`), so `config.engine` refuses it.
+- `guestcompose.py` — `[machine] compose = "vm"` (experimental; docs/compose-in-vm-scope.md): every
+  compose call, the stack's builds and a project's own box image run in the GUEST as the VM user,
+  each one ssh run of `python3 -I -` whose stdin is the whole payload: a deterministic zip of
+  `assets/compose/runner.py` and foldyard's pinned podman-compose + PyYAML + python-dotenv, imported
+  from memory, plus the request. Nothing is installed there and there is never a fallback to a client
+  here (no ssh route ⇒ a refusal). `stack._compose_output` / `_compose` / `_compose_captured` are the
+  only places that branch on it, an AST guard holds `ctx.compose` to them, and `composeguard` stands
+  down under it. `fy shell` needs a terminal on that stdin, so it finds the container through the
+  engine (`stack._exec_service`). Needs the checkout mounted in the VM; registry logins here don't
+  reach it. What it relays has its control sequences stripped: the answers are box-influenced.
 - `confighash.py` — the stack scope's verdict: the compose provider's own per-service config
   hash vs a fresh render (what `up` compares): a `python -m foldyard.confighash` subprocess drives the bundled podman-compose's parser (its internals — degrades to
   "unavailable", never a guess; `tests/test_confighash.py` pins the contract). The live oracles are `test_probes_e2e.py` / `test_e2e.py`.
@@ -378,6 +388,13 @@ foldyard's surface splits by *where it can be validated*:
    - `test_registrylogins_e2e.py` — a real client's headers on a logging socket (an auth file sends
      every login; clamped, none, default paths included), then a real `fy build` watched by a
      rootless container bind-mounting the guest's `/var/tmp`, as a box could, with a positive control.
+   - `test_guestcompose_e2e.py` — `[machine] compose = "vm"`: the spike (the payload on the guest's
+     python, one call's cost in the step summary, config-hash parity, red-first controls that an
+     `env_file:` and an `include:` naming files only on your computer are read by the host's client
+     and not the guest's, the premise that the VM user reads nothing a box can't, through the engine
+     socket), then the whole flow on a VM recreated from its own copy, a logging `podman` on the CLI's
+     PATH asserting no compose client or build ran on your computer. Its doc has the recipe for the
+     OTHER tiers under the switch, whose copies the VM doesn't mount otherwise.
    - `test_mounts_e2e.py` — ADR-0033's to-box against ROOT in the guest: a test-only boot script
      (own marker, always exits 0) remounts it rw and tries every kind of write; all refused and the
      host's seeded file unchanged. The red-first control records it `writable: true` (started with

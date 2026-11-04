@@ -476,9 +476,15 @@ disk_gib = 60
   ([stack](./stack.md#which-paths-compose-may-read)). `"vm"` runs foldyard's own podman-compose in
   the VM instead, over the VM's ssh route, so a path in a compose file reads the VM, which holds
   nothing of yours. Any other value is an error. Env: `MACHINE_COMPOSE`.
-  - *Experimental*, and arriving in steps: so far only the calls that read (`config`, `ps` and
-    the config hash `fy state` compares) run in the VM. `fy up`, the builds, `fy logs` and
-    `fy shell` still run on your computer, under the path check.
+  - *Experimental*: it hasn't run on Linux or WSL2 hosts yet, or under gVisor, and it hasn't been
+    used day to day.
+  - Every compose call and the build of a project's own box image run in the VM. `fy shell` enters
+    the container through the engine instead.
+  - The VM must mount the checkout. `fy machine ensure` does, for a VM created from it; otherwise
+    the verb refuses and names `fy machine recreate`.
+  - Registry logins on your computer don't reach the VM, so a private base image won't pull.
+  - `${HOME}`, `~` and `$USER` in a compose file are the VM's, not your computer's.
+  - Your own recipes that run `"$ENGINE" compose` are still a client on your computer.
   - Only podman-compose runs there: a `PODMAN_COMPOSE_PROVIDER` naming docker-compose is refused.
   - Inside the box nothing changes: the client there already runs in the VM.
   - The plan: [compose-in-vm-scope.md](https://github.com/twistco/foldyard/blob/main/docs/compose-in-vm-scope.md).

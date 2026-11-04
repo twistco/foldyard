@@ -199,8 +199,9 @@ repo and its worktrees (at the same paths as on your computer). A bind mount of 
 `/etc/hosts` from your computer has nothing there to find. Put what a service needs in the repo,
 or give it a credential through a mode ([below](#keep-secrets-out-of-compose)).
 
-Run from inside the box, the compose client runs in the VM, where none of your files are, so
-these checks don't apply.
+Run from inside the box, or with `[machine] compose = "vm"`
+([experimental](./configuration.md#machine)), the compose client runs in the VM, where none of
+your files are, so these checks don't apply: a path like that just isn't there.
 
 ## Private images
 
