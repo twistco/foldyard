@@ -90,7 +90,8 @@ def operators_env(env: dict[str, str]) -> dict[str, str]:
     """``env`` for something of YOURS foldyard launches (your editor), not a client of foldyard's:
     your own setting back, or none."""
     out = dict(env)
-    saved = out.pop(SAVED, "")
+    # From the process too: `env` is usually the compose client's, which never carries it.
+    saved = out.pop(SAVED, "") or os.environ.get(SAVED, "")
     if saved:
         out[AUTH] = saved
     else:
