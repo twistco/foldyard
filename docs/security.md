@@ -136,7 +136,10 @@ foldyard itself is installed on your computer as a uv tool (`uv tool install fol
 frozen copy the repo mount can't change
 ([ADR-0020](./adrs/0020-post-extraction-consumption-model.md)). The exception is developing
 foldyard itself with an editable install: if that source checkout is also mounted into a VM, the
-box can edit the code the supervisor runs.
+box can edit the code the supervisor runs. `just pin <hash>` in a foldyard checkout narrows that: an
+editable install from a private clone outside the mount, frozen at the commit you name. It protects
+`fy` and the supervisor from then on. That run of the recipe, and every other `just` recipe, still
+runs the checkout's code on your computer.
 
 ## The credential story: nothing at rest, injected in flight
 

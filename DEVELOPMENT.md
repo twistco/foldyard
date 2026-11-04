@@ -15,6 +15,7 @@ the TUI (imported lazily).
 
 ```bash
 just install     # uv tool install --force --editable (per-machine venv)
+just pin <hash>  # freeze `fy` at a commit, pushed or not; branch switches here no longer change it
 just test [args] # the suite (add -n auto to parallelise)
 just run <verb>  # run the CLI from source without installing
 just lint        # ruff check + format --check   (auto-fix: just format)
