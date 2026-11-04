@@ -1179,29 +1179,34 @@ def run_stream(
     timeout: float = 600.0,
     env: dict[str, str] | None = None,
     cwd: str | None = None,
+    stdin: bytes | None = None,
 ) -> int:
     """Run ``cmd`` to completion, calling ``on_line(text)`` for each output line (stdout+stderr
     merged, ANSI-stripped), and return its exit code. For long-running, NON-INTERACTIVE
     subprocesses whose progress should stream live — the TUI's doctor fixes and the posture
     reconcile's compose — unlike ``_run`` (which buffers and has a short timeout). A watchdog
     kills the process after ``timeout`` seconds so a wedged command can't hang the worker
-    forever. Deliberately NOT logged to the command log: the live stream is the record, and
+    forever. ``stdin``, when given, is written to it and closed (the guest compose client's
+    payload). Deliberately NOT logged to the command log: the live stream is the record, and
     double-logging would duplicate it under the fix output in the Doctor pane."""
     import threading
 
     try:
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.PIPE if stdin is not None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            text=stdin is None,
+            bufsize=1 if stdin is None else -1,
             env=env,
             cwd=cwd,
         )
     except Exception as e:
         on_line(f"✗ {e}")
         return 127
+    if stdin is not None:
+        return _run_stream_fed(proc, stdin, on_line, timeout)
     timer = threading.Timer(timeout, proc.kill)
     timer.start()
     rc = 127
@@ -1209,6 +1214,38 @@ def run_stream(
         assert proc.stdout is not None
         for line in proc.stdout:
             on_line(_strip_ansi(line.rstrip("\n")))
+        rc = proc.wait()
+    finally:
+        timer.cancel()
+    if rc < 0:
+        on_line(f"✗ process killed after {int(timeout)}s (timeout)")
+    return rc
+
+
+def _run_stream_fed(
+    proc: subprocess.Popen, stdin: bytes, on_line: Callable[[str], None], timeout: float
+) -> int:
+    """:func:`run_stream`'s loop for a process fed ``stdin`` from a thread: a payload bigger than a
+    pipe's buffer must not block the read of what the process says about it."""
+    import threading
+
+    assert proc.stdin is not None and proc.stdout is not None
+    pipe = proc.stdin
+
+    def feed() -> None:
+        try:
+            pipe.write(stdin)
+            pipe.close()
+        except OSError:  # it already exited: its code says why
+            pass
+
+    threading.Thread(target=feed, daemon=True).start()
+    timer = threading.Timer(timeout, proc.kill)
+    timer.start()
+    rc = 127
+    try:
+        for raw in proc.stdout:
+            on_line(_strip_ansi(raw.decode(errors="replace").rstrip("\r\n")))
         rc = proc.wait()
     finally:
         timer.cancel()

@@ -1273,6 +1273,26 @@ def machine_attribution() -> str:
     return level
 
 
+_MACHINE_COMPOSE = ("host", "vm")
+
+
+def machine_compose() -> str:
+    """``[machine].compose`` — where the stack's compose client runs (:mod:`foldyard.guestcompose`,
+    docs/compose-in-vm-scope.md): ``"host"`` (the default), on your computer under the path guard,
+    or ``"vm"``, in the guest as the VM user, where the compose files' paths read nothing of
+    yours. Experimental. ``MACHINE_COMPOSE`` env wins."""
+    raw = os.environ.get("MACHINE_COMPOSE")
+    if raw is None:
+        raw = _table("machine").get("compose", "host")
+    where = str(raw or "host").strip().lower()
+    if where not in _MACHINE_COMPOSE:
+        raise SystemExit(
+            f'✗ [machine].compose must be "vm" or "host" (the default), not {where!r} — it names '
+            "where foldyard runs its own compose client, never a program."
+        )
+    return where
+
+
 # Lima's documented guest→host address: the user-mode network's host gateway, which the usernet
 # forwards to the host (the same trick gvproxy plays with host.containers.internal, different
 # constant). Lima also writes it into the guest's /etc/hosts as `host.lima.internal`, but that

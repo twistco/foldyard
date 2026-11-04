@@ -314,6 +314,37 @@ def test_a_failure_names_the_logins_only_when_you_have_some(host, tmp_path, monk
     assert "compose_env" in hint and OPT_IN in hint
 
 
+def _in_the_vm(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MACHINE_COMPOSE", "vm")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv(OPT_IN, raising=False)
+
+
+def test_with_the_client_in_the_vm_the_hint_doesnt_offer_an_opt_in_that_cant_work(
+    host, tmp_path, monkeypatch
+):
+    # No file on your computer reaches a client in the VM, so telling someone to export one and name
+    # it would send them round a loop. What works: pull it once with the client here.
+    _in_the_vm(monkeypatch, tmp_path)
+    assert registrylogins.failure_hint() == []  # no logins of yours: a failed pull isn't about them
+    (tmp_path / ".docker").mkdir()
+    (tmp_path / ".docker" / "config.json").write_text("{}")
+    hint = "\n".join(registrylogins.failure_hint())
+    assert 'compose = "vm"' in hint and "MACHINE_COMPOSE=host fy build" in hint
+    assert "fy docs stack" in hint
+
+
+def test_with_the_client_in_the_vm_having_opted_in_still_gets_the_hint(host, tmp_path, monkeypatch):
+    # Off the VM, opting in silences the hint because the logins went. Here they don't go.
+    _in_the_vm(monkeypatch, tmp_path)
+    offered = tmp_path / "acme.json"
+    offered.write_text('{"auths": {}}')
+    monkeypatch.setenv(OPT_IN, str(offered))
+    monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
+    assert "MACHINE_COMPOSE=host" in "\n".join(registrylogins.failure_hint())
+
+
 def test_an_export_this_project_doesnt_name_still_gets_the_hint(host, tmp_path, monkeypatch):
     """Half an opt-in gives no logins, so it's the case most in need of being told."""
     monkeypatch.setenv("HOME", str(tmp_path))

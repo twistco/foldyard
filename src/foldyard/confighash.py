@@ -46,10 +46,18 @@ def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0)
     ``extra_profiles`` too, so running profile-gated services are rendered — or
     ``(None, reason)`` when the provider can't say. Never raises. Unavailable is never an empty
     map: an empty render would read as "nothing to compare" and hide every drift."""
-    from . import stack
+    from . import guestcompose, stack
 
     flags = stack._profile_flags(ctx, extra_profiles)
     docker = not stack._podman_compose_active(ctx)
+    if not docker and guestcompose.wanted():
+        # `[machine] compose = "vm"`: podman-compose's parser runs in the guest, not in a child
+        # here. A report only (`fy state`), so the box shaping the answer misleads no guard.
+        try:
+            proc = guestcompose.config_hashes(ctx, flags, timeout=timeout)
+        except (OSError, subprocess.SubprocessError) as e:
+            return None, f"{type(e).__name__}: {e}"
+        return _answer(proc, docker=False)
     if docker:
         cmd = [*ctx.compose, *flags, "config", "--hash", "*"]
     else:
@@ -73,6 +81,11 @@ def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0)
         )
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"{type(e).__name__}: {e}"
+    return _answer(proc, docker=docker)
+
+
+def _answer(proc: subprocess.CompletedProcess, *, docker: bool):
+    """:func:`desired`'s ``(hashes, reason)`` from the provider's finished run."""
     if proc.returncode != 0:
         lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
         return None, lines[-1] if lines else f"exited {proc.returncode}"

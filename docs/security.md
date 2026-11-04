@@ -71,7 +71,8 @@ the VM's container socket — so a box can reach its sibling worktrees' boxes, a
 services and proxy listener of any worktree. Each worktree keeps its own mode, which stops a
 permission meant for one branch being used on another *by accident*; it is not a wall between
 them. The VM is the boundary: a switch on in one worktree is usable from every box of that
-project. Give work you don't trust its own project (its own VM), not just its own worktree.
+project. Give work you don't trust its own project (its own VM), not just its own worktree. The
+same socket lets a box read what the VM user can, which includes the VM's whole journal.
 
 ### What code in the box can still reach on your computer
 
@@ -116,8 +117,10 @@ channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-moun
   `[project] compose_env`, which `fy config widenings` lists) and refuses to act on compose files
   that name paths outside the checkout — `env_file:`, build contexts, `include:` and the like.
   That check is a list of known keys, and the client re-opens each path after foldyard checked
-  it, so it narrows this channel rather than closing it; moving the client into the VM is the
-  planned fix.
+  it, so it narrows this channel rather than closing it. `[machine] compose = "vm"` closes it by
+  running the client in the VM, where those paths hold nothing of yours. It is experimental, and
+  it will become the default once it has been proven
+  ([configuration](./configuration.md#machine)).
 - **Registry logins stay on your computer.** A client there sends its logins to the VM's API service
   with each pull and build, all of them for a build, and the service keeps them in a temp file a box
   can read while it runs. So foldyard's clients get none, whatever `podman login` has stored. A
