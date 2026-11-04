@@ -26,6 +26,16 @@ install:
     uv tool install --force --editable "{{_dir}}"
     echo "✓ foldyard installed — try: fy mode | fy doctor"
 
+# Freeze `fy` at one commit, pushed or not, so branch switches here don't change the tool you're
+# running: an editable install from a private clone. Takes a hash, never a branch name (a box can
+# move one). `just install` puts `fy` back on this checkout. See tests/tools/pin.py.
+pin commit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v uv >/dev/null 2>&1 || { echo "✗ uv not found — brew install uv" >&2; exit 1; }
+    cd "{{_dir}}"
+    uv run --no-project python tests/tools/pin.py {{quote(commit)}}
+
 # Run the test suite (devmode/config/cli unit + headless Textual run_test pilots). The
 # uv dev env is kept OFF the shared mount (UV_PROJECT_ENVIRONMENT) so Mac/box runs don't
 # thrash one .venv — and keyed PER CHECKOUT (the cksum of _dir): with one shared dev-venv,

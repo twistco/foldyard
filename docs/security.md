@@ -129,7 +129,8 @@ foldyard itself is installed on your computer as a uv tool (`uv tool install fol
 frozen copy the repo mount can't change
 ([ADR-0020](./adrs/0020-post-extraction-consumption-model.md)). The exception is developing
 foldyard itself with an editable install: if that source checkout is also mounted into a VM, the
-box can edit the code the supervisor runs.
+box can edit the code the supervisor runs. `just pin <hash>` in a foldyard checkout closes that: an
+editable install from a private clone outside the mount, frozen at the commit you name.
 
 ## The credential story: nothing at rest, injected in flight
 
