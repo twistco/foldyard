@@ -373,6 +373,12 @@ def test_git_here_uses_foldyards_no_repo_code_flags():
     )
 
 
+def test_a_ref_starting_with_a_dash_is_read_as_a_ref_not_an_option(repo):
+    sha = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/heads/-odd", sha)
+    assert nested._rev_parse(repo, "-odd") == sha
+
+
 @pytest.mark.parametrize("ref", ["no-such-ref", "--upload-pack=x"])
 def test_a_ref_that_doesnt_name_a_commit_is_refused(repo, ref):
     with pytest.raises(nested.Refused, match="commit"):
