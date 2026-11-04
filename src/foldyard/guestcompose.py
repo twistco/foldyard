@@ -367,17 +367,16 @@ def run_relayed(
     return rc
 
 
-def captured_command(ctx, args: list[str]) -> tuple[list[str], bytes] | subprocess.CompletedProcess:
-    """``(ssh argv, stdin)`` for ``devmode.run_stream``, or the refusal to report."""
+def stream_to(ctx, args: list[str], emit: Callable[[str], None]) -> int:
+    """Like :func:`stream`, its two streams merged and handed to ``emit`` a line at a time (the
+    posture reconcile, whose output must not bleed over the TUI)."""
+    from . import devmode
+
     argv = [*ctx.compose[2:], *args]
-    if (refused := _provider_refusal(ctx, argv)) is not None:
-        return refused
-    command = _command("compose", argv, ctx.env, str(ctx.main))
+    refused = _provider_refusal(ctx, argv)
+    command = None if refused else _command("compose", argv, ctx.env, str(ctx.main))
     if command is None:
-        return _refused(["compose-in-vm", "compose", *argv], NO_ROUTE, _no_route())
-    return command
-
-
-def ssh_env() -> dict[str, str]:
-    """The environment the ssh client runs with (:data:`_SSH_ENV`)."""
-    return _ssh_env()
+        emit(refused.stderr.strip() if refused else f"✗ {_no_route()}")
+        return refused.returncode if refused else NO_ROUTE
+    cmd, stdin = command
+    return devmode.run_stream(cmd, lambda line: emit(printable(line)), env=_ssh_env(), stdin=stdin)

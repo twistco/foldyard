@@ -1824,17 +1824,7 @@ def _compose_captured(
     full = [*_profile_flags(ctx, extra_profiles), *args]
     emit(_shown(ctx, full))
     if guestcompose.wanted():
-        command = guestcompose.captured_command(ctx, full)
-        if isinstance(command, subprocess.CompletedProcess):
-            emit(command.stderr.strip())
-            return command.returncode
-        ssh, stdin = command
-        return devmode.run_stream(
-            ssh,
-            lambda line: emit(guestcompose.printable(line)),
-            env=guestcompose.ssh_env(),
-            stdin=stdin,
-        )
+        return guestcompose.stream_to(ctx, full, emit)
     return devmode.run_stream([*ctx.compose, *full], emit, env=ctx.env, cwd=str(ctx.main))
 
 
