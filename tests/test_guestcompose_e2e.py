@@ -420,7 +420,7 @@ def test_flow_doctor_has_no_failing_row(flow):
     repo, env, _ = flow
     doctor = fy(["doctor"], repo, timeout=300, env_extra=env)
     assert doctor.rc == 0, doctor.out
-    assert "machine.compose" in doctor.out or "compose" in doctor.out
+    assert '[machine] compose = "vm"' in doctor.out  # the experimental row: never forgotten
 
 
 def test_flow_fy_shell_enters_the_running_container(flow):
@@ -441,16 +441,22 @@ def test_flow_fy_shell_enters_the_running_container(flow):
     )
     os.close(follower)
     seen = b""
-    try:
-        os.write(leader, b"echo marker-$((40+2)); exit\n")
+
+    def read_until(marker: bytes) -> None:
+        nonlocal seen
         deadline = time.monotonic() + 60
-        while b"marker-42" not in seen and time.monotonic() < deadline:
+        while marker not in seen and time.monotonic() < deadline:
             if select.select([leader], [], [], 1)[0]:
                 try:
                     seen += os.read(leader, 4096)
                 except OSError:
                     break
-        assert b"marker-42" in seen, seen.decode(errors="replace")
+        assert marker in seen, seen.decode(errors="replace")
+
+    try:
+        read_until(b"# ")  # the container's prompt: typed any sooner, the input is lost
+        os.write(leader, b"echo marker-$((40+2)); exit\n")
+        read_until(b"marker-42")
     finally:
         proc.terminate()
         proc.wait(timeout=30)
@@ -521,6 +527,13 @@ def test_flow_a_projects_box_image_builds_in_the_guest(flow):
     repo, env, _ = flow
     built = fy(["box", "build"], repo, timeout=1500, env_extra=env)
     assert built.rc == 0, built.out
+    # Quick when the base VM's clone carried the layers, so prove it built: the fingerprint is a
+    # layer of its own, made by this build.
+    label = engine(
+        "image", "inspect", "--format", '{{index .Labels "io.foldyard.box-fingerprint"}}',
+        "foldyard-example-box:latest",
+    )  # fmt: skip
+    assert label.returncode == 0 and label.stdout.strip(), label.stderr
 
 
 def test_flow_no_compose_client_or_build_ran_on_your_computer(flow):
