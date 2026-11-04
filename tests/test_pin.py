@@ -13,7 +13,11 @@ import pytest
 
 from tools import pin
 
-Install = list[Path]
+
+def _env() -> dict[str, str]:
+    # a git hook running the suite exports GIT_DIR & co., which win over -C: never the real repo
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return env | {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -22,6 +26,7 @@ def _git(repo: Path, *args: str) -> str:
         check=True,
         capture_output=True,
         text=True,
+        env=_env(),
     ).stdout.strip()
 
 
@@ -47,15 +52,50 @@ def pin_dir(tmp_path):
     return tmp_path / "fy-pin"
 
 
-@pytest.fixture
-def installed() -> Install:
-    return []
+class FakeUv:
+    """What `uv tool install` and the receipt would do, in memory."""
+
+    def __init__(self) -> None:
+        self.source: Path | None = None
+        self.installs: list[Path] = []
+
+    def install(self, directory: Path) -> None:
+        self.installs.append(directory)
+        self.source = directory
+
+    def failing_install(self, _directory: Path) -> None:
+        raise pin.Refused("the install failed")
+
+    def installed_from(self, directory: Path) -> bool:
+        return self.source == directory
 
 
 @pytest.fixture
-def run(repo, pin_dir, installed):
+def uv() -> FakeUv:
+    return FakeUv()
+
+
+@pytest.fixture
+def installed(uv) -> list[Path]:
+    return uv.installs
+
+
+@pytest.fixture
+def run(repo, pin_dir, uv):
     def _run(commit: str, source: Path | None = None) -> pin.Pinned:
-        return pin.pin(commit, source or repo, pin_dir, install=installed.append)
+        return pin.pin(
+            commit, source or repo, pin_dir, install=uv.install, installed_from=uv.installed_from
+        )
+
+    return _run
+
+
+@pytest.fixture
+def run_failing(repo, pin_dir, uv):
+    def _run(commit: str) -> pin.Pinned:
+        return pin.pin(
+            commit, repo, pin_dir, install=uv.failing_install, installed_from=uv.installed_from
+        )
 
     return _run
 
@@ -187,11 +227,15 @@ def test_a_directory_that_isnt_a_clone_is_left_alone(repo, pin_dir, run, install
     assert installed == []
 
 
-def test_a_pin_inside_the_repo_is_refused(repo, installed):
+def test_a_pin_inside_the_repo_is_refused(repo, uv, installed):
     """The clone exists to be out of the box's reach."""
     with pytest.raises(pin.Refused, match="outside"):
         pin.pin(
-            _git(repo, "rev-parse", "HEAD"), repo, repo / "sub" / "pin", install=installed.append
+            _git(repo, "rev-parse", "HEAD"),
+            repo,
+            repo / "sub" / "pin",
+            install=uv.install,
+            installed_from=uv.installed_from,
         )
     assert not (repo / "sub").exists()
     assert installed == []
@@ -200,23 +244,166 @@ def test_a_pin_inside_the_repo_is_refused(repo, installed):
 # ── a failed install ──────────────────────────────────────────────────────────────────────────
 
 
-def _failing_install(_pin_dir: Path) -> None:
-    raise pin.Refused("the install failed")
-
-
-def test_a_failed_install_puts_the_previous_pin_back(repo, pin_dir, run):
+def test_a_failed_install_puts_the_previous_pin_back(repo, pin_dir, run, run_failing):
     first = _git(repo, "rev-parse", "HEAD")
     run(first)
     second = _commit(repo, "second\n")
     with pytest.raises(pin.Refused, match="still pinned to " + first):
-        pin.pin(second, repo, pin_dir, install=_failing_install)
+        run_failing(second)
     assert _git(pin_dir, "rev-parse", "HEAD") == first
     assert _pinned(pin_dir) == "good\n"
 
 
-def test_a_failed_first_install_says_nothing_is_pinned(repo, pin_dir):
+def test_a_failed_first_install_says_nothing_is_pinned(repo, run_failing):
     with pytest.raises(pin.Refused, match="not pinned"):
-        pin.pin(_git(repo, "rev-parse", "HEAD"), repo, pin_dir, install=_failing_install)
+        run_failing(_git(repo, "rev-parse", "HEAD"))
+
+
+# ── "pinned" means what `fy` really runs, not where the clone happens to be ───────────────────
+
+
+def test_after_just_install_a_failed_repin_doesnt_claim_a_pin(repo, uv, run, run_failing):
+    first = _git(repo, "rev-parse", "HEAD")
+    run(first)
+    uv.source = repo  # `just install`: `fy` follows the checkout again
+    second = _commit(repo, "second\n")
+    with pytest.raises(pin.Refused, match="not pinned") as e:
+        run_failing(second)
+    assert "still pinned" not in str(e.value)
+
+
+def test_after_just_install_a_repin_doesnt_say_it_replaced_a_pin(repo, uv, run):
+    run(_git(repo, "rev-parse", "HEAD"))
+    uv.source = repo
+    assert run(_commit(repo, "second\n")).previous is None
+
+
+def test_a_clone_left_by_a_failed_first_pin_is_never_called_a_pin(repo, run_failing):
+    with pytest.raises(pin.Refused):
+        run_failing(_git(repo, "rev-parse", "HEAD"))
+    second = _commit(repo, "second\n")
+    with pytest.raises(pin.Refused, match="not pinned") as e:
+        run_failing(second)
+    assert "still pinned" not in str(e.value)
+
+
+def test_a_failed_install_that_lost_the_tool_doesnt_claim_a_pin(repo, pin_dir, uv, run):
+    run(_git(repo, "rev-parse", "HEAD"))
+
+    def loses_it(_directory: Path) -> None:
+        uv.source = None
+        raise pin.Refused("the install failed")
+
+    second = _commit(repo, "second\n")
+    with pytest.raises(pin.Refused, match="not pinned"):
+        pin.pin(second, repo, pin_dir, install=loses_it, installed_from=uv.installed_from)
+
+
+def test_an_install_that_isnt_reported_as_this_clone_isnt_a_pin(repo, pin_dir):
+    """uv said yes, the receipt says otherwise: the receipt is what `fy` runs."""
+    with pytest.raises(pin.Refused, match="not pinned"):
+        pin.pin(
+            _git(repo, "rev-parse", "HEAD"),
+            repo,
+            pin_dir,
+            install=lambda _d: None,
+            installed_from=lambda _d: False,
+        )
+
+
+def _receipt(tool_dir: Path, requirements: str) -> None:
+    (tool_dir / "foldyard").mkdir(parents=True)
+    (tool_dir / "foldyard" / "uv-receipt.toml").write_text(
+        f"[tool]\nrequirements = {requirements}\n"
+    )
+
+
+@pytest.fixture
+def tool_dir(tmp_path, monkeypatch):
+    tools = tmp_path / "tools"
+    monkeypatch.setattr(
+        pin.subprocess,
+        "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, f"{tools}\n", ""),
+    )
+    return tools
+
+
+def test_the_receipt_says_where_fy_comes_from(tool_dir, pin_dir):
+    _receipt(tool_dir, f'[{{ name = "foldyard", editable = "{pin_dir}" }}]')
+    assert pin.installed_from(pin_dir)
+
+
+def test_the_receipt_is_compared_by_real_path(tool_dir, tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    _receipt(tool_dir, f'[{{ name = "foldyard", extras = ["host"], editable = "{link}" }}]')
+    assert pin.installed_from(real)
+
+
+@pytest.mark.parametrize(
+    "requirements",
+    [
+        '[{ name = "foldyard", editable = "/somewhere/else" }]',
+        '[{ name = "foldyard" }]',
+        '[{ name = "foldyard", git = "file:///a/repo?rev=abc" }]',
+        '[{ name = "other", editable = "PIN" }]',
+        "[]",
+    ],
+)
+def test_any_other_receipt_isnt_a_pin(tool_dir, pin_dir, requirements):
+    _receipt(tool_dir, requirements.replace("PIN", str(pin_dir)))
+    assert not pin.installed_from(pin_dir)
+
+
+def test_no_receipt_isnt_a_pin(tool_dir, pin_dir):
+    assert not pin.installed_from(pin_dir)
+
+
+def test_an_unreadable_receipt_isnt_a_pin(tool_dir, pin_dir):
+    (tool_dir / "foldyard").mkdir(parents=True)
+    (tool_dir / "foldyard" / "uv-receipt.toml").write_text("not = [toml")
+    assert not pin.installed_from(pin_dir)
+
+
+def test_a_uv_that_cant_answer_isnt_a_pin(pin_dir, monkeypatch):
+    monkeypatch.setattr(
+        pin.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "no")
+    )
+    assert not pin.installed_from(pin_dir)
+
+
+def test_a_failed_uv_doesnt_read_a_receipt_from_where_we_are(tmp_path, pin_dir, monkeypatch):
+    """With no answer the path would be relative, and we run in a checkout a box can write."""
+    _receipt(tmp_path, f'[{{ name = "foldyard", editable = "{pin_dir}" }}]')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        pin.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "no")
+    )
+    assert not pin.installed_from(pin_dir)
+
+
+def test_a_missing_uv_isnt_a_pin(pin_dir, monkeypatch):
+    def missing(_argv, **_kw):
+        raise FileNotFoundError("uv")
+
+    monkeypatch.setattr(pin.subprocess, "run", missing)
+    assert not pin.installed_from(pin_dir)
+
+
+def test_uv_is_asked_from_outside_the_checkout(tmp_path, pin_dir, monkeypatch):
+    """Anywhere under it, a box-written `uv.toml` could name another tool directory."""
+    cwds = []
+
+    def fake_run(argv, **kw):
+        cwds.append((argv, kw.get("cwd")))
+        return subprocess.CompletedProcess(argv, 0, f"{tmp_path}\n", "")
+
+    monkeypatch.setattr(pin.subprocess, "run", fake_run)
+    pin.installed_from(pin_dir)
+    assert cwds == [(["uv", "tool", "dir"], "/")]
 
 
 # ── a repo the box has been writing ───────────────────────────────────────────────────────────
@@ -315,9 +502,11 @@ def test_nothing_in_the_repos_config_runs(repo, tmp_path, pin_dir, run):
     marks = _arm(repo, tmp_path)
 
     # the controls: these traps are live for an ordinary git command in that repo
-    subprocess.run(["git", "-C", str(repo), "status"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "status"], capture_output=True, env=_env())
     assert (marks / "fsmonitor").exists()
-    subprocess.run(["git", "-C", str(repo), "cat-file", "-p", blob], capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-p", blob], capture_output=True, env=_env()
+    )
     assert (marks / "lazy").exists()
     _clear(marks)
 
@@ -339,6 +528,29 @@ def test_the_clone_takes_no_config_from_the_repo(repo, tmp_path, pin_dir, run):
     config = (pin_dir / ".git" / "config").read_text()
     for needle in ("hooksPath", "fsmonitor", "sshCommand", "promisor", "ext::"):
         assert needle not in config
+
+
+def test_git_location_variables_cant_send_it_to_another_repo(repo, pin_dir, run, monkeypatch):
+    """A git hook or `rebase --exec` exports these, and each wins over `-C`: init, remote add, fetch
+    and checkout would all land in the repo the hook belongs to."""
+    sha = _git(repo, "rev-parse", "HEAD")
+    for name, value in (
+        ("GIT_DIR", repo / ".git"),
+        ("GIT_WORK_TREE", repo),
+        ("GIT_INDEX_FILE", repo / ".git" / "index"),
+        ("GIT_COMMON_DIR", repo / ".git"),
+        ("GIT_OBJECT_DIRECTORY", repo / ".git" / "objects"),
+    ):
+        monkeypatch.setenv(name, str(value))
+    run(sha)
+    assert _git(pin_dir, "rev-parse", "HEAD") == sha
+    assert _pinned(pin_dir) == "good\n"
+    assert (
+        subprocess.run(
+            ["git", "-C", str(repo), "remote"], capture_output=True, text=True, env=_env()
+        ).stdout.strip()
+        == ""
+    )
 
 
 def test_control_characters_in_a_subject_dont_reach_the_terminal(repo, pin_dir, run):
@@ -397,7 +609,9 @@ def test_main_finds_the_repo_from_a_worktree_and_reports(
 ):
     monkeypatch.delenv("IN_DEVBOX", raising=False)
     monkeypatch.setenv("FY_PIN_DIR", str(pin_dir))
-    monkeypatch.setattr(pin, "install", lambda _d: None)
+    uv = FakeUv()
+    monkeypatch.setattr(pin, "install", uv.install)
+    monkeypatch.setattr(pin, "installed_from", uv.installed_from)
     wt = tmp_path / "wt"
     _git(repo, "worktree", "add", "-q", "-b", "wt", str(wt))
     sha = _commit(wt, "from a worktree\n", "worktree commit")
@@ -407,6 +621,16 @@ def test_main_finds_the_repo_from_a_worktree_and_reports(
     assert sha in out and "worktree commit" in out and "fy host restart" in out
     # origin is the main repo, not a worktree that may be removed
     assert os.path.realpath(_git(pin_dir, "remote", "get-url", "origin")) == os.path.realpath(repo)
+
+
+def test_main_asks_the_real_receipt(repo, pin_dir, monkeypatch, capsys):
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    monkeypatch.setenv("FY_PIN_DIR", str(pin_dir))
+    monkeypatch.setattr(pin, "install", lambda _d: None)
+    monkeypatch.setattr(pin, "installed_from", lambda _d: False)
+    monkeypatch.chdir(repo)
+    assert pin.main([_git(repo, "rev-parse", "HEAD")]) == 1
+    assert "not pinned" in capsys.readouterr().err
 
 
 def test_main_reports_a_refusal_and_fails(repo, pin_dir, monkeypatch, capsys):

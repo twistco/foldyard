@@ -32,6 +32,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,12 @@ _NO_REPO_CODE = (
     "protocol.ext.allow=never",
 )
 _NO_FETCH_ENV = {"GIT_NO_LAZY_FETCH": "1"}
+# Set by a git hook (and by `git rebase --exec`): each wins over -C, so a run from one would init,
+# fetch and check out in the repo the hook belongs to.
+_REPO_VARS = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
+    "GIT_NAMESPACE", "GIT_PREFIX",
+)  # fmt: skip
 
 
 class Refused(Exception):
@@ -78,10 +85,14 @@ def _clean_lines(text: str) -> str:
     return "\n".join(clean(line) for line in text.strip().splitlines()[-_REASON_LINES:])
 
 
+def _env() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if k not in _REPO_VARS} | _NO_FETCH_ENV
+
+
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", *_NO_REPO_CODE, "-C", str(cwd), *args],
-        env={**os.environ, **_NO_FETCH_ENV},
+        env=_env(),
         capture_output=True,
         text=True,
         errors="replace",
@@ -158,14 +169,44 @@ def install(directory: Path) -> None:
         raise Refused(f"`uv tool install` failed:\n{_clean_lines(done.stderr)}")
 
 
+def installed_from(directory: Path) -> bool:
+    """Is the `foldyard` tool an editable install of this directory? uv's receipt says, and nothing
+    else can: the clone's HEAD stays put through a `just install` or a failed first pin, when `fy`
+    is running something else. From `/` for the reason :func:`install` gives. Unknown counts as no,
+    since this decides whether we may call `fy` pinned."""
+    try:
+        asked = subprocess.run(
+            ["uv", "tool", "dir"], cwd="/", capture_output=True, text=True, errors="replace"
+        )
+    except OSError:
+        return False
+    if asked.returncode != 0:
+        return False
+    try:
+        receipt = Path(asked.stdout.strip()) / "foldyard" / "uv-receipt.toml"
+        requirements = tomllib.loads(receipt.read_text())["tool"]["requirements"]
+    except (OSError, ValueError, KeyError):  # TOMLDecodeError is a ValueError
+        return False
+    return any(
+        req.get("name") == "foldyard"
+        and req.get("editable")
+        and Path(req["editable"]).resolve() == directory.resolve()
+        for req in requirements
+    )
+
+
 def pin(
-    commit: str, repo: Path, directory: Path, install: Callable[[Path], None] = install
+    commit: str,
+    repo: Path,
+    directory: Path,
+    install: Callable[[Path], None] = install,
+    installed_from: Callable[[Path], bool] = installed_from,
 ) -> Pinned:
     if directory.resolve().is_relative_to(repo.resolve()):
         raise Refused(f"{directory} is inside {repo}: a pin has to be outside what a box can write")
     full = resolve(repo, commit)
     _ensure_clone(directory, repo)
-    previous = _head(directory)
+    previous = _head(directory) if installed_from(directory) else None
     _must(
         _git(directory, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", full),
         f"fetch {full}",
@@ -174,10 +215,15 @@ def pin(
     try:
         install(directory)
     except Refused as e:
-        if previous is None:
-            raise Refused(f"{e}\n`fy` is not pinned.") from e
-        _checkout(directory, previous)
-        raise Refused(f"{e}\n`fy` is still pinned to {previous}.") from e
+        if previous is not None:
+            _checkout(directory, previous)
+        if previous is not None and installed_from(directory):
+            raise Refused(f"{e}\n`fy` is still pinned to {previous}.") from e
+        raise Refused(f"{e}\n`fy` is not pinned.") from e
+    if not installed_from(directory):
+        raise Refused(
+            f"uv installed {directory}, but `fy` isn't reported as running it: not pinned."
+        )
     subject = _must(_git(directory, "log", "-1", "--format=%s", full), f"read {full}")
     return Pinned(full, clean(subject), previous)
 
@@ -209,7 +255,17 @@ def main(argv: list[str] | None = None) -> int:
             _git(Path.cwd(), "rev-parse", "--path-format=absolute", "--git-common-dir"),
             "find this repo",
         )
-        print(report(pin(args.commit, Path(common).parent, pin_dir(), install=install)))
+        print(
+            report(
+                pin(
+                    args.commit,
+                    Path(common).parent,
+                    pin_dir(),
+                    install=install,
+                    installed_from=installed_from,
+                )
+            )
+        )
     except Refused as e:
         print(f"✗ {e}", file=sys.stderr)
         return 1
