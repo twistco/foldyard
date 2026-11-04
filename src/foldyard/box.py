@@ -53,6 +53,7 @@ from . import (
     config,
     crossinject,
     crossmask,
+    guestcompose,
     hostclock,
     hostgit,
     keyless,
@@ -612,8 +613,12 @@ def _from_base_image(engine: str, img: str, expected: str, env: dict) -> bool:
     return subprocess.run([engine, "tag", boximage.BASE_BOX_TAG, img], env=env).returncode == 0
 
 
-def _gated_build(cmd: list, tail: list, env: dict, context: str, what: str) -> int:
-    """Run one ``build`` through the build gate (``buildgate``), proxy build-args in between."""
+def _gated_build(
+    cmd: list, tail: list, env: dict, context: str, what: str, *, in_vm: bool = False
+) -> int:
+    """Run one ``build`` through the build gate (``buildgate``), proxy build-args in between.
+    ``in_vm``: the client runs in the guest (:mod:`foldyard.guestcompose`), where ``context`` must
+    be visible, so it packs what the VM sees."""
 
     def build(proxy_url: str | None) -> int:
         # A walled build reaches the proxy as a TRUSTED BUILD (tunnelled, not decrypted — it has no
@@ -625,6 +630,8 @@ def _gated_build(cmd: list, tail: list, env: dict, context: str, what: str) -> i
             proxy_args += ["--build-arg", f"{key}={proxy_url}"]
         full = [*cmd, *proxy_args, *tail]
         _echo(stack._redact_build_args(full))
+        if in_vm:
+            return guestcompose.stream_podman(full[1:], env, context)
         return subprocess.run(full, env=env, cwd=context).returncode
 
     from . import buildgate
@@ -639,7 +646,11 @@ def _build_img(engine: str, main: Path, env: dict) -> int:
     context = img.get("context") or str(main)
     print(f"▶ building dev box image {img['tag']} (from {img['dockerfile']})…")
     cmd, tail = boximage.build_parts(engine, img, _box_image_fingerprint(main), context)
-    return _gated_build(cmd, tail, env, context, "box image build")
+    # Only a project's own image moves: its context is the repo, which the box can write. The
+    # packaged one's is foldyard's own files, which the VM can't see and the box can't write.
+    packaged = img["dockerfile"] == config.packaged_box_image(img["tag"])["dockerfile"]
+    in_vm = guestcompose.wanted() and not packaged
+    return _gated_build(cmd, tail, env, context, "box image build", in_vm=in_vm)
 
 
 # `[box].packages` — system packages baked into a layer ON TOP of the box image, so a recreated box
