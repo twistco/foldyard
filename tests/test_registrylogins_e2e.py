@@ -160,6 +160,23 @@ def test_the_clamped_client_sends_none_even_with_logins_in_a_default_path(api, a
     assert NEEDED not in "".join(listener.headers), listener.headers
 
 
+@pytest.mark.parametrize(
+    "args", [("pull", "registry.invalid/fy/base:1"), ("build", ".")], ids=["pull", "build"]
+)
+def test_a_client_pointed_at_a_missing_file_sends_none(api, args):
+    """What `no_logins_file` relies on when it can't write: the variable alone decides, so a missing
+    file means no logins, never a fall back to the default paths. (The client carries on without
+    them: it doesn't refuse.)"""
+    d, listener = api
+    _auth_file(d / "home" / ".config" / "containers" / "auth.json")
+    env = {**_host_env(), "HOME": str(d / "home")}
+    _client(d, env, *args)
+    assert NEEDED in "".join(listener.headers), "the default path wasn't read: no control"
+    listener.headers.clear()
+    _client(d, {**env, "REGISTRY_AUTH_FILE": str(d / "missing.json")}, *args)
+    assert NEEDED not in "".join(listener.headers), listener.headers
+
+
 # ── the real thing, seen from where a box stands ──────────────────────────────────────────
 
 _WATCH = (

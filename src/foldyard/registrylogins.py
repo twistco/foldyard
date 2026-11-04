@@ -54,14 +54,16 @@ def _write(path: Path) -> None:
 
 def no_logins_file() -> Path:
     """The auth file with no logins, made on first use and put right if it holds anything else. If
-    it can't be written the path is still the answer: a client pointed at a missing file refuses,
-    loudly, and never falls back to the default paths."""
+    that can't be written, the answer is a path with nothing there, never one holding logins: a
+    client pointed at a missing file carries none and doesn't fall back to the default paths
+    (tests/test_registrylogins_e2e.py). It doesn't refuse either, and this doesn't stop `fy`."""
     path = _path()
     try:
         if not _holds_no_logins(path):
             _write(path)
     except OSError:
-        pass
+        if path.exists() and not _holds_no_logins(path):
+            return path.with_name(f"{path.name}.unwritable")
     return path
 
 
@@ -120,8 +122,9 @@ def _your_logins() -> list[Path]:
 def failure_hint() -> list[str]:
     """What to say after a failed build or start, where a pull may be why: pinning makes this
     silent by construction, so it must be said. Only to someone who has logins here and hasn't
-    opted in."""
-    if config.in_box() or OPT_IN in config.compose_env() or not _your_logins():
+    opted in, which takes the export as well as the config line."""
+    opted_in = OPT_IN in config.compose_env() and os.environ.get(OPT_IN)
+    if config.in_box() or opted_in or not _your_logins():
         return []
     return [
         "  If that was a pull from a private registry: foldyard doesn't hand your registry logins",

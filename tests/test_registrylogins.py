@@ -82,12 +82,23 @@ def test_a_login_written_into_the_no_logins_file_doesnt_stay(host):
 
 
 def test_a_file_that_cant_be_written_still_carries_no_logins(host, monkeypatch):
-    """Fails closed: a client pointed at a missing file refuses, loudly, rather than falling back
-    to the logins in the default paths."""
+    """Fails closed: a client pointed at a missing file carries no logins, and doesn't fall back
+    to the default paths (tests/test_registrylogins_e2e.py shows that on a real client)."""
     monkeypatch.setattr(registrylogins, "_write", lambda path: (_ for _ in ()).throw(OSError("ro")))
     monkeypatch.setattr(registrylogins, "_path", lambda: registrylogins.Path("/nonexistent/x.json"))
     env = _clamped(monkeypatch)
     assert env[AUTH] == "/nonexistent/x.json"
+
+
+def test_a_login_that_cant_be_written_over_is_never_the_answer(host, monkeypatch):
+    """A full disk, say. Stopping every `fy` verb over it would be out of proportion when a path
+    with nothing there carries no logins either."""
+    path = registrylogins.no_logins_file()
+    path.write_text('{"auths": {"ghcr.io": {"auth": "ZmFrZTpmYWtl"}}}')
+    monkeypatch.setattr(registrylogins, "_write", lambda p: (_ for _ in ()).throw(OSError("full")))
+    answer = registrylogins.no_logins_file()
+    assert answer != path
+    assert not answer.exists()
 
 
 # ── the compose client's environment ──────────────────────────────────────────────────────
@@ -174,7 +185,18 @@ def test_a_project_already_opted_in_isnt_told_to(host, tmp_path, monkeypatch):
     (tmp_path / ".docker").mkdir()
     (tmp_path / ".docker" / "config.json").write_text("{}")
     monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
+    monkeypatch.setenv(OPT_IN, "/mine/narrow.json")
     assert registrylogins.failure_hint() == []
+
+
+def test_a_project_that_names_it_tells_whoever_hasnt_exported_it(host, tmp_path, monkeypatch):
+    """A teammate on the same adopted config: no export means no logins, so the failure is theirs
+    to fix, and this is how they find out."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".docker").mkdir()
+    (tmp_path / ".docker" / "config.json").write_text("{}")
+    monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
+    assert OPT_IN in "\n".join(registrylogins.failure_hint())
 
 
 def test_a_failed_stack_build_says_so(host, tmp_path, monkeypatch, capfd):
