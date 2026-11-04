@@ -161,7 +161,12 @@ def _tester_argv(vm: str, script: str) -> list[str]:
 
 def _status(vm: str) -> str:
     """The VM's status, ``""`` when there's no such VM."""
-    rows = _run(["limactl", "list", "--format", "{{.Name}} {{.Status}}"]).stdout.splitlines()
+    listed = _run(["limactl", "list", "--format", "{{.Name}} {{.Status}}"])
+    if listed.returncode != 0:
+        raise Refused(
+            f"`limactl list` failed, so {vm}'s state isn't known: {listed.stderr.strip()}"
+        )
+    rows = listed.stdout.splitlines()
     return next((r.split()[1] for r in rows if r.split()[:1] == [vm] and len(r.split()) > 1), "")
 
 
@@ -194,6 +199,10 @@ def forwards_to_your_computer(vm: str) -> bool:
     )
     _run(_tester_argv(vm, f"(nohup python3 -c {shlex.quote(listen)} >/dev/null 2>&1 &)"))
     time.sleep(FORWARD_WAIT_S)
+    # Inside first: with no listener there, silence on this side would prove nothing.
+    inside = f"timeout 5 bash -c {shlex.quote(f'</dev/tcp/127.0.0.1/{port}')}"
+    if _run(_tester_argv(vm, inside)).returncode != 0:
+        raise Refused(f"the listener for the forwarding check didn't start in {vm}.")
     return _port_answers(port)
 
 
@@ -300,10 +309,11 @@ def up(cfg: Config) -> None:
         _create(cfg)
         if not reaches_your_computer(cfg.vm):
             _stop(cfg.vm)
-            _run(["limactl", "delete", cfg.vm])
+            deleted = _run(["limactl", "delete", "--force", cfg.vm]).returncode == 0
             raise Refused(
                 f"{cfg.vm} couldn't reach your computer even before its wall, so the wall's probe "
-                "would prove nothing. Has Lima's gateway moved? The new VM has been deleted."
+                "would prove nothing. Has Lima's gateway moved? "
+                + ("The new VM has been deleted." if deleted else f"And couldn't delete {cfg.vm}.")
             )
     elif status != "Running":
         _start(cfg.vm)

@@ -55,6 +55,9 @@ class FakeL1:
         self.sent_pack = False
         self.git_can_refuse_lazy_fetch = True
         self.stops_refused = 0
+        self.listener_starts = True
+        self.deletes_refused = False
+        self.list_fails = False
         self.stops_claimed_only = 0
         self.port_forwards = json.dumps(nested.FORWARD_NOTHING)
         self.forward_answers = False
@@ -65,7 +68,16 @@ class FakeL1:
         self.calls.append(list(argv))
         joined = " ".join(argv)
         out, rc = "", 0
-        if ".Config.PortForwards" in joined:
+        if self.list_fails and argv[:2] == ["limactl", "list"]:
+            rc = 1
+        elif argv[:2] == ["limactl", "delete"]:
+            if self.deletes_refused:
+                rc = 1
+            else:
+                self.status = ""
+        elif "/dev/tcp/127.0.0.1" in joined:
+            rc = 0 if self.listener_starts else 1
+        elif ".Config.PortForwards" in joined:
             out = self.port_forwards
         elif "nft list table" in joined:
             out = self.wall_rules
@@ -170,7 +182,22 @@ def test_a_probe_that_fails_before_the_wall_rejects_the_fresh_vm(l1):
     with pytest.raises(nested.Refused, match="before its wall"):
         nested.up(CFG)
     assert not l1.sent("bash -s")
-    assert ["limactl", "delete", "fy-nested"] in l1.calls
+    assert ["limactl", "delete", "--force", "fy-nested"] in l1.calls
+
+
+def test_a_rejected_fresh_vm_isnt_reported_deleted_when_it_wasnt(l1):
+    l1.status = ""
+    l1.reaches = [False]
+    l1.deletes_refused = True
+    with pytest.raises(nested.Refused, match="couldn't delete"):
+        nested.up(CFG)
+
+
+def test_a_failing_limactl_list_isnt_read_as_no_vm(l1):
+    # `_stop` counts "no such VM" as stopped, so this would skip the force and the warning.
+    l1.list_fails = True
+    with pytest.raises(nested.Refused, match="limactl list"):
+        nested.down(CFG, delete=False)
 
 
 def test_up_restarts_only_when_the_traps_are_not_in_the_running_kernel(l1):
@@ -238,6 +265,7 @@ def test_up_sends_the_provisioning_script_to_root(l1):
             "forward",
         ),
         (lambda f: setattr(f, "forward_answers", True), "localhost"),
+        (lambda f: setattr(f, "listener_starts", False), "listener"),
         (lambda f: setattr(f, "wall_rules", ""), "wall"),
         (lambda f: setattr(f, "wall_rules", "table inet other {}"), "wall"),
         (lambda f: setattr(f, "status", "Stopped"), "nested-up"),
