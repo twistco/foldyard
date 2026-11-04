@@ -55,6 +55,7 @@ class FakeL1:
         self.sent_pack = False
         self.git_can_refuse_lazy_fetch = True
         self.stops_refused = 0
+        self.stops_claimed_only = 0
         self.port_forwards = json.dumps(nested.FORWARD_NOTHING)
         self.forward_answers = False
         self.wall_rules = "ip daddr { 100.64.0.0/10 } drop"
@@ -80,7 +81,9 @@ class FakeL1:
         elif argv[:2] == ["limactl", "info"]:
             out = '{"vmTypes":["qemu","vz"]}'
         elif argv[:2] == ["limactl", "stop"]:
-            if self.stops_refused:
+            if self.stops_claimed_only:
+                self.stops_claimed_only -= 1  # exits 0 with the VM still up
+            elif self.stops_refused:
                 self.stops_refused -= 1
                 rc = 1
             else:
@@ -471,6 +474,19 @@ def test_up_on_a_tainted_vm_left_running_also_stops_it(l1):
 def test_a_vm_that_wont_stop_at_all_is_reported(l1, capsys):
     l1.stops_refused = 2
     (l1.vm_dir / nested.HAD_ROOT).touch()
+    nested.down(CFG, delete=False)
+    assert "couldn't stop" in capsys.readouterr().out
+
+
+def test_a_stop_is_judged_by_the_vms_status_not_the_exit_code(l1, capsys):
+    # Lima can return 0 from a kill that failed.
+    l1.stops_claimed_only = 1
+    (l1.vm_dir / nested.HAD_ROOT).touch()
+    nested.down(CFG, delete=False)
+    assert ["limactl", "stop", "--force", "fy-nested"] in l1.calls
+    assert l1.status == "Stopped"
+    l1.status = "Running"
+    l1.stops_claimed_only = 2
     nested.down(CFG, delete=False)
     assert "couldn't stop" in capsys.readouterr().out
 

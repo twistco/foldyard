@@ -126,11 +126,13 @@ def _show(done: subprocess.CompletedProcess) -> None:
 
 
 def _stop(vm: str) -> None:
-    """Stop the L1 from outside, by force if the guest won't: a VM left up is the risk."""
-    if _run(["limactl", "stop", vm], capture=False).returncode == 0:
-        return
-    if _run(["limactl", "stop", "--force", vm], capture=False).returncode != 0:
-        print(f"⚠ couldn't stop {vm}, even by force: it's still running. See `limactl list`.")
+    """Stop the L1 from outside, by force if the guest won't: a VM left up is the risk. Judged by
+    its status, since Lima can return 0 from a kill that failed."""
+    for argv in (["limactl", "stop", vm], ["limactl", "stop", "--force", vm]):
+        _run(argv, capture=False)
+        if _status(vm) in ("Stopped", ""):
+            return
+    print(f"⚠ couldn't stop {vm}, even by force: it's still running. See `limactl list`.")
 
 
 def _stream(argv: Sequence[str]) -> int:
