@@ -575,12 +575,16 @@ def _compose_files(ctx: Context) -> list[str]:
     return [ctx.compose[i + 1] for i, arg in enumerate(ctx.compose[:-1]) if arg == "-f"]
 
 
-def _shown(ctx: Context, args: list[str]) -> str:
-    """The echoed line for a compose call (the "thin and echoing" rule), saying where it runs."""
+def _where() -> str:
+    """How an echoed command starts (the "thin and echoing" rule): it says where it runs."""
     from . import guestcompose
 
-    where = "+ (in the VM) " if guestcompose.wanted() else "+ "
-    return where + " ".join(shlex.quote(c) for c in [*ctx.compose, *args])
+    return "+ (in the VM) " if guestcompose.wanted() else "+ "
+
+
+def _shown(ctx: Context, args: list[str]) -> str:
+    """The echoed line for a compose call."""
+    return _where() + " ".join(shlex.quote(c) for c in [*ctx.compose, *args])
 
 
 def _engine_output(ctx: Context, cmd: list[str], **kw) -> int:
@@ -846,7 +850,7 @@ def _podman_build(
         for cname, cpath in extra_ctx.items():
             cmd += ["--build-context", f"{cname}={cpath}"]
         cmd.append(context)
-        echoed = "+ " + " ".join(shlex.quote(c) for c in _redact_build_args(cmd))
+        echoed = _where() + " ".join(shlex.quote(c) for c in _redact_build_args(cmd))
         _err(echoed)
         log.write(echoed + "\n")
         log.flush()  # the subprocess writes to the fd directly — keep ordering
@@ -858,7 +862,7 @@ def _podman_build(
             for alias_name, alias_svc in group[1:]:
                 alias = image_for(alias_name, alias_svc)
                 tag_cmd = [engine, "tag", image, alias]
-                tag_echoed = "+ " + " ".join(shlex.quote(c) for c in tag_cmd)
+                tag_echoed = _where() + " ".join(shlex.quote(c) for c in tag_cmd)
                 _err(tag_echoed)
                 log.write(tag_echoed + "\n")
                 log.flush()
