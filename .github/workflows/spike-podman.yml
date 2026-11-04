@@ -26,7 +26,7 @@ jobs:
           loginctl show-user "$USER" 2>&1 | grep -E 'Linger|State' || true
           systemctl --user is-system-running 2>&1 || true
           systemctl --user status podman.socket 2>&1 | head -5 || true
-          podman info --format '{{.Host.OCIRuntime.Name}} {{.Host.NetworkBackend}} {{.Host.Security.Rootless}} {{.Store.GraphDriverName}} {{.Host.RootlessNetworkCmd}} {{.Host.CgroupVersion}} {{.Host.CgroupManager}}'
+          podman info --format '{{.Host.OCIRuntime.Name}} {{.Host.NetworkBackend}} {{.Host.Security.Rootless}} {{.Store.GraphDriverName}} {{.Host.RootlessNetworkCmd}} {{.Host.CgroupManager}}' || true
           df -h / /mnt 2>/dev/null; free -g | head -2; nproc
       - name: Rootless run, bridge and DNS
         run: |
@@ -88,9 +88,12 @@ jobs:
           export CONTAINER_HOST="unix://$sock" DOCKER_HOST="unix://$sock"
           uv tool install --editable .
           set +e
-          cd example
+          cp -r example "$RUNNER_TEMP/fyex"
+          cd "$RUNNER_TEMP/fyex"
+          git init -q && git add -A && git -c user.name=ci -c user.email=ci@example.invalid commit -qm init
           time foldyard up; echo "up rc=$?"
           foldyard ps; echo "ps rc=$?"
+          foldyard state; echo "state rc=$?"
           podman ps --format '{{.Names}} {{.Status}}'
           time foldyard build; echo "rebuild rc=$?"
           foldyard down; echo "down rc=$?"
