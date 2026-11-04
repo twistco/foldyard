@@ -28,15 +28,27 @@ jobs:
           systemctl --user status podman.socket 2>&1 | head -5 || true
           podman info --format '{{.Host.OCIRuntime.Name}} {{.Host.NetworkBackend}} {{.Host.Security.Rootless}} {{.Store.GraphDriverName}} {{.Host.RootlessNetworkCmd}} {{.Host.CgroupManager}}' || true
           df -h / /mnt 2>/dev/null; free -g | head -2; nproc
-      - name: Rootless run, bridge and DNS
+      - name: The teardown, before and after a remedy
         run: |
-          set -x
-          time podman run --rm docker.io/library/alpine:latest echo RUN-OK
-          podman network create spike
-          podman run -d --name a --network spike docker.io/library/alpine:latest sleep 300
-          time podman run --rm --network spike docker.io/library/alpine:latest ping -c1 -W5 a
-          podman run --rm docker.io/library/alpine:latest wget -qO- https://example.com | head -c 80; echo
-          podman rm -f a; podman network rm spike
+          set +e
+          cycle() {
+            podman network create spike >/dev/null
+            podman run -d --name a --network spike docker.io/library/alpine:latest sleep 300 >/dev/null
+            podman rm -f -t0 a; echo "rm rc=$?"
+            podman ps -a --format '{{.Names}} {{.Status}}'
+            pgrep -a pasta || echo "no pasta left"
+            podman network rm spike; echo "net rm rc=$?"
+          }
+          ls -l /etc/apparmor.d/ | grep -iE 'pasta|passt|podman|crun|conmon|netavark|aardvark|buildah|slirp'
+          sudo aa-status 2>/dev/null | grep -iE 'pasta|passt|podman|crun|buildah|slirp' | sort -u
+          echo '=== before'; cycle
+          sudo journalctl -k --no-pager -n 400 | grep -i 'apparmor="DENIED"' | tail -6 | cut -c1-260
+          echo '=== after unloading only the pasta profile'
+          for f in /etc/apparmor.d/usr.bin.pasta /etc/apparmor.d/usr.bin.passt; do [ -e "$f" ] && sudo apparmor_parser -R "$f"; done
+          sudo aa-status 2>/dev/null | grep -iE 'pasta|passt' | sort -u
+          cycle
+          sudo journalctl -k --no-pager -n 40 | grep -i 'apparmor="DENIED"' | tail -3 | cut -c1-260
+          exit 0
       - name: Start the rootless API service
         run: |
           mkdir -p "$XDG_RUNTIME_DIR/podman"
