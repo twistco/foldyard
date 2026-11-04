@@ -24,7 +24,7 @@ Inside a box nothing is touched: its logins are its own. Stdlib only: this runs 
 from __future__ import annotations
 
 import os
-from collections.abc import MutableMapping
+from collections.abc import Collection, MutableMapping
 from pathlib import Path
 
 from . import config
@@ -54,17 +54,23 @@ def _write(path: Path) -> None:
 
 def no_logins_file() -> Path:
     """The auth file with no logins, made on first use and put right if it holds anything else. If
-    that can't be written, the answer is a path with nothing there, never one holding logins: a
+    that can't be written, the answer is a new path with nothing there, never one holding logins: a
     client pointed at a missing file carries none and doesn't fall back to the default paths
-    (tests/test_registrylogins_e2e.py). It doesn't refuse either, and this doesn't stop `fy`."""
+    (tests/test_registrylogins_e2e.py). It doesn't refuse either, and this doesn't stop `fy`. New
+    each time, because the client can write what it's pointed at (`podman login`)."""
     path = _path()
     try:
         if not _holds_no_logins(path):
             _write(path)
     except OSError:
         if path.exists() and not _holds_no_logins(path):
-            return path.with_name(f"{path.name}.unwritable")
+            return path.with_name(f"{path.name}.unwritable.{os.urandom(8).hex()}")
     return path
+
+
+def _ours(path: str | Path) -> bool:
+    """Whether ``path`` is the no-logins file or one of its fallbacks: never a login of yours."""
+    return Path(path).name.startswith(_path().name)
 
 
 def _holds_no_logins(path: Path) -> bool:
@@ -80,18 +86,21 @@ def clamp(environ: MutableMapping[str, str] | None = None) -> None:
     env = os.environ if environ is None else environ
     if config.in_box():
         return
-    empty = str(no_logins_file())
     own = env.get(AUTH)
-    if own and own != empty:
+    if own and not _ours(own):
         env[SAVED] = own
-    env[AUTH] = empty
+    env[AUTH] = str(no_logins_file())
+
+
+def _offered(declared: Collection[str]) -> str:
+    """The file a project opted in with, which takes both steps; ``""`` otherwise."""
+    return os.environ.get(OPT_IN, "") if OPT_IN in declared else ""
 
 
 def for_compose(declared: set[str]) -> str:
     """``REGISTRY_AUTH_FILE`` for the compose client and the builds, on your computer: the file
     you exported as :data:`OPT_IN`, if the adopted ``[project] compose_env`` names it, else none."""
-    offered = os.environ.get(OPT_IN, "")
-    return offered if OPT_IN in declared and offered else str(no_logins_file())
+    return _offered(declared) or str(no_logins_file())
 
 
 def operators_env(env: dict[str, str]) -> dict[str, str]:
@@ -116,15 +125,14 @@ def _your_logins() -> list[Path]:
         paths.insert(0, Path(runtime) / "containers/auth.json")
     if own := os.environ.get(SAVED) or os.environ.get(AUTH):
         paths.insert(0, Path(own))
-    return [p for p in paths if p.is_file() and p != _path()]
+    return [p for p in paths if p.is_file() and not _ours(p)]
 
 
 def failure_hint() -> list[str]:
     """What to say after a failed build or start, where a pull may be why: pinning makes this
     silent by construction, so it must be said. Only to someone who has logins here and hasn't
     opted in, which takes the export as well as the config line."""
-    opted_in = OPT_IN in config.compose_env() and os.environ.get(OPT_IN)
-    if config.in_box() or opted_in or not _your_logins():
+    if config.in_box() or _offered(config.compose_env()) or not _your_logins():
         return []
     return [
         "  If that was a pull from a private registry: foldyard doesn't hand your registry logins",

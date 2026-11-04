@@ -69,6 +69,18 @@ class _LoggingApi:
         self.sock.listen(8)
         threading.Thread(target=self._serve, daemon=True).start()
 
+    @staticmethod
+    def _headers(conn: socket.socket) -> str:
+        """Up to the blank line: one recv can stop short of it, and a header missed would read as
+        a login not sent. The body (a build's context) isn't needed."""
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        return data.decode(errors="replace")
+
     def _serve(self) -> None:
         version = json.dumps(
             {
@@ -89,7 +101,7 @@ class _LoggingApi:
                 conn, _ = self.sock.accept()
             except OSError:
                 return
-            data = conn.recv(65536).decode(errors="replace")
+            data = self._headers(conn)
             for header in data.split("\r\n"):
                 if header.lower().startswith("x-registry"):
                     value = header.split(":", 1)[1].strip()
@@ -158,6 +170,7 @@ def test_the_clamped_client_sends_none_even_with_logins_in_a_default_path(api, a
     registrylogins.clamp(env)
     _client(d, env, *args)
     assert NEEDED not in "".join(listener.headers), listener.headers
+    assert UNRELATED not in "".join(listener.headers), listener.headers
 
 
 @pytest.mark.parametrize(
@@ -175,6 +188,7 @@ def test_a_client_pointed_at_a_missing_file_sends_none(api, args):
     listener.headers.clear()
     _client(d, {**env, "REGISTRY_AUTH_FILE": str(d / "missing.json")}, *args)
     assert NEEDED not in "".join(listener.headers), listener.headers
+    assert UNRELATED not in "".join(listener.headers), listener.headers
 
 
 # ── the real thing, seen from where a box stands ──────────────────────────────────────────

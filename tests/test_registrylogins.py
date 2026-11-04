@@ -101,6 +101,43 @@ def test_a_login_that_cant_be_written_over_is_never_the_answer(host, monkeypatch
     assert not answer.exists()
 
 
+def test_a_login_written_into_the_fallback_is_never_handed_out(host, monkeypatch):
+    """The fallback is what the client is pointed at, so whatever inherits it and runs `podman
+    login` writes there. While the rewrite keeps failing, the next answer must not be that file."""
+    path = registrylogins.no_logins_file()
+    path.write_text('{"auths": {"ghcr.io": {"auth": "ZmFrZTpmYWtl"}}}')
+    monkeypatch.setattr(registrylogins, "_write", lambda p: (_ for _ in ()).throw(OSError("full")))
+    first = registrylogins.no_logins_file()
+    first.write_text('{"auths": {"ghcr.io": {"auth": "ZmFrZTpmYWtl"}}}')
+    second = registrylogins.no_logins_file()
+    assert second != first
+    assert not second.exists()
+
+
+def test_a_child_clamping_during_the_fallback_keeps_your_export(host, monkeypatch):
+    """Its fallback isn't its parent's clamp value, and neither is a login of yours: taken for your
+    export, it would overwrite the real one and go to your editor."""
+    monkeypatch.setenv(AUTH, "/mine/auth.json")
+    env = _clamped(monkeypatch)
+    path = registrylogins.no_logins_file()
+    path.write_text('{"auths": {"ghcr.io": {"auth": "ZmFrZTpmYWtl"}}}')
+    monkeypatch.setattr(registrylogins, "_write", lambda p: (_ for _ in ()).throw(OSError("full")))
+    registrylogins.clamp(env)  # the parent's value was the main path; this one's a fallback
+    registrylogins.clamp(env)  # and a grandchild's parent held a fallback
+    assert env[registrylogins.SAVED] == "/mine/auth.json"
+    assert registrylogins.operators_env(env)[AUTH] == "/mine/auth.json"
+
+
+def test_the_fallback_doesnt_read_as_you_having_logins(host, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    path = registrylogins.no_logins_file()
+    fallback = path.with_name(f"{path.name}.unwritable.abc")
+    fallback.write_text("{}")
+    monkeypatch.setenv(AUTH, str(fallback))
+    assert registrylogins.failure_hint() == []
+
+
 # ── the compose client's environment ──────────────────────────────────────────────────────
 
 
