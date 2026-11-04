@@ -116,7 +116,7 @@ min_foldyard_version = "0.2.0"
   what it needs to run (`PATH`, `HOME`, locale, `COMPOSE_*`/`PODMAN_*` settings) — never
   `host.env`. Each name is a widening, listed by `fy config widenings`: the compose files are
   editable from the box, and a `${NAME}` in one hands the value to a container.
-  `REGISTRY_AUTH_FILE` is the one way to give the client a registry login
+  `FY_REGISTRY_AUTH_FILE` is the one way to give the client a registry login
   ([stack](./stack.md#private-images)).
 - **`ensure_dirs`** — bind-mount source dirs (checkout-relative) your compose file expects;
   created empty on `up`. Default: `[]`.

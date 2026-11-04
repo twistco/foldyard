@@ -170,17 +170,19 @@ For a private image, opt in for that project:
 
 ```bash
 podman login --authfile ~/.foldyard/acme-registry.json ghcr.io
-export REGISTRY_AUTH_FILE=~/.foldyard/acme-registry.json
+export FY_REGISTRY_AUTH_FILE=~/.foldyard/acme-registry.json
 ```
 
 ```toml
 [project]
-compose_env = ["REGISTRY_AUTH_FILE"]
+compose_env = ["FY_REGISTRY_AUTH_FILE"]
 ```
 
 **A box can read what's in that file** while a build runs, so give it one login, read-only and
-scoped to what this project pulls. `fy config widenings` lists it. Naming it without exporting one
-means no logins, never your default `auth.json`.
+scoped to what this project pulls. `fy config widenings` lists it. It takes both steps: naming it
+without exporting a file means no logins, and so does exporting one this project doesn't name. Your
+own `REGISTRY_AUTH_FILE` never counts, so a line in `compose_env`, which the box can propose, can't
+send the `auth.json` you already point it at.
 
 An image already in the VM needs no registry, so `fy up` in the box finds it. A new one fails at the
 pull: the box has no login, and an agent can't make your logins fetch something new by editing a

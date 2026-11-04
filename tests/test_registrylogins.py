@@ -17,6 +17,7 @@ import pytest
 from foldyard import config, registrylogins, stack
 
 AUTH = "REGISTRY_AUTH_FILE"
+OPT_IN = registrylogins.OPT_IN
 
 
 @pytest.fixture
@@ -24,6 +25,7 @@ def host(monkeypatch):
     monkeypatch.setattr(config, "in_box", lambda: False)
     monkeypatch.delenv(AUTH, raising=False)
     monkeypatch.delenv(registrylogins.SAVED, raising=False)
+    monkeypatch.delenv(OPT_IN, raising=False)
     monkeypatch.setattr(config, "compose_env", lambda: [])
 
 
@@ -61,12 +63,22 @@ def test_in_the_box_nothing_is_touched(monkeypatch):
     assert _clamped(monkeypatch)[AUTH] == "/box/auth.json"
 
 
-def test_the_no_logins_file_is_private_and_kept(host):
+def test_the_no_logins_file_is_private_and_left_alone(host):
     path = registrylogins.no_logins_file()
     assert path.stat().st_mode & 0o077 == 0
-    path.write_text('{"auths": {}, "kept": true}')
+    before = path.stat().st_ino
     assert registrylogins.no_logins_file() == path
-    assert "kept" in path.read_text()
+    assert path.stat().st_ino == before  # no write on the hot path
+
+
+def test_a_login_written_into_the_no_logins_file_doesnt_stay(host):
+    """Anything inheriting the clamp that runs `podman login` writes HERE, and every later build
+    would then send it."""
+    path = registrylogins.no_logins_file()
+    path.write_text('{"auths": {"ghcr.io": {"auth": "ZmFrZTpmYWtl"}}}')
+    registrylogins.no_logins_file()
+    assert json.loads(path.read_text()) == {"auths": {}}
+    assert path.stat().st_mode & 0o077 == 0
 
 
 def test_a_file_that_cant_be_written_still_carries_no_logins(host, monkeypatch):
@@ -86,24 +98,40 @@ def test_the_compose_client_gets_no_logins_by_default(host, monkeypatch):
     assert stack._host_passthrough()[AUTH] == str(registrylogins.no_logins_file())
 
 
-def test_a_project_that_names_it_gets_the_file_you_exported(host, monkeypatch):
+def test_a_project_that_names_it_gets_the_file_you_exported_for_it(host, monkeypatch):
     """The opt-in: adopted, listed by `fy config widenings`, and only ever a file you named."""
-    monkeypatch.setattr(config, "compose_env", lambda: [AUTH])
-    monkeypatch.setenv(AUTH, "/mine/narrow.json")
+    monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
+    monkeypatch.setenv(OPT_IN, "/mine/narrow.json")
     assert stack._host_passthrough()[AUTH] == "/mine/narrow.json"
 
 
 def test_the_opt_in_survives_the_clamp_at_startup(host, monkeypatch):
-    monkeypatch.setattr(config, "compose_env", lambda: [AUTH])
-    monkeypatch.setenv(AUTH, "/mine/narrow.json")
-    registrylogins.clamp(os.environ)  # monkeypatch.setenv restores both names at teardown
-    monkeypatch.setenv(registrylogins.SAVED, os.environ[registrylogins.SAVED])
+    monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
+    monkeypatch.setenv(OPT_IN, "/mine/narrow.json")
+    monkeypatch.setenv(AUTH, "/mine/everything.json")
+    registrylogins.clamp(os.environ)  # monkeypatch.setenv restores it at teardown
     assert stack._host_passthrough()[AUTH] == "/mine/narrow.json"
 
 
-def test_naming_it_without_exporting_one_is_still_no_logins(host, monkeypatch):
-    """Never the default paths: that would be your whole auth.json again, by one config line."""
+def test_a_general_export_is_never_consent(host, monkeypatch):
+    """Plenty of people export REGISTRY_AUTH_FILE at their whole auth.json so podman, skopeo and
+    buildah share it, and a box can commit one line to `compose_env`, which reads as harmless when
+    it is adopted. So naming THAT variable gives nothing: only one that exists for this purpose."""
     monkeypatch.setattr(config, "compose_env", lambda: [AUTH])
+    monkeypatch.setenv(AUTH, "/mine/everything.json")
+    assert stack._host_passthrough()[AUTH] == str(registrylogins.no_logins_file())
+
+
+def test_a_project_naming_the_opt_in_without_your_export_gets_no_logins(host, monkeypatch):
+    """Never the default paths: that would be your whole auth.json again, by one config line."""
+    monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
+    monkeypatch.setenv(AUTH, "/mine/everything.json")
+    assert stack._host_passthrough()[AUTH] == str(registrylogins.no_logins_file())
+
+
+def test_an_export_a_project_didnt_name_gets_no_logins(host, monkeypatch):
+    """Yours to offer and the adopted config's to take: neither alone is enough."""
+    monkeypatch.setenv(OPT_IN, "/mine/narrow.json")
     assert stack._host_passthrough()[AUTH] == str(registrylogins.no_logins_file())
 
 
@@ -129,14 +157,14 @@ def test_a_failure_names_the_logins_only_when_you_have_some(host, tmp_path, monk
     (tmp_path / ".docker").mkdir()
     (tmp_path / ".docker" / "config.json").write_text("{}")
     hint = "\n".join(registrylogins.failure_hint())
-    assert "compose_env" in hint and AUTH in hint
+    assert "compose_env" in hint and OPT_IN in hint
 
 
 def test_a_project_already_opted_in_isnt_told_to(host, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / ".docker").mkdir()
     (tmp_path / ".docker" / "config.json").write_text("{}")
-    monkeypatch.setattr(config, "compose_env", lambda: [AUTH])
+    monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
     assert registrylogins.failure_hint() == []
 
 
