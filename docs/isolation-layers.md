@@ -342,6 +342,7 @@ which is the point. `fy verify` on the host still runs it over the default socke
 | CI `wsl2-host-e2e` (Windows Server 2025, WSL2, Lima/QEMU inside) | the same tier on WSL2; the host firewall test skips | a Windows 11 client |
 | a macOS host, by hand | the default vz path, krunkit, gVisor on arm64 | anything Linux-only |
 | a nested x86 Linux VM ([nested-virt.md](./nested-virt.md)) | the stacked microVM, gVisor's `kvm` platform, podman 6 guests | bare-metal numbers (one level deeper than a laptop) |
+| a nested arm64 Linux VM on an Apple M3+ ([nested-virt.md](./nested-virt.md)) | the Linux host tier on arm64 | bare-metal numbers; the stacked microVM and gVisor there are untested |
 | any x86 Windows 11 machine | `/dev/kvm` in the distro — a two-minute read-only check | — |
 
 ## Still open
