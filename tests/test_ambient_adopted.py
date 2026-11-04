@@ -97,7 +97,7 @@ def adopting_gate(host_checkout, monkeypatch):
 
 
 def test_an_adoption_at_the_gate_reruns_the_command_with_it(adopting_gate):
-    # Import-time constants (machine.MACHINE/BACKEND, devmode.AXES…) were bound from the config
+    # Import-time constants (machine.MACHINE/BACKEND…) were bound from the config
     # BEFORE the adoption; only a fresh process sees the adopted one everywhere.
     configpin.gate("fy up")
     # -P: a re-run never puts the working directory (a checkout) on sys.path (selfspawn).

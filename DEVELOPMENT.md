@@ -28,9 +28,10 @@ just nested-down [--delete]
 
 **Tooling (dev deps, in `pyproject.toml`):** ruff (lint+format, line-length 100), pyright +
 ty (both type-checkers — keep green under each), pytest-xdist (`-n auto`). ruff config
-carries the deliberate ignores (✓/✗/▶ glyphs = RUF001-003; typer `Argument`/`Option`
-defaults = B008; Textual mutable class-attrs = RUF012 in tui; box.py embeds long shell =
-E501). Keep all three at zero before committing (`just check`).
+carries the deliberate ignores (✓/✗/▶ glyphs = RUF001-003; `raise` without `from` = B904; Textual
+mutable class-attrs = RUF012 in tui; long lines = E501 in tests and in box.py, init.py and sandbox.py,
+which embed shell or template text); typer's `Argument`/`Option` defaults are exempt from B008 by
+`extend-immutable-calls`. Keep all three at zero before committing (`just check`).
 
 ## Module map — `src/foldyard/`
 
@@ -217,7 +218,7 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   (2026-10-26). Pins win and are never handed out; the box gets every offset baked in
   (`FY_WORKTREE_OFFSETS`). Should two daemons still want one port (a pin, `WT_OFFSET`), the
   supervisor runs one and blocks the other (`supervisor._port_sharers`) — never reaps its own.
-- `agents.py` — `fy agent start|ls|attach|stop|clean` (docs/agents.md): `fy claude`/`fy codex` in a
+- `agents.py` — `fy agent start|resume|ls|attach|stop|clean` (docs/agents.md): `fy claude`/`fy codex` in a
   detached tmux session in the box, on foldyard's own server (`tmux -L fy -f /dev/null`, its
   options set by argv on every start — `allow-passthrough off` and `set-clipboard external` keep an
   agent's ordinary output off your terminal and clipboard, so tmux < 3.3 is refused; a DEFAULT,
@@ -239,6 +240,14 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   podman connection per VM, which Podman Desktop lists side by side; where Podman Desktop is
   installed, `machine.ensure` keeps it current and pins the ssh port — `FOLDYARD_PODMAN_DESKTOP`
   `0`/`1` overrides the detection).
+- `buildgate.py` — an image build the egress wall refused, turned into one question per host.
+- `attribution.py` · `forwarder.py` — who a proxy row's stamp names, and the forwarder that stamps it
+  (`[machine].attribution = "record"`, ADR-0034).
+- `compat.py` · `changelog.py` — the consumer's declared foldyard version window, and `fy changelog`.
+- `githeal.py` — heals the shared git index after a box-side git moved HEAD (ADR-0021's follow-up).
+- `mountwrite.py` — host-side writes into the repo mount that never follow a symlink the box planted.
+- `sandbox.py` — the gVisor machine posture (`[machine].runtime = "gvisor"`).
+- `term.py` — terminal colour for the CLI's glyphs.
 - `selfspawn.py` — how foldyard runs its own modules as a child: `python -P -m <module>`
   (`python_m`), never plain `-m`, which puts the WORKING DIRECTORY first on `sys.path` — and those
   children run in a box-writable checkout (the supervisor keeps `fy up`'s directory, the proxy's
@@ -340,7 +349,8 @@ foldyard's surface splits by *where it can be validated*:
    - `tests/test_proxy_box_e2e.py`: the **proxy plugin driving a REAL dev-box container** over
      the socket — runs in an adapted topology so it works inside a dev box; see
      [docs/nested-virt.md](./docs/nested-virt.md). The proxy e2es:
-     `just test-proxy-e2e` (pulls the `e2e` group).
+     `just test-proxy-e2e` (pulls the `e2e` group), which also runs `test_proxy_wall_e2e.py`,
+     `test_capture_box_e2e.py` and `test_gcp_metadata_box_e2e.py`.
 4. **The host tier** — `machine ensure|stop|recreate`, `box up|build`, `host`, `mode set`,
    `verify`'s real VM boundary, the walls. These deliberately **refuse to run inside a dev box**
    (`config.in_box()` guards — the box must not manage its own VM or escalate its posture), and
@@ -400,6 +410,11 @@ foldyard's surface splits by *where it can be validated*:
      re-rendered, blocked-daemons empty; mode off.
    - `test_box_e2e.py` — `fy box up` on the VM (recreated to mount the module's copy), in-box
      `fy ps` over `CONTAINER_HOST`, in-box `fy verify` ALL PASS, `box down`.
+   - `test_forwarder_e2e.py` — `[machine] attribution = "record"` on a real walled VM: the forwarder's
+     boot script recorded under its own marker, `fy up` refusing unless the guest reports it serving,
+     then through the real supervisor-run mitmdump (ADR-0034).
+   - `test_basevm_e2e.py` — `fy machine base bake`, then a project VM created as a clone of it that
+     boots, provisions and runs containers (which base it drives: the sharding notes below).
    On a Lima host these run against the example's own VM (creating, restarting, recreating it),
    never a consumer's. What the runner cannot reach — nested virtualisation for the gVisor
    posture — stays the recipe in [docs/nested-virt.md](./docs/nested-virt.md). That page's M3+ rig
@@ -497,7 +512,7 @@ sharded (below):
 | `live-e2e` | the in-box topology: all the live e2es (`-k e2e`: the example stack up→serve→down, the in-process proxy e2e, AND the box e2e) — run **inside a docker-CLI container** that mirrors the dev box (see below) | runner Docker |
 | `lima-host-e2e` | the HOST topology: `ubuntu-24.04` as a real Linux host running foldyard's default `lima` backend — `machine ensure` boots a QEMU/KVM VM on the runner, then `tests/test_e2e.py` drives the real `foldyard up` / worktree lifecycle through the config-adopt gate, the supervisor and compose, exactly as on an operator's machine. Two shards, `L1`/`L2` | Lima VM (podman in the guest, over the forwarded socket) |
 | `wsl2-host-e2e` | the same host tier on `windows-2025`: an Ubuntu 24.04 distro under WSL2 ([Vampire/setup-wsl](https://github.com/Vampire/setup-wsl)) is the host, and the `lima` backend boots the QEMU/KVM VM INSIDE it — a second level of nesting the hosted Windows runners expose. Same modules, four shards `W1`–`W4`; `test_wall_e2e.py` skips itself there (below) | Lima VM inside the WSL2 distro |
-| `e2e` | the one status for the workflow: `needs:` every job above and fails unless each succeeded (a matrix job's result is its worst shard's) | none |
+| `e2e` | the one status for `foldyard-e2e.yml`: `needs:` the three live jobs above and fails unless each succeeded (a matrix job's result is its worst shard's). `check` gates separately, in `foldyard.yml` | none |
 
 **The weekly randomised property run (`property-explore.yml`).** Every job above loads the `ci`
 hypothesis profile, which replays the same examples every run and so never finds a new
@@ -546,7 +561,7 @@ runners (under-documented, but Lima's own CI boots QEMU VMs on `ubuntu-24.04` on
 recipe `modprobe kvm; chown $USER /dev/kvm` — group membership does not take effect there). A
 10-attempt spike of the real `lima` backend on `ubuntu-24.04` went 10/10 with no retry wrapper,
 with and without the walls, QEMU start → READY in 29–41 s and the whole attempt under 2.5 min;
-the record is in [docs/linux-support.md](./docs/linux-support.md#validated-on-a-linux-host). The
+the record is in [ADR-0027](./docs/adrs/0027-always-a-vm-native-backend-retired.md). The
 job creates the VM once from a throwaway example copy before pytest (the example stack has no bind
 mounts, so every test copy can drive the one VM). It bakes a session base VM first (`fy-ci-base`,
 named by `FY_BASE_VM_NAME`/`FY_BASE_VM_STAMP` job-wide, retried once), so that VM and every one a
@@ -750,12 +765,14 @@ minutes, and the `e2e` job is the single status to check.
   and prints nothing, so every lookup reads "no such VM" (Lima 2.2.0; the host tier's first
   monitor run). `LimaBackend._instances` and `e2e_host.lima_list` use `--format '{{json .}}'`,
   which writes straight out; split its rows on `\n` only (Go leaves U+0085 unescaped).
-- **Port offsets:** `stack._offset` shells to system `cksum` for exact parity with the
-  original shell implementation.
-- **Module-level constants** (`devmode.AXES`/`MODE_BLURB`/`AXIS_DAEMON`/`EMERGENCY`,
-  `machine.MACHINE`) bind at import from `config`/the registry. Tests **monkeypatch the module
-  attrs**; `config.repo_root`/`_toml` are `lru_cache`d → tests `cache_clear()` (see
-  `conftest.fresh_config`). `plugins.registry()` is also cached — tests build a
+- **Port offsets:** `stack._offset` takes `WT_OFFSET`, then a pin, then the offset the host recorded
+  for that worktree. Only its fallback, `_hashed_offset`, shells to system `cksum`, for exact parity
+  with the original shell implementation.
+- **Module-level constants** (`machine.MACHINE`, `devmode.PODMAN_MACHINE`) bind at import from
+  `config`. Tests **monkeypatch the module attrs**. The axis tables aren't constants: `devmode.axes()`,
+  `mode_blurb()`, `axis_daemon()` and `emergency()` read the live registry. `config`'s ambient readers
+  (`_repo_root_ambient`, `_toml_ambient`, `_identity_ambient`) are `lru_cache`d → tests call
+  `config.clear_caches()` (see `conftest.fresh_config`). `plugins.registry()` is also cached — tests build a
   `Registry([...])` directly or `load_plugins(extra=…)` rather than mutate the live one.
   `conftest` pins `FOLDYARD_ENGINE=podman` (autouse) for determinism.
 - **`fy down` ends with "Network … still in use"** — expected (the dev box is on that
