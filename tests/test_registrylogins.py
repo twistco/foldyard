@@ -373,6 +373,44 @@ def test_the_editor_gets_no_docker_config_if_you_set_none(docker_home, monkeypat
     assert DOCKER not in registrylogins.operators_env(_clamped(monkeypatch))
 
 
+# ── DOCKER_AUTH_CONFIG: a login in a variable, which beats any config file ────────────────
+
+BLOB = registrylogins.DOCKER_AUTH
+
+
+def test_the_clamp_takes_the_variable_away_from_the_engine(docker_home, monkeypatch):
+    monkeypatch.setenv(BLOB, '{"auths": {"ghcr.io": {"auth": "ZmFrZTpmYWtl"}}}')
+    assert BLOB not in _clamped(monkeypatch)
+
+
+def test_your_editor_gets_the_variable_back(docker_home, monkeypatch):
+    monkeypatch.setenv(BLOB, '{"auths": {}}')
+    env = _clamped(monkeypatch)
+    registrylogins.clamp(env)  # a child, with it already gone, must not lose it
+    assert registrylogins.operators_env(env)[BLOB] == '{"auths": {}}'
+    assert registrylogins.SAVED_DOCKER_AUTH not in registrylogins.operators_env(env)
+
+
+def test_the_compose_client_never_gets_the_variable_or_where_its_kept(docker_home, monkeypatch):
+    """Naming it in `compose_env` is one line a box can propose, and it's a login outright."""
+    monkeypatch.setattr(config, "compose_env", lambda: [BLOB, registrylogins.SAVED_DOCKER_AUTH])
+    monkeypatch.setenv(BLOB, "{}")
+    monkeypatch.setenv(registrylogins.SAVED_DOCKER_AUTH, "{}")
+    out = stack._host_passthrough()
+    assert BLOB not in out
+    assert registrylogins.SAVED_DOCKER_AUTH not in out
+
+
+def test_a_port_cant_bring_the_variable_back(docker_home, tmp_path, monkeypatch):
+    assert BLOB not in _resolved(monkeypatch, tmp_path, **{BLOB: "123"})
+
+
+def test_in_the_box_the_variable_is_left_alone(monkeypatch):
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    monkeypatch.setenv(BLOB, "{}")
+    assert _clamped(monkeypatch)[BLOB] == "{}"
+
+
 # ── which files are ours ──────────────────────────────────────────────────────────────────
 
 

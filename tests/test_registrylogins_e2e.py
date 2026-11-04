@@ -281,6 +281,26 @@ def test_the_clamped_docker_client_doesnt_fall_back_to_the_platforms_store(api, 
 
 
 @_needs_docker
+def test_a_login_in_the_docker_auth_variable_doesnt_reach_the_clamped_client(api, monkeypatch):
+    """`DOCKER_AUTH_CONFIG` beats any config file, on the docker CLIs that read it. Where one
+    doesn't, there is nothing to show."""
+    d, listener = api
+    login = base64.b64encode(f"fakeuser:{NEEDED}".encode()).decode()
+    blob = json.dumps({"auths": {"registry.invalid": {"auth": login}}})
+    env = {**_host_env(), "HOME": str(d), "DOCKER_AUTH_CONFIG": blob}
+    _docker(d, env, "pull", "registry.invalid/fy/base:1")
+    if NEEDED not in "".join(listener.headers):
+        pytest.skip("this docker CLI doesn't read DOCKER_AUTH_CONFIG")
+    listener.headers.clear()
+    monkeypatch.setenv("HOME", str(d))
+    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
+    registrylogins.clamp(env)
+    _docker(d, env, "pull", "registry.invalid/fy/base:1")
+    _docker(d, env, "build", "-q", ".")
+    assert NEEDED not in "".join(listener.headers), listener.headers
+
+
+@_needs_docker
 def test_docker_compose_still_runs_under_the_clean_config(monkeypatch):
     """The plugin lives in the config dir, so a clean one alone makes it "unknown command". Not a
     plugin installed here: nothing to lose, nothing to show."""

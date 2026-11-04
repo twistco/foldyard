@@ -24,6 +24,7 @@ whatever ``REGISTRY_AUTH_FILE`` says, and a build sends every login there. ``[en
 directory too.
 That directory keeps what lives beside the logins (plugins, or ``docker compose`` is an unknown
 command; contexts; the current context), and there is no opt-in on that engine.
+``DOCKER_AUTH_CONFIG``, a login in a variable, beats any config file, so it's removed as well.
 
 Inside a box nothing is touched: its logins are its own. Stdlib only: this runs on the hot path.
 """
@@ -39,12 +40,15 @@ from . import config
 
 AUTH = "REGISTRY_AUTH_FILE"
 DOCKER = "DOCKER_CONFIG"
+# A login in a variable, on docker CLIs that read it, which beats any config file.
+DOCKER_AUTH = "DOCKER_AUTH_CONFIG"
 # The opt-in: the one auth file you offered this project's compose client (see above).
 OPT_IN = "FY_REGISTRY_AUTH_FILE"
 # Your own REGISTRY_AUTH_FILE, remembered across the clamp only to hand back to your editor
 # (:func:`operators_env`). Not a name `stack._host_passthrough` lets through.
 SAVED = "FY_SAVED_REGISTRY_AUTH_FILE"
 SAVED_DOCKER = "FY_SAVED_DOCKER_CONFIG"
+SAVED_DOCKER_AUTH = "FY_SAVED_DOCKER_AUTH_CONFIG"
 # What the file holds. Anything else in it gets written over: whatever inherits the clamp and runs
 # `podman login` writes there, and every later build would send that login.
 _EMPTY = '{"auths": {}}\n'
@@ -177,6 +181,8 @@ def clamp(environ: MutableMapping[str, str] | None = None) -> None:
     own_docker = env.get(DOCKER)
     if own_docker and not _ours(own_docker):
         env[SAVED_DOCKER] = own_docker
+    if DOCKER_AUTH in env:
+        env[SAVED_DOCKER_AUTH] = env.pop(DOCKER_AUTH)
     env[AUTH] = str(no_logins_file())
     env[DOCKER] = str(no_logins_docker_config(env))
 
@@ -192,17 +198,24 @@ def for_compose(declared: set[str]) -> str:
     return _offered(declared) or str(no_logins_file())
 
 
-def for_engine(declared: Collection[str]) -> dict[str, str]:
-    """What an engine client on your computer reads for logins, for the env foldyard hands it. Set
-    last: `[ports]` and the mode env are project-derived and can name anything."""
-    return {AUTH: for_compose(set(declared)), DOCKER: str(no_logins_docker_config())}
+def apply_to(env: dict[str, str], declared: Collection[str]) -> None:
+    """Put right what an engine client on your computer reads for logins, in the env foldyard hands
+    it. Last, after any merge: `[ports]`, `compose_env` and the mode env can name anything."""
+    env[AUTH] = for_compose(set(declared))
+    env[DOCKER] = str(no_logins_docker_config())
+    env.pop(DOCKER_AUTH, None)
+    env.pop(SAVED_DOCKER_AUTH, None)
 
 
 def operators_env(env: dict[str, str]) -> dict[str, str]:
     """``env`` for something of YOURS foldyard launches (your editor), not a client of foldyard's:
     your own setting back, or none."""
     out = dict(env)
-    for name, remembered in ((AUTH, SAVED), (DOCKER, SAVED_DOCKER)):
+    for name, remembered in (
+        (AUTH, SAVED),
+        (DOCKER, SAVED_DOCKER),
+        (DOCKER_AUTH, SAVED_DOCKER_AUTH),
+    ):
         # From the process too: `env` is usually the compose client's, which never carries it.
         saved = out.pop(remembered, "") or os.environ.get(remembered, "")
         if saved:
