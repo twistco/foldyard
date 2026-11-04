@@ -536,6 +536,13 @@ def test_flow_a_projects_box_image_builds_in_the_guest(flow):
     assert label.returncode == 0 and label.stdout.strip(), label.stderr
 
 
+def test_flow_verify_passes_with_the_client_in_the_vm(flow):
+    """The credibility check, on the VM this flow made: moving the client widens nothing it sees."""
+    repo, env, _ = flow
+    verify = fy(["verify"], repo, timeout=600, env_extra=env)
+    assert verify.rc == 0, verify.out
+
+
 def test_flow_no_compose_client_or_build_ran_on_your_computer(flow):
     """Last, over everything above: what really ran here. The engine is asked plenty (`ps`,
     `inspect`, `exec`), and none of that parses a compose file or packs a context."""
