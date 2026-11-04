@@ -561,8 +561,8 @@ runners (under-documented, but Lima's own CI boots QEMU VMs on `ubuntu-24.04` on
 recipe `modprobe kvm; chown $USER /dev/kvm` — group membership does not take effect there). A
 10-attempt spike of the real `lima` backend on `ubuntu-24.04` went 10/10 with no retry wrapper,
 with and without the walls, QEMU start → READY in 29–41 s and the whole attempt under 2.5 min;
-the record is in [ADR-0027](./docs/adrs/0027-always-a-vm-native-backend-retired.md). The
-job creates the VM once from a throwaway example copy before pytest (the example stack has no bind
+[ADR-0027](./docs/adrs/0027-always-a-vm-native-backend-retired.md) records the outcome, and PR #17
+the measurements (its `docs/linux-support.md`; #34 later removed them from that page). The job creates the VM once from a throwaway example copy before pytest (the example stack has no bind
 mounts, so every test copy can drive the one VM). It bakes a session base VM first (`fy-ci-base`,
 named by `FY_BASE_VM_NAME`/`FY_BASE_VM_STAMP` job-wide, retried once), so that VM and every one a
 module recreates are clones: a template create runs the template's `dnf install podman` over the
@@ -768,8 +768,8 @@ minutes, and the `e2e` job is the single status to check.
 - **Port offsets:** `stack._offset` takes `WT_OFFSET`, then a pin, then the offset the host recorded
   for that worktree. Only its fallback, `_hashed_offset`, shells to system `cksum`, for exact parity
   with the original shell implementation.
-- **Module-level constants** (`machine.MACHINE`, `devmode.PODMAN_MACHINE`) bind at import from
-  `config`. Tests **monkeypatch the module attrs**. The axis tables aren't constants: `devmode.axes()`,
+- **Module-level constants** (`machine.MACHINE`/`BACKEND`, `devmode.PODMAN_MACHINE`/`_BACKEND`) bind
+  at import from `config`, and `config.clear_caches()` doesn't rebind them. Tests **monkeypatch the module attrs**. The axis tables aren't constants: `devmode.axes()`,
   `mode_blurb()`, `axis_daemon()` and `emergency()` read the live registry. `config`'s ambient readers
   (`_repo_root_ambient`, `_toml_ambient`, `_identity_ambient`) are `lru_cache`d → tests call
   `config.clear_caches()` (see `conftest.fresh_config`). `plugins.registry()` is also cached — tests build a
