@@ -65,7 +65,8 @@ foldyard runs your engine's own compose command, and echoes each command line
   `PODMAN_COMPOSE_PROVIDER` you set yourself wins if it names a podman-compose. On your computer any
   other name is refused: docker-compose is a docker client, which would send the VM your registry
   logins ([Private images](#private-images)).
-- **On docker** (a CI runner with no podman, or `[engine] cli = "docker"`): `docker compose`.
+- **On docker** (only in a box or a CI job that sets `IN_DEVBOX=1`; it is refused on your
+  computer): `docker compose`.
 
 If your CI runs `docker compose`, write files that work under both — the
 [differences below](#podman-compose-differences-that-bite) are the ones that bite.

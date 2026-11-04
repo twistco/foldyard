@@ -499,8 +499,8 @@ cli = "podman"
   Default: `podman` if installed, else `docker`. Env: `FOLDYARD_ENGINE`. **`docker` works only in a
   box**, and is refused on your computer.
 
-The docker fallback exists for CI runners, which ship docker and no podman, and whose jobs set
-`IN_DEVBOX=1`. On your computer you need podman: VM lifecycle has no docker equivalent, and a docker
+The docker fallback exists for CI jobs that drive a runner's docker socket and set `IN_DEVBOX=1`. On
+your computer you need podman: VM lifecycle has no docker equivalent, and a docker
 client would send the VM your registry logins ([stack](./stack.md#private-images)). foldyard exports `CONTAINER_HOST`
 pointing at the VM's socket, so plain podman works everywhere, including in the box.
 
