@@ -144,6 +144,14 @@ def test_shellenv_main_path(fake_repo, capsys):
     assert "export APP_PORT=3000" in out and "export SIM_PORT=4500" in out
 
 
+def test_a_compose_provider_arriving_in_the_mode_env_is_refused_too(fake_repo, monkeypatch):
+    # The mode env is merged last and can name anything, so the engine's own check has been and gone.
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    monkeypatch.setattr(stack.devmode, "derive_env", lambda _m: {"PODMAN_COMPOSE_PROVIDER": "x"})
+    with pytest.raises(stack.config.EngineRefused, match="PODMAN_COMPOSE_PROVIDER"):
+        stack.resolve(no_machine=True)
+
+
 def test_shellenv_preserves_explicit_compose_provider(fake_repo, capsys, monkeypatch):
     monkeypatch.setenv("PODMAN_COMPOSE_PROVIDER", "/custom/podman-compose")
     assert stack.shellenv() == 0

@@ -105,21 +105,25 @@ class _LoggingApi:
                 conn, _ = self.sock.accept()
             except OSError:
                 return
-            data = self._headers(conn)
-            for header in data.split("\r\n"):
-                if header.lower().startswith("x-registry"):
-                    value = header.split(":", 1)[1].strip()
-                    self.headers.append(base64.urlsafe_b64decode(value + "==").decode())
-            if "/_ping" in data.split("\r\n")[0] or "/version" in data.split("\r\n")[0]:
-                reply = (
-                    "HTTP/1.1 200 OK\r\nLibpod-API-Version: 6.0.2\r\nAPI-Version: 1.41\r\n"
-                    f"Content-Type: application/json\r\nContent-Length: {len(version)}\r\n"
-                    f"Connection: close\r\n\r\n{version}"
-                )
-            else:
-                reply = "HTTP/1.1 500 Oops\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
-            conn.sendall(reply.encode())
-            conn.close()
+            try:
+                data = self._headers(conn)
+                for header in data.split("\r\n"):
+                    if header.lower().startswith("x-registry"):
+                        value = header.split(":", 1)[1].strip()
+                        self.headers.append(base64.urlsafe_b64decode(value + "==").decode())
+                if "/_ping" in data.split("\r\n")[0] or "/version" in data.split("\r\n")[0]:
+                    reply = (
+                        "HTTP/1.1 200 OK\r\nLibpod-API-Version: 6.0.2\r\nAPI-Version: 1.41\r\n"
+                        f"Content-Type: application/json\r\nContent-Length: {len(version)}\r\n"
+                        f"Connection: close\r\n\r\n{version}"
+                    )
+                else:
+                    reply = "HTTP/1.1 500 Oops\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                conn.sendall(reply.encode())
+            except OSError:
+                pass  # it hung up: what it sent is kept, and the next client still needs an answer
+            finally:
+                conn.close()
 
 
 @pytest.fixture
@@ -158,6 +162,21 @@ def test_an_auth_file_sends_its_logins_to_the_api_service(api, args):
     assert NEEDED in sent, listener.headers
     if args[0] == "build":
         assert UNRELATED in sent
+
+
+def test_the_listener_outlives_a_client_hanging_up(api):
+    """It did not, once: a client gone before the reply ended its thread, and the next one sat in the
+    backlog until its timeout (a real `podman build` on the WSL2 runner)."""
+    d, _ = api
+    for _ in range(7):  # under the listen() backlog: a full one refuses, dead listener or not
+        with socket.socket(socket.AF_UNIX) as gone:
+            gone.connect(str(d / "a.sock"))
+            gone.sendall(b"POST /build HTTP/1.1\r\n\r\n")
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(10)
+        client.connect(str(d / "a.sock"))
+        client.sendall(b"GET /_ping HTTP/1.1\r\n\r\n")
+        assert client.recv(64).startswith(b"HTTP/1.1 200")
 
 
 @pytest.mark.parametrize(
@@ -280,6 +299,11 @@ def test_a_docker_engine_is_refused_and_can_be_undone(tmp_path_factory):
     toml = r / "foldyard.toml"
     toml.write_text(toml.read_text().replace('\n[engine]\ncli = "docker"\n', "\n"))
     _adopt_on_host(r)
+    # The same client by another door: podman runs whatever this names.
+    provider = {"PODMAN_COMPOSE_PROVIDER": "docker-compose"}
+    by_provider = fy(["build"], r, timeout=120, env_extra={**from_config, **provider})
+    assert by_provider.rc != 0 and "PODMAN_COMPOSE_PROVIDER" in by_provider.out, by_provider.out
+    assert "Traceback" not in by_provider.out, by_provider.out
     assert fy(["build"], r, timeout=600, env_extra=from_config).rc == 0
 
 
@@ -300,6 +324,7 @@ def test_a_supervisor_outlives_the_engine_being_refused_under_it(tmp_path_factor
     from_config = {"FOLDYARD_ENGINE": ""}
     fy_ok(["host", "restart"], r, timeout=300, env_extra=from_config)
     log = state_dir() / "host-supervisor.log"
+    before = log.stat().st_size  # it's appended to, across runs and modules
     toml = r / "foldyard.toml"
     original = toml.read_text()
     toml.write_text(original + '\n[engine]\ncli = "docker"\n')
@@ -307,15 +332,14 @@ def test_a_supervisor_outlives_the_engine_being_refused_under_it(tmp_path_factor
         _adopt_on_host(r)
         said = "the engine is refused"
         wait_for(
-            lambda: log.exists() and said in log.read_text(errors="replace"),
+            lambda: said.encode() in log.read_bytes()[before:],
             timeout=30,
             what="the supervisor saying the engine is refused",
         )
         _still_ticking()
         # One started now reads the refused engine outside any binding, on its first tick: the
         # way in a running one is spared (its ambient config is cached), so what proves it stays.
-        restarted = fy(["host", "restart"], r, timeout=120, env_extra=from_config)
-        assert "Traceback" not in restarted.out, restarted.out
+        fy_ok(["host", "restart"], r, timeout=120, env_extra=from_config)
         _still_ticking()
         doctor = fy(["doctor"], r, timeout=120, env_extra=from_config)
         assert "Traceback" not in doctor.out, doctor.out
@@ -323,4 +347,4 @@ def test_a_supervisor_outlives_the_engine_being_refused_under_it(tmp_path_factor
     finally:
         toml.write_text(original)
         _adopt_on_host(r)
-    fy_ok(["host", "restart"], r, timeout=300, env_extra=from_config)
+        fy_ok(["host", "restart"], r, timeout=300, env_extra=from_config)

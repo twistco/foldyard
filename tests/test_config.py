@@ -797,6 +797,30 @@ def test_a_refused_engine_ends_a_verb_and_reads_as_unreachable_to_a_probe(
     assert str(refused.value) == refused.value.code
 
 
+@pytest.mark.parametrize(
+    "provider", ["docker-compose", "/usr/libexec/docker/cli-plugins/docker-compose", "/tmp/other"]
+)
+def test_a_compose_provider_other_than_podman_compose_is_refused_here(
+    fresh_config, tmp_path, monkeypatch, provider
+):
+    # podman runs whatever this names: docker-compose is a docker client, which sends the VM the
+    # logins in ~/.docker/config.json and the keychain, whatever REGISTRY_AUTH_FILE says.
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE="podman")
+    monkeypatch.setenv("PODMAN_COMPOSE_PROVIDER", provider)
+    with pytest.raises(config.EngineRefused, match="PODMAN_COMPOSE_PROVIDER"):
+        config.engine()
+    monkeypatch.setattr(config, "in_box", lambda: True)  # no VM to send them to from a box
+    assert config.engine() == "podman"
+
+
+def test_your_own_podman_compose_is_still_yours(fresh_config, tmp_path, monkeypatch):
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE="podman")
+    monkeypatch.setenv("PODMAN_COMPOSE_PROVIDER", "/custom/podman-compose")
+    assert config.engine() == "podman"
+
+
 def test_engine_override_must_name_a_known_engine(fresh_config, tmp_path, monkeypatch):
     # `[engine].cli` is REPO config and this value is exec'd host-side by every engine verb, so an
     # unconstrained string would let anything that can write the checkout pick a binary the Mac then

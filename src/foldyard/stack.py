@@ -551,6 +551,7 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
         from . import registrylogins
 
         env[registrylogins.AUTH] = registrylogins.for_compose(config.compose_env())
+        config.refuse_compose_provider(env.get("PODMAN_COMPOSE_PROVIDER", ""))
     return Context(
         main=main,
         env=env,
@@ -1066,8 +1067,9 @@ def _provider_signature_filter(ctx: Context) -> str:
 def _podman_compose_active(ctx: Context) -> bool:
     """Whether podman-compose is the ACTIVE compose provider — the podman engine with its
     provider pinned to podman-compose (foldyard's bundled one, unless an explicit
-    ``PODMAN_COMPOSE_PROVIDER`` overrides it). Else docker-compose runs: the docker engine, or
-    that override naming docker-compose on podman. The providers label (and hash) differently."""
+    ``PODMAN_COMPOSE_PROVIDER`` overrides it). Else docker-compose runs: the docker engine, or, in
+    a box, that override naming docker-compose on podman. The providers label (and hash)
+    differently."""
     provider = Path(ctx.env.get("PODMAN_COMPOSE_PROVIDER", "")).name
     return config.engine() == "podman" and "podman-compose" in provider
 

@@ -6,7 +6,8 @@
   sends the VM its registry logins from several places (`config.json`, the platform's credential
   store, `DOCKER_AUTH_CONFIG`) with no one switch to stop that, and `[engine] cli` is one line a box
   can propose. podman has that switch (`foldyard.registrylogins`). It remains the fallback where it
-  always was: in CI's jobs, which carry the box's signature.
+  always was: in CI's jobs, which carry the box's signature. A `PODMAN_COMPOSE_PROVIDER` naming
+  docker-compose is the same client by another door, and is refused there too.
 - **Sources:** HANDOVER.md ("docker vs podman in the dev box", key decision 2),
   PLAN.md §7.1 (engine note), src/foldyard/stack.py engine/context resolution
 

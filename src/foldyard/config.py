@@ -760,8 +760,28 @@ def engine() -> str:
                 f"✗ engine {explicit!r} is not one of {', '.join(ENGINES)} — set [engine].cli "
                 "(or FOLDYARD_ENGINE) to an engine NAME, not a path"
             )
-        return _docker_here() if explicit == "docker" else explicit
-    return "podman" if which("podman") else _docker_here()
+        return _docker_here() if explicit == "docker" else _podman_here()
+    return _podman_here() if which("podman") else _docker_here()
+
+
+def _podman_here() -> str:
+    """podman, with no docker client behind it (:func:`refuse_compose_provider`)."""
+    refuse_compose_provider(os.environ.get("PODMAN_COMPOSE_PROVIDER", ""))
+    return "podman"
+
+
+def refuse_compose_provider(provider: str) -> None:
+    """On your computer the compose provider is podman-compose, foldyard's bundled one or your own.
+    podman runs whatever ``PODMAN_COMPOSE_PROVIDER`` names, and docker-compose is a docker client:
+    refused for the reason :func:`_docker_here` is, and ``REGISTRY_AUTH_FILE`` means nothing to it.
+    Any other name can't be vouched for. Not in a box, where a client has no logins to send."""
+    if provider and "podman-compose" not in Path(provider).name and not in_box():
+        raise EngineRefused(
+            f"✗ PODMAN_COMPOSE_PROVIDER names {Path(provider).name!r}: foldyard runs only "
+            "podman-compose on your computer,\n  because docker-compose would send the VM your "
+            "registry logins, where a box could read them.\n  Unset it to use the one foldyard "
+            "bundles."
+        )
 
 
 def _docker_here() -> str:
