@@ -1373,6 +1373,7 @@ def doctor(deep: bool = False):
     yield from _git_config_check()
     yield from _shadow_volume_check()
     yield from _box_shadow_check()
+    yield from _engine_refused_check()
     yield from _stack_shadow_check()
     yield from _stack_env_override_check()
     yield from _stack_container_env_check()
@@ -1656,6 +1657,15 @@ def active_project() -> str:
     return f"{prefix}-{worktree}" if worktree else prefix
 
 
+def _engine_refused_check():
+    """The one thing the rows asking the engine can't say: that foldyard won't ask it, and why.
+    They read that as an engine they can't reach. No row otherwise: whether it answers is theirs."""
+    try:
+        config.engine()
+    except config.EngineRefused as e:
+        yield ("fail", "engine", " ".join(str(e).split()))
+
+
 def _stack_containers(project: str) -> list[tuple[str, dict]]:
     """``(name, inspect spec)`` for each RUNNING container of ``project`` but the devbox, from one
     ``ps`` + one batched ``inspect``; ``[]`` when the engine can't say. Bounded (5s + 15s), and
@@ -1667,8 +1677,8 @@ def _stack_containers(project: str) -> list[tuple[str, dict]]:
     are invisible here and vice versa — otherwise every worktree would report main's paths. The
     devbox is skipped — it is the box rows' subject, and reporting it twice would just teach
     people to skim the rows."""
-    engine, env = config.engine(), _engine_env()
     try:
+        engine, env = config.engine(), _engine_env()
         out = subprocess.run(
             [
                 engine,
@@ -1696,7 +1706,7 @@ def _stack_containers(project: str) -> list[tuple[str, dict]]:
             env=env,
         )
         specs = json.loads(got.stdout) if got.returncode == 0 else []
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError, config.EngineRefused):
         return []  # engine unreachable / unparsable — doctor's own engine row covers that
     result = []
     for i, spec in enumerate(specs if isinstance(specs, list) else []):

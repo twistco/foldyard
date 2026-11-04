@@ -587,6 +587,96 @@ def test_reconcile_serves_main_daemons_but_writes_no_mirror_when_nothing_is_up(m
     assert written == []  # …but no checkout got a mirror dropped into it
 
 
+def test_a_refused_engine_leaves_the_supervisor_in_charge(monkeypatch):
+    # `[engine] cli = "docker"` is one adopted line a box can propose, and podman can leave PATH.
+    # The tick asks the engine, and the supervisor is all that expires a mode or stops a daemon: if
+    # it ended here, the proxy would carry on injecting credentials with nothing left to stop it.
+    # The real up_worktrees, the real engine(): only the daemons are stand-ins.
+    spec = {"cmd": ["proxy-main"], "env": {}, "requires": [], "port": None, "label": "main"}
+    desired = {"egress-proxy": spec}
+    logged: list[str] = []
+    notified: list[str] = []
+    stopped: list[str] = []
+
+    class FakeChild:
+        def __init__(self, name, spec):
+            self.name = name
+            self.spec = spec
+            self.signature = repr((spec["cmd"], sorted(spec["env"].items())))
+            self.started_at = 0.0
+            self.proc = types.SimpleNamespace(returncode=None)
+
+        def alive(self):
+            return True
+
+        def stop(self):
+            stopped.append(self.name)
+
+    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    monkeypatch.setattr(supervisor, "_stamp_heartbeat", lambda: None)
+    monkeypatch.setattr(supervisor.allowlist, "sweep", lambda: None)
+    monkeypatch.setattr(supervisor.githeal, "sweep", lambda log: None)
+    monkeypatch.setattr(supervisor.devmode, "worktree_config", _fake_cfg)
+    monkeypatch.setattr(supervisor, "expire_user_modes", lambda: {"github": "off"})
+    monkeypatch.setattr(supervisor.devmode, "desired_daemons", lambda mode: desired)
+    monkeypatch.setattr(supervisor.devmode, "env_defaults", lambda mode: {})
+    monkeypatch.setattr(supervisor, "Child", FakeChild)
+    monkeypatch.setattr(supervisor, "log", logged.append)
+    monkeypatch.setattr(supervisor, "_notify", lambda title, body: notified.append(body))
+    monkeypatch.setattr(supervisor, "_engine_refusals_seen", {})
+
+    children: dict = {}
+    supervisor.reconcile_once(children, {})
+    supervisor.reconcile_once(children, {})
+    assert set(children) == {"egress-proxy"}  # still served, and still this supervisor's
+    assert len(notified) == 1 and "podman" in notified[0]  # said, once
+    assert sum("podman" in line for line in logged) == 1
+
+    desired = {}  # what `fy mode … off` and a lapsed TTL come to
+    supervisor.reconcile_once(children, {})
+    assert stopped == ["egress-proxy"] and not children
+
+    logged.clear()
+    monkeypatch.setenv("FOLDYARD_ENGINE", "podman")
+    supervisor.reconcile_once(children, {})
+    assert any("engine" in line for line in logged)  # the all-clear
+    logged.clear()
+    supervisor.reconcile_once(children, {})
+    assert not any("engine" in line for line in logged)
+    assert len(notified) == 1
+
+
+def test_the_daemons_stop_however_the_loop_ends(monkeypatch, tmp_path):
+    # A proxy outliving its supervisor has nothing to expire it or stop it. A refused engine no
+    # longer ends the loop, but nothing promises nothing else ever will.
+    stopped: list[str] = []
+    monkeypatch.setattr(supervisor.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(supervisor.config, "log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(supervisor.devmode, "in_box", lambda: False)
+    monkeypatch.setattr(supervisor, "acquire_singleton", lambda: True)
+    monkeypatch.setattr(supervisor, "tee_stdio_to_logfile", lambda: None)
+    monkeypatch.setattr(supervisor, "load_host_env", lambda: None)
+    monkeypatch.setattr(supervisor, "log", lambda _m: None)
+    monkeypatch.setattr(supervisor.signal, "signal", lambda *a, **k: None)
+    monkeypatch.setattr(supervisor.allowlist, "clear_ephemeral", lambda: None)
+    monkeypatch.setattr(supervisor.configpin, "gate", lambda _verb: "clean")
+    monkeypatch.setattr(supervisor.devmode, "up_worktrees", lambda: [])
+    ready = tmp_path / "ready.json"
+    ready.write_text("{}")
+    monkeypatch.setattr(supervisor.config, "supervisor_ready_file", lambda: ready)
+
+    def tick(children, nagged):
+        children["egress-proxy"] = types.SimpleNamespace(stop=lambda: stopped.append("proxy"))
+        raise _StopTick
+
+    monkeypatch.setattr(supervisor, "reconcile_once", tick)
+    with pytest.raises(_StopTick):
+        supervisor.main()
+    assert stopped == ["proxy"]
+    assert not ready.exists()
+
+
 def test_main_clears_ephemeral_grants_on_start_then_sweeps_each_tick(monkeypatch, tmp_path):
     # The supervisor owns the allowlist lifecycle: at startup it drops 'until restart'/'once' grants
     # (clear_ephemeral — a restart must not preserve them), then expires lapsed 'once' grants every

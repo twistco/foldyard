@@ -766,16 +766,59 @@ def test_in_box_detection(monkeypatch):
 # ── engine selection ──────────────────────────────────────────────────────────────────
 
 
-def test_engine_explicit_env_wins(fresh_config):
+def test_engine_explicit_env_wins(fresh_config, monkeypatch):
     fresh_config(FOLDYARD_ENGINE="docker")
+    monkeypatch.setattr(config, "in_box", lambda: True)  # refused off-box: test_registrylogins
     assert config.engine() == "docker"
     assert config.engine_compose() == ["docker", "compose"]
 
 
-def test_engine_from_toml(fresh_config, tmp_path):
+def test_engine_from_toml(fresh_config, tmp_path, monkeypatch):
     (tmp_path / "foldyard.toml").write_text('[engine]\ncli = "docker"\n')
     fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE=None)
+    monkeypatch.setattr(config, "in_box", lambda: True)
     assert config.engine() == "docker"
+
+
+@pytest.mark.parametrize("named", ["docker", "/tmp/evil", None])
+def test_a_refused_engine_ends_a_verb_and_reads_as_unreachable_to_a_probe(
+    fresh_config, tmp_path, monkeypatch, named
+):
+    # Both bases are load-bearing. SystemExit: a verb ends on the message, with no traceback.
+    # Exception: every probe's `except Exception` takes it for an engine it can't reach. Only one
+    # of them, and a refused engine either tracebacks every verb or ends a running supervisor,
+    # which leaves its daemons running with nothing to expire them.
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE=named)  # None: no podman on this PATH
+    with pytest.raises(config.EngineRefused) as refused:
+        config.engine()
+    assert isinstance(refused.value, SystemExit) and isinstance(refused.value, Exception)
+    assert isinstance(refused.value.code, str) and refused.value.code.startswith("✗")
+    assert str(refused.value) == refused.value.code
+
+
+@pytest.mark.parametrize(
+    "provider", ["docker-compose", "/usr/libexec/docker/cli-plugins/docker-compose", "/tmp/other"]
+)
+def test_a_compose_provider_other_than_podman_compose_is_refused_here(
+    fresh_config, tmp_path, monkeypatch, provider
+):
+    # podman runs whatever this names: docker-compose is a docker client, which sends the VM the
+    # logins in ~/.docker/config.json and the keychain, whatever REGISTRY_AUTH_FILE says.
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE="podman")
+    monkeypatch.setenv("PODMAN_COMPOSE_PROVIDER", provider)
+    with pytest.raises(config.EngineRefused, match="PODMAN_COMPOSE_PROVIDER"):
+        config.engine()
+    monkeypatch.setattr(config, "in_box", lambda: True)  # no VM to send them to from a box
+    assert config.engine() == "podman"
+
+
+def test_your_own_podman_compose_is_still_yours(fresh_config, tmp_path, monkeypatch):
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE="podman")
+    monkeypatch.setenv("PODMAN_COMPOSE_PROVIDER", "/custom/podman-compose")
+    assert config.engine() == "podman"
 
 
 def test_engine_override_must_name_a_known_engine(fresh_config, tmp_path, monkeypatch):
@@ -789,6 +832,7 @@ def test_engine_override_must_name_a_known_engine(fresh_config, tmp_path, monkey
         config.engine()
     (tmp_path / "foldyard.toml").write_text('[engine]\ncli = "docker"\n')
     fresh_config(FOLDYARD_REPO=tmp_path)
+    monkeypatch.setattr(config, "in_box", lambda: True)
     assert config.engine() == "docker"
 
 
@@ -796,7 +840,8 @@ def test_engine_autodetect_prefers_podman_then_docker(fresh_config, tmp_path, mo
     import shutil
 
     fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE=None)  # no [engine] table either
-    monkeypatch.delenv("DOCKER_HOST", raising=False)  # not the box → pure which() autodetect
+    monkeypatch.delenv("DOCKER_HOST", raising=False)  # pure which() autodetect
+    monkeypatch.setattr(config, "in_box", lambda: True)  # where docker may be the answer
     monkeypatch.setattr(shutil, "which", lambda cmd: "/x/podman" if cmd == "podman" else None)
     assert config.engine() == "podman"  # podman is the dependency — prefer it
     monkeypatch.setattr(shutil, "which", lambda cmd: None)

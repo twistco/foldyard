@@ -58,6 +58,15 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   creates or builds (`stack._escapes`), host-only. Interim — a key list, and racy against a box
   that swaps a checked file for a symlink; the structural fix runs compose in the VM. Its sibling
   clamp: `stack._host_passthrough`, the compose client's allowlisted env.
+- `registrylogins.py` — a `podman` client on the host sends its logins to the API service in the VM
+  (a build sends all of them, and the service writes them to a temp file a box can read), so
+  `cli.main` pins `REGISTRY_AUTH_FILE` to an empty file before anything runs, and children inherit it.
+  The only way out takes both an export of `FY_REGISTRY_AUTH_FILE` at a file made for it and the
+  adopted `[project] compose_env` naming that (`stack._host_passthrough`, the compose client only):
+  never `REGISTRY_AUTH_FILE` itself, which people export at their whole auth.json, and never the
+  default paths. `stack.resolve` applies it again after its merges: `[ports]` can name anything. What
+  foldyard launches for you (the editor) gets `operators_env`. The docker CLI has no such switch
+  (`config.json`, the keychain, `DOCKER_AUTH_CONFIG`), so `config.engine` refuses it off-box.
 - `confighash.py` — the stack scope's verdict: the compose provider's own per-service config
   hash vs a fresh render (what `up` compares). podman: a `python -m foldyard.confighash`
   subprocess drives the bundled podman-compose's parser (its internals — degrades to
@@ -357,6 +366,9 @@ foldyard's surface splits by *where it can be validated*:
    - `test_mount_visibility_e2e.py` — the git heal's premise on THIS host's mount (virtiofs on
      macOS, 9p on the Linux/WSL2 runners): a file the VM renames into place reaches the host
      whole, never briefly missing, never older than one already seen (ADR-0021, 2026-09-27).
+   - `test_registrylogins_e2e.py` — a real client's headers on a logging socket (an auth file sends
+     every login; clamped, none, default paths included), then a real `fy build` watched by a
+     rootless container bind-mounting the guest's `/var/tmp`, as a box could, with a positive control.
    - `test_mounts_e2e.py` — ADR-0033's to-box against ROOT in the guest: a test-only boot script
      (own marker, always exits 0) remounts it rw and tries every kind of write; all refused and the
      host's seeded file unchanged. The red-first control records it `writable: true` (started with

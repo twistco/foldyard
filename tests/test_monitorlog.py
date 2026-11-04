@@ -216,6 +216,15 @@ def test_an_unreachable_engine_is_asked_again_never_recorded_as_gone(pulled, mon
     assert '"fyex-devbox"' in store.read_text()
 
 
+def test_engine_describe_cant_ask_a_refused_engine(monkeypatch):
+    # "Couldn't be asked", the answer the pull already handles: raised, it would stop the pull for
+    # as long as the engine is refused, and one adopted line a box can propose would stop the
+    # evidence collected about it.
+    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    assert monitorlog._engine_describe([BOX]) is None
+
+
 def test_engine_describe_treats_an_empty_listing_as_the_wrong_engine(monkeypatch):
     from foldyard import devmode
 

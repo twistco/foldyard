@@ -39,7 +39,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import config, configpin, devmode, stack
+from . import config, configpin, devmode, registrylogins, stack
 
 # The Dev Containers extension id whose globalStorage holds attached-container configs.
 _REMOTE_CONTAINERS = "ms-vscode-remote.remote-containers"
@@ -993,7 +993,7 @@ def code() -> int:
     # user-data-dir (started by an older foldyard) takes a later launch's env is unverified.
     subprocess.run(
         [code_cli, "--user-data-dir", str(udd), "--folder-uri", uri],
-        env=_launch_env(env, agent, gitconfig, udd),
+        env=registrylogins.operators_env(_launch_env(env, agent, gitconfig, udd)),
         cwd=str(udd),
     )
     print("✓ launched. If it didn't attach, the error's Show Log button has Dev Containers' own")

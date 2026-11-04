@@ -116,6 +116,8 @@ min_foldyard_version = "0.2.0"
   what it needs to run (`PATH`, `HOME`, locale, `COMPOSE_*`/`PODMAN_*` settings) — never
   `host.env`. Each name is a widening, listed by `fy config widenings`: the compose files are
   editable from the box, and a `${NAME}` in one hands the value to a container.
+  `FY_REGISTRY_AUTH_FILE` is the one way to give the client a registry login
+  ([stack](./stack.md#private-images)).
 - **`ensure_dirs`** — bind-mount source dirs (checkout-relative) your compose file expects;
   created empty on `up`. Default: `[]`.
 - **`external_network`** — `true` lets foldyard own the `{prefix}_default` network: created on
@@ -494,11 +496,17 @@ cli = "podman"
 
 - **`cli`** — the container-engine CLI: `"podman"` or `"docker"`, as a name, never a path (the
   value is run on your computer — [ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)).
-  Default: `podman` if installed, else `docker`. Env: `FOLDYARD_ENGINE`.
+  Default: `podman` if installed, else `docker`. Env: `FOLDYARD_ENGINE`. **`docker` works only in a
+  box**, and is refused on your computer.
 
-The docker fallback exists for CI runners, which ship docker and no podman. On a dev machine you
-need podman regardless: VM lifecycle has no docker equivalent. foldyard exports `CONTAINER_HOST`
+The docker fallback exists for CI jobs that drive a runner's docker socket and set `IN_DEVBOX=1`. On
+your computer you need podman: VM lifecycle has no docker equivalent, and a docker
+client would send the VM your registry logins ([stack](./stack.md#private-images)). foldyard exports `CONTAINER_HOST`
 pointing at the VM's socket, so plain podman works everywhere, including in the box.
+
+A refusal stops the command you ran. A supervisor already running stays, so modes still expire and
+`fy mode … off` still stops the daemons, and it treats every box as down: a worktree's daemons stop
+until the refusal is gone. It logs and notifies once, and `fy doctor` has an `engine` row.
 
 ## `[ports]`
 

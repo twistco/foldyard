@@ -639,7 +639,10 @@ def _build_img(engine: str, main: Path, env: dict) -> int:
     context = img.get("context") or str(main)
     print(f"▶ building dev box image {img['tag']} (from {img['dockerfile']})…")
     cmd, tail = boximage.build_parts(engine, img, _box_image_fingerprint(main), context)
-    return _gated_build(cmd, tail, env, context, "box image build")
+    rc = _gated_build(cmd, tail, env, context, "box image build")
+    if rc != 0:
+        stack._say_registry_logins()
+    return rc
 
 
 # `[box].packages` — system packages baked into a layer ON TOP of the box image, so a recreated box

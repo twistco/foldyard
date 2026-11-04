@@ -499,14 +499,19 @@ def _host_passthrough() -> dict[str, str]:
     """The slice of ``os.environ`` a compose/engine subprocess starts from: the fixed passthrough
     minus anything host.env declares, plus the names the adopted ``[project].compose_env`` opts
     into (those pass even from host.env — the operator named them)."""
+    from . import registrylogins
+
     declared = set(config.compose_env())
     secret = _host_env_keys()
-    return {
+    out = {
         k: v
         for k, v in os.environ.items()
         if k in declared
         or ((k in _PASSTHROUGH or k.startswith(_PASSTHROUGH_PREFIXES)) and k not in secret)
     }
+    if not config.in_box():  # the client's auth file: see registrylogins
+        out[registrylogins.AUTH] = registrylogins.for_compose(declared)
+    return out
 
 
 # ── engine verbs (compose passthroughs) ───────────────────────────────────────────────
@@ -542,6 +547,11 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
     for overlay in _compose_overlays(mode, base=checkout):
         compose += ["-f", overlay]
     env = {**_host_passthrough(), **plain, **exported, **ports, **mode_env}
+    if not config.in_box():  # again, last: `[ports]` and the mode env can name anything
+        from . import registrylogins
+
+        env[registrylogins.AUTH] = registrylogins.for_compose(config.compose_env())
+        config.refuse_compose_provider(env.get("PODMAN_COMPOSE_PROVIDER", ""))
     return Context(
         main=main,
         env=env,
@@ -861,6 +871,7 @@ def _podman_build(
             for line in log_path.read_text().splitlines()[-25:]:
                 _err("  " + line)
             _err(f"  full log: cat {log_path}")
+            _say_registry_logins()
             return failures[0][1]
     if superseded is not None:
         after = {image: _image_id(engine, image, ctx.env) for image in images}
@@ -868,6 +879,13 @@ def _podman_build(
             {old for image, old in before.items() if old and old != after.get(image)}
         )
     return 0
+
+
+def _say_registry_logins() -> None:
+    from . import registrylogins
+
+    for line in registrylogins.failure_hint():
+        _err(line)
 
 
 def _image_id(engine: str, image: str, env: dict[str, str]) -> str | None:
@@ -1003,6 +1021,8 @@ def up() -> int:
         # Build has already selected the engine-appropriate implementation; compose only starts
         # the resulting images, never re-enters a provider build path.
         rc = _compose(ctx, ["up", "-d", "--no-build"], extra_profiles=extra, rendered=rendered)
+        if rc != 0:  # after a failed build, _podman_build has said it
+            _say_registry_logins()
     if rc != 0:
         return rc
     # Containers are on the new images now; the ones the build replaced can go.
@@ -1047,8 +1067,9 @@ def _provider_signature_filter(ctx: Context) -> str:
 def _podman_compose_active(ctx: Context) -> bool:
     """Whether podman-compose is the ACTIVE compose provider — the podman engine with its
     provider pinned to podman-compose (foldyard's bundled one, unless an explicit
-    ``PODMAN_COMPOSE_PROVIDER`` overrides it). Else docker-compose runs: the docker engine, or
-    that override naming docker-compose on podman. The providers label (and hash) differently."""
+    ``PODMAN_COMPOSE_PROVIDER`` overrides it). Else docker-compose runs: the docker engine, or, in
+    a box, that override naming docker-compose on podman. The providers label (and hash)
+    differently."""
     provider = Path(ctx.env.get("PODMAN_COMPOSE_PROVIDER", "")).name
     return config.engine() == "podman" and "podman-compose" in provider
 
@@ -2027,11 +2048,11 @@ def disk_headroom(env: dict[str, str] | None = None, timeout: float = 15) -> Dis
 
     ``timeout`` is generous for the pre-build reclaim (the engine is often busy right then) and
     cut to the module's probe budget by doctor, whose rows a TUI re-runs on a 5s timer."""
-    if config.engine() != "podman":
-        return None
     try:
+        if config.engine() != "podman":
+            return None
         proc = _run(["podman", "info", "--format", "json"], env=env, timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, config.EngineRefused):
         return None
     if proc.returncode != 0:
         return None
