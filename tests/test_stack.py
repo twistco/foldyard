@@ -617,24 +617,6 @@ def test_down_sweeps_foreign_provider_containers(fake_repo, foreign_stack):
     assert any("compose" in c and "down" in c for c in foreign_stack)
 
 
-def test_sweep_signature_on_docker_engine_is_the_config_hash(fake_repo, foreign_stack, monkeypatch):
-    # docker-compose is the only provider writing com.docker.compose.config-hash — on the docker
-    # engine (box/CI) that existence-filter is the native signature, so podman-compose-created
-    # containers are the foreign ones there.
-    monkeypatch.setattr(config, "engine", lambda: "docker")  # a box: refused off-box
-    config.clear_caches()
-    assert stack.up() == 0
-    assert any(
-        len(c) >= 2
-        and c[0] == "docker"
-        and c[1] == "ps"
-        and "label=com.docker.compose.config-hash" in c
-        for c in foreign_stack
-    )
-    rm = next(c for c in foreign_stack if c[:3] == ["docker", "rm", "-f"])
-    assert rm[3:] == ["aaa"]
-
-
 @pytest.fixture
 def running_services(monkeypatch):
     """What the engine reports running, for the heal's filter — mutate the set in the test."""
@@ -1066,23 +1048,6 @@ def test_stack_builds_run_under_the_build_gate(fake_repo, monkeypatch, paths_ung
     assert gated == ["stack build"]
 
 
-def test_up_docker_engine_builds_then_starts_without_rebuilding(
-    fake_repo, capture_run, monkeypatch
-):
-    # Docker (e.g. CI) delegates the build to Compose/BuildKit, then starts the image with
-    # --no-build so up follows the same shared engine-selection path as explicit builds.
-    monkeypatch.setattr(config, "engine", lambda: "docker")  # a box: refused off-box
-    config.clear_caches()
-    assert stack.up() == 0
-    calls = capture_run
-    assert not any(len(c) >= 2 and c[1] == "build" for c in calls)  # no native podman build
-    assert not any("config" in c and "--format" in c for c in calls)  # no build-graph resolution
-    compose_build = next(c for c in _composes(calls) if "build" in c)
-    assert compose_build[-1] == "build"
-    up = next(c for c in _composes(calls) if "up" in c)
-    assert up[-3:] == ["up", "-d", "--no-build"]
-
-
 def test_build_podman_uses_native_builder_for_requested_profile_service(
     fake_repo, monkeypatch, paths_unguarded
 ):
@@ -1126,15 +1091,6 @@ def test_build_podman_uses_native_builder_for_requested_profile_service(
     ]
     config_call = next(c for c in _composes(calls) if "config" in c)
     assert config_call[-3:] == ["--profile", "e2e", "config"]
-
-
-def test_build_docker_delegates_to_compose(fake_repo, capture_run, monkeypatch):
-    monkeypatch.setattr(config, "engine", lambda: "docker")  # a box: refused off-box
-    config.clear_caches()
-
-    assert stack.build(["e2e-app"], extra_profiles=["e2e"]) == 0
-
-    assert _composes(capture_run)[-1][-4:] == ["--profile", "e2e", "build", "e2e-app"]
 
 
 def test_build_rejects_unknown_podman_service(fake_repo, monkeypatch, capsys):
@@ -2370,7 +2326,7 @@ def test_compose_ps_crashed_is_a_non_zero_exit_that_no_stop_signal_explains():
     assert stack._compose_ps_crashed("Error: something odd\n") == set()
 
 
-def test_crashed_services_lists_stopped_containers_on_either_provider(fake_repo, monkeypatch):
+def test_crashed_services_lists_stopped_containers(fake_repo, monkeypatch):
     # docker compose's `ps` shows only running containers without `-a`; the bundled
     # podman-compose's IS `podman ps -a` already and its parser refuses `-a`.
     import types
@@ -2384,10 +2340,6 @@ def test_crashed_services_lists_stopped_containers_on_either_provider(fake_repo,
 
     monkeypatch.setattr(stack, "_run", fake_run)
     ctx = stack.resolve(no_machine=True)
-    monkeypatch.setattr(stack, "_podman_compose_active", lambda ctx: False)
-    assert stack._crashed_services(ctx) == {"app"}
-    assert calls[-1][-4:] == ["ps", "-a", "--format", "json"]
-    monkeypatch.setattr(stack, "_podman_compose_active", lambda ctx: True)
     assert stack._crashed_services(ctx) == {"app"}
     assert calls[-1][-3:] == ["ps", "--format", "json"]
 
@@ -2420,7 +2372,7 @@ def _fake_ctx(fake_repo, env: dict[str, str]) -> stack.Context:
     return stack.Context(
         main=fake_repo,
         env=env,
-        compose=["docker", "compose"],
+        compose=["podman", "compose"],
         app="app",
         project="tangible-podman",
         worktree="",
@@ -2719,16 +2671,6 @@ def test_in_the_box_the_guard_stands_down(fake_repo, monkeypatch):
     assert stack._escapes(stack.resolve()) == []
 
 
-def test_on_docker_the_compose_build_and_up_are_refused(fake_repo, capture_run, monkeypatch):
-    # docker (the CI fallback) builds through `compose build`, not `_podman_build` — so the
-    # compose passthrough itself must ask the guard.
-    _plant(fake_repo)
-    monkeypatch.setattr(config, "engine", lambda: "docker")  # a box: refused off-box
-    config.clear_caches()
-    assert stack.up() != 0
-    assert not [v for v in _compose_verbs(capture_run) if v in ("build", "--no-build", "-d")]
-
-
 # ── stranded dependents (podman-compose 1.6.0's up/down disagreement) ──────────────────────
 # `up`'s internal `down` removes EVERY dependent of a service it recreates, but `up` only
 # re-creates the dependents that were RUNNING — a stopped one is removed and never re-created,
@@ -2817,7 +2759,6 @@ def _stranded_stack(monkeypatch, desired: dict | None, drop: tuple[str, ...] = (
         "_render_config",
         lambda *a, **k: {"services": {"app": {}, "sim": {"depends_on": {"app": {}}}}},
     )
-    monkeypatch.setattr(stack, "_podman_compose_active", lambda ctx: True)
     return calls
 
 
@@ -2926,15 +2867,6 @@ def sent_composes(monkeypatch) -> list[list[str]]:
     return sent
 
 
-def _drive_build_on_the_docker_engine(monkeypatch) -> None:
-    # Only the docker engine builds through compose (podman builds with buildah, see
-    # _podman_build), but foldyard sends one argv per verb whatever the provider, so the build's
-    # is held to the same contract.
-    monkeypatch.setattr(config, "engine", lambda: "docker")  # a box: refused off-box
-    config.clear_caches()
-    stack.build(["app"])
-
-
 def _drive_reconcile_of_an_up_stack(monkeypatch) -> None:
     monkeypatch.setattr(config, "in_box", lambda: False)
     monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): True)
@@ -3002,7 +2934,6 @@ _ARGV_CONTRACT: dict[str, _Sends] = {
         [],
         [("down", {"remove_orphans": True, "volumes": True, "rmi": None})],
     ),
-    "build": _Sends(_drive_build_on_the_docker_engine, ["app"], [("build", {"services": ["app"]})]),
     "reconcile (stack up)": _Sends(
         _drive_reconcile_of_an_up_stack,
         [],

@@ -60,21 +60,42 @@ create before `up`), `external_network` (below) and `compose_env` (below).
 foldyard runs your engine's own compose command, and echoes each command line
 (`+ podman compose -f …`) so you can copy it.
 
-- **On podman (every dev machine):** `podman compose`, with its provider pinned to the
-  **podman-compose** bundled in foldyard's install (version 1.6 or later). A
-  `PODMAN_COMPOSE_PROVIDER` you set yourself wins if it names a podman-compose. On your computer any
-  other name is refused: docker-compose is a docker client, which would send the VM your registry
-  logins ([Private images](#private-images)).
-- **On docker** (only in a box or a CI job that sets `IN_DEVBOX=1`; it is refused on your
-  computer): `docker compose`.
+`podman compose`, with its provider pinned to the **podman-compose** bundled in foldyard's install
+(version 1.6 or later). A `PODMAN_COMPOSE_PROVIDER` you set yourself wins if it names a
+podman-compose. Any other name is refused: docker-compose is a docker client, which would send the VM
+your registry logins ([Private images](#private-images)).
 
-If your CI runs `docker compose`, write files that work under both — the
-[differences below](#podman-compose-differences-that-bite) are the ones that bite.
-
-On podman, foldyard builds your images itself with `podman build`, then starts the stack with
+foldyard builds your images itself with `podman build`, then starts the stack with
 `up --no-build`. Builds go through the proxy and the allowlist like everything else
 ([networking.md](./networking.md#image-builds-trusted-still-behind-the-allowlist)).
 `fy build [svc]` builds without starting.
+
+### In CI
+
+Run the same engine there. GitHub's `ubuntu-26.04` runners ship a rootless podman 5.7, with no VM to
+create, so a job drives it directly and carries the box's signature, `IN_DEVBOX=1`, which stands the
+launch gates down: there's no VM to manage and nothing to adopt, and the checkout's own
+`foldyard.toml` is what runs.
+
+```yaml
+runs-on: ubuntu-26.04
+env:
+  IN_DEVBOX: "1"
+steps:
+  - uses: actions/checkout@v6
+  - name: Rootless podman's API service
+    run: |
+      # Ubuntu's profile for pasta refuses podman's signal when a network's last container goes.
+      sudo apparmor_parser -R /etc/apparmor.d/usr.bin.pasta
+      systemctl --user start podman.socket
+      sock="unix://$XDG_RUNTIME_DIR/podman/podman.sock"
+      echo "CONTAINER_HOST=$sock" >> "$GITHUB_ENV"
+      echo "DOCKER_HOST=$sock" >> "$GITHUB_ENV"
+  - run: uv tool install foldyard
+  - run: fy up
+```
+
+Pin the install to the version your `min_foldyard_version` asks for, so CI moves when you move it.
 
 ## Variables your compose files can use
 

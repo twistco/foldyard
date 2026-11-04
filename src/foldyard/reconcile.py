@@ -200,15 +200,13 @@ class StackScope(Scope):
 
     def _desired_hashes(self) -> tuple[dict[str, str] | None, str, str]:
         """``(hashes, why, label)``: the fresh render's hashes (spanning the running profiles) or
-        None with why, and the label the ACTIVE provider records its hash under — decided
-        together, so a docker-compose override on podman can't pair one's hash with the
-        other's label."""
+        None with why, and the label podman-compose records its hash under."""
         from . import confighash, stack
 
         try:
             ctx = stack.resolve(no_machine=True)
             hashes, why = confighash.desired(ctx, stack._running_extra_profiles(ctx))
-            return hashes, why, confighash.label(ctx)
+            return hashes, why, confighash.LABEL
         except (Exception, SystemExit) as e:  # resolve aborts a missing worktree with SystemExit
             return None, f"{type(e).__name__}: {e}", ""
 

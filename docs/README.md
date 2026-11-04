@@ -35,8 +35,8 @@ For using foldyard. These pages also ship with the install — `fy docs` prints 
   and its refusals, recovering a wrong-looking `git status`, the shared stash, the executable
   bit, and why pushing happens on your computer.
 - [stack.md](./stack.md) — bringing your compose stack in: the variables compose can use,
-  worktree stacks and shared volumes, which paths compose may read, and podman-compose's
-  differences from docker compose.
+  worktree stacks and shared volumes, which paths compose may read, running it in CI, and
+  podman-compose's differences from docker compose.
 - [compose-overlays.md](./compose-overlays.md) — `[[overlay]]` in depth: extra compose files
   that apply while a switch is at a given level.
 - [testing-modes.md](./testing-modes.md) — a zero-secret test rig (`fakecred` and a skewable

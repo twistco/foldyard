@@ -19,7 +19,7 @@ general export is never consent, and neither step alone gives anything. What's i
 the VM, so a box can read it during a build: make it hold one narrow login.
 
 This is podman's alone. The docker CLI has no one switch (``config.json``, the platform's credential
-store, ``DOCKER_AUTH_CONFIG``), so ``config.engine`` refuses it on your computer instead.
+store, ``DOCKER_AUTH_CONFIG``), so ``config.engine`` refuses it instead.
 
 Inside a box nothing is touched: its logins are its own. Stdlib only: this runs on the hot path.
 """

@@ -1,7 +1,7 @@
 name: foldyard · live e2e
 
 # foldyard's live e2es. Three advisory tiers run here:
-#   - `live-e2e`: the docker-in-container topology for proxy/box e2es that need a sibling box to
+#   - `live-e2e`: the podman-client-in-a-container topology for proxy/box e2es that need a sibling box to
 #     reach the test process by container IP (the IN-BOX topology, mirrored).
 #   - `lima-host-e2e`: a real Linux HOST — foldyard's default `lima` backend booting a QEMU/KVM
 #     VM on the runner (`/dev/kvm` is present on GitHub's x86 Linux runners; Lima's own CI boots
@@ -65,13 +65,13 @@ concurrency:
 
 jobs:
   live-e2e:
-    name: live e2e (example stack + proxy + box, on Docker)
+    name: live e2e (example stack + proxy + box, on podman)
     # Opt-in (mirrors platform-e2e): main, a manual dispatch, or a `[run-e2e]` commit message.
     if: >-
       github.ref == 'refs/heads/main'
       || contains(github.event.head_commit.message, '[run-e2e]')
       || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     steps:
       # Repo-only read: don't leave the GitHub token in .git/config. This job bind-mounts the
@@ -81,20 +81,30 @@ jobs:
         with:
           persist-credentials: false
 
-      # Warm the host Docker cache, in PARALLEL, so neither the `docker run` below (the uv image)
-      # nor the in-test pulls (the api base, the box image, postgres, alpine) wait on a serial pull.
-      # python:3.12-slim is the example api's FROM: without it warm, `foldyard up`'s buildkit does a
-      # live `load metadata for python:3.12-slim` against Docker Hub, which intermittently 502s and
-      # fails the build hard (no buildkit retry). Pre-pulling it (with retry) lets the in-test
-      # `docker compose build` resolve the base from the local cache instead of the registry.
-      # The box e2es' throwaway base is pinned in tests/e2e_box.py — keep it and the line below
-      # in step (a miss costs a serial pull mid-test, not a failure).
+      # The rootless podman the runner ships (5.7 on 26.04, close to the VMs' guests). Ubuntu's
+      # AppArmor profile for pasta refuses podman's signal when a network's last container goes
+      # ("rootless netns: kill network process: permission denied"), so that one profile is
+      # unloaded. Fedora guests have no such profile; `fy docs stack` gives consumers this recipe.
+      - name: Rootless podman's API service
+        run: |
+          sudo apparmor_parser -R /etc/apparmor.d/usr.bin.pasta
+          systemctl --user start podman.socket
+          sock="$XDG_RUNTIME_DIR/podman/podman.sock"
+          for _ in $(seq 1 50); do [ -S "$sock" ] && break; sleep 0.2; done
+          CONTAINER_HOST="unix://$sock" podman --remote info --format 'podman {{.Version.Version}}, rootless {{.Host.Security.Rootless}}'
+          echo "PODMAN_SOCK=$sock" >> "$GITHUB_ENV"
+
+      # Warm the store, in PARALLEL, so neither the `podman run` below (the uv image) nor the
+      # in-test pulls (the api base, the box image, postgres, alpine) wait on a serial pull: a pull
+      # from Docker Hub intermittently 502s. The box e2es' throwaway base is pinned in
+      # tests/e2e_box.py — keep it and the line below in step (a miss costs a serial pull
+      # mid-test, not a failure).
       - name: Pre-pull e2e images (parallel)
         run: |
-          pull() { for i in 1 2 3 4 5; do docker pull "$1" && return 0; sleep $((i * 5)); done; return 1; }
+          pull() { for i in 1 2 3 4 5; do podman pull -q "$1" && return 0; sleep $((i * 5)); done; return 1; }
           pids=()
           for img in \
-            ghcr.io/astral-sh/uv:python3.12-bookworm \
+            ghcr.io/astral-sh/uv:python3.12-trixie \
             docker.io/library/buildpack-deps:trixie-curl \
             docker.io/library/python:3.12-slim \
             docker.io/library/postgres:16-alpine \
@@ -112,36 +122,32 @@ jobs:
           exit "$rc"
 
       # The proxy/box live e2es need the test process to run INSIDE a container so a sibling box can
-      # reach the in-process proxy/emulator by container IP. Use docker CLI only (no podman), mount
-      # the host socket, and keep the repo at the same path so daemon-side bind mounts resolve.
+      # reach the in-process proxy/emulator by container IP (so on a real network: rootless podman's
+      # default is pasta, which gives a container no address a sibling can reach). Mount the
+      # rootless socket where a box has it, and keep the repo at the same path so bind mounts the
+      # service resolves still exist. Debian's podman is a client like the packaged box's.
       # IN_DEVBOX=1 is the box signature `config.in_box()` keys on — a preset DOCKER_HOST alone is
       # NOT one (Linux/WSL2 hosts export a socket too). It is what stands the launch gates down
       # here exactly as in the dev box: preflight's fail-closed default-backend block, the
       # config-adopt gate and `machine.ensure` all skip in-box, because there is no VM to manage
       # and nothing host-side to adopt.
-      - name: live e2e inside a docker-CLI container
+      - name: live e2e inside a podman-client container
         run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
+          podman run --rm --network podman \
+            -v "$PODMAN_SOCK:/var/run/docker.sock" \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -w "$GITHUB_WORKSPACE" \
             -e FOLDYARD_E2E=1 \
             -e IN_DEVBOX=1 \
+            -e CONTAINER_HOST=unix:///var/run/docker.sock \
             -e DOCKER_HOST=unix:///var/run/docker.sock \
-            ghcr.io/astral-sh/uv:python3.12-bookworm \
+            ghcr.io/astral-sh/uv:python3.12-trixie \
             bash -lc '
               set -euo pipefail
               apt-get update -qq
-              apt-get install -y -qq --no-install-recommends docker.io curl ca-certificates >/dev/null
-              # docker compose v2 plugin (the example-stack e2e shells `docker compose`); the static
-              # release binary, dropped into both plugin dirs the docker.io CLI searches.
-              for d in /usr/local/lib/docker/cli-plugins /usr/libexec/docker/cli-plugins; do
-                mkdir -p "$d"
-                curl -fsSL https://github.com/docker/compose/releases/download/v2.30.3/docker-compose-linux-x86_64 \
-                  -o "$d/docker-compose"
-                chmod +x "$d/docker-compose"
-              done
-              docker compose version
+              apt-get install -y -qq --no-install-recommends podman curl ca-certificates git >/dev/null
+              git config --global --add safe.directory "$PWD"
+              podman --version
               uv run --group e2e pytest tests -k e2e -v
             '
 
@@ -152,7 +158,7 @@ jobs:
       github.ref == 'refs/heads/main'
       || contains(github.event.head_commit.message, '[run-e2e]')
       || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Two shards, balanced by measured module times (unsharded, the job took 16–18 min, ~14 of
     # them pytest; sharded, 7–11 min each). Each is the union of two WSL2 shards below (W1+W3,
     # W2+W4), so a module has the same neighbours on both hosts. L1 ends with the monitor, whose
@@ -444,17 +450,17 @@ jobs:
           Get-Content "$env:USERPROFILE\.wslconfig"
           wsl --version
 
-      # Ubuntu 24.04 for parity with the Linux job (same podman 4.9.3 CLI, QEMU 8.2, ovmf), so a
+      # Ubuntu 26.04 for parity with the Linux job (same podman CLI, QEMU, ovmf), so a
       # failure here isolates WSL2 rather than a package delta. `wsl-conf` OVERWRITES the distro's
       # default file: systemd is required (the `runner` user's manager below — the host wall's
       # per-VM scope and `loginctl` need it); automount stays ON, because the wsl-bash wrapper
       # reads each step's script through /mnt/<drive>. The distro's default user is root at this
       # point — the wrapper runs the next three steps as root, and is regenerated for `runner`
       # after them.
-      - name: Install WSL2 + Ubuntu 24.04
+      - name: Install WSL2 + Ubuntu 26.04
         uses: Vampire/setup-wsl@v7.0.0
         with:
-          distribution: Ubuntu-24.04
+          distribution: Ubuntu-26.04
           wsl-version: 2
           set-as-default: "true"
           wsl-conf: |
@@ -496,7 +502,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}\wsl-apt
-          key: wsl2-apt-v1-${{ steps.month.outputs.month }}
+          key: wsl2-apt-v2-${{ steps.month.outputs.month }}
 
       # The Linux job's set, plus what the runner image has and a bare rootfs does not: git,
       # ssh (Lima), lsof + iproute2 (the port probes), sudo (the host wall's `nft`). Lima from
@@ -561,7 +567,7 @@ jobs:
       - name: Switch the wsl-bash wrapper to the runner user
         uses: Vampire/setup-wsl@v7.0.0
         with:
-          distribution: Ubuntu-24.04
+          distribution: Ubuntu-26.04
           wsl-shell-user: runner
           wsl-shell-command: bash --noprofile --norc -euo pipefail
 
@@ -701,7 +707,7 @@ jobs:
       && (github.ref == 'refs/heads/main'
         || contains(github.event.head_commit.message, '[run-e2e]')
         || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - name: Every job succeeded

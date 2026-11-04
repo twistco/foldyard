@@ -7,19 +7,12 @@ disagree with ``up``: an env-only posture change shows for precisely the service
 interpolate it, and a service no change touched never shows, whatever its ``config_files``
 label says (#33's follow-up — the overlay comparison could see neither).
 
-Each provider is asked in its own terms, and neither needs the engine:
-
-- **podman** (the product path): the bundled podman-compose has no hash command, so a
-  subprocess on foldyard's own interpreter (``python -m foldyard.confighash``) drives its
-  parser and ``config_hash`` — the very code its ``up`` compares with. A subprocess, never
-  in-process: podman-compose parses through a module-level singleton that reads
-  ``os.environ`` and the working directory. It leans on podman-compose internals, so it
-  degrades to "unavailable" (never to a guess) if those move; tests/test_confighash.py pins
-  the contract against the installed version.
-- **docker-compose** (the CI fallback engine, ``config.engine``, or an explicit
-  ``PODMAN_COMPOSE_PROVIDER`` naming it on podman): ``<engine> compose config --hash '*'``.
-  Which provider is active is ``stack._podman_compose_active`` — the same test the foreign-
-  container sweep uses, so the hash, the label and the sweep can never disagree about it.
+It needs no engine: the bundled podman-compose has no hash command, so a subprocess on foldyard's
+own interpreter (``python -m foldyard.confighash``) drives its parser and ``config_hash``, the very
+code its ``up`` compares with. A subprocess, never in-process: podman-compose parses through a
+module-level singleton that reads ``os.environ`` and the working directory. It leans on
+podman-compose internals, so it degrades to "unavailable" (never to a guess) if those move;
+tests/test_confighash.py pins the contract against the installed version.
 
 Stdlib-only at import; reconcile imports this lazily for ``fy state``.
 """
@@ -30,15 +23,7 @@ import json
 import subprocess
 import sys
 
-_DOCKER_LABEL = "com.docker.compose.config-hash"
-_PODMAN_LABEL = "io.podman.compose.config-hash"
-
-
-def label(ctx) -> str:
-    """The container label ``ctx``'s active compose provider records its config hash under."""
-    from . import stack
-
-    return _PODMAN_LABEL if stack._podman_compose_active(ctx) else _DOCKER_LABEL
+LABEL = "io.podman.compose.config-hash"
 
 
 def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0):
@@ -46,21 +31,16 @@ def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0)
     ``extra_profiles`` too, so running profile-gated services are rendered — or
     ``(None, reason)`` when the provider can't say. Never raises. Unavailable is never an empty
     map: an empty render would read as "nothing to compare" and hide every drift."""
-    from . import stack
+    from . import selfspawn, stack
 
-    flags = stack._profile_flags(ctx, extra_profiles)
-    docker = not stack._podman_compose_active(ctx)
-    if docker:
-        cmd = [*ctx.compose, *flags, "config", "--hash", "*"]
-    else:
-        from . import selfspawn
-
-        # -P: the child runs with cwd=the checkout, where plain -m would import a planted
-        # `foldyard/` first (selfspawn).
-        cmd = [*selfspawn.python_m(__name__), *ctx.compose[2:], *flags]
+    # -P: the child runs with cwd=the checkout, where plain -m would import a planted `foldyard/`
+    # first (selfspawn).
+    cmd = [
+        *selfspawn.python_m(__name__),
+        *ctx.compose[2:],
+        *stack._profile_flags(ctx, extra_profiles),
+    ]
     try:
-        from . import selfspawn
-
         # selfspawn.env: this child runs in the main checkout, not here — a relative PYTHONPATH
         # entry must keep pointing where it does for this process, not move into the checkout.
         proc = subprocess.run(
@@ -76,16 +56,11 @@ def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0)
     if proc.returncode != 0:
         lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
         return None, lines[-1] if lines else f"exited {proc.returncode}"
-    hashes = _parse(proc.stdout, docker=docker)
+    hashes = _parse(proc.stdout)
     return (hashes, "") if hashes else (None, "no service hashes in the render")
 
 
-def _parse(stdout: str, *, docker: bool) -> dict[str, str] | None:
-    if docker:  # one "<service> <hash>" per line
-        pairs = [line.split() for line in stdout.splitlines() if line.strip()]
-        if not pairs or any(len(p) != 2 for p in pairs):
-            return None
-        return dict(pairs)
+def _parse(stdout: str) -> dict[str, str] | None:
     try:
         parsed = json.loads(stdout)
     except ValueError:

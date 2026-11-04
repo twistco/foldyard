@@ -766,18 +766,28 @@ def test_in_box_detection(monkeypatch):
 # ── engine selection ──────────────────────────────────────────────────────────────────
 
 
-def test_engine_explicit_env_wins(fresh_config, monkeypatch):
-    fresh_config(FOLDYARD_ENGINE="docker")
-    monkeypatch.setattr(config, "in_box", lambda: True)  # refused off-box: test_registrylogins
-    assert config.engine() == "docker"
-    assert config.engine_compose() == ["docker", "compose"]
+def test_podman_is_the_engine_named_or_not(fresh_config, tmp_path, monkeypatch):
+    import shutil
 
-
-def test_engine_from_toml(fresh_config, tmp_path, monkeypatch):
-    (tmp_path / "foldyard.toml").write_text('[engine]\ncli = "docker"\n')
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/x/{cmd}")
     fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE=None)
-    monkeypatch.setattr(config, "in_box", lambda: True)
-    assert config.engine() == "docker"
+    assert config.engine() == "podman"
+    assert config.engine_compose() == ["podman", "compose"]
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE="podman")
+    assert config.engine() == "podman"
+    (tmp_path / "foldyard.toml").write_text('[engine]\ncli = "podman"\n')
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE=None)
+    assert config.engine() == "podman"
+
+
+@pytest.mark.parametrize("in_box", [False, True], ids=["your computer", "a box"])
+@pytest.mark.parametrize("named", ["docker", "/tmp/evil", None])
+def test_nothing_but_podman_runs_anywhere(fresh_config, tmp_path, monkeypatch, named, in_box):
+    # None: no podman on this PATH. There's no fallback left, in a box or in CI.
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE=named)
+    monkeypatch.setattr(config, "in_box", lambda: in_box)
+    with pytest.raises(config.EngineRefused, match="podman"):
+        config.engine()
 
 
 @pytest.mark.parametrize("named", ["docker", "/tmp/evil", None])
@@ -810,8 +820,9 @@ def test_a_compose_provider_other_than_podman_compose_is_refused_here(
     monkeypatch.setenv("PODMAN_COMPOSE_PROVIDER", provider)
     with pytest.raises(config.EngineRefused, match="PODMAN_COMPOSE_PROVIDER"):
         config.engine()
-    monkeypatch.setattr(config, "in_box", lambda: True)  # no VM to send them to from a box
-    assert config.engine() == "podman"
+    monkeypatch.setattr(config, "in_box", lambda: True)  # nowhere: it's the only provider tested
+    with pytest.raises(config.EngineRefused, match="PODMAN_COMPOSE_PROVIDER"):
+        config.engine()
 
 
 def test_your_own_podman_compose_is_still_yours(fresh_config, tmp_path, monkeypatch):
@@ -828,30 +839,14 @@ def test_engine_override_must_name_a_known_engine(fresh_config, tmp_path, monkey
     monkeypatch.delenv("FOLDYARD_ENGINE", raising=False)
     (tmp_path / "foldyard.toml").write_text('[engine]\ncli = "/tmp/evil"\n')
     fresh_config(FOLDYARD_REPO=tmp_path)
-    with pytest.raises(SystemExit, match="not one of podman, docker"):
+    with pytest.raises(SystemExit, match="only podman"):
         config.engine()
-    (tmp_path / "foldyard.toml").write_text('[engine]\ncli = "docker"\n')
-    fresh_config(FOLDYARD_REPO=tmp_path)
-    monkeypatch.setattr(config, "in_box", lambda: True)
-    assert config.engine() == "docker"
-
-
-def test_engine_autodetect_prefers_podman_then_docker(fresh_config, tmp_path, monkeypatch):
-    import shutil
-
-    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE=None)  # no [engine] table either
-    monkeypatch.delenv("DOCKER_HOST", raising=False)  # pure which() autodetect
-    monkeypatch.setattr(config, "in_box", lambda: True)  # where docker may be the answer
-    monkeypatch.setattr(shutil, "which", lambda cmd: "/x/podman" if cmd == "podman" else None)
-    assert config.engine() == "podman"  # podman is the dependency — prefer it
-    monkeypatch.setattr(shutil, "which", lambda cmd: None)
-    assert config.engine() == "docker"  # neither present → docker fallback
 
 
 def test_engine_podman_even_with_docker_host(fresh_config, tmp_path, monkeypatch):
     # podman is the engine even in the dev box (pre-set DOCKER_HOST): foldyard exports
-    # CONTAINER_HOST = the same socket so plain podman drives it. docker is NOT preferred
-    # just because a docker-compat socket is wired.
+    # CONTAINER_HOST = the same socket so plain podman drives it. A docker-compat socket and a
+    # docker CLI beside it change nothing.
     import shutil
 
     fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE=None)

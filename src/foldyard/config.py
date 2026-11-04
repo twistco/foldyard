@@ -6,8 +6,7 @@ Answers the rest of the package's "where/what/which" questions, project-agnostic
   - **What is the project called?** (``project`` — prefixes the host state dir)
   - **What names the stack?** (``project_prefix``, ``app_service``) and **which
     ports / compose files does it use?** (``port_bases``, ``compose_files``)
-  - **Which container engine drives it?** (``engine`` — podman where present, else
-    docker for the dev box)
+  - **Which container engine drives it?** (``engine`` — podman, or a refusal)
   - **How is the rootless machine sized/named?** (``machine_name``, ``machine_resources``)
   - **Where does host-side posture state live?** (``~/.foldyard/<project>/`` —
     deliberately OUTSIDE the repo mount, so nothing in the VM/box can escalate its
@@ -715,7 +714,7 @@ def in_box() -> bool:
 
 
 # The container engines foldyard drives. An override must name one of these — see `engine()`.
-ENGINES = ("podman", "docker")
+ENGINE = "podman"
 
 
 class EngineRefused(SystemExit, Exception):
@@ -727,78 +726,59 @@ class EngineRefused(SystemExit, Exception):
 
 
 def engine() -> str:
-    """The container-engine CLI that drives the compose stack — **podman** by default.
+    """The container engine foldyard drives: podman, or a refusal. On your computer, in a box and in
+    CI alike, because what's tested should be what runs.
 
-    podman IS foldyard's engine: the rootless machine is podman, and even the dev box's
-    bind-mounted socket is that machine's podman socket. foldyard exports ``CONTAINER_HOST``
-    = that socket (see ``foldyard.stack``) so plain ``podman``/``podman compose`` reach it
-    everywhere — including the box, where podman's *local* mode would otherwise be broken
-    (nested-podman). Override with ``FOLDYARD_ENGINE`` or ``[engine].cli``.
-
-    **The docker fallback exists for CI, not as a second supported engine** (ADR-0010: "docker
-    stays the CI fallback, not the engine"). GitHub-hosted runners ship docker and no podman, so
-    ``engine()`` degrades there and ``docker compose`` runs the same stack — which is what gives
-    ADR-0017 a real-engine e2e tier without KVM. Those jobs carry the box's signature, and that is
-    the only place it runs: on your computer it is refused (:func:`_docker_here`).
+    It drives the VM's rootless socket: the box mounts that same socket, and foldyard exports
+    ``CONTAINER_HOST`` = that socket (see ``foldyard.stack``) so plain ``podman`` reaches it
+    everywhere, including the box, where podman's *local* mode would otherwise be broken
+    (nested-podman). A docker client is refused rather than supported: it would send the VM its
+    registry logins from several places (``config.json``, the platform's credential store,
+    ``DOCKER_AUTH_CONFIG``) with no one switch to stop it, where podman has one
+    (:mod:`foldyard.registrylogins`).
 
     NOTE this is a DIFFERENT binary from the machine backend's ``cli``
     (:func:`machine_backend`): the backend creates the VM, this drives the socket it hands out.
     Lima needs ``limactl`` *and* this.
 
-    The override is a NAME from :data:`ENGINES`, never a path. `[engine].cli` is repo config, and
+    ``FOLDYARD_ENGINE`` and ``[engine].cli`` may only say so. `[engine].cli` is repo config, and
     this value is exec'd host-side by every engine verb (`fy up`, `fy box up`, the reconciler, the
-    worktree init container) — so an unconstrained string would let anything that can write the
-    checkout choose a binary the host then runs, which is the hole
-    ADR-0023 closed everywhere else. Two engines exist; anything else
-    is a typo or an attack, and both deserve the same loud refusal."""
+    worktree init container), so taking any other string would let anything that can write the
+    checkout choose a binary the host then runs, the hole ADR-0023 closed everywhere else."""
     from shutil import which
 
     explicit = os.environ.get("FOLDYARD_ENGINE") or _table("engine").get("cli")
-    if explicit:
-        if explicit not in ENGINES:
-            raise EngineRefused(
-                f"✗ engine {explicit!r} is not one of {', '.join(ENGINES)} — set [engine].cli "
-                "(or FOLDYARD_ENGINE) to an engine NAME, not a path"
-            )
-        return _docker_here() if explicit == "docker" else _podman_here()
-    return _podman_here() if which("podman") else _docker_here()
-
-
-def _podman_here() -> str:
-    """podman, with no docker client behind it (:func:`refuse_compose_provider`)."""
+    if explicit and explicit != ENGINE:
+        why = (
+            "A docker client would send the VM your registry logins, where a box could read them."
+            if explicit == "docker"
+            else "It's a name, never a path: this runs on your computer."
+        )
+        raise EngineRefused(
+            f"✗ [engine] cli or FOLDYARD_ENGINE says {explicit!r}, and foldyard drives only podman."
+            f"\n  {why}\n  Remove that line: `fy config diff` shows the adopted config, "
+            "`fy config adopt` updates it."
+        )
+    if not explicit and not which(ENGINE):
+        raise EngineRefused(
+            "✗ podman isn't installed, and foldyard drives only podman. Install it (your package "
+            "manager;\n  `brew install podman` on macOS). In a box, add it to the image; in CI, "
+            "`fy docs stack` has the recipe."
+        )
     refuse_compose_provider(os.environ.get("PODMAN_COMPOSE_PROVIDER", ""))
-    return "podman"
+    return ENGINE
 
 
 def refuse_compose_provider(provider: str) -> None:
-    """On your computer the compose provider is podman-compose, foldyard's bundled one or your own.
-    podman runs whatever ``PODMAN_COMPOSE_PROVIDER`` names, and docker-compose is a docker client:
-    refused for the reason :func:`_docker_here` is, and ``REGISTRY_AUTH_FILE`` means nothing to it.
-    Any other name can't be vouched for. Not in a box, where a client has no logins to send."""
-    if provider and "podman-compose" not in Path(provider).name and not in_box():
+    """The compose provider is podman-compose, foldyard's bundled one or your own. podman runs
+    whatever ``PODMAN_COMPOSE_PROVIDER`` names, docker-compose is a docker client
+    (``REGISTRY_AUTH_FILE`` means nothing to it), and any other name can't be vouched for."""
+    if provider and "podman-compose" not in Path(provider).name:
         raise EngineRefused(
             f"✗ PODMAN_COMPOSE_PROVIDER names {Path(provider).name!r}: foldyard runs only "
-            "podman-compose on your computer,\n  because docker-compose would send the VM your "
-            "registry logins, where a box could read them.\n  Unset it to use the one foldyard "
-            "bundles."
+            "podman-compose,\n  because docker-compose would send the VM your registry logins, "
+            "where a box could read them.\n  Unset it to use the one foldyard bundles."
         )
-
-
-def _docker_here() -> str:
-    """Docker, where it may run: in a box, which is what CI's jobs carry the signature of. On your
-    computer it is refused, named or by default, because a docker client there sends the VM its
-    logins and has no one switch to stop it (``config.json``, the platform's credential store,
-    ``DOCKER_AUTH_CONFIG``), and `[engine].cli` is one line a box can propose. podman has that
-    switch (:mod:`foldyard.registrylogins`), and machine lifecycle needs it anyway."""
-    if in_box():
-        return "docker"
-    raise EngineRefused(
-        "✗ foldyard drives podman on your computer, not docker: a docker client would send the "
-        "VM\n  your registry logins, where a box could read them. Install podman (your package "
-        "manager;\n  `brew install podman` on macOS). If [engine] cli or FOLDYARD_ENGINE says "
-        "docker, remove\n  that: `fy config diff` shows the adopted config, `fy config adopt` "
-        "updates it."
-    )
 
 
 def engine_compose() -> list[str]:

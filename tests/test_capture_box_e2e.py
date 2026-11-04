@@ -72,9 +72,6 @@ _VM_TMP = Path(__file__).resolve().parents[1] / ".e2e-tmp"
 
 
 def _engine() -> str:
-    for candidate in ("podman", "docker"):
-        if shutil.which(candidate):
-            return candidate
     return "podman"
 
 

@@ -47,9 +47,6 @@ _APP_SA = "app-runtime@acme-staging.iam.gserviceaccount.com"
 
 
 def _engine() -> str:
-    for candidate in ("podman", "docker"):
-        if _which(candidate):
-            return candidate
     return "podman"
 
 
