@@ -33,15 +33,13 @@ class _Backend:
     def ssh_target(self, name):
         return self._target
 
-    def guest_socket(self):
-        return GUEST_SOCK
-
 
 @pytest.fixture
 def vm(monkeypatch):
     """Your computer, `[machine] compose = "vm"`, a lima backend with an ssh route."""
     monkeypatch.setattr(config, "in_box", lambda: False)
     monkeypatch.setenv("MACHINE_COMPOSE", "vm")
+    monkeypatch.setenv("PODMAN_SOCK_IN_VM", GUEST_SOCK)  # else it names this machine's uid
     from foldyard import machine
 
     monkeypatch.setattr(machine, "MACHINE", "acme")
