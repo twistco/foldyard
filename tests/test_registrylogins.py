@@ -171,6 +171,15 @@ def test_a_failure_names_the_logins_only_when_you_have_some(host, tmp_path, monk
     assert "compose_env" in hint and OPT_IN in hint
 
 
+def test_an_export_this_project_doesnt_name_still_gets_the_hint(host, tmp_path, monkeypatch):
+    """Half an opt-in gives no logins, so it's the case most in need of being told."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".docker").mkdir()
+    (tmp_path / ".docker" / "config.json").write_text("{}")
+    monkeypatch.setenv(OPT_IN, "/mine/narrow.json")
+    assert OPT_IN in "\n".join(registrylogins.failure_hint())
+
+
 def test_the_clamp_itself_doesnt_read_as_you_having_logins(host, tmp_path, monkeypatch):
     """After the clamp REGISTRY_AUTH_FILE names the empty file, which is no login of yours, or every
     failed build would tell people with no logins about them."""
