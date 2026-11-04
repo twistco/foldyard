@@ -179,7 +179,6 @@ def _refuse_tainted(vm: str) -> None:
 
 
 def _check_contained(vm: str) -> None:
-    _refuse_tainted(vm)
     missing = _traps_missing(vm)
     if missing:
         raise Refused(
