@@ -766,15 +766,17 @@ def test_in_box_detection(monkeypatch):
 # ── engine selection ──────────────────────────────────────────────────────────────────
 
 
-def test_engine_explicit_env_wins(fresh_config):
+def test_engine_explicit_env_wins(fresh_config, monkeypatch):
     fresh_config(FOLDYARD_ENGINE="docker")
+    monkeypatch.setattr(config, "in_box", lambda: True)  # refused off-box: test_registrylogins
     assert config.engine() == "docker"
     assert config.engine_compose() == ["docker", "compose"]
 
 
-def test_engine_from_toml(fresh_config, tmp_path):
+def test_engine_from_toml(fresh_config, tmp_path, monkeypatch):
     (tmp_path / "foldyard.toml").write_text('[engine]\ncli = "docker"\n')
     fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE=None)
+    monkeypatch.setattr(config, "in_box", lambda: True)
     assert config.engine() == "docker"
 
 
@@ -789,6 +791,7 @@ def test_engine_override_must_name_a_known_engine(fresh_config, tmp_path, monkey
         config.engine()
     (tmp_path / "foldyard.toml").write_text('[engine]\ncli = "docker"\n')
     fresh_config(FOLDYARD_REPO=tmp_path)
+    monkeypatch.setattr(config, "in_box", lambda: True)
     assert config.engine() == "docker"
 
 
@@ -796,7 +799,8 @@ def test_engine_autodetect_prefers_podman_then_docker(fresh_config, tmp_path, mo
     import shutil
 
     fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE=None)  # no [engine] table either
-    monkeypatch.delenv("DOCKER_HOST", raising=False)  # not the box → pure which() autodetect
+    monkeypatch.delenv("DOCKER_HOST", raising=False)  # pure which() autodetect
+    monkeypatch.setattr(config, "in_box", lambda: True)  # where docker may be the answer
     monkeypatch.setattr(shutil, "which", lambda cmd: "/x/podman" if cmd == "podman" else None)
     assert config.engine() == "podman"  # podman is the dependency — prefer it
     monkeypatch.setattr(shutil, "which", lambda cmd: None)

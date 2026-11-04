@@ -184,10 +184,6 @@ without exporting a file means no logins, and so does exporting one this project
 own `REGISTRY_AUTH_FILE` never counts, so a line in `compose_env`, which the box can propose, can't
 send the `auth.json` you already point it at.
 
-With the docker engine (`[engine] cli = "docker"`, for CI rather than a computer) foldyard points
-`DOCKER_CONFIG` at a clean directory that keeps your plugins and contexts, removes
-`DOCKER_AUTH_CONFIG`, and has no opt-in.
-
 An image already in the VM needs no registry, so `fy up` in the box finds it. A new one fails at the
 pull: the box has no login, and an agent can't make your logins fetch something new by editing a
 compose file. An anonymous pull also means Docker Hub's lower rate limit.

@@ -61,13 +61,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   The only way out takes both an export of `FY_REGISTRY_AUTH_FILE` at a file made for it and the
   adopted `[project] compose_env` naming that (`stack._host_passthrough`, the compose client only):
   never `REGISTRY_AUTH_FILE` itself, which people export at their whole auth.json, and never the
-  default paths. The docker CLI ignores that variable and reads `$DOCKER_CONFIG/config.json`, so
-  `DOCKER_CONFIG` is pinned too, to a clean directory keeping the plugins and contexts, with no opt-in.
-  Its `auths` holds one empty placeholder on purpose: with none at all, docker falls back to the
-  platform's credential store (the keychain), and a build sends everything in it. `DOCKER_AUTH_CONFIG`
-  beats any config file, so it's removed.
-  `stack.resolve` applies both again after its merges: `[ports]` can name anything. What foldyard
-  launches for you (the editor) gets `operators_env`.
+  default paths. `stack.resolve` applies it again after its merges: `[ports]` can name anything. What
+  foldyard launches for you (the editor) gets `operators_env`. The docker CLI has no such switch
+  (`config.json`, the keychain, `DOCKER_AUTH_CONFIG`), so `config.engine` refuses it off-box.
 - `confighash.py` — the stack scope's verdict: the compose provider's own per-service config
   hash vs a fresh render (what `up` compares). podman: a `python -m foldyard.confighash`
   subprocess drives the bundled podman-compose's parser (its internals — degrades to

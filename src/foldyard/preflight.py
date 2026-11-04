@@ -43,9 +43,8 @@ def issues() -> list[str]:
 
     # 1. The ENGINE CLI drives the socket every backend hands out, so it is required whatever the
     #    backend is — and it is a DIFFERENT binary from the VM-lifecycle one (lima needs limactl
-    #    AND podman). `config.engine()` resolves to docker only when podman is absent, and that
-    #    fallback is for CI (ADR-0010), so a resolved `docker` on a dev host means podman is
-    #    missing — hence the fix hint names podman, not "podman or docker".
+    #    AND podman). `config.engine()` resolves to docker only in a box (ADR-0010, CI's
+    #    fallback), and refuses it here, saying why, so the fix hint names podman.
     if not which(config.engine()):
         out.append(
             f"✗ the container engine `{config.engine()}` isn't installed — every stack, box and\n"

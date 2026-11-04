@@ -496,10 +496,12 @@ cli = "podman"
 
 - **`cli`** — the container-engine CLI: `"podman"` or `"docker"`, as a name, never a path (the
   value is run on your computer — [ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)).
-  Default: `podman` if installed, else `docker`. Env: `FOLDYARD_ENGINE`.
+  Default: `podman` if installed, else `docker`. Env: `FOLDYARD_ENGINE`. **`docker` works only in a
+  box**, and is refused on your computer.
 
-The docker fallback exists for CI runners, which ship docker and no podman. On a dev machine you
-need podman regardless: VM lifecycle has no docker equivalent. foldyard exports `CONTAINER_HOST`
+The docker fallback exists for CI runners, which ship docker and no podman, and whose jobs set
+`IN_DEVBOX=1`. On your computer you need podman: VM lifecycle has no docker equivalent, and a docker
+client would send the VM your registry logins ([stack](./stack.md#private-images)). foldyard exports `CONTAINER_HOST`
 pointing at the VM's socket, so plain podman works everywhere, including in the box.
 
 ## `[ports]`

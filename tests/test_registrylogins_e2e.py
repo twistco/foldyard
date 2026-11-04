@@ -191,132 +191,6 @@ def test_a_client_pointed_at_a_missing_file_sends_none(api, args):
     assert UNRELATED not in "".join(listener.headers), listener.headers
 
 
-_needs_docker = pytest.mark.skipif(shutil.which("docker") is None, reason="no docker CLI here")
-
-
-def _docker(d: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess:
-    (d / "ctx").mkdir(exist_ok=True)
-    (d / "ctx" / "Dockerfile").write_text("FROM registry.invalid/fy/base:1\n")
-    return subprocess.run(
-        ["docker", *args],
-        env={**env, "DOCKER_HOST": f"unix://{d}/a.sock", "DOCKER_BUILDKIT": "0"},
-        cwd=str(d / "ctx"),
-        capture_output=True,
-        timeout=60,
-    )
-
-
-@_needs_docker
-def test_the_clamped_docker_client_sends_none(api, monkeypatch):
-    """REGISTRY_AUTH_FILE means nothing to the docker CLI: `[engine] cli = "docker"` reads
-    ~/.docker/config.json, and a build sends all of it."""
-    d, listener = api
-    _auth_file(d / "home" / ".docker" / "config.json")
-    env = {**_host_env(), "HOME": str(d / "home")}
-    _docker(d, env, "build", "-q", ".")
-    assert UNRELATED in "".join(listener.headers), "the config wasn't read: no control"
-    listener.headers.clear()
-    monkeypatch.setenv("HOME", str(d / "home"))  # no_logins_docker_config reads it from the process
-    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
-    registrylogins.clamp(env)
-    _docker(d, env, "build", "-q", ".")
-    _docker(d, env, "pull", "registry.invalid/fy/base:1")
-    sent = "".join(listener.headers)
-    assert NEEDED not in sent and UNRELATED not in sent, listener.headers
-
-
-# Stands in for the platform's credential store: what `docker` finds on PATH with a name it knows.
-# Fake, on a PATH holding nothing else, so a real keychain is never asked.
-_FAKE_HELPER = f"""#!/bin/sh
-case "$1" in
-  list) echo '{{"https://registry.invalid":"fakeuser"}}' ;;
-  get) /bin/cat >/dev/null; echo '{{"ServerURL":"https://registry.invalid","Username":"fakeuser","Secret":"{NEEDED}"}}' ;;
-esac
-"""
-
-
-def _helper_only_path(d: Path) -> str:
-    bin_dir = d / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    for name in ("osxkeychain", "secretservice"):  # macOS's default, and Linux's without `pass`
-        helper = bin_dir / f"docker-credential-{name}"
-        helper.write_text(_FAKE_HELPER)
-        helper.chmod(0o755)
-    return str(bin_dir)
-
-
-@_needs_docker
-def test_the_clamped_docker_client_doesnt_fall_back_to_the_platforms_store(api, monkeypatch):
-    """A config with no login at all makes the docker CLI go looking for the platform's credential
-    store (`DetectDefaultStore`), and a build then sends every login in it: on a computer with
-    Docker Desktop, the keychain. So a clean config has to not read as empty."""
-    d, listener = api
-    docker = shutil.which("docker")
-    assert docker
-    home = d / "home"
-    (d / "empty").mkdir()
-    (d / "empty" / "config.json").write_text("{}\n")
-    (d / "ctx").mkdir()
-    (d / "ctx" / "Dockerfile").write_text("FROM registry.invalid/fy/base:1\n")
-    home.mkdir()
-    env = {"PATH": _helper_only_path(d), "HOME": str(home), "DOCKER_HOST": f"unix://{d}/a.sock"}
-    env["DOCKER_BUILDKIT"] = "0"
-
-    def build(config_dir: str) -> None:
-        subprocess.run(
-            [docker, "build", "-q", "."],
-            env={**env, "DOCKER_CONFIG": config_dir},
-            cwd=str(d / "ctx"),
-            capture_output=True,
-            timeout=60,
-        )
-
-    build(str(d / "empty"))
-    assert NEEDED in "".join(listener.headers), f"no helper asked: no control: {listener.headers}"
-    listener.headers.clear()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
-    build(str(registrylogins.no_logins_docker_config()))
-    assert NEEDED not in "".join(listener.headers), listener.headers
-
-
-@_needs_docker
-def test_a_login_in_the_docker_auth_variable_doesnt_reach_the_clamped_client(api, monkeypatch):
-    """`DOCKER_AUTH_CONFIG` beats any config file, on the docker CLIs that read it. Where one
-    doesn't, there is nothing to show."""
-    d, listener = api
-    login = base64.b64encode(f"fakeuser:{NEEDED}".encode()).decode()
-    blob = json.dumps({"auths": {"registry.invalid": {"auth": login}}})
-    env = {**_host_env(), "HOME": str(d), "DOCKER_AUTH_CONFIG": blob}
-    _docker(d, env, "pull", "registry.invalid/fy/base:1")
-    if NEEDED not in "".join(listener.headers):
-        pytest.skip("this docker CLI doesn't read DOCKER_AUTH_CONFIG")
-    listener.headers.clear()
-    monkeypatch.setenv("HOME", str(d))
-    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
-    registrylogins.clamp(env)
-    _docker(d, env, "pull", "registry.invalid/fy/base:1")
-    _docker(d, env, "build", "-q", ".")
-    assert NEEDED not in "".join(listener.headers), listener.headers
-
-
-@_needs_docker
-def test_docker_compose_still_runs_under_the_clean_config(monkeypatch):
-    """The plugin lives in the config dir, so a clean one alone makes it "unknown command". Not a
-    plugin installed here: nothing to lose, nothing to show."""
-    plain = subprocess.run(["docker", "compose", "version"], capture_output=True, timeout=60)
-    if plain.returncode != 0:
-        pytest.skip("no compose plugin here")
-    env = dict(os.environ)
-    env.pop("DOCKER_CONFIG", None)
-    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
-    registrylogins.clamp(env)
-    clean = subprocess.run(
-        ["docker", "compose", "version"], env=env, capture_output=True, timeout=60
-    )
-    assert clean.returncode == 0, clean.stderr
-
-
 # ── the real thing, seen from where a box stands ──────────────────────────────────────────
 
 _WATCH = (
@@ -386,3 +260,20 @@ def test_fy_build_leaves_none_there_with_your_export_set(repo, tmp_path):
     built = fy(["build"], repo, timeout=600, env_extra={"REGISTRY_AUTH_FILE": str(auth)})
     assert built.rc == 0, built.out
     assert _seen() == []
+
+
+def test_a_docker_engine_is_refused_and_can_be_undone(tmp_path_factory):
+    """One adopted line a box can propose. The refusal must leave the way back open: `fy config`
+    reads no engine, or a bad adoption could never be reverted."""
+    r = example_copy(tmp_path_factory.mktemp("docker"), extra_toml='\n[engine]\ncli = "docker"\n')
+    _adopt_on_host(r)
+    from_config = {"FOLDYARD_ENGINE": ""}  # the test runner names podman, and the variable wins
+    built = fy(["build"], r, timeout=120, env_extra=from_config)
+    assert built.rc != 0, built.out
+    assert "docker" in built.out and "podman" in built.out
+    assert "Traceback" not in built.out, built.out
+    assert fy(["config", "diff"], r, timeout=60, env_extra=from_config).rc == 0
+    toml = r / "foldyard.toml"
+    toml.write_text(toml.read_text().replace('\n[engine]\ncli = "docker"\n', "\n"))
+    _adopt_on_host(r)
+    assert fy(["build"], r, timeout=600, env_extra=from_config).rc == 0

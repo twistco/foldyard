@@ -2,6 +2,11 @@
 
 - **Status:** Accepted (2026-06, "docker vs podman" investigation; buildah build path added in
   PR #36) — implemented
+- **Amended (2026-11-04):** docker is now refused on the host, not only discouraged. A docker client
+  sends the VM its registry logins from several places (`config.json`, the platform's credential
+  store, `DOCKER_AUTH_CONFIG`) with no one switch to stop that, and `[engine] cli` is one line a box
+  can propose. podman has that switch (`foldyard.registrylogins`). It remains the fallback where it
+  always was: in CI's jobs, which carry the box's signature.
 - **Sources:** HANDOVER.md ("docker vs podman in the dev box", key decision 2),
   PLAN.md §7.1 (engine note), src/foldyard/stack.py engine/context resolution
 

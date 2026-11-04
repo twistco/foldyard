@@ -730,11 +730,8 @@ def engine() -> str:
     **The docker fallback exists for CI, not as a second supported engine** (ADR-0010: "docker
     stays the CI fallback, not the engine"). GitHub-hosted runners ship docker and no podman, so
     ``engine()`` degrades there and ``docker compose`` runs the same stack — which is what gives
-    ADR-0017 a real-engine e2e tier without KVM. On a developer host the fallback is not a
-    configuration to aim for: machine lifecycle is podman-only either way (``podman machine`` has
-    no docker equivalent, and the lima backend drives a podman service inside the VM), so a host
-    with docker but no podman can run containers and still not have a machine. Read a resolved
-    engine of ``docker`` outside CI as "podman is missing", not as "docker was chosen".
+    ADR-0017 a real-engine e2e tier without KVM. Those jobs carry the box's signature, and that is
+    the only place it runs: on your computer it is refused (:func:`_docker_here`).
 
     NOTE this is a DIFFERENT binary from the machine backend's ``cli``
     (:func:`machine_backend`): the backend creates the VM, this drives the socket it hands out.
@@ -755,8 +752,25 @@ def engine() -> str:
                 f"✗ engine {explicit!r} is not one of {', '.join(ENGINES)} — set [engine].cli "
                 "(or FOLDYARD_ENGINE) to an engine NAME, not a path"
             )
-        return explicit
-    return "podman" if which("podman") else "docker"
+        return _docker_here() if explicit == "docker" else explicit
+    return "podman" if which("podman") else _docker_here()
+
+
+def _docker_here() -> str:
+    """Docker, where it may run: in a box, which is what CI's jobs carry the signature of. On your
+    computer it is refused, named or by default, because a docker client there sends the VM its
+    logins and has no one switch to stop it (``config.json``, the platform's credential store,
+    ``DOCKER_AUTH_CONFIG``), and `[engine].cli` is one line a box can propose. podman has that
+    switch (:mod:`foldyard.registrylogins`), and machine lifecycle needs it anyway."""
+    if in_box():
+        return "docker"
+    raise SystemExit(
+        "✗ foldyard drives podman on your computer, not docker: a docker client would send the "
+        "VM\n  your registry logins, where a box could read them. Install podman (your package "
+        "manager;\n  `brew install podman` on macOS). If [engine] cli or FOLDYARD_ENGINE says "
+        "docker, remove\n  that: `fy config diff` shows the adopted config, `fy config adopt` "
+        "updates it."
+    )
 
 
 def engine_compose() -> list[str]:

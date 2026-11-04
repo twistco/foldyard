@@ -509,8 +509,8 @@ def _host_passthrough() -> dict[str, str]:
         if k in declared
         or ((k in _PASSTHROUGH or k.startswith(_PASSTHROUGH_PREFIXES)) and k not in secret)
     }
-    if not config.in_box():  # the client's logins: see registrylogins
-        registrylogins.apply_to(out, declared)
+    if not config.in_box():  # the client's auth file: see registrylogins
+        out[registrylogins.AUTH] = registrylogins.for_compose(declared)
     return out
 
 
@@ -550,7 +550,7 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
     if not config.in_box():  # again, last: `[ports]` and the mode env can name anything
         from . import registrylogins
 
-        registrylogins.apply_to(env, config.compose_env())
+        env[registrylogins.AUTH] = registrylogins.for_compose(config.compose_env())
     return Context(
         main=main,
         env=env,

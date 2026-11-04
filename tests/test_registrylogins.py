@@ -222,11 +222,6 @@ def test_a_port_named_like_the_auth_file_cant_replace_it(host, tmp_path, monkeyp
     assert env[AUTH] == str(registrylogins.no_logins_file())
 
 
-def test_a_port_named_like_the_docker_config_cant_replace_it(host, tmp_path, monkeypatch):
-    env = _resolved(monkeypatch, tmp_path, **{registrylogins.DOCKER: "123"})
-    assert env[registrylogins.DOCKER] == str(registrylogins.no_logins_docker_config())
-
-
 def test_the_opt_in_survives_the_merge_too(host, tmp_path, monkeypatch):
     monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
     monkeypatch.setenv(OPT_IN, "/mine/narrow.json")
@@ -240,175 +235,58 @@ def test_in_the_box_the_merge_is_left_alone(tmp_path, monkeypatch):
     assert _resolved(monkeypatch, tmp_path, **{AUTH: "123"})[AUTH] == "123"
 
 
-# ── the docker CLI: its logins are in its own config, which REGISTRY_AUTH_FILE doesn't touch ──
+# ── the docker CLI isn't one of foldyard's clients on your computer ───────────────────────
 
 
-DOCKER = registrylogins.DOCKER
+def _no_podman(monkeypatch) -> None:
+    monkeypatch.setattr("shutil.which", lambda name: None)
 
 
-@pytest.fixture
-def docker_home(host, tmp_path, monkeypatch):
-    """Your ~/.docker with logins, a current context, contexts and plugins."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv(DOCKER, raising=False)
-    monkeypatch.delenv(registrylogins.SAVED_DOCKER, raising=False)
-    own = tmp_path / ".docker"
-    (own / "contexts").mkdir(parents=True)
-    (own / "config.json").write_text(
-        json.dumps(
-            {
-                "auths": {"ghcr.io": {"auth": "ZmFrZTpmYWtl"}},
-                "credsStore": "desktop",
-                "currentContext": "desktop-linux",
-            }
-        )
+def test_docker_named_in_the_config_is_refused(host, monkeypatch):
+    """Its logins are in several places, the keychain among them, with no one switch: the reviews
+    of #162 found another each round. And `[engine] cli` is one line a box can propose."""
+    monkeypatch.delenv("FOLDYARD_ENGINE", raising=False)
+    monkeypatch.setattr(
+        config, "_table", lambda name: {"cli": "docker"} if name == "engine" else {}
     )
-    return own
+    with pytest.raises(SystemExit, match="podman"):
+        config.engine()
 
 
-def _docker_config(env_dir) -> dict:
-    return json.loads((registrylogins.Path(env_dir) / "config.json").read_text())
+def test_docker_named_in_your_environment_is_refused(host, monkeypatch):
+    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
+    with pytest.raises(SystemExit, match="podman"):
+        config.engine()
 
 
-def test_the_clamp_points_docker_at_a_config_with_no_logins(docker_home, monkeypatch):
-    env = _clamped(monkeypatch)
-    cfg = _docker_config(env[DOCKER])
-    assert "credsStore" not in cfg and "credHelpers" not in cfg
-    assert not any(entry for entry in cfg["auths"].values())  # names, and nothing to send
+def test_docker_by_default_is_refused_and_says_to_install_podman(host, monkeypatch):
+    monkeypatch.delenv("FOLDYARD_ENGINE", raising=False)
+    monkeypatch.setattr(config, "_table", lambda name: {})
+    _no_podman(monkeypatch)
+    with pytest.raises(SystemExit, match="install"):
+        config.engine()
 
 
-def test_the_clean_docker_config_doesnt_read_as_empty(docker_home, monkeypatch):
-    """With no entry at all the docker CLI goes looking for the platform's credential store, and a
-    build sends every login in it: tests/test_registrylogins_e2e.py shows it on a real client."""
-    assert _docker_config(_clamped(monkeypatch)[DOCKER])["auths"]
-
-
-def test_the_clean_config_keeps_your_plugins_contexts_and_current_context(docker_home, monkeypatch):
-    """Without these `docker compose` is "unknown command": the plugin lives in the config dir."""
-    env = _clamped(monkeypatch)
-    cfg = _docker_config(env[DOCKER])
-    assert cfg["cliPluginsExtraDirs"] == [str(docker_home / "cli-plugins")]
-    assert cfg["currentContext"] == "desktop-linux"
-    assert "credsStore" not in cfg
-    assert (registrylogins.Path(env[DOCKER]) / "contexts").resolve() == docker_home / "contexts"
-
-
-def test_your_own_docker_config_is_remembered_and_read(docker_home, tmp_path, monkeypatch):
-    mine = tmp_path / "elsewhere"
-    mine.mkdir()
-    monkeypatch.setenv(DOCKER, str(mine))
-    env = _clamped(monkeypatch)
-    assert env[registrylogins.SAVED_DOCKER] == str(mine)
-    registrylogins.clamp(env)  # a child, under the clamped value
-    assert env[registrylogins.SAVED_DOCKER] == str(mine)
-    assert _docker_config(env[DOCKER])["cliPluginsExtraDirs"] == [str(mine / "cli-plugins")]
-
-
-def test_a_docker_login_under_the_clamp_doesnt_stay(docker_home, monkeypatch):
-    env = _clamped(monkeypatch)
-    cfg = registrylogins.Path(env[DOCKER]) / "config.json"
-    cfg.write_text('{"auths": {"ghcr.io": {"auth": "ZmFrZTpmYWtl"}}}')
-    registrylogins.clamp(env)
-    assert "ghcr.io" not in _docker_config(env[DOCKER])["auths"]
-
-
-def test_a_docker_config_that_cant_be_put_right_is_never_the_answer(docker_home, monkeypatch):
-    env = _clamped(monkeypatch)
-    cfg = registrylogins.Path(env[DOCKER]) / "config.json"
-    cfg.write_text('{"auths": {"ghcr.io": {"auth": "ZmFrZTpmYWtl"}}}')
-    monkeypatch.setattr(registrylogins, "_write", lambda *a: (_ for _ in ()).throw(OSError("full")))
-    first = registrylogins.no_logins_docker_config()
-    second = registrylogins.no_logins_docker_config()
-    assert first != registrylogins.Path(env[DOCKER])
-    assert first != second
-    assert not first.exists()
-
-
-def test_your_own_extra_plugin_dirs_come_too(docker_home, monkeypatch):
-    """A compose plugin can live only in one of them, and then it would be an unknown command."""
-    own = docker_home / "config.json"
-    data = json.loads(own.read_text())
-    data["cliPluginsExtraDirs"] = ["/opt/docker-plugins", str(docker_home / "cli-plugins"), 7]
-    own.write_text(json.dumps(data))
-    cfg = _docker_config(_clamped(monkeypatch)[DOCKER])
-    assert cfg["cliPluginsExtraDirs"] == [str(docker_home / "cli-plugins"), "/opt/docker-plugins"]
-
-
-def test_an_unreadable_docker_config_of_yours_is_only_no_current_context(docker_home, monkeypatch):
-    (docker_home / "config.json").write_text("not json")
-    env = _clamped(monkeypatch)
-    assert "currentContext" not in _docker_config(env[DOCKER])
-
-
-def test_the_compose_client_gets_the_clean_docker_config(docker_home, monkeypatch):
-    monkeypatch.setenv(DOCKER, str(docker_home))
-    assert stack._host_passthrough()[DOCKER] == str(registrylogins.no_logins_docker_config())
-
-
-def test_naming_the_docker_config_in_compose_env_gives_nothing(docker_home, monkeypatch):
-    """The opt-in is `podman`'s: a box can propose this line as easily as any."""
-    monkeypatch.setattr(config, "compose_env", lambda: [DOCKER])
-    monkeypatch.setenv(DOCKER, str(docker_home))
-    assert stack._host_passthrough()[DOCKER] == str(registrylogins.no_logins_docker_config())
-
-
-def test_in_the_box_docker_is_left_alone(monkeypatch):
+def test_in_a_box_docker_is_still_the_fallback(monkeypatch):
+    """CI's: a runner ships docker and no podman, and its jobs carry the box's signature."""
     monkeypatch.setattr(config, "in_box", lambda: True)
-    monkeypatch.setattr(config, "compose_env", lambda: [])
-    monkeypatch.setenv(DOCKER, "/box/.docker-fy")
-    assert stack._host_passthrough()[DOCKER] == "/box/.docker-fy"
-    assert _clamped(monkeypatch)[DOCKER] == "/box/.docker-fy"
+    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
+    assert config.engine() == "docker"
+    monkeypatch.delenv("FOLDYARD_ENGINE", raising=False)
+    monkeypatch.setattr(config, "_table", lambda name: {})
+    _no_podman(monkeypatch)
+    assert config.engine() == "docker"
 
 
-def test_the_editor_gets_your_docker_config_back_too(docker_home, tmp_path, monkeypatch):
-    mine = tmp_path / "elsewhere"
-    mine.mkdir()
-    monkeypatch.setenv(DOCKER, str(mine))
-    env = _clamped(monkeypatch)
-    assert registrylogins.operators_env(env)[DOCKER] == str(mine)
-    assert registrylogins.SAVED_DOCKER not in registrylogins.operators_env(env)
+def test_podman_is_untouched(host, monkeypatch):
+    monkeypatch.setenv("FOLDYARD_ENGINE", "podman")
+    assert config.engine() == "podman"
 
 
-def test_the_editor_gets_no_docker_config_if_you_set_none(docker_home, monkeypatch):
-    assert DOCKER not in registrylogins.operators_env(_clamped(monkeypatch))
-
-
-# ── DOCKER_AUTH_CONFIG: a login in a variable, which beats any config file ────────────────
-
-BLOB = registrylogins.DOCKER_AUTH
-
-
-def test_the_clamp_takes_the_variable_away_from_the_engine(docker_home, monkeypatch):
-    monkeypatch.setenv(BLOB, '{"auths": {"ghcr.io": {"auth": "ZmFrZTpmYWtl"}}}')
-    assert BLOB not in _clamped(monkeypatch)
-
-
-def test_your_editor_gets_the_variable_back(docker_home, monkeypatch):
-    monkeypatch.setenv(BLOB, '{"auths": {}}')
-    env = _clamped(monkeypatch)
-    registrylogins.clamp(env)  # a child, with it already gone, must not lose it
-    assert registrylogins.operators_env(env)[BLOB] == '{"auths": {}}'
-    assert registrylogins.SAVED_DOCKER_AUTH not in registrylogins.operators_env(env)
-
-
-def test_the_compose_client_never_gets_the_variable_or_where_its_kept(docker_home, monkeypatch):
-    """Naming it in `compose_env` is one line a box can propose, and it's a login outright."""
-    monkeypatch.setattr(config, "compose_env", lambda: [BLOB, registrylogins.SAVED_DOCKER_AUTH])
-    monkeypatch.setenv(BLOB, "{}")
-    monkeypatch.setenv(registrylogins.SAVED_DOCKER_AUTH, "{}")
-    out = stack._host_passthrough()
-    assert BLOB not in out
-    assert registrylogins.SAVED_DOCKER_AUTH not in out
-
-
-def test_a_port_cant_bring_the_variable_back(docker_home, tmp_path, monkeypatch):
-    assert BLOB not in _resolved(monkeypatch, tmp_path, **{BLOB: "123"})
-
-
-def test_in_the_box_the_variable_is_left_alone(monkeypatch):
-    monkeypatch.setattr(config, "in_box", lambda: True)
-    monkeypatch.setenv(BLOB, "{}")
-    assert _clamped(monkeypatch)[BLOB] == "{}"
+def test_a_bad_engine_name_is_still_its_own_refusal(host, monkeypatch):
+    monkeypatch.setenv("FOLDYARD_ENGINE", "/tmp/evil")
+    with pytest.raises(SystemExit, match="not one of"):
+        config.engine()
 
 
 # ── which files are ours ──────────────────────────────────────────────────────────────────
