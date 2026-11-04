@@ -83,6 +83,7 @@ env:
   IN_DEVBOX: "1"
 steps:
   - uses: actions/checkout@v6
+  - uses: astral-sh/setup-uv@v6
   - name: Rootless podman's API service
     run: |
       # Ubuntu's profile for pasta refuses podman's signal when a network's last container goes.
@@ -91,11 +92,9 @@ steps:
       sock="unix://$XDG_RUNTIME_DIR/podman/podman.sock"
       echo "CONTAINER_HOST=$sock" >> "$GITHUB_ENV"
       echo "DOCKER_HOST=$sock" >> "$GITHUB_ENV"
-  - run: uv tool install foldyard
+  - run: uv tool install "foldyard==X.Y.Z" # your min_foldyard_version: CI moves when you move it
   - run: fy up
 ```
-
-Pin the install to the version your `min_foldyard_version` asks for, so CI moves when you move it.
 
 Short image names (`python:3.12-slim`) need a registry to resolve against, which a dev VM's Fedora
 guest has and an Ubuntu runner may not. Name the registry in full, or add

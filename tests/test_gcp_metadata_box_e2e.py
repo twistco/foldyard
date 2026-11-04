@@ -46,10 +46,6 @@ _LOG_SA = "devbox-log-reader@acme-staging.iam.gserviceaccount.com"
 _APP_SA = "app-runtime@acme-staging.iam.gserviceaccount.com"
 
 
-def _engine() -> str:
-    return "podman"
-
-
 def _which(cmd: str) -> bool:
     from shutil import which
 
@@ -64,7 +60,7 @@ def _engine_env() -> dict:
 
 
 def _engine_reachable() -> bool:
-    eng = _engine()
+    eng = "podman"
     if not _which(eng):
         return False
     try:
@@ -85,7 +81,7 @@ def _self_on_network() -> tuple[str, str] | None:
         return None
     try:
         out = subprocess.run(
-            [_engine(), "inspect", socket.gethostname(), "--format",
+            ["podman", "inspect", socket.gethostname(), "--format",
              "{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{$c.IPAddress}}\n{{end}}"],
             env=_engine_env(), capture_output=True, text=True, timeout=20,
         )  # fmt: skip
@@ -237,7 +233,7 @@ def metadata_box(tmp_path):
     creates real boxes on our network pointed at the emulator. Tears everything down after."""
     assert _SELF is not None  # guarded by pytestmark
     net, ip = _SELF
-    engine, eng_env = _engine(), _engine_env()
+    engine, eng_env = "podman", _engine_env()
     minter = _FakeMinter(allowlist={_LOG_SA, _APP_SA})
     minter.start()
     sock = (os.environ.get("DOCKER_HOST") or os.environ.get("CONTAINER_HOST") or "").replace(

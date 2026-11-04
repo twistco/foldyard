@@ -152,6 +152,22 @@ def test_a_compose_provider_arriving_in_the_mode_env_is_refused_too(fake_repo, m
         stack.resolve(no_machine=True)
 
 
+def test_a_compose_provider_in_the_mode_env_is_refused_in_a_box_too(fake_repo, monkeypatch):
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/s")
+    monkeypatch.setattr(stack.devmode, "derive_env", lambda _m: {"PODMAN_COMPOSE_PROVIDER": "x"})
+    with pytest.raises(stack.config.EngineRefused, match="PODMAN_COMPOSE_PROVIDER"):
+        stack.resolve(no_machine=True)
+
+
+def test_the_box_keeps_its_docker_config_for_compose(fake_repo, monkeypatch):
+    # podman reads logins from $DOCKER_CONFIG/config.json too: `docker login` in a box writes them
+    # there, and an in-box build needs them. On your computer the pinned REGISTRY_AUTH_FILE wins.
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setenv("DOCKER_CONFIG", "/home/box/.docker-fy")
+    assert stack._host_passthrough()["DOCKER_CONFIG"] == "/home/box/.docker-fy"
+
+
 def test_shellenv_preserves_explicit_compose_provider(fake_repo, capsys, monkeypatch):
     monkeypatch.setenv("PODMAN_COMPOSE_PROVIDER", "/custom/podman-compose")
     assert stack.shellenv() == 0
@@ -2327,8 +2343,7 @@ def test_compose_ps_crashed_is_a_non_zero_exit_that_no_stop_signal_explains():
 
 
 def test_crashed_services_lists_stopped_containers(fake_repo, monkeypatch):
-    # docker compose's `ps` shows only running containers without `-a`; the bundled
-    # podman-compose's IS `podman ps -a` already and its parser refuses `-a`.
+    # podman-compose's `ps` IS `podman ps -a` already, and its parser refuses `-a`.
     import types
 
     calls: list[list[str]] = []

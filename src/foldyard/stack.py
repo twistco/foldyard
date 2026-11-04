@@ -472,7 +472,7 @@ _PASSTHROUGH = frozenset(
         "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "COLORTERM", "NO_COLOR",
         "FORCE_COLOR", "LANG", "TZ", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
         "XDG_CACHE_HOME", "DOCKER_HOST", "CONTAINER_HOST", "CONTAINER_CONNECTION",
-        "REGISTRY_AUTH_FILE",
+        "DOCKER_CONFIG", "DOCKER_CONTEXT", "REGISTRY_AUTH_FILE",
         "CONTAINERS_CONF", "CONTAINERS_REGISTRIES_CONF", "CONTAINERS_STORAGE_CONF", "WORKTREE",
         "WT_OFFSET",
     }
@@ -549,7 +549,7 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
         from . import registrylogins
 
         env[registrylogins.AUTH] = registrylogins.for_compose(config.compose_env())
-        config.refuse_compose_provider(env.get("PODMAN_COMPOSE_PROVIDER", ""))
+    config.refuse_compose_provider(env.get("PODMAN_COMPOSE_PROVIDER", ""))
     return Context(
         main=main,
         env=env,
