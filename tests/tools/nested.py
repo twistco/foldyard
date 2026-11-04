@@ -109,6 +109,17 @@ def _run(argv: Sequence[str], *, stdin=None, input=None, capture=True):
     )
 
 
+def _show(done: subprocess.CompletedProcess) -> None:
+    """What a command in the L1 printed, through :func:`clean`."""
+    print(clean(done.stdout + done.stderr), end="", flush=True)
+
+
+def _stop(vm: str) -> None:
+    """Stop the L1 from outside, by force if the guest won't: a VM left up is the risk."""
+    if _run(["limactl", "stop", vm], capture=False).returncode != 0:
+        _run(["limactl", "stop", "--force", vm], capture=False)
+
+
 def _stream(argv: Sequence[str]) -> int:
     """Run ``argv``, showing its output line by line through :func:`clean`; its exit code."""
     proc = subprocess.Popen(
@@ -232,13 +243,13 @@ def up(cfg: Config) -> None:
     provisioned = _run(
         _shell_argv(cfg.vm, "sudo", "env", f"LIMA_VERSION={LIMA_VERSION}", "bash", "-s"),
         input=script,
-        capture=False,
     )
+    _show(provisioned)
     if provisioned.returncode != 0:
         raise Refused(f"provisioning {cfg.vm} failed (exit {provisioned.returncode}).")
     if _traps_missing(cfg.vm):
         print(f"▶ restarting {cfg.vm}: its kernel needs the GIC trap arguments")
-        _run(["limactl", "stop", cfg.vm], capture=False)
+        _stop(cfg.vm)
         _start(cfg.vm)
     _check_contained(cfg.vm)
     print(f"✓ {cfg.vm} is ready: `just nested-test`")
@@ -337,18 +348,21 @@ def run_tests(cfg: Config, repo: Path, ref: str, modules: Sequence[str], *, with
 
 
 def down(cfg: Config, *, delete: bool) -> None:
-    """Stop inside-out: the run, the VMs in the L1, then the L1. ``delete`` removes it too."""
+    """Stop inside-out: the run, the VMs in the L1, then the L1. ``delete`` removes it too. A VM
+    that had root is only stopped from outside: a binary planted in it would answer anything run
+    there, and the VMs inside it stop along with it."""
     status = _status(cfg.vm)
     if not status:
         print(f"{cfg.vm} doesn't exist.")
         return
-    if status == "Running":
+    if status == "Running" and not _tainted(cfg.vm):
         inner = (
             f"systemctl --user stop {UNIT} 2>/dev/null; "
             'for v in $(limactl list -q 2>/dev/null); do limactl stop "$v" 2>/dev/null; done; true'
         )
-        _run(_tester_argv(cfg.vm, inner), capture=False)
-        _run(["limactl", "stop", cfg.vm], capture=False)
+        _show(_run(_tester_argv(cfg.vm, inner)))
+    if status == "Running":
+        _stop(cfg.vm)
     if delete:
         _run(["limactl", "delete", cfg.vm], capture=False)
 

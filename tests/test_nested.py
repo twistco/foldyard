@@ -43,6 +43,8 @@ class FakeL1:
         self.streamed: list[list[str]] = []
         self.sent_pack = False
         self.git_can_refuse_lazy_fetch = True
+        self.stops_refused = 0
+        self.inner_says = ""
 
     def run(self, argv, *, stdin=None, input=None, capture=True):
         self.calls.append(list(argv))
@@ -59,11 +61,17 @@ class FakeL1:
         elif argv[:2] == ["limactl", "info"]:
             out = '{"vmTypes":["qemu","vz"]}'
         elif argv[:2] == ["limactl", "stop"]:
-            self.status = "Stopped"
+            if self.stops_refused:
+                self.stops_refused -= 1
+                rc = 1
+            else:
+                self.status = "Stopped"
         elif argv[:2] == ["limactl", "start"]:
             self.status = "Running"
             if self.traps_after_restart:
                 self.cmdline = f"BOOT_IMAGE=x ro {TRAPS}"
+        elif "limactl list -q" in joined or "bash -s" in joined:
+            out = self.inner_says
         elif "/proc/cmdline" in joined:
             out = self.cmdline
         elif "journalctl -k -b" in joined:
@@ -335,6 +343,46 @@ def test_down_stops_inside_out_and_keeps_the_vm(l1):
     outer = next(i for i, c in enumerate(order) if c.startswith("limactl stop"))
     assert inner < outer
     assert not l1.sent("limactl delete")
+
+
+def test_down_shows_nothing_from_inside_a_vm_uncleaned(l1, capsys):
+    l1.inner_says = "\x1b]52;c;ZXZpbA==\x07stopping\n"
+    nested.down(CFG, delete=False)
+    shown = capsys.readouterr().out
+    assert "\x1b" not in shown
+    assert "stopping" in shown
+
+
+def test_provisioning_shows_nothing_uncleaned(l1, capsys):
+    l1.inner_says = "\x1b]52;c;ZXZpbA==\x07installed\n"
+    nested.up(CFG)
+    shown = capsys.readouterr().out
+    assert "\x1b" not in shown
+    assert "installed" in shown
+
+
+def test_a_vm_that_had_root_is_stopped_from_outside_only(l1):
+    # A binary root planted in there could answer anything we ran, to your terminal or otherwise.
+    nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=True)
+    assert not l1.sent("limactl list -q")
+    assert not l1.sent("systemctl --user stop")
+
+
+def test_down_on_a_vm_that_had_root_runs_nothing_in_it(l1):
+    (l1.vm_dir / nested.HAD_ROOT).touch()
+    nested.down(CFG, delete=True)
+    assert not l1.sent("limactl shell")
+    assert l1.sent("limactl stop")
+    assert ["limactl", "delete", "fy-nested"] in l1.calls
+
+
+def test_a_vm_refusing_to_stop_is_forced(l1):
+    # What root left behind can block a shutdown, and a VM left up is what stopping was to avoid.
+    l1.stops_refused = 1
+    (l1.vm_dir / nested.HAD_ROOT).touch()
+    nested.down(CFG, delete=False)
+    assert ["limactl", "stop", "--force", "fy-nested"] in l1.calls
+    assert l1.status == "Stopped"
 
 
 def test_down_deletes_only_when_asked(l1):
