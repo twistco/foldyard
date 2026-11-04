@@ -686,3 +686,60 @@ def test_preflight_refuses_vm_on_an_engine_it_cant_run_on(monkeypatch):
     monkeypatch.setenv("MACHINE_COMPOSE", "host")
     monkeypatch.setattr(config, "engine", lambda: "docker")
     assert preflight._compose_issues() == []
+
+
+# ── the relays, run for real: a payload bigger than a pipe's buffer, and hostile output ───
+
+
+# Bigger than a pipe's 64 KB, which is what deadlocks a relay that writes before it reads. The
+# program says something first, so a relay that only starts reading after the write would hang.
+_NOISY = (
+    "import sys\n"
+    "print('\\x1b]0;pwned\\x07out line', flush=True)\n"
+    "print('\\x1b[31merr line\\x1b[0m', file=sys.stderr, flush=True)\n"
+    "sys.exit(3)\n#" + "x" * 300_000 + "\n"
+).encode()
+
+
+def test_run_relayed_keeps_the_streams_apart_and_cleans_them():
+    out: list[str] = []
+    err: list[str] = []
+    rc = guestcompose.run_relayed([sys.executable, "-I", "-"], _NOISY, out.append, err.append)
+    assert rc == 3
+    assert out == ["]0;pwnedout line"]
+    assert err == ["err line"]
+
+
+def test_run_stream_feeds_a_large_stdin_and_merges_the_output():
+    from foldyard import devmode
+
+    lines: list[str] = []
+    assert devmode.run_stream([sys.executable, "-I", "-"], lines.append, stdin=_NOISY) == 3
+    assert "err line" in lines
+
+
+def test_a_stream_with_no_route_says_so_and_runs_nothing(vm, tmp_path, monkeypatch, capfd):
+    vm.BACKEND = _Backend(None)
+    monkeypatch.setattr(guestcompose.subprocess, "Popen", _never)
+    assert guestcompose.stream(_ctx(tmp_path), ["ps"]) == guestcompose.NO_ROUTE
+    assert "no ssh route" in capfd.readouterr().err
+
+
+def test_a_stream_refuses_the_docker_compose_provider(vm, tmp_path, monkeypatch, capfd):
+    monkeypatch.setattr(guestcompose.subprocess, "Popen", _never)
+    ctx = _ctx(tmp_path, provider="/usr/libexec/docker/docker-compose")
+    assert guestcompose.stream(ctx, ["ps"]) == guestcompose.WRONG_PROVIDER
+    assert "docker-compose" in capfd.readouterr().err
+
+
+def test_the_reconciles_stream_says_when_it_cant_run(vm, tmp_path, monkeypatch):
+    vm.BACKEND = _Backend(None)
+    lines: list[str] = []
+    assert guestcompose.stream_to(_ctx(tmp_path), ["up"], lines.append) == guestcompose.NO_ROUTE
+    assert "no ssh route" in lines[0]
+
+
+def test_the_build_line_says_where_it_runs(vm, tmp_path, monkeypatch):
+    assert stack._where().startswith("+ (in the VM)")
+    monkeypatch.setenv("MACHINE_COMPOSE", "host")
+    assert stack._where() == "+ "
