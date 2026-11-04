@@ -63,6 +63,8 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   never `REGISTRY_AUTH_FILE` itself, which people export at their whole auth.json, and never the
   default paths. The docker CLI ignores that variable and reads `$DOCKER_CONFIG/config.json`, so
   `DOCKER_CONFIG` is pinned too, to a clean directory keeping the plugins and contexts, with no opt-in.
+  Its `auths` holds one empty placeholder on purpose: with none at all, docker falls back to the
+  platform's credential store (the keychain), and a build sends everything in it.
   `stack.resolve` applies both again after its merges: `[ports]` can name anything. What foldyard
   launches for you (the editor) gets `operators_env`.
 - `confighash.py` — the stack scope's verdict: the compose provider's own per-service config

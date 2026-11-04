@@ -48,6 +48,8 @@ SAVED_DOCKER = "FY_SAVED_DOCKER_CONFIG"
 # What the file holds. Anything else in it gets written over: whatever inherits the clamp and runs
 # `podman login` writes there, and every later build would send that login.
 _EMPTY = '{"auths": {}}\n'
+# See :func:`_docker_config`. `.invalid` never resolves (RFC 6761), so no image's registry is it.
+_PLACEHOLDER = "no-registry-logins.invalid"
 
 
 def _path() -> Path:
@@ -94,12 +96,23 @@ def _own_docker_dir(env: Mapping[str, str]) -> Path:
 
 def _docker_config(own: Path) -> str:
     """The clean ``config.json``: your plugins and current context, and nothing else of yours. Only
-    that one key is read from your file, which also holds your logins."""
-    config_json: dict[str, object] = {"cliPluginsExtraDirs": [str(own / "cli-plugins")]}
+    those keys are read from your file, which also holds your logins.
+
+    ``auths`` holds one empty entry on purpose. With no auth at all the docker CLI looks for the
+    platform's credential store (``DetectDefaultStore``: the keychain on a computer with Docker
+    Desktop), and a build then sends every login in it. This names a host, with nothing to send."""
     try:
-        current = json.loads((own / "config.json").read_text()).get("currentContext")
+        mine = json.loads((own / "config.json").read_text())
+        current, extra = mine.get("currentContext"), mine.get("cliPluginsExtraDirs")
     except (OSError, ValueError, AttributeError):
-        current = None
+        current, extra = None, None
+    plugins = [str(own / "cli-plugins")]
+    if isinstance(extra, list):
+        plugins += [d for d in extra if isinstance(d, str) and d not in plugins]
+    config_json: dict[str, object] = {
+        "auths": {_PLACEHOLDER: {}},
+        "cliPluginsExtraDirs": plugins,
+    }
     if isinstance(current, str):
         config_json["currentContext"] = current
     return json.dumps(config_json, sort_keys=True) + "\n"

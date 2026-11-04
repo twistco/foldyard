@@ -225,6 +225,61 @@ def test_the_clamped_docker_client_sends_none(api, monkeypatch):
     assert NEEDED not in sent and UNRELATED not in sent, listener.headers
 
 
+# Stands in for the platform's credential store: what `docker` finds on PATH with a name it knows.
+# Fake, on a PATH holding nothing else, so a real keychain is never asked.
+_FAKE_HELPER = f"""#!/bin/sh
+case "$1" in
+  list) echo '{{"https://registry.invalid":"fakeuser"}}' ;;
+  get) /bin/cat >/dev/null; echo '{{"ServerURL":"https://registry.invalid","Username":"fakeuser","Secret":"{NEEDED}"}}' ;;
+esac
+"""
+
+
+def _helper_only_path(d: Path) -> str:
+    bin_dir = d / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name in ("osxkeychain", "secretservice"):  # macOS's default, and Linux's without `pass`
+        helper = bin_dir / f"docker-credential-{name}"
+        helper.write_text(_FAKE_HELPER)
+        helper.chmod(0o755)
+    return str(bin_dir)
+
+
+@_needs_docker
+def test_the_clamped_docker_client_doesnt_fall_back_to_the_platforms_store(api, monkeypatch):
+    """A config with no login at all makes the docker CLI go looking for the platform's credential
+    store (`DetectDefaultStore`), and a build then sends every login in it: on a computer with
+    Docker Desktop, the keychain. So a clean config has to not read as empty."""
+    d, listener = api
+    docker = shutil.which("docker")
+    assert docker
+    home = d / "home"
+    (d / "empty").mkdir()
+    (d / "empty" / "config.json").write_text("{}\n")
+    (d / "ctx").mkdir()
+    (d / "ctx" / "Dockerfile").write_text("FROM registry.invalid/fy/base:1\n")
+    home.mkdir()
+    env = {"PATH": _helper_only_path(d), "HOME": str(home), "DOCKER_HOST": f"unix://{d}/a.sock"}
+    env["DOCKER_BUILDKIT"] = "0"
+
+    def build(config_dir: str) -> None:
+        subprocess.run(
+            [docker, "build", "-q", "."],
+            env={**env, "DOCKER_CONFIG": config_dir},
+            cwd=str(d / "ctx"),
+            capture_output=True,
+            timeout=60,
+        )
+
+    build(str(d / "empty"))
+    assert NEEDED in "".join(listener.headers), f"no helper asked: no control: {listener.headers}"
+    listener.headers.clear()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
+    build(str(registrylogins.no_logins_docker_config()))
+    assert NEEDED not in "".join(listener.headers), listener.headers
+
+
 @_needs_docker
 def test_docker_compose_still_runs_under_the_clean_config(monkeypatch):
     """The plugin lives in the config dir, so a clean one alone makes it "unknown command". Not a

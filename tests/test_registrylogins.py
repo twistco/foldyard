@@ -273,7 +273,14 @@ def _docker_config(env_dir) -> dict:
 def test_the_clamp_points_docker_at_a_config_with_no_logins(docker_home, monkeypatch):
     env = _clamped(monkeypatch)
     cfg = _docker_config(env[DOCKER])
-    assert "auths" not in cfg and "credsStore" not in cfg and "credHelpers" not in cfg
+    assert "credsStore" not in cfg and "credHelpers" not in cfg
+    assert not any(entry for entry in cfg["auths"].values())  # names, and nothing to send
+
+
+def test_the_clean_docker_config_doesnt_read_as_empty(docker_home, monkeypatch):
+    """With no entry at all the docker CLI goes looking for the platform's credential store, and a
+    build sends every login in it: tests/test_registrylogins_e2e.py shows it on a real client."""
+    assert _docker_config(_clamped(monkeypatch)[DOCKER])["auths"]
 
 
 def test_the_clean_config_keeps_your_plugins_contexts_and_current_context(docker_home, monkeypatch):
@@ -282,6 +289,7 @@ def test_the_clean_config_keeps_your_plugins_contexts_and_current_context(docker
     cfg = _docker_config(env[DOCKER])
     assert cfg["cliPluginsExtraDirs"] == [str(docker_home / "cli-plugins")]
     assert cfg["currentContext"] == "desktop-linux"
+    assert "credsStore" not in cfg
     assert (registrylogins.Path(env[DOCKER]) / "contexts").resolve() == docker_home / "contexts"
 
 
@@ -301,7 +309,7 @@ def test_a_docker_login_under_the_clamp_doesnt_stay(docker_home, monkeypatch):
     cfg = registrylogins.Path(env[DOCKER]) / "config.json"
     cfg.write_text('{"auths": {"ghcr.io": {"auth": "ZmFrZTpmYWtl"}}}')
     registrylogins.clamp(env)
-    assert "auths" not in _docker_config(env[DOCKER])
+    assert "ghcr.io" not in _docker_config(env[DOCKER])["auths"]
 
 
 def test_a_docker_config_that_cant_be_put_right_is_never_the_answer(docker_home, monkeypatch):
@@ -314,6 +322,16 @@ def test_a_docker_config_that_cant_be_put_right_is_never_the_answer(docker_home,
     assert first != registrylogins.Path(env[DOCKER])
     assert first != second
     assert not first.exists()
+
+
+def test_your_own_extra_plugin_dirs_come_too(docker_home, monkeypatch):
+    """A compose plugin can live only in one of them, and then it would be an unknown command."""
+    own = docker_home / "config.json"
+    data = json.loads(own.read_text())
+    data["cliPluginsExtraDirs"] = ["/opt/docker-plugins", str(docker_home / "cli-plugins"), 7]
+    own.write_text(json.dumps(data))
+    cfg = _docker_config(_clamped(monkeypatch)[DOCKER])
+    assert cfg["cliPluginsExtraDirs"] == [str(docker_home / "cli-plugins"), "/opt/docker-plugins"]
 
 
 def test_an_unreadable_docker_config_of_yours_is_only_no_current_context(docker_home, monkeypatch):
