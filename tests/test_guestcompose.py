@@ -743,3 +743,28 @@ def test_the_build_line_says_where_it_runs(vm, tmp_path, monkeypatch):
     assert stack._where().startswith("+ (in the VM)")
     monkeypatch.setenv("MACHINE_COMPOSE", "host")
     assert stack._where() == "+ "
+
+
+def test_a_compose_file_the_vm_cant_read_fails_the_profile_read(vm, tmp_path, monkeypatch):
+    """Callers are best-effort and catch this: quietly skipping the file would read as "no service
+    has a profile", and the reconcile would then drop running profile-gated services."""
+    f = str(tmp_path / "compose.yml")
+    monkeypatch.setattr(guestcompose, "file_services", lambda files, timeout=None: {f: None})
+    with pytest.raises(OSError, match="couldn't read"):
+        stack._service_profiles(_ctx(tmp_path))
+
+
+def test_a_failed_answer_is_unknown_however_it_reads(vm, tmp_path, monkeypatch):
+    """The VM user's shell startup files are box-writable, so a failed call's stdout is anyone's:
+    the exit code decides, not whether it happens to parse."""
+    f = str(tmp_path / "compose.yml")
+    _answering(monkeypatch, json.dumps({f: {"web": []}}), rc=255)
+    assert guestcompose.file_services([f]) == {f: None}
+
+
+def test_fy_ps_to_a_file_keeps_the_guests_stderr_out_of_it(vm, tmp_path, monkeypatch, capfd):
+    program = b"import sys\nprint('row')\nprint('noise', file=sys.stderr)\n"
+    monkeypatch.setattr(guestcompose, "_command", lambda *a: ([sys.executable, "-I", "-"], program))
+    assert guestcompose.stream(_ctx(tmp_path), ["ps"]) == 0
+    captured = capfd.readouterr()
+    assert (captured.out, captured.err) == ("row\n", "noise\n")
