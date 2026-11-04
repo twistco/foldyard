@@ -226,16 +226,18 @@ def _refuse_tainted(vm: str) -> None:
 
 
 def _forwards_nothing(rules: list[dict] | None) -> bool:
-    """Is the first rule, which wins, ours? `limactl list` reports it with Lima's defaults filled
-    in, and may leave a false value out."""
-    first = (rules or [{}])[0]
+    """Is our rule the only one? Lima forwards socket and reverse rules in a loop of their own, so
+    it wouldn't stop those. `limactl list` reports it with Lima's defaults filled in, and may leave
+    a false value out."""
+    if not rules or len(rules) != 1:
+        return False
+    rule = rules[0]
     return (
-        first.get("ignore") is True
-        and first.get("guestIP") == "0.0.0.0"
-        and not first.get("guestIPMustBeZero")
-        and first.get("proto") == "any"
-        and first.get("guestPortRange", [1, 65535]) == [1, 65535]
-        and not first.get("guestSocket")
+        rule.get("ignore") is True
+        and rule.get("guestIP") == "0.0.0.0"
+        and not rule.get("guestIPMustBeZero")
+        and rule.get("proto") == "any"
+        and rule.get("guestPortRange", [1, 65535]) == [1, 65535]
     )
 
 

@@ -251,8 +251,24 @@ def test_a_run_refuses_an_l1_that_is_not_contained(l1, spoil, why):
 
 
 def test_the_forward_rule_is_recognised_with_limas_defaults_filled_in(l1):
-    l1.port_forwards = json.dumps([FILLED_IN, {"guestIP": "127.0.0.1"}])
+    l1.port_forwards = json.dumps([FILLED_IN])
     assert nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=False) == 0
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"guestSocket": "/run/x.sock", "hostSocket": "x.sock"},
+        {"guestSocket": "/run/x.sock", "hostSocket": "/tmp/x.sock", "reverse": True},
+        {"guestPort": 80, "hostPort": 80},
+    ],
+)
+def test_any_rule_beside_ours_is_refused(l1, extra):
+    # Lima forwards socket and reverse rules in a loop of their own, so a first-match `ignore`
+    # doesn't stop them, and neither of the live probes would see one.
+    l1.port_forwards = json.dumps([FILLED_IN, extra])
+    with pytest.raises(nested.Refused, match="forward"):
+        nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=False)
 
 
 def test_a_run_sends_the_commit_then_runs_the_tier_as_the_tester(l1):
