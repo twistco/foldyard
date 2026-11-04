@@ -43,9 +43,8 @@ def issues() -> list[str]:
 
     # 1. The ENGINE CLI drives the socket every backend hands out, so it is required whatever the
     #    backend is — and it is a DIFFERENT binary from the VM-lifecycle one (lima needs limactl
-    #    AND podman). `config.engine()` resolves to docker only when podman is absent, and that
-    #    fallback is for CI (ADR-0010), so a resolved `docker` on a dev host means podman is
-    #    missing — hence the fix hint names podman, not "podman or docker".
+    #    AND podman). `config.engine()` resolves to docker only in a box (ADR-0010, CI's
+    #    fallback), and refuses it here, saying why, so the fix hint names podman.
     if not which(config.engine()):
         out.append(
             f"✗ the container engine `{config.engine()}` isn't installed — every stack, box and\n"
@@ -178,8 +177,6 @@ def issues() -> list[str]:
 
     # 7c. The attributing forwarder (see _attribution_issues).
     out.extend(_attribution_issues(backend_name))
-    # 7d. The compose client in the guest (see _compose_issues).
-    out.extend(_compose_issues())
 
     # 8. The host-side wall is the tier ABOVE the guest wall (same band, enforced where the guest
     #    has no reach), so it needs `wall` — and a host that can enforce it: nftables + cgroup v2
@@ -212,17 +209,6 @@ def issues() -> list[str]:
                 "    still applies)."
             )
     return out
-
-
-def _compose_issues() -> list[str]:
-    """``[machine] compose = "vm"`` runs foldyard's podman-compose in the guest against its podman:
-    on any other engine it would fail on every call, so it is refused here, once."""
-    if config.machine_compose() != "vm" or config.engine() == "podman":
-        return []
-    return [
-        f'✗ [machine] compose = "vm" needs the podman engine, but the engine is\n'
-        f"    '{config.engine()}'. Unset FOLDYARD_ENGINE, or drop `compose`."
-    ]
 
 
 def _attribution_issues(backend_name: str) -> list[str]:

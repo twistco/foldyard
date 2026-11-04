@@ -121,6 +121,13 @@ channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-moun
   running the client in the VM, where those paths hold nothing of yours. It is experimental, and
   it will become the default once it has been proven
   ([configuration](./configuration.md#machine)).
+- **Registry logins stay on your computer.** A client there sends its logins to the VM's API service
+  with each pull and build, all of them for a build, and the service keeps them in a temp file a box
+  can read while it runs. So foldyard's clients get none, whatever `podman login` has stored. A
+  project can name `FY_REGISTRY_AUTH_FILE` in `[project] compose_env`, for a file you export under
+  that name ([stack](./stack.md#private-images)): a box can read that file's login during a build,
+  so keep it narrow. Before this, every login on your computer was exposed that way. Your own recipes that run
+  `"$ENGINE" compose` or `podman build` aren't foldyard's clients: they still send yours.
 - **Repo text that steers the agent.** `[claude].system_prompt` is prepended to every teammate's
   agent, and `[claude.settings]` / `[codex.config]` are passed to the agent CLI (`--settings` /
   `-c`), where a `hooks` or `permissions` entry steers it harder than any prompt. This runs in the

@@ -650,7 +650,10 @@ def _build_img(engine: str, main: Path, env: dict) -> int:
     # packaged one's is foldyard's own files, which the VM can't see and the box can't write.
     packaged = img["dockerfile"] == config.packaged_box_image(img["tag"])["dockerfile"]
     in_vm = guestcompose.wanted() and not packaged
-    return _gated_build(cmd, tail, env, context, "box image build", in_vm=in_vm)
+    rc = _gated_build(cmd, tail, env, context, "box image build", in_vm=in_vm)
+    if rc != 0:
+        stack._say_registry_logins()
+    return rc
 
 
 # `[box].packages` — system packages baked into a layer ON TOP of the box image, so a recreated box

@@ -157,13 +157,6 @@ def test_no_ssh_route_is_said_never_run_here_instead(vm, tmp_path, monkeypatch):
     assert "no ssh route" in proc.stderr
 
 
-def test_the_docker_compose_provider_is_refused_in_the_vm(vm, tmp_path, monkeypatch):
-    monkeypatch.setattr(guestcompose.subprocess, "run", _never)
-    proc = guestcompose.compose(_ctx(tmp_path, provider="/usr/libexec/docker/docker-compose"), [])
-    assert proc.returncode == guestcompose.WRONG_PROVIDER
-    assert "docker-compose" in proc.stderr
-
-
 def _never(*a, **kw):
     raise AssertionError(f"ran {a[0] if a else kw}")
 
@@ -672,20 +665,6 @@ def test_the_packaged_box_image_stays_here(vm, tmp_path, monkeypatch):
     assert ran[0][:2] == ["podman", "build"]
 
 
-def test_preflight_refuses_vm_on_an_engine_it_cant_run_on(monkeypatch):
-    from foldyard import preflight
-
-    monkeypatch.setenv("MACHINE_COMPOSE", "vm")
-    monkeypatch.setattr(config, "engine", lambda: "docker")
-    [issue] = preflight._compose_issues()
-    assert 'compose = "vm"' in issue and "podman" in issue
-    monkeypatch.setattr(config, "engine", lambda: "podman")
-    assert preflight._compose_issues() == []
-    monkeypatch.setenv("MACHINE_COMPOSE", "host")
-    monkeypatch.setattr(config, "engine", lambda: "docker")
-    assert preflight._compose_issues() == []
-
-
 # ── the relays, run for real: a payload bigger than a pipe's buffer, and hostile output ───
 
 
@@ -721,13 +700,6 @@ def test_a_stream_with_no_route_says_so_and_runs_nothing(vm, tmp_path, monkeypat
     monkeypatch.setattr(guestcompose.subprocess, "Popen", _never)
     assert guestcompose.stream(_ctx(tmp_path), ["ps"]) == guestcompose.NO_ROUTE
     assert "no ssh route" in capfd.readouterr().err
-
-
-def test_a_stream_refuses_the_docker_compose_provider(vm, tmp_path, monkeypatch, capfd):
-    monkeypatch.setattr(guestcompose.subprocess, "Popen", _never)
-    ctx = _ctx(tmp_path, provider="/usr/libexec/docker/docker-compose")
-    assert guestcompose.stream(ctx, ["ps"]) == guestcompose.WRONG_PROVIDER
-    assert "docker-compose" in capfd.readouterr().err
 
 
 def test_the_reconciles_stream_says_when_it_cant_run(vm, tmp_path, monkeypatch):

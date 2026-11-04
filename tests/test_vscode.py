@@ -1484,3 +1484,17 @@ def test_no_operator_vscode_seeds_nothing(fake):
 
     assert not (fake["udd"] / "User" / "keybindings.json").exists()
     assert "update.mode" not in json.loads(_settings(fake).read_text())
+
+
+def test_the_editor_gets_your_own_registry_auth_file_back(fake, monkeypatch):
+    """foldyard's clients carry no registry logins (`registrylogins`), but the editor is yours, and
+    a new instance would hand that empty file to every terminal you open in it."""
+    from foldyard import registrylogins
+
+    monkeypatch.setenv(registrylogins.AUTH, str(registrylogins.no_logins_file()))
+    monkeypatch.setenv(registrylogins.SAVED, "/mine/auth.json")
+    fake["state"]["running"] = True
+    assert vscode.code() == 0
+    env = _launch(fake["calls"])[0]["env"]
+    assert env[registrylogins.AUTH] == "/mine/auth.json"
+    assert registrylogins.SAVED not in env

@@ -62,8 +62,11 @@ foldyard runs your engine's own compose command, and echoes each command line
 
 - **On podman (every dev machine):** `podman compose`, with its provider pinned to the
   **podman-compose** bundled in foldyard's install (version 1.6 or later). A
-  `PODMAN_COMPOSE_PROVIDER` you set yourself wins.
-- **On docker** (a CI runner with no podman, or `[engine] cli = "docker"`): `docker compose`.
+  `PODMAN_COMPOSE_PROVIDER` you set yourself wins if it names a podman-compose. On your computer any
+  other name is refused: docker-compose is a docker client, which would send the VM your registry
+  logins ([Private images](#private-images)).
+- **On docker** (only in a box or a CI job that sets `IN_DEVBOX=1`; it is refused on your
+  computer): `docker compose`.
 
 If your CI runs `docker compose`, write files that work under both — the
 [differences below](#podman-compose-differences-that-bite) are the ones that bite.
@@ -159,6 +162,40 @@ or give it a credential through a mode ([below](#keep-secrets-out-of-compose)).
 Run from inside the box, or with `[machine] compose = "vm"`
 ([experimental](./configuration.md#machine)), the compose client runs in the VM, where none of
 your files are, so these checks don't apply: a path like that just isn't there.
+
+## Private images
+
+A compose client doesn't pull on your computer: it asks the VM to, and sends your logins along. So
+foldyard gives the clients it starts on your computer **no registry logins**, whatever `podman login`
+has stored, and images come from a registry anonymously. Your logins would otherwise sit in the VM
+during a build, where a box can read them, all of them, not only the one that build needs.
+
+For a private image, opt in for that project:
+
+```bash
+podman login --authfile ~/.foldyard/acme-registry.json ghcr.io
+export FY_REGISTRY_AUTH_FILE=~/.foldyard/acme-registry.json
+```
+
+```toml
+[project]
+compose_env = ["FY_REGISTRY_AUTH_FILE"]
+```
+
+**A box can read what's in that file** while a build runs, so give it one login, read-only and
+scoped to what this project pulls. `fy config widenings` lists it. It takes both steps: naming it
+without exporting a file means no logins, and so does exporting one this project doesn't name. Your
+own `REGISTRY_AUTH_FILE` never counts, so a line in `compose_env`, which the box can propose, can't
+send the `auth.json` you already point it at.
+
+An image already in the VM needs no registry, so `fy up` in the box finds it. A new one fails at the
+pull: the box has no login, and an agent can't make your logins fetch something new by editing a
+compose file. An anonymous pull also means Docker Hub's lower rate limit.
+
+With `[machine] compose = "vm"` *(experimental)* the client runs in the VM, where no file on your
+computer reaches it, so the opt-in does nothing there. Pull a private image once with the client on
+your computer, `MACHINE_COMPOSE=host fy build` with the opt-in above; from then on it's in the VM and
+needs no login.
 
 ## podman-compose differences that bite
 

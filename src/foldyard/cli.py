@@ -1626,8 +1626,9 @@ def skill_install(
 
 def main() -> None:
     """Console-script entry point (`foldyard = foldyard.cli:main`)."""
-    from . import term
+    from . import registrylogins, term
 
+    registrylogins.clamp()  # before anything can start an engine client
     term.install()  # color the ✓/✗/▶/⚠ glyphs when stdout/stderr are real TTYs
     app()
 

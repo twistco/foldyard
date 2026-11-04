@@ -21,6 +21,9 @@ just lint        # ruff check + format --check   (auto-fix: just format)
 just typecheck   # pyright + ty (both, run together)
 just check       # lint + typecheck + suite — what CI gates on
 just prune       # list merged .claude/worktrees, local branches, orphaned dev venvs (--apply removes)
+just nested-up   # Apple M3+: a VM of its own for the host tier (docs/nested-virt.md)
+just nested-test [--ref REF] [modules]   # send a commit in, run the tier (default: CI's shards)
+just nested-down [--delete]
 ```
 
 **Tooling (dev deps, in `pyproject.toml`):** ruff (lint+format, line-length 100), pyright +
@@ -55,6 +58,15 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   creates or builds (`stack._escapes`), host-only. Interim — a key list, and racy against a box
   that swaps a checked file for a symlink; the structural fix runs compose in the VM. Its sibling
   clamp: `stack._host_passthrough`, the compose client's allowlisted env.
+- `registrylogins.py` — a `podman` client on the host sends its logins to the API service in the VM
+  (a build sends all of them, and the service writes them to a temp file a box can read), so
+  `cli.main` pins `REGISTRY_AUTH_FILE` to an empty file before anything runs, and children inherit it.
+  The only way out takes both an export of `FY_REGISTRY_AUTH_FILE` at a file made for it and the
+  adopted `[project] compose_env` naming that (`stack._host_passthrough`, the compose client only):
+  never `REGISTRY_AUTH_FILE` itself, which people export at their whole auth.json, and never the
+  default paths. `stack.resolve` applies it again after its merges: `[ports]` can name anything. What
+  foldyard launches for you (the editor) gets `operators_env`. The docker CLI has no such switch
+  (`config.json`, the keychain, `DOCKER_AUTH_CONFIG`), so `config.engine` refuses it off-box.
 - `guestcompose.py` — `[machine] compose = "vm"` (experimental; docs/compose-in-vm-scope.md): every
   compose call, the stack's builds and a project's own box image run in the GUEST as the VM user,
   each one ssh run of `python3 -I -` whose stdin is the whole payload: a deterministic zip of
@@ -364,6 +376,9 @@ foldyard's surface splits by *where it can be validated*:
    - `test_mount_visibility_e2e.py` — the git heal's premise on THIS host's mount (virtiofs on
      macOS, 9p on the Linux/WSL2 runners): a file the VM renames into place reaches the host
      whole, never briefly missing, never older than one already seen (ADR-0021, 2026-09-27).
+   - `test_registrylogins_e2e.py` — a real client's headers on a logging socket (an auth file sends
+     every login; clamped, none, default paths included), then a real `fy build` watched by a
+     rootless container bind-mounting the guest's `/var/tmp`, as a box could, with a positive control.
    - `test_guestcompose_e2e.py` — `[machine] compose = "vm"`: the spike (the payload on the guest's
      python, one call's cost in the step summary, config-hash parity, red-first controls that an
      `env_file:` and an `include:` naming files only on your computer are read by the host's client
@@ -404,7 +419,12 @@ foldyard's surface splits by *where it can be validated*:
      `fy ps` over `CONTAINER_HOST`, in-box `fy verify` ALL PASS, `box down`.
    On a Lima host these run against the example's own VM (creating, restarting, recreating it),
    never a consumer's. What the runner cannot reach — nested virtualisation for the gVisor
-   posture — stays the recipe in [docs/nested-virt.md](./docs/nested-virt.md).
+   posture — stays the recipe in [docs/nested-virt.md](./docs/nested-virt.md). That page's M3+ rig
+   (`just nested-up`, `just nested-test`, tests/tools/nested.py) also runs this tier on arm64 Linux
+   in a VM of its own, so it can't collide with the `foldyard-example` on your computer. **On the M3
+   Max and macOS 27.0.1 where this was measured, the L1 kernel needs the GIC traps the page names, or
+   no L2 boots**, while `/dev/kvm` and `KVM_CREATE_VM` still look fine. Why a box doesn't get `/dev/kvm` itself:
+   [ADR-0035](./docs/adrs/0035-the-box-asks-for-a-test-run.md).
    From a Claude Code cloud session (root, no `/dev/kvm`, an egress proxy that re-signs TLS) the
    tier runs under QEMU's TCG, slowly: [`.claude/skills/cloud-host/`](./.claude/skills/cloud-host/SKILL.md)
    sets that host up in one script and lists what breaks there and why.

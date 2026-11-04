@@ -144,6 +144,14 @@ def test_shellenv_main_path(fake_repo, capsys):
     assert "export APP_PORT=3000" in out and "export SIM_PORT=4500" in out
 
 
+def test_a_compose_provider_arriving_in_the_mode_env_is_refused_too(fake_repo, monkeypatch):
+    # The mode env is merged last and can name anything, so the engine's own check has been and gone.
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    monkeypatch.setattr(stack.devmode, "derive_env", lambda _m: {"PODMAN_COMPOSE_PROVIDER": "x"})
+    with pytest.raises(stack.config.EngineRefused, match="PODMAN_COMPOSE_PROVIDER"):
+        stack.resolve(no_machine=True)
+
+
 def test_shellenv_preserves_explicit_compose_provider(fake_repo, capsys, monkeypatch):
     monkeypatch.setenv("PODMAN_COMPOSE_PROVIDER", "/custom/podman-compose")
     assert stack.shellenv() == 0
@@ -613,7 +621,7 @@ def test_sweep_signature_on_docker_engine_is_the_config_hash(fake_repo, foreign_
     # docker-compose is the only provider writing com.docker.compose.config-hash — on the docker
     # engine (box/CI) that existence-filter is the native signature, so podman-compose-created
     # containers are the foreign ones there.
-    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
+    monkeypatch.setattr(config, "engine", lambda: "docker")  # a box: refused off-box
     config.clear_caches()
     assert stack.up() == 0
     assert any(
@@ -1063,7 +1071,7 @@ def test_up_docker_engine_builds_then_starts_without_rebuilding(
 ):
     # Docker (e.g. CI) delegates the build to Compose/BuildKit, then starts the image with
     # --no-build so up follows the same shared engine-selection path as explicit builds.
-    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
+    monkeypatch.setattr(config, "engine", lambda: "docker")  # a box: refused off-box
     config.clear_caches()
     assert stack.up() == 0
     calls = capture_run
@@ -1121,7 +1129,7 @@ def test_build_podman_uses_native_builder_for_requested_profile_service(
 
 
 def test_build_docker_delegates_to_compose(fake_repo, capture_run, monkeypatch):
-    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
+    monkeypatch.setattr(config, "engine", lambda: "docker")  # a box: refused off-box
     config.clear_caches()
 
     assert stack.build(["e2e-app"], extra_profiles=["e2e"]) == 0
@@ -2715,7 +2723,7 @@ def test_on_docker_the_compose_build_and_up_are_refused(fake_repo, capture_run, 
     # docker (the CI fallback) builds through `compose build`, not `_podman_build` — so the
     # compose passthrough itself must ask the guard.
     _plant(fake_repo)
-    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
+    monkeypatch.setattr(config, "engine", lambda: "docker")  # a box: refused off-box
     config.clear_caches()
     assert stack.up() != 0
     assert not [v for v in _compose_verbs(capture_run) if v in ("build", "--no-build", "-d")]
@@ -2922,7 +2930,7 @@ def _drive_build_on_the_docker_engine(monkeypatch) -> None:
     # Only the docker engine builds through compose (podman builds with buildah, see
     # _podman_build), but foldyard sends one argv per verb whatever the provider, so the build's
     # is held to the same contract.
-    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
+    monkeypatch.setattr(config, "engine", lambda: "docker")  # a box: refused off-box
     config.clear_caches()
     stack.build(["app"])
 

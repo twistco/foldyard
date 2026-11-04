@@ -87,6 +87,34 @@ prune *args:
     cd "{{_dir}}"
     uv run --no-project python tests/tools/prune.py {{args}}
 
+# The host tier in a VM of its own, on an Apple M3+ (tests/tools/nested.py, docs/nested-virt.md):
+# it can't collide with the VMs on your computer, and what it runs can't reach your computer.
+# Run these on your computer. A foldyard-only tool, so these aren't `fy` verbs.
+#   just nested-up
+#   just nested-test [--ref REF] [tests/test_*_e2e.py …]   # default: HEAD, CI's shards
+#   just nested-test --with-sudo tests/test_wall_e2e.py    # root: stops the VM, then replace it
+#   just nested-down [--delete]
+nested-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v uv >/dev/null 2>&1 || { echo "✗ uv not found — brew install uv" >&2; exit 1; }
+    cd "{{_dir}}"
+    uv run --no-project python tests/tools/nested.py up
+
+nested-test *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v uv >/dev/null 2>&1 || { echo "✗ uv not found — brew install uv" >&2; exit 1; }
+    cd "{{_dir}}"
+    uv run --no-project python tests/tools/nested.py test {{args}}
+
+nested-down *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v uv >/dev/null 2>&1 || { echo "✗ uv not found — brew install uv" >&2; exit 1; }
+    cd "{{_dir}}"
+    uv run --no-project python tests/tools/nested.py down {{args}}
+
 # Run the foldyard CLI from source (without installing) — handy while iterating.
 # e.g. `just run mode` / `just run doctor`.
 run *args:

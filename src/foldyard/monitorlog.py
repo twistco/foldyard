@@ -198,7 +198,7 @@ def _engine_describe(ids: list[str]) -> dict[str, dict | None] | None:
              "{{.ID}}\t{{.Names}}\t{{json .Labels}}"],
             capture_output=True, text=True, timeout=15, env=devmode._engine_env(),
         )  # fmt: skip
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, config.EngineRefused):
         return None
     if res.returncode != 0:
         return None

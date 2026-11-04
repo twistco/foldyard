@@ -166,6 +166,7 @@ jobs:
               - tests/test_machine_e2e.py
               - tests/test_verify_e2e.py
               - tests/test_mount_visibility_e2e.py
+              - tests/test_registrylogins_e2e.py
               - tests/test_guestcompose_e2e.py
               - tests/test_forwarder_e2e.py
               - tests/test_e2e.py
@@ -386,6 +387,7 @@ jobs:
               - tests/test_machine_e2e.py
               - tests/test_verify_e2e.py
               - tests/test_mount_visibility_e2e.py
+              - tests/test_registrylogins_e2e.py
               - tests/test_guestcompose_e2e.py
               - tests/test_forwarder_e2e.py
           - name: W2

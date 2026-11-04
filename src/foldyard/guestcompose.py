@@ -51,7 +51,6 @@ _RUNNER = "fy_compose_runner"
 
 # Exit codes this module answers with itself, never from the guest.
 NO_ROUTE = 125
-WRONG_PROVIDER = 2
 
 # Names in the compose env that describe YOUR computer and mean nothing in the guest (paths,
 # connection names, the provider's path here). The guest runner supplies its own PATH/HOME/USER/
@@ -229,28 +228,9 @@ def call(
     )
 
 
-def _provider_refusal(ctx, argv: list[str]) -> subprocess.CompletedProcess | None:
-    """Only podman-compose runs in the guest: it has no docker-compose
-    (docs/compose-in-vm-scope.md, decision 3)."""
-    from . import stack
-
-    if stack._podman_compose_active(ctx):
-        return None
-    return _refused(
-        ["compose-in-vm", "compose", *argv],
-        WRONG_PROVIDER,
-        '[machine] compose = "vm" runs foldyard\'s own podman-compose in the VM, and this '
-        "stack's compose provider is docker-compose (PODMAN_COMPOSE_PROVIDER). Unset it, or "
-        'leave [machine] compose at "host".',
-    )
-
-
 def compose(ctx, args: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess:
     """``<engine> compose -f … <args>`` for ``ctx``, run in the guest, its output captured."""
-    argv = [*ctx.compose[2:], *args]
-    if (refused := _provider_refusal(ctx, argv)) is not None:
-        return refused
-    return call("compose", argv, ctx.env, str(ctx.main), timeout=timeout)
+    return call("compose", [*ctx.compose[2:], *args], ctx.env, str(ctx.main), timeout=timeout)
 
 
 def config_hashes(ctx, flags: list[str], *, timeout: float | None = None):
@@ -305,11 +285,7 @@ def _print_to(file_name: str) -> Callable[[str], None]:
 def stream(ctx, args: list[str]) -> int:
     """Like :func:`compose`, its output relayed live to your stdout and stderr (a line at a time,
     :func:`printable`). For the verbs a person watches: ``up``, ``down``, ``ps``, ``logs -f``."""
-    argv = [*ctx.compose[2:], *args]
-    if (refused := _provider_refusal(ctx, argv)) is not None:
-        print(refused.stderr, end="", file=sys.stderr)
-        return refused.returncode
-    return _stream("compose", argv, ctx.env, str(ctx.main))
+    return _stream("compose", [*ctx.compose[2:], *args], ctx.env, str(ctx.main))
 
 
 def stream_podman(argv: list[str], env: dict[str, str], cwd: str) -> int:
@@ -372,11 +348,9 @@ def stream_to(ctx, args: list[str], emit: Callable[[str], None]) -> int:
     posture reconcile, whose output must not bleed over the TUI)."""
     from . import devmode
 
-    argv = [*ctx.compose[2:], *args]
-    refused = _provider_refusal(ctx, argv)
-    command = None if refused else _command("compose", argv, ctx.env, str(ctx.main))
+    command = _command("compose", [*ctx.compose[2:], *args], ctx.env, str(ctx.main))
     if command is None:
-        emit(refused.stderr.strip() if refused else f"✗ {_no_route()}")
-        return refused.returncode if refused else NO_ROUTE
+        emit(f"✗ {_no_route()}")
+        return NO_ROUTE
     cmd, stdin = command
     return devmode.run_stream(cmd, lambda line: emit(printable(line)), env=_ssh_env(), stdin=stdin)
