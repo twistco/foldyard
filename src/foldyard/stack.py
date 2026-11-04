@@ -565,16 +565,12 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
 _CREATES = frozenset({"up", "run", "create", "build"})
 
 
-def _compose_read(
+def _compose_output(
     ctx: Context, args: list[str], *, timeout: float | None = None
 ) -> subprocess.CompletedProcess:
-    """A compose call that only READS (``config --services``, ``ps``), its output captured as
-    text: in the guest under ``[machine] compose = "vm"`` (:mod:`foldyard.guestcompose`), else
-    here. ``args`` follow the ``-f`` list (profile flags first, where the caller wants them).
-
-    Not the full render (:func:`_render_config`): while ``up`` and the builds still run here, the
-    path guard must judge what THIS client will read, and an answer from the guest is the box's
-    to shape (the VM user's home is box-writable). It moves with them (phase 2)."""
+    """A compose call whose output is captured as text: in the guest under ``[machine] compose =
+    "vm"`` (:mod:`foldyard.guestcompose`), else here. ``args`` follow the ``-f`` list (profile flags
+    first, where the caller wants them)."""
     from . import guestcompose
 
     if guestcompose.wanted():
@@ -582,15 +578,36 @@ def _compose_read(
     return _run([*ctx.compose, *args], env=ctx.env, cwd=str(ctx.main), timeout=timeout)
 
 
+def _compose_files(ctx: Context) -> list[str]:
+    """The ``-f`` paths of ``ctx``'s compose command, in order."""
+    return [ctx.compose[i + 1] for i, arg in enumerate(ctx.compose[:-1]) if arg == "-f"]
+
+
+def _shown(ctx: Context, args: list[str]) -> str:
+    """The echoed line for a compose call (the "thin and echoing" rule), saying where it runs."""
+    from . import guestcompose
+
+    where = "+ (in the VM) " if guestcompose.wanted() else "+ "
+    return where + " ".join(shlex.quote(c) for c in [*ctx.compose, *args])
+
+
+def _engine_output(ctx: Context, cmd: list[str], **kw) -> int:
+    """A build step (``podman build`` or ``tag``): in the guest under ``[machine] compose = "vm"``,
+    so the client packs the context from what the VM sees, else here. ``kw`` names where its output
+    goes."""
+    from . import guestcompose
+
+    if guestcompose.wanted():
+        return guestcompose.call("podman", cmd[1:], ctx.env, str(ctx.main), **kw).returncode
+    return subprocess.run(cmd, env=ctx.env, cwd=str(ctx.main), **kw).returncode
+
+
 def _render_config(
     ctx: Context, extra_profiles: list[str] | None = None, deadline: float | None = None
 ) -> dict | None:
     """The normalized ``compose config`` document, or None when it can't be rendered/parsed."""
-    proc = _run(
-        [*ctx.compose, *_profile_flags(ctx, extra_profiles), "config"],
-        env=ctx.env,
-        cwd=str(ctx.main),
-        timeout=_left(deadline),
+    proc = _compose_output(
+        ctx, [*_profile_flags(ctx, extra_profiles), "config"], timeout=_left(deadline)
     )
     if proc.returncode != 0:
         return None
@@ -611,14 +628,16 @@ def _escapes(
     deadline: float | None = None,
 ) -> list[str]:
     """Why the compose client must not act on this stack: paths its compose files name outside
-    the checkout (see :mod:`foldyard.composeguard`). ``[]`` in the box — the client there runs
-    in the VM with nothing of the operator's to read. Fails closed: a config that won't render
-    is a refusal too (compose would fail on it anyway)."""
-    if config.in_box():
+    the checkout (see :mod:`foldyard.composeguard`). ``[]`` wherever the client runs in the VM
+    with nothing of the operator's to read: in the box, and under ``[machine] compose = "vm"``.
+    Fails closed: a config that won't render is a refusal too (compose would fail on it anyway)."""
+    from . import guestcompose
+
+    if config.in_box() or guestcompose.wanted():
         return []
     from . import composeguard
 
-    files = [Path(ctx.compose[i + 1]) for i, a in enumerate(ctx.compose[:-1]) if a == "-f"]
+    files = [Path(f) for f in _compose_files(ctx)]
     if not files:
         return []
     project_dir = files[0].parent
@@ -660,9 +679,13 @@ def _compose(
         for line in _refusal(problems):
             _err(line)
         return 1
-    cmd = list(ctx.compose) + _profile_flags(ctx, extra_profiles) + args
-    _err("+ " + " ".join(shlex.quote(c) for c in cmd))
-    return subprocess.run(cmd, env=ctx.env, cwd=str(ctx.main)).returncode
+    from . import guestcompose
+
+    full = [*_profile_flags(ctx, extra_profiles), *args]
+    _err(_shown(ctx, full))
+    if guestcompose.wanted():
+        return guestcompose.stream(ctx, full)
+    return subprocess.run([*ctx.compose, *full], env=ctx.env, cwd=str(ctx.main)).returncode
 
 
 def _redact_build_args(cmd: list[str]) -> list[str]:
@@ -752,11 +775,7 @@ def _podman_build(
     previous `<project>_<service>` images — for `up` to remove once containers have moved off
     them (see ``_remove_superseded``).
     """
-    cfg = _run(
-        list(ctx.compose) + _profile_flags(ctx, extra_profiles) + ["config"],
-        env=ctx.env,
-        cwd=str(ctx.main),
-    )
+    cfg = _compose_output(ctx, [*_profile_flags(ctx, extra_profiles), "config"])
     if cfg.returncode != 0:
         _err(cfg.stderr.strip())
         return cfg.returncode
@@ -838,9 +857,7 @@ def _podman_build(
         _err(echoed)
         log.write(echoed + "\n")
         log.flush()  # the subprocess writes to the fd directly — keep ordering
-        rc = subprocess.run(
-            cmd, env=ctx.env, cwd=str(ctx.main), stdout=log, stderr=subprocess.STDOUT
-        ).returncode
+        rc = _engine_output(ctx, cmd, stdout=log, stderr=subprocess.STDOUT)
         if rc == 0:
             # Several services commonly share one base/dev image definition. Build the identical
             # spec once, then give its result every provider-expected service tag instead of making
@@ -852,13 +869,7 @@ def _podman_build(
                 _err(tag_echoed)
                 log.write(tag_echoed + "\n")
                 log.flush()
-                rc = subprocess.run(
-                    tag_cmd,
-                    env=ctx.env,
-                    cwd=str(ctx.main),
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                ).returncode
+                rc = _engine_output(ctx, tag_cmd, stdout=log, stderr=subprocess.STDOUT)
                 if rc != 0:
                     return alias_name, rc
         return name, rc
@@ -1126,7 +1137,7 @@ def _remove_orphan_containers(
     a container with no service label all mean "remove nothing" (stale-but-running beats
     swept-by-accident); named volumes are never touched."""
     try:
-        rendered = _compose_read(
+        rendered = _compose_output(
             ctx, [*_profile_flags(ctx, extra_profiles), "config", "--services"]
         )
         services = {s.strip() for s in rendered.stdout.splitlines() if s.strip()}
@@ -1562,7 +1573,7 @@ def _left(deadline: float | None) -> float | None:
 def _running_services(ctx: Context, deadline: float | None = None) -> set[str] | None:
     """The project's RUNNING compose services (``compose ps``); None when the engine can't say."""
     try:
-        out = _compose_read(ctx, ["ps", "--format", "json"], timeout=_left(deadline))
+        out = _compose_output(ctx, ["ps", "--format", "json"], timeout=_left(deadline))
     except Exception:
         return None
     return _compose_ps_services(out.stdout) if out.returncode == 0 else None
@@ -1573,7 +1584,7 @@ def _crashed_services(ctx: Context, deadline: float | None = None) -> set[str]:
     podman-compose's ``ps`` is ``podman ps -a`` already, and its parser refuses ``-a``. Fail-safe:
     an empty set on any error — the heal then refreshes only what runs, never reviving a guess."""
     try:
-        out = _compose_read(ctx, ["ps", "--format", "json"], timeout=_left(deadline))
+        out = _compose_output(ctx, ["ps", "--format", "json"], timeout=_left(deadline))
     except Exception:
         return set()
     return _compose_ps_crashed(out.stdout) if out.returncode == 0 else set()
@@ -1598,7 +1609,7 @@ def _running_extra_profiles(
         running = (_running_services(ctx, deadline) or set()) | set(also)
         if not running:
             return []
-        profiles = _service_profiles(ctx)
+        profiles = _service_profiles(ctx, timeout=_left(deadline))
         enabled = {p for p in (ctx.env.get("COMPOSE_PROFILES") or "").split(",") if p}
         extra: list[str] = []
         # As FEW profiles as enable every running service: an unscoped reconcile `up` starts every
@@ -1616,15 +1627,27 @@ def _running_extra_profiles(
         return []
 
 
-def _service_profiles(ctx: Context) -> dict[str, list[str]]:
+def _service_profiles(ctx: Context, timeout: float | None = None) -> dict[str, list[str]]:
     """Service → its ``profiles``, merged across the ``-f`` files in order the way compose
     merges them: a later file's list APPENDS (podman-compose's list merge, compose-spec's rule for
     sequences), de-duplicated in order. Raises on an unreadable file — callers are best-effort.
     PyYAML rides in with the bundled podman-compose; imported here only, off the hot path."""
     import yaml
 
-    files = [ctx.compose[i + 1] for i, arg in enumerate(ctx.compose[:-1]) if arg == "-f"]
+    from . import guestcompose
+
+    files = _compose_files(ctx)
     out: dict[str, list[str]] = {}
+    if guestcompose.wanted():
+        parsed = guestcompose.file_services(files, timeout=timeout)
+        for f in files:
+            services = parsed[f]
+            if services is None:
+                raise OSError(f"the VM couldn't read {f} as a compose file")
+            for name, profiles in services.items():
+                if profiles:
+                    out[name] = list(dict.fromkeys([*out.get(name, []), *profiles]))
+        return out
     for f in files:
         path = Path(f) if Path(f).is_absolute() else ctx.main / f
         services = (yaml.safe_load(path.read_text()) or {}).get("services") or {}
@@ -1685,13 +1708,12 @@ def recreate_services(
             return False, f"{', '.join(unrendered)} not in the rendered config — nothing recreated"
         if problems := _escapes(ctx, extra, deadline=deadline):
             return False, _refusal(problems)[0] + " " + "; ".join(problems)
-        cmd = [
-            *ctx.compose,
+        args = [
             *_profile_flags(ctx, extra),
             *["up", "-d", "--no-build", "--force-recreate", "--no-deps", *wanted],
         ]
-        _err("+ " + " ".join(shlex.quote(c) for c in cmd))
-        proc = _run(cmd, env=ctx.env, cwd=str(ctx.main), timeout=_left(deadline))
+        _err(_shown(ctx, args))
+        proc = _compose_output(ctx, args, timeout=_left(deadline))
         if proc.returncode != 0:
             lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
             return False, (lines[-1] if lines else f"compose exited {proc.returncode}")
@@ -1797,9 +1819,23 @@ def _compose_captured(
         for line in _refusal(problems):
             emit(line)
         return 1
-    cmd = list(ctx.compose) + _profile_flags(ctx, extra_profiles) + args
-    emit("+ " + " ".join(shlex.quote(c) for c in cmd))
-    return devmode.run_stream(cmd, emit, env=ctx.env, cwd=str(ctx.main))
+    from . import guestcompose
+
+    full = [*_profile_flags(ctx, extra_profiles), *args]
+    emit(_shown(ctx, full))
+    if guestcompose.wanted():
+        command = guestcompose.captured_command(ctx, full)
+        if isinstance(command, subprocess.CompletedProcess):
+            emit(command.stderr.strip())
+            return command.returncode
+        ssh, stdin = command
+        return devmode.run_stream(
+            ssh,
+            lambda line: emit(guestcompose.printable(line)),
+            env=guestcompose.ssh_env(),
+            stdin=stdin,
+        )
+    return devmode.run_stream([*ctx.compose, *full], emit, env=ctx.env, cwd=str(ctx.main))
 
 
 def stack_declared(verb: str, box_verb: str | None) -> int | None:
@@ -1919,7 +1955,40 @@ def shell() -> int:
     if not engine_reachable("exec into"):
         return 1
     ctx = resolve()
+    from . import guestcompose
+
+    if guestcompose.wanted():
+        return _exec_service(ctx, ctx.app)
     return _compose(ctx, ["exec", ctx.app, "bash"])
+
+
+def _exec_service(ctx: Context, service: str) -> int:
+    """A shell in ``service``'s running container, the way ``fy box shell`` enters a box: the
+    engine finds it by its compose labels, and no compose file is parsed. ``exec`` needs your
+    terminal on the stdin the guest's payload uses, so this is the one verb that stays here."""
+    engine = config.engine()
+    found = subprocess.run(
+        [
+            engine,
+            "ps",
+            "--filter",
+            f"label=io.podman.compose.project={ctx.project}",
+            "--filter",
+            f"label=com.docker.compose.service={service}",
+            "--format",
+            "{{.ID}}",
+        ],
+        env=ctx.env,
+        capture_output=True,
+        text=True,
+    )
+    ids = found.stdout.split() if found.returncode == 0 else []
+    if not ids:
+        _err(f"✗ no running container for service '{service}' in '{ctx.project}' (fy up?)")
+        return 1
+    cmd = [engine, "exec", "-it", ids[0], "bash"]
+    _err("+ " + " ".join(shlex.quote(c) for c in cmd))
+    return subprocess.run(cmd, env=ctx.env).returncode
 
 
 def _remove_external_network(ctx: Context) -> None:
@@ -2040,7 +2109,7 @@ def _rendered_services(
 ) -> set[str]:
     """The compose config's service names (``set()`` on any render failure — callers then
     decompose no image names at all, which keeps everything). ``deadline`` bounds the render."""
-    proc = _compose_read(
+    proc = _compose_output(
         ctx, [*_profile_flags(ctx, extra_profiles), "config", "--services"], timeout=_left(deadline)
     )
     if proc.returncode != 0:

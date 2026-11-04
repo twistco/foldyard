@@ -159,7 +159,7 @@ def test_ps_answers_json(shared, bound):
     from foldyard import stack
 
     scratch, _ = shared
-    proc = stack._compose_read(_ctx(scratch), ["ps", "--format", "json"], timeout=120)
+    proc = stack._compose_output(_ctx(scratch), ["ps", "--format", "json"], timeout=120)
     assert proc.returncode == 0, proc.stderr
     assert stack._compose_ps_rows(proc.stdout) == []  # nothing of this project runs
 

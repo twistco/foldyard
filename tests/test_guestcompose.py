@@ -1,8 +1,8 @@
 """`[machine] compose = "vm"` — the compose client in the guest (docs/compose-in-vm-scope.md).
 
 Hermetic: ssh is never run. The payload itself IS run, by this interpreter under ``-I`` (the
-interpreter is the one binary the gate lets through), so the code the guest runs — the memfd
-zip, the runner, foldyard's podman-compose on PyYAML's pure-Python parser — is exercised here
+interpreter is the one binary the gate lets through), so the code the guest runs — the zip
+imported from memory, the runner, foldyard's podman-compose on PyYAML's pure-Python parser — is exercised here
 without a VM. The live check is the spike's (docs/compose-in-vm-scope.md, phase 0).
 """
 
@@ -131,8 +131,8 @@ def test_a_call_is_one_ssh_run_of_the_payload(vm, tmp_path, monkeypatch):
     assert cmd[-1] == "exec /usr/bin/python3 -I -"  # nothing from argv reaches the guest's shell
     assert kw["timeout"] == 7
     source = kw["input"].decode()
-    assert "memfd_create" in source
-    request = json.loads(_literal(source, "_r = json.loads(base64.b64decode("))
+    assert "meta_path" in source  # imported from memory: no file in the guest to swap
+    request = _request_in(source)
     assert request["op"] == "compose"
     assert request["argv"] == ["-f", str(tmp_path / "compose.yml"), "config", "--services"]
     assert request["socket"] == GUEST_SOCK
@@ -140,19 +140,21 @@ def test_a_call_is_one_ssh_run_of_the_payload(vm, tmp_path, monkeypatch):
     assert "DOCKER_HOST" not in request["env"]
 
 
-def _literal(source: str, prefix: str) -> str:
+def _request_in(source: str) -> dict:
+    """The request in a bootstrap: the base64 literal on its last line."""
     import ast
     import base64
 
-    line = next(x for x in source.splitlines() if x.startswith(prefix))
-    return base64.b64decode(ast.literal_eval(line[len(prefix) : -2])).decode()
+    last = source.strip().splitlines()[-1]
+    literal = last.split("b64decode(", 1)[1].split(")", 1)[0]
+    return json.loads(base64.b64decode(ast.literal_eval(literal)))
 
 
 def test_no_ssh_route_is_said_never_run_here_instead(vm, tmp_path, monkeypatch):
     vm.BACKEND = _Backend(None)
     monkeypatch.setattr(guestcompose.subprocess, "run", _never)
     monkeypatch.setattr(stack, "_run", _never)
-    proc = stack._compose_read(_ctx(tmp_path), ["ps", "--format", "json"])
+    proc = stack._compose_output(_ctx(tmp_path), ["ps", "--format", "json"])
     assert proc.returncode == guestcompose.NO_ROUTE
     assert "no ssh route" in proc.stderr
 
@@ -168,7 +170,7 @@ def _never(*a, **kw):
     raise AssertionError(f"ran {a[0] if a else kw}")
 
 
-# ── which calls move (phase 1: reads whose answer gates no read here) ─────────────────────
+# ── which calls move ──────────────────────────────────────────────────────────────────────
 
 
 def test_ps_and_the_service_list_go_to_the_guest(vm, tmp_path, monkeypatch):
@@ -186,22 +188,6 @@ def test_ps_and_the_service_list_go_to_the_guest(vm, tmp_path, monkeypatch):
     stack._rendered_services(ctx)
     assert asked[0] == ["ps", "--format", "json"]
     assert asked[1][-2:] == ["config", "--services"]
-
-
-def test_the_full_render_stays_here_while_up_does(vm, tmp_path, monkeypatch):
-    """The path guard judges what THIS client will read; a render from the guest is the box's to
-    shape. So `_render_config` runs here until `up` and the builds move too (phase 2)."""
-    monkeypatch.setattr(guestcompose, "compose", _never)
-    seen = []
-    monkeypatch.setattr(
-        stack,
-        "_run",
-        lambda cmd, **kw: (
-            seen.append(cmd) or subprocess.CompletedProcess(cmd, 0, "services: {}", "")
-        ),
-    )
-    assert stack._render_config(_ctx(tmp_path)) == {"services": {}}
-    assert seen[0][:2] == ["podman", "compose"]
 
 
 def test_off_nothing_goes_to_the_guest(tmp_path, monkeypatch):
@@ -310,3 +296,393 @@ def test_the_payload_never_runs_an_unknown_op(checkout):
     proc = _run_payload(checkout, "sh", ["-c", "id"], {})
     assert proc.returncode == 125
     assert b"unknown op" in proc.stderr
+
+
+# ── phase 2: with it on, no compose client runs on your computer ──────────────────────────
+
+
+@pytest.fixture
+def no_host_client(vm, monkeypatch):
+    """Your computer's compose client and engine, unreachable: any argv reaching ``stack``'s own
+    subprocess fails the test by name. Stand-ins are set by each test."""
+    monkeypatch.setattr(stack, "_run", _never)
+    monkeypatch.setattr(stack.subprocess, "run", _never)
+    return vm
+
+
+def _answering(monkeypatch, stdout: str = "", rc: int = 0) -> list[tuple]:
+    """``guestcompose.call`` answering ``stdout``, recording ``(op, argv, kwargs)``."""
+    asked: list[tuple] = []
+
+    def call(op, argv, env, cwd, **kw):
+        asked.append((op, argv, kw))
+        return subprocess.CompletedProcess(argv, rc, stdout, "")
+
+    monkeypatch.setattr(guestcompose, "call", call)
+    return asked
+
+
+def test_the_render_comes_from_the_guest(no_host_client, tmp_path, monkeypatch):
+    asked = _answering(monkeypatch, "services: {web: {image: x}}")
+    assert stack._render_config(_ctx(tmp_path)) == {"services": {"web": {"image": "x"}}}
+    assert asked[0][0] == "compose" and asked[0][1][-1] == "config"
+
+
+def test_the_path_guard_stands_down_when_nothing_on_your_computer_reads(
+    no_host_client, tmp_path, monkeypatch
+):
+    """No client here means nothing here to guard, and the guard itself reads box-writable files
+    on your computer. So it isn't asked at all, rendered or raw."""
+    from foldyard import composeguard
+
+    monkeypatch.setattr(composeguard, "raw_problems", _never)
+    monkeypatch.setattr(composeguard, "rendered_problems", _never)
+    assert stack._escapes(_ctx(tmp_path)) == []
+
+
+def test_off_the_path_guard_still_refuses(tmp_path, monkeypatch):
+    from foldyard import composeguard
+
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setenv("MACHINE_COMPOSE", "host")
+    monkeypatch.setattr(composeguard, "raw_problems", lambda *a: ["env_file: /etc/passwd"])
+    monkeypatch.setattr(composeguard, "rendered_problems", lambda *a, **k: [])
+    problems = stack._escapes(_ctx(tmp_path), rendered={"services": {}})
+    assert problems == ["env_file: /etc/passwd"]
+
+
+def test_up_and_down_stream_from_the_guest(no_host_client, tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(guestcompose, "stream", lambda ctx, args: seen.append(args) or 0)
+    ctx = _ctx(tmp_path)
+    assert stack._compose(ctx, ["up", "-d", "--no-build"], rendered={"services": {}}) == 0
+    assert stack._compose(ctx, ["down", "--remove-orphans"]) == 0
+    assert seen == [["up", "-d", "--no-build"], ["down", "--remove-orphans"]]
+
+
+def test_a_failing_stream_is_the_verbs_exit_code(no_host_client, tmp_path, monkeypatch):
+    monkeypatch.setattr(guestcompose, "stream", lambda ctx, args: 7)
+    assert stack._compose(_ctx(tmp_path), ["logs", "-f"]) == 7
+
+
+def test_the_posture_reconcile_streams_from_the_guest_through_emit(
+    no_host_client, tmp_path, monkeypatch
+):
+    from foldyard import devmode
+
+    def run_stream(cmd, on_line, **kw):
+        assert kw["stdin"].startswith(b"import base64")  # the payload, never an argv
+        assert cmd[0] == "ssh"
+        on_line("Container web started")
+        return 0
+
+    monkeypatch.setattr(devmode, "run_stream", run_stream)
+    lines: list[str] = []
+    assert stack._compose_captured(_ctx(tmp_path), ["up", "-d"], lines.append) == 0
+    assert lines[-1] == "Container web started"
+
+
+def test_the_stack_build_runs_in_the_guest_and_logs_here(no_host_client, tmp_path, monkeypatch):
+    """Render, then `podman build` + `podman tag`, all there: the client packs the context from
+    what the VM sees. The build's output still lands in the log on your computer, and the build's
+    secret (the proxy url) travels in the request, never an argv here."""
+    rendered = {
+        "services": {
+            "api": {"build": {"context": str(tmp_path / "api"), "args": {"A": "1"}}},
+            "worker": {"build": {"context": str(tmp_path / "api"), "args": {"A": "1"}}},
+        }
+    }
+    monkeypatch.setattr(stack, "_image_id", lambda *a: None)
+    monkeypatch.setattr(config, "state_dir", lambda: tmp_path / "state")
+    calls = []
+
+    def call(op, argv, env, cwd, **kw):
+        calls.append((op, argv, kw))
+        if op == "compose":
+            import yaml
+
+            return subprocess.CompletedProcess(argv, 0, yaml.safe_dump(rendered), "")
+        kw["stdout"].write(f"built {argv[0]}\n")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(guestcompose, "call", call)
+    assert stack._podman_build(_ctx(tmp_path), "http://fy-build:s3cret@gw:4100") == 0
+    ops = [(op, argv[0]) for op, argv, _ in calls]
+    assert ops[0] == ("compose", "-f")
+    assert ("podman", "build") in ops and ("podman", "tag") in ops
+    build = next(argv for op, argv, _ in calls if op == "podman" and argv[0] == "build")
+    assert "HTTP_PROXY=http://fy-build:s3cret@gw:4100" in build
+    log = (tmp_path / "state" / "build-acme.log").read_text()
+    assert "built build" in log and "s3cret" not in log  # the echoed line is redacted
+
+
+def test_the_capability_heal_recreates_from_the_guest(no_host_client, tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    monkeypatch.setattr(stack, "machine_down", lambda: None)
+    monkeypatch.setattr(stack, "resolve", lambda **kw: ctx)
+    monkeypatch.setattr(stack, "_running_services", lambda c, d: {"web"})
+    monkeypatch.setattr(stack, "_crashed_services", lambda c, d: set())
+    monkeypatch.setattr(stack, "_running_extra_profiles", lambda c, d, also=(): [])
+    monkeypatch.setattr(stack, "_rendered_services", lambda c, e, d: {"web"})
+    asked = _answering(monkeypatch)
+    ok, summary = stack.recreate_services(["web"])
+    assert ok, summary
+    assert asked[0][1][-1] == "web"
+    assert "--force-recreate" in asked[0][1]
+    assert asked[0][2]["timeout"] is not None  # one deadline over every call, as on the host
+
+
+def test_fy_shell_is_the_engines_exec_never_a_compose_client(vm, tmp_path, monkeypatch):
+    """`exec` needs your terminal on stdin, where the payload goes. So the container is found by
+    its labels, through the engine, and entered the way `fy box shell` enters a box: no compose
+    file is parsed on your computer."""
+    ctx = _ctx(tmp_path)
+    monkeypatch.setattr(stack, "stack_declared", lambda *a: None)
+    monkeypatch.setattr(stack, "engine_reachable", lambda *a: True)
+    monkeypatch.setattr(stack, "resolve", lambda: ctx)
+    monkeypatch.setattr(guestcompose, "call", _never)
+    ran = []
+
+    def run(cmd, **kw):
+        ran.append(cmd)
+        if cmd[1] == "ps":
+            return subprocess.CompletedProcess(cmd, 0, "abc123\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(stack.subprocess, "run", run)
+    assert stack.shell() == 0
+    assert "label=io.podman.compose.project=acme" in ran[0]
+    assert "label=com.docker.compose.service=app" in ran[0]
+    assert ran[1] == ["podman", "exec", "-it", "abc123", "bash"]
+    assert "compose" not in ran[1]
+
+
+def test_fy_shell_says_when_the_service_isnt_running(vm, tmp_path, monkeypatch, capfd):
+    ctx = _ctx(tmp_path)
+    monkeypatch.setattr(stack, "stack_declared", lambda *a: None)
+    monkeypatch.setattr(stack, "engine_reachable", lambda *a: True)
+    monkeypatch.setattr(stack, "resolve", lambda: ctx)
+    monkeypatch.setattr(
+        stack.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", "")
+    )
+    assert stack.shell() == 1
+    assert "app" in capfd.readouterr().err
+
+
+def test_the_profile_read_parses_in_the_guest(no_host_client, tmp_path, monkeypatch):
+    """`_service_profiles` used to parse each file on your computer: box-writable bytes, read
+    through whatever link the box left there."""
+    monkeypatch.setattr(Path, "read_text", _never)
+    answer = {str(tmp_path / "compose.yml"): {"web": ["dev"], "db": []}}
+    asked = _answering(monkeypatch, json.dumps(answer))
+    assert stack._service_profiles(_ctx(tmp_path)) == {"web": ["dev"]}
+    assert asked[0][0] == "services"
+
+
+def test_the_overlay_read_parses_in_the_guest(no_host_client, tmp_path, monkeypatch):
+    from foldyard import reconcile
+
+    monkeypatch.setattr(Path, "read_text", _never)
+    good, bad = tmp_path / "a.yml", tmp_path / "b.yml"
+    asked = _answering(monkeypatch, json.dumps({str(good): {"web": []}, str(bad): None}))
+    assert reconcile._overlay_services({"a": good, "b": bad}) == {"a": {"web"}, "b": None}
+    assert asked[0][0] == "services"
+
+
+def test_a_guest_that_cant_answer_the_overlay_read_is_unknown_never_empty(
+    no_host_client, tmp_path, monkeypatch
+):
+    from foldyard import reconcile
+
+    _answering(monkeypatch, "", rc=255)
+    assert reconcile._overlay_services({"a": tmp_path / "a.yml"}) == {"a": None}
+
+
+def test_the_ssh_client_gets_a_clean_environment(vm, tmp_path, monkeypatch):
+    """The supervisor calls this, and its environment holds every host.env secret: ssh doesn't
+    forward it by default, but a `SendEnv` in your ssh config would."""
+    monkeypatch.setenv("GH_PEM_B64", "s3cret")
+    seen = {}
+
+    def run(cmd, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(guestcompose.subprocess, "run", run)
+    guestcompose.call("compose", ["ps"], {}, "/")
+    assert "GH_PEM_B64" not in seen["env"]
+    assert "PATH" in seen["env"]
+
+
+def test_only_the_client_helpers_ever_touch_the_compose_argv():
+    """The guard behind "no compose client on your computer": every use of ``ctx.compose`` as an
+    argv is in a function that asks ``guestcompose`` first. A new one here would run the client on
+    your computer with the path guard standing down."""
+    import ast
+
+    tree = ast.parse(Path(stack.__file__).read_text())
+    users = {
+        fn.name
+        for fn in ast.walk(tree)
+        if isinstance(fn, ast.FunctionDef)
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "compose"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "ctx"
+    }
+    # _compose_files lists the -f paths and _shown echoes; the others branch on wanted().
+    assert users == {"_compose", "_compose_captured", "_compose_output", "_compose_files", "_shown"}
+
+
+def test_the_guests_output_reaches_your_terminal_without_control_sequences():
+    line = "\x1b]0;pwned\x07\x1b[31mred\x1b[0m\tok\x08 café"
+    assert guestcompose.printable(line) == "]0;pwnedred\tok café"
+
+
+# ── the runner, run for real ──────────────────────────────────────────────────────────────
+
+
+def test_the_runner_waits_out_a_compose_file_the_vm_reads_as_missing(checkout):
+    """A file your computer just replaced reads as missing from the VM for a moment (up to ~5 s on
+    libkrun: ADR-0021's visibility record), and compose would call that a missing file."""
+    import threading
+
+    late = checkout / "late.yml"
+    timer = threading.Timer(0.5, lambda: late.write_text(COMPOSE))
+    timer.start()
+    try:
+        proc = _run_payload(
+            checkout, "compose", ["-f", str(late), "config", "--services"], {"X": "1"}
+        )
+    finally:
+        timer.join()
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert proc.stdout.split() == [b"web"]
+
+
+def test_the_services_op_parses_each_file_and_says_which_it_couldnt(checkout):
+    good = checkout / "stack.yml"
+    bad = checkout / "bad.yml"
+    bad.write_text("services: [\n")
+    proc = _run_payload(checkout, "services", [str(good), str(bad), "/nonexistent.yml"], {})
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert json.loads(proc.stdout) == {
+        str(good): {"web": []},
+        str(bad): None,
+        "/nonexistent.yml": None,
+    }
+
+
+def test_the_guests_client_dies_with_the_ssh_session(checkout):
+    """`fy logs -f` interrupted, or a timeout that kills ssh: without a terminal nothing tells the
+    guest, and a compose client would carry on (a `logs -f` until its next line, an `up` to the
+    end). ``parent`` stands in for sshd's session."""
+    import os
+    import signal
+    import time
+
+    pidfile = checkout / "podman.pid"
+    fake = checkout / "bin" / "podman"
+    fake.write_text(
+        f"#!{sys.executable} -I\n"
+        "import os, time\n"
+        f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+    request = {"op": "podman", "argv": ["logs"], "env": {}, "cwd": str(checkout), "socket": ""}
+    (checkout / "payload.py").write_bytes(guestcompose.bootstrap(request))
+    parent = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-I', {str(checkout / 'payload.py')!r}])\n"
+        "time.sleep(60)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-I", "-c", parent],
+        env={"PATH": str(checkout / "bin"), "HOME": str(checkout)},
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while not pidfile.exists() or not pidfile.read_text():
+            assert time.monotonic() < deadline, "the runner never started podman"
+            time.sleep(0.05)
+        child = int(pidfile.read_text())
+        proc.send_signal(signal.SIGKILL)
+        proc.wait()
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        os.kill(child, signal.SIGKILL)
+        raise AssertionError("the guest's process outlived its session")
+    finally:
+        proc.kill()
+
+
+# ── phase 3: the box image ────────────────────────────────────────────────────────────────
+
+
+def _gated(monkeypatch):
+    """The build gate out of the way (it's tested on its own): runs the build with no proxy."""
+    from foldyard import buildgate
+
+    monkeypatch.setattr(buildgate, "run", lambda build, what: build(None))
+
+
+def test_a_projects_own_box_image_builds_in_the_guest(vm, tmp_path, monkeypatch):
+    """Its context is the repo, which the box can write, so it is packed in the VM."""
+    from foldyard import box
+
+    _gated(monkeypatch)
+    monkeypatch.setattr(
+        config,
+        "box_image",
+        lambda: {"dockerfile": "box.Dockerfile", "tag": "acme-devbox:latest"},
+    )
+    monkeypatch.setattr(box, "_box_image_fingerprint", lambda main: "fp")
+    monkeypatch.setattr(box.subprocess, "run", _never)
+    seen = []
+
+    def stream(argv, env, cwd):
+        seen.append((argv, cwd))
+        return 0
+
+    monkeypatch.setattr(guestcompose, "stream_podman", stream)
+    assert box._build_img("podman", tmp_path, {"A": "1"}) == 0
+    [(argv, cwd)] = seen
+    assert argv[0] == "build" and argv[-1] == str(tmp_path)
+    assert argv[argv.index("-f") + 1] == "box.Dockerfile"
+    assert cwd == str(tmp_path)
+
+
+def test_the_packaged_box_image_stays_here(vm, tmp_path, monkeypatch):
+    """Its context is foldyard's own files, which the VM can't see and the box can't write."""
+    from foldyard import box
+
+    _gated(monkeypatch)
+    monkeypatch.setattr(box, "_box_image_fingerprint", lambda main: "fp")
+    monkeypatch.setattr(guestcompose, "stream_podman", _never)
+    ran = []
+    monkeypatch.setattr(
+        box.subprocess,
+        "run",
+        lambda cmd, **kw: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0),
+    )
+    assert box._build_img("podman", tmp_path, {}) == 0
+    assert ran[0][:2] == ["podman", "build"]
+
+
+def test_preflight_refuses_vm_on_an_engine_it_cant_run_on(monkeypatch):
+    from foldyard import preflight
+
+    monkeypatch.setenv("MACHINE_COMPOSE", "vm")
+    monkeypatch.setattr(config, "engine", lambda: "docker")
+    [issue] = preflight._compose_issues()
+    assert 'compose = "vm"' in issue and "podman" in issue
+    monkeypatch.setattr(config, "engine", lambda: "podman")
+    assert preflight._compose_issues() == []
+    monkeypatch.setenv("MACHINE_COMPOSE", "host")
+    monkeypatch.setattr(config, "engine", lambda: "docker")
+    assert preflight._compose_issues() == []

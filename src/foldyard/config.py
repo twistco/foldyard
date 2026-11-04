@@ -1267,8 +1267,7 @@ def machine_compose() -> str:
     """``[machine].compose`` — where the stack's compose client runs (:mod:`foldyard.guestcompose`,
     docs/compose-in-vm-scope.md): ``"host"`` (the default), on your computer under the path guard,
     or ``"vm"``, in the guest as the VM user, where the compose files' paths read nothing of
-    yours. Experimental, and phased: today only the read-only calls move. ``MACHINE_COMPOSE`` env
-    wins."""
+    yours. Experimental. ``MACHINE_COMPOSE`` env wins."""
     raw = os.environ.get("MACHINE_COMPOSE")
     if raw is None:
         raw = _table("machine").get("compose", "host")
