@@ -51,8 +51,12 @@ TRAP_ARGS = (
 )
 
 # Off, spelled out. `.portForwards=[]` isn't: Lima appends a default rule to whatever's listed, and
-# a listener in the guest appeared on your computer's localhost within seconds.
-FORWARD_NOTHING = [{"guestIP": "0.0.0.0", "proto": "any", "ignore": True}]
+# a listener in the guest appeared on your computer's localhost within seconds. Nor is this rule
+# without `guestIPMustBeZero: false`: Lima fills that in as true, and the rule then misses a
+# listener on 127.0.0.1, which falls through to the default.
+FORWARD_NOTHING = [
+    {"guestIP": "0.0.0.0", "guestIPMustBeZero": False, "proto": "any", "ignore": True},
+]
 FORWARD_WAIT_S = 6  # longer than Lima takes to notice a listener: it took under 4
 WALL_TABLE = "fy_nested_wall"
 
@@ -221,6 +225,20 @@ def _refuse_tainted(vm: str) -> None:
         )
 
 
+def _forwards_nothing(rules: list[dict] | None) -> bool:
+    """Is the first rule, which wins, ours? `limactl list` reports it with Lima's defaults filled
+    in, and may leave a false value out."""
+    first = (rules or [{}])[0]
+    return (
+        first.get("ignore") is True
+        and first.get("guestIP") == "0.0.0.0"
+        and not first.get("guestIPMustBeZero")
+        and first.get("proto") == "any"
+        and first.get("guestPortRange", [1, 65535]) == [1, 65535]
+        and not first.get("guestSocket")
+    )
+
+
 def _check_contained(vm: str) -> None:
     missing = _traps_missing(vm)
     if missing:
@@ -237,7 +255,7 @@ def _check_contained(vm: str) -> None:
     if json.loads(mounts or "null"):
         raise Refused(f"{vm} has mounts, so code in it could reach your files. Recreate it.")
     forwards = _run(["limactl", "list", vm, "--format", "{{json .Config.PortForwards}}"]).stdout
-    if (json.loads(forwards.strip() or "null") or [{}])[0] != FORWARD_NOTHING[0]:
+    if not _forwards_nothing(json.loads(forwards.strip() or "null")):
         raise Refused(
             f"{vm} isn't set to forward nothing, so a listener in it could appear on your "
             "computer. `just nested-down --delete && just nested-up` replaces it."

@@ -130,9 +130,10 @@ Fedora's mirrors and the registries directly. So `just nested-up` sets up its ow
   straight after, so what root left can't act on your computer between runs, and every run and
   `just nested-up` refuse it until `just nested-down --delete && just nested-up` replaces it.
 - **No mounts, forwards or credentials.** A commit arrives as a `git pack-objects` stream. Turning
-  forwards off takes an explicit `ignore` rule: with `.portForwards=[]`, Lima appends a default
-  rule, and a listener in the guest appeared on your computer's localhost within 4 seconds, where
-  code under test could squat a port a local tool or browser trusts.
+  forwards off takes an explicit rule: with `.portForwards=[]`, Lima appends a default one, and a
+  listener in the guest appeared on your computer's localhost within 4 seconds, where code under
+  test could squat a port a local tool or browser trusts. An `ignore` rule on `0.0.0.0` also needs
+  `guestIPMustBeZero: false`, or a listener on `127.0.0.1` passes it and still appears.
 
 Every run checks the traps, the mounts, the forwarding rule, any `sudo` rule and the wall's rules
 first. It also asks the network: a real connection attempt to a socket on your computer, and a real

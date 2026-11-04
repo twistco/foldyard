@@ -23,6 +23,16 @@ PROVISION = (ROOT / "tests/tools/nested_l1/provision.sh").read_text()
 RUN_TIER = (ROOT / "tests/tools/nested_l1/run-tier.sh").read_text()
 WORKFLOW = (ROOT / ".github/workflows/foldyard-e2e.yml").read_text()
 
+# The rule as `limactl list` reports it, Lima's defaults filled in.
+FILLED_IN = {
+    "guestIP": "0.0.0.0",
+    "guestPortRange": [1, 65535],
+    "hostIP": "127.0.0.1",
+    "hostPortRange": [1, 65535],
+    "proto": "any",
+    "ignore": True,
+}
+
 CFG = nested.Config(vm="fy-nested", cpus=8, memory_gib=16, disk_gib=60)
 TRAPS = " ".join(f"{arg}=1" for arg in nested.TRAP_ARGS)
 
@@ -143,6 +153,9 @@ def test_a_fresh_l1_forwards_nothing_explicitly():
     # this computer's localhost within seconds (live). Only a rule with `ignore` turns it off.
     rule = nested.FORWARD_NOTHING[0]
     assert (rule["guestIP"], rule["proto"], rule["ignore"]) == ("0.0.0.0", "any", True)
+    # Lima fills this in as true otherwise, and the rule then matches only sockets bound to exactly
+    # 0.0.0.0: a listener on 127.0.0.1 passed it and appeared on this computer (live).
+    assert rule["guestIPMustBeZero"] is False
     assert json.dumps(nested.FORWARD_NOTHING) in nested._create_set_expr()
 
 
@@ -205,6 +218,22 @@ def test_up_sends_the_provisioning_script_to_root(l1):
         (lambda f: setattr(f, "mounts", '[{"location":"~"}]'), "mount"),
         (lambda f: setattr(f, "port_forwards", "null"), "forward"),
         (lambda f: setattr(f, "port_forwards", '[{"guestPort":80,"hostPort":80}]'), "forward"),
+        (
+            lambda f: setattr(
+                f, "port_forwards", json.dumps([{**FILLED_IN, "guestIPMustBeZero": True}])
+            ),
+            "forward",
+        ),
+        (
+            lambda f: setattr(f, "port_forwards", json.dumps([{**FILLED_IN, "ignore": False}])),
+            "forward",
+        ),
+        (
+            lambda f: setattr(
+                f, "port_forwards", json.dumps([{**FILLED_IN, "guestPortRange": [1, 80]}])
+            ),
+            "forward",
+        ),
         (lambda f: setattr(f, "forward_answers", True), "localhost"),
         (lambda f: setattr(f, "wall_rules", ""), "wall"),
         (lambda f: setattr(f, "wall_rules", "table inet other {}"), "wall"),
@@ -219,6 +248,11 @@ def test_a_run_refuses_an_l1_that_is_not_contained(l1, spoil, why):
         nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=False)
     assert not l1.sent_pack
     assert not l1.streamed
+
+
+def test_the_forward_rule_is_recognised_with_limas_defaults_filled_in(l1):
+    l1.port_forwards = json.dumps([FILLED_IN, {"guestIP": "127.0.0.1"}])
+    assert nested.run_tests(CFG, ROOT, "HEAD", [], with_sudo=False) == 0
 
 
 def test_a_run_sends_the_commit_then_runs_the_tier_as_the_tester(l1):
