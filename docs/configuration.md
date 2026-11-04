@@ -471,8 +471,8 @@ disk_gib = 60
   ([stack](./stack.md#which-paths-compose-may-read)). `"vm"` runs foldyard's own podman-compose in
   the VM instead, over the VM's ssh route, so a path in a compose file reads the VM, which holds
   nothing of yours. Any other value is an error. Env: `MACHINE_COMPOSE`.
-  - *Experimental*: it hasn't run on Linux or WSL2 hosts yet, or under gVisor, and it hasn't been
-    used day to day.
+  - *Experimental*: it hasn't run under gVisor or on the podman backend, and it hasn't been used
+    day to day.
   - Every compose call and the build of a project's own box image run in the VM. `fy shell` enters
     the container through the engine instead.
   - The VM must mount the checkout. `fy machine ensure` does, for a VM created from it; otherwise

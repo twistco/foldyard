@@ -1,8 +1,10 @@
 # Compose in the VM: scope
 
 Status: **phases 0–3 built, behind an experimental switch**, 2026-11-04. With `[machine] compose =
-"vm"`, no compose client runs on your computer. Phase 4 (on by default, the host path deleted) waits
-on CI's 9p and WSL2 hosts and on real use. The four decisions below were taken as recommended.
+"vm"`, no compose client runs on your computer. `tests/test_guestcompose_e2e.py` passes on vz, on
+Linux over 9p and inside WSL2 (CI, run 41751053725). Phase 4 (on by default, the host path deleted)
+waits on a route for private images, gVisor, the podman backend and real use. The four decisions
+below were taken as recommended.
 Related:
 [ADR-0022](./adrs/0022-host-runs-the-adopted-config.md) (its 0.3.2 amendment names this as the
 structural fix), [ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md),
@@ -161,8 +163,8 @@ Consequences of running as the VM user:
    or invalidate, and no version to drift. An earlier version loaded it from a memfd, but
    `memfd_create` doesn't exist on macOS, where the hermetic tests run the payload.
 2. **Latency:** on vz, a bare ssh is about 125 ms and a whole `config --services` about 240 ms, payload
-   included. `fy up` makes about 10 calls, so connection reuse isn't needed there. 9p and WSL2 are
-   measured by the same test in CI: it writes the numbers to the step summary.
+   included. `fy up` makes about 10 calls, so connection reuse isn't needed there. The same test
+   writes 9p's and WSL2's numbers to CI's step summary, where its own 10 s bound held.
 3. **Interactive verbs:** `fy logs -f` runs without a terminal, so nothing would tell the guest when
    ssh goes; the runner watches its parent and ends its process group. `fy shell` doesn't go there
    (above). Both are tested live, the shell through a real pty.
@@ -170,8 +172,8 @@ Consequences of running as the VM user:
    virtiofs, 5 s on libkrun (ADR-0021), and compose would call that a missing file. So the runner
    waits up to 6 s for a `-f` file before compose runs.
 
-**Still open:** the gVisor posture, the podman-machine backend (its ssh route exists, untested), and
-9p and WSL2 until CI runs them.
+**Still open:** the gVisor posture and the podman-machine backend (its ssh route exists, untested).
+The other host-tier modules have run under the switch on vz only, not on 9p or WSL2.
 
 Out of scope: **which compose client long-term** (plan 04 asked whether docker-compose in the VM
 could retire podman-compose's quirks). Keep podman-compose for this move, so only one thing changes

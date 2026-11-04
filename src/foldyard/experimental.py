@@ -120,10 +120,11 @@ REGISTER: tuple[Feature, ...] = (
         reader="machine_compose",
         kinds=(MAY_CHANGE, UNPROVEN),
         unproven=(
-            "every compose call and a project's own box image run in the VM, and the host-tier "
-            "modules pass with it on under vz with and without the firewall, but it hasn't run "
-            "on 9p or WSL2 hosts, the podman-machine backend or under gVisor, and no maintainer "
-            "uses it day to day yet. Registry logins on your computer don't reach the VM"
+            "every compose call and a project's own box image run in the VM, and its own e2e "
+            "module passes on vz, Linux and WSL2 hosts, but the other host-tier modules have run "
+            "with it on under vz only, it hasn't run on the podman backend or under gVisor, and "
+            "no maintainer uses it day to day yet. Registry logins on your computer don't reach "
+            "the VM"
         ),
         graduates_when=(
             "the host tiers pass with it on in CI on Linux and WSL2, a maintainer has run a real "
