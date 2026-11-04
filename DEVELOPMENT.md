@@ -21,6 +21,9 @@ just lint        # ruff check + format --check   (auto-fix: just format)
 just typecheck   # pyright + ty (both, run together)
 just check       # lint + typecheck + suite — what CI gates on
 just prune       # list merged .claude/worktrees, local branches, orphaned dev venvs (--apply removes)
+just nested-up   # Apple M3+: a VM of its own for the host tier (docs/nested-virt.md)
+just nested-test [--ref REF] [--with-sudo] [modules]   # send a commit in, run the tier (default: CI's shards)
+just nested-down [--delete]
 ```
 
 **Tooling (dev deps, in `pyproject.toml`):** ruff (lint+format, line-length 100), pyright +
@@ -388,9 +391,11 @@ foldyard's surface splits by *where it can be validated*:
    On a Lima host these run against the example's own VM (creating, restarting, recreating it),
    never a consumer's. What the runner cannot reach — nested virtualisation for the gVisor
    posture — stays the recipe in [docs/nested-virt.md](./docs/nested-virt.md). That page's M3+ rig
-   also runs this tier on arm64 Linux in a VM of its own, so it can't collide with the
-   `foldyard-example` on your computer; **its L1 kernel needs the GIC traps the page names, or no
-   L2 boots** — while `/dev/kvm` and `KVM_CREATE_VM` still look fine.
+   (`just nested-up`, `just nested-test`, tests/tools/nested.py) also runs this tier on arm64 Linux
+   in a VM of its own, so it can't collide with the `foldyard-example` on your computer; **its L1
+   kernel needs the GIC traps the page names, or no L2 boots**, while `/dev/kvm` and `KVM_CREATE_VM`
+   still look fine. Why a box doesn't get `/dev/kvm` itself:
+   [ADR-0035](./docs/adrs/0035-the-box-asks-for-a-test-run.md).
    From a Claude Code cloud session (root, no `/dev/kvm`, an egress proxy that re-signs TLS) the
    tier runs under QEMU's TCG, slowly: [`.claude/skills/cloud-host/`](./.claude/skills/cloud-host/SKILL.md)
    sets that host up in one script and lists what breaks there and why.

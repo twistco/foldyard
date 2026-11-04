@@ -79,8 +79,8 @@ Start at [DEVELOPMENT.md](../DEVELOPMENT.md): the module map, test tiers, CI and
   and the tricky parts of the Lima backend.
 - [lima-wall-machine-integration.md](./lima-wall-machine-integration.md) — how the box reaches
   the proxy on the host, and the design of the VM and host firewalls.
-- [nested-virt.md](./nested-virt.md) — a nested-KVM rig for testing the paths that only run on
-  the host.
+- [nested-virt.md](./nested-virt.md) — nested-KVM rigs for testing the paths that only run on
+  the host, including `just nested-test`: the host tier in a VM of its own on an Apple M3+.
 - [monitor-pipeline.md](./monitor-pipeline.md) — the guest monitor's host side: the storage
   measurements (chDB, DuckDB, SQLite, compressed JSONL), retention tiers, filtering at source,
   the score → decide → review pipeline, and hooks.

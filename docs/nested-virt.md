@@ -58,7 +58,8 @@ drivers. M1 and M2 have no nested virtualisation.
 
 **The Linux host tier runs on this rig, provided the L1 kernel traps the guest's GIC registers.**
 Without that setting no L2 gets past early boot. Measured 2026-11-04: M3 Max, macOS 27.0.1,
-Lima 2.1.3, Fedora 44 as L1 and L2 (kernel 6.19.10), QEMU 10.2.2.
+Lima 2.1.3 on your computer and 2.2.0 in the L1, Fedora 44 as L1 and L2 (kernel 6.19.10),
+QEMU 10.2.2.
 
 ### The GIC traps are required
 
@@ -84,60 +85,52 @@ The root cause isn't established, only that the traps work. An untrapped L2 did 
 (`kernel-irqchip=off,gic-version=2`, which stops in the firmware). QEMU's `-machine its=off` did
 boot one L2 on krunkit with kernel 7.2.15, but it was not tried on `vz` and Lima can't pass it.
 
-### Setting it up
+### Running the tier
 
-From your computer. No mounts, and nothing forwarded: code reaches the L1 only by being sent there.
+On your computer:
 
 ```bash
-limactl start --tty=false --name=fy-nested --vm-type=vz --cpus=8 --memory=16 --disk=60 \
-  --set '.nestedVirtualization=true | .mounts=[] | .portForwards=[]' template:podman
-limactl shell --workdir / fy-nested sudo grubby --update-kernel=ALL --args="\
-kvm-arm.vgic_v3_group0_trap=1 kvm-arm.vgic_v3_group1_trap=1 kvm-arm.vgic_v3_common_trap=1"
-limactl stop fy-nested && limactl start --tty=false fy-nested
-limactl shell --workdir / fy-nested sudo dmesg | grep 'sysreg trapping'  # must print a line
+just nested-up                     # create or repair the L1, and check it
+just nested-test                   # HEAD, all of CI's shards
+just nested-test --ref my-branch tests/test_box_e2e.py
+just nested-test --with-sudo tests/test_wall_e2e.py
+just nested-down                   # stop inside-out; --delete removes the L1 too
 ```
 
-Then, inside the L1:
+The tier runs on your computer's committed `--ref`, as `lima-host-e2e` runs it in
+[foldyard-e2e.yml](../.github/workflows/foldyard-e2e.yml): the same settings, a base VM baked for
+the run, and CI's shards unless you name modules. Each run starts from no VMs and no state. A full
+run takes about 19 minutes, and naming one module about 2 more than that module. Uncommitted work
+isn't sent.
 
-1. `sudo dnf install qemu-system-aarch64-core qemu-img edk2-aarch64 git just uv jq nftables`
-2. Install Lima from its `Linux-aarch64` release tarball into `/usr/local`, then run
-   `sudo loginctl enable-linger "$USER"` (`sudo` is required here, unlike on a runner).
-3. Send the code over: `git bundle create x.bundle <ref>` on your computer, `limactl copy` it in,
-   and `git clone` it.
-4. Run the modules as `lima-host-e2e` in
-   [foldyard-e2e.yml](../.github/workflows/foldyard-e2e.yml) does: its `env`, the session base bake,
-   `fy machine ensure` from a copy of `example/`, then `uv run --group e2e pytest` per shard.
+`FY_NESTED_VM` names the L1 (`fy-nested-<name>`, one run at a time in each), and `FY_NESTED_CPUS`,
+`FY_NESTED_MEMORY_GIB` and `FY_NESTED_DISK_GIB` size a new one (default 8, 16, 60). Each L1 has its
+own `~/.lima`, so the tier's fixed `foldyard-example` VM can't collide with one on your computer.
+These recipes are foldyard's own, not `fy` verbs: a consumer never gets them. Why they stay outside
+the box is in [ADR-0035](./adrs/0035-the-box-asks-for-a-test-run.md).
 
-Each L1 has its own `~/.lima`, so the host tier's fixed `foldyard-example` VM can't collide with
-one on your computer.
-
-### Keep the code under test away from your computer
+### What keeps the code under test away from your computer
 
 A Lima guest reaches your computer's `127.0.0.1` through the gateway at `192.168.5.2`: from an
-unwalled L1, a listener bound to localhost on your computer answered with a 200. So the L1 holds no
-credentials and mounts nothing, and if it runs code you wouldn't run on your computer, wall it
-first. foldyard's own VM firewall doesn't fit, since it forces all egress through the proxy, while
-this tier needs Fedora's mirrors and the registries directly.
+unwalled L1, a listener bound to localhost on your computer answered with a 200. foldyard's own VM
+firewall doesn't fit here, since it forces all egress through the proxy, while this tier needs
+Fedora's mirrors and the registries directly. So `just nested-up` sets up its own
+([provision.sh](../tests/tools/nested_l1/provision.sh)):
 
-```bash
-sudo nft -f - <<'NFT'
-table inet fy_nested_wall {
-  chain output { type filter hook output priority 0; policy accept;
-    oifname "lo" accept
-    ct state established,related accept
-    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } udp dport 53 accept
-    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } tcp dport 53 accept
-    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } drop
-  }
-}
-NFT
-```
+- **A wall loaded at boot**, exempting no user: DNS is allowed, then every private address is
+  dropped. DNS has to come first, because the resolver is on the gateway.
+- **An unprivileged user, `fytest`**, runs the tier, so what it runs can't remove the wall.
+  `test_wall_e2e` needs `sudo` on its "host" and skips without it; `--with-sudo` grants it for that
+  one run.
+- **No mounts, forwards or credentials.** A commit arrives as a `git pack-objects` stream.
 
-The DNS lines must come first: the resolver is on the gateway. Behind this rule the listener timed
-out, while DNS, public egress, `limactl shell` from your computer and a full L2 boot with an image
-pull all worked. It doesn't survive a reboot, so apply it after each start. It leaves the L1 free
-to reach the public internet, so it protects your computer, not your data's route out. **The full
-host tier hasn't been run behind it**: the results below are from an unwalled L1 running `main`.
+Every run checks the traps, the mounts, `sudo` and the wall first, the wall by a real connection
+attempt to a socket on your computer, and refuses if any of them is wrong. `just nested-up` repairs
+what it can. Both refusals were seen live: with the wall's table deleted, and with a stale `sudo`
+grant in place, a run stopped before sending anything, and `just nested-up` put each right.
+
+This keeps your computer out of reach. It doesn't limit what leaves the L1 over the public internet,
+and a run's verdict is only what the code under test reports.
 
 ### Results
 
@@ -148,9 +141,9 @@ With an 8 vCPU, 16 GiB L1 on `vz`, and `MACHINE_CPUS=2` as in CI:
 | raw QEMU boot to a login prompt, 2 vCPUs | 6/6 at about 25 s (TCG, as a control: 84 s) |
 | Lima L2 from `template:podman` | 37 s |
 | L1 response during a 60 s CPU and disk burn in the L2 | 8–11 ms, no stalls in either kernel |
-| shard `L1`, including the hypervisor SIGKILL in `test_machine_e2e` | 39 passed, 11:36 |
-| shard `L2`, including the box and both firewalls | 34 passed, 1 setup error (below), 8:35 |
-| `test_basevm_e2e.py` with no session base: bake, clone, `rm` | 3 passed, 2:05 |
+| `just nested-test`: shard `L1`, including the hypervisor SIGKILL in `test_machine_e2e` | 39 passed, 10:19 |
+| `just nested-test`: shard `L2`, including the box | 23 passed, 12 skipped (`test_wall_e2e`, no `sudo`), 6:03 |
+| `just nested-test --with-sudo tests/test_wall_e2e.py`: both firewalls | 12 passed, 2:11 |
 | rootless container, box-style flags plus `--device /dev/kvm`: Lima L2 inside | 46 s, `accel=kvm`, with egress |
 
 The earlier warning that this rig is fragile under load, with an L2 starving the L1's control plane
@@ -159,13 +152,14 @@ hung the VM on start then.
 
 ### Traps
 
-- **`test_basevm_e2e.py`'s stand-in fixture fails with a session base.** Lima names its guest home
-  `/home/<user>.guest`, so that is `$HOME` in the L1, and a bare `template:podman` create there
-  mounts `~` onto the path Lima reserves in the L2 (`mountPoint is the reserved internal home
-  directory`). It fails at validation, before any VM starts. Run that module without
-  `FY_BASE_VM_NAME`/`FY_BASE_VM_STAMP`. Don't set `user.home` in `_config/override.yaml` to avoid
-  it: on VMs that already exist, it left `sudo` asking for a password and the next start waiting on
-  its boot check.
+- **Don't run the tier as Lima's own user in the L1.** Lima names that user's home
+  `/home/<user>.guest`, and a bare `template:podman` create there mounts `~` onto the path Lima
+  reserves in the L2 (`mountPoint is the reserved internal home directory`). `test_basevm_e2e.py`'s
+  stand-in fixture fails on it. `fytest` has a plain home, so the recipes don't hit it. Setting
+  `user.home` in `_config/override.yaml` isn't a fix: on VMs that already exist, it left `sudo`
+  asking for a password and the next start waiting on its boot check.
+- **Lima's user holds the whole default subordinate id range in this image**, so a plain `useradd`
+  fails with `Can't get unique subordinate UID range`.
 - **`limactl` refuses to run as root**, so a container running it needs a non-root user.
 - **`/tmp` in the L1 is empty after a restart**: keep scripts in the home directory.
 - **The cloud image has `kernel-core`, not `kernel`**: `dnf upgrade kernel` fails with "available,
