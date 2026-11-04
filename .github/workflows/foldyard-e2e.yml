@@ -8,7 +8,8 @@ name: foldyard · live e2e
 #     VMs the same way), so `machine ensure`, the config-adopt gate, the supervisor and the real
 #     `foldyard up` / worktree lifecycle run exactly as on an operator's machine. The phase-0
 #     spike that established this (10/10 attempts green, ~2 min per attempt, 2026-09-17): the
-#     outcome is in ADR-0027, the measurements in PR #17. It replaced a `native`-backend job, which exercised no VM.
+#     outcome is in ADR-0027, the measurements in PR #17. It replaced a `native`-backend job,
+#     which exercised no VM.
 #   - `wsl2-host-e2e`: the same HOST topology on a Windows runner — an Ubuntu distro under WSL2
 #     (`windows-2025`, Vampire/setup-wsl), with foldyard's `lima` backend booting the QEMU/KVM VM
 #     INSIDE the distro. That is a second level of nesting (Azure → runner VM → WSL2 utility VM →

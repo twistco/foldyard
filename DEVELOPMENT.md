@@ -562,7 +562,8 @@ recipe `modprobe kvm; chown $USER /dev/kvm` — group membership does not take e
 10-attempt spike of the real `lima` backend on `ubuntu-24.04` went 10/10 with no retry wrapper,
 with and without the walls, QEMU start → READY in 29–41 s and the whole attempt under 2.5 min;
 [ADR-0027](./docs/adrs/0027-always-a-vm-native-backend-retired.md) records the outcome, and PR #17
-the measurements (its `docs/linux-support.md`; #34 later removed them from that page). The job creates the VM once from a throwaway example copy before pytest (the example stack has no bind
+the measurements (its `docs/linux-support.md`; #34 later removed them from that page). The job
+creates the VM once from a throwaway example copy before pytest (the example stack has no bind
 mounts, so every test copy can drive the one VM). It bakes a session base VM first (`fy-ci-base`,
 named by `FY_BASE_VM_NAME`/`FY_BASE_VM_STAMP` job-wide, retried once), so that VM and every one a
 module recreates are clones: a template create runs the template's `dnf install podman` over the
