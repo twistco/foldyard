@@ -97,6 +97,10 @@ steps:
 
 Pin the install to the version your `min_foldyard_version` asks for, so CI moves when you move it.
 
+Short image names (`python:3.12-slim`) need a registry to resolve against, which a dev VM's Fedora
+guest has and an Ubuntu runner may not. Name the registry in full, or add
+`unqualified-search-registries = ["docker.io"]` to `~/.config/containers/registries.conf`.
+
 ## Variables your compose files can use
 
 | Variable | Value |

@@ -458,7 +458,7 @@ jobs:
       # point — the wrapper runs the next three steps as root, and is regenerated for `runner`
       # after them.
       - name: Install WSL2 + Ubuntu 26.04
-        uses: Vampire/setup-wsl@v7.0.0
+        uses: Vampire/setup-wsl@v7.2.0
         with:
           distribution: Ubuntu-26.04
           wsl-version: 2
@@ -565,7 +565,7 @@ jobs:
       # Regenerate the wsl-bash wrapper for `runner`: setup-wsl only rewrites an existing wrapper
       # when `wsl-shell-command` is given explicitly. Every step from here runs as `runner`.
       - name: Switch the wsl-bash wrapper to the runner user
-        uses: Vampire/setup-wsl@v7.0.0
+        uses: Vampire/setup-wsl@v7.2.0
         with:
           distribution: Ubuntu-26.04
           wsl-shell-user: runner
