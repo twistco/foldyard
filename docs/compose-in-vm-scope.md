@@ -1,7 +1,9 @@
 # Compose in the VM: scope
 
-Status: **accepted, phase 1 built** (experimental), 2026-11-03. The four decisions below were taken as
-recommended. Related:
+Status: **phases 0–3 built, behind an experimental switch**, 2026-11-04. With `[machine] compose =
+"vm"`, no compose client runs on your computer. Phase 4 (on by default, the host path deleted) waits
+on CI's 9p and WSL2 hosts and on real use. The four decisions below were taken as recommended.
+Related:
 [ADR-0022](./adrs/0022-host-runs-the-adopted-config.md) (its 0.3.2 amendment names this as the
 structural fix), [ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md),
 [ADR-0010](./adrs/0010-podman-everywhere-container-host.md) (why builds use native `podman build`),
@@ -24,7 +26,9 @@ a boundary today:
 Inside the box the client already runs in the VM, and neither clamp applies there. This scope moves
 the host's client there too.
 
-### What runs the client on your computer today
+### What ran the client on your computer
+
+All of this moved under the switch, and each row still runs here without it.
 
 | caller | what it runs | who calls it |
 | --- | --- | --- |
@@ -36,26 +40,30 @@ the host's client there too.
 | `confighash.desired` | podman-compose's own parser, in a `python -P -m foldyard.confighash` child | `fy state` |
 | `devmode._rendered_compose` | `config` | doctor's stack-env row |
 | `box._build_img` | `podman build` of the box image, the repo as its context, packed on your computer | `fy box build`, `fy box up` (not compose, but the same shape) |
+| `stack._service_profiles`, `reconcile._overlay_services` | not a client at all: `yaml.safe_load(path.read_text())` of each compose file, through any link the box left there | `up`'s running profiles, `fy state` |
 
-## Proposal: the guest runs the client, as the VM user, over ssh
+The last row wasn't in the first draft of this table, and the path guard never covered it. It turned
+up while moving the others, which is the argument for a boundary over a list of keys.
+
+## The design: the guest runs the client, as the VM user, over ssh
 
 - **Where.** In the guest, as the VM user, over the backend's ssh route (`Backend.ssh_target`,
   the one `crossinject` and `guestlog` already use, so both backends have it). Not in a container:
   that needs an image in the VM (built or pulled through the wall, and the consumer's box image may
   have no Python), and the dev box may not be running, or may not exist at all for a box-only
   consumer.
-- **What.** foldyard's own pinned podman-compose (the version in foldyard's venv) with its two
-  pure-Python dependencies (PyYAML, python-dotenv), delivered by foldyard, plus a small packaged
-  entry point (`assets/compose/`) that reads one request from stdin (the compose argv, the env,
-  the working directory) and runs podman-compose, the config hash or the builds, streaming output
-  back. It is foldyard's code, run in the guest like the socket filter and the crossmask helper,
-  so ADR-0023 is not in tension.
-- **Which podman.** The guest's own `podman`, in remote mode against the same guest socket the
-  host's client uses today (`podman.sock`, or `podman-runsc.sock` under the gVisor posture), so a
-  posture's runtime selection doesn't change. The client is then always the server's own version:
-  in the box today, a podman-remote 5.4.2 client against a 5.8.4 server fails
-  `--build-context name=<dir>` with "invalid additional build context format", so the host build's
-  `additional_contexts` currently depend on how new your computer's podman is.
+- **What.** `foldyard.guestcompose` sends one payload per call on `python3 -I -`'s stdin: foldyard's
+  own pinned podman-compose (the version in foldyard's venv) with its two pure-Python dependencies
+  (PyYAML, python-dotenv) and a small runner (`assets/compose/runner.py`), as a 96 KB zip imported
+  from memory, plus one request (the argv, the env, the working directory). Nothing is installed in
+  the guest. It is foldyard's code, run in the guest like the socket filter and the crossmask
+  helper, so ADR-0023 is not in tension.
+- **Which podman.** The guest's own `podman`, in remote mode against the socket your computer's
+  client uses (`podman.sock`), so what it starts belongs to the API service, not to the ssh session,
+  and a posture's runtime selection doesn't change. The client is then always the server's own
+  version: in the box, a podman-remote 5.4.2 client against a 5.8.4 server fails `--build-context
+  name=<dir>` with "invalid additional build context format", so a build's `additional_contexts`
+  otherwise depend on how new the client's podman is.
 - **The env.** The host still computes `ctx.env` and sends it in the request, with `DOCKER_HOST` /
   `CONTAINER_HOST` rewritten to the guest-side socket. Nothing comes from the guest's login
   environment except what podman itself needs (`XDG_RUNTIME_DIR` and the like).
@@ -63,28 +71,68 @@ the host's client there too.
   posture overlays live in the checkout, so every `-f` resolves the same way. The build log stays
   host-side, written from the streamed output as today.
 - **What the host keeps.** Engine selection, the adopt gate, the build gate (its per-build secret,
-  the grant prompts, reading the proxy log), computing the env, and deciding from the answers.
+  the grant prompts, reading the proxy log), computing the env, deciding from the answers, and
+  engine calls that parse no compose file (`ps`, `inspect`, `image inspect`).
+- **`fy shell`** is the one verb that doesn't go there: `exec` needs your terminal on the stdin the
+  payload uses. It finds the container by its compose labels through the engine and runs `podman
+  exec -it`, the way `fy box shell` enters a box.
+- **Two builds stay here on purpose:** the packaged box image and the `[box].packages` layer. Their
+  contexts are foldyard's own files, which the VM can't see and the box can't write.
 
-### Why running there is safe: the premise the spike must prove
+### Why running there is safe: the premise, and what the spike found
 
 The VM user is the box's uid, and any container a box creates through the engine socket can
-bind-mount whatever the VM user can read. So a client running as the VM user should reach nothing
-a box can't already reach. **The spike checks this, rather than assuming it**, for each of: Lima's
-`cidata` mount, the VM user's home in the guest, the to-box and the from-box, the guest monitor's
-files (root-owned, so out of reach either way), and the gVisor posture's filtered socket (does it
-allow the same bind mounts?). Anything the VM user can read that a box can't is a finding, fixed
-before this lands.
+bind-mount whatever the VM user can read. So a client running as the VM user should reach nothing a
+box can't already reach. `test_the_vm_user_reads_nothing_a_box_cant` checks this through the engine
+socket, as a box must, and a path the VM user reads and a box can't is a finding. On a vz guest with
+the firewall, the monitor and the forwarder all on:
 
-Two consequences of running as the VM user:
+| path | VM user | box |
+| --- | --- | --- |
+| `/mnt/lima-cidata` (the boot scripts, keys included), `user-data.txt`, `cloud-init-output.log` | refused | — |
+| `/etc/fy-monitor/relay.key`, `/etc/fy-fwd/forwarder.key`, `/etc/sudoers.d`, `/var/log/tetragon` | refused | — |
+| `/run/fy-wall`, `/run/fy-monitor`, `/var/lib/fy-monitor` (the inbox) | readable | readable |
+| `/var/log/journal`, `/run/log/journal` | readable (group `systemd-journal`) | readable, see below |
 
-- **The answers are box-influenced data.** Anything that can write the VM user's files (a box
-  writing `~/.bashrc` through a bind mount, say, which the `bash -c` that sshd starts reads)
-  changes what comes back. The host already treats the render and `ps` as claims, since the
-  compose files are the box's anyway. The host must never act on an answer beyond the project
-  it asked about. That's already the rule for engine output.
-- **Terminal output.** podman-compose's output reaches your terminal today and keeps doing so.
-  foldyard strips control sequences from what it relays from the guest, as it does for the box's
-  tmux fields.
+**The journal is the one that took looking at.** The VM user reads it through a supplementary group,
+which a container doesn't keep by default, and a remote client refuses `--group-add keep-groups`.
+But that refusal is the client's: `--annotation run.oci.keep_original_groups=1` reaches crun from any
+client, and the API service holds the group. So a box can read the VM's whole journal, and the
+premise holds (the test has a negative control, without the annotation). On those guests the relay
+and forwarder keys are not in the journal, and nothing else secret was seen in it.
+
+Not yet checked: the premise under the gVisor posture's filtered socket.
+
+Consequences of running as the VM user:
+
+- **The answers are box-influenced data.** Anything that can write the VM user's files (a box writing
+  `~/.bashrc` through a bind mount, say, which the `bash` that sshd starts reads) changes what comes
+  back. The host already treats the render and `ps` as claims, since the compose files are the box's
+  anyway. So a failed call's stdout is never parsed, and the host acts on an answer only for the
+  project it asked about, the existing rule for engine output.
+- **Names in `[project] compose_env`** reach the guest on every compose call, where a box could read
+  them from the client's `/proc`. That widens nothing: a box can already edit a compose file to
+  interpolate any of them into a container it can inspect.
+- **Terminal output.** What's relayed from the guest has its control sequences stripped
+  (`guestcompose.printable`). The client on your computer doesn't do that, so `fy logs` is cleaner
+  here than it is without the switch.
+
+### What changes for a project
+
+- **The checkout must be mounted in the VM**, because the client reads it there. A real project's
+  always is, since `fy machine ensure` creates the VM from it. A VM that doesn't mount the checkout
+  used to work for image-only and context-shipped stacks, and now refuses, naming `fy machine
+  recreate`.
+- **Registry logins on your computer don't reach the VM.** A client on your computer read
+  `auth.json` and sent the credentials with each pull and build, which is itself a host secret the
+  compose files could spend. In the VM there is no such file, so a private base image needs another
+  route. **Open:** what that route should be before phase 4.
+- **`${HOME}`, `~` and `$USER` in a compose file are the guest's.** Your computer's home was never in
+  the VM, so a bind mount from it found nothing there anyway.
+- **Your own recipes aren't moved.** A recipe that runs `"$ENGINE" compose` after `eval "$(fy
+  shellenv)"` is still a compose client on your computer, and foldyard can't see it.
+- **Only podman-compose runs there:** `PODMAN_COMPOSE_PROVIDER` naming docker-compose is refused, and
+  preflight refuses `vm` on the docker engine.
 
 ## What it removes
 
@@ -100,22 +148,23 @@ Two consequences of running as the VM user:
 - **A smaller supervisor split (plan 03).** The process holding `host.env` then parses no compose
   file at all: what remains is ssh and engine calls with the clamped env.
 
-## Open questions for the spike
+## What the spike answered
 
-1. **Delivery.** Stream the payload on every call (the crossmask helper's pattern: no file in the
-   guest the VM user can change), or cache it in the guest under its hash and check the hash on each
-   run? Which Python each guest has (the Fedora 44 template, podman machine's CoreOS), and whether
-   podman-compose runs on PyYAML's pure-Python path there.
-2. **Latency.** One ssh per compose call. `fy up` makes about 6–10, `fy state` and doctor 1–3.
-   Measure on vz, qemu/9p and WSL2, and use an ssh `ControlMaster` (its socket on your computer) if
-   it's needed.
-3. **Interactive verbs.** `fy shell` (`exec -it`) and `fy logs -f` over `ssh -t`, Ctrl-C included.
-4. **The gVisor posture.** Confirm the client in the guest against `podman-runsc.sock` creates the
-   same containers as today's host client.
-5. **The docker-compose provider.** The guest has no `docker-compose` binary. Proposal: support only
-   podman-compose here and refuse `PODMAN_COMPOSE_PROVIDER=docker-compose` on the host. (In the box,
-   and in CI's in-box topology, nothing changes.)
-6. **The podman-machine backend.** The ssh route exists. Check its user and socket paths.
+1. **Delivery:** the payload on stdin on every call, imported from memory. There is nothing to cache
+   or invalidate, and no version to drift. An earlier version loaded it from a memfd, but
+   `memfd_create` doesn't exist on macOS, where the hermetic tests run the payload.
+2. **Latency:** on vz, a bare ssh is about 125 ms and a whole `config --services` about 240 ms, payload
+   included. `fy up` makes about 10 calls, so connection reuse isn't needed there. 9p and WSL2 are
+   measured by the same test in CI: it writes the numbers to the step summary.
+3. **Interactive verbs:** `fy logs -f` runs without a terminal, so nothing would tell the guest when
+   ssh goes; the runner watches its parent and ends its process group. `fy shell` doesn't go there
+   (above). Both are tested live, the shell through a real pty.
+4. **A file your computer just replaced** can read as missing from the VM for up to about 1 s on
+   virtiofs, 5 s on libkrun (ADR-0021), and compose would call that a missing file. So the runner
+   waits up to 6 s for a `-f` file before compose runs.
+
+**Still open:** the gVisor posture, the podman-machine backend (its ssh route exists, untested), and
+9p and WSL2 until CI runs them.
 
 Out of scope: **which compose client long-term** (plan 04 asked whether docker-compose in the VM
 could retire podman-compose's quirks). Keep podman-compose for this move, so only one thing changes
@@ -123,33 +172,39 @@ at a time.
 
 ## Phases
 
-0. **Spike** on `foldyard-example`: the open questions, vz locally, qemu/9p and WSL2 through a CI
-   dispatch. It is a host-tier module, `tests/test_guestcompose_e2e.py` (shards L1 and W1), which
-   writes the call cost and the premise table to the run's step summary. Already seen from a dev
-   box: the payload (the runner, podman-compose 1.6.0, PyYAML 6.0.3, python-dotenv 1.2.2) is a
-   96 KB zip, which loads from a memfd under `python3 -I` and renders on PyYAML's pure-Python
-   parser.
-1. **Read-only, behind an experimental switch** (`[machine] compose = "vm"`, in
-   `experimental.REGISTER`): `ps`, `config --services` and the config hash run in the guest
-   (`foldyard.guestcompose`). **Built.** The full `config` render does NOT move yet: while `up`
-   and the builds run on your computer, the path guard must judge what THAT client will read, and
-   a render from the guest is the box's to shape (the VM user's home is box-writable). A guard fed
-   a clean render from the guest while the client on your computer reads the real files would be
-   worse than today. So the render moves with `up`, in phase 2.
-2. **Mutating verbs:** build, `up`, `down`, the supervisor's recreate, `logs`, `shell`, `run`.
-3. **`fy box build`** in the guest too.
+0. **Spike.** Done on vz: `tests/test_guestcompose_e2e.py` (shards L1 and W1).
+1. **Read-only calls, behind the switch** (`[machine] compose = "vm"`, in `experimental.REGISTER`).
+   Done. The full render stayed on your computer until `up` moved: a guard fed a render from the guest
+   while the client here reads the real files would be worse than either.
+2. **Every other call:** the render, the builds, `up`, `down`, `logs`, the supervisor's recreate, and
+   the two reads that parsed compose files here. Done. The guard stands down under the switch.
+3. **`fy box build`**, for a project's own image. Done.
 4. **Default on, then the host path deleted** with `composeguard`, the docs section, and a new ADR
    amending 0022. There is no permanent fallback: with ssh unavailable, the verb refuses and says so.
 
 ## Tests
 
-- **Golden:** the argv becomes the ssh route plus the request. A guard test, like
-  `tests/test_selfspawn.py`'s, fails on any compose client or `podman build` argv in host code paths
-  outside the guest runner.
-- **Live, red first:** a compose file whose `env_file:` names a file that exists only on your
-  computer. Today, with the guard switched off, its contents reach the container. In the VM, the
-  file isn't there. The existing host tiers (`test_e2e.py`, `test_worktree_e2e.py`,
-  `test_probes_e2e.py`) must pass unchanged.
+- **Hermetic** (`tests/test_guestcompose.py`): the real payload run by the test's interpreter. An AST
+  guard fails on any new use of `ctx.compose` outside the helpers that ask `guestcompose` first.
+- **Live** (`tests/test_guestcompose_e2e.py`): the red-first controls prove the channel with the client
+  on your computer (an `env_file:` reaching a container, an `include:` reaching a render) and then that
+  it's closed from the guest, including a planted symlink, the race the guard can't close. A logging
+  `podman` first on the CLI's PATH makes "no compose client or build ran on your computer" an assertion
+  over what ran. `fy verify` passes.
+- **The existing tiers, unchanged, with `MACHINE_COMPOSE=vm`:** their copies aren't in the VM's mounts,
+  so give the VM one for a directory of its own and run under it:
+
+  ```bash
+  limactl stop foldyard-example
+  limactl edit --tty=false foldyard-example \
+    --set ".mounts += [{\"location\":\"$HOME/fy-e2e/vmtier\",\"mountPoint\":\"$HOME/fy-e2e/vmtier\",\"writable\":true}]"
+  limactl start foldyard-example
+  FOLDYARD_E2E=1 MACHINE_COMPOSE=vm CONTAINER_HOST=unix://$HOME/.lima/foldyard-example/sock/podman.sock \
+    uv run --group e2e pytest --basetemp=$HOME/fy-e2e/vmtier/run tests/test_e2e.py tests/test_probes_e2e.py …
+  ```
+
+  `fy verify` fails on that VM, correctly, for that extra mount. `test_reclaim_e2e` must not directly
+  follow `test_worktree_e2e` there: the removed worktree's image is one more orphan than it expects.
 
 ## Decisions for the maintainer
 

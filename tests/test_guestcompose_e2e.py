@@ -87,6 +87,8 @@ def shared(tmp_path_factory):
         for m in mounts
         if m.get("writable") and m.get("mountPoint") in (None, m["location"])
     ]
+    # A mount can outlive what it shares here: pytest deletes the copies of its earlier sessions.
+    roots = [r for r in roots if r.is_dir()]
     if not roots:
         pytest.skip(f"{VM} has no writable mount at the same path on both sides")
     scratch = roots[0] / f".fy-guestcompose-{int(time.time())}"

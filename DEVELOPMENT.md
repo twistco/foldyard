@@ -55,6 +55,16 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   creates or builds (`stack._escapes`), host-only. Interim — a key list, and racy against a box
   that swaps a checked file for a symlink; the structural fix runs compose in the VM. Its sibling
   clamp: `stack._host_passthrough`, the compose client's allowlisted env.
+- `guestcompose.py` — `[machine] compose = "vm"` (experimental; docs/compose-in-vm-scope.md): every
+  compose call, the stack's builds and a project's own box image run in the GUEST as the VM user,
+  each one ssh run of `python3 -I -` whose stdin is the whole payload: a deterministic zip of
+  `assets/compose/runner.py` and foldyard's pinned podman-compose + PyYAML + python-dotenv, imported
+  from memory, plus the request. Nothing is installed there and there is never a fallback to a client
+  here (no ssh route ⇒ a refusal). `stack._compose_output` / `_compose` / `_compose_captured` are the
+  only places that branch on it, an AST guard holds `ctx.compose` to them, and `composeguard` stands
+  down under it. `fy shell` needs a terminal on that stdin, so it finds the container through the
+  engine (`stack._exec_service`). Needs the checkout mounted in the VM; registry logins here don't
+  reach it. What it relays has its control sequences stripped: the answers are box-influenced.
 - `confighash.py` — the stack scope's verdict: the compose provider's own per-service config
   hash vs a fresh render (what `up` compares). podman: a `python -m foldyard.confighash`
   subprocess drives the bundled podman-compose's parser (its internals — degrades to
@@ -354,6 +364,13 @@ foldyard's surface splits by *where it can be validated*:
    - `test_mount_visibility_e2e.py` — the git heal's premise on THIS host's mount (virtiofs on
      macOS, 9p on the Linux/WSL2 runners): a file the VM renames into place reaches the host
      whole, never briefly missing, never older than one already seen (ADR-0021, 2026-09-27).
+   - `test_guestcompose_e2e.py` — `[machine] compose = "vm"`: the spike (the payload on the guest's
+     python, one call's cost in the step summary, config-hash parity, red-first controls that an
+     `env_file:` and an `include:` naming files only on your computer are read by the host's client
+     and not the guest's, the premise that the VM user reads nothing a box can't, through the engine
+     socket), then the whole flow on a VM recreated from its own copy, a logging `podman` on the CLI's
+     PATH asserting no compose client or build ran on your computer. Its doc has the recipe for the
+     OTHER tiers under the switch, whose copies the VM doesn't mount otherwise.
    - `test_mounts_e2e.py` — ADR-0033's to-box against ROOT in the guest: a test-only boot script
      (own marker, always exits 0) remounts it rw and tries every kind of write; all refused and the
      host's seeded file unchanged. The red-first control records it `writable: true` (started with
