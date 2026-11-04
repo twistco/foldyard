@@ -191,6 +191,57 @@ def test_a_client_pointed_at_a_missing_file_sends_none(api, args):
     assert UNRELATED not in "".join(listener.headers), listener.headers
 
 
+_needs_docker = pytest.mark.skipif(shutil.which("docker") is None, reason="no docker CLI here")
+
+
+def _docker(d: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess:
+    (d / "ctx").mkdir(exist_ok=True)
+    (d / "ctx" / "Dockerfile").write_text("FROM registry.invalid/fy/base:1\n")
+    return subprocess.run(
+        ["docker", *args],
+        env={**env, "DOCKER_HOST": f"unix://{d}/a.sock", "DOCKER_BUILDKIT": "0"},
+        cwd=str(d / "ctx"),
+        capture_output=True,
+        timeout=60,
+    )
+
+
+@_needs_docker
+def test_the_clamped_docker_client_sends_none(api, monkeypatch):
+    """REGISTRY_AUTH_FILE means nothing to the docker CLI: `[engine] cli = "docker"` reads
+    ~/.docker/config.json, and a build sends all of it."""
+    d, listener = api
+    _auth_file(d / "home" / ".docker" / "config.json")
+    env = {**_host_env(), "HOME": str(d / "home")}
+    _docker(d, env, "build", "-q", ".")
+    assert UNRELATED in "".join(listener.headers), "the config wasn't read: no control"
+    listener.headers.clear()
+    monkeypatch.setenv("HOME", str(d / "home"))  # no_logins_docker_config reads it from the process
+    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
+    registrylogins.clamp(env)
+    _docker(d, env, "build", "-q", ".")
+    _docker(d, env, "pull", "registry.invalid/fy/base:1")
+    sent = "".join(listener.headers)
+    assert NEEDED not in sent and UNRELATED not in sent, listener.headers
+
+
+@_needs_docker
+def test_docker_compose_still_runs_under_the_clean_config(monkeypatch):
+    """The plugin lives in the config dir, so a clean one alone makes it "unknown command". Not a
+    plugin installed here: nothing to lose, nothing to show."""
+    plain = subprocess.run(["docker", "compose", "version"], capture_output=True, timeout=60)
+    if plain.returncode != 0:
+        pytest.skip("no compose plugin here")
+    env = dict(os.environ)
+    env.pop("DOCKER_CONFIG", None)
+    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
+    registrylogins.clamp(env)
+    clean = subprocess.run(
+        ["docker", "compose", "version"], env=env, capture_output=True, timeout=60
+    )
+    assert clean.returncode == 0, clean.stderr
+
+
 # ── the real thing, seen from where a box stands ──────────────────────────────────────────
 
 _WATCH = (

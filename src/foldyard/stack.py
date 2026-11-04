@@ -509,8 +509,8 @@ def _host_passthrough() -> dict[str, str]:
         if k in declared
         or ((k in _PASSTHROUGH or k.startswith(_PASSTHROUGH_PREFIXES)) and k not in secret)
     }
-    if not config.in_box():  # the client's auth file: see registrylogins
-        out[registrylogins.AUTH] = registrylogins.for_compose(declared)
+    if not config.in_box():  # the client's logins: see registrylogins
+        out.update(registrylogins.for_engine(declared))
     return out
 
 
@@ -547,6 +547,10 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
     for overlay in _compose_overlays(mode, base=checkout):
         compose += ["-f", overlay]
     env = {**_host_passthrough(), **plain, **exported, **ports, **mode_env}
+    if not config.in_box():  # again, last: `[ports]` and the mode env can name anything
+        from . import registrylogins
+
+        env.update(registrylogins.for_engine(config.compose_env()))
     return Context(
         main=main,
         env=env,
