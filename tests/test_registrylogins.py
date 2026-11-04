@@ -160,6 +160,15 @@ def test_a_failure_names_the_logins_only_when_you_have_some(host, tmp_path, monk
     assert "compose_env" in hint and OPT_IN in hint
 
 
+def test_the_clamp_itself_doesnt_read_as_you_having_logins(host, tmp_path, monkeypatch):
+    """After the clamp REGISTRY_AUTH_FILE names the empty file, which is no login of yours, or every
+    failed build would tell people with no logins about them."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv(AUTH, str(registrylogins.no_logins_file()))
+    assert registrylogins.failure_hint() == []
+
+
 def test_a_project_already_opted_in_isnt_told_to(host, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / ".docker").mkdir()
