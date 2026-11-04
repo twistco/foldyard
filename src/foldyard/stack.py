@@ -2046,11 +2046,11 @@ def disk_headroom(env: dict[str, str] | None = None, timeout: float = 15) -> Dis
 
     ``timeout`` is generous for the pre-build reclaim (the engine is often busy right then) and
     cut to the module's probe budget by doctor, whose rows a TUI re-runs on a 5s timer."""
-    if config.engine() != "podman":
-        return None
     try:
+        if config.engine() != "podman":
+            return None
         proc = _run(["podman", "info", "--format", "json"], env=env, timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, config.EngineRefused):
         return None
     if proc.returncode != 0:
         return None

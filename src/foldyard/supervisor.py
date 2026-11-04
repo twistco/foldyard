@@ -1316,6 +1316,7 @@ _UNADOPTED = "unadopted"
 
 # The unregistered worktree dirs last reported, so the log line fires once per change.
 _unregistered_seen: list[str] = []
+_engine_refusals_seen: dict[str, str] = {}  # worktree → the refusal last said
 
 
 def _report_unregistered() -> None:
@@ -1337,6 +1338,27 @@ def _report_unregistered() -> None:
             f"⚠ worktrees not registered with this computer — running nothing for them: "
             f"{', '.join(stray)}. If they are yours: {fixes}."
         )
+
+
+def _report_engine_refused(wt: str) -> None:
+    """Say — once per change — that this checkout's adopted config or this computer has the engine
+    refused (:class:`config.EngineRefused`). The tick carries on under it, reading the engine as
+    unreachable, and a box that reads as down loses a worktree's daemons, so it must not be silent:
+    a line in the log and a notification, and `fy doctor` says the same."""
+    try:
+        config.engine()
+        refusal = ""
+    except config.EngineRefused as e:
+        refusal = " ".join(str(e).split())
+    if refusal == _engine_refusals_seen.get(wt, ""):
+        return
+    _engine_refusals_seen[wt] = refusal
+    where = f" [worktree {wt}]" if wt else ""
+    if refusal:
+        log(f"⚠ the engine is refused{where}: {refusal}")
+        _notify(f"fy {config.project()}: the engine is refused{where}", refusal)
+    else:
+        log(f"✓ the engine is no longer refused{where}")
 
 
 def _report_config_drift(wt: str, cfg: config.Config) -> bool:
@@ -1660,6 +1682,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
                     "`fy config adopt`"
                 )
                 continue
+            _report_engine_refused(wt)
             mode = expire_user_modes()
             _report_held(wt, mode)
             _report_inject_overlaps(wt, mode)
@@ -2195,16 +2218,24 @@ def main() -> int:
     # stamps at read time (ADR-0034): its own thread too, idle while attribution is off.
     attribution.start(log, lambda: stopping)
 
-    while not stopping:
-        reconcile_once(children, nagged)
+    try:
+        while not stopping:
+            reconcile_once(children, nagged)
 
-        # (Each active worktree's mirror was refreshed inside the reconcile loop above.)
-        # Sleep in small slices so Ctrl-C lands promptly.
-        for _ in range(int(TICK_SECONDS / 0.2)):
-            if stopping:
-                break
-            time.sleep(0.2)
+            # (Each active worktree's mirror was refreshed inside the reconcile loop above.)
+            # Sleep in small slices so Ctrl-C lands promptly.
+            for _ in range(int(TICK_SECONDS / 0.2)):
+                if stopping:
+                    break
+                time.sleep(0.2)
+    finally:
+        # However the loop ended: a daemon that outlives its supervisor has nothing to expire a
+        # mode or stop it, and those children are in their own session, so they would.
+        _shut_down(children)
+    return 0
 
+
+def _shut_down(children: dict[str, Child]) -> None:
     log("shutting down…")
     for child in children.values():
         child.stop()
@@ -2219,7 +2250,6 @@ def main() -> int:
                 state["mode"], state["expires"], devmode.daemon_status(state["mode"])
             )
     log("bye")
-    return 0
 
 
 if __name__ == "__main__":

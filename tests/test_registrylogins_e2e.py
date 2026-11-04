@@ -30,7 +30,11 @@ from e2e_host import (
     ensure_vm,
     example_copy,
     fy,
+    fy_ok,
+    heartbeat_file,
     host_tier,
+    state_dir,
+    wait_for,
 )
 from foldyard import registrylogins
 
@@ -277,3 +281,46 @@ def test_a_docker_engine_is_refused_and_can_be_undone(tmp_path_factory):
     toml.write_text(toml.read_text().replace('\n[engine]\ncli = "docker"\n', "\n"))
     _adopt_on_host(r)
     assert fy(["build"], r, timeout=600, env_extra=from_config).rc == 0
+
+
+def _still_ticking() -> None:
+    beat = heartbeat_file().stat().st_mtime
+    wait_for(
+        lambda: heartbeat_file().stat().st_mtime > beat + 4,  # some ticks on
+        timeout=30,
+        what="the supervisor still ticking",
+    )
+
+
+def test_a_supervisor_outlives_the_engine_being_refused_under_it(tmp_path_factory):
+    """The same line, adopted while a supervisor is running. It is all that expires a mode or stops
+    a daemon, so it has to stay, say why, and let `fy doctor` finish."""
+    r = example_copy(tmp_path_factory.mktemp("supervised"))
+    _adopt_on_host(r)
+    from_config = {"FOLDYARD_ENGINE": ""}
+    fy_ok(["host", "restart"], r, timeout=300, env_extra=from_config)
+    log = state_dir() / "host-supervisor.log"
+    toml = r / "foldyard.toml"
+    original = toml.read_text()
+    toml.write_text(original + '\n[engine]\ncli = "docker"\n')
+    try:
+        _adopt_on_host(r)
+        said = "the engine is refused"
+        wait_for(
+            lambda: log.exists() and said in log.read_text(errors="replace"),
+            timeout=30,
+            what="the supervisor saying the engine is refused",
+        )
+        _still_ticking()
+        # One started now reads the refused engine outside any binding, on its first tick: the
+        # way in a running one is spared (its ambient config is cached), so what proves it stays.
+        restarted = fy(["host", "restart"], r, timeout=120, env_extra=from_config)
+        assert "Traceback" not in restarted.out, restarted.out
+        _still_ticking()
+        doctor = fy(["doctor"], r, timeout=120, env_extra=from_config)
+        assert "Traceback" not in doctor.out, doctor.out
+        assert "podman" in doctor.out and "adopted config" in doctor.out, doctor.out
+    finally:
+        toml.write_text(original)
+        _adopt_on_host(r)
+    fy_ok(["host", "restart"], r, timeout=300, env_extra=from_config)

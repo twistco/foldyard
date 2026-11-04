@@ -67,6 +67,36 @@ def test_set_mode_refreshes_an_existing_mirror_even_with_box_down(isolated_state
     assert json.loads(isolated_state["mirror"].read_text())["github"] == "on"
 
 
+def test_a_mode_can_still_be_set_under_a_refused_engine(isolated_state, monkeypatch):
+    # `fy mode … off`, and a lapsed TTL, which lands here inside the supervisor's tick: asking
+    # whether the box is up must read as "can't tell", or the mode never comes down.
+    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    devmode.set_mode({"github": "on"})
+    devmode.set_mode({"github": "off"})
+    assert devmode.read()["mode"]["github"] == "off"
+
+
+def test_doctor_says_the_engine_is_refused_and_carries_on(isolated_state, monkeypatch):
+    # The verb you reach for when something's off: it must name the refusal, then finish the rest
+    # (the rows asking the running stack read their engine outside their own guard).
+    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    monkeypatch.setattr(devmode, "_run", lambda cmd, timeout=8: (0, "ok"))
+    rows = [row for row in devmode.doctor(deep=False) if row[0] != "running"]
+    engine = [row for row in rows if row[1] == "engine"]
+    assert len(engine) == 1, rows
+    status, _, detail = engine[0]
+    assert status == "fail" and "podman" in detail and "\n" not in detail
+    assert rows.index(engine[0]) < len(rows) - 1  # …and it wasn't the last word
+
+
+def test_doctor_has_no_engine_row_when_the_engine_is_fine(isolated_state, monkeypatch):
+    # "ok" rows about what nobody asked are noise: the row exists for the refusal.
+    monkeypatch.setattr(devmode, "_run", lambda cmd, timeout=8: (0, "ok"))
+    assert "engine" not in [row[1] for row in devmode.doctor(deep=False)]
+
+
 def test_set_mode_does_not_create_a_mirror_when_box_down(isolated_state, monkeypatch):
     # `fy mode` against a fully-down project must not re-dirty a clean checkout with
     # .dev-mode.json — the supervisor seeds the mirror within a tick of a box coming up.

@@ -718,6 +718,14 @@ def in_box() -> bool:
 ENGINES = ("podman", "docker")
 
 
+class EngineRefused(SystemExit, Exception):
+    """foldyard won't drive the engine this config or computer points it at. Both at once, on
+    purpose. As a :class:`SystemExit` a verb ends on the message, with no traceback. As an
+    :class:`Exception` every probe's ``except Exception`` takes it for an engine it can't reach, so
+    the long-running code asking the engine carries on: the supervisor is all that expires a mode
+    or stops a daemon, and `[engine].cli` is a line a box can propose."""
+
+
 def engine() -> str:
     """The container-engine CLI that drives the compose stack — **podman** by default.
 
@@ -748,7 +756,7 @@ def engine() -> str:
     explicit = os.environ.get("FOLDYARD_ENGINE") or _table("engine").get("cli")
     if explicit:
         if explicit not in ENGINES:
-            raise SystemExit(
+            raise EngineRefused(
                 f"✗ engine {explicit!r} is not one of {', '.join(ENGINES)} — set [engine].cli "
                 "(or FOLDYARD_ENGINE) to an engine NAME, not a path"
             )
@@ -764,7 +772,7 @@ def _docker_here() -> str:
     switch (:mod:`foldyard.registrylogins`), and machine lifecycle needs it anyway."""
     if in_box():
         return "docker"
-    raise SystemExit(
+    raise EngineRefused(
         "✗ foldyard drives podman on your computer, not docker: a docker client would send the "
         "VM\n  your registry logins, where a box could read them. Install podman (your package "
         "manager;\n  `brew install podman` on macOS). If [engine] cli or FOLDYARD_ENGINE says "

@@ -780,6 +780,23 @@ def test_engine_from_toml(fresh_config, tmp_path, monkeypatch):
     assert config.engine() == "docker"
 
 
+@pytest.mark.parametrize("named", ["docker", "/tmp/evil", None])
+def test_a_refused_engine_ends_a_verb_and_reads_as_unreachable_to_a_probe(
+    fresh_config, tmp_path, monkeypatch, named
+):
+    # Both bases are load-bearing. SystemExit: a verb ends on the message, with no traceback.
+    # Exception: every probe's `except Exception` takes it for an engine it can't reach. Only one
+    # of them, and a refused engine either tracebacks every verb or ends a running supervisor,
+    # which leaves its daemons running with nothing to expire them.
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE=named)  # None: no podman on this PATH
+    with pytest.raises(config.EngineRefused) as refused:
+        config.engine()
+    assert isinstance(refused.value, SystemExit) and isinstance(refused.value, Exception)
+    assert isinstance(refused.value.code, str) and refused.value.code.startswith("✗")
+    assert str(refused.value) == refused.value.code
+
+
 def test_engine_override_must_name_a_known_engine(fresh_config, tmp_path, monkeypatch):
     # `[engine].cli` is REPO config and this value is exec'd host-side by every engine verb, so an
     # unconstrained string would let anything that can write the checkout pick a binary the Mac then

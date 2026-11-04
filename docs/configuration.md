@@ -504,6 +504,10 @@ The docker fallback exists for CI runners, which ship docker and no podman, and 
 client would send the VM your registry logins ([stack](./stack.md#private-images)). foldyard exports `CONTAINER_HOST`
 pointing at the VM's socket, so plain podman works everywhere, including in the box.
 
+A refusal stops the command you ran. A supervisor already running stays, so modes still expire and
+`fy mode … off` still stops the daemons, and it treats every box as down: a worktree's daemons stop
+until the refusal is gone. It logs and notifies once, and `fy doctor` has an `engine` row.
+
 ## `[ports]`
 
 Ports your stack publishes on your computer. **Keys are the exact env-var names your compose
