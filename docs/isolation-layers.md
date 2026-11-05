@@ -149,7 +149,7 @@ dominant cost under any runtime.
 ### Lima + QEMU on Linux (foldyard's own `lima` backend)
 
 What the `lima` backend does on a Linux host (first measured 2026-09-11; now run on every
-`lima-host-e2e` and `wsl2-host-e2e` CI job — the CI section of [DEVELOPMENT.md](../DEVELOPMENT.md)):
+`lima-host-e2e` and `wsl2-host-e2e` CI job — [the CI page](./dev/ci.md)):
 
 - `resolve_vmtype()` picks `qemu` from `limactl info`, not from the OS.
 - The host needs `qemu-img` (package `qemu-utils` / `qemu-img`), which `qemu-system-x86-core` does
@@ -307,9 +307,8 @@ which is why that shape is gone ([ADR-0027](./adrs/0027-always-a-vm-native-backe
 **WSL2's options are the Linux options.** The stock WSL2 kernel builds KVM as modules, and with
 nested virtualisation on, `/dev/kvm` is in the distro; foldyard's `lima` backend boots its QEMU VM
 there unchanged. Measured in CI on 2026-09-17 (the `wsl2-host-e2e` job, a hosted Windows Server 2025
-runner, `nestedVirtualization=true` in `.wslconfig`): the full host tier passes. Details: the CI
-section of [DEVELOPMENT.md](../DEVELOPMENT.md),
-[linux-support.md](./linux-support.md#validated-on-a-linux-host).
+runner, `nestedVirtualization=true` in `.wslconfig`): the full host tier passes. Details:
+[the CI page](./dev/ci.md), [linux-support.md](./linux-support.md#validated-on-a-linux-host).
 
 Limits:
 

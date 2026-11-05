@@ -34,7 +34,7 @@ host-side launch adopts it via the code fingerprint. The pin closes the unattend
 not those.
 
 Host-only (like :mod:`foldyard.allowlist`): in the box there is no pin and everything falls back to
-the working tree, which is what a box session should see anyway. Stdlib only.
+the working tree, which is what a box session should see anyway. Stdlib only. See ADR-0022.
 """
 
 from __future__ import annotations

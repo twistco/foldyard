@@ -18,9 +18,11 @@ Two halves, deliberately apart:
   event's mount-namespace inode and, separately, kernel snapshots of inode → container; the join
   happens here, at read time, over the stored evidence — so it can be improved and re-run without
   touching the VM. See :func:`attribute` for the rules, including why a namespace number on its
-  own is never trusted across time. Any stretch of the store is joined with the catalogue's
-  snapshots around it (:func:`join`), never just the ones that happen to fall inside the bytes
-  read: two snapshots can be a minute and tens of megabytes apart under load.
+  own is never trusted across time (the kernel hands the next namespace made the lowest free
+  number). Any stretch of the store is joined with the catalogue's snapshots around it
+  (:func:`join`), never just the ones that happen to fall inside the bytes read: two snapshots can
+  be a minute and tens of megabytes apart under load, and a byte window once silently dropped
+  every event between them (2026-10-21).
 """
 
 from __future__ import annotations

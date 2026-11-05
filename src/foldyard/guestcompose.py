@@ -19,6 +19,11 @@ says so. The one verb that doesn't come here is ``fy shell``, which needs your t
 stdin the payload uses: ``stack.shell`` finds the container through the engine and enters it the
 way ``fy box shell`` does, parsing no compose file.
 
+``stack._compose_output`` / ``_compose`` / ``_compose_captured`` are the only places that branch on
+it (an AST guard in tests/test_guestcompose.py holds every use of ``ctx.compose`` to them), and
+``composeguard`` stands down under it. It needs the checkout mounted in the VM, and registry logins
+on your computer don't reach it.
+
 What comes back is box-influenced data, like everything the engine answers: the compose files
 are the box's, and so is the VM user's home in the guest (anything a box can bind-mount). Callers
 use it only for the project they asked about, as they always have, and what is relayed to your

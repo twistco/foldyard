@@ -18,9 +18,9 @@ rides this axis too: the data services get their ADC (and thus their runtime GSM
 the Langfuse keys) from the *llm* overlay, not the identity overlay, so a cassette run
 under ``gcp=sa`` still traces nowhere.
 
-DECLARED plugin (loads only on a ``[plugins.llm]`` table), and consumer-shaped like
-auth0-sim: it migrates into the consumer repo via ``[plugins].load`` in spinout Phase 2
-(decisions D3/D4). Stdlib only (loads on the recipe hot path).
+DECLARED plugin (loads only on a ``[plugins.llm]`` table), and Tangible-bound like auth0-sim:
+slated for DELETION, not migration — ADR-0024: it turned out to be data, so a declarative
+``[[axis]]`` table replaces it, once that is built. Stdlib only (loads on the recipe hot path).
 """
 
 from __future__ import annotations

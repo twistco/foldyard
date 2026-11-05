@@ -1,4 +1,4 @@
-"""This repo's own pre-commit hook (`.githooks/pre-commit`; DEVELOPMENT.md).
+"""This repo's own pre-commit hook (`.githooks/pre-commit`; docs/dev/gotchas.md).
 
 Git runs a hook only if it is executable, and skips one that isn't without a word. Clones of this
 repo have `core.fileMode = false` (the shared mount), so git records a new file's mode as it is

@@ -136,7 +136,7 @@ def test_a_worktree_offset_pin_comes_from_mains_adoption(host_checkout, monkeypa
 # Tangible's `just e2e` on a fresh host printed "[project].compose is unset in foldyard.toml" and a
 # PODMAN_PROJECT guessed from the directory name, while the tree's toml set both: the host read
 # nothing (nothing adopted) and reported what nothing implies. Pinning makes an edit silent by
-# construction, so the silence itself has to be reported (DEVELOPMENT.md: reporting is part of it).
+# construction, so the silence itself has to be reported (docs/dev/invariants.md: reporting is part of it).
 
 
 def test_an_unadopted_checkout_is_named_as_such(host_checkout, monkeypatch):

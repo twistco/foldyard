@@ -5,7 +5,7 @@ Unlike the golden/mocked tests, this runs the engine for real — `foldyard up` 
 image, pulls postgres, and the test queries the DB across the compose network. It is OPT-IN:
 skipped unless FOLDYARD_E2E=1 AND an engine is reachable (it pulls images + builds, ~minutes).
 Run it where foldyard has an engine — the dev box (the rootless machine socket), a nested
-podman host (see DEVELOPMENT.md), or CI's `lima-host-e2e` job, where the VM is created once before
+podman host (see docs/dev/testing.md), or CI's `lima-host-e2e` job, where the VM is created once before
 pytest and its socket handed to THIS test's engine helpers as CONTAINER_HOST — never DOCKER_HOST,
 which the CLI would take as "socket pre-exported" and skip `machine.ensure` — so `foldyard up`
 here runs the REAL host path (machine ensure → adopt gate → supervisor → compose). It namespaces

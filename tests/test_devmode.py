@@ -1422,7 +1422,7 @@ def test_doctor_asks_the_box_on_either_side(monkeypatch):
 def _stub_engine(monkeypatch, names: list[str], specs: list[dict], seen: list | None = None):
     """Stub devmode's engine calls for the stack check: `ps` returns `names`, `inspect` returns
     `specs`. NEVER let these tests reach a real socket — inside the box `_engine_env()` resolves
-    the LIVE machine, and a stray verb there acts on the running stack for real (DEVELOPMENT.md
+    the LIVE machine, and a stray verb there acts on the running stack for real (docs/dev/testing.md
     "Golden tests must never see a live engine socket")."""
 
     def fake_run(cmd, **kw):

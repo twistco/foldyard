@@ -51,7 +51,7 @@ def bound(repo, monkeypatch):
     """Bind the in-process package to the example copy: env + cwd, caches cleared (config's
     lru_caches, the plugin registry) and the machine module's import-time constants re-pointed —
     they bind from config at import, which may have happened for another checkout earlier in
-    the session (DEVELOPMENT.md, conventions)."""
+    the session (docs/dev/gotchas.md)."""
     from foldyard import config, machine, machine_backend, plugins
 
     monkeypatch.setenv("FOLDYARD_REPO", str(repo))
@@ -129,7 +129,7 @@ def test_machine_flag_socket_and_liveness_agree_then_diverge(bound):
     assert machine.state() == "running"
     assert machine.socket() == f"unix://{LIMA_SOCK}"
     assert machine.responsive()
-    # The paired invariant (DEVELOPMENT.md): `state()` is a lifecycle FLAG, `responsive()` is a
+    # The paired invariant (docs/dev/gotchas.md): `state()` is a lifecycle FLAG, `responsive()` is a
     # real connect. Moving the socket aside kills the second and leaves the first untouched.
     aside = LIMA_SOCK.with_name("podman.sock.aside")
     os.rename(LIMA_SOCK, aside)

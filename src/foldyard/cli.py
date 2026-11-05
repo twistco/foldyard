@@ -3,9 +3,9 @@
 Distributed via `uv tool install` (ADR-0012), so `foldyard` is an on-PATH entry point
 with its own per-machine venv — typer/textual live there, off the shared repo mount.
 
-Step-1 surface: the host-side posture substrate. Engine verbs (up/down/nuke/ps/logs/
-shell/box/verify/worktree/machine/transcripts) are ported from the `just` recipes in
-later steps and will carry real typed options.
+Every verb is declared here: the host-side posture substrate and the engine verbs (up/
+down/nuke/ps/logs/shell/box/verify/worktree/machine/transcripts), ported from the `just`
+recipes.
 
 Each command's heavy imports are LAZY (inside the function): typer itself loads on
 every invocation (incl. the per-recipe `foldyard env` hot path), but Textual — a

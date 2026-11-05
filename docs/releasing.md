@@ -1,7 +1,7 @@
 # Releasing foldyard
 
-Contributor-facing, like [DEVELOPMENT.md](../DEVELOPMENT.md) — deliberately **not** in the `fy docs`
-set a consumer install ships (see `docs.py`). Nothing here is a consumer's problem.
+Contributor-facing, like [AGENTS.md](../AGENTS.md) — deliberately **not** in the `fy docs` set a
+consumer install ships (see `docs.py`). Nothing here is a consumer's problem.
 
 ## The mechanism, which is already automated
 
