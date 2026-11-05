@@ -267,17 +267,6 @@ def test_docker_by_default_is_refused_and_says_to_install_podman(host, monkeypat
         config.engine()
 
 
-def test_in_a_box_docker_is_still_the_fallback(monkeypatch):
-    """CI's: a runner ships docker and no podman, and its jobs carry the box's signature."""
-    monkeypatch.setattr(config, "in_box", lambda: True)
-    monkeypatch.setenv("FOLDYARD_ENGINE", "docker")
-    assert config.engine() == "docker"
-    monkeypatch.delenv("FOLDYARD_ENGINE", raising=False)
-    monkeypatch.setattr(config, "_table", lambda name: {})
-    _no_podman(monkeypatch)
-    assert config.engine() == "docker"
-
-
 def test_podman_is_untouched(host, monkeypatch):
     monkeypatch.setenv("FOLDYARD_ENGINE", "podman")
     assert config.engine() == "podman"
@@ -285,8 +274,9 @@ def test_podman_is_untouched(host, monkeypatch):
 
 def test_a_bad_engine_name_is_still_its_own_refusal(host, monkeypatch):
     monkeypatch.setenv("FOLDYARD_ENGINE", "/tmp/evil")
-    with pytest.raises(SystemExit, match="not one of"):
+    with pytest.raises(SystemExit, match="never a path") as refused:
         config.engine()
+    assert "registry" not in str(refused.value)  # that's docker's reason, not this
 
 
 # ── which files are ours ──────────────────────────────────────────────────────────────────

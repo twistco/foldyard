@@ -248,10 +248,6 @@ _GIT_AUTH_DENIED = re.compile(
 
 
 def _rootless(engine: str, env: dict) -> bool:
-    """docker reports rootless in `.SecurityOptions`; podman in `.Host.Security.Rootless`."""
-    sec = _run([engine, "info", "--format", "{{.SecurityOptions}}"], env, capture=True)
-    if sec.returncode == 0 and "rootless" in sec.stdout:
-        return True
     rl = _run([engine, "info", "--format", "{{.Host.Security.Rootless}}"], env, capture=True)
     return rl.returncode == 0 and "true" in rl.stdout.lower()
 

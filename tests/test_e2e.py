@@ -30,7 +30,7 @@ EXAMPLE = Path(__file__).resolve().parent.parent / "example"
 # The autouse `scrubbed_box_session_env` fixture (conftest) strips IN_DEVBOX from every test's
 # environment so the golden tests behave identically on a host, in CI and in a box. This test
 # drives the REAL CLI as a subprocess, and that CLI must know where it is: in a box — the dev box,
-# or CI's docker-CLI container — the launch gates stand down (no VM to manage, nothing host-side
+# or CI's podman-client container — the launch gates stand down (no VM to manage, nothing host-side
 # to adopt), and without the signature preflight refuses `up` over the default backend's missing
 # limactl. Read it at import, before the fixture runs, and hand it back to the subprocess.
 _IN_BOX = os.environ.get("IN_DEVBOX") == "1"
@@ -40,12 +40,6 @@ API_DB_URL = "http://api:8080/db"  # the api service (in-network) + the DB-wirin
 
 
 def _engine() -> str:
-    """The actually-installed engine. NB: ignore FOLDYARD_ENGINE here — conftest pins it to
-    'podman' for golden-test determinism, but a LIVE test must use whatever is really on PATH
-    (e.g. the dev box has only the `docker` CLI, which speaks the podman socket)."""
-    for candidate in ("podman", "docker"):
-        if shutil.which(candidate):
-            return candidate
     return "podman"
 
 
@@ -85,7 +79,7 @@ def _service_is_listed(output: str, project: str, service: str) -> bool:
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("FOLDYARD_E2E") != "1" or not _engine_reachable(),
-    reason="live e2e: set FOLDYARD_E2E=1 and have a reachable podman/docker engine",
+    reason="live e2e: set FOLDYARD_E2E=1 and have a reachable podman engine",
 )
 
 
@@ -180,8 +174,7 @@ def test_example_stack_up_serves_then_down(example_repo):
     body = _probe_db()
     assert "reachable" in body, f"api /db never became reachable; last response: {body!r}"
 
-    # The config-hash drift check against labels a real `up` just wrote — on whichever provider
-    # this tier runs (docker compose in live-e2e, podman-compose on the Lima host tier).
+    # The config-hash drift check against labels a real `up` just wrote.
     state = _foldyard(["state"], example_repo, timeout=60)
     assert "match the rendered config" in state.stdout, state.stdout + state.stderr
 

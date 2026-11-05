@@ -713,6 +713,11 @@ def deterministic_engine(monkeypatch, request):
     if _runs_the_real_cli(request.module):
         return
     monkeypatch.setenv("FOLDYARD_ENGINE", "podman")
+    # A scrubbed PATH has no podman, and a golden test's engine is a mock: pinned reads as installed.
+    on_path = config._podman_on_path
+    monkeypatch.setattr(
+        config, "_podman_on_path", lambda: bool(os.environ.get("FOLDYARD_ENGINE")) or on_path()
+    )
 
 
 @pytest.fixture

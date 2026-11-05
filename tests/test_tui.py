@@ -139,7 +139,7 @@ def _hint_for(monkeypatch, drift, *, in_box=False):
         return drift
 
     monkeypatch.setattr(box, "env_drift", fake_drift)
-    monkeypatch.setattr(devmode.config, "engine", lambda: "docker")
+    monkeypatch.setattr(devmode.config, "engine", lambda: "podman")
     monkeypatch.setattr(devmode, "in_box", lambda: in_box)
     monkeypatch.setattr(devmode, "_engine_env", lambda: {"DOCKER_HOST": "unix:///nonexistent/s"})
     monkeypatch.setattr(devmode, "read", lambda *a, **k: {"mode": {}})

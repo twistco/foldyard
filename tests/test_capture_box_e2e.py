@@ -71,13 +71,6 @@ ADDON = Path(__file__).resolve().parents[1] / "src/foldyard/assets/proxy/egress_
 _VM_TMP = Path(__file__).resolve().parents[1] / ".e2e-tmp"
 
 
-def _engine() -> str:
-    for candidate in ("podman", "docker"):
-        if shutil.which(candidate):
-            return candidate
-    return "podman"
-
-
 def _engine_env() -> dict:
     env = dict(os.environ)
     if not env.get("CONTAINER_HOST") and env.get("DOCKER_HOST"):
@@ -86,7 +79,7 @@ def _engine_env() -> dict:
 
 
 def _engine_reachable() -> bool:
-    eng = _engine()
+    eng = "podman"
     if not shutil.which(eng):
         return False
     try:
@@ -107,7 +100,7 @@ def _self_on_network() -> tuple[str, str] | None:
         return None
     try:
         out = subprocess.run(
-            [_engine(), "inspect", socket.gethostname(), "--format",
+            ["podman", "inspect", socket.gethostname(), "--format",
              "{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{$c.IPAddress}}\n{{end}}"],
             env=_engine_env(), capture_output=True, text=True, timeout=20,
         )  # fmt: skip
@@ -292,7 +285,7 @@ def capture_box(tmp_path, monkeypatch):
     store via box.py's own snippet. Yields (box, upstream-port, self-ip, egress-log)."""
     assert _SELF is not None  # guarded by pytestmark
     net, ip = _SELF
-    engine, eng_env = _engine(), _engine_env()
+    engine, eng_env = "podman", _engine_env()
     uport, pport = _free_port(), _free_port()
 
     # Point the log dir at our tmp BEFORE building the spec, so the daemon's PROXY_LOG_FILE and the
@@ -454,7 +447,7 @@ def av_box(tmp_path, monkeypatch):
     registry."""
     assert _SELF is not None
     net, ip = _SELF
-    engine, eng_env = _engine(), _engine_env()
+    engine, eng_env = "podman", _engine_env()
     uport, pport = _free_port(), _free_port()
 
     monkeypatch.setattr(config, "log_dir", lambda: tmp_path)

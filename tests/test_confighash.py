@@ -11,7 +11,6 @@ labels a real `up` wrote (tests/test_probes_e2e.py on podman, tests/test_e2e.py 
 from __future__ import annotations
 
 import os
-import types
 from pathlib import Path
 
 from foldyard import confighash, stack
@@ -30,15 +29,12 @@ services:
 """
 
 
-def _ctx(
-    tmp_path: Path, engine: str = "podman", provider: str = "/venv/bin/podman-compose", **env: str
-) -> stack.Context:
+def _ctx(tmp_path: Path, **env: str) -> stack.Context:
     (tmp_path / "compose.yml").write_text(_COMPOSE)
-    pinned = {"PODMAN_COMPOSE_PROVIDER": provider} if engine == "podman" else {}
     return stack.Context(
         main=tmp_path,
-        env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), **pinned, **env},
-        compose=[engine, "compose", "-f", str(tmp_path / "compose.yml")],
+        env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), **env},
+        compose=["podman", "compose", "-f", str(tmp_path / "compose.yml")],
         app="api",
         project="proj",
         worktree="",
@@ -70,50 +66,9 @@ def test_podman_render_failure_is_unavailable_never_empty(tmp_path):
     assert hashes is None and why
 
 
-def test_docker_uses_the_native_hash_command(tmp_path, monkeypatch):
-    calls: list[list[str]] = []
+def test_the_label_is_the_one_podman_compose_writes():
+    # `fy state` compares this label on running containers with a fresh render. Named wrong, every
+    # container reads as having no hash, whatever is really running.
+    import podman_compose
 
-    def fake_run(cmd, **kw):
-        calls.append(cmd)
-        return types.SimpleNamespace(returncode=0, stdout="api 111\ndb 222\n", stderr="")
-
-    monkeypatch.setattr(confighash.subprocess, "run", fake_run)
-    hashes, _ = confighash.desired(_ctx(tmp_path, engine="docker"), extra_profiles=["data"])
-    assert hashes == {"api": "111", "db": "222"}
-    assert calls[-1][-3:] == ["config", "--hash", "*"]
-    assert calls[-1][calls[-1].index("--profile") + 1] == "data"
-
-
-def test_docker_failure_or_garbage_is_unavailable(tmp_path, monkeypatch):
-    for proc in (
-        types.SimpleNamespace(returncode=1, stdout="", stderr="unknown flag: --hash"),
-        types.SimpleNamespace(returncode=0, stdout="", stderr=""),
-        types.SimpleNamespace(returncode=0, stdout="no-hash-here\n", stderr=""),
-    ):
-        monkeypatch.setattr(confighash.subprocess, "run", lambda cmd, _p=proc, **kw: _p)
-        hashes, why = confighash.desired(_ctx(tmp_path, engine="docker"))
-        assert hashes is None and why, proc
-
-
-def test_label_names_the_active_providers_own_hash_label(tmp_path):
-    assert confighash.label(_ctx(tmp_path)) == "io.podman.compose.config-hash"
-    assert confighash.label(_ctx(tmp_path, engine="docker")) == "com.docker.compose.config-hash"
-    # An explicit PODMAN_COMPOSE_PROVIDER overrides foldyard's pin: podman engine, docker-compose
-    # provider — it writes (and `up` compares) docker's label.
-    over = _ctx(tmp_path, provider="/usr/libexec/docker/cli-plugins/docker-compose")
-    assert confighash.label(over) == "com.docker.compose.config-hash"
-
-
-def test_docker_compose_on_podman_is_asked_natively(tmp_path, monkeypatch):
-    # Hashing it through bundled podman-compose would compare podman-compose's hash with
-    # labels docker-compose wrote: drift on every matching container.
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, **kw):
-        calls.append(cmd)
-        return types.SimpleNamespace(returncode=0, stdout="api 111\n", stderr="")
-
-    monkeypatch.setattr(confighash.subprocess, "run", fake_run)
-    over = _ctx(tmp_path, provider="/usr/libexec/docker/cli-plugins/docker-compose")
-    assert confighash.desired(over) == ({"api": "111"}, "")
-    assert calls[-1][:2] == ["podman", "compose"] and calls[-1][-3:] == ["config", "--hash", "*"]
+    assert f'"{confighash.LABEL}=' in Path(podman_compose.__file__).read_text()
