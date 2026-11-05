@@ -1041,7 +1041,7 @@ def _adopt_config(name: str) -> bool:
 
 def _box_up(name: str) -> int:
     """``WORKTREE=<name> fy box up``, as a FRESH process. Not box code in-process: this process
-    bound its import-time constants (``machine.MACHINE``, ``devmode.AXES``…) and config caches
+    bound its import-time constants (``machine.MACHINE``…) and config caches
     before the adoption, which is exactly what the launch gate's own re-run
     (:func:`configpin._rerun_with_adopted_config`) exists to shed. Its env drops the gate's re-run
     marker, so the child's gate keeps its one re-run."""

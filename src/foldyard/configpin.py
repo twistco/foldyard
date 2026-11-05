@@ -952,7 +952,7 @@ RERUN_ENV = "FOLDYARD_ADOPTION_RERUN"
 def _rerun_with_adopted_config(verb: str, rerun: bool) -> None:
     """After an adoption at the gate, start ``verb`` again in a fresh process. The ambient config
     on the host IS the adoption, but this process read it before the operator adopted: caches,
-    and constants bound at import (``machine.MACHINE``/``BACKEND``, ``devmode.AXES``…), all hold
+    and constants bound at import (``machine.MACHINE``/``BACKEND``…), all hold
     the pre-adoption config. Clearing caches can't reach the constants; a fresh process does. The
     re-run's own gate finds nothing to do, and ``rerun`` stops it re-running again regardless."""
     config.clear_caches()

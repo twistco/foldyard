@@ -16,7 +16,7 @@ the 401 re-mint + re-issue (token rotation) reaches the box as a 200; and (d) th
 it. The proxy daemon command + env come from the REAL ``ProxyPlugin.daemons``/``box_args`` — only a
 fake minter + fake upstream stand in for GitHub. No GitHub App, no real token.
 
-ADAPTED TOPOLOGY (see DEVELOPMENT.md "Nested-virtualization architecture"): the FAITHFUL path is
+ADAPTED TOPOLOGY (see docs/nested-virt.md): the FAITHFUL path is
 ``foldyard host`` running the proxy + ``foldyard box up`` creating the box, with the box reaching the
 proxy at ``FY_PROXY=host.containers.internal:8088`` — that needs foldyard to run as the *host* (a
 Mac, or the nested-KVM "host" container), which the in-box guards + the absence of ``/dev/kvm``
