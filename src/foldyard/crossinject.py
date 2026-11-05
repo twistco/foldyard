@@ -1,18 +1,21 @@
 """Masking another checkout's dirs in a dev box that is ALREADY running (#91, the follow-up).
 
 A box gets its masks (:mod:`foldyard.crossmask`) at create, so a worktree added while it runs was
-unmasked in it until a recreate. Mount propagation can't fix that: crun's binds come up private,
-so nothing mounted in the VM reaches a running container. What does: foldyard's own helper
-(``assets/crossmask/inject.py``), run in the VM as the VM user over the backend's ssh, joins the
-box's namespaces (the VM user owns them — no root, no sudo) and attaches a read-only clone of the
-note volume on each target, refusing a symlink anywhere on the path. The result is the same
-read-only mount a create would have made, and the box's root can't take it off.
+unmasked in it until a recreate. Mount propagation can't fix that: crun's binds come up private
+(the spike, 2026-10-27), so nothing mounted in the VM reaches a running container. What does:
+foldyard's own helper (``assets/crossmask/inject.py``), run in the VM as the VM user over the
+backend's ssh, joins the box's namespaces (the VM user owns them — no root, no sudo; the mount
+namespace is its conmon's, never `podman unshare`'s: after a `system migrate` the API service's and
+the CLI's differ, as recorded when this was built) and attaches a read-only clone of the note volume
+on each target, refusing a symlink anywhere on the path. The result is the same read-only mount a
+create would have made, and the box's root can't take it off.
 
 :func:`inject` does that for a box; :func:`check` asks the same helper which targets ARE masked,
 since ``inspect``'s ``Mounts`` never shows a mount added after create (in a box, the box reads its
-own mount table instead). Both are host-side reads and one ssh call per box. A mount added this way
-lasts as long as the box's processes: a restart of the box or the VM drops it, and the create that
-follows a ``fy box down`` carries every mask anyway.
+own mount table instead). ``box._mask_gaps`` asks it for the nag, doctor's `box shadowing` row and
+`fy worktree add`'s ``box._late_boxes``, falling back to ``inspect``. Both are host-side reads and
+one ssh call per box. A mount added this way lasts as long as the box's processes: a restart of the
+box or the VM drops it, and the create that follows a ``fy box down`` carries every mask anyway.
 
 It refuses — and the callers fall back to naming the box and the recreate — in a box (only your
 computer reaches the VM), under the gVisor posture (runsc's own kernel never sees a mount made in

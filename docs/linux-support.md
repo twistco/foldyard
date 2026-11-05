@@ -6,7 +6,7 @@ not been *run there*. This page is the index of which is which. The measurements
 were taken (linked per row); keep this page the summary.
 
 Linux and WSL2 hosts are validated in CI on every run of the host tier (`lima-host-e2e` and
-`wsl2-host-e2e`, see [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml--foldyard-e2eyml)).
+`wsl2-host-e2e`, see [the CI page](./dev/ci.md)).
 macOS (`lima` with `vz`) is the platform most day-to-day use has seen
 ([isolation-layers.md](./isolation-layers.md#macos-arm64--the-machine-layer-does-the-work)).
 
@@ -36,12 +36,12 @@ Windows, not the credentials, so the VM is required inside the distro too. Both 
 | `[machine] firewall` (the VM firewall) | ✅ direct guest egress refused, DNS resolves | 2026-09-11, CI | [lima-wall-machine-integration §2](./lima-wall-machine-integration.md#2-enforcement--machinewall--true) |
 | root in the guest only at boot; stale provisioning refused | ✅ checked by every `machine ensure` | 2026-09-12, CI | as above |
 | `[machine] host_firewall` (the host firewall) via `fy up` | ✅ ([2](#2-the-host-firewall)) | 2026-09-12, CI | [lima-wall-machine-integration §3](./lima-wall-machine-integration.md#3-host-side-enforcement--machinehost_wall--true-linux) |
-| `fy machine ensure` / `stop` / `recreate` / `rm`, SIGKILLed QEMU recovered | ✅ | CI (`test_machine_e2e.py`) | [DEVELOPMENT.md](../DEVELOPMENT.md#test-tiers) |
+| `fy machine ensure` / `stop` / `recreate` / `rm`, SIGKILLed QEMU recovered | ✅ | CI (`test_machine_e2e.py`) | [Testing](./dev/testing.md) |
 | `fy up` end to end: preflight, config-adopt gate, supervisor, proxy, overlay, compose | ✅ | CI (`test_e2e.py`, `test_host_daemons_e2e.py`) | as above |
 | the proxy on the host: CA, box routing, egress log | ✅ | 2026-09-13, CI | as above |
 | config-adopt gate: first adoption, drift, revert | ✅ | 2026-09-13 | [ADR-0022](./adrs/0022-host-runs-the-adopted-config.md) |
 | `fy box up` / `down` + in-box `fy verify` | ✅ ([3](#3-the-box)) | CI (`test_box_e2e.py`) | [archive/verify-false-pass.md](./archive/verify-false-pass.md#a-false-fail-2026-09-13-the-options-field) |
-| `fy worktree add` / `remove` | ✅ | CI (`test_worktree_e2e.py`; a new worktree's checkout: `test_box_e2e.py`) | [DEVELOPMENT.md](../DEVELOPMENT.md#test-tiers) |
+| `fy worktree add` / `remove` | ✅ | CI (`test_worktree_e2e.py`; a new worktree's checkout: `test_box_e2e.py`) | [Testing](./dev/testing.md) |
 | `fy reclaim` on a real store | ✅ | CI (`test_reclaim_e2e.py`) | as above |
 | engine probes on host podman 4.9 (`fy state`, `fy doctor`) | ✅ after a fix ([4](#4-podman-49-labels)) | CI (`test_probes_e2e.py`) | as above |
 | gVisor as the box runtime (`[machine] runtime = "gvisor"`) | ✅ works; overhead measured ([5](#5-gvisor)) | 2026-09-11 – 13, rig | [ADR-0025](./adrs/0025-gvisor-machine-posture-and-socket-narrowing.md) |
@@ -113,7 +113,7 @@ The distro has `/dev/kvm` once `%USERPROFILE%\.wslconfig` sets `nestedVirtualiza
 (before the distro first starts). The unmodified `machine ensure` boots the guest to READY in
 68 s (47 s on a restart), and the host tier runs as-is, about 3.5× slower than on Linux. Nothing
 in the product differs; the job's plumbing (WSLENV, the user switch, the clone onto ext4) is
-described in [DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml--foldyard-e2eyml).
+described in [the CI page](./dev/ci.md).
 
 The host firewall can't work on stock WSL2: it matches the VM by `socket cgroupv2`, and the WSL2
 kernel (6.6 and 6.18 branches) has `# CONFIG_NFT_SOCKET is not set`, so `nft` refuses the rule and
@@ -139,7 +139,7 @@ the firewall fails closed. `test_wall_e2e.py` probes for this and skips. A custo
 - **Wording that assumes macOS.** The sweep from "Mac" to "host" is in progress. A few
   user-facing strings remain, e.g. the Lima create failure in `machine.py` that blames Apple
   Virtualization. The rule for new text is in
-  [DEVELOPMENT.md](../DEVELOPMENT.md#conventions--gotchas): write *host*, say *macOS* only where
+  [gotchas](./dev/gotchas.md): write *host*, say *macOS* only where
   the claim really is macOS-only.
 - **9p is slow on metadata** (4.9 s vs 0.05 s for 3,000 small files). The fix is upstream
   (`virtiofsd` root/file-handle support) or a newer Lima. Re-test when either moves.

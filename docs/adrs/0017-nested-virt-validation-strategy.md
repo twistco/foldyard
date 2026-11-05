@@ -15,7 +15,7 @@
   host tier ran in a nested Lima VM, with the Lima VM as the L1 rather than a container playing the
   host. Without those arguments, no L2 boots on the software measured (docs/nested-virt.md,
   Rig 2).
-- **Sources:** DEVELOPMENT.md (test tiers, nested-virt architecture, confirmations),
+- **Sources:** the contributor guide (now docs/dev/testing.md: test tiers, nested-virt architecture, confirmations),
   docs/history/nested-podman-in-devbox.md, docs/history/lima-network-forcing-spike.md
 
 ## Context

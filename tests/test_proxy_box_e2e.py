@@ -360,7 +360,7 @@ def box_proxy(tmp_path, monkeypatch):
     finally:
         if box is not None:
             # `rm -f` is safe: the box is a plain `sleep infinity` (NO nested KVM guest — the only
-            # thing the DEVELOPMENT.md teardown caution is about).
+            # thing the docs/nested-virt.md teardown caution is about).
             subprocess.run(
                 [engine, "rm", "-f", box.name], env=eng_env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,

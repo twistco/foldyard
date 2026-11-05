@@ -8,9 +8,10 @@ ended at `0.1.0`. Issues and pull requests are both welcome, and a merged PR kee
 The single commit at the root of `main` is the squash-start ([ADR-0013](./docs/adrs/0013-in-repo-carve-out-until-extraction.md));
 the pre-extraction run-logs stay in the origin monorepo.
 
-**How to work on it.** [`DEVELOPMENT.md`](./DEVELOPMENT.md) is the guide: the module map, the
-test tiers (what runs anywhere, what needs an engine, what only runs on a real host), the
-conventions, and the don't-break list. The short version:
+**How to work on it.** [`AGENTS.md`](./AGENTS.md) is the map. [`docs/dev/`](./docs/dev/testing.md) has
+the detail: the [test tiers](./docs/dev/testing.md) (what runs anywhere, what needs an engine, what
+only runs on a real host), [CI](./docs/dev/ci.md), the [conventions and gotchas](./docs/dev/gotchas.md)
+and the [don't-break list](./docs/dev/invariants.md). The short version:
 
 ```bash
 uv tool install --force --editable .   # the `fy` on your PATH runs your checkout

@@ -182,7 +182,7 @@ the developer's running stack while the whole suite passed green.
 **The lesson:** make the test suite unable to reach real tools, rather than trusting each test to
 mock them.
 
-**Recorded in:** [DEVELOPMENT.md](../../DEVELOPMENT.md) ("Golden tests must never see a live engine
+**Recorded in:** [docs/dev/testing.md](../dev/testing.md) ("Golden tests must never see a live engine
 socket" and the hermetic suite).
 
 ## 14. The self-test went green without checking

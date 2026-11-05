@@ -95,6 +95,10 @@ nav:
       - Deep-dives: prior-art/README.md
       - Archive: archive/README.md
   - Contributing:
+      - dev/testing.md
+      - dev/ci.md
+      - dev/gotchas.md
+      - dev/invariants.md
       - releasing.md
       - linux-support.md
       - isolation-layers.md

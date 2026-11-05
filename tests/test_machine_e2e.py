@@ -1,6 +1,6 @@
 """`fy machine` — the VM lifecycle, live: `ensure` is idempotent; `stop` stops the supervisor with
 the VM (the heartbeat goes stale) and keeps everything inside it; a VM whose hypervisor died
-underneath its lifecycle flag is recovered by `ensure` (DEVELOPMENT.md: `machine.state()` is a
+underneath its lifecycle flag is recovered by `ensure` (docs/dev/gotchas.md: `machine.state()` is a
 flag, not liveness — `ensure` must pair it with a real connect and restart, never hand out a
 socket nothing serves); `recreate` boots a fresh VM.
 

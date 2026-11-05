@@ -9,6 +9,8 @@ new project's VM is then a `limactl clone` of it — copy-on-write on APFS, so i
 with the project's own `--set` (sizing, ONLY its mounts, the vmType) applied exactly as the
 template path would. Everything after the create — foldyard's boot provisioning, the wall, the
 guest-report check — runs unchanged, so a clone and a template VM can't be told apart by it.
+``LimaBackend.create`` clones when :func:`clone_source` says the base fits, else uses the template;
+``box._from_base_image`` re-tags the box image the clone carried in.
 
 Rules this module keeps:
 

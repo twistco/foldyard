@@ -21,9 +21,10 @@ in the box, so the box mustn't be able to shorten it (nor fill your computer's d
 **The catalogue** (``logs/monitor-index.sqlite``, derived data: deleted, it is rebuilt from the
 segments) holds every snapshot and the latest engine claim per container, so a reader joining ANY
 stretch of the store sees the snapshot before it and the one after it wherever they are, and the
-claim naming a container however long ago it was made. The pull writes a record's catalogue entry
-BEFORE the record itself — a crash between the two re-stores the record (the pull's cursor moves
-only after), and an entry seen twice counts once. Every reader first indexes what isn't yet
+claim naming a container however long ago it was made. Each segment's span of a boot's sequence
+numbers is there too: it says which segments hold an event. The pull writes a record's catalogue
+entry BEFORE the record itself — a crash between the two re-stores the record (the pull's cursor
+moves only after), and an entry seen twice counts once. Every reader first indexes what isn't yet
 (:meth:`Catalogue.catch_up`), so an upgrade or a lost catalogue costs one scan, not wrong answers.
 When a segment leaves the store its snapshots go too, except the newest one of each boot: the
 snapshot before the oldest events still kept.

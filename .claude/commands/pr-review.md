@@ -253,8 +253,8 @@ Review the changes for, in this order:
 - Test coverage
 - Code quality, conventions and performance
 
-`DEVELOPMENT.md` (`CLAUDE.md` is a symlink to it) is the guide: its module map,
-test tiers, conventions and **don't-break list**. The threat model is in
+`AGENTS.md` is the map, and `docs/dev/` the guide: the test tiers, CI, gotchas and
+**`docs/dev/invariants.md`, the don't-break list**. The threat model is in
 `SECURITY.md` and `docs/security.md`, and the reasons behind design calls are in
 `docs/adrs/`. A change that reverses an ADR needs a new ADR that supersedes it.
 Use `Read`, `Glob`, `Grep`, `WebSearch`, and `WebFetch` to investigate the codebase

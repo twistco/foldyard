@@ -6,6 +6,8 @@ and the row is its data. Each row becomes one on/off mode switch + one egress-pr
 :class:`~foldyard.plugins.InjectRule`, so a consumer adds a host-side credential injector with
 CONFIG ONLY — no Python, and no per-service plugin (GitHub had one; it was a kind plus data
 wearing a class, and its permission ceiling was a second place that had to agree with the App).
+A ``[plugins.github]`` table left in a config is refused at launch, with its replacement rows
+(:mod:`foldyard.preflight`).
 
 Config (``foldyard.toml``)::
 

@@ -21,6 +21,9 @@ Each provider is asked in its own terms, and neither needs the engine:
   Which provider is active is ``stack._podman_compose_active`` — the same test the foreign-
   container sweep uses, so the hash, the label and the sweep can never disagree about it.
 
+This is the verdict of reconcile's stack scope. The live oracles, against labels a real ``up``
+wrote, are tests/test_probes_e2e.py and tests/test_e2e.py.
+
 Stdlib-only at import; reconcile imports this lazily for ``fy state``.
 """
 

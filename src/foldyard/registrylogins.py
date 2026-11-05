@@ -18,6 +18,9 @@ and a box can commit one line to ``compose_env``, which reads as harmless when i
 general export is never consent, and neither step alone gives anything. What's in that file reaches
 the VM, so a box can read it during a build: make it hold one narrow login.
 
+``stack._host_passthrough`` asks :func:`for_compose`, and ``stack.resolve`` asks again after its
+merges, because ``[ports]`` and the mode env can name anything.
+
 This is podman's alone. The docker CLI has no one switch (``config.json``, the platform's credential
 store, ``DOCKER_AUTH_CONFIG``), so ``config.engine`` refuses it on your computer instead.
 

@@ -223,7 +223,7 @@ caches = [{ volume = "foldyard-uv-cache", path = ".cache/uv" }]   # path is unde
 #     the PYRIGHT_PYTHON_FORCE_VERSION escape hatch would npm-install a non-bundled version),
 #     and the wrapper's update check uses the already-granted pypi.org JSON API with a 1s
 #     timeout that fails silent.
-#   • just — how DEVELOPMENT.md tells you to run everything (`just check`, `just test`,
+#   • just — how AGENTS.md tells you to run everything (`just check`, `just test`,
 #     `just build`); the packaged generic box has no task runner, so without it every one of
 #     those instructions was a dead end in here. Debian trixie ships it (1.40).
 #   • unzip — for inspecting a built wheel: `just build`'s own comment tells you to run

@@ -66,7 +66,13 @@ Why foldyard is built the way it is.
 
 ## Contributing to foldyard
 
-Start at [DEVELOPMENT.md](../DEVELOPMENT.md): the module map, test tiers, CI and conventions.
+Start at [AGENTS.md](../AGENTS.md), the map for people and agents alike.
+
+- [dev/testing.md](./dev/testing.md) — the test tiers: what runs anywhere, what needs an engine, what
+  only runs on a real host.
+- [dev/ci.md](./dev/ci.md) — the CI jobs, and why each is shaped as it is.
+- [dev/gotchas.md](./dev/gotchas.md) — conventions, and the traps worth knowing first.
+- [dev/invariants.md](./dev/invariants.md) — what must always hold, with the reasoning.
 
 - [releasing.md](./releasing.md) — how a release is cut (tag-driven).
 - [linux-support.md](./linux-support.md) — what has been run on a Linux host and inside WSL2,
