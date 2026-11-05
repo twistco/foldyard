@@ -96,6 +96,11 @@ steps:
   - run: fy up
 ```
 
+Elsewhere, check the runner's podman has systemd support: a static build never runs a container's
+healthcheck, so compose waits for `service_healthy` forever. (Blacksmith's `ubuntu-2404` image has
+one, and its `ubuntu-2604` image has Ubuntu's package, which works.) Set a `timeout-minutes` on the
+job either way.
+
 Short image names (`python:3.12-slim`) need a registry to resolve against, which a dev VM's Fedora
 guest has and an Ubuntu runner may not. Name the registry in full, or add
 `unqualified-search-registries = ["docker.io"]` to `~/.config/containers/registries.conf`.

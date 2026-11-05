@@ -15,7 +15,7 @@ bump: minor
   (`fy docs stack`, Private images). A failed build or start says so if you have logins on your
   computer.
 - **foldyard drives only podman now, everywhere.** `[engine] cli = "docker"`, `FOLDYARD_ENGINE=docker`
-  and a `PODMAN_COMPOSE_PROVIDER` naming anything but a podman-compose are refused, on your computer,
+  and a `PODMAN_COMPOSE_PROVIDER` whose file isn't called `podman-compose` are refused, on your computer,
   in a box and in CI, and a machine with docker and no podman is told to install podman. A docker
   client sends the VM its logins from several places, your keychain among them, with no one switch to
   stop that, and the config line is one a box can propose. **A CI job that runs foldyard on docker
