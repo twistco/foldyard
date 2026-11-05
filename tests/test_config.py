@@ -808,7 +808,13 @@ def test_a_refused_engine_ends_a_verb_and_reads_as_unreachable_to_a_probe(
 
 
 @pytest.mark.parametrize(
-    "provider", ["docker-compose", "/usr/libexec/docker/cli-plugins/docker-compose", "/tmp/other"]
+    "provider",
+    [
+        "docker-compose",
+        "/usr/libexec/docker/cli-plugins/docker-compose",
+        "/tmp/other",
+        "/tmp/podman-compose-docker",  # contains the name, and isn't it
+    ],
 )
 def test_a_compose_provider_other_than_podman_compose_is_refused_here(
     fresh_config, tmp_path, monkeypatch, provider
@@ -822,6 +828,18 @@ def test_a_compose_provider_other_than_podman_compose_is_refused_here(
         config.engine()
     monkeypatch.setattr(config, "in_box", lambda: True)  # nowhere: it's the only provider tested
     with pytest.raises(config.EngineRefused, match="PODMAN_COMPOSE_PROVIDER"):
+        config.engine()
+
+
+def test_a_named_engine_still_has_to_be_installed(fresh_config, tmp_path, monkeypatch):
+    # In a box preflight stands down, so this is the only thing between a pin and a raw
+    # FileNotFoundError from the first engine call.
+    import shutil
+
+    monkeypatch.setattr(config, "_podman_on_path", lambda: shutil.which("podman") is not None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)  # the seam conftest answers for a pin
+    fresh_config(FOLDYARD_REPO=tmp_path, FOLDYARD_ENGINE="podman")
+    with pytest.raises(config.EngineRefused, match="isn't installed"):
         config.engine()
 
 

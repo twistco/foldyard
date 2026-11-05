@@ -61,8 +61,8 @@ foldyard runs your engine's own compose command, and echoes each command line
 (`+ podman compose -f …`) so you can copy it.
 
 `podman compose`, with its provider pinned to the **podman-compose** bundled in foldyard's install
-(version 1.6 or later). A `PODMAN_COMPOSE_PROVIDER` you set yourself wins if it names a
-podman-compose. Any other name is refused: docker-compose is a docker client, which would send the VM
+(version 1.6 or later). A `PODMAN_COMPOSE_PROVIDER` you set yourself wins if the file is called
+`podman-compose`. Any other name is refused: docker-compose is a docker client, which would send the VM
 your registry logins ([Private images](#private-images)).
 
 foldyard builds your images itself with `podman build`, then starts the stack with

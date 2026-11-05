@@ -745,8 +745,6 @@ def engine() -> str:
     this value is exec'd host-side by every engine verb (`fy up`, `fy box up`, the reconciler, the
     worktree init container), so taking any other string would let anything that can write the
     checkout choose a binary the host then runs, the hole ADR-0023 closed everywhere else."""
-    from shutil import which
-
     explicit = os.environ.get("FOLDYARD_ENGINE") or _table("engine").get("cli")
     if explicit and explicit != ENGINE:
         why = (
@@ -759,7 +757,7 @@ def engine() -> str:
             f"\n  {why}\n  Remove that line: `fy config diff` shows the adopted config, "
             "`fy config adopt` updates it."
         )
-    if not explicit and not which(ENGINE):
+    if not _podman_on_path():
         raise EngineRefused(
             "✗ podman isn't installed, and foldyard drives only podman. Install it (your package "
             "manager;\n  `brew install podman` on macOS). In a box, add it to the image; in CI, "
@@ -769,11 +767,18 @@ def engine() -> str:
     return ENGINE
 
 
+def _podman_on_path() -> bool:
+    from shutil import which
+
+    return which(ENGINE) is not None
+
+
 def refuse_compose_provider(provider: str) -> None:
     """The compose provider is podman-compose, foldyard's bundled one or your own. podman runs
     whatever ``PODMAN_COMPOSE_PROVIDER`` names, docker-compose is a docker client
-    (``REGISTRY_AUTH_FILE`` means nothing to it), and any other name can't be vouched for."""
-    if provider and "podman-compose" not in Path(provider).name:
+    (``REGISTRY_AUTH_FILE`` means nothing to it), and any other name can't be vouched for. A name
+    only catches a mistake: the value is your own export, which no box can set."""
+    if provider and Path(provider).name != "podman-compose":
         raise EngineRefused(
             f"✗ PODMAN_COMPOSE_PROVIDER names {Path(provider).name!r}: foldyard runs only "
             "podman-compose,\n  because docker-compose would send the VM your registry logins, "
