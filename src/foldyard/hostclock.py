@@ -8,8 +8,9 @@ the FORMAT. Two facts carry them, both passed at box creation (``box._clock_env`
   ``LC_ALL`` → ``LC_TIME`` → ``LANG`` for its own timestamps, and glibc tools read ``LC_TIME``;
   ``LANG``/``LC_ALL`` would also change messages and collation for every tool in the box.
 
-Both are host facts, not repo config, so the adopted-config rule (ADR-0022) doesn't apply. Each
-value ends up in a container argument, so each is checked against a strict pattern and dropped
+They reach the box only: the stack's containers stay on UTC. A key ``[box].env`` sets overrides
+either. Both are host facts, not repo config, so the adopted-config rule (ADR-0022) doesn't apply.
+Each value ends up in a container argument, so each is checked against a strict pattern and dropped
 (no variable passed) when it doesn't fit. Stdlib-only.
 """
 

@@ -1,4 +1,4 @@
-"""Open the selected stack's localhost app URL in the host browser."""
+"""`fy open` — open the selected stack's localhost app URL in the host browser."""
 
 from __future__ import annotations
 

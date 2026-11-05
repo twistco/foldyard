@@ -1,6 +1,6 @@
 """The registry's user-facing edges: a launch verb in an unregistered worktree is refused with the
 fix in the message, and a worktree the host ignores is never silent (doctor row + supervisor log).
-"Reporting is part of the fix" (CLAUDE.md): a worktree that went quiet must say why."""
+"Reporting is part of the fix" (docs/dev/invariants.md): a worktree that went quiet must say why."""
 
 from __future__ import annotations
 

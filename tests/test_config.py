@@ -1012,7 +1012,7 @@ def test_a_retired_github_table_is_found_in_the_resolved_config(fresh_config, tm
 
 def test_a_retired_github_table_only_in_the_tree_is_not_read_on_the_host(fresh_config, tmp_path):
     # The refusal reads the ADOPTED copy only. A tree read would let anything that can write the
-    # checkout block the operator's `fy up` (a host consequence, however narrow — CLAUDE.md's
+    # checkout block the operator's `fy up` (a host consequence, however narrow — docs/dev/invariants.md's
     # "repo config is never live input to the host"), and it buys nothing: the adopt gate runs
     # first, so a table in the tree is shown in `fy config diff` and refused once adopted.
     (tmp_path / "foldyard.toml").write_text(_OLD_GITHUB)

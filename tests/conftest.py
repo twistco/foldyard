@@ -492,7 +492,7 @@ def scrubbed_box_session_env(monkeypatch):
 # ── hermetic subprocess ─────────────────────────────────────────────────────────────────
 # The suite must not execute a real host tool. Twice now a code path escaped its mocks at a layer
 # below the one the test stubbed: an engine probe that `podman rm -f`'d the box's live dev
-# stack (2026-08, hence the dead-socket rule in CLAUDE.md), and the supervisor's "newly blocked
+# stack (2026-08, hence the dead-socket rule in docs/dev/testing.md), and the supervisor's "newly blocked
 # daemon" push that posted "egress proxy (claude keyless) not started" to a developer's
 # Notification Center (2026-09-17). Before this guard a census found 210 tests spawning a real
 # process — `limactl` 114, `podman` 111, `gcloud`/`gh` 3 each; `set_mode` round trips were

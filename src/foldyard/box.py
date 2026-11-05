@@ -2090,7 +2090,7 @@ def _motd(box: str) -> str:
       │    fy claude                   # start the agent, pre-oriented (skips prompts)
       │    fy ps | logs | e2e | verify
       │
-      │  Orientation: foldyard/README.md + DEVELOPMENT.md + docs/
+      │  Orientation: foldyard/README.md + AGENTS.md + docs/
       └──────────────────────────────────────────────────────────────────────
 """
 

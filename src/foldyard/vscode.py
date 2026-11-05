@@ -542,9 +542,9 @@ def _write_local_terminal_cwd(
     # GIT_CONFIG_GLOBAL there. So it's written only on a Linux host, where the trade-off is
     # unavoidable (box terminals lose a `[box].env` git config override), and left alone on macOS.
     # Never put a host path or socket there. This is the package's ONE `sys.platform` branch, on
-    # purpose (DEVELOPMENT.md): the key VS Code reads IS the OS name, so no capability probe stands
-    # in for it. A WSL2 host's VS Code runs Windows-side (`.windows`), which `fy code` doesn't
-    # cover yet — like the rest of `fy code` off macOS, untested (docs/linux-support.md).
+    # purpose (docs/dev/gotchas.md): the key VS Code reads IS the OS name, so no capability probe
+    # stands in for it. A WSL2 host's VS Code runs Windows-side (`.windows`), which `fy code`
+    # doesn't cover yet — like the rest of `fy code` off macOS, untested (docs/linux-support.md).
     if sys.platform.startswith("linux"):
         settings[_TERMINAL_ENV_LINUX] = {
             **{str(key): value for key, value in loaded_linux_env.items()},

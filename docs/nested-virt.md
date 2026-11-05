@@ -10,7 +10,7 @@ is now covered by CI; this page says what isn't, and how to test it on a rig wit
 
 ## What CI covers now
 
-The host tier ([DEVELOPMENT.md](../DEVELOPMENT.md#test-tiers)) boots a real Lima/QEMU VM (Fedora 44
+The host tier ([Testing](./dev/testing.md)) boots a real Lima/QEMU VM (Fedora 44
 guest, rootless podman) on GitHub-hosted x86 runners, on Linux (`lima-host-e2e`) and inside WSL2
 (`wsl2-host-e2e`). It drives `fy machine ensure` / `stop` / `recreate`, `fy up` through the
 config-adopt gate and the supervisor, `fy box up` with in-box `fy verify`, the VM and host

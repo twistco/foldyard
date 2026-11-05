@@ -78,7 +78,7 @@ def test_each_shard_hands_its_module_list_to_pytest_and_the_substrate(job):
 @pytest.mark.parametrize("job", HOST_JOBS)
 def test_each_shard_sizes_its_vm_at_two_cpus(job):
     # Measured, not a default: 4 vCPUs made the WSL2 tier slower and flakier, and Linux no
-    # faster (DEVELOPMENT.md, CI). Set explicitly so the create step's assert proves the env
+    # faster (docs/dev/ci.md). Set explicitly so the create step's assert proves the env
     # reaches the VM, and trying another size is a one-line change.
     assert str(_jobs()[job]["env"]["MACHINE_CPUS"]) == "2"
 

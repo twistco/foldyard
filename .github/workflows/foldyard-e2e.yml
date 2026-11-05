@@ -189,7 +189,7 @@ jobs:
       # The VM's size, explicitly (the env wins over [machine], see config.machine_resources;
       # the create step asserts it took). 2, the example's own, on purpose: 4 was tried on
       # 2026-10-22 and made no module faster here, while on WSL2 it made every VM-heavy module
-      # slower and less predictable (DEVELOPMENT.md, CI).
+      # slower and less predictable (docs/dev/ci.md).
       MACHINE_CPUS: "2"
       FOLDYARD_E2E: "1"
       FOLDYARD_ENGINE: podman

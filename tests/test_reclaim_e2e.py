@@ -1,7 +1,7 @@
 """`fy reclaim`, live: the sweeps `up` runs only under low headroom, run unconditionally
 (`stack.reclaim_now`, `force=True`) — so no fake disk pressure is needed to see them act.
 
-The three properties DEVELOPMENT.md calls load-bearing, on a real store: a removed worktree's
+The three properties docs/dev/gotchas.md calls load-bearing, on a real store: a removed worktree's
 TAGGED images (`{prefix}-{worktree}_{service}`, both provider spellings) are swept — prune can
 never see them; the main project's own image and the pulled base images survive — a plain
 prune, never `-a`; and the layer cache survives — the next `fy up` builds `Using cache`. On a

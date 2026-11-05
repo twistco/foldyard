@@ -40,7 +40,7 @@ project is closer to the second than the first.
 Copy the example OUT of the foldyard checkout first — a foldyard project must be its own git
 repo (the machine mounts the checkout; a `foldyard.toml` nested inside a bigger repo makes
 preflight abort `fy up` with this same recipe). CI's host tier does the same (see
-[DEVELOPMENT.md](../DEVELOPMENT.md#ci-githubworkflowsfoldyardyml--foldyard-e2eyml)):
+[the CI page](../docs/dev/ci.md)):
 
 ```bash
 cp -r foldyard/example ~/fy-example && cd ~/fy-example
@@ -121,6 +121,8 @@ for two places that can:
 - **CI's host tier** (`lima-host-e2e` on Linux, `wsl2-host-e2e` inside WSL2) boots a real
   Lima/QEMU VM from a throwaway copy of this directory and runs `tests/test_*_e2e.py` against it —
   `fy up`, `fy box up`, `fy verify`, the firewalls, worktrees. See
-  [DEVELOPMENT.md](../DEVELOPMENT.md#test-tiers).
+  [Testing](../docs/dev/testing.md).
 - **A nested-KVM rig**, for what a runner can't reach (gVisor as the box runtime, arm64, laptop
   timings): [../docs/nested-virt.md](../docs/nested-virt.md).
+
+`tests/test_example.py` guards this config from bitrot.
