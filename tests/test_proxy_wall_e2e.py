@@ -183,3 +183,179 @@ def test_tls_to_the_answered_tunnel_completes_without_an_upstream(wall):
             assert tls.version() is not None
     _settle()
     assert counter.accepted == 0, proxy.mitm_log.read_text()
+
+
+# ── path grants on the wire ───────────────────────────────────────────────────────────────────
+# A host granted only for paths has its CONNECT answered like a refused one, so the unit tier
+# can't see the part that matters: that mitmproxy then dials it for the ClientHello (the eager
+# handshake) and carries the granted read over that connection, while a raw TCP tunnel's dial is
+# refused and raw bytes after a decrypted handshake (which mitmproxy relays, not parses, when they
+# don't look like HTTP) never reach the host.
+
+SCOPED = "127.0.0.3"  # granted for one path, listening on :443
+PREFIX = "/bucket/"
+
+
+class _Recorder:
+    """A TLS listener on SCOPED:443 that records every connection's bytes and answers a GET."""
+
+    def __init__(self, cert, key) -> None:
+        self.sock = socket.socket()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.sock.bind((SCOPED, 443))
+        except OSError as e:
+            self.sock.close()
+            pytest.skip(f"can't listen on {SCOPED}:443 here ({e})")
+        self.sock.listen()
+        self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
+        self.accepted = 0
+        self.received: list[bytes] = []
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self.accepted += 1
+            threading.Thread(target=self._one, args=(conn,), daemon=True).start()
+
+    def _one(self, conn) -> None:
+        try:
+            tls = self.ctx.wrap_socket(conn, server_side=True)
+            tls.settimeout(3)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = tls.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            self.received.append(data)
+            if data.startswith((b"GET ", b"HEAD ")):
+                path = data.split(b" ", 2)[1]
+                body = b"ok " + path
+                tls.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
+                    % (len(body), body)
+                )
+            tls.close()
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            conn.close()
+
+    def close(self) -> None:
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.sock.close()
+
+
+@pytest.fixture
+def scoped(tmp_path):
+    from test_proxy_e2e import _self_signed
+
+    cert, key = tmp_path / "scoped.crt", tmp_path / "scoped.key"
+    _self_signed(cert, key)
+    recorder = _Recorder(cert, key)
+    allow = tmp_path / "allow-effective.json"
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    try:
+        with _running_proxy(
+            rig,
+            "import json; print(json.dumps({'value': 'token FAKE', 'ttl': 3600}))\n",
+            env={"DEFAULT_DENY": "1", "ALLOW_FILE": str(allow)},
+        ) as proxy:
+            allow.write_text(json.dumps({"default_deny": True, "allow": [f"{SCOPED}{PREFIX}"]}))
+            yield proxy, recorder
+    finally:
+        recorder.close()
+
+
+def _via(proxy, method: str, path: str, **kw):
+    return _session().request(
+        method,
+        f"https://{SCOPED}{path}",
+        proxies={"https": f"http://{HOST}:{proxy.pport}"},
+        verify=str(proxy.ca),
+        timeout=20,
+        **kw,
+    )
+
+
+def test_a_granted_read_reaches_the_host_through_the_answered_tunnel(scoped):
+    proxy, recorder = scoped
+    resp = _via(proxy, "GET", f"{PREFIX}chrome.zip?generation=1")
+    assert resp.status_code == 200, proxy.mitm_log.read_text()
+    assert resp.text == f"ok {PREFIX}chrome.zip?generation=1"
+    assert any(r.startswith(f"GET {PREFIX}chrome.zip".encode()) for r in recorder.received)
+
+
+def test_outside_the_prefix_or_not_a_read_never_reaches_the_host(scoped):
+    proxy, recorder = scoped
+    for method, path, data in (
+        ("GET", "/other/secret", None),
+        ("GET", f"{PREFIX}../other/secret", None),
+        ("PUT", f"{PREFIX}upload", b"payload"),
+        ("POST", f"{PREFIX}upload", b"payload"),
+    ):
+        resp = _via(proxy, method, path, data=data)
+        assert resp.status_code == 403, (method, path)
+        assert f"{SCOPED}{PREFIX}" in resp.text
+    _settle()
+    # The ClientHello may have handshaken the host; no request line ever reached it.
+    assert all(not r for r in recorder.received), recorder.received
+    rows = _rows_for(proxy, SCOPED)
+    assert {(r["method"], r.get("outside")) for r in rows} == {
+        ("GET", True),
+        ("PUT", True),
+        ("POST", True),
+    }
+
+
+def test_a_raw_tcp_tunnel_to_a_path_host_is_never_dialled(scoped):
+    proxy, recorder = scoped
+    with socket.create_connection((HOST, proxy.pport), timeout=10) as s:
+        s.sendall(f"CONNECT {SCOPED}:443 HTTP/1.1\r\nHost: {SCOPED}:443\r\n\r\n".encode())
+        assert s.recv(4096).startswith(b"HTTP/1.1 200")
+        # Not TLS, and not HTTP to mitmproxy (a leading CRLF): its raw TCP layer, which dials.
+        s.sendall(b"\r\nPUT /other/x HTTP/1.1\r\nHost: x\r\n\r\n")
+        s.settimeout(5)
+        try:
+            while s.recv(4096):
+                pass
+        except (TimeoutError, ConnectionResetError):
+            pass
+    _settle()
+    assert recorder.accepted == 0, proxy.mitm_log.read_text()
+
+
+def test_raw_bytes_after_a_decrypted_handshake_never_reach_the_host(scoped):
+    # A leading CRLF makes mitmproxy relay the stream raw instead of parsing it as HTTP — and a
+    # server may skip that CRLF and read the request after it.
+    proxy, recorder = scoped
+    ctx = ssl.create_default_context(cafile=str(proxy.ca))
+    with socket.create_connection((HOST, proxy.pport), timeout=10) as raw:
+        raw.sendall(f"CONNECT {SCOPED}:443 HTTP/1.1\r\nHost: {SCOPED}:443\r\n\r\n".encode())
+        assert raw.recv(4096).startswith(b"HTTP/1.1 200")
+        with ctx.wrap_socket(raw, server_hostname=SCOPED) as tls:
+            tls.sendall(b"\r\nPUT /other/x HTTP/1.1\r\nHost: " + SCOPED.encode() + b"\r\n\r\n")
+            tls.settimeout(5)
+            try:
+                while tls.recv(4096):
+                    pass
+            except (TimeoutError, ConnectionResetError, ssl.SSLError):
+                pass
+    _settle()
+    assert all(b"PUT" not in r for r in recorder.received), recorder.received
+    _wait(
+        lambda: any(r["method"] == "TCP" for r in _rows_for(proxy, SCOPED)),
+        5,
+        "the raw-bytes refusal row",
+        proxy.mitm_log.read_text(),
+    )
