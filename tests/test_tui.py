@@ -1466,14 +1466,40 @@ async def test_copy_takes_a_request_or_a_hosts_rows_as_json(monkeypatch):
         copied: list[str] = []
         monkeypatch.setattr(app, "copy_to_clipboard", copied.append)
         assert app.check_action("copy_row", ()) is True
-        await pilot.press("y")
+        await pilot.press("l")
         await pilot.pause()
         assert json.loads(copied[-1])["path"] == _ZIP
         tree.cursor_line = 0  # the host
         await pilot.pause()
-        await pilot.press("y")
+        await pilot.press("l")
         await pilot.pause()
         assert [r["method"] for r in json.loads(copied[-1])] == ["GET", "CONNECT"]
+
+
+def _footer(app) -> dict[str, str]:
+    """What the footer SHOWS right now, key → its label: the rendered keys, so a cursor move
+    that changed the bindings but never repainted the footer fails too."""
+    return {str(k.key): str(k.description) for k in app.query("FooterKey")}
+
+
+async def test_the_footer_names_what_each_key_does_on_the_row_under_the_cursor(monkeypatch):
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_request_tree))
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app, tree = await _on_network_leaf(pilot, 1)  # a refused GET with a path to grant
+        footer = _footer(app)
+        assert footer["a"] == "allow path…" and footer["l"] == "copy log row" and "x" not in footer
+        for line, a in ((0, "allow host"), (2, "allow host")):  # the host; the CONNECT row
+            tree.cursor_line = line
+            await pilot.pause()
+            footer = _footer(app)
+            assert footer["a"] == a and footer["l"] == "copy log row", line
+        tree.cursor_line = 3  # the "… earlier" note: nothing to copy, its host still to allow
+        await pilot.pause()
+        footer = _footer(app)
+        assert footer["a"] == "allow host" and "l" not in footer
 
 
 def test_copied_json_is_printable_ascii_whatever_the_box_wrote():
@@ -2414,12 +2440,21 @@ async def test_x_is_gated_to_the_network_tab(monkeypatch):
     monkeypatch.setattr(
         tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
     )
-    _stub_wall(monkeypatch)
+    _stub_wall(monkeypatch, pending=[{"host": "unpkg.com", "why": ""}])
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
         assert app.check_action("wall_answer", ()) is False
         app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        # On the tab, `x` is the wall pane's: shown while one of its rows is selected, and not
+        # while the log tree has focus, where it would do nothing.
+        tree = app.query_one("#network-tree", tui.Tree)
+        tree.focus()
+        await pilot.pause()
+        assert app.check_action("wall_answer", ()) is False
+        app.refresh_panels()
+        app.query_one("#network-manage", tui.DataTable).focus()
         await pilot.pause()
         assert app.check_action("wall_answer", ()) is True
 

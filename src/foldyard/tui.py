@@ -458,12 +458,16 @@ class DevModeTui(App):
         # from under a live agent session. No d/D doctor either — the doctor runs deep on startup
         # and re-runs from the Doctor tab's ↻ deep refresh button (the `d` key now belongs to the
         # workspace list's dev-box toggle).
+        # `a` twice: on a refused request whose path a grant can be shaped on it offers that path
+        # (and names it in the footer); anywhere else on the Network Log it allows the host. The
+        # first binding check_action allows is the one shown and run.
+        ("a", "allow_path", "allow path…"),
         ("a", "allow_host", "allow host"),
-        # The wall pane's other half: decline a recommended host / revoke a grant. Gated to the
-        # Network Log tab in check_action, like `a`.
+        # The wall pane's other half: decline a recommended host / revoke a grant. Shown while
+        # that pane has a row selected (check_action).
         ("x", "wall_answer", "reject/revoke"),
-        # The Network Log's copy key: the request under the cursor as JSON (a host: its rows).
-        ("y", "copy_row", "copy JSON"),
+        # The Network Log's copy key: the row under the cursor as JSON (a host: its requests).
+        ("l", "copy_row", "copy log row"),
         ("q", "quit", "quit"),
     ]
     CSS = """
@@ -1333,15 +1337,44 @@ class DevModeTui(App):
         tabs.active = panes[(panes.index(tabs.active) + delta) % len(panes)]
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
-        # `a` (allow a blocked host) and `x` (decline/revoke in the wall pane) only make sense on
-        # the Network Log tab — hide them elsewhere so the footer doesn't advertise no-ops.
-        # Tolerate the tabs not being mounted yet (startup).
-        if action in ("allow_host", "wall_answer", "copy_row"):
+        # The Network Log's keys only make sense on its tab, and each only where its cursor is on
+        # something it acts on — hidden otherwise, so the footer names what a key will do HERE.
+        # `allow_path` hidden lets `a` fall through to `allow_host`. Tolerate the tabs not being
+        # mounted yet (startup).
+        if action in ("allow_host", "allow_path", "wall_answer", "copy_row"):
             try:
-                return self.query_one(TabbedContent).active == "tab-network"
+                if self.query_one(TabbedContent).active != "tab-network":
+                    return False
             except Exception:
                 return True
+            if action == "wall_answer":
+                return self._manage_selection() is not None
+            node = self._log_cursor()
+            if action == "allow_path":
+                return node is not None and bool(
+                    _row_scopes(node.data if isinstance(node.data, dict) else None)
+                )
+            if action == "copy_row":
+                return node is not None and isinstance(node.data, (dict, str))
         return True
+
+    def _log_cursor(self) -> TreeNode | None:
+        """The Network Log tree's cursor node while the tree has focus, else None."""
+        try:
+            tree = self.query_one("#network-tree", Tree)
+        except NoMatches:
+            return None
+        return tree.cursor_node if self.focused is tree else None
+
+    def on_tree_node_highlighted(self, _event) -> None:
+        self.refresh_bindings()  # the footer follows the cursor: host, request, or note
+
+    def on_data_table_row_highlighted(self, _event) -> None:
+        self.refresh_bindings()
+
+    def action_allow_path(self) -> None:
+        """`a` on a refused request: the scope picker (`action_allow_host` reads the leaf)."""
+        self.action_allow_host()
 
     def action_allow_host(self) -> None:
         """Allow the focused host through the egress wall — from either half of the Network Log
@@ -1406,7 +1439,7 @@ class DevModeTui(App):
             payload = [c.data for c in node.children if isinstance(c.data, dict)]
             what = f"{len(payload)} request(s) to {data}"
         else:
-            self.notify("move the cursor onto a request or a host first, then press y")
+            self.notify("move the cursor onto a request or a host first, then press l")
             return
         self.copy_to_clipboard(json.dumps(payload, indent=2, sort_keys=True))
         self.notify(f"copied {what} as JSON")
