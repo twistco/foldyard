@@ -337,8 +337,15 @@ def _net_leaf_body(e: dict, escape) -> str:
             if e.get("mismatch")
             else "a git push — the box doesn't push"
             if e.get("push")
+            else "outside the paths this host is granted for"
+            if e.get("outside")
             else "not on the allowlist"
         )
+        # A granted host's redirect sent the request here (box-reached text: escaped, capped).
+        # The narrow fix is then a path grant, `fy allow add <host>/<path>/`.
+        via = e.get("via")
+        if isinstance(via, str) and via:
+            why += f" (redirected from {escape(via[:60])})"
         return f"[dim]{ts}[/dim] {asked}[red]403 ⛔ blocked — {why}[/red]"
     if e.get("held"):
         # The box sent a dummy (an agent's keyless one, or an [[inject]] row's box_env) with its
