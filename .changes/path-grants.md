@@ -12,3 +12,9 @@ bump: minor
   host and the path grant to make, in its `403` and in the Network Log (`redirected from …`). The
   proxy still doesn't follow redirects for the box: that would let any granted host with an open
   redirect send the box anywhere. See `fy docs networking`, "Path grants".
+- **In `fy tui`'s Network Log, `a` on a refused request offers a path grant.** You pick one of the
+  request's directories, the path itself, or the whole host, then how long. Before, `a` worked only
+  on a host row and granted the whole host.
+- **`y` in the Network Log copies the request under the cursor as JSON** (on a host, its listed
+  requests), through your terminal's clipboard support. Box-written text in it is escaped to
+  printable ASCII.
