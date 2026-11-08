@@ -14,10 +14,11 @@ bump: minor
   `FY_REGISTRY_AUTH_FILE` at a file holding one narrow login, and name it in `[project] compose_env`
   (`fy docs stack`, Private images). A failed build or start says so if you have logins on your
   computer.
-- **`PODMAN_COMPOSE_PROVIDER` naming anything but a podman-compose is refused on your computer**, for
-  the reason below. Unset it to use the one foldyard bundles.
-- **`[engine] cli = "docker"` and `FOLDYARD_ENGINE=docker` are refused on your computer.** A docker
-  client sends the VM its logins from several places, your keychain among them, with no one switch
-  to stop that, and the config line is one a box can propose. Docker was only ever CI's fallback,
-  and it still is: jobs that set `IN_DEVBOX=1` are unaffected. A computer with docker and no podman
-  is told to install podman, which VM lifecycle needed anyway.
+- **foldyard drives only podman now, everywhere.** `[engine] cli = "docker"`, `FOLDYARD_ENGINE=docker`
+  and a `PODMAN_COMPOSE_PROVIDER` whose file isn't called `podman-compose` are refused, on your computer,
+  in a box and in CI, and a machine with docker and no podman is told to install podman. A docker
+  client sends the VM its logins from several places, your keychain among them, with no one switch to
+  stop that, and the config line is one a box can propose. **A CI job that runs foldyard on docker
+  must move** before it takes this version: GitHub's `ubuntu-26.04` runners ship podman 5.7, and
+  `fy docs stack` (In CI) has the steps. A docker CLI of your own in a box still reaches the socket
+  through `DOCKER_HOST`; a box image with no podman needs it added.

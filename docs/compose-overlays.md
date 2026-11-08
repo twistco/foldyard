@@ -29,7 +29,7 @@ env  = "FOLDYARD_GCP_IDENTITY_COMPOSE"       # optional — an env var that over
 ## Order: declaration order is `-f` order
 
 Matching overlays are added after your configured compose files, **in the order they appear in
-`foldyard.toml`**. `docker compose` lets a later `-f` file override an earlier one, so the table's
+`foldyard.toml`**. Compose lets a later `-f` file override an earlier one, so the table's
 order *is* the base → override order. Put the file others build on first (e.g. an identity
 overlay before the overlays that use that identity), and an app override before its data-layer
 twin.

@@ -2,6 +2,11 @@
 
 - **Status:** Accepted (2026-06, "docker vs podman" investigation; buildah build path added in
   PR #36) — implemented
+- **Amended again (2026-11-04):** docker is gone. CI drives rootless podman on `ubuntu-26.04` runners
+  (5.7, with bridge networks, DNS and buildah), with the same tests passing and skipping as on docker,
+  so the fallback below had no reason left. Its premise was false by then anyway: runners shipped
+  podman (4.9.3 on 24.04), and ADR-0017's other reason, no VM on a runner, went with the Lima jobs
+  (2026-09-17). `engine()` now answers podman or refuses, in a box too.
 - **Amended (2026-11-04):** docker is now refused on the host, not only discouraged. A docker client
   sends the VM its registry logins from several places (`config.json`, the platform's credential
   store, `DOCKER_AUTH_CONFIG`) with no one switch to stop that, and `[engine] cli` is one line a box

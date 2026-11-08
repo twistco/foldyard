@@ -86,8 +86,10 @@ by a *container*, not a second VM — and keep CI on containers, with no KVM job
 
   *(Correction, 2026-11-04: this no longer holds as a hard rule. A Lima L1 survived the host tier's
   SIGKILL of the hypervisor. Inside-out remains the sensible default.)*
-- **CI runs tiers 1–3 on containers, none on KVM.** The `live-e2e` job runs inside a docker-CLI
-  container that mirrors the dev box: docker CLI only (so `engine()` picks docker, ADR-0010),
+- **CI runs tiers 1–3 on containers, none on KVM.** *(Since 2026-11-04 on podman, and
+  `engine()` no longer has a docker path: ADR-0010's amendment. The shape is unchanged: a
+  podman-client container, the runner's rootless socket mounted.)* The `live-e2e` job runs inside a
+  container that mirrors the dev box: an engine client only (ADR-0010),
   the runner's socket mounted + `DOCKER_HOST` set (so `in_box()` is true and `machine.ensure`
   short-circuits — no `/dev/kvm` needed), and the repo mounted at its same host path (so the
   box's CA `-v` mount, resolved daemon-side, exists). The box e2e spawns a *sibling* box and

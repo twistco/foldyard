@@ -41,8 +41,8 @@ Core (stdlib-only on the hot path; heavy imports lazy):
 - `config.py` — repo/project/path resolution + ALL consumer config (env var wins →
   `foldyard.local.toml` → `foldyard.toml` → default) + the `~/.foldyard/<project>/` state paths.
 - `stack.py` — stack-setup env + the compose verbs (`up`/`down`/`ps`/`logs`/`shell`…); emits
-  `ENGINE`, `DOCKER_HOST` **and** `CONTAINER_HOST` (same socket, both names), and pins Podman's
-  provider to the `podman-compose` bundled in Foldyard's tool venv.
+  `ENGINE`, `DOCKER_HOST` **and** `CONTAINER_HOST` (same socket, both names: a box's own tools may
+  read the first), and pins Podman's provider to the `podman-compose` bundled in Foldyard's tool venv.
 - `devmode.py` — posture-mode substrate (state I/O, TTLs, expiry + the settle cascade,
   dashboard incl. DEGRADED capability, the `fy clock` test skew); axes/daemons/env/probes
   delegate to the plugin registry.
@@ -67,12 +67,10 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   never `REGISTRY_AUTH_FILE` itself, which people export at their whole auth.json, and never the
   default paths. `stack.resolve` applies it again after its merges: `[ports]` can name anything. What
   foldyard launches for you (the editor) gets `operators_env`. The docker CLI has no such switch
-  (`config.json`, the keychain, `DOCKER_AUTH_CONFIG`), so `config.engine` refuses it off-box.
+  (`config.json`, the keychain, `DOCKER_AUTH_CONFIG`), so `config.engine` refuses it.
 - `confighash.py` — the stack scope's verdict: the compose provider's own per-service config
-  hash vs a fresh render (what `up` compares). podman: a `python -m foldyard.confighash`
-  subprocess drives the bundled podman-compose's parser (its internals — degrades to
-  "unavailable", never a guess; `tests/test_confighash.py` pins the contract); docker:
-  `config --hash '*'`. The live oracles are `test_probes_e2e.py` / `test_e2e.py`.
+  hash vs a fresh render (what `up` compares): a `python -m foldyard.confighash` subprocess drives the bundled podman-compose's parser (its internals — degrades to
+  "unavailable", never a guess; `tests/test_confighash.py` pins the contract). The live oracles are `test_probes_e2e.py` / `test_e2e.py`.
 - `verify.py` — the isolation battery, the product's credibility check; plugin-agnostic core +
   the registry's `verify_checks`.
 - `machine.py` / `machine_backend.py` — rootless dev-VM lifecycle behind the pluggable
@@ -335,7 +333,7 @@ foldyard's surface splits by *where it can be validated*:
    wins over `CI`) is the weekly randomised hunt in CI, below. A test that sets its own
    `max_examples` wraps it in `pbt.scaled_examples(n)`, or `explore` leaves it at its everyday
    budget. Keep strategies as plain data (hypothesis shrinks data, not closures).
-2. **Engine verbs (golden tests)** — mock the engine; assert the exact `docker`/`podman`
+2. **Engine verbs (golden tests)** — mock the engine; assert the exact `podman`
    command *sequences* foldyard emits. No real engine.
 3. **Live smoke (e2e)** — drive the REAL machinery on a real engine, opt-in (`FOLDYARD_E2E=1`):
    - `tests/test_e2e.py`: the real CLI (`foldyard up`/`ps`/`down`) against the
@@ -465,12 +463,10 @@ every test passed green. Invariants: fixture `DOCKER_HOST` values must be dead p
 (`unix:///nonexistent/…`, never a plausible socket), and a fixture that lets a verb execute
 (`up`/`down`/`reconcile_posture`) must stub `stack.subprocess.run` itself — stubbing only a
 higher layer (e.g. `devmode.run_stream`) leaves the direct-engine helpers live. When touching
-stack verbs, canary-check from the box with the active provider's signature. For Docker Compose:
-`docker run -d --name fy-canary --label com.docker.compose.project=<project> --label
-com.docker.compose.config-hash=fy-canary <any-image> …`. For podman-compose: `podman run -d
---name fy-canary --label com.docker.compose.project=<project> --label
-io.podman.compose.project=<project> <any-image> …`. Run the suite once in each provider direction,
-confirm the matching canary survives each run, then remove it.
+stack verbs, canary-check from the box with podman-compose's signature: `podman run -d --name
+fy-canary --label com.docker.compose.project=<project> --label
+io.podman.compose.project=<project> <any-image> …`. Run the suite, confirm the canary survives it,
+then remove it.
 
 **The suite is hermetic by construction, not by convention** (`tests/conftest.py`, the "hermetic
 subprocess" section; pinned by `tests/test_hermetic.py`). Every non-e2e test runs on a PATH
@@ -509,9 +505,9 @@ sharded (below):
 | job | what | engine |
 | --- | --- | --- |
 | `check` | `just check` — ruff + pyright + ty + the unit/golden/TUI suite. typecheck installs the `e2e` group so the opt-in proxy/box e2e files (which import `cryptography`/`requests`) resolve | none |
-| `live-e2e` | the in-box topology: all the live e2es (`-k e2e`: the example stack up→serve→down, the in-process proxy e2e, AND the box e2e) — run **inside a docker-CLI container** that mirrors the dev box (see below) | runner Docker |
-| `lima-host-e2e` | the HOST topology: `ubuntu-24.04` as a real Linux host running foldyard's default `lima` backend — `machine ensure` boots a QEMU/KVM VM on the runner, then `tests/test_e2e.py` drives the real `foldyard up` / worktree lifecycle through the config-adopt gate, the supervisor and compose, exactly as on an operator's machine. Two shards, `L1`/`L2` | Lima VM (podman in the guest, over the forwarded socket) |
-| `wsl2-host-e2e` | the same host tier on `windows-2025`: an Ubuntu 24.04 distro under WSL2 ([Vampire/setup-wsl](https://github.com/Vampire/setup-wsl)) is the host, and the `lima` backend boots the QEMU/KVM VM INSIDE it — a second level of nesting the hosted Windows runners expose. Same modules, four shards `W1`–`W4`; `test_wall_e2e.py` skips itself there (below) | Lima VM inside the WSL2 distro |
+| `live-e2e` | the in-box topology: all the live e2es (`-k e2e`: the example stack up→serve→down, the in-process proxy e2e, AND the box e2e) — run **inside a podman-client container** that mirrors the dev box (see below) | runner's rootless podman |
+| `lima-host-e2e` | the HOST topology: `ubuntu-26.04` as a real Linux host running foldyard's default `lima` backend — `machine ensure` boots a QEMU/KVM VM on the runner, then `tests/test_e2e.py` drives the real `foldyard up` / worktree lifecycle through the config-adopt gate, the supervisor and compose, exactly as on an operator's machine. Two shards, `L1`/`L2` | Lima VM (podman in the guest, over the forwarded socket) |
+| `wsl2-host-e2e` | the same host tier on `windows-2025`: an Ubuntu 26.04 distro under WSL2 ([Vampire/setup-wsl](https://github.com/Vampire/setup-wsl)) is the host, and the `lima` backend boots the QEMU/KVM VM INSIDE it — a second level of nesting the hosted Windows runners expose. Same modules, four shards `W1`–`W4`; `test_wall_e2e.py` skips itself there (below) | Lima VM inside the WSL2 distro |
 | `e2e` | the one status for `foldyard-e2e.yml`: `needs:` the three live jobs above and fails unless each succeeded (a matrix job's result is its worst shard's). `check` gates separately, in `foldyard.yml` | none |
 
 **The weekly randomised property run (`property-explore.yml`).** Every job above loads the `ci`
@@ -545,14 +541,25 @@ expression. A `dry_run` prints the issue instead of posting it.
 
 **Why `live-e2e` runs inside a container.** The box e2e (`test_proxy_box_e2e.py`) spawns a
 *sibling* box and must discover its own network — so the test process itself has to be in a
-container, exactly as in the dev box. The job's `docker run` reproduces the dev-box environment
-precisely: **docker CLI only** (no podman ⇒ foldyard's `_engine()` picks docker ⇒ `docker compose`,
-not the `podman machine` VM path that a bare runner would take); the **host socket mounted** +
-`IN_DEVBOX=1` + `DOCKER_HOST` set (⇒ `in_box()` true ⇒ the launch gates — preflight's backend
-check, the config-adopt gate — and `machine.ensure` all short-circuit; no `/dev/kvm` needed); and
-the **repo mounted at its same host path** (so the box's `-v <CA>` mount, which the daemon resolves
-on the host, points at a path that exists there — the test copies the CA under the repo for this).
-A `docker compose` v2 plugin binary is dropped in for the example stack.
+container, exactly as in the dev box. The job's `podman run` reproduces the dev-box environment:
+Debian's **podman as a client** of the **runner's rootless socket, mounted at the box's path**, on a
+real network (`--network podman`: rootless podman's default, pasta, gives a container no address a
+sibling can reach) + `IN_DEVBOX=1` + `CONTAINER_HOST`/`DOCKER_HOST` set (⇒ `in_box()` true ⇒ the
+launch gates — preflight's backend check, the config-adopt gate — and `machine.ensure` all
+short-circuit; no `/dev/kvm` needed); and the **repo mounted at its same host path** (so the box's
+`-v <CA>` mount, which the service resolves on the runner, points at a path that exists there — the
+test copies the CA under the repo for this).
+
+**Why CI runs podman, not docker (2026-11-04).** This job ran on the runner's dockerd until then, as
+foldyard's and Tangible's CI had from the start, on two premises that had stopped being true: that
+runners ship no podman (24.04 ships 4.9.3, 26.04 5.7.0) and that a runner can't boot a VM (the Lima
+jobs do). What was left was convenience, and it cost CI testing a compose provider and builder no
+developer runs. A spike on `ubuntu-26.04` had the same tests passing and skipping as the docker job
+(62 and 83), compared by name. One thing it needs: Ubuntu's AppArmor profile for `pasta` denies
+podman's signal when a network's last container goes (`apparmor="DENIED" operation="signal"
+profile="pasta"`, `rootless netns: kill network process: permission denied`), so the job unloads that
+one profile, which clears it. Fedora guests have no such profile, and this needs root in the runner,
+so it stays in the workflow. `engine()` refuses anything else now, in a box too.
 
 **Why a VM job works on a shared runner (2026-09-17).** Until then this page said podman-machine
 / Lima VMs were "flaky" on GitHub-hosted runners; the only citation was a *libvirt* permission
@@ -800,8 +807,8 @@ minutes, and the `e2e` job is the single status to check.
 
 - The hot path stays venv-free / Textual-free. **`verify` stays the credibility check — never
   weaken its assertions.** Keep echoing the underlying `"$ENGINE"` commands.
-- **Don't stop emitting `CONTAINER_HOST`, and don't make `engine()` "prefer docker" again** —
-  in-box `up`/`ps`/`verify` all depend on podman reaching the socket via it.
+- **Don't stop emitting `CONTAINER_HOST`, and `engine()` answers podman or refuses** — in-box
+  `up`/`ps`/`verify` all depend on podman reaching the socket via it.
 - **No host-executed code from the repo mount, and no command strings from config.** Minters are
   packaged KINDS (`Plugin.secrets` declares what host.env must hold; a `[[secret]]` `how` hint is
   PRINTED, never run). Don't reintroduce a `minter = "<command>"` config key or a minter path under

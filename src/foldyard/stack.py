@@ -265,10 +265,9 @@ def _context(
     # dump/cache dir). Exported ⇒ a shell-driven `compose up` subprocess sees it too, not just the
     # Python `resolve()` env.
     exported: dict[str, str] = {"MAIN_REPO": str(main)}
-    if config.engine() == "podman":
-        exported["PODMAN_COMPOSE_PROVIDER"] = os.environ.get(
-            "PODMAN_COMPOSE_PROVIDER", compose_provider_path()
-        )
+    exported["PODMAN_COMPOSE_PROVIDER"] = os.environ.get(
+        "PODMAN_COMPOSE_PROVIDER", compose_provider_path()
+    )
 
     worktree = _active_worktree(wt_root) if worktree is None else worktree
     # Export the resolved worktree so a shell that `eval`s shellenv — and every `foldyard` it then
@@ -299,9 +298,9 @@ def _context(
     dh = _docker_host(main, wt_root, no_machine, read_only)
     if dh:
         # The same docker-compat socket of the rootless machine, under both names:
-        # podman reads CONTAINER_HOST, docker reads DOCKER_HOST. Setting both lets podman
-        # drive it everywhere (incl. the box, where plain/local podman would be broken)
-        # while any remaining docker caller still works.
+        # podman reads CONTAINER_HOST, and a tool of your own in the box may read DOCKER_HOST.
+        # podman reaching it is what makes it work everywhere (incl. the box, where plain/local
+        # podman would be broken).
         exported["DOCKER_HOST"] = dh
         exported["CONTAINER_HOST"] = dh
     exported["FOLDYARD_ENV_OVERRIDE"] = str(
@@ -415,7 +414,6 @@ def shellenv(no_machine: bool = False) -> int:
     # STACK (a plugin can contribute several; several plugins can each contribute) — e.g. dump +
     # a data-callback overlay — instead of one clobbering the rest. Manual FOLDYARD_COMPOSE_EXTRA
     # entries (os.pathsep-joined) append LAST, so an explicit override wins on conflicting keys.
-    # Engine: docker when DOCKER_HOST is preset (the box), else podman.
     compose = config.engine_compose()
     for f in config.compose_files():
         p = Path(f)
@@ -551,7 +549,7 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
         from . import registrylogins
 
         env[registrylogins.AUTH] = registrylogins.for_compose(config.compose_env())
-        config.refuse_compose_provider(env.get("PODMAN_COMPOSE_PROVIDER", ""))
+    config.refuse_compose_provider(env.get("PODMAN_COMPOSE_PROVIDER", ""))
     return Context(
         main=main,
         env=env,
@@ -718,7 +716,7 @@ def _podman_build(
 ) -> int:
     """Build every service with a `build:` section using NATIVE `podman build` (buildah).
 
-    On the podman engine this is the ONLY builder that handles compose `additional_contexts`:
+    This is the ONLY builder that handles compose `additional_contexts`:
     `<engine> compose --build` shells out to the docker-compose provider, and podman hard-sets
     DOCKER_BUILDKIT=0 on that provider's env, so the build falls back to the classic builder —
     which rejects additional contexts ("the classic builder doesn't support additional
@@ -731,8 +729,7 @@ def _podman_build(
     podman-compose computes at `up`. `up` then runs with `--no-build`, so it REUSES these images
     (podman
     resolves the bare name to its `localhost/…` store entry) and never re-enters the broken
-    provider build. The docker engine (CI) never reaches here — compose's BuildKit default
-    handles additional contexts there; see `up`.
+    provider build.
 
     ``superseded``, when given, collects the ids of images a successful build untagged — the
     previous `<project>_<service>` images — for `up` to remove once containers have moved off
@@ -934,26 +931,19 @@ def _build(
     extra_profiles: list[str] | None = None,
     superseded: list[str] | None = None,
 ) -> int:
-    """Build compose services with the configured engine.
-
-    Podman uses buildah directly so local development never enters the Docker
-    Compose provider's BuildKit path. Docker (including CI) retains Compose's
-    regular BuildKit build.
-    """
+    """Build compose services with buildah directly (:func:`_podman_build`)."""
     from . import buildgate
 
-    if config.engine() == "podman":
-        return buildgate.run(
-            lambda proxy_url: _podman_build(
-                ctx,
-                proxy_url,
-                extra_profiles=extra_profiles,
-                services=services,
-                superseded=superseded,
-            ),
-            what="stack build",
-        )
-    return _compose(ctx, ["build", *(services or [])], extra_profiles=extra_profiles)
+    return buildgate.run(
+        lambda proxy_url: _podman_build(
+            ctx,
+            proxy_url,
+            extra_profiles=extra_profiles,
+            services=services,
+            superseded=superseded,
+        ),
+        what="stack build",
+    )
 
 
 def build(services: list[str], *, extra_profiles: list[str] | None = None) -> int:
@@ -1051,32 +1041,15 @@ def up() -> int:
 
 
 def _provider_signature_filter(ctx: Context) -> str:
-    """The ``--filter label=…`` that selects the containers the ACTIVE compose provider can SEE.
-
-    podman-compose finds a project's containers ONLY via ``io.podman.compose.project`` (it also
-    writes the ``com.docker.compose.*`` compat labels on everything it creates, but never reads
-    them back); docker-compose finds them via ``com.docker.compose.project`` and is the only
-    provider that writes ``com.docker.compose.config-hash``. So: podman-compose active → its
-    valued project label; docker-compose active (docker engine, or an explicit
-    ``PODMAN_COMPOSE_PROVIDER`` override on podman) → the config-hash label's existence."""
-    if _podman_compose_active(ctx):
-        return f"label=io.podman.compose.project={ctx.project}"
-    return "label=com.docker.compose.config-hash"
-
-
-def _podman_compose_active(ctx: Context) -> bool:
-    """Whether podman-compose is the ACTIVE compose provider — the podman engine with its
-    provider pinned to podman-compose (foldyard's bundled one, unless an explicit
-    ``PODMAN_COMPOSE_PROVIDER`` overrides it). Else docker-compose runs: the docker engine, or, in
-    a box, that override naming docker-compose on podman. The providers label (and hash)
-    differently."""
-    provider = Path(ctx.env.get("PODMAN_COMPOSE_PROVIDER", "")).name
-    return config.engine() == "podman" and "podman-compose" in provider
+    """The ``--filter label=…`` that selects the containers podman-compose can SEE: it finds a
+    project's containers ONLY via ``io.podman.compose.project`` (it also writes the
+    ``com.docker.compose.*`` compat labels on everything it creates, but never reads them back)."""
+    return f"label=io.podman.compose.project={ctx.project}"
 
 
 def _reconcile_foreign_containers(ctx: Context, emit: Callable[[str], None] | None = None) -> None:
-    """Remove this project's containers that the ACTIVE compose provider cannot SEE — the
-    migration path across a provider switch (docker-compose ⇄ the bundled podman-compose).
+    """Remove this project's containers that podman-compose cannot SEE: what a docker-compose
+    provider left on a VM from before it was refused.
 
     A provider only recognises containers carrying its own signature label (see
     ``_provider_signature_filter``), so a stack the OTHER provider created is invisible to it:
@@ -1244,8 +1217,6 @@ def _remove_stranded_dependents(
     removes nothing. Named volumes are never touched. ``rendered`` is the caller's render,
     shared with the path guard so the sweep adds no host-side parse of the compose files."""
     emit = emit or _err
-    if not _podman_compose_active(ctx):
-        return
     try:
         from . import confighash
 
@@ -1589,13 +1560,11 @@ def _running_services(ctx: Context, deadline: float | None = None) -> set[str] |
 
 def _crashed_services(ctx: Context, deadline: float | None = None) -> set[str]:
     """The project's compose services whose container CRASHED (:func:`_compose_ps_crashed`).
-    docker compose's ``ps`` lists only running containers without ``-a``; the bundled
-    podman-compose's is ``podman ps -a`` already, and its parser refuses ``-a``. Fail-safe: an
-    empty set on any error — the heal then refreshes only what runs, never reviving a guess."""
-    flags = [] if _podman_compose_active(ctx) else ["-a"]
+    podman-compose's ``ps`` is ``podman ps -a`` already, and its parser refuses ``-a``. Fail-safe:
+    an empty set on any error — the heal then refreshes only what runs, never reviving a guess."""
     try:
         out = _run(
-            [*ctx.compose, "ps", *flags, "--format", "json"],
+            [*ctx.compose, "ps", "--format", "json"],
             env=ctx.env,
             cwd=str(ctx.main),
             timeout=_left(deadline),
@@ -1934,8 +1903,8 @@ def logs(svc: list[str]) -> int:
         return rc
     if not engine_reachable("follow"):
         return 0
-    # `--tail`, not `-n`: docker compose reads `-n` as --tail, but podman-compose reads it as
-    # its value-less --names, which made the 50 a service name.
+    # `--tail`, not `-n`: podman-compose reads `-n` as its value-less --names, which made the 50 a
+    # service name.
     return _compose(resolve(), ["logs", "-f", "--tail", "50", *svc])
 
 
@@ -2042,16 +2011,13 @@ def disk_headroom(env: dict[str, str] | None = None, timeout: float = 15) -> Dis
 
     Read from ``podman info`` (``store.graphRootAllocated``/``graphRootUsed``) rather than a
     ``statvfs``: the store lives inside the VM, so a host-side ``df`` measures the host's disk
-    and not the one that runs out mid-build. docker exposes no equivalent field, and guessing
-    is worse than declining to answer — every caller treats ``None`` as "no finding, change
+    and not the one that runs out mid-build. Every caller treats ``None`` as "no finding, change
     nothing".
 
     ``timeout`` is generous for the pre-build reclaim (the engine is often busy right then) and
     cut to the module's probe budget by doctor, whose rows a TUI re-runs on a 5s timer."""
     try:
-        if config.engine() != "podman":
-            return None
-        proc = _run(["podman", "info", "--format", "json"], env=env, timeout=timeout)
+        proc = _run([config.engine(), "info", "--format", "json"], env=env, timeout=timeout)
     except (OSError, subprocess.SubprocessError, config.EngineRefused):
         return None
     if proc.returncode != 0:

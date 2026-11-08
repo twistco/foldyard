@@ -1794,7 +1794,7 @@ def _disk_headroom_check():
     """The VM's disk, asked of the engine so the answer is the same from either side of the
     mount (a host-side ``df`` would measure the host's disk instead of the store's).
 
-    Yields nothing when the figure can't be read — no machine yet, a docker engine, a stopped
+    Yields nothing when the figure can't be read — no machine yet, a refused engine, a stopped
     VM — because "unknown" is not a finding. The threshold is stack's, shared with the ``fy
     up`` reclaim, so this row and that sweep can never disagree about what "low" means.
 

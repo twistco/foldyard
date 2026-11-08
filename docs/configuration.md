@@ -494,15 +494,14 @@ foldyard doesn't detect the install.
 cli = "podman"
 ```
 
-- **`cli`** — the container-engine CLI: `"podman"` or `"docker"`, as a name, never a path (the
-  value is run on your computer — [ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)).
-  Default: `podman` if installed, else `docker`. Env: `FOLDYARD_ENGINE`. **`docker` works only in a
-  box**, and is refused on your computer.
+- **`cli`** — the container-engine CLI, and it can only say `"podman"`: anything else is refused,
+  in a box and in CI too. It is run on your computer, so it is a name, never a path
+  ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)). Env: `FOLDYARD_ENGINE`.
 
-The docker fallback exists for CI jobs that drive a runner's docker socket and set `IN_DEVBOX=1`. On
-your computer you need podman: VM lifecycle has no docker equivalent, and a docker
-client would send the VM your registry logins ([stack](./stack.md#private-images)). foldyard exports `CONTAINER_HOST`
-pointing at the VM's socket, so plain podman works everywhere, including in the box.
+foldyard drives podman everywhere: VM lifecycle has no docker equivalent, a docker client would send
+the VM your registry logins ([stack](./stack.md#private-images)), and CI should test what you run. A
+docker CLI of your own in a box still works: foldyard exports the VM's socket as both
+`CONTAINER_HOST` and `DOCKER_HOST`.
 
 A refusal stops the command you ran. A supervisor already running stays, so modes still expire and
 `fy mode … off` still stops the daemons, and it treats every box as down: a worktree's daemons stop

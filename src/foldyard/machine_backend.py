@@ -6,10 +6,9 @@ downstream (``stack.py``'s ``CONTAINER_HOST`` export, compose, box, worktrees)
 is backend-blind: ``machine.socket()`` returns a podman URI either way.
 
 ``cli`` here is the VM-LIFECYCLE binary, and it is not the whole prerequisite. The engine CLI
-(:func:`config.engine` — ``podman``, or ``docker`` where podman is absent) is a SEPARATE and
-always-required host dependency: it is what drives the socket a backend hands out, for every
-compose/box/engine verb. So Lima is limactl *plus* whichever engine CLI :func:`config.engine`
-resolves to, not limactl *instead of* one.
+(:func:`config.engine`, podman) is a SEPARATE and always-required host dependency: it is what
+drives the socket a backend hands out, for every compose/box/engine verb. So Lima is limactl *plus*
+podman, not limactl *instead of* it.
 
 * :class:`LimaBackend` (**the default**): ``limactl`` + Lima's **podman template**, which runs a
   real podman service inside each VM and forwards its libpod socket to the host
