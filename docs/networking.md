@@ -184,10 +184,10 @@ back on.
 - `fy allow sync [--yes]` for the hosts the repo recommends;
 - one keypress in `fy tui`'s Network Log: `a` on a host grants the host, and `a` on a refused
   request first asks how much of the host to grant: one of the request's directories, the path
-  itself, or the whole host (see [path grants](#path-grants-one-path-of-a-shared-host)). `y` copies
-  the request under the cursor as JSON (on a host, its listed requests), say for a bug report.
-  The copy goes through your terminal's clipboard support (OSC 52), which
-  some terminals turn off.
+  itself, or the whole host (see [path grants](#path-grants-one-path-of-a-shared-host)). `l` copies
+  the log row under the cursor as JSON (on a host, its listed requests), say for a bug report.
+  The copy goes through your terminal's clipboard support (OSC 52), which some terminals turn
+  off. The footer names what each key does on the row the cursor is on.
 
 Both the grants and the enforcement switch live on your computer for the same reason: the box can
 write repo config, so an allowlist in the repo is one the box could widen or switch off. Keyless

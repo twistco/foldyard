@@ -15,6 +15,8 @@ bump: minor
 - **In `fy tui`'s Network Log, `a` on a refused request offers a path grant.** You pick one of the
   request's directories, the path itself, or the whole host, then how long. Before, `a` worked only
   on a host row and granted the whole host.
-- **`y` in the Network Log copies the request under the cursor as JSON** (on a host, its listed
+- **`l` in the Network Log copies the log row under the cursor as JSON** (on a host, its listed
   requests), through your terminal's clipboard support. Box-written text in it is escaped to
-  printable ASCII.
+  printable ASCII. The footer now shows what each key does on the row under the cursor: `a` reads
+  `allow path…` on a request it can offer a path for, and `x` appears only in the allowlist pane,
+  the only place it does anything.
