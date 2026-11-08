@@ -979,3 +979,37 @@ def test_a_path_grant_on_a_local_address_is_still_a_local_key(env):
     assert allowlist.local_key("127.0.0.1/repo/")
     assert allowlist.local_key("192.168.1.10/x/")
     assert not allowlist.local_key(_GCS_PATH)
+
+
+def test_a_request_offers_its_directories_then_its_file(env):
+    zip_ = "/chrome-for-testing-public/156.0.8078.4/linux-arm64/chrome-linux-arm64.zip"
+    assert allowlist.path_scopes("Storage.GoogleAPIs.com", zip_ + "?x-goog-signature=s") == [
+        "storage.googleapis.com/chrome-for-testing-public/",
+        "storage.googleapis.com/chrome-for-testing-public/156.0.8078.4/",
+        "storage.googleapis.com/chrome-for-testing-public/156.0.8078.4/linux-arm64/",
+        f"storage.googleapis.com{zip_}",
+    ]
+    assert allowlist.path_scopes("example.com", "/a/b/c/d/e/") == [
+        "example.com/a/",
+        "example.com/a/b/",
+        "example.com/a/b/c/",
+        "example.com/a/b/c/d/e/",
+    ]
+
+
+@pytest.mark.parametrize(
+    "host, path",
+    [
+        ("example.com", "/"),  # nothing narrower than the host
+        ("example.com", "/a/../b/x"),  # a path a server could resolve elsewhere offers nothing
+        ("example.com", "/a//b"),
+        ("example.com", "/a%2fb/c"),
+        ("example.com", "/[evil]/x"),  # nor anything outside a path's characters
+        ("example.com:8443", "/a/b"),  # a path grant has no port
+        ("127.0.0.1", "/a/b"),  # a local address is typed, never offered
+        ("example.com", None),
+        (None, "/a"),
+    ],
+)
+def test_a_request_offers_no_path_it_cannot_grant_as_it_stands(env, host, path):
+    assert allowlist.path_scopes(host, path) == []

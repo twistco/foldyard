@@ -12,6 +12,7 @@ Run:  fy tui-test                 (uv resolves pytest + textual from foldyard)
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 from datetime import timedelta
@@ -1334,6 +1335,153 @@ async def test_allow_host_picker_cancels_without_granting(monkeypatch):
         await pilot.pause()
         await app.workers.wait_for_complete()
         assert grants == []
+
+
+_ZIP = "/chrome-for-testing-public/156.0.8078.4/linux-arm64/chrome-linux-arm64.zip"
+_GCS = "storage.googleapis.com"
+
+
+def _request_tree(rows: list[dict] | None = None):
+    """A Network Log host with request rows on its leaves, as the proxy plugin hands them over."""
+    rows = rows or [
+        {"ts": "t2", "method": "GET", "host": _GCS, "path": _ZIP, "status": 403, "blocked": True},
+        {"ts": "t1", "method": "CONNECT", "host": _GCS, "path": "", "blocked": True},
+    ]
+    return plugins.PanelTree(
+        summary="2 blocked",
+        groups=[
+            plugins.PanelGroup(
+                key=_GCS,
+                label=f"[b]{_GCS}[/b] · ⛔ 2 blocked",
+                children=[f"{r['method']} {r['path']}" for r in rows] + ["… 3 earlier"],
+                rows=[*rows, None],
+            )
+        ],
+    )
+
+
+async def _on_network_leaf(pilot, line: int):
+    """Open the Network Log, expand the first host and put the cursor on tree line ``line``."""
+    app = cast(tui.DevModeTui, pilot.app)
+    app.query_one(tui.TabbedContent).active = "tab-network"
+    await pilot.pause()
+    tree = app.query_one("#network-tree", tui.Tree)
+    tree.focus()
+    tree.root.children[0].expand()
+    await pilot.pause()
+    tree.cursor_line = line
+    await pilot.pause()
+    return app, tree
+
+
+async def test_allow_on_a_request_offers_its_paths_then_grants_the_one_picked(monkeypatch):
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_request_tree))
+    )
+    grants: list[tuple[str, str]] = []
+    monkeypatch.setattr(tui.allowlist, "grant", lambda host, level: grants.append((host, level)))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app, tree = await _on_network_leaf(pilot, 1)  # the GET under the host
+        assert tree.cursor_node is not None
+        assert cast(dict, tree.cursor_node.data)["path"] == _ZIP
+        await pilot.press("a")
+        await pilot.pause()
+        assert isinstance(app.screen, tui.GrantScopeScreen)
+        assert app.screen.scopes[0] == f"{_GCS}/chrome-for-testing-public/"
+        assert app.screen.scopes[-1] == f"{_GCS}{_ZIP}"
+        await pilot.press("enter")  # the first: the bucket, as the proxy's 403 suggests
+        await pilot.pause()
+        assert isinstance(app.screen, tui.AllowHostScreen)
+        assert app.screen.host == f"{_GCS}/chrome-for-testing-public/"
+        await pilot.press("o")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert grants == [(f"{_GCS}/chrome-for-testing-public/", "once")]
+
+
+async def test_the_scope_picker_still_offers_the_whole_host(monkeypatch):
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_request_tree))
+    )
+    grants: list[tuple[str, str]] = []
+    monkeypatch.setattr(tui.allowlist, "grant", lambda host, level: grants.append((host, level)))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app, _tree = await _on_network_leaf(pilot, 1)
+        await pilot.press("a")
+        await pilot.pause()
+        await pilot.press("h")
+        await pilot.pause()
+        assert isinstance(app.screen, tui.AllowHostScreen) and app.screen.host == _GCS
+        await pilot.press("s")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert grants == [(_GCS, "session")]
+
+
+@pytest.mark.parametrize("line", [2, 3])  # the CONNECT row (no path read), the "earlier" note
+async def test_allow_on_a_request_with_no_path_to_grant_offers_its_host(monkeypatch, line):
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_request_tree))
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app, _tree = await _on_network_leaf(pilot, line)
+        await pilot.press("a")
+        await pilot.pause()
+        assert isinstance(app.screen, tui.AllowHostScreen) and app.screen.host == _GCS
+
+
+async def test_a_relabelled_leaf_carries_its_new_row(monkeypatch):
+    # The panel refreshes in place while the line count holds: each leaf's row must follow its
+    # line, or `a`/`y` would act on the request that USED to be there.
+    state: dict[str, list[dict] | None] = {"rows": None}
+    monkeypatch.setattr(
+        tui,
+        "registry",
+        lambda: _panel_registry(_NetworkPanelPlugin(lambda: _request_tree(state["rows"]))),
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app, tree = await _on_network_leaf(pilot, 1)
+        state["rows"] = [
+            {"ts": "t3", "method": "GET", "host": _GCS, "path": "/new/x", "blocked": True},
+            {"ts": "t2", "method": "GET", "host": _GCS, "path": _ZIP, "blocked": True},
+        ]
+        app.refresh_panels()
+        await pilot.pause()
+        assert tree.cursor_node is not None
+        assert cast(dict, tree.cursor_node.data)["path"] == "/new/x"
+
+
+async def test_copy_takes_a_request_or_a_hosts_rows_as_json(monkeypatch):
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_request_tree))
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        assert cast(tui.DevModeTui, pilot.app).check_action("copy_row", ()) is False  # off-tab
+        app, tree = await _on_network_leaf(pilot, 1)
+        copied: list[str] = []
+        monkeypatch.setattr(app, "copy_to_clipboard", copied.append)
+        assert app.check_action("copy_row", ()) is True
+        await pilot.press("y")
+        await pilot.pause()
+        assert json.loads(copied[-1])["path"] == _ZIP
+        tree.cursor_line = 0  # the host
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+        assert [r["method"] for r in json.loads(copied[-1])] == ["GET", "CONNECT"]
+
+
+def test_copied_json_is_printable_ascii_whatever_the_box_wrote():
+    # A row's text is box-written; json.dumps escapes control and non-ASCII characters, so
+    # nothing reaches the clipboard that a terminal or an editor would act on.
+    row = {"path": "/x\x1b]52;c;ZXZpbA==\x07\u202e", "ua": "a\nb"}
+    text = json.dumps(row, indent=2, sort_keys=True)
+    assert all(c == "\n" or " " <= c <= "~" for c in text)
 
 
 async def test_down_enters_grid_then_arrows_move_between_cells():

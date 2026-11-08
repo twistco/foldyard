@@ -41,6 +41,7 @@ Navigation is zoned (see DevModeTui / ModeGrid / WorkspaceList for the seams):
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Callable
 from typing import cast
@@ -71,6 +72,22 @@ from . import allowlist, config, configpin, devmode, term
 from .plugins import DoctorFix, PanelData, PanelGroup, PanelTree, TuiPanel, registry
 
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def _leaf_row(group: PanelGroup, i: int) -> object:
+    """What leaf ``i`` of ``group`` stands for (:attr:`PanelGroup.rows`), or None."""
+    return group.rows[i] if i < len(group.rows) else None
+
+
+def _row_scopes(row: dict | None) -> list[str]:
+    """The path grants a Network Log request row offers (:func:`allowlist.path_scopes`): only a
+    request the wall refused, with a path — never a CONNECT or raw-TCP row (no path was read),
+    nor a refusal a grant can't answer (a git push, a Host header naming another host)."""
+    if not row or not row.get("blocked") or row.get("method") in ("", "CONNECT", "TCP"):
+        return []
+    if row.get("push") or row.get("mismatch") or row.get("local"):
+        return []
+    return allowlist.path_scopes(row.get("host"), row.get("path"))
 
 
 _DOCTOR_GLYPHS = {"ok": ("✓", "green"), "warn": ("○", "yellow"), "fail": ("✗", "red")}
@@ -445,6 +462,8 @@ class DevModeTui(App):
         # The wall pane's other half: decline a recommended host / revoke a grant. Gated to the
         # Network Log tab in check_action, like `a`.
         ("x", "wall_answer", "reject/revoke"),
+        # The Network Log's copy key: the request under the cursor as JSON (a host: its rows).
+        ("y", "copy_row", "copy JSON"),
         ("q", "quit", "quit"),
     ]
     CSS = """
@@ -512,6 +531,8 @@ class DevModeTui(App):
     #allow-title { text-style: bold; height: auto; }
     #allow-list { height: auto; max-height: 6; border: round $surface; margin: 1 0; }
     #allow-list ListItem { padding: 0 1; }
+    #scope-list { height: auto; max-height: 8; border: round $surface; margin: 1 0; }
+    #scope-list ListItem { padding: 0 1; }
     #allow-hint { color: $text-muted; height: auto; }
     /* The adopt gate. The diff is the reviewable part, so it gets its own scroll pane — a
        branch can add any number of lines and none of them may be silently cut off. */
@@ -1315,7 +1336,7 @@ class DevModeTui(App):
         # `a` (allow a blocked host) and `x` (decline/revoke in the wall pane) only make sense on
         # the Network Log tab — hide them elsewhere so the footer doesn't advertise no-ops.
         # Tolerate the tabs not being mounted yet (startup).
-        if action in ("allow_host", "wall_answer"):
+        if action in ("allow_host", "wall_answer", "copy_row"):
             try:
                 return self.query_one(TabbedContent).active == "tab-network"
             except Exception:
@@ -1326,8 +1347,10 @@ class DevModeTui(App):
         """Allow the focused host through the egress wall — from either half of the Network Log
         tab. In the wall pane (below the log) it acts on the selected row: a pending
         recommendation or an existing grant (re-levelling it). In the log tree it keys off the
-        cursor node — group nodes carry their host in `.data`, leaf (request) nodes carry none.
-        Both push the level picker (once/session/permanent)."""
+        cursor node — group nodes carry their host in `.data`, leaf (request) nodes the request's
+        log row. On a request whose path a grant can be shaped on, the scope picker comes first:
+        a path grant at one of its directories, the file itself, or the whole host
+        (:func:`allowlist.path_scopes`). Then the level picker (once/session/permanent)."""
         if self.query_one(TabbedContent).active != "tab-network":
             return
         sel = self._manage_selection()
@@ -1345,15 +1368,48 @@ class DevModeTui(App):
         tree = self.query_one("#network-tree", Tree)
         node = tree.cursor_node
         host = node.data if node is not None else None
+        if node is not None and node.parent is not None and not isinstance(host, str):
+            # A leaf: a request (its log row), or a note under the host. Its host is the group's.
+            row = host if isinstance(host, dict) else None
+            host = node.parent.data
+            scopes = _row_scopes(row)
+            if isinstance(host, str) and host and scopes:  # path_scopes offers no local address
+                self.push_screen(GrantScopeScreen(host, scopes), self._pick_level)
+                return
         if not isinstance(host, str) or not host:
             self.notify(
-                "move the cursor onto a host row in the Network Log first, then press a",
+                "move the cursor onto a host or a request in the Network Log first, then press a",
                 severity="warning",
             )
             return
-        if self._typed_only(host):
+        self._pick_level(host)
+
+    def _pick_level(self, key: str | None) -> None:
+        """The level picker for ``key`` (a host or a path grant), then the grant."""
+        if not key or self._typed_only(key):
             return
-        self.push_screen(AllowHostScreen(host), lambda level: self._after_allow(host, level))
+        self.push_screen(AllowHostScreen(key), lambda level: self._after_allow(key, level))
+
+    def action_copy_row(self) -> None:
+        """Copy what the Network Log's cursor is on, as JSON: a request's log row, or a host's
+        rows (the ones the tree shows, newest first). ``json.dumps`` escapes every non-ASCII and
+        control character, so box-written text (a path, a User-Agent) reaches the clipboard as
+        printable ASCII. Through the terminal (OSC 52), which some terminals turn off."""
+        if self.query_one(TabbedContent).active != "tab-network":
+            return
+        node = self.query_one("#network-tree", Tree).cursor_node
+        data = node.data if node is not None else None
+        if isinstance(data, dict):
+            payload: object = data
+            what = "the request"
+        elif isinstance(data, str) and node is not None:
+            payload = [c.data for c in node.children if isinstance(c.data, dict)]
+            what = f"{len(payload)} request(s) to {data}"
+        else:
+            self.notify("move the cursor onto a request or a host first, then press y")
+            return
+        self.copy_to_clipboard(json.dumps(payload, indent=2, sort_keys=True))
+        self.notify(f"copied {what} as JSON")
 
     def _typed_only(self, host: str) -> bool:
         """A local address (allowlist.local_key) is never granted from a keypress: it opens a
@@ -1612,8 +1668,8 @@ class DevModeTui(App):
         tree.show_root = False
         for g in data.groups:
             node = tree.root.add(Text.from_markup(g.label), data=g.key)
-            for child in g.children:
-                node.add_leaf(Text.from_markup(child))
+            for i, child in enumerate(g.children):
+                node.add_leaf(Text.from_markup(child), data=_leaf_row(g, i))
             if g.key in expanded:
                 node.expand()
         tree.root.expand()
@@ -1627,16 +1683,19 @@ class DevModeTui(App):
         """Bring one group's node from ``old`` to ``new`` without replacing the node."""
         if old.label != new.label:
             node.set_label(Text.from_markup(new.label))
-        if old.children == new.children:
+        if old.children == new.children and old.rows == new.rows:
             return
         if len(old.children) == len(new.children):
-            for leaf, was, now in zip(node.children, old.children, new.children, strict=True):
+            for i, (leaf, was, now) in enumerate(
+                zip(node.children, old.children, new.children, strict=True)
+            ):
                 if was != now:
                     leaf.set_label(Text.from_markup(now))
+                leaf.data = _leaf_row(new, i)  # the row the line now stands for
             return
         node.remove_children()
-        for child in new.children:
-            node.add_leaf(Text.from_markup(child))
+        for i, child in enumerate(new.children):
+            node.add_leaf(Text.from_markup(child), data=_leaf_row(new, i))
 
     def _manage_data(self) -> tuple[str, list[tuple[str, str, str]], list[tuple[str, str]]]:
         """``(summary, rows, keys)`` for the wall pane — pending recommendation offers first (the
@@ -1855,9 +1914,68 @@ class BranchItem(ListItem):
 class _LevelItem(ListItem):
     """An allow-level picker row carrying the level it grants (read back via `getattr`)."""
 
-    def __init__(self, level: str, label: str) -> None:
+    def __init__(self, level: str, label: str | Text) -> None:
         super().__init__(Static(label))
         self.level = level
+
+
+class GrantScopeScreen(ModalScreen):
+    """Pick how much of a host to grant from one refused request: a path grant at one of the
+    request's directories, the file itself, or the whole host. ↑/↓ + enter (or a click), `h` for
+    the host, esc to cancel. Dismisses with the grant key or None. Every key is plain text here:
+    the path came from the box, so it is never read as markup."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "cancel"),
+        Binding("h", "pick_host", "whole host"),
+        Binding("down", "hl_move(1)", "↓", show=False),
+        Binding("up", "hl_move(-1)", "↑", show=False),
+        Binding("enter", "choose", "choose", show=False),
+    ]
+
+    def __init__(self, host: str, scopes: list[str]) -> None:
+        super().__init__()
+        self.host = host
+        self.scopes = scopes
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="allow-dialog"):
+            yield Static(Text(f"How much of {self.host} should the box reach?"), id="allow-title")
+            yield ListView(id="scope-list")
+            yield Static(
+                "a path: GET/HEAD under it only · h the whole host · esc cancel", id="allow-hint"
+            )
+
+    def on_mount(self) -> None:
+        lv = self.query_one("#scope-list", ListView)
+        for key in self.scopes:
+            what = "this file only" if not key.endswith("/") else "reads under it"
+            lv.append(_LevelItem(key, Text(f"{key}  — {what}")))
+        lv.append(_LevelItem(self.host, Text(f"{self.host}  — the whole host, any request")))
+        lv.index = 0
+        lv.focus()
+
+    def action_pick_host(self) -> None:
+        self.dismiss(self.host)
+
+    def action_hl_move(self, delta: int) -> None:
+        lv = self.query_one("#scope-list", ListView)
+        n = len(lv.children)
+        if n:
+            lv.index = 0 if lv.index is None else max(0, min(lv.index + delta, n - 1))
+
+    def action_choose(self) -> None:
+        key = getattr(self.query_one("#scope-list", ListView).highlighted_child, "level", None)
+        if key:
+            self.dismiss(key)
+
+    def on_list_view_selected(self, event) -> None:  # a click on a scope
+        key = getattr(event.item, "level", None)
+        if key:
+            self.dismiss(key)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class AllowHostScreen(ModalScreen):

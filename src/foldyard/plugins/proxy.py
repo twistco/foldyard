@@ -465,9 +465,11 @@ def _network_panel_tree() -> PanelTree:
             _net_leaf(e, escape, resolver.who(e.get("origin"), e.get("ts")) if resolver else None)
             for e in v.rows
         ]
+        rows: list[object] = list(v.rows)  # each leaf's request: what `a` and `y` act on
         if v.earlier:
             children.append(f"[dim]… {v.earlier} earlier[/dim]")
-        groups.append(PanelGroup(key=v.host, label=header, children=children))
+            rows.append(None)
+        groups.append(PanelGroup(key=v.host, label=header, children=children, rows=rows))
 
     since = f" · since {snap.since[:16].replace('T', ' ')}" if snap.since else ""
     shown = f" ({len(groups)} shown)" if len(groups) < len(snap.hosts) else ""

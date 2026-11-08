@@ -138,6 +138,32 @@ def valid_grant(key: str) -> bool:
     return valid_host(key) or path_grant(key) is not None
 
 
+_SCOPE_DIRS = 3  # how many directory prefixes a request offers, shallowest first
+
+
+def path_scopes(host: object, path: object) -> list[str]:
+    """The path grants a request to ``host`` + ``path`` (a Network Log row's, so box-written) can
+    be answered with, broadest first: its first :data:`_SCOPE_DIRS` directories
+    (``host/bucket/``, ``host/bucket/v1/``, …), then the path itself (a file, or a directory
+    deeper than that). Only keys
+    :func:`path_grant` accepts as they stand — a path it refuses offers nothing rather than a
+    cleaned-up guess — and none for a ``host:port`` key (a path grant has no port) or a local
+    address (typed, never offered: :func:`local_key`). The query never reaches a key."""
+    if not isinstance(host, str) or not isinstance(path, str) or ":" in host or local_key(host):
+        return []
+    plain = path.split("?", 1)[0]
+    segments = plain.split("/")[1:]
+    if not segments or not segments[0]:
+        return []
+    dirs = segments[:-1]
+    keys = [host + "/" + "/".join(dirs[: i + 1]) + "/" for i in range(min(len(dirs), _SCOPE_DIRS))]
+    keys.append(host + plain)  # what it asked for: the file, or a directory past the cap
+    if path_grant(host + plain) is None:
+        return []  # one bad segment anywhere: the request isn't one a grant should be shaped on
+    parsed = [path_grant(key) for key in keys]
+    return list(dict.fromkeys(h + p for h, p in (x for x in parsed if x is not None)))
+
+
 def grant_host(key: str) -> str:
     """The host part of a grant key: a path grant's host, else the key itself."""
     parsed = path_grant(key)

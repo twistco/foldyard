@@ -195,6 +195,11 @@ class PanelGroup:
     key: str  # stable group identity (e.g. the host) — survives label changes across refreshes
     label: str  # the group header row (markup ok), e.g. "api.github.com  12 req · 1 inj"
     children: list[str]  # the leaf rows under the group (markup ok), display-ordered
+    # What each leaf row IS, parallel to ``children`` (``None`` where a line stands for nothing,
+    # like a "… N earlier" note): the core TUI hangs it on the leaf, so an action can act on that
+    # row — the Network Log's allow key offers a path grant from a request, its copy key copies
+    # the request's JSON. Plain data (the plugin's own record), never a callable.
+    rows: list[object] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
