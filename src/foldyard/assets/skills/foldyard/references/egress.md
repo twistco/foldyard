@@ -22,6 +22,12 @@ when you ask. (`fy docs glossary` defines each.)
   one-line `why`: that commits the recommendation for the whole team — everyone is *offered* it
   per host on their own computer (after reviewing your edit at the adoption gate) instead of
   rediscovering the block, and nothing is granted without their yes.
+- **`403` that says a granted host "redirected here"**, or that the host "is granted only for
+  GET/HEAD under …": the host you reached was granted, and redirected you to one that isn't (a
+  CDN sending a download to a bucket on a shared storage host). Ask for the **path grant** the
+  message names (`fy allow add <host>/<path>/`), which lets you read under that path and nothing
+  else on the host, rather than the whole host. It covers reads only (GET/HEAD). An upload there
+  is a whole-host question for the human.
 - **`403` "refused by the foldyard proxy - the box doesn't push"** (git shows it as a `remote:`
   line) — the proxy refuses git pushes over HTTPS, whatever credential you have (an emergency
   switch that can push lifts that only on the host its own token goes to). Not a grant to ask

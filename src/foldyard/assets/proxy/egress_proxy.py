@@ -450,8 +450,9 @@ def _path_grant(key: str) -> tuple[str, str] | None:
     → ``("storage.googleapis.com", "/chrome-for-testing-public/")`` — or None for a host key or a
     malformed one. Exact host only: no ``*.`` glob, no port (a path grant covers what a bare one
     does, :443 and cleartext :80), and a prefix of at least one segment that :func:`_plain_path`
-    accepts as it stands. foldyard's ``allowlist.path_grant`` is the same rule; a test holds the
-    two equal."""
+    accepts as it stands. foldyard's ``allowlist.path_grant`` is the same rule with a narrower
+    character set (it writes the keys); a test holds that every key it accepts parses the same
+    here."""
     host, sep, rest = key.partition("/")
     if not sep or not host or host.startswith("*.") or ":" in host or "?" in rest:
         return None

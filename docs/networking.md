@@ -188,6 +188,51 @@ Both the grants and the enforcement switch live on your computer for the same re
 write repo config, so an allowlist in the repo is one the box could widen or switch off. Keyless
 agent hosts are always allowed — never list them.
 
+### Path grants: one path of a shared host
+
+Sometimes the host you'd have to grant is much bigger than what the box needs from it. The usual
+case is a **redirect**: you grant `cdn.playwright.dev`, and it answers a browser download with a
+302 to `storage.googleapis.com/chrome-for-testing-public/…`. The tool follows the redirect itself,
+so that's a new request to a host you haven't granted, and the allowlist refuses it. Granting
+`storage.googleapis.com` would let the box reach every bucket on it, other people's included,
+and a signed upload URL needs no credentials in the box. A **path grant** names just the part you
+mean:
+
+```bash
+fy allow add storage.googleapis.com/chrome-for-testing-public/ --level once --ttl 900
+```
+
+A path grant lets the box **read** under that prefix and nothing else on the host:
+
+- `GET` and `HEAD` only, with no body and no `Upgrade` (so no WebSocket);
+- at or under the prefix, on a segment boundary (`/bucket/` doesn't cover `/bucket-two/`), judged
+  on the path before the query;
+- never a path a server could resolve to somewhere else: a `.` or `..` segment (`..;` too), `//`,
+  a backslash, or a percent-encoded `/`, `\`, `.` or `%` is refused;
+- the ports a host grant covers (HTTPS `:443`, plain HTTP `:80`). The host has to be exact: no
+  `*.` glob and no port.
+
+The proxy has to see each request to check its path, so a path-granted host is always decrypted,
+even if `[proxy] passthrough` lists it. It's never tunnelled for an image build either, which is
+why a path grant can't be `--build`. Grant the host `--build` for a build. The proxy only opens a
+connection to the host once the box's TLS handshake shows the request will be decrypted, so a raw
+TCP tunnel through the grant is refused. Bytes in a decrypted tunnel that don't parse as HTTP are
+dropped, never relayed. A refused request names the paths the host *is* granted, and the
+Network Log marks it `outside the paths this host is granted for`.
+
+**After a redirect, the refusal says so.** When a granted host redirects the box to a host it
+can't reach, the proxy remembers the target for two minutes. If the box's request to it is then
+refused, the `403` names the host that redirected and suggests the path grant (`fy allow add
+storage.googleapis.com/chrome-for-testing-public/`), and the Network Log row says `redirected from
+cdn.playwright.dev`. The proxy doesn't follow redirects for the box, because then a host you
+granted would decide where the box can go. Any host with an open redirect (a `?next=` login, a
+link shortener) would send a request, and whatever it carries, anywhere.
+
+A path grant is a runtime grant like any other: `fy allow list` shows it, `fy allow remove
+<host>/<path>/` revokes it, and it doesn't come from `[proxy] recommend` (hosts only). Making it
+answers the host in the Network Log, so a refusal outside the path doesn't ask about the whole
+host again.
+
 ### The VM firewall
 
 `[machine] firewall = true` (lima backend; `fy init` turns it on) makes the proxy the *only way
@@ -401,8 +446,9 @@ out through the proxy. How that works:
 
 When the allowlist refuses a build, the tool's error names the URL it *asked* for, which is often
 not the host that was refused: a CDN can redirect inside the tunnel (Playwright's
-`cdn.playwright.dev` sends browser downloads to `storage.googleapis.com`). So foldyard reports the
-refused hosts itself:
+`cdn.playwright.dev` sends browser downloads to `storage.googleapis.com`). In the box, a
+[path grant](#path-grants-one-path-of-a-shared-host) is the narrow answer to that. A build is
+tunnelled, so its grants are whole hosts. So foldyard reports the refused hosts itself:
 
 1. **On your computer, with a terminal,** it asks about each refused host: once (15 minutes, long
    enough for the build), session, permanent, or no.
@@ -469,6 +515,10 @@ own HTTP client, or a program opening raw sockets.
 - **A build or tool needs a host you haven't allowed.** Watch the TUI's blocked rows and grant from
   there (`a`), or run `fy allow add <host> --level permanent`. Grants live on your computer, never
   in repo config, so the box can't widen its own allowlist.
+- **You granted a host and the download still fails, refused at another host.** The granted host
+  redirected (the Network Log row says `redirected from …`). Grant only the path it redirected to,
+  `fy allow add <host>/<path>/` ([path grants](#path-grants-one-path-of-a-shared-host)), rather
+  than the whole host.
 - **A long, quiet request to a Google API dies at about 60 seconds.** That's Google's front ends
   (`*.googleapis.com`), not the VM or the proxy: they close any connection that has carried no
   bytes for about 60 s, idle or mid-request, and TCP keepalives don't reset the timer. It measures

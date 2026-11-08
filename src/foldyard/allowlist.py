@@ -114,7 +114,8 @@ def path_grant(key: str) -> tuple[str, str] | None:
     the rest of that host. So: an exact host (no ``*.`` glob, no port — it covers what a bare
     grant does, :443 and cleartext :80), and a prefix of at least one segment with no dot
     segment, no ``//``, no backslash, no query and no percent-encoded separator, dot or percent.
-    The proxy's ``_path_grant`` is the same rule (a test holds the two equal)."""
+    The proxy's ``_path_grant`` is the same rule over a wider character set; a test holds that
+    every key this accepts parses the same there."""
     host, sep, rest = key.partition("/")
     if not sep or not host or host.startswith("*.") or ":" in host or not valid_host(host):
         return None
