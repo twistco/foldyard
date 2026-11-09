@@ -14,6 +14,8 @@ bump: patch
   the VM can repoint it. Under `[machine] runtime = "gvisor"` it is the box's filtered socket, so
   a stack container holding it can't create a container outside gVisor. Write
   `/run/foldyard/engine.sock:/var/run/docker.sock` (docs/gcp.md shows it). The path is lima's
-  only: on the deprecated podman machine backend keep `/run/docker.sock`. **After upgrading,
-  `fy up` asks you to restart each lima VM** (`fy machine stop && fy up`), since the boot script
-  changed. Switching gVisor on or off now takes the same restart as well as the box recreate.
+  only: on the deprecated podman machine backend keep `/run/docker.sock`, or under gVisor mount
+  `/run/user/<uid>/podman/podman-runsc-filtered.sock`. A CI runner can link the path itself
+  (docs/stack.md, In CI). **After upgrading, `fy up` asks you to restart each lima VM**
+  (`fy machine stop && fy up`), since the boot script changed. Switching gVisor on or off now
+  takes the same restart as well as the box recreate.
