@@ -4,6 +4,7 @@ real engine. The injectors' box-dummy rows are unit-tested in test_inject_kinds.
 
 from __future__ import annotations
 
+import errno
 import os
 import pathlib
 import types
@@ -512,12 +513,13 @@ def _ssh_origin(
     push_url="git@github.com:acme/app.git\n",
     connects=(),
     timeouts=(),
+    unreachable=(),
     resolves=True,
     proxy_up=True,
 ):
     """An SSH origin whose dry-run push died at the connect, as in a walled box. `connects` are
-    the (host, port)s a direct connect reaches, `timeouts` those it times out on; everything else
-    is refused."""
+    the (host, port)s a direct connect reaches, `timeouts` those it times out on, `unreachable`
+    those an upstream ICMP reply turns away; everything else is refused, the wall's reset."""
     _enter_box(monkeypatch, tmp_path)
     monkeypatch.setattr(verify.config, "machine_backend", lambda: "lima")
     monkeypatch.setattr(verify.config, "machine_wall", lambda: wall)
@@ -534,6 +536,8 @@ def _ssh_origin(
             return _Sock()
         if tuple(addr) in timeouts:
             raise TimeoutError("timed out")
+        if tuple(addr) in unreachable:
+            raise OSError(errno.EHOSTUNREACH, "No route to host")
         return wall_connect(addr, *a, **kw)
 
     def getaddrinfo(host, port, *a, **kw):
@@ -572,8 +576,20 @@ def test_an_ssh_connect_that_times_out_warns_instead_of_proving_the_wall(
     out = capsys.readouterr().out
     assert "SSH push impossible" not in out
     assert "UNREACHABLE" not in out
-    assert "SSH push blocked: github.com:22 timed out" in out
+    assert "SSH push blocked: github.com:22 (timed out)" in out
     assert "not proof the VM firewall" in out
+
+
+def test_an_ssh_host_turned_away_upstream_warns_instead_of_proving_the_wall(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # Only a reset is the wall's signature. "No route to host" is an ICMP reply from somewhere
+    # upstream, which can't be credited to the wall either.
+    _ssh_origin(secure_engine, monkeypatch, tmp_path, unreachable={("github.com", 22)})
+    assert verify.verify() == 0
+    out = capsys.readouterr().out
+    assert "SSH push impossible" not in out
+    assert "SSH push blocked: github.com:22 (No route to host)" in out
 
 
 def test_one_timed_out_ssh_push_url_makes_the_whole_row_a_warning(
@@ -590,7 +606,7 @@ def test_one_timed_out_ssh_push_url_makes_the_whole_row_a_warning(
     assert verify.verify() == 0
     out = capsys.readouterr().out
     assert "SSH push impossible" not in out
-    assert "gitlab.com:22 timed out" in out
+    assert "gitlab.com:22 (timed out)" in out
 
 
 def test_the_ssh_probe_dials_what_ssh_would_dial(secure_engine, monkeypatch, tmp_path, capsys):
@@ -603,7 +619,7 @@ def test_the_ssh_probe_dials_what_ssh_would_dial(secure_engine, monkeypatch, tmp
     assert verify.verify() == 0
     out = capsys.readouterr().out
     assert "SSH push impossible: the VM firewall refuses ssh.github.com:443" in out
-    assert results["ssh_cmds"][0][-3:] == ["-p", "2222", "git@gh-alias"]
+    assert results["ssh_cmds"][0][-4:] == ["-p", "2222", "--", "git@gh-alias"]
     assert ("ssh.github.com", 443) in results["dialled"]
 
 
@@ -1088,7 +1104,7 @@ def _wall_net(monkeypatch, *, proxy_up=True, direct_ports=()):
             raise OSError("connection refused")
         if port in direct_ports:
             return _Sock()
-        raise OSError("connection refused")
+        raise ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
 
     monkeypatch.setattr(verify.socket, "create_connection", connect)
 

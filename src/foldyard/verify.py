@@ -706,7 +706,7 @@ def _ssh_target(dest: str, port: str | None, git_env: dict) -> tuple[str, int] |
     ProxyCommand/ProxyJump — a refused direct connect proves nothing about those."""
     try:
         got = subprocess.run(
-            ["ssh", "-G", *(["-p", port] if port else []), dest],
+            ["ssh", "-G", *(["-p", port] if port else []), "--", dest],
             env=git_env,
             capture_output=True,
             text=True,
@@ -726,9 +726,9 @@ def _ssh_target(dest: str, port: str | None, git_env: dict) -> tuple[str, int] |
 def _ssh_push_walled(checkout: str, git_env: dict) -> tuple[bool, str] | None:
     """With the VM firewall on, an SSH origin's push dies at the TCP connect: ssh doesn't use the
     proxy, and direct egress is refused. When every push URL's connect fails (its host resolves,
-    the proxy answers): (True, PASS row) if all were refused, which is the wall's signature;
-    (False, WARN row) if any timed out, which a network dropping port 22 upstream looks like too.
-    None otherwise."""
+    the proxy answers): (True, PASS row) if all were refused, a reset being the wall's signature;
+    (False, WARN row) if any failed otherwise (a timeout, an upstream ICMP "no route"), which a
+    network turning port 22 away looks like too. None otherwise."""
     try:
         got = subprocess.run(
             ["git", "-C", checkout, "remote", "get-url", "--push", "--all", "origin"],
@@ -744,7 +744,7 @@ def _ssh_push_walled(checkout: str, git_env: dict) -> tuple[bool, str] | None:
     if not dests or len(dests) != len(urls) or not _permitted_path_open():
         return None
     refused: list[str] = []
-    timed_out: list[str] = []
+    unproven: list[str] = []
     for dest, port in dests:
         target = _ssh_target(dest, port, git_env)
         if target is None:
@@ -758,14 +758,16 @@ def _ssh_push_walled(checkout: str, git_env: dict) -> tuple[bool, str] | None:
         try:
             with socket.create_connection((host, ssh_port), timeout=5):
                 return None
-        except TimeoutError:
-            timed_out.append(where)
         except OSError as e:
-            refused.append(f"{where} ({e.strerror or str(e) or type(e).__name__})")
-    if timed_out:
+            reason = "timed out" if isinstance(e, TimeoutError) else None
+            reason = reason or e.strerror or str(e) or type(e).__name__
+            (refused if isinstance(e, ConnectionRefusedError) else unproven).append(
+                f"{where} ({reason})"
+            )
+    if unproven:
         return False, (
-            f"SSH push blocked: {', '.join(timed_out)} timed out rather than being refused, so "
-            "this is not proof the VM firewall did it (a network dropping port 22 looks the same)"
+            f"SSH push blocked: {', '.join(unproven)}, not a refusal, so this is not proof the "
+            "VM firewall did it (a network turning port 22 away upstream looks the same)"
         )
     return True, f"SSH push impossible: the VM firewall refuses {', '.join(refused)}"
 

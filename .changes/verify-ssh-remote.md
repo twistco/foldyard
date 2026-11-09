@@ -10,8 +10,9 @@ bump: patch
   verify. It now proves the refusal directly: for every push URL, the host and port ssh would
   dial (`ssh -G`) resolve, the proxy answers, and a direct connection to that port is refused. The
   row reads `SSH push impossible: the VM firewall refuses github.com:22 (Connection refused)`. A
-  connection that times out is a warning instead: the wall rejects, so a timeout could just as
-  well be a network that drops port 22, and isn't credited to the wall. A
+  connection that fails any other way (a timeout, "No route to host") is a warning instead: the
+  wall answers with a reset, so anything else could just as well be a network turning port 22
+  away, and isn't credited to the wall. A
   `ProxyCommand` or `ProxyJump`, a name that doesn't resolve, a connection that succeeds, or no
   firewall still fails the row. The unreachable row now also names ssh's own error rather than
   git's closing "…and the repository exists."

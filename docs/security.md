@@ -257,8 +257,9 @@ the box only the VM-boundary checks run. What it checks:
   ssh would dial (`ssh -G`, so your ssh config's `HostName` and `Port` apply) must resolve, the
   proxy must answer, and a direct connection to that port must be refused. That passes as
   `SSH push impossible: the VM firewall refuses github.com:22 (Connection refused)`. A connection
-  that times out instead is a warning, `SSH push blocked: github.com:22 timed out …`: the wall
-  rejects, so a timeout looks like a network dropping port 22 upstream, which can't be credited
+  that fails any other way (it times out, or an ICMP reply says "No route to host") is a warning,
+  `SSH push blocked: github.com:22 (timed out), not a refusal …`: the wall answers with a reset,
+  so anything else looks like a network turning port 22 away upstream, which can't be credited
   to the wall and won't follow you to the next network. A
   `ProxyCommand` or `ProxyJump`, a name that doesn't resolve, a connection that succeeds, or no
   firewall leaves the row unproven, as before. These
