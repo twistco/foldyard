@@ -469,12 +469,16 @@ Otherwise it also sets a `NO_PROXY` naming them, in both cases (undici prefers t
 one). That replaces the list podman hands it, so keep every entry podman's has: loopback, the
 host gateway, your `[proxy] no_proxy`, and foldyard's own services (`metadata-emulator` while
 `[plugins.gcp-metadata]` is configured, even with gcp off: turning it on doesn't rebuild the VM's
-list). `printenv NO_PROXY` in a running container shows the list to start from:
+list). A throwaway container with no override of its own shows the list to start from:
+`podman run --rm alpine printenv NO_PROXY` (a service that already overrides it shows its own).
 
 ```yaml
   NO_PROXY: localhost,127.0.0.1,192.168.5.2,metadata-emulator,kong,db
   no_proxy: localhost,127.0.0.1,192.168.5.2,metadata-emulator,kong,db
 ```
+
+These are copies: when `[proxy] no_proxy` or a plugin's configuration changes, the VM's list
+follows after a restart but these don't, so update them alongside.
 
 Leave the proxy address, the CA and npm's settings out: foldyard provides them, and a copy goes
 stale when the port band moves.
