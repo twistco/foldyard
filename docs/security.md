@@ -259,7 +259,7 @@ the box only the VM-boundary checks run. What it checks:
   `SSH push impossible: the VM firewall refuses github.com:22 (Connection refused)`. A connection
   that fails any other way (it times out, or an ICMP reply says "No route to host") is a warning,
   `SSH push blocked: github.com:22 (timed out), not a refusal …`: the wall answers with a reset,
-  so anything else looks like a network turning port 22 away upstream, which can't be credited
+  so anything else looks like a network turning ssh's port away upstream, which can't be credited
   to the wall and won't follow you to the next network. A
   `ProxyCommand` or `ProxyJump`, a name that doesn't resolve, a connection that succeeds, or no
   firewall leaves the row unproven, as before. These

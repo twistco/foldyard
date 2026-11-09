@@ -11,7 +11,7 @@ bump: patch
   dial (`ssh -G`) resolve, the proxy answers, and a direct connection to that port is refused. The
   row reads `SSH push impossible: the VM firewall refuses github.com:22 (Connection refused)`. A
   connection that fails any other way (a timeout, "No route to host") is a warning instead: the
-  wall answers with a reset, so anything else could just as well be a network turning port 22
+  wall answers with a reset, so anything else could just as well be a network turning ssh's port
   away, and isn't credited to the wall. A
   `ProxyCommand` or `ProxyJump`, a name that doesn't resolve, a connection that succeeds, or no
   firewall still fails the row. The unreachable row now also names ssh's own error rather than

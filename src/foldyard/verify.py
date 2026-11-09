@@ -728,7 +728,7 @@ def _ssh_push_walled(checkout: str, git_env: dict) -> tuple[bool, str] | None:
     proxy, and direct egress is refused. When every push URL's connect fails (its host resolves,
     the proxy answers): (True, PASS row) if all were refused, a reset being the wall's signature;
     (False, WARN row) if any failed otherwise (a timeout, an upstream ICMP "no route"), which a
-    network turning port 22 away looks like too. None otherwise."""
+    network turning ssh's port away looks like too. None otherwise."""
     try:
         got = subprocess.run(
             ["git", "-C", checkout, "remote", "get-url", "--push", "--all", "origin"],
@@ -767,7 +767,7 @@ def _ssh_push_walled(checkout: str, git_env: dict) -> tuple[bool, str] | None:
     if unproven:
         return False, (
             f"SSH push blocked: {', '.join(unproven)}, not a refusal, so this is not proof the "
-            "VM firewall did it (a network turning port 22 away upstream looks the same)"
+            "VM firewall did it (a network turning that port away upstream looks the same)"
         )
     return True, f"SSH push impossible: the VM firewall refuses {', '.join(refused)}"
 
