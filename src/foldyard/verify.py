@@ -652,13 +652,137 @@ def _box_posture(rep: _Report, env: dict) -> None:
             "no `origin` remote in the checkout — push refusal UNPROVEN "
             "(the shared .git/config lost its remotes? `fy doctor` → shared git config)"
         )
+    elif _walled() and (walled := _ssh_push_walled(checkout, git_env)):
+        proven, msg = walled
+        (rep.ok if proven else rep.warn)(msg)
     else:
         # It failed, but not because a credential was refused — origin was never reached. That
         # is a network fact, not a posture one, and must not certify the credential-less claim.
         rep.bad(
             "git remote UNREACHABLE for non-credential reasons — push refusal UNPROVEN "
-            f"({why.strip().splitlines()[-1] if why.strip() else 'no error output'})"
+            f"({_git_reason(why)})"
         )
+
+
+def _git_reason(stderr: str) -> str:
+    """The line of a failed push's stderr that says why: ssh's own complaint when there is one,
+    since git closes an SSH failure with boilerplate ("…and the repository exists.")."""
+    lines = [line for line in stderr.strip().splitlines() if line.strip()]
+    return next(
+        (line for line in lines if line.startswith("ssh:")),
+        lines[-1] if lines else "no error output",
+    )
+
+
+def _walled() -> bool:
+    return config.machine_backend() == "lima" and config.machine_wall()
+
+
+_SSH_URL = re.compile(
+    r"(?:ssh|git\+ssh|ssh\+git)://(?:(?P<user>[^@/]*)@)?(?P<host>\[[^\]/]+\]|[^:/\[\]]+)"
+    r"(?::(?P<port>\d*))?(?:/.*)?",
+    re.I,
+)
+# git's scp-like form: no slash before the first colon. Bracketed hosts are left unparsed.
+_SCP_LIKE = re.compile(r"(?:(?P<user>[^@/:\[\]]+)@)?(?P<host>[^@/:\[\]]+):.*")
+
+
+def _ssh_destination(url: str) -> tuple[str, str | None] | None:
+    """The ssh destination (``[user@]host``) and port a git URL names, or None for any other
+    transport (or an SSH form this doesn't read, which therefore never proves anything)."""
+    if m := _SSH_URL.fullmatch(url):
+        host = m["host"].strip("[]")
+    elif "://" not in url and (m := _SCP_LIKE.fullmatch(url)):
+        host = m["host"]
+    else:
+        return None
+    dest = f"{m['user']}@{host}" if m["user"] else host
+    return dest, (m.groupdict().get("port") or None)
+
+
+def _ssh_target(dest: str, port: str | None, git_env: dict) -> tuple[str, int] | None:
+    """The host and port ssh itself would dial for ``dest`` (its config applied: ``Host``
+    aliases, ``HostName``, ``Port``), or None when ssh won't say or would go through a
+    ProxyCommand/ProxyJump — a refused direct connect proves nothing about those."""
+    try:
+        got = subprocess.run(
+            ["ssh", "-G", *(["-p", port] if port else []), "--", dest],
+            env=git_env,
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if got.returncode != 0:
+        return None
+    cfg = {k: v for k, _, v in (line.partition(" ") for line in (got.stdout or "").splitlines())}
+    if any(cfg.get(k, "none").strip().lower() != "none" for k in ("proxycommand", "proxyjump")):
+        return None
+    host, ssh_port = cfg.get("hostname", "").strip(), cfg.get("port", "").strip()
+    return (host, int(ssh_port)) if host and ssh_port.isdigit() else None
+
+
+def _ssh_push_walled(checkout: str, git_env: dict) -> tuple[bool, str] | None:
+    """With the VM firewall on, an SSH origin's push dies at the TCP connect: ssh doesn't use the
+    proxy, and direct egress is refused. When every push URL's connect fails (its host resolves,
+    the proxy answers): (True, PASS row) if all were refused, a reset being the wall's signature;
+    (False, WARN row) if any failed otherwise (a timeout, an upstream ICMP "no route"), which a
+    network turning ssh's port away looks like too. None otherwise."""
+    try:
+        got = subprocess.run(
+            ["git", "-C", checkout, "remote", "get-url", "--push", "--all", "origin"],
+            env=git_env,
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    urls = (got.stdout or "").split() if got.returncode == 0 else []
+    dests = [d for u in urls if (d := _ssh_destination(u))]
+    if not dests or len(dests) != len(urls) or not _permitted_path_open():
+        return None
+    refused: list[str] = []
+    unproven: list[str] = []
+    for dest, port in dests:
+        target = _ssh_target(dest, port, git_env)
+        if target is None:
+            return None
+        host, ssh_port = target
+        try:
+            socket.getaddrinfo(host, ssh_port, type=socket.SOCK_STREAM)
+        except OSError:  # a DNS failure is not the wall
+            return None
+        where = f"[{host}]:{ssh_port}" if ":" in host else f"{host}:{ssh_port}"
+        try:
+            with socket.create_connection((host, ssh_port), timeout=5):
+                return None
+        except OSError as e:
+            reason = "timed out" if isinstance(e, TimeoutError) else None
+            reason = reason or e.strerror or str(e) or type(e).__name__
+            (refused if isinstance(e, ConnectionRefusedError) else unproven).append(
+                f"{where} ({reason})"
+            )
+    if unproven:
+        return False, (
+            f"SSH push blocked: {', '.join(unproven)}, not a refusal, so this is not proof the "
+            "VM firewall did it (a network turning that port away upstream looks the same)"
+        )
+    return True, f"SSH push impossible: the VM firewall refuses {', '.join(refused)}"
+
+
+def _permitted_path_open() -> bool:
+    """The box's proxy accepts a connection: the wall's one way out, so a refusal elsewhere is
+    the wall's and not an outage's."""
+    try:
+        host, port = _proxy_address(
+            os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
+        )
+        with socket.create_connection((host, port), timeout=5):
+            return True
+    except (OSError, ValueError):
+        return False
 
 
 def _origin_credential(rep: _Report, checkout: str, git_env: dict) -> None:
@@ -1057,10 +1181,10 @@ def verify() -> int:
     if config.in_box():
         _box_posture(rep, ctx.env)
         _push_refusal(rep)
-        if config.machine_backend() == "lima" and config.machine_wall():
+        if _walled():
             _wall_posture(rep)
     else:
-        if config.machine_backend() == "lima" and config.machine_wall():
+        if _walled():
             _host_loopback(rep, engine, ctx.env, probe)
         print(
             "▶ dev-box checks — skipped (not inside the box; run via 'fy box shell' "
