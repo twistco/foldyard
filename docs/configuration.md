@@ -482,7 +482,8 @@ disk_gib = 60
     the container through the engine instead.
   - The VM must mount the checkout. `fy machine ensure` does, for a VM created from it; otherwise
     the verb refuses and names `fy machine recreate`.
-  - Registry logins on your computer don't reach the VM, so a private base image won't pull.
+  - Registry logins on your computer don't reach the VM, so a private base image won't pull
+    ([what to do instead](./stack.md#private-images)).
   - `${HOME}`, `~` and `$USER` in a compose file are the VM's, not your computer's.
   - Your own recipes that run `"$ENGINE" compose` are still a client on your computer.
   - Only podman-compose runs there: a `PODMAN_COMPOSE_PROVIDER` naming docker-compose is refused.
