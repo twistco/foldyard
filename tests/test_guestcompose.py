@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -554,6 +555,36 @@ def test_the_runner_waits_out_a_compose_file_the_vm_reads_as_missing(checkout):
         timer.join()
     assert proc.returncode == 0, proc.stderr.decode()
     assert proc.stdout.split() == [b"web"]
+
+
+def test_the_runner_waits_out_a_long_form_file_flag_too(checkout):
+    import threading
+
+    late = checkout / "late.yml"
+    timer = threading.Timer(0.5, lambda: late.write_text(COMPOSE))
+    timer.start()
+    try:
+        proc = _run_payload(
+            checkout, "compose", ["--file", str(late), "config", "--services"], {"X": "1"}
+        )
+    finally:
+        timer.join()
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert proc.stdout.split() == [b"web"]
+
+
+def test_the_guests_podman_carries_no_registry_logins(checkout):
+    """Parity with the clamp on your computer: a `podman login` in the VM would otherwise ride
+    along with every guest build. The request can't widen it either."""
+    (checkout / "bin" / "podman").write_text(
+        f"#!{sys.executable} -I\nimport os; print(os.environ.get('REGISTRY_AUTH_FILE'))\n"
+    )
+    proc = _run_payload(checkout, "podman", ["info"], {"REGISTRY_AUTH_FILE": "/home/me/auth.json"})
+    assert proc.returncode == 0, proc.stderr.decode()
+    pinned = proc.stdout.decode().strip()
+    assert pinned != "/home/me/auth.json"
+    assert not Path(pinned).exists()
+    assert not os.access(Path(pinned).parent, os.F_OK)  # nowhere the VM user could create it
 
 
 def test_the_services_op_parses_each_file_and_says_which_it_couldnt(checkout):

@@ -38,6 +38,10 @@ import time
 # What podman needs from the guest's own login environment to run as this user. Everything else
 # comes from the request.
 _GUEST = ("PATH", "HOME", "USER", "LOGNAME", "XDG_RUNTIME_DIR")
+# The guest's half of foldyard.registrylogins' clamp, so a `podman login` in the VM never rides
+# along with a build. A missing file carries no logins and stops podman's fallback to its default
+# paths; the VM user can't create one under /.
+_NO_LOGINS = "/nonexistent/foldyard-no-registry-logins.json"
 
 # A file your computer just replaced can read as missing from the VM for a moment: up to about 1 s
 # on Lima's virtiofs, 5 s on libkrun's (ADR-0021's visibility record). So a compose file that isn't
@@ -52,6 +56,7 @@ def _environ(request: dict) -> dict[str, str]:
         if key in os.environ:
             env[key] = os.environ[key]
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    env["REGISTRY_AUTH_FILE"] = _NO_LOGINS
     socket = str(request.get("socket") or "")
     if socket:
         env["CONTAINER_HOST"] = env["DOCKER_HOST"] = f"unix://{socket}"
@@ -84,7 +89,7 @@ def _die_with_the_session() -> None:
 def _settle(argv: list[str]) -> None:
     deadline = time.monotonic() + _SETTLE
     for i, arg in enumerate(argv[:-1]):
-        if arg == "-f":
+        if arg in ("-f", "--file"):
             while not os.path.exists(argv[i + 1]) and time.monotonic() < deadline:
                 time.sleep(0.1)
 

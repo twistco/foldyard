@@ -234,8 +234,10 @@ compose file. An anonymous pull also means Docker Hub's lower rate limit.
 
 With `[machine] compose = "vm"` *(experimental)* the client runs in the VM, where no file on your
 computer reaches it, so the opt-in does nothing there. Pull a private image once with the client on
-your computer, `MACHINE_COMPOSE=host fy build` with the opt-in above; from then on it's in the VM and
-needs no login.
+your computer, `MACHINE_COMPOSE=host fy up` with the opt-in above. That covers base images and
+services that only name an image, which `fy build` skips. From then on the image is in the VM and
+needs no login, and the override lasts only that run: the supervisor keeps following
+`[machine] compose`.
 
 ## podman-compose differences that bite
 

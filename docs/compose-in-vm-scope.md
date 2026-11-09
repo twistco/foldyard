@@ -112,6 +112,14 @@ Consequences of running as the VM user:
   back. The host already treats the render and `ps` as claims, since the compose files are the box's
   anyway. So a failed call's stdout is never parsed, and the host acts on an answer only for the
   project it asked about, the existing rule for engine output.
+- **The request reaches the box's code first.** sshd starts the client through the VM user's
+  `bash`, which reads `~/.bashrc` before `python3 -I` runs, so a box that wrote that file can read
+  the request off stdin, build gate token included, and hold the call open. Nothing running as the
+  VM user can prove it's the runner, so this isn't closed: the token is one a box can already read
+  from a running build (ADR-0029), and its grants end with the call or, if the call is held open,
+  at the token's six-hour expiry (`buildgate.TOKEN_TTL_SECONDS`).
+- **Registry logins.** The runner points `REGISTRY_AUTH_FILE` at a missing file, as the clamp on
+  your computer does, so a `podman login` run in the VM isn't sent along with guest builds.
 - **Names in `[project] compose_env`** reach the guest on every compose call, where a box could read
   them from the client's `/proc`. That widens nothing: a box can already edit a compose file to
   interpolate any of them into a container it can inspect.

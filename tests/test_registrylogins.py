@@ -321,7 +321,7 @@ def test_with_the_client_in_the_vm_the_hint_doesnt_offer_an_opt_in_that_cant_wor
     (tmp_path / ".docker").mkdir()
     (tmp_path / ".docker" / "config.json").write_text("{}")
     hint = "\n".join(registrylogins.failure_hint())
-    assert 'compose = "vm"' in hint and "MACHINE_COMPOSE=host fy build" in hint
+    assert 'compose = "vm"' in hint and "MACHINE_COMPOSE=host fy up" in hint
     assert "fy docs stack" in hint
 
 

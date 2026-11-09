@@ -866,6 +866,21 @@ def _order(monkeypatch) -> list[str]:
     return events
 
 
+def test_a_one_off_compose_override_doesnt_stick_to_the_supervisor(monkeypatch):
+    # `MACHINE_COMPOSE=host fy up` is the failure hint's one-off pull. If that run starts the
+    # supervisor, its later recreates would keep the host client, and nothing would say so.
+    monkeypatch.setenv("MACHINE_COMPOSE", "host")
+    seen: dict = {}
+
+    def _fake_popen(cmd, **kw):
+        seen.update(kw["env"])
+        return types.SimpleNamespace(pid=4242)
+
+    monkeypatch.setattr(supervisor.subprocess, "Popen", _fake_popen)
+    assert supervisor._spawn() == 4242
+    assert "MACHINE_COMPOSE" not in seen
+
+
 def test_a_launch_offers_after_the_restart_has_cleared_grants(monkeypatch, tmp_path):
     # Session/once grants end when a supervisor starts. The offer used to run BEFORE that start, so
     # it skipped hosts whose session grant was about to vanish, and an operator's [s]ession/[o]nce
