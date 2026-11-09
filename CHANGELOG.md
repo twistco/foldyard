@@ -6,6 +6,170 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.8.0 — 2026-11-09
+
+A security release: upgrade now. A box could read your registry logins during a build, reach
+services on your computer's loopback or LAN through the egress proxy, and ask your computer for git
+credentials through `fy code`'s editor bridges. All three are closed, and the proxy now refuses
+git pushes from the box. The release also drops the docker engine (CI included: see Removed), and
+adds `fy agent` and path grants. After upgrading, run `fy host restart`: until the proxy and the
+supervisor match, even an emergency `gh-cli` push is refused. Then run `fy box down && fy box up` so the
+box picks up the new image, which now includes tmux.
+
+### Security
+
+- **foldyard's own child processes no longer import code from the checkout.** Several ran as
+  `python -m <foldyard module>` in a checkout's directory, inherited from the `fy` command that
+  started them or set outright. Plain `-m` puts that directory first on Python's import path, and
+  the box can write the checkout, so a `foldyard/` package planted at its root would have run on
+  your computer in their place. The affected children: the config-hash check `fy up` runs, the
+  `fy box up` that `fy worktree add` starts, the launch gate's re-run, the host-firewall probe, and
+  the credential minters the proxy runs, which a planted package would have run beside the
+  credential they were handed. All of them now run as `python -P -m`, which leaves the working
+  directory off the import path and changes nothing else. The config-hash check, which runs in
+  the main checkout rather than where you ran `fy up`, also resolves a relative `PYTHONPATH` entry
+  where you ran it, not inside the checkout.
+- **The egress proxy no longer reaches services on your computer or its network for the box.**
+  The proxy runs on your computer, so whatever it dials is dialled from there. While enforcement
+  was off or a learn window was open, a box could reach any service listening on your loopback
+  (a dev server, a database, a local model server) by sending the request through the proxy, and
+  with enforcement on, a granted name that resolved to `127.0.0.1` did the same. Now a dial to
+  loopback, a private range, CGNAT (a tailnet) or link-local (a cloud's metadata service) is
+  refused in every mode, whether the box named an address or a name that resolves there. Names are
+  judged by the answer the connection actually uses, so DNS rebinding can't get past the check.
+  **Only a grant naming the exact address lets one through** (`fy allow add 127.0.0.1:8123`), and
+  only that command makes one: the Network Log's allow key, `fy allow learn` and `[proxy]
+  recommend` never offer it. **If the box reached a LAN or VPN host by a name that resolves to a
+  private address** (an internal registry, say), the refusal names the address to grant.
+- **`fy verify` on your computer checks your loopback is out of reach** when `[machine] firewall`
+  is on: a probe container tries a throwaway service on your loopback directly and through the
+  proxy, and the service must see no connection.
+- **`fy code` no longer lets the box ask your computer for git credentials.** Dev Containers
+  creates an IPC socket in the box on every attach. Its host side runs `git credential fill`
+  (and the Docker credential helpers) on your computer for anything that asks, and no setting
+  switches that off. So a process in the box could fetch, say, your keychain's GitHub token and
+  push with it. `fy code` now launches VS Code with an empty git config, so there's no helper on
+  your side for it to run. It also starts VS Code from the instance's own state directory rather
+  than your checkout, whose box-writable `.git/config` could otherwise name a helper to run on
+  your computer. Your git config comes back in the instance's local terminals.
+- **`fy code` pins the rest of the editor's credential forwarders off**, at user and machine
+  scope: `dev.containers.gitCredentialHelperConfigLocation` (`"none"`),
+  `dev.containers.dockerCredentialHelper`, `dev.containers.copyGitConfig`,
+  `dev.containers.githubCLILoginWithToken` and `github.gitAuthentication`. A consumer no longer
+  needs `"github.gitAuthentication" = false` in its own `[vscode.settings]`.
+- **`fy code` refuses to launch when it can't rewrite the instance's `settings.json`** (comments
+  or invalid JSON in it). Before, it warned and launched with none of its pins. Fix the file or
+  delete it, and the next `fy code` copies your own VS Code's settings in again.
+- **The in-box reaper also deletes Dev Containers' and the `code` CLI's IPC sockets**, in
+  `/tmp/user/*`, `$XDG_RUNTIME_DIR` and `$TMPDIR` as well as `/tmp`. A running box swaps its old
+  reaper for the new one the next time `harden.sh` runs. `fy verify` checks the same places, and
+  gains a row that fails when the box's git has a `credential.helper` calling back through Dev
+  Containers.
+- **The egress proxy refuses git pushes over HTTPS, on any host.** A push's two requests
+  (`…/info/refs?service=git-receive-pack`, then `POST …/git-receive-pack`) get a `403` that git
+  shows as `remote: refused by the foldyard proxy - the box doesn't push …`; fetches are untouched.
+  "The box doesn't push" no longer depends on no credential ever reaching it — a token in a
+  `.env`, a pasted one, or a bridge like the ones above. The refusal lifts while a push-capable
+  mode is on (the emergency `gh-cli` switch), but only on the hosts that switch injects its token
+  on (`api.github.com`), and returns when it turns off: a push to any other host is refused even
+  then. Mixed versions across an upgrade fail closed: the new proxy ignores an older supervisor's
+  every-host `allow_push`, and an older proxy finds none in a new supervisor's settings, so either
+  way pushes are refused everywhere until `fy host restart`. The proxy can't see
+  inside a `passthrough` tunnel, so `fy config widenings` now names the git hosts (`github.com`,
+  `gitlab.com`, … — the `@vcs` bundle has them) where a push can't be refused. `fy verify` gains a
+  row that sends a push's first request through the proxy and expects the refusal, and, where the
+  proxy refuses its dry-run push, asks git for a credential for `origin` directly (`git credential
+  fill`) and fails if one is there.
+- **foldyard's clients on your computer no longer send your registry logins to the VM.** A `podman`
+  client asks the VM's API service to pull and build, and sends its logins along: a build sent every
+  login in your `auth.json`, whatever it needed, and the service kept them in a temp file a box could
+  read while the build ran. So any box could read your registry logins during any `fy up`, `fy build`
+  or `fy box build` run from your computer (the docker CLI did the same, from
+  `~/.docker/config.json` and your keychain, and so did a `docker-compose` provider). Consider
+  rotating them if a box you didn't trust ran during a build. foldyard's clients now get none, so
+  images pull anonymously. **A project that pulls a private image must now opt in:** export
+  `FY_REGISTRY_AUTH_FILE` at a file holding one narrow login, and name it in `[project] compose_env`
+  (`fy docs stack`, Private images). A failed build or start says so if you have logins on your
+  computer.
+- **foldyard drives only podman now, everywhere.** `[engine] cli = "docker"`, `FOLDYARD_ENGINE=docker`
+  and a `PODMAN_COMPOSE_PROVIDER` whose file isn't called `podman-compose` are refused, on your computer,
+  in a box and in CI, and a machine with docker and no podman is told to install podman. A docker
+  client sends the VM its logins from several places, your keychain among them, with no one switch to
+  stop that, and the config line is one a box can propose. **A CI job that runs foldyard on docker
+  must move** before it takes this version: GitHub's `ubuntu-26.04` runners ship podman 5.7, and
+  `fy docs stack` (In CI) has the steps. A docker CLI of your own in a box still reaches the socket
+  through `DOCKER_HOST`; a box image with no podman needs it added.
+
+### Removed
+
+- **foldyard drives only podman: the docker engine is gone, in CI too.** `[engine].cli` and
+  `FOLDYARD_ENGINE` accept only `"podman"`, and the compose provider must be a podman-compose.
+  docker was kept as a fallback for CI, because GitHub's runners had no podman and couldn't boot a
+  VM. Neither is true now: `ubuntu-26.04` ships a rootless podman 5.7. Keeping the fallback meant
+  CI tested a compose provider and a builder that no developer runs, and a docker client sends the
+  VM your registry logins. **A CI job that sets `FOLDYARD_ENGINE: docker` must move to podman
+  before taking this release.** `fy docs stack`, "In CI", has the recipe. A box image with no
+  podman needs it added. foldyard still exports the VM's socket as `DOCKER_HOST` alongside
+  `CONTAINER_HOST`, so a docker CLI of your own in a box still works.
+
+### Added
+
+- **`fy agent start|ls|attach|resume|stop`: agents in tmux sessions that outlive their terminal.**
+  `fy agent start` runs `fy claude` (or `fy codex`) in a detached session in the box, from your
+  computer or the box. `fy agent ls` lists every local project's sessions without starting any
+  VM. `fy agent attach <id>` reattaches from anywhere on your computer, and
+  `fy agent clean --older-than 7d` removes sessions that exited longer ago than that (never a
+  running one). `fy agent resume <id>` picks an exited agent's conversation up again (Claude's or
+  Codex's), or one whose box was recreated. For Claude the id is Claude's own session id (unless Claude picks the session
+  itself, with `--continue`, a bare `--resume` or `--fork-session`), so the id a transcript viewer such as
+  claude-code-log shows is the one to attach with. foldyard runs its own tmux server, which by
+  default keeps an agent's escape sequences and clipboard writes off your terminal (a default,
+  not a boundary: the box can turn it off). `fy claude` is unchanged. See `fy docs agents`.
+- **The packaged box image now includes tmux.** Its fingerprint changes, so the next `fy box up`
+  rebuilds the image, and `fy prereq --fetch` re-bakes the base VM; `fy agent start` in a box made
+  before it says to recreate the box. On your own `[box].image`, `fy agent start` offers to add
+  `"tmux"` to `[box].packages` for you (asked, never done unasked).
+- **`fy box down` names the agent sessions still running in the box before removing it**, and
+  asks first on a terminal (`--yes` skips the question). The TUI's stop-box confirmation lists
+  them too.
+- **A grant can name one path of a host: `fy allow add storage.googleapis.com/chrome-for-testing-public/`.**
+  It lets the box read under that prefix and nothing else on the host: GET and HEAD with no body,
+  checked request by request, and never tunnelled undecrypted. It's for a granted host that
+  redirects to a shared one, such as `cdn.playwright.dev` sending Playwright's browser download to
+  one bucket of `storage.googleapis.com`. The only option before was to grant the whole shared
+  host, which reaches every bucket on it. A refusal after a granted host's redirect now names that
+  host and the path grant to make, in its `403` and in the Network Log (`redirected from …`). The
+  proxy still doesn't follow redirects for the box: that would let any granted host with an open
+  redirect send the box anywhere. See `fy docs networking`, "Path grants".
+- **In `fy tui`'s Network Log, `a` on a refused request offers a path grant.** You pick one of the
+  request's directories, the path itself, or the whole host, then how long. Before, `a` worked only
+  on a host row and granted the whole host.
+- **`l` in the Network Log copies the log row under the cursor as JSON** (on a host, its listed
+  requests), through your terminal's clipboard support. Box-written text in it is escaped to
+  printable ASCII. The footer now shows what each key does on the row under the cursor: `a` reads
+  `allow path…` on a request it can offer a path for, and `x` appears only in the allowlist pane,
+  the only place it does anything.
+
+### Fixed
+
+- **`fy code` attaches on a computer with podman and no Docker.** The Dev Containers extension
+  runs `docker` for every container call unless `dev.containers.dockerPath` says otherwise, so a
+  podman-only computer got "Docker version 17.12.0 or later required" and an offer to install
+  Docker Desktop instead of the box. The `fy code` window now sets that setting to the podman
+  foldyard itself uses, on every run, and `fy code` installs the Dev Containers extension when
+  it's missing (into `~/.vscode/extensions`, so your everyday VS Code gets it too).
+- **`fy worktree add` and `fy worktree remove` no longer print git's "unable to access
+  '/home/…/.config/git/ignore': Permission denied" warnings.** The one-off container they run git
+  in drops every capability, so its root can't read the box image user's home, and git warned
+  each time it looked for its global ignore and attributes files there. That container now gives
+  git no home directory. The warnings never changed a result.
+- **`fy codex` works with Codex 0.166.** Codex now starts a shared background server by default
+  and manages it with `ps`, which the packaged box image doesn't have, so `codex` exited at once
+  ("failed to invoke ps for pid-managed app server"). `fy codex` now runs it without that server
+  (`-c features.daemon_auto_start=false`), which older Codex versions accept too. With the server,
+  an agent's work would also run outside its terminal. `features.daemon_auto_start = true` in
+  `[codex.config]` turns it back on.
+
 ## 0.7.0 — 2026-10-27
 
 A security release: upgrade now. A compromised box could get code run on your computer through
