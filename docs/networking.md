@@ -470,7 +470,8 @@ one). That replaces the list podman hands it, so keep every entry podman's has: 
 host gateway, your `[proxy] no_proxy`, and foldyard's own services (`metadata-emulator` while
 `[plugins.gcp-metadata]` is configured, even with gcp off: turning it on doesn't rebuild the VM's
 list). Start from the VM's own copy, which no client's environment can colour:
-`limactl shell <machine> cat ~/.config/environment.d/90-fy-wall-proxy.conf` (`[machine] name`). A
+`limactl shell <machine> sh -c 'cat ~/.config/environment.d/90-fy-wall-proxy.conf'` (`<machine>`
+is `[machine] name`, else the project name; the `sh -c` keeps `~` the guest's home, not yours). A
 running service's `printenv` won't do: one that already overrides `NO_PROXY` shows its own.
 
 ```yaml
