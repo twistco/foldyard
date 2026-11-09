@@ -2,11 +2,10 @@
 #
 # Two services on purpose — to demonstrate the wall's one caveat. With [machine] firewall = true,
 # foldyard's wall provisioning sets proxy env (HTTP(S)_PROXY) on the VM's rootless podman
-# service, and podman propagates that into the containers it runs. So WITHOUT the `no_proxy`
-# below, `worker` would resolve `http://api:8090` and try to reach it THROUGH the Mac proxy —
-# which can't see the podman network → the intra-stack call fails. The fix is per-service
-# `no_proxy` listing the in-stack names. (The dev BOX already gets this via foldyard's
-# box_args NO_PROXY; stack services set it themselves, as shown here.)
+# service, and podman propagates that into the containers it runs. So unless `api` is on
+# NO_PROXY, `worker` would try to reach `http://api:8090` THROUGH the Mac proxy — which can't
+# see the podman network → the intra-stack call fails. foldyard.toml's `[proxy] no_proxy`
+# lists it, and the walled VM puts that list on every container's NO_PROXY (the box's too).
 
 services:
   api:
@@ -26,12 +25,6 @@ services:
     depends_on:
       api:
         condition: service_healthy
-    environment:
-      # THE CAVEAT FIX. `api` (+ localhost) must bypass the inherited proxy — it's an in-stack
-      # name the Mac proxy can't resolve. Drop this line to SEE the caveat: the worker's
-      # api calls start failing (proxy 502/refused) while its external calls still work.
-      no_proxy: "api,localhost,127.0.0.1"
-      NO_PROXY: "api,localhost,127.0.0.1"
     # Loop: hit the in-stack api (must bypass the proxy) — that's the line the caveat is about.
     command:
       - python

@@ -12,7 +12,7 @@
 # The stack is deliberately two services (api + worker) so the wall's ONE caveat is visible:
 # under the wall, podman propagates the VM's proxy env into stack containers too, so a
 # container calling ANOTHER by its compose name would wrongly try to egress via the Mac proxy
-# (which can't resolve an in-stack name) unless it bypasses with `no_proxy` — see compose.yml.
+# (which can't resolve an in-stack name) unless the name is on `[proxy] no_proxy` below.
 #
 # Run it on a Mac with Lima: `cd foldyard/example-lima-wall && fy up`, then
 # `bash test_network.sh` (the host-run test + diagnostics harness).
@@ -56,6 +56,10 @@ image = { dockerfile = "box.Dockerfile", tag = "fy-wall-example-box:latest" }
 #     from; a copy here would only go stale.
 [proxy]
 enforce = true
+# THE CAVEAT FIX: the in-stack names the box and every stack container reach directly. Drop
+# `api` (then `fy machine stop && fy up`, `fy down && fy up`) to SEE the caveat: the worker's
+# api calls start failing at the proxy while its external calls still work.
+no_proxy = ["api"]
 recommend = [
   { host = "registry-1.docker.io", why = "box + stack images — Docker Hub manifest/blobs" },
   { host = "auth.docker.io", why = "Docker Hub auth token" },

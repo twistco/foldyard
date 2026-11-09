@@ -157,7 +157,7 @@ if vm podman ps --format '{{.Names}}' | grep -qi worker; then
         pass "worker reaches api intra-stack (no_proxy bypass working)"
     elif vm podman logs --tail 8 "$WNAME" 2>/dev/null | grep -q "api call FAILED"; then
         fail "worker's api call FAILED — the no_proxy caveat: 'api' is routing via the proxy."
-        info "     Fix: no_proxy must list in-stack service names (see compose.yml's worker)."
+        info "     Fix: [proxy] no_proxy must list in-stack service names (see foldyard.toml)."
     else
         info "worker running ($WNAME) but no verdict yet — give it a few seconds and re-run"
     fi

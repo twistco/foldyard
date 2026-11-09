@@ -81,7 +81,9 @@ def test_test_network_script_is_executable_and_host_only():
     )
 
 
-def test_compose_worker_documents_the_no_proxy_caveat():
-    # The teaching payload: the worker service must carry the no_proxy bypass for the in-stack name.
-    text = (EXAMPLE / "compose.yml").read_text()
-    assert "no_proxy" in text and "api" in text
+def test_the_worker_reaches_api_through_proxy_no_proxy(wall_repo):
+    # The teaching payload: `api` is on `[proxy] no_proxy`, which the walled VM hands every stack
+    # container, so the worker's compose entry sets no NO_PROXY of its own.
+    assert "api" in config.proxy_no_proxy()
+    compose = (EXAMPLE / "compose.yml").read_text()
+    assert "no_proxy:" not in compose.lower()

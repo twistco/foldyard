@@ -601,16 +601,20 @@ enforce = "learn"
   own trust roots): a certificate error naming the proxy's CA (`mitmproxy`) is the sign. Like every
   host-side key it takes effect when adopted. `fy config widenings` shows how many hosts your
   list resolves to and flags a mistyped `@bundle` (which expands to nothing).
-- **`no_proxy`** — your stack's own hostnames the box must reach **directly**. The proxy runs on
-  your computer and can't resolve them, so a proxied call hangs, then fails with 502 — usually
-  seen as a mysteriously slow test against an emulator. Default: `[]`.
+- **`no_proxy`** — your stack's own hostnames the box, and with the VM firewall on every stack
+  container, must reach **directly**. The proxy runs on your computer and can't resolve them, so
+  a proxied call hangs, then fails with 502 (or the proxy refuses it) — usually seen as a
+  mysteriously slow test against an emulator. Default: `[]`.
 
   ```toml
   [proxy]
   no_proxy = ["{project}-postgres", "redis", "fake-gcs"]
   ```
 
-  `{project}` expands to the compose project name, so one entry covers every worktree.
+  `{project}` expands to the compose project name, so one entry covers every worktree's box.
+  Stack containers share one list for the whole VM, set when it boots, where `{project}` is the
+  main checkout's: a change takes `fy machine stop && fy up`, then `fy down && fy up` to recreate
+  the containers ([Stack containers trust the proxy too](networking.md#stack-containers-trust-the-proxy-too)).
   `localhost`, `127.0.0.1` and foldyard's own services are always included. Listing a service
   that isn't running is harmless. **Entries may not contain a dot or a `*`** (`fy up` refuses
   them): a bypassed host skips the proxy entirely — no logging, no allowlist — and single-label
