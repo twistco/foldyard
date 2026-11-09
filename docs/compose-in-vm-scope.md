@@ -140,8 +140,9 @@ Consequences of running as the VM user:
 - **Registry logins on your computer don't reach the VM.** The client on your computer sends none
   unless the project opts in ([stack.md, Private images](./stack.md#private-images)): an exported
   `FY_REGISTRY_AUTH_FILE` that `[project] compose_env` names, a host secret the compose files could
-  spend. The client in the VM has no such file, so a private image needs another route. None of the maintainers' projects uses one today, so this stays a documented limit for now,
-  and it **blocks phase 4**: other projects need a route before the host path goes. The two options:
+  spend. The client in the VM has no such file, so a private image needs another route. None of
+  the maintainers' projects uses one today, so this stays a documented limit for now, and it
+  **blocks phase 4**: other projects need a route before the host path goes. The two options:
   an adopted list of images pulled by `podman pull` from your computer (small, and needs no new tool,
   but the named registry's login reaches the VM during that pull), or by `skopeo` on your computer
   and `podman load` (the login never enters the VM, but it needs `skopeo`, and your computer then

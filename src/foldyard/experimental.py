@@ -124,7 +124,8 @@ REGISTER: tuple[Feature, ...] = (
             "module passes on vz, Linux and WSL2 hosts, but the other host-tier modules have run "
             "with it on under vz only, it hasn't run on the podman backend or under gVisor, and "
             "no maintainer uses it day to day yet. Registry logins on your computer don't reach "
-            "the VM"
+            "the VM, and a box that writes the VM user's ~/.bashrc can read a build's gate token "
+            "before the runner starts (docs/compose-in-vm-scope.md)"
         ),
         graduates_when=(
             "the host tiers pass with it on in CI on Linux and WSL2, a maintainer has run a real "

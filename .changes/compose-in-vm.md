@@ -10,6 +10,6 @@ experimental: true
   a symlink swapped in after the check. With this set, every compose call and the build of a
   project's own box image run in the VM over its ssh route, as foldyard's own pinned podman-compose,
   so a path in a compose file reads the VM, where the checkout is the only thing of yours.
-  `fy shell` enters the container through the engine. Three things differ: the VM must mount the checkout, registry logins
-  on your computer don't reach the VM, and `${HOME}` in a compose file is the VM's. The plan is
-  docs/compose-in-vm-scope.md.
+  `fy shell` enters the container through the engine. Three things differ: the VM must mount the
+  checkout, registry logins on your computer don't reach the VM, and `${HOME}` in a compose file
+  is the VM's. The plan is docs/compose-in-vm-scope.md.
