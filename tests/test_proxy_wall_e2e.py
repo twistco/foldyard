@@ -473,3 +473,4 @@ def test_a_body_an_http2_read_doesnt_announce_never_reaches_the_host(scoped):
     seen = recorder.received + recorder.after
     assert f"GET {PREFIX}chrome.zip".encode() in recorder.received, seen
     assert not any(b"EXFILTRATED" in r for r in seen), seen
+    assert not any(recorder.after), seen  # not a byte of it, however the DATA was split
