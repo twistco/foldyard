@@ -817,6 +817,7 @@ def _spawn(*, grants_cleared: bool = False) -> int | None:
     """Launch `foldyard host run` detached; the launched pid, or None if it couldn't start."""
     env = os.environ.copy()
     env.pop(GRANTS_CLEARED_ENV, None)
+    env.pop("MACHINE_COMPOSE", None)  # a one-off override; the supervisor follows the config
     if grants_cleared:
         env[GRANTS_CLEARED_ENV] = "1"
     # No terminal here, and the spawned supervisor tees its OWN output to host-supervisor.log

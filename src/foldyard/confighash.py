@@ -31,15 +31,20 @@ def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0)
     ``extra_profiles`` too, so running profile-gated services are rendered — or
     ``(None, reason)`` when the provider can't say. Never raises. Unavailable is never an empty
     map: an empty render would read as "nothing to compare" and hide every drift."""
-    from . import selfspawn, stack
+    from . import guestcompose, selfspawn, stack
 
+    flags = stack._profile_flags(ctx, extra_profiles)
+    if guestcompose.wanted():
+        # `[machine] compose = "vm"`: podman-compose's parser runs in the guest, not in a child
+        # here. A report only (`fy state`), so the box shaping the answer misleads no guard.
+        try:
+            proc = guestcompose.config_hashes(ctx, flags, timeout=timeout)
+        except (OSError, subprocess.SubprocessError) as e:
+            return None, f"{type(e).__name__}: {e}"
+        return _answer(proc)
     # -P: the child runs with cwd=the checkout, where plain -m would import a planted `foldyard/`
     # first (selfspawn).
-    cmd = [
-        *selfspawn.python_m(__name__),
-        *ctx.compose[2:],
-        *stack._profile_flags(ctx, extra_profiles),
-    ]
+    cmd = [*selfspawn.python_m(__name__), *ctx.compose[2:], *flags]
     try:
         # selfspawn.env: this child runs in the main checkout, not here — a relative PYTHONPATH
         # entry must keep pointing where it does for this process, not move into the checkout.
@@ -53,6 +58,11 @@ def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0)
         )
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"{type(e).__name__}: {e}"
+    return _answer(proc)
+
+
+def _answer(proc: subprocess.CompletedProcess):
+    """:func:`desired`'s ``(hashes, reason)`` from the provider's finished run."""
     if proc.returncode != 0:
         lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
         return None, lines[-1] if lines else f"exited {proc.returncode}"

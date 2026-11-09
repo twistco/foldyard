@@ -308,7 +308,15 @@ def _overlay_services(paths: dict[str, Path]) -> dict[str, set[str] | None]:
     bundled podman-compose and is imported only here, off the hot path (as ``stack`` does)."""
     import yaml
 
+    from . import guestcompose
+
     out: dict[str, set[str] | None] = {}
+    if guestcompose.wanted():  # parsing them here would read box-written bytes on your computer
+        parsed = guestcompose.file_services([str(p) for p in paths.values()], timeout=20)
+        for name, path in paths.items():
+            services = parsed[str(path)]
+            out[name] = None if services is None else set(services)
+        return out
     for name, path in paths.items():
         try:
             services = (yaml.safe_load(path.read_text()) or {}).get("services") or {}

@@ -152,6 +152,15 @@ def test_a_compose_provider_arriving_in_the_mode_env_is_refused_too(fake_repo, m
         stack.resolve(no_machine=True)
 
 
+def test_a_compose_provider_is_refused_with_the_client_in_the_vm_too(fake_repo, monkeypatch):
+    # The guest never reads this name (it runs foldyard's own), so this refusal is the only one.
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    monkeypatch.setenv("MACHINE_COMPOSE", "vm")
+    monkeypatch.setenv("PODMAN_COMPOSE_PROVIDER", "/usr/libexec/docker/docker-compose")
+    with pytest.raises(stack.config.EngineRefused, match="PODMAN_COMPOSE_PROVIDER"):
+        stack.resolve(no_machine=True)
+
+
 def test_a_compose_provider_in_the_mode_env_is_refused_in_a_box_too(fake_repo, monkeypatch):
     monkeypatch.setenv("IN_DEVBOX", "1")
     monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/s")

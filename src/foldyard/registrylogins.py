@@ -136,8 +136,21 @@ def _your_logins() -> list[Path]:
 def failure_hint() -> list[str]:
     """What to say after a failed build or start, where a pull may be why: pinning makes this
     silent by construction, so it must be said. Only to someone who has logins here and hasn't
-    opted in, which takes the export as well as the config line."""
-    if config.in_box() or _offered(config.compose_env()) or not _your_logins():
+    opted in, which takes the export as well as the config line. With the client in the VM, no file
+    here reaches it, so opting in changes nothing and isn't what to offer."""
+    if config.in_box():
+        return []
+    if config.machine_compose() == "vm":
+        if not (_your_logins() or os.environ.get(OPT_IN)):
+            return []
+        return [
+            '  If that was a pull from a private registry: with [machine] compose = "vm" no login',
+            "  on your computer reaches the VM. An image already in the VM needs none, so pull it",
+            f"  once with the client here: export {OPT_IN} to a file with only that login, add",
+            "  that name to [project] compose_env, then run `MACHINE_COMPOSE=host fy up`",
+            "  (`fy docs stack`, Private images).",
+        ]
+    if _offered(config.compose_env()) or not _your_logins():
         return []
     return [
         "  If that was a pull from a private registry: foldyard doesn't hand your registry logins",
