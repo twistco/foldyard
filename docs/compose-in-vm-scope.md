@@ -140,8 +140,9 @@ Consequences of running as the VM user:
   the VM, so a bind mount from it found nothing there anyway.
 - **Your own recipes aren't moved.** A recipe that runs `"$ENGINE" compose` after `eval "$(fy
   shellenv)"` is still a compose client on your computer, and foldyard can't see it.
-- **Only podman-compose runs there:** `PODMAN_COMPOSE_PROVIDER` naming docker-compose is refused, and
-  preflight refuses `vm` on the docker engine.
+- **Only foldyard's own podman-compose runs there:** the guest never reads `PODMAN_COMPOSE_PROVIDER`.
+  A provider that isn't a podman-compose, and any engine but podman, are refused everywhere since
+  0.8.0 (#165), so there is no `vm`-only check.
 
 ## What it removes
 
@@ -220,5 +221,5 @@ at a time.
 1. Where it runs: the guest, as the VM user, over ssh (recommended), rather than a container.
 2. Rollout: an experimental switch, then default on, then the host path deleted, with no permanent
    fallback.
-3. The docker-compose provider on your computer: refused.
+3. The docker-compose provider on your computer: refused (settled for every client by #165).
 4. `fy box build` included, as phase 3.

@@ -47,13 +47,13 @@ def vm(monkeypatch):
     return machine
 
 
-def _ctx(tmp_path: Path, provider: str = "/venv/bin/podman-compose") -> stack.Context:
+def _ctx(tmp_path: Path) -> stack.Context:
     env = {
         "PATH": "/opt/homebrew/bin:/usr/bin",
         "HOME": "/Users/dain",
         "DOCKER_HOST": "unix:///nonexistent/podman.sock",
         "CONTAINER_HOST": "unix:///nonexistent/podman.sock",
-        "PODMAN_COMPOSE_PROVIDER": provider,
+        "PODMAN_COMPOSE_PROVIDER": "/venv/bin/podman-compose",
         "PODMAN_PROJECT": "acme",
         "COMPOSE_PROJECT_NAME": "acme",
         "FOLDYARD_CHECKOUT": str(tmp_path),
@@ -102,9 +102,13 @@ def test_the_payload_is_deterministic_and_pure_python():
 
 
 def test_the_guest_env_drops_what_only_describes_your_computer(tmp_path):
-    env = stack._host_passthrough() | _ctx(tmp_path).env
+    # REGISTRY_AUTH_FILE is the clamp's empty file here (registrylogins): a path the guest lacks.
+    env = stack._host_passthrough() | _ctx(tmp_path).env | {"REGISTRY_AUTH_FILE": "/h/no-logins"}
     sent = guestcompose.guest_env(env)
-    for name in ("PATH", "HOME", "DOCKER_HOST", "CONTAINER_HOST", "PODMAN_COMPOSE_PROVIDER"):
+    for name in (
+        "PATH", "HOME", "DOCKER_HOST", "CONTAINER_HOST", "PODMAN_COMPOSE_PROVIDER",
+        "REGISTRY_AUTH_FILE",
+    ):  # fmt: skip
         assert name not in sent
     assert sent["PODMAN_PROJECT"] == "acme"
     assert sent["APP_PORT"] == "3007"
@@ -155,13 +159,6 @@ def test_no_ssh_route_is_said_never_run_here_instead(vm, tmp_path, monkeypatch):
     proc = stack._compose_output(_ctx(tmp_path), ["ps", "--format", "json"])
     assert proc.returncode == guestcompose.NO_ROUTE
     assert "no ssh route" in proc.stderr
-
-
-def test_the_docker_compose_provider_is_refused_in_the_vm(vm, tmp_path, monkeypatch):
-    monkeypatch.setattr(guestcompose.subprocess, "run", _never)
-    proc = guestcompose.compose(_ctx(tmp_path, provider="/usr/libexec/docker/docker-compose"), [])
-    assert proc.returncode == guestcompose.WRONG_PROVIDER
-    assert "docker-compose" in proc.stderr
 
 
 def _never(*a, **kw):
@@ -672,20 +669,6 @@ def test_the_packaged_box_image_stays_here(vm, tmp_path, monkeypatch):
     assert ran[0][:2] == ["podman", "build"]
 
 
-def test_preflight_refuses_vm_on_an_engine_it_cant_run_on(monkeypatch):
-    from foldyard import preflight
-
-    monkeypatch.setenv("MACHINE_COMPOSE", "vm")
-    monkeypatch.setattr(config, "engine", lambda: "docker")
-    [issue] = preflight._compose_issues()
-    assert 'compose = "vm"' in issue and "podman" in issue
-    monkeypatch.setattr(config, "engine", lambda: "podman")
-    assert preflight._compose_issues() == []
-    monkeypatch.setenv("MACHINE_COMPOSE", "host")
-    monkeypatch.setattr(config, "engine", lambda: "docker")
-    assert preflight._compose_issues() == []
-
-
 # ── the relays, run for real: a payload bigger than a pipe's buffer, and hostile output ───
 
 
@@ -721,13 +704,6 @@ def test_a_stream_with_no_route_says_so_and_runs_nothing(vm, tmp_path, monkeypat
     monkeypatch.setattr(guestcompose.subprocess, "Popen", _never)
     assert guestcompose.stream(_ctx(tmp_path), ["ps"]) == guestcompose.NO_ROUTE
     assert "no ssh route" in capfd.readouterr().err
-
-
-def test_a_stream_refuses_the_docker_compose_provider(vm, tmp_path, monkeypatch, capfd):
-    monkeypatch.setattr(guestcompose.subprocess, "Popen", _never)
-    ctx = _ctx(tmp_path, provider="/usr/libexec/docker/docker-compose")
-    assert guestcompose.stream(ctx, ["ps"]) == guestcompose.WRONG_PROVIDER
-    assert "docker-compose" in capfd.readouterr().err
 
 
 def test_the_reconciles_stream_says_when_it_cant_run(vm, tmp_path, monkeypatch):

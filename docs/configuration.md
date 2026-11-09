@@ -486,7 +486,8 @@ disk_gib = 60
     ([what to do instead](./stack.md#private-images)).
   - `${HOME}`, `~` and `$USER` in a compose file are the VM's, not your computer's.
   - Your own recipes that run `"$ENGINE" compose` are still a client on your computer.
-  - Only podman-compose runs there: a `PODMAN_COMPOSE_PROVIDER` naming docker-compose is refused.
+  - The VM runs foldyard's own podman-compose, never one a `PODMAN_COMPOSE_PROVIDER` of yours
+    names.
   - Inside the box nothing changes: the client there already runs in the VM.
   - The plan: [compose-in-vm-scope.md](https://github.com/twistco/foldyard/blob/main/docs/compose-in-vm-scope.md).
 - **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`. Same rule as
