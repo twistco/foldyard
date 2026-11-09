@@ -177,6 +177,38 @@ belongs in the middle — but *one* middle, not a switch between two.
   none of those restart it either: they reach the running proxy through its live file.
 - **A User-Agent on every decrypted row** becomes available by default — what an observe-first
   allowlist can use to say *which tool* reached a host, without instrumenting the box.
+- **A grant can name a path** (amended 2026-11-08). A proxy that sees every request can allow
+  less than a host. The case that asked for it: `cdn.playwright.dev` (granted) answers a browser
+  download with a 302 to `storage.googleapis.com/chrome-for-testing-public/…`. Playwright follows
+  it as a new request, and the wall refuses that host. The only grant on offer was all of
+  `storage.googleapis.com`, which is every bucket on it, other tenants' too. A signed upload URL
+  needs no credential in the box, so that grant is an exfiltration channel. A **path grant**,
+  `fy allow add storage.googleapis.com/chrome-for-testing-public/`, allows reads under that prefix
+  and nothing else:
+  - GET/HEAD only, no body, no `Upgrade`, on the ports a host grant covers. The headers rule
+    out a body over HTTP/1. Over HTTP/2 they can't: a HEADERS frame can leave its stream open
+    for DATA with no `content-length`, and mitmproxy streams a body past `stream_large_bodies`
+    upstream before the `request` hook sees it. So a path-granted read is streamed through a
+    filter that drops every chunk (a bodyless one, whose stream ends with its headers, is never
+    streamed). Trailers, header fields sent after that body, are dropped in the `request` hook,
+    which mitmproxy runs before it forwards them. Only the head goes out;
+  - judged on the raw path before the query, on a segment boundary;
+  - refused outright if a server might resolve the path elsewhere (dot segments, `..;`, `//`, a
+    backslash, a percent-encoded `/`, `\`, `.` or `%`).
+
+  It lives in the effective file's `allow` list beside the host grants. A proxy that predates
+  path grants matches no host against `host/path`, so it fails closed. A path can only be judged
+  decrypted, so a path-granted host is never blind-tunnelled: not on `passthrough`, not for a
+  build. That makes `--build` path grants a refusal, since builds are tunnelled. The tunnel itself
+  had to be fenced. mitmproxy relays a CONNECT's raw TCP, and inside a decrypted tunnel it relays
+  any stream that doesn't look like HTTP: a leading CRLF is enough, and a server may skip the CRLF
+  and read the request after it. So the proxy answers the CONNECT itself, as for a refused host,
+  and opens the upstream only for a connection that earned it: a ClientHello the proxy is about
+  to decrypt, or a cleartext request the grant passed. Raw bytes in a decrypted tunnel are emptied
+  before mitmproxy sends them, and the connection is closed. `tests/test_proxy_wall_e2e.py` pins
+  all three on a real mitmdump. A refusal that follows a granted host's redirect names that host
+  and suggests the path grant (`via` on the row). The proxy keeps that memory for two minutes, as
+  an explanation only.
 
 ## Rejected
 
@@ -186,3 +218,10 @@ belongs in the middle — but *one* middle, not a switch between two.
   undecryptable hosts and puts all bulk toolchain traffic through the single Python loop.
 - **Decrypt nothing** (vhrn's end). Incompatible with injection, and discards the request-level view
   this proxy exists to give.
+- **Follow redirects in the proxy** (weighed with path grants, 2026-11-08). "A granted host may
+  send the box where it likes" puts the destination in the hands of whoever controls a granted
+  host's redirects. Login flows (`?next=`), link shorteners and user-content hosts are common open
+  redirectors, so `granted/redirect?to=https://anywhere/?d=<data>` would reach anywhere. Remembering
+  the one target a redirect named has the same flaw, because with an open redirector the box chose
+  that target. Today the wall judges the box's own follow-up request, which holds even when a
+  granted host redirects anywhere.

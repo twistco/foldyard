@@ -926,3 +926,90 @@ def test_no_offer_path_hands_out_a_local_address(env):
     # Typed, it is made — the one way in.
     allowlist.grant("127.0.0.1:8123", "once")
     assert "127.0.0.1:8123" in allowlist.effective()["allow"]
+
+
+# ── path grants (`host/prefix/`: reads under one prefix of a host) ─────────────────────────────
+
+_GCS_PATH = "storage.googleapis.com/chrome-for-testing-public/"
+
+
+def test_a_path_grant_lands_in_the_effective_allow_list_as_typed(env):
+    allowlist.grant("Storage.GoogleAPIs.com/chrome-for-testing-public/", "once", ttl=900)
+    # The host part as the proxy compares it; the path exactly (paths are case-sensitive).
+    assert _GCS_PATH in allowlist.live_hosts()
+    assert json.loads(config.allow_effective_file().read_text())["allow"] == [_GCS_PATH]
+    allowlist.revoke("storage.googleapis.com/chrome-for-testing-public/")
+    assert allowlist.live_hosts() == []
+
+
+def test_a_path_grant_is_never_for_builds(env):
+    with pytest.raises(SystemExit, match="a path grant is for the box"):
+        allowlist.grant(_GCS_PATH, "session", build=True)
+    assert allowlist.build_hosts() == []
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "storage.googleapis.com/",
+        "storage.googleapis.com/a/../b/",
+        "storage.googleapis.com/a//b/",
+        "storage.googleapis.com/a%2fb/",
+        "storage.googleapis.com:443/a/",
+        "*.googleapis.com/a/",
+        "storage.googleapis.com/a?x=1",
+    ],
+)
+def test_a_malformed_path_grant_is_refused_with_what_one_looks_like(env, key):
+    with pytest.raises(SystemExit, match="not a valid path grant"):
+        allowlist.grant(key, "session")
+    assert allowlist.live_hosts() == []
+
+
+def test_a_path_grant_answers_its_host_in_the_network_log(env):
+    # The operator decided how much of the host the box gets; a refusal outside it says so on its
+    # own row rather than floating the host as unanswered again. Other hosts are untouched.
+    keys = {"storage.googleapis.com", "other.example.com", "storage.googleapis.com:8443"}
+    assert allowlist.unanswered(keys) == keys
+    allowlist.grant(_GCS_PATH, "session")
+    assert allowlist.unanswered(keys) == {"other.example.com", "storage.googleapis.com:8443"}
+
+
+def test_a_path_grant_on_a_local_address_is_still_a_local_key(env):
+    assert allowlist.local_key("127.0.0.1/repo/")
+    assert allowlist.local_key("192.168.1.10/x/")
+    assert not allowlist.local_key(_GCS_PATH)
+
+
+def test_a_request_offers_its_directories_then_its_file(env):
+    zip_ = "/chrome-for-testing-public/156.0.8078.4/linux-arm64/chrome-linux-arm64.zip"
+    assert allowlist.path_scopes("Storage.GoogleAPIs.com", zip_ + "?x-goog-signature=s") == [
+        "storage.googleapis.com/chrome-for-testing-public/",
+        "storage.googleapis.com/chrome-for-testing-public/156.0.8078.4/",
+        "storage.googleapis.com/chrome-for-testing-public/156.0.8078.4/linux-arm64/",
+        f"storage.googleapis.com{zip_}",
+    ]
+    assert allowlist.path_scopes("example.com", "/a/b/c/d/e/") == [
+        "example.com/a/",
+        "example.com/a/b/",
+        "example.com/a/b/c/",
+        "example.com/a/b/c/d/e/",
+    ]
+
+
+@pytest.mark.parametrize(
+    "host, path",
+    [
+        ("example.com", "/"),  # nothing narrower than the host
+        ("example.com", "/a/../b/x"),  # a path a server could resolve elsewhere offers nothing
+        ("example.com", "/a//b"),
+        ("example.com", "/a%2fb/c"),
+        ("example.com", "/[evil]/x"),  # nor anything outside a path's characters
+        ("example.com:8443", "/a/b"),  # a path grant has no port
+        ("127.0.0.1", "/a/b"),  # a local address is typed, never offered
+        ("example.com", None),
+        (None, "/a"),
+    ],
+)
+def test_a_request_offers_no_path_it_cannot_grant_as_it_stands(env, host, path):
+    assert allowlist.path_scopes(host, path) == []

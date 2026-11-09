@@ -98,6 +98,78 @@ def valid_host(host: str) -> bool:
     return "." in bare and all(part for part in bare.split("."))
 
 
+# What a path grant's path may hold: RFC 3986's path characters, which keeps TOML- and
+# terminal-breaking text out of the store as `valid_host` does for hosts.
+_PATH_CHARS = re.compile(r"[A-Za-z0-9\-._~!$&'()*+,;=:@%/]+")
+_ENCODED_SEPARATOR = re.compile(r"%(?:2e|2f|5c|25)", re.IGNORECASE)
+
+
+def path_grant(key: str) -> tuple[str, str] | None:
+    """A PATH GRANT's ``(host, prefix)`` — ``storage.googleapis.com/chrome-for-testing-public/``
+    → ``("storage.googleapis.com", "/chrome-for-testing-public/")`` — or None for anything else.
+
+    A path grant lets the box READ under one prefix of one host: GET/HEAD only, no body,
+    decrypted and judged request by request, never blind-tunnelled — what a redirect to a shared
+    host (a CDN sending a download to one bucket of ``storage.googleapis.com``) needs, without
+    the rest of that host. So: an exact host (no ``*.`` glob, no port — it covers what a bare
+    grant does, :443 and cleartext :80), and a prefix of at least one segment with no dot
+    segment, no ``//``, no backslash, no query and no percent-encoded separator, dot or percent.
+    The proxy's ``_path_grant`` is the same rule over a wider character set; a test holds that
+    every key this accepts parses the same there."""
+    host, sep, rest = key.partition("/")
+    if not sep or not host or host.startswith("*.") or ":" in host or not valid_host(host):
+        return None
+    prefix = "/" + rest
+    if prefix == "/" or not _PATH_CHARS.fullmatch(prefix) or _ENCODED_SEPARATOR.search(prefix):
+        return None
+    segments = rest.split("/")
+    for i, seg in enumerate(segments):
+        if not seg and i != len(segments) - 1:
+            return None
+        if seg.split(";", 1)[0] in (".", ".."):
+            return None
+    return host.lower().rstrip("."), prefix
+
+
+def valid_grant(key: str) -> bool:
+    """What `fy allow add` takes: a host key (:func:`valid_host`) or a path grant
+    (:func:`path_grant`)."""
+    key = key.strip()
+    return valid_host(key) or path_grant(key) is not None
+
+
+_SCOPE_DIRS = 3  # how many directory prefixes a request offers, shallowest first
+
+
+def path_scopes(host: object, path: object) -> list[str]:
+    """The path grants a request to ``host`` + ``path`` (a Network Log row's, so box-written) can
+    be answered with, broadest first: its first :data:`_SCOPE_DIRS` directories
+    (``host/bucket/``, ``host/bucket/v1/``, …), then the path itself (a file, or a directory
+    deeper than that). Only keys
+    :func:`path_grant` accepts as they stand — a path it refuses offers nothing rather than a
+    cleaned-up guess — and none for a ``host:port`` key (a path grant has no port) or a local
+    address (typed, never offered: :func:`local_key`). The query never reaches a key."""
+    if not isinstance(host, str) or not isinstance(path, str) or ":" in host or local_key(host):
+        return []
+    plain = path.split("?", 1)[0]
+    segments = plain.split("/")[1:]
+    if not segments or not segments[0]:
+        return []
+    dirs = segments[:-1]
+    keys = [host + "/" + "/".join(dirs[: i + 1]) + "/" for i in range(min(len(dirs), _SCOPE_DIRS))]
+    keys.append(host + plain)  # what it asked for: the file, or a directory past the cap
+    if path_grant(host + plain) is None:
+        return []  # one bad segment anywhere: the request isn't one a grant should be shaped on
+    parsed = [path_grant(key) for key in keys]
+    return list(dict.fromkeys(h + p for h, p in (x for x in parsed if x is not None)))
+
+
+def grant_host(key: str) -> str:
+    """The host part of a grant key: a path grant's host, else the key itself."""
+    parsed = path_grant(key)
+    return parsed[0] if parsed is not None else key
+
+
 def local_key(key: str) -> bool:
     """Does a grant key (``host`` or ``host:port``) name a LOCAL address — your computer, its
     network, link-local — the kind the proxy dials only on a grant naming it (egress_proxy's
@@ -107,6 +179,7 @@ def local_key(key: str) -> bool:
     recommend`` list, whose text the box can write."""
     import ipaddress
 
+    key = grant_host(key)  # a path grant naming a local address names it too
     # A bracketed v6 key with a port ("[::1]:8123") isn't parsed and reads as not local; harmless,
     # since valid_host refuses that spelling and no v6 grant can be made.
     host = key.rpartition(":")[0] if key.count(":") == 1 else key
@@ -731,7 +804,15 @@ def unanswered(keys: Iterable[str]) -> set[str]:
     if "*" in refused:
         return set()
     granted = live_hosts()
-    return {key for key in keys if key not in refused and not _matches(key, granted)}
+    # A path grant answers its host: the operator decided how much of it the box gets, and a
+    # refusal outside those paths says so on its own row (`outside`) rather than re-asking. At
+    # runtime only — a path grant never covers a build, so a build-side reader can't use this.
+    scoped = {parsed[0] for parsed in map(path_grant, granted) if parsed is not None}
+    return {
+        key
+        for key in keys
+        if key not in refused and key not in scoped and not _matches(key, granted)
+    }
 
 
 def build_hosts() -> list[str]:
@@ -802,6 +883,9 @@ def grant(host: str, level: str, ttl: int | None = None, *, build: bool = False)
     """Allow ``host`` at ``level`` (once|session|permanent) — for everything, or with ``build``
     only for a host-started image build. Host only. Returns the new effective.
 
+    ``host`` may be a path grant (:func:`path_grant`): reads under that prefix only, for the box
+    (never ``build``).
+
     A build grant never replaces a live runtime one (which already covers builds); a runtime grant
     replaces a build one."""
     _require_host()
@@ -809,8 +893,23 @@ def grant(host: str, level: str, ttl: int | None = None, *, build: bool = False)
     host = host.strip()
     if level not in LEVELS:
         raise SystemExit(f"✗ unknown level {level!r} (have: {', '.join(LEVELS)})")
-    if not valid_host(host):
+    scoped = path_grant(host)
+    if scoped is None and not valid_host(host):
+        if "/" in host and "://" not in host:
+            raise SystemExit(
+                f"✗ not a valid path grant: {host!r} — an exact host and a path of at least one "
+                "segment (`storage.example.com/bucket/`), no glob, port, query, `..`, `//` or "
+                "encoded separator"
+            )
         raise SystemExit(f"✗ not a valid host/glob: {host!r}")
+    if scoped is not None:
+        if build:
+            raise SystemExit(
+                f"✗ a path grant is for the box, not for builds: a build is tunnelled, so the "
+                f"proxy can't see its paths. Grant the host for builds instead "
+                f"(`fy allow add {scoped[0]} --build`)."
+            )
+        host = scoped[0] + scoped[1]  # the host part as the proxy compares it
 
     hosts, _ = _prune(_load_store())
     current = hosts.get(host)
@@ -857,6 +956,9 @@ def revoke(host: str) -> dict:
     _require_host()
     _require_readable_store()
     host = host.strip()
+    scoped = path_grant(host)
+    if scoped is not None:
+        host = scoped[0] + scoped[1]  # as `grant` stored it
     hosts, _ = _prune(_load_store())
     if host in hosts:
         del hosts[host]

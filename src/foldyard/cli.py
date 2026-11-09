@@ -1063,7 +1063,9 @@ app.add_typer(allow_app)
 @allow_app.command("add")
 def allow_add(
     host: str = typer.Argument(
-        ..., help="exact host or *.suffix glob (:443); host:port for one other tunnel port"
+        ...,
+        help="exact host or *.suffix glob (:443); host:port for one other tunnel port; "
+        "host/path/ for reads under that path only",
     ),
     level: str = typer.Option(
         "session",
@@ -1084,11 +1086,18 @@ def allow_add(
 
     A local address (loopback, your network, link-local) is refused in every mode unless a grant
     names it exactly, e.g. 127.0.0.1:8123 — and only this command makes one.
+
+    A path grant, `storage.googleapis.com/chrome-for-testing-public/`, lets the box READ under
+    that path and nothing else on the host: GET and HEAD with no body, decrypted and checked
+    request by request. It's the narrow answer when a granted host redirects to a shared one
+    (a CDN sending its downloads to one bucket of a storage service). For the box only, never
+    `--build`.
     """
     from . import allowlist
 
     eff = allowlist.grant(host, level, ttl or None, build=build)
-    scope = "for builds, " if build else ""
+    scoped = allowlist.path_grant(host.strip())
+    scope = "for builds, " if build else "GET/HEAD under that path only, " if scoped else ""
     listed = ", ".join(eff["allow"]) or "empty"
     print(f"✓ {host} allowed ({scope}{level}). Effective allowlist: {listed}")
     if allowlist.local_key(host):
@@ -1115,7 +1124,7 @@ def allow_list() -> None:
             f"default_deny: {'on — unlisted hosts are refused' if eff['default_deny'] else 'off'}"
         )
     for host in eff["allow"]:
-        print(f"  {host}")
+        print(f"  {host}" + ("   (GET/HEAD under this path only)" if "/" in host else ""))
     if not eff["allow"]:
         print("  (no grants — `fy allow add <host>`, or the TUI's `a` key on a blocked row)")
     if eff.get("build_allow"):
@@ -1351,7 +1360,9 @@ def allow_learn(
 
 @allow_app.command("remove")
 def allow_remove(
-    host: str = typer.Argument(..., help="host/glob to revoke, at whatever level it was granted"),
+    host: str = typer.Argument(
+        ..., help="host/glob (or host/path/) to revoke, at whatever level it was granted"
+    ),
 ) -> None:
     """Revoke a host's grant."""
     from . import allowlist

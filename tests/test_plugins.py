@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import timedelta
+from typing import cast
 
 import pytest
 
@@ -1678,6 +1679,8 @@ def test_network_panel_data_rows_summary_and_escaping(monkeypatch, tmp_path):
     assert "[green]200[/green]" in group.children[1]
     assert "\\[q]" in group.children[1]  # untrusted path is markup-escaped
     assert "2 requests across 1 hosts · 1 with injected Authorization" in data.summary
+    # Each line carries its request's row, which the TUI's allow and copy keys act on.
+    assert [cast(dict, r)["path"] for r in group.rows] == ["/issues", "/p[q]"]
 
 
 def test_network_panel_tree_groups_by_host(monkeypatch, tmp_path):

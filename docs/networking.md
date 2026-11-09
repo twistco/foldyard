@@ -182,11 +182,75 @@ back on.
 
 - `fy allow add <host> [--level once|session|permanent]` (default `session`);
 - `fy allow sync [--yes]` for the hosts the repo recommends;
-- one keypress on a blocked row in `fy tui`'s Network Log.
+- one keypress in `fy tui`'s Network Log: `a` on a host grants the host, and `a` on a refused
+  request first asks how much of the host to grant: one of the request's directories, the path
+  itself, or the whole host (see [path grants](#path-grants-one-path-of-a-shared-host)). `l` copies
+  the log row under the cursor as JSON (on a host, its listed requests), say for a bug report.
+  The copy goes through your terminal's clipboard support (OSC 52), which some terminals turn
+  off. The footer names what each key does on the row the cursor is on.
 
 Both the grants and the enforcement switch live on your computer for the same reason: the box can
 write repo config, so an allowlist in the repo is one the box could widen or switch off. Keyless
 agent hosts are always allowed — never list them.
+
+### Path grants: one path of a shared host
+
+Sometimes the host you'd have to grant is much bigger than what the box needs from it. The usual
+case is a **redirect**: you grant `cdn.playwright.dev`, and it answers a browser download with a
+302 to `storage.googleapis.com/chrome-for-testing-public/…`. The tool follows the redirect itself,
+so that's a new request to a host you haven't granted, and the allowlist refuses it. Granting
+`storage.googleapis.com` would let the box reach every bucket on it, other people's included,
+and a signed upload URL needs no credentials in the box. A **path grant** names just the part you
+mean:
+
+```bash
+fy allow add storage.googleapis.com/chrome-for-testing-public/ --level once --ttl 900
+```
+
+A path grant lets the box **read** under that prefix and nothing else on the host:
+
+- `GET` and `HEAD` only, with no body and no `Upgrade` (so no WebSocket). Over HTTP/2 a request
+  can send a body its headers don't announce, and trailers after it; the proxy drops both, so
+  only the read goes out;
+- at or under the prefix, on a segment boundary (`/bucket/` doesn't cover `/bucket-two/`), judged
+  on the path before the query;
+- never a path a server could resolve to somewhere else: a `.` or `..` segment (`..;` too), `//`,
+  a backslash, or a percent-encoded `/`, `\`, `.` or `%` is refused;
+- the ports a host grant covers (HTTPS `:443`, plain HTTP `:80`). The host has to be exact: no
+  `*.` glob and no port. On an [address on your computer](#services-on-your-computer)
+  (`127.0.0.1/repo/`) it covers requests to that address, never a granted name that resolves
+  there.
+
+A read still sends something: the URL. The path under the prefix and the query reach the host,
+and whoever reads its logs. For a public bucket that doesn't matter. For a host you don't trust,
+it's a small way out, so grant a path there the way you'd grant the host.
+
+The proxy has to see each request to check its path, so a path-granted host is always decrypted,
+even if `[proxy] passthrough` lists it. It's never tunnelled for an image build either, which is
+why a path grant can't be `--build`. Grant the host `--build` for a build. The proxy only opens a
+connection to the host once the box's TLS handshake shows the request will be decrypted, so a raw
+TCP tunnel through the grant is refused. Bytes in a decrypted tunnel that don't parse as HTTP are
+dropped, never relayed. A refused request names the paths the host *is* granted, and the
+Network Log marks it `outside the paths this host is granted for`.
+
+**After a redirect, the refusal says so.** When a granted host redirects the box to a host it
+can't reach, the proxy remembers the target for two minutes. If the box's request to it is then
+refused, the `403` names the host that redirected and suggests the path grant (`fy allow add
+storage.googleapis.com/chrome-for-testing-public/`), and the Network Log row says `redirected from
+cdn.playwright.dev`. The proxy doesn't follow redirects for the box, because then a host you
+granted would decide where the box can go. Any host with an open redirect (a `?next=` login, a
+link shortener) would send a request, and whatever it carries, anywhere.
+
+In `fy tui`, put the cursor on the refused request in the Network Log and press `a`. It offers the
+request's first three directories (`storage.googleapis.com/chrome-for-testing-public/`, then one
+level deeper, and so on), the path it asked for, and the whole host. Then you choose how long the
+grant lasts. A path with anything a grant would refuse (a `..`, an encoded separator) offers only
+the host.
+
+A path grant is a runtime grant like any other: `fy allow list` shows it, `fy allow remove
+<host>/<path>/` revokes it, and it doesn't come from `[proxy] recommend` (hosts only). Making it
+answers the host in the Network Log, so a refusal outside the path doesn't ask about the whole
+host again.
 
 ### The VM firewall
 
@@ -401,8 +465,9 @@ out through the proxy. How that works:
 
 When the allowlist refuses a build, the tool's error names the URL it *asked* for, which is often
 not the host that was refused: a CDN can redirect inside the tunnel (Playwright's
-`cdn.playwright.dev` sends browser downloads to `storage.googleapis.com`). So foldyard reports the
-refused hosts itself:
+`cdn.playwright.dev` sends browser downloads to `storage.googleapis.com`). In the box, a
+[path grant](#path-grants-one-path-of-a-shared-host) is the narrow answer to that. A build is
+tunnelled, so its grants are whole hosts. So foldyard reports the refused hosts itself:
 
 1. **On your computer, with a terminal,** it asks about each refused host: once (15 minutes, long
    enough for the build), session, permanent, or no.
@@ -469,6 +534,10 @@ own HTTP client, or a program opening raw sockets.
 - **A build or tool needs a host you haven't allowed.** Watch the TUI's blocked rows and grant from
   there (`a`), or run `fy allow add <host> --level permanent`. Grants live on your computer, never
   in repo config, so the box can't widen its own allowlist.
+- **You granted a host and the download still fails, refused at another host.** The granted host
+  redirected (the Network Log row says `redirected from …`). Grant only the path it redirected to,
+  `fy allow add <host>/<path>/` ([path grants](#path-grants-one-path-of-a-shared-host)), or press
+  `a` on that row in `fy tui`, rather than granting the whole host.
 - **A long, quiet request to a Google API dies at about 60 seconds.** That's Google's front ends
   (`*.googleapis.com`), not the VM or the proxy: they close any connection that has carried no
   bytes for about 60 s, idle or mid-request, and TCP keepalives don't reset the timer. It measures
