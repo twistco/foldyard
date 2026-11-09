@@ -2492,8 +2492,17 @@ class Injector:
 
     async def request(self, flow: http.HTTPFlow) -> None:
         """Fires after ``requestheaders`` (after a buffered body, or after a streamed one has gone
-        upstream). The work happened there; this only covers a caller that skips that hook."""
+        upstream). The work happened there; this only covers a caller that skips that hook —
+        and a path-granted read's trailers, which arrive after its body (HTTP/2) and which
+        mitmproxy sends upstream only after this hook: header fields the box chose once the head
+        had been judged, so a read drops them as it drops its body."""
         await self._on_request(flow)
+        if flow.metadata.get("egress_proxy_path_read") and flow.request.trailers:
+            flow.request.trailers = None
+            ctx.log.info(
+                "egress_proxy: dropped the trailers of a read a path grant let through to "
+                f"{_destination(flow.request)}"
+            )
 
     async def _on_request(self, flow: http.HTTPFlow) -> None:
         self.refresh()

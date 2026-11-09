@@ -57,6 +57,7 @@ class _Req:
         # mitmproxy's request-body streaming: off, on, or on through a filter.
         self.stream: Callable[[bytes], bytes] | bool | None = None
         self.headers: dict[str, str] = {}
+        self.trailers: dict[str, str] | None = None
         # mitmproxy's request.query is a settable MultiDictView reflected into the URL; the addon
         # only ever does `query[name] = value`, so a plain dict is a faithful enough stand-in.
         self.query: dict[str, str] = {}

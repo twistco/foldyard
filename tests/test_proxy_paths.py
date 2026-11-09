@@ -173,6 +173,10 @@ async def test_a_body_the_headers_dont_announce_never_leaves(walled):
     assert callable(stream)
     assert stream(b"exfiltrated") == b"" and stream(b"") == b""
     assert flow.metadata["egress_proxy_body_dropped"] is True
+    # Trailers come after the body and go upstream after `request`: dropped there too.
+    flow.request.trailers = {"x-trailer": "exfiltrated"}
+    await inj.request(flow)
+    assert not flow.request.trailers and flow.response is None
     # Only a read that leaves: mitmproxy won't stream a request the proxy answered itself.
     refused = _request(path="/another-bucket/x")
     assert not await _judged(inj, refused)

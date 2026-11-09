@@ -190,7 +190,8 @@ belongs in the middle — but *one* middle, not a switch between two.
     for DATA with no `content-length`, and mitmproxy streams a body past `stream_large_bodies`
     upstream before the `request` hook sees it. So a path-granted read is streamed through a
     filter that drops every chunk (a bodyless one, whose stream ends with its headers, is never
-    streamed);
+    streamed). Trailers, header fields sent after that body, are dropped in the `request` hook,
+    which mitmproxy runs before it forwards them. Only the head goes out;
   - judged on the raw path before the query, on a segment boundary;
   - refused outright if a server might resolve the path elsewhere (dot segments, `..;`, `//`, a
     backslash, a percent-encoded `/`, `\`, `.` or `%`).

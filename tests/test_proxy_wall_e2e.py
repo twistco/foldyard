@@ -266,7 +266,8 @@ class _Recorder:
 
     def _h2(self, tls) -> None:
         """An HTTP/2 connection: each request's head goes to ``received`` (as ``METHOD path``),
-        the DATA every stream carried to ``after``, and every stream that ends is answered 200."""
+        every DATA chunk and trailer field to ``after`` as it arrives (the connection may still be
+        open when a test looks), and every stream that ends is answered 200."""
         import h2.config
         import h2.connection
         import h2.events
@@ -276,7 +277,6 @@ class _Recorder:
         conn.initiate_connection()
         tls.sendall(conn.data_to_send())
         tls.settimeout(5)
-        body = b""
         try:
             while data := tls.recv(65535):
                 for event in conn.receive_data(data):
@@ -284,7 +284,7 @@ class _Recorder:
                         head = dict(event.headers)
                         self.received.append(head[b":method"] + b" " + head[b":path"])
                     elif isinstance(event, h2.events.DataReceived):
-                        body += event.data
+                        self.after.append(event.data)
                         conn.acknowledge_received_data(
                             event.flow_controlled_length, event.stream_id
                         )
@@ -293,11 +293,11 @@ class _Recorder:
                             event.stream_id, [(":status", "200"), ("content-length", "2")]
                         )
                         conn.send_data(event.stream_id, b"ok", end_stream=True)
+                    elif isinstance(event, h2.events.TrailersReceived):
+                        self.after.extend(b"%s: %s" % field for field in event.headers)
                 tls.sendall(conn.data_to_send())
         except (OSError, ssl.SSLError, h2.exceptions.H2Error):
             pass
-        finally:
-            self.after.append(body)
 
     def close(self) -> None:
         try:
@@ -418,7 +418,8 @@ def test_a_body_an_http2_read_doesnt_announce_never_reaches_the_host(scoped):
     # HTTP/2 lets a GET leave its stream open after HEADERS and send DATA with no content-length,
     # so the headers give the wall nothing to refuse — and mitmproxy streams a body past
     # `stream_large_bodies` upstream before the `request` hook could look at it. The read goes
-    # through; the body never does, whatever its size.
+    # through; the body never does, whatever its size — nor trailers after it (header fields
+    # sent once the body is done, which mitmproxy forwards after the `request` hook).
     import h2.config
     import h2.connection
     import h2.events
@@ -452,8 +453,10 @@ def test_a_body_an_http2_read_doesnt_announce_never_reaches_the_host(scoped):
                 while not done:
                     window = min(conn.local_flow_control_window(1), conn.max_outbound_frame_size)
                     if body and window > 0:
-                        conn.send_data(1, body[:window], end_stream=len(body) <= window)
+                        conn.send_data(1, body[:window])
                         body = body[window:]
+                        if not body:
+                            conn.send_headers(1, [("x-trailer", "EXFILTRATED")], end_stream=True)
                         tls.sendall(conn.data_to_send())
                         continue
                     data = tls.recv(65535)
@@ -466,7 +469,7 @@ def test_a_body_an_http2_read_doesnt_announce_never_reaches_the_host(scoped):
                             done = True
                     tls.sendall(conn.data_to_send())
         assert status == b"200", (size, proxy.mitm_log.read_text())
-    time.sleep(1.5)  # the recorder's wait for anything after the answer
+    _settle()
     seen = recorder.received + recorder.after
     assert f"GET {PREFIX}chrome.zip".encode() in recorder.received, seen
     assert not any(b"EXFILTRATED" in r for r in seen), seen

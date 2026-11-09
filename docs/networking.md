@@ -210,7 +210,8 @@ fy allow add storage.googleapis.com/chrome-for-testing-public/ --level once --tt
 A path grant lets the box **read** under that prefix and nothing else on the host:
 
 - `GET` and `HEAD` only, with no body and no `Upgrade` (so no WebSocket). Over HTTP/2 a request
-  can send a body its headers don't announce; the proxy drops it, so only the read goes out;
+  can send a body its headers don't announce, and trailers after it; the proxy drops both, so
+  only the read goes out;
 - at or under the prefix, on a segment boundary (`/bucket/` doesn't cover `/bucket-two/`), judged
   on the path before the query;
 - never a path a server could resolve to somewhere else: a `.` or `..` segment (`..;` too), `//`,
