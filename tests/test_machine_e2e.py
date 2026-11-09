@@ -45,6 +45,8 @@ from e2e_host import (
     socket_alive,
     wait_for,
 )
+from foldyard.machine import ENGINE_SOCK_IN_VM
+from foldyard.sandbox import FILTER_SOCKET
 
 pytestmark = host_tier
 
@@ -70,6 +72,20 @@ def test_the_vm_mounts_the_checkout_under_the_host_home(repo):
     assert str(repo).startswith(str(Path.home())), repo
     seen = lima_shell("ls", str(repo / "foldyard.toml"))
     assert seen.returncode == 0, f"{seen.stdout}{seen.stderr}"
+
+
+def assert_engine_link_serves() -> None:
+    # Re-created by guest boot provisioning on every boot, since /run is a tmpfs.
+    uid = lima_shell("id", "-u").stdout.strip()
+    name = FILTER_SOCKET if os.environ.get("MACHINE_RUNTIME") == "gvisor" else "podman.sock"
+    target = lima_shell("readlink", ENGINE_SOCK_IN_VM)
+    assert target.stdout.strip() == f"/run/user/{uid}/podman/{name}", target
+    info = lima_shell("podman", "--url", f"unix://{ENGINE_SOCK_IN_VM}", "info", timeout=120)
+    assert info.returncode == 0, f"{info.stdout}{info.stderr}"
+
+
+def test_a_fresh_vm_links_the_engine_socket(repo):
+    assert_engine_link_serves()
 
 
 def test_ensure_is_idempotent_on_a_running_vm(repo):
@@ -99,6 +115,7 @@ def test_stop_stops_the_supervisor_too_and_keeps_the_vm(repo):
     ensure_vm(repo)  # a restart with the home-path mount: the engine must run a container again
     assert lima_status() == "Running"
     assert engine("info").returncode == 0
+    assert_engine_link_serves()
     fy_ok(["down"], repo, timeout=180)
 
 
@@ -120,6 +137,7 @@ def test_ensure_recovers_a_vm_whose_hypervisor_died(repo):
     info = engine("info")
     assert info.returncode == 0, f"engine dead after ensure:\n{info.stderr}\n{recovered.out}"
     ensure_vm(repo)  # and, past the socket accepting: a container actually runs
+    assert_engine_link_serves()
 
 
 def test_recreate_boots_a_fresh_vm(repo):

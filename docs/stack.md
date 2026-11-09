@@ -92,6 +92,9 @@ steps:
       sock="unix://$XDG_RUNTIME_DIR/podman/podman.sock"
       echo "CONTAINER_HOST=$sock" >> "$GITHUB_ENV"
       echo "DOCKER_HOST=$sock" >> "$GITHUB_ENV"
+      # The path a service that talks to the engine mounts; a VM's boot script makes it there.
+      sudo install -d -m 0755 /run/foldyard
+      sudo ln -sfn "$XDG_RUNTIME_DIR/podman/podman.sock" /run/foldyard/engine.sock
   - run: uv tool install "foldyard==X.Y.Z" # your min_foldyard_version: CI moves when you move it
   - run: fy up
 ```
@@ -117,6 +120,14 @@ guest has and an Ubuntu runner may not. Name the registry in full, or add
 
 Variables the current mode sets (from the plugins you use) are there too, and so is the project
 `.env` beside your first compose file, which compose reads itself.
+
+**A service that talks to the engine** (the [gcp metadata emulator](./gcp.md#in-your-compose-file),
+say) mounts `/run/foldyard/engine.sock:/var/run/docker.sock`, written as is: it's the same path on
+every lima VM. foldyard's boot script links it to the VM user's engine socket, whose own path
+holds your user id, or under `[machine] runtime = "gvisor"` to the box's filtered socket. On the
+deprecated podman machine backend, mount `/run/docker.sock`, or under gVisor
+`/run/user/<uid>/podman/podman-runsc-filtered.sock` (`<uid>` is `id -u` on your computer). A CI
+runner has no boot script, so the [step above](#in-ci) makes the same link.
 
 **Nothing else from your shell reaches the compose client.** It gets only what it needs to run
 (`PATH`, `HOME`, locale, the engine's and compose's own `COMPOSE_*`/`PODMAN_*` settings) and the
