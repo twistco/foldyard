@@ -255,8 +255,11 @@ the box only the VM-boundary checks run. What it checks:
   so the wall refuses its connection. Verify then proves that directly, for every push URL
   (`git remote get-url --push --all origin`, so `pushurl` and `insteadOf` apply): the host and port
   ssh would dial (`ssh -G`, so your ssh config's `HostName` and `Port` apply) must resolve, the
-  proxy must answer, and a direct connection to that port must fail. That passes as
-  `SSH push impossible: the VM firewall refuses github.com:22 (Connection refused)`. A
+  proxy must answer, and a direct connection to that port must be refused. That passes as
+  `SSH push impossible: the VM firewall refuses github.com:22 (Connection refused)`. A connection
+  that times out instead is a warning, `SSH push blocked: github.com:22 timed out …`: the wall
+  rejects, so a timeout looks like a network dropping port 22 upstream, which can't be credited
+  to the wall and won't follow you to the next network. A
   `ProxyCommand` or `ProxyJump`, a name that doesn't resolve, a connection that succeeds, or no
   firewall leaves the row unproven, as before. These
   are built into foldyard's core, so a missing or broken plugin can't weaken them.

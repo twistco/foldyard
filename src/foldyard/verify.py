@@ -653,7 +653,8 @@ def _box_posture(rep: _Report, env: dict) -> None:
             "(the shared .git/config lost its remotes? `fy doctor` → shared git config)"
         )
     elif _walled() and (walled := _ssh_push_walled(checkout, git_env)):
-        rep.ok(walled)
+        proven, msg = walled
+        (rep.ok if proven else rep.warn)(msg)
     else:
         # It failed, but not because a credential was refused — origin was never reached. That
         # is a network fact, not a posture one, and must not certify the credential-less claim.
@@ -722,10 +723,12 @@ def _ssh_target(dest: str, port: str | None, git_env: dict) -> tuple[str, int] |
     return (host, int(ssh_port)) if host and ssh_port.isdigit() else None
 
 
-def _ssh_push_walled(checkout: str, git_env: dict) -> str | None:
+def _ssh_push_walled(checkout: str, git_env: dict) -> tuple[bool, str] | None:
     """With the VM firewall on, an SSH origin's push dies at the TCP connect: ssh doesn't use the
-    proxy, and direct egress is refused. The PASS row when that is shown for every push URL (its
-    host resolves, the proxy answers, the connect to ssh's port fails), else None."""
+    proxy, and direct egress is refused. When every push URL's connect fails (its host resolves,
+    the proxy answers): (True, PASS row) if all were refused, which is the wall's signature;
+    (False, WARN row) if any timed out, which a network dropping port 22 upstream looks like too.
+    None otherwise."""
     try:
         got = subprocess.run(
             ["git", "-C", checkout, "remote", "get-url", "--push", "--all", "origin"],
@@ -741,6 +744,7 @@ def _ssh_push_walled(checkout: str, git_env: dict) -> str | None:
     if not dests or len(dests) != len(urls) or not _permitted_path_open():
         return None
     refused: list[str] = []
+    timed_out: list[str] = []
     for dest, port in dests:
         target = _ssh_target(dest, port, git_env)
         if target is None:
@@ -750,13 +754,20 @@ def _ssh_push_walled(checkout: str, git_env: dict) -> str | None:
             socket.getaddrinfo(host, ssh_port, type=socket.SOCK_STREAM)
         except OSError:  # a DNS failure is not the wall
             return None
+        where = f"[{host}]:{ssh_port}" if ":" in host else f"{host}:{ssh_port}"
         try:
             with socket.create_connection((host, ssh_port), timeout=5):
                 return None
+        except TimeoutError:
+            timed_out.append(where)
         except OSError as e:
-            where = f"[{host}]:{ssh_port}" if ":" in host else f"{host}:{ssh_port}"
             refused.append(f"{where} ({e.strerror or str(e) or type(e).__name__})")
-    return f"SSH push impossible: the VM firewall refuses {', '.join(refused)}"
+    if timed_out:
+        return False, (
+            f"SSH push blocked: {', '.join(timed_out)} timed out rather than being refused, so "
+            "this is not proof the VM firewall did it (a network dropping port 22 looks the same)"
+        )
+    return True, f"SSH push impossible: the VM firewall refuses {', '.join(refused)}"
 
 
 def _permitted_path_open() -> bool:

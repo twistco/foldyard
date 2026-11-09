@@ -66,7 +66,8 @@ def secure_engine(monkeypatch, tmp_path):
         calls.append(cmd)
         if cmd[0] == "ssh":
             results.setdefault("ssh_cmds", []).append(cmd)
-            return _Proc(results["ssh_rc"], results["ssh_g"])
+            ssh_g = results["ssh_g"]
+            return _Proc(results["ssh_rc"], str(ssh_g(cmd[-1]) if callable(ssh_g) else ssh_g))
         if cmd[0] == "git" and "rev-parse" in cmd:  # does HEAD name a commit?
             if results["has_commits"] is None:
                 raise verify.subprocess.TimeoutExpired(cmd, kw.get("timeout") or 0)
@@ -510,11 +511,13 @@ def _ssh_origin(
     wall=True,
     push_url="git@github.com:acme/app.git\n",
     connects=(),
+    timeouts=(),
     resolves=True,
     proxy_up=True,
 ):
     """An SSH origin whose dry-run push died at the connect, as in a walled box. `connects` are
-    the (host, port)s a direct connect reaches; everything else is refused."""
+    the (host, port)s a direct connect reaches, `timeouts` those it times out on; everything else
+    is refused."""
     _enter_box(monkeypatch, tmp_path)
     monkeypatch.setattr(verify.config, "machine_backend", lambda: "lima")
     monkeypatch.setattr(verify.config, "machine_wall", lambda: wall)
@@ -529,6 +532,8 @@ def _ssh_origin(
         dialled.append(addr)
         if tuple(addr) in connects:
             return _Sock()
+        if tuple(addr) in timeouts:
+            raise TimeoutError("timed out")
         return wall_connect(addr, *a, **kw)
 
     def getaddrinfo(host, port, *a, **kw):
@@ -555,6 +560,37 @@ def test_an_ssh_origin_the_vm_firewall_refuses_proves_the_push_refusal(
     assert ("github.com", 22) in results["dialled"]
     assert results["url_cmd"][-4:] == ["get-url", "--push", "--all", "origin"]
     assert results["ssh_cmds"][0][:2] == ["ssh", "-G"]
+
+
+def test_an_ssh_connect_that_times_out_warns_instead_of_proving_the_wall(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # The wall rejects; a timeout looks the same as a network upstream dropping port 22, so it
+    # can't be credited to the wall. Blocked all the same, so a warning, not a failure.
+    _ssh_origin(secure_engine, monkeypatch, tmp_path, timeouts={("github.com", 22)})
+    assert verify.verify() == 0
+    out = capsys.readouterr().out
+    assert "SSH push impossible" not in out
+    assert "UNREACHABLE" not in out
+    assert "SSH push blocked: github.com:22 timed out" in out
+    assert "not proof the VM firewall" in out
+
+
+def test_one_timed_out_ssh_push_url_makes_the_whole_row_a_warning(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    results = _ssh_origin(
+        secure_engine,
+        monkeypatch,
+        tmp_path,
+        push_url="git@github.com:acme/app.git\ngit@gitlab.com:acme/app.git\n",
+        timeouts={("gitlab.com", 22)},
+    )
+    results["ssh_g"] = lambda dest: f"hostname {dest.split('@')[-1]}\nport 22\n"
+    assert verify.verify() == 0
+    out = capsys.readouterr().out
+    assert "SSH push impossible" not in out
+    assert "gitlab.com:22 timed out" in out
 
 
 def test_the_ssh_probe_dials_what_ssh_would_dial(secure_engine, monkeypatch, tmp_path, capsys):
