@@ -449,7 +449,8 @@ In the box, all three are defaults: `[box].env` may override any of them. With
 name has to be in `[proxy] no_proxy` (it already had to be for curl and Python).
 
 **Why not in stack containers.** podman gives every container `HTTP_PROXY` with a `NO_PROXY`
-naming, besides loopback and the host gateway, only what `[proxy] no_proxy` lists
+naming, besides loopback and the host gateway, only what `[proxy] no_proxy` lists and foldyard's
+own in-stack services (the `metadata-emulator`, when a gcp mode runs it)
 ([above](#stack-containers-trust-the-proxy-too)). Node
 ignoring it is what lets one Node service reach a sibling that isn't listed (Supabase Studio
 calling `http://kong:8000`). Set everywhere, those calls would go to the proxy, which runs on
@@ -464,11 +465,13 @@ environment:
 ```
 
 Otherwise it also sets a `NO_PROXY` naming them, in both cases (undici prefers the lowercase
-one), keeping podman's entries (loopback, the host gateway, and your `[proxy] no_proxy`):
+one). That replaces the list podman hands it, so keep every entry podman's has: loopback, the
+host gateway, your `[proxy] no_proxy`, and foldyard's own services (`metadata-emulator` under a
+gcp mode). `printenv NO_PROXY` in a running container shows the list to start from:
 
 ```yaml
-  NO_PROXY: localhost,127.0.0.1,192.168.5.2,kong,db
-  no_proxy: localhost,127.0.0.1,192.168.5.2,kong,db
+  NO_PROXY: localhost,127.0.0.1,192.168.5.2,metadata-emulator,kong,db
+  no_proxy: localhost,127.0.0.1,192.168.5.2,metadata-emulator,kong,db
 ```
 
 Leave the proxy address, the CA and npm's settings out: foldyard provides them, and a copy goes
