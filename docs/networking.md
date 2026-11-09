@@ -450,7 +450,8 @@ name has to be in `[proxy] no_proxy` (it already had to be for curl and Python).
 
 **Why not in stack containers.** podman gives every container `HTTP_PROXY` with a `NO_PROXY`
 naming, besides loopback and the host gateway, only what `[proxy] no_proxy` lists and foldyard's
-own in-stack services (the `metadata-emulator`, when a gcp mode runs it)
+own in-stack services (the `metadata-emulator`, whenever `[plugins.gcp-metadata]` is configured,
+whatever the gcp mode)
 ([above](#stack-containers-trust-the-proxy-too)). Node
 ignoring it is what lets one Node service reach a sibling that isn't listed (Supabase Studio
 calling `http://kong:8000`). Set everywhere, those calls would go to the proxy, which runs on
@@ -466,8 +467,9 @@ environment:
 
 Otherwise it also sets a `NO_PROXY` naming them, in both cases (undici prefers the lowercase
 one). That replaces the list podman hands it, so keep every entry podman's has: loopback, the
-host gateway, your `[proxy] no_proxy`, and foldyard's own services (`metadata-emulator` under a
-gcp mode). `printenv NO_PROXY` in a running container shows the list to start from:
+host gateway, your `[proxy] no_proxy`, and foldyard's own services (`metadata-emulator` while
+`[plugins.gcp-metadata]` is configured, even with gcp off: turning it on doesn't rebuild the VM's
+list). `printenv NO_PROXY` in a running container shows the list to start from:
 
 ```yaml
   NO_PROXY: localhost,127.0.0.1,192.168.5.2,metadata-emulator,kong,db
