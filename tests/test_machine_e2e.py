@@ -46,6 +46,7 @@ from e2e_host import (
     wait_for,
 )
 from foldyard.machine import ENGINE_SOCK_IN_VM
+from foldyard.sandbox import FILTER_SOCKET
 
 pytestmark = host_tier
 
@@ -76,8 +77,9 @@ def test_the_vm_mounts_the_checkout_under_the_host_home(repo):
 def assert_engine_link_serves() -> None:
     # Re-created by guest boot provisioning on every boot, since /run is a tmpfs.
     uid = lima_shell("id", "-u").stdout.strip()
+    name = FILTER_SOCKET if os.environ.get("MACHINE_RUNTIME") == "gvisor" else "podman.sock"
     target = lima_shell("readlink", ENGINE_SOCK_IN_VM)
-    assert target.stdout.strip() == f"/run/user/{uid}/podman/podman.sock", target
+    assert target.stdout.strip() == f"/run/user/{uid}/podman/{name}", target
     info = lima_shell("podman", "--url", f"unix://{ENGINE_SOCK_IN_VM}", "info", timeout=120)
     assert info.returncode == 0, f"{info.stdout}{info.stderr}"
 
