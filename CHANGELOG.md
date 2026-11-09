@@ -6,6 +6,71 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.9.0 — 2026-11-09
+
+Two fixes for the VM firewall, a fixed engine socket path for compose services on lima, and,
+experimental and off by default, a compose client that runs in the VM. Stack services can now reach
+each other by name, and `fy verify` no longer fails a checkout whose origin is an SSH URL. After
+upgrading, restart each lima VM once (`fy machine stop && fy up`): its boot provisioning changed,
+and `fy up` refuses the running VM until it restarts. Then recreate the stack's containers
+(`fy down && fy up`) so they pick up the new `NO_PROXY`.
+
+### Added
+
+- **On lima, a compose service can mount the VM's engine socket at `/run/foldyard/engine.sock`,
+  the same path on every VM.** A service that talks to the engine, such as the gcp
+  `metadata-emulator`, bind-mounts the VM's own socket, whose path holds the VM user's id
+  (`/run/user/<uid>/podman/podman.sock`), so it differs from one developer to the next and
+  compose files hard-coded one: `docs/gcp.md`'s example named `/run/user/1000/…`, wrong on
+  macOS, and a project moved from podman machine kept `/run/docker.sock`, so every gcp mode switch
+  failed on `statfs /run/docker.sock: no such file or directory` and the emulator never started.
+  foldyard's boot script now links the fixed path to the right socket, root-owned so nothing in
+  the VM can repoint it. Under `[machine] runtime = "gvisor"` it is the box's filtered socket, so
+  a stack container holding it can't create a container outside gVisor. Write
+  `/run/foldyard/engine.sock:/var/run/docker.sock` (docs/gcp.md shows it). The path is lima's
+  only: on the deprecated podman machine backend keep `/run/docker.sock`, or under gVisor mount
+  `/run/user/<uid>/podman/podman-runsc-filtered.sock`. A CI runner can link the path itself
+  (docs/stack.md, In CI). **After upgrading, `fy up` asks you to restart each lima VM**
+  (`fy machine stop && fy up`), since the boot script changed. Switching gVisor on or off now
+  takes the same restart as well as the box recreate.
+- **Experimental: `[machine] compose = "vm"` runs the compose client in the VM instead of on your computer.**
+  Your stack already runs in the VM, but its compose client runs on your computer, where it parses
+  compose files the box can edit; a path check stands in for a boundary there, and it can't close
+  a symlink swapped in after the check. With this set, every compose call and the build of a
+  project's own box image run in the VM over its ssh route, as foldyard's own pinned podman-compose,
+  so a path in a compose file reads the VM, where the checkout is the only thing of yours.
+  `fy shell` enters the container through the engine. Three things differ: the VM must mount the
+  checkout, registry logins on your computer don't reach the VM, and `${HOME}` in a compose file
+  is the VM's. The plan is docs/compose-in-vm-scope.md.
+
+### Fixed
+
+- **`fy verify` passes an SSH origin behind the VM firewall instead of failing it as
+  unreachable.** With `[machine] firewall = true`, a push to a `git@host:path` or `ssh://` origin
+  dies at the connection, since ssh doesn't use the proxy. Verify could only say "git remote
+  UNREACHABLE … push refusal UNPROVEN", so every firewall user with an SSH origin got a failing
+  verify. It now proves the refusal directly: for every push URL, the host and port ssh would
+  dial (`ssh -G`) resolve, the proxy answers, and a direct connection to that port is refused. The
+  row reads `SSH push impossible: the VM firewall refuses github.com:22 (Connection refused)`. A
+  connection that fails any other way (a timeout, "No route to host") is a warning instead: the
+  wall answers with a reset, so anything else could just as well be a network turning ssh's port
+  away, and isn't credited to the wall. A `ProxyCommand` or `ProxyJump`, a name that doesn't
+  resolve, a connection that succeeds, or no firewall still fails the row. The unreachable row now also names ssh's own error rather than
+  git's closing "…and the repository exists."
+- **With the VM firewall on, stack containers now skip the proxy for the names in `[proxy]
+  no_proxy`.** podman gives every container the VM's proxy settings, but their `NO_PROXY` held
+  only loopback and the host gateway. A service calling a sibling by name through a client that
+  honours the proxy variables (curl, Python's `requests`, Google's Node clients such as
+  `@google-cloud/storage`) sent the call to the proxy on your computer, which can't resolve a
+  stack name and refused it: `fake-gcs:8000` showed up in the Network Log as a blocked host on
+  every retry. That `NO_PROXY` now also holds your `[proxy] no_proxy` and foldyard's own services
+  (the gcp metadata emulator), the same names the box gets. It is one list for the whole VM, set
+  when it boots, so `{project}` is the main checkout's: a worktree's stack is covered by bare
+  service names. After upgrading, `fy up` asks you to restart a walled VM (`fy machine stop &&
+  fy up`); then run `fy down && fy up` so the stack's containers are recreated with it. A later
+  change to `[proxy] no_proxy` takes the same two steps. See `fy docs networking`, "Stack
+  containers trust the proxy too".
+
 ## 0.8.0 — 2026-11-09
 
 A security release: upgrade now. A box could read your registry logins during a build, reach

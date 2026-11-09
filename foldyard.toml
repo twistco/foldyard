@@ -26,7 +26,7 @@ prefix = "foldyard"
 # `[box].packages`, and 0.7.0 is a security release. When the recommendation moves past it,
 # raise the floor to meet it once everyone has moved.
 min_foldyard_version = "0.7.0"
-recommended_foldyard_version = "0.8.0"
+recommended_foldyard_version = "0.9.0"
 # A compose stack to drive alongside the box — uncomment when you have one (step 3), add
 # its host ports under [ports] below, and extend [claude].system_prompt with the stack
 # paragraph parked beside it (an agent that knows the box but not the stack is half-lost).
@@ -43,6 +43,7 @@ recommended_foldyard_version = "0.8.0"
 [project.foldyard_version_reasons]
 "0.7.0" = "security release: foldyard's git on your computer runs no repo hooks, filters or fetches (new worktrees check out in the box image, so `fy box build` first); `fy worktree add` adopts the config, copies keyless mode and takes `--box`; new worktrees masked in running boxes; podman backend deprecated — `fy box down && fy box up` once after upgrading (plus `fy machine stop && fy up` for a guest-monitor or 9p VM)"
 "0.8.0" = "security release: no registry logins reach the VM, the proxy refuses your computer's loopback/LAN and box git pushes, and `fy code` closes its host credential bridges; podman only (a CI job on `FOLDYARD_ENGINE: docker` must move first); adds `fy agent` and path grants — `fy host restart`, then `fy box down && fy box up`"
+"0.9.0" = "VM firewall fixes (stack containers' NO_PROXY includes `[proxy] no_proxy`; `fy verify` with an SSH origin), `/run/foldyard/engine.sock` for compose services on lima, and experimental `[machine] compose = \"vm\"` — `fy machine stop && fy up` for each lima VM, then `fy down && fy up`"
 
 [machine]
 # A rootless VM that mounts ONLY this repo. Default here is the Lima backend + an in-VM
