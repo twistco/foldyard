@@ -250,7 +250,15 @@ the box only the VM-boundary checks run. What it checks:
   **refused** for lack of a credential — the push handshake needs write access, so this holds for a
   public origin too. Where the proxy refuses that push itself (an HTTPS origin it decrypts), git
   never gets as far as offering a credential, so verify asks git directly instead
-  (`git credential fill` for origin's push URL) and fails if it finds one. These
+  (`git credential fill` for origin's push URL) and fails if it finds one. With the VM firewall
+  on, an SSH origin (`git@host:path` or `ssh://…`) never gets that far: ssh doesn't use the proxy,
+  so the wall refuses its connection. Verify then proves that directly, for every push URL
+  (`git remote get-url --push --all origin`, so `pushurl` and `insteadOf` apply): the host and port
+  ssh would dial (`ssh -G`, so your ssh config's `HostName` and `Port` apply) must resolve, the
+  proxy must answer, and a direct connection to that port must fail. That passes as
+  `SSH push impossible: the VM firewall refuses github.com:22 (Connection refused)`. A
+  `ProxyCommand` or `ProxyJump`, a name that doesn't resolve, a connection that succeeds, or no
+  firewall leaves the row unproven, as before. These
   are built into foldyard's core, so a missing or broken plugin can't weaken them.
 - **Push refusal** (inside a box that routes through the proxy): a push's first request
   (`GET https://github.com/…/info/refs?service=git-receive-pack`) sent through the box's proxy must
@@ -332,9 +340,13 @@ Each row names *what* failed. What it usually means, and what to do:
   UNPROVEN`** means `git credential fill` timed out or failed for another reason (the row says
   which), or origin's push URL couldn't be read.
 - **`git remote UNREACHABLE for non-credential reasons`** — the push never got as far as asking
-  for a credential: no egress, or a blocked host. Under the VM firewall git goes through the
-  proxy like everything else in the box, so a refused `github.com` is the allowlist's
-  (`fy allow add github.com`).
+  for a credential: no egress, or a blocked host. The row ends with the reason (ssh's own line
+  for an SSH origin). Under the VM firewall git over HTTPS goes through the proxy like
+  everything else in the box, so a refused `github.com` is the allowlist's
+  (`fy allow add github.com`). An SSH origin behind the firewall shows up here only when the
+  refusal couldn't be proven: its name didn't resolve, ssh is configured to go through a
+  `ProxyCommand` or `ProxyJump`, the proxy didn't answer, or the connection to the SSH port
+  succeeded (a grant, or a firewall that isn't enforcing: see the VM firewall rows).
 - **Push refusal rows:**
   - `a git push through the proxy was NOT refused` — the proxy decrypted the request and let it
     reach GitHub. Check `fy mode` on your computer (a push-capable switch injecting on `github.com`

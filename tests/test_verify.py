@@ -57,10 +57,16 @@ def secure_engine(monkeypatch, tmp_path):
         "cred_out": "",
         "cred_err": "fatal: could not read Username for 'https://github.com': terminal prompts "
         "disabled\n",
+        # `ssh -G <dest>`: the effective ssh config for an SSH origin's host (walled boxes only)
+        "ssh_g": "user git\nhostname github.com\nport 22\nbatchmode no\n",
+        "ssh_rc": 0,
     }
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
+        if cmd[0] == "ssh":
+            results.setdefault("ssh_cmds", []).append(cmd)
+            return _Proc(results["ssh_rc"], results["ssh_g"])
         if cmd[0] == "git" and "rev-parse" in cmd:  # does HEAD name a commit?
             if results["has_commits"] is None:
                 raise verify.subprocess.TimeoutExpired(cmd, kw.get("timeout") or 0)
@@ -485,6 +491,194 @@ def test_git_timeout_is_still_not_a_refusal(secure_engine, monkeypatch, tmp_path
     _enter_box(monkeypatch, tmp_path)
     assert verify.verify() == 1
     assert "UNPROVEN" in capsys.readouterr().out
+
+
+# ── an SSH origin behind the VM firewall ─────────────────────────────────────────────────
+
+_SSH_REFUSED_STDERR = (
+    "ssh: connect to host github.com port 22: Connection refused\n"
+    "fatal: Could not read from remote repository.\n\n"
+    "Please make sure you have the correct access rights\nand the repository exists.\n"
+)
+
+
+def _ssh_origin(
+    secure_engine,
+    monkeypatch,
+    tmp_path,
+    *,
+    wall=True,
+    push_url="git@github.com:acme/app.git\n",
+    connects=(),
+    resolves=True,
+    proxy_up=True,
+):
+    """An SSH origin whose dry-run push died at the connect, as in a walled box. `connects` are
+    the (host, port)s a direct connect reaches; everything else is refused."""
+    _enter_box(monkeypatch, tmp_path)
+    monkeypatch.setattr(verify.config, "machine_backend", lambda: "lima")
+    monkeypatch.setattr(verify.config, "machine_wall", lambda: wall)
+    _, results = secure_engine
+    results["git_rc"], results["git_stderr"] = 128, _SSH_REFUSED_STDERR
+    results["push_url"] = push_url
+    _wall_net(monkeypatch, proxy_up=proxy_up)
+    wall_connect = verify.socket.create_connection
+    dialled: list[tuple[str, int]] = []
+
+    def connect(addr, *a, **kw):
+        dialled.append(addr)
+        if tuple(addr) in connects:
+            return _Sock()
+        return wall_connect(addr, *a, **kw)
+
+    def getaddrinfo(host, port, *a, **kw):
+        if not resolves:
+            raise verify.socket.gaierror(-2, "Name or service not known")
+        return [(verify.socket.AF_INET, verify.socket.SOCK_STREAM, 6, "", ("140.82.121.4", port))]
+
+    monkeypatch.setattr(verify.socket, "create_connection", connect)
+    monkeypatch.setattr(verify.socket, "getaddrinfo", getaddrinfo)
+    results["dialled"] = dialled
+    return results
+
+
+def test_an_ssh_origin_the_vm_firewall_refuses_proves_the_push_refusal(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # The walled box can't open a TCP connection to the SSH host at all, so a push is impossible
+    # whatever credential the box holds — the refusal, proven directly, not a network outage.
+    results = _ssh_origin(secure_engine, monkeypatch, tmp_path)
+    assert verify.verify() == 0
+    out = capsys.readouterr().out
+    assert "SSH push impossible: the VM firewall refuses github.com:22" in out
+    assert "UNREACHABLE" not in out
+    assert ("github.com", 22) in results["dialled"]
+    assert results["url_cmd"][-4:] == ["get-url", "--push", "--all", "origin"]
+    assert results["ssh_cmds"][0][:2] == ["ssh", "-G"]
+
+
+def test_the_ssh_probe_dials_what_ssh_would_dial(secure_engine, monkeypatch, tmp_path, capsys):
+    # ssh's own config decides the host and port (a `Host` alias, `Port 443`), so the probe asks
+    # `ssh -G` for them, passing the URL's port, rather than assuming the URL's host on 22.
+    results = _ssh_origin(
+        secure_engine, monkeypatch, tmp_path, push_url="ssh://git@gh-alias:2222/acme/app.git\n"
+    )
+    results["ssh_g"] = "user git\nhostname ssh.github.com\nport 443\n"
+    assert verify.verify() == 0
+    out = capsys.readouterr().out
+    assert "SSH push impossible: the VM firewall refuses ssh.github.com:443" in out
+    assert results["ssh_cmds"][0][-3:] == ["-p", "2222", "git@gh-alias"]
+    assert ("ssh.github.com", 443) in results["dialled"]
+
+
+def test_without_the_vm_firewall_an_unreachable_ssh_origin_stays_unproven(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    results = _ssh_origin(secure_engine, monkeypatch, tmp_path, wall=False)
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "UNREACHABLE" in out and "VM firewall refuses" not in out
+    assert results["dialled"] == []  # no wall, nothing to prove: not even probed
+    # The row names ssh's own complaint, not git's closing boilerplate.
+    assert "(ssh: connect to host github.com port 22: Connection refused)" in out
+
+
+def test_an_ssh_host_the_box_can_connect_to_is_not_walled(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # A grant, or a wall that isn't enforcing: the connect succeeds, so the push failed for some
+    # other reason and nothing about the wall is proven.
+    _ssh_origin(secure_engine, monkeypatch, tmp_path, connects={("github.com", 22)})
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "UNREACHABLE" in out and "VM firewall refuses" not in out
+
+
+def test_an_ssh_host_that_does_not_resolve_is_not_the_wall(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    _ssh_origin(secure_engine, monkeypatch, tmp_path, resolves=False)
+    assert verify.verify() == 1
+    out = capsys.readouterr().out
+    assert "UNREACHABLE" in out and "VM firewall refuses" not in out
+
+
+def test_an_ssh_host_reached_through_a_proxy_command_is_not_walled(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # A ProxyCommand/ProxyJump carries ssh some other way (the egress proxy's CONNECT, say), so a
+    # refused direct connect says nothing about whether ssh gets out.
+    results = _ssh_origin(secure_engine, monkeypatch, tmp_path)
+    results["ssh_g"] = "hostname ssh.github.com\nport 443\nproxycommand nc -X connect %h %p\n"
+    assert verify.verify() == 1
+    assert "VM firewall refuses" not in capsys.readouterr().out
+    results["ssh_g"] = "hostname github.com\nport 22\nproxyjump bastion\n"
+    assert verify.verify() == 1
+    assert "VM firewall refuses" not in capsys.readouterr().out
+
+
+def test_an_unreadable_ssh_config_is_not_walled(secure_engine, monkeypatch, tmp_path, capsys):
+    results = _ssh_origin(secure_engine, monkeypatch, tmp_path)
+    results["ssh_rc"], results["ssh_g"] = 255, ""
+    assert verify.verify() == 1
+    assert "VM firewall refuses" not in capsys.readouterr().out
+
+
+def test_an_offline_walled_box_does_not_prove_an_ssh_refusal(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    # The proxy is the wall's permitted path: if that is unreachable too, the refused connect is
+    # an outage, not the wall.
+    _ssh_origin(secure_engine, monkeypatch, tmp_path, proxy_up=False)
+    assert verify.verify() == 1
+    assert "VM firewall refuses" not in capsys.readouterr().out
+
+
+def test_every_push_url_must_be_a_walled_ssh_one(secure_engine, monkeypatch, tmp_path, capsys):
+    # git pushes to each push URL; one over HTTPS goes through the proxy, which the SSH proof
+    # says nothing about.
+    _ssh_origin(
+        secure_engine,
+        monkeypatch,
+        tmp_path,
+        push_url="git@github.com:acme/app.git\nhttps://gitlab.com/acme/app.git\n",
+    )
+    assert verify.verify() == 1
+    assert "VM firewall refuses" not in capsys.readouterr().out
+
+
+def test_an_https_origin_behind_the_wall_is_not_an_ssh_refusal(
+    secure_engine, monkeypatch, tmp_path, capsys
+):
+    results = _ssh_origin(
+        secure_engine, monkeypatch, tmp_path, push_url="https://github.com/acme/app.git\n"
+    )
+    results["git_stderr"] = "fatal: unable to access 'https://github.com/acme/app.git/': 503\n"
+    assert verify.verify() == 1
+    assert "VM firewall refuses" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("git@github.com:acme/app.git", ("git@github.com", None)),
+        ("github.com:acme/app.git", ("github.com", None)),
+        ("ssh://git@github.com/acme/app.git", ("git@github.com", None)),
+        ("ssh://git@github.com:2222/acme/app.git", ("git@github.com", "2222")),
+        ("git+ssh://github.com/acme/app.git", ("github.com", None)),
+        ("ssh+git://git@github.com:22/acme/app", ("git@github.com", "22")),
+        ("SSH://git@[2001:db8::1]:2222/acme/app", ("git@2001:db8::1", "2222")),
+        ("https://github.com/acme/app.git", None),
+        ("http://github.com/acme/app.git", None),
+        ("file:///srv/app.git", None),
+        ("/srv/app.git", None),
+        ("./a:b", None),  # a slash before the colon: a local path, not scp-like
+        ("git@[::1]:acme/app", None),  # bracketed scp-like: not parsed, so never passed
+        ("", None),
+    ],
+)
+def test_ssh_destination_reads_git_ssh_urls(url, expected):
+    assert verify._ssh_destination(url) == expected
 
 
 def test_mount_audit_under_gvisor_is_not_applicable_not_a_failure(
